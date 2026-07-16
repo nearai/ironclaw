@@ -860,6 +860,9 @@ async def start_reborn_server(
     )
     try:
         await wait_for_ready(f"{base_url}/api/health", timeout=90.0)
+    except asyncio.CancelledError:
+        stop_process(proc)
+        raise
     except Exception as exc:
         stop_process(proc)
         tail = ""

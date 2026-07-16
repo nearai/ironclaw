@@ -3487,6 +3487,70 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
 
         self.assertEqual(captured["cwd"], workspace)
 
+    def test_start_reborn_server_stops_before_workspace_cleanup_on_cancellation(self):
+        cancellation = asyncio.CancelledError("readiness cancelled")
+        process = object()
+        stop_observations: list[bool] = []
+
+        def fake_popen(*_args, **kwargs):
+            kwargs["stdout"].close()
+            kwargs["stderr"].close()
+            return process
+
+        async def fake_wait_for_ready(_url: str, *, timeout: float) -> None:
+            self.assertEqual(timeout, 90.0)
+            raise cancellation
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            repository_root = root / "checkout"
+            output_dir = repository_root / "artifacts" / "live-canary"
+            output_dir.mkdir(parents=True)
+
+            with run_live_qa.isolated_agent_workspace(
+                repository_root,
+                output_dir,
+            ) as workspace:
+                with (
+                    patch.object(
+                        run_live_qa,
+                        "reserve_loopback_port",
+                        return_value=38555,
+                    ),
+                    patch.object(
+                        run_live_qa.subprocess,
+                        "Popen",
+                        side_effect=fake_popen,
+                    ),
+                    patch.object(
+                        run_live_qa,
+                        "wait_for_ready",
+                        side_effect=fake_wait_for_ready,
+                    ),
+                    patch.object(
+                        run_live_qa,
+                        "stop_process",
+                        side_effect=lambda stopped: stop_observations.append(
+                            stopped is process and workspace.is_dir()
+                        ),
+                    ),
+                ):
+                    with self.assertRaises(asyncio.CancelledError) as raised:
+                        asyncio.run(
+                            run_live_qa.start_reborn_server(
+                                root / "ironclaw-reborn",
+                                root / "reborn-home",
+                                output_dir,
+                                workspace,
+                                {},
+                            )
+                        )
+
+                    self.assertIs(raised.exception, cancellation)
+
+            self.assertEqual(stop_observations, [True])
+            self.assertFalse(workspace.exists())
+
     def test_start_reborn_server_sets_slack_personal_oauth_redirect(self):
         captured: dict[str, object] = {}
 
@@ -8471,6 +8535,140 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
                 (output_dir / "green-run-explanation.json").read_text(encoding="utf-8")
             )
             self.assertEqual(green_explanation["successful_cases"], 2)
+
+    def test_run_cases_keeps_agent_workspace_until_cleanup_finishes(self):
+        def run_case(*, case_raises: bool) -> list[tuple[str, bool]]:
+            lifecycle: list[tuple[str, bool]] = []
+            workspace: Path | None = None
+            process = object()
+
+            async def fake_case(
+                _ctx: run_live_qa.LiveQaContext,
+            ) -> run_live_qa.ProbeResult:
+                self.assertIsNotNone(workspace)
+                lifecycle.append(("case", workspace.is_dir()))
+                if case_raises:
+                    raise RuntimeError("case failed")
+                return run_live_qa.ProbeResult(
+                    provider="test",
+                    mode="live",
+                    success=True,
+                    latency_ms=1,
+                    details={},
+                )
+
+            async def fake_start_reborn_server(
+                _binary: Path,
+                _reborn_home: Path,
+                _output_dir: Path,
+                workspace_dir: Path,
+                _env: dict[str, str],
+            ):
+                nonlocal workspace
+                workspace = workspace_dir
+                lifecycle.append(("start", workspace.is_dir()))
+                return process, "http://127.0.0.1:38555"
+
+            def fake_stop_process(stopped: object) -> None:
+                self.assertIs(stopped, process)
+                self.assertIsNotNone(workspace)
+                lifecycle.append(("stop", workspace.is_dir()))
+
+            def fake_export_case_trace(
+                _output_dir: Path,
+                case_name: str,
+                _reborn_home: Path,
+            ) -> dict[str, object]:
+                self.assertEqual(case_name, "workspace_lifetime_case")
+                self.assertIsNotNone(workspace)
+                lifecycle.append(("export", workspace.is_dir()))
+                return {
+                    "case": case_name,
+                    "path": "trace.json",
+                    "entry_count": 0,
+                }
+
+            with tempfile.TemporaryDirectory() as tmpdir:
+                root = Path(tmpdir)
+                output_dir = root / "out"
+                binary = root / "ironclaw-reborn"
+                binary.touch()
+                prepared_home = root / "prepared-home"
+                prepared_home.mkdir()
+                args = argparse.Namespace(
+                    all_cases=False,
+                    non_telegram_qa_cases=False,
+                    case=["workspace_lifetime_case"],
+                    output_dir=output_dir,
+                    reborn_home=root / "source-home",
+                    skip_build=True,
+                    require_slack_live=False,
+                )
+                prepared = run_live_qa.PreparedRebornHome(
+                    path=prepared_home,
+                    env={},
+                    preflight={
+                        "slack": {},
+                        "slack_personal_auth": {},
+                        "google_product_auth": {},
+                        "telegram": {},
+                        "github_auth": {},
+                    },
+                )
+
+                with (
+                    patch.object(
+                        run_live_qa,
+                        "CASES",
+                        {"workspace_lifetime_case": run_live_qa.CaseSpec(fake_case)},
+                    ),
+                    patch.object(run_live_qa, "QA_SHEET_CASES", {}),
+                    patch.object(run_live_qa, "_reborn_binary", return_value=binary),
+                    patch.object(
+                        run_live_qa,
+                        "prepare_reborn_home",
+                        return_value=prepared,
+                    ),
+                    patch.object(
+                        run_live_qa,
+                        "start_reborn_server",
+                        side_effect=fake_start_reborn_server,
+                    ),
+                    patch.object(
+                        run_live_qa,
+                        "stop_process",
+                        side_effect=fake_stop_process,
+                    ),
+                    patch.object(
+                        run_live_qa,
+                        "export_case_trace",
+                        side_effect=fake_export_case_trace,
+                    ),
+                ):
+                    if case_raises:
+                        with self.assertRaisesRegex(RuntimeError, "case failed"):
+                            asyncio.run(run_live_qa.run_cases(args))
+                    else:
+                        self.assertEqual(asyncio.run(run_live_qa.run_cases(args)), 0)
+
+                self.assertIsNotNone(workspace)
+                lifecycle.append(("after", workspace.exists()))
+
+            return lifecycle
+
+        for case_raises in (False, True):
+            with self.subTest(case_raises=case_raises):
+                lifecycle = run_case(case_raises=case_raises)
+                self.assertEqual(
+                    lifecycle,
+                    [
+                        ("start", True),
+                        ("case", True),
+                        ("stop", True),
+                        ("export", True),
+                        ("after", False),
+                    ],
+                )
 
     def test_run_cases_blocks_slack_connect_without_personal_product_auth(self):
         async def fake_case(_ctx: run_live_qa.LiveQaContext) -> run_live_qa.ProbeResult:
