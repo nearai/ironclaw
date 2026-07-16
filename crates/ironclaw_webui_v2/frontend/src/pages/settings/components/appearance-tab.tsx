@@ -1,12 +1,31 @@
-// @ts-nocheck
 import { Card } from "../../../design-system/card";
 import { Icon } from "../../../design-system/icons";
+import type { InterfaceTheme } from "../../../design-system/theme";
 import { useT } from "../../../lib/i18n";
 import { useInterfacePreferences } from "../../../lib/interface-preferences";
 import { matchesSearch } from "../lib/settings-search";
 import { SettingsSearchEmpty } from "./settings-search-empty";
 
-function Switch({ checked, label, onChange }) {
+type SwitchProps = {
+  checked: boolean;
+  label: string;
+  onChange: (checked: boolean) => void;
+};
+
+type ThemeOptionProps = {
+  checked: boolean;
+  icon: "sun" | "moon";
+  label: string;
+  onSelect: () => void;
+};
+
+type AppearanceTabProps = {
+  searchQuery?: string;
+  theme: InterfaceTheme;
+  onThemeChange: (theme: InterfaceTheme) => void;
+};
+
+function Switch({ checked, label, onChange }: SwitchProps) {
   return (
     <button
       type="button"
@@ -33,7 +52,12 @@ function Switch({ checked, label, onChange }) {
   );
 }
 
-export function ThemeOption({ checked, icon, label, onSelect }) {
+export function ThemeOption({
+  checked,
+  icon,
+  label,
+  onSelect,
+}: ThemeOptionProps) {
   return (
     <button
       type="button"
@@ -60,7 +84,7 @@ export function AppearanceTab({
   searchQuery = "",
   theme,
   onThemeChange,
-}) {
+}: AppearanceTabProps) {
   const t = useT();
   const { showChatLogsShortcut, setShowChatLogsShortcut } =
     useInterfacePreferences();
