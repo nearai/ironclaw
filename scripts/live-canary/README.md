@@ -30,6 +30,14 @@ guide, not by creating a new standalone runner shape.
 
 Run commands from the repository root.
 
+## What belongs in Live Canary
+
+Live Canary is supplemental coverage for drift that requires a real external
+service, live model, provider credential, or browser-consent surface. It does
+not replace hermetic Reborn integration tests, mock auth/workflow coverage, or
+recorded replay contracts. A scenario that can produce the same signal without
+live infrastructure belongs in the deterministic owner instead.
+
 ## Workflow ownership
 
 The local `run.sh` lane vocabulary is broader than any single GitHub workflow.
@@ -39,7 +47,7 @@ CI ownership is intentionally split by signal type:
 | --- | --- | --- |
 | `.github/workflows/live-canary.yml` (Live Canary) | Live external-provider drift only | `public-smoke`, `persona-rotating`, `private-oauth`, `provider-matrix`, `release-public-full`, `auth-live-seeded`, `auth-browser-consent`, `reborn-webui-v2-live-qa` |
 | `.github/workflows/reborn-tests.yml` (Tests (Reborn)) | Hermetic PR/merge CI | Mock auth profiles `auth-smoke`, `auth-full`, `auth-channels`, plus `workflow-canary` |
-| `.github/workflows/replay-gate.yml` (Replay Snapshot Gate) | Deterministic recorded replay | Replay snapshot tests; not a Live Canary job |
+| `.github/workflows/replay-gate.yml` (Replay Gate; workflow name `Replay Snapshot Gate`) | Deterministic recorded replay | Replay snapshot tests; not a Live Canary job |
 | `.github/workflows/upgrade-compatibility.yml` (Upgrade Compatibility) | Manual previous/current compatibility | `upgrade-canary` through `run.sh` and `upgrade-canary.sh` |
 
 This separation keeps mock/replay failures in required deterministic CI, live
@@ -114,11 +122,16 @@ REBORN_WEBUI_V2_LIVE_QA_HOME=/tmp/ironclaw-reborn-real-slack \
 scripts/live-canary/run.sh
 ```
 
-Run the full QA-sheet-backed Reborn suite:
+Run the full manual/local non-Telegram Reborn target (47 implemented cases):
 
 ```bash
 LANE=reborn-webui-v2-live-qa CASES=all scripts/live-canary/run.sh
 ```
+
+The GitHub 3-hour schedule is consolidated to 39 cases: it retains one live
+connection journey per integration and omits eight redundant connection-only
+journeys. The default GitHub manual dispatch uses that same 39-case matrix;
+use the local command above when a full manual 47-case sweep is required.
 
 Use CI-style browser installation for auth browser lanes:
 
@@ -147,6 +160,47 @@ Artifacts are written under:
 artifacts/live-canary/<lane>/<provider>/<timestamp>/
 ```
 
+## Reborn QA signal semantics
+
+The Reborn WebUI v2 report separates three health signals. For example:
+
+```text
+Contracts: 44/44 passed
+Behavioral quality: 1/3 passed, 2 warnings
+Infrastructure/preconditions: 0 inconclusive
+```
+
+The reporter omits the infrastructure/preconditions line when the value is
+zero; it is shown here to make the three-signal interpretation explicit.
+
+- Contract failures are blocking. Missing or malformed classification metadata
+  fails closed into this tier.
+- Behavioral-quality failures are nonblocking warnings, so model variance stays
+  visible without masquerading as a product-contract regression.
+- Infrastructure and precondition failures are inconclusive and do not count as
+  contract or behavioral failures.
+
+Any combined `succeeded of total` line is execution detail only. Use the tiered
+lines above as the primary health signal.
+
+For `qa_10g_slack_last_message_sent_global`, the harness first seeds a unique
+Slack marker and polls workspace search for bounded index freshness (90 seconds
+by default). A stale index, exception, or malformed observation returns an
+inconclusive result before any model call. Persisted preflight metadata is
+bounded to `indexed`, `attempts`, `latency_ms`, and an optional sanitized,
+240-character `last_error`.
+
+Each Reborn QA case starts `ironclaw-reborn` with an ephemeral agent working
+directory outside both the checkout and artifact tree. The directory is removed
+after the server stops. Routine creation passes only after a structurally final
+assistant reply and a new durable `trigger_record`; Slack correctness probes
+bind expected terminal capability evidence to the current turn/run rather than
+trusting response prose alone.
+
+The `persona-rotating` environment summary records only integration names in
+`persona_live_integrations` and `persona_stubbed_integrations` (`github`,
+`google`, `slack`, `telegram`, `composio`). It never writes credential values.
+
 ## Secrets And Account Material
 
 Public live LLM lane secrets and variables are documented in
@@ -160,6 +214,6 @@ Seeded auth live-provider credentials:
 
 GitHub Actions uses `.github/workflows/live-canary.yml` only for scheduled or
 manual live drift checks. Mock auth and workflow scenarios run in Tests
-(Reborn), deterministic replay runs in Replay Snapshot Gate, and upgrade
+(Reborn), deterministic replay runs in Replay Gate, and upgrade
 compatibility has its own manual workflow. Do not add hermetic or compatibility
 jobs back to Live Canary merely because they use this directory's dispatcher.
