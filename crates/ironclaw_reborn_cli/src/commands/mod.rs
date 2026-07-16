@@ -24,6 +24,8 @@ pub(crate) mod skills;
 pub(crate) mod status;
 pub(crate) mod traces;
 #[cfg(feature = "webui-v2-beta")]
+pub(crate) mod tui;
+#[cfg(feature = "webui-v2-beta")]
 pub(crate) mod user_directory;
 #[cfg(feature = "webui-v2-beta")]
 pub(crate) mod webui_auth;
@@ -72,6 +74,12 @@ pub(crate) enum Command {
     Status(status::StatusCommand),
     /// Manage trace contributions to TraceCommons.
     Traces(Box<traces::TracesCommand>),
+    /// Launch the ratatui thin client against a running (or auto-spawned)
+    /// `ironclaw-reborn serve`. Available only when built with the
+    /// `webui-v2-beta` Cargo feature, since it drives the WebChat v2
+    /// HTTP+SSE API.
+    #[cfg(feature = "webui-v2-beta")]
+    Tui(tui::TuiCommand),
 }
 
 impl Command {
@@ -116,6 +124,10 @@ impl Command {
                 command.execute(crate::context::RebornCliContext::resolve_from_env()?)
             }
             Self::Traces(command) => command.execute(),
+            #[cfg(feature = "webui-v2-beta")]
+            Self::Tui(command) => {
+                command.execute(crate::context::RebornCliContext::resolve_from_env()?)
+            }
         }
     }
 }

@@ -1478,6 +1478,55 @@ fn serve_fails_closed_when_env_user_id_var_is_unset() {
 
 #[cfg(feature = "webui-v2-beta")]
 #[test]
+fn tui_help_mentions_base_url() {
+    let output = Command::new(reborn_bin())
+        .arg("tui")
+        .arg("--help")
+        .env_clear()
+        .output()
+        .expect("ironclaw-reborn tui --help should run");
+
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("--base-url"), "stdout: {stdout}");
+}
+
+#[cfg(feature = "webui-v2-beta")]
+#[test]
+fn tui_fails_closed_when_env_bearer_token_var_is_unset() {
+    // Mirrors `serve_fails_closed_when_env_bearer_token_var_is_unset`: the
+    // tui subcommand resolves its bearer token the same way `serve` does
+    // (env var named by `[webui].env_token_var`, defaulting to
+    // IRONCLAW_REBORN_WEBUI_TOKEN). When it's absent, `tui` must exit
+    // non-zero before entering raw mode / taking over the terminal — a
+    // process-level check, no real TTY required.
+    let temp = tempfile::tempdir().expect("tempdir");
+
+    let output = Command::new(reborn_bin())
+        .arg("tui")
+        .env("IRONCLAW_REBORN_HOME", temp.path().join("reborn-home"))
+        .env_remove("IRONCLAW_REBORN_PROFILE")
+        .env_remove("IRONCLAW_REBORN_WEBUI_TOKEN")
+        .output()
+        .expect("ironclaw-reborn tui should run");
+
+    assert!(
+        !output.status.success(),
+        "tui must fail closed when the bearer token env var is unset"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("IRONCLAW_REBORN_WEBUI_TOKEN must be set"),
+        "stderr should explain which env var is missing: {stderr}"
+    );
+}
+
+#[cfg(feature = "webui-v2-beta")]
+#[test]
 fn serve_with_env_auth_seeds_reborn_config_before_binding() {
     let temp = tempfile::tempdir().expect("tempdir");
     let reborn_home = temp.path().join("reborn-home");

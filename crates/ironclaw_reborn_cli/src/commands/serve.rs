@@ -39,9 +39,13 @@ use crate::runtime::{
     resolve_google_oauth_config_from_env,
 };
 
-const DEFAULT_SERVE_HOST: &str = "127.0.0.1";
-const DEFAULT_SERVE_PORT: u16 = 3000;
-const DEFAULT_ENV_TOKEN_VAR: &str = "IRONCLAW_REBORN_WEBUI_TOKEN";
+// `pub(crate)`: `commands/tui.rs` imports these three to mirror `serve`'s
+// own host/port/token-var resolution without calling into this module —
+// see the doc comment on `TuiCommand` for why the ~30 lines of resolution
+// logic are duplicated rather than shared as a function.
+pub(crate) const DEFAULT_SERVE_HOST: &str = "127.0.0.1";
+pub(crate) const DEFAULT_SERVE_PORT: u16 = 3000;
+pub(crate) const DEFAULT_ENV_TOKEN_VAR: &str = "IRONCLAW_REBORN_WEBUI_TOKEN";
 const DEFAULT_ENV_USER_ID_VAR: &str = "IRONCLAW_REBORN_WEBUI_USER_ID";
 /// Lifetime of the one-time API bearer minted when an admin creates a user. A
 /// year: this is a long-lived programmatic credential, not a browser session.

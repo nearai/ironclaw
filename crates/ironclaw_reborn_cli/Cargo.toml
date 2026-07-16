@@ -42,6 +42,7 @@ root-llm-provider = [
 webui-v2-beta = [
     "ironclaw_reborn_composition/webui-v2-beta",
     "dep:ironclaw_reborn_webui_ingress",
+    "dep:ironclaw_reborn_tui",
     "dep:async-trait",
 ]
 # Compile in the Slack Events API host-beta mount for `ironclaw-reborn serve`.
@@ -84,6 +85,7 @@ dotenvy = "0.15"
 ironclaw_reborn_composition = { path = "../ironclaw_reborn_composition", version = "0.1.0" }
 ironclaw_reborn_config = { path = "../ironclaw_reborn_config", version = "0.1.0" }
 ironclaw_reborn_traces = { path = "../ironclaw_reborn_traces", version = "0.1.0" }
+ironclaw_reborn_tui = { path = "../ironclaw_reborn_tui", version = "0.1.0", optional = true }
 ironclaw_reborn_webui_ingress = { path = "../ironclaw_reborn_webui_ingress", version = "0.1.0", optional = true }
 reqwest = { version = "0.12", default-features = false, features = ["json", "multipart", "rustls-tls-native-roots", "stream"] }
 secrecy = "0.10"
