@@ -39,6 +39,11 @@ impl OnboardCommand {
         }
 
         let outcome = write_default_config_files(home, self.force, ExistingConfigPolicy::Preserve)?;
+        // Independent of `--force`: a valid existing token is never
+        // regenerated (see `ensure_webui_token_file`'s doc for why), so a
+        // repeated `onboard --force` cannot invalidate sessions or an
+        // operator-copied env var keyed to the current token value.
+        let webui_token_action = crate::webui_token::ensure_webui_token_file(home.path())?;
         let marker_action =
             write_onboarding_marker(home, &marker_path, self.force, self.import_history)?;
 
@@ -47,6 +52,11 @@ impl OnboardCommand {
         println!("home_source: {}", home.source_label());
         println!("{}", outcome.config.display_line());
         println!("{}", outcome.providers.display_line());
+        println!(
+            "webui_token: {} ({})",
+            crate::webui_token::webui_token_file_path(home.path()).display(),
+            webui_token_action
+        );
         println!(
             "onboarding_marker: {} ({})",
             marker_path.display(),
@@ -57,6 +67,7 @@ impl OnboardCommand {
         println!("completed:");
         println!("- reborn home initialized");
         println!("- config.toml and providers.json available");
+        println!("- webui bearer token provisioned (used by `serve` when the env var is unset)");
         println!("- onboarding completion marker available");
         println!();
         println!("remaining:");
@@ -90,6 +101,15 @@ fn print_dry_run(home: &RebornHome, marker_path: &Path, force: bool, import_hist
         "would_write_or_preserve: {}",
         home.providers_file_path().display()
     );
+    let webui_token_action = if crate::webui_token::webui_token_file_is_valid(home.path()) {
+        "would_preserve"
+    } else {
+        "would_write"
+    };
+    println!(
+        "{webui_token_action}: {}",
+        crate::webui_token::webui_token_file_path(home.path()).display()
+    );
     let marker_action = if marker_path.exists() && !force {
         "would_preserve"
     } else {
@@ -116,9 +136,11 @@ fn write_onboarding_marker(
         "home_source": home.source_label(),
         "config_file": home.config_file_path(),
         "providers_file": home.providers_file_path(),
+        "webui_token_file": crate::webui_token::webui_token_file_path(home.path()),
         "steps_completed": [
             "reborn_home",
             "config_files",
+            "webui_token",
             "completion_marker"
         ],
         "steps_pending": pending_steps(import_history),

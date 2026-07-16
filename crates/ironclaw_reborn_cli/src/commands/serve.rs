@@ -141,13 +141,20 @@ impl ServeCommand {
             .and_then(|section| section.env_user_id_var.as_deref())
             .unwrap_or(DEFAULT_ENV_USER_ID_VAR);
 
-        let token_value = env::var(env_token_var).map_err(|_| {
-            anyhow!(
-                "{env_token_var} must be set to the WebChat v2 bearer token. \
-                 Override the variable name via `[webui].env_token_var` in {}.",
-                boot_config.home().config_file_path().display(),
-            )
-        })?;
+        // Precedence: `env_token_var` (if set and non-empty), else
+        // `<reborn_home>/webui-token` (the `onboard`-provisioned fallback a
+        // service-installed serve, whose unit environment carries only
+        // HOME/PROFILE, still needs — see `serve_invocation.rs`). Also
+        // enforces the >=32-byte entropy floor (this token doubles as the
+        // session-signing HMAC key — see the comment near
+        // `session_signing_secret` below) so a weak or missing token fails
+        // closed here rather than starting the server and having it reject
+        // the value opaquely.
+        let token_value = crate::webui_token::resolve_webui_token(
+            env_token_var,
+            env::var(env_token_var).ok().as_deref(),
+            boot_config.home().path(),
+        )?;
         let user_id_raw = env::var(env_user_id_var).map_err(|_| {
             anyhow!(
                 "{env_user_id_var} must be set to the UserId an env-bearer-authenticated caller maps to. \
@@ -161,10 +168,10 @@ impl ServeCommand {
         // Keep a copy of the operator secret to key the SSO session-token
         // HMAC before the value is moved into the env-bearer authenticator.
         // Held as `SecretString` so it is redacted in `Debug`/logs and
-        // zeroed on drop — it doubles as the session-signing key. Capture
-        // its byte length first (for the session-signing entropy floor below)
-        // since the value is consumed here.
-        let token_byte_len = token_value.len();
+        // zeroed on drop — it doubles as the session-signing key.
+        // `resolve_webui_token` above already enforced the >=32-byte
+        // entropy floor this key needs, regardless of which of its two
+        // sources (env var or `<reborn_home>/webui-token`) produced it.
         let session_signing_secret = SecretString::from(token_value.clone());
         let env_authenticator: Arc<dyn WebuiAuthenticator> = Arc::new(EnvBearerAuthenticator::new(
             SecretString::from(token_value),
@@ -314,29 +321,21 @@ impl ServeCommand {
         // the login wiring are assembled inside the async runtime below,
         // because opening the libSQL user store is async.
         let sso_startup = crate::commands::serve_sso::sso_startup_config_from_env(listen_addr)?;
-        // This token keys the stateless session HMAC, so a weak value becomes
+        // This token keys the stateless session HMAC, so a weak value would be
         // an OFFLINE forgery target: an attacker who obtains one legitimate
-        // `{payload}.{hmac}` session pair can brute-force a low-entropy key
+        // `{payload}.{hmac}` session pair could brute-force a low-entropy key
         // locally, then mint a session for any user/tenant. Two paths mint
-        // such user-visible session tokens, so the floor is unconditional:
+        // such user-visible session tokens, so the entropy floor is
+        // unconditional:
         //   - SSO login (`sso_startup`) signs a session on every login, and
         //   - admin user-management (wired above via
         //     `with_admin_api_token_minter`) mints a one-time session bearer
         //     on `POST /admin/users`.
         // The admin minter is always installed, so a signed session token can
-        // always be produced regardless of whether SSO is configured. Pre-admin
-        // the token only ever gated an online, rate-limited bearer guess; now it
-        // signs offline-verifiable tokens, so require real entropy and fail
-        // closed rather than warn.
-        if token_byte_len < 32 {
-            return Err(anyhow!(
-                "{env_token_var} is also the WebChat session-signing key (it signs the \
-                 stateless, user-visible session tokens issued by SSO login and by admin \
-                 user creation) and must be at least 32 bytes of high-entropy random \
-                 material. The current value is {token_byte_len} bytes — generate one with \
-                 e.g. `openssl rand -hex 32`."
-            ));
-        }
+        // always be produced regardless of whether SSO is configured.
+        // `crate::webui_token::resolve_webui_token` already enforced the
+        // >=32-byte floor when `token_value` was resolved above, so no
+        // separate check is needed here.
         // Sidecar DB used by the local-runtime trigger-fire access checker. It
         // backs the local trigger-fire
         // access store used to seed default-user and SSO-user trigger access;
