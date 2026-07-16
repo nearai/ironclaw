@@ -47,7 +47,7 @@ async def _route_notification_threads(page):
     await page.route("**/api/webchat/v2/threads?**", handler)
 
 
-async def _open_v2(page, base_url, path="/v2/"):
+async def _open_v2(page, base_url, path="/"):
     separator = "&" if "?" in path else "?"
     await page.goto(f"{base_url}{path}{separator}token={REBORN_V2_AUTH_TOKEN}")
     await expect(page.locator(SEL_V2["notification_bell"])).to_be_visible(timeout=15000)
@@ -71,7 +71,7 @@ async def test_reborn_v2_notification_popover_opens_automation_thread(
 
         await page.locator(SEL_V2["notification_row"]).first.click()
         await expect(page).to_have_url(
-            re.compile(rf".*/v2/chat/{THREAD_ID}(?:\?.*)?$"),
+            re.compile(rf".*/chat/{THREAD_ID}(?:\?.*)?$"),
             timeout=5000,
         )
     finally:
@@ -94,7 +94,7 @@ async def test_reborn_v2_notification_open_marks_read_without_hiding_pending_mes
         await page.locator(SEL_V2["notification_bell"]).click()
         await page.locator(SEL_V2["notification_row"]).first.click()
         await expect(page).to_have_url(
-            re.compile(rf".*/v2/chat/{THREAD_ID}(?:\?.*)?$"),
+            re.compile(rf".*/chat/{THREAD_ID}(?:\?.*)?$"),
             timeout=5000,
         )
 
@@ -117,7 +117,7 @@ async def test_reborn_v2_notification_drawer_and_header_actions_fit_mobile(
     page = await context.new_page()
     try:
         await _route_notification_threads(page)
-        await _open_v2(page, reborn_v2_server, "/v2/settings/language")
+        await _open_v2(page, reborn_v2_server, "/settings/language")
 
         for selector in (SEL_V2["header_logs_link"], SEL_V2["header_docs_link"]):
             action = page.locator(selector)

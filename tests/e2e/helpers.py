@@ -227,7 +227,7 @@ EMULATE_GITHUB_SECONDARY_BEARER = "ghp_emulate_github_secondary_token"
 # which targets the legacy `ironclaw` web channel.
 REBORN_V2_AUTH_TOKEN = "e2e-reborn-v2-bearer-token-0123456789abcdef"
 
-# Selectors for the Reborn WebUI v2 React SPA (served under /v2/). The shell
+# Selectors for the Reborn WebUI v2 React SPA (served at /). The shell
 # DOM differs entirely from the legacy gateway in SEL, so keep these separate.
 SEL_V2 = {
     "root":           "#v2-root",          # SPA mount point (index.html)
