@@ -17,19 +17,13 @@ on:
         default: reborn-webui-v2-live-qa
         options:
           - all
-          - deterministic-replay
           - public-smoke
           - persona-rotating
           - private-oauth
           - provider-matrix
           - release-public-full
-          - upgrade-canary
-          - auth-smoke
-          - auth-full
-          - auth-channels
           - auth-live-seeded
           - auth-browser-consent
-          - workflow-canary
           - reborn-webui-v2-live-qa
       scenario:
         description: "Optional scenario/test filter. Use auto for rotating persona."
@@ -41,11 +35,6 @@ on:
         required: false
         default: ""
         type: string
-      previous_ref:
-        description: "Previous release/tag for upgrade-canary"
-        type: string
-        required: false
-        default: ""
       target_ref:
         description: "Optional ref/SHA for the Reborn WebUI v2 live QA checkout. Used by /canary PR comments."
         type: string
@@ -92,99 +81,6 @@ env:
   RUST_LOG: ironclaw=info
 
 jobs:
-  auth-smoke:
-    name: Auth Smoke
-    if: >
-      github.event_name == 'workflow_dispatch' && (inputs.lane == 'all' || inputs.lane == 'auth-smoke')
-    runs-on: ubuntu-latest
-    timeout-minutes: 60
-    env:
-      LANE: auth-smoke
-      PROVIDER: mock
-      PLAYWRIGHT_INSTALL: with-deps
-    steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
-        with:
-          persist-credentials: false
-      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
-      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
-        with:
-          python-version: "3.12"
-      - name: Run auth smoke lane
-        run: scripts/live-canary/run.sh
-      - name: Scrub artifacts
-        if: always()
-        run: scripts/live-canary/scrub-artifacts.sh artifacts/live-canary
-      - name: Upload artifacts
-        if: always()
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
-        with:
-          name: live-canary-auth-smoke
-          path: artifacts/live-canary/
-          if-no-files-found: ignore
-
-  auth-full:
-    name: Auth Full
-    if: >
-      github.event_name == 'workflow_dispatch' && (inputs.lane == 'all' || inputs.lane == 'auth-full')
-    runs-on: ubuntu-latest
-    timeout-minutes: 75
-    env:
-      LANE: auth-full
-      PROVIDER: mock
-      PLAYWRIGHT_INSTALL: with-deps
-    steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
-        with:
-          persist-credentials: false
-      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
-      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
-        with:
-          python-version: "3.12"
-      - name: Run auth full lane
-        run: scripts/live-canary/run.sh
-      - name: Scrub artifacts
-        if: always()
-        run: scripts/live-canary/scrub-artifacts.sh artifacts/live-canary
-      - name: Upload artifacts
-        if: always()
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
-        with:
-          name: live-canary-auth-full
-          path: artifacts/live-canary/
-          if-no-files-found: ignore
-
-  auth-channels:
-    name: Auth Channels
-    if: >
-      github.event_name == 'workflow_dispatch' && (inputs.lane == 'all' || inputs.lane == 'auth-channels')
-    runs-on: ubuntu-latest
-    timeout-minutes: 60
-    env:
-      LANE: auth-channels
-      PROVIDER: mock
-      PLAYWRIGHT_INSTALL: with-deps
-    steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
-        with:
-          persist-credentials: false
-      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
-      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
-        with:
-          python-version: "3.12"
-      - name: Run auth channel lane
-        run: scripts/live-canary/run.sh
-      - name: Scrub artifacts
-        if: always()
-        run: scripts/live-canary/scrub-artifacts.sh artifacts/live-canary
-      - name: Upload artifacts
-        if: always()
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
-        with:
-          name: live-canary-auth-channels
-          path: artifacts/live-canary/
-          if-no-files-found: ignore
-
   auth-live-seeded:
     name: Auth Live Seeded
     if: >
@@ -374,122 +270,6 @@ jobs:
           name: live-canary-auth-browser-consent
           path: artifacts/live-canary/
           if-no-files-found: ignore
-
-  workflow-canary:
-    name: Workflow Canary
-    if: >
-      github.event_name == 'workflow_dispatch' && (inputs.lane == 'all' || inputs.lane == 'workflow-canary')
-    runs-on: ubuntu-latest
-    timeout-minutes: 30
-    env:
-      LANE: workflow-canary
-      PROVIDER: mock
-      PLAYWRIGHT_INSTALL: skip
-      # Forwarded into run.sh's SCENARIO; translated to one or more
-      # --scenario flags on run_workflow_canary.py. Empty = full suite.
-      SCENARIO: ${{ inputs.scenario }}
-    steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
-        with:
-          persist-credentials: false
-      # wasm32-wasip2 + cargo-component + the channels build are all
-      # required: the lane's telegram_channel_install /
-      # telegram_round_trip / routine_visibility_from_telegram /
-      # manual_trigger_from_telegram scenarios call
-      # `/api/extensions/install` for the bundled telegram WASM
-      # channel, which only succeeds when channels-src/telegram has a
-      # built telegram.wasm artifact. Other live-canary lanes that
-      # exercise WASM extensions follow the same pattern.
-      # `--channels` skips the WASM tools build (~5 tools that
-      # workflow-canary doesn't exercise) to keep the lane under
-      # ~6 min on a fresh runner.
-      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
-        with:
-          targets: wasm32-wasip2
-      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
-        with:
-          key: live-canary-workflow-canary
-      - name: Setup OVH sccache
-        uses: ./.github/actions/setup-sccache-dist
-        with:
-          scheduler-url: ${{ vars.SCCACHE_DIST_SCHEDULER_URL }}
-          auth-token: ${{ secrets.SCCACHE_DIST_AUTH_TOKEN }}
-          cache-ssh-host: ${{ vars.SCCACHE_CACHE_SSH_HOST }}
-          cache-ssh-user: ${{ vars.SCCACHE_CACHE_SSH_USER }}
-          cache-ssh-port: ${{ vars.SCCACHE_CACHE_SSH_PORT }}
-          cache-ssh-private-key: ${{ secrets.SCCACHE_CACHE_SSH_PRIVATE_KEY }}
-          cache-ssh-known-hosts: ${{ secrets.SCCACHE_CACHE_SSH_KNOWN_HOSTS }}
-          redis-password: ${{ secrets.SCCACHE_REDIS_PASSWORD }}
-      - name: Install cargo-component
-        run: cargo install cargo-component --locked || true
-      - name: Build WASM channels
-        run: ./scripts/build-wasm-extensions.sh --channels
-      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
-        with:
-          python-version: "3.12"
-      - name: Run workflow canary lane
-        run: scripts/live-canary/run.sh
-      - name: Scrub artifacts
-        if: always()
-        run: scripts/live-canary/scrub-artifacts.sh artifacts/live-canary
-      - name: Upload artifacts
-        if: always()
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
-        with:
-          name: live-canary-workflow-canary
-          path: artifacts/live-canary/
-          if-no-files-found: ignore
-
-  deterministic-replay:
-    name: Deterministic Replay
-    if: >
-      github.event_name == 'workflow_dispatch' &&
-      (inputs.lane == 'all' || inputs.lane == 'deterministic-replay')
-    runs-on: ubuntu-latest
-    timeout-minutes: 90
-    steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
-        with:
-          persist-credentials: false
-      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
-        with:
-          targets: wasm32-wasip2
-      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
-        with:
-          key: live-canary-deterministic-replay
-      - name: Setup OVH sccache
-        uses: ./.github/actions/setup-sccache-dist
-        with:
-          scheduler-url: ${{ vars.SCCACHE_DIST_SCHEDULER_URL }}
-          auth-token: ${{ secrets.SCCACHE_DIST_AUTH_TOKEN }}
-          cache-ssh-host: ${{ vars.SCCACHE_CACHE_SSH_HOST }}
-          cache-ssh-user: ${{ vars.SCCACHE_CACHE_SSH_USER }}
-          cache-ssh-port: ${{ vars.SCCACHE_CACHE_SSH_PORT }}
-          cache-ssh-private-key: ${{ secrets.SCCACHE_CACHE_SSH_PRIVATE_KEY }}
-          cache-ssh-known-hosts: ${{ secrets.SCCACHE_CACHE_SSH_KNOWN_HOSTS }}
-          redis-password: ${{ secrets.SCCACHE_REDIS_PASSWORD }}
-      - name: Install cargo-component
-        run: cargo install cargo-component --locked || true
-      - name: Build WASM extensions
-        run: ./scripts/build-wasm-extensions.sh
-      - name: Run deterministic replay lane
-        env:
-          LANE: deterministic-replay
-          SCENARIO: ${{ inputs.scenario }}
-          PROVIDER: replay
-          COMMAND_TIMEOUT: 90m
-          LIBSQL_PATH: ${{ runner.temp }}/ironclaw-live-replay.db
-        run: scripts/live-canary/run.sh
-      - name: Scrub artifacts
-        if: always()
-        run: scripts/live-canary/scrub-artifacts.sh artifacts/live-canary
-      - name: Upload artifacts
-        if: always()
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
-        with:
-          name: live-canary-deterministic-replay
-          path: artifacts/live-canary/
-          retention-days: 14
 
   public-smoke:
     name: Public Live Smoke
@@ -1479,72 +1259,18 @@ jobs:
           path: artifacts/live-canary/
           retention-days: 30
 
-  upgrade-canary:
-    name: Upgrade Canary
-    if: >
-      (github.event_name == 'workflow_dispatch' && (inputs.lane == 'all' || inputs.lane == 'upgrade-canary'))
-    runs-on: ubuntu-latest
-    timeout-minutes: 180
-    steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
-        with:
-          fetch-depth: 0
-          fetch-tags: true
-          persist-credentials: false
-      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
-        with:
-          targets: wasm32-wasip2
-      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
-        with:
-          key: live-canary-upgrade
-      - name: Setup OVH sccache
-        uses: ./.github/actions/setup-sccache-dist
-        with:
-          scheduler-url: ${{ vars.SCCACHE_DIST_SCHEDULER_URL }}
-          auth-token: ${{ secrets.SCCACHE_DIST_AUTH_TOKEN }}
-          cache-ssh-host: ${{ vars.SCCACHE_CACHE_SSH_HOST }}
-          cache-ssh-user: ${{ vars.SCCACHE_CACHE_SSH_USER }}
-          cache-ssh-port: ${{ vars.SCCACHE_CACHE_SSH_PORT }}
-          cache-ssh-private-key: ${{ secrets.SCCACHE_CACHE_SSH_PRIVATE_KEY }}
-          cache-ssh-known-hosts: ${{ secrets.SCCACHE_CACHE_SSH_KNOWN_HOSTS }}
-          redis-password: ${{ secrets.SCCACHE_REDIS_PASSWORD }}
-      - name: Run upgrade canary lane
-        env:
-          LANE: upgrade-canary
-          PROVIDER: upgrade
-          PREVIOUS_REF: ${{ inputs.previous_ref }}
-          CURRENT_REF: ${{ github.sha }}
-          COMMAND_TIMEOUT: 150m
-        run: scripts/live-canary/run.sh
-      - name: Scrub artifacts
-        if: always()
-        run: scripts/live-canary/scrub-artifacts.sh artifacts/live-canary
-      - name: Upload artifacts
-        if: always()
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
-        with:
-          name: live-canary-upgrade
-          path: artifacts/live-canary/
-          retention-days: 30
-
   canary-report:
     name: Canary Report
     needs:
-      - auth-smoke
-      - auth-full
-      - auth-channels
       - auth-live-seeded
       - auth-browser-consent
-      - workflow-canary
       - preflight-reborn-webui-v2-google-oauth
       - reborn-webui-v2-live-qa
-      - deterministic-replay
       - public-smoke
       - persona-rotating
       - private-oauth
       - provider-matrix
       - release-public-full
-      - upgrade-canary
     if: ${{ always() }}
     runs-on: ubuntu-latest
     timeout-minutes: 10

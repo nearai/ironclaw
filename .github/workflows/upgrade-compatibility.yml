@@ -1,0 +1,76 @@
+name: Upgrade Compatibility
+
+on:
+  workflow_dispatch:
+    inputs:
+      previous_ref:
+        description: Previous release tag or commit to create the database
+        required: true
+        type: string
+      current_ref:
+        description: Current branch, tag, or commit to validate
+        required: true
+        default: main
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: upgrade-compatibility-${{ inputs.previous_ref }}-${{ inputs.current_ref }}
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+  DATABASE_BACKEND: libsql
+  ALLOW_LOCAL_TOOLS: "true"
+  AGENT_AUTO_APPROVE_TOOLS: "true"
+  RUST_LOG: ironclaw=info
+
+jobs:
+  upgrade-compatibility:
+    name: Upgrade Compatibility
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    steps:
+      - name: Checkout current ref with release history
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          ref: ${{ inputs.current_ref }}
+          fetch-depth: 0
+          fetch-tags: true
+          persist-credentials: false
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+
+      - name: Restore Rust cache
+        uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          key: upgrade-compatibility
+
+      - name: Run upgrade compatibility lane
+        env:
+          # Preserve the canonical route: run.sh maps this lane to
+          # scripts/live-canary/upgrade-canary.sh.
+          LANE: upgrade-canary
+          PROVIDER: upgrade
+          PREVIOUS_REF: ${{ inputs.previous_ref }}
+          # The checkout resolves branches/tags/SHA inputs to the exact commit
+          # under test; HEAD remains valid when actions/checkout uses detached HEAD.
+          CURRENT_REF: HEAD
+          COMMAND_TIMEOUT: 150m
+        run: scripts/live-canary/run.sh
+
+      - name: Scrub artifacts
+        if: always()
+        run: scripts/live-canary/scrub-artifacts.sh artifacts/live-canary
+
+      - name: Upload artifacts
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: upgrade-compatibility
+          path: artifacts/live-canary/
+          if-no-files-found: ignore
+          retention-days: 30

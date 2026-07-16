@@ -778,6 +778,145 @@ jobs:
       - name: Run Reborn QA fixture contracts and replay
         run: cargo test --test reborn_qa_recorded_behavior --features libsql -- --nocapture
 
+  mock-auth-e2e:
+    name: Mock auth E2E (${{ matrix.profile }})
+    needs: changes
+    if: needs.changes.outputs.docs_only != 'true' && needs.changes.outputs.has_reborn_tests == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 75
+    env:
+      LANE: auth-${{ matrix.profile }}
+      PROVIDER: mock
+      PLAYWRIGHT_INSTALL: with-deps
+    strategy:
+      fail-fast: false
+      matrix:
+        profile:
+          - smoke
+          - full
+          - channels
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          ref: ${{ inputs.ref || github.sha }}
+          persist-credentials: false
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+        with:
+          targets: wasm32-wasip2
+
+      - name: Restore Rust cache
+        uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          shared-key: reborn-mock-auth-e2e
+          save-if: ${{ (github.event_name == 'push' && github.ref == 'refs/heads/main') || github.event_name == 'merge_group' }}
+
+      - name: Install mold and clang
+        run: |
+          scripts/ci/install-ci-apt-packages.sh clang mold
+          test -x /usr/bin/mold
+
+      - name: Install cargo-component
+        run: cargo install cargo-component --locked || true
+
+      - name: Build WASM extensions
+        run: ./scripts/build-wasm-extensions.sh
+
+      - name: Install Python
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: "3.12"
+
+      - name: Run mock auth profile
+        run: scripts/live-canary/run.sh
+
+      - name: Scrub artifacts
+        if: always()
+        run: scripts/live-canary/scrub-artifacts.sh artifacts/live-canary
+
+      - name: Upload artifacts
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: reborn-mock-auth-${{ matrix.profile }}
+          path: artifacts/live-canary/
+          if-no-files-found: ignore
+
+  workflow-hermetic-e2e:
+    name: Workflow hermetic E2E
+    needs: changes
+    if: needs.changes.outputs.docs_only != 'true' && needs.changes.outputs.has_reborn_tests == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      LANE: workflow-canary
+      PROVIDER: mock
+      PLAYWRIGHT_INSTALL: skip
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          ref: ${{ inputs.ref || github.sha }}
+          persist-credentials: false
+
+      # These scenarios install the bundled Telegram channel through the real
+      # extension API, so the hermetic suite owns its channel WASM setup too.
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+        with:
+          targets: wasm32-wasip2
+
+      - name: Restore Rust cache
+        uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          key: reborn-workflow-hermetic-e2e
+          save-if: ${{ (github.event_name == 'push' && github.ref == 'refs/heads/main') || github.event_name == 'merge_group' }}
+
+      - name: Install mold and clang
+        run: |
+          scripts/ci/install-ci-apt-packages.sh clang mold
+          test -x /usr/bin/mold
+
+      - name: Setup OVH sccache
+        uses: ./.github/actions/setup-sccache-dist
+        with:
+          scheduler-url: ${{ vars.SCCACHE_DIST_SCHEDULER_URL }}
+          auth-token: ${{ secrets.SCCACHE_DIST_AUTH_TOKEN }}
+          cache-ssh-host: ${{ vars.SCCACHE_CACHE_SSH_HOST }}
+          cache-ssh-user: ${{ vars.SCCACHE_CACHE_SSH_USER }}
+          cache-ssh-port: ${{ vars.SCCACHE_CACHE_SSH_PORT }}
+          cache-ssh-private-key: ${{ secrets.SCCACHE_CACHE_SSH_PRIVATE_KEY }}
+          cache-ssh-known-hosts: ${{ secrets.SCCACHE_CACHE_SSH_KNOWN_HOSTS }}
+          redis-password: ${{ secrets.SCCACHE_REDIS_PASSWORD }}
+
+      - name: Install cargo-component
+        run: cargo install cargo-component --locked || true
+
+      - name: Build WASM channels
+        run: ./scripts/build-wasm-extensions.sh --channels
+
+      - name: Install Python
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: "3.12"
+
+      - name: Run workflow hermetic lane
+        run: scripts/live-canary/run.sh
+
+      - name: Scrub artifacts
+        if: always()
+        run: scripts/live-canary/scrub-artifacts.sh artifacts/live-canary
+
+      - name: Upload artifacts
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: reborn-workflow-hermetic-e2e
+          path: artifacts/live-canary/
+          if-no-files-found: ignore
+
   reborn-tests:
     name: Tests (Reborn)
     runs-on: ubuntu-latest
@@ -792,6 +931,8 @@ jobs:
       - coverage-report
       - webui-v2-js-tests
       - qa-recorded-fixtures
+      - mock-auth-e2e
+      - workflow-hermetic-e2e
     steps:
       - name: Checkout repository
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
@@ -868,5 +1009,15 @@ jobs:
 
           if ! job_result_ok "qa-recorded-fixtures" "${{ needs.qa-recorded-fixtures.result }}" false "allow"; then
             echo "Reborn QA recorded fixture tests failed: ${{ needs.qa-recorded-fixtures.result }}"
+            exit 1
+          fi
+
+          if ! job_result_ok "mock-auth-e2e" "${{ needs.mock-auth-e2e.result }}" false "allow"; then
+            echo "One or more mock auth E2E profiles failed: ${{ needs.mock-auth-e2e.result }}"
+            exit 1
+          fi
+
+          if ! job_result_ok "workflow-hermetic-e2e" "${{ needs.workflow-hermetic-e2e.result }}" false "allow"; then
+            echo "Workflow hermetic E2E failed: ${{ needs.workflow-hermetic-e2e.result }}"
             exit 1
           fi
