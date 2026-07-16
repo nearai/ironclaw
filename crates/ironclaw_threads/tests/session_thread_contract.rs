@@ -2150,6 +2150,69 @@ async fn append_tool_result_reference_persists_model_observation_in_envelope() {
     assert!(observation["detail"].get("preview").is_none());
 }
 
+/// Regression (#5902): an ordinary result preview containing "Secretary" must
+/// survive the owning persistence-to-model-context path. The credential-marker
+/// policy must not reduce `secretary` to a safe-summary-only replay.
+#[tokio::test]
+async fn tool_result_preview_with_secretary_survives_model_context_replay() {
+    let service = InMemorySessionThreadService::default();
+    let scope = scope("secretary-preview-replay");
+    let thread = service
+        .ensure_thread(EnsureThreadRequest {
+            scope: scope.clone(),
+            thread_id: Some(ThreadId::new("thread-secretary-preview-replay").unwrap()),
+            created_by_actor_id: "actor".into(),
+            title: None,
+            metadata_json: None,
+        })
+        .await
+        .unwrap();
+    let preview = "Report by the Secretary of the Treasury";
+    let tool_result = service
+        .append_tool_result_reference(AppendToolResultReferenceRequest {
+            scope: scope.clone(),
+            thread_id: thread.thread_id.clone(),
+            turn_run_id: "run-1".into(),
+            result_ref: "result:secretary-preview".into(),
+            safe_summary: ToolResultSafeSummary::new("read treasury report").unwrap(),
+            provider_call: None,
+            model_observation: Some(serde_json::json!({
+                "schema_version": 1,
+                "status": "success",
+                "summary": "Tool completed; preview available.",
+                "detail": {
+                    "kind": "result_reference",
+                    "result_ref": "result:secretary-preview",
+                    "byte_len": preview.len(),
+                    "preview": preview,
+                    "total_bytes": preview.len(),
+                    "next_offset": preview.len(),
+                },
+                "trust": "untrusted_tool_output"
+            })),
+        })
+        .await
+        .unwrap();
+
+    let context = service
+        .load_context_window(LoadContextWindowRequest {
+            scope,
+            thread_id: thread.thread_id,
+            max_messages: 10,
+        })
+        .await
+        .unwrap();
+    let replayed = context
+        .messages
+        .iter()
+        .find(|message| message.message_id == Some(tool_result.message_id.clone()))
+        .expect("tool result should be included in model context");
+    assert!(
+        replayed.content.contains(preview),
+        "model context must retain ordinary document text rather than fall back to the summary"
+    );
+}
+
 /// Issue #5838: `ironclaw_reborn_composition::local_dev` inlines a first-look
 /// result preview up to `TOOL_RESULT_RECORD_READ_MAX_BYTES` into the
 /// `result_reference` observation. This pins that a full-size,

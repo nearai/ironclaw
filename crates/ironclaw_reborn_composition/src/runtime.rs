@@ -5471,7 +5471,7 @@ output_schema_ref = "schemas/write.output.json"
     fn large_echo_message() -> String {
         let repeat_count = TOOL_RESULT_RECORD_READ_MAX_BYTES / LARGE_ECHO_MESSAGE.len() + 1;
         format!(
-            "{}{}",
+            "Secretary of the Treasury: {}{}",
             LARGE_ECHO_MESSAGE.repeat(repeat_count),
             LARGE_ECHO_TAIL
         )
@@ -5521,9 +5521,13 @@ output_schema_ref = "schemas/write.output.json"
                     "model replay must carry a bounded result-reference observation"
                 );
                 assert!(
-                    tool_result.content.len() <= 4096,
+                    tool_result.content.len() <= TOOL_RESULT_RECORD_READ_MAX_BYTES * 2,
                     "tool result replay must stay within the envelope bound, got {} bytes",
                     tool_result.content.len()
+                );
+                assert!(
+                    tool_result.content.contains("Secretary of the Treasury"),
+                    "the initial result-reference preview must retain ordinary document text"
                 );
                 let result_ref = match tool_result.tool_result_content.as_ref() {
                     Some(HostManagedToolResultContent::Reference { envelope }) => {

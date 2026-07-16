@@ -465,7 +465,7 @@ pub struct PutToolResultRecordRequest {
 /// context-compaction crash) originally set this to 2,048 bytes -- a 49x cut
 /// from the pre-fix 100,000-byte inline cap that left most tool results
 /// requiring dozens of manual `result_read` calls to recover, which tanked
-/// agent benchmark performance. Raised to 40KB: still per-call bounded (the
+/// agent benchmark performance. Raised to 24KB: still per-call bounded (the
 /// property #5838 actually needed -- unbounded *accumulation* of large
 /// results in the compacted transcript, not single-call size, caused the
 /// crash) and far below the pre-fix 100,000-byte constant, while making most

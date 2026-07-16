@@ -24,6 +24,11 @@ const MAX_TOOL_RESULT_SUMMARY_BYTES: usize = 512;
 /// stub on replay and the model loses the content, exactly the retention
 /// failure behind the #5902 regression.
 const MAX_MODEL_OBSERVATION_BYTES: usize = crate::contract::TOOL_RESULT_RECORD_READ_MAX_BYTES * 2;
+// Keep the observation envelope large enough for the largest result-read
+// preview. This is compile-time because both bounds are compile-time contract
+// constants; a drift must fail the build rather than rely on a runtime test.
+const _: () =
+    assert!(MAX_MODEL_OBSERVATION_BYTES >= crate::contract::TOOL_RESULT_RECORD_READ_MAX_BYTES);
 const MODEL_VISIBLE_TOOL_OBSERVATION_SCHEMA_VERSION: u64 = 1;
 const MODEL_OBSERVATION_SUMMARY_MAX_BYTES: usize = 512;
 const MODEL_OBSERVATION_ARTIFACTS_MAX: usize = 16;
@@ -588,9 +593,7 @@ fn contains_marker_at_word_boundary(haystack: &str, marker: &str) -> bool {
     }
     let starts_alnum = marker.starts_with(|c: char| c.is_ascii_alphanumeric());
     let ends_alnum = marker.ends_with(|c: char| c.is_ascii_alphanumeric());
-    let mut from = 0;
-    while let Some(rel) = haystack[from..].find(marker) {
-        let start = from + rel;
+    for (start, _) in haystack.match_indices(marker) {
         let end = start + marker.len();
         let before_ok = !starts_alnum
             || start == 0
@@ -601,7 +604,6 @@ fn contains_marker_at_word_boundary(haystack: &str, marker: &str) -> bool {
         if before_ok && after_ok {
             return true;
         }
-        from = start + 1;
     }
     false
 }
@@ -1067,9 +1069,10 @@ mod tests {
             "secretary of the treasury",
             "secret"
         ));
-        assert!(
-            validate_model_observation_text("Report by the Secretary of the Treasury").is_ok()
-        );
+        // Continuing past a non-match must stay on a UTF-8 character boundary,
+        // including if a future marker itself begins with a multibyte character.
+        assert!(contains_marker_at_word_boundary("éxy éx", "éx"));
+        assert!(validate_model_observation_text("Report by the Secretary of the Treasury").is_ok());
         // Standalone credential markers must still be rejected.
         assert!(contains_marker_at_word_boundary(
             "here is the client secret value",
@@ -1127,23 +1130,6 @@ mod tests {
         assert!(
             replayed.contains("Secretary of the Treasury"),
             "replayed observation must carry the document content, not the safe-summary stub"
-        );
-    }
-
-    /// Structural guard against the #5902 class of bug: the whole-observation
-    /// envelope cap MUST stay >= the raw preview/chunk cap. If the preview cap
-    /// ever exceeds the envelope cap, every large observation is rejected on
-    /// replay and dropped to a stub — the exact retention failure this PR
-    /// fixes. This test fails loudly if the two constants ever drift apart.
-    #[test]
-    fn observation_envelope_cap_covers_the_preview_cap() {
-        assert!(
-            super::MAX_MODEL_OBSERVATION_BYTES
-                >= crate::contract::TOOL_RESULT_RECORD_READ_MAX_BYTES,
-            "MAX_MODEL_OBSERVATION_BYTES ({}) must be >= the preview cap ({}), else large \
-             observations drop to a stub on replay (#5902 retention failure)",
-            super::MAX_MODEL_OBSERVATION_BYTES,
-            crate::contract::TOOL_RESULT_RECORD_READ_MAX_BYTES,
         );
     }
 
@@ -1376,7 +1362,12 @@ mod tests {
 
     #[test]
     fn safe_summary_still_rejects_credentials_and_delimiters() {
+        assert!(
+            ToolResultSafeSummary::new("Secretary of the Treasury").is_ok(),
+            "ordinary words containing a marker prefix must remain valid summaries"
+        );
         for rejected in [
+            "secret",
             "leaked sk-LIVEsecretvalue token",
             "authorization header bearer abc123",
             "the api key was exposed",
