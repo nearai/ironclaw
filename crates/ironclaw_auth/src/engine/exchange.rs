@@ -459,12 +459,13 @@ pub(super) fn extract_token_response(
                         // declared is dropped (no over-claim). A scope granted
                         // beyond THIS flow's request but within the ceiling is
                         // kept — vendors with cumulative grants (opted into via
-                        // recipe data, e.g. Google's `include_granted_scopes`
+                        // recipe data, e.g. an `include_granted_scopes`-style
                         // authorize param) echo previously granted scopes on
                         // every exchange, and the stored account is shared by
                         // every extension using the vendor, so discarding them
                         // would silently sign the other extensions out (the
-                        // gmail → google-docs regression). The per-flow request
+                        // shared-vendor-account sign-out regression). The
+                        // per-flow request
                         // still drives the authorize URL and the downgrade warn
                         // below; it is not the storage bound. Generic and
                         // spec-agnostic — every vendor gets the same clamp.

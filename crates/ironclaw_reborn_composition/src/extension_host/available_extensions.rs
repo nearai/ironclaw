@@ -406,7 +406,7 @@ impl AvailableExtensionCatalog {
 
     /// Test-support only: discover filesystem packages with the
     /// `HostBundled` stamp, so integration fixtures that model host-bundled
-    /// extensions (the invented-vendor acme fixture, overview §8) may assert
+    /// extensions (the invented-vendor fixture, overview §8) may assert
     /// first-party trust. Production discovery always stamps
     /// `InstalledLocal` (#5459: a restart must never launder an uploaded
     /// bundle into first-party trust).
@@ -1586,13 +1586,15 @@ input_schema_ref = "schemas/static-mcp/dynamic/run.input.v1.json"
              when the root NEAR AI provider owns the credential"
         );
 
-        // Manifest v3: hosted-MCP nearai declares one [mcp] block instead of
-        // placeholder static tools. Before live tools/list discovery the only
-        // capability is the host-internal connection template — never
-        // model-visible — so the browser summary carries zero visible tools.
-        assert!(
-            summary.visible_capability_ids.is_empty(),
-            "hosted-MCP nearai has no model-visible tools before discovery"
+        // Manifest v3: hosted-MCP nearai pins web_search as a static tool so
+        // the model can search from first boot (main parity) — the bundled
+        // fallback and pre-discovery summary carry exactly that tool, and a
+        // successful tools/list discovery replaces the static set with the
+        // server's live catalog.
+        assert_eq!(
+            summary.visible_capability_ids,
+            vec!["nearai.web_search".to_string()],
+            "hosted-MCP nearai must pin exactly the static web_search tool before discovery"
         );
         let template = package
             .package

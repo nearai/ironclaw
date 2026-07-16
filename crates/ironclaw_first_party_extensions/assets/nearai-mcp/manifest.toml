@@ -20,6 +20,17 @@ vendor = "nearai"
 scopes = []
 injection = { type = "header", name = "authorization", prefix = "Bearer " }
 
+# Statically pinned tool: guaranteed model-visible from first boot and on the
+# bundled-manifest fallback, without live MCP discovery. A successful
+# tools/list discovery replaces the static set with the server's live catalog.
+# Credentials/effects inherit the [mcp] connection template.
+[[tools]]
+id = "nearai.web_search"
+description = "Search through the NEAR AI MCP server."
+default_permission = "ask"
+input_schema_ref = "schemas/nearai/web_search.input.v1.json"
+prompt_doc_ref = "prompts/nearai/web_search.md"
+
 [auth.nearai]
 method = "api_key"
 display_name = "NEAR AI API key"

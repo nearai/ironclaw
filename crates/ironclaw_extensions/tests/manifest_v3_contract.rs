@@ -322,24 +322,73 @@ fn mcp_manifest_parses_and_synthesizes_a_host_internal_template() {
 }
 
 #[test]
-fn mcp_is_mutually_exclusive_with_runtime_tools_and_channel() {
+fn mcp_is_mutually_exclusive_with_runtime_and_channel() {
     let with_runtime = mcp_manifest().replace(
         "[mcp]",
         "[runtime]\nkind = \"wasm\"\nmodule = \"wasm/zeta.wasm\"\n\n[mcp]",
     );
     assert!(parse_v3(&with_runtime).is_err());
 
-    let with_tools = format!(
-        "{}\n[[tools]]\nid = \"zeta.extra\"\ndescription = \"x\"\neffects = [\"network\"]\ndefault_permission = \"ask\"\ninput_schema_ref = \"schemas/zeta/x.input.v1.json\"\n",
-        mcp_manifest()
-    );
-    assert!(parse_v3(&with_tools).is_err());
-
     let with_channel = format!(
         "{}\n[channel]\nid = \"messages\"\ndisplay_name = \"Zeta\"\nconversation_model = \"continuous\"\n",
         mcp_manifest()
     );
     assert!(parse_v3(&with_channel).is_err());
+}
+
+/// Regression contract for the boot-time hosted-MCP tool guarantee: an
+/// `[mcp]` manifest may pin static `[[tools]]` that exist without live
+/// discovery (bundled fallback, first boot). They inherit the connection
+/// template's credential/effect/host-port shape — a static tool declaring
+/// its own credentials, effects, or resource_profile is rejected.
+#[test]
+fn mcp_static_tools_parse_and_inherit_the_connection_template() {
+    let with_static_tool = format!(
+        "{}\n[[tools]]\nid = \"zeta.search\"\ndescription = \"Search through Zeta.\"\ndefault_permission = \"ask\"\ninput_schema_ref = \"schemas/zeta/search.input.v1.json\"\n",
+        mcp_manifest()
+    );
+    let record = parse_v3(&with_static_tool).expect("mcp manifest with static tool parses");
+    let manifest = record.manifest();
+    assert_eq!(manifest.capabilities.len(), 2);
+    // The host-internal connection template stays first (discovery reads the
+    // template from the leading capability).
+    let template = &manifest.capabilities[0];
+    assert_eq!(template.id.as_str(), "zeta.mcp_server");
+    assert_eq!(template.visibility, CapabilityVisibility::HostInternal);
+    let static_tool = &manifest.capabilities[1];
+    assert_eq!(static_tool.id.as_str(), "zeta.search");
+    assert_eq!(static_tool.visibility, CapabilityVisibility::Model);
+    // Inherited template shape: same credentials (server-host audience),
+    // same effects, same host ports — the discovery template-consistency
+    // check must hold for every capability on the package.
+    assert_eq!(
+        static_tool.runtime_credentials,
+        template.runtime_credentials
+    );
+    assert_eq!(static_tool.effects, template.effects);
+    assert_eq!(
+        static_tool.required_host_ports,
+        template.required_host_ports
+    );
+    assert_eq!(
+        static_tool.runtime_credentials[0].audience.host_pattern,
+        "mcp.zeta.example"
+    );
+
+    for divergent in [
+        "credentials = [{ handle = \"zeta_account\", vendor = \"zeta\", audience = { scheme = \"https\", host = \"mcp.zeta.example\" }, injection = { type = \"header\", name = \"authorization\", prefix = \"Bearer \" } }]",
+        "effects = [\"network\"]",
+        "resource_profile = { default_estimate = { wall_clock_ms = 5000 } }",
+    ] {
+        let with_divergent_tool = format!(
+            "{}\n[[tools]]\nid = \"zeta.search\"\ndescription = \"Search through Zeta.\"\ndefault_permission = \"ask\"\ninput_schema_ref = \"schemas/zeta/search.input.v1.json\"\n{divergent}\n",
+            mcp_manifest()
+        );
+        assert!(
+            parse_v3(&with_divergent_tool).is_err(),
+            "static mcp tool declaring `{divergent}` must be rejected"
+        );
+    }
 }
 
 #[test]

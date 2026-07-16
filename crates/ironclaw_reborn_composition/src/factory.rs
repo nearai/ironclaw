@@ -7026,17 +7026,22 @@ mod tests {
         assert_eq!(projection.phase, InstallationState::Active);
 
         // v3 hosted-MCP surface: boot-time bootstrap activates the package
-        // statically, which publishes only the host-internal MCP connection
-        // template — no model-visible tools exist before live discovery.
+        // statically, publishing the host-internal MCP connection template
+        // plus the statically pinned web_search tool (main parity: searchable
+        // from first boot); live tools/list discovery replaces the static set
+        // with the server's catalog.
         let capabilities = extension_management
             .active_model_visible_capabilities()
             .await
             .expect("active capabilities");
-        assert!(
+        assert_eq!(
             capabilities
                 .iter()
-                .all(|capability| capability.provider.as_str() != "nearai"),
-            "activated hosted-MCP package must expose no model-visible tools before discovery"
+                .filter(|capability| capability.provider.as_str() == "nearai")
+                .map(|capability| capability.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["nearai.web_search"],
+            "activated hosted-MCP package must pin exactly the static web_search tool before discovery"
         );
         let template_id = CapabilityId::new("nearai.mcp_server").unwrap();
         let registry = extension_management.active_extensions_for_test().snapshot();
@@ -7360,19 +7365,23 @@ mod tests {
             .expect("NEAR AI MCP projected");
         assert_eq!(projection.phase, InstallationState::Active);
 
-        // v3 hosted-MCP surface: reinstall-and-activate publishes only the
-        // host-internal MCP connection template; model-visible tools appear
-        // only via live tools/list discovery, which this bootstrap-focused
-        // test does not run.
+        // v3 hosted-MCP surface: reinstall-and-activate publishes the
+        // host-internal MCP connection template plus the statically pinned
+        // web_search tool (main parity: searchable from first boot); a
+        // successful live tools/list discovery — which this bootstrap-focused
+        // test does not run — replaces the static set with the live catalog.
         let capabilities = extension_management
             .active_model_visible_capabilities()
             .await
             .expect("active capabilities");
-        assert!(
+        assert_eq!(
             capabilities
                 .iter()
-                .all(|capability| capability.provider.as_str() != "nearai"),
-            "reinstalled hosted-MCP package must expose no model-visible tools before discovery"
+                .filter(|capability| capability.provider.as_str() == "nearai")
+                .map(|capability| capability.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["nearai.web_search"],
+            "reinstalled hosted-MCP package must pin exactly the static web_search tool before discovery"
         );
         let template_id = CapabilityId::new("nearai.mcp_server").unwrap();
         let registry = extension_management.active_extensions_for_test().snapshot();

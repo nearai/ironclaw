@@ -1783,7 +1783,7 @@ pub(crate) struct RawCapabilityV2 {
     pub(crate) resource_profile: Option<ResourceProfile>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct RawRuntimeCredentialV2 {
     pub(crate) handle: String,

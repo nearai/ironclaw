@@ -2,7 +2,11 @@
 //!
 //! v3 is v2 plus explicit surface declarations: top-level `[[tools]]`, at
 //! most one `[channel]`, `[auth.<vendor>]` recipes, and — for hosted MCP
-//! servers — one `[mcp]` declaration instead of `[runtime]` + `[[tools]]`.
+//! servers — one `[mcp]` declaration instead of `[runtime]`. An `[mcp]`
+//! manifest may still pin static `[[tools]]`: they are the surfaces
+//! guaranteed present without live discovery (bundled fallback, first boot)
+//! and inherit the connection template's credential/effect shape; a
+//! successful tools/list discovery replaces them with the live catalog.
 //! The host-api contract indirection (`[[host_api]]` + operational sections)
 //! is gone: surfaces are first-class manifest vocabulary.
 //!
@@ -46,7 +50,7 @@ pub enum ManifestV3Error {
     Invalid { reason: String },
     #[error("exactly one of [runtime] or [mcp] must declare the implementation")]
     RuntimeDeclaration,
-    #[error("[mcp] is mutually exclusive with [[tools]] and [channel]")]
+    #[error("[mcp] is mutually exclusive with [channel]")]
     McpExclusivity,
     #[error("[auth.{vendor}] recipe is invalid: {error}")]
     InvalidRecipe {
@@ -253,7 +257,7 @@ pub(crate) fn parse_v3(
     let (runtime, mcp) = match (raw.runtime, raw.mcp) {
         (Some(runtime), None) => (runtime_from_raw(runtime), None),
         (None, Some(mcp)) => {
-            if !raw.tools.is_empty() || raw.channel.is_some() {
+            if raw.channel.is_some() {
                 return Err(ManifestV3Error::McpExclusivity);
             }
             if mcp.namespace != id.as_str() {
@@ -313,7 +317,28 @@ pub(crate) fn parse_v3(
     // internal capability model, reusing the v2 validated construction path.
     let mut referenced_vendors: BTreeMap<VendorId, ()> = BTreeMap::new();
     let mut capabilities = Vec::new();
+    let mut mcp_template_credentials = None;
     if let Some(mcp) = &mcp {
+        let template_credentials = mcp
+            .credentials
+            .iter()
+            .map(|credential| {
+                credential_from_v3(
+                    &credential.handle,
+                    &credential.vendor,
+                    &credential.scopes,
+                    RawAudienceV3 {
+                        scheme: NetworkScheme::Https,
+                        host: mcp.server.host(),
+                        port: None,
+                    },
+                    credential.injection.clone(),
+                    true,
+                    &recipes,
+                    &mut referenced_vendors,
+                )
+            })
+            .collect::<Result<Vec<_>, _>>()?;
         let raw_capability = RawCapabilityV2 {
             id: format!("{id}.mcp_server"),
             network_targets: Vec::new(),
@@ -329,26 +354,7 @@ pub(crate) fn parse_v3(
             output_schema_ref: None,
             prompt_doc_ref: None,
             required_host_ports: derived_host_ports(&mcp.effects, true),
-            runtime_credentials: mcp
-                .credentials
-                .iter()
-                .map(|credential| {
-                    credential_from_v3(
-                        &credential.handle,
-                        &credential.vendor,
-                        &credential.scopes,
-                        RawAudienceV3 {
-                            scheme: NetworkScheme::Https,
-                            host: mcp.server.host(),
-                            port: None,
-                        },
-                        credential.injection.clone(),
-                        true,
-                        &recipes,
-                        &mut referenced_vendors,
-                    )
-                })
-                .collect::<Result<Vec<_>, _>>()?,
+            runtime_credentials: template_credentials.clone(),
             resource_profile: None,
         };
         capabilities.push(CapabilityDeclV2::from_raw(
@@ -356,37 +362,77 @@ pub(crate) fn parse_v3(
             &id,
             host_port_catalog,
         )?);
+        mcp_template_credentials = Some(template_credentials);
     }
     for tool in raw.tools {
-        let raw_capability = RawCapabilityV2 {
-            id: tool.id,
-            network_targets: Vec::new(),
-            implements: Vec::new(),
-            description: tool.description,
-            effects: with_dispatch_effect(tool.effects.clone()),
-            default_permission: tool.default_permission,
-            visibility: tool.visibility,
-            input_schema_ref: tool.input_schema_ref,
-            output_schema_ref: None,
-            prompt_doc_ref: tool.prompt_doc_ref,
-            required_host_ports: derived_host_ports(&tool.effects, sandboxed_runtime),
-            runtime_credentials: tool
-                .credentials
-                .into_iter()
-                .map(|credential| {
-                    credential_from_v3(
-                        &credential.handle,
-                        &credential.vendor,
-                        &credential.scopes,
-                        credential.audience,
-                        credential.injection,
-                        credential.required,
-                        &recipes,
-                        &mut referenced_vendors,
-                    )
-                })
-                .collect::<Result<Vec<_>, _>>()?,
-            resource_profile: tool.resource_profile,
+        // Statically pinned tools on an `[mcp]` manifest are the surfaces
+        // guaranteed present without live discovery (bundled fallback, first
+        // boot); a successful tools/list discovery replaces them with the
+        // server's live catalog. They inherit the connection template's
+        // credential/effect/host-port shape so every capability on the
+        // package stays template-consistent — including when composition
+        // patches `[mcp].server` to a configured endpoint.
+        let raw_capability = match (&mcp, &mcp_template_credentials) {
+            (Some(mcp), Some(template_credentials)) => {
+                if !tool.credentials.is_empty()
+                    || !tool.effects.is_empty()
+                    || tool.resource_profile.is_some()
+                {
+                    return Err(ManifestV3Error::Invalid {
+                        reason: format!(
+                            "static tool `{}` on an [mcp] manifest inherits the server \
+                             connection template; remove its credentials, effects, and \
+                             resource_profile",
+                            tool.id
+                        ),
+                    });
+                }
+                RawCapabilityV2 {
+                    id: tool.id,
+                    network_targets: Vec::new(),
+                    implements: Vec::new(),
+                    description: tool.description,
+                    effects: with_dispatch_effect(mcp.effects.clone()),
+                    default_permission: tool.default_permission,
+                    visibility: tool.visibility,
+                    input_schema_ref: tool.input_schema_ref,
+                    output_schema_ref: None,
+                    prompt_doc_ref: tool.prompt_doc_ref,
+                    required_host_ports: derived_host_ports(&mcp.effects, true),
+                    runtime_credentials: template_credentials.clone(),
+                    resource_profile: None,
+                }
+            }
+            _ => RawCapabilityV2 {
+                id: tool.id,
+                network_targets: Vec::new(),
+                implements: Vec::new(),
+                description: tool.description,
+                effects: with_dispatch_effect(tool.effects.clone()),
+                default_permission: tool.default_permission,
+                visibility: tool.visibility,
+                input_schema_ref: tool.input_schema_ref,
+                output_schema_ref: None,
+                prompt_doc_ref: tool.prompt_doc_ref,
+                required_host_ports: derived_host_ports(&tool.effects, sandboxed_runtime),
+                runtime_credentials: tool
+                    .credentials
+                    .into_iter()
+                    .map(|credential| {
+                        credential_from_v3(
+                            &credential.handle,
+                            &credential.vendor,
+                            &credential.scopes,
+                            credential.audience,
+                            credential.injection,
+                            credential.required,
+                            &recipes,
+                            &mut referenced_vendors,
+                        )
+                    })
+                    .collect::<Result<Vec<_>, _>>()?,
+                resource_profile: tool.resource_profile,
+            },
         };
         capabilities.push(CapabilityDeclV2::from_raw(
             raw_capability,

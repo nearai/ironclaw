@@ -189,7 +189,7 @@ pub struct RebornBuildInput {
     pub(crate) network_http_egress_for_test: Option<Arc<dyn NetworkHttpEgress>>,
     /// Test-support only: stamp filesystem-discovered extension packages as
     /// `HostBundled` so integration fixtures that model host-bundled
-    /// extensions (the §8 invented-vendor acme fixture) may assert
+    /// extensions (the §8 invented-vendor fixture) may assert
     /// first-party trust. Production discovery always stamps
     /// `InstalledLocal` (#5459).
     #[cfg(any(test, feature = "test-support"))]
