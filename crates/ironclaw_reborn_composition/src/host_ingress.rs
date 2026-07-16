@@ -87,12 +87,14 @@ fn projection(error: impl std::fmt::Display) -> HostIngressProjectionError {
 /// keyed on `(tenant, adapter installation)`. Shared by every channel host;
 /// serve layers map [`InstallationRateExceeded`] onto their own sanitized
 /// ingress error shapes.
+#[cfg(any(feature = "slack-v2-host-beta", feature = "telegram-v2-host-beta"))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct InstallationRateLimitConfig {
     pub(crate) max_requests: std::num::NonZeroU32,
     pub(crate) window: std::time::Duration,
 }
 
+#[cfg(any(feature = "slack-v2-host-beta", feature = "telegram-v2-host-beta"))]
 impl InstallationRateLimitConfig {
     pub(crate) fn new(max_requests: std::num::NonZeroU32, window: std::time::Duration) -> Self {
         Self {
@@ -102,6 +104,7 @@ impl InstallationRateLimitConfig {
     }
 }
 
+#[cfg(any(feature = "slack-v2-host-beta", feature = "telegram-v2-host-beta"))]
 /// The limiter refused a request for this installation within the window.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct InstallationRateExceeded {
@@ -109,6 +112,7 @@ pub(crate) struct InstallationRateExceeded {
     pub(crate) adapter_installation_id: ironclaw_product_adapters::AdapterInstallationId,
 }
 
+#[cfg(any(feature = "slack-v2-host-beta", feature = "telegram-v2-host-beta"))]
 #[derive(Clone)]
 pub(crate) struct InstallationRateLimiter {
     config: InstallationRateLimitConfig,
@@ -117,6 +121,7 @@ pub(crate) struct InstallationRateLimiter {
     >,
 }
 
+#[cfg(any(feature = "slack-v2-host-beta", feature = "telegram-v2-host-beta"))]
 impl InstallationRateLimiter {
     pub(crate) fn new(config: InstallationRateLimitConfig) -> Self {
         Self {
@@ -166,6 +171,7 @@ impl InstallationRateLimiter {
     }
 }
 
+#[cfg(any(feature = "slack-v2-host-beta", feature = "telegram-v2-host-beta"))]
 impl std::fmt::Debug for InstallationRateLimiter {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter
@@ -175,18 +181,21 @@ impl std::fmt::Debug for InstallationRateLimiter {
     }
 }
 
+#[cfg(any(feature = "slack-v2-host-beta", feature = "telegram-v2-host-beta"))]
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 struct InstallationRateLimitKey {
     tenant_id: ironclaw_host_api::TenantId,
     adapter_installation_id: ironclaw_product_adapters::AdapterInstallationId,
 }
 
+#[cfg(any(feature = "slack-v2-host-beta", feature = "telegram-v2-host-beta"))]
 #[derive(Debug, Clone)]
 struct RateLimitBucket {
     last_refilled_at: std::time::Instant,
     tokens: f64,
 }
 
+#[cfg(any(feature = "slack-v2-host-beta", feature = "telegram-v2-host-beta"))]
 impl RateLimitBucket {
     fn full(now: std::time::Instant, config: &InstallationRateLimitConfig) -> Self {
         Self {
@@ -219,6 +228,7 @@ impl RateLimitBucket {
     }
 }
 
+#[cfg(any(feature = "slack-v2-host-beta", feature = "telegram-v2-host-beta"))]
 /// Sanitized webhook error vocabulary shared by every channel host's public
 /// ingress route: the response body is `{"error": <category>}` and never
 /// carries provider or internal detail.
@@ -232,11 +242,13 @@ pub(crate) enum WebhookErrorCategory {
     TemporarilyUnavailable,
 }
 
+#[cfg(any(feature = "slack-v2-host-beta", feature = "telegram-v2-host-beta"))]
 #[derive(Debug, serde::Serialize)]
 struct WebhookErrorBody {
     error: WebhookErrorCategory,
 }
 
+#[cfg(any(feature = "slack-v2-host-beta", feature = "telegram-v2-host-beta"))]
 pub(crate) fn webhook_error_response(
     status: axum::http::StatusCode,
     category: WebhookErrorCategory,
@@ -245,6 +257,7 @@ pub(crate) fn webhook_error_response(
     (status, axum::Json(WebhookErrorBody { error: category })).into_response()
 }
 
+#[cfg(any(feature = "slack-v2-host-beta", feature = "telegram-v2-host-beta"))]
 /// The shared `RunnerError` → HTTP mapping every channel webhook uses:
 /// authentication failures 401, capacity 429, retryable adapter/workflow
 /// faults 503, everything else a sanitized 400. Serve layers add their own
