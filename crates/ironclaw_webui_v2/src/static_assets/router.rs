@@ -9,9 +9,12 @@
 //! the router's concern — host composition wraps this Router with
 //! its own middleware stack.
 
+use std::fmt;
+use std::sync::Arc;
+
 use axum::Router;
 use axum::body::Body;
-use axum::extract::Path as AxumPath;
+use axum::extract::{Path as AxumPath, State};
 use axum::http::{HeaderValue, StatusCode, Uri, header};
 use axum::response::{IntoResponse, Redirect, Response};
 use axum::routing::get;
@@ -27,6 +30,145 @@ const NONCE_PLACEHOLDER: &str = "__IRONCLAW_CSP_NONCE__";
 /// characters, well above the CSP-3 recommendation of 128 bits.
 const NONCE_BYTES: usize = 16;
 
+/// Lower-case hexadecimal alphabet used to encode CSP nonce bytes without a
+/// temporary allocation per byte.
+const HEX_DIGITS: &[u8; 16] = b"0123456789abcdef";
+
+/// Server-owned root namespaces that stay fail-closed even when optional host
+/// route mounts are disabled. Composition adds roots derived from every route
+/// descriptor it actually mounts.
+const DEFAULT_RESERVED_ROOT_NAMESPACES: &[&str] = &["api", "auth", "v1", "webhooks"];
+
+/// Root namespaces with explicit Rust routes owned by the static WebUI surface.
+///
+/// React routes intentionally share the wildcard and may be replaced when host
+/// composition explicitly reserves their root. Embedded asset roots are
+/// checked from the generated asset table separately so adding a new top-level
+/// asset cannot silently create a host route collision.
+const EXPLICIT_STATIC_ROOT_NAMESPACES: &[&str] = &["v2", "wallet"];
+
+/// Invalid root namespace supplied to [`StaticRouterConfig`].
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum StaticRouterConfigError {
+    /// The value is not one canonical literal URL path segment.
+    NonCanonicalRootNamespace { namespace: String },
+    /// The static WebUI already owns behavior or assets below this root.
+    StaticRootNamespaceConflict { namespace: String },
+}
+
+impl fmt::Display for StaticRouterConfigError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::NonCanonicalRootNamespace { namespace } => write!(
+                formatter,
+                "root namespace {namespace:?} must be one canonical ASCII URL path segment",
+            ),
+            Self::StaticRootNamespaceConflict { namespace } => write!(
+                formatter,
+                "root namespace {namespace:?} is owned by the static WebUI surface",
+            ),
+        }
+    }
+}
+
+impl std::error::Error for StaticRouterConfigError {}
+
+/// Static SPA fallback policy supplied by host composition.
+///
+/// The default preserves the server namespaces that must never render the SPA
+/// shell. Composition should add the first literal segment from every mounted
+/// route descriptor so a future host-owned namespace automatically inherits
+/// the same fail-closed behavior.
+#[derive(Clone, Debug)]
+pub struct StaticRouterConfig {
+    reserved_root_namespaces: Vec<String>,
+}
+
+impl Default for StaticRouterConfig {
+    fn default() -> Self {
+        Self {
+            reserved_root_namespaces: DEFAULT_RESERVED_ROOT_NAMESPACES
+                .iter()
+                .copied()
+                .map(String::from)
+                .collect(),
+        }
+    }
+}
+
+impl StaticRouterConfig {
+    /// Add literal root path segments owned by host routes.
+    ///
+    /// Each namespace must be one non-empty ASCII RFC 3986 `pchar` segment,
+    /// excluding percent-encoding, `.` and `..`. Static-owned roots are
+    /// rejected because reserving one would either shadow an asset/route or be
+    /// bypassed by a more specific static route.
+    pub fn try_with_additional_reserved_root_namespaces<I, S>(
+        mut self,
+        namespaces: I,
+    ) -> Result<Self, StaticRouterConfigError>
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        for namespace in namespaces {
+            let namespace = namespace.into();
+            if !is_canonical_root_namespace(&namespace) {
+                return Err(StaticRouterConfigError::NonCanonicalRootNamespace { namespace });
+            }
+            if static_router_owns_root_namespace(&namespace) {
+                return Err(StaticRouterConfigError::StaticRootNamespaceConflict { namespace });
+            }
+            self.reserved_root_namespaces.push(namespace);
+        }
+        self.reserved_root_namespaces.sort_unstable();
+        self.reserved_root_namespaces.dedup();
+        Ok(self)
+    }
+}
+
+fn is_canonical_root_namespace(namespace: &str) -> bool {
+    !namespace.is_empty()
+        && namespace != "."
+        && namespace != ".."
+        && namespace.bytes().all(is_unencoded_ascii_pchar)
+}
+
+fn is_unencoded_ascii_pchar(byte: u8) -> bool {
+    byte.is_ascii_alphanumeric()
+        || matches!(
+            byte,
+            b'-' | b'.'
+                | b'_'
+                | b'~'
+                | b'!'
+                | b'$'
+                | b'&'
+                | b'\''
+                | b'('
+                | b')'
+                | b'*'
+                | b'+'
+                | b','
+                | b';'
+                | b'='
+                | b':'
+                | b'@'
+        )
+}
+
+fn static_router_owns_root_namespace(namespace: &str) -> bool {
+    EXPLICIT_STATIC_ROOT_NAMESPACES.contains(&namespace)
+        || assets::ASSETS
+            .iter()
+            .any(|(path, _)| path.split('/').next().is_some_and(|root| root == namespace))
+}
+
+#[derive(Clone)]
+struct StaticRouterState {
+    reserved_root_namespaces: Arc<[String]>,
+}
+
 /// Build the SPA static-asset router at the gateway root.
 ///
 /// The canonical browser routes live at `/chat`, `/settings`, and the other
@@ -35,9 +177,17 @@ const NONCE_BYTES: usize = 16;
 /// login tickets keep working during the migration. Host-owned namespaces
 /// such as `/api`, `/auth`, `/v1`, and `/webhooks` remain fail-closed.
 ///
-/// The router owns no per-instance state; each request generates a
-/// fresh nonce.
+/// The router state contains only the immutable fallback namespace set; each
+/// request still generates a fresh nonce.
 pub fn static_router() -> Router {
+    static_router_with_config(StaticRouterConfig::default())
+}
+
+/// Build the root SPA router with additional host-owned root namespaces.
+pub fn static_router_with_config(config: StaticRouterConfig) -> Router {
+    let state = StaticRouterState {
+        reserved_root_namespaces: config.reserved_root_namespaces.into(),
+    };
     // Explicit routes keep `axum::Router::nest` out of the picture — nest in
     // 0.8 has quirky dispatch for exact prefixes with/without trailing slash.
     // The wildcard handler receives the root-relative path via `Path`.
@@ -54,8 +204,9 @@ pub fn static_router() -> Router {
         // merely because the SPA owns GET for the same catch-all path.
         .route(
             "/{*path}",
-            get(serve_wildcard).fallback(|| async { StatusCode::NOT_FOUND }),
+            get(serve_configured_wildcard).fallback(|| async { StatusCode::NOT_FOUND }),
         )
+        .with_state(state)
 }
 
 /// Redirect a legacy `/v2` URL to its root-mounted equivalent.
@@ -68,6 +219,13 @@ pub fn static_router() -> Router {
 /// WHATWG URL parsing treats them like slashes for HTTP(S), so forwarding a
 /// raw backslash could otherwise turn a same-origin `Location` into an
 /// external navigation.
+///
+/// Only literal `/` and `\` need normalization here. Hyper parses the request
+/// target into `http::Uri` before Axum calls this handler, and that parser
+/// rejects raw ASCII whitespace and control characters. Percent-encoded bytes
+/// remain encoded in `Uri::path()` and therefore stay ordinary same-origin path
+/// data after the owned leading `/` below. Do not refactor this helper to use a
+/// percent-decoded `Path<String>` without preserving those invariants.
 async fn redirect_legacy_v2(uri: Uri) -> Redirect {
     Redirect::temporary(&legacy_v2_target(&uri))
 }
@@ -136,10 +294,20 @@ pub async fn serve_root() -> Response {
 /// path that has no file extension), 404 for unknown asset paths
 /// that do look like asset requests.
 pub async fn serve_wildcard(AxumPath(path): AxumPath<String>) -> Response {
-    serve_for_path(&path)
+    serve_for_path(&path, DEFAULT_RESERVED_ROOT_NAMESPACES)
 }
 
-fn serve_for_path(path: &str) -> Response {
+async fn serve_configured_wildcard(
+    State(state): State<StaticRouterState>,
+    AxumPath(path): AxumPath<String>,
+) -> Response {
+    serve_for_path(&path, &state.reserved_root_namespaces)
+}
+
+fn serve_for_path<T>(path: &str, reserved_root_namespaces: &[T]) -> Response
+where
+    T: AsRef<str>,
+{
     // Axum strips exactly one slash from a wildcard capture. A request with
     // repeated leading slashes therefore reaches this helper with a leading
     // slash still present (for example, `//api/x` becomes `/api/x`). Its Path
@@ -162,10 +330,11 @@ fn serve_for_path(path: &str) -> Response {
     // Root-mounting the SPA must not turn unknown host/API requests into a
     // successful HTML response. Exact registered routes still win in axum;
     // unmatched requests in these server-owned namespaces fail closed here.
-    if matches!(
-        path.split('/').next(),
-        Some("api" | "auth" | "v1" | "webhooks")
-    ) {
+    if path.split('/').next().is_some_and(|root| {
+        reserved_root_namespaces
+            .iter()
+            .any(|reserved| reserved.as_ref() == root)
+    }) {
         return StatusCode::NOT_FOUND.into_response();
     }
 
@@ -271,7 +440,8 @@ fn generate_nonce() -> String {
     rand::rng().fill(&mut buf);
     let mut out = String::with_capacity(NONCE_BYTES * 2);
     for byte in &buf {
-        out.push_str(&format!("{byte:02x}"));
+        out.push(HEX_DIGITS[(byte >> 4) as usize] as char);
+        out.push(HEX_DIGITS[(byte & 0x0f) as usize] as char);
     }
     out
 }
@@ -335,6 +505,16 @@ mod tests {
             // raw backslash from becoming a network-path redirect target.
             (r"/v2/\evil.example", "/evil.example"),
             (r"/v2/path\segment", "/path/segment"),
+            // `http::Uri` preserves percent-encoded bytes. Even encoded ASCII
+            // whitespace or separators therefore remain path data after the
+            // same-origin leading slash instead of becoming a URL authority.
+            ("/v2/%09//evil.example", "/%09//evil.example"),
+            ("/v2/%0A//evil.example", "/%0A//evil.example"),
+            ("/v2/%0D//evil.example", "/%0D//evil.example"),
+            ("/v2/%0C//evil.example", "/%0C//evil.example"),
+            ("/v2/%20//evil.example", "/%20//evil.example"),
+            ("/v2/%2F%2Fevil.example", "/%2F%2Fevil.example"),
+            ("/v2/%5C%5Cevil.example", "/%5C%5Cevil.example"),
         ] {
             let response = app
                 .clone()
@@ -359,6 +539,17 @@ mod tests {
                     .and_then(|value| value.to_str().ok()),
                 Some(target),
                 "GET {source}",
+            );
+        }
+    }
+
+    #[test]
+    fn legacy_v2_raw_ascii_whitespace_is_rejected_by_uri_parser() {
+        for character in ['\t', '\n', '\r', '\u{000c}', ' '] {
+            let source = format!("/v2/{character}//evil.example");
+            assert!(
+                source.parse::<Uri>().is_err(),
+                "raw ASCII whitespace must not reach redirect construction: {source:?}",
             );
         }
     }
@@ -669,6 +860,87 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn configured_host_namespace_does_not_fall_back_to_spa() {
+        let app = static_router_with_config(
+            StaticRouterConfig::default()
+                .try_with_additional_reserved_root_namespaces(["future-host"])
+                .expect("canonical unowned namespace"),
+        );
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method(Method::GET)
+                    .uri("/future-host/not-a-route")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("oneshot");
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[test]
+    fn static_router_config_rejects_noncanonical_root_namespaces() {
+        for namespace in [
+            "",
+            "/future-host",
+            "future-host/child",
+            r"future\host",
+            ".",
+            "..",
+            "%66uture-host",
+            "{namespace}",
+            "future{namespace}",
+            "future host",
+            "future\nroot",
+            "futuré-host",
+        ] {
+            let error = StaticRouterConfig::default()
+                .try_with_additional_reserved_root_namespaces([namespace])
+                .expect_err("noncanonical namespace must fail closed");
+            assert_eq!(
+                error,
+                StaticRouterConfigError::NonCanonicalRootNamespace {
+                    namespace: namespace.to_string(),
+                },
+            );
+        }
+    }
+
+    #[test]
+    fn static_router_config_accepts_unencoded_ascii_pchar_namespaces() {
+        StaticRouterConfig::default()
+            .try_with_additional_reserved_root_namespaces([
+                "foo@bar",
+                "oauth:callback",
+                "foo!$&'()*+,;=bar",
+            ])
+            .expect("unencoded RFC 3986 pchar namespaces are canonical");
+    }
+
+    #[test]
+    fn static_router_config_rejects_static_owned_root_namespaces() {
+        for namespace in [
+            "v2",
+            "wallet",
+            "assets",
+            "vendor",
+            "wallet-connect.html",
+            "wallet-connect.js",
+        ] {
+            let error = StaticRouterConfig::default()
+                .try_with_additional_reserved_root_namespaces([namespace])
+                .expect_err("static-owned namespace must fail closed");
+            assert_eq!(
+                error,
+                StaticRouterConfigError::StaticRootNamespaceConflict {
+                    namespace: namespace.to_string(),
+                },
+            );
+        }
+    }
+
+    #[tokio::test]
     async fn standalone_noncanonical_path_separators_are_rejected() {
         let app = static_router();
         for path in [
@@ -788,7 +1060,10 @@ mod tests {
         let b = generate_nonce();
         assert_ne!(a, b);
         assert_eq!(a.len(), NONCE_BYTES * 2);
-        assert!(a.chars().all(|c| c.is_ascii_hexdigit()));
+        assert!(
+            a.bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+        );
     }
 
     #[test]

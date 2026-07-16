@@ -139,4 +139,7 @@ pub use schema::{WebChatV2Event, WebChatV2EventFrame};
 #[cfg(feature = "webui-v2-beta")]
 pub use sse_capacity::DEFAULT_SSE_MAX_CONCURRENT_PER_CALLER;
 #[cfg(feature = "webui-v2-beta")]
-pub use static_assets::{serve_root, serve_wildcard, static_router};
+pub use static_assets::{
+    StaticRouterConfig, StaticRouterConfigError, serve_root, serve_wildcard, static_router,
+    static_router_with_config,
+};

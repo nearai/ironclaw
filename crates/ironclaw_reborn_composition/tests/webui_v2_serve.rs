@@ -38,7 +38,7 @@ use ironclaw_product_workflow::{
 };
 use ironclaw_reborn_composition::{
     PublicRouteMount, RebornReadiness, RebornWebuiBundle, WebuiAuthentication, WebuiAuthenticator,
-    WebuiServeConfig, webui_v2_app,
+    WebuiServeConfig, WebuiServeError, webui_v2_app,
 };
 use ironclaw_threads::{SessionThreadRecord, ThreadScope};
 use ironclaw_turns::{EventCursor, RunProfileId, RunProfileVersion, TurnRunId, TurnStatus};
@@ -48,6 +48,68 @@ use tower::ServiceExt;
 const TENANT: &str = "tenant-alpha";
 const USER: &str = "user-alpha";
 const VALID_TOKEN: &str = "valid-bearer-token";
+
+fn public_test_descriptor(
+    route_id: &str,
+    route_pattern: &str,
+) -> ironclaw_host_api::ingress::IngressRouteDescriptor {
+    use ironclaw_host_api::IngressScopeSource;
+    use ironclaw_host_api::ingress::{
+        AllowedEffectPath, AuditTraceClass, BodyLimitPolicy, CorsPolicy, IngressAuthPolicy,
+        IngressJustification, IngressPolicy, IngressPolicyParts, IngressRouteDescriptor,
+        ListenerClass, RateLimitPolicy, RateLimitScope, StreamingMode, WebSocketOriginPolicy,
+    };
+    use std::num::NonZeroU32;
+
+    IngressRouteDescriptor::new(
+        route_id,
+        NetworkMethod::Get,
+        route_pattern,
+        IngressPolicy::new(IngressPolicyParts {
+            listener_class: ListenerClass::LocalGateway,
+            auth: IngressAuthPolicy::Public {
+                justification: IngressJustification::new("test public", "regression test")
+                    .expect("justification"),
+            },
+            scope_source: IngressScopeSource::PublicRoute,
+            body_limit: BodyLimitPolicy::NoBody,
+            rate_limit: RateLimitPolicy::Limited {
+                scope: RateLimitScope::PerIp,
+                max_requests: NonZeroU32::new(120).expect("120 != 0"),
+                window_seconds: NonZeroU32::new(60).expect("60 != 0"),
+            },
+            cors: CorsPolicy::SameOriginOnly,
+            websocket_origin: WebSocketOriginPolicy::NotApplicable,
+            streaming: StreamingMode::None,
+            audit: AuditTraceClass::PublicCallback,
+            effect_path: AllowedEffectPath::NoEffect,
+        })
+        .expect("policy"),
+    )
+    .expect("descriptor")
+}
+
+fn compose_with_public_descriptor(
+    route_id: &str,
+    route_pattern: &str,
+) -> Result<axum::Router, WebuiServeError> {
+    let bundle = RebornWebuiBundle {
+        api: Arc::new(StubServices::default()),
+        product_auth: None,
+        readiness: RebornReadiness::disabled(),
+    };
+    let descriptor = public_test_descriptor(route_id, route_pattern);
+    let config = WebuiServeConfig::new(
+        TenantId::new(TENANT).expect("tenant"),
+        Arc::new(OnlyValidToken),
+        vec![HeaderValue::from_static("http://localhost:1234")],
+    )
+    .with_default_agent_id(AgentId::new(AGENT).expect("agent"))
+    .with_default_project_id(ProjectId::new(PROJECT).expect("project"))
+    .with_public_route_mount(PublicRouteMount::new(axum::Router::new(), vec![descriptor]));
+
+    webui_v2_app(bundle, config)
+}
 
 fn service_unavailable_error(retryable: bool) -> RebornServicesError {
     RebornServicesError {
@@ -2869,14 +2931,7 @@ async fn js_client_resolve_gate_path_decodes_percent_encoded_gate_ref() {
 #[tokio::test]
 async fn public_route_mount_is_merged_without_bearer_auth_and_keeps_descriptor_policy() {
     use axum::extract::ConnectInfo;
-    use ironclaw_host_api::ingress::{
-        AllowedEffectPath, AuditTraceClass, BodyLimitPolicy, CorsPolicy, IngressAuthPolicy,
-        IngressJustification, IngressPolicy, IngressPolicyParts, IngressRouteDescriptor,
-        ListenerClass, RateLimitPolicy, RateLimitScope, StreamingMode, WebSocketOriginPolicy,
-    };
-    use ironclaw_host_api::{IngressScopeSource, NetworkMethod};
     use std::net::SocketAddr;
-    use std::num::NonZeroU32;
 
     let services = Arc::new(StubServices::default());
     let bundle = RebornWebuiBundle {
@@ -2888,32 +2943,7 @@ async fn public_route_mount_is_merged_without_bearer_auth_and_keeps_descriptor_p
         "/auth/providers",
         axum::routing::get(|| async { axum::Json(serde_json::json!({ "providers": [] })) }),
     );
-    let descriptor = IngressRouteDescriptor::new(
-        "webui.sso.providers.test".to_string(),
-        NetworkMethod::Get,
-        "/auth/providers".to_string(),
-        IngressPolicy::new(IngressPolicyParts {
-            listener_class: ListenerClass::LocalGateway,
-            auth: IngressAuthPolicy::Public {
-                justification: IngressJustification::new("test public", "regression test")
-                    .expect("justification"),
-            },
-            scope_source: IngressScopeSource::PublicRoute,
-            body_limit: BodyLimitPolicy::NoBody,
-            rate_limit: RateLimitPolicy::Limited {
-                scope: RateLimitScope::PerIp,
-                max_requests: NonZeroU32::new(120).expect("120 != 0"),
-                window_seconds: NonZeroU32::new(60).expect("60 != 0"),
-            },
-            cors: CorsPolicy::SameOriginOnly,
-            websocket_origin: WebSocketOriginPolicy::NotApplicable,
-            streaming: StreamingMode::None,
-            audit: AuditTraceClass::PublicCallback,
-            effect_path: AllowedEffectPath::NoEffect,
-        })
-        .expect("policy"),
-    )
-    .expect("descriptor");
+    let descriptor = public_test_descriptor("webui.sso.providers.test", "/auth/providers");
 
     let config = WebuiServeConfig::new(
         TenantId::new(TENANT).expect("tenant"),
@@ -2967,6 +2997,138 @@ async fn public_route_mount_is_merged_without_bearer_auth_and_keeps_descriptor_p
         .await
         .expect("oneshot");
     assert_eq!(protected.status(), StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn public_route_mount_reserves_its_root_namespace_from_spa_fallback() {
+    use axum::extract::ConnectInfo;
+    use std::net::SocketAddr;
+
+    let services = Arc::new(StubServices::default());
+    let bundle = RebornWebuiBundle {
+        api: services,
+        product_auth: None,
+        readiness: RebornReadiness::disabled(),
+    };
+    let public = axum::Router::new().route(
+        "/future-host/ping",
+        axum::routing::get(|| async { StatusCode::NO_CONTENT }),
+    );
+    let descriptor = public_test_descriptor("webui.future_host.ping.test", "/future-host/ping");
+    let config = WebuiServeConfig::new(
+        TenantId::new(TENANT).expect("tenant"),
+        Arc::new(OnlyValidToken),
+        vec![HeaderValue::from_static("http://localhost:1234")],
+    )
+    .with_default_agent_id(AgentId::new(AGENT).expect("agent"))
+    .with_default_project_id(ProjectId::new(PROJECT).expect("project"))
+    .with_public_route_mount(PublicRouteMount::new(public, vec![descriptor]));
+    let app = webui_v2_app(bundle, config).expect("webui v2 app");
+
+    let mut exact_request = Request::builder()
+        .method(Method::GET)
+        .uri("/future-host/ping")
+        .body(Body::empty())
+        .expect("request");
+    exact_request
+        .extensions_mut()
+        .insert(ConnectInfo(SocketAddr::from(([127, 0, 0, 1], 1234))));
+    let exact = app.clone().oneshot(exact_request).await.expect("oneshot");
+    assert_eq!(exact.status(), StatusCode::NO_CONTENT);
+
+    let unknown = app
+        .oneshot(
+            Request::builder()
+                .method(Method::GET)
+                .uri("/future-host/not-a-route")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("oneshot");
+    assert_eq!(
+        unknown.status(),
+        StatusCode::NOT_FOUND,
+        "unknown paths in a host-owned root namespace must not render the SPA shell",
+    );
+    assert_ne!(
+        unknown
+            .headers()
+            .get(header::CONTENT_TYPE)
+            .and_then(|value| value.to_str().ok()),
+        Some("text/html; charset=utf-8"),
+    );
+}
+
+#[test]
+fn public_route_mount_with_dynamic_root_namespace_fails_composition() {
+    let error = match compose_with_public_descriptor(
+        "webui.dynamic_namespace.ping.test",
+        "/{namespace}/ping",
+    ) {
+        Ok(_) => panic!("dynamic root namespace must fail composition"),
+        Err(error) => error,
+    };
+    assert!(matches!(
+        error,
+        WebuiServeError::NonCanonicalRootNamespace {
+            route_id,
+            route_pattern,
+            root_namespace,
+        } if route_id == "webui.dynamic_namespace.ping.test"
+            && route_pattern == "/{namespace}/ping"
+            && root_namespace == "{namespace}"
+    ));
+}
+
+#[test]
+fn public_route_mount_with_encoded_root_namespace_fails_composition() {
+    let error = match compose_with_public_descriptor(
+        "webui.encoded_namespace.ping.test",
+        "/%66uture-host/ping",
+    ) {
+        Ok(_) => panic!("encoded root namespace must fail composition"),
+        Err(error) => error,
+    };
+    assert!(matches!(
+        error,
+        WebuiServeError::NonCanonicalRootNamespace {
+            route_id,
+            route_pattern,
+            root_namespace,
+        } if route_id == "webui.encoded_namespace.ping.test"
+            && route_pattern == "/%66uture-host/ping"
+            && root_namespace == "%66uture-host"
+    ));
+}
+
+#[test]
+fn public_route_mount_with_static_owned_root_namespace_fails_composition() {
+    for (root_namespace, route_pattern) in [
+        ("v2", "/v2/ping"),
+        ("wallet", "/wallet/ping"),
+        ("assets", "/assets/ping"),
+        ("vendor", "/vendor/ping"),
+        ("wallet-connect.js", "/wallet-connect.js/ping"),
+    ] {
+        let error = match compose_with_public_descriptor(
+            "webui.static_namespace_conflict.ping.test",
+            route_pattern,
+        ) {
+            Ok(_) => panic!("static-owned root namespace must fail composition"),
+            Err(error) => error,
+        };
+        assert!(matches!(
+            error,
+            WebuiServeError::StaticRootNamespaceConflict {
+                route_id,
+                route_pattern: actual_pattern,
+                root_namespace: actual_namespace,
+            } if route_id == "webui.static_namespace_conflict.ping.test"
+                && actual_pattern == route_pattern
+                && actual_namespace == root_namespace
+        ));
+    }
 }
 
 // ─── Automations panel UI (fix/reborn-automations-ux) ─────────────────

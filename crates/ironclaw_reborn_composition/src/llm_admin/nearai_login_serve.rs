@@ -209,8 +209,11 @@ mod tests {
 
         assert_eq!(response.status(), StatusCode::SEE_OTHER);
         assert_eq!(
-            response.headers().get(header::LOCATION),
-            Some(&NEARAI_LOGIN_SUCCESS_REDIRECT.parse().expect("location"))
+            response
+                .headers()
+                .get(header::LOCATION)
+                .and_then(|value| value.to_str().ok()),
+            Some("/chat"),
         );
         assert_eq!(reload.calls.load(Ordering::SeqCst), 1);
     }
@@ -241,8 +244,11 @@ mod tests {
 
             assert_eq!(response.status(), StatusCode::SEE_OTHER);
             assert_eq!(
-                response.headers().get(header::LOCATION),
-                Some(&NEARAI_LOGIN_ERROR_REDIRECT.parse().expect("location"))
+                response
+                    .headers()
+                    .get(header::LOCATION)
+                    .and_then(|value| value.to_str().ok()),
+                Some("/settings/inference?nearai_login=error"),
             );
         }
         assert_eq!(reload.calls.load(Ordering::SeqCst), 0);
