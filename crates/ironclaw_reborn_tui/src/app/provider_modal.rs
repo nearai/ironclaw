@@ -125,27 +125,20 @@ fn dispatch_esc(state: &mut AppState, modal: ProviderModalState) -> Vec<Effect> 
     match modal {
         ProviderModalState::Providers { .. } => {
             state.modal = None;
+            Vec::new()
         }
-        ProviderModalState::Models { .. } => {
+        ProviderModalState::Models { .. } | ProviderModalState::Confirmed { .. } => {
+            // Neither child state retains the provider catalog. Refetch it
+            // through the existing effect instead of showing an empty,
+            // non-loading Providers view that cannot recover.
             state.modal = Some(Modal::Provider(ProviderModalState::Providers {
                 providers: Vec::new(),
                 selected: 0,
-                loading: false,
+                loading: true,
             }));
-        }
-        ProviderModalState::Confirmed { .. } => {
-            // `Confirmed` doesn't carry `adapter`/`base_url` (its shape is
-            // deliberately slimmer than `Models`'), so there is no data to
-            // step back to a live Models view with; fall back to a fresh
-            // Providers view rather than fabricate an adapter.
-            state.modal = Some(Modal::Provider(ProviderModalState::Providers {
-                providers: Vec::new(),
-                selected: 0,
-                loading: false,
-            }));
+            vec![Effect::Api(ApiCall::LlmProviders)]
         }
     }
-    Vec::new()
 }
 
 fn dispatch_enter(state: &mut AppState, modal: ProviderModalState) -> Vec<Effect> {
@@ -281,7 +274,7 @@ mod tests {
     }
 
     #[test]
-    fn esc_steps_back_one_level_not_closes_modal() {
+    fn esc_from_models_refetches_providers() {
         let mut state = AppState::default().set_modal(Some(models_modal_with(
             "openai",
             "open_ai_completions",
@@ -289,14 +282,49 @@ mod tests {
             0,
         )));
         let effects = reduce(&mut state, AppEvent::Key(key(KeyCode::Esc)));
-        assert!(effects.is_empty());
         assert!(
             matches!(
                 &state.modal,
-                Some(Modal::Provider(ProviderModalState::Providers { .. }))
+                Some(Modal::Provider(ProviderModalState::Providers {
+                    providers,
+                    loading: true,
+                    ..
+                })) if providers.is_empty()
             ),
-            "Esc from Models steps back to Providers, it does not close the modal"
+            "Esc from Models shows a recoverable loading Providers view"
         );
+        assert!(matches!(
+            effects.as_slice(),
+            [Effect::Api(ApiCall::LlmProviders)]
+        ));
+    }
+
+    #[test]
+    fn esc_from_confirmed_refetches_providers() {
+        let mut state =
+            AppState::default().set_modal(Some(Modal::Provider(ProviderModalState::Confirmed {
+                provider_id: "openai".to_string(),
+                model: "gpt-5".to_string(),
+                test_result: None,
+            })));
+
+        let effects = reduce(&mut state, AppEvent::Key(key(KeyCode::Esc)));
+
+        assert!(
+            matches!(
+                &state.modal,
+                Some(Modal::Provider(ProviderModalState::Providers {
+                    providers,
+                    loading: true,
+                    ..
+                })) if providers.is_empty()
+            ),
+            "Esc from Confirmed shows a recoverable loading Providers view"
+        );
+        assert!(matches!(
+            effects.as_slice(),
+            [Effect::Api(ApiCall::LlmProviders)]
+        ));
     }
 
     #[test]

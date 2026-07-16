@@ -16,14 +16,16 @@ pub(crate) fn apply_conn_change(state: &mut AppState, conn: ConnState) -> Vec<Ef
 mod tests {
     use crossterm::event::KeyCode;
 
-    use super::super::test_support::key;
-    use super::super::{AppEvent, AutomationsModalState, Modal, reduce};
+    use super::super::test_support::{automations_modal_with, key};
+    use super::super::{AppEvent, reduce};
     use super::*;
 
     #[test]
     fn lost_connection_keeps_open_modal_but_blocks_new_api_effects() {
-        let mut state = AppState::default()
-            .set_modal(Some(Modal::Automations(AutomationsModalState::default())));
+        let mut state = AppState::default().set_modal(Some(automations_modal_with(
+            &[("a-1", "Daily digest", "active")],
+            0,
+        )));
         reduce(&mut state, AppEvent::Conn(ConnState::Lost));
         assert!(state.modal.is_some(), "modal stays open while disconnected");
         let effects = reduce(&mut state, AppEvent::Key(key(KeyCode::Char(' '))));

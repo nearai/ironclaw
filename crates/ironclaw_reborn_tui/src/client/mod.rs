@@ -94,7 +94,7 @@ impl ApiClient {
             return Err(ClientError::RateLimited);
         }
         if !status.is_success() {
-            let body = response.text().await.unwrap_or_default();
+            let body = response.text().await?;
             return Err(ClientError::Server {
                 status: status.as_u16(),
                 body,
@@ -123,7 +123,42 @@ impl ApiClient {
 
 #[cfg(test)]
 mod tests {
-    use super::ClientError;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpListener;
+
+    use super::{ApiClient, ClientError};
+
+    async fn spawn_truncated_error_server() -> std::net::SocketAddr {
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind truncated error server");
+        let addr = listener.local_addr().expect("truncated error server addr");
+        tokio::spawn(async move {
+            let Ok((mut socket, _)) = listener.accept().await else {
+                return;
+            };
+            let mut request = Vec::new();
+            let mut buffer = [0_u8; 1024];
+            loop {
+                let Ok(read) = socket.read(&mut buffer).await else {
+                    return;
+                };
+                if read == 0 {
+                    return;
+                }
+                request.extend_from_slice(&buffer[..read]);
+                if request.windows(4).any(|window| window == b"\r\n\r\n") {
+                    break;
+                }
+            }
+            let _ = socket
+                .write_all(
+                    b"HTTP/1.1 500 Internal Server Error\r\ncontent-length: 64\r\nconnection: close\r\n\r\npartial body",
+                )
+                .await;
+        });
+        addr
+    }
 
     #[test]
     fn server_error_display_does_not_expose_response_body() {
@@ -134,5 +169,18 @@ mod tests {
 
         assert_eq!(error.to_string(), "server error 500");
         assert!(!error.to_string().contains("secret backend detail"));
+    }
+
+    #[tokio::test]
+    async fn truncated_error_body_propagates_transport_failure() {
+        let addr = spawn_truncated_error_server().await;
+        let client = ApiClient::new(format!("http://{addr}"), "test-token".to_string());
+
+        let error = client
+            .send(client.http.get(client.url("/truncated")))
+            .await
+            .expect_err("truncated response body must not become a server error");
+
+        assert!(matches!(error, ClientError::Transport(_)));
     }
 }

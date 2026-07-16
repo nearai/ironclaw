@@ -208,7 +208,7 @@ async fn open_connection(state: &mut SubscribeState) -> Result<OpenConnection, C
         return Err(ClientError::Unauthorized);
     }
     if !status.is_success() {
-        let body = response.text().await.unwrap_or_default();
+        let body = response.text().await?;
         return Err(ClientError::Server {
             status: status.as_u16(),
             body,
@@ -256,12 +256,12 @@ async fn read_next_chunk(
             .map_err(|_| ClientError::StreamProtocol("SSE line is not valid UTF-8"))?;
         if line.is_empty() {
             if !connection.block_data.is_empty() {
+                let frame = serde_json::from_slice::<WebChatV2EventFrame>(&connection.block_data)
+                    .map_err(|error| ClientError::StreamParse(error.to_string()))?;
                 if let Some(id) = connection.block_id.take() {
                     *last_event_id = Some(id);
                 }
-                let item = serde_json::from_slice::<WebChatV2EventFrame>(&connection.block_data)
-                    .map_err(|error| ClientError::StreamParse(error.to_string()));
-                push_pending(pending, item)?;
+                push_pending(pending, Ok(frame))?;
             }
             connection.block_data.clear();
             continue;

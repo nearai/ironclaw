@@ -1,5 +1,6 @@
 mod support;
 
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use futures::StreamExt;
@@ -177,6 +178,86 @@ async fn spawn_chunked_sse_server(chunks: Vec<Vec<u8>>) -> std::net::SocketAddr 
     addr
 }
 
+async fn read_http_request(socket: &mut tokio::net::TcpStream) -> Option<Vec<u8>> {
+    let mut request = Vec::new();
+    let mut buffer = [0_u8; 1024];
+    loop {
+        let read = socket.read(&mut buffer).await.ok()?;
+        if read == 0 {
+            return None;
+        }
+        request.extend_from_slice(&buffer[..read]);
+        if request.windows(4).any(|window| window == b"\r\n\r\n") {
+            return Some(request);
+        }
+    }
+}
+
+async fn spawn_open_malformed_sse_server(
+    attempts: usize,
+) -> (std::net::SocketAddr, Arc<Mutex<Vec<Vec<u8>>>>) {
+    let listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind malformed SSE server");
+    let addr = listener.local_addr().expect("malformed SSE server addr");
+    let requests = Arc::new(Mutex::new(Vec::new()));
+    let captured = requests.clone();
+    tokio::spawn(async move {
+        for _ in 0..attempts {
+            let Ok((mut socket, _)) = listener.accept().await else {
+                return;
+            };
+            let captured = captured.clone();
+            tokio::spawn(async move {
+                let Some(request) = read_http_request(&mut socket).await else {
+                    return;
+                };
+                captured
+                    .lock()
+                    .expect("lock captured requests")
+                    .push(request);
+
+                let block = b"id: malformed-cursor\ndata: {not-json}\n\n";
+                let header = b"HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ntransfer-encoding: chunked\r\n\r\n";
+                let prefix = format!("{:x}\r\n", block.len());
+                if socket.write_all(header).await.is_err()
+                    || socket.write_all(prefix.as_bytes()).await.is_err()
+                    || socket.write_all(block).await.is_err()
+                    || socket.write_all(b"\r\n").await.is_err()
+                {
+                    return;
+                }
+
+                std::future::pending::<()>().await;
+            });
+        }
+    });
+    (addr, requests)
+}
+
+async fn spawn_truncated_error_sse_server() -> std::net::SocketAddr {
+    let listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind truncated SSE error server");
+    let addr = listener
+        .local_addr()
+        .expect("truncated SSE error server addr");
+    tokio::spawn(async move {
+        let Ok((mut socket, _)) = listener.accept().await else {
+            return;
+        };
+        if read_http_request(&mut socket).await.is_none() {
+            return;
+        }
+        let _ = socket
+            .write_all(
+                b"HTTP/1.1 500 Internal Server Error\r\ncontent-length: 64\r\nconnection: close\r\n\r\npartial body",
+            )
+            .await;
+    });
+    addr
+}
+
 async fn spawn_unauthorized_sse_server() -> std::net::SocketAddr {
     let listener = TcpListener::bind("127.0.0.1:0")
         .await
@@ -211,6 +292,68 @@ async fn unauthorized_sse_response_is_terminal_without_reconnect() {
         ironclaw_reborn_tui::client::ClientError::Unauthorized
     ));
     assert!(stream.next().await.is_none(), "401 must not reconnect");
+}
+
+#[tokio::test]
+async fn malformed_frame_reconnects_to_budget_without_advancing_cursor() {
+    let (addr, requests) = spawn_open_malformed_sse_server(4).await;
+    let client = ApiClient::new(format!("http://{addr}"), "test-token".to_string());
+    let mut stream = std::pin::pin!(subscribe(&client, "thread-1", None));
+
+    tokio::time::timeout(Duration::from_secs(12), async {
+        for _ in 0..4 {
+            let error = stream
+                .next()
+                .await
+                .expect("malformed frame item")
+                .expect_err("malformed JSON must fail the connection");
+            assert!(matches!(
+                error,
+                ironclaw_reborn_tui::client::ClientError::StreamParse(_)
+            ));
+        }
+
+        let terminal = stream
+            .next()
+            .await
+            .expect("terminal reconnect item")
+            .expect_err("reconnect budget must be exhausted");
+        assert!(matches!(
+            terminal,
+            ironclaw_reborn_tui::client::ClientError::ReconnectBudgetExhausted {
+                attempts: 3,
+                window_secs: 60
+            }
+        ));
+        assert!(stream.next().await.is_none(), "stream must terminate");
+    })
+    .await
+    .expect("malformed-frame reconnects must remain bounded");
+
+    let requests = requests.lock().expect("lock captured requests");
+    assert_eq!(requests.len(), 4, "initial connection plus three retries");
+    assert!(requests.iter().all(|request| {
+        !String::from_utf8_lossy(request)
+            .to_ascii_lowercase()
+            .contains("last-event-id:")
+    }));
+}
+
+#[tokio::test]
+async fn truncated_sse_error_body_propagates_transport_failure() {
+    let addr = spawn_truncated_error_sse_server().await;
+    let client = ApiClient::new(format!("http://{addr}"), "test-token".to_string());
+    let mut stream = std::pin::pin!(subscribe(&client, "thread-1", None));
+
+    let error = stream
+        .next()
+        .await
+        .expect("transport failure item")
+        .expect_err("truncated error body must not become a server error");
+    assert!(matches!(
+        error,
+        ironclaw_reborn_tui::client::ClientError::Transport(_)
+    ));
 }
 
 #[tokio::test]

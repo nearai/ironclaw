@@ -2,7 +2,7 @@
 
 use crossterm::event::{KeyCode, KeyEvent};
 
-use super::{ApiCall, AppState, Effect, Modal};
+use super::{ApiCall, AppState, Effect, Modal, commit_thread_switch};
 use crate::client::ThreadSummary;
 
 /// Default page size for `ApiCall::LoadTimeline` when a thread is selected
@@ -69,12 +69,7 @@ pub(crate) fn dispatch_key(
                 return Vec::new();
             };
             let thread_id = thread.thread_id.clone();
-            state.thread_id = Some(thread_id.clone());
-            state.transcript.clear();
-            // A freshly selected thread cannot own the previous thread's
-            // pending gate; `LoadTimeline` (below) is the recovery if the
-            // new thread has its own blocked run.
-            state.pending_gate = None;
+            commit_thread_switch(state, thread_id.clone());
             state.modal = None;
             vec![Effect::Api(ApiCall::LoadTimeline {
                 thread_id,
@@ -115,7 +110,9 @@ pub(crate) fn dispatch_key(
 #[cfg(test)]
 mod tests {
     use super::super::test_support::{ctrl, key, threads_modal_with};
-    use super::super::{ApiCall, AppEvent, AppState, Effect, Modal, reduce};
+    use super::super::{
+        ApiCall, AppEvent, AppState, Effect, Modal, PendingGate, TranscriptItem, reduce,
+    };
     use super::*;
 
     #[test]
@@ -142,6 +139,35 @@ mod tests {
             &effects[0],
             Effect::Api(ApiCall::LoadTimeline { thread_id, .. }) if thread_id == "t-2"
         ));
+    }
+
+    #[test]
+    fn switching_threads_clears_the_previous_threads_live_state() {
+        let mut state = AppState::default()
+            .set_thread_id("old-thread")
+            .set_modal(Some(threads_modal_with(["new-thread"], 1)))
+            .set_pending_gate(Some(PendingGate::Approval {
+                turn_run_id: "old-run".to_string(),
+                gate_ref: "old-gate".to_string(),
+                headline: "Approve".to_string(),
+                body: String::new(),
+                allow_always: false,
+            }))
+            .set_running(true)
+            .set_active_run_id("old-run")
+            .set_transcript_scroll(4);
+        state.transcript.push(TranscriptItem::System {
+            text: "old transcript".to_string(),
+        });
+
+        reduce(&mut state, AppEvent::Key(key(KeyCode::Enter)));
+
+        assert_eq!(state.thread_id.as_deref(), Some("new-thread"));
+        assert!(state.transcript.is_empty());
+        assert_eq!(state.transcript_scroll, None);
+        assert!(state.pending_gate.is_none());
+        assert!(!state.running);
+        assert_eq!(state.active_run_id, None);
     }
 
     #[test]

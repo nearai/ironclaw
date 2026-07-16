@@ -33,6 +33,7 @@ impl ApiClient {
 mod tests {
     use std::sync::{Arc, Mutex};
 
+    use axum::Json;
     use axum::Router;
     use axum::extract::{OriginalUri, State};
     use axum::http::Method;
@@ -41,15 +42,27 @@ mod tests {
 
     use super::*;
 
+    #[derive(Clone)]
+    struct CapturedRequest {
+        method: Method,
+        path: String,
+        client_action_id: Option<String>,
+    }
+
     #[derive(Clone, Default)]
-    struct Captured(Arc<Mutex<Option<(Method, String)>>>);
+    struct Captured(Arc<Mutex<Option<CapturedRequest>>>);
 
     async fn cancel_run_stub(
         State(captured): State<Captured>,
         method: Method,
         OriginalUri(uri): OriginalUri,
+        Json(request): Json<WebUiCancelRunRequest>,
     ) -> axum::Json<serde_json::Value> {
-        *captured.0.lock().expect("lock captured request") = Some((method, uri.path().to_string()));
+        *captured.0.lock().expect("lock captured request") = Some(CapturedRequest {
+            method,
+            path: uri.path().to_string(),
+            client_action_id: request.client_action_id,
+        });
         axum::Json(serde_json::json!({
             "run_id": "run-1",
             "status": "cancelled",
@@ -86,13 +99,22 @@ mod tests {
             .await
             .expect("cancel_run succeeds against stub");
 
-        let (method, path) = captured
+        let request = captured
             .0
             .lock()
             .expect("lock captured request")
             .clone()
             .expect("stub must have been hit");
-        assert_eq!(method, Method::POST);
-        assert_eq!(path, "/api/webchat/v2/threads/t-1/runs/run-1/cancel");
+        assert_eq!(request.method, Method::POST);
+        assert_eq!(
+            request.path,
+            "/api/webchat/v2/threads/t-1/runs/run-1/cancel"
+        );
+        assert!(
+            request
+                .client_action_id
+                .is_some_and(|id| !id.trim().is_empty()),
+            "cancel request must carry a fresh non-empty client_action_id"
+        );
     }
 }

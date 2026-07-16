@@ -5,7 +5,7 @@
 
 use crossterm::event::{KeyCode, KeyEvent};
 
-use super::{ApiCall, AppState, Effect, Modal};
+use super::{ApiCall, AppState, Effect, Modal, commit_thread_switch};
 use crate::client::AutomationSummary;
 
 /// Wire `RebornAutomationState` values (raw snake_case strings on
@@ -105,12 +105,7 @@ pub(crate) fn dispatch_key(
                 state.modal = Some(Modal::Automations(modal));
                 return Vec::new();
             };
-            state.thread_id = Some(thread_id.clone());
-            state.transcript.clear();
-            // The newly opened thread cannot own whatever gate was pending
-            // on the previously open thread (if any); `LoadTimeline` below
-            // is the recovery if this thread has its own blocked run.
-            state.pending_gate = None;
+            commit_thread_switch(state, thread_id.clone());
             state.modal = None;
             vec![Effect::Api(ApiCall::LoadTimeline {
                 thread_id,
@@ -122,13 +117,12 @@ pub(crate) fn dispatch_key(
         // `DeleteAutomation` variant. See
         // `automations_modal_does_not_bind_a_delete_key` below.
         KeyCode::Char(' ') => {
-            let (id, is_active) = match modal.automations.get(modal.selected) {
-                Some(automation) => (
-                    automation.automation_id.clone(),
-                    ACTIVE_STATES.contains(&automation.state.as_str()),
-                ),
-                None => (String::new(), false),
+            let Some(automation) = modal.automations.get(modal.selected) else {
+                state.modal = Some(Modal::Automations(modal));
+                return Vec::new();
             };
+            let id = automation.automation_id.clone();
+            let is_active = ACTIVE_STATES.contains(&automation.state.as_str());
             state.modal = Some(Modal::Automations(modal));
             vec![Effect::Api(if is_active {
                 ApiCall::PauseAutomation { id }
@@ -198,7 +192,9 @@ fn dispatch_rename_key(
 #[cfg(test)]
 mod tests {
     use super::super::test_support::{automations_modal_with, key};
-    use super::super::{ApiCall, AppEvent, AppState, Effect, Modal, reduce};
+    use super::super::{
+        ApiCall, AppEvent, AppState, Effect, Modal, PendingGate, TranscriptItem, reduce,
+    };
     use super::*;
     use crate::client::automations::AutomationRecentRun;
 
@@ -252,6 +248,17 @@ mod tests {
             &effects[0],
             Effect::Api(ApiCall::ResumeAutomation { id }) if id == "a-1"
         ));
+    }
+
+    #[test]
+    fn space_without_an_automation_row_is_a_no_op() {
+        let mut state = AppState::default()
+            .set_modal(Some(Modal::Automations(AutomationsModalState::default())));
+
+        let effects = reduce(&mut state, AppEvent::Key(key(KeyCode::Char(' '))));
+
+        assert!(effects.is_empty());
+        assert!(matches!(state.modal, Some(Modal::Automations(_))));
     }
 
     #[test]
@@ -315,6 +322,46 @@ mod tests {
             Effect::Api(ApiCall::LoadTimeline { thread_id, cursor: None, .. })
                 if thread_id == "thread-1"
         ));
+    }
+
+    #[test]
+    fn opening_an_automation_run_thread_clears_the_previous_threads_live_state() {
+        let automation = automation_with_runs(
+            "a-1",
+            "Daily digest",
+            "active",
+            vec![recent_run(Some("new-thread"), "running")],
+        );
+        let mut state = AppState::default()
+            .set_thread_id("old-thread")
+            .set_modal(Some(Modal::Automations(AutomationsModalState {
+                automations: vec![automation],
+                selected: 0,
+                loading: false,
+                renaming: None,
+            })))
+            .set_pending_gate(Some(PendingGate::Approval {
+                turn_run_id: "old-run".to_string(),
+                gate_ref: "old-gate".to_string(),
+                headline: "Approve".to_string(),
+                body: String::new(),
+                allow_always: false,
+            }))
+            .set_running(true)
+            .set_active_run_id("old-run")
+            .set_transcript_scroll(4);
+        state.transcript.push(TranscriptItem::System {
+            text: "old transcript".to_string(),
+        });
+
+        reduce(&mut state, AppEvent::Key(key(KeyCode::Enter)));
+
+        assert_eq!(state.thread_id.as_deref(), Some("new-thread"));
+        assert!(state.transcript.is_empty());
+        assert_eq!(state.transcript_scroll, None);
+        assert!(state.pending_gate.is_none());
+        assert!(!state.running);
+        assert_eq!(state.active_run_id, None);
     }
 
     #[test]

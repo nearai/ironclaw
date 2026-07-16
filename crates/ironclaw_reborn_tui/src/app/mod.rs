@@ -197,7 +197,7 @@ pub enum ApiCall {
         gate_ref: String,
         provider: String,
         account_label: String,
-        token: String,
+        token: gate::ManualToken,
     },
     ListAutomations,
     PauseAutomation {
@@ -373,6 +373,17 @@ impl AppState {
     }
 }
 
+pub(crate) fn commit_thread_switch(state: &mut AppState, thread_id: String) {
+    if state.thread_id.as_deref() != Some(thread_id.as_str()) {
+        state.transcript.clear();
+        state.transcript_scroll = None;
+        state.pending_gate = None;
+        state.running = false;
+        state.active_run_id = None;
+    }
+    state.thread_id = Some(thread_id);
+}
+
 /// The one reducer entry point: turns one event into zero or more effects,
 /// mutating `state` in place.
 pub fn reduce(state: &mut AppState, event: AppEvent) -> Vec<Effect> {
@@ -499,7 +510,9 @@ fn dispatch_composer_key(state: &mut AppState, key: KeyEvent) -> Vec<Effect> {
             if text == "/exit" {
                 return vec![Effect::Quit];
             }
-            let thread_id = state.thread_id.clone().unwrap_or_default();
+            let Some(thread_id) = state.thread_id.clone() else {
+                return Vec::new();
+            };
             state.composer_text.clear();
             vec![Effect::Api(ApiCall::SendMessage { thread_id, text })]
         }
@@ -634,6 +647,16 @@ mod dispatch_key_tests {
         let mut state = AppState::default().set_thread_id("t-1");
         let effects = reduce(&mut state, AppEvent::Key(key(KeyCode::Enter)));
         assert!(effects.is_empty());
+    }
+
+    #[test]
+    fn composer_enter_without_a_selected_thread_preserves_the_draft() {
+        let mut state = AppState::default().set_composer_text("send this later");
+
+        let effects = reduce(&mut state, AppEvent::Key(key(KeyCode::Enter)));
+
+        assert!(effects.is_empty());
+        assert_eq!(state.composer_text, "send this later");
     }
 
     #[test]

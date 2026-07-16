@@ -15,9 +15,32 @@
 use crossterm::event::{KeyCode, KeyEvent};
 use ironclaw_product_workflow::{AuthPromptView, GatePromptView, WebUiGateResolution};
 
+use std::fmt;
+
 use super::{ApiCall, AppState, Effect, wire_label};
 
-#[derive(Debug, Clone)]
+/// Raw manual credential carried to the runtime while remaining redacted
+/// from the reducer's derived `Debug` surfaces.
+#[derive(Clone, PartialEq, Eq)]
+pub struct ManualToken(String);
+
+impl ManualToken {
+    pub(crate) fn new(value: String) -> Self {
+        Self(value)
+    }
+
+    pub(crate) fn expose(&self) -> &str {
+        &self.0
+    }
+}
+
+impl fmt::Debug for ManualToken {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("[REDACTED]")
+    }
+}
+
+#[derive(Clone)]
 pub enum PendingGate {
     Approval {
         turn_run_id: String,
@@ -50,6 +73,49 @@ pub enum PendingGate {
         /// gates have no manual-token flow.
         token_input: Option<String>,
     },
+}
+
+impl fmt::Debug for PendingGate {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Approval {
+                turn_run_id,
+                gate_ref,
+                headline,
+                body,
+                allow_always,
+            } => formatter
+                .debug_struct("Approval")
+                .field("turn_run_id", turn_run_id)
+                .field("gate_ref", gate_ref)
+                .field("headline", headline)
+                .field("body", body)
+                .field("allow_always", allow_always)
+                .finish(),
+            Self::Auth {
+                turn_run_id,
+                gate_ref,
+                headline,
+                body,
+                challenge_kind,
+                authorization_url,
+                provider,
+                account_label,
+                token_input,
+            } => formatter
+                .debug_struct("Auth")
+                .field("turn_run_id", turn_run_id)
+                .field("gate_ref", gate_ref)
+                .field("headline", headline)
+                .field("body", body)
+                .field("challenge_kind", challenge_kind)
+                .field("authorization_url", authorization_url)
+                .field("provider", provider)
+                .field("account_label", account_label)
+                .field("token_input", &token_input.as_ref().map(|_| "[REDACTED]"))
+                .finish(),
+        }
+    }
 }
 
 impl PendingGate {
@@ -360,7 +426,7 @@ fn submit_token(state: &mut AppState) -> Vec<Effect> {
         gate_ref,
         provider,
         account_label,
-        token,
+        token: ManualToken::new(token),
     })]
 }
 
@@ -659,7 +725,16 @@ mod tests {
         for c in "sekret".chars() {
             reduce(&mut state, AppEvent::Key(key(KeyCode::Char(c))));
         }
+        let state_debug = format!("{state:?}");
+        assert!(!state_debug.contains("sekret"));
+        assert!(state_debug.contains("[REDACTED]"));
+        assert!(state_debug.contains("work@example.com"));
+
         let effects = reduce(&mut state, AppEvent::Key(key(KeyCode::Enter)));
+        let effects_debug = format!("{effects:?}");
+        assert!(!effects_debug.contains("sekret"));
+        assert!(effects_debug.contains("[REDACTED]"));
+        assert!(effects_debug.contains("work@example.com"));
 
         assert!(matches!(
             &effects[0],
@@ -674,7 +749,7 @@ mod tests {
                 && gate_ref == "ar-1"
                 && provider == "google"
                 && account_label == "work@example.com"
-                && token == "sekret"
+                && token.expose() == "sekret"
         ));
         assert!(
             matches!(

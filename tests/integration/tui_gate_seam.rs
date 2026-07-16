@@ -39,11 +39,11 @@
 //! (or `blocked_approval`, as a safety net) status, not a `FinalReply`
 //! event — see the comment at that loop, below.
 //!
-//! ## Tier B regression coverage (this section)
+//! ## Executable Tier B regression coverage
 //!
-//! The functions below extend the original submit/gate/resolve/completed
-//! seam test with the Reborn TUI's other Tier B behaviors, all driven
-//! through the SAME real-harness recipe (real `webui_v2_app` listener, real
+//! The non-ignored functions below extend the original
+//! submit/gate/resolve/completed seam test with other TUI behaviors driven
+//! through the same real-harness recipe (real `webui_v2_app` listener, real
 //! `ApiClient`, scripted LLM at the vendor-SDK seam):
 //!
 //! - [`tui_client_thread_switch_replay_dedupes_to_one_reply`] — defect E
@@ -52,10 +52,16 @@
 //!   — `POST .../runs/{run_id}/cancel` through the real client.
 //! - [`tui_client_drives_submit_gate_deny_resolve_seam`] — the DENY
 //!   complement of the original approve test.
-//! - [`tui_client_credential_two_step_auth_gate_resumes_via_manual_token_submit`]
-//!   — the manual-token submit -> `CredentialProvided` resolve chain.
-//! - [`tui_client_automations_parity_list_and_open_run_thread`] — marked
-//!   NOT REACHABLE (see its doc comment).
+//!
+//! Two ignored placeholders document missing whole-path coverage; they are
+//! not executable integration evidence:
+//!
+//! - [`ignored_placeholder_credential_two_step_auth_gate_resumes_via_manual_token_submit`]
+//!   — lower-tier manual-token client and reducer coverage exists, but the
+//!   harness cannot execute the credential-backed capability chain.
+//! - [`ignored_placeholder_automations_parity_list_and_open_run_thread`] —
+//!   lower-tier automation client and modal coverage exists, but the harness
+//!   has no fired-trigger automation facade to exercise the whole path.
 
 #[allow(dead_code)]
 #[path = "support/mod.rs"]
@@ -796,7 +802,14 @@ async fn tui_client_drives_submit_gate_deny_resolve_seam() {
         .expect("denied write must never have executed");
 }
 
-/// Credential 2-step / auth-required flow: an unseeded `github.get_repo`
+/// Ignored whole-path placeholder, not shipped integration evidence.
+///
+/// Lower-tier coverage exercises manual-token submission in
+/// `client/gates.rs` and token entry/chaining in `app/gate.rs`. What remains
+/// missing is this complete credential-backed capability flow through the
+/// real listener and harness.
+///
+/// Intended credential 2-step / auth-required flow: an unseeded `github.get_repo`
 /// call on `RebornIntegrationGroup::live_auth_and_approval()` raises a real
 /// `BlockedApproval` gate first (empirically documented on that profile —
 /// see `tests/integration/support/harness/profiles/github.rs`'s
@@ -824,7 +837,7 @@ async fn tui_client_drives_submit_gate_deny_resolve_seam() {
             manual-token submit -> CredentialProvided resolve client logic is covered at \
             crate tier (client/gates.rs::submit_manual_token, app/gate.rs token sub-mode \
             + two-step chaining). Re-enable if the harness gains a github capability backend."]
-async fn tui_client_credential_two_step_auth_gate_resumes_via_manual_token_submit() {
+async fn ignored_placeholder_credential_two_step_auth_gate_resumes_via_manual_token_submit() {
     let group = RebornIntegrationGroup::live_auth_and_approval()
         .await
         .expect("live-auth-and-approval group builds");
@@ -1262,8 +1275,15 @@ fn describe_item(item: &app::TranscriptItem) -> String {
     format!("{item:?}")
 }
 
-/// Automations parity (`list_automations(include_completed=true)` +
-/// opening a completed run's thread via `recent_runs[].thread_id`).
+/// Ignored whole-path placeholder, not shipped integration evidence.
+///
+/// Lower-tier coverage exercises automation list/pause/resume/rename HTTP
+/// calls in `crates/ironclaw_reborn_tui/tests/client_automations.rs` and the
+/// modal's selection/open-run behavior in `app/automations_modal.rs`. What
+/// remains missing is automation parity through a real fired-trigger facade.
+///
+/// Intended parity flow: `list_automations(include_completed=true)` plus
+/// opening a completed run's thread via `recent_runs[].thread_id`.
 ///
 /// NOT REACHABLE IN HARNESS: every other test in this file builds its
 /// `RebornServicesApi` via `ironclaw_product_workflow::RebornServices::new(..)`,
@@ -1289,4 +1309,4 @@ fn describe_item(item: &app::TranscriptItem) -> String {
 #[ignore = "NOT REACHABLE IN HARNESS: see fn doc comment — no real automation \
             facade / trigger-poller wiring is reachable from RebornIntegrationGroup \
             within this file's two-file scope"]
-async fn tui_client_automations_parity_list_and_open_run_thread() {}
+async fn ignored_placeholder_automations_parity_list_and_open_run_thread() {}

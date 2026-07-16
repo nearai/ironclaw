@@ -357,7 +357,7 @@ async fn execute_api_call(client: &ApiClient, state: &mut AppState, call: ApiCal
             .submit_manual_token(
                 &provider,
                 &account_label,
-                &token,
+                token.expose(),
                 &thread_id,
                 &run_id,
                 &gate_ref,
@@ -1399,7 +1399,7 @@ mod tests {
                 gate_ref: "gate-1".to_string(),
                 provider: "google".to_string(),
                 account_label: "work@example.com".to_string(),
-                token: "raw-secret".to_string(),
+                token: app::gate::ManualToken::new("raw-secret".to_string()),
             }),
         )
         .await;
@@ -1443,7 +1443,7 @@ mod tests {
                 gate_ref: "gate-1".to_string(),
                 provider: "google".to_string(),
                 account_label: "work@example.com".to_string(),
-                token: "raw-secret".to_string(),
+                token: app::gate::ManualToken::new("raw-secret".to_string()),
             }),
         )
         .await;

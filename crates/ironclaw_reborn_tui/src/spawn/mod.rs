@@ -120,8 +120,10 @@ pub async fn ensure_serve(
     client: &ApiClient,
     spawn: Option<&ProcessInvocation>,
 ) -> Result<ServeHandle, SpawnError> {
-    if client.session().await.is_ok() {
-        return Ok(ServeHandle::External);
+    match client.session().await {
+        Ok(_) => return Ok(ServeHandle::External),
+        Err(ClientError::Unauthorized) => return Err(SpawnError::Unauthorized),
+        Err(_) => {}
     }
     let invocation = spawn.ok_or(SpawnError::NoServeAvailable)?;
     let (stdout, stderr) = child_stdio(invocation);

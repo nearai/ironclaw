@@ -114,6 +114,12 @@ async fn timeline_sends_limit_and_cursor_query_params() {
     assert_eq!(page.messages[0].content.as_deref(), Some("hi"));
     assert_eq!(page.next_cursor.as_deref(), Some("cursor-2"));
 
-    let path = &server.requests()[0].path;
-    assert_eq!(path, "/api/webchat/v2/threads/thread-1/timeline");
+    let requests = server.requests();
+    let request = &requests[0];
+    assert_eq!(request.path, "/api/webchat/v2/threads/thread-1/timeline");
+    assert_eq!(
+        request.query.as_deref(),
+        Some("limit=50&cursor=cursor-1"),
+        "timeline must preserve the public caller's exact limit and cursor"
+    );
 }

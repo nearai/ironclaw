@@ -6,8 +6,10 @@ import pathlib
 import re
 import subprocess
 import sys
+import tempfile
 import unittest
 from dataclasses import dataclass
+from unittest import mock
 
 
 PANIC_PATTERN = re.compile(r"\.(?:unwrap|expect)\(|(?<!_)assert(?:_eq|_ne)?!")
@@ -375,6 +377,72 @@ def main() -> int:
 
 
 class CheckNoPanicsTests(unittest.TestCase):
+    def collect_from_source(self, source: str) -> list[tuple[str, int, str]]:
+        """Exercise the production collector with a hermetic diff/source seam."""
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = pathlib.Path(temp_dir) / "crates/example/src/lib.rs"
+            path.parent.mkdir(parents=True)
+            path.write_text(source, encoding="utf-8")
+            added_lines = set(range(1, len(source.splitlines()) + 1))
+            with (
+                mock.patch(
+                    f"{__name__}.changed_rust_files", return_value=[path]
+                ),
+                mock.patch(
+                    f"{__name__}.added_lines_for_file", return_value=added_lines
+                ),
+            ):
+                return collect_violations("mock-base", "mock-head")
+
+    def test_collect_violations_skips_exact_cfg_test_source_preamble(self) -> None:
+        violations = self.collect_from_source(
+            "//! test fixtures\n"
+            "#![allow(dead_code)]\n"
+            "#![cfg(test)]\n"
+            "fn fixture() {\n"
+            '    value.expect("allowed in test-only source");\n'
+            "}\n"
+        )
+
+        self.assertEqual(violations, [])
+
+    def test_collect_violations_reports_non_preamble_cfg_test_sources(self) -> None:
+        cases = {
+            "near match": (
+                "#![cfg(all(test, unix))]\n"
+                "fn production() {\n"
+                '    value.expect("must remain checked");\n'
+                "}\n",
+                3,
+            ),
+            "nested": (
+                "fn production() {\n"
+                '    value.expect("must remain checked");\n'
+                "}\n"
+                "mod tests {\n"
+                "    #![cfg(test)]\n"
+                "}\n",
+                2,
+            ),
+            "misplaced": (
+                "fn earlier_item() {}\n"
+                "#![cfg(test)]\n"
+                "fn production() {\n"
+                '    value.expect("must remain checked");\n'
+                "}\n",
+                4,
+            ),
+        }
+
+        for case, (source, line_no) in cases.items():
+            with self.subTest(case=case):
+                violations = self.collect_from_source(source)
+                self.assertEqual(len(violations), 1)
+                self.assertEqual(
+                    violations[0][1:],
+                    (line_no, '    value.expect("must remain checked");'),
+                )
+
     def test_cfg_test_module_marks_inner_lines(self) -> None:
         lines = [
             "#[cfg(test)]\n",

@@ -14,19 +14,38 @@ pub fn render(frame: &mut Frame, area: Rect, state: &AppState) {
     let Some(gate) = &state.pending_gate else {
         return;
     };
-    let (headline, body, options) = describe(gate);
+    let block = Block::default().borders(Borders::ALL).title("gate");
+    let paragraph = paragraph(gate).block(block);
+    frame.render_widget(paragraph, area);
+}
 
+pub(super) fn desired_height(gate: &PendingGate, width: u16) -> u16 {
+    let inner_width = width.saturating_sub(2).max(1);
+    let (headline, body, options) = describe(gate);
+    let content_height = wrapped_rows(&headline, inner_width)
+        .saturating_add(wrapped_rows(&body, inner_width))
+        .saturating_add(wrapped_rows(&options, inner_width));
+    u16::try_from(content_height.saturating_add(2)).unwrap_or(u16::MAX)
+}
+
+fn wrapped_rows(text: &str, width: u16) -> usize {
+    if text.is_empty() {
+        return 0;
+    }
+    let width = usize::from(width);
+    text.split('\n')
+        .map(|line| Line::raw(line).width().max(1).div_ceil(width))
+        .sum()
+}
+
+fn paragraph(gate: &PendingGate) -> Paragraph<'static> {
+    let (headline, body, options) = describe(gate);
     let mut lines = vec![Line::styled(headline, Style::default().fg(Color::Yellow))];
     if !body.is_empty() {
-        lines.push(Line::raw(body));
+        lines.extend(body.lines().map(|line| Line::raw(line.to_string())));
     }
     lines.push(Line::styled(options, Style::default().fg(Color::Gray)));
-
-    let block = Block::default().borders(Borders::ALL).title("gate");
-    let paragraph = Paragraph::new(lines)
-        .block(block)
-        .wrap(Wrap { trim: false });
-    frame.render_widget(paragraph, area);
+    Paragraph::new(lines).wrap(Wrap { trim: false })
 }
 
 fn describe(gate: &PendingGate) -> (String, String, String) {
@@ -108,8 +127,8 @@ mod tests {
     use super::*;
     use crate::ui::test_support::buffer_text;
 
-    fn draw(state: &AppState) -> String {
-        let backend = TestBackend::new(80, 24);
+    fn draw_at(state: &AppState, width: u16, height: u16) -> String {
+        let backend = TestBackend::new(width, height);
         let mut terminal = Terminal::new(backend).unwrap();
         terminal
             .draw(|f| {
@@ -118,6 +137,10 @@ mod tests {
             })
             .unwrap();
         buffer_text(terminal.backend().buffer())
+    }
+
+    fn draw(state: &AppState) -> String {
+        draw_at(state, 80, 24)
     }
 
     /// `PendingGate::Auth` fixture — a plain helper fn rather than a base
@@ -154,6 +177,24 @@ mod tests {
             content.contains("[esc] cancel"),
             "Esc now resolves the gate server-side, not just a local dismiss"
         );
+    }
+
+    #[test]
+    fn desired_height_counts_cjk_cells_and_explicit_newlines() {
+        let gate = PendingGate::Approval {
+            turn_run_id: "run-wide".to_string(),
+            gate_ref: "gate-wide".to_string(),
+            headline: "Wide approval".to_string(),
+            body: format!("{}\nnext line", "界".repeat(40)),
+            allow_always: true,
+        };
+        let state = AppState::default().set_pending_gate(Some(gate.clone()));
+        let height = desired_height(&gate, 42);
+
+        assert_eq!(height, 8, "wide CJK cells need two wrapped body rows");
+        let content = draw_at(&state, 42, height);
+        assert!(content.contains("next line"));
+        assert!(content.contains("[esc] cancel"));
     }
 
     #[test]

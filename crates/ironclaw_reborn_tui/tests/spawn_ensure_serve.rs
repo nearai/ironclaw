@@ -13,7 +13,7 @@
 mod support;
 
 use ironclaw_reborn_tui::client::ApiClient;
-use ironclaw_reborn_tui::spawn::{ServeHandle, SpawnError, ensure_serve};
+use ironclaw_reborn_tui::spawn::{ProcessInvocation, ServeHandle, SpawnError, ensure_serve};
 use support::{MockServer, ScriptedResponse};
 
 #[tokio::test]
@@ -44,6 +44,31 @@ async fn ensure_serve_without_spawn_and_unhealthy_returns_no_serve_available() {
         .expect_err("expected NoServeAvailable");
 
     assert!(matches!(error, SpawnError::NoServeAvailable));
+}
+
+#[tokio::test]
+async fn ensure_serve_returns_unauthorized_before_attempting_spawn() {
+    let server = MockServer::start().await;
+    server.queue(
+        "GET /api/webchat/v2/session",
+        ScriptedResponse::status(401, serde_json::json!({})),
+    );
+    let invocation = ProcessInvocation {
+        exe: "/path/that/must/not/be/spawned".into(),
+        args: vec!["serve".to_string()],
+        env: Vec::new(),
+    };
+
+    let error = ensure_serve(&server.client(), Some(&invocation))
+        .await
+        .expect_err("401 must be terminal before spawn");
+
+    assert!(matches!(error, SpawnError::Unauthorized));
+    assert_eq!(
+        server.requests().len(),
+        1,
+        "only the initial probe is allowed"
+    );
 }
 
 #[tokio::test]

@@ -41,6 +41,7 @@ impl ScriptedResponse {
 pub(crate) struct RecordedRequest {
     pub(crate) method: String,
     pub(crate) path: String,
+    pub(crate) query: Option<String>,
     pub(crate) authorization: Option<String>,
     pub(crate) last_event_id: Option<String>,
     pub(crate) body: Option<serde_json::Value>,
@@ -144,6 +145,7 @@ async fn fallback_handler(
     request: Request,
 ) -> Response {
     let path = uri.path().to_string();
+    let query = uri.query().map(str::to_string);
     let key = format!("{method} {path}");
     let authorization = headers
         .get("authorization")
@@ -174,6 +176,7 @@ async fn fallback_handler(
         .push(RecordedRequest {
             method: method.to_string(),
             path: path.clone(),
+            query,
             authorization,
             last_event_id,
             body,
@@ -212,6 +215,7 @@ fn sse_response(
         .push(RecordedRequest {
             method: "GET".to_string(),
             path,
+            query: None,
             authorization,
             last_event_id,
             body: None,

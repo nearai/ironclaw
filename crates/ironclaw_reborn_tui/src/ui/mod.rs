@@ -22,26 +22,34 @@ use ratatui::widgets::{Block, Borders, Clear, Paragraph};
 
 use crate::app::AppState;
 
-/// Fixed row budget for the gate zone when a gate/auth prompt is pending
-/// (headline + wrapped body + one options line, plus the block's border).
-const GATE_ZONE_HEIGHT: u16 = 5;
+/// Upper bound for gate content so a long URL or explanation cannot consume
+/// the whole screen.
+const MAX_GATE_ZONE_HEIGHT: u16 = 12;
+/// A bordered transcript needs three rows to retain one visible content row.
+const MIN_TRANSCRIPT_HEIGHT: u16 = 3;
 /// Fixed row budget for the composer (bordered single-line input).
 const COMPOSER_HEIGHT: u16 = 3;
+const STATUS_HEIGHT: u16 = 1;
 
 /// Renders the whole screen for one frame. Called once per event-loop tick
 /// by `lib.rs`'s `run_event_loop`.
 pub fn render(frame: &mut Frame, state: &AppState) {
     let area = frame.area();
-    let gate_zone_height = if state.pending_gate.is_some() {
-        GATE_ZONE_HEIGHT
-    } else {
-        0
-    };
+    let gate_zone_height = state.pending_gate.as_ref().map_or(0, |gate| {
+        let available = area.height.saturating_sub(
+            MIN_TRANSCRIPT_HEIGHT
+                .saturating_add(COMPOSER_HEIGHT)
+                .saturating_add(STATUS_HEIGHT),
+        );
+        gate_zone::desired_height(gate, area.width)
+            .min(MAX_GATE_ZONE_HEIGHT)
+            .min(available)
+    });
     let chunks = Layout::vertical([
         Constraint::Min(1),
         Constraint::Length(gate_zone_height),
         Constraint::Length(COMPOSER_HEIGHT),
-        Constraint::Length(1),
+        Constraint::Length(STATUS_HEIGHT),
     ])
     .split(area);
 
@@ -87,7 +95,7 @@ mod tests {
 
     use super::test_support::buffer_text;
     use super::*;
-    use crate::app::{Modal, ThreadsModalState, TranscriptItem};
+    use crate::app::{Modal, PendingGate, ThreadsModalState, TranscriptItem};
 
     fn draw(state: &AppState, width: u16, height: u16) -> String {
         let backend = TestBackend::new(width, height);
@@ -133,5 +141,69 @@ mod tests {
         let state = AppState::default().set_composer_text("draft message");
         let content = draw(&state, 80, 24);
         assert!(content.contains("draft message"));
+    }
+
+    #[test]
+    fn approval_gate_layout_keeps_controls_and_surrounding_panes_visible() {
+        let state = AppState::default()
+            .set_pending_gate(Some(PendingGate::approval_stub("Allow write_file?")))
+            .set_composer_text("draft message");
+
+        let content = draw(&state, 80, 16);
+
+        assert!(content.contains("Allow write_file?"));
+        assert!(content.contains("[a] allow"));
+        assert!(content.contains("[d] deny"));
+        assert!(content.contains("transcript"));
+        assert!(content.contains("draft message"));
+    }
+
+    #[test]
+    fn auth_gate_layout_keeps_url_challenge_and_controls_visible() {
+        let state = AppState::default().set_pending_gate(Some(PendingGate::Auth {
+            turn_run_id: "run-auth".to_string(),
+            gate_ref: "gate-auth".to_string(),
+            headline: "Connect Gmail".to_string(),
+            body: "Sign in to continue.".to_string(),
+            challenge_kind: Some("oauth_url".to_string()),
+            authorization_url: Some(
+                "https://accounts.example.com/oauth/authorize?client_id=ironclaw&scope=mail"
+                    .to_string(),
+            ),
+            provider: Some("google".to_string()),
+            account_label: Some("Gmail".to_string()),
+            token_input: None,
+        }));
+
+        let content = draw(&state, 80, 18);
+
+        assert!(content.contains("Connect Gmail"));
+        assert!(content.contains("kind: oauth_url"));
+        assert!(content.contains("[o] open"));
+        assert!(content.contains("[t] enter token"));
+        assert!(content.contains("message"));
+    }
+
+    #[test]
+    fn manual_token_layout_keeps_masked_input_and_submit_controls_visible() {
+        let state = AppState::default().set_pending_gate(Some(PendingGate::Auth {
+            turn_run_id: "run-auth".to_string(),
+            gate_ref: "gate-auth".to_string(),
+            headline: "Connect GitHub".to_string(),
+            body: "Paste a personal access token.".to_string(),
+            challenge_kind: Some("manual_token".to_string()),
+            authorization_url: None,
+            provider: Some("github".to_string()),
+            account_label: Some("GitHub PAT".to_string()),
+            token_input: Some("secret".to_string()),
+        }));
+
+        let content = draw(&state, 60, 14);
+
+        assert!(content.contains("token: ******"));
+        assert!(!content.contains("secret"));
+        assert!(content.contains("[enter] submit"));
+        assert!(content.contains("[esc] cancel"));
+        assert!(content.contains("message"));
     }
 }

@@ -1,16 +1,14 @@
 //! Modal popups: threads (switch/create/delete), automations
 //! (list/pause-resume/rename), provider (providers -> models -> confirmed).
 //! `ui::render` draws whichever one is open inside a `Clear`-backed centered
-//! popup. Per the plan, only the threads modal gets a dedicated render test
-//! here (small, non-brittle set); automations/provider rendering is still
-//! implemented (so the real event loop has something to draw) but ships
-//! without UI-tier goldens — their reducer behavior is already covered in
-//! `app::automations_modal`/`app::provider_modal`.
+//! popup. Small render tests cover stable visibility and presentation
+//! contracts; reducer behavior remains in `app::automations_modal` and
+//! `app::provider_modal`.
 
 use ratatui::Frame;
 use ratatui::layout::Rect;
 use ratatui::style::{Color, Modifier, Style};
-use ratatui::widgets::{Block, Borders, List, ListItem};
+use ratatui::widgets::{Block, Borders, List, ListItem, ListState};
 
 use crate::app::{AutomationsModalState, Modal, ProviderModalState, ThreadsModalState};
 
@@ -22,12 +20,19 @@ pub fn render(frame: &mut Frame, area: Rect, modal: &Modal) {
     }
 }
 
-fn selected_style(idx: usize, selected: usize) -> Style {
-    if idx == selected {
-        Style::default().add_modifier(Modifier::REVERSED)
-    } else {
-        Style::default()
-    }
+fn render_selectable_list<'a>(
+    frame: &mut Frame,
+    area: Rect,
+    items: Vec<ListItem<'a>>,
+    block: Block<'a>,
+    selected: usize,
+) {
+    let selected = (!items.is_empty()).then(|| selected.min(items.len() - 1));
+    let list = List::new(items)
+        .block(block)
+        .highlight_style(Style::default().add_modifier(Modifier::REVERSED));
+    let mut state = ListState::default().with_selected(selected);
+    frame.render_stateful_widget(list, area, &mut state);
 }
 
 /// The `+ new` row is pinned first, ahead of every listed thread — it is
@@ -37,21 +42,26 @@ fn selected_style(idx: usize, selected: usize) -> Style {
 /// `threads[selected - 1]`), so the highlight below lines up with what
 /// `Enter`/`d` act on.
 fn render_threads(frame: &mut Frame, area: Rect, modal: &ThreadsModalState) {
-    let mut items = vec![ListItem::new("+ new").style(selected_style(0, modal.selected))];
-    for (idx, thread) in modal.threads.iter().enumerate() {
+    let mut items = vec![ListItem::new("+ new")];
+    for thread in &modal.threads {
         let label = thread
             .title
             .clone()
             .unwrap_or_else(|| thread.thread_id.clone());
-        items.push(ListItem::new(label).style(selected_style(idx + 1, modal.selected)));
+        items.push(ListItem::new(label));
     }
     let title = if modal.pending_delete_confirm {
         "threads (press d again to delete)"
     } else {
         "threads"
     };
-    let list = List::new(items).block(Block::default().borders(Borders::ALL).title(title));
-    frame.render_widget(list, area);
+    render_selectable_list(
+        frame,
+        area,
+        items,
+        Block::default().borders(Borders::ALL).title(title),
+        modal.selected,
+    );
 }
 
 /// Maps a raw `RebornAutomationHoldReason` wire string (see
@@ -88,7 +98,7 @@ fn render_automations(frame: &mut Frame, area: Rect, modal: &AutomationsModalSta
                 (Some(draft), true) => format!("{} > {draft}", automation.name),
                 _ => format!("{} [{}]", automation.name, automation.state),
             };
-            let mut style = selected_style(idx, modal.selected);
+            let mut style = Style::default();
             if let Some(hold) = &automation.active_hold {
                 label.push(' ');
                 label.push_str(hold_badge_label(&hold.reason));
@@ -97,8 +107,13 @@ fn render_automations(frame: &mut Frame, area: Rect, modal: &AutomationsModalSta
             ListItem::new(label).style(style)
         })
         .collect();
-    let list = List::new(items).block(Block::default().borders(Borders::ALL).title("automations"));
-    frame.render_widget(list, area);
+    render_selectable_list(
+        frame,
+        area,
+        items,
+        Block::default().borders(Borders::ALL).title("automations"),
+        modal.selected,
+    );
 }
 
 fn render_provider(frame: &mut Frame, area: Rect, modal: &ProviderModalState) {
@@ -110,20 +125,23 @@ fn render_provider(frame: &mut Frame, area: Rect, modal: &ProviderModalState) {
         } => {
             let items: Vec<ListItem> = providers
                 .iter()
-                .enumerate()
-                .map(|(idx, provider)| {
+                .map(|provider| {
                     let marker = if provider.active { "● " } else { "  " };
                     let label = format!("{marker}{} ({})", provider.id, provider.adapter);
-                    let mut style = selected_style(idx, *selected);
+                    let mut style = Style::default();
                     if provider.active {
                         style = style.fg(Color::Green);
                     }
                     ListItem::new(label).style(style)
                 })
                 .collect();
-            let list =
-                List::new(items).block(Block::default().borders(Borders::ALL).title("providers"));
-            frame.render_widget(list, area);
+            render_selectable_list(
+                frame,
+                area,
+                items,
+                Block::default().borders(Borders::ALL).title("providers"),
+                *selected,
+            );
         }
         ProviderModalState::Models {
             provider_id,
@@ -133,17 +151,17 @@ fn render_provider(frame: &mut Frame, area: Rect, modal: &ProviderModalState) {
         } => {
             let items: Vec<ListItem> = models
                 .iter()
-                .enumerate()
-                .map(|(idx, model)| {
-                    ListItem::new(model.clone()).style(selected_style(idx, *selected))
-                })
+                .map(|model| ListItem::new(model.clone()))
                 .collect();
-            let list = List::new(items).block(
+            render_selectable_list(
+                frame,
+                area,
+                items,
                 Block::default()
                     .borders(Borders::ALL)
                     .title(format!("models: {provider_id}")),
+                *selected,
             );
-            frame.render_widget(list, area);
         }
         ProviderModalState::Confirmed {
             provider_id,
@@ -230,8 +248,8 @@ mod tests {
         }
     }
 
-    fn draw_modal(modal: &Modal) -> String {
-        let backend = TestBackend::new(80, 24);
+    fn draw_modal_at(modal: &Modal, width: u16, height: u16) -> String {
+        let backend = TestBackend::new(width, height);
         let mut terminal = Terminal::new(backend).unwrap();
         terminal
             .draw(|f| {
@@ -240,6 +258,10 @@ mod tests {
             })
             .unwrap();
         buffer_text(terminal.backend().buffer())
+    }
+
+    fn draw_modal(modal: &Modal) -> String {
+        draw_modal_at(modal, 80, 24)
     }
 
     #[test]
@@ -266,6 +288,27 @@ mod tests {
         });
         let content = draw_modal(&modal);
         assert!(content.contains("press d again to delete"));
+    }
+
+    #[test]
+    fn threads_modal_scrolls_to_keep_selected_row_visible() {
+        let modal = Modal::Threads(ThreadsModalState {
+            threads: (0..8).map(|index| thread(&format!("t-{index}"))).collect(),
+            selected: 8,
+            pending_delete_confirm: false,
+            loading: false,
+        });
+
+        let content = draw_modal_at(&modal, 32, 5);
+
+        assert!(
+            content.contains("t-7"),
+            "selected row must be visible: {content:?}"
+        );
+        assert!(
+            !content.contains("+ new"),
+            "viewport must move off the first row"
+        );
     }
 
     #[test]
@@ -298,6 +341,51 @@ mod tests {
     }
 
     #[test]
+    fn provider_modal_scrolls_to_keep_selected_row_visible() {
+        let modal = Modal::Provider(ProviderModalState::Providers {
+            providers: (0..8)
+                .map(|index| provider(&format!("p-{index}"), "adapter", false))
+                .collect(),
+            selected: 7,
+            loading: false,
+        });
+
+        let content = draw_modal_at(&modal, 32, 5);
+
+        assert!(
+            content.contains("p-7"),
+            "selected row must be visible: {content:?}"
+        );
+        assert!(
+            !content.contains("p-0"),
+            "viewport must move off the first row"
+        );
+    }
+
+    #[test]
+    fn provider_models_scroll_to_keep_selected_row_visible() {
+        let modal = Modal::Provider(ProviderModalState::Models {
+            provider_id: "provider".to_string(),
+            adapter: "adapter".to_string(),
+            base_url: None,
+            models: (0..8).map(|index| format!("model-{index}")).collect(),
+            selected: 7,
+            loading: false,
+        });
+
+        let content = draw_modal_at(&modal, 32, 5);
+
+        assert!(
+            content.contains("model-7"),
+            "selected row must be visible: {content:?}"
+        );
+        assert!(
+            !content.contains("model-0"),
+            "viewport must move off the first row"
+        );
+    }
+
+    #[test]
     fn automations_modal_renders_hold_badge_for_gate_parked_row() {
         let modal = Modal::Automations(AutomationsModalState {
             automations: vec![
@@ -324,6 +412,29 @@ mod tests {
         assert!(
             !free_line.contains("approval") && !free_line.contains("held"),
             "row without an active_hold must render no badge: {free_line:?}"
+        );
+    }
+
+    #[test]
+    fn automations_modal_scrolls_to_keep_selected_row_visible() {
+        let modal = Modal::Automations(AutomationsModalState {
+            automations: (0..8)
+                .map(|index| automation(&format!("a-{index}"), &format!("Job {index}"), "active"))
+                .collect(),
+            selected: 7,
+            loading: false,
+            renaming: None,
+        });
+
+        let content = draw_modal_at(&modal, 32, 5);
+
+        assert!(
+            content.contains("Job 7"),
+            "selected row must be visible: {content:?}"
+        );
+        assert!(
+            !content.contains("Job 0"),
+            "viewport must move off the first row"
         );
     }
 

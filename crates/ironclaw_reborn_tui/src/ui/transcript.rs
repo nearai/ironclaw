@@ -1,10 +1,10 @@
 //! Transcript widget: renders a window of `state.transcript` inside a
 //! bordered, wrapping paragraph. Pure function of `&AppState` — windowing is
-//! item-count based (one `TranscriptItem` maps to one *pre-wrap item slot*,
-//! itself expanded into one or more `Line`s when the item's body has
-//! embedded `\n`s), not a precise post-wrap row count, matching
-//! `app/mod.rs`'s `PageUp`/`PageDown` paging (which is likewise item-count
-//! based, since the reducer has no access to the render width).
+//! row-budget based after each `TranscriptItem` is expanded into physical
+//! lines and soft wrapping is accounted for. `app/mod.rs`'s
+//! `PageUp`/`PageDown` reducer still stores an item index because it has no
+//! access to render dimensions; this module uses that index as the pinned
+//! window's starting item and fills the available rendered rows from there.
 //! `state.transcript_scroll` drives which window of *items* is shown:
 //! `None` (follow) always shows the tail, so newly appended items stay
 //! visible; `Some(start)` pins the window to an absolute start item index,
@@ -19,8 +19,11 @@ use ratatui::widgets::{Block, Borders, Paragraph, Wrap};
 use crate::app::{AppState, TranscriptItem, wire_label};
 
 pub fn render(frame: &mut Frame, area: Rect, state: &AppState) {
-    let item_lines: Vec<Vec<Line<'static>>> = state.transcript.iter().map(render_item).collect();
-    let window = visible_window(&item_lines, area, state.transcript_scroll);
+    let window: Vec<Line<'static>> =
+        visible_items(&state.transcript, area, state.transcript_scroll)
+            .iter()
+            .flat_map(render_item)
+            .collect();
     let block = Block::default().borders(Borders::ALL).title("transcript");
     let paragraph = Paragraph::new(window)
         .block(block)
@@ -28,29 +31,57 @@ pub fn render(frame: &mut Frame, area: Rect, state: &AppState) {
     frame.render_widget(paragraph, area);
 }
 
-/// Slices `items` (one entry per `TranscriptItem`, each already expanded
-/// into its own `Line`s) down to what the pane can show, per
-/// `state.transcript_scroll`, then flattens the selected items' lines into
-/// the single `Vec<Line>` the `Paragraph` renders. `area`'s border consumes
-/// the top/bottom row, so the usable height is `area.height - 2` (floored
-/// at 1 so a degenerate/tiny area still shows something rather than
-/// panicking on the slice). The item-count-based window size is an
-/// approximation of the visible row budget — a multi-line item can still
-/// push later items off-screen — matching this module's existing
-/// item-count paging contract with `app/mod.rs`.
-fn visible_window(
-    items: &[Vec<Line<'static>>],
-    area: Rect,
-    scroll: Option<usize>,
-) -> Vec<Line<'static>> {
+/// Slices `items` down to what the pane can show, per
+/// `state.transcript_scroll`, before the selected items are expanded into
+/// rendered lines. `area`'s border consumes the top/bottom row, so the usable
+/// height is `area.height - 2` (floored at 1 so a degenerate/tiny area still
+/// shows something rather than panicking on the slice). Each item's row cost
+/// includes both explicit newlines and soft wrapping at the pane's inner
+/// width. The stored scroll position remains an item index; only the visible
+/// window's end is derived from the rendered row budget.
+fn visible_items(items: &[TranscriptItem], area: Rect, scroll: Option<usize>) -> &[TranscriptItem] {
     let len = items.len();
-    let visible = (area.height.saturating_sub(2)).max(1) as usize;
-    let start = match scroll {
-        Some(idx) => idx.min(len),
-        None => len.saturating_sub(visible),
+    let row_budget = usize::from(area.height.saturating_sub(2).max(1));
+    let inner_width = usize::from(area.width.saturating_sub(2).max(1));
+
+    let (start, end) = match scroll {
+        Some(idx) => {
+            let start = idx.min(len);
+            let mut end = start;
+            let mut used_rows = 0_usize;
+            while end < len {
+                let rows = rendered_rows(&items[end], inner_width);
+                if end > start && used_rows.saturating_add(rows) > row_budget {
+                    break;
+                }
+                used_rows = used_rows.saturating_add(rows);
+                end += 1;
+            }
+            (start, end)
+        }
+        None => {
+            let end = len;
+            let mut start = end;
+            let mut used_rows = 0_usize;
+            while start > 0 {
+                let rows = rendered_rows(&items[start - 1], inner_width);
+                if start < end && used_rows.saturating_add(rows) > row_budget {
+                    break;
+                }
+                used_rows = used_rows.saturating_add(rows);
+                start -= 1;
+            }
+            (start, end)
+        }
     };
-    let end = (start + visible).min(len);
-    items[start..end].iter().flatten().cloned().collect()
+    &items[start..end]
+}
+
+fn rendered_rows(item: &TranscriptItem, inner_width: usize) -> usize {
+    render_item(item)
+        .iter()
+        .map(|line| line.width().max(1).div_ceil(inner_width))
+        .sum()
 }
 
 /// Splits `text` on embedded `\n` into one `Line` per physical line, all
@@ -217,6 +248,62 @@ mod tests {
         assert!(
             !content.contains("item-000"),
             "the oldest item must have scrolled off with the default tail window"
+        );
+    }
+
+    #[test]
+    fn long_transcript_renders_only_the_existing_visible_item_slice() {
+        // height 10 -> 8 rows. Selecting before final rendering must avoid
+        // formatting the other 992 items without changing visible output.
+        let state = state_with_items(1_000);
+        let area = Rect::new(0, 0, 40, 10);
+        let selected = visible_items(&state.transcript, area, None);
+
+        assert_eq!(selected.len(), 8);
+        assert!(matches!(
+            &selected[0],
+            TranscriptItem::System { text } if text == "item-992"
+        ));
+        assert!(matches!(
+            &selected[7],
+            TranscriptItem::System { text } if text == "item-999"
+        ));
+
+        let mut slice_state = AppState::default();
+        slice_state.transcript.extend(selected.iter().cloned());
+        assert_eq!(
+            draw(&state, 40, 10),
+            draw(&slice_state, 40, 10),
+            "pre-render item slicing must preserve the existing window output"
+        );
+    }
+
+    #[test]
+    fn default_follow_counts_multiline_rows_before_selecting_the_tail() {
+        // height 10 -> 8 usable rows. These seven items would fit an
+        // item-count window, but consume nine rendered rows: one explicit
+        // newline plus a soft-wrapped 39-cell continuation make the first
+        // item three rows tall.
+        let mut state = AppState::default();
+        state.transcript.push(TranscriptItem::final_text(format!(
+            "line one\n{}",
+            "x".repeat(39)
+        )));
+        for i in 1..=6 {
+            state.transcript.push(TranscriptItem::System {
+                text: format!("item-{i:03}"),
+            });
+        }
+
+        let content = draw(&state, 40, 10);
+
+        assert!(
+            content.contains("item-006"),
+            "the newest item must remain visible after multiline history: {content}"
+        );
+        assert!(
+            !content.contains("line one"),
+            "the oldest multiline item must scroll off to preserve the tail: {content}"
         );
     }
 

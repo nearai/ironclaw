@@ -146,6 +146,22 @@ pub(crate) fn apply_server_event(state: &mut AppState, frame: WebChatV2EventFram
             Vec::new()
         }
         WebChatV2Event::Failed { run_state } => {
+            let run_id = run_state.run_id.to_string();
+            if state
+                .pending_gate
+                .as_ref()
+                .is_some_and(|gate| gate.turn_run_id() == run_id)
+            {
+                state.pending_gate = None;
+            }
+            if state
+                .active_run_id
+                .as_deref()
+                .is_none_or(|active_run_id| active_run_id == run_id)
+            {
+                state.running = false;
+                state.active_run_id = None;
+            }
             let status_label = wire_label(&run_state.status);
             let text = match run_state.failure {
                 Some(failure) => match failure.detail() {
@@ -300,8 +316,10 @@ fn apply_projection_item(state: &mut AppState, item: ProductProjectionItem) -> V
 /// `applyProjectionItems`'s terminal-status branch in `useChatEvents.ts`.
 fn apply_run_status(state: &mut AppState, run_id: String, status: String) -> Vec<Effect> {
     if TERMINAL_RUN_STATUSES.contains(&status.as_str()) {
-        state.running = false;
-        state.active_run_id = None;
+        if state.active_run_id.as_deref() == Some(run_id.as_str()) {
+            state.running = false;
+            state.active_run_id = None;
+        }
         if state
             .pending_gate
             .as_ref()
@@ -385,7 +403,7 @@ mod tests {
         activity_view, final_reply_view, final_reply_view_for_run, frame, key, projection_gate,
         projection_run_status, projection_state, projection_text, run_state_with_failure,
     };
-    use super::super::{AppEvent, reduce};
+    use super::super::{AppEvent, PendingGate, reduce};
     use super::*;
 
     /// Pins Defect E's fix at the reducer level: a `FinalReply` carrying a
@@ -520,6 +538,100 @@ mod tests {
                 .iter()
                 .any(|i| i.as_error_text() == Some("model_unavailable"))
         );
+    }
+
+    #[test]
+    fn running_then_failed_settles_before_an_active_run_id_is_known() {
+        let run_id = TurnRunId::new();
+        let mut failed_state = run_state_with_failure("model_unavailable", None);
+        failed_state.run_id = run_id;
+        let mut state = AppState::default();
+
+        apply_server_event(
+            &mut state,
+            frame(WebChatV2Event::Running {
+                progress: ironclaw_product_workflow::ProgressUpdateView {
+                    turn_run_id: run_id,
+                    kind: ironclaw_product_workflow::ProgressKind::Typing,
+                    generated_at: chrono::Utc::now(),
+                },
+            }),
+        );
+        assert!(state.is_running());
+        assert_eq!(state.active_run_id, None);
+
+        apply_server_event(
+            &mut state,
+            frame(WebChatV2Event::Failed {
+                run_state: failed_state,
+            }),
+        );
+
+        assert!(!state.is_running());
+        assert_eq!(state.active_run_id, None);
+    }
+
+    #[test]
+    fn failed_event_settles_only_its_matching_active_run_and_gate() {
+        let failed_run = TurnRunId::new();
+        let mut failed_state = run_state_with_failure("model_unavailable", None);
+        failed_state.run_id = failed_run;
+        let mut state = AppState::default()
+            .set_running(true)
+            .set_active_run_id(failed_run.to_string())
+            .set_pending_gate(Some(PendingGate::Approval {
+                turn_run_id: failed_run.to_string(),
+                gate_ref: "gate-failed".to_string(),
+                headline: "Approve".to_string(),
+                body: String::new(),
+                allow_always: false,
+            }));
+
+        reduce(
+            &mut state,
+            AppEvent::Server(super::super::test_support::boxed_frame(
+                WebChatV2Event::Failed {
+                    run_state: failed_state,
+                },
+            )),
+        );
+
+        assert!(!state.is_running());
+        assert_eq!(state.active_run_id, None);
+        assert!(state.pending_gate.is_none());
+    }
+
+    #[test]
+    fn failed_event_for_another_run_preserves_the_current_run_and_gate() {
+        let active_run = TurnRunId::new();
+        let mut failed_state = run_state_with_failure("model_unavailable", None);
+        failed_state.run_id = TurnRunId::new();
+        let mut state = AppState::default()
+            .set_running(true)
+            .set_active_run_id(active_run.to_string())
+            .set_pending_gate(Some(PendingGate::Approval {
+                turn_run_id: active_run.to_string(),
+                gate_ref: "gate-active".to_string(),
+                headline: "Approve".to_string(),
+                body: String::new(),
+                allow_always: false,
+            }));
+
+        reduce(
+            &mut state,
+            AppEvent::Server(super::super::test_support::boxed_frame(
+                WebChatV2Event::Failed {
+                    run_state: failed_state,
+                },
+            )),
+        );
+
+        assert!(state.is_running());
+        assert_eq!(state.active_run_id, Some(active_run.to_string()));
+        assert!(matches!(
+            state.pending_gate,
+            Some(PendingGate::Approval { ref gate_ref, .. }) if gate_ref == "gate-active"
+        ));
     }
 
     #[test]
@@ -755,6 +867,35 @@ mod tests {
             state.active_run_id, None,
             "a terminal RunStatus must clear the cancel target"
         );
+    }
+
+    #[test]
+    fn terminal_run_status_for_another_run_preserves_the_active_run() {
+        let active_run = TurnRunId::new();
+        let terminal_run = TurnRunId::new();
+        let mut state = AppState::default()
+            .set_thread_id("t-1")
+            .set_running(true)
+            .set_active_run_id(active_run.to_string());
+
+        let effects = reduce(
+            &mut state,
+            AppEvent::Server(super::super::test_support::boxed_frame(
+                WebChatV2Event::ProjectionUpdate {
+                    state: projection_state(
+                        "t-1",
+                        vec![projection_run_status(terminal_run, "completed")],
+                    ),
+                },
+            )),
+        );
+
+        assert!(state.is_running());
+        assert_eq!(state.active_run_id, Some(active_run.to_string()));
+        assert!(matches!(
+            effects.as_slice(),
+            [Effect::Api(ApiCall::LoadTimeline { thread_id, .. })] if thread_id == "t-1"
+        ));
     }
 
     #[test]
