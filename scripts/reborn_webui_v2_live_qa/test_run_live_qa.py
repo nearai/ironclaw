@@ -61,6 +61,28 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
             env={},
         )
 
+    @staticmethod
+    def _checked_trigger_baseline():
+        from scripts.reborn_webui_v2_live_qa.routine_evidence import TriggerSnapshot
+
+        return TriggerSnapshot(checked=True, delivery_target_column_present=True)
+
+    @staticmethod
+    def _routine_validation(*, valid: bool, error: str | None = None):
+        from scripts.reborn_webui_v2_live_qa.routine_evidence import RoutineValidation
+
+        return RoutineValidation(
+            valid,
+            error,
+            {
+                "before_record_count": 0,
+                "after_record_count": 1 if valid else 0,
+                "new_record_count": 1 if valid else 0,
+                "terminal_invocation_count": 1 if valid else 0,
+                "wait_ms": 25,
+            },
+        )
+
     def _drive_submission_capture_state(
         self,
         *,
@@ -1138,11 +1160,21 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
                 "_live_chat_case",
                 side_effect=fake_live_chat_case,
             ),
-            patch.object(run_live_qa, "_trigger_record_count", return_value=0),
             patch.object(
                 run_live_qa,
-                "_wait_for_trigger_record_after_count",
-                return_value=(0, 25),
+                "read_trigger_snapshot",
+                return_value=self._checked_trigger_baseline(),
+            ),
+            patch.object(
+                run_live_qa,
+                "_wait_for_current_turn_trigger_validation",
+                return_value=self._routine_validation(
+                    valid=False,
+                    error=(
+                        "finalized assistant reply observed, but routine scope "
+                        "'qa-test-routine' has no new durable trigger_record"
+                    ),
+                ),
             ),
         ):
             result = asyncio.run(
@@ -1190,11 +1222,15 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
                 "_live_chat_case",
                 side_effect=fake_live_chat_case,
             ),
-            patch.object(run_live_qa, "_trigger_record_count", return_value=0),
             patch.object(
                 run_live_qa,
-                "_wait_for_trigger_record_after_count",
-                return_value=(1, 25),
+                "read_trigger_snapshot",
+                return_value=self._checked_trigger_baseline(),
+            ),
+            patch.object(
+                run_live_qa,
+                "_wait_for_current_turn_trigger_validation",
+                return_value=self._routine_validation(valid=True),
             ),
         ):
             result = asyncio.run(
@@ -1248,13 +1284,13 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
                     ),
                     patch.object(
                         run_live_qa,
-                        "_trigger_record_count",
-                        side_effect=[0, 1],
+                        "read_trigger_snapshot",
+                        return_value=self._checked_trigger_baseline(),
                     ),
                     patch.object(
                         run_live_qa,
-                        "_wait_for_trigger_record_after_count",
-                        return_value=(1, 25),
+                        "_wait_for_current_turn_trigger_validation",
+                        return_value=self._routine_validation(valid=True),
                     ),
                 ):
                     result = asyncio.run(
@@ -1269,12 +1305,159 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
                     )
 
                 self.assertEqual(result.success, expected_success)
-                self.assertEqual(result.details["trigger_records_after"], 1)
+                self.assertEqual(
+                    result.details["trigger_records_after"],
+                    1 if expected_success else 0,
+                )
                 if not expected_success:
                     self.assertIn(
                         "reply was not structurally finalized",
                         result.details["error"],
                     )
+
+    def test_routine_creation_uses_current_turn_typed_durable_validation(self):
+        from scripts.reborn_webui_v2_live_qa.routine_evidence import (
+            RoutineValidation,
+            TriggerSnapshot,
+        )
+
+        captured: dict[str, object] = {}
+
+        async def fake_live_chat_case(_ctx, **kwargs):
+            captured.update(kwargs)
+            return run_live_qa.ProbeResult(
+                provider="test",
+                mode="live:qa_test_routine",
+                success=True,
+                latency_ms=1,
+                details={
+                    "text_excerpt": "created",
+                    "assistant_reply_wait_reason": "final_reply_observed",
+                    "submission_identity": {
+                        "accepted_message_ref": "message",
+                        "thread_id": "thread",
+                        "turn_id": "turn",
+                        "run_id": "run",
+                    },
+                },
+            )
+
+        validation = RoutineValidation(
+            True,
+            None,
+            {
+                "new_record_count": 1,
+                "record_prompt_sha256": "prompt-hash",
+                "terminal_invocation_count": 1,
+            },
+        )
+        with (
+            patch.object(run_live_qa, "_live_chat_case", side_effect=fake_live_chat_case),
+            patch.object(
+                run_live_qa,
+                "read_trigger_snapshot",
+                return_value=TriggerSnapshot(checked=True),
+            ),
+            patch.object(
+                run_live_qa,
+                "_wait_for_current_turn_trigger_validation",
+                return_value=validation,
+            ) as wait_evidence,
+        ):
+            result = asyncio.run(
+                run_live_qa._routine_creation_case(
+                    self._dummy_ctx(),
+                    case_name="qa_test_routine",
+                    prompt="create it",
+                    marker="marker",
+                    routine_name="routine",
+                    required_text=["routine"],
+                )
+            )
+
+        self.assertTrue(captured["capture_submission_identity"])
+        self.assertTrue(result.success)
+        self.assertEqual(result.details["routine_evidence"], validation.safe_summary)
+        wait_evidence.assert_awaited_once()
+
+    def test_routed_routine_missing_delivery_column_fails_before_chat(self):
+        from scripts.reborn_webui_v2_live_qa.routine_evidence import TriggerSnapshot
+
+        chat = AsyncMock()
+        with (
+            patch.object(
+                run_live_qa,
+                "read_trigger_snapshot",
+                return_value=TriggerSnapshot(
+                    checked=True,
+                    delivery_target_column_present=False,
+                ),
+            ),
+            patch.object(run_live_qa, "_routine_creation_case", chat),
+        ):
+            result = asyncio.run(
+                run_live_qa._slack_delivery_routine_case(
+                    self._dummy_ctx(),
+                    case_name="qa_routed",
+                    routine_prefix="routine",
+                    marker_prefix="MARKER",
+                    routine_instruction="do work",
+                    required_delivery_text=[],
+                    require_persisted_delivery_target=True,
+                )
+            )
+
+        self.assertFalse(result.success)
+        self.assertIn("delivery_target column", result.details["error"])
+        chat.assert_not_awaited()
+
+    def test_current_turn_outbound_target_requires_terminal_final_reply_target(self):
+        identity = {"thread_id": "thread", "run_id": "run"}
+        terminal = {
+            "terminal_sequence": [
+                {
+                    "capability_id": run_live_qa.OUTBOUND_DELIVERY_TARGETS_LIST_CAPABILITY_ID,
+                    "invocation_id": "list-1",
+                    "status": "completed",
+                }
+            ]
+        }
+        previews = [
+            {
+                "invocation_id": "list-1",
+                "capability_id": run_live_qa.OUTBOUND_DELIVERY_TARGETS_LIST_CAPABILITY_ID,
+                "input": {"channel": "slack"},
+                "output": {
+                    "targets": [
+                        {
+                            "target": {"target_id": "status-only", "channel": "slack"},
+                            "capabilities": {"final_replies": False},
+                        },
+                        {
+                            "target": {"target_id": "slack-final", "channel": "slack"},
+                            "capabilities": {"final_replies": True},
+                        },
+                    ]
+                },
+            }
+        ]
+        with (
+            patch.object(
+                run_live_qa,
+                "_current_turn_capability_evidence",
+                return_value=terminal,
+            ),
+            patch.object(
+                run_live_qa,
+                "_current_turn_capability_previews",
+                return_value=previews,
+            ),
+        ):
+            targets = run_live_qa._current_turn_outbound_final_reply_target_ids(
+                Path("/tmp/home"), [identity]
+            )
+
+        self.assertEqual(targets, ["slack-final"])
 
     def test_strategy_doc_knowledge_requires_current_turn_google_docs_evidence(self):
         captured: dict[str, object] = {}
@@ -1286,13 +1469,22 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
         }
         expected_capabilities = [
             "google-docs.create_document",
+            "google-docs.insert_text",
             "google-docs.read_content",
         ]
         evidence = {
             "statuses": {
                 capability_id: ["completed"]
                 for capability_id in expected_capabilities
-            }
+            },
+            "terminal_sequence": [
+                {
+                    "seq": index,
+                    "capability_id": capability_id,
+                    "invocation_id": f"invocation-{index}",
+                }
+                for index, capability_id in enumerate(expected_capabilities)
+            ],
         }
 
         async def fake_live_chat_with_extensions_case(_ctx, **kwargs):
@@ -1319,6 +1511,40 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
                 "_current_turn_capability_evidence",
                 return_value=evidence,
             ) as evidence_reader,
+            patch.object(
+                run_live_qa,
+                "_current_turn_capability_previews",
+                side_effect=lambda *_args: [
+                    {
+                        "invocation_id": "invocation-0",
+                        "capability_id": "google-docs.create_document",
+                        "input": {"title": "QA"},
+                        "output": {"document_id": "doc-id"},
+                    },
+                    {
+                        "invocation_id": "invocation-1",
+                        "capability_id": "google-docs.insert_text",
+                        "input": {
+                            "document_id": "doc-id",
+                            "text": captured.get("extra_details", {}).get(
+                                "strategy_phrase", ""
+                            ),
+                        },
+                        "output": {"document_id": "doc-id"},
+                    },
+                    {
+                        "invocation_id": "invocation-2",
+                        "capability_id": "google-docs.read_content",
+                        "input": {"document_id": "doc-id"},
+                        "output": {
+                            "document_id": "doc-id",
+                            "content": captured.get("extra_details", {}).get(
+                                "strategy_phrase", ""
+                            ),
+                        },
+                    },
+                ],
+            ),
         ):
             result = asyncio.run(
                 run_live_qa.case_qa_5c_strategy_doc_knowledge_base(
@@ -1348,7 +1574,7 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
             expected_capabilities,
             {"completed"},
         )
-        self.assertEqual(result.details["capability_evidence"], evidence)
+        self.assertTrue(result.details["capability_evidence"]["verified"])
 
     def test_strategy_doc_knowledge_fails_without_current_turn_google_docs_evidence(
         self,
@@ -1455,38 +1681,118 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
         self.assertFalse(result.details["blocking"])
         self.assertIn("database is locked", result.details["error"])
 
-    def test_wait_for_trigger_record_after_count_polls_until_record_added(self):
-        counts = iter([0, 0, 1])
-        observed_sleeps: list[float] = []
+    def test_google_docs_chain_requires_bound_create_insert_read_readback(self):
+        phrase = "unique strategy phrase"
+        terminal = {
+            "statuses": {
+                "google-docs.create_document": ["completed"],
+                "google-docs.insert_text": ["completed"],
+                "google-docs.read_content": ["completed"],
+            },
+            "terminal_sequence": [
+                {"seq": 10, "capability_id": "google-docs.create_document", "invocation_id": "a"},
+                {"seq": 20, "capability_id": "google-docs.insert_text", "invocation_id": "b"},
+                {"seq": 30, "capability_id": "google-docs.read_content", "invocation_id": "c"},
+            ],
+        }
+        previews = [
+            {
+                "invocation_id": "a",
+                "capability_id": "google-docs.create_document",
+                "input": {"title": "QA strategy"},
+                "output": {"document_id": "doc-secret", "title": "QA strategy"},
+            },
+            {
+                "invocation_id": "b",
+                "capability_id": "google-docs.insert_text",
+                "input": {"document_id": "doc-secret", "text": phrase},
+                "output": {"document_id": "doc-secret"},
+            },
+            {
+                "invocation_id": "c",
+                "capability_id": "google-docs.read_content",
+                "input": {"document_id": "doc-secret"},
+                "output": {"document_id": "doc-secret", "content": f"body {phrase}"},
+            },
+        ]
 
-        def fake_trigger_record_count(_home: Path, routine_name: str | None) -> int:
-            self.assertIsNone(routine_name)
-            return next(counts)
+        evidence = run_live_qa._evaluate_google_docs_chain(terminal, previews, phrase)
 
-        async def fake_sleep(seconds: float) -> None:
-            observed_sleeps.append(seconds)
+        self.assertTrue(evidence["verified"])
+        self.assertTrue(evidence["authoritative_phrase_readback"])
+        encoded = json.dumps(evidence)
+        self.assertNotIn("doc-secret", encoded)
 
-        with (
-            patch.object(
-                run_live_qa,
-                "_trigger_record_count",
-                side_effect=fake_trigger_record_count,
-            ),
-            patch.object(run_live_qa.asyncio, "sleep", new=fake_sleep),
-        ):
-            after_count, waited_ms = asyncio.run(
-                run_live_qa._wait_for_trigger_record_after_count(
-                    Path("/tmp/reborn-home"),
-                    None,
-                    before_count=0,
-                    timeout=10.0,
-                    poll_interval=0.01,
-                )
+    def test_google_docs_chain_rejects_wrong_document_and_missing_phrase(self):
+        terminal = {
+            "statuses": {
+                "google-docs.create_document": ["completed"],
+                "google-docs.insert_text": ["completed"],
+                "google-docs.read_content": ["completed"],
+            },
+            "terminal_sequence": [
+                {"seq": 10, "capability_id": "google-docs.create_document", "invocation_id": "a"},
+                {"seq": 20, "capability_id": "google-docs.insert_text", "invocation_id": "b"},
+                {"seq": 30, "capability_id": "google-docs.read_content", "invocation_id": "c"},
+            ],
+        }
+        previews = [
+            {
+                "invocation_id": "a",
+                "capability_id": "google-docs.create_document",
+                "input": {"title": "QA strategy"},
+                "output": {"document_id": "created-doc"},
+            },
+            {
+                "invocation_id": "b",
+                "capability_id": "google-docs.insert_text",
+                "input": {"document_id": "other-doc", "text": "expected phrase"},
+                "output": {"document_id": "other-doc"},
+            },
+            {
+                "invocation_id": "c",
+                "capability_id": "google-docs.read_content",
+                "input": {"document_id": "other-doc"},
+                "output": {"document_id": "other-doc", "content": "different"},
+            },
+        ]
+
+        evidence = run_live_qa._evaluate_google_docs_chain(
+            terminal, previews, "expected phrase"
+        )
+
+        self.assertFalse(evidence["verified"])
+        self.assertFalse(evidence["same_document"])
+        self.assertFalse(evidence["authoritative_phrase_readback"])
+
+    def test_strategy_doc_prompt_demands_unique_create_insert_read_chain(self):
+        captured: dict[str, object] = {}
+
+        async def fake_live_chat_with_extensions_case(_ctx, **kwargs):
+            captured.update(kwargs)
+            return run_live_qa.ProbeResult(
+                provider="test",
+                mode="live:qa_5c_strategy_doc_knowledge_base",
+                success=False,
+                latency_ms=1,
+                details={"error": "stop after prompt capture"},
             )
 
-        self.assertEqual(after_count, 1)
-        self.assertGreaterEqual(len(observed_sleeps), 1)
-        self.assertGreaterEqual(waited_ms, 0)
+        with patch.object(
+            run_live_qa,
+            "_live_chat_with_extensions_case",
+            side_effect=fake_live_chat_with_extensions_case,
+        ):
+            asyncio.run(
+                run_live_qa.case_qa_5c_strategy_doc_knowledge_base(self._dummy_ctx())
+            )
+
+        self.assertIn("google-docs.insert_text", captured["extensions"][0]["required_tools"])
+        prompt = captured["prompt"]
+        self.assertIn("create_document", prompt)
+        self.assertIn("insert_text", prompt)
+        self.assertIn("read_content", prompt)
+        self.assertIn(captured["extra_details"]["strategy_phrase"], prompt)
 
     def test_routine_confirmation_follow_up_answers_timezone_confirmation(self):
         text = (
@@ -1522,6 +1828,7 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
             timeout,
             extra_details,
             enforce_marker,
+            capture_submission_identity,
         ):
             captured.update(
                 {
@@ -1533,6 +1840,7 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
                     "timeout": timeout,
                     "extra_details": extra_details,
                     "enforce_marker": enforce_marker,
+                    "capture_submission_identity": capture_submission_identity,
                 }
             )
             extra_details = extra_details or {}
@@ -1554,7 +1862,16 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
                 "_live_chat_with_extensions_case",
                 side_effect=fake_live_chat_with_extensions_case,
             ),
-            patch.object(run_live_qa, "_trigger_record_count", side_effect=[0, 1]),
+            patch.object(
+                run_live_qa,
+                "read_trigger_snapshot",
+                return_value=self._checked_trigger_baseline(),
+            ),
+            patch.object(
+                run_live_qa,
+                "_wait_for_current_turn_trigger_validation",
+                return_value=self._routine_validation(valid=True),
+            ),
         ):
             result = asyncio.run(
                 run_live_qa._routine_creation_case(
@@ -2700,6 +3017,30 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
         with self.assertRaisesRegex(AssertionError, "ambiguous submission identity"):
             record_identity(observed, second)
         self.assertEqual(observed["submission_identity"]["run_id"], "run-first")
+
+    def test_follow_up_submission_identity_is_tracked_without_replacing_primary(self):
+        observed: dict[str, object] = {}
+        first = {
+            "thread_id": "thread",
+            "accepted_message_ref": "message-first",
+            "turn_id": "turn-first",
+            "run_id": "run-first",
+        }
+        second = {
+            "thread_id": "thread",
+            "accepted_message_ref": "message-second",
+            "turn_id": "turn-second",
+            "run_id": "run-second",
+        }
+
+        run_live_qa._record_submitted_identity(observed, first)
+        run_live_qa._record_follow_up_submitted_identity(observed, second)
+
+        self.assertEqual(observed["submission_identity"]["run_id"], "run-first")
+        self.assertEqual(
+            [identity["run_id"] for identity in observed["submission_identities"]],
+            ["run-first", "run-second"],
+        )
 
     def test_live_chat_with_extensions_delegates_to_shared_live_chat_case(self):
         captured: dict[str, object] = {}
@@ -4180,7 +4521,16 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
 
         with (
             patch.object(run_live_qa, "_live_chat_case", side_effect=fake_live_chat_case),
-            patch.object(run_live_qa, "_trigger_record_count", side_effect=[0, 1]),
+            patch.object(
+                run_live_qa,
+                "read_trigger_snapshot",
+                return_value=self._checked_trigger_baseline(),
+            ),
+            patch.object(
+                run_live_qa,
+                "_wait_for_current_turn_trigger_validation",
+                return_value=self._routine_validation(valid=True),
+            ),
         ):
             result = asyncio.run(
                 run_live_qa.case_qa_3c_endpoint_status_slack_routine(self._dummy_ctx())
@@ -4243,7 +4593,16 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
 
         with (
             patch.object(run_live_qa, "_live_chat_case", side_effect=fake_live_chat_case),
-            patch.object(run_live_qa, "_trigger_record_count", side_effect=[0, 1]),
+            patch.object(
+                run_live_qa,
+                "read_trigger_snapshot",
+                return_value=self._checked_trigger_baseline(),
+            ),
+            patch.object(
+                run_live_qa,
+                "_wait_for_current_turn_trigger_validation",
+                return_value=self._routine_validation(valid=True),
+            ),
         ):
             result = asyncio.run(
                 run_live_qa.case_qa_8c_hn_keyword_slack_routine(self._dummy_ctx())
@@ -5925,7 +6284,7 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
 
         source = inspect.getsource(run_live_qa._slack_delivery_routine_case)
         self.assertIn("schedule_kind", source)
-        self.assertIn("_trigger_record_snapshot", source)
+        self.assertIn("read_trigger_snapshot", source)
         self.assertIn(
             "record_count",
             source,
@@ -5948,7 +6307,7 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
             db_dir = home / "local-dev"
             db_dir.mkdir(parents=True)
             db_path = db_dir / "reborn-local-dev.db"
-            with sqlite3_module.connect(db_path) as db:
+            with closing(sqlite3_module.connect(db_path)) as db, db:
                 db.execute(
                     "CREATE TABLE root_filesystem_entries "
                     "(path TEXT, contents TEXT, is_dir INTEGER)"
@@ -5959,18 +6318,14 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
                     "'{\"final_reply_target\": \"reply:adapter:slack\"}', 0)"
                 )
             targets = run_live_qa._outbound_final_reply_targets(home)
-            self.assertEqual(
-                targets,
-                {
-                    "/tenants/t/users/u/outbound/communication-preferences/a.json": (
-                        "reply:adapter:slack"
-                    )
-                },
-            )
+            self.assertTrue(targets.checked)
+            self.assertEqual(len(targets.bindings), 1)
+            self.assertEqual(targets.safe_summary["target_count"], 1)
+            self.assertNotIn("reply:adapter:slack", json.dumps(targets.safe_summary))
         with tempfile.TemporaryDirectory() as tmp:
-            self.assertEqual(
-                run_live_qa._outbound_final_reply_targets(Path(tmp)), {}
-            )
+            missing = run_live_qa._outbound_final_reply_targets(Path(tmp))
+            self.assertFalse(missing.checked)
+            self.assertTrue(missing.error)
 
     def test_exactly_once_case_specs_gate_on_personal_auth_and_run_by_default(self):
         for case_name in (
@@ -6026,67 +6381,6 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
         self.assertAlmostEqual(parsed, 1783631771.0, delta=1.0)
         self.assertIsNone(run_live_qa._parse_epoch_seconds(None))
         self.assertIsNone(run_live_qa._parse_epoch_seconds("not-a-time"))
-
-    def test_trigger_record_snapshot_reads_schedule_and_delivery_target(self):
-        import sqlite3 as sqlite3_module
-        import tempfile
-
-        with tempfile.TemporaryDirectory() as tmp:
-            home = Path(tmp)
-            db_dir = home / "local-dev"
-            db_dir.mkdir(parents=True)
-            db_path = db_dir / "reborn-local-dev.db"
-            with sqlite3_module.connect(db_path) as db:
-                db.execute(
-                    "CREATE TABLE trigger_records ("
-                    "name TEXT, schedule_kind TEXT, next_run_at TEXT, "
-                    "delivery_target TEXT)"
-                )
-                db.execute(
-                    "INSERT INTO trigger_records VALUES "
-                    "('probe', 'once', '2026-07-09T21:16:11.000000000Z', "
-                    "'slack:personal-dm:T1:me')"
-                )
-            snapshot = run_live_qa._trigger_record_snapshot(home, "probe")
-            self.assertTrue(snapshot["checked"])
-            self.assertEqual(snapshot["record_count"], 1)
-            self.assertEqual(snapshot["schedule_kind"], "once")
-            self.assertEqual(snapshot["delivery_target"], "slack:personal-dm:T1:me")
-            self.assertFalse(snapshot["delivery_target_column_missing"])
-
-    def test_trigger_record_snapshot_flags_missing_delivery_target_column(self):
-        import sqlite3 as sqlite3_module
-        import tempfile
-
-        with tempfile.TemporaryDirectory() as tmp:
-            home = Path(tmp)
-            db_dir = home / "local-dev"
-            db_dir.mkdir(parents=True)
-            db_path = db_dir / "reborn-local-dev.db"
-            with sqlite3_module.connect(db_path) as db:
-                db.execute(
-                    "CREATE TABLE trigger_records ("
-                    "name TEXT, schedule_kind TEXT, next_run_at TEXT)"
-                )
-                db.execute(
-                    "INSERT INTO trigger_records VALUES "
-                    "('probe', 'cron', '2026-07-09T21:16:11.000000000Z')"
-                )
-            snapshot = run_live_qa._trigger_record_snapshot(home, "probe")
-            # Pre-fix server: schedule facts still readable, delivery target
-            # column reported missing (NOT an opaque sqlite error).
-            self.assertTrue(snapshot["checked"])
-            self.assertTrue(snapshot["delivery_target_column_missing"])
-            self.assertEqual(snapshot["schedule_kind"], "cron")
-            self.assertIsNone(snapshot["delivery_target"])
-
-    def test_trigger_record_snapshot_reports_unreadable_db(self):
-        import tempfile
-
-        with tempfile.TemporaryDirectory() as tmp:
-            snapshot = run_live_qa._trigger_record_snapshot(Path(tmp), "probe")
-            self.assertFalse(snapshot["checked"])
-            self.assertIn("error", snapshot)
 
     def test_raw_slack_user_id_pattern_requires_id_shape(self):
         self.assertEqual(
@@ -8976,13 +9270,8 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
             ),
             patch.object(
                 run_live_qa,
-                "_trigger_record_snapshot",
-                return_value={
-                    "checked": True,
-                    "record_count": 0,
-                    "schedule_kind": None,
-                    "next_run_at": None,
-                },
+                "read_trigger_snapshot",
+                return_value=self._checked_trigger_baseline(),
             ),
             patch.object(
                 run_live_qa,

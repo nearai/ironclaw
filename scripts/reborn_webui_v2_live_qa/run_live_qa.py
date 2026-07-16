@@ -53,6 +53,15 @@ from scripts.reborn_webui_v2_live_qa.case_matrix import (  # noqa: E402
     QA_SHEET_URL,
     qa_row_sort_key,
 )
+from scripts.reborn_webui_v2_live_qa.capability_evidence import (  # noqa: E402
+    current_turn_outbound_final_reply_target_ids,
+    current_turn_capability_previews as _current_turn_capability_previews,
+    evaluate_google_docs_chain as _evaluate_google_docs_chain,
+    wait_for_current_turn_trigger_validation,
+)
+from scripts.reborn_webui_v2_live_qa.diagnostic_sanitizer import (  # noqa: E402
+    sanitize_diagnostic,
+)
 from scripts.reborn_webui_v2_live_qa.errors import LiveQaError  # noqa: E402
 from scripts.reborn_webui_v2_live_qa.external_auth_helpers import (  # noqa: E402
     _github_auth_preflight,
@@ -95,6 +104,14 @@ from scripts.reborn_webui_v2_live_qa.root_filesystem import (  # noqa: E402
     _root_filesystem_create_table,
     _root_filesystem_json,
     _root_filesystem_secret_by_handle,
+)
+from scripts.reborn_webui_v2_live_qa.routine_evidence import (  # noqa: E402
+    DefaultTargetSnapshot,
+    RoutineValidation,
+    TriggerSnapshot,
+    read_default_target_snapshot,
+    read_trigger_snapshot,
+    trigger_prompt_has_self_delivery_routing,
 )
 from scripts.reborn_webui_v2_live_qa.green_run_explanation import (  # noqa: E402
     write_green_run_explanation,
@@ -949,28 +966,10 @@ def _browser_diagnostics_dir(output_dir: Path, case_name: str) -> Path:
 
 
 def _redact_browser_diagnostic_value(value: object) -> object:
-    if value is None or isinstance(value, (bool, int, float)):
-        return value
-    text = str(value)
-    if AUTH_TOKEN:
-        text = text.replace(AUTH_TOKEN, "<REDACTED_AUTH_TOKEN>")
-    text = re.sub(
-        r"(?i)([?&](?:token|code|state|access_token|refresh_token|id_token)=)[^&#\s]+",
-        r"\1<REDACTED>",
-        text,
+    return sanitize_diagnostic(
+        value,
+        literal_secrets=(AUTH_TOKEN,) if AUTH_TOKEN else (),
     )
-    text = re.sub(
-        r"(?i)\b(?:token|code|state|access_token|refresh_token|id_token)=[^,\s)'\"]+",
-        lambda match: match.group(0).split("=", 1)[0] + "=<REDACTED>",
-        text,
-    )
-    text = re.sub(r"(?i)(bearer\s+)[^\s]+", r"\1<REDACTED>", text)
-    text = re.sub(r"(?i)(cookie\s*:\s*)[^\r\n]+", r"\1<REDACTED>", text)
-    text = re.sub(r"xox[baprs]-[A-Za-z0-9-]{10,}", "<REDACTED_SLACK_TOKEN>", text)
-    text = re.sub(r"ya29\.[A-Za-z0-9._-]{20,}", "<REDACTED_GOOGLE_TOKEN>", text)
-    text = re.sub(r"sk-ant-[A-Za-z0-9_-]{10,}", "<REDACTED_ANTHROPIC_KEY>", text)
-    text = re.sub(r"sk-[A-Za-z0-9_-]{20,}", "<REDACTED_OPENAI_KEY>", text)
-    return text
 
 
 def _browser_event_value(obj: object, name: str) -> object | None:
@@ -1317,6 +1316,23 @@ def _record_submitted_identity(
             "acknowledgements matched one prompt"
         )
     observed["submission_identity"] = identity
+    observed["submission_identities"] = [identity]
+
+
+def _record_follow_up_submitted_identity(
+    observed: dict[str, Any],
+    payload: dict[str, object],
+) -> None:
+    if any(not payload.get(field) for field in _SUBMISSION_IDENTITY_FIELDS):
+        raise AssertionError("follow-up submitted response omitted turn identity fields")
+    identity = {
+        field: str(payload[field]) for field in _SUBMISSION_IDENTITY_FIELDS
+    }
+    existing = observed.get("submission_identities")
+    identities = list(existing) if isinstance(existing, list) else []
+    if identity not in identities:
+        identities.append(identity)
+    observed["submission_identities"] = identities
 
 
 def _record_replayed_submission_identity(
@@ -1346,6 +1362,7 @@ def _record_replayed_submission_identity(
             )
         return
     observed["submission_identity"] = identity
+    observed["submission_identities"] = [identity]
 
 
 def _routine_confirmation_follow_up_for_text(
@@ -1406,7 +1423,7 @@ async def _live_chat_case(
             str(extension["package_id"]) for extension in extensions
         ]
 
-    def is_matching_submission_response(response: object) -> bool:
+    def is_matching_submission_response(response: object, content: str) -> bool:
         try:
             request = response.request  # type: ignore[attr-defined]
             if request.method != "POST":
@@ -1419,21 +1436,27 @@ async def _live_chat_case(
             request_body = request.post_data_json
             if callable(request_body):
                 request_body = request_body()
-            return isinstance(request_body, dict) and request_body.get("content") == prompt
+            return isinstance(request_body, dict) and request_body.get("content") == content
         except Exception:
             return False
 
-    async def submit_prompt(page: object, composer: object) -> bool:
+    async def submit_prompt(
+        page: object,
+        composer: object,
+        content: str = prompt,
+        *,
+        follow_up: bool = False,
+    ) -> bool:
         if not capture_submission_identity:
-            await composer.fill(prompt)  # type: ignore[attr-defined]
+            await composer.fill(content)  # type: ignore[attr-defined]
             await composer.press("Enter")  # type: ignore[attr-defined]
             return True
         try:
             async with page.expect_response(  # type: ignore[attr-defined]
-                is_matching_submission_response,
+                lambda response: is_matching_submission_response(response, content),
                 timeout=15000,
             ) as response_info:
-                await composer.fill(prompt)  # type: ignore[attr-defined]
+                await composer.fill(content)  # type: ignore[attr-defined]
                 await composer.press("Enter")  # type: ignore[attr-defined]
             response = await response_info.value
         except Exception as exc:
@@ -1447,7 +1470,10 @@ async def _live_chat_case(
         outcome = str(payload.get("outcome") or "")
         existing = observed.get("submission_identity")
         if outcome == "submitted":
-            _record_submitted_identity(observed, payload)
+            if follow_up:
+                _record_follow_up_submitted_identity(observed, payload)
+            else:
+                _record_submitted_identity(observed, payload)
             return True
         if outcome == "already_submitted":
             _record_replayed_submission_identity(observed, payload)
@@ -1584,8 +1610,15 @@ async def _live_chat_case(
                 observed["routine_confirmation_initial_text_excerpt"] = (
                     reply.text_excerpt
                 )
-                await composer.fill(follow_up)
-                await composer.press("Enter")
+                if not await submit_prompt(
+                    page,
+                    composer,
+                    follow_up,
+                    follow_up=True,
+                ):
+                    raise AssertionError(
+                        "routine confirmation follow-up produced no matching response"
+                    )
                 await expect(page.locator("[data-testid='msg-user']").last).to_contain_text(  # type: ignore[attr-defined]
                     follow_up[:80],
                     timeout=15000,
@@ -2067,45 +2100,7 @@ async def case_qa_3b_endpoint_status_live_chat(ctx: LiveQaContext) -> ProbeResul
     )
 
 
-def _trigger_record_count(reborn_home: Path, routine_name: str | None = None) -> int:
-    db_path = reborn_home / "local-dev" / "reborn-local-dev.db"
-    if not db_path.exists():
-        return 0
-    with closing(sqlite3.connect(db_path)) as db:
-        if routine_name:
-            cursor = db.execute(
-                "SELECT COUNT(*) FROM trigger_records WHERE name = ?",
-                (routine_name,),
-            )
-        else:
-            cursor = db.execute("SELECT COUNT(*) FROM trigger_records")
-        value = cursor.fetchone()[0]
-    return int(value)
-
-
 ROUTINE_TRIGGER_RECORD_WAIT_TIMEOUT_SECONDS = 120.0
-ROUTINE_TRIGGER_RECORD_POLL_SECONDS = 2.0
-
-
-async def _wait_for_trigger_record_after_count(
-    reborn_home: Path,
-    routine_name: str | None,
-    *,
-    before_count: int,
-    timeout: float = ROUTINE_TRIGGER_RECORD_WAIT_TIMEOUT_SECONDS,
-    poll_interval: float = ROUTINE_TRIGGER_RECORD_POLL_SECONDS,
-) -> tuple[int, int]:
-    started = time.monotonic()
-    deadline = started + timeout
-    last_count = _trigger_record_count(reborn_home, routine_name)
-    while last_count <= before_count:
-        now = time.monotonic()
-        if now >= deadline:
-            break
-        await asyncio.sleep(min(poll_interval, deadline - now))
-        last_count = _trigger_record_count(reborn_home, routine_name)
-    waited_ms = int((time.monotonic() - started) * 1000)
-    return last_count, waited_ms
 
 
 def _trigger_run_rows(reborn_home: Path, routine_name: str) -> list[dict[str, object]]:
@@ -2144,83 +2139,9 @@ def _parse_epoch_seconds(value: object) -> float | None:
         return None
 
 
-def _outbound_final_reply_targets(reborn_home: Path) -> dict[str, object]:
-    """Every persisted user-default final-reply target, keyed by row path.
-
-    qa_9d compares this before creation and after delivery: per-trigger
-    routing must NOT be implemented by silently rewriting the user-wide
-    default delivery target."""
-    db_path = reborn_home / "local-dev" / "reborn-local-dev.db"
-    targets: dict[str, object] = {}
-    if not db_path.exists():
-        return targets
-    try:
-        with closing(sqlite3.connect(db_path)) as db:
-            rows = db.execute(
-                "SELECT path, contents FROM root_filesystem_entries "
-                "WHERE path LIKE '%/outbound/communication-preferences/%' "
-                "AND is_dir = 0"
-            ).fetchall()
-    except sqlite3.Error:
-        return targets
-    for path, contents in rows:
-        if isinstance(contents, bytes):
-            contents = contents.decode("utf-8", "replace")
-        try:
-            record = json.loads(contents) if contents else {}
-        except (json.JSONDecodeError, TypeError):
-            continue
-        if isinstance(record, dict):
-            targets[str(path)] = record.get("final_reply_target")
-    return targets
-
-
-def _trigger_record_snapshot(reborn_home: Path, routine_name: str) -> dict[str, object]:
-    """Read count/schedule/delivery-target facts for one routine from the
-    server DB.
-
-    `delivery_target_column_missing` is reported separately (the column only
-    exists on servers with per-trigger delivery routing) while the schedule
-    columns exist on every server version this probe targets, so pre-fix
-    servers still get schedule preconditions checked.
-    """
-    db_path = reborn_home / "local-dev" / "reborn-local-dev.db"
-    snapshot: dict[str, object] = {
-        "checked": False,
-        "record_count": 0,
-        "schedule_kind": None,
-        "next_run_at": None,
-        "delivery_target": None,
-        "delivery_target_column_missing": False,
-    }
-    if not db_path.exists():
-        snapshot["error"] = "reborn-local-dev.db missing"
-        return snapshot
-    try:
-        with closing(sqlite3.connect(db_path)) as db:
-            rows = db.execute(
-                "SELECT schedule_kind, next_run_at FROM trigger_records WHERE name = ?",
-                (routine_name,),
-            ).fetchall()
-            snapshot["record_count"] = len(rows)
-            if rows:
-                snapshot["schedule_kind"] = rows[0][0]
-                snapshot["next_run_at"] = rows[0][1]
-            try:
-                target_rows = db.execute(
-                    "SELECT delivery_target FROM trigger_records WHERE name = ?",
-                    (routine_name,),
-                ).fetchall()
-                if target_rows:
-                    snapshot["delivery_target"] = target_rows[0][0]
-            except sqlite3.OperationalError as exc:
-                if "no such column" not in str(exc):
-                    raise
-                snapshot["delivery_target_column_missing"] = True
-            snapshot["checked"] = True
-    except sqlite3.Error as exc:
-        snapshot["error"] = _exc_text(exc)
-    return snapshot
+def _outbound_final_reply_targets(reborn_home: Path) -> DefaultTargetSnapshot:
+    """Typed, fail-closed user-default target snapshot for qa_9d."""
+    return read_default_target_snapshot(reborn_home)
 
 
 def _triggered_delivery_outcome(reborn_home: Path, run_id: str) -> dict[str, object] | None:
@@ -2615,14 +2536,11 @@ SLACK_SEARCH_INDEX_QUERY_SECRET_PATTERN = re.compile(
 
 
 def _sanitize_slack_search_index_error(error: object) -> str:
-    redacted = str(_redact_browser_diagnostic_value(error))
-    redacted = SLACK_SEARCH_INDEX_QUERY_SECRET_PATTERN.sub(
-        r"\1<REDACTED>",
-        redacted,
-    )
-    redacted = RAW_SLACK_CONVERSATION_ID_PATTERN.sub(
-        "C_REDACTED",
-        _redact_slack_user_ids_in_text(redacted),
+    redacted = str(
+        sanitize_diagnostic(
+            error,
+            literal_secrets=(AUTH_TOKEN,) if AUTH_TOKEN else (),
+        )
     )
     return " ".join(redacted.split())[:SLACK_SEARCH_INDEX_ERROR_MAX_CHARS]
 
@@ -3851,6 +3769,38 @@ def _current_turn_capability_evidence(
     return evidence
 
 
+def _current_turn_outbound_final_reply_target_ids(
+    reborn_home: Path,
+    submission_identities: list[dict[str, object]],
+) -> list[str]:
+    return current_turn_outbound_final_reply_target_ids(
+        reborn_home,
+        submission_identities,
+        capability_id=OUTBOUND_DELIVERY_TARGETS_LIST_CAPABILITY_ID,
+        terminal_reader=_current_turn_capability_evidence,
+        preview_reader=_current_turn_capability_previews,
+    )
+
+
+async def _wait_for_current_turn_trigger_validation(
+    reborn_home: Path,
+    before: TriggerSnapshot,
+    submission_identities: list[dict[str, object]],
+    *,
+    timeout: float = ROUTINE_TRIGGER_RECORD_WAIT_TIMEOUT_SECONDS,
+    poll_interval: float = 0.25,
+) -> RoutineValidation:
+    return await wait_for_current_turn_trigger_validation(
+        reborn_home,
+        before,
+        submission_identities,
+        terminal_reader=_current_turn_capability_evidence,
+        preview_reader=_current_turn_capability_previews,
+        timeout=timeout,
+        poll_interval=poll_interval,
+    )
+
+
 async def _extension_chat_connect_case(
     ctx: LiveQaContext,
     *,
@@ -4331,9 +4281,15 @@ async def case_qa_5b_drive_connect(ctx: LiveQaContext) -> ProbeResult:
 
 
 async def case_qa_5c_strategy_doc_knowledge_base(ctx: LiveQaContext) -> ProbeResult:
-    strategy_phrase = "Reborn QA Strategy North Star: verify live WebUIv2 tool grounding."
+    suffix = uuid.uuid4().hex
+    strategy_phrase = (
+        "Reborn QA Strategy North Star: verify live WebUIv2 tool grounding "
+        f"({suffix})."
+    )
+    document_title = f"Reborn QA Strategy {suffix}"
     expected_capabilities = [
         "google-docs.create_document",
+        "google-docs.insert_text",
         "google-docs.read_content",
     ]
     result = await _live_chat_with_extensions_case(
@@ -4348,9 +4304,21 @@ async def case_qa_5c_strategy_doc_knowledge_base(ctx: LiveQaContext) -> ProbeRes
                 "required_tools": expected_capabilities,
             },
         ],
-        prompt=_qa_sheet_prompt("qa_5c_strategy_doc_knowledge_base"),
+        prompt=(
+            f"{_qa_sheet_prompt('qa_5c_strategy_doc_knowledge_base')}\n\n"
+            f"Create a new Google Doc titled `{document_title}` with "
+            "google-docs.create_document. Write the following exact phrase into "
+            "that created document with google-docs.insert_text, then read the "
+            "same document back with google-docs.read_content and confirm the "
+            f"phrase is present in the read result: {strategy_phrase}"
+        ),
         timeout=360.0,
-        extra_details={"strategy_phrase": strategy_phrase},
+        extra_details={
+            "strategy_phrase": strategy_phrase,
+            "document_title_sha256": hashlib.sha256(
+                document_title.encode("utf-8")
+            ).hexdigest(),
+        },
         forbidden_text=[
             "auth_denied",
             "authentication required",
@@ -4371,8 +4339,22 @@ async def case_qa_5c_strategy_doc_knowledge_base(ctx: LiveQaContext) -> ProbeRes
         expected_capabilities,
         {"completed"},
     )
+    previews = _current_turn_capability_previews(
+        ctx.reborn_home,
+        submission_identity if isinstance(submission_identity, dict) else {},
+        expected_capabilities,
+    )
+    chain_evidence = _evaluate_google_docs_chain(
+        evidence,
+        previews,
+        strategy_phrase,
+    )
     result.details["expected_capabilities"] = expected_capabilities
-    result.details["capability_evidence"] = evidence
+    result.details["capability_evidence"] = {
+        "terminal_sequence": evidence.get("terminal_sequence", []),
+        "statuses": evidence.get("statuses", {}),
+        **chain_evidence,
+    }
     statuses = evidence.get("statuses")
     missing_capabilities = (
         [
@@ -4399,14 +4381,15 @@ async def case_qa_5c_strategy_doc_knowledge_base(ctx: LiveQaContext) -> ProbeRes
                 "blocking": False,
             }
         )
-    elif missing_capabilities:
+    elif missing_capabilities or not chain_evidence["verified"]:
         result.success = False
         result.details.update(
             {
                 "error": (
-                    "strategy document reply did not produce current-turn terminal "
-                    "success evidence for the expected Google Docs capabilities: "
-                    f"{missing_capabilities!r}"
+                    "strategy document reply did not produce an authoritative "
+                    "current-turn create -> insert -> read chain bound to one "
+                    "document with phrase readback; missing capabilities: "
+                    f"{missing_capabilities!r}; chain={chain_evidence!r}"
                 ),
                 "failure_class": "model_quality",
                 "failure_category": "missing_expected_capability",
@@ -4737,8 +4720,8 @@ async def _routine_creation_case(
     extra_details: dict[str, object] | None = None,
     follow_up_timezone_instruction: str | None = None,
 ) -> ProbeResult:
-    count_name = routine_name if marker else None
-    before_count = _trigger_record_count(ctx.reborn_home, count_name)
+    before_snapshot = read_trigger_snapshot(ctx.reborn_home)
+    before_count = len(before_snapshot.records)
     details = {
         "routine_name": routine_name,
         "trigger_records_before": before_count,
@@ -4746,6 +4729,24 @@ async def _routine_creation_case(
         "expected_creation_terms": required_text,
         **(extra_details or {}),
     }
+    if not before_snapshot.checked:
+        return _result(
+            case_name,
+            False,
+            time.monotonic(),
+            {
+                **details,
+                "error": (
+                    "could not establish the durable trigger baseline before chat: "
+                    f"{before_snapshot.error}"
+                ),
+                "failure_class": "infrastructure",
+                "failure_category": "trigger_evidence_unavailable",
+                "failure_status": "inconclusive",
+                "inconclusive": True,
+                "blocking": False,
+            },
+        )
     if extensions:
         result = await _live_chat_with_extensions_case(
             ctx,
@@ -4757,6 +4758,7 @@ async def _routine_creation_case(
             timeout=180.0,
             extra_details=details,
             enforce_marker=False,
+            capture_submission_identity=True,
         )
     else:
         result = await _live_chat_case(
@@ -4770,6 +4772,7 @@ async def _routine_creation_case(
             routine_confirmation_follow_up=True,
             routine_follow_up_timezone_instruction=follow_up_timezone_instruction,
             enforce_marker=False,
+            capture_submission_identity=True,
         )
     reply_wait_reason = result.details.get("assistant_reply_wait_reason")
     result.details["structural_final_reply_reasons"] = sorted(
@@ -4785,25 +4788,36 @@ async def _routine_creation_case(
             f"assistant_reply_wait_reason={reply_wait_reason!r}"
         )
     if result.success:
-        after_count, wait_ms = await _wait_for_trigger_record_after_count(
+        submission_identity = result.details.get("submission_identity")
+        submission_identities = result.details.get("submission_identities")
+        validation = await _wait_for_current_turn_trigger_validation(
             ctx.reborn_home,
-            count_name,
-            before_count=before_count,
+            before_snapshot,
+            (
+                [identity for identity in submission_identities if isinstance(identity, dict)]
+                if isinstance(submission_identities, list)
+                else [submission_identity]
+                if isinstance(submission_identity, dict)
+                else []
+            ),
         )
+        result.details["routine_evidence"] = validation.safe_summary
+        result.details["trigger_records_after"] = validation.safe_summary.get(
+            "after_record_count",
+            before_count + int(validation.safe_summary.get("new_record_count") or 0),
+        )
+        result.details["trigger_record_wait_ms"] = validation.safe_summary.get(
+            "wait_ms", 0
+        )
+        result.details["trigger_record_wait_timeout_ms"] = int(
+            ROUTINE_TRIGGER_RECORD_WAIT_TIMEOUT_SECONDS * 1000
+        )
+        if not validation.valid:
+            result.success = False
+            result.details["error"] = validation.error
     else:
-        after_count = _trigger_record_count(ctx.reborn_home, count_name)
-        wait_ms = 0
-    result.details["trigger_records_after"] = after_count
-    result.details["trigger_record_wait_ms"] = wait_ms
-    result.details["trigger_record_wait_timeout_ms"] = int(
-        ROUTINE_TRIGGER_RECORD_WAIT_TIMEOUT_SECONDS * 1000
-    )
-    if result.success and after_count <= before_count:
-        result.success = False
-        result.details["error"] = (
-            "finalized assistant reply observed, but routine scope "
-            f"{routine_name!r} has no new durable trigger_record"
-        )
+        result.details["trigger_records_after"] = before_count
+        result.details["trigger_record_wait_ms"] = 0
     return result
 
 
@@ -4846,9 +4860,58 @@ async def _slack_delivery_routine_case(
     routine_name = f"{routine_prefix}-{suffix}"
     creation_marker = f"{marker_prefix}_ROUTINE_CREATED_{suffix}"
     delivery_marker = f"{marker_prefix}_SLACK_DELIVERED_{suffix}"
-    default_targets_before: dict[str, object] | None = None
+    default_targets_before: DefaultTargetSnapshot | None = None
     if require_persisted_delivery_target:
+        schema_snapshot = read_trigger_snapshot(ctx.reborn_home)
+        if not schema_snapshot.checked:
+            return _result(
+                case_name,
+                False,
+                started,
+                {
+                    "error": (
+                        "could not inspect trigger_records before routed routine chat: "
+                        f"{schema_snapshot.error}"
+                    ),
+                    "failure_class": "infrastructure",
+                    "failure_category": "trigger_evidence_unavailable",
+                    "failure_status": "inconclusive",
+                    "inconclusive": True,
+                },
+            )
+        if not schema_snapshot.delivery_target_column_present:
+            return _result(
+                case_name,
+                False,
+                started,
+                {
+                    "error": (
+                        "server does not support routed routines: trigger_records "
+                        "delivery_target column missing"
+                    ),
+                    "failure_category": "missing_delivery_target_schema",
+                },
+            )
         default_targets_before = _outbound_final_reply_targets(ctx.reborn_home)
+        if not default_targets_before.checked:
+            return _result(
+                case_name,
+                False,
+                started,
+                {
+                    "error": (
+                        "could not establish user-default delivery targets before "
+                        f"routed routine chat: {default_targets_before.error}"
+                    ),
+                    "failure_class": "infrastructure",
+                    "failure_category": "default_target_evidence_unavailable",
+                    "failure_status": "inconclusive",
+                    "inconclusive": True,
+                    "default_delivery_targets_before": (
+                        default_targets_before.safe_summary
+                    ),
+                },
+            )
     creation = await _routine_creation_case(
         ctx,
         case_name=case_name,
@@ -4877,7 +4940,8 @@ async def _slack_delivery_routine_case(
         "delivery_marker": delivery_marker,
         "required_delivery_text": required_delivery_text,
     }
-    record_snapshot: dict[str, object] | None = None
+    record_snapshot: TriggerSnapshot | None = None
+    routine_record = None
     slack_tools_surface: dict[str, object] | None = None
     try:
         # Server-capability and schedule preconditions run FIRST (and inside
@@ -4885,55 +4949,131 @@ async def _slack_delivery_routine_case(
         # crashing the shard): a pre-fix server must red deterministically on
         # the missing capability, not on model-compliance noise.
         if require_persisted_delivery_target or expect_one_shot_schedule:
-            record_snapshot = _trigger_record_snapshot(ctx.reborn_home, routine_name)
-            base_details["trigger_record_snapshot"] = record_snapshot
+            record_snapshot = read_trigger_snapshot(ctx.reborn_home)
+            matching_records = (
+                [record for record in record_snapshot.records if record.name == routine_name]
+                if record_snapshot.checked
+                else []
+            )
+            routine_record = matching_records[0] if len(matching_records) == 1 else None
+            base_details["trigger_record_snapshot"] = {
+                "checked": record_snapshot.checked,
+                "record_count": len(matching_records),
+                "delivery_target_column_present": (
+                    record_snapshot.delivery_target_column_present
+                ),
+                "record_identity_sha256": (
+                    hashlib.sha256(
+                        (
+                            routine_record.key.tenant_id
+                            + ":"
+                            + routine_record.key.trigger_id
+                        ).encode("utf-8")
+                    ).hexdigest()
+                    if routine_record is not None
+                    else None
+                ),
+                "schedule_kind": (
+                    routine_record.schedule_kind if routine_record is not None else None
+                ),
+                "next_run_at": (
+                    routine_record.next_run_at if routine_record is not None else None
+                ),
+                "delivery_target_present": bool(
+                    routine_record and routine_record.delivery_target
+                ),
+                **({"error": record_snapshot.error} if record_snapshot.error else {}),
+            }
         if require_persisted_delivery_target and record_snapshot is not None:
-            if record_snapshot.get("delivery_target_column_missing"):
+            if not record_snapshot.delivery_target_column_present:
                 raise AssertionError(
                     "server does not support per-trigger delivery targets "
                     "(trigger_records.delivery_target column missing)"
                 )
-            if not record_snapshot.get("checked"):
+            if not record_snapshot.checked:
                 raise AssertionError(
                     "probe could not read trigger_records for the persisted "
-                    f"delivery target: {record_snapshot.get('error')!r}"
+                    f"delivery target: {record_snapshot.error!r}"
                 )
-            if not record_snapshot.get("delivery_target"):
+            if routine_record is None or not routine_record.delivery_target:
                 raise AssertionError(
                     "routine was created without a per-trigger delivery_target_id "
                     "on the trigger record"
+                )
+            raw_identities = creation.details.get("submission_identities")
+            primary_identity = creation.details.get("submission_identity")
+            identities = (
+                [identity for identity in raw_identities if isinstance(identity, dict)]
+                if isinstance(raw_identities, list)
+                else [primary_identity]
+                if isinstance(primary_identity, dict)
+                else []
+            )
+            eligible_target_ids = _current_turn_outbound_final_reply_target_ids(
+                ctx.reborn_home,
+                identities,
+            )
+            base_details["outbound_target_evidence"] = {
+                "eligible_final_reply_target_count": len(eligible_target_ids),
+                "selected_target_sha256": hashlib.sha256(
+                    routine_record.delivery_target.encode("utf-8")
+                ).hexdigest(),
+                "selected_target_was_listed": (
+                    routine_record.delivery_target in eligible_target_ids
+                ),
+            }
+            if routine_record.delivery_target not in eligible_target_ids:
+                raise AssertionError(
+                    "persisted delivery target was not a current-turn listed Slack "
+                    "target with capabilities.final_replies=true"
                 )
         if expect_one_shot_schedule and record_snapshot is not None:
             # Exactly-once counting is only well-defined for once-schedules:
             # a recurring trigger legitimately re-posts the marker on fire #2
             # and fabricates a "duplicate delivery" red. Verify the OUTCOME
             # (the persisted schedule), not the prompt wording.
-            if not record_snapshot.get("checked"):
+            if not record_snapshot.checked:
                 raise AssertionError(
                     "probe could not read trigger_records for the schedule "
-                    f"precondition: {record_snapshot.get('error')!r}"
+                    f"precondition: {record_snapshot.error!r}"
                 )
-            record_count = int(record_snapshot.get("record_count") or 0)
+            matching_records = [
+                record for record in record_snapshot.records if record.name == routine_name
+            ]
+            record_count = len(matching_records)
             if record_count != 1:
                 raise SlackDeliveryProbePrecondition(
                     "probe precondition failed: expected exactly one trigger "
                     f"record named {routine_name!r}, found {record_count}"
                 )
-            schedule_kind = record_snapshot.get("schedule_kind")
+            schedule_kind = routine_record.schedule_kind if routine_record else None
             if schedule_kind != "once":
                 raise SlackDeliveryProbePrecondition(
                     "probe precondition failed: routine is not one-shot "
                     f"(schedule_kind={schedule_kind!r})"
                 )
+            task_prompt_has_routing = bool(
+                routine_record
+                and trigger_prompt_has_self_delivery_routing(routine_record.prompt)
+            )
+            base_details["stored_task_prompt_delivery_routing_stripped"] = (
+                not task_prompt_has_routing
+            )
+            if task_prompt_has_routing:
+                raise AssertionError(
+                    "stored trigger task prompt retained requester delivery routing; "
+                    "host-owned result delivery must be stripped from the task"
+                )
             wait_anchor = time.time()
-            fire_epoch = _parse_epoch_seconds(record_snapshot.get("next_run_at"))
+            next_run_at = routine_record.next_run_at if routine_record else None
+            fire_epoch = _parse_epoch_seconds(next_run_at)
             window_end = wait_anchor + delivery_timeout - 60.0
             if fire_epoch is None or not (
                 wall_started - 5.0 <= fire_epoch <= window_end
             ):
                 raise SlackDeliveryProbePrecondition(
                     "probe precondition failed: one-shot fire time "
-                    f"{record_snapshot.get('next_run_at')!r} is outside the "
+                    f"{next_run_at!r} is outside the "
                     f"delivery wait window (case start {wall_started:.0f}, "
                     f"window end {window_end:.0f}) — a mis-scheduled fire "
                     "would time out on a correct server"
@@ -5067,9 +5207,18 @@ async def _slack_delivery_routine_case(
             # the model) rewrote the user-wide default target instead of
             # honoring the trigger's own delivery_target_id.
             default_targets_after = _outbound_final_reply_targets(ctx.reborn_home)
-            base_details["default_delivery_targets_before"] = default_targets_before
-            base_details["default_delivery_targets_after"] = default_targets_after
-            if default_targets_after != default_targets_before:
+            base_details["default_delivery_targets_before"] = (
+                default_targets_before.safe_summary
+            )
+            base_details["default_delivery_targets_after"] = (
+                default_targets_after.safe_summary
+            )
+            if not default_targets_after.checked:
+                raise AssertionError(
+                    "user-default outbound delivery target snapshot became "
+                    f"unreadable: {default_targets_after.error}"
+                )
+            if default_targets_after.bindings != default_targets_before.bindings:
                 raise AssertionError(
                     "user-default outbound delivery target changed during the "
                     "per-trigger routing case — routing must come from the "
@@ -5873,10 +6022,11 @@ async def case_qa_9a_slack_connect(ctx: LiveQaContext) -> ProbeResult:
 async def case_qa_9b_routine_dm_delivery_exactly_once(ctx: LiveQaContext) -> ProbeResult:
     """Wrong-channel/duplicate-delivery probe.
 
-    Uses the historically bug-triggering phrasing ("… and send me the result
-    in a Slack DM") so the stored routine prompt reads like a delivery
-    instruction, then asserts the result reaches the requester's Slack DM
-    EXACTLY once, from the bot identity only, after a grace window. Failure
+    Uses the historically bug-triggering user phrasing ("… and send me the
+    result in a Slack DM"). Trigger creation must strip that delivery routing
+    from the stored task prompt and let the host route the final result. The
+    probe then asserts it reaches the requester's Slack DM EXACTLY once, from
+    the bot identity only, after a grace window. Failure
     modes this catches live: result delivered to another conversation (marker
     never appears in the DM → timeout), duplicate delivery (marker appears
     twice), and user-identity self-delivery (marker from a non-bot author).
