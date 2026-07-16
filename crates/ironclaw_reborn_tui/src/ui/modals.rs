@@ -32,17 +32,18 @@ fn selected_style(idx: usize, selected: usize) -> Style {
 
 /// The `+ new` row is pinned first, ahead of every listed thread — it is
 /// not a real `ThreadSummary`, just a create-thread affordance rendered at
-/// index 0 of the list, shifting every thread row's *displayed* position by
-/// one (selection indexing in `app::threads_modal` is unaffected; this is a
-/// render-only offset).
+/// index 0 of the list. `app::threads_modal::ThreadsModalState::selected`
+/// indexes this same rendered order (0 = "+ new", 1..=threads.len() =
+/// `threads[selected - 1]`), so the highlight below lines up with what
+/// `Enter`/`d` act on.
 fn render_threads(frame: &mut Frame, area: Rect, modal: &ThreadsModalState) {
-    let mut items = vec![ListItem::new("+ new")];
+    let mut items = vec![ListItem::new("+ new").style(selected_style(0, modal.selected))];
     for (idx, thread) in modal.threads.iter().enumerate() {
         let label = thread
             .title
             .clone()
             .unwrap_or_else(|| thread.thread_id.clone());
-        items.push(ListItem::new(label).style(selected_style(idx, modal.selected)));
+        items.push(ListItem::new(label).style(selected_style(idx + 1, modal.selected)));
     }
     let title = if modal.pending_delete_confirm {
         "threads (press d again to delete)"

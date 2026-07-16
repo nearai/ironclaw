@@ -12,6 +12,9 @@ const DEFAULT_TIMELINE_LIMIT: u32 = 50;
 #[derive(Debug, Clone, Default)]
 pub struct ThreadsModalState {
     pub threads: Vec<ThreadSummary>,
+    /// Selection index over the *rendered* list, which is the pinned
+    /// "+ new" affordance (`ui/modals.rs`) followed by `threads`: `0` is
+    /// "+ new", and `1..=threads.len()` map to `threads[selected - 1]`.
     pub selected: usize,
     pub pending_delete_confirm: bool,
     pub loading: bool,
@@ -43,7 +46,9 @@ pub(crate) fn dispatch_key(
             Vec::new()
         }
         KeyCode::Down => {
-            if modal.selected + 1 < modal.threads.len() {
+            // Row 0 is the pinned "+ new" row; rows 1..=threads.len() are
+            // the thread list, so the last valid index is threads.len().
+            if modal.selected < modal.threads.len() {
                 modal.selected += 1;
             }
             modal.pending_delete_confirm = false;
@@ -51,7 +56,15 @@ pub(crate) fn dispatch_key(
             Vec::new()
         }
         KeyCode::Enter => {
-            let Some(thread) = modal.threads.get(modal.selected) else {
+            if modal.selected == 0 {
+                // The pinned "+ new" row: close the modal immediately
+                // (optimistic, same as picking an existing thread) and let
+                // `execute_effect` assign `state.thread_id` once the server
+                // confirms creation — the reducer has no id to set yet.
+                state.modal = None;
+                return vec![Effect::Api(ApiCall::CreateThread)];
+            }
+            let Some(thread) = modal.threads.get(modal.selected - 1) else {
                 state.modal = Some(Modal::Threads(modal));
                 return Vec::new();
             };
@@ -70,8 +83,15 @@ pub(crate) fn dispatch_key(
             })]
         }
         KeyCode::Char('d') => {
+            if modal.selected == 0 {
+                // The pinned "+ new" row isn't a real thread; nothing to
+                // delete.
+                state.modal = Some(Modal::Threads(modal));
+                return Vec::new();
+            }
+            let thread_idx = modal.selected - 1;
             if modal.pending_delete_confirm {
-                let Some(thread) = modal.threads.get(modal.selected) else {
+                let Some(thread) = modal.threads.get(thread_idx) else {
                     state.modal = Some(Modal::Threads(modal));
                     return Vec::new();
                 };
@@ -108,7 +128,9 @@ mod tests {
 
     #[test]
     fn enter_on_selected_thread_swaps_thread_and_loads_timeline() {
-        let mut state = AppState::default().set_modal(Some(threads_modal_with(["t-1", "t-2"], 1)));
+        // Row 0 is the pinned "+ new" affordance, so thread rows start at 1:
+        // selected 2 -> threads[1] -> "t-2".
+        let mut state = AppState::default().set_modal(Some(threads_modal_with(["t-1", "t-2"], 2)));
         let effects = reduce(&mut state, AppEvent::Key(key(KeyCode::Enter)));
         assert_eq!(state.thread_id.as_deref(), Some("t-2"));
         assert!(state.modal.is_none(), "selecting a thread closes the modal");
@@ -123,8 +145,48 @@ mod tests {
     }
 
     #[test]
-    fn dd_on_selected_thread_requires_confirm_then_deletes() {
+    fn enter_on_new_row_emits_create_thread() {
+        // Default selection (0) is the pinned "+ new" row.
         let mut state = AppState::default().set_modal(Some(threads_modal_with(["t-1"], 0)));
+        let effects = reduce(&mut state, AppEvent::Key(key(KeyCode::Enter)));
+        assert!(
+            state.modal.is_none(),
+            "creating a thread closes the modal immediately"
+        );
+        assert!(
+            state.thread_id.is_none(),
+            "the reducer does not fabricate a thread_id; execute_effect assigns it once the server confirms creation"
+        );
+        assert_eq!(effects.len(), 1);
+        assert!(matches!(effects[0], Effect::Api(ApiCall::CreateThread)));
+    }
+
+    #[test]
+    fn up_down_navigate_across_pinned_new_row() {
+        let mut state = AppState::default().set_modal(Some(threads_modal_with(["t-1", "t-2"], 1)));
+
+        // Up from the first thread (selected 1) lands on the pinned row (0).
+        reduce(&mut state, AppEvent::Key(key(KeyCode::Up)));
+        assert!(matches!(&state.modal, Some(Modal::Threads(m)) if m.selected == 0));
+
+        // Up again stays pinned; it never goes negative.
+        reduce(&mut state, AppEvent::Key(key(KeyCode::Up)));
+        assert!(matches!(&state.modal, Some(Modal::Threads(m)) if m.selected == 0));
+
+        // Down walks back onto t-1 (1), then t-2 (2), then stops (no overflow
+        // past the last thread row).
+        reduce(&mut state, AppEvent::Key(key(KeyCode::Down)));
+        assert!(matches!(&state.modal, Some(Modal::Threads(m)) if m.selected == 1));
+        reduce(&mut state, AppEvent::Key(key(KeyCode::Down)));
+        assert!(matches!(&state.modal, Some(Modal::Threads(m)) if m.selected == 2));
+        reduce(&mut state, AppEvent::Key(key(KeyCode::Down)));
+        assert!(matches!(&state.modal, Some(Modal::Threads(m)) if m.selected == 2));
+    }
+
+    #[test]
+    fn dd_on_selected_thread_requires_confirm_then_deletes() {
+        // Selected 1 -> threads[0] -> "t-1" (row 0 is the pinned "+ new" row).
+        let mut state = AppState::default().set_modal(Some(threads_modal_with(["t-1"], 1)));
         reduce(&mut state, AppEvent::Key(key(KeyCode::Char('d'))));
         assert!(matches!(&state.modal, Some(Modal::Threads(m)) if m.pending_delete_confirm));
         let effects = reduce(&mut state, AppEvent::Key(key(KeyCode::Char('d'))));
@@ -132,6 +194,14 @@ mod tests {
             &effects[0],
             Effect::Api(ApiCall::DeleteThread { thread_id }) if thread_id == "t-1"
         ));
+    }
+
+    #[test]
+    fn d_on_pinned_new_row_is_a_no_op() {
+        let mut state = AppState::default().set_modal(Some(threads_modal_with(["t-1"], 0)));
+        let effects = reduce(&mut state, AppEvent::Key(key(KeyCode::Char('d'))));
+        assert!(effects.is_empty());
+        assert!(matches!(&state.modal, Some(Modal::Threads(m)) if !m.pending_delete_confirm));
     }
 
     #[test]
