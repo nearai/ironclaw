@@ -82,6 +82,8 @@ function renderChat({
   globalAutoApproveEnabled = false,
   showChatLogsShortcut = true,
 }) {
+  const stateSlots = [];
+  let stateIndex = 0;
   const components = {
     ApprovalCard() {},
     AuthGenericCard() {},
@@ -107,10 +109,21 @@ function renderChat({
       },
       useMemo: (fn) => fn(),
       useRef: (initial) => ({ current: initial }),
-      useState: (initial) => [
-        typeof initial === "function" ? initial() : initial,
-        () => {},
-      ],
+      useState: (initial) => {
+        const index = stateIndex;
+        stateIndex += 1;
+        if (!(index in stateSlots)) {
+          stateSlots[index] =
+            typeof initial === "function" ? initial() : initial;
+        }
+        return [
+          stateSlots[index],
+          (next) => {
+            stateSlots[index] =
+              typeof next === "function" ? next(stateSlots[index]) : next;
+          },
+        ];
+      },
     },
     NEW_DRAFT_KEY: "new",
     THREAD_STATE: { NEEDS_ATTENTION: "needs_attention", RUNNING: "running" },
@@ -135,15 +148,20 @@ function renderChat({
   };
 
   vm.runInNewContext(chatSourceForTest(), context);
-  const tree = context.globalThis.__testExports.Chat({
+  const props = {
     threads: activeThreadId ? [{ id: activeThreadId }] : [],
     activeThreadId,
     onSelectThread: () => {},
     isCreatingThread: false,
     gatewayStatus: {},
     globalAutoApproveEnabled,
-  });
-  return { tree, components };
+  };
+  const render = () => {
+    stateIndex = 0;
+    return context.globalThis.__testExports.Chat(props);
+  };
+  const tree = render();
+  return { tree, components, render };
 }
 
 test("Chat cancel button routes through active thread run cancellation", async () => {
@@ -233,6 +251,53 @@ test("Chat shows typing indicator before assistant text streams", () => {
   });
 
   assert.ok(findComponent(tree, components.TypingIndicator));
+});
+
+test("Chat shows typing indicator while the first message creates its thread", async () => {
+  let resolveSend;
+  const sendPending = new Promise((resolve) => {
+    resolveSend = resolve;
+  });
+  const { tree, components, render } = renderChat({
+    activeThreadId: null,
+    hookState: {
+      messages: [],
+      isProcessing: false,
+      pendingGate: null,
+      suggestions: [],
+      sseStatus: "idle",
+      historyLoading: false,
+      hasMore: false,
+      cooldownSeconds: 0,
+      recoveryNotice: null,
+      activeRun: null,
+      send: () => sendPending,
+      cancelRun: async () => {},
+      retryMessage: () => {},
+      approve: () => {},
+      recoverHistory: () => {},
+      loadMore: () => {},
+      setSuggestions: () => {},
+      submitAuthToken: async () => {},
+    },
+  });
+
+  const emptyState = findComponent(tree, components.EmptyState);
+  const sendPromise = componentProps(emptyState, components.EmptyState).onSend("hello");
+  const pendingTree = render();
+
+  assert.ok(findComponent(pendingTree, components.TypingIndicator));
+  assert.equal(findComponent(pendingTree, components.EmptyState), null);
+  assert.equal(
+    componentProps(
+      findComponent(pendingTree, components.MessageList),
+      components.MessageList,
+    ).pending,
+    true,
+  );
+
+  resolveSend({ thread_id: "thread-created" });
+  await sendPromise;
 });
 
 test("Chat hides typing indicator once the active run streams assistant text", () => {

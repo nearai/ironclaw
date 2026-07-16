@@ -67,6 +67,8 @@ export function Chat({
 }) {
   const t = useT();
   const { showChatLogsShortcut } = useInterfacePreferences();
+  const [isSubmittingFirstMessage, setIsSubmittingFirstMessage] =
+    React.useState(false);
   const {
     messages,
     isProcessing,
@@ -137,18 +139,22 @@ export function Chat({
   const activeThreadHasOnboarding =
     Boolean(activeThreadId) && Boolean(pendingOnboarding);
   const activeThreadIsProcessing = Boolean(activeThreadId) && isProcessing;
+  const newConversationIsProcessing =
+    !activeThreadId && isSubmittingFirstMessage;
+  const chatIsProcessing =
+    activeThreadIsProcessing || newConversationIsProcessing;
   const activeRunId = activeRun?.runId || null;
   const streamingAssistantTextVisible = hasVisibleStreamingAssistantText(
     messages,
     activeRunId
   );
   const showTypingIndicator =
-    activeThreadIsProcessing &&
+    chatIsProcessing &&
     !activeThreadHasGate &&
     !streamingAssistantTextVisible;
   const hasMessages =
     messages.length > 0 ||
-    activeThreadIsProcessing ||
+    chatIsProcessing ||
     activeThreadHasGate ||
     activeThreadHasOnboarding;
   // Don't show the landing composer when history failed to load — show the
@@ -167,7 +173,7 @@ export function Chat({
   const composerSendDisabled =
     activeThreadHasGate ||
     activeThreadHasOnboarding ||
-    (activeThreadIsProcessing &&
+    (chatIsProcessing &&
       !activeThreadHasGate &&
       !activeThreadHasOnboarding) ||
     cooldownSeconds > 0;
@@ -197,17 +203,23 @@ export function Chat({
         throw new Error(approvalSubmitWarning);
       }
       if (composerSendBlockedRef.current) return null;
-      const response = await send(content, {
-        images,
-        attachments,
-        displayContent,
-        threadId: activeThreadId,
-      });
-      const responseThreadId = response?.thread_id || activeThreadId;
-      if (!activeThreadId && responseThreadId && onSelectThread) {
-        onSelectThread(responseThreadId, { replace: true });
+      const isFirstMessage = !activeThreadId;
+      if (isFirstMessage) setIsSubmittingFirstMessage(true);
+      try {
+        const response = await send(content, {
+          images,
+          attachments,
+          displayContent,
+          threadId: activeThreadId,
+        });
+        const responseThreadId = response?.thread_id || activeThreadId;
+        if (!activeThreadId && responseThreadId && onSelectThread) {
+          onSelectThread(responseThreadId, { replace: true });
+        }
+        return response;
+      } finally {
+        if (isFirstMessage) setIsSubmittingFirstMessage(false);
       }
-      return response;
     },
     [
       activeThreadId,
@@ -338,7 +350,7 @@ export function Chat({
             onRetryMessage={retryMessage}
             threadId={activeThreadId}
             logsPath={logsPath}
-            pending={activeThreadIsProcessing}
+            pending={chatIsProcessing}
           >
             {recoveryNotice &&
             (
