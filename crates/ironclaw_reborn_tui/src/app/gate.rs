@@ -35,6 +35,24 @@ pub enum PendingGate {
         /// `"manual_token"`) — see the module doc.
         challenge_kind: Option<String>,
         authorization_url: Option<String>,
+        /// Provider id (e.g. `"google"`) the manual-token flow submits
+        /// alongside the raw token — from `AuthPromptView::provider`.
+        /// `None` for gates that arrive via `apply_projection_gate` (the
+        /// projection item's `auth_context` carries no provider field
+        /// today); [`submit_token`] falls back to an empty string in that
+        /// case, same posture as the rest of this crate degrading rather
+        /// than panicking on an absent field.
+        provider: Option<String>,
+        /// From `AuthPromptView::account_label`; [`submit_token`] falls
+        /// back to `"{provider} credential"` when absent, mirroring
+        /// webui's `useChat.ts::submitAuthToken`.
+        account_label: Option<String>,
+        /// `Some(buffer)` while the manual-token input sub-mode is active
+        /// (entered via the `t` key — see [`dispatch_gate_key`]), holding
+        /// the characters typed so far; `None` while the gate shows its
+        /// normal a/A/d/o/esc prompt. Only meaningful on `Auth` — approval
+        /// gates have no manual-token flow.
+        token_input: Option<String>,
     },
 }
 
@@ -100,6 +118,9 @@ pub(crate) fn apply_auth_prompt(state: &mut AppState, prompt: AuthPromptView) ->
             body: prompt.body,
             challenge_kind: prompt.challenge_kind.map(|kind| wire_label(&kind)),
             authorization_url: prompt.authorization_url,
+            provider: prompt.provider,
+            account_label: prompt.account_label,
+            token_input: None,
         },
     );
     Vec::new()
@@ -158,6 +179,14 @@ pub(crate) fn apply_projection_gate(
             body,
             challenge_kind,
             authorization_url,
+            // The projection item's `auth_context` (`AuthPromptContextView`)
+            // carries no provider/account_label field today — see this
+            // variant's field doc. `apply_gate_prompt`/`apply_auth_prompt`
+            // (the raw `auth_required` frame) is the path that populates
+            // these from the real `AuthPromptView`.
+            provider: None,
+            account_label: None,
+            token_input: None,
         }
     } else {
         PendingGate::Approval {
@@ -196,6 +225,17 @@ pub(crate) fn dispatch_gate_key(state: &mut AppState, key: KeyEvent) -> Vec<Effe
     let Some(pending) = state.pending_gate.clone() else {
         return Vec::new();
     };
+
+    // Token-input sub-mode claims every key itself (typed chars, Enter,
+    // Esc) before the normal a/A/d/o handlers below ever see it.
+    if let PendingGate::Auth {
+        token_input: Some(_),
+        ..
+    } = &pending
+    {
+        return dispatch_token_input_key(state, key);
+    }
+
     match key.code {
         KeyCode::Char('a') => resolve(
             state,
@@ -230,8 +270,103 @@ pub(crate) fn dispatch_gate_key(state: &mut AppState, key: KeyEvent) -> Vec<Effe
             }
             Vec::new()
         }
+        // Enters the manual-token input sub-mode. Only meaningful on an
+        // `Auth` gate — the pattern below simply doesn't match `Approval`,
+        // so `t` stays a no-op there, same as any other unbound key.
+        KeyCode::Char('t') => {
+            if let Some(PendingGate::Auth { token_input, .. }) = &mut state.pending_gate {
+                *token_input = Some(String::new());
+            }
+            Vec::new()
+        }
         _ => Vec::new(),
     }
+}
+
+/// Key handling once the manual-token input sub-mode is active (reached
+/// from [`dispatch_gate_key`] above). Esc cancels back to the normal gate
+/// prompt without resolving anything server-side — unlike the gate's own
+/// Esc, which is a real decline; this Esc only ever touches local state.
+fn dispatch_token_input_key(state: &mut AppState, key: KeyEvent) -> Vec<Effect> {
+    match key.code {
+        KeyCode::Esc => {
+            if let Some(PendingGate::Auth { token_input, .. }) = &mut state.pending_gate {
+                *token_input = None;
+            }
+            Vec::new()
+        }
+        KeyCode::Backspace => {
+            if let Some(PendingGate::Auth {
+                token_input: Some(buf),
+                ..
+            }) = &mut state.pending_gate
+            {
+                buf.pop();
+            }
+            Vec::new()
+        }
+        KeyCode::Char(c) => {
+            if let Some(PendingGate::Auth {
+                token_input: Some(buf),
+                ..
+            }) = &mut state.pending_gate
+            {
+                buf.push(c);
+            }
+            Vec::new()
+        }
+        KeyCode::Enter => submit_token(state),
+        _ => Vec::new(),
+    }
+}
+
+/// Submits the token typed so far (Enter, while in the sub-mode). A blank
+/// (or whitespace-only) buffer is a no-op — mirrors `dispatch_composer_key`'s
+/// `Enter` guard on `state.composer_text` — so an accidental empty Enter
+/// doesn't fire a doomed request or exit the sub-mode. On a non-empty
+/// submit, exits the sub-mode back to the normal gate prompt (the gate
+/// itself stays pending until the server confirms — same posture as
+/// [`resolve`]) and emits [`ApiCall::SubmitManualToken`]; `lib.rs`'s
+/// `execute_api_call` chains the returned `credential_ref` into
+/// `ApiCall::ResolveGate`'s `CredentialProvided` resolution (step 2 of the
+/// two-step flow — see `client/gates.rs::submit_manual_token`'s doc).
+fn submit_token(state: &mut AppState) -> Vec<Effect> {
+    let Some(pending) = state.pending_gate.clone() else {
+        return Vec::new();
+    };
+    let PendingGate::Auth {
+        token_input: Some(token),
+        provider,
+        account_label,
+        ..
+    } = &pending
+    else {
+        return Vec::new();
+    };
+    let token = token.trim().to_string();
+    if token.is_empty() {
+        return Vec::new();
+    }
+    let provider = provider.clone().unwrap_or_default();
+    let account_label = account_label
+        .clone()
+        .unwrap_or_else(|| format!("{provider} credential"));
+    let thread_id = state.thread_id.clone().unwrap_or_default();
+    let run_id = pending.turn_run_id().to_string();
+    let gate_ref = pending.gate_ref().to_string();
+
+    if let Some(PendingGate::Auth { token_input, .. }) = &mut state.pending_gate {
+        *token_input = None;
+    }
+
+    vec![Effect::Api(ApiCall::SubmitManualToken {
+        thread_id,
+        run_id,
+        gate_ref,
+        provider,
+        account_label,
+        token,
+    })]
 }
 
 /// Best-effort local browser launch for an auth prompt's `authorization_url`
@@ -424,5 +559,185 @@ mod tests {
                 ..
             })
         ));
+    }
+
+    #[test]
+    fn t_key_on_auth_gate_enters_token_input_sub_mode() {
+        let mut state = AppState::default();
+        reduce(
+            &mut state,
+            AppEvent::Server(boxed_frame(WebChatV2Event::AuthRequired {
+                prompt: auth_prompt("ar-1"),
+            })),
+        );
+        let effects = reduce(&mut state, AppEvent::Key(key(KeyCode::Char('t'))));
+        assert!(
+            effects.is_empty(),
+            "entering the sub-mode is local-only, no API call yet"
+        );
+        assert!(matches!(
+            &state.pending_gate,
+            Some(PendingGate::Auth { token_input: Some(buf), .. }) if buf.is_empty()
+        ));
+    }
+
+    #[test]
+    fn t_key_on_approval_gate_is_a_no_op() {
+        let mut state = AppState::default();
+        reduce(
+            &mut state,
+            AppEvent::Server(boxed_frame(WebChatV2Event::Gate {
+                prompt: gate_prompt("gr-1", false),
+            })),
+        );
+        let effects = reduce(&mut state, AppEvent::Key(key(KeyCode::Char('t'))));
+        assert!(
+            effects.is_empty(),
+            "approval gates have no manual-token flow"
+        );
+        assert!(matches!(
+            state.pending_gate,
+            Some(PendingGate::Approval { .. })
+        ));
+    }
+
+    #[test]
+    fn typed_chars_in_sub_mode_accumulate_and_never_reach_the_a_d_handlers() {
+        let mut state = AppState::default();
+        reduce(
+            &mut state,
+            AppEvent::Server(boxed_frame(WebChatV2Event::AuthRequired {
+                prompt: auth_prompt("ar-1"),
+            })),
+        );
+        reduce(&mut state, AppEvent::Key(key(KeyCode::Char('t'))));
+        // `a`/`d` would normally approve/decline — while in the sub-mode
+        // they must just be captured as text instead.
+        for c in ['a', 'b', 'd'] {
+            reduce(&mut state, AppEvent::Key(key(KeyCode::Char(c))));
+        }
+        reduce(&mut state, AppEvent::Key(key(KeyCode::Backspace)));
+        assert!(matches!(
+            &state.pending_gate,
+            Some(PendingGate::Auth { token_input: Some(buf), .. }) if buf == "ab"
+        ));
+    }
+
+    #[test]
+    fn esc_in_sub_mode_exits_locally_without_resolving_the_gate() {
+        let mut state = AppState::default();
+        reduce(
+            &mut state,
+            AppEvent::Server(boxed_frame(WebChatV2Event::AuthRequired {
+                prompt: auth_prompt("ar-1"),
+            })),
+        );
+        reduce(&mut state, AppEvent::Key(key(KeyCode::Char('t'))));
+        reduce(&mut state, AppEvent::Key(key(KeyCode::Char('x'))));
+        let effects = reduce(&mut state, AppEvent::Key(key(KeyCode::Esc)));
+        assert!(
+            effects.is_empty(),
+            "sub-mode Esc must not emit ResolveGate, unlike the gate's own Esc"
+        );
+        assert!(matches!(
+            &state.pending_gate,
+            Some(PendingGate::Auth {
+                token_input: None,
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn enter_in_sub_mode_emits_submit_manual_token_and_exits_the_sub_mode() {
+        let mut state = AppState::default().set_thread_id("t-1");
+        let prompt = AuthPromptView {
+            provider: Some("google".to_string()),
+            account_label: Some("work@example.com".to_string()),
+            ..auth_prompt("ar-1")
+        };
+        reduce(
+            &mut state,
+            AppEvent::Server(boxed_frame(WebChatV2Event::AuthRequired { prompt })),
+        );
+        reduce(&mut state, AppEvent::Key(key(KeyCode::Char('t'))));
+        for c in "sekret".chars() {
+            reduce(&mut state, AppEvent::Key(key(KeyCode::Char(c))));
+        }
+        let effects = reduce(&mut state, AppEvent::Key(key(KeyCode::Enter)));
+
+        assert!(matches!(
+            &effects[0],
+            Effect::Api(ApiCall::SubmitManualToken {
+                thread_id,
+                gate_ref,
+                provider,
+                account_label,
+                token,
+                ..
+            }) if thread_id == "t-1"
+                && gate_ref == "ar-1"
+                && provider == "google"
+                && account_label == "work@example.com"
+                && token == "sekret"
+        ));
+        assert!(
+            matches!(
+                &state.pending_gate,
+                Some(PendingGate::Auth {
+                    token_input: None,
+                    ..
+                })
+            ),
+            "submitting exits the sub-mode back to the normal gate prompt"
+        );
+    }
+
+    #[test]
+    fn enter_in_sub_mode_falls_back_to_a_derived_account_label_when_absent() {
+        let mut state = AppState::default().set_thread_id("t-1");
+        let prompt = AuthPromptView {
+            provider: Some("google".to_string()),
+            account_label: None,
+            ..auth_prompt("ar-1")
+        };
+        reduce(
+            &mut state,
+            AppEvent::Server(boxed_frame(WebChatV2Event::AuthRequired { prompt })),
+        );
+        reduce(&mut state, AppEvent::Key(key(KeyCode::Char('t'))));
+        reduce(&mut state, AppEvent::Key(key(KeyCode::Char('x'))));
+        let effects = reduce(&mut state, AppEvent::Key(key(KeyCode::Enter)));
+
+        assert!(matches!(
+            &effects[0],
+            Effect::Api(ApiCall::SubmitManualToken { account_label, .. })
+                if account_label == "google credential"
+        ));
+    }
+
+    #[test]
+    fn enter_with_a_blank_token_input_is_a_no_op() {
+        let mut state = AppState::default();
+        reduce(
+            &mut state,
+            AppEvent::Server(boxed_frame(WebChatV2Event::AuthRequired {
+                prompt: auth_prompt("ar-1"),
+            })),
+        );
+        reduce(&mut state, AppEvent::Key(key(KeyCode::Char('t'))));
+        reduce(&mut state, AppEvent::Key(key(KeyCode::Char(' '))));
+        let effects = reduce(&mut state, AppEvent::Key(key(KeyCode::Enter)));
+        assert!(effects.is_empty());
+        assert!(
+            matches!(
+                &state.pending_gate,
+                Some(PendingGate::Auth {
+                    token_input: Some(_),
+                    ..
+                })
+            ),
+            "still in the sub-mode — nothing was submitted"
+        );
     }
 }
