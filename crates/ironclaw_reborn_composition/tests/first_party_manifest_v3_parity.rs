@@ -110,7 +110,13 @@ fn assert_static_projection_parity(dir: &str) {
         "{dir}: runtime declaration"
     );
 
-    // Derived surface kinds, in order.
+    // Derived surface kinds, in order. DEL-5 retired the v2 channel
+    // vocabulary (`ironclaw.product_adapter/v1`), so a frozen v2 baseline can
+    // no longer attest a channel surface — the channel surface is compared as
+    // a v3-only presence pin (`slack_v3_still_declares_the_channel_surface`)
+    // and excluded from the byte-order comparison here. Everything else must
+    // match exactly, and the v2 baseline must not carry a channel surface at
+    // all (its vocabulary no longer parses).
     let kinds = |record: &ExtensionManifestRecord| {
         record
             .manifest()
@@ -119,7 +125,21 @@ fn assert_static_projection_parity(dir: &str) {
             .map(CapabilitySurfaceDeclV2::kind)
             .collect::<Vec<_>>()
     };
-    assert_eq!(kinds(&v2), kinds(&v3), "{dir}: derived surface kinds");
+    assert!(
+        !kinds(&v2).contains(&ironclaw_host_api::CapabilitySurfaceKind::Channel),
+        "{dir}: v2 fixtures cannot attest channel surfaces post-DEL-5"
+    );
+    let non_channel_kinds = |record: &ExtensionManifestRecord| {
+        kinds(record)
+            .into_iter()
+            .filter(|kind| *kind != ironclaw_host_api::CapabilitySurfaceKind::Channel)
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(
+        non_channel_kinds(&v2),
+        non_channel_kinds(&v3),
+        "{dir}: derived surface kinds"
+    );
 
     // Tool-by-tool parity.
     let (v2_tools, v3_tools) = (&v2.manifest().capabilities, &v3.manifest().capabilities);
@@ -264,11 +284,46 @@ fn assert_hosted_mcp_projection(dir: &str, expected_namespace: &str) {
 
     let v2_template = &v2.manifest().capabilities[0];
     let v3_template = &v3.manifest().capabilities[0];
-    assert_eq!(
-        v3.manifest().capabilities.len(),
-        1,
-        "{dir}: v3 declares exactly the connection template"
-    );
+    // The connection template leads; any further capabilities are statically
+    // pinned tools (guaranteed present without live discovery — the bundled
+    // fallback / first-boot set). Each static tool must exist in the v2
+    // fixture under the same id with the same schema/prompt refs and
+    // visibility, and must inherit the connection template's credentials —
+    // v3 may pin fewer static tools than v2 declared (the rest became
+    // discovery), but never invent new ones.
+    for static_tool in &v3.manifest().capabilities[1..] {
+        let id = static_tool.id.as_str();
+        let v2_tool = v2
+            .manifest()
+            .capabilities
+            .iter()
+            .find(|capability| capability.id == static_tool.id)
+            .unwrap_or_else(|| panic!("{dir}/{id}: static v3 tool must exist in the v2 fixture"));
+        assert_eq!(
+            static_tool.visibility, v2_tool.visibility,
+            "{dir}/{id}: static tool visibility"
+        );
+        assert_eq!(
+            static_tool.input_schema_ref, v2_tool.input_schema_ref,
+            "{dir}/{id}: static tool input_schema_ref"
+        );
+        assert_eq!(
+            static_tool.prompt_doc_ref, v2_tool.prompt_doc_ref,
+            "{dir}/{id}: static tool prompt_doc_ref"
+        );
+        assert_eq!(
+            static_tool.default_permission, v2_tool.default_permission,
+            "{dir}/{id}: static tool default_permission"
+        );
+        assert_eq!(
+            static_tool.runtime_credentials, v3_template.runtime_credentials,
+            "{dir}/{id}: static tool inherits the connection template credentials"
+        );
+        assert_eq!(
+            static_tool.required_host_ports, v3_template.required_host_ports,
+            "{dir}/{id}: static tool inherits the connection template host ports"
+        );
+    }
     assert_eq!(
         v3_template.visibility,
         ironclaw_extensions::CapabilityVisibility::HostInternal,
@@ -342,6 +397,29 @@ static_parity!(google_slides_v3_projects_identically, "google-slides");
 static_parity!(slack_v3_projects_identically, "slack");
 static_parity!(web_access_v3_projects_identically, "web-access");
 
+/// DEL-5 removed `ironclaw.product_adapter/v1`, so the v2 slack baseline can
+/// no longer carry its channel surface — this presence pin replaces the byte
+/// parity for that one surface: the live v3 manifest must keep declaring the
+/// Slack channel.
+#[test]
+fn slack_v3_still_declares_the_channel_surface() {
+    let v3 = parse(&live_asset("slack"));
+    let kinds = v3
+        .manifest()
+        .capability_surfaces()
+        .iter()
+        .map(CapabilitySurfaceDeclV2::kind)
+        .collect::<Vec<_>>();
+    assert_eq!(
+        kinds
+            .iter()
+            .filter(|kind| **kind == ironclaw_host_api::CapabilitySurfaceKind::Channel)
+            .count(),
+        1,
+        "live slack manifest must declare exactly one channel surface; got {kinds:?}"
+    );
+}
+
 #[test]
 fn notion_mcp_v3_declares_the_ceiling() {
     assert_hosted_mcp_projection("notion-mcp", "notion");
@@ -350,4 +428,21 @@ fn notion_mcp_v3_declares_the_ceiling() {
 #[test]
 fn nearai_mcp_v3_declares_the_ceiling() {
     assert_hosted_mcp_projection("nearai-mcp", "nearai");
+    // Main parity: web_search is statically pinned — model-visible from
+    // first boot and on the bundled-manifest fallback, without live MCP
+    // discovery (the regression `runtime_nearai_mcp_bootstraps_*` pins at
+    // the runtime tier).
+    let v3 = parse(&live_asset("nearai-mcp"));
+    assert_eq!(
+        v3.manifest()
+            .capabilities
+            .iter()
+            .filter(|capability| {
+                capability.visibility == ironclaw_extensions::CapabilityVisibility::Model
+            })
+            .map(|capability| capability.id.as_str().to_string())
+            .collect::<Vec<_>>(),
+        vec!["nearai.web_search".to_string()],
+        "nearai-mcp: web_search must stay statically pinned"
+    );
 }

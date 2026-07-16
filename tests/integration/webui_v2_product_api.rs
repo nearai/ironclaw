@@ -686,16 +686,18 @@ async fn production_runtime_restart_skips_installation_row_absent_from_catalog()
         .as_array()
         .expect("manifests array")
         .clone();
-    let mut orphan_manifest = manifests
-        .first()
-        .expect("at least one manifest present")
-        .clone();
-    orphan_manifest["raw_toml"] = Value::String(
-        orphan_manifest["raw_toml"]
-            .as_str()
-            .expect("raw_toml is a string")
+    // Rewrite the WHOLE cloned manifest entry, not just `raw_toml`: manifest
+    // records are resolved-authoritative (REC-1..4 — rehydration reads
+    // `resolved` and never reparses `raw_toml`), so the orphan id must land
+    // in the resolved contract too or the entry re-registers under the
+    // original id and the orphan installation row points at a manifest that
+    // does not exist at all.
+    let orphan_manifest: Value = serde_json::from_str(
+        &serde_json::to_string(manifests.first().expect("at least one manifest present"))
+            .expect("serialize manifest entry")
             .replace("catalog-present", "orphan-migrated"),
-    );
+    )
+    .expect("orphan manifest entry is JSON");
     let mut new_manifests = manifests;
     new_manifests.push(orphan_manifest);
     state["manifests"] = Value::Array(new_manifests);

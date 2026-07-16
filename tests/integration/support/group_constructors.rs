@@ -313,11 +313,34 @@ impl RebornIntegrationGroupBuilder {
 
     /// Build the invented-vendor fixture group. See
     /// [`RebornIntegrationGroup::extension_runtime_acme`].
-    pub async fn extension_runtime_acme(self) -> HarnessResult<RebornIntegrationGroup> {
+    pub async fn extension_runtime_acme(mut self) -> HarnessResult<RebornIntegrationGroup> {
+        let base = self.build_base().await?;
         let host_runtime =
             super::super::harness::profiles::extension::extension_runtime_acme_tools().await?;
+        // Same slot fill as `extension_lifecycle` above: acme-messenger
+        // declares a channel surface backed by an auth vendor, so
+        // `builtin.extension_remove` fail-closes on an empty channel
+        // disconnect slot once removal runs under an authenticated actor.
+        // Wire the real generic facade over this harness's own
+        // `RebornServices`, keyed to the group's dispatch scope.
+        let scope = &base.product_harness.scope;
+        let channel_connection =
+            ironclaw_reborn_composition::test_support::build_channel_connection_for_test(
+                host_runtime
+                    .reborn_services_for_test()
+                    .ok_or("extension_runtime_acme harness is missing its RebornServices bundle")?,
+                ironclaw_reborn_composition::test_support::ChannelConnectionTestConfig {
+                    tenant_id: scope.tenant_id.as_str().to_string(),
+                    agent_id: scope
+                        .agent_id
+                        .as_ref()
+                        .map(|agent| agent.as_str().to_string())
+                        .ok_or("group product scope is missing an agent id")?,
+                },
+            )?;
+        self.channel_connection = Some(Arc::new(channel_connection));
         let capability = GroupCapability::HostRuntime(Arc::new(host_runtime));
-        self.build_with_capability(capability).await
+        self.into_group(base, capability).await
     }
 
     /// Build a delivery-proof group. See
