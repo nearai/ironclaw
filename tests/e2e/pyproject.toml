@@ -20,6 +20,18 @@ vision = [
 telegram = [
     "telethon>=1.40",
 ]
+# Reborn TUI PTY e2e (test_reborn_tui_happy_path.py): drives the ratatui
+# thin client through a real pseudo-terminal. `pyte` is a VT100 screen
+# emulator — ratatui's crossterm backend only rewrites terminal cells that
+# changed between frames (unchanged interior cells, often plain spaces,
+# are skipped via cursor-jump escapes), so a rendered sentence is not
+# reliably one contiguous run of bytes in the raw pty stream. Feeding the
+# stream through `pyte` reconstructs the actual on-screen 2D character
+# grid, so an exact-substring assertion against `screen.display` holds.
+tui = [
+    "pexpect>=4.9",
+    "pyte>=0.8",
+]
 
 # `fixtures/` (live-LLM record/replay JSON, no Python) sits alongside
 # `scenarios/` after #3133 landed. Setuptools auto-discovery refuses a
