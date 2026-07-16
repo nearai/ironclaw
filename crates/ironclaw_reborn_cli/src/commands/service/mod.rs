@@ -277,4 +277,119 @@ mod tests {
     fn run_checked_succeeds_on_zero_exit() {
         assert!(run_checked("test exit 0", Command::new("sh").args(["-c", "exit 0"])).is_ok());
     }
+
+    // ── Command-level file lifecycle (temp-$HOME) ──────────────────
+
+    /// RAII guard pointing the OS home (`$HOME`, read by `home_dir()`)
+    /// at a tempdir, and clearing IRONCLAW_REBORN_HOME so the derived
+    /// Reborn home nests under the same tempdir (RebornHome falls back
+    /// to `$HOME/.ironclaw/reborn` when unset). Restores both on drop.
+    /// Caller must hold `lock_runtime_env()`.
+    struct TempHomeGuard {
+        prior_home: Option<std::ffi::OsString>,
+        prior_reborn_home: Option<std::ffi::OsString>,
+    }
+
+    impl TempHomeGuard {
+        fn set(tmp: &std::path::Path) -> Self {
+            let prior_home = std::env::var_os("HOME");
+            let prior_reborn_home = std::env::var_os("IRONCLAW_REBORN_HOME");
+            // SAFETY: caller holds `lock_runtime_env()` for this guard's lifetime.
+            unsafe {
+                std::env::set_var("HOME", tmp);
+                std::env::remove_var("IRONCLAW_REBORN_HOME");
+            }
+            Self {
+                prior_home,
+                prior_reborn_home,
+            }
+        }
+    }
+
+    impl Drop for TempHomeGuard {
+        fn drop(&mut self) {
+            // SAFETY: see `set`.
+            unsafe {
+                match self.prior_home.take() {
+                    Some(v) => std::env::set_var("HOME", v),
+                    None => std::env::remove_var("HOME"),
+                }
+                match self.prior_reborn_home.take() {
+                    Some(v) => std::env::set_var("IRONCLAW_REBORN_HOME", v),
+                    None => std::env::remove_var("IRONCLAW_REBORN_HOME"),
+                }
+            }
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn install_then_uninstall_linux_writes_and_removes_unit_file() {
+        let _lock = crate::runtime::test_env::lock_runtime_env();
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let _home = TempHomeGuard::set(tmp.path());
+        let context = RebornCliContext::from_boot_config(
+            ironclaw_reborn_config::RebornBootConfig::resolve_from_env()
+                .expect("boot config must resolve under temp HOME"),
+        );
+
+        ServicePlatform::Linux
+            .install(&context)
+            .expect("install must succeed");
+        let unit_path = tmp
+            .path()
+            .join(".config/systemd/user/ironclaw-reborn.service");
+        assert!(unit_path.exists(), "unit file must be written");
+        let contents = std::fs::read_to_string(&unit_path).expect("read unit file");
+        assert!(contents.contains("ExecStart="));
+        assert!(contents.contains("IRONCLAW_REBORN_HOME="));
+
+        // Idempotent reinstall: overwrites cleanly, no fail or duplicate.
+        ServicePlatform::Linux
+            .install(&context)
+            .expect("reinstall must succeed");
+        assert!(unit_path.exists());
+
+        ServicePlatform::Linux
+            .uninstall()
+            .expect("uninstall must succeed");
+        assert!(!unit_path.exists(), "unit file must be removed");
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn install_then_uninstall_macos_writes_and_removes_plist() {
+        let _lock = crate::runtime::test_env::lock_runtime_env();
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let _home = TempHomeGuard::set(tmp.path());
+        let context = RebornCliContext::from_boot_config(
+            ironclaw_reborn_config::RebornBootConfig::resolve_from_env()
+                .expect("boot config must resolve under temp HOME"),
+        );
+
+        ServicePlatform::MacOs
+            .install(&context)
+            .expect("install must succeed");
+        let plist_path = tmp
+            .path()
+            .join("Library/LaunchAgents/com.ironclaw.reborn.daemon.plist");
+        assert!(plist_path.exists(), "plist file must be written");
+        let contents = std::fs::read_to_string(&plist_path).expect("read plist file");
+        assert!(contents.contains(SERVICE_LABEL));
+        assert!(contents.contains("<key>IRONCLAW_REBORN_HOME</key>"));
+
+        // Idempotent reinstall.
+        ServicePlatform::MacOs
+            .install(&context)
+            .expect("reinstall must succeed");
+        assert!(plist_path.exists());
+
+        // NOTE: uninstall() calls stop() first, which shells `launchctl`
+        // against the real label — harmless if not loaded (errors ignored
+        // via `.ok()`), but the test still exercises the real code path.
+        ServicePlatform::MacOs
+            .uninstall()
+            .expect("uninstall must succeed");
+        assert!(!plist_path.exists(), "plist file must be removed");
+    }
 }
