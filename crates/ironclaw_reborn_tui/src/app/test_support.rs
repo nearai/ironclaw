@@ -161,6 +161,8 @@ pub(crate) fn automation_summary(id: &str, name: &str, state: &str) -> Automatio
         last_run_at: None,
         last_status: None,
         is_active: state == "active",
+        active_hold: None,
+        recent_runs: Vec::new(),
     }
 }
 
