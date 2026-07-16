@@ -1,6 +1,6 @@
 import { useT } from "../../../lib/i18n";
 import { Panel } from "../../../design-system/primitives";
-import { sortEntries } from "../lib/workspace-presenters";
+import { areaDisplayName, sortEntries } from "../lib/workspace-presenters";
 import { WorkspaceBreadcrumb } from "./workspace-breadcrumb";
 
 // Files/dirs whose any path segment starts with "." stay hidden in the UI
@@ -28,11 +28,12 @@ export function WorkspaceDirectory({ path, entries, isLoading, filter, onOpen, o
   }
 
   const visible = (entries || []).filter((entry) => !isUiHiddenWorkspacePath(entry.path));
+  const displayName = (entry) => path ? entry.name : areaDisplayName(entry.path, t);
   const needle = String(filter || "").trim().toLowerCase();
   const filtered = needle
-    ? visible.filter((entry) => entry.name.toLowerCase().includes(needle))
+    ? visible.filter((entry) => displayName(entry).toLowerCase().includes(needle))
     : visible;
-  const rows = sortEntries(filtered);
+  const rows = sortEntries(filtered, displayName);
 
   let body;
   if (!visible.length) {
@@ -52,7 +53,7 @@ export function WorkspaceDirectory({ path, entries, isLoading, filter, onOpen, o
             <span className={["w-4 text-center text-xs", entry.is_dir ? "text-signal" : "text-iron-400"].join(" ")}>
               {entry.is_dir ? "□" : "·"}
             </span>
-            <span className={["min-w-0 truncate", entry.is_dir ? "font-semibold" : ""].join(" ")}>{entry.name}</span>
+            <span className={["min-w-0 truncate", entry.is_dir ? "font-semibold" : ""].join(" ")}>{displayName(entry)}</span>
           </button>
         ))}
       </div>

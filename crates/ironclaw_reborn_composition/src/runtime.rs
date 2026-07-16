@@ -1501,6 +1501,23 @@ impl RebornRuntime {
         ))
     }
 
+    /// Read-only reader exposing the live active/default model id so the WebUI
+    /// facade can price a default-model run (one with no `resolved_model_route`)
+    /// against the model that actually ran. Backed by the same hot-swappable
+    /// primary provider the model gateway drives, so it tracks operator model
+    /// swaps. `None` when no LLM provider was wired at boot.
+    #[cfg(feature = "root-llm-provider")]
+    pub(crate) fn webui_active_model_reader(
+        &self,
+    ) -> Option<Arc<dyn ironclaw_product_workflow::ActiveModelReader>> {
+        let parts = self.llm_reload.as_ref()?;
+        Some(Arc::new(
+            crate::llm_admin::active_model::ProviderActiveModelReader::new(
+                parts.reload_handle.primary_provider(),
+            ),
+        ))
+    }
+
     /// Diagnostic id for the no-profile run profile selected by this runtime.
     pub fn default_run_profile_id(&self) -> &str {
         &self.default_run_profile_id
@@ -5160,7 +5177,8 @@ output_schema_ref = "schemas/write.output.json"
     use ironclaw_skills::SkillTrust;
     use ironclaw_threads::{
         AppendToolResultReferenceRequest, EnsureThreadRequest, LoadContextMessagesRequest,
-        MessageKind, MessageStatus, ThreadHistoryRequest, ThreadScope, ToolResultSafeSummary,
+        MessageKind, MessageStatus, TOOL_RESULT_RECORD_READ_MAX_BYTES, ThreadHistoryRequest,
+        ThreadScope, ToolResultSafeSummary,
     };
     use ironclaw_turns::{
         AcceptedMessageRef, AllowAllTurnAdmissionPolicy, BlockedReason, GetRunStateRequest,
@@ -5461,14 +5479,19 @@ output_schema_ref = "schemas/write.output.json"
         }
     }
 
-    /// A long echo argument (well over the safe-preview 512-byte string cap) so
-    /// the default-observer test can prove the payload is truncated before the
-    /// observer sees it.
+    /// A long echo argument, sized well over `TOOL_RESULT_RECORD_READ_MAX_BYTES`
+    /// (not just the old hardcoded 2KiB), so the default-observer test can
+    /// prove the payload is truncated before the observer sees it.
     const LARGE_ECHO_MESSAGE: &str = "PAYLOAD0123456789ABCDEF_";
     const LARGE_ECHO_TAIL: &str = "UNREPLAYED_RAW_TOOL_RESULT_TAIL";
 
     fn large_echo_message() -> String {
-        format!("{}{}", LARGE_ECHO_MESSAGE.repeat(100), LARGE_ECHO_TAIL)
+        let repeat_count = TOOL_RESULT_RECORD_READ_MAX_BYTES / LARGE_ECHO_MESSAGE.len() + 1;
+        format!(
+            "Secretary of the Treasury: {}{}",
+            LARGE_ECHO_MESSAGE.repeat(repeat_count),
+            LARGE_ECHO_TAIL
+        )
     }
 
     #[derive(Debug, Default)]
@@ -5515,9 +5538,13 @@ output_schema_ref = "schemas/write.output.json"
                     "model replay must carry a bounded result-reference observation"
                 );
                 assert!(
-                    tool_result.content.len() <= 4096,
+                    tool_result.content.len() <= TOOL_RESULT_RECORD_READ_MAX_BYTES * 2,
                     "tool result replay must stay within the envelope bound, got {} bytes",
                     tool_result.content.len()
+                );
+                assert!(
+                    tool_result.content.contains("Secretary of the Treasury"),
+                    "the initial result-reference preview must retain ordinary document text"
                 );
                 let result_ref = match tool_result.tool_result_content.as_ref() {
                     Some(HostManagedToolResultContent::Reference { envelope }) => {
@@ -9597,6 +9624,7 @@ output_schema_ref = "schemas/write.output.json"
                     thread_id: Some(created.thread.thread_id.to_string()),
                     content: Some("hello webui stream".to_string()),
                     attachments: Vec::new(),
+                    model: None,
                 },
             )
             .await
@@ -10836,6 +10864,7 @@ output_schema_ref = "schemas/write.output.json"
                     thread_id: Some(created.thread.thread_id.to_string()),
                     content: Some("$webui-helper please help".to_string()),
                     attachments: Vec::new(),
+                    model: None,
                 },
             )
             .await
@@ -11231,6 +11260,7 @@ output_schema_ref = "schemas/write.output.json"
                     thread_id: Some(thread_id.to_string()),
                     content: Some("message B while thread is busy".to_string()),
                     attachments: Vec::new(),
+                    model: None,
                 },
             )
             .await
@@ -11341,6 +11371,7 @@ output_schema_ref = "schemas/write.output.json"
                     thread_id: Some(thread_id.to_string()),
                     content: Some("message C after thread is free".to_string()),
                     attachments: Vec::new(),
+                    model: None,
                 },
             )
             .await

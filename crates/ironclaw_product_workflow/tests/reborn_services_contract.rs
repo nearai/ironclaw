@@ -1,5 +1,7 @@
 //! Contract tests for WebUI-facing RebornServices facade.
 
+// arch-exempt: large_file, contract suite tracks the RebornServicesApi facade one seam per test; splits with the domain-port decomposition, plan #5985
+
 use std::{
     collections::{HashMap, HashSet},
     sync::{
@@ -30,7 +32,7 @@ use ironclaw_product_adapters::{
 use ironclaw_product_workflow::{
     AUTOMATION_LIST_DEFAULT_PAGE_SIZE, AUTOMATION_LIST_MAX_PAGE_SIZE,
     AUTOMATION_RUN_HISTORY_DEFAULT_PAGE_SIZE, AUTOMATION_RUN_HISTORY_MAX_PAGE_SIZE,
-    AUTOMATION_TRIGGER_THREAD_SOURCE_TAG, ApprovalInteractionActionView,
+    AUTOMATION_TRIGGER_THREAD_SOURCE_TAG, ActiveModelReader, ApprovalInteractionActionView,
     ApprovalInteractionDecision, ApprovalInteractionScope, ApprovalInteractionService,
     AuthInteractionDecision, AuthInteractionService, AutomationListRequest, AutomationName,
     AutomationProductFacade, CodexLoginStart, ExtensionCredentialSetupService,
@@ -101,6 +103,7 @@ use ironclaw_threads::{
     ThreadMessageRecord, ThreadScope, UpdateAssistantDraftRequest,
     UpdateToolResultReferenceRequest,
 };
+use ironclaw_turns::run_profile::{LoopModelRouteSnapshot, LoopModelUsage};
 use ironclaw_turns::{
     AcceptedMessageRef, AdmissionRejection, AdmissionRejectionReason, CancelRunRequest,
     CancelRunResponse, DefaultTurnCoordinator, EventCursor, GateRef, GetRunStateRequest,
@@ -269,6 +272,8 @@ struct FakeTurnCoordinator {
     parked_auth_gate: Mutex<bool>,
     parked_approval_gate: Mutex<bool>,
     run_state_failure: Mutex<Option<SanitizedFailure>>,
+    run_state_usage: Mutex<Option<LoopModelUsage>>,
+    run_state_model_route: Mutex<Option<LoopModelRouteSnapshot>>,
 }
 
 impl Default for FakeTurnCoordinator {
@@ -289,6 +294,8 @@ impl Default for FakeTurnCoordinator {
             parked_auth_gate: Mutex::default(),
             parked_approval_gate: Mutex::default(),
             run_state_failure: Mutex::default(),
+            run_state_usage: Mutex::default(),
+            run_state_model_route: Mutex::default(),
         }
     }
 }
@@ -347,6 +354,18 @@ impl FakeTurnCoordinator {
 
     fn set_run_state_failure(&self, failure: SanitizedFailure) {
         *self.run_state_failure.lock().expect("lock") = Some(failure);
+    }
+
+    fn set_run_state_usage(&self, usage: LoopModelUsage, model_route: LoopModelRouteSnapshot) {
+        *self.run_state_usage.lock().expect("lock") = Some(usage);
+        *self.run_state_model_route.lock().expect("lock") = Some(model_route);
+    }
+
+    /// Report usage for a default-model run: token usage is captured but no
+    /// `resolved_model_route` is set (the caller did not pick a model).
+    fn set_run_state_usage_default_model(&self, usage: LoopModelUsage) {
+        *self.run_state_usage.lock().expect("lock") = Some(usage);
+        *self.run_state_model_route.lock().expect("lock") = None;
     }
 
     fn submission_count(&self) -> usize {
@@ -538,8 +557,8 @@ impl TurnCoordinator for FakeTurnCoordinator {
                 .expect("valid ref"),
             resolved_run_profile_id: RunProfileId::default_profile(),
             resolved_run_profile_version: RunProfileVersion::new(1),
-            resolved_model_route: None,
-            model_usage: None,
+            resolved_model_route: self.run_state_model_route.lock().expect("lock").clone(),
+            model_usage: *self.run_state_usage.lock().expect("lock"),
             received_at: Utc::now(),
             checkpoint_id: None,
             gate_ref,
@@ -9878,6 +9897,162 @@ async fn get_run_state_returns_stable_dto_without_m3_internal_fields() {
     assert!(!rendered.contains("\"scope\""));
     assert!(!rendered.contains("\"detail\""));
     assert!(!rendered.contains("/internal/models/route-xyz"));
+    // With no reported usage, the token/cost fields are omitted entirely.
+    assert!(!rendered.contains("\"usage\""));
+    assert!(!rendered.contains("\"cost\""));
+}
+
+#[tokio::test]
+async fn get_run_state_surfaces_token_usage_and_priced_cost() {
+    let coordinator = Arc::new(FakeTurnCoordinator::default());
+    // A run that reported usage against a concrete (gpt-4o) model surfaces both
+    // the token counts and a USD cost priced from the shared cost table.
+    coordinator.set_run_state_usage(
+        LoopModelUsage {
+            input_tokens: 1_000,
+            output_tokens: 500,
+            cache_read_input_tokens: 0,
+            cache_creation_input_tokens: 0,
+        },
+        LoopModelRouteSnapshot::new("openai", "gpt-4o", "config:v1", "auth:v1"),
+    );
+    let services = RebornServices::new(
+        Arc::new(InMemorySessionThreadService::default()),
+        coordinator.clone(),
+    );
+    setup_owned_thread(&services, caller(), "thread-alpha").await;
+
+    let response = services
+        .get_run_state(
+            caller(),
+            RebornGetRunStateRequest {
+                thread_id: "thread-alpha".to_string(),
+                run_id: run_id_string(),
+            },
+        )
+        .await
+        .expect("get_run_state succeeds");
+
+    let usage = response.usage.expect("token usage surfaced");
+    assert_eq!(usage.input_tokens, 1_000);
+    assert_eq!(usage.output_tokens, 500);
+
+    let cost = response
+        .cost
+        .as_ref()
+        .expect("cost priced from resolved model");
+    // gpt-4o: input 0.0000025/tok → 1000 * 0.0000025 = 0.0025; output 0.00001/tok
+    // → 500 * 0.00001 = 0.005; total 0.0075.
+    assert_eq!(cost.input_cost_usd, "0.0025");
+    assert_eq!(cost.output_cost_usd, "0.005");
+    assert_eq!(cost.total_cost_usd, "0.0075");
+    assert_eq!(cost.currency, "USD");
+
+    // The resolved route stays internal even though its model id fed pricing.
+    let rendered = serde_json::to_string(&response).expect("json");
+    assert!(!rendered.contains("resolved_model_route"));
+    assert!(rendered.contains("\"usage\""));
+    assert!(rendered.contains("\"cost\""));
+}
+
+/// Stub [`ActiveModelReader`] returning a fixed active/default model id.
+struct FixedActiveModelReader(Option<String>);
+
+impl ActiveModelReader for FixedActiveModelReader {
+    fn active_model_id(&self) -> Option<String> {
+        self.0.clone()
+    }
+}
+
+#[tokio::test]
+async fn get_run_state_prices_default_model_run_against_active_model() {
+    let coordinator = Arc::new(FakeTurnCoordinator::default());
+    // A default-model run: usage is reported but no route was resolved (the
+    // caller sent no `model`). Pricing falls back to the runtime's live active
+    // model so the run is still priced instead of reporting `usage` with no
+    // `cost`.
+    coordinator.set_run_state_usage_default_model(LoopModelUsage {
+        input_tokens: 1_000,
+        output_tokens: 500,
+        cache_read_input_tokens: 0,
+        cache_creation_input_tokens: 0,
+    });
+    let services = RebornServices::new(
+        Arc::new(InMemorySessionThreadService::default()),
+        coordinator.clone(),
+    )
+    .with_active_model_reader(Arc::new(FixedActiveModelReader(Some("gpt-4o".to_string()))));
+    setup_owned_thread(&services, caller(), "thread-alpha").await;
+
+    let response = services
+        .get_run_state(
+            caller(),
+            RebornGetRunStateRequest {
+                thread_id: "thread-alpha".to_string(),
+                run_id: run_id_string(),
+            },
+        )
+        .await
+        .expect("get_run_state succeeds");
+
+    let usage = response.usage.expect("token usage surfaced");
+    assert_eq!(usage.input_tokens, 1_000);
+    assert_eq!(usage.output_tokens, 500);
+
+    // gpt-4o pricing, identical to the explicit-route case: input 1000 *
+    // 0.0000025 = 0.0025; output 500 * 0.00001 = 0.005; total 0.0075.
+    let cost = response
+        .cost
+        .as_ref()
+        .expect("default-model run priced against the active model");
+    assert_eq!(cost.input_cost_usd, "0.0025");
+    assert_eq!(cost.output_cost_usd, "0.005");
+    assert_eq!(cost.total_cost_usd, "0.0075");
+
+    // The active model was only used to price; it is not leaked as a route.
+    let rendered = serde_json::to_string(&response).expect("json");
+    assert!(!rendered.contains("resolved_model_route"));
+    assert!(!rendered.contains("gpt-4o"));
+}
+
+#[tokio::test]
+async fn get_run_state_default_model_run_omits_cost_without_active_model() {
+    let coordinator = Arc::new(FakeTurnCoordinator::default());
+    coordinator.set_run_state_usage_default_model(LoopModelUsage {
+        input_tokens: 1_000,
+        output_tokens: 500,
+        cache_read_input_tokens: 0,
+        cache_creation_input_tokens: 0,
+    });
+    // No active-model reader wired (and a reader that reports no concrete model
+    // behaves the same): the run reports token usage but omits cost rather than
+    // mispricing against a sentinel.
+    let services = RebornServices::new(
+        Arc::new(InMemorySessionThreadService::default()),
+        coordinator.clone(),
+    )
+    .with_active_model_reader(Arc::new(FixedActiveModelReader(None)));
+    setup_owned_thread(&services, caller(), "thread-alpha").await;
+
+    let response = services
+        .get_run_state(
+            caller(),
+            RebornGetRunStateRequest {
+                thread_id: "thread-alpha".to_string(),
+                run_id: run_id_string(),
+            },
+        )
+        .await
+        .expect("get_run_state succeeds");
+
+    assert!(response.usage.is_some(), "token usage still surfaced");
+    assert!(
+        response.cost.is_none(),
+        "cost omitted when no concrete model is available"
+    );
+    let rendered = serde_json::to_string(&response).expect("json");
+    assert!(rendered.contains("\"usage\""));
+    assert!(!rendered.contains("\"cost\""));
 }
 
 #[tokio::test]
