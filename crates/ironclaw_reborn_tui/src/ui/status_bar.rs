@@ -1,7 +1,7 @@
 //! One-row status bar: priority-ordered segments folded to fit the
 //! available width. Priority (highest to lowest, per the design): a
 //! working spinner+elapsed indicator, connection state, thread name,
-//! provider/model.
+//! provider/model, global keybinding hints.
 //!
 //! `AppState` (as landed in `app/mod.rs`) does not carry an elapsed-time
 //! field or an active-provider/model field — those only exist transiently
@@ -60,7 +60,24 @@ fn build_segments(state: &AppState) -> Vec<(String, Style)> {
 
     // Priority 4 (provider/model) intentionally omitted: no AppState field
     // carries the active provider/model today (see module doc).
+
+    // Priority 5 (lowest): global keybinding hints, so it's the first thing
+    // dropped on a narrow terminal. Context-aware: while a run is active,
+    // `Esc stop` (this crate's cancel binding — `app/mod.rs`'s
+    // `dispatch_composer_key`) leads the hint, since it's the one action a
+    // user mid-run is most likely to reach for.
+    segments.push((hint_text(state), Style::default().fg(Color::DarkGray)));
+
     segments
+}
+
+fn hint_text(state: &AppState) -> String {
+    const GLOBAL_HINTS: &str = "^X threads · ^A automations · ^P providers · ^C quit";
+    if state.is_running() {
+        format!("Esc stop · {GLOBAL_HINTS}")
+    } else {
+        GLOBAL_HINTS.to_string()
+    }
 }
 
 /// Greedily includes segments in priority order until the next one would
@@ -139,5 +156,27 @@ mod tests {
         assert!(content.contains("thread: t-1"));
         assert!(!content.contains("reconnecting"));
         assert!(!content.contains("disconnected"));
+    }
+
+    #[test]
+    fn renders_the_global_keybinding_hint_row() {
+        let state = AppState::default();
+        let content = draw(&state, 80, 1);
+        assert!(content.contains("threads"));
+        assert!(content.contains("automations"));
+        assert!(content.contains("providers"));
+        assert!(content.contains("quit"));
+    }
+
+    #[test]
+    fn hint_row_shows_esc_stop_only_while_a_run_is_active() {
+        let idle = draw(&AppState::default(), 80, 1);
+        assert!(!idle.contains("stop"), "no run active, no stop hint");
+
+        let running = draw(&AppState::default().set_running(true), 80, 1);
+        assert!(
+            running.contains("Esc stop") || running.contains("Esc st"),
+            "a running turn must surface the stop hint: {running}"
+        );
     }
 }

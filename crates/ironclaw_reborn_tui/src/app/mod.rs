@@ -376,7 +376,10 @@ fn dispatch_key_inner(state: &mut AppState, key: KeyEvent) -> Vec<Effect> {
 
 fn is_quit_key(key: KeyEvent) -> bool {
     key.modifiers.contains(KeyModifiers::CONTROL)
-        && matches!(key.code, KeyCode::Char('c') | KeyCode::Char('C'))
+        && matches!(
+            key.code,
+            KeyCode::Char('c') | KeyCode::Char('C') | KeyCode::Char('d') | KeyCode::Char('D')
+        )
 }
 
 fn dispatch_modal_key(state: &mut AppState, key: KeyEvent) -> Vec<Effect> {
@@ -428,7 +431,11 @@ fn dispatch_composer_key(state: &mut AppState, key: KeyEvent) -> Vec<Effect> {
         return match key.code {
             KeyCode::Char('x') | KeyCode::Char('X') => threads_modal::open(state),
             KeyCode::Char('a') | KeyCode::Char('A') => automations_modal::open(state),
-            KeyCode::Char('l') | KeyCode::Char('L') => provider_modal::open(state),
+            // Design doc wants `Ctrl+P`; `Ctrl+L` is kept working too (an
+            // already-shipped binding) — both open the same modal.
+            KeyCode::Char('l') | KeyCode::Char('L') | KeyCode::Char('p') | KeyCode::Char('P') => {
+                provider_modal::open(state)
+            }
             _ => Vec::new(),
         };
     }
@@ -437,6 +444,9 @@ fn dispatch_composer_key(state: &mut AppState, key: KeyEvent) -> Vec<Effect> {
             let text = state.composer_text.trim().to_string();
             if text.is_empty() {
                 return Vec::new();
+            }
+            if text == "/exit" {
+                return vec![Effect::Quit];
             }
             let thread_id = state.thread_id.clone().unwrap_or_default();
             state.composer_text.clear();
@@ -724,5 +734,47 @@ mod cancel_run_tests {
         let mut state = AppState::default().set_thread_id("t-1").set_running(true);
         let effects = reduce(&mut state, AppEvent::Key(key(KeyCode::Esc)));
         assert!(effects.is_empty());
+    }
+}
+
+#[cfg(test)]
+mod navigation_polish_tests {
+    use crossterm::event::KeyCode;
+
+    use super::test_support::{ctrl, key};
+    use super::*;
+
+    #[test]
+    fn ctrl_p_opens_the_provider_modal_same_as_ctrl_l() {
+        let mut state = AppState::default();
+        let effects = reduce(&mut state, AppEvent::Key(ctrl('p')));
+        assert!(matches!(state.modal, Some(Modal::Provider(_))));
+        assert!(matches!(effects[0], Effect::Api(ApiCall::LlmProviders)));
+    }
+
+    #[test]
+    fn slash_exit_on_enter_quits() {
+        let mut state = AppState::default().set_composer_text("/exit");
+        let effects = reduce(&mut state, AppEvent::Key(key(KeyCode::Enter)));
+        assert_eq!(effects, vec![Effect::Quit]);
+    }
+
+    #[test]
+    fn a_message_that_merely_contains_slash_exit_is_sent_normally() {
+        let mut state = AppState::default()
+            .set_thread_id("t-1")
+            .set_composer_text("please /exit the loop");
+        let effects = reduce(&mut state, AppEvent::Key(key(KeyCode::Enter)));
+        assert!(matches!(
+            &effects[0],
+            Effect::Api(ApiCall::SendMessage { .. })
+        ));
+    }
+
+    #[test]
+    fn ctrl_d_quits_from_the_composer() {
+        let mut state = AppState::default();
+        let effects = reduce(&mut state, AppEvent::Key(ctrl('d')));
+        assert_eq!(effects, vec![Effect::Quit]);
     }
 }
