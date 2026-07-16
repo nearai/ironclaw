@@ -78,6 +78,9 @@ repository = "https://github.com/nearai/ironclaw"
 [package.metadata.ironclaw]
 layer = "legacy"
 
+[package.metadata.dist]
+dist = false
+
 [package.metadata.wix]
 upgrade-guid = "D0156E61-BA37-451E-8AB9-1A2ECCCFA48F"
 path-guid = "F90B6EA6-87F7-499B-BB19-CF55DE1EB339"

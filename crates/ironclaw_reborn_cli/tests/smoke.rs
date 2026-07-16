@@ -155,6 +155,141 @@ fn dockerfile_reborn_builds_with_postgres_feature() {
 }
 
 #[test]
+fn default_dockerfile_targets_reborn_runtime() {
+    let dockerfile =
+        std::fs::read_to_string(workspace_root().join("Dockerfile")).expect("Dockerfile");
+    let deps_stage = dockerfile
+        .split_once("FROM chef AS deps")
+        .and_then(|(_, stages)| stages.split_once("FROM deps AS builder"))
+        .map(|(stage, _)| stage)
+        .expect("Dockerfile should define a deps stage");
+    let builder_stage = dockerfile
+        .split_once("FROM deps AS builder")
+        .and_then(|(_, stages)| stages.split_once("FROM debian:bookworm-slim"))
+        .map(|(stage, _)| stage)
+        .expect("Dockerfile should define a builder stage");
+
+    assert!(
+        dockerfile.contains("--package ironclaw_reborn_cli")
+            && dockerfile.contains("--bin ironclaw-reborn")
+            && dockerfile.contains("COPY --from=builder /app/target/dist/ironclaw-reborn /usr/local/bin/ironclaw-reborn")
+            && dockerfile.contains("ENTRYPOINT [\"ironclaw-reborn-entrypoint\"]"),
+        "default Dockerfile must build and run the Reborn CLI image: {dockerfile}"
+    );
+    assert!(
+        !dockerfile.contains("--bin ironclaw\n")
+            && !dockerfile.contains("ENTRYPOINT [\"ironclaw\"]")
+            && !dockerfile.contains("/usr/local/bin/ironclaw\n"),
+        "default Dockerfile must not build or run the legacy root ironclaw binary: {dockerfile}"
+    );
+    assert!(
+        dockerfile.contains(
+            "FROM debian:bookworm-slim@sha256:7b140f374b289a7c2befc338f42ebe6441b7ea838a042bbd5acbfca6ec875818 AS runtime"
+        ),
+        "default Dockerfile must pin the shipped runtime base image: {dockerfile}"
+    );
+    assert!(
+        !deps_stage.contains("pnpm install --frozen-lockfile")
+            && builder_stage.contains("pnpm install --frozen-lockfile"),
+        "default Dockerfile must install frontend dependencies only in the builder stage: {dockerfile}"
+    );
+    assert!(
+        dockerfile.contains("curl \\")
+            && dockerfile.contains("HEALTHCHECK --interval=30s")
+            && dockerfile.contains("http://127.0.0.1:${PORT:-3000}/api/health"),
+        "default Dockerfile must include a local HTTP healthcheck for the Reborn service: {dockerfile}"
+    );
+}
+
+#[test]
+fn release_workflows_keep_existing_ironclaw_tags() {
+    let release = std::fs::read_to_string(workspace_root().join(".github/workflows/release.yml"))
+        .expect("release workflow");
+    let rebuild = std::fs::read_to_string(
+        workspace_root().join(".github/workflows/rebuild-release-image.yml"),
+    )
+    .expect("rebuild release image workflow");
+
+    assert!(
+        release.contains("ironclaw-v[0-9]+.[0-9]+.[0-9]+*")
+            && rebuild.contains("EXPECTED_REF=\"ironclaw-v${EXPECTED_TAG}\""),
+        "release workflows must keep the existing IronClaw tag family"
+    );
+    assert!(
+        !release.contains("ironclaw-reborn-v[0-9]+.[0-9]+.[0-9]+*")
+            && !rebuild.contains("EXPECTED_REF=\"ironclaw-reborn-v${EXPECTED_TAG}\""),
+        "release workflows must not introduce a second Reborn tag family"
+    );
+}
+
+#[test]
+fn reborn_release_artifacts_use_shipping_features() {
+    let manifest =
+        std::fs::read_to_string(workspace_root().join("crates/ironclaw_reborn_cli/Cargo.toml"))
+            .expect("Reborn CLI manifest");
+    let dockerfile =
+        std::fs::read_to_string(workspace_root().join("Dockerfile")).expect("Dockerfile");
+    let build_all =
+        std::fs::read_to_string(workspace_root().join("scripts/build-all.sh")).expect("build-all");
+    let expected_features = [
+        "openai-compat-beta",
+        "slack-v2-host-beta",
+        "webui-v2-beta",
+        "libsql",
+        "postgres",
+        "inmemory-turn-state",
+    ];
+
+    for feature in expected_features {
+        assert!(
+            manifest.contains(&format!("\"{feature}\"")),
+            "Reborn cargo-dist metadata must include shipping feature {feature}: {manifest}"
+        );
+        assert!(
+            dockerfile.contains(feature),
+            "default Dockerfile must build with shipping feature {feature}: {dockerfile}"
+        );
+        assert!(
+            build_all.contains(feature),
+            "build-all helper must build with shipping feature {feature}: {build_all}"
+        );
+    }
+}
+
+#[test]
+fn legacy_v1_worker_and_test_dockerfiles_are_retired() {
+    let root = workspace_root();
+
+    assert!(
+        !root.join("Dockerfile.worker").exists(),
+        "Dockerfile.worker built the retired v1 ironclaw worker image and must stay removed"
+    );
+    assert!(
+        !root.join("Dockerfile.test").exists(),
+        "Dockerfile.test built the retired v1 gateway test image and must stay removed"
+    );
+}
+
+#[test]
+fn docker_workflow_uses_existing_reborn_runtime_target() {
+    let workflow = std::fs::read_to_string(workspace_root().join(".github/workflows/docker.yml"))
+        .expect("docker workflow");
+
+    assert!(
+        workflow.contains("echo \"target=runtime\" >> \"$GITHUB_OUTPUT\""),
+        "docker workflow must build the Dockerfile's existing runtime target: {workflow}"
+    );
+    assert!(
+        !workflow.contains("runtime-staging"),
+        "docker workflow must not reference the removed runtime-staging target: {workflow}"
+    );
+    assert!(
+        workflow.contains("contains(steps.tags.outputs.tags, ':staging')"),
+        "docker workflow should keep staging skip checks tied to staging tags: {workflow}"
+    );
+}
+
+#[test]
 fn dockerfile_reborn_ships_extension_ownership_migration() {
     let dockerfile = std::fs::read_to_string(workspace_root().join("Dockerfile.reborn"))
         .expect("Dockerfile.reborn");

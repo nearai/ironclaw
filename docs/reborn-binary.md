@@ -625,17 +625,27 @@ Do not port the current `src/cli/*` command tree wholesale. Port commands one at
 
 ## Release packaging decision
 
-`ironclaw-reborn` is **not yet included in cargo-dist release artifacts**.
+`ironclaw-reborn` is the cargo-dist release artifact for the Reborn runtime.
 
-Current `dist plan --output-format=json` with `crates/ironclaw_reborn_cli` marked `dist = false` emits only the root `ironclaw` package artifacts. Removing `dist = false` alone is not enough to ship `ironclaw-reborn` in the existing `ironclaw-v*` release workflow because that workflow is shaped around the root `ironclaw` package tag. Enabling a standalone `ironclaw_reborn_cli` release also requires cargo-dist WiX metadata/template work and an explicit tag/versioning decision.
+Release tags keep the existing `ironclaw-v*` prefix. The legacy root
+`ironclaw` package is marked `dist = false`; `crates/ironclaw_reborn_cli` is
+marked `dist = true` and carries its own WiX identity so Windows installers do
+not reuse the legacy package identity.
 
-Follow-up issue: #3483 tracks packaging `ironclaw-reborn` in release artifacts.
-
-Until #3483 is resolved, keep:
+The Docker image rebuild workflow follows the same tag family:
+`source_ref=ironclaw-v<version>`.
 
 ```toml
 [package.metadata.dist]
-dist = false
+dist = true
+features = [
+    "openai-compat-beta",
+    "slack-v2-host-beta",
+    "webui-v2-beta",
+    "libsql",
+    "postgres",
+    "inmemory-turn-state",
+]
 ```
 
-in `crates/ironclaw_reborn_cli/Cargo.toml` so releases do not silently claim to ship an unverified Reborn binary package.
+in `crates/ironclaw_reborn_cli/Cargo.toml` is the expected state.
