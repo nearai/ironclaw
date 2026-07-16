@@ -305,7 +305,7 @@ async fn expired_flow_callback_rejected_then_fresh_flow_retry_succeeds() {
             &provider,
             &state_hash,
             &pkce_hash,
-            Utc::now() - Duration::seconds(1),
+            Utc::now() - Duration::seconds(10),
         ))
         .await
         .expect("create_flow must accept a flow that will read back as lapsed");
@@ -542,17 +542,33 @@ async fn replayed_callback_is_idempotent_then_fresh_flow_reconnects() {
     let reconnect_account = reconnect
         .credential_account_id
         .expect("the reconnect callback must mint a credential account");
+    assert_ne!(
+        reconnect_account, first_account,
+        "a fresh reconnect flow must mint a DISTINCT credential account, not reuse the original"
+    );
+    assert_eq!(
+        bundle.egress.captured_count(),
+        2,
+        "the reconnect must run its own token exchange (first callback's plus one)"
+    );
     let listed = bundle
         .services
         .credential_account_service()
         .list_accounts(CredentialAccountListRequest::new(scope, provider))
         .await
         .expect("list_accounts must not error after the reconnect");
-    assert!(
-        listed
-            .accounts
-            .iter()
-            .any(|account| account.id == reconnect_account),
-        "the reconnect's account must be listed alongside any prior account"
+    assert_eq!(
+        listed.accounts.len(),
+        2,
+        "exactly the original and the reconnect accounts must exist"
     );
+    for expected in [&first_account, &reconnect_account] {
+        assert!(
+            listed
+                .accounts
+                .iter()
+                .any(|account| &account.id == expected),
+            "account {expected:?} must be listed after the reconnect"
+        );
+    }
 }

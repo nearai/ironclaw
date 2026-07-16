@@ -3752,9 +3752,11 @@ mod tests {
         // must carry the DM conversation id decoded from the saved
         // preference's binding ref — not the run's current channel or another
         // user's target.
-        let body = String::from_utf8(post.body).expect("postMessage body is UTF-8 JSON");
-        assert!(
-            body.contains(r#""channel":"D456""#),
+        let body: serde_json::Value =
+            serde_json::from_slice(&post.body).expect("postMessage body is valid JSON");
+        assert_eq!(
+            body.get("channel").and_then(|channel| channel.as_str()),
+            Some("D456"),
             "chat.postMessage must target the preference binding's DM conversation; body: {body}"
         );
 
