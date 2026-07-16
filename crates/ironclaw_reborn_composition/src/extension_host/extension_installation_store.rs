@@ -126,6 +126,73 @@ impl FilesystemExtensionInstallationStore {
         *persisted = Some(bytes);
         Ok(())
     }
+
+    /// Undo an in-memory mutation whose snapshot write failed, so the
+    /// in-memory view stays identical to disk and a retry replays cleanly
+    /// instead of double-applying (e.g. re-deleting an already-deleted row
+    /// and turning a transient IO failure into a malformed-request error).
+    /// Best-effort: a rollback failure is logged and the original write
+    /// error still surfaces; the store is then diverged either way and the
+    /// retryable `StoreUnavailable` tells the caller to back off.
+    async fn restore_installation_row(&self, prior: Option<ExtensionInstallation>) {
+        let result = match prior {
+            Some(prior) => {
+                let installation_id = prior.installation_id().clone();
+                self.inner
+                    .upsert_installation(prior)
+                    .await
+                    .map_err(|error| (format!("restore installation {installation_id}"), error))
+            }
+            None => Ok(()),
+        };
+        if let Err((operation, error)) = result {
+            tracing::debug!(
+                ?error,
+                operation,
+                "in-memory rollback after failed snapshot write failed"
+            );
+        }
+    }
+
+    async fn restore_manifest_row(&self, prior: Option<ExtensionManifestRecord>) {
+        let result = match prior {
+            Some(prior) => {
+                let extension_id = prior.extension_id().clone();
+                self.inner
+                    .upsert_manifest(prior)
+                    .await
+                    .map_err(|error| (format!("restore manifest {extension_id}"), error))
+            }
+            None => Ok(()),
+        };
+        if let Err((operation, error)) = result {
+            tracing::debug!(
+                ?error,
+                operation,
+                "in-memory rollback after failed snapshot write failed"
+            );
+        }
+    }
+
+    async fn remove_inserted_installation_row(&self, installation_id: &ExtensionInstallationId) {
+        if let Err(error) = self.inner.delete_installation(installation_id).await {
+            tracing::debug!(
+                ?error,
+                installation_id = %installation_id,
+                "in-memory rollback after failed snapshot write failed"
+            );
+        }
+    }
+
+    async fn remove_inserted_manifest_row(&self, extension_id: &ExtensionId) {
+        if let Err(error) = self.inner.delete_manifest(extension_id).await {
+            tracing::debug!(
+                ?error,
+                extension_id = %extension_id,
+                "in-memory rollback after failed snapshot write failed"
+            );
+        }
+    }
 }
 
 async fn write_snapshot(
@@ -177,8 +244,17 @@ impl ExtensionInstallationStore for FilesystemExtensionInstallationStore {
     ) -> Result<(), ExtensionInstallationError> {
         let mut persisted = self.persisted_snapshot.lock().await;
         self.ensure_snapshot_current(&persisted).await?;
+        let extension_id = manifest.extension_id().clone();
+        let prior = self.inner.get_manifest(&extension_id).await?;
         self.inner.upsert_manifest(manifest).await?;
-        self.save_snapshot(&mut persisted).await
+        if let Err(error) = self.save_snapshot(&mut persisted).await {
+            match prior {
+                Some(prior) => self.restore_manifest_row(Some(prior)).await,
+                None => self.remove_inserted_manifest_row(&extension_id).await,
+            }
+            return Err(error);
+        }
+        Ok(())
     }
 
     async fn upsert_manifest_and_installation(
@@ -188,10 +264,28 @@ impl ExtensionInstallationStore for FilesystemExtensionInstallationStore {
     ) -> Result<(), ExtensionInstallationError> {
         let mut persisted = self.persisted_snapshot.lock().await;
         self.ensure_snapshot_current(&persisted).await?;
+        let extension_id = manifest.extension_id().clone();
+        let installation_id = installation.installation_id().clone();
+        let prior_manifest = self.inner.get_manifest(&extension_id).await?;
+        let prior_installation = self.inner.get_installation(&installation_id).await?;
         self.inner
             .upsert_manifest_and_installation(manifest, installation)
             .await?;
-        self.save_snapshot(&mut persisted).await
+        if let Err(error) = self.save_snapshot(&mut persisted).await {
+            match prior_installation {
+                Some(prior) => self.restore_installation_row(Some(prior)).await,
+                None => {
+                    self.remove_inserted_installation_row(&installation_id)
+                        .await
+                }
+            }
+            match prior_manifest {
+                Some(prior) => self.restore_manifest_row(Some(prior)).await,
+                None => self.remove_inserted_manifest_row(&extension_id).await,
+            }
+            return Err(error);
+        }
+        Ok(())
     }
 
     async fn list_installations(
@@ -219,8 +313,20 @@ impl ExtensionInstallationStore for FilesystemExtensionInstallationStore {
     ) -> Result<(), ExtensionInstallationError> {
         let mut persisted = self.persisted_snapshot.lock().await;
         self.ensure_snapshot_current(&persisted).await?;
+        let installation_id = installation.installation_id().clone();
+        let prior = self.inner.get_installation(&installation_id).await?;
         self.inner.upsert_installation(installation).await?;
-        self.save_snapshot(&mut persisted).await
+        if let Err(error) = self.save_snapshot(&mut persisted).await {
+            match prior {
+                Some(prior) => self.restore_installation_row(Some(prior)).await,
+                None => {
+                    self.remove_inserted_installation_row(&installation_id)
+                        .await
+                }
+            }
+            return Err(error);
+        }
+        Ok(())
     }
 
     async fn set_activation_state(
@@ -230,10 +336,15 @@ impl ExtensionInstallationStore for FilesystemExtensionInstallationStore {
     ) -> Result<(), ExtensionInstallationError> {
         let mut persisted = self.persisted_snapshot.lock().await;
         self.ensure_snapshot_current(&persisted).await?;
+        let prior = self.inner.get_installation(installation_id).await?;
         self.inner
             .set_activation_state(installation_id, state)
             .await?;
-        self.save_snapshot(&mut persisted).await
+        if let Err(error) = self.save_snapshot(&mut persisted).await {
+            self.restore_installation_row(prior).await;
+            return Err(error);
+        }
+        Ok(())
     }
 
     async fn delete_installation(
@@ -242,8 +353,13 @@ impl ExtensionInstallationStore for FilesystemExtensionInstallationStore {
     ) -> Result<(), ExtensionInstallationError> {
         let mut persisted = self.persisted_snapshot.lock().await;
         self.ensure_snapshot_current(&persisted).await?;
+        let prior = self.inner.get_installation(installation_id).await?;
         self.inner.delete_installation(installation_id).await?;
-        self.save_snapshot(&mut persisted).await
+        if let Err(error) = self.save_snapshot(&mut persisted).await {
+            self.restore_installation_row(prior).await;
+            return Err(error);
+        }
+        Ok(())
     }
 
     async fn delete_manifest(
@@ -252,8 +368,13 @@ impl ExtensionInstallationStore for FilesystemExtensionInstallationStore {
     ) -> Result<(), ExtensionInstallationError> {
         let mut persisted = self.persisted_snapshot.lock().await;
         self.ensure_snapshot_current(&persisted).await?;
+        let prior = self.inner.get_manifest(extension_id).await?;
         self.inner.delete_manifest(extension_id).await?;
-        self.save_snapshot(&mut persisted).await
+        if let Err(error) = self.save_snapshot(&mut persisted).await {
+            self.restore_manifest_row(prior).await;
+            return Err(error);
+        }
+        Ok(())
     }
 
     async fn update_health(
@@ -263,8 +384,13 @@ impl ExtensionInstallationStore for FilesystemExtensionInstallationStore {
     ) -> Result<(), ExtensionInstallationError> {
         let mut persisted = self.persisted_snapshot.lock().await;
         self.ensure_snapshot_current(&persisted).await?;
+        let prior = self.inner.get_installation(installation_id).await?;
         self.inner.update_health(installation_id, health).await?;
-        self.save_snapshot(&mut persisted).await
+        if let Err(error) = self.save_snapshot(&mut persisted).await {
+            self.restore_installation_row(prior).await;
+            return Err(error);
+        }
+        Ok(())
     }
 }
 

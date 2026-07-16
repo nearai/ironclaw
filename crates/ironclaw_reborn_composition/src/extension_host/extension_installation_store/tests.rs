@@ -684,6 +684,124 @@ fn stored_installation_with_bindings(
     .unwrap()
 }
 
+struct FailNextWriteFilesystem {
+    inner: Arc<InMemoryBackend>,
+    fail_next: std::sync::atomic::AtomicBool,
+}
+
+impl FailNextWriteFilesystem {
+    fn new() -> Self {
+        Self {
+            inner: Arc::new(InMemoryBackend::new()),
+            fail_next: std::sync::atomic::AtomicBool::new(false),
+        }
+    }
+
+    fn fail_next_write(&self) {
+        self.fail_next
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
+#[async_trait]
+impl RootFilesystem for FailNextWriteFilesystem {
+    fn capabilities(&self) -> BackendCapabilities {
+        self.inner.capabilities()
+    }
+
+    async fn put(
+        &self,
+        path: &VirtualPath,
+        entry: Entry,
+        cas: CasExpectation,
+    ) -> Result<RecordVersion, FilesystemError> {
+        if self
+            .fail_next
+            .swap(false, std::sync::atomic::Ordering::SeqCst)
+        {
+            return Err(FilesystemError::Backend {
+                path: path.clone(),
+                operation: FilesystemOperation::WriteFile,
+                reason: "injected one-shot write failure".to_string(),
+            });
+        }
+        self.inner.put(path, entry, cas).await
+    }
+
+    async fn get(&self, path: &VirtualPath) -> Result<Option<VersionedEntry>, FilesystemError> {
+        self.inner.get(path).await
+    }
+
+    async fn list_dir(&self, path: &VirtualPath) -> Result<Vec<DirEntry>, FilesystemError> {
+        self.inner.list_dir(path).await
+    }
+
+    async fn stat(&self, path: &VirtualPath) -> Result<FileStat, FilesystemError> {
+        self.inner.stat(path).await
+    }
+
+    async fn delete(&self, path: &VirtualPath) -> Result<(), FilesystemError> {
+        self.inner.delete(path).await
+    }
+}
+
+#[tokio::test]
+async fn failed_snapshot_write_rolls_back_the_in_memory_mutation_so_retry_converges() {
+    let filesystem = Arc::new(FailNextWriteFilesystem::new());
+    let state_path = test_state_path();
+    let store = FilesystemExtensionInstallationStore::load_at(
+        Arc::clone(&filesystem) as Arc<dyn RootFilesystem>,
+        state_path.clone(),
+    )
+    .await
+    .expect("store loads");
+    let installation_id =
+        ExtensionInstallationId::new("gmail".to_string()).expect("valid installation id");
+    store
+        .upsert_manifest_and_installation(gmail_manifest(), gmail_installation(&installation_id))
+        .await
+        .expect("seed installation");
+
+    filesystem.fail_next_write();
+    let error = store
+        .delete_installation(&installation_id)
+        .await
+        .expect_err("failed snapshot write surfaces");
+    assert!(
+        matches!(error, ExtensionInstallationError::StoreUnavailable { .. }),
+        "a write outage is the retryable store class, got {error:?}"
+    );
+    // The in-memory view matches disk again: the row is still present...
+    assert!(
+        store
+            .get_installation(&installation_id)
+            .await
+            .expect("post-failure lookup")
+            .is_some(),
+        "the in-memory delete must be rolled back when its snapshot write fails"
+    );
+    // ...so retrying the SAME delete converges instead of replaying against
+    // already-mutated state and misreading a transient IO failure as a
+    // malformed request.
+    store
+        .delete_installation(&installation_id)
+        .await
+        .expect("retry of the same delete converges");
+    let reloaded = FilesystemExtensionInstallationStore::load_at(
+        Arc::clone(&filesystem) as Arc<dyn RootFilesystem>,
+        state_path,
+    )
+    .await
+    .expect("store reloads");
+    assert!(
+        reloaded
+            .get_installation(&installation_id)
+            .await
+            .expect("reload lookup")
+            .is_none()
+    );
+}
+
 struct WriteFailureFilesystem {
     inner: Arc<InMemoryBackend>,
 }

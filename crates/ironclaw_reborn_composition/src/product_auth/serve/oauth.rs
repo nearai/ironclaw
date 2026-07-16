@@ -2937,6 +2937,102 @@ mod tests {
         );
     }
 
+    /// A crash or failed abandon between "supersede the prior flow" and
+    /// "abandon its epoch" leaves a live epoch whose flow is already terminal
+    /// — and the supersede walk only returns non-terminal flows, so nothing
+    /// would ever release it. The start path must reconcile the stranded
+    /// epoch from the flow record instead of 409ing until its TTL lapses.
+    #[cfg(feature = "slack-v2-host-beta")]
+    #[tokio::test]
+    async fn slack_personal_reopen_recovers_when_a_stranded_epoch_outlives_its_flow() {
+        let shared = Arc::new(InMemoryAuthProductServices::new());
+        let provider_identity = OAuthProviderIdentity::new(
+            "U123",
+            Some("T123".to_string()),
+            None,
+            Some("A123".to_string()),
+        )
+        .expect("provider identity");
+        let provider_client = Arc::new(SlackIdentityProviderClient::new(provider_identity));
+        let product_auth = Arc::new(
+            RebornProductAuthServices::from_shared(
+                shared.clone(),
+                Arc::new(RecordingDispatcher::default()),
+            )
+            .with_flow_record_source(shared)
+            .with_provider_client(provider_client),
+        );
+        let tenant_id = TenantId::new("tenant-alpha").expect("tenant");
+        let user_id = UserId::new("user-alpha").expect("user");
+        let installation_id = AdapterInstallationId::new("install-alpha").expect("installation");
+        let binding_store = Arc::new(RecordingBindingStore::default());
+        let binding_service = Arc::new(SlackPersonalUserBindingService::new(
+            [SlackPersonalBindingInstallation {
+                tenant_id: tenant_id.clone(),
+                installation_id: installation_id.clone(),
+                selector: SlackInstallationSelector::app_team("A123", "T123"),
+            }],
+            binding_store.clone(),
+        ));
+        let lifecycle_store = Arc::new(TestSlackLifecycleStore::default());
+        let state = ProductAuthRouteState::new(product_auth.clone(), tenant_id.clone(), None, None)
+            .with_test_installed_extension_lookup()
+            .with_slack_personal_oauth(slack_personal_oauth_test_slot().await)
+            .with_slack_personal_oauth_binding(SlackPersonalOAuthBindingConfig::new(
+                binding_service,
+                Arc::new(StaticSlackPersonalConnectionScopeResolver::new(Some(
+                    SlackPersonalConnectionScope { installation_id },
+                ))),
+                binding_store,
+                lifecycle_store.clone(),
+            ));
+        let caller = WebUiAuthenticatedCaller::new(tenant_id.clone(), user_id.clone(), None, None);
+        let start_request = || ExtensionOAuthStartRequest {
+            provider: SLACK_PERSONAL_PROVIDER_ID.to_string(),
+            account_label: "personal slack".to_string(),
+            scopes: vec![],
+            expires_at: Utc::now() + ChronoDuration::minutes(5),
+            invocation_id: Some(InvocationId::new().to_string()),
+        };
+
+        // Click Connect: flow F1 and epoch E1 are live.
+        let Json(first_start) = extension_oauth_start_handler(
+            State(state.clone()),
+            Extension(caller.clone()),
+            Path("slack".to_string()),
+            Json(start_request()),
+        )
+        .await
+        .expect("first Slack connect starts");
+
+        // Re-open while the epoch-abandon write fails: supersede cancels F1,
+        // then the abandon errors out — the exact partial failure that
+        // strands E1 with no non-terminal flow left pointing at it.
+        lifecycle_store
+            .fail_next_abandon
+            .store(true, Ordering::SeqCst);
+        extension_oauth_start_handler(
+            State(state.clone()),
+            Extension(caller.clone()),
+            Path("slack".to_string()),
+            Json(start_request()),
+        )
+        .await
+        .expect_err("a failed epoch abandon fails the re-open");
+
+        // Third click with a healthy backend. Only flow-record reconciliation
+        // can release E1 now; without it this 409s until the epoch TTL.
+        let Json(third_start) = extension_oauth_start_handler(
+            State(state.clone()),
+            Extension(caller.clone()),
+            Path("slack".to_string()),
+            Json(start_request()),
+        )
+        .await
+        .expect("re-opening after a stranded abandon reconciles the dead epoch instead of 409ing");
+        assert_ne!(third_start.flow_id, first_start.flow_id);
+    }
+
     #[cfg(feature = "slack-v2-host-beta")]
     #[tokio::test]
     async fn slack_personal_terminal_callback_failures_allow_immediate_retry() {
@@ -4367,6 +4463,19 @@ mod tests {
             self.inner.create_flow(request).await
         }
 
+        // Forward instead of inheriting the trait's no-op default: a
+        // decorator that silently skips supersede-on-start would diverge
+        // from the store it wraps.
+        async fn cancel_superseded_setup_flows(
+            &self,
+            scope: &AuthProductScope,
+            provider: &ironclaw_auth::AuthProviderId,
+        ) -> Result<Vec<ironclaw_auth::AuthFlowId>, AuthProductError> {
+            self.inner
+                .cancel_superseded_setup_flows(scope, provider)
+                .await
+        }
+
         async fn get_flow(
             &self,
             scope: &AuthProductScope,
@@ -4467,6 +4576,19 @@ mod tests {
             request: ironclaw_auth::NewAuthFlow,
         ) -> Result<ironclaw_auth::AuthFlowRecord, AuthProductError> {
             self.inner.create_flow(request).await
+        }
+
+        // Forward instead of inheriting the trait's no-op default: a
+        // decorator that silently skips supersede-on-start would diverge
+        // from the store it wraps.
+        async fn cancel_superseded_setup_flows(
+            &self,
+            scope: &AuthProductScope,
+            provider: &ironclaw_auth::AuthProviderId,
+        ) -> Result<Vec<ironclaw_auth::AuthFlowId>, AuthProductError> {
+            self.inner
+                .cancel_superseded_setup_flows(scope, provider)
+                .await
         }
 
         async fn get_flow(

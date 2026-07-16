@@ -1716,7 +1716,7 @@ impl RebornProductAuthServices {
     ) -> Result<ironclaw_host_api::SecretHandle, AuthProductError> {
         ironclaw_host_api::SecretHandle::new(format!("{SETUP_PKCE_SECRET_HANDLE_LABEL}-{flow_id}"))
             .map_err(|error| {
-                tracing::warn!(
+                tracing::debug!(
                     flow_id = %flow_id,
                     error = %error,
                     "failed to build setup OAuth PKCE secret handle"
@@ -1744,7 +1744,7 @@ impl RebornProductAuthServices {
             .await
             .map(|_| ())
             .map_err(|error| {
-                tracing::warn!(
+                tracing::debug!(
                     flow_id = %flow_id,
                     error = %error,
                     "failed to store setup OAuth PKCE verifier"
@@ -1768,7 +1768,7 @@ impl RebornProductAuthServices {
             Ok(lease) => lease,
             Err(error) if error.is_unknown_secret() => return Ok(None),
             Err(error) => {
-                tracing::warn!(
+                tracing::debug!(
                     flow_id = %flow_id,
                     error = %error,
                     "failed to lease setup OAuth PKCE verifier"
@@ -1781,7 +1781,7 @@ impl RebornProductAuthServices {
             .await
             .map(Some)
             .map_err(|error| {
-                tracing::warn!(
+                tracing::debug!(
                     flow_id = %flow_id,
                     error = %error,
                     "failed to consume setup OAuth PKCE verifier"
@@ -1801,7 +1801,13 @@ impl RebornProductAuthServices {
             return;
         };
         if let Err(error) = self.secret_store.delete(&scope.resource, &handle).await {
-            tracing::warn!(
+            // Already consumed by the callback's one-shot `lease_once`/
+            // `consume` read (or a prior cleanup) — deletion is idempotent,
+            // so an unknown handle is success, not noise.
+            if error.is_unknown_secret() {
+                return;
+            }
+            tracing::debug!(
                 flow_id = %flow_id,
                 error = %error,
                 "failed to delete setup OAuth PKCE verifier"
@@ -1820,6 +1826,22 @@ impl RebornProductAuthServices {
         let Some(registry) = &self.dcr_oauth_registry else {
             return Ok(None);
         };
+        // Supersede-on-start (RFC 9700 §4.7.1), mirroring
+        // `start_setup_oauth_flow`: DCR providers (e.g. Notion) reach flow
+        // creation through the registry rather than the plain setup seam, and
+        // a re-opened connect popup must not leave two live authorization
+        // requests racing to write the same credential. Superseded flows'
+        // setup-store verifiers are dropped best-effort (a no-op for
+        // DCR-created flows, whose verifier material lives in the DCR
+        // registry and ages out by its own TTL).
+        for superseded in self
+            .flow_manager
+            .cancel_superseded_setup_flows(&request.scope, &request.provider)
+            .await?
+        {
+            self.delete_setup_pkce_verifier(&request.scope, superseded)
+                .await;
+        }
         registry
             .start_setup_flow(
                 &self.flow_manager,
