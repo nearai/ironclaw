@@ -11,6 +11,7 @@ use thiserror::Error;
 
 pub mod automations;
 pub mod gates;
+pub mod llm;
 pub mod threads;
 
 pub use automations::AutomationSummary;
