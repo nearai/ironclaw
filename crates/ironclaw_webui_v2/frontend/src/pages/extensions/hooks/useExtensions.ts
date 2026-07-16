@@ -328,14 +328,6 @@ export function useExtensions() {
 
   const isLoading = extensionsQuery.isLoading || registryQuery.isLoading;
   const isBusy = installMutation.isPending || activateMutation.isPending || removeMutation.isPending || importMutation.isPending;
-  const remove = React.useCallback(
-    (extension) => {
-      const name = extension?.displayName || extension?.packageRef?.id || "this extension";
-      if (!window.confirm(`Remove ${name}?`)) return;
-      removeMutation.mutate(extension);
-    },
-    [removeMutation]
-  );
 
   return {
     status,
@@ -349,6 +341,8 @@ export function useExtensions() {
     registry,
     catalogEntries,
     connectableChannels,
+    isExtensionsLoading: extensionsQuery.isLoading,
+    isRegistryLoading: registryQuery.isLoading,
     isLoading,
     extensionsError: extensionsQuery.error || null,
     registryError: registryQuery.error || null,
@@ -360,7 +354,8 @@ export function useExtensions() {
     clearResult,
     install: installMutation.mutate,
     activate: activateMutation.mutate,
-    remove,
+    remove: removeMutation.mutate,
+    isRemoving: removeMutation.isPending,
     importTool: (payload) => importMutation.mutate(payload),
     isImporting: importMutation.isPending,
     invalidate,
