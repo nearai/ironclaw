@@ -56,6 +56,13 @@ CANNED_RESPONSES = [
         re.compile(r"reborn tui multiline reply", re.IGNORECASE),
         "line one\nline two\nline three",
     ),
+    *[
+        (
+            re.compile(rf"\bhello scroll {turn:03d}\b", re.IGNORECASE),
+            f"Scroll turn {turn:03d} complete.",
+        )
+        for turn in range(1, 21)
+    ],
     (
         re.compile(
             r"reborn create automation rename target (?P<label>[a-z0-9_-]+)",
@@ -1382,12 +1389,6 @@ def _explicit_canned_response(content: str) -> str | None:
     (e.g. the post-tool-call summary) without collapsing every unmatched
     conversation into the default response.
     """
-    scroll_turn = re.search(
-        r"\bhello scroll (?P<turn>\d{3})\b", content, re.IGNORECASE
-    )
-    if scroll_turn is not None:
-        return f"Scroll turn {scroll_turn.group('turn')} complete."
-
     for pattern, response in CANNED_RESPONSES:
         if pattern.search(content):
             return response
