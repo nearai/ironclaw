@@ -1,5 +1,6 @@
 // @ts-nocheck
 import { apiFetch } from "./api";
+import { channelSetupError, optionalString } from "./channel-setup-api";
 
 export const TELEGRAM_SETUP_PATH = "/api/webchat/v2/channels/telegram/setup";
 export const TELEGRAM_PAIRING_PATH = "/api/webchat/v2/channels/telegram/pairing";
@@ -44,11 +45,4 @@ export function disconnectTelegramPairing() {
   return apiFetch(TELEGRAM_PAIRING_PATH, { method: "DELETE" });
 }
 
-export function telegramSetupError(error, fallback) {
-  return error?.payload?.error || error?.payload?.message || error?.message || fallback;
-}
-
-function optionalString(value) {
-  const normalized = String(value || "").trim();
-  return normalized ? normalized : null;
-}
+export const telegramSetupError = channelSetupError;

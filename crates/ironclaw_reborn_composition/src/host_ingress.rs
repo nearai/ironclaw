@@ -83,6 +83,201 @@ fn projection(error: impl std::fmt::Display) -> HostIngressProjectionError {
     }
 }
 
+/// Per-installation token-bucket rate limiter for channel webhook ingress,
+/// keyed on `(tenant, adapter installation)`. Shared by every channel host;
+/// serve layers map [`InstallationRateExceeded`] onto their own sanitized
+/// ingress error shapes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct InstallationRateLimitConfig {
+    pub(crate) max_requests: std::num::NonZeroU32,
+    pub(crate) window: std::time::Duration,
+}
+
+impl InstallationRateLimitConfig {
+    pub(crate) fn new(max_requests: std::num::NonZeroU32, window: std::time::Duration) -> Self {
+        Self {
+            max_requests,
+            window,
+        }
+    }
+}
+
+/// The limiter refused a request for this installation within the window.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct InstallationRateExceeded {
+    pub(crate) tenant_id: ironclaw_host_api::TenantId,
+    pub(crate) adapter_installation_id: ironclaw_product_adapters::AdapterInstallationId,
+}
+
+#[derive(Clone)]
+pub(crate) struct InstallationRateLimiter {
+    config: InstallationRateLimitConfig,
+    buckets: std::sync::Arc<
+        std::sync::Mutex<std::collections::HashMap<InstallationRateLimitKey, RateLimitBucket>>,
+    >,
+}
+
+impl InstallationRateLimiter {
+    pub(crate) fn new(config: InstallationRateLimitConfig) -> Self {
+        Self {
+            config,
+            buckets: std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
+        }
+    }
+
+    pub(crate) fn check(
+        &self,
+        tenant_id: &ironclaw_host_api::TenantId,
+        adapter_installation_id: &ironclaw_product_adapters::AdapterInstallationId,
+    ) -> Result<(), InstallationRateExceeded> {
+        let now = std::time::Instant::now();
+        let key = InstallationRateLimitKey {
+            tenant_id: tenant_id.clone(),
+            adapter_installation_id: adapter_installation_id.clone(),
+        };
+        let mut buckets = match self.buckets.lock() {
+            Ok(buckets) => buckets,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        self.prune_stale_buckets(&mut buckets, now);
+        let bucket = buckets
+            .entry(key)
+            .or_insert_with(|| RateLimitBucket::full(now, &self.config));
+        bucket.refill(now, &self.config);
+        if !bucket.try_consume() {
+            return Err(InstallationRateExceeded {
+                tenant_id: tenant_id.clone(),
+                adapter_installation_id: adapter_installation_id.clone(),
+            });
+        }
+        Ok(())
+    }
+
+    fn prune_stale_buckets(
+        &self,
+        buckets: &mut std::collections::HashMap<InstallationRateLimitKey, RateLimitBucket>,
+        now: std::time::Instant,
+    ) {
+        let ttl = self.config.window.saturating_mul(2);
+        let capacity = self.config.max_requests.get() as f64;
+        buckets.retain(|_, bucket| {
+            now.duration_since(bucket.last_refilled_at) < ttl || bucket.tokens < capacity
+        });
+    }
+}
+
+impl std::fmt::Debug for InstallationRateLimiter {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("InstallationRateLimiter")
+            .field("config", &self.config)
+            .finish_non_exhaustive()
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct InstallationRateLimitKey {
+    tenant_id: ironclaw_host_api::TenantId,
+    adapter_installation_id: ironclaw_product_adapters::AdapterInstallationId,
+}
+
+#[derive(Debug, Clone)]
+struct RateLimitBucket {
+    last_refilled_at: std::time::Instant,
+    tokens: f64,
+}
+
+impl RateLimitBucket {
+    fn full(now: std::time::Instant, config: &InstallationRateLimitConfig) -> Self {
+        Self {
+            last_refilled_at: now,
+            tokens: config.max_requests.get() as f64,
+        }
+    }
+
+    fn refill(&mut self, now: std::time::Instant, config: &InstallationRateLimitConfig) {
+        let elapsed = now.duration_since(self.last_refilled_at);
+        if elapsed.is_zero() {
+            return;
+        }
+        let capacity = config.max_requests.get() as f64;
+        let refill_ratio = if config.window.is_zero() {
+            1.0
+        } else {
+            elapsed.as_secs_f64() / config.window.as_secs_f64()
+        };
+        self.tokens = capacity.min(self.tokens + refill_ratio * capacity);
+        self.last_refilled_at = now;
+    }
+
+    fn try_consume(&mut self) -> bool {
+        if self.tokens < 1.0 {
+            return false;
+        }
+        self.tokens -= 1.0;
+        true
+    }
+}
+
+/// Sanitized webhook error vocabulary shared by every channel host's public
+/// ingress route: the response body is `{"error": <category>}` and never
+/// carries provider or internal detail.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum WebhookErrorCategory {
+    Authentication,
+    Capacity,
+    MalformedPayload,
+    Adapter,
+    TemporarilyUnavailable,
+}
+
+#[derive(Debug, serde::Serialize)]
+struct WebhookErrorBody {
+    error: WebhookErrorCategory,
+}
+
+pub(crate) fn webhook_error_response(
+    status: axum::http::StatusCode,
+    category: WebhookErrorCategory,
+) -> axum::response::Response {
+    use axum::response::IntoResponse;
+    (status, axum::Json(WebhookErrorBody { error: category })).into_response()
+}
+
+/// The shared `RunnerError` → HTTP mapping every channel webhook uses:
+/// authentication failures 401, capacity 429, retryable adapter/workflow
+/// faults 503, everything else a sanitized 400. Serve layers add their own
+/// per-target debug diagnostics around it.
+pub(crate) fn runner_error_status(
+    error: &ironclaw_wasm_product_adapters::RunnerError,
+) -> (axum::http::StatusCode, WebhookErrorCategory) {
+    use axum::http::StatusCode;
+    use ironclaw_wasm_product_adapters::RunnerError;
+    match error {
+        RunnerError::AuthenticationFailed { .. } => (
+            StatusCode::UNAUTHORIZED,
+            WebhookErrorCategory::Authentication,
+        ),
+        RunnerError::TooManyInFlight { .. } => (
+            StatusCode::TOO_MANY_REQUESTS,
+            WebhookErrorCategory::Capacity,
+        ),
+        RunnerError::Adapter(adapter_error) if adapter_error.is_retryable() => (
+            StatusCode::SERVICE_UNAVAILABLE,
+            WebhookErrorCategory::TemporarilyUnavailable,
+        ),
+        RunnerError::WorkflowTimeout { .. }
+        | RunnerError::WorkflowJoinFailed
+        | RunnerError::WorkflowPanicked
+        | RunnerError::AdapterPanicked => (
+            StatusCode::SERVICE_UNAVAILABLE,
+            WebhookErrorCategory::TemporarilyUnavailable,
+        ),
+        RunnerError::Adapter(_) => (StatusCode::BAD_REQUEST, WebhookErrorCategory::Adapter),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -8,15 +8,14 @@
 //! pairing-aware [`crate::telegram::telegram_dispatch::TelegramInboundPreRouter`],
 //! which wraps a [`NativeProductAdapterRunner`] for paired-sender traffic.
 
-use std::collections::HashMap;
 use std::future::Future;
 use std::num::{NonZeroU32, NonZeroUsize};
 use std::pin::Pin;
-use std::sync::{Arc, LazyLock, Mutex as StdMutex};
-use std::time::{Duration, Instant};
+use std::sync::{Arc, LazyLock};
+use std::time::Duration;
 
 use axum::{
-    Json, Router,
+    Router,
     body::Bytes,
     extract::State,
     http::{HeaderMap, StatusCode},
@@ -37,7 +36,6 @@ use ironclaw_wasm_product_adapters::{
     RunnerError, SharedSecretHeaderAuth, WebhookAuth, WebhookProcessOutcome,
 };
 use secrecy::ExposeSecret;
-use serde::Serialize;
 use thiserror::Error;
 use tokio::sync::Mutex;
 
@@ -523,159 +521,32 @@ impl DynamicTelegramDispatcherLifecycle {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct TelegramInstallationRateLimitConfig {
-    pub(crate) max_requests: NonZeroU32,
-    pub(crate) window: Duration,
-}
-
-impl TelegramInstallationRateLimitConfig {
-    // Production uses the default bounds; tests tighten them.
-    #[cfg_attr(not(test), allow(dead_code))]
-    pub(crate) fn new(max_requests: NonZeroU32, window: Duration) -> Self {
-        Self {
-            max_requests,
-            window,
-        }
-    }
-}
-
-impl Default for TelegramInstallationRateLimitConfig {
-    fn default() -> Self {
-        Self {
-            max_requests: TELEGRAM_INSTALLATION_MAX_REQUESTS,
-            window: TELEGRAM_INSTALLATION_RATE_WINDOW,
-        }
-    }
-}
-
-/// Per-installation token bucket applied after verification, mirroring
-/// `SlackInstallationRateLimiter` (120 requests / 60s by default).
-#[derive(Clone)]
-pub(crate) struct TelegramInstallationRateLimiter {
-    config: TelegramInstallationRateLimitConfig,
-    buckets: Arc<StdMutex<HashMap<TelegramInstallationRateLimitKey, TelegramRateLimitBucket>>>,
-}
-
-impl TelegramInstallationRateLimiter {
-    pub(crate) fn new(config: TelegramInstallationRateLimitConfig) -> Self {
-        Self {
-            config,
-            buckets: Arc::new(StdMutex::new(HashMap::new())),
-        }
-    }
-
-    pub(crate) fn check(
-        &self,
-        installation: &ResolvedTelegramInstallation,
-    ) -> Result<(), TelegramIngressError> {
-        let now = Instant::now();
-        let key = TelegramInstallationRateLimitKey {
-            tenant_id: installation.tenant_id.clone(),
-            adapter_installation_id: installation.adapter_installation_id.clone(),
-        };
-        let mut buckets = match self.buckets.lock() {
-            Ok(buckets) => buckets,
-            Err(poisoned) => poisoned.into_inner(),
-        };
-        self.prune_stale_buckets(&mut buckets, now);
-        let bucket = buckets
-            .entry(key)
-            .or_insert_with(|| TelegramRateLimitBucket::full(now, &self.config));
-        bucket.refill(now, &self.config);
-        if !bucket.try_consume() {
-            return Err(TelegramIngressError::InstallationRateLimited {
-                tenant_id: installation.tenant_id.clone(),
-                adapter_installation_id: installation.adapter_installation_id.clone(),
-            });
-        }
-        Ok(())
-    }
-
-    fn prune_stale_buckets(
-        &self,
-        buckets: &mut HashMap<TelegramInstallationRateLimitKey, TelegramRateLimitBucket>,
-        now: Instant,
-    ) {
-        let ttl = self.config.window.saturating_mul(2);
-        let capacity = self.config.max_requests.get() as f64;
-        buckets.retain(|_, bucket| {
-            now.duration_since(bucket.last_refilled_at) < ttl || bucket.tokens < capacity
-        });
-    }
-}
-
-impl std::fmt::Debug for TelegramInstallationRateLimiter {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter
-            .debug_struct("TelegramInstallationRateLimiter")
-            .field("config", &self.config)
-            .finish_non_exhaustive()
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-struct TelegramInstallationRateLimitKey {
-    tenant_id: TenantId,
-    adapter_installation_id: AdapterInstallationId,
-}
-
-#[derive(Debug, Clone)]
-struct TelegramRateLimitBucket {
-    last_refilled_at: Instant,
-    tokens: f64,
-}
-
-impl TelegramRateLimitBucket {
-    fn full(now: Instant, config: &TelegramInstallationRateLimitConfig) -> Self {
-        Self {
-            last_refilled_at: now,
-            tokens: config.max_requests.get() as f64,
-        }
-    }
-
-    fn refill(&mut self, now: Instant, config: &TelegramInstallationRateLimitConfig) {
-        let elapsed = now.duration_since(self.last_refilled_at);
-        if elapsed.is_zero() {
-            return;
-        }
-        let capacity = config.max_requests.get() as f64;
-        let refill_ratio = if config.window.is_zero() {
-            1.0
-        } else {
-            elapsed.as_secs_f64() / config.window.as_secs_f64()
-        };
-        self.tokens = capacity.min(self.tokens + refill_ratio * capacity);
-        self.last_refilled_at = now;
-    }
-
-    fn try_consume(&mut self) -> bool {
-        if self.tokens < 1.0 {
-            return false;
-        }
-        self.tokens -= 1.0;
-        true
-    }
-}
-
 #[derive(Clone)]
 pub(crate) struct TelegramIngressService {
     resolver: Arc<dyn TelegramInstallationResolver>,
-    installation_rate_limiter: TelegramInstallationRateLimiter,
+    installation_rate_limiter: crate::host_ingress::InstallationRateLimiter,
 }
 
 impl TelegramIngressService {
     pub(crate) fn new(resolver: Arc<dyn TelegramInstallationResolver>) -> Self {
-        Self::with_rate_limit_config(resolver, TelegramInstallationRateLimitConfig::default())
+        Self::with_rate_limit_config(
+            resolver,
+            crate::host_ingress::InstallationRateLimitConfig::new(
+                TELEGRAM_INSTALLATION_MAX_REQUESTS,
+                TELEGRAM_INSTALLATION_RATE_WINDOW,
+            ),
+        )
     }
 
     pub(crate) fn with_rate_limit_config(
         resolver: Arc<dyn TelegramInstallationResolver>,
-        rate_limit: TelegramInstallationRateLimitConfig,
+        rate_limit: crate::host_ingress::InstallationRateLimitConfig,
     ) -> Self {
         Self {
             resolver,
-            installation_rate_limiter: TelegramInstallationRateLimiter::new(rate_limit),
+            installation_rate_limiter: crate::host_ingress::InstallationRateLimiter::new(
+                rate_limit,
+            ),
         }
     }
 
@@ -684,8 +555,14 @@ impl TelegramIngressService {
             Ok(ingress) => ingress,
             Err(error) => return ingress_error_response(error),
         };
-        if let Err(error) = self.installation_rate_limiter.check(ingress.installation()) {
-            return ingress_error_response(error);
+        if let Err(exceeded) = self.installation_rate_limiter.check(
+            &ingress.installation().tenant_id,
+            &ingress.installation().adapter_installation_id,
+        ) {
+            return ingress_error_response(TelegramIngressError::InstallationRateLimited {
+                tenant_id: exceeded.tenant_id,
+                adapter_installation_id: exceeded.adapter_installation_id,
+            });
         }
         let installation = ingress.installation();
         match installation
@@ -845,9 +722,9 @@ fn ingress_error_response(error: TelegramIngressError) -> Response {
                 reason = "not_found",
                 "Telegram updates installation resolution failed"
             );
-            error_response(
+            crate::host_ingress::webhook_error_response(
                 StatusCode::UNAUTHORIZED,
-                TelegramWebhookErrorCategory::Authentication,
+                crate::host_ingress::WebhookErrorCategory::Authentication,
             )
         }
         TelegramIngressError::TemporarilyUnavailable => {
@@ -856,9 +733,9 @@ fn ingress_error_response(error: TelegramIngressError) -> Response {
                 reason = "unavailable",
                 "Telegram updates installation resolution temporarily unavailable"
             );
-            error_response(
+            crate::host_ingress::webhook_error_response(
                 StatusCode::SERVICE_UNAVAILABLE,
-                TelegramWebhookErrorCategory::TemporarilyUnavailable,
+                crate::host_ingress::WebhookErrorCategory::TemporarilyUnavailable,
             )
         }
         TelegramIngressError::InstallationRateLimited {
@@ -871,65 +748,23 @@ fn ingress_error_response(error: TelegramIngressError) -> Response {
                 adapter_installation_id = %adapter_installation_id,
                 "Telegram updates installation rate limit exceeded"
             );
-            error_response(
+            crate::host_ingress::webhook_error_response(
                 StatusCode::TOO_MANY_REQUESTS,
-                TelegramWebhookErrorCategory::Capacity,
+                crate::host_ingress::WebhookErrorCategory::Capacity,
             )
         }
     }
 }
 
 fn runner_error_response(error: RunnerError) -> Response {
-    let (status, category) = match &error {
-        RunnerError::AuthenticationFailed { .. } => (
-            StatusCode::UNAUTHORIZED,
-            TelegramWebhookErrorCategory::Authentication,
-        ),
-        RunnerError::TooManyInFlight { .. } => (
-            StatusCode::TOO_MANY_REQUESTS,
-            TelegramWebhookErrorCategory::Capacity,
-        ),
-        RunnerError::Adapter(adapter_error) if adapter_error.is_retryable() => (
-            StatusCode::SERVICE_UNAVAILABLE,
-            TelegramWebhookErrorCategory::TemporarilyUnavailable,
-        ),
-        RunnerError::WorkflowTimeout { .. }
-        | RunnerError::WorkflowJoinFailed
-        | RunnerError::WorkflowPanicked
-        | RunnerError::AdapterPanicked => (
-            StatusCode::SERVICE_UNAVAILABLE,
-            TelegramWebhookErrorCategory::TemporarilyUnavailable,
-        ),
-        RunnerError::Adapter(_) => (
-            StatusCode::BAD_REQUEST,
-            TelegramWebhookErrorCategory::Adapter,
-        ),
-    };
+    let (status, category) = crate::host_ingress::runner_error_status(&error);
     tracing::debug!(
         target = "ironclaw::reborn::telegram_updates",
         status = status.as_u16(),
         error = %error,
         "Telegram updates webhook rejected"
     );
-    error_response(status, category)
-}
-
-#[derive(Debug, Clone, Copy, Serialize)]
-#[serde(rename_all = "snake_case")]
-enum TelegramWebhookErrorCategory {
-    Authentication,
-    Capacity,
-    Adapter,
-    TemporarilyUnavailable,
-}
-
-#[derive(Debug, Serialize)]
-struct TelegramWebhookErrorBody {
-    error: TelegramWebhookErrorCategory,
-}
-
-fn error_response(status: StatusCode, category: TelegramWebhookErrorCategory) -> Response {
-    (status, Json(TelegramWebhookErrorBody { error: category })).into_response()
+    crate::host_ingress::webhook_error_response(status, category)
 }
 
 fn map_setup_error_to_ingress_unavailable(
@@ -1664,7 +1499,7 @@ mod tests {
         let resolver = Arc::new(FakeTelegramResolver::new(Arc::new(dispatcher)));
         let state = TelegramUpdatesRouteState::new(TelegramIngressService::with_rate_limit_config(
             resolver,
-            TelegramInstallationRateLimitConfig::new(
+            crate::host_ingress::InstallationRateLimitConfig::new(
                 NonZeroU32::new(1).expect("nonzero"),
                 Duration::from_secs(60),
             ),

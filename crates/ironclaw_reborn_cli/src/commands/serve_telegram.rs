@@ -29,19 +29,13 @@ fn telegram_enabled(
     section: Option<&ironclaw_reborn_config::TelegramSection>,
 ) -> anyhow::Result<bool> {
     match std::env::var(TELEGRAM_ENABLED_ENV) {
-        Ok(value) => parse_telegram_enabled_bool(TELEGRAM_ENABLED_ENV, value.as_str()),
+        Ok(value) => {
+            crate::commands::parse_channel_enabled_bool(TELEGRAM_ENABLED_ENV, value.as_str())
+        }
         Err(std::env::VarError::NotPresent) => Ok(section.and_then(|s| s.enabled).unwrap_or(false)),
         Err(std::env::VarError::NotUnicode(_)) => {
             anyhow::bail!("{TELEGRAM_ENABLED_ENV} must be valid UTF-8 when set")
         }
-    }
-}
-
-fn parse_telegram_enabled_bool(field: &str, value: &str) -> anyhow::Result<bool> {
-    match value.trim().to_ascii_lowercase().as_str() {
-        "1" | "true" | "yes" | "on" => Ok(true),
-        "0" | "false" | "no" | "off" => Ok(false),
-        _ => anyhow::bail!("{field} must be a boolean value"),
     }
 }
 
@@ -139,12 +133,18 @@ mod tests {
     #[test]
     fn parse_telegram_enabled_bool_accepts_known_values_and_rejects_garbage() {
         for value in ["1", "true", "YES", " on "] {
-            assert!(parse_telegram_enabled_bool("test_field", value).expect("truthy value parses"));
+            assert!(
+                crate::commands::parse_channel_enabled_bool("test_field", value)
+                    .expect("truthy value parses")
+            );
         }
         for value in ["0", "false", "No", "off"] {
-            assert!(!parse_telegram_enabled_bool("test_field", value).expect("falsy value parses"));
+            assert!(
+                !crate::commands::parse_channel_enabled_bool("test_field", value)
+                    .expect("falsy value parses")
+            );
         }
-        assert!(parse_telegram_enabled_bool("test_field", "maybe").is_err());
+        assert!(crate::commands::parse_channel_enabled_bool("test_field", "maybe").is_err());
     }
 
     #[cfg(not(feature = "telegram-v2-host-beta"))]

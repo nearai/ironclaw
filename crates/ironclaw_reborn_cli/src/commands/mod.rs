@@ -109,3 +109,13 @@ impl Command {
         }
     }
 }
+
+/// Shared boolean parsing for channel-enablement env overrides
+/// (`IRONCLAW_REBORN_SLACK_ENABLED`, `IRONCLAW_REBORN_TELEGRAM_ENABLED`, …).
+pub(crate) fn parse_channel_enabled_bool(field: &str, value: &str) -> anyhow::Result<bool> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "1" | "true" | "yes" | "on" => Ok(true),
+        "0" | "false" | "no" | "off" => Ok(false),
+        _ => anyhow::bail!("{field} must be a boolean value"),
+    }
+}

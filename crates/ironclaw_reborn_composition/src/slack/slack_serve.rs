@@ -9,8 +9,9 @@ use std::future::Future;
 use std::pin::Pin;
 use std::sync::{Arc, LazyLock};
 
+use crate::webui::webui_serve::{PublicRouteDrain, PublicRouteMount};
 use axum::{
-    Json, Router,
+    Router,
     body::Bytes,
     extract::State,
     http::{HeaderMap, StatusCode},
@@ -23,16 +24,13 @@ use ironclaw_product_adapters::ProtocolAuthEvidence;
 use ironclaw_wasm_product_adapters::{
     ImmediateAckWorkflowObserver, NativeProductAdapterRunner, RunnerError, WebhookProcessOutcome,
 };
-use serde::Serialize;
-
-use crate::webui::webui_serve::{PublicRouteDrain, PublicRouteMount};
 
 mod installation;
 pub use installation::{
     ResolvedSlackIngress, ResolvedSlackInstallation, SlackApiAppId, SlackChannelId,
-    SlackEnterpriseId, SlackEnvelopeMetadata, SlackIngressError, SlackInstallationRateLimitConfig,
-    SlackInstallationRateLimiter, SlackInstallationRecord, SlackInstallationResolver,
-    SlackInstallationSelector, SlackTeamId, SlackUserId, StaticSlackInstallationResolver,
+    SlackEnterpriseId, SlackEnvelopeMetadata, SlackIngressError, SlackInstallationRecord,
+    SlackInstallationResolver, SlackInstallationSelector, SlackTeamId, SlackUserId,
+    StaticSlackInstallationResolver,
 };
 
 #[cfg(test)]
@@ -90,21 +88,29 @@ impl SlackEventsWebhookDispatcher for NativeProductAdapterRunner {
 #[derive(Clone)]
 pub struct SlackIngressService {
     resolver: Arc<dyn SlackInstallationResolver>,
-    installation_rate_limiter: SlackInstallationRateLimiter,
+    installation_rate_limiter: crate::host_ingress::InstallationRateLimiter,
 }
 
 impl SlackIngressService {
     pub fn new(resolver: Arc<dyn SlackInstallationResolver>) -> Self {
-        Self::with_rate_limit_config(resolver, SlackInstallationRateLimitConfig::default())
+        Self::with_rate_limit_config(
+            resolver,
+            crate::host_ingress::InstallationRateLimitConfig::new(
+                super::slack_serve::installation::SLACK_INSTALLATION_MAX_REQUESTS,
+                super::slack_serve::installation::SLACK_INSTALLATION_RATE_WINDOW,
+            ),
+        )
     }
 
-    pub fn with_rate_limit_config(
+    pub(crate) fn with_rate_limit_config(
         resolver: Arc<dyn SlackInstallationResolver>,
-        rate_limit: SlackInstallationRateLimitConfig,
+        rate_limit: crate::host_ingress::InstallationRateLimitConfig,
     ) -> Self {
         Self {
             resolver,
-            installation_rate_limiter: SlackInstallationRateLimiter::new(rate_limit),
+            installation_rate_limiter: crate::host_ingress::InstallationRateLimiter::new(
+                rate_limit,
+            ),
         }
     }
 
@@ -118,8 +124,14 @@ impl SlackIngressService {
             Ok(ingress) => ingress,
             Err(error) => return ingress_error_response(error),
         };
-        if let Err(error) = self.installation_rate_limiter.check(ingress.installation()) {
-            return ingress_error_response(error);
+        if let Err(exceeded) = self.installation_rate_limiter.check(
+            ingress.installation().tenant_id(),
+            ingress.installation().adapter_installation_id(),
+        ) {
+            return ingress_error_response(SlackIngressError::InstallationRateLimited {
+                tenant_id: exceeded.tenant_id,
+                adapter_installation_id: exceeded.adapter_installation_id,
+            });
         }
 
         match ingress {
@@ -294,9 +306,9 @@ fn ingress_error_response(error: SlackIngressError) -> Response {
                 error = %error,
                 "Slack Events API envelope metadata parse failed"
             );
-            error_response(
+            crate::host_ingress::webhook_error_response(
                 StatusCode::BAD_REQUEST,
-                SlackWebhookErrorCategory::MalformedPayload,
+                crate::host_ingress::WebhookErrorCategory::MalformedPayload,
             )
         }
         SlackIngressError::InstallationNotFound => {
@@ -305,9 +317,9 @@ fn ingress_error_response(error: SlackIngressError) -> Response {
                 reason = "not_found",
                 "Slack Events API installation resolution failed"
             );
-            error_response(
+            crate::host_ingress::webhook_error_response(
                 StatusCode::UNAUTHORIZED,
-                SlackWebhookErrorCategory::Authentication,
+                crate::host_ingress::WebhookErrorCategory::Authentication,
             )
         }
         SlackIngressError::AmbiguousInstallation => {
@@ -316,9 +328,9 @@ fn ingress_error_response(error: SlackIngressError) -> Response {
                 reason = "ambiguous",
                 "Slack Events API installation resolution failed"
             );
-            error_response(
+            crate::host_ingress::webhook_error_response(
                 StatusCode::UNAUTHORIZED,
-                SlackWebhookErrorCategory::Authentication,
+                crate::host_ingress::WebhookErrorCategory::Authentication,
             )
         }
         SlackIngressError::InstallationRateLimited {
@@ -331,9 +343,9 @@ fn ingress_error_response(error: SlackIngressError) -> Response {
                 adapter_installation_id = %adapter_installation_id,
                 "Slack Events API installation rate limit exceeded"
             );
-            error_response(
+            crate::host_ingress::webhook_error_response(
                 StatusCode::TOO_MANY_REQUESTS,
-                SlackWebhookErrorCategory::Capacity,
+                crate::host_ingress::WebhookErrorCategory::Capacity,
             )
         }
         SlackIngressError::ConversationStoreUnavailable { reason } => {
@@ -344,63 +356,23 @@ fn ingress_error_response(error: SlackIngressError) -> Response {
             );
             // Storage/infra outage, not an auth failure: 503 so Slack retries
             // delivery instead of treating the installation as unauthorized.
-            error_response(
+            crate::host_ingress::webhook_error_response(
                 StatusCode::SERVICE_UNAVAILABLE,
-                SlackWebhookErrorCategory::TemporarilyUnavailable,
+                crate::host_ingress::WebhookErrorCategory::TemporarilyUnavailable,
             )
         }
     }
 }
 
 fn runner_error_response(error: RunnerError) -> Response {
-    let (status, category) = match &error {
-        RunnerError::AuthenticationFailed { .. } => (
-            StatusCode::UNAUTHORIZED,
-            SlackWebhookErrorCategory::Authentication,
-        ),
-        RunnerError::TooManyInFlight { .. } => (
-            StatusCode::TOO_MANY_REQUESTS,
-            SlackWebhookErrorCategory::Capacity,
-        ),
-        RunnerError::Adapter(adapter_error) if adapter_error.is_retryable() => (
-            StatusCode::SERVICE_UNAVAILABLE,
-            SlackWebhookErrorCategory::TemporarilyUnavailable,
-        ),
-        RunnerError::WorkflowTimeout { .. }
-        | RunnerError::WorkflowJoinFailed
-        | RunnerError::WorkflowPanicked
-        | RunnerError::AdapterPanicked => (
-            StatusCode::SERVICE_UNAVAILABLE,
-            SlackWebhookErrorCategory::TemporarilyUnavailable,
-        ),
-        RunnerError::Adapter(_) => (StatusCode::BAD_REQUEST, SlackWebhookErrorCategory::Adapter),
-    };
+    let (status, category) = crate::host_ingress::runner_error_status(&error);
     tracing::debug!(
         target = "ironclaw::reborn::slack_events",
         status = status.as_u16(),
         error = %error,
         "Slack Events API webhook rejected"
     );
-    error_response(status, category)
-}
-
-#[derive(Debug, Clone, Copy, Serialize)]
-#[serde(rename_all = "snake_case")]
-enum SlackWebhookErrorCategory {
-    Authentication,
-    Capacity,
-    MalformedPayload,
-    Adapter,
-    TemporarilyUnavailable,
-}
-
-#[derive(Debug, Serialize)]
-struct SlackWebhookErrorBody {
-    error: SlackWebhookErrorCategory,
-}
-
-fn error_response(status: StatusCode, category: SlackWebhookErrorCategory) -> Response {
-    (status, Json(SlackWebhookErrorBody { error: category })).into_response()
+    crate::host_ingress::webhook_error_response(status, category)
 }
 
 #[cfg(test)]

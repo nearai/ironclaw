@@ -1465,7 +1465,7 @@ impl ImmediateAckWorkflowObserver for FinalReplyDeliveryObserver {
 }
 
 #[derive(Debug, thiserror::Error)]
-pub(crate) enum FinalReplyDeliveryError {
+pub enum FinalReplyDeliveryError {
     #[error("workflow binding failed: {0}")]
     Workflow(#[from] ProductWorkflowError),
     #[error("turn coordinator failed: {0}")]

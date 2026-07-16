@@ -1054,6 +1054,63 @@ fn status_check(
     }
 }
 
+/// Cross-vendor WebUI composition lives here — never inside a vendor module.
+/// Each channel host contributes its facade pair; this builder concatenates
+/// them through the generic composites in [`crate::webui::composite_channels`].
+/// Compose the WebUI bundle when the Slack host-beta AND Telegram channel
+/// hosts are both enabled: the same assembly as
+/// [`crate::build_webui_services_with_slack_host_beta_mounts`], with the Telegram
+/// facade pair concatenated through the generic composite facades so Settings
+/// lists both channels and per-caller connection state merges.
+#[cfg(all(feature = "slack-v2-host-beta", feature = "telegram-v2-host-beta"))]
+pub fn build_webui_services_with_slack_and_telegram_host_mounts(
+    runtime: &RebornRuntime,
+    event_stream: Option<Arc<dyn ProjectionStream>>,
+    slack_mounts: Option<&crate::SlackHostBetaMounts>,
+    operator_route_visibility: crate::SlackOperatorRouteVisibility,
+    telegram_mounts: &crate::telegram::telegram_host_beta::TelegramHostMounts,
+) -> Result<RebornWebuiBundle, RebornBuildError> {
+    use ironclaw_product_workflow::ChannelConnectionFacade;
+
+    use crate::slack::slack_connectable_channel::slack_webui_composition;
+    use crate::webui::composite_channels::{
+        CompositeChannelConnectionFacade, CompositeConnectableChannelsFacade,
+    };
+
+    let composition = slack_webui_composition(runtime, slack_mounts, operator_route_visibility)?;
+
+    let mut connectables: Vec<Arc<dyn ConnectableChannelsProductFacade>> = Vec::new();
+    if let Some(slack_connectable) = composition.connectable {
+        connectables.push(slack_connectable);
+    }
+    connectables.push(telegram_mounts.connectable_channels());
+    let connectable_channels: Option<Arc<dyn ConnectableChannelsProductFacade>> = Some(Arc::new(
+        CompositeConnectableChannelsFacade::new(connectables),
+    ));
+
+    let mut connections: Vec<Arc<dyn ChannelConnectionFacade>> = Vec::new();
+    if let Some(slack_connection) = composition.connection {
+        connections.push(slack_connection);
+    }
+    connections.push(telegram_mounts.channel_connection());
+    let channel_connection: Option<Arc<dyn ChannelConnectionFacade>> =
+        Some(Arc::new(CompositeChannelConnectionFacade::new(connections)));
+
+    // Fill the extension-lifecycle handler's late-binding facade slot with the
+    // composite so an inbound-channel activation can check either channel's
+    // connection state. Idempotent; same facade the WebUI surface uses.
+    if let Some(facade) = channel_connection.as_ref() {
+        runtime.set_channel_connection_facade(Arc::clone(facade));
+    }
+    build_webui_services_with_connectable_channels(
+        runtime,
+        event_stream,
+        connectable_channels,
+        channel_connection,
+        composition.outbound_delivery_target_providers,
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1908,61 +1965,4 @@ output_schema_ref = "schemas/{capability_name}.output.json"
     fn skill_content(name: &str, description: &str) -> String {
         format!("---\nname: {name}\ndescription: {description}\n---\nUse this skill.\n")
     }
-}
-
-/// Cross-vendor WebUI composition lives here — never inside a vendor module.
-/// Each channel host contributes its facade pair; this builder concatenates
-/// them through the generic composites in [`crate::webui::composite_channels`].
-/// Compose the WebUI bundle when the Slack host-beta AND Telegram channel
-/// hosts are both enabled: the same assembly as
-/// [`crate::build_webui_services_with_slack_host_beta_mounts`], with the Telegram
-/// facade pair concatenated through the generic composite facades so Settings
-/// lists both channels and per-caller connection state merges.
-#[cfg(all(feature = "slack-v2-host-beta", feature = "telegram-v2-host-beta"))]
-pub fn build_webui_services_with_slack_and_telegram_host_mounts(
-    runtime: &RebornRuntime,
-    event_stream: Option<Arc<dyn ProjectionStream>>,
-    slack_mounts: Option<&crate::SlackHostBetaMounts>,
-    operator_route_visibility: crate::SlackOperatorRouteVisibility,
-    telegram_mounts: &crate::telegram::telegram_host_beta::TelegramHostMounts,
-) -> Result<RebornWebuiBundle, RebornBuildError> {
-    use ironclaw_product_workflow::ChannelConnectionFacade;
-
-    use crate::slack::slack_connectable_channel::slack_webui_composition;
-    use crate::webui::composite_channels::{
-        CompositeChannelConnectionFacade, CompositeConnectableChannelsFacade,
-    };
-
-    let composition = slack_webui_composition(runtime, slack_mounts, operator_route_visibility)?;
-
-    let mut connectables: Vec<Arc<dyn ConnectableChannelsProductFacade>> = Vec::new();
-    if let Some(slack_connectable) = composition.connectable {
-        connectables.push(slack_connectable);
-    }
-    connectables.push(telegram_mounts.connectable_channels());
-    let connectable_channels: Option<Arc<dyn ConnectableChannelsProductFacade>> = Some(Arc::new(
-        CompositeConnectableChannelsFacade::new(connectables),
-    ));
-
-    let mut connections: Vec<Arc<dyn ChannelConnectionFacade>> = Vec::new();
-    if let Some(slack_connection) = composition.connection {
-        connections.push(slack_connection);
-    }
-    connections.push(telegram_mounts.channel_connection());
-    let channel_connection: Option<Arc<dyn ChannelConnectionFacade>> =
-        Some(Arc::new(CompositeChannelConnectionFacade::new(connections)));
-
-    // Fill the extension-lifecycle handler's late-binding facade slot with the
-    // composite so an inbound-channel activation can check either channel's
-    // connection state. Idempotent; same facade the WebUI surface uses.
-    if let Some(facade) = channel_connection.as_ref() {
-        runtime.set_channel_connection_facade(Arc::clone(facade));
-    }
-    build_webui_services_with_connectable_channels(
-        runtime,
-        event_stream,
-        connectable_channels,
-        channel_connection,
-        composition.outbound_delivery_target_providers,
-    )
 }

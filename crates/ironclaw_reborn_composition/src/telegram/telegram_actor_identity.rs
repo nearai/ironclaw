@@ -142,10 +142,12 @@ mod tests {
 
     use super::*;
 
+    type BindingsByProviderUser = HashMap<(String, String), (UserId, Option<String>)>;
+
     /// Epoch-aware lookup fake keyed by `(provider, provider_user_id)`.
     #[derive(Debug, Default)]
     struct EpochLookup {
-        bindings: StdMutex<HashMap<(String, String), (UserId, Option<String>)>>,
+        bindings: StdMutex<BindingsByProviderUser>,
     }
 
     impl EpochLookup {

@@ -10,15 +10,17 @@
 use std::{
     collections::{HashMap, HashSet},
     future::Future,
-    sync::{Arc, Mutex, Weak},
+    sync::Arc,
     time::Duration,
 };
 
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use chrono::{DateTime, Utc};
+#[cfg(test)]
+use ironclaw_filesystem::Entry;
 use ironclaw_filesystem::{
-    CasExpectation, ContentType, Entry, FileType, FilesystemError, FilesystemOperation,
-    RecordVersion, RootFilesystem, ScopedFilesystem,
+    CasExpectation, FileType, FilesystemError, FilesystemOperation, RecordVersion, RootFilesystem,
+    ScopedFilesystem,
 };
 use ironclaw_host_api::{
     AgentId, InvocationId, ProjectId, ResourceScope, ScopedPath, TenantId, UserId,
@@ -85,7 +87,7 @@ where
 {
     filesystem: Arc<ScopedFilesystem<F>>,
     scope: ResourceScope,
-    locks: Arc<Mutex<HashMap<String, Weak<tokio::sync::Mutex<()>>>>>,
+    locks: Arc<crate::support::fs::host_state_records::KeyedAsyncLocks>,
 }
 
 impl<F> Clone for FilesystemSlackHostState<F>
@@ -135,22 +137,12 @@ where
                 thread_id: None,
                 invocation_id: InvocationId::new(),
             },
-            locks: Arc::new(Mutex::new(HashMap::new())),
+            locks: Arc::new(crate::support::fs::host_state_records::KeyedAsyncLocks::default()),
         }
     }
 
     fn lock_for(&self, key: String) -> Arc<tokio::sync::Mutex<()>> {
-        let mut locks = self
-            .locks
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        locks.retain(|_, lock| lock.strong_count() > 0);
-        if let Some(lock) = locks.get(&key).and_then(Weak::upgrade) {
-            return lock;
-        }
-        let lock = Arc::new(tokio::sync::Mutex::new(()));
-        locks.insert(key, Arc::downgrade(&lock));
-        lock
+        self.locks.lock_for(key)
     }
 
     async fn read_record<T>(
@@ -160,16 +152,13 @@ where
     where
         T: DeserializeOwned,
     {
-        let Some(versioned) = self.filesystem.get(&self.scope, path).await? else {
-            return Ok(None);
-        };
-        let value = serde_json::from_slice(&versioned.entry.body).map_err(|_| {
-            FilesystemError::BackendInfrastructure {
-                operation: FilesystemOperation::ReadFile,
-                reason: "Slack host-state record is invalid JSON".into(),
-            }
-        })?;
-        Ok(Some((value, versioned.version)))
+        crate::support::fs::host_state_records::read_json_record(
+            &self.filesystem,
+            &self.scope,
+            path,
+            "Slack host-state",
+        )
+        .await
     }
 
     async fn write_record<T>(
@@ -181,19 +170,15 @@ where
     where
         T: Serialize,
     {
-        let body =
-            serde_json::to_vec(value).map_err(|_| FilesystemError::BackendInfrastructure {
-                operation: FilesystemOperation::WriteFile,
-                reason: "Slack host-state record could not be serialized".into(),
-            })?;
-        self.filesystem
-            .put(
-                &self.scope,
-                path,
-                Entry::bytes(body).with_content_type(ContentType::json()),
-                cas,
-            )
-            .await
+        crate::support::fs::host_state_records::write_json_record(
+            &self.filesystem,
+            &self.scope,
+            path,
+            value,
+            cas,
+            "Slack host-state",
+        )
+        .await
     }
 
     async fn delete_record(&self, path: &ScopedPath) -> Result<(), FilesystemError> {
