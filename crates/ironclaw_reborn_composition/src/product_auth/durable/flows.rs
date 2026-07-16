@@ -46,6 +46,14 @@ where
     F: RootFilesystem + 'static,
 {
     async fn create_flow(&self, request: NewAuthFlow) -> Result<AuthFlowRecord, AuthProductError> {
+        // Supersede-on-start happens at the creation seam itself (see the
+        // `AuthFlowManager::create_flow` contract): cancel the prior live
+        // setup-class flows before this one becomes visible, so the walk can
+        // never observe — and cancel — the flow it is clearing the way for.
+        if is_setup_class_continuation(&request.continuation) {
+            self.cancel_superseded_setup_flows(&request.scope, &request.provider)
+                .await?;
+        }
         if let Some(binding) = &request.update_binding {
             let account = self
                 .read_account(&request.scope, binding.account_id)

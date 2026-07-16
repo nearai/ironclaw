@@ -181,6 +181,13 @@ impl AuthFlowRecordSource for InMemoryAuthProductServices {
 #[async_trait]
 impl AuthFlowManager for InMemoryAuthProductServices {
     async fn create_flow(&self, request: NewAuthFlow) -> Result<AuthFlowRecord, AuthProductError> {
+        // Supersede-on-start happens at the creation seam itself (see the
+        // `AuthFlowManager::create_flow` contract), before the state lock so
+        // the walk's own locking cannot re-enter it.
+        if crate::is_setup_class_continuation(&request.continuation) {
+            self.cancel_superseded_setup_flows(&request.scope, &request.provider)
+                .await?;
+        }
         let mut state = self.lock_state();
         if let Some(binding) = &request.update_binding {
             let account = state

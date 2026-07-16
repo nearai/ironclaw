@@ -292,6 +292,16 @@ pub struct OAuthCallbackClaimRequest {
 
 #[async_trait]
 pub trait AuthFlowManager: Send + Sync {
+    /// Mint a new durable auth flow.
+    ///
+    /// Contract: when the request's continuation is setup-class
+    /// ([`is_setup_class_continuation`]), creation itself supersedes — it
+    /// cancels every prior non-terminal setup-class flow for the same owner
+    /// root + provider (RFC 9700 §4.7.1) before the new flow becomes visible,
+    /// so "≤1 live setup-class flow per owner+provider" holds structurally and
+    /// no start route can forget it. `TurnGateResume`/`ProductActionResume`
+    /// creations supersede nothing and are never superseded: a parked
+    /// turn/action must outlive an unrelated setup start.
     async fn create_flow(&self, request: NewAuthFlow) -> Result<AuthFlowRecord, AuthProductError>;
 
     async fn get_flow(
@@ -361,10 +371,10 @@ pub trait AuthFlowManager: Send + Sync {
         flow_id: AuthFlowId,
     ) -> Result<AuthFlowRecord, AuthProductError>;
 
-    /// Supersede-on-start (RFC 9700 §4.7.1). Cancel any prior non-terminal
-    /// setup-class flow for the same owner+provider before a fresh setup flow
-    /// is minted, so a re-opened "Connect" popup cannot leave two live
-    /// authorization requests racing to write the same credential.
+    /// Internal building block of [`Self::create_flow`]'s supersede-on-start
+    /// contract (RFC 9700 §4.7.1): cancel any prior non-terminal setup-class
+    /// flow for the same owner+provider. Production code must not need to
+    /// call this directly — creating the successor flow already runs it.
     ///
     /// Setup-class means [`is_setup_class_continuation`]: the web connect
     /// button's `SetupOnly` and the extension card's `LifecycleActivation`.
@@ -379,7 +389,8 @@ pub trait AuthFlowManager: Send + Sync {
     ///
     /// The default is a no-op for narrow flow stores and test doubles that
     /// never hold more than one concurrent setup flow; the durable store and
-    /// the in-memory fake override it.
+    /// the in-memory fake override it (and route their `create_flow` through
+    /// it).
     async fn cancel_superseded_setup_flows(
         &self,
         _scope: &AuthProductScope,

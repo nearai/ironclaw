@@ -865,14 +865,14 @@ async fn uninstall_cancels_lifecycle_package_flows_regardless_of_provider() {
         pkce_verifier_hash: Some(pkce_hash(state)),
         expires_at,
     };
+    // `create_flow` allows at most one live setup-class flow per
+    // owner+provider (a later creation supersedes the earlier one), so the
+    // two halves of the selector invariant are staged sequentially: first the
+    // removed package's own live flow dies with the uninstall…
     let removed_flow = services
         .create_flow(lifecycle_flow(&removed_package, "removed-state"))
         .await
         .expect("removed package flow");
-    let surviving_flow = services
-        .create_flow(lifecycle_flow(&surviving_package, "surviving-state"))
-        .await
-        .expect("surviving package flow");
 
     let request = SecretCleanupRequest {
         scope: owner.clone(),
@@ -896,6 +896,18 @@ async fn uninstall_cancels_lifecycle_package_flows_regardless_of_provider() {
         AuthFlowStatus::Canceled,
         "the removed package's connect flow dies with the extension"
     );
+
+    // …then, with ANOTHER package's flow live on the very same provider, a
+    // repeat of the removed package's uninstall must not blanket-cancel the
+    // shared provider's flow: the package selector discriminates by package.
+    let surviving_flow = services
+        .create_flow(lifecycle_flow(&surviving_package, "surviving-state"))
+        .await
+        .expect("surviving package flow");
+    let repeat = services
+        .cleanup_for_lifecycle(request.clone())
+        .await
+        .expect("package-keyed cleanup repeat");
     assert_eq!(
         services
             .get_flow(&owner, surviving_flow.id)
@@ -905,6 +917,10 @@ async fn uninstall_cancels_lifecycle_package_flows_regardless_of_provider() {
             .status,
         AuthFlowStatus::AwaitingUser,
         "another package's flow on the same provider survives"
+    );
+    assert!(
+        repeat.canceled_flows.is_empty(),
+        "the repeat uninstall has nothing of its own package left to cancel"
     );
     assert_eq!(
         report

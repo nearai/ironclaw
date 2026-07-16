@@ -1181,29 +1181,18 @@ async fn flow_status(
         .status
 }
 
-/// Supersede-on-start (RFC 9700 §4.7.1) is SETUP-CLASS scoped, not
-/// `SetupOnly`-only. A re-opened "Connect" popup must cancel the prior
-/// non-terminal setup-class flow for the same owner+provider — and on this
-/// codebase the extension-card connect button mints a `LifecycleActivation`
-/// continuation (`extension_oauth_start_handler` passes it through
-/// `start_setup_oauth_flow` verbatim), so a `SetupOnly`-only predicate would
-/// miss the user's actual re-open scenario.
-///
-/// A `TurnGateResume` flow is a DIFFERENT class — an agent turn is parked on it
-/// — so a setup start must never cancel it. Other providers and other owners
-/// are likewise untouched.
+/// Supersede-on-start lives INSIDE `create_flow`: minting a setup-class flow
+/// is itself the seam that cancels the prior live setup-class flows for the
+/// same owner root + provider, so no start route can forget to supersede
+/// (the #6130 DCR/Notion gap class becomes unrepresentable). Gate flows, other
+/// providers, and other owners are bystanders the creation must not disturb.
 #[tokio::test]
-async fn cancel_superseded_setup_flows_supersedes_only_matching_setup_class_flows() {
+async fn create_flow_supersedes_prior_live_setup_class_flows() {
     let services = InMemoryAuthProductServices::new();
     let owner = scope("alice");
-    // Bind bob's scope once: `scope()` mints a fresh invocation_id per call and
-    // `get_flow` compares full scope equality, so a re-derived scope would not
-    // locate the record (that owner-vs-full-scope distinction is exactly what
-    // the supersede's owner-granularity matching must bridge).
     let bob = scope("bob");
     let other_provider = AuthProviderId::new("gmail").expect("valid provider");
 
-    // Two abandoned "Connect" popups for github, one per setup-class flavour.
     let setup_only = setup_flow_with(
         &services,
         owner.clone(),
@@ -1218,8 +1207,6 @@ async fn cancel_superseded_setup_flows_supersedes_only_matching_setup_class_flow
         lifecycle_continuation(),
     )
     .await;
-
-    // Bystanders supersede must never touch.
     let turn_gate = setup_flow_with(
         &services,
         owner.clone(),
@@ -1242,24 +1229,140 @@ async fn cancel_superseded_setup_flows_supersedes_only_matching_setup_class_flow
     )
     .await;
 
-    // The next "Connect" popup starts: supersede both prior setup-class flows.
-    let mut superseded = services
-        .cancel_superseded_setup_flows(&owner, &provider())
-        .await
-        .expect("supersede");
-    superseded.sort();
-    let mut expected = vec![setup_only.id, lifecycle.id];
-    expected.sort();
-    assert_eq!(superseded, expected);
+    // The re-opened "Connect" popup mints its flow: creation supersedes.
+    let reopened = setup_flow_with(
+        &services,
+        owner.clone(),
+        provider(),
+        AuthContinuationRef::SetupOnly,
+    )
+    .await;
 
     assert_eq!(
+        flow_status(&services, &owner, reopened.id).await,
+        AuthFlowStatus::AwaitingUser,
+        "the freshly created flow must not supersede itself"
+    );
+    assert_eq!(
         flow_status(&services, &owner, setup_only.id).await,
-        AuthFlowStatus::Canceled
+        AuthFlowStatus::Canceled,
+        "creating a setup-class flow must cancel the prior SetupOnly flow"
     );
     assert_eq!(
         flow_status(&services, &owner, lifecycle.id).await,
         AuthFlowStatus::Canceled,
-        "the extension-card connect flavour is setup-class and must be superseded"
+        "creating a setup-class flow must cancel the prior LifecycleActivation flow"
+    );
+    assert_eq!(
+        flow_status(&services, &owner, turn_gate.id).await,
+        AuthFlowStatus::AwaitingUser,
+        "a parked turn's auth gate is not a setup flow and must survive creation"
+    );
+    assert_eq!(
+        flow_status(&services, &owner, other_prov.id).await,
+        AuthFlowStatus::AwaitingUser
+    );
+    assert_eq!(
+        flow_status(&services, &bob, other_owner.id).await,
+        AuthFlowStatus::AwaitingUser
+    );
+}
+
+/// The exclusion that keeps parked turns alive cuts both ways: creating a
+/// `TurnGateResume` flow is not a setup start, so it must not cancel a live
+/// setup-class flow for the same owner+provider (and vice versa is pinned
+/// above). Both classes stay live side by side.
+#[tokio::test]
+async fn create_flow_for_a_parked_turn_gate_does_not_supersede_setup_flows() {
+    let services = InMemoryAuthProductServices::new();
+    let owner = scope("alice");
+
+    let setup_only = setup_flow_with(
+        &services,
+        owner.clone(),
+        provider(),
+        AuthContinuationRef::SetupOnly,
+    )
+    .await;
+    let turn_gate = setup_flow_with(
+        &services,
+        owner.clone(),
+        provider(),
+        turn_gate_continuation("gate:parked-turn"),
+    )
+    .await;
+
+    assert_eq!(
+        flow_status(&services, &owner, setup_only.id).await,
+        AuthFlowStatus::AwaitingUser,
+        "a gate flow's creation must never cancel the setup surface's flow"
+    );
+    assert_eq!(
+        flow_status(&services, &owner, turn_gate.id).await,
+        AuthFlowStatus::AwaitingUser
+    );
+}
+
+/// The internal supersede walk `create_flow` routes through: it reports the
+/// superseded ids, matches on the owner root (not full scope equality — each
+/// popup re-open mints a fresh invocation id), spares every bystander class,
+/// and finds nothing on a second pass. Under the `create_flow` contract at
+/// most one setup-class flow is live per owner+provider, so this walk can
+/// only ever see one victim; the class matching across both setup flavours is
+/// pinned by `create_flow_supersedes_prior_live_setup_class_flows`.
+#[tokio::test]
+async fn cancel_superseded_setup_flows_returns_superseded_ids_and_is_idempotent() {
+    let services = InMemoryAuthProductServices::new();
+    let owner = scope("alice");
+    // Bind bob's scope once: `scope()` mints a fresh invocation_id per call and
+    // `get_flow` compares full scope equality, so a re-derived scope would not
+    // locate the record (that owner-vs-full-scope distinction is exactly what
+    // the supersede's owner-granularity matching must bridge).
+    let bob = scope("bob");
+    let other_provider = AuthProviderId::new("gmail").expect("valid provider");
+
+    // One abandoned "Connect" popup for github…
+    let setup_only = setup_flow_with(
+        &services,
+        owner.clone(),
+        provider(),
+        AuthContinuationRef::SetupOnly,
+    )
+    .await;
+    // …and bystanders the walk must never touch (none of these creations
+    // supersedes the setup flow: a gate flow is a different class, and the
+    // other setup flows live under a different provider or owner root).
+    let turn_gate = setup_flow_with(
+        &services,
+        owner.clone(),
+        provider(),
+        turn_gate_continuation("gate:parked-turn"),
+    )
+    .await;
+    let other_prov = setup_flow_with(
+        &services,
+        owner.clone(),
+        other_provider,
+        AuthContinuationRef::SetupOnly,
+    )
+    .await;
+    let other_owner = setup_flow_with(
+        &services,
+        bob.clone(),
+        provider(),
+        AuthContinuationRef::SetupOnly,
+    )
+    .await;
+
+    let superseded = services
+        .cancel_superseded_setup_flows(&owner, &provider())
+        .await
+        .expect("supersede");
+    assert_eq!(superseded, vec![setup_only.id]);
+
+    assert_eq!(
+        flow_status(&services, &owner, setup_only.id).await,
+        AuthFlowStatus::Canceled
     );
     assert_eq!(
         flow_status(&services, &owner, turn_gate.id).await,

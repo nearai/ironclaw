@@ -1645,25 +1645,13 @@ impl RebornProductAuthServices {
         &self,
         request: RebornOAuthStartFlowRequest,
     ) -> Result<AuthFlowRecord, AuthProductError> {
-        // Supersede-on-start (RFC 9700 §4.7.1). Before minting a new setup
-        // flow, cancel any prior non-terminal setup-class flow for the same
-        // owner+provider so a re-opened connect popup cannot leave two live
-        // authorization requests racing to write the same credential. This is
-        // the durable analogue of the gate path's reusable-flow supersede, and
-        // it sits at the seam BOTH start handlers funnel through.
-        // Best-effort + idempotent; `create_flow` below keeps
-        // `CasExpectation::Absent`, so a genuinely concurrent create still
-        // races cleanly on the new flow id.
-        for superseded in self
-            .flow_manager
-            .cancel_superseded_setup_flows(&request.scope, &request.provider)
-            .await?
-        {
-            // A superseded flow can never complete a callback, so its stored
-            // verifier is dead material — drop it rather than leave it to TTL.
-            self.delete_setup_pkce_verifier(&request.scope, superseded)
-                .await;
-        }
+        // Supersede-on-start (RFC 9700 §4.7.1) is `create_flow`'s own contract
+        // now: minting the setup-class flow below cancels any prior live
+        // setup-class flow for the same owner+provider, so a re-opened connect
+        // popup cannot leave two live authorization requests racing to write
+        // the same credential. A superseded flow's stored verifier is dead
+        // material; its store TTL (the dead flow's own `expires_at`) reclaims
+        // it.
 
         // Mint the id up front so the verifier can be stored BEFORE the flow
         // exists, mirroring the gate driver: a flow is never visible without
@@ -1826,22 +1814,12 @@ impl RebornProductAuthServices {
         let Some(registry) = &self.dcr_oauth_registry else {
             return Ok(None);
         };
-        // Supersede-on-start (RFC 9700 §4.7.1), mirroring
-        // `start_setup_oauth_flow`: DCR providers (e.g. Notion) reach flow
-        // creation through the registry rather than the plain setup seam, and
-        // a re-opened connect popup must not leave two live authorization
-        // requests racing to write the same credential. Superseded flows'
-        // setup-store verifiers are dropped best-effort (a no-op for
-        // DCR-created flows, whose verifier material lives in the DCR
-        // registry and ages out by its own TTL).
-        for superseded in self
-            .flow_manager
-            .cancel_superseded_setup_flows(&request.scope, &request.provider)
-            .await?
-        {
-            self.delete_setup_pkce_verifier(&request.scope, superseded)
-                .await;
-        }
+        // Supersede-on-start (RFC 9700 §4.7.1) is `create_flow`'s own
+        // contract: DCR providers (e.g. Notion) reach flow creation through
+        // the registry rather than the plain setup seam, and inherit it there
+        // — the exact per-route omission #6130 had to patch here is now
+        // structurally impossible. Superseded flows' verifier material ages
+        // out by its own store TTL.
         registry
             .start_setup_flow(
                 &self.flow_manager,

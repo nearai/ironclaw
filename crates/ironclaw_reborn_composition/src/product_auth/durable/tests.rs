@@ -1170,12 +1170,12 @@ async fn cleanup_for_lifecycle_cancels_the_removed_packages_flows_despite_shared
         pkce_verifier_hash: Some(pkce_hash(state)),
         expires_at: Utc::now() + Duration::minutes(10),
     };
+    // `create_flow` allows at most one live setup-class flow per
+    // owner+provider (a later creation supersedes the earlier one), so the two
+    // halves of the selector invariant are staged sequentially: first the
+    // removed package's own live flow dies with the uninstall…
     let removed_flow = service
         .create_flow(lifecycle_flow(&removed_package, "removed-package"))
-        .await
-        .unwrap();
-    let surviving_flow = service
-        .create_flow(lifecycle_flow(&surviving_package, "surviving-package"))
         .await
         .unwrap();
 
@@ -1201,16 +1201,6 @@ async fn cleanup_for_lifecycle_cancels_the_removed_packages_flows_despite_shared
         AuthFlowStatus::Canceled,
         "the removed package's connect flow must die with the extension"
     );
-    assert_eq!(
-        service
-            .get_flow(&scope, surviving_flow.id)
-            .await
-            .unwrap()
-            .expect("surviving package flow is retained")
-            .status,
-        AuthFlowStatus::AwaitingUser,
-        "another extension's flow on the shared provider must survive"
-    );
     // The report names the canceled flow so the composition wrapper can drop
     // its durable setup PKCE verifier eagerly instead of waiting out the TTL.
     assert_eq!(
@@ -1222,10 +1212,184 @@ async fn cleanup_for_lifecycle_cancels_the_removed_packages_flows_despite_shared
         vec![removed_flow.id]
     );
 
+    // …then, with ANOTHER package's flow live on the very same provider, a
+    // repeat of the removed package's uninstall must not blanket-cancel the
+    // shared provider's flow: the package selector discriminates by package.
+    let surviving_flow = service
+        .create_flow(lifecycle_flow(&surviving_package, "surviving-package"))
+        .await
+        .unwrap();
     let retry = ironclaw_auth::SecretCleanupService::cleanup_for_lifecycle(&service, request)
         .await
         .expect("package-keyed cleanup retry");
+    assert_eq!(
+        service
+            .get_flow(&scope, surviving_flow.id)
+            .await
+            .unwrap()
+            .expect("surviving package flow is retained")
+            .status,
+        AuthFlowStatus::AwaitingUser,
+        "another extension's flow on the shared provider must survive"
+    );
     assert!(retry.canceled_flows.is_empty(), "cleanup is idempotent");
+}
+
+/// Durable twin of the `create_flow_supersedes_prior_live_setup_class_flows`
+/// contract test: supersede-on-start lives INSIDE `create_flow`, keyed off the
+/// request's continuation class, so a start route that reaches flow creation
+/// through any path (plain setup, DCR registry, a future route) inherits the
+/// "≤1 live setup-class flow per owner+provider" invariant structurally.
+/// Setup flows are thread-less and every popup re-open mints a fresh
+/// invocation, so the two prior flows here deliberately carry different
+/// invocation ids under the same durable owner root.
+#[tokio::test]
+async fn create_flow_supersedes_prior_live_setup_class_flows_in_the_durable_store() {
+    let filesystem = test_filesystem();
+    let secret_store: Arc<dyn SecretStore> = Arc::new(InMemorySecretStore::new());
+    let service = test_service(filesystem, secret_store);
+
+    let provider = AuthProviderId::new("github").unwrap();
+    let other_provider = AuthProviderId::new("gmail").unwrap();
+    let setup_flow = |scope: &AuthProductScope,
+                      flow_provider: &AuthProviderId,
+                      continuation: AuthContinuationRef,
+                      state: &str| NewAuthFlow {
+        id: None,
+        scope: scope.clone(),
+        kind: AuthFlowKind::IntegrationCredential,
+        provider: flow_provider.clone(),
+        challenge: AuthChallenge::OAuthUrl {
+            authorization_url: OAuthAuthorizationUrl::new(
+                "https://example.com/oauth/authorize?state=supersede",
+            )
+            .unwrap(),
+            expires_at: Utc::now() + Duration::minutes(10),
+        },
+        continuation,
+        update_binding: None,
+        opaque_state_hash: Some(state_hash(state)),
+        pkce_verifier_hash: Some(pkce_hash(state)),
+        expires_at: Utc::now() + Duration::minutes(10),
+    };
+
+    // Each start mints a fresh invocation id (`test_scope` does the same), so
+    // supersede must match on the owner root, not full scope equality.
+    let first_open = test_scope();
+    let setup_only = service
+        .create_flow(setup_flow(
+            &first_open,
+            &provider,
+            AuthContinuationRef::SetupOnly,
+            "first-open",
+        ))
+        .await
+        .unwrap();
+    let card_open = test_scope();
+    let lifecycle = service
+        .create_flow(setup_flow(
+            &card_open,
+            &provider,
+            AuthContinuationRef::LifecycleActivation {
+                package_ref: ironclaw_auth::LifecyclePackageRef::new("github-extension").unwrap(),
+            },
+            "card-open",
+        ))
+        .await
+        .unwrap();
+    let gate_scope = test_scope();
+    let turn_gate = service
+        .create_flow(setup_flow(
+            &gate_scope,
+            &provider,
+            AuthContinuationRef::TurnGateResume {
+                turn_run_ref: TurnRunRef::new("run-parked").unwrap(),
+                gate_ref: AuthGateRef::new("gate:parked-turn").unwrap(),
+            },
+            "gate-open",
+        ))
+        .await
+        .unwrap();
+    let other_scope = test_scope();
+    let other_prov = service
+        .create_flow(setup_flow(
+            &other_scope,
+            &other_provider,
+            AuthContinuationRef::SetupOnly,
+            "other-provider",
+        ))
+        .await
+        .unwrap();
+
+    let reopen = test_scope();
+    let reopened = service
+        .create_flow(setup_flow(
+            &reopen,
+            &provider,
+            AuthContinuationRef::SetupOnly,
+            "reopen",
+        ))
+        .await
+        .unwrap();
+
+    let status_of = |flow: &AuthFlowRecord| {
+        let scope = flow.scope.clone();
+        let id = flow.id;
+        let service = &service;
+        async move {
+            service
+                .get_flow(&scope, id)
+                .await
+                .unwrap()
+                .expect("flow record is retained")
+                .status
+        }
+    };
+    assert_eq!(
+        status_of(&reopened).await,
+        AuthFlowStatus::AwaitingUser,
+        "the freshly created flow must not supersede itself"
+    );
+    assert_eq!(
+        status_of(&setup_only).await,
+        AuthFlowStatus::Canceled,
+        "creation must cancel the prior SetupOnly flow across invocation ids"
+    );
+    assert_eq!(
+        status_of(&lifecycle).await,
+        AuthFlowStatus::Canceled,
+        "creation must cancel the prior LifecycleActivation flow"
+    );
+    assert_eq!(
+        status_of(&turn_gate).await,
+        AuthFlowStatus::AwaitingUser,
+        "a parked turn's gate flow must survive a setup start"
+    );
+    assert_eq!(
+        status_of(&other_prov).await,
+        AuthFlowStatus::AwaitingUser,
+        "another provider's setup flow must survive"
+    );
+
+    // And the exclusion cuts both ways: a gate creation supersedes nothing.
+    let second_gate_scope = test_scope();
+    service
+        .create_flow(setup_flow(
+            &second_gate_scope,
+            &provider,
+            AuthContinuationRef::TurnGateResume {
+                turn_run_ref: TurnRunRef::new("run-parked-two").unwrap(),
+                gate_ref: AuthGateRef::new("gate:parked-turn-two").unwrap(),
+            },
+            "second-gate-open",
+        ))
+        .await
+        .unwrap();
+    assert_eq!(
+        status_of(&reopened).await,
+        AuthFlowStatus::AwaitingUser,
+        "a gate flow's creation must never cancel the live setup flow"
+    );
 }
 
 /// #4a lifecycle lock — the removal entrypoints cancel a pending flow through
