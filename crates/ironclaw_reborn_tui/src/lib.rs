@@ -341,6 +341,16 @@ async fn execute_api_call(client: &ApiClient, state: &mut AppState, call: ApiCal
             Ok(result) => apply_llm_test_result(state, result),
             Err(err) => set_local_error(state, "test llm connection", err),
         },
+        ApiCall::CancelRun { thread_id, run_id } => {
+            // `state.running`/`active_run_id` deliberately stay untouched
+            // here even on success, same rationale as `ResolveGate` above:
+            // they only clear once the server confirms via a later SSE
+            // `Cancelled`/terminal `RunStatus` event, never optimistically
+            // from this call's own response.
+            if let Err(err) = client.cancel_run(&thread_id, &run_id).await {
+                set_local_error(state, "cancel run", err);
+            }
+        }
     }
 }
 

@@ -13,6 +13,7 @@ pub mod automations;
 pub mod events;
 pub mod gates;
 pub mod llm;
+pub mod runs;
 pub mod session;
 pub mod threads;
 

@@ -79,6 +79,10 @@ pub(crate) fn apply_server_event(state: &mut AppState, frame: WebChatV2EventFram
             {
                 state.pending_gate = None;
             }
+            if state.active_run_id.as_deref() == Some(run_id.as_str()) {
+                state.running = false;
+                state.active_run_id = None;
+            }
             state.transcript.push(TranscriptItem::System {
                 text: format!("run {}", wire_label(&response.status)),
             });
@@ -203,6 +207,7 @@ fn apply_projection_item(state: &mut AppState, item: ProductProjectionItem) -> V
 fn apply_run_status(state: &mut AppState, run_id: String, status: String) -> Vec<Effect> {
     if TERMINAL_RUN_STATUSES.contains(&status.as_str()) {
         state.running = false;
+        state.active_run_id = None;
         if state
             .pending_gate
             .as_ref()
@@ -220,6 +225,13 @@ fn apply_run_status(state: &mut AppState, run_id: String, status: String) -> Vec
         };
     }
     state.running = !PROMPT_RUN_STATUSES.contains(&status.as_str());
+    // Tracked whenever the run isn't terminal (including a blocked/prompt
+    // status, which is still an active — just paused — run), so a gate
+    // that resolves back into the same run keeps a target for `Esc` to
+    // cancel. `Esc` itself only fires while `state.running` is also true
+    // (see `dispatch_composer_key`), so a blocked run doesn't offer a
+    // composer-focus cancel (the gate zone owns `Esc` there instead).
+    state.active_run_id = Some(run_id);
     Vec::new()
 }
 
@@ -268,7 +280,7 @@ mod tests {
     use ironclaw_host_api::InvocationId;
     use ironclaw_product_workflow::CapabilityActivityStatusView;
     use ironclaw_product_workflow::webchat_schema::WebChatV2Event;
-    use ironclaw_turns::TurnRunId;
+    use ironclaw_turns::{EventCursor, TurnRunId, TurnStatus};
 
     use super::super::test_support::{
         activity_view, final_reply_view, frame, projection_gate, projection_run_status,
@@ -485,5 +497,95 @@ mod tests {
             ),
             "first arrival (the projection item) wins; the later raw frame is a no-op"
         );
+    }
+
+    #[test]
+    fn non_terminal_run_status_captures_the_active_run_id() {
+        let mut state = AppState::default();
+        let run_id = TurnRunId::new();
+        apply_server_event(
+            &mut state,
+            frame(WebChatV2Event::ProjectionUpdate {
+                state: projection_state("t-1", vec![projection_run_status(run_id, "in_progress")]),
+            }),
+        );
+        assert_eq!(
+            state.active_run_id.as_deref(),
+            Some(run_id.to_string().as_str())
+        );
+        assert!(state.is_running());
+    }
+
+    #[test]
+    fn terminal_run_status_clears_the_active_run_id() {
+        let mut state = AppState::default().set_thread_id("t-1");
+        let run_id = TurnRunId::new();
+        apply_server_event(
+            &mut state,
+            frame(WebChatV2Event::ProjectionUpdate {
+                state: projection_state("t-1", vec![projection_run_status(run_id, "in_progress")]),
+            }),
+        );
+        assert!(state.active_run_id.is_some());
+
+        apply_server_event(
+            &mut state,
+            frame(WebChatV2Event::ProjectionUpdate {
+                state: projection_state("t-1", vec![projection_run_status(run_id, "completed")]),
+            }),
+        );
+        assert_eq!(
+            state.active_run_id, None,
+            "a terminal RunStatus must clear the cancel target"
+        );
+    }
+
+    #[test]
+    fn cancelled_event_for_the_active_run_clears_running_and_active_run_id() {
+        let mut state = AppState::default();
+        let run_id = TurnRunId::new();
+        state.running = true;
+        state.active_run_id = Some(run_id.to_string());
+
+        apply_server_event(
+            &mut state,
+            frame(WebChatV2Event::Cancelled {
+                response: ironclaw_product_workflow::RebornCancelRunResponse {
+                    run_id,
+                    status: TurnStatus::Cancelled,
+                    event_cursor: EventCursor(1),
+                    already_terminal: false,
+                },
+            }),
+        );
+
+        assert!(!state.is_running());
+        assert_eq!(state.active_run_id, None);
+    }
+
+    #[test]
+    fn cancelled_event_for_a_different_run_does_not_clear_the_active_run_id() {
+        let mut state = AppState::default();
+        let active_run_id = TurnRunId::new();
+        state.running = true;
+        state.active_run_id = Some(active_run_id.to_string());
+
+        apply_server_event(
+            &mut state,
+            frame(WebChatV2Event::Cancelled {
+                response: ironclaw_product_workflow::RebornCancelRunResponse {
+                    run_id: TurnRunId::new(),
+                    status: TurnStatus::Cancelled,
+                    event_cursor: EventCursor(1),
+                    already_terminal: false,
+                },
+            }),
+        );
+
+        assert!(
+            state.is_running(),
+            "a stale/unrelated run must not clear this state"
+        );
+        assert_eq!(state.active_run_id, Some(active_run_id.to_string()));
     }
 }

@@ -208,6 +208,10 @@ pub enum ApiCall {
         adapter: String,
         base_url: Option<String>,
     },
+    CancelRun {
+        thread_id: String,
+        run_id: String,
+    },
 }
 
 /// Canonical shape (B2.0, binding): everything the reducer hands back to the
@@ -241,6 +245,13 @@ pub struct AppState {
     /// items never shifts what's on screen while scrolled. `End` (or
     /// `PageDown` walking off the tail) resets to `None` to resume follow.
     pub transcript_scroll: Option<usize>,
+    /// `run_id` of the turn currently in flight, captured from the last
+    /// non-terminal `RunStatus` projection item (`app/transcript.rs`'s
+    /// `apply_run_status`) and cleared once that run settles. Lets a
+    /// composer-focus `Esc` target the right run for `ApiCall::CancelRun`
+    /// without this crate storing a typed `TurnRunId` (see the module
+    /// doc's boundary note).
+    pub active_run_id: Option<String>,
 }
 
 impl AppState {
@@ -281,6 +292,11 @@ impl AppState {
 
     pub fn set_transcript_scroll(mut self, transcript_scroll: usize) -> Self {
         self.transcript_scroll = Some(transcript_scroll);
+        self
+    }
+
+    pub fn set_active_run_id(mut self, active_run_id: impl Into<String>) -> Self {
+        self.active_run_id = Some(active_run_id.into());
         self
     }
 
@@ -434,6 +450,21 @@ fn dispatch_composer_key(state: &mut AppState, key: KeyEvent) -> Vec<Effect> {
             state.composer_text.push(c);
             Vec::new()
         }
+        // Cancels the in-flight run, mirroring webui's Cancel affordance.
+        // Only reachable in plain chat: a modal or a pending gate would
+        // have already claimed `Esc` via `dispatch_key_inner`'s focus
+        // precedence, and this arm itself only fires an effect while a run
+        // is actually active — otherwise there's nothing to cancel.
+        KeyCode::Esc => match (
+            state.running,
+            state.thread_id.clone(),
+            state.active_run_id.clone(),
+        ) {
+            (true, Some(thread_id), Some(run_id)) => {
+                vec![Effect::Api(ApiCall::CancelRun { thread_id, run_id })]
+            }
+            _ => Vec::new(),
+        },
         KeyCode::PageUp => {
             scroll_transcript_page_up(state);
             Vec::new()
@@ -651,5 +682,47 @@ mod transcript_scroll_tests {
             state.transcript_scroll, None,
             "nothing to page down to past the tail"
         );
+    }
+}
+
+#[cfg(test)]
+mod cancel_run_tests {
+    use crossterm::event::KeyCode;
+
+    use super::test_support::key;
+    use super::*;
+
+    #[test]
+    fn esc_cancels_the_active_run_in_plain_chat() {
+        let mut state = AppState::default()
+            .set_thread_id("t-1")
+            .set_active_run_id("run-1")
+            .set_running(true);
+        let effects = reduce(&mut state, AppEvent::Key(key(KeyCode::Esc)));
+        assert_eq!(
+            effects,
+            vec![Effect::Api(ApiCall::CancelRun {
+                thread_id: "t-1".to_string(),
+                run_id: "run-1".to_string(),
+            })]
+        );
+    }
+
+    #[test]
+    fn esc_is_a_no_op_when_no_run_is_active() {
+        let mut state = AppState::default().set_thread_id("t-1");
+        let effects = reduce(&mut state, AppEvent::Key(key(KeyCode::Esc)));
+        assert!(
+            effects.is_empty(),
+            "nothing running, nothing to cancel: {effects:?}"
+        );
+    }
+
+    #[test]
+    fn esc_is_a_no_op_when_active_run_id_is_missing_even_if_running() {
+        // Defensive: `running` alone isn't enough without a run id to send.
+        let mut state = AppState::default().set_thread_id("t-1").set_running(true);
+        let effects = reduce(&mut state, AppEvent::Key(key(KeyCode::Esc)));
+        assert!(effects.is_empty());
     }
 }
