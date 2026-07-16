@@ -3,7 +3,7 @@ name = "ironclaw_reborn_cli"
 version = "1.0.0"
 edition = "2024"
 rust-version.workspace = true
-description = "Standalone IronClaw Reborn binary"
+description = "IronClaw agent runtime"
 authors = ["NEAR AI <support@near.ai>"]
 license = "MIT OR Apache-2.0"
 homepage = "https://github.com/nearai/ironclaw"
@@ -13,20 +13,9 @@ publish = false
 [package.metadata.ironclaw]
 layer = "app"
 
-[package.metadata.dist]
-dist = true
-features = [
-    "openai-compat-beta",
-    "slack-v2-host-beta",
-    "webui-v2-beta",
-    "libsql",
-    "postgres",
-    "inmemory-turn-state",
-]
-
 [package.metadata.wix]
 upgrade-guid = "6301E43A-1806-43AC-9732-8785B45EE105"
-path-guid = "47201070-B2F0-4AFF-9604-60209AF4B700"
+path-guid = "C4F989DA-4C5D-4F6A-BF5F-284F02A5CC07"
 license = false
 eula = false
 
@@ -41,7 +30,7 @@ root-llm-provider = [
     "ironclaw_reborn_composition/root-llm-provider",
 ]
 # Compile in the WebChat v2 beta HTTP gateway subcommand
-# (`ironclaw-reborn serve`). Off by default so a default binary build
+# (`ironclaw serve`). Off by default so a default binary build
 # does not link the auth/HTTP middleware stack at all — production
 # binaries that genuinely expose v2 over HTTP must opt in. Pulls in
 # `webui-v2-beta` on the composition crate plus the ingress crate
@@ -56,7 +45,7 @@ webui-v2-beta = [
     "dep:ironclaw_reborn_webui_ingress",
     "dep:async-trait",
 ]
-# Compile in the Slack Events API host-beta mount for `ironclaw-reborn serve`.
+# Compile in the Slack Events API host-beta mount for `ironclaw serve`.
 # Still requires effective Slack enablement at runtime before the route is
 # mounted: either `[slack].enabled = true` or
 # `IRONCLAW_REBORN_SLACK_ENABLED=true`.
@@ -68,7 +57,7 @@ openai-compat-beta = [
     "webui-v2-beta",
     "ironclaw_reborn_composition/openai-compat-beta",
 ]
-# Enable production PostgreSQL storage composition for `ironclaw-reborn`.
+# Enable production PostgreSQL storage composition for `ironclaw`.
 postgres = [
     "ironclaw_reborn_composition/postgres",
 ]
@@ -125,5 +114,5 @@ ironclaw_common = { path = "../ironclaw_common", version = "0.4.2" }
 semver = "1"
 
 [[bin]]
-name = "ironclaw-reborn"
+name = "ironclaw"
 path = "src/main.rs"

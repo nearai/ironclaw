@@ -1,7 +1,7 @@
 """Served Reborn WebUI v2 skill-management API tests.
 
 These scenarios exercise `/api/webchat/v2/skills*` through a real
-`ironclaw-reborn serve` process. They replace QA-matrix coverage that used to
+`ironclaw serve` process. They replace QA-matrix coverage that used to
 be represented by Rust handler/composition contract tests, which are now owned
 by normal CI.
 """

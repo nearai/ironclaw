@@ -87,7 +87,7 @@ RUN cargo build \
     --profile dist \
     --package ironclaw_reborn_cli \
     --features openai-compat-beta,slack-v2-host-beta,webui-v2-beta,libsql,postgres,inmemory-turn-state \
-    --bin ironclaw-reborn
+    --bin ironclaw
 
 RUN cargo build \
     --profile dist \
@@ -106,13 +106,13 @@ RUN apt-get -o Acquire::Retries=3 update \
         sqlite3 \
     && rm -rf /var/lib/apt/lists/*
 
-COPY --from=builder /app/target/dist/ironclaw-reborn /usr/local/bin/ironclaw-reborn
+COPY --from=builder /app/target/dist/ironclaw /usr/local/bin/ironclaw
 COPY --from=builder /app/target/dist/ironclaw-reborn-extension-ownership-migration /usr/local/bin/ironclaw-reborn-extension-ownership-migration
 COPY docker/reborn/config.toml /opt/ironclaw/reborn/config.toml
 COPY docker/reborn/config.hosted-single-tenant.toml /opt/ironclaw/reborn/config.hosted-single-tenant.toml
 COPY docker/reborn/config.hosted-single-tenant-volume.toml /opt/ironclaw/reborn/config.hosted-single-tenant-volume.toml
 COPY docker/reborn/config.production.toml /opt/ironclaw/reborn/config.production.toml
-COPY docker/reborn/entrypoint.sh /usr/local/bin/ironclaw-reborn-entrypoint
+COPY docker/reborn/entrypoint.sh /usr/local/bin/ironclaw-entrypoint
 
 ENV HOME=/home/ironclaw \
     IRONCLAW_REBORN_LOG=info \
@@ -121,7 +121,7 @@ ENV HOME=/home/ironclaw \
 RUN useradd -m -d /home/ironclaw -u 1000 ironclaw \
     && mkdir -p /data/ironclaw-reborn /workspace \
     && chown -R ironclaw:ironclaw /home/ironclaw /data/ironclaw-reborn /workspace \
-    && chmod +x /usr/local/bin/ironclaw-reborn-entrypoint
+    && chmod +x /usr/local/bin/ironclaw-entrypoint
 
 WORKDIR /workspace
 
@@ -132,4 +132,4 @@ HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \
 
 USER ironclaw
 
-ENTRYPOINT ["ironclaw-reborn-entrypoint"]
+ENTRYPOINT ["ironclaw-entrypoint"]

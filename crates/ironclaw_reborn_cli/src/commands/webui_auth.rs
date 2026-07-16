@@ -1,4 +1,4 @@
-//! WebChat v2 auth-surface assembly for `ironclaw-reborn serve`.
+//! WebChat v2 auth-surface assembly for `ironclaw serve`.
 //!
 //! Owns the one place that turns host config into the pair the listener
 //! needs: the `WebuiAuthenticator` the protected v2 routes use, plus the
@@ -132,7 +132,7 @@ pub(crate) async fn build_webui_auth_surface(
     .expect("non-empty providers always produce login wiring"); // safety: sso_startup_config_from_env returns None when providers is empty, so this Some(sso) arm always has a non-empty provider list
 
     eprintln!(
-        "ironclaw-reborn: WebChat v2 SSO login mounted — \
+        "ironclaw: WebChat v2 SSO login mounted — \
          see GET /auth/providers for the enabled set"
     );
     Ok(WebuiAuthSurface {

@@ -1150,7 +1150,7 @@ mod tests {
         RebornLocalServiceLifecycle::for_test(
             ServicePlatform::Macos,
             Some(temp.path().to_path_buf()),
-            PathBuf::from("/usr/local/bin/ironclaw-reborn"),
+            PathBuf::from("/usr/local/bin/ironclaw"),
             runner,
         )
     }
@@ -1159,7 +1159,7 @@ mod tests {
         RebornLocalServiceLifecycle::for_test(
             ServicePlatform::Linux,
             Some(temp.path().to_path_buf()),
-            PathBuf::from("/usr/local/bin/ironclaw-reborn"),
+            PathBuf::from("/usr/local/bin/ironclaw"),
             runner,
         )
     }
@@ -1195,7 +1195,7 @@ mod tests {
         let unit = std::fs::read_to_string(&unit_path).expect("unit file");
         #[cfg(unix)]
         assert_service_file_owner_only(&unit_path);
-        assert!(unit.contains("ExecStart=\"/usr/local/bin/ironclaw-reborn\" serve"));
+        assert!(unit.contains("ExecStart=\"/usr/local/bin/ironclaw\" serve"));
         assert!(unit.contains("Environment=\"IRONCLAW_REBORN_WEBUI_TOKEN=test-webui-token\""));
         assert!(unit.contains("Environment=\"IRONCLAW_REBORN_WEBUI_USER_ID=user-test\""));
         assert_eq!(
@@ -1521,7 +1521,7 @@ env_user_id_var = "CUSTOM_WEBUI_USER_ID"
         let service = RebornLocalServiceLifecycle::for_test(
             ServicePlatform::Linux,
             None,
-            PathBuf::from("/usr/local/bin/ironclaw-reborn"),
+            PathBuf::from("/usr/local/bin/ironclaw"),
             Arc::new(RecordingRunner::new("")),
         );
 
@@ -1882,7 +1882,7 @@ env_user_id_var = "CUSTOM_WEBUI_USER_ID"
         let service = RebornLocalServiceLifecycle::for_test(
             ServicePlatform::Unsupported,
             None,
-            PathBuf::from("/usr/local/bin/ironclaw-reborn"),
+            PathBuf::from("/usr/local/bin/ironclaw"),
             Arc::new(RecordingRunner::new("")),
         );
 

@@ -1,7 +1,7 @@
 //! Caller-level production-chain test for multi-user WebChat v2 SSO.
 //!
 //! Unlike `session_round_trip.rs` (which uses the dev `InMemorySessionStore`),
-//! this drives the REAL production session path the `ironclaw-reborn serve`
+//! this drives the REAL production session path the `ironclaw serve`
 //! binary wires: `build_signed_session_login` → `SignedTokenSessionStore`
 //! (stateless HMAC) → `CompositeAuthenticator` → composed `webui_v2_app`.
 //!

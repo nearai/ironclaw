@@ -229,7 +229,7 @@ pub async fn serve_webui_v2(opts: RebornWebuiServeOptions) -> Result<(), RebornW
 
 /// Authenticator that compares the bearer token from the request
 /// against a single host-installation token loaded from an environment
-/// variable. Intended for the standalone `ironclaw-reborn` deployment
+/// variable. Intended for the canonical `ironclaw` deployment
 /// (single operator, single user) and for local dev.
 ///
 /// Production deployments with multiple users / sessions / OIDC should

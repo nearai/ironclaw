@@ -1,7 +1,7 @@
 """Served Reborn WebUI v2 automation, trace, outbound, and channel API tests.
 
 These scenarios exercise the browser-facing `/api/webchat/v2/*` route family
-through a real `ironclaw-reborn serve` process. They intentionally cover the
+through a real `ironclaw serve` process. They intentionally cover the
 served HTTP boundary rather than the Rust contract/substrate tests that normal
 CI already owns.
 """

@@ -39,27 +39,25 @@
 
 ## IronClaw Reborn Quick Start
 
-IronClaw Reborn is the standalone runtime on the `reborn-integration` branch.
-It uses the separate `ironclaw-reborn` binary from the
-`ironclaw_reborn_cli` package and a separate Reborn state root. It does not use
-the legacy `ironclaw` state directory as its config root.
-
-For the older `ironclaw` binary, see [Installation](#installation) and
-[Legacy IronClaw Usage](#legacy-ironclaw-usage).
+IronClaw Reborn is the shipping runtime. The internal
+`ironclaw_reborn_cli` package builds the canonical `ironclaw` executable while
+Reborn configuration and state remain isolated under the existing Reborn state
+root. Existing `IRONCLAW_REBORN_*` environment variables and state paths are
+unchanged by the executable rename.
 
 ### Build or run the binary
 
 From the repo root:
 
 ```bash
-cargo run -q -p ironclaw_reborn_cli --bin ironclaw-reborn -- --help
+cargo run -q -p ironclaw_reborn_cli --bin ironclaw -- --help
 ```
 
 Or build it first:
 
 ```bash
-cargo build -p ironclaw_reborn_cli --bin ironclaw-reborn
-./target/debug/ironclaw-reborn --help
+cargo build -p ironclaw_reborn_cli --bin ironclaw
+./target/debug/ironclaw --help
 ```
 
 The default Reborn home is `$HOME/.ironclaw/reborn`. Override it with an
@@ -67,7 +65,7 @@ absolute path when you want isolated state:
 
 ```bash
 export IRONCLAW_REBORN_HOME="$PWD/.reborn-home"
-cargo run -q -p ironclaw_reborn_cli --bin ironclaw-reborn -- config path
+cargo run -q -p ironclaw_reborn_cli --bin ironclaw -- config path
 ```
 
 `config path` and `doctor` are safe diagnostics; they report the resolved home,
@@ -80,28 +78,28 @@ The CLI-native way to configure Reborn's default model route is:
 
 ```bash
 export IRONCLAW_REBORN_HOME="$PWD/.reborn-home"
-cargo run -q -p ironclaw_reborn_cli --bin ironclaw-reborn -- models set-provider openai --model gpt-5-mini
+cargo run -q -p ironclaw_reborn_cli --bin ironclaw -- models set-provider openai --model gpt-5-mini
 ```
 
 That writes `$IRONCLAW_REBORN_HOME/config.toml` with `[llm.default]` and the
 provider's credential env-var name. Check it with:
 
 ```bash
-cargo run -q -p ironclaw_reborn_cli --bin ironclaw-reborn -- models status
-cargo run -q -p ironclaw_reborn_cli --bin ironclaw-reborn -- models list openai
+cargo run -q -p ironclaw_reborn_cli --bin ironclaw -- models status
+cargo run -q -p ironclaw_reborn_cli --bin ironclaw -- models list openai
 ```
 
 For OpenAI, set the secret value in the environment before starting:
 
 ```bash
 export OPENAI_API_KEY="sk-..."
-cargo run -q -p ironclaw_reborn_cli --bin ironclaw-reborn -- run --message "hello"
+cargo run -q -p ironclaw_reborn_cli --bin ironclaw -- run --message "hello"
 ```
 
 Omit `--message` or use `repl` for an interactive stdin session:
 
 ```bash
-cargo run -q -p ironclaw_reborn_cli --bin ironclaw-reborn -- repl
+cargo run -q -p ironclaw_reborn_cli --bin ironclaw -- repl
 ```
 
 ### `config.toml` shape
@@ -109,7 +107,7 @@ cargo run -q -p ironclaw_reborn_cli --bin ironclaw-reborn -- repl
 `config init` creates editable starter files:
 
 ```bash
-cargo run -q -p ironclaw_reborn_cli --bin ironclaw-reborn -- config init
+cargo run -q -p ironclaw_reborn_cli --bin ironclaw -- config init
 ```
 
 It writes:
@@ -182,7 +180,7 @@ continues to work:
 export IRONCLAW_REBORN_HOME="$PWD/.reborn-env-only"
 export LLM_BACKEND=openai
 export OPENAI_API_KEY="sk-..."
-cargo run -q -p ironclaw_reborn_cli --bin ironclaw-reborn -- run --message "hello"
+cargo run -q -p ironclaw_reborn_cli --bin ironclaw -- run --message "hello"
 ```
 
 Common provider env vars:
@@ -224,7 +222,7 @@ explicitly:
 
 ```bash
 export IRONCLAW_REBORN_PROFILE=local-dev-yolo
-cargo run -q -p ironclaw_reborn_cli --bin ironclaw-reborn -- repl --confirm-host-access
+cargo run -q -p ironclaw_reborn_cli --bin ironclaw -- repl --confirm-host-access
 ```
 
 ### WebUI service
@@ -235,8 +233,8 @@ and embed the SPA bundle. Build or run the binary with that feature to enable th
 command:
 
 ```bash
-cargo run -q -p ironclaw_reborn_cli --features webui-v2-beta --bin ironclaw-reborn -- serve --help
-cargo build -p ironclaw_reborn_cli --features webui-v2-beta --bin ironclaw-reborn
+cargo run -q -p ironclaw_reborn_cli --features webui-v2-beta --bin ironclaw -- serve --help
+cargo build -p ironclaw_reborn_cli --features webui-v2-beta --bin ironclaw
 ```
 
 The WebUI listener defaults to `127.0.0.1:3000`. The service requires an
@@ -249,7 +247,7 @@ export OPENAI_API_KEY="sk-..." # or the required env var for your configured pro
 export IRONCLAW_REBORN_WEBUI_TOKEN="$(openssl rand -hex 32)"
 export IRONCLAW_REBORN_WEBUI_USER_ID="reborn-cli"
 
-cargo run -q -p ironclaw_reborn_cli --features webui-v2-beta --bin ironclaw-reborn -- serve
+cargo run -q -p ironclaw_reborn_cli --features webui-v2-beta --bin ironclaw -- serve
 ```
 
 Equivalent `config.toml` listener configuration:
@@ -322,7 +320,7 @@ export IRONCLAW_REBORN_WEBUI_ALLOWED_EMAIL_DOMAINS="example.com,team.example.com
 export IRONCLAW_REBORN_WEBUI_GOOGLE_CLIENT_ID="..."
 export IRONCLAW_REBORN_WEBUI_GOOGLE_CLIENT_SECRET="..."
 
-cargo run -q -p ironclaw_reborn_cli --features webui-v2-beta --bin ironclaw-reborn -- serve --host 0.0.0.0 --port 3000
+cargo run -q -p ironclaw_reborn_cli --features webui-v2-beta --bin ironclaw -- serve --host 0.0.0.0 --port 3000
 ```
 
 `IRONCLAW_REBORN_WEBUI_ALLOWED_EMAIL_DOMAINS` is the actual admission
@@ -348,7 +346,7 @@ export IRONCLAW_REBORN_WEBUI_TOKEN="$(openssl rand -hex 32)"
 export IRONCLAW_REBORN_WEBUI_USER_ID="reborn-cli"
 export IRONCLAW_REBORN_SLACK_ENABLED="true"
 
-cargo run -q -p ironclaw_reborn_cli --features slack-v2-host-beta --bin ironclaw-reborn -- serve
+cargo run -q -p ironclaw_reborn_cli --features slack-v2-host-beta --bin ironclaw -- serve
 ```
 
 Enable Slack by setting `IRONCLAW_REBORN_SLACK_ENABLED=true`, or by adding a
@@ -475,8 +473,8 @@ Install it with `cargo`, just make sure you have [Rust](https://rustup.rs) insta
 git clone https://github.com/nearai/ironclaw.git
 cd ironclaw
 
-# Build
-cargo build --release
+# Build the canonical executable
+cargo build --release -p ironclaw_reborn_cli --bin ironclaw
 
 # Run tests
 cargo test
@@ -639,10 +637,10 @@ External content passes through multiple security layers:
 ironclaw onboard
 
 # Start interactive REPL
-cargo run
+cargo run -q -p ironclaw_reborn_cli --bin ironclaw -- repl
 
 # REPL with debug logging
-RUST_LOG=ironclaw=debug cargo run
+RUST_LOG=ironclaw=debug cargo run -q -p ironclaw_reborn_cli --bin ironclaw -- repl
 ```
 
 ## Development

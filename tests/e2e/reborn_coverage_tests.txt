@@ -1,7 +1,7 @@
 # Reborn E2E coverage gate.
 #
 # Keep this list limited to tests that exercise the standalone
-# `ironclaw-reborn serve` binary and its Reborn WebChat v2 / OpenAI-compatible
+# `ironclaw serve` binary and its Reborn WebChat v2 / OpenAI-compatible
 # API surface. Do not add legacy `ironclaw` gateway tests, even when they run
 # with ENGINE_V2=true; those belong in compatibility/runtime E2E jobs, not this
 # Reborn coverage gate.

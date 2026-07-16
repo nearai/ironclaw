@@ -34,7 +34,7 @@ class ScrubArtifactsTests(unittest.TestCase):
     def test_strict_scrub_redacts_diagnostics_and_preserves_files(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
-            product_log = root / "ironclaw-reborn-serve.stderr.log"
+            product_log = root / "ironclaw-serve.stderr.log"
             browser_events = root / "browser-events.jsonl"
             product_log.write_text(
                 "authorization: bearer super-secret-token\n"
@@ -55,7 +55,7 @@ class ScrubArtifactsTests(unittest.TestCase):
     def test_strict_scrub_fails_if_redacted_artifact_still_matches_secret_shape(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
-            product_log = root / "ironclaw-reborn-serve.stderr.log"
+            product_log = root / "ironclaw-serve.stderr.log"
             product_log.write_text("aws_access_key = akia1234567890abcdef\n", encoding="utf-8")
 
             result = self.run_scrub(root, strict=True)

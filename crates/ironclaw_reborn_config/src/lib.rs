@@ -2,7 +2,7 @@
 //!
 //! This crate is intentionally small and has no IronClaw workspace dependencies.
 //! It owns process/environment boot configuration that must be shared by the
-//! `ironclaw-reborn` binary and later Reborn runtime composition without pulling
+//! `ironclaw` binary and Reborn runtime composition without pulling
 //! in the v1 root application.
 //!
 //! Four boot-time surfaces live here:

@@ -1,7 +1,7 @@
 """Served Reborn WebUI v2 operator and LLM configuration API tests.
 
 These scenarios convert REBCLI-048 QA-matrix rows from Rust contract proxies
-to caller-facing coverage through a real `ironclaw-reborn serve` process.
+to caller-facing coverage through a real `ironclaw serve` process.
 They intentionally avoid provider-login browser flows, which are covered by
 the dedicated provider-login scenarios.
 """

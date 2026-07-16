@@ -1,7 +1,7 @@
-//! Boot-time TOML config for the standalone Reborn binary.
+//! Boot-time TOML config for the canonical IronClaw runtime.
 //!
 //! Operator-facing file at `$IRONCLAW_REBORN_HOME/config.toml`. Read once
-//! at process start by `ironclaw-reborn run`. Provides the *selection*
+//! at process start by `ironclaw run`. Provides the *selection*
 //! layer of the three-layer config model:
 //!
 //! - **Catalog**: `providers.json` (this crate exposes the path; the
@@ -84,7 +84,7 @@ pub struct RebornConfigFile {
     /// fall back to compiled defaults documented on each field.
     pub webui: Option<WebuiSection>,
     /// Slack Events API host-beta route settings. Consumed by
-    /// `ironclaw-reborn serve` only when the binary is built with the
+    /// `ironclaw serve` only when the binary is built with the
     /// Slack host-beta feature. Secrets are env-only; this section stores
     /// IDs and environment variable names.
     pub slack: Option<SlackSection>,
@@ -288,7 +288,7 @@ pub struct WebuiSection {
     /// specific interface to expose the gateway).
     pub listen_host: Option<String>,
     /// TCP port the listener binds. Default `3000`. `0` is rejected
-    /// at composition time (`ironclaw-reborn serve` accepts `0` only
+    /// at composition time (`ironclaw serve` accepts `0` only
     /// via an explicit `--port 0` CLI flag, intended for tests).
     pub listen_port: Option<u16>,
     /// Name of the environment variable holding the host-installation
@@ -345,7 +345,7 @@ pub struct WebuiSection {
 #[serde(deny_unknown_fields)]
 pub struct SlackSection {
     /// Explicit host-beta enablement gate. Omitted/false means the Slack route
-    /// is not mounted by `ironclaw-reborn serve` unless
+    /// is not mounted by `ironclaw serve` unless
     /// `IRONCLAW_REBORN_SLACK_ENABLED` overrides it.
     pub enabled: Option<bool>,
     /// Deprecated: adapter installation id for legacy config-backed setup.

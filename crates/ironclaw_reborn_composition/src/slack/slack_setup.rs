@@ -806,7 +806,7 @@ impl SlackInstallationSetupStore for InMemorySlackSetupStore {
 impl SlackPersonalSetupServiceSlot {
     /// Tests-only filled slot mirroring the production fill path
     /// (`SlackHostBetaMounts::fill_slack_personal_oauth_slot`, driven by the
-    /// `ironclaw-reborn serve` wiring): an in-memory [`SlackSetupService`]
+    /// `ironclaw serve` wiring): an in-memory [`SlackSetupService`]
     /// seeded with bot credentials plus the given personal-OAuth client
     /// id/secret. Exists so caller-level serve tests can drive the composed
     /// router's Slack OAuth start route; ships zero bytes in production

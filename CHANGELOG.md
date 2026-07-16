@@ -25,6 +25,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- *(reborn-cli)* **Breaking:** promote the shipping executable, completions, container entrypoint, and release artifacts from `ironclaw-reborn` to `ironclaw`; existing `IRONCLAW_REBORN_*` variables, Reborn state paths, and service identities remain unchanged ([#6143](https://github.com/nearai/ironclaw/issues/6143)).
 - *(release)* make `ironclaw-reborn` 1.0.0 the release-plz, cargo-dist, and Docker version source with cargo-dist-compatible `ironclaw/v*` tags.
 - *(reborn)* raise the default agent-loop runaway backstop from 256 to 1,024 iterations and the subagent ceiling from 16 to 256 ([#5959](https://github.com/nearai/ironclaw/pull/5959)).
 - *(reborn-cli)* document the standalone `config init` atomic-write dependency on `tempfile` and call out the default runner cadence change to 5s heartbeats / 200ms polling (down from 10s / 2s).

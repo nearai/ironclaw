@@ -206,7 +206,7 @@ pub async fn onboard_instance_with_sink(
 }
 
 /// Base-dir-parameterised instance enrollment using the default
-/// direct-`reqwest` sink — the admin CLI path (`ironclaw-reborn traces
+/// direct-`reqwest` sink — the admin CLI path (`ironclaw traces
 /// enroll-instance`), where host-shell possession is the admin gate and there
 /// is no host egress pipeline to route through. Targets
 /// `<base>/trace_contributions/` (the scope-`None` location), so all users

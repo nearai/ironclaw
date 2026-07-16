@@ -30,7 +30,7 @@ impl ConfigInitCommand {
         println!("{}", outcome.config.display_line());
         println!("{}", outcome.providers.display_line());
         println!();
-        println!("edit them, then run `ironclaw-reborn run`.");
+        println!("edit them, then run `ironclaw run`.");
         Ok(())
     }
 }
@@ -141,7 +141,7 @@ fn config_stub() -> String {
 # Precedence on each field:
 #   compiled defaults < this file < env vars < CLI flags.
 #
-# Regenerate with `ironclaw-reborn config init --force`.
+# Regenerate with `ironclaw config init --force`.
 
 api_version = "{api_version}"
 
@@ -219,7 +219,7 @@ api_key_env = "OPENAI_API_KEY"
 # api_key_env = "ANTHROPIC_API_KEY"
 
 # [slack]
-# # Host-beta Slack Events API route for `ironclaw-reborn serve`.
+# # Host-beta Slack Events API route for `ironclaw serve`.
 # # Requires a binary built with `--features slack-v2-host-beta`.
 # # Can also be overridden by IRONCLAW_REBORN_SLACK_ENABLED.
 # enabled = false

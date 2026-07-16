@@ -11,11 +11,11 @@ echo "Building bundled first-party extensions..."
 ./scripts/build-wasm-extensions.sh --first-party
 
 echo ""
-echo "Building ironclaw-reborn..."
+echo "Building ironclaw..."
 cargo build --release \
     -p ironclaw_reborn_cli \
     --features openai-compat-beta,slack-v2-host-beta,webui-v2-beta,libsql,postgres,inmemory-turn-state \
-    --bin ironclaw-reborn
+    --bin ironclaw
 
 echo ""
-echo "Done. Binary: target/release/ironclaw-reborn"
+echo "Done. Binary: target/release/ironclaw"

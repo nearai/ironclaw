@@ -221,7 +221,7 @@ EMULATE_SLACK_LIMITED_BEARER = "emulate-slack-limited-token"
 EMULATE_GITHUB_BEARER = "ghp_emulate_github_token"
 EMULATE_GITHUB_SECONDARY_BEARER = "ghp_emulate_github_secondary_token"
 
-# Bearer token for the Reborn WebUI v2 surface (`ironclaw-reborn serve`).
+# Bearer token for the Reborn WebUI v2 surface (`ironclaw serve`).
 # Must be >= 32 bytes: `serve` also uses this value as the SSO session-signing
 # key and refuses to bind with a shorter secret. Distinct from AUTH_TOKEN,
 # which targets the legacy `ironclaw` web channel.

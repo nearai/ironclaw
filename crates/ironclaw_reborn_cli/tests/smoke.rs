@@ -10,7 +10,7 @@ use std::{
 const INVALID_PROFILE_MESSAGE: &str = "IRONCLAW_REBORN_PROFILE must be one of";
 
 fn reborn_bin() -> &'static str {
-    env!("CARGO_BIN_EXE_ironclaw-reborn")
+    env!("CARGO_BIN_EXE_ironclaw")
 }
 
 fn assert_stdout_file_action(stdout: &str, file_name: &str, action: &str) {
@@ -63,7 +63,7 @@ fn fake_reborn_bin(bin_dir: &Path) {
     use std::os::unix::fs::PermissionsExt;
 
     std::fs::create_dir_all(bin_dir).expect("fake bin dir");
-    let bin = bin_dir.join("ironclaw-reborn");
+    let bin = bin_dir.join("ironclaw");
     std::fs::write(
         &bin,
         "#!/bin/sh\nprintf 'home=%s\\n' \"$IRONCLAW_REBORN_HOME\"\nprintf 'args=%s\\n' \"$*\"\n",
@@ -114,6 +114,15 @@ fn dockerfile_reborn_builds_with_postgres_feature() {
     let dockerfile = std::fs::read_to_string(workspace_root().join("Dockerfile.reborn"))
         .expect("Dockerfile.reborn");
 
+    assert!(
+        dockerfile.contains("--package ironclaw_reborn_cli")
+            && dockerfile.contains("--bin ironclaw")
+            && dockerfile
+                .contains("COPY --from=builder /app/target/dist/ironclaw /usr/local/bin/ironclaw")
+            && dockerfile.contains("ENTRYPOINT [\"ironclaw-entrypoint\"]")
+            && !dockerfile.contains("ENTRYPOINT [\"ironclaw-reborn-entrypoint\"]"),
+        "Dockerfile.reborn must build, copy, and run the canonical ironclaw executable: {dockerfile}"
+    );
     assert!(
         dockerfile
             .matches("webui-v2-beta,slack-v2-host-beta,libsql,postgres")
@@ -171,16 +180,19 @@ fn default_dockerfile_targets_reborn_runtime() {
 
     assert!(
         dockerfile.contains("--package ironclaw_reborn_cli")
-            && dockerfile.contains("--bin ironclaw-reborn")
-            && dockerfile.contains("COPY --from=builder /app/target/dist/ironclaw-reborn /usr/local/bin/ironclaw-reborn")
-            && dockerfile.contains("ENTRYPOINT [\"ironclaw-reborn-entrypoint\"]"),
+            && dockerfile.contains("--bin ironclaw")
+            && dockerfile
+                .contains("COPY --from=builder /app/target/dist/ironclaw /usr/local/bin/ironclaw")
+            && dockerfile.contains("ENTRYPOINT [\"ironclaw-entrypoint\"]"),
         "default Dockerfile must build and run the Reborn CLI image: {dockerfile}"
     );
     assert!(
-        !dockerfile.contains("--bin ironclaw\n")
-            && !dockerfile.contains("ENTRYPOINT [\"ironclaw\"]")
-            && !dockerfile.contains("/usr/local/bin/ironclaw\n"),
-        "default Dockerfile must not build or run the legacy root ironclaw binary: {dockerfile}"
+        !dockerfile.contains("--bin ironclaw-reborn\n")
+            && !dockerfile.contains(
+                "COPY --from=builder /app/target/dist/ironclaw-reborn /usr/local/bin/ironclaw-reborn"
+            )
+            && !dockerfile.contains("ENTRYPOINT [\"ironclaw-reborn-entrypoint\"]"),
+        "default Dockerfile must not retain the retired ironclaw-reborn executable paths: {dockerfile}"
     );
     assert!(
         dockerfile.contains(
@@ -203,13 +215,17 @@ fn default_dockerfile_targets_reborn_runtime() {
 
 #[test]
 fn reborn_release_artifacts_use_shipping_features() {
-    let manifest =
-        std::fs::read_to_string(workspace_root().join("crates/ironclaw_reborn_cli/Cargo.toml"))
-            .expect("Reborn CLI manifest");
-    let dockerfile =
-        std::fs::read_to_string(workspace_root().join("Dockerfile")).expect("Dockerfile");
-    let build_all =
-        std::fs::read_to_string(workspace_root().join("scripts/build-all.sh")).expect("build-all");
+    let root = workspace_root();
+    let manifest = std::fs::read_to_string(root.join("crates/ironclaw_reborn_cli/Cargo.toml"))
+        .expect("Reborn CLI manifest");
+    let dist_workspace = std::fs::read_to_string(root.join("dist-workspace.toml"))
+        .expect("cargo-dist workspace config");
+    let dist_package = std::fs::read_to_string(root.join("crates/ironclaw_reborn_cli/dist.toml"))
+        .expect("Reborn CLI cargo-dist config");
+    let wix = std::fs::read_to_string(root.join("crates/ironclaw_reborn_cli/wix/main.wxs"))
+        .expect("Reborn CLI WiX template");
+    let dockerfile = std::fs::read_to_string(root.join("Dockerfile")).expect("Dockerfile");
+    let build_all = std::fs::read_to_string(root.join("scripts/build-all.sh")).expect("build-all");
     let expected_features = [
         "openai-compat-beta",
         "slack-v2-host-beta",
@@ -221,8 +237,8 @@ fn reborn_release_artifacts_use_shipping_features() {
 
     for feature in expected_features {
         assert!(
-            manifest.contains(&format!("\"{feature}\"")),
-            "Reborn cargo-dist metadata must include shipping feature {feature}: {manifest}"
+            dist_package.contains(&format!("\"{feature}\"")),
+            "Reborn cargo-dist config must include shipping feature {feature}: {dist_package}"
         );
         assert!(
             dockerfile.contains(feature),
@@ -233,6 +249,64 @@ fn reborn_release_artifacts_use_shipping_features() {
             "build-all helper must build with shipping feature {feature}: {build_all}"
         );
     }
+    assert!(
+        dist_workspace.contains("members = [\"cargo:.\"]")
+            && dist_workspace.contains("cargo-dist-version = \"0.31.0\""),
+        "cargo-dist workspace config must keep the pinned workspace release contract: {dist_workspace}"
+    );
+    assert!(
+        dist_package.contains("name = \"ironclaw\"")
+            && dist_package.contains("binaries = [\"ironclaw\"]")
+            && !dist_package.contains("ironclaw-reborn"),
+        "cargo-dist must publish the canonical ironclaw app and executable: {dist_package}"
+    );
+    assert!(
+        wix.contains("<Product")
+            && wix.contains("Name='ironclaw'")
+            && wix.contains("<Directory Id='APPLICATIONFOLDER' Name='ironclaw'>")
+            && wix.contains("Name='ironclaw.exe'")
+            && wix.contains("Source='$(var.CargoTargetBinDir)\\ironclaw.exe'"),
+        "MSI packaging must expose the canonical ironclaw product and executable: {wix}"
+    );
+    let upgrade_guid = "6301E43A-1806-43AC-9732-8785B45EE105";
+    let path_guid = "C4F989DA-4C5D-4F6A-BF5F-284F02A5CC07";
+    assert!(
+        manifest.contains(&format!("upgrade-guid = \"{upgrade_guid}\""))
+            && wix.contains(&format!("UpgradeCode='{upgrade_guid}'")),
+        "MSI packaging must retain the upgrade identity across the executable rename"
+    );
+    assert!(
+        manifest.contains(&format!("path-guid = \"{path_guid}\""))
+            && wix.contains(&format!("<Component Id='Path' Guid='{path_guid}'")),
+        "MSI PATH component must use the rotated GUID for the renamed install directory"
+    );
+}
+
+#[test]
+fn live_canary_artifacts_use_the_canonical_executable_name() {
+    let root = workspace_root();
+    for path in [
+        ".github/workflows/reborn-e2e.yml",
+        ".github/workflows/live-canary.yml",
+    ] {
+        let contents = std::fs::read_to_string(root.join(path)).expect("live-canary workflow");
+        assert!(
+            contents.contains("ironclaw.tar.gz")
+                && contents.contains("ironclaw.tar.gz.sha256")
+                && !contents.contains("ironclaw-reborn.tar.gz"),
+            "{path} must package the canonical ironclaw archive and checksum: {contents}"
+        );
+    }
+
+    let validator = std::fs::read_to_string(
+        root.join("scripts/live-canary/validate_reborn_binary_artifact.py"),
+    )
+    .expect("live-canary artifact validator");
+    assert!(
+        validator.contains("ARCHIVE_NAME = \"ironclaw.tar.gz\"")
+            && !validator.contains("ironclaw-reborn.tar.gz"),
+        "live-canary artifact validation must consume the canonical archive: {validator}"
+    );
 }
 
 #[test]
@@ -624,7 +698,7 @@ fn help_mentions_reborn_commands() {
     let output = Command::new(reborn_bin())
         .arg("--help")
         .output()
-        .expect("ironclaw-reborn --help should run");
+        .expect("ironclaw --help should run");
 
     assert!(
         output.status.success(),
@@ -633,9 +707,10 @@ fn help_mentions_reborn_commands() {
     );
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(
-        stdout.contains("Standalone IronClaw Reborn runtime"),
+        stdout.contains("IronClaw agent runtime"),
         "stdout: {stdout}"
     );
+    assert!(stdout.contains("Usage: ironclaw"), "stdout: {stdout}");
     assert!(stdout.contains("channels"), "stdout: {stdout}");
     assert!(stdout.contains("completion"), "stdout: {stdout}");
     assert!(stdout.contains("config"), "stdout: {stdout}");
@@ -667,7 +742,7 @@ fn extension_search_does_not_seed_reborn_config() {
         .env("IRONCLAW_REBORN_HOME", &reborn_home)
         .env("HOME", temp.path().join("home"))
         .output()
-        .expect("ironclaw-reborn extension search should run");
+        .expect("ironclaw extension search should run");
 
     assert!(
         output.status.success(),
@@ -687,7 +762,7 @@ fn profile_list_shows_supported_profiles_without_reborn_home() {
         .arg("list")
         .env_clear()
         .output()
-        .expect("ironclaw-reborn profile list should run");
+        .expect("ironclaw profile list should run");
 
     assert!(
         output.status.success(),
@@ -722,7 +797,7 @@ fn profile_list_json_is_stable_and_does_not_resolve_reborn_home() {
         .arg("--json")
         .env_clear()
         .output()
-        .expect("ironclaw-reborn profile list --json should run");
+        .expect("ironclaw profile list --json should run");
 
     assert!(
         output.status.success(),
@@ -838,7 +913,7 @@ fn skills_list_reports_reborn_skill_data() {
         .env("IRONCLAW_REBORN_HOME", &reborn_home)
         .env("IRONCLAW_BASE_DIR", &v1_home)
         .output()
-        .expect("ironclaw-reborn skills list should run");
+        .expect("ironclaw skills list should run");
 
     assert!(
         output.status.success(),
@@ -890,7 +965,7 @@ fn skills_list_verbose_reports_reborn_skill_details() {
         .env_clear()
         .env("IRONCLAW_REBORN_HOME", &reborn_home)
         .output()
-        .expect("ironclaw-reborn skills list --verbose should run");
+        .expect("ironclaw skills list --verbose should run");
 
     assert!(
         output.status.success(),
@@ -928,7 +1003,7 @@ fn skills_list_json_reports_reborn_skill_data() {
         .env_clear()
         .env("IRONCLAW_REBORN_HOME", &reborn_home)
         .output()
-        .expect("ironclaw-reborn skills list --json should run");
+        .expect("ironclaw skills list --json should run");
 
     assert!(
         output.status.success(),
@@ -972,7 +1047,7 @@ fn skills_list_rejects_unsupported_profiles() {
             .env("IRONCLAW_REBORN_HOME", temp.path().join("reborn-home"))
             .env("IRONCLAW_REBORN_PROFILE", profile)
             .output()
-            .expect("ironclaw-reborn skills list should run");
+            .expect("ironclaw skills list should run");
 
         assert!(
             !output.status.success(),
@@ -980,7 +1055,7 @@ fn skills_list_rejects_unsupported_profiles() {
         );
         let stderr = String::from_utf8_lossy(&output.stderr);
         assert!(
-            stderr.contains("ironclaw-reborn skills currently supports profile=local-dev"),
+            stderr.contains("ironclaw skills currently supports profile=local-dev"),
             "stderr: {stderr}"
         );
         assert!(
@@ -1020,7 +1095,7 @@ fn models_list_reports_reborn_provider_catalog_without_v1_state() {
         .env_clear()
         .env("HOME", temp.path())
         .output()
-        .expect("ironclaw-reborn models list should run");
+        .expect("ironclaw models list should run");
 
     assert!(
         output.status.success(),
@@ -1052,7 +1127,7 @@ fn models_status_json_reports_routes_not_configured_without_v1_state() {
         .env_clear()
         .env("HOME", temp.path())
         .output()
-        .expect("ironclaw-reborn models status --json should run");
+        .expect("ironclaw models status --json should run");
 
     assert!(
         output.status.success(),
@@ -1090,7 +1165,7 @@ api_key_env = "OPENAI_API_KEY"
         .env_clear()
         .env("IRONCLAW_REBORN_HOME", &reborn_home)
         .output()
-        .expect("ironclaw-reborn models status --json should run");
+        .expect("ironclaw models status --json should run");
 
     assert!(
         output.status.success(),
@@ -1121,7 +1196,7 @@ fn models_set_provider_writes_reborn_config_without_v1_state() {
         .env_clear()
         .env("IRONCLAW_REBORN_HOME", &reborn_home)
         .output()
-        .expect("ironclaw-reborn models set-provider should run");
+        .expect("ironclaw models set-provider should run");
 
     assert!(
         output.status.success(),
@@ -1179,7 +1254,7 @@ api_key_env = "OPENAI_API_KEY"
         .env_clear()
         .env("IRONCLAW_REBORN_HOME", &reborn_home)
         .output()
-        .expect("ironclaw-reborn models set should run");
+        .expect("ironclaw models set should run");
 
     assert!(
         output.status.success(),
@@ -1209,7 +1284,7 @@ fn models_set_without_provider_fails_without_panicking() {
         .env_clear()
         .env("IRONCLAW_REBORN_HOME", &reborn_home)
         .output()
-        .expect("ironclaw-reborn models set should run");
+        .expect("ironclaw models set should run");
 
     assert!(!output.status.success(), "models set should fail");
     let stderr = String::from_utf8_lossy(&output.stderr);
@@ -1228,7 +1303,7 @@ fn models_list_no_default_features_does_not_resolve_reborn_home() {
         .arg("list")
         .env_clear()
         .output()
-        .expect("ironclaw-reborn models list should run");
+        .expect("ironclaw models list should run");
 
     assert!(
         output.status.success(),
@@ -1252,7 +1327,7 @@ fn models_status_no_default_features_does_not_resolve_reborn_home() {
         .arg("--json")
         .env_clear()
         .output()
-        .expect("ironclaw-reborn models status should run");
+        .expect("ironclaw models status should run");
 
     assert!(
         output.status.success(),
@@ -1276,7 +1351,7 @@ fn models_write_commands_report_root_llm_provider_required_without_default_featu
             .args(args)
             .env_clear()
             .output()
-            .expect("ironclaw-reborn models write command should run");
+            .expect("ironclaw models write command should run");
 
         assert!(!output.status.success(), "command should fail: {args:?}");
         let stderr = String::from_utf8_lossy(&output.stderr);
@@ -1302,7 +1377,7 @@ fn assert_empty_not_wired_surface(
         .args(args)
         .env_clear()
         .output()
-        .expect("ironclaw-reborn command should run");
+        .expect("ironclaw command should run");
 
     assert!(
         output.status.success(),
@@ -1324,7 +1399,7 @@ fn assert_empty_not_wired_surface(
         .args(json_args)
         .env_clear()
         .output()
-        .expect("ironclaw-reborn JSON command should run");
+        .expect("ironclaw JSON command should run");
     assert!(
         output.status.success(),
         "stderr: {}",
@@ -1386,7 +1461,7 @@ fn assert_verbose_detail(args: &[&str], expected_detail: &str) {
         .args(args)
         .env_clear()
         .output()
-        .expect("ironclaw-reborn verbose command should run");
+        .expect("ironclaw verbose command should run");
 
     assert!(
         output.status.success(),
@@ -1407,7 +1482,7 @@ fn assert_json_verbose_detail(
         .args(args)
         .env_clear()
         .output()
-        .expect("ironclaw-reborn JSON verbose command should run");
+        .expect("ironclaw JSON verbose command should run");
 
     assert!(
         output.status.success(),
@@ -1444,7 +1519,7 @@ fn config_path_reports_reborn_home_without_touching_v1_state() {
         .env("IRONCLAW_REBORN_PROFILE", "production")
         .env("IRONCLAW_BASE_DIR", &v1_base_dir)
         .output()
-        .expect("ironclaw-reborn config path should run");
+        .expect("ironclaw config path should run");
 
     assert!(
         output.status.success(),
@@ -1489,7 +1564,7 @@ fn config_path_reports_default_reborn_home_without_creating_directories() {
         .env_remove("USERPROFILE")
         .env_remove("IRONCLAW_REBORN_PROFILE")
         .output()
-        .expect("ironclaw-reborn config path should run");
+        .expect("ironclaw config path should run");
 
     assert!(
         output.status.success(),
@@ -1517,7 +1592,7 @@ fn completion_generates_zsh_script_without_reborn_home() {
         .arg("zsh")
         .env_clear()
         .output()
-        .expect("ironclaw-reborn completion should run");
+        .expect("ironclaw completion should run");
 
     assert!(
         output.status.success(),
@@ -1525,11 +1600,8 @@ fn completion_generates_zsh_script_without_reborn_home() {
         String::from_utf8_lossy(&output.stderr)
     );
     let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(
-        stdout.contains("#compdef ironclaw-reborn"),
-        "stdout: {stdout}"
-    );
-    assert!(stdout.contains("_ironclaw-reborn"), "stdout: {stdout}");
+    assert!(stdout.contains("#compdef ironclaw"), "stdout: {stdout}");
+    assert!(stdout.contains("_ironclaw"), "stdout: {stdout}");
     assert!(
         stdout.contains("$+functions[compdef]"),
         "zsh completion should guard compdef: {stdout}"
@@ -1544,7 +1616,7 @@ fn completion_generates_bash_script_without_reborn_home() {
         .arg("bash")
         .env_clear()
         .output()
-        .expect("ironclaw-reborn completion should run");
+        .expect("ironclaw completion should run");
 
     assert!(
         output.status.success(),
@@ -1552,7 +1624,7 @@ fn completion_generates_bash_script_without_reborn_home() {
         String::from_utf8_lossy(&output.stderr)
     );
     let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(stdout.contains("_ironclaw-reborn()"), "stdout: {stdout}");
+    assert!(stdout.contains("_ironclaw()"), "stdout: {stdout}");
     assert!(stdout.contains("COMPREPLY"), "stdout: {stdout}");
 }
 
@@ -1564,7 +1636,7 @@ fn serve_help_mentions_host_and_port() {
         .arg("--help")
         .env_clear()
         .output()
-        .expect("ironclaw-reborn serve --help should run");
+        .expect("ironclaw serve --help should run");
 
     assert!(
         output.status.success(),
@@ -1598,7 +1670,7 @@ fn serve_fails_closed_when_env_bearer_token_var_is_unset() {
         .env_remove("IRONCLAW_REBORN_WEBUI_TOKEN")
         .env_remove("IRONCLAW_REBORN_WEBUI_USER_ID")
         .output()
-        .expect("ironclaw-reborn serve should run");
+        .expect("ironclaw serve should run");
 
     assert!(
         !output.status.success(),
@@ -1626,7 +1698,7 @@ fn serve_fails_closed_when_env_user_id_var_is_unset() {
         .env("IRONCLAW_REBORN_WEBUI_TOKEN", "any-non-empty-token")
         .env_remove("IRONCLAW_REBORN_WEBUI_USER_ID")
         .output()
-        .expect("ironclaw-reborn serve should run");
+        .expect("ironclaw serve should run");
 
     assert!(
         !output.status.success(),
@@ -1665,7 +1737,7 @@ fn serve_with_env_auth_seeds_reborn_config_before_binding() {
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
-        .expect("ironclaw-reborn serve should start");
+        .expect("ironclaw serve should start");
     let stderr = child.stderr.take().expect("stderr should be piped");
     let (stderr_tx, stderr_rx) = std::sync::mpsc::channel();
     std::thread::spawn(move || {
@@ -1691,7 +1763,7 @@ fn serve_with_env_auth_seeds_reborn_config_before_binding() {
             Ok(Ok(line)) => {
                 stderr_text.push_str(&line);
                 stderr_text.push('\n');
-                if stderr_text.contains("ironclaw-reborn: WebChat v2 listener") {
+                if stderr_text.contains("ironclaw: WebChat v2 listener") {
                     break;
                 }
             }
@@ -1793,7 +1865,7 @@ fn serve_env_slack_enabled_mounts_slack_events_route() {
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
-        .expect("ironclaw-reborn serve should start");
+        .expect("ironclaw serve should start");
     let stderr = child.stderr.take().expect("stderr should be piped");
     let (stderr_tx, stderr_rx) = std::sync::mpsc::channel();
     std::thread::spawn(move || {
@@ -1819,7 +1891,7 @@ fn serve_env_slack_enabled_mounts_slack_events_route() {
             Ok(Ok(line)) => {
                 stderr_text.push_str(&line);
                 stderr_text.push('\n');
-                if stderr_text.contains("ironclaw-reborn: WebChat v2 listener") {
+                if stderr_text.contains("ironclaw: WebChat v2 listener") {
                     break;
                 }
             }
@@ -1911,7 +1983,7 @@ fn serve_rejects_malformed_host_before_webui_handoff() {
         .arg("localhost:3000")
         .env("IRONCLAW_REBORN_HOME", temp.path().join("reborn-home"))
         .output()
-        .expect("ironclaw-reborn serve should run");
+        .expect("ironclaw serve should run");
 
     assert!(
         !output.status.success(),
@@ -1965,7 +2037,7 @@ max_body_bytes_fallback = 0
             )
             .env("IRONCLAW_REBORN_WEBUI_USER_ID", "test-user")
             .output()
-            .expect("ironclaw-reborn serve should not crash");
+            .expect("ironclaw serve should not crash");
 
         assert!(
             !output.status.success(),
@@ -1977,7 +2049,7 @@ max_body_bytes_fallback = 0
             "stderr should contain {expected:?}; got: {stderr}"
         );
         assert!(
-            !stderr.contains("ironclaw-reborn: WebChat v2 listener"),
+            !stderr.contains("ironclaw: WebChat v2 listener"),
             "serve must not bind after invalid WebUI security config; got: {stderr}"
         );
     }
@@ -2002,7 +2074,7 @@ fn serve_fails_closed_when_sso_provider_has_no_allowed_domain_allowlist() {
             "client-secret",
         )
         .output()
-        .expect("ironclaw-reborn serve should not crash");
+        .expect("ironclaw serve should not crash");
 
     assert!(
         !output.status.success(),
@@ -2016,7 +2088,7 @@ fn serve_fails_closed_when_sso_provider_has_no_allowed_domain_allowlist() {
         "stderr should explain the missing SSO admission allowlist; got: {stderr}"
     );
     assert!(
-        !stderr.contains("ironclaw-reborn: WebChat v2 listener"),
+        !stderr.contains("ironclaw: WebChat v2 listener"),
         "serve must not bind after SSO admission misconfiguration; got: {stderr}"
     );
 }
@@ -2038,7 +2110,7 @@ fn serve_fails_closed_when_session_token_lacks_entropy_without_sso() {
         .env("IRONCLAW_REBORN_WEBUI_TOKEN", "short-weak-token")
         .env("IRONCLAW_REBORN_WEBUI_USER_ID", "test-user")
         .output()
-        .expect("ironclaw-reborn serve should not crash");
+        .expect("ironclaw serve should not crash");
 
     assert!(
         !output.status.success(),
@@ -2050,7 +2122,7 @@ fn serve_fails_closed_when_session_token_lacks_entropy_without_sso() {
         "stderr should explain the session-signing entropy floor; got: {stderr}"
     );
     assert!(
-        !stderr.contains("ironclaw-reborn: WebChat v2 listener"),
+        !stderr.contains("ironclaw: WebChat v2 listener"),
         "serve must not bind with a low-entropy session-signing secret; got: {stderr}"
     );
 }
@@ -2088,7 +2160,7 @@ fn run_reports_runtime_readiness_snapshot_without_touching_v1_state() {
         .env_remove("USERPROFILE")
         .env_remove("IRONCLAW_REBORN_PROFILE")
         .output()
-        .expect("ironclaw-reborn run should run");
+        .expect("ironclaw run should run");
 
     assert!(
         output.status.success(),
@@ -2138,7 +2210,7 @@ fn doctor_uses_reborn_home_override_without_touching_v1_state() {
         .env("IRONCLAW_REBORN_HOME", &reborn_home)
         .env_remove("IRONCLAW_REBORN_PROFILE")
         .output()
-        .expect("ironclaw-reborn doctor should run");
+        .expect("ironclaw doctor should run");
 
     assert!(
         output.status.success(),
@@ -2173,7 +2245,7 @@ fn repl_help_mentions_composed_runtime() {
         .arg("--help")
         .env_clear()
         .output()
-        .expect("ironclaw-reborn repl --help should run");
+        .expect("ironclaw repl --help should run");
 
     assert!(
         output.status.success(),
@@ -2204,7 +2276,7 @@ fn repl_exit_command_seeds_reborn_config() {
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
-        .expect("ironclaw-reborn repl should start");
+        .expect("ironclaw repl should start");
     child
         .stdin
         .as_mut()
@@ -2213,7 +2285,7 @@ fn repl_exit_command_seeds_reborn_config() {
         .expect("exit command should be written");
     let output = child
         .wait_with_output()
-        .expect("ironclaw-reborn repl should finish");
+        .expect("ironclaw repl should finish");
 
     assert!(
         output.status.success(),
@@ -2224,7 +2296,7 @@ fn repl_exit_command_seeds_reborn_config() {
     assert!(stdout.is_empty(), "stdout should stay reply-only: {stdout}");
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
-        stderr.contains("ironclaw-reborn: runtime started"),
+        stderr.contains("ironclaw: runtime started"),
         "stderr: {stderr}"
     );
     assert!(
@@ -2288,7 +2360,7 @@ fn repl_resolves_codex_auth_env_without_openai_api_key() {
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
-        .expect("ironclaw-reborn repl should start");
+        .expect("ironclaw repl should start");
     child
         .stdin
         .as_mut()
@@ -2297,7 +2369,7 @@ fn repl_resolves_codex_auth_env_without_openai_api_key() {
         .expect("exit command should be written");
     let output = child
         .wait_with_output()
-        .expect("ironclaw-reborn repl should finish");
+        .expect("ironclaw repl should finish");
 
     assert!(
         output.status.success(),
@@ -2306,7 +2378,7 @@ fn repl_resolves_codex_auth_env_without_openai_api_key() {
     );
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
-        stderr.contains("ironclaw-reborn: runtime started"),
+        stderr.contains("ironclaw: runtime started"),
         "stderr: {stderr}"
     );
     assert!(
@@ -2344,7 +2416,7 @@ fn repl_resolves_codex_api_key_auth_env_without_openai_api_key() {
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
-        .expect("ironclaw-reborn repl should start");
+        .expect("ironclaw repl should start");
     child
         .stdin
         .as_mut()
@@ -2353,7 +2425,7 @@ fn repl_resolves_codex_api_key_auth_env_without_openai_api_key() {
         .expect("exit command should be written");
     let output = child
         .wait_with_output()
-        .expect("ironclaw-reborn repl should finish");
+        .expect("ironclaw repl should finish");
 
     assert!(
         output.status.success(),
@@ -2362,7 +2434,7 @@ fn repl_resolves_codex_api_key_auth_env_without_openai_api_key() {
     );
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
-        stderr.contains("ironclaw-reborn: runtime started"),
+        stderr.contains("ironclaw: runtime started"),
         "stderr: {stderr}"
     );
     assert!(
@@ -2388,7 +2460,7 @@ fn run_rejects_codex_backend_when_auth_file_is_missing() {
         .env("LLM_BACKEND", "openai_codex")
         .env("CODEX_AUTH_PATH", &missing_codex_auth_path)
         .output()
-        .expect("ironclaw-reborn run should not crash");
+        .expect("ironclaw run should not crash");
     assert!(
         !output.status.success(),
         "missing Codex auth should fail; stdout: {} stderr: {}",
@@ -2419,7 +2491,7 @@ fn repl_help_command_prints_repl_commands_and_exits_on_exit() {
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
-        .expect("ironclaw-reborn repl should start");
+        .expect("ironclaw repl should start");
     child
         .stdin
         .as_mut()
@@ -2428,7 +2500,7 @@ fn repl_help_command_prints_repl_commands_and_exits_on_exit() {
         .expect("repl commands should be written");
     let output = child
         .wait_with_output()
-        .expect("ironclaw-reborn repl should finish");
+        .expect("ironclaw repl should finish");
 
     assert!(
         output.status.success(),
@@ -2454,7 +2526,7 @@ fn run_help_command_prints_repl_commands_and_exits_on_quit() {
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
-        .expect("ironclaw-reborn run should start");
+        .expect("ironclaw run should start");
     child
         .stdin
         .as_mut()
@@ -2463,7 +2535,7 @@ fn run_help_command_prints_repl_commands_and_exits_on_quit() {
         .expect("run repl commands should be written");
     let output = child
         .wait_with_output()
-        .expect("ironclaw-reborn run should finish");
+        .expect("ironclaw run should finish");
 
     assert!(
         output.status.success(),
@@ -2492,7 +2564,7 @@ fn repl_piped_message_exits_nonzero_when_runtime_does_not_produce_reply() {
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
-        .expect("ironclaw-reborn repl should start");
+        .expect("ironclaw repl should start");
     child
         .stdin
         .as_mut()
@@ -2501,7 +2573,7 @@ fn repl_piped_message_exits_nonzero_when_runtime_does_not_produce_reply() {
         .expect("prompt should be written");
     let output = child
         .wait_with_output()
-        .expect("ironclaw-reborn repl should finish");
+        .expect("ironclaw repl should finish");
 
     assert!(
         !output.status.success(),
@@ -2548,7 +2620,7 @@ fn run_message_exits_nonzero_when_runtime_does_not_produce_reply() {
         .env("IRONCLAW_REBORN_HOME", &reborn_home)
         .env("HOME", temp.path().join("home"))
         .output()
-        .expect("ironclaw-reborn run --message should run");
+        .expect("ironclaw run --message should run");
 
     assert!(
         !output.status.success(),
@@ -2596,7 +2668,7 @@ fn run_piped_stdin_exits_nonzero_when_runtime_does_not_produce_reply() {
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
-        .expect("ironclaw-reborn run should start");
+        .expect("ironclaw run should start");
     child
         .stdin
         .as_mut()
@@ -2605,7 +2677,7 @@ fn run_piped_stdin_exits_nonzero_when_runtime_does_not_produce_reply() {
         .expect("prompt should be written");
     let output = child
         .wait_with_output()
-        .expect("ironclaw-reborn run should finish");
+        .expect("ironclaw run should finish");
 
     assert!(
         !output.status.success(),
@@ -2632,7 +2704,7 @@ fn doctor_default_home_is_reborn_scoped_and_dry_run() {
         .env_remove("USERPROFILE")
         .env_remove("IRONCLAW_REBORN_PROFILE")
         .output()
-        .expect("ironclaw-reborn doctor should run");
+        .expect("ironclaw doctor should run");
 
     assert!(
         output.status.success(),
@@ -2661,7 +2733,7 @@ fn doctor_reports_explicit_profile() {
         .env("IRONCLAW_REBORN_HOME", temp.path().join("reborn-home"))
         .env("IRONCLAW_REBORN_PROFILE", "production")
         .output()
-        .expect("ironclaw-reborn doctor should run");
+        .expect("ironclaw doctor should run");
 
     assert!(
         output.status.success(),
@@ -2690,7 +2762,7 @@ fn run_reports_explicit_profile() {
         .env("IRONCLAW_REBORN_HOME", temp.path().join("reborn-home"))
         .env("IRONCLAW_REBORN_PROFILE", "migration-dry-run")
         .output()
-        .expect("ironclaw-reborn run should run");
+        .expect("ironclaw run should run");
 
     assert!(
         output.status.success(),
@@ -2713,7 +2785,7 @@ fn doctor_rejects_invalid_profile() {
         .env("IRONCLAW_REBORN_HOME", temp.path().join("reborn-home"))
         .env("IRONCLAW_REBORN_PROFILE", "prod")
         .output()
-        .expect("ironclaw-reborn doctor should run");
+        .expect("ironclaw doctor should run");
 
     assert!(
         !output.status.success(),
@@ -2732,7 +2804,7 @@ fn doctor_rejects_empty_profile_override() {
         .env("IRONCLAW_REBORN_HOME", temp.path().join("reborn-home"))
         .env("IRONCLAW_REBORN_PROFILE", "")
         .output()
-        .expect("ironclaw-reborn doctor should run");
+        .expect("ironclaw doctor should run");
 
     assert!(
         !output.status.success(),
@@ -2751,7 +2823,7 @@ fn run_rejects_invalid_profile() {
         .env("IRONCLAW_REBORN_HOME", temp.path().join("reborn-home"))
         .env("IRONCLAW_REBORN_PROFILE", "prod")
         .output()
-        .expect("ironclaw-reborn run should run");
+        .expect("ironclaw run should run");
 
     assert!(
         !output.status.success(),
@@ -2771,7 +2843,7 @@ fn run_rejects_reborn_home_equal_to_explicit_v1_base_dir() {
         .env("IRONCLAW_REBORN_HOME", &v1_root)
         .env("IRONCLAW_BASE_DIR", &v1_root)
         .output()
-        .expect("ironclaw-reborn run should run");
+        .expect("ironclaw run should run");
 
     assert!(!output.status.success(), "run should reject v1 root");
     let stderr = String::from_utf8_lossy(&output.stderr);
@@ -2791,7 +2863,7 @@ fn doctor_rejects_reborn_home_equal_to_explicit_v1_base_dir() {
         .env("IRONCLAW_REBORN_HOME", &v1_root)
         .env("IRONCLAW_BASE_DIR", &v1_root)
         .output()
-        .expect("ironclaw-reborn doctor should run");
+        .expect("ironclaw doctor should run");
 
     assert!(!output.status.success(), "doctor should reject v1 root");
     let stderr = String::from_utf8_lossy(&output.stderr);
@@ -2812,7 +2884,7 @@ fn doctor_rejects_reborn_home_equal_to_relative_explicit_v1_base_dir() {
         .env("IRONCLAW_REBORN_HOME", &v1_root)
         .env("IRONCLAW_BASE_DIR", "v1-state")
         .output()
-        .expect("ironclaw-reborn doctor should run");
+        .expect("ironclaw doctor should run");
 
     assert!(!output.status.success(), "doctor should reject v1 root");
     let stderr = String::from_utf8_lossy(&output.stderr);
@@ -2829,7 +2901,7 @@ fn doctor_rejects_empty_reborn_home_override() {
         .env_clear()
         .env("IRONCLAW_REBORN_HOME", "")
         .output()
-        .expect("ironclaw-reborn doctor should run");
+        .expect("ironclaw doctor should run");
 
     assert!(!output.status.success(), "doctor should reject empty home");
     let stderr = String::from_utf8_lossy(&output.stderr);
@@ -2846,7 +2918,7 @@ fn doctor_rejects_relative_reborn_home_override() {
         .env_clear()
         .env("IRONCLAW_REBORN_HOME", "relative/reborn")
         .output()
-        .expect("ironclaw-reborn doctor should run");
+        .expect("ironclaw doctor should run");
 
     assert!(
         !output.status.success(),
@@ -2865,7 +2937,7 @@ fn doctor_rejects_missing_home_for_default_reborn_home() {
         .arg("doctor")
         .env_clear()
         .output()
-        .expect("ironclaw-reborn doctor should run");
+        .expect("ironclaw doctor should run");
 
     assert!(
         !output.status.success(),
@@ -2888,7 +2960,7 @@ fn doctor_json_reports_checks_and_summary() {
         .env("IRONCLAW_REBORN_HOME", &reborn_home)
         .env_remove("IRONCLAW_REBORN_PROFILE")
         .output()
-        .expect("ironclaw-reborn doctor --json should run");
+        .expect("ironclaw doctor --json should run");
 
     assert!(
         output.status.success(),
@@ -2929,7 +3001,7 @@ fn config_init_writes_both_files() {
         .env_remove("USERPROFILE")
         .env("IRONCLAW_REBORN_HOME", &reborn_home)
         .output()
-        .expect("ironclaw-reborn config init should run");
+        .expect("ironclaw config init should run");
     assert!(
         output.status.success(),
         "stderr: {}",
@@ -3052,7 +3124,7 @@ fn onboard_bootstraps_reborn_home_without_touching_v1_state() {
         .env("IRONCLAW_REBORN_HOME", &reborn_home)
         .env("IRONCLAW_BASE_DIR", &v1_home)
         .output()
-        .expect("ironclaw-reborn onboard should run");
+        .expect("ironclaw onboard should run");
 
     assert!(
         output.status.success(),
@@ -3095,7 +3167,7 @@ fn onboard_dry_run_is_read_only() {
         .env_clear()
         .env("IRONCLAW_REBORN_HOME", &reborn_home)
         .output()
-        .expect("ironclaw-reborn onboard --dry-run should run");
+        .expect("ironclaw onboard --dry-run should run");
 
     assert!(
         output.status.success(),
@@ -3127,7 +3199,7 @@ fn onboard_dry_run_reports_existing_marker_as_preserved() {
         .env_clear()
         .env("IRONCLAW_REBORN_HOME", &reborn_home)
         .output()
-        .expect("ironclaw-reborn onboard --dry-run should run");
+        .expect("ironclaw onboard --dry-run should run");
 
     assert!(
         output.status.success(),
@@ -3153,7 +3225,7 @@ fn onboard_import_history_records_pending_step() {
         .env_clear()
         .env("IRONCLAW_REBORN_HOME", &reborn_home)
         .output()
-        .expect("ironclaw-reborn onboard --import-history should run");
+        .expect("ironclaw onboard --import-history should run");
 
     assert!(
         output.status.success(),
@@ -3189,7 +3261,7 @@ fn onboard_preserves_existing_config_without_force() {
         .env_clear()
         .env("IRONCLAW_REBORN_HOME", &reborn_home)
         .output()
-        .expect("ironclaw-reborn onboard should run");
+        .expect("ironclaw onboard should run");
 
     assert!(
         output.status.success(),
@@ -3235,7 +3307,7 @@ fn onboard_with_force_overwrites_existing_files_and_marker() {
         .env_clear()
         .env("IRONCLAW_REBORN_HOME", &reborn_home)
         .output()
-        .expect("ironclaw-reborn onboard --force should run");
+        .expect("ironclaw onboard --force should run");
 
     assert!(
         output.status.success(),
@@ -3320,7 +3392,7 @@ fn status_reports_reborn_home_without_touching_v1_state() {
         .env("IRONCLAW_REBORN_HOME", &reborn_home)
         .env_remove("IRONCLAW_REBORN_PROFILE")
         .output()
-        .expect("ironclaw-reborn status should run");
+        .expect("ironclaw status should run");
 
     assert!(
         output.status.success(),
@@ -3359,7 +3431,7 @@ fn status_json_reports_reborn_home_without_touching_v1_state() {
         .env("IRONCLAW_REBORN_HOME", &reborn_home)
         .env_remove("IRONCLAW_REBORN_PROFILE")
         .output()
-        .expect("ironclaw-reborn status --json should run");
+        .expect("ironclaw status --json should run");
 
     assert!(
         output.status.success(),
@@ -3398,7 +3470,7 @@ fn status_json_reports_present_config_and_providers_files() {
         .args(["status", "--json"])
         .env("IRONCLAW_REBORN_HOME", &reborn_home)
         .output()
-        .expect("ironclaw-reborn status --json should run");
+        .expect("ironclaw status --json should run");
     assert!(
         output.status.success(),
         "stderr: {}",
@@ -3430,7 +3502,7 @@ fn config_list_reports_entries_without_creating_state() {
         .env("IRONCLAW_REBORN_HOME", &reborn_home)
         .env_remove("IRONCLAW_REBORN_PROFILE")
         .output()
-        .expect("ironclaw-reborn config list should run");
+        .expect("ironclaw config list should run");
 
     assert!(
         output.status.success(),
@@ -3465,7 +3537,7 @@ fn config_list_json_reports_entries_without_creating_state() {
         .env("IRONCLAW_REBORN_HOME", &reborn_home)
         .env_remove("IRONCLAW_REBORN_PROFILE")
         .output()
-        .expect("ironclaw-reborn config list --json should run");
+        .expect("ironclaw config list --json should run");
 
     assert!(
         output.status.success(),
@@ -3502,7 +3574,7 @@ fn config_get_known_key_prints_value() {
         .env("IRONCLAW_REBORN_HOME", &reborn_home)
         .env_remove("IRONCLAW_REBORN_PROFILE")
         .output()
-        .expect("ironclaw-reborn config get should run");
+        .expect("ironclaw config get should run");
 
     assert!(
         output.status.success(),
@@ -3526,7 +3598,7 @@ fn config_get_known_key_json_prints_value() {
         .env("IRONCLAW_REBORN_HOME", &reborn_home)
         .env_remove("IRONCLAW_REBORN_PROFILE")
         .output()
-        .expect("ironclaw-reborn config get --json should run");
+        .expect("ironclaw config get --json should run");
 
     assert!(
         output.status.success(),
@@ -3548,7 +3620,7 @@ fn config_get_unknown_key_exits_nonzero() {
         .env("IRONCLAW_REBORN_HOME", &reborn_home)
         .env_remove("IRONCLAW_REBORN_PROFILE")
         .output()
-        .expect("ironclaw-reborn config get should run");
+        .expect("ironclaw config get should run");
 
     assert!(
         !output.status.success(),
@@ -3606,7 +3678,7 @@ api_key_env = "sk-proj-1234567890abcdef12345678"
     let output = isolated_no_llm_command(temp.path(), &reborn_home)
         .args(["run", "-m", "ping"])
         .output()
-        .expect("ironclaw-reborn run should not crash");
+        .expect("ironclaw run should not crash");
     assert!(
         !output.status.success(),
         "inline secret must cause failure; stdout: {} stderr: {}",
@@ -3632,7 +3704,7 @@ fn run_warns_when_falling_back_to_stub_gateway() {
     let output = isolated_no_llm_command(&workspace, &reborn_home)
         .args(["run", "-m", "ping"])
         .output()
-        .expect("ironclaw-reborn run should not crash");
+        .expect("ironclaw run should not crash");
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
         stderr.contains("no LLM selection configured") && stderr.contains("Runs will fail"),
@@ -3652,7 +3724,7 @@ fn run_confirm_host_access_flag_gates_local_dev_yolo() {
     let reborn_home = temp.path().join("reborn-home");
     let missing = local_yolo_command(&temp, &["run", "-m", "ping"])
         .output()
-        .expect("ironclaw-reborn run should not crash");
+        .expect("ironclaw run should not crash");
     assert!(!missing.status.success(), "missing confirmation must fail");
     let missing_stderr = String::from_utf8_lossy(&missing.stderr);
     assert!(
@@ -3666,7 +3738,7 @@ fn run_confirm_host_access_flag_gates_local_dev_yolo() {
 
     let confirmed = local_yolo_command(&temp, &["run", "--confirm-host-access", "-m", "ping"])
         .output()
-        .expect("ironclaw-reborn run should not crash");
+        .expect("ironclaw run should not crash");
     let confirmed_stderr = String::from_utf8_lossy(&confirmed.stderr);
     assert!(
         !confirmed_stderr.contains("requires explicit disclosure acknowledgement")
@@ -3693,7 +3765,7 @@ fn run_confirm_host_access_requires_home_or_userprofile() {
         .env("IRONCLAW_REBORN_HOME", &reborn_home)
         .env("IRONCLAW_REBORN_PROFILE", "local-dev-yolo")
         .output()
-        .expect("ironclaw-reborn run should not crash");
+        .expect("ironclaw run should not crash");
 
     assert!(!output.status.success(), "missing host home must fail"); // safety: test-only assertion.
     let stderr = String::from_utf8_lossy(&output.stderr);
@@ -3719,7 +3791,7 @@ fn run_confirm_host_access_uses_userprofile_when_home_is_absent() {
         .env("IRONCLAW_REBORN_PROFILE", "local-dev-yolo")
         .env("USERPROFILE", &host_home)
         .output()
-        .expect("ironclaw-reborn run should not crash");
+        .expect("ironclaw run should not crash");
 
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
@@ -3736,7 +3808,7 @@ fn repl_confirm_host_access_flag_gates_local_dev_yolo() {
     let missing = local_yolo_command(&temp, &["repl"])
         .stdin(Stdio::null())
         .output()
-        .expect("ironclaw-reborn repl should not crash");
+        .expect("ironclaw repl should not crash");
     assert!(!missing.status.success(), "missing confirmation must fail");
     let missing_stderr = String::from_utf8_lossy(&missing.stderr);
     assert!(
@@ -3747,7 +3819,7 @@ fn repl_confirm_host_access_flag_gates_local_dev_yolo() {
     let confirmed = local_yolo_command(&temp, &["repl", "--confirm-host-access"])
         .stdin(Stdio::null())
         .output()
-        .expect("ironclaw-reborn repl should not crash");
+        .expect("ironclaw repl should not crash");
     let confirmed_stderr = String::from_utf8_lossy(&confirmed.stderr);
     assert!(
         !confirmed_stderr.contains("requires explicit disclosure acknowledgement")
@@ -3763,7 +3835,7 @@ fn serve_confirm_host_access_flag_gates_local_dev_yolo() {
     let reborn_home = temp.path().join("reborn-home");
     let missing = local_yolo_command(&temp, &["serve"])
         .output()
-        .expect("ironclaw-reborn serve should not crash");
+        .expect("ironclaw serve should not crash");
     assert!(!missing.status.success(), "missing confirmation must fail");
     let missing_stderr = String::from_utf8_lossy(&missing.stderr);
     assert!(
@@ -3777,7 +3849,7 @@ fn serve_confirm_host_access_flag_gates_local_dev_yolo() {
 
     let confirmed = local_yolo_command(&temp, &["serve", "--confirm-host-access"])
         .output()
-        .expect("ironclaw-reborn serve should not crash");
+        .expect("ironclaw serve should not crash");
     assert!(
         !confirmed.status.success(),
         "serve still needs webui token config"
@@ -3815,7 +3887,7 @@ fn serve_confirmed_local_dev_yolo_rejects_non_loopback_cli_host() {
     )
     .env("IRONCLAW_REBORN_WEBUI_USER_ID", "test-user")
     .output()
-    .expect("ironclaw-reborn serve should not crash");
+    .expect("ironclaw serve should not crash");
 
     assert!(
         !output.status.success(),
@@ -3854,7 +3926,7 @@ listen_host = "0.0.0.0"
         )
         .env("IRONCLAW_REBORN_WEBUI_USER_ID", "test-user")
         .output()
-        .expect("ironclaw-reborn serve should not crash");
+        .expect("ironclaw serve should not crash");
 
     assert!(
         !output.status.success(),
@@ -3879,7 +3951,7 @@ fn serve_local_dev_allows_non_loopback_without_trusted_laptop_access() {
         .env_remove("IRONCLAW_REBORN_WEBUI_TOKEN")
         .env_remove("IRONCLAW_REBORN_WEBUI_USER_ID")
         .output()
-        .expect("ironclaw-reborn serve should not crash");
+        .expect("ironclaw serve should not crash");
 
     assert!(
         !output.status.success(),
@@ -3916,7 +3988,7 @@ profile = "production"
         .env_remove("IRONCLAW_REBORN_PROFILE")
         .env("IRONCLAW_REBORN_HOME", &reborn_home)
         .output()
-        .expect("ironclaw-reborn run should not crash");
+        .expect("ironclaw run should not crash");
     assert!(
         !output.status.success(),
         "production profile should fail until wired; stdout: {} stderr: {}",
@@ -3950,7 +4022,7 @@ provider_id = " {secret} "
     let output = isolated_no_llm_command(temp.path(), &reborn_home)
         .args(["run", "-m", "ping"])
         .output()
-        .expect("ironclaw-reborn run should not crash");
+        .expect("ironclaw run should not crash");
     assert!(!output.status.success(), "inline secret must fail");
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
@@ -3984,7 +4056,7 @@ default_owner = "operator"
     let output = isolated_no_llm_command(&workspace, &reborn_home)
         .args(["run", "-m", "ping"])
         .output()
-        .expect("ironclaw-reborn run should not crash");
+        .expect("ironclaw run should not crash");
     assert!(
         !output.status.success(),
         "run should still fail without a model gateway"
@@ -4022,7 +4094,7 @@ default_project = "project-alpha"
         .env_remove("USERPROFILE")
         .env("IRONCLAW_REBORN_HOME", &reborn_home)
         .output()
-        .expect("ironclaw-reborn run should not crash");
+        .expect("ironclaw run should not crash");
     assert!(
         !output.status.success(),
         "unsupported project scope must fail"
@@ -4055,7 +4127,7 @@ default_approval_policy = "ask_always"
         .env_remove("USERPROFILE")
         .env("IRONCLAW_REBORN_HOME", &reborn_home)
         .output()
-        .expect("ironclaw-reborn run should not crash");
+        .expect("ironclaw run should not crash");
     assert!(!output.status.success(), "unsupported policy must fail");
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
@@ -4085,7 +4157,7 @@ provider_id = "openai"
         .env_remove("USERPROFILE")
         .env("IRONCLAW_REBORN_HOME", &reborn_home)
         .output()
-        .expect("ironclaw-reborn run should not crash");
+        .expect("ironclaw run should not crash");
     assert!(!output.status.success(), "malformed overlay must fail");
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
@@ -4131,7 +4203,7 @@ provider_id = "empty-key-provider"
         .env("IRONCLAW_REBORN_HOME", &reborn_home)
         .env("REBORN_TEST_EMPTY_KEY", "")
         .output()
-        .expect("ironclaw-reborn run should not crash");
+        .expect("ironclaw run should not crash");
     assert!(!output.status.success(), "empty API key must fail");
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
@@ -4159,7 +4231,7 @@ heartbeat_interval_secs = 0
         .env_remove("USERPROFILE")
         .env("IRONCLAW_REBORN_HOME", &reborn_home)
         .output()
-        .expect("ironclaw-reborn run should not crash");
+        .expect("ironclaw run should not crash");
     assert!(
         !output.status.success(),
         "zero heartbeat interval must fail"
@@ -4190,7 +4262,7 @@ poll_interval_ms = 0
         .env_remove("USERPROFILE")
         .env("IRONCLAW_REBORN_HOME", &reborn_home)
         .output()
-        .expect("ironclaw-reborn run should not crash");
+        .expect("ironclaw run should not crash");
     assert!(!output.status.success(), "zero poll interval must fail");
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
@@ -4222,7 +4294,7 @@ api_key_env = "REBORN_TEST_UNSET_BC8F4D_KEY"
         .env_remove("REBORN_TEST_UNSET_BC8F4D_KEY")
         .env("IRONCLAW_REBORN_HOME", &reborn_home)
         .output()
-        .expect("ironclaw-reborn run should not crash");
+        .expect("ironclaw run should not crash");
     assert!(
         !output.status.success(),
         "missing api key must fail; stdout: {} stderr: {}",

@@ -1,7 +1,7 @@
 """Served Reborn WebUI v2 project-file and filesystem-browser API tests.
 
 These scenarios exercise the browser-facing `/api/webchat/v2/threads/*/files`
-and `/api/webchat/v2/fs/*` routes through a real `ironclaw-reborn serve`
+and `/api/webchat/v2/fs/*` routes through a real `ironclaw serve`
 process. They replace QA-matrix coverage that used to be represented by Rust
 contract tests, which are now owned by normal CI.
 """
