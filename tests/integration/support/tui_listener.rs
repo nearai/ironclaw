@@ -75,3 +75,44 @@ pub async fn spawn_webui_v2(
     });
     (addr, AbortOnDrop(handle))
 }
+
+/// Creates a thread with an explicit id via a real HTTP POST against
+/// `/api/webchat/v2/threads` on the listener `spawn_webui_v2` bound —
+/// production's `RebornServices::create_thread` handler, same bearer auth,
+/// same `EnsureThreadRequest` path a real create does.
+///
+/// This exists because `ironclaw_reborn_tui::client::ApiClient::create_thread()`
+/// doesn't expose `WebUiCreateThreadRequest::requested_thread_id` (real TUI
+/// usage never needs to pick a specific id — see `crates/ironclaw_reborn_tui/src/lib.rs`,
+/// which calls `create_thread()` plain during startup when the account has no
+/// threads yet). `requested_thread_id` is nonetheless a genuine, already-shipped
+/// wire field: `RebornServices::create_thread`'s doc comment
+/// (`crates/ironclaw_product_workflow/src/reborn_services.rs`) says it "makes
+/// the caller's choice authoritative." A caller-pinned id is what lets a test
+/// align the thread this creates with a `TurnScope` it already knows about
+/// (e.g. one a scripted-reply gateway was registered against before this
+/// listener existed) — the same (tenant, agent, project, owner_user_id) tuple
+/// the bearer authenticates as, plus a chosen `thread_id`.
+///
+/// Panics on any non-2xx response — test-only plumbing, not production code.
+pub async fn create_thread_pinned(addr: SocketAddr, token: &str, thread_id: &str) {
+    let response = reqwest::Client::new()
+        .post(format!("http://{addr}/api/webchat/v2/threads"))
+        .bearer_auth(token)
+        .json(&serde_json::json!({
+            "client_action_id": uuid::Uuid::new_v4().to_string(),
+            "requested_thread_id": thread_id,
+        }))
+        .send()
+        .await
+        .expect("create_thread_pinned request");
+    let status = response.status();
+    assert!(
+        status.is_success(),
+        "create_thread_pinned({thread_id}) failed: {status} {}",
+        response
+            .text()
+            .await
+            .unwrap_or_else(|_| "<no body>".to_string())
+    );
+}

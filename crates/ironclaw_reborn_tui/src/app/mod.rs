@@ -101,10 +101,21 @@ pub enum Focus {
 
 /// One row of the rendered transcript. Canonical shape (B2.0, binding) —
 /// every consumer uses this exact enum.
+///
+/// `LiveText`/`Thinking` (added for projection streaming — see
+/// `app/transcript.rs`'s `apply_projection`) are distinct from `Assistant`:
+/// they carry the projection item's own `id` so a repeated
+/// `ProductProjectionItem::Text`/`Thinking` for the same id UPSERTS in
+/// place (live text replaces itself as it streams) instead of appending a
+/// new row per delta. `Assistant` stays the shape for a *durable* message —
+/// the legacy `FinalReply` event and timeline rehydration
+/// (`transcript_item_from_message` in `lib.rs`) both still produce it.
 #[derive(Debug, Clone)]
 pub enum TranscriptItem {
     User { text: String },
     Assistant { text: String },
+    LiveText { id: String, body: String },
+    Thinking { id: String, body: String },
     Activity(CapabilityActivityView),
     Preview(CapabilityDisplayPreviewView),
     System { text: String },
@@ -133,6 +144,13 @@ impl TranscriptItem {
     pub fn as_error_text(&self) -> Option<&str> {
         match self {
             Self::Error { text } => Some(text),
+            _ => None,
+        }
+    }
+
+    pub fn as_live_text(&self) -> Option<&str> {
+        match self {
+            Self::LiveText { body, .. } => Some(body),
             _ => None,
         }
     }

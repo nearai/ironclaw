@@ -10,10 +10,12 @@
 use chrono::Utc;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ironclaw_host_api::{CapabilityId, InvocationId, ThreadId};
+use ironclaw_product_adapters::ProductGateKind;
 use ironclaw_product_workflow::webchat_schema::{WebChatV2Event, WebChatV2EventFrame};
 use ironclaw_product_workflow::{
     AuthPromptView, CapabilityActivityStatusView, CapabilityActivityView, FinalReplyView,
-    GatePromptView, LlmProviderView, ProjectionCursor, RebornGetRunStateResponse,
+    GatePromptView, LlmProviderView, ProductProjectionItem, ProductProjectionState,
+    ProjectionCursor, RebornGetRunStateResponse,
 };
 use ironclaw_turns::{AcceptedMessageRef, EventCursor, SanitizedFailure, TurnRunId, TurnStatus};
 
@@ -225,5 +227,50 @@ pub(crate) fn approval_gate(gate_ref: &str, allow_always: bool) -> PendingGate {
         headline: "Approve action".to_string(),
         body: String::new(),
         allow_always,
+    }
+}
+
+/// `ProductProjectionState::new` validates (non-empty `items`, bounded text)
+/// — the same construction path production code goes through, so a test
+/// fixture can never accidentally exercise a wire shape the real producer
+/// couldn't emit.
+pub(crate) fn projection_state(
+    thread_id: &str,
+    items: Vec<ProductProjectionItem>,
+) -> ProductProjectionState {
+    ProductProjectionState::new(thread_id, items).expect("valid projection state")
+}
+
+pub(crate) fn projection_text(id: &str, run_id: TurnRunId, body: &str) -> ProductProjectionItem {
+    ProductProjectionItem::Text {
+        id: id.to_string(),
+        run_id: Some(run_id),
+        body: body.to_string(),
+    }
+}
+
+pub(crate) fn projection_run_status(run_id: TurnRunId, status: &str) -> ProductProjectionItem {
+    ProductProjectionItem::RunStatus {
+        run_id,
+        status: status.to_string(),
+        failure_category: None,
+        failure_summary: None,
+        retryable: None,
+    }
+}
+
+/// `ProductGateKind::Approval` shape — not `Auth` (`AuthPromptContextView`
+/// construction needs more dev-only wiring than these tests need; the auth
+/// path is exercised via `apply_auth_prompt`'s existing raw-frame tests).
+pub(crate) fn projection_gate(run_id: TurnRunId, gate_ref: &str) -> ProductProjectionItem {
+    ProductProjectionItem::Gate {
+        run_id,
+        gate_kind: ProductGateKind::Approval,
+        gate_ref: gate_ref.to_string(),
+        invocation_id: None,
+        headline: "Approve action".to_string(),
+        body: Some("Review the requested action.".to_string()),
+        allow_always: true,
+        auth_context: None,
     }
 }

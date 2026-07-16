@@ -5105,10 +5105,12 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "axum 0.8.9",
+ "bytes",
  "chrono",
  "crossterm 0.29.0",
  "futures",
  "ironclaw_host_api",
+ "ironclaw_product_adapters",
  "ironclaw_product_workflow",
  "ironclaw_turns",
  "ratatui",

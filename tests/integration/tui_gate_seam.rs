@@ -14,13 +14,30 @@
 //! not a private fn). See `support/tui_listener.rs` for why this needs a
 //! bound listener where `webui_v2_product_api.rs` does not.
 //!
-//! CURRENTLY RED — verified upstream blocker, not a wiring bug (B2.13's own
-//! scope is `tests/integration/tui_gate_seam.rs` +
-//! `tests/integration/support/tui_listener.rs` + the root `Cargo.toml`
-//! `[[test]]` entry only; fixing it means editing
-//! `crates/ironclaw_reborn_tui/src/client/**`, out of this task's ownership).
-//! See the comment at the `send_message` call site below for the exact
-//! defect and fix.
+//! Was RED for three independent reasons found across two rounds of
+//! diagnosis, all now fixed: (1) `ApiClient::send_message`/`resolve_gate`
+//! were missing `client_action_id` — fixed in `client/gates.rs`. (2) the
+//! harness's `group.thread(...).build()` never persists a thread row before
+//! this test's `client.send_message()` — see the comment at the
+//! `create_thread_pinned` call site below for the root cause and fix. (3) a
+//! genuine bug in `ironclaw_reborn_tui::client::events::subscribe`
+//! (`crates/ironclaw_reborn_tui/src/client/events.rs`) that only surfaced
+//! SSE frames after the underlying HTTP connection closed — the real
+//! `webui_v2_app` server correctly keeps the connection open for up to 5
+//! minutes (`SSE_MAX_LIFETIME`), so `events.next()` never resolved during a
+//! live turn. Fixed by restructuring `SubscribeState`/`connect_and_drain`
+//! (now `open_connection`/`read_next_chunk`) to hold the open byte stream
+//! across `Stream::poll_next` calls and yield each frame as soon as it's
+//! decoded, instead of draining the whole connection body first.
+//!
+//! One more thing the (3) fix surfaced: the real `local-dev` WebChat v2
+//! producer never emits `final_reply`/`accepted`/`running`/`cancelled`/
+//! `failed` typed SSE events — only `projection_snapshot`/
+//! `projection_update` frames carrying `ProductProjectionState`. Completion
+//! detection below therefore drains `ProjectionUpdate`/`ProjectionSnapshot`
+//! frames for a `ProductProjectionItem::RunStatus` item reaching a terminal
+//! (or `blocked_approval`, as a safety net) status, not a `FinalReply`
+//! event — see the comment at that loop, below.
 
 #[allow(dead_code)]
 #[path = "support/mod.rs"]
@@ -36,7 +53,9 @@ use std::sync::Arc;
 
 use futures::StreamExt;
 use ironclaw_events::InMemoryDurableEventLog;
-use ironclaw_product_workflow::{RebornServices, RebornServicesApi, WebUiGateResolution};
+use ironclaw_product_workflow::{
+    ProductProjectionItem, RebornServices, RebornServicesApi, WebUiGateResolution,
+};
 use ironclaw_reborn_tui::client::ApiClient;
 use ironclaw_turns::{ReplyTargetBindingRef, TurnEventProjectionSource, TurnStatus};
 use reborn_support::group::RebornIntegrationGroup;
@@ -104,6 +123,7 @@ async fn tui_client_drives_submit_gate_resolve_completed_seam() {
         .clone()
         .expect("live_approvals binding resolves an agent_id (required for turn submission)");
     let token = "reborn-tui-gate-seam-test-token-0123456789ab";
+
     let (addr, _serve_guard) = tui_listener::spawn_webui_v2(
         services,
         h.binding.tenant_id.clone(),
@@ -117,35 +137,55 @@ async fn tui_client_drives_submit_gate_resolve_completed_seam() {
     let client = ApiClient::new(format!("http://{addr}"), token.to_string());
     let thread_id = h.binding.thread_id.as_str().to_string();
 
+    // Pre-create the thread the ApiClient bearer will operate on — root cause
+    // (verified with a direct `read_thread` probe against the shared
+    // `thread_service` before this fix existed): `RebornServices::submit_turn`
+    // fails closed with 404 NotFound (`resolve_webui_thread_metadata` ->
+    // `read_thread` -> `SessionThreadError::UnknownThread`) whenever the
+    // thread has never actually been persisted — NOT an owner/scope mismatch.
+    // `group.thread(...).build()` only *resolves* `h.binding` (tenant/user/
+    // agent/project/thread_id come straight from it, and were confirmed byte-
+    // for-byte equal to the bearer identity `spawn_webui_v2` authenticates
+    // as); it performs no I/O against `SessionThreadService`, so
+    // `h.binding.thread_id` names a thread that exists only as a computed
+    // value, not a stored row, until something writes it.
+    //
+    // This mirrors real TUI behavior, not a scope bypass: a real user's TUI
+    // always calls `client.create_thread()` before the first `send_message()`
+    // on an account with no threads yet (`crates/ironclaw_reborn_tui/src/lib.rs`
+    // ~line 121, `"create_thread during TUI startup (account has no threads
+    // yet)"`) — `create_thread` and `send_message` always run through the
+    // same `ApiClient`/bearer token, so a real user never creates a thread as
+    // one identity and sends to it as another. `tui_listener::create_thread_pinned`
+    // makes that same real HTTP call (through the identical bound listener,
+    // bearer, and `RebornServices::create_thread` production handler), just
+    // additionally setting `requested_thread_id` — a genuine, already-shipped
+    // field on the wire (`WebUiCreateThreadRequest::requested_thread_id`,
+    // `reborn_services.rs`'s create_thread doc comment: "makes the caller's
+    // choice authoritative") that `ApiClient::create_thread()`'s typed helper
+    // doesn't yet expose (real TUI usage never needs to pick a specific id).
+    // Pinning it to `h.binding.thread_id` is what makes the thread this test
+    // creates identical (same tenant/agent/project/owner_user_id AND thread_id)
+    // to the `TurnScope` the harness registered its scripted LLM replies
+    // against at `.build()` time — so the approval-triggering turn below still
+    // finds its scripted tool-call/text steps.
+    tui_listener::create_thread_pinned(addr, token, &thread_id).await;
+
     // submit — real HTTP POST through the TUI's own client, not the harness's
     // `submit_turn`/`submit_turn_until_blocked` shortcut.
-    //
-    // BLOCKER (verified, not a test-wiring issue): this call currently 400s
-    // with `{"field":"client_action_id","validation_code":"missing_field"}`.
-    // `ApiClient::send_message` (crates/ironclaw_reborn_tui/src/client/gates.rs)
-    // builds `WebUiSendMessageRequest { content: Some(text), ..Default::default() }`
-    // and never sets `client_action_id`. Every WebUI v2 mutation body requires
-    // it as a mandatory idempotency key — enforced by
-    // `parse_client_action_id`/`required_text` in
-    // `crates/ironclaw_product_workflow/src/webui_inbound.rs` (~line 587),
-    // which every mutation handler calls before dispatch. `resolve_gate`
-    // (same file, `resolve_gate_body`) has the identical gap, so this would
-    // fail a second time at the resolve step even if submit were patched
-    // around. Fix (out of this task's ownership — `crates/ironclaw_reborn_tui/src/**`
-    // is off-limits per this task's scope) is two one-line additions in
-    // `client/gates.rs`: set `client_action_id: Some(Uuid::new_v4().to_string())`
-    // (or similar) on both `WebUiSendMessageRequest` and the
-    // `WebUiResolveGateRequest` built by `resolve_gate_body`.
     client
         .send_message(&thread_id, "write the tui gate seam file")
         .await
         .expect("send_message");
 
-    // gate — drive the real SSE `subscribe()` to find the Gate frame.
-    // `subscribe()` returns `impl Stream` built over `futures::stream::unfold`
-    // of an async block, which is not `Unpin`; `StreamExt::next()` requires
-    // `Self: Unpin`, so pin it on the stack with the stable `std::pin::pin!`
-    // macro (any real consumer of this client API hits the same requirement).
+    // gate — drive the real SSE `subscribe()` to find the Gate frame. The
+    // raw `gate` typed event really is emitted by the real producer
+    // alongside the projection state (see the module doc); this loop is
+    // unchanged by the (3) fix above. `subscribe()` returns `impl Stream`
+    // built over `futures::stream::unfold` of an async block, which is not
+    // `Unpin`; `StreamExt::next()` requires `Self: Unpin`, so pin it on the
+    // stack with the stable `std::pin::pin!` macro (any real consumer of
+    // this client API hits the same requirement).
     let mut events = std::pin::pin!(ironclaw_reborn_tui::client::events::subscribe(
         &client, &thread_id, None
     ));
@@ -173,22 +213,61 @@ async fn tui_client_drives_submit_gate_resolve_completed_seam() {
         .await
         .expect("resolve_gate");
 
-    // completed seam — drain until FinalReply, not a bare status poll.
-    let final_text = loop {
+    // completed seam — drain `projection_update`/`projection_snapshot`
+    // frames until a `ProductProjectionItem::RunStatus` item for this run
+    // reaches a terminal (or `blocked_approval`, as a safety net — mirrors
+    // `TERMINAL_RUN_STATUSES`/`PROMPT_RUN_STATUSES` in
+    // `crates/ironclaw_webui_v2/frontend/src/pages/chat/lib/useChatEvents.ts`)
+    // status. NOT a `FinalReply` event: the real `local-dev` producer never
+    // emits `final_reply` on this wire (see the module doc) — the durable
+    // reply text lives only in the thread timeline, which
+    // `ironclaw_reborn_tui`'s own reducer now reloads on settle
+    // (`app::transcript::apply_run_status`); this test's job is only to
+    // prove the run actually reaches a terminal status and the approved
+    // write actually lands, which the assertions below already cover.
+    const SETTLED_RUN_STATUSES: &[&str] = &[
+        "completed",
+        "succeeded",
+        "failed",
+        "cancelled",
+        "recovery_required",
+        "blocked_approval",
+    ];
+    let settled_status = loop {
         let frame = events
             .next()
             .await
-            .expect("stream stays open until the final reply arrives")
+            .expect("stream stays open until the run settles")
             .expect("frame decodes");
-        if let ironclaw_product_workflow::webchat_schema::WebChatV2Event::FinalReply { reply } =
-            frame.event
-        {
-            break reply.text;
+        let projection = match frame.event {
+            ironclaw_product_workflow::webchat_schema::WebChatV2Event::ProjectionUpdate {
+                state,
+            }
+            | ironclaw_product_workflow::webchat_schema::WebChatV2Event::ProjectionSnapshot {
+                state,
+            } => state,
+            _ => continue,
+        };
+        let run_id = gate.turn_run_id.to_string();
+        let settled = projection.items.into_iter().find_map(|item| match item {
+            ProductProjectionItem::RunStatus {
+                run_id: item_run_id,
+                status,
+                ..
+            } if item_run_id.to_string() == run_id
+                && SETTLED_RUN_STATUSES.contains(&status.as_str()) =>
+            {
+                Some(status)
+            }
+            _ => None,
+        });
+        if let Some(status) = settled {
+            break status;
         }
     };
-    assert!(
-        final_text.contains("file written after TUI-resolved approval"),
-        "unexpected final reply text: {final_text:?}"
+    assert_eq!(
+        settled_status, "completed",
+        "run should complete after the approved write is re-dispatched"
     );
 
     h.wait_for_status(gate.turn_run_id, TurnStatus::Completed)

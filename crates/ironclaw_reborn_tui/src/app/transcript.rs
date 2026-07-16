@@ -4,9 +4,43 @@
 //! than touching the transcript.
 
 use ironclaw_product_workflow::webchat_schema::{WebChatV2Event, WebChatV2EventFrame};
-use ironclaw_product_workflow::{CapabilityActivityView, CapabilityDisplayPreviewView};
+use ironclaw_product_workflow::{
+    CapabilityActivityView, CapabilityDisplayPreviewView, ProductProjectionItem,
+    ProductProjectionState,
+};
 
-use super::{AppState, Effect, TranscriptItem, gate, wire_label};
+use super::{ApiCall, AppState, Effect, TranscriptItem, gate, wire_label};
+
+/// Page size for the timeline refetch fired on every terminal `RunStatus`
+/// projection item (see `apply_run_status`). A third independent copy of
+/// the same "first page" default `lib.rs`'s `INITIAL_TIMELINE_LIMIT` and
+/// `threads_modal.rs`'s `DEFAULT_TIMELINE_LIMIT` already keep — see those
+/// modules' own doc comments on why each is its own copy, not a shared
+/// constant.
+const SETTLED_RUN_TIMELINE_REFETCH_LIMIT: u32 = 50;
+
+/// `ProductProjectionItem::RunStatus.status` values that mean the run is
+/// over (mirrors the frontend's `TERMINAL_RUN_STATUSES` in
+/// `useChatEvents.ts`).
+const TERMINAL_RUN_STATUSES: [&str; 5] = [
+    "completed",
+    "succeeded",
+    "failed",
+    "cancelled",
+    "recovery_required",
+];
+
+/// `ProductProjectionItem::RunStatus.status` values that mean the run is
+/// blocked on the user, not actively working (mirrors the frontend's
+/// `PROMPT_RUN_STATUSES`). Distinct from "terminal": a prompt status still
+/// has an active run, waiting on the gate/auth resolution the `Gate`
+/// projection item (or the raw `gate`/`auth_required` frame) supplies.
+const PROMPT_RUN_STATUSES: [&str; 4] = [
+    "blocked_auth",
+    "blocked_approval",
+    "blocked_resource",
+    "blocked_dependent_run",
+];
 
 pub(crate) fn apply_server_event(state: &mut AppState, frame: WebChatV2EventFrame) -> Vec<Effect> {
     match frame.event {
@@ -62,13 +96,150 @@ pub(crate) fn apply_server_event(state: &mut AppState, frame: WebChatV2EventFram
             state.transcript.push(TranscriptItem::Error { text });
             Vec::new()
         }
-        // Out of MVP transcript scope (noted, not fabricated) — the
-        // projection state is rendered by a later increment, not this
-        // reducer's transcript.
-        WebChatV2Event::ProjectionSnapshot { .. } | WebChatV2Event::ProjectionUpdate { .. } => {
-            Vec::new()
+        // The real `local-dev` producer's primary wire: both snapshot and
+        // update carry the same `ProductProjectionState` shape and are
+        // applied identically (mirrors the frontend's `useChatEvents.ts`,
+        // which routes both event types through the same
+        // `applyProjectionItems`).
+        WebChatV2Event::ProjectionSnapshot { state: projection }
+        | WebChatV2Event::ProjectionUpdate { state: projection } => {
+            apply_projection(state, projection)
         }
         WebChatV2Event::KeepAlive => Vec::new(),
+    }
+}
+
+/// Applies every item in one `projection_snapshot`/`projection_update`
+/// frame, in order.
+fn apply_projection(state: &mut AppState, projection: ProductProjectionState) -> Vec<Effect> {
+    let mut effects = Vec::new();
+    for item in projection.items {
+        effects.extend(apply_projection_item(state, item));
+    }
+    effects
+}
+
+fn apply_projection_item(state: &mut AppState, item: ProductProjectionItem) -> Vec<Effect> {
+    match item {
+        ProductProjectionItem::RunStatus { run_id, status, .. } => {
+            apply_run_status(state, run_id.to_string(), status)
+        }
+        ProductProjectionItem::Text { id, body, .. } => {
+            upsert_live_text(state, id, body);
+            Vec::new()
+        }
+        ProductProjectionItem::Thinking { id, body, .. } => {
+            upsert_thinking(state, id, body);
+            Vec::new()
+        }
+        ProductProjectionItem::Gate {
+            run_id,
+            gate_kind,
+            gate_ref,
+            headline,
+            body,
+            allow_always,
+            auth_context,
+            ..
+        } => {
+            // `ProductGateKind`/`AuthPromptContextView` are not re-exported
+            // by `ironclaw_product_workflow` (see `gate::apply_projection_gate`'s
+            // doc) — reduce them to primitives here, where the compiler
+            // still has the concrete wire types in scope from this match's
+            // destructure, before crossing into `gate`.
+            let is_auth = wire_label(&gate_kind) == "auth";
+            let (challenge_kind, authorization_url) = match auth_context {
+                Some(ctx) => (Some(wire_label(&ctx.challenge_kind)), ctx.authorization_url),
+                None => (None, None),
+            };
+            gate::apply_projection_gate(
+                state,
+                gate::ProjectionGateFields {
+                    turn_run_id: run_id.to_string(),
+                    gate_ref,
+                    headline,
+                    body: body.unwrap_or_default(),
+                    allow_always,
+                    is_auth,
+                    challenge_kind,
+                    authorization_url,
+                },
+            )
+        }
+        // Rendered minimally as an appended `System` line (mirroring the
+        // frontend's own scope — neither item type gets bespoke
+        // chat-bubble/upsert rendering there either; see the module doc).
+        // Unlike `Text`/`Thinking`, the contract does not require an
+        // in-place upsert for these two: a `WorkSummary` phase transition
+        // reads fine as a sequence of status lines, not a single line that
+        // rewrites itself.
+        ProductProjectionItem::WorkSummary { phase, body, .. } => {
+            state.transcript.push(TranscriptItem::System {
+                text: format!("[{}] {body}", wire_label(&phase)),
+            });
+            Vec::new()
+        }
+        ProductProjectionItem::SkillActivation { skill_names, .. } => {
+            state.transcript.push(TranscriptItem::System {
+                text: format!("skills: {}", skill_names.join(", ")),
+            });
+            Vec::new()
+        }
+        // Not populated by the current producer for this projection item —
+        // the raw `capability_activity` frame (handled by `upsert_activity`
+        // above) is the real tool-card path. See the module doc.
+        ProductProjectionItem::CapabilityActivity(_) => Vec::new(),
+    }
+}
+
+/// Drives `state.running` and, on a terminal status, settles the run: clears
+/// a matching pending gate and fires the SAME `ApiCall::LoadTimeline` effect
+/// startup rehydration and `threads_modal`'s thread-switch already use, so
+/// the durable assistant reply (and any tool-input/output previews — never
+/// carried by projection state, only by the timeline; see the module doc)
+/// lands once the live stream can no longer show them. Mirrors the
+/// frontend's `onRunSettled` timeline reload in `useHistory.ts`, fired from
+/// `applyProjectionItems`'s terminal-status branch in `useChatEvents.ts`.
+fn apply_run_status(state: &mut AppState, run_id: String, status: String) -> Vec<Effect> {
+    if TERMINAL_RUN_STATUSES.contains(&status.as_str()) {
+        state.running = false;
+        if state
+            .pending_gate
+            .as_ref()
+            .is_some_and(|g| g.turn_run_id() == run_id)
+        {
+            state.pending_gate = None;
+        }
+        return match state.thread_id.clone() {
+            Some(thread_id) => vec![Effect::Api(ApiCall::LoadTimeline {
+                thread_id,
+                limit: SETTLED_RUN_TIMELINE_REFETCH_LIMIT,
+                cursor: None,
+            })],
+            None => Vec::new(),
+        };
+    }
+    state.running = !PROMPT_RUN_STATUSES.contains(&status.as_str());
+    Vec::new()
+}
+
+fn upsert_live_text(state: &mut AppState, id: String, body: String) {
+    let existing = state.transcript.iter_mut().find(|item| {
+        matches!(item, TranscriptItem::LiveText { id: existing_id, .. } if *existing_id == id)
+    });
+    match existing {
+        Some(TranscriptItem::LiveText { body: slot, .. }) => *slot = body,
+        _ => state.transcript.push(TranscriptItem::LiveText { id, body }),
+    }
+}
+
+fn upsert_thinking(state: &mut AppState, id: String, body: String) {
+    let existing = state.transcript.iter_mut().find(|item| {
+        matches!(item, TranscriptItem::Thinking { id: existing_id, .. } if *existing_id == id)
+    });
+    match existing {
+        Some(TranscriptItem::Thinking { body: slot, .. }) => *slot = body,
+        _ => state.transcript.push(TranscriptItem::Thinking { id, body }),
     }
 }
 
@@ -97,9 +268,11 @@ mod tests {
     use ironclaw_host_api::InvocationId;
     use ironclaw_product_workflow::CapabilityActivityStatusView;
     use ironclaw_product_workflow::webchat_schema::WebChatV2Event;
+    use ironclaw_turns::TurnRunId;
 
     use super::super::test_support::{
-        activity_view, final_reply_view, frame, run_state_with_failure,
+        activity_view, final_reply_view, frame, projection_gate, projection_run_status,
+        projection_state, projection_text, run_state_with_failure,
     };
     use super::*;
 
@@ -201,5 +374,116 @@ mod tests {
         );
         assert!(state.is_running());
         assert!(state.transcript.is_empty());
+    }
+
+    #[test]
+    fn projection_text_then_terminal_run_status_renders_reply_and_refetches_timeline() {
+        let mut state = AppState::default().set_thread_id("t-1");
+        let run_id = TurnRunId::new();
+
+        let effects = apply_server_event(
+            &mut state,
+            frame(WebChatV2Event::ProjectionUpdate {
+                state: projection_state(
+                    "t-1",
+                    vec![
+                        projection_text("item-1", run_id, "hello from the live stream"),
+                        projection_run_status(run_id, "completed"),
+                    ],
+                ),
+            }),
+        );
+
+        assert!(
+            state
+                .transcript
+                .iter()
+                .any(|i| i.as_live_text() == Some("hello from the live stream")),
+            "projection Text item must render into the transcript"
+        );
+        assert!(!state.is_running(), "terminal RunStatus clears running");
+        assert!(matches!(
+            effects.as_slice(),
+            [Effect::Api(ApiCall::LoadTimeline { thread_id, .. })] if thread_id == "t-1"
+        ));
+    }
+
+    #[test]
+    fn projection_text_upserts_by_id_instead_of_appending_duplicates() {
+        let mut state = AppState::default();
+        let run_id = TurnRunId::new();
+
+        apply_server_event(
+            &mut state,
+            frame(WebChatV2Event::ProjectionUpdate {
+                state: projection_state("t-1", vec![projection_text("item-1", run_id, "partial")]),
+            }),
+        );
+        apply_server_event(
+            &mut state,
+            frame(WebChatV2Event::ProjectionUpdate {
+                state: projection_state(
+                    "t-1",
+                    vec![projection_text(
+                        "item-1",
+                        run_id,
+                        "partial reply, now complete",
+                    )],
+                ),
+            }),
+        );
+
+        let live_texts: Vec<_> = state
+            .transcript
+            .iter()
+            .filter_map(|i| i.as_live_text())
+            .collect();
+        assert_eq!(
+            live_texts,
+            vec!["partial reply, now complete"],
+            "same item id must upsert in place, not append a second row"
+        );
+    }
+
+    #[test]
+    fn projection_gate_item_and_raw_gate_frame_for_the_same_run_dedupe_to_one_pending_gate() {
+        let mut state = AppState::default();
+        let run_id = TurnRunId::new();
+
+        apply_server_event(
+            &mut state,
+            frame(WebChatV2Event::ProjectionUpdate {
+                state: projection_state("t-1", vec![projection_gate(run_id, "gr-1")]),
+            }),
+        );
+        assert!(state.pending_gate.is_some());
+
+        apply_server_event(
+            &mut state,
+            frame(WebChatV2Event::Gate {
+                prompt: ironclaw_product_workflow::GatePromptView {
+                    turn_run_id: run_id,
+                    gate_ref: "gr-1".to_string(),
+                    invocation_id: None,
+                    headline: "Approve action (raw frame)".to_string(),
+                    body: "Should not replace the already-pending gate.".to_string(),
+                    allow_always: false,
+                    approval_context: None,
+                },
+            }),
+        );
+
+        assert_eq!(
+            state.pending_gate.as_ref().map(gate::PendingGate::gate_ref),
+            Some("gr-1"),
+            "still exactly one pending gate, keyed on (run_id, gate_ref)"
+        );
+        assert!(
+            matches!(
+                &state.pending_gate,
+                Some(gate::PendingGate::Approval { headline, .. }) if headline == "Approve action"
+            ),
+            "first arrival (the projection item) wins; the later raw frame is a no-op"
+        );
     }
 }

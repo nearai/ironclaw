@@ -30,6 +30,14 @@ fn render_item(item: &TranscriptItem) -> Line<'static> {
             Span::styled("assistant: ", Style::default().fg(Color::Cyan)),
             Span::raw(text.clone()),
         ]),
+        TranscriptItem::LiveText { body, .. } => Line::from(vec![
+            Span::styled("assistant: ", Style::default().fg(Color::Cyan)),
+            Span::raw(body.clone()),
+        ]),
+        TranscriptItem::Thinking { body, .. } => Line::styled(
+            format!("thinking: {body}"),
+            Style::default().fg(Color::DarkGray),
+        ),
         TranscriptItem::Activity(activity) => {
             let status = wire_label(&activity.status);
             let detail = activity.subtitle.clone().unwrap_or_default();

@@ -77,26 +77,117 @@ impl PendingGate {
 }
 
 pub(crate) fn apply_gate_prompt(state: &mut AppState, prompt: GatePromptView) -> Vec<Effect> {
-    state.pending_gate = Some(PendingGate::Approval {
-        turn_run_id: prompt.turn_run_id.to_string(),
-        gate_ref: prompt.gate_ref,
-        headline: prompt.headline,
-        body: prompt.body,
-        allow_always: prompt.allow_always,
-    });
+    set_pending_gate_if_new(
+        state,
+        PendingGate::Approval {
+            turn_run_id: prompt.turn_run_id.to_string(),
+            gate_ref: prompt.gate_ref,
+            headline: prompt.headline,
+            body: prompt.body,
+            allow_always: prompt.allow_always,
+        },
+    );
     Vec::new()
 }
 
 pub(crate) fn apply_auth_prompt(state: &mut AppState, prompt: AuthPromptView) -> Vec<Effect> {
-    state.pending_gate = Some(PendingGate::Auth {
-        turn_run_id: prompt.turn_run_id.to_string(),
-        gate_ref: prompt.auth_request_ref,
-        headline: prompt.headline,
-        body: prompt.body,
-        challenge_kind: prompt.challenge_kind.map(|kind| wire_label(&kind)),
-        authorization_url: prompt.authorization_url,
-    });
+    set_pending_gate_if_new(
+        state,
+        PendingGate::Auth {
+            turn_run_id: prompt.turn_run_id.to_string(),
+            gate_ref: prompt.auth_request_ref,
+            headline: prompt.headline,
+            body: prompt.body,
+            challenge_kind: prompt.challenge_kind.map(|kind| wire_label(&kind)),
+            authorization_url: prompt.authorization_url,
+        },
+    );
     Vec::new()
+}
+
+/// Already wire-type-erased fields of a `ProductProjectionItem::Gate`,
+/// bundled into one struct so [`apply_projection_gate`] stays under
+/// clippy's `too_many_arguments` — see that function's doc for why the
+/// fields are primitives rather than the wire types themselves.
+pub(crate) struct ProjectionGateFields {
+    pub(crate) turn_run_id: String,
+    pub(crate) gate_ref: String,
+    pub(crate) headline: String,
+    pub(crate) body: String,
+    pub(crate) allow_always: bool,
+    pub(crate) is_auth: bool,
+    pub(crate) challenge_kind: Option<String>,
+    pub(crate) authorization_url: Option<String>,
+}
+
+/// Builds a pending gate from a `ProductProjectionItem::Gate`'s fields
+/// (mirrors the frontend's `gateFromProjectionGate` in
+/// `crates/ironclaw_webui_v2/frontend/src/pages/chat/lib/gates.ts`), then
+/// applies the same first-wins dedupe as [`apply_gate_prompt`]/
+/// [`apply_auth_prompt`].
+///
+/// Takes primitive fields (via [`ProjectionGateFields`]) rather than
+/// `&ProductProjectionItem` / `ProductGateKind` / `AuthPromptContextView`
+/// directly: none of those three types are re-exported by
+/// `ironclaw_product_workflow`, so — per this module's/`app/mod.rs`'s
+/// boundary doc — this crate's production code never names them.
+/// `transcript::apply_projection_item` destructures the wire item (where the
+/// compiler still has the concrete types in scope) and passes through
+/// already-erased values: `is_auth` is `gate_kind` reduced through
+/// `wire_label`, and `challenge_kind`/`authorization_url` are pulled out of
+/// `auth_context` the same way.
+pub(crate) fn apply_projection_gate(
+    state: &mut AppState,
+    fields: ProjectionGateFields,
+) -> Vec<Effect> {
+    let ProjectionGateFields {
+        turn_run_id,
+        gate_ref,
+        headline,
+        body,
+        allow_always,
+        is_auth,
+        challenge_kind,
+        authorization_url,
+    } = fields;
+    let candidate = if is_auth {
+        PendingGate::Auth {
+            turn_run_id,
+            gate_ref,
+            headline,
+            body,
+            challenge_kind,
+            authorization_url,
+        }
+    } else {
+        PendingGate::Approval {
+            turn_run_id,
+            gate_ref,
+            headline,
+            body,
+            allow_always,
+        }
+    };
+    set_pending_gate_if_new(state, candidate);
+    Vec::new()
+}
+
+/// The single gate-dedupe seam: the same gate can arrive twice — once as a
+/// raw `gate`/`auth_required` frame, once as a `ProjectionUpdate` `Gate`
+/// item (or the projection item can repeat across a reconnect's replayed
+/// snapshot) — keyed on `(turn_run_id, gate_ref)`. First arrival wins;
+/// later arrivals for the same key are a no-op, mirroring the frontend's
+/// `setPendingGate((current) => current || pendingGate)`. A different
+/// pending gate (different key) still overwrites, same as before this
+/// dedupe existed.
+fn set_pending_gate_if_new(state: &mut AppState, candidate: PendingGate) {
+    let is_duplicate = state.pending_gate.as_ref().is_some_and(|existing| {
+        existing.turn_run_id() == candidate.turn_run_id()
+            && existing.gate_ref() == candidate.gate_ref()
+    });
+    if !is_duplicate {
+        state.pending_gate = Some(candidate);
+    }
 }
 
 /// Key handling while a gate is pending (`Focus::GateZone`), reached from
