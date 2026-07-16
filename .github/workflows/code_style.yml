@@ -408,6 +408,25 @@ jobs:
       - name: Self-test the boundary script
         run: python3 scripts/check_gateway_boundaries.py test
 
+  composition-budget:
+    name: Composition mass ratchet
+    needs: changes
+    if: needs.changes.outputs.has_code == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          persist-credentials: false
+      # Gate: ironclaw_reborn_composition's share of production crate code must
+      # not grow past the committed ceiling (scripts/ci/composition-budget.toml).
+      # Pure bash over the working tree — no compile, seconds to run.
+      - name: Check composition mass budget
+        run: bash scripts/ci/check-composition-budget.sh
+      # Guardrails are code — self-test the gate whenever it or its budget changes.
+      - name: Self-test the composition budget gate
+        run: bash scripts/ci/test-check-composition-budget.sh
+
   code-style:
     name: Code Style (fmt + clippy)
     runs-on: ubuntu-latest
@@ -425,6 +444,7 @@ jobs:
       - reborn-cli-smoke
       - no-panics
       - gateway-boundaries
+      - composition-budget
       - webui-v2-js-lint
     steps:
       - name: Checkout repository
@@ -451,6 +471,7 @@ jobs:
             "tracked-ignored-files=${{ needs.tracked-ignored-files.result }}" \
             "static-checks=${{ needs.static-checks.result }}" \
             "gateway-boundaries=${{ needs.gateway-boundaries.result }}" \
+            "composition-budget=${{ needs.composition-budget.result }}" \
             "webui-v2-js-lint=${{ needs.webui-v2-js-lint.result }}"; do
             name="${job_result%%=*}"
             result="${job_result##*=}"
