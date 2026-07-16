@@ -18,6 +18,8 @@ pub(crate) mod serve;
 pub(crate) mod serve_slack;
 #[cfg(feature = "webui-v2-beta")]
 pub(crate) mod serve_sso;
+#[cfg(feature = "webui-v2-beta")]
+pub(crate) mod service;
 pub(crate) mod skills;
 pub(crate) mod status;
 pub(crate) mod traces;
