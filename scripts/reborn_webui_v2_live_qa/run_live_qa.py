@@ -1245,6 +1245,26 @@ def _result(case_name: str, success: bool, started: float, details: dict[str, ob
     )
 
 
+def _precondition_result(
+    case_name: str,
+    started: float,
+    details: dict[str, object],
+) -> ProbeResult:
+    result = _result(
+        case_name,
+        False,
+        started,
+        {
+            **details,
+            "failure_class": "precondition",
+            "failure_status": "inconclusive",
+            "inconclusive": True,
+        },
+    )
+    result.details["blocking"] = False
+    return result
+
+
 def _is_blocking_failure(result: ProbeResult) -> bool:
     return not result.success and bool(result.details.get("blocking", True))
 
@@ -6873,18 +6893,22 @@ def _slack_correctness_failure_result(
     artifact_details = {
         **details,
         "error": error,
-        "failure_class": "precondition" if precondition else "product",
         "failure_category": (
             "invalid_fixture" if precondition else "answer_mismatch"
         ),
-        "failure_status": "failed",
     }
     _redact_slack_entity_ids_in_artifact_details(artifact_details)
+    if precondition:
+        return _precondition_result(case_name, started, artifact_details)
     return _result(
         case_name,
         False,
         started,
-        artifact_details,
+        {
+            **artifact_details,
+            "failure_class": "product",
+            "failure_status": "failed",
+        },
     )
 
 
@@ -8298,9 +8322,8 @@ async def run_cases(args: argparse.Namespace) -> int:
             and not telegram_preflight.get("ready")
         ):
             started = time.monotonic()
-            result = _result(
+            result = _precondition_result(
                 name,
-                False,
                 started,
                 {
                     "blocked": True,
@@ -8330,9 +8353,8 @@ async def run_cases(args: argparse.Namespace) -> int:
             and not github_preflight.get("ready")
         ):
             started = time.monotonic()
-            result = _result(
+            result = _precondition_result(
                 name,
-                False,
                 started,
                 {
                     "blocked": True,
@@ -8382,9 +8404,8 @@ async def run_cases(args: argparse.Namespace) -> int:
             credential_action = _google_credential_action_for_block(google_preflight)
             if credential_action:
                 details["credential_action"] = credential_action
-            result = _result(
+            result = _precondition_result(
                 name,
-                False,
                 started,
                 details,
             )
@@ -8416,9 +8437,8 @@ async def run_cases(args: argparse.Namespace) -> int:
                         f"{slack_auth.get('error') if isinstance(slack_auth, dict) else 'unknown'}"
                     )
                     blocked = "slack_auth_failed"
-                result = _result(
+                result = _precondition_result(
                     name,
-                    False,
                     started,
                     {
                         "blocked": True,
@@ -8446,9 +8466,8 @@ async def run_cases(args: argparse.Namespace) -> int:
             )
             if mismatch:
                 started = time.monotonic()
-                result = _result(
+                result = _precondition_result(
                     name,
-                    False,
                     started,
                     {
                         "blocked": True,
@@ -8477,9 +8496,8 @@ async def run_cases(args: argparse.Namespace) -> int:
             and not slack_personal_auth_preflight.get("ready")
         ):
             started = time.monotonic()
-            result = _result(
+            result = _precondition_result(
                 name,
-                False,
                 started,
                 {
                     "blocked": True,
@@ -8508,9 +8526,8 @@ async def run_cases(args: argparse.Namespace) -> int:
             and not slack_preflight.get("delivery_target_present")
         ):
             started = time.monotonic()
-            result = _result(
+            result = _precondition_result(
                 name,
-                False,
                 started,
                 {
                     "blocked": True,
@@ -8557,9 +8574,8 @@ async def run_cases(args: argparse.Namespace) -> int:
                     )
                     if not setup_api.get("applied"):
                         blocked_preflight = {**slack_preflight, "setup_api": setup_api}
-                        result = _result(
+                        result = _precondition_result(
                             name,
-                            False,
                             setup_started,
                             {
                                 "blocked": True,

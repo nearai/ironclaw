@@ -347,6 +347,16 @@ class RebornQaSlackReportTests(unittest.TestCase):
                 rendered,
             )
             self.assertNotIn("3/5 passed", rendered)
+        self.assertIn(
+            "| Lane | Provider | Status | Contract health | "
+            "Behavioral quality | Inconclusive | Duration |\n"
+            "| --- | --- | --- | ---: | ---: | ---: | ---: |\n"
+            "| `reborn-webui-v2-live-qa` | `reborn-webui-v2` | "
+            ":warning: warn | 2/2 passed | 1/3 passed, 2 warnings | 0 | 0s |",
+            github,
+        )
+        primary_table = github.split("\n\n", 1)[1].split("\n\n", 1)[0]
+        self.assertNotIn("3/5", primary_table)
 
     def test_infrastructure_results_do_not_increment_tier_totals(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -381,6 +391,70 @@ class RebornQaSlackReportTests(unittest.TestCase):
             notify._tier_health_lines(report),
             ["Infrastructure/preconditions: 1 inconclusive"],
         )
+
+    def test_precondition_results_do_not_increment_tier_totals(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            lane_dir = (
+                Path(tmpdir)
+                / "reborn-webui-v2-live-qa"
+                / "reborn-webui-v2"
+                / "run"
+            )
+            lane_dir.mkdir(parents=True)
+            precondition = result_entry(
+                "invalid_fixture",
+                False,
+                "contract",
+                True,
+                failure_class="precondition",
+                failure_status="failed",
+            )
+            (lane_dir / "results.json").write_text(
+                json.dumps({"results": [precondition]}),
+                encoding="utf-8",
+            )
+            report = notify.collect_lane(lane_dir)
+
+        self.assertEqual((report.contract_passed, report.contract_total), (0, 0))
+        self.assertEqual((report.behavioral_passed, report.behavioral_total), (0, 0))
+        self.assertEqual(report.failed, 0)
+        self.assertEqual(report.warnings, 0)
+        self.assertEqual(report.inconclusive, 1)
+        self.assertEqual(report.status, "inconclusive")
+        case = report.reborn_qa_cases[0]
+        self.assertTrue(case.inconclusive)
+        self.assertEqual(case.failure_class, "precondition")
+
+    def test_missing_or_invalid_tier_forces_blocking_contract(self):
+        for label, case_tier in (("missing", None), ("invalid", "experimental")):
+            with self.subTest(case_tier=label), tempfile.TemporaryDirectory() as tmpdir:
+                lane_dir = (
+                    Path(tmpdir)
+                    / "reborn-webui-v2-live-qa"
+                    / "reborn-webui-v2"
+                    / label
+                )
+                lane_dir.mkdir(parents=True)
+                entry = result_entry(
+                    f"{label}_tier",
+                    False,
+                    case_tier,
+                    False,
+                )
+                (lane_dir / "results.json").write_text(
+                    json.dumps({"results": [entry]}),
+                    encoding="utf-8",
+                )
+                report = notify.collect_lane(lane_dir)
+
+            self.assertEqual((report.contract_passed, report.contract_total), (0, 1))
+            self.assertEqual((report.behavioral_passed, report.behavioral_total), (0, 0))
+            self.assertEqual(report.failed, 1)
+            self.assertEqual(report.warnings, 0)
+            self.assertEqual(report.status, "fail")
+            case = report.reborn_qa_cases[0]
+            self.assertEqual(case.case_tier, "contract")
+            self.assertTrue(case.blocking)
 
     def test_untyped_failures_fail_closed_into_contract_tier_totals(self):
         with tempfile.TemporaryDirectory() as tmpdir:

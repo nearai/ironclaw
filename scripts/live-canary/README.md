@@ -213,18 +213,20 @@ zero; it is shown here to make the three-signal interpretation explicit.
 - Current runner-emitted contract cases are blocking; current behavioral cases
   are nonblocking warnings, so model variance stays visible without
   masquerading as a product-contract regression.
-- The notifier normalizes `case_tier` and `blocking` independently. A missing or
-  invalid tier becomes `contract`; a missing or nonboolean blocking value
-  becomes `true`. One valid field is not discarded because the other is bad.
+- For a valid `case_tier`, the notifier normalizes `blocking` independently: a
+  boolean value is preserved and a missing or nonboolean value becomes `true`.
+  A missing or invalid tier fails closed atomically as `case_tier=contract` and
+  `blocking=true`, even when the entry supplies `blocking=false`.
 - A result is inconclusive only when it is explicitly typed with
-  `failure_class=infrastructure`, `failure_status=inconclusive`, or
-  `inconclusive=true`. Examples include the stale Slack search index, a terminal
-  model-provider incident, and a durable-evidence read error.
+  `failure_class=infrastructure`, `failure_class=precondition`,
+  `failure_status=inconclusive`, or `inconclusive=true`. Examples include the
+  stale Slack search index, a terminal model-provider incident, and a
+  durable-evidence read error.
 - Missing required credentials, setup, or fixtures—including Slack fixture
-  preconditions—are not automatically inconclusive. They retain the case's
-  emitted tier and blocking policy: current contract cases block and current
-  behavioral cases warn, unless the result explicitly carries one of those
-  infrastructure/inconclusive markers.
+  preconditions—are emitted as explicit precondition inconclusives with
+  `failure_status=inconclusive`, `inconclusive=true`, and `blocking=false`.
+  They remain unsuccessful for diagnostics but do not enter contract or
+  behavioral totals.
 
 Any combined `succeeded of total` line is execution detail only. Use the tiered
 lines above as the primary health signal.
@@ -236,13 +238,16 @@ inconclusive result before any model call. Persisted preflight metadata is
 bounded to `indexed`, `attempts`, `latency_ms`, and an optional sanitized,
 240-character `last_error`.
 
-Each Reborn QA case that passes credential/setup/fixture preflight and reaches
-server execution starts `ironclaw-reborn` with a new ephemeral agent working
-directory outside both the checkout and artifact tree. Preflight failures do
-not allocate one and return their classified result; cases short-circuited
-after a terminal provider incident do not run. For a started case, the harness
-stops the server, exports its trace while the context is still live, and only
-then removes the workspace. Routine creation passes only after a structurally
+Each Reborn QA case that passes the pre-server credential, delivery-target, and
+fixture checks starts `ironclaw-reborn` with a new ephemeral agent working
+directory outside both the checkout and artifact tree. Those early preflight
+incidents do not start a server or allocate a workspace. A Slack setup-API
+preflight happens after server start but before any model case call; an incident
+still emits the same nonblocking precondition inconclusive and enters normal
+server/workspace cleanup. Cases short-circuited after a terminal provider
+incident do not run. For a started case, the harness stops the server, exports
+its trace while the context is still live, and only then removes the workspace.
+Routine creation passes only after a structurally
 final assistant reply and a new durable `trigger_record`; Slack correctness
 probes bind expected terminal capability evidence to the current turn/run
 rather than trusting response prose alone.

@@ -151,9 +151,14 @@ def _normalize_result_classification(entry: dict) -> _ResultClassification:
         details = {}
 
     tier_value = details.get("case_tier")
-    tier = tier_value if tier_value in ("contract", "behavioral") else "contract"
+    tier_is_valid = tier_value in ("contract", "behavioral")
+    tier = tier_value if tier_is_valid else "contract"
     blocking_value = details.get("blocking")
-    blocking = blocking_value if isinstance(blocking_value, bool) else True
+    blocking = (
+        blocking_value
+        if tier_is_valid and isinstance(blocking_value, bool)
+        else True
+    )
 
     def typed_string(key: str) -> str:
         value = details.get(key)
@@ -164,7 +169,7 @@ def _normalize_result_classification(entry: dict) -> _ResultClassification:
     failure_status = typed_string("failure_status")
     inconclusive = (
         details.get("inconclusive") is True
-        or failure_class == "infrastructure"
+        or failure_class in ("infrastructure", "precondition")
         or failure_status == "inconclusive"
     )
     return _ResultClassification(
@@ -227,8 +232,8 @@ def parse_results_json(path: Path, report: LaneReport) -> None:
         ]}
 
     ``passed`` counts successful probes. Failed probes with explicit
-    ``blocking=false`` metadata become warnings, and infrastructure
-    results become inconclusive; neither increments the blocking
+    ``blocking=false`` metadata become warnings, while infrastructure and
+    precondition results become inconclusive; neither increments the blocking
     ``failed`` count or ``junit_failures``. Older results without typed
     metadata fail closed as blocking failures.
     """
@@ -1153,8 +1158,9 @@ def github_comment_body(
 
     lines.extend(
         [
-            "| Lane | Provider | Status | Passed | Failed | Duration |",
-            "| --- | --- | --- | ---: | ---: | ---: |",
+            "| Lane | Provider | Status | Contract health | "
+            "Behavioral quality | Inconclusive | Duration |",
+            "| --- | --- | --- | ---: | ---: | ---: | ---: |",
         ]
     )
     for r in reports:
@@ -1165,10 +1171,28 @@ def github_comment_body(
             "inconclusive": ":grey_question:",
             "skip": ":heavy_minus_sign:",
         }.get(r.status, ":grey_question:")
+        contract_health = (
+            f"{r.contract_passed}/{r.contract_total} passed"
+            if r.contract_total
+            else "—"
+        )
+        if r.behavioral_total:
+            behavioral_warnings = r.behavioral_total - r.behavioral_passed
+            behavioral_health = (
+                f"{r.behavioral_passed}/{r.behavioral_total} passed"
+            )
+            if behavioral_warnings:
+                behavioral_health += (
+                    f", {behavioral_warnings} warning"
+                    f"{'s' if behavioral_warnings != 1 else ''}"
+                )
+        else:
+            behavioral_health = "—"
         lines.append(
             f"| `{_github_md_code(r.lane)}` | `{_github_md_code(r.provider)}` | "
             f"{status} {r.status} | "
-            f"{r.passed}/{r.tests} | {r.failed} | {r.duration_s:.0f}s |"
+            f"{contract_health} | {behavioral_health} | {r.inconclusive} | "
+            f"{r.duration_s:.0f}s |"
         )
 
     if category_summary:

@@ -94,28 +94,30 @@ explicitly.
 - **Runner-emitted case policy:** current contract cases are blocking; current
   behavioral cases explicitly carry `blocking=false`, so a failure is a warning
   rather than a contract regression.
-- **Notifier normalization:** `case_tier` and `blocking` are normalized
-  independently. A missing or invalid `case_tier` becomes `contract`; a missing
-  or nonboolean `blocking` becomes `true`. A valid value for one field survives
-  an invalid value for the other.
+- **Notifier normalization:** for a valid `case_tier`, a boolean `blocking`
+  value is preserved and a missing or nonboolean value becomes `true`. A
+  missing or invalid tier fails closed atomically as `case_tier=contract` and
+  `blocking=true`, even when the entry supplies `blocking=false`.
 - **Infrastructure/preconditions:** a result is inconclusive only when it
   explicitly carries `failure_class=infrastructure`,
-  `failure_status=inconclusive`, or `inconclusive=true`. Examples are a stale
-  Slack search index, a terminal model-provider incident, and a durable-evidence
-  read error. These results do not increment contract or behavioral totals.
+  `failure_class=precondition`, `failure_status=inconclusive`, or
+  `inconclusive=true`. Examples are a stale Slack search index, a terminal
+  model-provider incident, and a durable-evidence read error. These results do
+  not increment contract or behavioral totals.
 - Missing credentials, setup, or fixtures—including Slack fixture
-  preconditions—are not automatically inconclusive. They retain the case's
-  emitted tier and blocking policy: current contract cases block and current
-  behavioral cases warn, unless the result is explicitly typed with one of the
-  infrastructure/inconclusive markers above.
+  preconditions—are emitted as explicit precondition inconclusives with
+  `failure_status=inconclusive`, `inconclusive=true`, and `blocking=false`.
+  They remain unsuccessful for diagnostics but do not enter contract or
+  behavioral totals.
 
 Slack and GitHub summaries may also show an aggregate execution count such as
 `succeeded of total`. That combined number is secondary execution detail; it
 must not be used in place of the three tier-specific health lines.
 
 Older JUnit-only lanes are treated as contract results. For structured results,
-the notifier applies the tier, blocking, and inconclusive rules independently
-rather than treating them as one all-or-nothing metadata pair.
+the notifier applies the inconclusive rule separately from product tiering. A
+valid tier retains its independently normalized blocking value; an invalid tier
+uses the atomic fail-closed contract policy above.
 
 ## Reborn WebUI v2 operating guarantees
 
@@ -139,11 +141,14 @@ redact query secrets plus Slack user/conversation identifiers.
 
 ### Agent workspace isolation
 
-Only a selected Reborn QA case that passes credential/setup/fixture preflight
-and reaches server execution gets a newly created ephemeral working directory.
-Preflight failures return their classified result before allocation; after a
-terminal provider incident, the remaining selected cases are recorded as
-inconclusive without being run or allocated workspaces.
+Only a selected Reborn QA case that passes pre-server credential,
+delivery-target, and fixture checks reaches server execution and gets a newly
+created ephemeral working directory. Those early preflight incidents start no
+server and allocate no workspace. The Slack setup-API preflight happens after
+server start but before any model case call; an incident emits the same
+nonblocking precondition inconclusive and enters normal server/workspace
+cleanup. After a terminal provider incident, the remaining selected cases are
+recorded as inconclusive without being run or allocated workspaces.
 
 For a case that starts, the harness rejects a working directory inside either
 the repository checkout or the artifact output tree and passes the isolated
