@@ -50,8 +50,9 @@ use crate::{
     LifecycleProductFacade, ListPendingApprovalsRequest, ProductWorkflowError,
     ResolveApprovalInteractionRequest, ResolveApprovalInteractionResponse,
     ResolveAuthInteractionRequest, ResolveAuthInteractionResponse,
-    UnsupportedLifecycleProductFacade, WebUiAuthenticatedCaller, WebUiCancelRunRequest,
-    WebUiCreateThreadRequest, WebUiGateResolution, WebUiInboundCommand, WebUiInboundValidationCode,
+    UnsupportedLifecycleProductFacade, WebUiAuthenticatedCaller, WebUiAutomationScheduleRequest,
+    WebUiCancelRunRequest, WebUiCreateAutomationRequest, WebUiCreateThreadRequest,
+    WebUiGateResolution, WebUiInboundCommand, WebUiInboundValidationCode,
     WebUiInboundValidationError, WebUiListAutomationsRequest, WebUiListThreadsRequest,
     WebUiRenameAutomationRequest, WebUiResolveGateRequest, WebUiRetryRunRequest,
     WebUiSendMessageRequest, WebUiSetupExtensionRequest,
@@ -621,6 +622,47 @@ pub struct AutomationListRequest {
     pub include_completed: bool,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AutomationCreateRequest {
+    pub name: String,
+    pub prompt: String,
+    pub schedule: AutomationCreateSchedule,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AutomationCreateSchedule {
+    Cron {
+        expression: String,
+        timezone: String,
+    },
+    Once {
+        at: String,
+        timezone: String,
+    },
+}
+
+impl From<WebUiCreateAutomationRequest> for AutomationCreateRequest {
+    fn from(request: WebUiCreateAutomationRequest) -> Self {
+        let schedule = match request.schedule {
+            WebUiAutomationScheduleRequest::Cron {
+                expression,
+                timezone,
+            } => AutomationCreateSchedule::Cron {
+                expression,
+                timezone,
+            },
+            WebUiAutomationScheduleRequest::Once { at, timezone } => {
+                AutomationCreateSchedule::Once { at, timezone }
+            }
+        };
+        Self {
+            name: request.name,
+            prompt: request.prompt,
+            schedule,
+        }
+    }
+}
+
 /// Stored scope of a trigger-fired thread, returned by
 /// `AutomationProductFacade::resolve_run_thread_scope`.
 ///
@@ -679,6 +721,14 @@ struct AutomationApprovalThreadCandidate {
 
 #[async_trait]
 pub trait AutomationProductFacade: Send + Sync {
+    async fn create_automation(
+        &self,
+        _caller: ProductAgentBoundCaller,
+        _request: AutomationCreateRequest,
+    ) -> Result<RebornAutomationInfo, RebornServicesError> {
+        Err(automation_unavailable())
+    }
+
     async fn list_automations(
         &self,
         caller: ProductAgentBoundCaller,
@@ -2039,6 +2089,15 @@ pub trait RebornServicesApi: Send + Sync {
         caller: WebUiAuthenticatedCaller,
         request: WebUiListAutomationsRequest,
     ) -> Result<RebornListAutomationsResponse, RebornServicesError>;
+
+    async fn create_automation(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+        request: WebUiCreateAutomationRequest,
+    ) -> Result<RebornAutomationInfo, RebornServicesError> {
+        let _ = (caller, request);
+        Err(RebornServicesError::service_unavailable(false))
+    }
 
     async fn pause_automation(
         &self,
@@ -4570,6 +4629,23 @@ impl RebornServicesApi for RebornServices {
             automations,
             scheduler_enabled,
         })
+    }
+
+    async fn create_automation(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+        request: WebUiCreateAutomationRequest,
+    ) -> Result<RebornAutomationInfo, RebornServicesError> {
+        let Some(caller) = product_agent_bound_caller_from_webui(caller) else {
+            return Err(RebornServicesError::from_status(
+                RebornServicesErrorCode::InvalidRequest,
+                400,
+                false,
+            ));
+        };
+        self.automation_facade
+            .create_automation(caller, request.into())
+            .await
     }
 
     async fn pause_automation(

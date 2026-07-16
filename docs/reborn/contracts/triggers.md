@@ -422,6 +422,29 @@ directly.
 The trigger system must expose `trigger_create`, `trigger_list`, `trigger_remove`,
 `trigger_pause`, and `trigger_resume` as first-party Reborn capabilities.
 
+Reborn 产品表面同时提供 caller-scoped 的直接创建操作。WebUI v2 通过
+`POST /api/webchat/v2/automations` 调用 typed `RebornServicesApi` /
+`AutomationProductFacade`，不得从 HTTP handler dispatch 模型可见的
+`builtin.trigger_create`。第一版产品请求只接受 `cron` 和 `once` schedule，
+并严格拒绝 legacy message/system/webhook trigger、execution、delivery 和
+post-create-disable 字段。tenant、creator、agent 与 project scope 只能来自已认证
+caller，不能来自请求体。
+
+`once.at` 接受两种格式：无 offset 的 `YYYY-MM-DDTHH:MM:SS` 按请求中的
+IANA timezone 解释；带 `Z` 或显式 UTC offset 的 RFC3339 值以 offset 确定
+绝对 instant。RFC3339 offset 必须等于该 IANA timezone 在该 instant 的实际
+offset，否则创建在持久化前以非重试 `400 InvalidRequest` 拒绝。本地时间在
+DST overlap/gap 时继续 fail closed；显式且匹配 timezone 的 RFC3339 offset
+可以唯一选择 overlap occurrence。两种格式最终都持久化为现有 UTC instant
++ IANA timezone，不需要 schema migration。
+
+模型 capability 与产品 facade 必须共用 `ironclaw_triggers` 的 typed creation
+service。该 service 统一拥有 schedule 转换、未来 fire slot 验证、record 构造、
+repository upsert、creator pairing 与 pairing 失败后的补偿删除。逐操作 timeout
+必须保留补偿路径：pairing timeout 视为 lifecycle failure，并尝试删除刚写入的
+trigger；只有持久化和 pairing 均成功后，产品 API 才返回 `201 Created` 与
+`RebornAutomationInfo`。
+
 - `trigger_create` validates the schedule and timezone, captures caller scope,
   pairs the caller as the host-trusted synthetic trigger actor used by the
   poller, and persists the trigger. Schedule validation includes both cadence
@@ -508,6 +531,17 @@ V1 acceptance does not require external delivery. A valid V1 trigger fire is one
   schedules are rejected before persistence.
 - `trigger_create` caller-level tests must prove accepted finite schedules with
   no future slot at dispatch time are rejected before persistence.
+- Direct product creation caller-level tests must drive
+  `RebornAutomationProductFacade::create_automation` and the real WebUI v2
+  router. They must prove exact authenticated scope persistence, cron/once
+  creation, list read-back, invalid input with zero writes, sanitized 503
+  mapping, and pairing-failure rollback.
+- Durable creation tests must exercise the shared typed creation service over
+  both libSQL and PostgreSQL repositories so persistence, scoped read-back, and
+  compensation semantics cannot drift by backend.
+- RFC3339 one-time caller-level tests must prove `Z`/offset normalization,
+  offset/timezone mismatch rejection, past-time zero writes, DST overlap
+  disambiguation, and identical product/capability semantics.
 - Trusted inbound caller-level tests must prove duplicate scheduled-slot retries
   replay the original accepted message and turn submission before binding
   creation.
@@ -522,6 +556,18 @@ V1 acceptance does not require external delivery. A valid V1 trigger fire is one
   `list_automations` and `trigger_list` while a fire is gate-parked, and absent
   once the fire reaches a terminal outcome — already covered by
   `tests/integration/group_triggers/scenario_triggered_gate_hold_visible.rs`.
+
+对应验证命令：
+
+```bash
+cargo test -p ironclaw_triggers creation::tests
+cargo test -p ironclaw_triggers --features libsql --test repository_contract creation_service
+cargo test -p ironclaw_triggers --features postgres --test repository_contract creation_service
+cargo test -p ironclaw_product_workflow --test reborn_services_contract create_automation
+cargo test -p ironclaw_reborn_composition automation::facade::tests::mutation_tests::create_automation --lib
+cargo test -p ironclaw_webui_v2 --features webui-v2-beta --test webui_v2_descriptors_contract
+cargo test -p ironclaw_webui_v2 --features webui-v2-beta --test webui_v2_handlers_contract create_automation
+```
 
 ---
 

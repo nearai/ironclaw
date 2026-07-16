@@ -24,12 +24,19 @@ use sha2::{Digest, Sha256};
 use thiserror::Error;
 use ulid::Ulid;
 
+mod creation;
 #[cfg(feature = "libsql")]
 mod libsql;
 #[cfg(feature = "postgres")]
 mod postgres;
 mod trusted_submit;
 mod worker;
+
+pub use creation::{
+    NoopTriggerCreationLifecycle, SystemTriggerCreationClock, TriggerCreateLifecycle,
+    TriggerCreateRequest, TriggerCreateSchedule, TriggerCreateScheduleKind, TriggerCreationClock,
+    TriggerCreationError, TriggerCreationService,
+};
 
 pub use trusted_submit::{
     TRIGGER_TRUSTED_ADAPTER_INSTALLATION_ID, TRIGGER_TRUSTED_ADAPTER_KIND,
@@ -90,6 +97,7 @@ pub enum TriggerRecordValidationKind {
 pub enum TriggerScheduleValidationKind {
     InvalidTimezone,
     InvalidDateTime,
+    OffsetTimezoneMismatch,
     AmbiguousDateTime,
     NonexistentDateTime,
     EmptyCronExpression,
@@ -566,7 +574,7 @@ impl TriggerSchedule {
                 return Err(TriggerError::InvalidSchedule {
                     kind: TriggerScheduleValidationKind::AmbiguousDateTime,
                     reason: format!(
-                        "datetime '{at_str}' is ambiguous in timezone '{timezone_str}' (DST overlap); use an explicit UTC offset"
+                        "datetime '{at_str}' is ambiguous in timezone '{timezone_str}' (DST overlap); use RFC3339 with an explicit offset matching the timezone"
                     ),
                 });
             }
@@ -580,6 +588,32 @@ impl TriggerSchedule {
             }
         };
         Self::once(at, timezone_str)
+    }
+
+    /// Parse either an RFC3339 timestamp with an explicit offset or a naive
+    /// wall-clock timestamp interpreted in the supplied IANA timezone.
+    pub fn once_from_input(at_str: &str, timezone_str: &str) -> Result<Self, TriggerError> {
+        use chrono::Offset as _;
+
+        let timezone = parse_timezone(timezone_str)?;
+        let Ok(offset_datetime) = chrono::DateTime::parse_from_rfc3339(at_str) else {
+            return Self::once_from_local(at_str, timezone_str);
+        };
+        let supplied_offset_seconds = offset_datetime.offset().local_minus_utc();
+        let timezone_offset_seconds = offset_datetime
+            .with_timezone(&timezone)
+            .offset()
+            .fix()
+            .local_minus_utc();
+        if supplied_offset_seconds != timezone_offset_seconds {
+            return Err(TriggerError::InvalidSchedule {
+                kind: TriggerScheduleValidationKind::OffsetTimezoneMismatch,
+                reason: format!(
+                    "datetime '{at_str}' offset does not match timezone '{timezone_str}' at that instant"
+                ),
+            });
+        }
+        Self::once(offset_datetime.with_timezone(&chrono::Utc), timezone_str)
     }
 
     pub fn validate(&self) -> Result<(), TriggerError> {
@@ -3394,6 +3428,95 @@ mod tests {
             }
             other => panic!("expected InvalidSchedule, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn once_from_input_accepts_rfc3339_z_and_positive_offset() {
+        for (input, timezone, expected) in [
+            (
+                "2026-07-20T01:00:00Z",
+                "UTC",
+                Utc.with_ymd_and_hms(2026, 7, 20, 1, 0, 0).unwrap(),
+            ),
+            (
+                "2026-07-20T09:00:00+08:00",
+                "Asia/Shanghai",
+                Utc.with_ymd_and_hms(2026, 7, 20, 1, 0, 0).unwrap(),
+            ),
+        ] {
+            let schedule =
+                TriggerSchedule::once_from_input(input, timezone).expect("valid RFC3339 input");
+            assert_eq!(
+                schedule,
+                TriggerSchedule::Once {
+                    at: expected,
+                    timezone: timezone.to_string(),
+                }
+            );
+        }
+    }
+
+    #[test]
+    fn once_from_input_accepts_negative_offset_to_disambiguate_dst_overlap() {
+        let schedule =
+            TriggerSchedule::once_from_input("2026-11-01T01:30:00-04:00", "America/New_York")
+                .expect("explicit EDT offset disambiguates overlap");
+        assert_eq!(
+            schedule,
+            TriggerSchedule::Once {
+                at: Utc.with_ymd_and_hms(2026, 11, 1, 5, 30, 0).unwrap(),
+                timezone: "America/New_York".to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn once_from_input_rejects_offset_timezone_mismatch() {
+        let error = TriggerSchedule::once_from_input("2026-07-20T09:00:00+09:00", "Asia/Shanghai")
+            .expect_err("mismatched offset rejected");
+        assert!(matches!(
+            error,
+            TriggerError::InvalidSchedule {
+                kind: TriggerScheduleValidationKind::OffsetTimezoneMismatch,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn once_from_input_rejects_invalid_timezone_and_malformed_input() {
+        for (input, timezone, expected_kind) in [
+            (
+                "2026-07-20T09:00:00+08:00",
+                "Not/A/Timezone",
+                TriggerScheduleValidationKind::InvalidTimezone,
+            ),
+            (
+                "not-a-date+08:00",
+                "Asia/Shanghai",
+                TriggerScheduleValidationKind::InvalidDateTime,
+            ),
+        ] {
+            let error = TriggerSchedule::once_from_input(input, timezone)
+                .expect_err("invalid one-time input rejected");
+            assert!(matches!(
+                error,
+                TriggerError::InvalidSchedule { kind, .. } if kind == expected_kind
+            ));
+        }
+    }
+
+    #[test]
+    fn once_from_input_keeps_local_time_behavior() {
+        let schedule = TriggerSchedule::once_from_input("2026-07-20T09:00:00", "Asia/Shanghai")
+            .expect("local time remains accepted");
+        assert_eq!(
+            schedule,
+            TriggerSchedule::Once {
+                at: Utc.with_ymd_and_hms(2026, 7, 20, 1, 0, 0).unwrap(),
+                timezone: "Asia/Shanghai".to_string(),
+            }
+        );
     }
 
     #[cfg(any(feature = "libsql", feature = "postgres"))]

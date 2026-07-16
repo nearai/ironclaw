@@ -245,7 +245,7 @@ pub fn webui_v2_router_with_options(state: WebUiV2State, options: WebUiV2RouteOp
         .route(WEBUI_V2_PATTERN_RETRY_RUN, post(handlers::retry_run))
         .route(
             WEBUI_V2_PATTERN_LIST_AUTOMATIONS,
-            get(handlers::list_automations),
+            get(handlers::list_automations).post(handlers::create_automation),
         )
         .route(
             WEBUI_V2_PATTERN_PAUSE_AUTOMATION,

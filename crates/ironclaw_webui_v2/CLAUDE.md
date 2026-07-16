@@ -64,6 +64,7 @@ browser-reachable.
 | `webui.v2.retry_run` | POST | `/api/webchat/v2/threads/{thread_id}/runs/{run_id}/retry` | None | `TurnCoordinator` |
 | `webui.v2.resolve_gate` | POST | `/api/webchat/v2/threads/{thread_id}/runs/{run_id}/gates/{gate_ref}/resolve` | None | `TurnCoordinator` |
 | `webui.v2.list_automations` | GET | `/api/webchat/v2/automations` (optional `?limit=N&run_limit=N`) | None | `ProductWorkflow` |
+| `webui.v2.create_automation` | POST | `/api/webchat/v2/automations` (cron/once only; once accepts local time or RFC3339 offset; 4 KiB body cap) | None | `ProductWorkflow` |
 | `webui.v2.pause_automation` | POST | `/api/webchat/v2/automations/{automation_id}/pause` | None | `ProductWorkflow` |
 | `webui.v2.resume_automation` | POST | `/api/webchat/v2/automations/{automation_id}/resume` | None | `ProductWorkflow` |
 | `webui.v2.rename_automation` | POST | `/api/webchat/v2/automations/{automation_id}` | None | `ProductWorkflow` |
@@ -132,6 +133,11 @@ scope source. The host's bearer middleware is responsible for
 constructing the `WebUiAuthenticatedCaller`, carrying the matched
 token's `WebUiV2Capabilities`, and injecting both as axum
 `Extension`s before the handler runs.
+
+For `schedule.kind = "once"`, `at` accepts local
+`YYYY-MM-DDTHH:MM:SS` interpreted in the required IANA `timezone`, or strict
+RFC3339 with `Z`/an explicit offset. An RFC3339 offset must match the named
+timezone at that instant; mismatches return sanitized, non-retryable `400`.
 
 The `/api/webchat/v2/settings/tools` routes are authenticated caller routes,
 not operator routes. They expose the caller's tenant/user-scoped tool approval

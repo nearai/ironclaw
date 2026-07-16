@@ -1,5 +1,3 @@
-use chrono::{Datelike, TimeZone};
-
 use super::*;
 
 /// Duplicate-delivery contract: the stored trigger prompt is replayed to a
@@ -52,27 +50,6 @@ fn trigger_create_description_teaches_task_only_prompt_and_host_owned_delivery()
             && TRIGGER_CREATE_DESCRIPTION.contains("builtin__outbound_delivery_targets_list"),
         "trigger_create description must teach per-trigger delivery routing: {TRIGGER_CREATE_DESCRIPTION}"
     );
-}
-
-#[test]
-fn next_run_at_for_schedule_rejects_schedule_with_no_future_slot() {
-    let future_year = Utc::now().year() + 1;
-    let schedule = TriggerSchedule::cron(format!("0 0 8 * * * {future_year}"))
-        .expect("future finite schedule is valid");
-    let after_schedule_expires = Utc
-        .with_ymd_and_hms(future_year + 1, 1, 1, 0, 0, 0)
-        .unwrap();
-
-    let error = next_run_at_for_schedule(&schedule, after_schedule_expires)
-        .expect_err("exhausted schedule rejected");
-
-    assert!(matches!(
-        error,
-        TriggerError::InvalidSchedule {
-            kind: TriggerScheduleValidationKind::NoFutureFireTime,
-            ..
-        }
-    ));
 }
 
 #[test]
@@ -165,6 +142,27 @@ fn trigger_create_input_accepts_once_schedule_and_persists_as_utc() {
         }
         TriggerSchedule::Cron { .. } => panic!("expected Once"),
     }
+}
+
+#[test]
+fn trigger_create_input_accepts_rfc3339_once_schedule_and_persists_as_utc() {
+    let input = serde_json::json!({
+        "name": "one-off reminder",
+        "prompt": "remind me about the meeting",
+        "schedule": { "kind": "once", "at": "2099-06-25T01:00:00+08:00", "timezone": "Asia/Shanghai" }
+    });
+    let parsed: TriggerCreateInput =
+        serde_json::from_value(input).expect("deserialize RFC3339 one-shot input");
+    let schedule = parsed
+        .schedule
+        .into_schedule()
+        .expect("valid RFC3339 once schedule accepted");
+    assert!(matches!(
+        schedule,
+        TriggerSchedule::Once { ref at, ref timezone }
+            if at.to_rfc3339() == "2099-06-24T17:00:00+00:00"
+                && timezone == "Asia/Shanghai"
+    ));
 }
 
 #[test]

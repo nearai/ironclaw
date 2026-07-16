@@ -9,10 +9,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- *(webui-v2)* add authenticated caller-scoped creation of cron and one-time automations through `POST /api/webchat/v2/automations`, backed by the same typed trigger creation and rollback semantics as `builtin.trigger_create`.
 - *(reborn)* automations and `trigger_list` now surface why a scheduled trigger is currently held (approval/auth/in-progress) and how many scheduled occurrences elapsed while held ([#5886](https://github.com/nearai/ironclaw/issues/5886)).
 
 ### Fixed
 
+- *(reborn)* accept RFC3339 `Z`/offset values for one-time automation creation, require the offset to match the supplied IANA timezone, and preserve existing local-time DST validation across WebUI and `builtin.trigger_create`.
 - *(webui-v2)* render the Extensions Registry as soon as catalog data arrives instead of holding the skeleton screen for slower installed-extension enrichment ([#6052](https://github.com/nearai/ironclaw/issues/6052)).
 - *(webui-v2)* submit the latest composer value when Enter follows input before React rerenders, avoiding intermittently dropped follow-up messages ([#6044](https://github.com/nearai/ironclaw/issues/6044)).
 - *(reborn)* recover the filesystem resource governor after transient libSQL writer contention without bypassing durable accounting, reject stale authority writes during recovery, and distinguish accounting outages from provider budget failures.

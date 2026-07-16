@@ -33,6 +33,7 @@ pub const WEBUI_V2_ROUTE_GET_ATTACHMENT: &str = "webui.v2.get_attachment";
 pub const WEBUI_V2_ROUTE_STREAM_EVENTS: &str = "webui.v2.stream_events";
 pub const WEBUI_V2_ROUTE_STREAM_EVENTS_WS: &str = "webui.v2.stream_events_ws";
 pub const WEBUI_V2_ROUTE_LIST_AUTOMATIONS: &str = "webui.v2.list_automations";
+pub const WEBUI_V2_ROUTE_CREATE_AUTOMATION: &str = "webui.v2.create_automation";
 pub const WEBUI_V2_ROUTE_PAUSE_AUTOMATION: &str = "webui.v2.pause_automation";
 pub const WEBUI_V2_ROUTE_RESUME_AUTOMATION: &str = "webui.v2.resume_automation";
 pub const WEBUI_V2_ROUTE_RENAME_AUTOMATION: &str = "webui.v2.rename_automation";
@@ -228,6 +229,7 @@ pub fn webui_v2_routes() -> Vec<IngressRouteDescriptor> {
         resolve_gate_descriptor(),
         retry_run_descriptor(),
         list_automations_descriptor(),
+        create_automation_descriptor(),
         pause_automation_descriptor(),
         resume_automation_descriptor(),
         rename_automation_descriptor(),
@@ -860,6 +862,20 @@ fn list_automations_descriptor() -> IngressRouteDescriptor {
             AuditTraceClass::UserAction,
             AllowedEffectPath::ProductWorkflow,
             StreamingMode::None,
+        ),
+    )
+}
+
+fn create_automation_descriptor() -> IngressRouteDescriptor {
+    descriptor(
+        WEBUI_V2_ROUTE_CREATE_AUTOMATION,
+        NetworkMethod::Post,
+        WEBUI_V2_PATTERN_LIST_AUTOMATIONS,
+        mutation_policy(
+            body_limit_kib(4),
+            mutation_rate_limit(),
+            AuditTraceClass::UserAction,
+            AllowedEffectPath::ProductWorkflow,
         ),
     )
 }
