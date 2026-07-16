@@ -30,16 +30,32 @@ jobs:
           ref: ${{ inputs.source_ref }}
           persist-credentials: false
 
-      - name: Extract version from Cargo.toml
+      - name: Extract source release version
         id: version
         run: |
-          VERSION=$(grep '^version' Cargo.toml | head -1 | sed 's/.*"\(.*\)"/\1/')
+          VERSION_MANIFEST="crates/ironclaw_reborn_cli/Cargo.toml"
+          if [[ ! -f "${VERSION_MANIFEST}" ]]; then
+            # Tags before the Reborn cutover shipped the root package.
+            VERSION_MANIFEST="Cargo.toml"
+          fi
+          VERSION="$(
+            python3 - "${VERSION_MANIFEST}" <<'PY'
+          import sys
+          import tomllib
+
+          with open(sys.argv[1], "rb") as manifest:
+              version = tomllib.load(manifest).get("package", {}).get("version")
+          if not isinstance(version, str):
+              raise SystemExit(f"missing [package].version in {sys.argv[1]}")
+          print(version)
+          PY
+          )"
           if [[ ! "${VERSION}" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]]; then
             echo "::error::Extracted version '${VERSION}' must match MAJOR.MINOR.PATCH[-prerelease] (Docker tags forbid '+')"
             exit 1
           fi
           echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
-          echo "Detected version: ${VERSION}"
+          echo "Detected version ${VERSION} from ${VERSION_MANIFEST}"
 
       - name: Verify requested tag matches source version
         env:
@@ -47,7 +63,7 @@ jobs:
           SOURCE_REF: ${{ inputs.source_ref }}
           SOURCE_VERSION: ${{ steps.version.outputs.version }}
         run: |
-          EXPECTED_REF="ironclaw-reborn-v${EXPECTED_TAG}"
+          EXPECTED_REF="ironclaw/v${EXPECTED_TAG}"
           if [[ "${SOURCE_REF}" != "${EXPECTED_REF}" ]]; then
             echo "::error::Expected source_ref '${EXPECTED_REF}' for tag '${EXPECTED_TAG}', got '${SOURCE_REF}'"
             exit 1
