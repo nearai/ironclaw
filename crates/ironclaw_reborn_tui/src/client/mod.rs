@@ -12,9 +12,11 @@ use thiserror::Error;
 pub mod automations;
 pub mod gates;
 pub mod llm;
+pub mod session;
 pub mod threads;
 
 pub use automations::AutomationSummary;
+pub use session::SessionInfo;
 pub use threads::{ThreadMessageSummary, ThreadSummary, TimelinePage};
 
 #[derive(Debug, Error)]
