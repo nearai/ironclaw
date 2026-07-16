@@ -47,6 +47,8 @@ export function WorkspaceDirectory({ path, entries, isLoading, filter, onOpen, o
           <button
             key={entry.path}
             type="button"
+            data-testid="workspace-directory-entry"
+            data-entry-path={entry.path}
             onClick={() => onOpen(entry.path)}
             className="flex w-full items-center gap-3 px-4 py-2.5 text-left text-sm text-iron-200 hover:bg-white/[0.05] hover:text-white"
           >
