@@ -19,9 +19,10 @@
 //!   `OAuthProductAuthTestBundle`'s `flow_manager()`.
 //!
 //! Panics with a case-labeled message on the first violation, matching the
-//! contract-test style of both call sites. Lives unconditionally in the lib
-//! (like `fakes.rs`): this crate's charter is auth contracts *and* their test
-//! vocabulary.
+//! contract-test style of both call sites. Feature-gated test vocabulary
+//! (`#[cfg(any(test, feature = "test-support"))]`, under [`crate::test_support`]):
+//! this crate's charter is auth contracts *and* their test vocabulary, but the
+//! panic-on-violation harness must not ship in production binaries.
 
 use chrono::{Duration, Utc};
 
@@ -257,7 +258,9 @@ async fn expired_flow_rejects_and_marks_expired(
             scope,
             provider,
             tag,
-            Utc::now() - Duration::seconds(1),
+            // 10s (not 1s) so second-precision timestamp truncation on durable
+            // backends still lands the flow firmly in the past.
+            Utc::now() - Duration::seconds(10),
         ))
         .await
         .unwrap_or_else(|error| panic!("[{CASE}] create_flow: {error:?}"));
