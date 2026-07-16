@@ -1,6 +1,5 @@
 """Reborn WebUI v2 notification center E2E coverage."""
 
-import asyncio
 import json
 import re
 from urllib.parse import parse_qs, urlparse
@@ -178,6 +177,7 @@ async def test_reborn_v2_error_toast_pauses_dismisses_and_stays_above_notificati
     context = await reborn_v2_browser.new_context(viewport={"width": 1280, "height": 720})
     page = await context.new_page()
     try:
+        await page.clock.install()
         await _route_notification_threads(page)
         await _route_thread_delete_failure(page)
         await _open_v2(page, reborn_v2_server)
@@ -199,7 +199,7 @@ async def test_reborn_v2_error_toast_pauses_dismisses_and_stays_above_notificati
         # Hover beyond the full eight-second error duration. The toast must
         # retain its remaining lifetime rather than expiring underneath the user.
         await toast.hover()
-        await asyncio.sleep(8.5)
+        await page.clock.fast_forward(8500)
         await expect(toast).to_be_visible()
 
         await page.locator(SEL_V2["notification_bell"]).click()
