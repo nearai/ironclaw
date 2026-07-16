@@ -30,7 +30,7 @@ is_shared_test_path() {
     Cargo.toml|Cargo.lock|build.rs|providers.json|Dockerfile)
       return 0
       ;;
-    scripts/ci/classify-test-scope.sh|scripts/ci/test-classify-test-scope.sh|scripts/ci/package-feature-flags.sh)
+    scripts/ci/classify-test-scope.sh|scripts/ci/test-classify-test-scope.sh|scripts/ci/package-feature-flags.sh|scripts/build-wasm-extensions.sh)
       return 0
       ;;
     .github/workflows/test.yml|.github/workflows/reborn-tests.yml|.github/workflows/reborn-e2e.yml|.github/workflows/nightly-deep-ci.yml)
@@ -55,6 +55,12 @@ is_shared_test_path() {
       return 0
       ;;
     crates/ironclaw_embeddings/*|crates/ironclaw_safety/*|crates/ironclaw_skills/*|crates/ironclaw_oauth/*)
+      return 0
+      ;;
+    tests/e2e/scenarios/test_v2_auth_oauth_matrix.py|tests/e2e/scenarios/test_telegram_pairing_chat_claim.py)
+      return 0
+      ;;
+    registry/channels/*|registry/tools/*|channels-src/*|tools-src/*)
       return 0
       ;;
     *)
@@ -87,6 +93,15 @@ is_reborn_test_path() {
     scripts/ci/reborn-coverage-*.sh|scripts/ci/test-reborn-coverage.sh|scripts/ci/test-reborn-coverage-*.sh|scripts/ci/lib/reborn_coverage_lcov.py|scripts/ci/check-test-suite-boundaries.sh|scripts/ci/classify-test-scope.sh|scripts/ci/test-classify-test-scope.sh)
       return 0
       ;;
+    scripts/auth_canary/*|scripts/workflow_canary/*|scripts/live_canary/*|scripts/live-canary/*)
+      return 0
+      ;;
+    scripts/build-wasm-extensions.sh|tests/e2e/scenarios/test_v2_auth_oauth_matrix.py|tests/e2e/scenarios/test_telegram_pairing_chat_claim.py)
+      return 0
+      ;;
+    registry/channels/*|registry/tools/*|channels-src/*|tools-src/*)
+      return 0
+      ;;
     *)
       return 1
       ;;
@@ -96,13 +111,13 @@ is_reborn_test_path() {
 is_code_path() {
   local path="$1"
   case "$path" in
-    src/*|crates/*|channels-src/*|tools-src/*|tests/*|migrations/*)
+    src/*|crates/*|channels-src/*|tools-src/*|tests/*|migrations/*|registry/channels/*|registry/tools/*)
       return 0
       ;;
     Cargo.toml|Cargo.lock|Dockerfile|build.rs|providers.json)
       return 0
       ;;
-    scripts/check_no_panics.py|scripts/check_gateway_boundaries.py|scripts/build-wasm-extensions.sh|scripts/check-version-bumps.sh|scripts/reborn-e2e-rust.sh|scripts/ci/*)
+    scripts/check_no_panics.py|scripts/check_gateway_boundaries.py|scripts/build-wasm-extensions.sh|scripts/check-version-bumps.sh|scripts/reborn-e2e-rust.sh|scripts/ci/*|scripts/auth_canary/*|scripts/workflow_canary/*|scripts/live_canary/*|scripts/live-canary/*)
       return 0
       ;;
     .github/workflows/*.yml|.github/actions/install-cargo-component/*|.github/dependabot.yml|.github/labeler.yml)

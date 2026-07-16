@@ -1,6 +1,7 @@
 # Live Canary Local and GitHub Setup
 
-This directory contains the unified entrypoints for the live regression lanes:
+This directory contains the unified local dispatcher and artifact helpers used
+by several CI owners:
 
 - `run.sh` dispatches named lanes and writes artifacts
 - `scrub-artifacts.sh` scans artifacts before upload
@@ -29,23 +30,25 @@ guide, not by creating a new standalone runner shape.
 
 Run commands from the repository root.
 
-## Lane Families
+## Workflow ownership
 
-### Upstream live LLM lanes
+The local `run.sh` lane vocabulary is broader than any single GitHub workflow.
+CI ownership is intentionally split by signal type:
 
-- `deterministic-replay`
-- `public-smoke`
-- `persona-rotating`
-- `private-oauth`
-- `provider-matrix`
-- `release-public-full`
-- `upgrade-canary`
+| Owner | Signal | Lanes or tests |
+| --- | --- | --- |
+| `.github/workflows/live-canary.yml` (Live Canary) | Live external-provider drift only | `public-smoke`, `persona-rotating`, `private-oauth`, `provider-matrix`, `release-public-full`, `auth-live-seeded`, `auth-browser-consent`, `reborn-webui-v2-live-qa` |
+| `.github/workflows/reborn-tests.yml` (Tests (Reborn)) | Hermetic PR/merge CI | Mock auth profiles `auth-smoke`, `auth-full`, `auth-channels`, plus `workflow-canary` |
+| `.github/workflows/replay-gate.yml` (Replay Snapshot Gate) | Deterministic recorded replay | Replay snapshot tests; not a Live Canary job |
+| `.github/workflows/upgrade-compatibility.yml` (Upgrade Compatibility) | Manual previous/current compatibility | `upgrade-canary` through `run.sh` and `upgrade-canary.sh` |
 
-### Auth lanes added on this branch
+This separation keeps mock/replay failures in required deterministic CI, live
+provider failures in the drift workflow, and expensive compatibility checks
+behind an explicit manual dispatch. The local dispatcher retains all lane names
+for operator reproduction.
 
-- `auth-smoke`
-- `auth-full`
-- `auth-channels`
+### Live auth lanes
+
 - `auth-live-seeded`
 - `auth-browser-consent`
 
@@ -155,6 +158,8 @@ Seeded auth live-provider credentials:
 
 ## GitHub Workflow
 
-GitHub Actions uses `.github/workflows/live-canary.yml` as the single scheduled
-and manual entrypoint. That workflow now contains both the upstream live LLM
-jobs and the auth-specific canary jobs.
+GitHub Actions uses `.github/workflows/live-canary.yml` only for scheduled or
+manual live drift checks. Mock auth and workflow scenarios run in Tests
+(Reborn), deterministic replay runs in Replay Snapshot Gate, and upgrade
+compatibility has its own manual workflow. Do not add hermetic or compatibility
+jobs back to Live Canary merely because they use this directory's dispatcher.

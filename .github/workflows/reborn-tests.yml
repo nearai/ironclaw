@@ -55,16 +55,21 @@ jobs:
       docs_only: ${{ steps.non_diff.outputs.docs_only || steps.diff.outputs.docs_only }}
       has_reborn_tests: ${{ steps.non_diff.outputs.has_reborn_tests || steps.diff.outputs.has_reborn_tests }}
     steps:
+      - name: Checkout repository
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          ref: ${{ inputs.ref || github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Verify workflow ownership
+        run: python3 scripts/live-canary/test_workflow_tiering.py -v
+
       - id: non_diff
         if: github.event_name != 'pull_request' && github.event_name != 'merge_group'
         run: |
           echo "docs_only=false" >> "$GITHUB_OUTPUT"
           echo "has_reborn_tests=true" >> "$GITHUB_OUTPUT"
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
-        if: github.event_name == 'pull_request' || github.event_name == 'merge_group'
-        with:
-          fetch-depth: 0
-          persist-credentials: false
       - id: diff
         if: github.event_name == 'pull_request' || github.event_name == 'merge_group'
         env:
@@ -788,6 +793,8 @@ jobs:
       LANE: auth-${{ matrix.profile }}
       PROVIDER: mock
       PLAYWRIGHT_INSTALL: with-deps
+      ALLOW_LOCAL_TOOLS: "true"
+      AGENT_AUTO_APPROVE_TOOLS: "true"
     strategy:
       fail-fast: false
       matrix:
@@ -854,6 +861,8 @@ jobs:
       LANE: workflow-canary
       PROVIDER: mock
       PLAYWRIGHT_INSTALL: skip
+      ALLOW_LOCAL_TOOLS: "true"
+      AGENT_AUTO_APPROVE_TOOLS: "true"
     steps:
       - name: Checkout repository
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6

@@ -44,8 +44,27 @@ scripts/workflow_canary/
 ```
 
 `scripts/live-canary/run.sh` dispatches `LANE=workflow-canary` here, and
-`.github/workflows/live-canary.yml` has a matching `workflow-canary`
-job in the live-canary matrix.
+`.github/workflows/reborn-tests.yml` owns the matching
+`workflow-hermetic-e2e` job. The harness is mock-backed and deterministic, so
+it is part of required Reborn CI rather than the live-drift workflow.
+
+## Workflow ownership
+
+Canary signals are separated by what they prove:
+
+| Owner | Responsibility |
+| --- | --- |
+| `.github/workflows/live-canary.yml` (Live Canary) | Live external-provider and browser-consent drift only |
+| `.github/workflows/reborn-tests.yml` (Tests (Reborn)) | Mock auth profiles and this hermetic workflow suite |
+| `.github/workflows/replay-gate.yml` (Replay Snapshot Gate) | Deterministic recorded replay |
+| `.github/workflows/upgrade-compatibility.yml` (Upgrade Compatibility) | Manual previous/current database compatibility through the existing upgrade lane |
+
+`scripts/live-canary/run.sh` remains the shared local dispatcher, but it does
+not determine CI ownership. New mock workflow scenarios belong here and in
+`workflow-hermetic-e2e`; they do not belong in Live Canary. Real-provider
+variants belong in a live lane, recorded replay belongs in Replay Snapshot
+Gate, and release-to-release compatibility belongs in the manual upgrade
+workflow.
 
 ## Mock surfaces
 

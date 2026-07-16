@@ -188,6 +188,94 @@ has_legacy_tests=true
 has_reborn_tests=true"
 
 assert_scope \
+  "Reborn-owned mock auth runner" \
+  "scripts/auth_canary/run_canary.py" \
+  "docs_only=false
+has_core_code=true
+has_legacy_tests=false
+has_reborn_tests=true"
+
+assert_scope \
+  "Reborn-owned workflow harness" \
+  "scripts/workflow_canary/scenarios/telegram_round_trip.py" \
+  "docs_only=false
+has_core_code=true
+has_legacy_tests=false
+has_reborn_tests=true"
+
+assert_scope \
+  "Reborn-owned live canary Python helpers" \
+  "scripts/live_canary/auth_registry.py" \
+  "docs_only=false
+has_core_code=true
+has_legacy_tests=false
+has_reborn_tests=true"
+
+assert_scope \
+  "Reborn-owned live canary dispatcher" \
+  "scripts/live-canary/run.sh" \
+  "docs_only=false
+has_core_code=true
+has_legacy_tests=false
+has_reborn_tests=true"
+
+assert_scope \
+  "shared mock auth OAuth scenario" \
+  "tests/e2e/scenarios/test_v2_auth_oauth_matrix.py" \
+  "docs_only=false
+has_core_code=true
+has_legacy_tests=true
+has_reborn_tests=true"
+
+assert_scope \
+  "shared mock auth Telegram scenario" \
+  "tests/e2e/scenarios/test_telegram_pairing_chat_claim.py" \
+  "docs_only=false
+has_core_code=true
+has_legacy_tests=true
+has_reborn_tests=true"
+
+assert_scope \
+  "shared WASM build script" \
+  "scripts/build-wasm-extensions.sh" \
+  "docs_only=false
+has_core_code=true
+has_legacy_tests=true
+has_reborn_tests=true"
+
+assert_scope \
+  "shared channel registry input" \
+  "registry/channels/telegram.json" \
+  "docs_only=false
+has_core_code=true
+has_legacy_tests=true
+has_reborn_tests=true"
+
+assert_scope \
+  "shared channel WASM source" \
+  "channels-src/telegram/src/lib.rs" \
+  "docs_only=false
+has_core_code=true
+has_legacy_tests=true
+has_reborn_tests=true"
+
+assert_scope \
+  "shared tool registry input" \
+  "registry/tools/gmail.json" \
+  "docs_only=false
+has_core_code=true
+has_legacy_tests=true
+has_reborn_tests=true"
+
+assert_scope \
+  "shared tool WASM source" \
+  "tools-src/gmail/src/lib.rs" \
+  "docs_only=false
+has_core_code=true
+has_legacy_tests=true
+has_reborn_tests=true"
+
+assert_scope \
   "Reborn Responses E2E manifest checker" \
   "scripts/ci/check-reborn-responses-e2e-manifest.py" \
   "docs_only=false
