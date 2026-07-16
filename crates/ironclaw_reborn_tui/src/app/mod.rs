@@ -182,6 +182,21 @@ pub enum ApiCall {
         gate_ref: String,
         resolution: ironclaw_product_workflow::WebUiGateResolution,
     },
+    /// Step 1 of the manual-token auth flow (`app::gate::submit_token`,
+    /// entered via the pending auth gate's `t` key). `lib.rs`'s
+    /// `execute_api_call` chains the response's `credential_ref` straight
+    /// into a follow-up `ResolveGate { resolution: CredentialProvided, .. }`
+    /// — step 2 — rather than surfacing it as a separate effect, mirroring
+    /// how `PauseAutomation`/`RenameAutomation` already chain a follow-up
+    /// call within their own arm.
+    SubmitManualToken {
+        thread_id: String,
+        run_id: String,
+        gate_ref: String,
+        provider: String,
+        account_label: String,
+        token: String,
+    },
     ListAutomations,
     PauseAutomation {
         id: String,

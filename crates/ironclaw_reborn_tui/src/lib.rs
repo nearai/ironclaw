@@ -286,6 +286,47 @@ async fn execute_api_call(client: &ApiClient, state: &mut AppState, call: ApiCal
                 set_local_error(state, "resolve gate", err);
             }
         }
+        // Step 1 (submit) then, on success, step 2 (resolve) — both awaited
+        // in this one arm, the same "call, then chain a follow-up call on
+        // success" shape `PauseAutomation`/`RenameAutomation` already use
+        // below via `refresh_automations_modal`. No separate event/effect
+        // round-trip needed: `execute_api_call` is already the seam where
+        // an API result feeds the next step.
+        ApiCall::SubmitManualToken {
+            thread_id,
+            run_id,
+            gate_ref,
+            provider,
+            account_label,
+            token,
+        } => match client
+            .submit_manual_token(
+                &provider,
+                &account_label,
+                &token,
+                &thread_id,
+                &run_id,
+                &gate_ref,
+            )
+            .await
+        {
+            Ok(credential_ref) => {
+                if let Err(err) = client
+                    .resolve_gate(
+                        &thread_id,
+                        &run_id,
+                        &gate_ref,
+                        ironclaw_product_workflow::WebUiGateResolution::CredentialProvided {
+                            credential_ref,
+                        },
+                    )
+                    .await
+                {
+                    set_local_error(state, "resolve gate after manual token submit", err);
+                }
+            }
+            Err(err) => set_local_error(state, "submit manual token", err),
+        },
         ApiCall::ListAutomations => match client.list_automations().await {
             Ok(automations) => apply_automations_list(state, automations),
             Err(err) => set_local_error(state, "list automations", err),
@@ -474,12 +515,15 @@ mod tests {
     /// are already dev-dependencies) rather than the `tests/support`
     /// fixture: `execute_effect` is `pub(crate)`, unreachable from an
     /// external `tests/*.rs` integration-test binary. One scripted JSON
-    /// body per `"METHOD /path"` key; a fallback records every hit so a
-    /// test can also assert which route was actually called.
+    /// body per `"METHOD /path"` key; a fallback records every hit (and,
+    /// since the manual-token two-step chain needs to assert what the
+    /// second call's *request* body carried, the body too) so a test can
+    /// also assert which route was actually called and with what payload.
     #[derive(Default)]
     struct StubState {
         routes: Mutex<HashMap<String, (u16, serde_json::Value)>>,
         hits: Mutex<Vec<String>>,
+        request_bodies: Mutex<HashMap<String, serde_json::Value>>,
     }
 
     struct StubServer {
@@ -523,6 +567,15 @@ mod tests {
             self.state.hits.lock().expect("hits lock").clone()
         }
 
+        fn request_body(&self, method_and_path: &str) -> Option<serde_json::Value> {
+            self.state
+                .request_bodies
+                .lock()
+                .expect("request bodies lock")
+                .get(method_and_path)
+                .cloned()
+        }
+
         fn client(&self) -> ApiClient {
             ApiClient::new(self.base_url.clone(), "stub-token".to_string())
         }
@@ -532,9 +585,17 @@ mod tests {
         State(state): State<Arc<StubState>>,
         method: Method,
         OriginalUri(uri): OriginalUri,
+        body: axum::body::Bytes,
     ) -> Response {
         let key = format!("{method} {}", uri.path());
         state.hits.lock().expect("hits lock").push(key.clone());
+        if let Ok(parsed) = serde_json::from_slice::<serde_json::Value>(&body) {
+            state
+                .request_bodies
+                .lock()
+                .expect("request bodies lock")
+                .insert(key.clone(), parsed);
+        }
         let routes = state.routes.lock().expect("routes lock");
         match routes.get(&key) {
             Some((status, body)) => (
@@ -718,6 +779,95 @@ mod tests {
         assert!(
             state.pending_gate.is_some(),
             "gate clears only on a later server-confirmed event, not the resolve response"
+        );
+    }
+
+    /// The two-step manual-token flow, driven through the exact same
+    /// `execute_effect` seam every other `ApiCall` uses: a single
+    /// `SubmitManualToken` effect must hit the submit route first, then
+    /// automatically chain a `resolve` call carrying the submit response's
+    /// `credential_ref` as `CredentialProvided` — no separate user action
+    /// or second effect required.
+    #[tokio::test]
+    async fn submit_manual_token_chains_into_resolve_gate_with_the_returned_credential_ref() {
+        let stub = StubServer::start().await;
+        stub.ok(
+            "POST /api/reborn/product-auth/manual-token/submit",
+            serde_json::json!({
+                "credential_ref": "cred-abc-123",
+                "status": "active",
+                "continuation": "resumed",
+            }),
+        );
+        stub.ok(
+            "POST /api/webchat/v2/threads/t-1/runs/run-1/gates/gate-1/resolve",
+            serde_json::json!({}),
+        );
+        let mut state = AppState::default().set_thread_id("t-1");
+
+        execute_effect(
+            &stub.client(),
+            &mut state,
+            Effect::Api(ApiCall::SubmitManualToken {
+                thread_id: "t-1".to_string(),
+                run_id: "run-1".to_string(),
+                gate_ref: "gate-1".to_string(),
+                provider: "google".to_string(),
+                account_label: "work@example.com".to_string(),
+                token: "raw-secret".to_string(),
+            }),
+        )
+        .await;
+
+        assert_eq!(
+            stub.hits(),
+            vec![
+                "POST /api/reborn/product-auth/manual-token/submit".to_string(),
+                "POST /api/webchat/v2/threads/t-1/runs/run-1/gates/gate-1/resolve".to_string(),
+            ],
+            "submit must complete before resolve fires, in that order"
+        );
+        let submit_body = stub
+            .request_body("POST /api/reborn/product-auth/manual-token/submit")
+            .expect("submit request body captured");
+        assert_eq!(submit_body["token"], "raw-secret");
+        assert_eq!(submit_body["provider"], "google");
+        let resolve_body = stub
+            .request_body("POST /api/webchat/v2/threads/t-1/runs/run-1/gates/gate-1/resolve")
+            .expect("resolve request body captured");
+        assert_eq!(resolve_body["resolution"], "credential_provided");
+        assert_eq!(
+            resolve_body["credential_ref"], "cred-abc-123",
+            "must be the credential_ref the submit step returned, not the raw token"
+        );
+        assert!(state.last_local_error.is_none());
+    }
+
+    #[tokio::test]
+    async fn submit_manual_token_failure_degrades_to_local_error_and_never_calls_resolve() {
+        let stub = StubServer::start().await;
+        stub.error("POST /api/reborn/product-auth/manual-token/submit", 502);
+        let mut state = AppState::default().set_thread_id("t-1");
+
+        execute_effect(
+            &stub.client(),
+            &mut state,
+            Effect::Api(ApiCall::SubmitManualToken {
+                thread_id: "t-1".to_string(),
+                run_id: "run-1".to_string(),
+                gate_ref: "gate-1".to_string(),
+                provider: "google".to_string(),
+                account_label: "work@example.com".to_string(),
+                token: "raw-secret".to_string(),
+            }),
+        )
+        .await;
+
+        assert!(state.last_local_error.is_some());
+        assert_eq!(
+            stub.hits(),
+            vec!["POST /api/reborn/product-auth/manual-token/submit".to_string()],
+            "a failed submit must never reach the resolve step"
         );
     }
 
