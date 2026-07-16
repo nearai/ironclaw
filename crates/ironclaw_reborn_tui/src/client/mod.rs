@@ -9,9 +9,11 @@ use std::fmt;
 use serde::de::DeserializeOwned;
 use thiserror::Error;
 
+pub mod automations;
 pub mod gates;
 pub mod threads;
 
+pub use automations::AutomationSummary;
 pub use threads::{ThreadMessageSummary, ThreadSummary, TimelinePage};
 
 #[derive(Debug, Error)]
