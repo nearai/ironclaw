@@ -2205,7 +2205,7 @@ async fn tool_result_preview_with_secretary_survives_model_context_replay() {
     let replayed = context
         .messages
         .iter()
-        .find(|message| message.message_id == Some(tool_result.message_id.clone()))
+        .find(|message| message.message_id == Some(tool_result.message_id))
         .expect("tool result should be included in model context");
     assert!(
         replayed.content.contains(preview),

@@ -27,8 +27,8 @@ const MAX_MODEL_OBSERVATION_BYTES: usize = crate::contract::TOOL_RESULT_RECORD_R
 // Keep the observation envelope large enough for the largest result-read
 // preview. This is compile-time because both bounds are compile-time contract
 // constants; a drift must fail the build rather than rely on a runtime test.
-const _: () =
-    assert!(MAX_MODEL_OBSERVATION_BYTES >= crate::contract::TOOL_RESULT_RECORD_READ_MAX_BYTES);
+const _: [(); 1] = [(); (MAX_MODEL_OBSERVATION_BYTES
+    >= crate::contract::TOOL_RESULT_RECORD_READ_MAX_BYTES) as usize];
 const MODEL_VISIBLE_TOOL_OBSERVATION_SCHEMA_VERSION: u64 = 1;
 const MODEL_OBSERVATION_SUMMARY_MAX_BYTES: usize = 512;
 const MODEL_OBSERVATION_ARTIFACTS_MAX: usize = 16;
