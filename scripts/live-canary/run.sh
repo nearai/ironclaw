@@ -85,6 +85,38 @@ emit_results_json() {
     --provider "${PROVIDER}" 2>&1 | tee -a "${LOG_FILE}" >/dev/null
 }
 
+write_persona_credential_summary() {
+  local -a live_integrations=()
+  local -a stubbed_integrations=()
+  local integration credential_env
+
+  while IFS=: read -r integration credential_env; do
+    if [[ -n "${!credential_env:-}" ]]; then
+      live_integrations+=("${integration}")
+    else
+      stubbed_integrations+=("${integration}")
+    fi
+  done <<'EOF'
+github:LIVE_CANARY_GITHUB_TOKEN
+google:LIVE_CANARY_GOOGLE_OAUTH_TOKEN
+slack:LIVE_CANARY_SLACK_BOT_TOKEN
+telegram:LIVE_CANARY_TELEGRAM_BOT_TOKEN
+composio:LIVE_CANARY_COMPOSIO_API_KEY
+EOF
+
+  local IFS=,
+  if [[ ${#live_integrations[@]} -gt 0 ]]; then
+    printf 'persona_live_integrations=%s\n' "${live_integrations[*]}"
+  else
+    printf 'persona_live_integrations=\n'
+  fi
+  if [[ ${#stubbed_integrations[@]} -gt 0 ]]; then
+    printf 'persona_stubbed_integrations=%s\n' "${stubbed_integrations[*]}"
+  else
+    printf 'persona_stubbed_integrations=\n'
+  fi
+}
+
 write_env_summary() {
   {
     echo "lane=${LANE}"
@@ -110,6 +142,9 @@ write_env_summary() {
     echo "reborn_webui_v2_live_qa_build_source=${REBORN_WEBUI_V2_LIVE_QA_BUILD_SOURCE:-<local>}"
     echo "skip_build=${SKIP_BUILD:-0}"
     echo "skip_python_bootstrap=${SKIP_PYTHON_BOOTSTRAP:-0}"
+    if [[ "${LANE}" == "persona-rotating" ]]; then
+      write_persona_credential_summary
+    fi
   } > "${ENV_FILE}"
 }
 
