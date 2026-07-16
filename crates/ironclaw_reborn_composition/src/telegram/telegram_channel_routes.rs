@@ -48,11 +48,11 @@ const TELEGRAM_PAIRING_STATUS_ROUTE_ID: &str = "webui.v2.channels.telegram.pairi
 const TELEGRAM_PAIRING_DISCONNECT_ROUTE_ID: &str = "webui.v2.channels.telegram.pairing.disconnect";
 
 const TELEGRAM_ROUTES_BODY_LIMIT_BYTES: std::num::NonZeroU64 =
-    std::num::NonZeroU64::new(16 * 1024).expect("non-zero body limit");
+    std::num::NonZeroU64::new(16 * 1024).expect("non-zero body limit"); // safety: const evaluated at compile time; a zero literal fails the build, never a runtime panic.
 const TELEGRAM_ROUTES_MAX_REQUESTS: std::num::NonZeroU32 =
-    std::num::NonZeroU32::new(60).expect("non-zero rate limit");
+    std::num::NonZeroU32::new(60).expect("non-zero rate limit"); // safety: const evaluated at compile time; a zero literal fails the build, never a runtime panic.
 const TELEGRAM_ROUTES_RATE_WINDOW_SECONDS: std::num::NonZeroU32 =
-    std::num::NonZeroU32::new(60).expect("non-zero rate window");
+    std::num::NonZeroU32::new(60).expect("non-zero rate window"); // safety: const evaluated at compile time; a zero literal fails the build, never a runtime panic.
 
 /// Post-save extension activation trigger (mirrors the Slack setup
 /// activation): the telegram host mounts wire it to lifecycle `activate` on

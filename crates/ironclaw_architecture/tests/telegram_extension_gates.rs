@@ -68,7 +68,11 @@ fn no_retired_taxonomy_telegram_identifiers() {
             if trimmed.starts_with("//") || trimmed.starts_with("*") {
                 continue;
             }
-            for needle in ["telegram_personal", "telegram_channel\"", "\"telegram_bot\""] {
+            for needle in [
+                "telegram_personal",
+                "telegram_channel\"",
+                "\"telegram_bot\"",
+            ] {
                 if line.contains(needle) {
                     offenders.push(format!("{display}:{}: {needle}", line_number + 1));
                 }
@@ -104,8 +108,7 @@ fn reborn_context_free_of_v1_pairing_routes() {
             let trimmed = line.trim_start();
             // Prose references in comments may describe the v1 monolith
             // surface; only executable string literals are violations.
-            if trimmed.starts_with("//") || trimmed.starts_with("*") || trimmed.starts_with("///")
-            {
+            if trimmed.starts_with("//") || trimmed.starts_with("*") || trimmed.starts_with("///") {
                 continue;
             }
             offenders.push(format!("{display}:{}", line_number + 1));
