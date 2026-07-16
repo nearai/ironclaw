@@ -9,7 +9,7 @@
 
 use ratatui::Frame;
 use ratatui::layout::Rect;
-use ratatui::style::{Modifier, Style};
+use ratatui::style::{Color, Modifier, Style};
 use ratatui::widgets::{Block, Borders, List, ListItem};
 
 use crate::app::{AutomationsModalState, Modal, ProviderModalState, ThreadsModalState};
@@ -82,8 +82,13 @@ fn render_provider(frame: &mut Frame, area: Rect, modal: &ProviderModalState) {
                 .iter()
                 .enumerate()
                 .map(|(idx, provider)| {
-                    let label = format!("{} ({})", provider.id, provider.adapter);
-                    ListItem::new(label).style(selected_style(idx, *selected))
+                    let marker = if provider.active { "● " } else { "  " };
+                    let label = format!("{marker}{} ({})", provider.id, provider.adapter);
+                    let mut style = selected_style(idx, *selected);
+                    if provider.active {
+                        style = style.fg(Color::Green);
+                    }
+                    ListItem::new(label).style(style)
                 })
                 .collect();
             let list =
@@ -136,6 +141,8 @@ mod tests {
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
 
+    use ironclaw_product_workflow::LlmProviderView;
+
     use super::*;
     use crate::client::ThreadSummary;
     use crate::ui::test_support::buffer_text;
@@ -146,6 +153,23 @@ mod tests {
             title: None,
             created_at: None,
             updated_at: None,
+        }
+    }
+
+    fn provider(id: &str, adapter: &str, active: bool) -> LlmProviderView {
+        LlmProviderView {
+            id: id.to_string(),
+            description: id.to_string(),
+            adapter: adapter.to_string(),
+            default_model: "default-model".to_string(),
+            base_url: None,
+            builtin: true,
+            active,
+            active_model: None,
+            api_key_required: false,
+            accepts_api_key: true,
+            api_key_set: false,
+            can_list_models: true,
         }
     }
 
@@ -185,5 +209,34 @@ mod tests {
         });
         let content = draw_modal(&modal);
         assert!(content.contains("press d again to delete"));
+    }
+
+    #[test]
+    fn provider_modal_marks_active_provider() {
+        let modal = Modal::Provider(ProviderModalState::Providers {
+            providers: vec![
+                provider("openai", "open_ai_completions", false),
+                provider("anthropic", "anthropic", true),
+            ],
+            selected: 0,
+            loading: false,
+        });
+        let content = draw_modal(&modal);
+        let openai_line = content
+            .lines()
+            .find(|line| line.contains("openai"))
+            .expect("openai row rendered");
+        let anthropic_line = content
+            .lines()
+            .find(|line| line.contains("anthropic"))
+            .expect("anthropic row rendered");
+        assert!(
+            anthropic_line.contains('●'),
+            "active provider row must carry the active marker: {anthropic_line:?}"
+        );
+        assert!(
+            !openai_line.contains('●'),
+            "inactive provider row must not carry the active marker: {openai_line:?}"
+        );
     }
 }
