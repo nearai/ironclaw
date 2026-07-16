@@ -33,6 +33,8 @@ use crate::provider::{
     ToolDefinition as IronToolDefinition, strip_unsupported_completion_params,
     strip_unsupported_tool_params,
 };
+use crate::tool_args::parse_tool_call_args_lossy;
+use crate::tool_repair::repair_tool_args;
 use crate::tool_schema::{ToolSchemaPolicy, shape_tool_schema};
 #[cfg(test)]
 use crate::tool_schema::{normalize_schema_strict, serialize_json_capped};
@@ -681,6 +683,7 @@ fn rig_reasoning_to_iron(reasoning: &rig::message::Reasoning) -> Option<IronReas
 fn extract_response(
     choice: &OneOrMany<AssistantContent>,
     _usage: &RigUsage,
+    allow_argument_completion: bool,
 ) -> (
     Option<String>,
     Vec<IronToolCall>,
@@ -701,17 +704,22 @@ fn extract_response(
             }
             AssistantContent::Text(_) => {}
             AssistantContent::ToolCall(tc) => {
+                let arguments = repair_rig_tool_arguments(
+                    &tc.function.name,
+                    &tc.function.arguments,
+                    allow_argument_completion,
+                );
                 tool_calls.push(IronToolCall {
                     id: tc.id.clone(),
                     name: tc.function.name.clone(),
-                    arguments: tc.function.arguments.clone(),
+                    arguments: arguments.0,
                     reasoning: None,
                     // Capture Gemini `thought_signature` (and any other
                     // per-tool-call signatures) so the next turn can echo
                     // them. Without this, Gemini 2.5+ rejects the next
                     // request with HTTP 400. See #3225.
                     signature: tc.signature.clone(),
-                    arguments_parse_error: None,
+                    arguments_parse_error: arguments.1,
                 });
             }
             AssistantContent::Reasoning(r) if !r.content.is_empty() => {
@@ -759,6 +767,32 @@ fn extract_response(
     (text, tool_calls, finish, reasoning, typed_reasoning)
 }
 
+fn repair_rig_tool_arguments(
+    tool_name: &str,
+    arguments: &serde_json::Value,
+    allow_completion: bool,
+) -> (serde_json::Value, Option<String>) {
+    let Some(raw) = arguments.as_str() else {
+        return (arguments.clone(), None);
+    };
+
+    match serde_json::from_str::<serde_json::Value>(raw) {
+        Ok(parsed) => (parsed, None),
+        Err(parse_error) => {
+            let Some(repaired) = repair_tool_args(raw, allow_completion) else {
+                return parse_tool_call_args_lossy(raw);
+            };
+            tracing::debug!(
+                tool_name = %tool_name,
+                raw_len = raw.len(),
+                error = %parse_error,
+                "repaired malformed rig tool-call arguments JSON"
+            );
+            (repaired, None)
+        }
+    }
+}
+
 /// Saturate u64 to u32 for token counts.
 fn saturate_u32(val: u64) -> u32 {
     val.min(u32::MAX as u64) as u32
@@ -791,6 +825,38 @@ fn extract_cache_creation<T: Serialize>(raw: &T) -> u32 {
         .and_then(|v| v.get("usage")?.get("cache_creation_input_tokens")?.as_u64())
         .map(|n| n.min(u32::MAX as u64) as u32)
         .unwrap_or(0)
+}
+
+fn raw_response_finish_reason<T: Serialize>(raw: &T) -> Option<FinishReason> {
+    let value = serde_json::to_value(raw).ok()?;
+    find_finish_reason(&value).map(map_raw_finish_reason)
+}
+
+fn find_finish_reason(value: &serde_json::Value) -> Option<&str> {
+    if let Some(reason) = value
+        .get("finish_reason")
+        .and_then(serde_json::Value::as_str)
+    {
+        return Some(reason);
+    }
+    if let Some(reason) = value.get("stop_reason").and_then(serde_json::Value::as_str) {
+        return Some(reason);
+    }
+    value
+        .get("choices")
+        .and_then(serde_json::Value::as_array)?
+        .iter()
+        .find_map(find_finish_reason)
+}
+
+fn map_raw_finish_reason(reason: &str) -> FinishReason {
+    match reason.to_ascii_lowercase().as_str() {
+        "length" | "max_tokens" | "max_output_tokens" => FinishReason::Length,
+        "tool_calls" | "tool_use" => FinishReason::ToolUse,
+        "content_filter" | "safety" => FinishReason::ContentFilter,
+        "stop" | "end_turn" => FinishReason::Stop,
+        _ => FinishReason::Unknown,
+    }
 }
 
 /// Merge default additional parameters into the rig-core request.
@@ -967,8 +1033,10 @@ where
             .await
             .map_err(|e| map_rig_error(&self.model_name, e))?;
 
+        let allow_argument_completion =
+            raw_response_finish_reason(&response.raw_response) != Some(FinishReason::Length);
         let (text, _tool_calls, finish, _reasoning, _reasoning_details) =
-            extract_response(&response.choice, &response.usage);
+            extract_response(&response.choice, &response.usage, allow_argument_completion);
 
         let resp = CompletionResponse {
             content: text.unwrap_or_default(),
@@ -1029,8 +1097,10 @@ where
             .await
             .map_err(|e| map_rig_error(&self.model_name, e))?;
 
+        let allow_argument_completion =
+            raw_response_finish_reason(&response.raw_response) != Some(FinishReason::Length);
         let (text, mut tool_calls, finish, reasoning, reasoning_details) =
-            extract_response(&response.choice, &response.usage);
+            extract_response(&response.choice, &response.usage, allow_argument_completion);
 
         // Normalize tool call names: some proxies prepend "proxy_" prefixes.
         for tc in &mut tool_calls {
@@ -2294,7 +2364,7 @@ mod tests {
         let content = OneOrMany::one(AssistantContent::text("Hello world"));
         let usage = RigUsage::new();
         let (text, calls, finish, _reasoning, _reasoning_details) =
-            extract_response(&content, &usage);
+            extract_response(&content, &usage, true);
         assert_eq!(text, Some("Hello world".to_string()));
         assert!(calls.is_empty());
         assert_eq!(finish, FinishReason::Stop);
@@ -2306,7 +2376,7 @@ mod tests {
         let content = OneOrMany::one(tc);
         let usage = RigUsage::new();
         let (text, calls, finish, _reasoning, _reasoning_details) =
-            extract_response(&content, &usage);
+            extract_response(&content, &usage, true);
         assert!(text.is_none());
         assert_eq!(calls.len(), 1);
         assert_eq!(calls[0].name, "search");
@@ -3124,6 +3194,82 @@ mod tests {
         }
     }
 
+    #[test]
+    fn extract_response_repairs_malformed_string_tool_arguments() {
+        let rig_response = OneOrMany::one(AssistantContent::ToolCall(rig::message::ToolCall::new(
+            "call_abc123".to_string(),
+            ToolFunction::new(
+                "shell".to_string(),
+                serde_json::Value::String(
+                    r#"{"command":"cat","content":"hello"}</parameter>"#.to_string(),
+                ),
+            ),
+        )));
+        let usage = RigUsage::new();
+        let (_text, tool_calls, finish, _reasoning, _reasoning_details) =
+            extract_response(&rig_response, &usage, true);
+
+        assert_eq!(finish, FinishReason::ToolUse);
+        assert_eq!(tool_calls.len(), 1);
+        assert_eq!(tool_calls[0].arguments["command"], "cat");
+        assert_eq!(tool_calls[0].arguments["content"], "hello");
+        assert!(tool_calls[0].arguments_parse_error.is_none());
+    }
+
+    #[test]
+    fn extract_response_promotes_valid_string_and_preserves_object_tool_arguments() {
+        let rig_response = OneOrMany::many(vec![
+            AssistantContent::ToolCall(rig::message::ToolCall::new(
+                "call_string".to_string(),
+                ToolFunction::new(
+                    "shell".to_string(),
+                    serde_json::Value::String(r#"{"command":"pwd"}"#.to_string()),
+                ),
+            )),
+            AssistantContent::ToolCall(rig::message::ToolCall::new(
+                "call_object".to_string(),
+                ToolFunction::new("shell".to_string(), serde_json::json!({"command": "ls"})),
+            )),
+        ])
+        .unwrap();
+        let usage = RigUsage::new();
+        let (_text, tool_calls, finish, _reasoning, _reasoning_details) =
+            extract_response(&rig_response, &usage, true);
+
+        assert_eq!(finish, FinishReason::ToolUse);
+        assert_eq!(tool_calls.len(), 2);
+        assert_eq!(tool_calls[0].arguments["command"], "pwd");
+        assert!(tool_calls[0].arguments_parse_error.is_none());
+        assert_eq!(tool_calls[1].arguments["command"], "ls");
+        assert!(tool_calls[1].arguments_parse_error.is_none());
+    }
+
+    #[test]
+    fn extract_response_does_not_complete_length_truncated_tool_arguments() {
+        let rig_response = OneOrMany::one(AssistantContent::ToolCall(rig::message::ToolCall::new(
+            "call_abc123".to_string(),
+            ToolFunction::new(
+                "write_file".to_string(),
+                serde_json::Value::String(r#"{"path":"/tmp/a","content":"hel"#.to_string()),
+            ),
+        )));
+        let usage = RigUsage::new();
+        let (_text, tool_calls, finish, _reasoning, _reasoning_details) =
+            extract_response(&rig_response, &usage, false);
+
+        assert_eq!(finish, FinishReason::ToolUse);
+        assert_eq!(tool_calls.len(), 1);
+        assert_eq!(
+            tool_calls[0].arguments,
+            serde_json::Value::Object(Default::default())
+        );
+        assert!(
+            tool_calls[0].arguments_parse_error.as_deref().is_some_and(
+                |reason| reason.starts_with("failed to parse tool-call arguments JSON: ")
+            )
+        );
+    }
+
     /// Regression for #3201 / #3225 (the high-severity gap in PR #3326):
     /// the dedicated rig-core DeepSeek/Gemini/OpenRouter clients only fix the
     /// reasoning round-trip *inside* rig-core. IronClaw's RigAdapter sits
@@ -3161,7 +3307,7 @@ mod tests {
         .unwrap();
         let usage = RigUsage::new();
         let (text, tool_calls, finish, reasoning, reasoning_details) =
-            extract_response(&rig_response, &usage);
+            extract_response(&rig_response, &usage, true);
 
         assert_eq!(finish, FinishReason::ToolUse);
         assert_eq!(text, None);
@@ -3269,7 +3415,7 @@ mod tests {
 
         let usage = RigUsage::new();
         let (text, tool_calls, _finish, reasoning, reasoning_details) =
-            extract_response(&rig_response, &usage);
+            extract_response(&rig_response, &usage, true);
 
         assert_eq!(text, None);
         assert_eq!(reasoning.as_deref(), Some("safe summary"));

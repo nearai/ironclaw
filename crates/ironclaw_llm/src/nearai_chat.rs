@@ -30,6 +30,8 @@ use crate::tool_args::parse_tool_call_args_allow_trailing_lossy;
 
 #[path = "nearai_tool_message_flattening.rs"]
 mod nearai_tool_message_flattening;
+use crate::tool_args::parse_tool_call_args_lossy;
+use crate::tool_repair::repair_tool_args;
 use crate::tool_schema::{ToolSchemaPolicy, shape_tool_schema};
 use crate::{costs, session::SessionManager};
 
@@ -925,19 +927,25 @@ impl LlmProvider for NearAiChatProvider {
         emit_reasoning_trace(reasoning_fallback.as_deref());
         let provider_reasoning = reasoning_fallback.clone();
 
+        let raw_finish_reason = choice.finish_reason.as_deref();
+        let allow_argument_completion = raw_finish_reason != Some("length");
+
         let tool_calls: Vec<ToolCall> = message_tool_calls
             .unwrap_or_default()
             .into_iter()
             .map(|tc| {
-                let arguments = serde_json::from_str(&tc.function.arguments)
-                    .unwrap_or(serde_json::Value::Object(Default::default()));
+                let arguments = parse_tool_call_arguments(
+                    &tc.function.name,
+                    &tc.function.arguments,
+                    allow_argument_completion,
+                );
                 ToolCall {
                     id: tc.id,
                     name: tc.function.name,
-                    arguments,
+                    arguments: arguments.0,
                     reasoning: None,
                     signature: None,
-                    arguments_parse_error: None,
+                    arguments_parse_error: arguments.1,
                 }
             })
             .collect();
@@ -954,7 +962,7 @@ impl LlmProvider for NearAiChatProvider {
             message_content
         };
 
-        let finish_reason = match choice.finish_reason.as_deref() {
+        let finish_reason = match raw_finish_reason {
             Some("stop") => FinishReason::Stop,
             Some("length") => FinishReason::Length,
             Some("tool_calls") => FinishReason::ToolUse,
@@ -1657,6 +1665,29 @@ fn map_finish_reason(reason: &str) -> FinishReason {
 fn emit_reasoning_trace(reasoning: Option<&str>) {
     if let Some(rc) = reasoning.filter(|s| !s.is_empty()) {
         tracing::trace!(target: "ironclaw_llm::reasoning", "{rc}");
+    }
+}
+
+fn parse_tool_call_arguments(
+    tool_name: &str,
+    raw_arguments: &str,
+    allow_completion: bool,
+) -> (serde_json::Value, Option<String>) {
+    match serde_json::from_str(raw_arguments) {
+        Ok(arguments) => (arguments, None),
+        Err(parse_error) => {
+            if let Some(arguments) = repair_tool_args(raw_arguments, allow_completion) {
+                tracing::debug!(
+                    tool_name = %tool_name,
+                    raw_len = raw_arguments.len(),
+                    error = %parse_error,
+                    "repaired malformed NEAR AI tool-call arguments JSON"
+                );
+                (arguments, None)
+            } else {
+                parse_tool_call_args_lossy(raw_arguments)
+            }
+        }
     }
 }
 
@@ -2973,6 +3004,24 @@ data: [DONE]
         let (default_in, default_out) = costs::default_cost();
         assert_eq!(input, default_in);
         assert_eq!(output, default_out);
+    }
+
+    #[test]
+    fn length_truncated_tool_arguments_fall_back_to_empty_object_with_error() {
+        let (arguments, parse_error) =
+            parse_tool_call_arguments("write_file", r#"{"path":"/tmp/a","content":"hel"#, false);
+        assert_eq!(arguments, serde_json::Value::Object(Default::default()));
+        assert!(parse_error.as_deref().is_some_and(|reason| {
+            reason.starts_with("failed to parse tool-call arguments JSON: ")
+        }));
+    }
+
+    #[test]
+    fn non_truncated_leaked_tag_tool_arguments_are_repaired_without_error() {
+        let (arguments, parse_error) =
+            parse_tool_call_arguments("shell", r#"{"command":"cat"}</parameter>"#, true);
+        assert_eq!(arguments["command"], "cat");
+        assert!(parse_error.is_none());
     }
 
     /// Regression: reasoning fallbacks must NOT leak into tool-call responses.
