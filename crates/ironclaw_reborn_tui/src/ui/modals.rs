@@ -54,17 +54,47 @@ fn render_threads(frame: &mut Frame, area: Rect, modal: &ThreadsModalState) {
     frame.render_widget(list, area);
 }
 
+/// Maps a raw `RebornAutomationHoldReason` wire string (see
+/// `client::AutomationActiveHold::reason`'s doc comment) to a short badge
+/// label, mirroring the WebUI's `ACTIVE_HOLD_PRESENTATION` table
+/// (`automations-presenters.ts`): approval/auth/other are gate-parked and
+/// need the user to act, in_progress is merely informational.
+fn hold_badge_label(reason: &str) -> &'static str {
+    match reason {
+        "approval" => "⚠ approval",
+        "auth" => "⚠ auth",
+        "in_progress" => "⏳ in progress",
+        _ => "⚠ held",
+    }
+}
+
+/// Tone for [`hold_badge_label`]: `in_progress` is informational (cyan),
+/// every gate-parked reason (including unknown/`other`) is a warning
+/// (yellow) — same warning/info split as `ACTIVE_HOLD_PRESENTATION`.
+fn hold_badge_color(reason: &str) -> Color {
+    match reason {
+        "in_progress" => Color::Cyan,
+        _ => Color::Yellow,
+    }
+}
+
 fn render_automations(frame: &mut Frame, area: Rect, modal: &AutomationsModalState) {
     let items: Vec<ListItem> = modal
         .automations
         .iter()
         .enumerate()
         .map(|(idx, automation)| {
-            let label = match (&modal.renaming, idx == modal.selected) {
+            let mut label = match (&modal.renaming, idx == modal.selected) {
                 (Some(draft), true) => format!("{} > {draft}", automation.name),
                 _ => format!("{} [{}]", automation.name, automation.state),
             };
-            ListItem::new(label).style(selected_style(idx, modal.selected))
+            let mut style = selected_style(idx, modal.selected);
+            if let Some(hold) = &automation.active_hold {
+                label.push(' ');
+                label.push_str(hold_badge_label(&hold.reason));
+                style = style.fg(hold_badge_color(&hold.reason));
+            }
+            ListItem::new(label).style(style)
         })
         .collect();
     let list = List::new(items).block(Block::default().borders(Borders::ALL).title("automations"));
@@ -144,7 +174,8 @@ mod tests {
     use ironclaw_product_workflow::LlmProviderView;
 
     use super::*;
-    use crate::client::ThreadSummary;
+    use crate::client::automations::AutomationActiveHold;
+    use crate::client::{AutomationSummary, ThreadSummary};
     use crate::ui::test_support::buffer_text;
 
     fn thread(id: &str) -> ThreadSummary {
@@ -153,6 +184,32 @@ mod tests {
             title: None,
             created_at: None,
             updated_at: None,
+        }
+    }
+
+    fn automation(id: &str, name: &str, state: &str) -> AutomationSummary {
+        AutomationSummary {
+            automation_id: id.to_string(),
+            name: name.to_string(),
+            state: state.to_string(),
+            next_run_at: None,
+            last_run_at: None,
+            last_status: None,
+            is_active: state == "active",
+            active_hold: None,
+            recent_runs: Vec::new(),
+        }
+    }
+
+    fn held_automation(id: &str, name: &str, state: &str, reason: &str) -> AutomationSummary {
+        AutomationSummary {
+            active_hold: Some(AutomationActiveHold {
+                reason: reason.to_string(),
+                since: None,
+                elapsed_occurrences: None,
+                elapsed_occurrences_capped: false,
+            }),
+            ..automation(id, name, state)
         }
     }
 
@@ -237,6 +294,60 @@ mod tests {
         assert!(
             !openai_line.contains('●'),
             "inactive provider row must not carry the active marker: {openai_line:?}"
+        );
+    }
+
+    #[test]
+    fn automations_modal_renders_hold_badge_for_gate_parked_row() {
+        let modal = Modal::Automations(AutomationsModalState {
+            automations: vec![
+                held_automation("a-1", "Daily digest", "active", "approval"),
+                automation("a-2", "Weekly report", "active"),
+            ],
+            selected: 0,
+            loading: false,
+            renaming: None,
+        });
+        let content = draw_modal(&modal);
+        let held_line = content
+            .lines()
+            .find(|line| line.contains("Daily digest"))
+            .expect("held automation row rendered");
+        let free_line = content
+            .lines()
+            .find(|line| line.contains("Weekly report"))
+            .expect("non-held automation row rendered");
+        assert!(
+            held_line.contains("approval"),
+            "gate-parked row must render its hold badge: {held_line:?}"
+        );
+        assert!(
+            !free_line.contains("approval") && !free_line.contains("held"),
+            "row without an active_hold must render no badge: {free_line:?}"
+        );
+    }
+
+    #[test]
+    fn automations_modal_renders_in_progress_hold_distinctly_from_approval() {
+        let modal = Modal::Automations(AutomationsModalState {
+            automations: vec![held_automation(
+                "a-1",
+                "Nightly sync",
+                "active",
+                "in_progress",
+            )],
+            selected: 0,
+            loading: false,
+            renaming: None,
+        });
+        let content = draw_modal(&modal);
+        let line = content
+            .lines()
+            .find(|line| line.contains("Nightly sync"))
+            .expect("held automation row rendered");
+        assert!(
+            line.contains("in progress"),
+            "in_progress hold must render its own label, not the approval one: {line:?}"
         );
     }
 }

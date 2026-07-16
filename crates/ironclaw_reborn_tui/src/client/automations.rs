@@ -163,10 +163,7 @@ mod tests {
     async fn list_automations_requests_include_completed() {
         let captured = CapturedQuery::default();
         let router = Router::new()
-            .route(
-                "/api/webchat/v2/automations",
-                get(list_automations_stub),
-            )
+            .route("/api/webchat/v2/automations", get(list_automations_stub))
             .with_state(captured.clone());
         let listener = TcpListener::bind("127.0.0.1:0")
             .await
