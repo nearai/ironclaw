@@ -1197,6 +1197,12 @@ class TerminalRunFailure(AssertionError):
 
 ASSISTANT_REPLY_FALLBACK_QUIET_SECONDS = 2.0
 ASSISTANT_REPLY_POLL_SECONDS = 0.5
+STRUCTURAL_FINAL_ASSISTANT_REPLY_REASONS = frozenset(
+    {
+        "final_reply_observed",
+        "semantic_judge_final_reply_observed",
+    }
+)
 # Persisted diagnostic excerpt only — content checks read
 # AssistantReplyWaitResult.full_text, never this truncation.
 ASSISTANT_REPLY_EXCERPT_MAX_CHARS = 2000
@@ -4353,7 +4359,23 @@ async def case_qa_5c_strategy_doc_knowledge_base(ctx: LiveQaContext) -> ProbeRes
         if isinstance(statuses, dict)
         else expected_capabilities
     )
-    if missing_capabilities:
+    evidence_read_error = evidence.get("read_error")
+    if evidence_read_error:
+        result.success = False
+        result.details.update(
+            {
+                "error": (
+                    "Google Docs capability evidence could not be read: "
+                    f"{evidence_read_error}"
+                ),
+                "failure_class": "infrastructure",
+                "failure_category": "capability_evidence_unavailable",
+                "failure_status": "inconclusive",
+                "inconclusive": True,
+                "blocking": False,
+            }
+        )
+    elif missing_capabilities:
         result.success = False
         result.details.update(
             {
@@ -4725,6 +4747,19 @@ async def _routine_creation_case(
             routine_follow_up_timezone_instruction=follow_up_timezone_instruction,
             enforce_marker=False,
         )
+    reply_wait_reason = result.details.get("assistant_reply_wait_reason")
+    result.details["structural_final_reply_reasons"] = sorted(
+        STRUCTURAL_FINAL_ASSISTANT_REPLY_REASONS
+    )
+    if (
+        result.success
+        and reply_wait_reason not in STRUCTURAL_FINAL_ASSISTANT_REPLY_REASONS
+    ):
+        result.success = False
+        result.details["error"] = (
+            "routine creation reply was not structurally finalized; "
+            f"assistant_reply_wait_reason={reply_wait_reason!r}"
+        )
     if result.success:
         after_count, wait_ms = await _wait_for_trigger_record_after_count(
             ctx.reborn_home,
@@ -4742,8 +4777,8 @@ async def _routine_creation_case(
     if result.success and after_count <= before_count:
         result.success = False
         result.details["error"] = (
-            "assistant matched required routine text before trigger_create completed; "
-            f"routine scope {routine_name!r} did not add a trigger_record"
+            "finalized assistant reply observed, but routine scope "
+            f"{routine_name!r} has no new durable trigger_record"
         )
     return result
 

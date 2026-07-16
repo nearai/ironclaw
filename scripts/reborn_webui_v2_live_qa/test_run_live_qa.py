@@ -1127,6 +1127,7 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
                 latency_ms=1,
                 details={
                     "text_excerpt": "routine created",
+                    "assistant_reply_wait_reason": "final_reply_observed",
                     **extra_details,
                 },
             )
@@ -1160,7 +1161,8 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
         self.assertEqual(captured_follow_up_flags, [True])
         self.assertEqual(result.details["trigger_records_after"], 0)
         self.assertEqual(result.details["trigger_record_wait_ms"], 25)
-        self.assertIn("did not add a trigger_record", result.details["error"])
+        self.assertIn("finalized assistant reply observed", result.details["error"])
+        self.assertIn("no new durable trigger_record", result.details["error"])
 
     def test_routine_creation_accepts_reformatted_reply_when_trigger_is_durable(self):
         marker = "REBORN_QA_ROUTINE_CREATED"
@@ -1177,6 +1179,7 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
                 latency_ms=1,
                 details={
                     "text_excerpt": "Trigger created successfully.",
+                    "assistant_reply_wait_reason": "final_reply_observed",
                     **extra_details,
                 },
             )
@@ -1209,6 +1212,69 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
         self.assertEqual(result.details["trigger_records_after"], 1)
         self.assertEqual(result.details["expected_creation_marker"], marker)
         self.assertEqual(result.details["expected_creation_terms"], expected_terms)
+
+    def test_routine_creation_accepts_only_structural_final_reply_reasons(self):
+        cases = (
+            ("final_reply_observed", True),
+            ("semantic_judge_final_reply_observed", True),
+            ("fallback_quiet_period_matched", False),
+            ("semantic_judge_timeout_fallback", False),
+            ("unknown_reply_reason", False),
+            (None, False),
+        )
+
+        for reply_reason, expected_success in cases:
+            with self.subTest(reply_reason=reply_reason):
+                async def fake_live_chat_case(_ctx, **kwargs):
+                    details = {
+                        "text_excerpt": "Trigger created successfully.",
+                        **(kwargs.get("extra_details") or {}),
+                    }
+                    if reply_reason is not None:
+                        details["assistant_reply_wait_reason"] = reply_reason
+                    return run_live_qa.ProbeResult(
+                        provider="test",
+                        mode=f"live:{kwargs['case_name']}",
+                        success=True,
+                        latency_ms=1,
+                        details=details,
+                    )
+
+                with (
+                    patch.object(
+                        run_live_qa,
+                        "_live_chat_case",
+                        side_effect=fake_live_chat_case,
+                    ),
+                    patch.object(
+                        run_live_qa,
+                        "_trigger_record_count",
+                        side_effect=[0, 1],
+                    ),
+                    patch.object(
+                        run_live_qa,
+                        "_wait_for_trigger_record_after_count",
+                        return_value=(1, 25),
+                    ),
+                ):
+                    result = asyncio.run(
+                        run_live_qa._routine_creation_case(
+                            self._dummy_ctx(),
+                            case_name="qa_test_routine",
+                            prompt="create the requested routine",
+                            marker="REBORN_QA_ROUTINE_CREATED",
+                            routine_name="qa-test-routine",
+                            required_text=["routine", "created"],
+                        )
+                    )
+
+                self.assertEqual(result.success, expected_success)
+                self.assertEqual(result.details["trigger_records_after"], 1)
+                if not expected_success:
+                    self.assertIn(
+                        "reply was not structurally finalized",
+                        result.details["error"],
+                    )
 
     def test_strategy_doc_knowledge_requires_current_turn_google_docs_evidence(self):
         captured: dict[str, object] = {}
@@ -1335,6 +1401,60 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
         )
         self.assertIn("google-docs.read_content", result.details["error"])
 
+    def test_strategy_doc_knowledge_evidence_read_failure_is_inconclusive(self):
+        async def fake_live_chat_with_extensions_case(_ctx, **kwargs):
+            return run_live_qa.ProbeResult(
+                provider="test",
+                mode=f"live:{kwargs['case_name']}",
+                success=True,
+                latency_ms=1,
+                details={
+                    "text_excerpt": "The strategy document is ready.",
+                    "submission_identity": {
+                        "accepted_message_ref": "msg:qa-5c",
+                        "thread_id": "thread-qa-5c",
+                        "turn_id": "turn-qa-5c",
+                        "run_id": "run-qa-5c",
+                    },
+                },
+            )
+
+        evidence = {
+            "statuses": {
+                "google-docs.create_document": [],
+                "google-docs.read_content": [],
+            },
+            "read_error": "database is locked",
+        }
+        with (
+            patch.object(
+                run_live_qa,
+                "_live_chat_with_extensions_case",
+                side_effect=fake_live_chat_with_extensions_case,
+            ),
+            patch.object(
+                run_live_qa,
+                "_current_turn_capability_evidence",
+                return_value=evidence,
+            ),
+        ):
+            result = asyncio.run(
+                run_live_qa.case_qa_5c_strategy_doc_knowledge_base(
+                    self._dummy_ctx()
+                )
+            )
+
+        self.assertFalse(result.success)
+        self.assertEqual(result.details["failure_class"], "infrastructure")
+        self.assertEqual(
+            result.details["failure_category"],
+            "capability_evidence_unavailable",
+        )
+        self.assertEqual(result.details["failure_status"], "inconclusive")
+        self.assertTrue(result.details["inconclusive"])
+        self.assertFalse(result.details["blocking"])
+        self.assertIn("database is locked", result.details["error"])
+
     def test_wait_for_trigger_record_after_count_polls_until_record_added(self):
         counts = iter([0, 0, 1])
         observed_sleeps: list[float] = []
@@ -1423,6 +1543,7 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
                 latency_ms=1,
                 details={
                     "text_excerpt": "routine created",
+                    "assistant_reply_wait_reason": "final_reply_observed",
                     **extra_details,
                 },
             )
@@ -4051,7 +4172,10 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
                 mode=f"live:{kwargs['case_name']}",
                 success=True,
                 latency_ms=1,
-                details={"text_excerpt": "Routine created"},
+                details={
+                    "text_excerpt": "Routine created",
+                    "assistant_reply_wait_reason": "final_reply_observed",
+                },
             )
 
         with (
@@ -4112,7 +4236,8 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
                     "text_excerpt": (
                         "Done! Here's what was created: HN Monitor. "
                         "Schedule: Every hour at :00."
-                    )
+                    ),
+                    "assistant_reply_wait_reason": "final_reply_observed",
                 },
             )
 
