@@ -627,17 +627,25 @@ Do not port the current `src/cli/*` command tree wholesale. Port commands one at
 
 `ironclaw-reborn` is the cargo-dist release artifact for the Reborn runtime.
 
-Release tags use the `ironclaw-reborn-v*` prefix. The legacy root `ironclaw`
-package is marked `dist = false`; `crates/ironclaw_reborn_cli` is marked
-`dist = true` and carries its own WiX identity so Windows installers do not
-reuse the legacy package identity.
+Release tags keep the existing `ironclaw-v*` prefix. The legacy root
+`ironclaw` package is marked `dist = false`; `crates/ironclaw_reborn_cli` is
+marked `dist = true` and carries its own WiX identity so Windows installers do
+not reuse the legacy package identity.
 
 The Docker image rebuild workflow follows the same tag family:
-`source_ref=ironclaw-reborn-v<version>`.
+`source_ref=ironclaw-v<version>`.
 
 ```toml
 [package.metadata.dist]
 dist = true
+features = [
+    "openai-compat-beta",
+    "slack-v2-host-beta",
+    "webui-v2-beta",
+    "libsql",
+    "postgres",
+    "inmemory-turn-state",
+]
 ```
 
 in `crates/ironclaw_reborn_cli/Cargo.toml` is the expected state.

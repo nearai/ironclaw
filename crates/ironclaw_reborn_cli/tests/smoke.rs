@@ -202,7 +202,7 @@ fn default_dockerfile_targets_reborn_runtime() {
 }
 
 #[test]
-fn release_workflows_target_reborn_tags() {
+fn release_workflows_keep_existing_ironclaw_tags() {
     let release = std::fs::read_to_string(workspace_root().join(".github/workflows/release.yml"))
         .expect("release workflow");
     let rebuild = std::fs::read_to_string(
@@ -211,14 +211,62 @@ fn release_workflows_target_reborn_tags() {
     .expect("rebuild release image workflow");
 
     assert!(
-        release.contains("ironclaw-reborn-v[0-9]+.[0-9]+.[0-9]+*")
-            && rebuild.contains("EXPECTED_REF=\"ironclaw-reborn-v${EXPECTED_TAG}\""),
-        "release workflows must use the Reborn tag family"
+        release.contains("ironclaw-v[0-9]+.[0-9]+.[0-9]+*")
+            && rebuild.contains("EXPECTED_REF=\"ironclaw-v${EXPECTED_TAG}\""),
+        "release workflows must keep the existing IronClaw tag family"
     );
     assert!(
-        !release.contains("ironclaw-v[0-9]+.[0-9]+.[0-9]+*")
-            && !rebuild.contains("EXPECTED_REF=\"ironclaw-v${EXPECTED_TAG}\""),
-        "release workflows must not trigger from the legacy root tag family"
+        !release.contains("ironclaw-reborn-v[0-9]+.[0-9]+.[0-9]+*")
+            && !rebuild.contains("EXPECTED_REF=\"ironclaw-reborn-v${EXPECTED_TAG}\""),
+        "release workflows must not introduce a second Reborn tag family"
+    );
+}
+
+#[test]
+fn reborn_release_artifacts_use_shipping_features() {
+    let manifest =
+        std::fs::read_to_string(workspace_root().join("crates/ironclaw_reborn_cli/Cargo.toml"))
+            .expect("Reborn CLI manifest");
+    let dockerfile =
+        std::fs::read_to_string(workspace_root().join("Dockerfile")).expect("Dockerfile");
+    let build_all =
+        std::fs::read_to_string(workspace_root().join("scripts/build-all.sh")).expect("build-all");
+    let expected_features = [
+        "openai-compat-beta",
+        "slack-v2-host-beta",
+        "webui-v2-beta",
+        "libsql",
+        "postgres",
+        "inmemory-turn-state",
+    ];
+
+    for feature in expected_features {
+        assert!(
+            manifest.contains(&format!("\"{feature}\"")),
+            "Reborn cargo-dist metadata must include shipping feature {feature}: {manifest}"
+        );
+        assert!(
+            dockerfile.contains(feature),
+            "default Dockerfile must build with shipping feature {feature}: {dockerfile}"
+        );
+        assert!(
+            build_all.contains(feature),
+            "build-all helper must build with shipping feature {feature}: {build_all}"
+        );
+    }
+}
+
+#[test]
+fn legacy_v1_worker_and_test_dockerfiles_are_retired() {
+    let root = workspace_root();
+
+    assert!(
+        !root.join("Dockerfile.worker").exists(),
+        "Dockerfile.worker built the retired v1 ironclaw worker image and must stay removed"
+    );
+    assert!(
+        !root.join("Dockerfile.test").exists(),
+        "Dockerfile.test built the retired v1 gateway test image and must stay removed"
     );
 }
 

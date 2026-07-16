@@ -54,7 +54,7 @@ COPY --from=planner /app/recipe.json recipe.json
 RUN cargo chef cook \
     --profile dist \
     --package ironclaw_reborn_cli \
-    --features webui-v2-beta,slack-v2-host-beta,libsql,postgres,inmemory-turn-state \
+    --features openai-compat-beta,slack-v2-host-beta,webui-v2-beta,libsql,postgres,inmemory-turn-state \
     --recipe-path recipe.json
 RUN cargo chef cook \
     --profile dist \
@@ -84,7 +84,7 @@ WORKDIR /app
 RUN cargo build \
     --profile dist \
     --package ironclaw_reborn_cli \
-    --features webui-v2-beta,slack-v2-host-beta,libsql,postgres,inmemory-turn-state \
+    --features openai-compat-beta,slack-v2-host-beta,webui-v2-beta,libsql,postgres,inmemory-turn-state \
     --bin ironclaw-reborn
 
 RUN cargo build \

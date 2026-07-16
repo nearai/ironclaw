@@ -19,7 +19,7 @@ primary references during the retirement:
 | Reborn crate/unit/integration coverage | `.github/workflows/reborn-tests.yml` |
 | Reborn deterministic E2E contracts | `.github/workflows/reborn-e2e.yml`, `scripts/reborn-e2e-rust.sh` |
 | Reborn browser/WebUI checks | `.github/workflows/reborn-playwright.yml` |
-| Reborn hosted container | `Dockerfile.reborn` |
+| Reborn hosted container | `Dockerfile` (default production image), `Dockerfile.reborn` (explicit compatibility path) |
 | Reborn local WebUI helper | `scripts/run-reborn-webui.sh` |
 | Reborn live canary binary artifact | `.github/workflows/live-canary.yml` |
 
@@ -27,14 +27,14 @@ primary references during the retirement:
 
 | Area | Current dependency |
 | --- | --- |
-| Legacy Docker image | `Dockerfile` builds and runs `--bin ironclaw`. |
-| Worker image | `Dockerfile.worker` builds and runs `--bin ironclaw`. |
-| Test image | `Dockerfile.test` builds `--bin ironclaw`. |
+| Legacy Docker image | Retired from the default `Dockerfile`; the default image now builds and runs `ironclaw-reborn`. |
+| Worker image | `Dockerfile.worker` retired because it built and ran the v1 `ironclaw` worker image. |
+| Test image | `Dockerfile.test` retired because it built the v1 gateway test image. |
 | Legacy browser E2E | `.github/workflows/e2e.yml` uploads and executes `target/debug/ironclaw`. |
 | Legacy Rust matrix | `.github/workflows/test.yml` is the root package test matrix, now frozen in workflow docs. |
 | Build helper | `scripts/build-all.sh` reports `target/release/ironclaw`. |
 | Scope classifiers | `.github/workflows/test.yml`, `platform-and-compat.yml`, and `scripts/ci/classify-test-scope.sh` still route selected changes through legacy `src/` and gateway paths. |
-| Release packaging | cargo-dist currently has the Reborn CLI package marked `dist = false`; legacy release semantics must be retired or replaced deliberately. |
+| Release packaging | cargo-dist now builds `ironclaw_reborn_cli` with the Reborn shipping feature set while keeping the existing `ironclaw-v*` tag family. |
 
 ## Retarget Sequence
 
@@ -58,7 +58,7 @@ primary references during the retirement:
 Run these checks in the retargeting PRs, not only in the final deletion PR:
 
 ```bash
-cargo build -p ironclaw_reborn_cli --features webui-v2-beta,libsql
+cargo build -p ironclaw_reborn_cli --features openai-compat-beta,slack-v2-host-beta,webui-v2-beta,libsql,postgres,inmemory-turn-state --bin ironclaw-reborn
 cargo test -p ironclaw_architecture
 bash scripts/reborn-e2e-rust.sh
 git diff --check
@@ -67,7 +67,7 @@ git diff --check
 For Docker/release changes, also run:
 
 ```bash
-docker build -f Dockerfile.reborn -t ironclaw-reborn-test:ci .
+docker build --target runtime -t ironclaw-reborn-test:ci .
 ```
 
 ## Rollback
