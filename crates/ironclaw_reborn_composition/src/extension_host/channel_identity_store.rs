@@ -93,6 +93,15 @@ impl FilesystemChannelIdentityStore {
         }
     }
 
+    /// The (tenant, user) identity scope this store reads and writes under —
+    /// captured by the channel-connection test bundle so its restart-survival
+    /// reopen probe reconstructs the store with the same scoping production
+    /// composed (`build_reborn_services`' channel egress scope). Tests only.
+    #[cfg(feature = "test-support")]
+    pub(crate) fn identity_scope_tenant_and_user(&self) -> (&TenantId, &UserId) {
+        (&self.scope.tenant_id, &self.scope.user_id)
+    }
+
     fn lock_for(&self, key: String) -> Arc<tokio::sync::Mutex<()>> {
         let mut locks = self
             .locks

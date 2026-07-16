@@ -6,8 +6,8 @@
 //! and asserts the state a process restart must reconstruct is actually
 //! there:
 //! - the active Slack identity binding (the durable "connected" evidence),
-//!   read through a fresh `FilesystemSlackHostState` composed exactly the way
-//!   production boot composes it;
+//!   read through a fresh generic `FilesystemChannelIdentityStore` composed
+//!   exactly the way production boot composes it;
 //! - the Slack extension installation record (the durable "installed"
 //!   evidence).
 //!
@@ -24,8 +24,8 @@ use super::reborn_support::group::{HarnessResult, RebornIntegrationGroup};
 
 pub async fn run(g: &RebornIntegrationGroup) -> HarnessResult<()> {
     let slack = g
-        .slack_channel_connection()
-        .ok_or("extension_lifecycle group must carry the Slack channel-connection bundle")?;
+        .channel_connection()
+        .ok_or("extension_lifecycle group must carry the generic channel-connection bundle")?;
     let actor = g.canonical_actor_user();
     let capability_harness = g
         .capability_harness()
@@ -34,21 +34,22 @@ pub async fn run(g: &RebornIntegrationGroup) -> HarnessResult<()> {
 
     // Live-handle sanity: scenario 6 must have left Slack connected, or the
     // reopen assertions below would be vacuous.
-    if !slack.caller_channel_connected(&actor).await? {
+    if !slack.caller_channel_connected("slack", &actor).await? {
         return Err(
             "precondition: slack must still be connected after the lifecycle scenario".into(),
         );
     }
 
     // Durable "connected": the active identity binding reads back through a
-    // FRESH host-state store over a FRESH root filesystem at the same
-    // storage_root — the state a restarted process would reconstruct. One
-    // reopen serves both probes, so the positive read and its non-vacuity
-    // control (a user that never connected) see the same reconstructed store.
+    // FRESH generic channel-identity store over a FRESH root filesystem at
+    // the same storage_root — the state a restarted process would
+    // reconstruct. One reopen serves both probes, so the positive read and
+    // its non-vacuity control (a user that never connected) see the same
+    // reconstructed store.
     let stranger = ironclaw_host_api::UserId::new("reopen-probe-stranger")
         .map_err(|error| error.to_string())?;
     let bindings = slack
-        .active_identity_bindings_after_reopen(&storage_root, &[&actor, &stranger])
+        .active_identity_bindings_after_reopen("slack", &storage_root, &[&actor, &stranger])
         .await?;
     if bindings != [true, false] {
         return Err(format!(

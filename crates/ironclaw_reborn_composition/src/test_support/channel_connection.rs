@@ -71,6 +71,11 @@ pub struct ChannelConnectionTestBundle {
     facade: Arc<dyn ChannelConnectionFacade>,
     identity_binding: ChannelIdentityBindingConfig,
     identity_lookup: Arc<dyn RebornUserIdentityLookup>,
+    /// The (tenant, user) scope the LIVE identity store was composed with —
+    /// the restart-survival reopen probe reconstructs a fresh store under the
+    /// same scoping so its reads see the same identity subtree.
+    identity_store_tenant_id: TenantId,
+    identity_store_user_id: UserId,
 }
 
 /// Build the real generic channel-connection facade over `services`' own
@@ -167,12 +172,18 @@ pub fn build_channel_connection_for_test(
         overrides: Vec::new(),
     };
 
+    let (identity_store_tenant_id, identity_store_user_id) = {
+        let (tenant, user) = identity_store.identity_scope_tenant_and_user();
+        (tenant.clone(), user.clone())
+    };
     Ok(ChannelConnectionTestBundle {
         tenant_id,
         agent_id,
         facade,
         identity_binding,
         identity_lookup: identity_store,
+        identity_store_tenant_id,
+        identity_store_user_id,
     })
 }
 
@@ -276,5 +287,52 @@ impl ChannelConnectionTestBundle {
             .user_has_provider_binding_with_provider_user_id_prefix(provider, user_id, None)
             .await
             .map_err(|error| error.to_string())
+    }
+
+    /// Restart-survival probe (T5 of issue #6105): evaluate the SAME
+    /// active-binding predicate as
+    /// [`Self::has_any_active_identity_binding`] for EACH of `user_ids`, but
+    /// through ONE fresh `FilesystemChannelIdentityStore` over ONE fresh
+    /// local-dev root filesystem reopened at `storage_root` — fully
+    /// independent of the live runtime's in-memory handles. This is the
+    /// integration-tier approximation of a process restart: it proves the
+    /// durable binding is reconstructible the way production reconstructs it
+    /// on boot (`build_reborn_services` →
+    /// `FilesystemChannelIdentityStore::new` over the composed local-dev
+    /// root). Results come back in `user_ids` order; the single reopen means
+    /// a positive probe and its non-vacuity control read the same
+    /// reconstructed store. Tests only.
+    ///
+    /// `libsql`-only, matching the factory seam it opens: the local-default
+    /// reopen path composes the libsql local-dev backend, so a wider gate
+    /// would silently probe a fresh in-memory store on non-libsql builds.
+    #[cfg(feature = "libsql")]
+    pub async fn active_identity_bindings_after_reopen(
+        &self,
+        provider: &str,
+        storage_root: &std::path::Path,
+        user_ids: &[&UserId],
+    ) -> Result<Vec<bool>, String> {
+        let filesystem = crate::factory::open_local_dev_root_filesystem_for_test(storage_root)
+            .await
+            .map_err(|error| error.to_string())?;
+        let store = Arc::new(
+            crate::extension_host::channel_identity_store::FilesystemChannelIdentityStore::new(
+                filesystem,
+                self.identity_store_tenant_id.clone(),
+                self.identity_store_user_id.clone(),
+            ),
+        );
+        let lookup: Arc<dyn RebornUserIdentityLookup> = store;
+        let mut bindings = Vec::with_capacity(user_ids.len());
+        for user_id in user_ids {
+            bindings.push(
+                lookup
+                    .user_has_provider_binding_with_provider_user_id_prefix(provider, user_id, None)
+                    .await
+                    .map_err(|error| error.to_string())?,
+            );
+        }
+        Ok(bindings)
     }
 }

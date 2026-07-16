@@ -1691,7 +1691,15 @@ impl RebornIntegrationHarness {
                 );
             }
         };
-        let scope = self.run_resource_scope_for_user(harness.capability_user_id().clone());
+        // Mirror production execution-user resolution (owner → actor), the
+        // same derivation `seed_capability_credential_account` uses — the
+        // revoke must land on the accounts that seeding created.
+        let dispatch_user = self
+            .turn_scope
+            .explicit_owner_user_id()
+            .cloned()
+            .unwrap_or_else(|| self.binding.actor_user_id.clone());
+        let scope = self.run_resource_scope_for_user(dispatch_user);
         let revoked = harness
             .revoke_credential_accounts_for_provider(&scope, provider)
             .await?;
