@@ -1937,7 +1937,7 @@ impl PostSubmitDeliveryHook for CompositePostSubmitDeliveryHook {
             .collect();
         for handle in handles {
             if let Err(error) = handle.await {
-                tracing::warn!(
+                tracing::debug!(
                     target = "ironclaw::reborn::trigger_delivery",
                     %run_id,
                     %error,
@@ -2167,6 +2167,7 @@ impl TriggeredRunDeliveryDriver {
 /// (still running / stuck), distinguished here by `delivered_blocked_marker`. See
 /// `docs/plans/2026-06-25-slack-delivery-blocked-terminal.md` for the production
 /// incident (23× spurious `Failed` after 30-min polls) this guards against.
+// arch-exempt: too_many_args, needs a triggered-delivery context bundle (services + settings + fire + run identity + delivery store + fallback agent + target provider), plan docs/plans/2026-06-10-slack-gate-feedback-and-routing.md Phase C
 #[allow(clippy::too_many_arguments)]
 async fn deliver_triggered_run(
     services: &FinalReplyDeliveryServices,

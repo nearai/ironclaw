@@ -61,7 +61,10 @@ impl TelegramOutboundTargetProvider {
             installation_id.as_str(),
             target.user_id.as_str()
         ))
-        .map_err(|_| telegram_target_backend_error())?;
+        .map_err(|error| {
+            tracing::debug!(%error, "telegram outbound target id/label construction failed");
+            telegram_target_backend_error()
+        })?;
         Ok(OutboundDeliveryTargetEntry {
             summary: RebornOutboundDeliveryTargetSummary::new(
                 target_id,
@@ -69,7 +72,10 @@ impl TelegramOutboundTargetProvider {
                 "Telegram DM".to_string(),
                 Some(format!("Telegram DM via @{bot_username}")),
             )
-            .map_err(|_| telegram_target_backend_error())?,
+            .map_err(|error| {
+                tracing::debug!(%error, "telegram outbound target id/label construction failed");
+                telegram_target_backend_error()
+            })?,
             capabilities: RebornOutboundDeliveryTargetCapabilities {
                 final_replies: true,
                 gate_prompts: true,

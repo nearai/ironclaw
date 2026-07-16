@@ -50,10 +50,10 @@ where
     let Some(versioned) = filesystem.get(scope, path).await? else {
         return Ok(None);
     };
-    let value = serde_json::from_slice(&versioned.entry.body).map_err(|_| {
+    let value = serde_json::from_slice(&versioned.entry.body).map_err(|error| {
         FilesystemError::BackendInfrastructure {
             operation: FilesystemOperation::ReadFile,
-            reason: format!("{label} record is invalid JSON"),
+            reason: format!("{label} record is invalid JSON: {error}"),
         }
     })?;
     Ok(Some((value, versioned.version)))
@@ -71,10 +71,11 @@ where
     F: RootFilesystem + 'static,
     T: Serialize,
 {
-    let body = serde_json::to_vec(value).map_err(|_| FilesystemError::BackendInfrastructure {
-        operation: FilesystemOperation::WriteFile,
-        reason: format!("{label} record could not be serialized"),
-    })?;
+    let body =
+        serde_json::to_vec(value).map_err(|error| FilesystemError::BackendInfrastructure {
+            operation: FilesystemOperation::WriteFile,
+            reason: format!("{label} record could not be serialized: {error}"),
+        })?;
     filesystem
         .put(
             scope,

@@ -163,11 +163,14 @@ impl InstallationRateLimiter {
         buckets: &mut std::collections::HashMap<InstallationRateLimitKey, RateLimitBucket>,
         now: std::time::Instant,
     ) {
+        // Prune on idle time alone: `last_refilled_at` advances on every
+        // `check` for the key, so a bucket untouched for 2× the window is
+        // stale regardless of its token level (a recreated bucket starts
+        // full, which is exactly the fresh-window semantic). Keeping
+        // sub-capacity buckets alive forever — the previous predicate — made
+        // the map grow monotonically with every installation ever seen.
         let ttl = self.config.window.saturating_mul(2);
-        let capacity = self.config.max_requests.get() as f64;
-        buckets.retain(|_, bucket| {
-            now.duration_since(bucket.last_refilled_at) < ttl || bucket.tokens < capacity
-        });
+        buckets.retain(|_, bucket| now.duration_since(bucket.last_refilled_at) < ttl);
     }
 }
 
@@ -288,6 +291,54 @@ pub(crate) fn runner_error_status(
             WebhookErrorCategory::TemporarilyUnavailable,
         ),
         RunnerError::Adapter(_) => (StatusCode::BAD_REQUEST, WebhookErrorCategory::Adapter),
+    }
+}
+
+#[cfg(all(
+    test,
+    any(feature = "slack-v2-host-beta", feature = "telegram-v2-host-beta")
+))]
+mod installation_rate_limiter_tests {
+    use super::*;
+
+    fn key_parts(
+        label: &str,
+    ) -> (
+        ironclaw_host_api::TenantId,
+        ironclaw_product_adapters::AdapterInstallationId,
+    ) {
+        (
+            ironclaw_host_api::TenantId::new("tenant-a").expect("tenant"),
+            ironclaw_product_adapters::AdapterInstallationId::new(label).expect("installation"),
+        )
+    }
+
+    /// Regression: a bucket that consumed a token and then went idle must be
+    /// pruned once it passes 2× the window — the old predicate kept every
+    /// sub-capacity bucket alive forever, growing the map monotonically.
+    #[test]
+    fn idle_buckets_are_pruned_after_the_ttl() {
+        let limiter = InstallationRateLimiter::new(InstallationRateLimitConfig::new(
+            std::num::NonZeroU32::new(5).expect("nonzero"),
+            std::time::Duration::from_millis(2),
+        ));
+        let (tenant, installation_a) = key_parts("tg-bot-1");
+        limiter
+            .check(&tenant, &installation_a)
+            .expect("first check passes");
+        assert_eq!(limiter.buckets.lock().expect("lock").len(), 1);
+
+        std::thread::sleep(std::time::Duration::from_millis(10));
+        let (_, installation_b) = key_parts("tg-bot-2");
+        limiter
+            .check(&tenant, &installation_b)
+            .expect("second key passes");
+        let buckets = limiter.buckets.lock().expect("lock");
+        assert_eq!(
+            buckets.len(),
+            1,
+            "the idle tg-bot-1 bucket must be pruned once past 2x the window"
+        );
     }
 }
 

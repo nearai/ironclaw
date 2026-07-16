@@ -151,6 +151,16 @@ export function ChannelsTab({
   const hasInstalledSlackPackage = installedChannels.some(isSlackPackage);
   const showBuiltinSlackConnectActions =
     slackConnectActions.length > 0 && !hasInstalledSlackPackage;
+  // Telegram mirrors the Slack shape: before the extension is installed, the
+  // operator's bot-setup card (admin_managed_channels) renders as a built-in
+  // row; once installed, the Messaging section's card owns the connect
+  // actions instead.
+  const telegramConnectActions = connectActionsForChannel(connectableChannels, "telegram");
+  const hasInstalledTelegramPackage = installedChannels.some(
+    (item) => packageId(item) === "telegram"
+  );
+  const showBuiltinTelegramConnectActions =
+    telegramConnectActions.length > 0 && !hasInstalledTelegramPackage;
 
   return (
     <div className="space-y-5">
@@ -199,6 +209,21 @@ export function ChannelsTab({
           >
             <ChannelConnectActionSections
               connectActions={slackConnectActions}
+            />
+          </BuiltinRow>
+        )}
+        {showBuiltinTelegramConnectActions &&
+        (
+          <BuiltinRow
+            name={t("channels.telegram")}
+            description={t("channels.telegramDesc")}
+            enabled={false}
+            statusLabel={t("channels.setup")}
+            statusTone="muted"
+            detail={t("channels.telegramDetail")}
+          >
+            <ChannelConnectActionSections
+              connectActions={telegramConnectActions}
             />
           </BuiltinRow>
         )}

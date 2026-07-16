@@ -608,9 +608,7 @@ fn provider_user_id_matches_installation_prefix(candidate: &str, prefix: &str) -
     if installation.is_empty() {
         return true;
     }
-    candidate
-        .split_once(':')
-        .is_some_and(|(candidate_installation, _)| candidate_installation == installation)
+    crate::telegram::telegram_actor_identity::installation_segment_matches(candidate, installation)
 }
 
 #[async_trait]

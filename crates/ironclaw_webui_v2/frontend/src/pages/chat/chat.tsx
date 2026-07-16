@@ -132,8 +132,14 @@ export function Chat({
         errorMessage: channelConnectionGate.errorMessage,
       }
     : null;
+  // A Telegram BlockedAuth pairing gate is a channel-connection gate too:
+  // the composer must say "finish pairing", not "resolve the approval".
+  const telegramPairingGate =
+    pendingGate?.kind === "auth_required" &&
+    pendingGate?.challengeKind === "pairing" &&
+    pendingGate?.provider === "telegram";
   const activeThreadHasChannelConnectionGate =
-    activeThreadHasGate && Boolean(channelConnectionGate);
+    activeThreadHasGate && (Boolean(channelConnectionGate) || telegramPairingGate);
   const activeThreadHasOnboarding =
     Boolean(activeThreadId) && Boolean(pendingOnboarding);
   const activeThreadIsProcessing = Boolean(activeThreadId) && isProcessing;
@@ -385,8 +391,7 @@ export function Chat({
                       approve(pendingGate.requestId, "cancel", pendingGate.kind)}
                   />
                 ))
-                  : pendingGate.challengeKind === "pairing" &&
-                      pendingGate.provider === "telegram"
+                  : telegramPairingGate
                   ? (
                   // A live BlockedAuth pairing gate renders the same pairing
                   // panel the Extensions card uses (dual-surface parity —

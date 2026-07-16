@@ -310,6 +310,77 @@ test("ChannelsTab keeps Slack controls in the builtin location when Slack is not
   );
 });
 
+test("ChannelsTab keeps the Telegram bot-setup card in the builtin location when Telegram is not installed", () => {
+  const view = channelsTabForTest({
+    status: { enabled_channels: [], sse_connections: 0, ws_connections: 0 },
+    channels: [],
+    connectableChannels: [
+      { channel: "telegram", strategy: "admin_managed_channels", action: {} },
+    ],
+    channelRegistry: [{ package_ref: { id: "telegram" } }],
+    isBusy: false,
+    onActivate() {},
+    onConfigure() {},
+    onInstall() {},
+    onRemove() {},
+  });
+
+  // The operator's bot-setup card must render pre-install (design spec §2:
+  // the Channels tab shows the Telegram card exactly like Slack's), not be
+  // dropped until the extension is installed.
+  const builtinTelegramSection = renderedNodeContainingComponent(
+    view.rendered,
+    view.ChannelConnectActionSections,
+  );
+  assert.notEqual(builtinTelegramSection, undefined, "expected builtin Telegram section");
+  assert.equal(
+    renderedContainsChannelAction(builtinTelegramSection, "telegram", "admin_managed_channels"),
+    true,
+  );
+
+  const registryCard = renderedNodeContainingComponent(view.rendered, view.RegistryCard);
+  assert.notEqual(registryCard, undefined, "expected available channels registry card");
+  assert.equal(
+    renderedContainsComponent(registryCard, view.ChannelConnectActionSections),
+    false,
+  );
+});
+
+test("ChannelsTab moves Telegram connect controls under the installed Telegram card", () => {
+  const view = channelsTabForTest({
+    status: { enabled_channels: [], sse_connections: 0, ws_connections: 0 },
+    channels: [
+      { package_ref: { id: "telegram" }, kind: "channel", activation_status: "installed" },
+    ],
+    connectableChannels: [
+      { channel: "telegram", strategy: "admin_managed_channels", action: {} },
+      { channel: "telegram", strategy: "web_generated_code", action: {} },
+    ],
+    channelRegistry: [],
+    isBusy: false,
+    onActivate() {},
+    onConfigure() {},
+    onInstall() {},
+    onRemove() {},
+  });
+
+  const installedCard = renderedNodeContainingComponent(
+    view.rendered,
+    view.ChannelConnectActionSections,
+  );
+  assert.notEqual(installedCard, undefined, "expected installed Telegram card wrapper");
+  assert.equal(
+    renderedContainsChannelAction(installedCard, "telegram", "admin_managed_channels"),
+    true,
+  );
+  // Exactly one connect-actions section: the builtin row must not duplicate
+  // the installed card's controls.
+  assert.equal(
+    renderedComponentCount(view.rendered, view.ChannelConnectActionSections),
+    1,
+  );
+});
+
 test("ChannelsTab renders Slack connect controls under the installed Slack card", () => {
   const view = channelsTabForTest({
     status: { enabled_channels: [], sse_connections: 0, ws_connections: 0 },

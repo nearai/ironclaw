@@ -125,9 +125,16 @@ pub(crate) fn provider_user_id_in_installation(
     provider_user_id: &str,
     installation_id: &AdapterInstallationId,
 ) -> bool {
+    installation_segment_matches(provider_user_id, installation_id.as_str())
+}
+
+/// Core exact-segment comparison shared by every installation-scoping check:
+/// the candidate's `{installation}` segment (before the first `:`) must equal
+/// `installation` exactly — never a string prefix.
+pub(crate) fn installation_segment_matches(provider_user_id: &str, installation: &str) -> bool {
     provider_user_id
         .split_once(':')
-        .is_some_and(|(candidate, _)| candidate == installation_id.as_str())
+        .is_some_and(|(candidate, _)| candidate == installation)
 }
 
 #[cfg(test)]

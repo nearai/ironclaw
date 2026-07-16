@@ -835,7 +835,7 @@ impl PostSubmitDeliveryHook for DynamicTelegramTriggeredRunDeliveryHook {
                 );
             }
             Err(error) => {
-                tracing::warn!(
+                tracing::debug!(
                     %run_id,
                     %error,
                     "Telegram triggered-run delivery skipped: delivery hook unavailable"
