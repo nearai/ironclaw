@@ -8097,13 +8097,34 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
         ):
             self.assertIn(case_name, selected_cases)
 
-    def test_live_canary_workflow_shards_cover_non_telegram_qa_suite(self):
-        args = argparse.Namespace(
-            all_cases=False,
-            non_telegram_qa_cases=True,
-            case=[],
-        )
-        selected_cases = run_live_qa._selected_case_names(args)
+    def test_scheduled_suite_keeps_one_connect_journey_per_integration(self):
+        scheduled = run_live_qa._scheduled_non_telegram_case_names()
+        retained = {
+            "qa_2a_gmail_connect",
+            "qa_2b_calendar_connect",
+            "qa_2c_drive_connect",
+            "qa_3a_slack_connect",
+            "qa_4b_github_connect",
+            "qa_6b_sheets_connect",
+        }
+        removed = {
+            "qa_4a_gmail_connect",
+            "qa_5a_slack_connect",
+            "qa_5b_drive_connect",
+            "qa_6a_gmail_connect",
+            "qa_7a_slack_product_channel_connect",
+            "qa_7b_sheets_connect",
+            "qa_8a_slack_connect",
+            "qa_9a_slack_connect",
+        }
+
+        self.assertEqual(run_live_qa.SCHEDULED_REDUNDANT_CONNECTION_CASES, removed)
+        self.assertTrue(retained.issubset(scheduled))
+        self.assertTrue(removed.isdisjoint(scheduled))
+        self.assertEqual(len(scheduled), 39)
+
+    def test_live_canary_workflow_shards_cover_scheduled_non_telegram_suite(self):
+        selected_cases = run_live_qa._scheduled_non_telegram_case_names()
         workflow_path = (
             Path(__file__).resolve().parents[2] / ".github/workflows/live-canary.yml"
         )
@@ -8228,6 +8249,27 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
             "must use the same executable case classifier",
         )
         self.assertNotIn("google_cases='", match.group("body"))
+        google_cases_match = re.search(
+            r"(?ms)^      REBORN_WEBUI_V2_GOOGLE_CASES:\s*>-\n"
+            r"(?P<cases>.*?)(?=^      [A-Z][A-Z0-9_]+:)",
+            match.group("body"),
+        )
+        self.assertIsNotNone(
+            google_cases_match,
+            "Reborn WebUI v2 live QA Google-case classification list missing",
+        )
+        google_cases = [
+            case_name.strip()
+            for line in google_cases_match.group("cases").splitlines()
+            for case_name in line.split(",")
+            if case_name.strip()
+        ]
+        expected_google_cases = [
+            case_name
+            for case_name in selected_cases
+            if run_live_qa.CASES[case_name].requires_google_product_auth
+        ]
+        self.assertEqual(google_cases, expected_google_cases)
         self.assertIn(
             "steps.mint_reborn_webui_v2_google_token.outputs.skip_shard != '1'",
             match.group("body"),

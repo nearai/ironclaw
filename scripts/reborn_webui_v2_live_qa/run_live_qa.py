@@ -8227,6 +8227,26 @@ def _non_telegram_qa_case_names() -> list[str]:
     ]
 
 
+SCHEDULED_REDUNDANT_CONNECTION_CASES = {
+    "qa_4a_gmail_connect",
+    "qa_5a_slack_connect",
+    "qa_5b_drive_connect",
+    "qa_6a_gmail_connect",
+    "qa_7a_slack_product_channel_connect",
+    "qa_7b_sheets_connect",
+    "qa_8a_slack_connect",
+    "qa_9a_slack_connect",
+}
+
+
+def _scheduled_non_telegram_case_names() -> list[str]:
+    return [
+        name
+        for name in _non_telegram_qa_case_names()
+        if name not in SCHEDULED_REDUNDANT_CONNECTION_CASES
+    ]
+
+
 def _selected_case_names(args: argparse.Namespace) -> list[str]:
     if args.all_cases:
         return list(CASES)
