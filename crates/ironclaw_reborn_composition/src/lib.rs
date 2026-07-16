@@ -56,7 +56,7 @@ pub use product_auth::api::auth_prompt::{
 };
 #[cfg(feature = "slack-v2-host-beta")]
 mod delivered_gate_routing;
-#[cfg(feature = "slack-v2-host-beta")]
+#[cfg(any(feature = "slack-v2-host-beta", feature = "telegram-v2-host-beta"))]
 mod host_ingress;
 mod readiness;
 mod retry_disposition;

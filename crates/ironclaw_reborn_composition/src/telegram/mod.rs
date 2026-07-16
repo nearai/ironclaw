@@ -16,8 +16,12 @@ pub(crate) mod telegram_channel_routes;
 #[cfg(feature = "telegram-v2-host-beta")]
 pub(crate) mod telegram_connectable_channel;
 #[cfg(feature = "telegram-v2-host-beta")]
+pub(crate) mod telegram_dispatch;
+#[cfg(feature = "telegram-v2-host-beta")]
 pub(crate) mod telegram_host_state;
 #[cfg(feature = "telegram-v2-host-beta")]
 pub(crate) mod telegram_pairing;
+#[cfg(feature = "telegram-v2-host-beta")]
+pub(crate) mod telegram_serve;
 #[cfg(feature = "telegram-v2-host-beta")]
 pub(crate) mod telegram_setup;
