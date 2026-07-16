@@ -10,6 +10,7 @@ use serde::de::DeserializeOwned;
 use thiserror::Error;
 
 pub mod automations;
+pub mod events;
 pub mod gates;
 pub mod llm;
 pub mod session;
