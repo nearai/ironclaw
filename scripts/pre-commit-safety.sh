@@ -137,18 +137,22 @@ fi
 
 # Composition mass ratchet: block commits that push ironclaw_reborn_composition's
 # share of production crate code past the committed ceiling
-# (scripts/ci/composition-budget.toml). Only runs when the staged set touches the
-# composition crate or the gate itself — the gate measures the working tree, so a
-# commit that only shrinks other crates can also lift the share and is worth
-# catching locally. CI (.github/workflows/code_style.yml) is the authoritative gate.
+# (scripts/ci/composition-budget.toml). Triggers on ANY staged crates/**.rs change
+# (composition growth OR another crate shrinking both lift the share — the metric
+# is a ratio) or a change to the gate itself.
+#
+# LIMITATION: the gate measures the WORKING TREE, not the staged index, so an
+# unstaged edit can mask a staged breach or cause a false block. This hook is a
+# fast local advisory; CI (.github/workflows/code_style.yml) runs the gate on the
+# actual merge commit and is the authoritative check.
 if [ "$HAS_STAGED_CHANGES" -eq 1 ]; then
     COMPOSITION_STAGED=$(git diff --cached --name-only -- \
-        'crates/ironclaw_reborn_composition/src/**' \
+        'crates/**/*.rs' \
         'scripts/ci/composition-budget.toml' \
         'scripts/ci/check-composition-budget.sh' 2>/dev/null || true)
 else
     COMPOSITION_STAGED=$(git diff --name-only -- \
-        'crates/ironclaw_reborn_composition/src/**' \
+        'crates/**/*.rs' \
         'scripts/ci/composition-budget.toml' \
         'scripts/ci/check-composition-budget.sh' 2>/dev/null || true)
 fi

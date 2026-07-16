@@ -37,11 +37,29 @@ def git(*args: str) -> str:
 
 def try_gh(*args: str) -> str | None:
     try:
-        r = subprocess.run(["gh", *args], capture_output=True, text=True)
-    except FileNotFoundError:
+        r = subprocess.run(
+            ["gh", *args],
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=30,  # gh can block on network/auth failures; treat as unavailable
+        )
+    except (FileNotFoundError, subprocess.TimeoutExpired):
         return None
     if r.returncode != 0:
         return None
+    return r.stdout
+
+
+def sh(cmd: str, ok: tuple[int, ...] = (0,)) -> str:
+    """Run a bash pipeline with pipefail; warn (never silently zero) on a
+    non-ok exit so a failed find/grep/cat surfaces instead of faking a metric."""
+    r = subprocess.run(
+        ["bash", "-c", f"set -o pipefail; {cmd}"],
+        capture_output=True, text=True,
+    )
+    if r.returncode not in ok:
+        print(f"[warn] metric probe rc={r.returncode}: {cmd[:70]}", file=sys.stderr)
     return r.stdout
 
 
@@ -66,6 +84,24 @@ CONV_TYPES = {
 PRODUCT_CHANGE = {"feat", "fix", "refactor", "perf"}
 
 
+def classify_commit(subj: str) -> dict:
+    """Pure classification of a commit subject (no git) — unit-testable."""
+    # strip scope + breaking marker: feat(reborn)! -> feat
+    head = subj.split(":", 1)[0] if ":" in subj else ""
+    base = head.split("(", 1)[0].rstrip("!").strip().lower()
+    typ = base if base in CONV_TYPES else None
+    is_pr = "(#" in subj and subj.rstrip().endswith(")")
+    # rework signals: explicit revert, or a fix that undoes/reverts a prior PR
+    low = subj.lower()
+    is_revert = (
+        typ == "revert"
+        or low.startswith("revert ")
+        or "undoes #" in low
+        or "reverts #" in low
+    )
+    return {"type": typ, "is_pr": is_pr, "is_revert": is_revert}
+
+
 def load_commits() -> list[dict]:
     # unit-separator delimited: hash \x1f iso-date \x1f subject
     raw = git("log", "--no-merges", "--pretty=format:%H\x1f%cI\x1f%s")
@@ -76,25 +112,7 @@ def load_commits() -> list[dict]:
             continue
         h, iso, subj = parts
         date = datetime.fromisoformat(iso).astimezone(timezone.utc)
-        typ = None
-        head = subj.split(":", 1)[0] if ":" in subj else ""
-        # strip scope + breaking marker: feat(reborn)! -> feat
-        base = head.split("(", 1)[0].rstrip("!").strip().lower()
-        if base in CONV_TYPES:
-            typ = base
-        is_pr = "(#" in subj and subj.rstrip().endswith(")")
-        # rework signals: explicit revert, or a fix that undoes/reverts a prior PR
-        low = subj.lower()
-        is_revert = (
-            typ == "revert"
-            or low.startswith("revert ")
-            or "undoes #" in low
-            or "reverts #" in low
-        )
-        out.append(
-            {"hash": h, "date": date, "subj": subj, "type": typ,
-             "is_pr": is_pr, "is_revert": is_revert}
-        )
+        out.append({"hash": h, "date": date, "subj": subj, **classify_commit(subj)})
     return out
 
 
@@ -130,7 +148,10 @@ def tier1(commits: list[dict], now: datetime, pr_limit: int) -> dict:
         "--json", "number,createdAt,mergedAt,additions,deletions,changedFiles",
     )
     if gh_json:
-        prs = json.loads(gh_json)
+        try:
+            prs = json.loads(gh_json)
+        except json.JSONDecodeError:
+            prs = []  # gh emitted non-JSON (warning/rate-limit) — treat as no sample
         lead_hours, sizes, files = [], [], []
         for p in prs:
             try:
@@ -243,6 +264,9 @@ def count_matches(pattern: str, path: str) -> int:
         ["grep", "-rEho", pattern, path, "--include=*.rs"],
         capture_output=True, text=True,
     )
+    # grep: 0 = matches, 1 = no matches (valid 0), >1 = real error.
+    if r.returncode > 1:
+        print(f"[warn] grep rc={r.returncode} for pattern {pattern[:40]!r}", file=sys.stderr)
     return len([l for l in r.stdout.splitlines() if l.strip()])
 
 
@@ -275,8 +299,10 @@ def tier3(now: datetime) -> dict:
         s["composition_kloc"] = round(s["composition_bytes"] / bytes_per_line / 1000, 1)
         s["v1_src_kloc"] = round(s["v1_src_bytes"] / bytes_per_line / 1000, 1)
         s["crates_kloc"] = round(s["crates_bytes"] / bytes_per_line / 1000, 1)
-        # composition as % of all crate code — the "god-crate" gauge
-        s["composition_share_pct"] = round(
+        # Byte-share of ALL crate code INCLUDING tests — a coarse historical
+        # gauge, NOT the ratchet metric (which is production-LOC over crates/*/src
+        # with test files excluded; see composition_share_gate_pct).
+        s["composition_byte_share_pct"] = round(
             100 * s["composition_bytes"] / s["crates_bytes"], 1
         ) if s["crates_bytes"] else 0.0
     res["size_trend"] = samples
@@ -289,8 +315,20 @@ def tier3(now: datetime) -> dict:
     res["v1_src_kloc_now"] = round(_exact_lines(V1_SRC) / 1000, 1)
     res["crates_kloc_now"] = round(_exact_lines(CRATES_SRC) / 1000, 1)
 
+    # Gate-aligned current share — matches scripts/ci/check-composition-budget.sh
+    # EXACTLY (production LOC, test-only files excluded, crates/*/src denominator).
+    # This is the number the ratchet enforces; the byte-based size_trend below is
+    # a DIFFERENT, coarser measurement (see its label).
+    comp_prod = _prod_lines(COMPOSITION)
+    all_prod = _prod_lines("crates/*/src")
+    res["composition_share_gate_pct"] = (
+        round(100 * comp_prod / all_prod, 2) if all_prod else 0.0
+    )
+
     traits = count_matches(r"^\s*(pub |pub\(crate\) )?(unsafe )?trait [A-Za-z0-9_]+", "crates")
-    impls = count_matches(r"^\s*impl( <[^>]*>)? [A-Za-z0-9_:<>]+ for ", "crates")
+    # Trait impls incl. generics: `impl Trait for T` AND `impl<T> Trait for T`
+    # (optional generic clause with NO required space before `<`).
+    impls = count_matches(r"^[[:space:]]*impl(<[^>]*>)?[[:space:]]+[A-Za-z0-9_:<>]+ for ", "crates")
     res["trait_defs"] = traits
     res["trait_impls_for"] = impls
     res["impls_per_trait"] = round(impls / traits, 2) if traits else 0.0
@@ -308,39 +346,50 @@ def tier3(now: datetime) -> dict:
     return res
 
 
-def _exact_lines(path: str) -> int:
-    r = subprocess.run(
-        ["bash", "-c",
-         f"find {path} -name '*.rs' -type f -print0 | xargs -0 cat 2>/dev/null | wc -l"],
-        capture_output=True, text=True,
+# Test-only file pattern — kept in sync with TEST_FILE_RE in
+# scripts/ci/check-composition-budget.sh so the gate-aligned share matches.
+TEST_FILE_RE = r"(^|/)(tests?\.rs|test_[^/]*\.rs|[^/]*_tests?\.rs)$|/tests/"
+
+
+def _prod_lines(path_glob: str) -> int:
+    """Production LOC of *.rs under path_glob, excluding test-only files —
+    the gate's exact numerator/denominator definition."""
+    out = sh(
+        f"find {path_glob} -name '*.rs' -type f 2>/dev/null "
+        f"| {{ grep -vE \"{TEST_FILE_RE}\" || true; }} "
+        f"| tr '\\n' '\\0' | xargs -0 cat 2>/dev/null | wc -l"
     )
     try:
-        return int(r.stdout.strip().split()[0])
+        return int(out.strip().split()[0])
+    except (ValueError, IndexError):
+        return 0
+
+
+def _exact_lines(path: str) -> int:
+    out = sh(f"find {path} -name '*.rs' -type f -print0 | xargs -0 cat 2>/dev/null | wc -l")
+    try:
+        return int(out.strip().split()[0])
     except (ValueError, IndexError):
         return 0
 
 
 def _files_over(threshold: int) -> list:
-    r = subprocess.run(
-        ["bash", "-c",
-         "find crates -name '*.rs' -type f -exec wc -l {} + "
-         "| awk '$2!=\"total\"{print $1\" \"$2}' | sort -rn"],
-        capture_output=True, text=True,
-    )
-    out = []
-    for line in r.stdout.splitlines():
+    out = sh("find crates -name '*.rs' -type f -exec wc -l {} + "
+             "| awk '$2!=\"total\"{print $1\" \"$2}' | sort -rn")
+    result = []
+    for line in out.splitlines():
         parts = line.split(None, 1)
         if len(parts) == 2 and parts[0].isdigit() and int(parts[0]) > threshold:
-            out.append((int(parts[0]), parts[1]))
-    return out
+            result.append((int(parts[0]), parts[1]))
+    return result
 
 
 def _boundary_tests() -> int:
     f = "crates/ironclaw_architecture/tests/reborn_dependency_boundaries.rs"
-    r = subprocess.run(["bash", "-c", f"grep -cE '#\\[test\\]' {f} 2>/dev/null"],
-                       capture_output=True, text=True)
+    # grep -c exits 1 when zero matches — that is a valid 0, not a probe failure.
+    out = sh(f"grep -cE '#\\[test\\]' {f} 2>/dev/null", ok=(0, 1))
     try:
-        return int(r.stdout.strip() or 0)
+        return int(out.strip() or 0)
     except ValueError:
         return 0
 
@@ -390,6 +439,7 @@ def render_md(t1, t2, t3, now) -> str:
     L.append("| metric | value |")
     L.append("|---|---|")
     L.append(f"| Workspace crates | {t3['crate_count']} |")
+    L.append(f"| **composition share (ratchet metric)** | **{t3['composition_share_gate_pct']}%** |")
     L.append(f"| composition KLOC (now) | {t3['composition_kloc_now']} |")
     L.append(f"| v1 `src/` KLOC (now) | {t3['v1_src_kloc_now']} |")
     L.append(f"| all `crates/` KLOC (now) | {t3['crates_kloc_now']} |")
@@ -399,10 +449,12 @@ def render_md(t1, t2, t3, now) -> str:
     L.append(f"| arch-exempt allows | {t3['arch_exempt_allows']} |")
     L.append("")
     L.append("### Size trend — composition mass & v1 burndown (calibrated KLOC est.)\n")
-    L.append("| date | composition KLOC | comp % of crates | v1 src KLOC | all crates KLOC |")
+    L.append("_Byte-based over ALL crate code incl. tests — a coarse historical gauge, "
+             "NOT the ratchet metric above (which is production-LOC, test files excluded)._\n")
+    L.append("| date | composition KLOC | comp byte-% (incl tests) | v1 src KLOC | all crates KLOC |")
     L.append("|---|---|---|---|---|")
     for s in t3["size_trend"]:
-        L.append(f"| {s['date']} | {s['composition_kloc']} | {s['composition_share_pct']}% | {s['v1_src_kloc']} | {s['crates_kloc']} |")
+        L.append(f"| {s['date']} | {s['composition_kloc']} | {s['composition_byte_share_pct']}% | {s['v1_src_kloc']} | {s['crates_kloc']} |")
     L.append("")
     L.append("### Biggest files (sprawl watch)\n")
     for n, f in t3["biggest_files"]:
@@ -437,11 +489,11 @@ def main() -> int:
     print(md)
 
     if args.out:
-        with open(args.out, "w") as f:
+        with open(args.out, "w", encoding="utf-8") as f:
             f.write(md)
         print(f"\n[written] {args.out}", file=sys.stderr)
     if args.json_out:
-        with open(args.json_out, "w") as f:
+        with open(args.json_out, "w", encoding="utf-8") as f:
             json.dump({"tier1": t1, "tier2": t2, "tier3": t3,
                        "generated": now.isoformat()}, f, indent=2)
         print(f"[written] {args.json_out}", file=sys.stderr)

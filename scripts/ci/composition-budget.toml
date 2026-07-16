@@ -14,8 +14,14 @@
 # THE METRIC
 #   observed_bp = 10000 * (LOC of crates/ironclaw_reborn_composition/src/**.rs)
 #                       / (LOC of all crates/*/src/**.rs)
-#   Production src only (tests excluded from both numerator and denominator),
-#   in basis points (1 bp = 0.01 percentage point).
+#   Production src only, in basis points (1 bp = 0.01 percentage point).
+#   Test-only FILES are excluded from both numerator and denominator (basenames
+#   tests.rs/test.rs/test_*.rs/*_test.rs/*_tests.rs, and any /tests/ dir — see
+#   TEST_FILE_RE in check-composition-budget.sh). Inline `#[cfg(test)]` modules
+#   inside otherwise-production files are still counted (a line-counter cannot
+#   parse them); this residual is symmetric across numerator and denominator, so
+#   it does not bias the share. Splitting inline test modules into their own
+#   files (carve-out Phase 0) therefore also lowers the number honestly.
 #
 # HOW IT RATCHETS
 #   The gate FAILS when observed_bp > ceiling_bp + tolerance_bp. It is
@@ -31,13 +37,13 @@
 enforce = true
 
 # Ceiling on composition's share of production crate code, in basis points.
-# 2670 bp = 26.70%, the observed value on the date below (a true ratchet: set to
+# 2398 bp = 23.98%, the observed value on the date below (a true ratchet: set to
 # current, not padded). tolerance_bp gives working slack for in-flight PRs.
-ceiling_bp = 2670
+ceiling_bp = 2398
 tolerance_bp = 30
 
 # Informational — the observed share when this file was last updated. Lets a
 # reviewer see the baseline and lets the gate emit a down-ratchet nudge. Not
 # consulted for the pass/fail decision.
-observed_bp = 2670
+observed_bp = 2398
 observed_date = "2026-07-16"

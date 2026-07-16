@@ -29,12 +29,21 @@ BUDGET_FILE="${BUDGET_FILE:-scripts/ci/composition-budget.toml}"
 print_only=false
 [ "${1:-}" = "--print" ] && print_only=true
 
-# --- count LOC of *.rs under a directory (0 if it does not exist) ------------
+# Files that are test-only, excluded from the production-code metric. Matches
+# `tests.rs` / `test.rs`, `test_*.rs`, `*_test.rs`, `*_tests.rs`, and anything
+# under a `/tests/` directory. Inline `#[cfg(test)]` modules inside otherwise-
+# production files are NOT excluded (a line-counter cannot parse them) — a
+# documented, symmetric residual that applies to numerator and denominator
+# alike, so it does not bias composition's *share*.
+TEST_FILE_RE='(^|/)(tests?\.rs|test_[^/]*\.rs|[^/]*_tests?\.rs)$|/tests/'
+
+# --- count LOC of production *.rs under a directory (0 if it does not exist) --
 count_loc() {
     local dir="$1"
     [ -d "${dir}" ] || { echo 0; return; }
-    find "${dir}" -name '*.rs' -type f -print0 2>/dev/null \
-        | xargs -0 cat 2>/dev/null | wc -l | tr -d ' '
+    find "${dir}" -name '*.rs' -type f 2>/dev/null \
+        | { grep -vE "${TEST_FILE_RE}" || true; } \
+        | tr '\n' '\0' | xargs -0 cat 2>/dev/null | wc -l | tr -d ' '
 }
 
 # --- sum LOC of every crates/*/src tree (the denominator) --------------------
@@ -52,7 +61,10 @@ count_denominator() {
 # Values are simple: integers, true/false, or "quoted strings". No nested tables.
 toml_get() {
     local key="$1"
-    grep -E "^[[:space:]]*${key}[[:space:]]*=" "${BUDGET_FILE}" \
+    # `|| true`: a missing/commented key makes grep exit non-zero, which under
+    # `set -e`+`pipefail` would abort BEFORE the schema validation below can
+    # emit a clear error. Swallow it so an empty value reaches validation.
+    { grep -E "^[[:space:]]*${key}[[:space:]]*=" "${BUDGET_FILE}" || true; } \
         | head -1 \
         | sed -E "s/^[[:space:]]*${key}[[:space:]]*=[[:space:]]*//; s/[[:space:]]*(#.*)?$//; s/^\"//; s/\"$//"
 }

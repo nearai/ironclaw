@@ -12,7 +12,7 @@
 # file, points the gate at them via COMPOSITION_SRC / CRATES_ROOT / BUDGET_FILE,
 # and asserts the exit code + key output lines.
 
-set -uo pipefail
+set -euo pipefail
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 gate="${repo_root}/scripts/ci/check-composition-budget.sh"
@@ -22,7 +22,8 @@ FAIL=0
 CAP_OUT=""
 CAP_RC=0
 
-capture() { CAP_OUT="$("$@" 2>&1)"; CAP_RC=$?; }
+# Record output+exit without tripping errexit when the gate exits non-zero.
+capture() { CAP_RC=0; CAP_OUT="$("$@" 2>&1)" || CAP_RC=$?; }
 
 assert_rc() {
     local name="$1" want="$2" got="$3"
@@ -30,15 +31,16 @@ assert_rc() {
     else FAIL=$((FAIL+1)); echo "FAIL: ${name} — expected exit ${want}, got ${got}"; echo "----"; echo "${CAP_OUT}"; echo "----"; fi
 }
 
+# Pure-bash substring match — no pipes, so immune to SIGPIPE under pipefail.
 assert_contains() {
     local name="$1" hay="$2" needle="$3"
-    if printf '%s' "${hay}" | grep -qF -- "${needle}"; then PASS=$((PASS+1));
+    if [[ "${hay}" == *"${needle}"* ]]; then PASS=$((PASS+1));
     else FAIL=$((FAIL+1)); echo "FAIL: ${name} — output missing: ${needle}"; echo "----"; echo "${hay}"; echo "----"; fi
 }
 
 assert_not_contains() {
     local name="$1" hay="$2" needle="$3"
-    if printf '%s' "${hay}" | grep -qF -- "${needle}"; then FAIL=$((FAIL+1)); echo "FAIL: ${name} — output should NOT contain: ${needle}";
+    if [[ "${hay}" == *"${needle}"* ]]; then FAIL=$((FAIL+1)); echo "FAIL: ${name} — output should NOT contain: ${needle}";
     else PASS=$((PASS+1)); fi
 }
 
@@ -53,8 +55,10 @@ make_fixture() {
     local dir="$1" comp_lines="$2" other_lines="$3"
     rm -rf "${dir}"
     mkdir -p "${dir}/ironclaw_reborn_composition/src" "${dir}/other_crate/src"
-    yes 'let _ = 1;' | head -n "${comp_lines}"  > "${dir}/ironclaw_reborn_composition/src/lib.rs"
-    yes 'let _ = 2;' | head -n "${other_lines}" > "${dir}/other_crate/src/lib.rs"
+    # `|| true`: `yes | head` makes `yes` exit with SIGPIPE (141), which under
+    # `set -e`+`pipefail` would abort the harness. The file is fully written.
+    { yes 'let _ = 1;' | head -n "${comp_lines}";  } > "${dir}/ironclaw_reborn_composition/src/lib.rs" || true
+    { yes 'let _ = 2;' | head -n "${other_lines}"; } > "${dir}/other_crate/src/lib.rs" || true
 }
 
 # 3000 comp / (3000+7000) = 30.00% = 3000 bp
@@ -132,6 +136,26 @@ EOF
 run_gate
 assert_rc       "C8 bad enforce exits 1"  1 "${CAP_RC}"
 assert_contains "C8 reports enforce error" "${CAP_OUT}" "enforce must be true or false"
+
+# C8b: MISSING key (not just bad value) must reach schema validation, not crash
+# under set -e+pipefail (regression for the toml_get grep-fail abort).
+cat > "${tmp}/budget.toml" <<'EOF'
+[gate]
+enforce = true
+tolerance_bp = 30
+EOF
+run_gate
+assert_rc       "C8b missing ceiling_bp exits 1"   1 "${CAP_RC}"
+assert_contains "C8b reports schema error not crash" "${CAP_OUT}" "ceiling_bp must be an integer"
+
+# C8c: test-only FILES are excluded from the metric. Add a big tests.rs to the
+# composition fixture; the observed share must stay 30.00% (3000 bp), unchanged.
+make_fixture "${tmp}/crates" 3000 7000
+printf 'let _ = 9;\n%.0s' $(seq 1 5000) > "${tmp}/crates/ironclaw_reborn_composition/src/tests.rs"
+budget true 3000 30; run_gate
+assert_rc       "C8c test file excluded exits 0"   0 "${CAP_RC}"
+assert_contains "C8c share ignores tests.rs"       "${CAP_OUT}" "30.00% (3000 bp)"
+make_fixture "${tmp}/crates" 3000 7000  # restore clean fixture for later cases
 
 # C9: --print never fails and reports the share.
 budget true 100 0; run_gate  # ceiling absurdly low, but --print ignores it
