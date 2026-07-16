@@ -98,12 +98,10 @@ fn service_running(launchctl_list_output: &str) -> bool {
 pub(super) fn install(context: &RebornCliContext, invocation: &ServeInvocation) -> Result<()> {
     let file = plist_path()?;
     if let Some(parent) = file.parent() {
-        std::fs::create_dir_all(parent)
-            .with_context(|| format!("create {}", parent.display()))?;
+        std::fs::create_dir_all(parent).with_context(|| format!("create {}", parent.display()))?;
     }
     let logs_dir = context.boot_config().home().path().join("logs");
-    std::fs::create_dir_all(&logs_dir)
-        .with_context(|| format!("create {}", logs_dir.display()))?;
+    std::fs::create_dir_all(&logs_dir).with_context(|| format!("create {}", logs_dir.display()))?;
     let stdout_log = logs_dir.join("serve.stdout.log");
     let stderr_log = logs_dir.join("serve.stderr.log");
     let plist = plist_content(invocation, &stdout_log, &stderr_log);
@@ -265,7 +263,11 @@ mod tests {
                 "a&b<c>d\"e'f".to_string(),
             )],
         };
-        let plist = plist_content(&invocation, Path::new("/tmp/o.log"), Path::new("/tmp/e.log"));
+        let plist = plist_content(
+            &invocation,
+            Path::new("/tmp/o.log"),
+            Path::new("/tmp/e.log"),
+        );
         assert!(plist.contains("a&amp;b&lt;c&gt;d&quot;e&apos;f"));
         assert!(!plist.contains("a&b<c>d\"e'f"));
     }

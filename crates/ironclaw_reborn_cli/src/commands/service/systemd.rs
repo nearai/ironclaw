@@ -63,8 +63,7 @@ fn unit_path() -> Result<PathBuf> {
 pub(super) fn install(invocation: &ServeInvocation) -> Result<()> {
     let file = unit_path()?;
     if let Some(parent) = file.parent() {
-        std::fs::create_dir_all(parent)
-            .with_context(|| format!("create {}", parent.display()))?;
+        std::fs::create_dir_all(parent).with_context(|| format!("create {}", parent.display()))?;
     }
     let unit = unit_content(invocation);
     std::fs::write(&file, unit).with_context(|| format!("write {}", file.display()))?;

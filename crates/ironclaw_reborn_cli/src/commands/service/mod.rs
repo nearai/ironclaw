@@ -230,11 +230,8 @@ mod tests {
         let (_tmp, context) = RebornCliContext::test_context();
         let home = context.boot_config().home();
         std::fs::create_dir_all(home.path()).expect("create home");
-        std::fs::write(
-            crate::commands::onboard::onboarding_marker_path(home),
-            "{}",
-        )
-        .expect("write marker");
+        std::fs::write(crate::commands::onboard::onboarding_marker_path(home), "{}")
+            .expect("write marker");
         std::fs::write(home.config_file_path(), "").expect("write config");
 
         assert!(preflight_warnings(&context).is_empty());
