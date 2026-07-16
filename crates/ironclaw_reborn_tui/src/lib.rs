@@ -8,6 +8,7 @@
 
 #![forbid(unsafe_code)]
 
+pub mod app;
 pub mod client;
 
 use std::path::PathBuf;

@@ -29,6 +29,13 @@ anyhow = "1"
 axum = { version = "0.8", features = ["ws"] }
 tower = { version = "0.5", features = ["util"] }
 tokio = { version = "1", features = ["full"] }
+# app-state reducer test fixtures only (`GatePromptView`/`CapabilityActivityView`/…
+# construction) — production code in this crate never names these types; see
+# `app/mod.rs`'s module doc and `crates/ironclaw_architecture/tests/reborn_dependency_boundaries.rs`
+# (`reborn_tui_allowed`), which only inspects `[dependencies]`.
+chrono = { version = "0.4", features = ["serde"] }
+ironclaw_host_api = { path = "../ironclaw_host_api", version = "0.1.0" }
+ironclaw_turns = { path = "../ironclaw_turns", version = "0.1.0" }
 
 [lints]
 workspace = true
