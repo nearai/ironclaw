@@ -60,6 +60,12 @@ pub(crate) enum Command {
     /// before being linked into a production binary.
     #[cfg(feature = "webui-v2-beta")]
     Serve(serve::ServeCommand),
+    /// Install/start/stop/status/uninstall the standalone Reborn binary
+    /// as an OS-native service (launchd on macOS, systemd on Linux).
+    /// Available only when built with the `webui-v2-beta` Cargo feature,
+    /// since the installed unit runs `serve`.
+    #[cfg(feature = "webui-v2-beta")]
+    Service(service::ServiceCommand),
     /// Inspect configured Reborn skills.
     Skills(skills::SkillsCommand),
     /// Show Reborn runtime status snapshot.
@@ -97,6 +103,10 @@ impl Command {
             }
             #[cfg(feature = "webui-v2-beta")]
             Self::Serve(command) => {
+                command.execute(crate::context::RebornCliContext::resolve_from_env()?)
+            }
+            #[cfg(feature = "webui-v2-beta")]
+            Self::Service(command) => {
                 command.execute(crate::context::RebornCliContext::resolve_from_env()?)
             }
             Self::Skills(command) => {
