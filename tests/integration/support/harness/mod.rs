@@ -432,6 +432,50 @@ impl HostRuntimeCapabilityHarness {
         Ok(())
     }
 
+    /// Flip every non-revoked credential account for `provider` under
+    /// `scope`'s credential-owner view to `Revoked`, returning how many were
+    /// flipped. Models an EXTERNAL revocation (the user revoked the grant on
+    /// the provider's side) through the same production transition the
+    /// refresh sweep's `report_terminal_refresh_status` performs:
+    /// `CredentialAccountService::update_status(.., Revoked)`. Companion to
+    /// [`Self::seed_credential_account_with_material`] for the #5878
+    /// activation-with-revoked-credential shape.
+    pub(crate) async fn revoke_credential_accounts_for_provider(
+        &self,
+        scope: &ResourceScope,
+        provider: &str,
+    ) -> HarnessResult<usize> {
+        let product_auth = self
+            .product_auth
+            .as_ref()
+            .ok_or("harness missing local-dev product auth (not built via new_with_options)")?;
+        let scope = AuthProductScope::credential_owner(scope, AuthSurface::Api);
+        let provider_id = AuthProviderId::new(provider)?;
+        let accounts = product_auth
+            .credential_account_record_source_for_test()
+            .accounts_for_owner(&scope)
+            .await
+            .map_err(|error| format!("account enumeration for revoke failed: {error:?}"))?;
+        let mut revoked = 0;
+        for account in accounts {
+            if account.provider != provider_id || account.status == CredentialAccountStatus::Revoked
+            {
+                continue;
+            }
+            // Pass the account's OWN stored scope: `update_status` requires
+            // full scope equality, and the stored scope carries the minting
+            // invocation id no reconstructed scope can reproduce (same
+            // pattern as the refresh sweep's terminal-status write).
+            product_auth
+                .credential_account_service()
+                .update_status(&account.scope, account.id, CredentialAccountStatus::Revoked)
+                .await
+                .map_err(|error| format!("revoking account {} failed: {error:?}", account.id))?;
+            revoked += 1;
+        }
+        Ok(revoked)
+    }
+
     /// The fixed user this harness dispatches first-party capabilities under
     /// (see [`Self::with_user_id`]). Credential seeding aimed at a capability's
     /// dispatch-time account selection must use THIS user — for groups that do

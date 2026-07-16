@@ -24,7 +24,7 @@ export function WorkspaceBreadcrumb({ path, onNavigate }) {
       {parts.map((part, index) => {
         current = current ? `${current}/${part}` : part;
         const target = current;
-        const label = index === 0 ? areaDisplayName(part) : part;
+        const label = index === 0 ? areaDisplayName(part, t) : part;
         return (
           <>
           <span key={target} className="text-iron-400">/</span>
