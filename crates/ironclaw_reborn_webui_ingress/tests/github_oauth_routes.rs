@@ -202,7 +202,7 @@ async fn login_and_callback(router: &axum::Router) -> String {
         .oneshot(
             Request::builder()
                 .method("GET")
-                .uri("/auth/login/github?redirect_after=%2Fv2")
+                .uri("/auth/login/github?redirect_after=%2F")
                 .body(Body::empty())
                 .expect("request"),
         )
@@ -286,7 +286,7 @@ async fn login_redirects_to_github_with_state_and_scope_and_no_pkce() {
         .oneshot(
             Request::builder()
                 .method("GET")
-                .uri("/auth/login/github?redirect_after=%2Fv2")
+                .uri("/auth/login/github?redirect_after=%2F")
                 .body(Body::empty())
                 .expect("request"),
         )
@@ -318,7 +318,7 @@ async fn callback_success_mints_session_for_primary_verified_email() {
     let router = build_router(vec![github_provider(addr)], session_store);
 
     let landing = login_and_callback(&router).await;
-    assert!(landing.starts_with("/v2?login_ticket="), "got {landing}");
+    assert!(landing.starts_with("/?login_ticket="), "got {landing}");
     assert!(
         !landing.contains("#token="),
         "callback Location must not carry the bearer: {landing}",
@@ -391,7 +391,7 @@ async fn callback_with_unverified_emails_mints_session_for_provider_sub() {
     let router = build_router(vec![github_provider(addr)], session_store);
 
     let landing = login_and_callback(&router).await;
-    assert!(landing.starts_with("/v2?login_ticket="), "got {landing}");
+    assert!(landing.starts_with("/?login_ticket="), "got {landing}");
     let ticket = ticket_from_landing(&landing);
     let bearer = redeem_ticket(&router, &ticket).await;
     let session = store_inner
@@ -428,10 +428,7 @@ async fn callback_with_provider_error_redirects_with_denied() {
         .await
         .expect("oneshot");
     assert_eq!(resp.status(), StatusCode::SEE_OTHER);
-    assert_eq!(
-        header_str(&resp, header::LOCATION),
-        "/v2?login_error=denied"
-    );
+    assert_eq!(header_str(&resp, header::LOCATION), "/?login_error=denied");
 }
 
 #[tokio::test]
@@ -491,7 +488,7 @@ async fn callback_exchange_failure_redirects_with_exchange_failed() {
     assert_eq!(callback.status(), StatusCode::SEE_OTHER);
     assert_eq!(
         header_str(&callback, header::LOCATION),
-        "/v2?login_error=exchange_failed",
+        "/?login_error=exchange_failed",
     );
 }
 
@@ -517,7 +514,7 @@ async fn callback_with_unknown_state_redirects_with_invalid_state_error() {
     assert_eq!(resp.status(), StatusCode::SEE_OTHER);
     assert_eq!(
         header_str(&resp, header::LOCATION),
-        "/v2?login_error=invalid_state"
+        "/?login_error=invalid_state"
     );
 }
 
@@ -560,7 +557,7 @@ async fn callback_with_state_replay_fails_closed() {
         .await
         .expect("oneshot");
     assert_eq!(first.status(), StatusCode::SEE_OTHER);
-    assert!(header_str(&first, header::LOCATION).starts_with("/v2?login_ticket="));
+    assert!(header_str(&first, header::LOCATION).starts_with("/?login_ticket="));
     assert_eq!(store_inner.len(), 1);
 
     // Replaying the SAME state must fail closed — no second session.
@@ -580,7 +577,7 @@ async fn callback_with_state_replay_fails_closed() {
     assert_eq!(replay.status(), StatusCode::SEE_OTHER);
     assert_eq!(
         header_str(&replay, header::LOCATION),
-        "/v2?login_error=invalid_state"
+        "/?login_error=invalid_state"
     );
     assert_eq!(
         store_inner.len(),
@@ -655,7 +652,7 @@ async fn callback_profile_fetch_failure_redirects_with_exchange_failed() {
     assert_eq!(callback.status(), StatusCode::SEE_OTHER);
     assert_eq!(
         header_str(&callback, header::LOCATION),
-        "/v2?login_error=exchange_failed",
+        "/?login_error=exchange_failed",
     );
 }
 
@@ -722,7 +719,7 @@ async fn callback_exchange_timeout_redirects_with_exchange_failed() {
     assert_eq!(callback.status(), StatusCode::SEE_OTHER);
     assert_eq!(
         header_str(&callback, header::LOCATION),
-        "/v2?login_error=exchange_failed",
+        "/?login_error=exchange_failed",
     );
 }
 

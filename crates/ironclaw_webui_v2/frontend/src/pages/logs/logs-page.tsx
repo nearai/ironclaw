@@ -246,7 +246,7 @@ export function LogsPage() {
               (item) => (<ScopeChip key={item.param} scopeKey={item.param} label={t(item.labelKey)} value={item.value} />)
             )}
             <a
-              href="/v2/logs"
+              href="/logs"
               className="ml-auto rounded-[6px] px-2 py-1 text-xs text-[var(--v2-text-muted)] hover:bg-[var(--v2-surface-muted)] hover:text-[var(--v2-text-strong)]"
             >
               {t("logs.clearScope")}

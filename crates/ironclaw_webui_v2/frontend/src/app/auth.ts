@@ -23,13 +23,13 @@ import { clearAllDrafts } from "../pages/chat/lib/draft-store";
 //              the login page).
 // `login_ticket=` — OAuth callback transport. The host's
 //              `/auth/callback/{provider}` redirects to
-//              `/v2?login_ticket=<ticket>`. The ticket is short-lived
+//              `/?login_ticket=<ticket>`. The ticket is short-lived
 //              and single-use; the SPA POSTs it to
 //              `/auth/session/exchange` for the real bearer so the
 //              bearer never appears in a redirect `Location` header.
 //
 // Raw bearer URL tokens are honored ONLY when sessionStorage has no
-// token yet. Without this guard a crafted `/v2/#token=INVALID` link
+// token yet. Without this guard a crafted `/#token=INVALID` link
 // could replace a user's working bearer with garbage and lock them
 // out until they re-auth. OAuth `login_ticket` redirects are different:
 // they come from an intentional provider callback and must replace a

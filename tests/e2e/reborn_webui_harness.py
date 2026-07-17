@@ -2,7 +2,7 @@
 
 The legacy Playwright suite has mature shared fixtures in ``conftest.py`` for
 the ``ironclaw`` gateway. Reborn WebUI v2 is a different product surface: it
-boots ``ironclaw-reborn serve``, serves the React SPA under ``/v2/``, and uses
+boots ``ironclaw-reborn serve``, serves the React SPA at the root path, and uses
 ``/api/webchat/v2/*`` endpoints. Keep that setup here so browser and served API
 scenarios exercise the real Reborn binary without duplicating process plumbing.
 """
@@ -411,7 +411,7 @@ async def reborn_v2_vision_page(reborn_v2_vision_server, reborn_v2_browser):
     await context.close()
 
 
-async def open_reborn_v2_page(page, base_url: str, path: str = "/v2/") -> None:
+async def open_reborn_v2_page(page, base_url: str, path: str = "/") -> None:
     separator = "&" if "?" in path else "?"
     await page.goto(f"{base_url}{path}{separator}token={REBORN_V2_AUTH_TOKEN}")
     await page.wait_for_selector(SEL_V2["chat_composer"], timeout=15000)

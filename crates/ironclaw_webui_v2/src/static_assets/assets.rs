@@ -2,8 +2,8 @@
 //!
 //! Populated at compile time by `build.rs` from the crate-owned WebUI bundle
 //! and committed public assets. Each file becomes one
-//! `Asset` row keyed by its URL path (relative to the `/v2` mount
-//! prefix). `index.html` is handled separately — see
+//! `Asset` row keyed by its URL path (relative to the gateway root).
+//! `index.html` is handled separately — see
 //! [`INDEX_HTML_TEMPLATE`].
 
 pub(crate) struct Asset {
