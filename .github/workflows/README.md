@@ -59,6 +59,43 @@ Rules for a roll-up job that is (or may become) required:
    merge-queue/push run's clippy matrix is missing any of the three feature
    lanes, so a "green but slim" regression cannot come back silently.
 
+## Reborn release binary compile matrix
+
+`reborn-release-compile.yml` is a compile-only preflight for the shipping
+`ironclaw-reborn` binary. The tag-driven `release.yml` calls it and will not run
+its `host` job unless every target succeeds. The existing `release.yml` also
+owns the pull-request trigger, so a PR can validate the reusable workflow before
+that new workflow file reaches the default branch. After merge, the compile-only
+workflow can also run directly through `workflow_dispatch`.
+
+| Rust target | GitHub runner |
+|---|---|
+| `x86_64-unknown-linux-gnu` | `ubuntu-22.04` |
+| `x86_64-unknown-linux-musl` | `ubuntu-22.04` |
+| `aarch64-unknown-linux-gnu` | `ubuntu-24.04-arm` |
+| `aarch64-unknown-linux-musl` | `ubuntu-24.04-arm` |
+| `x86_64-apple-darwin` | `macos-15-intel` |
+| `aarch64-apple-darwin` | `macos-15` |
+| `x86_64-pc-windows-msvc` | `windows-2022` |
+
+Each matrix entry performs a final `cargo build --locked --profile dist` link
+for `ironclaw_reborn_cli` / `ironclaw-reborn` with an explicit compile feature
+contract owned by this workflow:
+`webui-v2-beta,slack-v2-host-beta,libsql,postgres,inmemory-turn-state`.
+This proves compilation only; it does not provide runtime smoke coverage,
+installers, or cargo-dist release packaging. The feature list is intentionally
+not inferred from Docker or #6122.
+
+The uploaded `reborn-compile-*` artifacts are short-lived compile evidence.
+Their prefix deliberately does not match the release host's `artifacts-*`
+download pattern, so they are not attached to the GitHub Release. Until #3483
+defines the standalone Reborn tag/version/installer contract,
+`ironclaw_reborn_cli` remains `dist = false`.
+
+For #6160, the `release.yml` Docker caller remains present but has a constant
+false condition. This skips Docker build/publish on the release path without
+changing `docker.yml`; its manual and scheduled entry points remain available.
+
 ## Deep tier (nightly)
 
 `nightly-deep-ci.yml` (04:00 UTC) reuses `platform-and-compat.yml`,

@@ -173,6 +173,103 @@ fn dockerfile_reborn_builds_with_production_features() {
 }
 
 #[test]
+fn release_ci_compiles_reborn_for_all_supported_targets_without_docker_publish() {
+    let root = workspace_root();
+    let compile_workflow =
+        std::fs::read_to_string(root.join(".github/workflows/reborn-release-compile.yml"))
+            .expect("Reborn release compile workflow");
+    let release_workflow = std::fs::read_to_string(root.join(".github/workflows/release.yml"))
+        .expect("release workflow");
+    let docker_workflow = std::fs::read_to_string(root.join(".github/workflows/docker.yml"))
+        .expect("Docker workflow");
+    let cli_manifest = std::fs::read_to_string(root.join("crates/ironclaw_reborn_cli/Cargo.toml"))
+        .expect("Reborn CLI manifest");
+
+    let target_runners = [
+        ("x86_64-unknown-linux-gnu", "ubuntu-22.04"),
+        ("x86_64-unknown-linux-musl", "ubuntu-22.04"),
+        ("aarch64-unknown-linux-gnu", "ubuntu-24.04-arm"),
+        ("aarch64-unknown-linux-musl", "ubuntu-24.04-arm"),
+        ("x86_64-apple-darwin", "macos-15-intel"),
+        ("aarch64-apple-darwin", "macos-15"),
+        ("x86_64-pc-windows-msvc", "windows-2022"),
+    ];
+    let release_features = "webui-v2-beta,slack-v2-host-beta,libsql,postgres,inmemory-turn-state";
+
+    assert_eq!(
+        compile_workflow.matches("          - target: ").count(),
+        target_runners.len(),
+        "Reborn release compile matrix must contain exactly seven targets"
+    );
+    for (target, runner) in target_runners {
+        let matrix_entry = format!("          - target: {target}\n            runner: {runner}\n");
+        assert!(
+            compile_workflow.contains(&matrix_entry),
+            "Reborn release compile matrix must map {target} to {runner}"
+        );
+    }
+
+    assert!(
+        compile_workflow.contains("fail-fast: false")
+            && compile_workflow.contains("cargo build --locked --profile dist")
+            && compile_workflow.contains("--package ironclaw_reborn_cli")
+            && compile_workflow.contains("--bin ironclaw-reborn")
+            && compile_workflow.contains("--target \"$TARGET\"")
+            && compile_workflow.contains(release_features),
+        "Reborn release CI must fully link the shipping binary and keep all target results"
+    );
+    assert!(
+        compile_workflow.matches("musl: true").count() == 2
+            && compile_workflow.contains("sudo apt-get install --yes musl-tools")
+            && compile_workflow.contains("CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_LINKER")
+            && compile_workflow.contains("CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_LINKER")
+            && compile_workflow.contains("node-version: \"22\"")
+            && compile_workflow.contains("corepack enable pnpm")
+            && compile_workflow.contains("binary: ironclaw-reborn.exe")
+            && compile_workflow.contains("core.longpaths true"),
+        "release CI must install the target-specific native and WebUI build prerequisites"
+    );
+    assert!(
+        compile_workflow.contains("name: reborn-compile-${{ matrix.target }}")
+            && compile_workflow.contains("if-no-files-found: error")
+            && !compile_workflow.contains("name: artifacts-reborn"),
+        "compile evidence must stay outside cargo-dist's artifacts-* release namespace"
+    );
+
+    assert!(
+        release_workflow.contains("uses: ./.github/workflows/reborn-release-compile.yml")
+            && release_workflow.contains("needs.reborn-binary-compile.result == 'success'")
+            && release_workflow.contains("  pull_request:\n")
+            && !compile_workflow.contains("  pull_request:\n"),
+        "the existing release workflow must own PR validation and wait for the Reborn matrix"
+    );
+    assert!(
+        release_workflow.contains("publishing: ${{ !github.event.pull_request }}")
+            && release_workflow.contains("needs.plan.outputs.publishing == 'true'")
+            && compile_workflow.contains("permissions:\n  contents: read"),
+        "PR compile validation must remain read-only and must not enter release publishing"
+    );
+    let docker_job = release_workflow
+        .split_once("  docker-image:\n")
+        .and_then(|(_, jobs)| jobs.split_once("\n  update-registry-checksums:"))
+        .map(|(job, _)| job)
+        .expect("release workflow should retain the Docker caller job");
+    assert!(
+        docker_job.contains("if: ${{ false }}")
+            && docker_job.contains("uses: ./.github/workflows/docker.yml"),
+        "release CI must retain but skip its Docker caller"
+    );
+    assert!(
+        docker_workflow.contains("workflow_dispatch:") && docker_workflow.contains("schedule:"),
+        "the independent Docker workflow must remain manually and periodically runnable"
+    );
+    assert!(
+        cli_manifest.contains("[package.metadata.dist]\ndist = false"),
+        "#6160 must not opt Reborn into cargo-dist before #3483 is resolved"
+    );
+}
+
+#[test]
 fn dockerfile_reborn_ships_extension_ownership_migration() {
     let dockerfile = std::fs::read_to_string(workspace_root().join("Dockerfile.reborn"))
         .expect("Dockerfile.reborn");

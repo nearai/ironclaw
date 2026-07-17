@@ -1,0 +1,151 @@
+name: Reborn Release Binary Compile
+
+on:
+  workflow_call:
+    inputs:
+      ref:
+        description: Commit SHA or ref to compile
+        required: false
+        type: string
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  # #6160 owns this compile contract. Keep it independent from cargo-dist and
+  # Docker changes so this workflow does not depend on the #6122 migration.
+  REBORN_RELEASE_FEATURES: webui-v2-beta,slack-v2-host-beta,libsql,postgres,inmemory-turn-state
+
+jobs:
+  compile:
+    name: ironclaw-reborn (${{ matrix.target }})
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-gnu
+            runner: ubuntu-22.04
+            binary: ironclaw-reborn
+            musl: false
+          - target: x86_64-unknown-linux-musl
+            runner: ubuntu-22.04
+            binary: ironclaw-reborn
+            musl: true
+            cc_env: CC_x86_64_unknown_linux_musl=musl-gcc
+            linker_env: CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_LINKER=musl-gcc
+          - target: aarch64-unknown-linux-gnu
+            runner: ubuntu-24.04-arm
+            binary: ironclaw-reborn
+            musl: false
+          - target: aarch64-unknown-linux-musl
+            runner: ubuntu-24.04-arm
+            binary: ironclaw-reborn
+            musl: true
+            cc_env: CC_aarch64_unknown_linux_musl=musl-gcc
+            linker_env: CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_LINKER=musl-gcc
+          - target: x86_64-apple-darwin
+            runner: macos-15-intel
+            binary: ironclaw-reborn
+            musl: false
+          - target: aarch64-apple-darwin
+            runner: macos-15
+            binary: ironclaw-reborn
+            musl: false
+          - target: x86_64-pc-windows-msvc
+            runner: windows-2022
+            binary: ironclaw-reborn.exe
+            musl: false
+    steps:
+      - name: Enable Windows long paths
+        if: runner.os == 'Windows'
+        run: git config --global core.longpaths true
+
+      - name: Checkout repository
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          ref: ${{ inputs.ref || github.sha }}
+          persist-credentials: false
+
+      - name: Install Rust target
+        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Install Node.js for the embedded WebUI
+        uses: actions/setup-node@60edb5dd545a775178f52524783378180af0d1f8 # v4
+        with:
+          node-version: "22"
+
+      - name: Enable pnpm
+        run: corepack enable pnpm
+
+      - name: Install musl toolchain
+        if: matrix.musl
+        shell: bash
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes musl-tools
+
+      - name: Configure musl compiler
+        if: matrix.musl
+        shell: bash
+        env:
+          CC_ENV: ${{ matrix.cc_env }}
+          LINKER_ENV: ${{ matrix.linker_env }}
+        run: |
+          echo "$CC_ENV" >> "$GITHUB_ENV"
+          echo "$LINKER_ENV" >> "$GITHUB_ENV"
+
+      - name: Restore Rust cache
+        uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          key: reborn-release-${{ matrix.target }}
+          save-if: ${{ github.event_name != 'pull_request' }}
+
+      - id: build
+        name: Compile ironclaw-reborn
+        shell: bash
+        env:
+          TARGET: ${{ matrix.target }}
+        run: |
+          cargo build --locked --profile dist \
+            --package ironclaw_reborn_cli \
+            --bin ironclaw-reborn \
+            --target "$TARGET" \
+            --features "$REBORN_RELEASE_FEATURES"
+
+      # These are compile evidence only. The reborn-compile-* prefix keeps the
+      # existing release host's artifacts-* download pattern from publishing them.
+      - id: upload
+        name: Upload compile evidence
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: reborn-compile-${{ matrix.target }}
+          path: target/${{ matrix.target }}/dist/${{ matrix.binary }}
+          if-no-files-found: error
+          retention-days: 7
+
+      - name: Summarize compile result
+        if: always()
+        shell: bash
+        env:
+          TARGET: ${{ matrix.target }}
+          RUNNER: ${{ matrix.runner }}
+          BINARY: ${{ matrix.binary }}
+          BUILD_RESULT: ${{ steps.build.outcome || 'not-run' }}
+          UPLOAD_RESULT: ${{ steps.upload.outcome || 'not-run' }}
+        run: |
+          {
+            echo "### ironclaw-reborn compile"
+            echo
+            echo "- Target: \`$TARGET\`"
+            echo "- Runner: \`$RUNNER\`"
+            echo "- Features: \`$REBORN_RELEASE_FEATURES\`"
+            echo "- Binary: \`target/$TARGET/dist/$BINARY\`"
+            echo "- Build result: \`$BUILD_RESULT\`"
+            echo "- Compile evidence upload: \`$UPLOAD_RESULT\`"
+            echo "- Docker publish: skipped by the release workflow for #6160"
+          } >> "$GITHUB_STEP_SUMMARY"

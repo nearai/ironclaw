@@ -628,6 +628,14 @@ Do not port the current `src/cli/*` command tree wholesale. Port commands one at
 
 `ironclaw-reborn` is **not yet included in cargo-dist release artifacts**.
 
+The release pipeline still compiles the shipping binary directly through
+`.github/workflows/reborn-release-compile.yml` before hosting a release. That
+compile-only matrix performs a final link on the two GNU Linux, two musl Linux,
+two macOS, and one Windows target configured for releases. Its short-lived
+`reborn-compile-*` workflow artifacts are build evidence only and are excluded
+from the `artifacts-*` set uploaded to the GitHub Release. It does not claim
+runtime validation, installer coverage, or standalone Reborn packaging.
+
 Current `dist plan --output-format=json` with `crates/ironclaw_reborn_cli` marked `dist = false` emits only the root `ironclaw` package artifacts. Removing `dist = false` alone is not enough to ship `ironclaw-reborn` in the existing `ironclaw-v*` release workflow because that workflow is shaped around the root `ironclaw` package tag. Enabling a standalone `ironclaw_reborn_cli` release also requires cargo-dist WiX metadata/template work and an explicit tag/versioning decision.
 
 Follow-up issue: #3483 tracks packaging `ironclaw-reborn` in release artifacts.
