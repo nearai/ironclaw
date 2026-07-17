@@ -40,60 +40,9 @@ const TELEGRAM_EGRESS_CAPABILITY_ID: &str = "telegram.egress";
 /// placeholder the mediated egress substitutes.
 pub const TELEGRAM_BOT_TOKEN_CREDENTIAL_HANDLE: &str = "telegram_bot_token";
 
-/// Resolves the opaque `telegram_bot_token` handle to the current bot token
-/// at send time. The dynamic setup-service-backed implementation re-reads the
-/// durable setup record per send, so a WebUI token rotation takes effect on
-/// the next outbound message without a rebuild.
-#[async_trait]
-pub trait TelegramEgressCredentialProvider: Send + Sync {
-    async fn resolve_telegram_bot_token(
-        &self,
-        handle: &EgressCredentialHandle,
-    ) -> Result<SecretString, ProtocolHttpEgressError>;
-}
-
-/// Production provider over [`TelegramSetupService::bot_token`].
-pub struct SetupServiceTelegramEgressCredentialProvider {
-    setup_service: Arc<TelegramSetupService>,
-}
-
-impl SetupServiceTelegramEgressCredentialProvider {
-    pub fn new(setup_service: Arc<TelegramSetupService>) -> Self {
-        Self { setup_service }
-    }
-}
-
-#[async_trait]
-impl TelegramEgressCredentialProvider for SetupServiceTelegramEgressCredentialProvider {
-    async fn resolve_telegram_bot_token(
-        &self,
-        handle: &EgressCredentialHandle,
-    ) -> Result<SecretString, ProtocolHttpEgressError> {
-        if handle.as_str() != TELEGRAM_BOT_TOKEN_CREDENTIAL_HANDLE {
-            return Err(ProtocolHttpEgressError::UnknownCredentialHandle {
-                handle: handle.as_str().to_string(),
-            });
-        }
-        self.setup_service
-            .bot_token()
-            .await
-            .map_err(|error| {
-                tracing::debug!(%error, "telegram bot token resolution failed for egress");
-                ProtocolHttpEgressError::Network(RedactedString::new(
-                    "telegram bot token unavailable",
-                ))
-            })?
-            .ok_or_else(|| {
-                ProtocolHttpEgressError::Network(RedactedString::new(
-                    "telegram bot token unavailable",
-                ))
-            })
-    }
-}
-
 pub struct TelegramProtocolHttpEgress {
     host_egress: HostRuntimeHttpEgressPort,
-    credentials: Arc<dyn TelegramEgressCredentialProvider>,
+    setup_service: Arc<TelegramSetupService>,
     policy: EgressPolicy,
     scope_template: ResourceScope,
 }
@@ -101,13 +50,13 @@ pub struct TelegramProtocolHttpEgress {
 impl TelegramProtocolHttpEgress {
     pub fn new(
         host_egress: HostRuntimeHttpEgressPort,
-        credentials: Arc<dyn TelegramEgressCredentialProvider>,
+        setup_service: Arc<TelegramSetupService>,
         policy: EgressPolicy,
         scope_template: ResourceScope,
     ) -> Self {
         Self {
             host_egress,
-            credentials,
+            setup_service,
             policy,
             scope_template,
         }
@@ -144,7 +93,7 @@ impl TelegramProtocolHttpEgress {
                     scope,
                     capability_id,
                     method: network_method(request.method().as_str())?,
-                    url: telegram_bot_api_url(request.host().as_str(), request.path().as_str()),
+                    url: bot_api_url(request.host().as_str(), request.path().as_str()),
                     headers: headers.to_vec(),
                     body: request.body().to_vec(),
                     network_policy: telegram_network_policy(request.host().as_str()),
@@ -245,7 +194,26 @@ impl TelegramProtocolHttpEgress {
                 ),
             });
         };
-        let token = self.credentials.resolve_telegram_bot_token(handle).await?;
+        if handle.as_str() != TELEGRAM_BOT_TOKEN_CREDENTIAL_HANDLE {
+            return Err(ProtocolHttpEgressError::UnknownCredentialHandle {
+                handle: handle.as_str().to_string(),
+            });
+        }
+        let token = self
+            .setup_service
+            .bot_token()
+            .await
+            .map_err(|error| {
+                tracing::debug!(%error, "telegram bot token resolution failed for egress");
+                ProtocolHttpEgressError::Network(RedactedString::new(
+                    "telegram bot token unavailable",
+                ))
+            })?
+            .ok_or_else(|| {
+                ProtocolHttpEgressError::Network(RedactedString::new(
+                    "telegram bot token unavailable",
+                ))
+            })?;
         validate_bot_token(&token)?;
         let secret_handle = SecretHandle::new(handle.as_str()).map_err(|error| {
             ProtocolHttpEgressError::PolicyDenied {
@@ -269,9 +237,9 @@ impl TelegramProtocolHttpEgress {
 /// carries only the literal `{telegram_bot_token}` placeholder — never raw
 /// token material — and the host egress substitutes the credential via
 /// [`RuntimeCredentialTarget::PathPlaceholder`]. Mirrors
-/// [`crate::telegram_bot_api::HostEgressTelegramBotApi`]'s URL
+/// [`crate::bot_api::HostEgressTelegramBotApi`]'s URL
 /// construction so setup-time and delivery-time egress cannot drift.
-fn telegram_bot_api_url(host: &str, path: &str) -> String {
+fn bot_api_url(host: &str, path: &str) -> String {
     format!("https://{host}/bot{{{TELEGRAM_BOT_TOKEN_CREDENTIAL_HANDLE}}}{path}")
 }
 
@@ -375,28 +343,11 @@ mod tests {
         EgressMethod, EgressPath,
     };
     use ironclaw_resources::InMemoryResourceGovernor;
-    use ironclaw_secrets::InMemorySecretStore;
+    use ironclaw_secrets::{InMemorySecretStore, SecretStore};
 
     use super::*;
-
-    struct StaticTokenProvider {
-        token: String,
-    }
-
-    #[async_trait]
-    impl TelegramEgressCredentialProvider for StaticTokenProvider {
-        async fn resolve_telegram_bot_token(
-            &self,
-            handle: &EgressCredentialHandle,
-        ) -> Result<SecretString, ProtocolHttpEgressError> {
-            if handle.as_str() != TELEGRAM_BOT_TOKEN_CREDENTIAL_HANDLE {
-                return Err(ProtocolHttpEgressError::UnknownCredentialHandle {
-                    handle: handle.as_str().to_string(),
-                });
-            }
-            Ok(SecretString::from(self.token.clone()))
-        }
-    }
+    use crate::telegram_setup::TelegramInstallationSetup;
+    use crate::test_support::{RecordingBotApi, telegram_state};
 
     struct RecordingNetworkHttpEgress {
         requests: Arc<Mutex<Vec<NetworkHttpRequest>>>,
@@ -527,12 +478,13 @@ mod tests {
     /// exactly once, and the second response is returned as-is.
     #[tokio::test(start_paused = true)]
     async fn send_retries_once_on_429_honoring_retry_after() {
-        let (egress, recorded) = telegram_egress_with_network(
+        let (egress, recorded) = egress_with_network(
             RecordingNetworkHttpEgress::with_queued(vec![Ok(flood_wait_response(
                 serde_json::json!(2),
             ))]),
             "12345:secret-token",
-        );
+        )
+        .await;
 
         let before = tokio::time::Instant::now();
         let response = egress
@@ -555,13 +507,14 @@ mod tests {
     /// honestly with no third attempt.
     #[tokio::test(start_paused = true)]
     async fn send_returns_second_429_honestly_without_a_third_attempt() {
-        let (egress, recorded) = telegram_egress_with_network(
+        let (egress, recorded) = egress_with_network(
             RecordingNetworkHttpEgress::with_queued(vec![
                 Ok(flood_wait_response(serde_json::json!(1))),
                 Ok(flood_wait_response(serde_json::json!(1))),
             ]),
             "12345:secret-token",
-        );
+        )
+        .await;
 
         let response = egress
             .send(telegram_request(telegram_handle()))
@@ -583,12 +536,13 @@ mod tests {
     /// surfaces immediately after one attempt.
     #[tokio::test(start_paused = true)]
     async fn send_does_not_retry_when_retry_after_exceeds_the_cap() {
-        let (egress, recorded) = telegram_egress_with_network(
+        let (egress, recorded) = egress_with_network(
             RecordingNetworkHttpEgress::with_queued(vec![Ok(flood_wait_response(
                 serde_json::json!(600),
             ))]),
             "12345:secret-token",
-        );
+        )
+        .await;
 
         let before = tokio::time::Instant::now();
         let response = egress
@@ -611,12 +565,13 @@ mod tests {
     /// honor: one attempt, returned as-is.
     #[tokio::test(start_paused = true)]
     async fn send_does_not_retry_a_429_without_retry_after() {
-        let (egress, recorded) = telegram_egress_with_network(
+        let (egress, recorded) = egress_with_network(
             RecordingNetworkHttpEgress::with_queued(vec![Ok(flood_wait_response(
                 serde_json::Value::Null,
             ))]),
             "12345:secret-token",
-        );
+        )
+        .await;
 
         let response = egress
             .send(telegram_request(telegram_handle()))
@@ -630,7 +585,7 @@ mod tests {
         );
     }
 
-    fn telegram_egress_with_network(
+    async fn egress_with_network(
         network: RecordingNetworkHttpEgress,
         token: &str,
     ) -> (
@@ -640,11 +595,57 @@ mod tests {
         let recorded = network.requests();
         let host_egress = host_egress_port(network);
         let handle = telegram_handle();
+        let state = telegram_state();
+        let secret_store = Arc::new(InMemorySecretStore::new());
+        let tenant_id = ironclaw_host_api::TenantId::new("tenant-a").expect("tenant");
+        let user_id = ironclaw_host_api::UserId::new("operator").expect("user");
+        let agent_id = ironclaw_host_api::AgentId::new("agent-a").expect("agent");
+        let token_handle = SecretHandle::new("telegram_bot_token_test_v1").expect("token handle");
+        let webhook_handle =
+            SecretHandle::new("telegram_webhook_secret_test_v1").expect("webhook handle");
+        secret_store
+            .put(
+                ResourceScope {
+                    tenant_id: tenant_id.clone(),
+                    user_id: user_id.clone(),
+                    agent_id: Some(agent_id.clone()),
+                    project_id: None,
+                    mission_id: None,
+                    thread_id: None,
+                    invocation_id: InvocationId::new(),
+                },
+                token_handle.clone(),
+                SecretMaterial::from(token.to_string()),
+                None,
+            )
+            .await
+            .expect("token persists");
+        state
+            .put_telegram_installation_setup(&TelegramInstallationSetup {
+                bot_id: 4242,
+                bot_username: "ironclaw_qa_bot".to_string(),
+                webhook_url: "https://ironclaw.example/webhooks/extensions/telegram/updates"
+                    .to_string(),
+                bot_token_handle: token_handle,
+                webhook_secret_handle: webhook_handle,
+                revision: 1,
+                updated_at: chrono::Utc::now(),
+            })
+            .await
+            .expect("setup persists");
+        let setup_service = Arc::new(TelegramSetupService::new(
+            tenant_id,
+            agent_id,
+            None,
+            user_id,
+            state,
+            secret_store,
+            RecordingBotApi::default().client(),
+            Some("https://ironclaw.example".to_string()),
+        ));
         let egress = TelegramProtocolHttpEgress::new(
             host_egress,
-            Arc::new(StaticTokenProvider {
-                token: token.to_string(),
-            }),
+            setup_service,
             EgressPolicy::new([DeclaredEgressTarget::new(telegram_host(), Some(handle))]),
             ResourceScope::system(),
         );
@@ -652,13 +653,13 @@ mod tests {
     }
 
     #[test]
-    fn telegram_bot_api_url_carries_placeholder_and_never_raw_token() {
+    fn bot_api_url_carries_placeholder_and_never_raw_token() {
         // Exact equality pins both halves of the contract: the URL contains
         // the literal `/bot{telegram_bot_token}` placeholder segment and
         // nothing else — no token material can be embedded because the
         // builder never sees a token.
         assert_eq!(
-            telegram_bot_api_url("api.telegram.org", "/sendMessage"),
+            bot_api_url("api.telegram.org", "/sendMessage"),
             "https://api.telegram.org/bot{telegram_bot_token}/sendMessage"
         );
     }
@@ -672,7 +673,7 @@ mod tests {
     #[tokio::test]
     async fn telegram_protocol_http_egress_substitutes_token_and_dispatches() {
         let (egress, recorded) =
-            telegram_egress_with_network(RecordingNetworkHttpEgress::ok(), "12345:secret-token");
+            egress_with_network(RecordingNetworkHttpEgress::ok(), "12345:secret-token").await;
 
         let response = egress
             .send(telegram_request(telegram_handle()))
@@ -689,7 +690,7 @@ mod tests {
     }
 
     #[test]
-    fn telegram_egress_requests_cannot_carry_authorization_headers() {
+    fn egress_requests_cannot_carry_authorization_headers() {
         // The type layer already rejects host-owned headers at construction
         // (and on deserialize), so no adapter can hand this module an
         // Authorization header; the send-time guard in `send` stays as
@@ -703,7 +704,7 @@ mod tests {
     #[tokio::test]
     async fn telegram_protocol_http_egress_fails_closed_without_credential_handle() {
         let (egress, recorded) =
-            telegram_egress_with_network(RecordingNetworkHttpEgress::ok(), "12345:secret-token");
+            egress_with_network(RecordingNetworkHttpEgress::ok(), "12345:secret-token").await;
 
         let request = EgressRequest::new(
             telegram_host(),
@@ -725,10 +726,8 @@ mod tests {
 
     #[tokio::test]
     async fn telegram_protocol_http_egress_rejects_control_chars_in_token_before_network() {
-        let (egress, recorded) = telegram_egress_with_network(
-            RecordingNetworkHttpEgress::ok(),
-            "12345:secret\r\ninjected",
-        );
+        let (egress, recorded) =
+            egress_with_network(RecordingNetworkHttpEgress::ok(), "12345:secret\r\ninjected").await;
 
         let error = egress
             .send(telegram_request(telegram_handle()))
@@ -745,7 +744,7 @@ mod tests {
     #[tokio::test]
     async fn telegram_protocol_http_egress_rejects_unknown_handle_before_network() {
         let (egress, recorded) =
-            telegram_egress_with_network(RecordingNetworkHttpEgress::ok(), "12345:secret-token");
+            egress_with_network(RecordingNetworkHttpEgress::ok(), "12345:secret-token").await;
 
         let unknown = EgressCredentialHandle::new("other_token").expect("other handle");
         let request = EgressRequest::new(

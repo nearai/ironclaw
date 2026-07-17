@@ -421,9 +421,10 @@ after the named evidence is green.
   one filesystem-backed state; the four parallel state-store traits and all Telegram
   `InMemory*Store` fakes are gone. Eight state tests, the 100-test Telegram suite, targeted
   Clippy, the real-state architecture ratchet, and the Telegram composition feature check pass.
-- [ ] **A3 — Concrete Bot API:** `TelegramBotApi` is gone and tests use mediated HTTP, or a
-  security-boundary exception is documented with evidence that deletion would expose
-  credentials or bypass network mediation.
+- [x] **A3 — Concrete Bot API:** the same-crate Bot API, egress-credential, and installation
+  resolver traits are gone. Setup, dispatch, pairing, and egress tests use the concrete client
+  over host-mediated HTTP; the 101-test Telegram suite, targeted Clippy, exact deleted-symbol
+  scan, and Telegram composition feature check pass.
 - [ ] **A4 — DTO cleanup:** `TelegramPairingStatusResponse`,
   `ResolvedTelegramIngress`, dead wrappers, and unused public accessors are gone while
   public JSON and behavior remain byte-compatible.

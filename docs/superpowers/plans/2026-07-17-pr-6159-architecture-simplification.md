@@ -442,23 +442,23 @@ git commit -m "refactor(telegram): use one concrete filesystem host state"
 **Interfaces:**
 - Produces concrete `HostEgressTelegramBotApi`, `TelegramProtocolHttpEgress`, and `DynamicTelegramInstallationResolver` values. The only retained lower seams are `HostRuntimeHttpEgressPort` and `TelegramRevisionWorkflowBuilder`.
 
-- [ ] **Step 1: Convert Bot API setup tests to mediated HTTP recordings**
+- [x] **Step 1: Convert Bot API setup tests to mediated HTTP recordings**
 
 Use the host-runtime test egress double to assert method names, placeholder URLs, credential target, request JSON, success envelopes, provider rejection, malformed envelopes, and compensation ordering. Run the selected setup/Bot API tests and verify they fail while setup still requires `Arc<dyn TelegramBotApi>`.
 
-- [ ] **Step 2: Delete `TelegramBotApi` and call inherent client methods**
+- [x] **Step 2: Delete `TelegramBotApi` and call inherent client methods**
 
 Change `TelegramSetupService.bot_api` to `Arc<HostEgressTelegramBotApi>`. Retain `get_me`, `set_webhook`, `delete_webhook`, and `send_message` as inherent async methods; never expose token bytes or weaken network policy.
 
-- [ ] **Step 3: Delete the egress credential-provider trait and wrapper**
+- [x] **Step 3: Delete the egress credential-provider trait and wrapper**
 
 Change `TelegramProtocolHttpEgress.credentials` to `Arc<TelegramSetupService>` and call a crate-visible concrete token-resolution method that validates the opaque handle. Delete `TelegramEgressCredentialProvider` and `SetupServiceTelegramEgressCredentialProvider`; egress tests persist a setup/token in the real filesystem/secret backends.
 
-- [ ] **Step 4: Delete installation resolver trait and ingress wrapper DTO**
+- [x] **Step 4: Delete installation resolver trait and ingress wrapper DTO**
 
 Change `TelegramIngressService` and route state to hold `Arc<DynamicTelegramInstallationResolver>`. Delete `TelegramInstallationResolver` and `ResolvedTelegramIngress`; return/use `ResolvedTelegramInstallation` directly. Resolver tests inject only `TelegramRevisionWorkflowBuilder` and concrete state/setup services.
 
-- [ ] **Step 5: Run security and deleted-symbol regressions**
+- [x] **Step 5: Run security and deleted-symbol regressions**
 
 ```bash
 cargo test -p ironclaw_telegram_extension bot_api
@@ -469,7 +469,13 @@ cargo test -p ironclaw_architecture --test telegram_extension_gates deleted_tele
 
 Expected: all pass; `rg -n "(trait TelegramBotApi|TelegramEgressCredentialProvider|TelegramInstallationResolver|ResolvedTelegramIngress)" crates` prints nothing.
 
-- [ ] **Step 6: Commit concrete clients/resolver**
+Observed: all 101 Telegram tests pass, including concrete mediated-request shape, provider
+rejection, malformed envelope, compensation, egress injection/retry, revision replacement, and
+route tests. Targeted Telegram Clippy and the Telegram composition feature check pass. The exact
+client/provider/resolver symbol scan prints nothing; the combined architecture ratchet now reports
+only `TelegramPairingStatusResponse`, intentionally removed by Task 7.
+
+- [x] **Step 6: Commit concrete clients/resolver**
 
 ```bash
 git add crates/ironclaw_telegram_extension crates/ironclaw_reborn_composition
@@ -712,7 +718,8 @@ git commit -m "docs(reborn): complete PR 6159 architecture evidence"
 - [x] **A2 — Concrete Telegram state:** Task 5; eight concrete-state tests, the 100-test
   Telegram suite, targeted Clippy, the deleted-trait/test-store scan, real-state ratchet, and
   Telegram composition feature check pass.
-- [ ] **A3 — Concrete Bot API:** Task 6; mediated HTTP tests plus deleted-symbol ratchet.
+- [x] **A3 — Concrete Bot API:** Task 6; 101 Telegram tests, mediated request/security tests,
+  targeted Clippy, exact client/provider/resolver scan, and composition feature check pass.
 - [ ] **A4 — DTO cleanup:** Tasks 2, 6, and 7; exact JSON tests plus deleted-symbol/accessor audit.
 - [x] **A5 — Generic lifecycle:** Task 4; six registry transition tests, 101 focused
   lifecycle tests, Telegram descriptor and idempotent mount regressions, the lifecycle source

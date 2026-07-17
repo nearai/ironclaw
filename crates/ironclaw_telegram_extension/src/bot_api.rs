@@ -9,7 +9,6 @@
 
 use std::sync::Arc;
 
-use async_trait::async_trait;
 use ironclaw_host_api::{
     CapabilityId, ExtensionId, InvocationId, NetworkMethod, NetworkPolicy, NetworkScheme,
     NetworkTargetPattern, ResourceScope, RuntimeCredentialTarget, RuntimeHttpEgressRequest,
@@ -86,32 +85,6 @@ fn classify_rejection(status: u16) -> TelegramBotApiRejection {
     }
 }
 
-/// The hermetic seam for every Telegram Bot API call the host makes outside
-/// the adapter render path. Tests substitute a recording fake.
-#[async_trait]
-pub trait TelegramBotApi: Send + Sync + std::fmt::Debug {
-    async fn get_me(
-        &self,
-        bot_token: &SecretString,
-    ) -> Result<TelegramBotIdentity, TelegramBotApiError>;
-
-    async fn set_webhook(
-        &self,
-        bot_token: &SecretString,
-        url: &str,
-        secret_token: &SecretString,
-    ) -> Result<(), TelegramBotApiError>;
-
-    async fn delete_webhook(&self, bot_token: &SecretString) -> Result<(), TelegramBotApiError>;
-
-    async fn send_message(
-        &self,
-        bot_token: &SecretString,
-        chat_id: i64,
-        text: &str,
-    ) -> Result<(), TelegramBotApiError>;
-}
-
 /// Production implementation over the shared mediated host HTTP egress port.
 pub struct HostEgressTelegramBotApi {
     host_egress: HostRuntimeHttpEgressPort,
@@ -135,7 +108,7 @@ impl HostEgressTelegramBotApi {
     pub fn arced(
         host_egress: HostRuntimeHttpEgressPort,
         scope_template: ResourceScope,
-    ) -> Arc<dyn TelegramBotApi> {
+    ) -> Arc<Self> {
         Arc::new(Self::new(host_egress, scope_template))
     }
 
@@ -145,63 +118,144 @@ impl HostEgressTelegramBotApi {
         method: &str,
         body: serde_json::Value,
     ) -> Result<serde_json::Value, TelegramBotApiError> {
-        let capability_id = CapabilityId::new(TELEGRAM_EGRESS_CAPABILITY_ID).map_err(|error| {
-            TelegramBotApiError::Unavailable {
-                reason: format!("invalid capability id: {error}"),
-            }
-        })?;
-        let extension_id = ExtensionId::new("ironclaw_telegram").map_err(|error| {
-            TelegramBotApiError::Unavailable {
-                reason: format!("invalid extension id: {error}"),
-            }
-        })?;
-        let secret_handle = SecretHandle::new(TELEGRAM_BOT_TOKEN_PLACEHOLDER).map_err(|error| {
-            TelegramBotApiError::Unavailable {
-                reason: format!("invalid credential handle: {error}"),
-            }
-        })?;
-        let body_bytes =
-            serde_json::to_vec(&body).map_err(|error| TelegramBotApiError::Unavailable {
-                reason: format!("request serialization failed: {error}"),
-            })?;
-        let mut scope = self.scope_template.clone();
-        scope.invocation_id = InvocationId::new();
         let response = self
             .host_egress
-            .execute(HostRuntimeHttpEgressRequest {
-                extension_id,
-                trust: TrustClass::System,
-                request: RuntimeHttpEgressRequest {
-                    runtime: RuntimeKind::FirstParty,
-                    scope,
-                    capability_id,
-                    method: NetworkMethod::Post,
-                    url: format!(
-                        "https://{TELEGRAM_API_HOST}/bot{{{TELEGRAM_BOT_TOKEN_PLACEHOLDER}}}/{method}"
-                    ),
-                    headers: vec![("content-type".to_string(), "application/json".to_string())],
-                    body: body_bytes,
-                    network_policy: telegram_network_policy(),
-                    credential_injections: Vec::new(),
-                    response_body_limit: Some(TELEGRAM_EGRESS_RESPONSE_BODY_LIMIT_BYTES),
-                    save_body_to: None,
-                    timeout_ms: Some(TELEGRAM_EGRESS_TIMEOUT_MS),
-                },
-                credentials: vec![HostRuntimeCredentialMaterial {
-                    handle: secret_handle,
-                    material: SecretMaterial::from(bot_token.expose_secret().to_string()),
-                    target: RuntimeCredentialTarget::PathPlaceholder {
-                        placeholder: TELEGRAM_BOT_TOKEN_PLACEHOLDER.to_string(),
-                    },
-                    required: true,
-                }],
-            })
+            .execute(bot_api_request(
+                &self.scope_template,
+                bot_token,
+                method,
+                body,
+            )?)
             .await
             .map_err(|error| TelegramBotApiError::Unavailable {
                 reason: error.stable_runtime_reason().to_string(),
             })?;
         parse_bot_api_response(response.status, &response.body)
     }
+
+    pub async fn get_me(
+        &self,
+        bot_token: &SecretString,
+    ) -> Result<TelegramBotIdentity, TelegramBotApiError> {
+        let result = self.call(bot_token, "getMe", serde_json::json!({})).await?;
+        #[derive(Debug, Deserialize)]
+        struct Me {
+            id: i64,
+            username: Option<String>,
+        }
+        let me: Me =
+            serde_json::from_value(result).map_err(|_| TelegramBotApiError::InvalidResponse {
+                reason: "getMe result missing id/username".to_string(),
+            })?;
+        let username = me
+            .username
+            .ok_or_else(|| TelegramBotApiError::InvalidResponse {
+                reason: "getMe result missing username".to_string(),
+            })?;
+        Ok(TelegramBotIdentity {
+            id: me.id,
+            username,
+        })
+    }
+
+    pub async fn set_webhook(
+        &self,
+        bot_token: &SecretString,
+        url: &str,
+        secret_token: &SecretString,
+    ) -> Result<(), TelegramBotApiError> {
+        self.call(
+            bot_token,
+            "setWebhook",
+            serde_json::json!({
+                "url": url,
+                "secret_token": secret_token.expose_secret(),
+                "allowed_updates": ["message"],
+            }),
+        )
+        .await
+        .map(|_| ())
+    }
+
+    pub async fn delete_webhook(
+        &self,
+        bot_token: &SecretString,
+    ) -> Result<(), TelegramBotApiError> {
+        self.call(bot_token, "deleteWebhook", serde_json::json!({}))
+            .await
+            .map(|_| ())
+    }
+
+    pub async fn send_message(
+        &self,
+        bot_token: &SecretString,
+        chat_id: i64,
+        text: &str,
+    ) -> Result<(), TelegramBotApiError> {
+        self.call(
+            bot_token,
+            "sendMessage",
+            serde_json::json!({ "chat_id": chat_id, "text": text }),
+        )
+        .await
+        .map(|_| ())
+    }
+}
+
+fn bot_api_request(
+    scope_template: &ResourceScope,
+    bot_token: &SecretString,
+    method: &str,
+    body: serde_json::Value,
+) -> Result<HostRuntimeHttpEgressRequest, TelegramBotApiError> {
+    let capability_id = CapabilityId::new(TELEGRAM_EGRESS_CAPABILITY_ID).map_err(|error| {
+        TelegramBotApiError::Unavailable {
+            reason: format!("invalid capability id: {error}"),
+        }
+    })?;
+    let extension_id = ExtensionId::new("ironclaw_telegram").map_err(|error| {
+        TelegramBotApiError::Unavailable {
+            reason: format!("invalid extension id: {error}"),
+        }
+    })?;
+    let secret_handle = SecretHandle::new(TELEGRAM_BOT_TOKEN_PLACEHOLDER).map_err(|error| {
+        TelegramBotApiError::Unavailable {
+            reason: format!("invalid credential handle: {error}"),
+        }
+    })?;
+    let body = serde_json::to_vec(&body).map_err(|error| TelegramBotApiError::Unavailable {
+        reason: format!("request serialization failed: {error}"),
+    })?;
+    let mut scope = scope_template.clone();
+    scope.invocation_id = InvocationId::new();
+    Ok(HostRuntimeHttpEgressRequest {
+        extension_id,
+        trust: TrustClass::System,
+        request: RuntimeHttpEgressRequest {
+            runtime: RuntimeKind::FirstParty,
+            scope,
+            capability_id,
+            method: NetworkMethod::Post,
+            url: format!(
+                "https://{TELEGRAM_API_HOST}/bot{{{TELEGRAM_BOT_TOKEN_PLACEHOLDER}}}/{method}"
+            ),
+            headers: vec![("content-type".to_string(), "application/json".to_string())],
+            body,
+            network_policy: telegram_network_policy(),
+            credential_injections: Vec::new(),
+            response_body_limit: Some(TELEGRAM_EGRESS_RESPONSE_BODY_LIMIT_BYTES),
+            save_body_to: None,
+            timeout_ms: Some(TELEGRAM_EGRESS_TIMEOUT_MS),
+        },
+        credentials: vec![HostRuntimeCredentialMaterial {
+            handle: secret_handle,
+            material: SecretMaterial::from(bot_token.expose_secret().to_string()),
+            target: RuntimeCredentialTarget::PathPlaceholder {
+                placeholder: TELEGRAM_BOT_TOKEN_PLACEHOLDER.to_string(),
+            },
+            required: true,
+        }],
+    })
 }
 
 fn telegram_network_policy() -> NetworkPolicy {
@@ -256,77 +310,50 @@ fn parse_bot_api_response(
     Ok(envelope.result.unwrap_or(serde_json::Value::Null))
 }
 
-#[async_trait]
-impl TelegramBotApi for HostEgressTelegramBotApi {
-    async fn get_me(
-        &self,
-        bot_token: &SecretString,
-    ) -> Result<TelegramBotIdentity, TelegramBotApiError> {
-        let result = self.call(bot_token, "getMe", serde_json::json!({})).await?;
-        #[derive(Debug, Deserialize)]
-        struct Me {
-            id: i64,
-            username: Option<String>,
-        }
-        let me: Me =
-            serde_json::from_value(result).map_err(|_| TelegramBotApiError::InvalidResponse {
-                reason: "getMe result missing id/username".to_string(),
-            })?;
-        let username = me
-            .username
-            .ok_or_else(|| TelegramBotApiError::InvalidResponse {
-                reason: "getMe result missing username".to_string(),
-            })?;
-        Ok(TelegramBotIdentity {
-            id: me.id,
-            username,
-        })
-    }
-
-    async fn set_webhook(
-        &self,
-        bot_token: &SecretString,
-        url: &str,
-        secret_token: &SecretString,
-    ) -> Result<(), TelegramBotApiError> {
-        self.call(
-            bot_token,
-            "setWebhook",
-            serde_json::json!({
-                "url": url,
-                "secret_token": secret_token.expose_secret(),
-                "allowed_updates": ["message"],
-            }),
-        )
-        .await
-        .map(|_| ())
-    }
-
-    async fn delete_webhook(&self, bot_token: &SecretString) -> Result<(), TelegramBotApiError> {
-        self.call(bot_token, "deleteWebhook", serde_json::json!({}))
-            .await
-            .map(|_| ())
-    }
-
-    async fn send_message(
-        &self,
-        bot_token: &SecretString,
-        chat_id: i64,
-        text: &str,
-    ) -> Result<(), TelegramBotApiError> {
-        self.call(
-            bot_token,
-            "sendMessage",
-            serde_json::json!({ "chat_id": chat_id, "text": text }),
-        )
-        .await
-        .map(|_| ())
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn mediated_request_keeps_token_in_host_credential_material() {
+        let request = bot_api_request(
+            &ResourceScope::system(),
+            &SecretString::from("12345:secret-token".to_string()),
+            "setWebhook",
+            serde_json::json!({
+                "url": "https://ironclaw.example/webhooks/extensions/telegram/updates",
+                "secret_token": "webhook-secret",
+                "allowed_updates": ["message"],
+            }),
+        )
+        .expect("request builds");
+
+        assert_eq!(request.request.method, NetworkMethod::Post);
+        assert_eq!(
+            request.request.url,
+            "https://api.telegram.org/bot{telegram_bot_token}/setWebhook"
+        );
+        assert!(!request.request.url.contains("12345:secret-token"));
+        assert_eq!(request.credentials.len(), 1);
+        assert_eq!(
+            request.credentials[0].handle.as_str(),
+            TELEGRAM_BOT_TOKEN_PLACEHOLDER
+        );
+        assert!(matches!(
+            &request.credentials[0].target,
+            RuntimeCredentialTarget::PathPlaceholder { placeholder }
+                if placeholder == TELEGRAM_BOT_TOKEN_PLACEHOLDER
+        ));
+        assert!(request.credentials[0].required);
+        let body: serde_json::Value =
+            serde_json::from_slice(&request.request.body).expect("request JSON");
+        assert_eq!(
+            body["url"],
+            "https://ironclaw.example/webhooks/extensions/telegram/updates"
+        );
+        assert_eq!(body["secret_token"], "webhook-secret");
+        assert_eq!(body["allowed_updates"], serde_json::json!(["message"]));
+    }
 
     #[test]
     fn parse_ok_envelope_returns_result() {

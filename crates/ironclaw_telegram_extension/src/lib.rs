@@ -18,15 +18,15 @@
 
 #![warn(unreachable_pub)]
 
+pub mod bot_api;
+pub mod egress;
 pub mod state;
 pub mod telegram_account_setup;
 pub mod telegram_actor_identity;
 pub mod telegram_adapter;
-pub mod telegram_bot_api;
 pub mod telegram_channel_routes;
 pub mod telegram_connectable_channel;
 pub mod telegram_dispatch;
-pub mod telegram_egress;
 pub mod telegram_manifest;
 pub mod telegram_outbound_targets;
 pub mod telegram_pairing;

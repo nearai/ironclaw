@@ -6,14 +6,14 @@
   `docs/reborn/contracts/telegram-v2.md` — read it before changing semantics.
 - Read `src/lib.rs` first, then the module you need:
   - `telegram_setup.rs` — operator save pipeline (`getMe` → mint webhook secret → `setWebhook` → persist → activate, with rollback/compensation), redacted status, clear.
-  - `telegram_bot_api.rs` — the host-egress Bot API client (envelope handling, sanitized error categories).
+  - `bot_api.rs` — the concrete host-egress Bot API client (envelope handling, sanitized error categories).
   - `telegram_host_state.rs` — durable setup/pairing/binding/DM-target records on the tenant-shared filesystem plane (CAS-guarded).
   - `telegram_pairing.rs` — WebGeneratedCode pairing: issue/rotate/consume/refuse/unpair, continuation dispatch, the lifecycle paired-status impl.
   - `telegram_dispatch.rs` — the pairing-aware DM-only pre-router wrapping the adapter runner.
   - `telegram_serve.rs` — manifest-projected webhook route fragment, dynamic per-setup-revision installation resolver, ingress error mapping.
   - `telegram_actor_identity.rs` — provider `telegram`, key `tg-bot-<bot_id>:<tg_user>`, binding-epoch re-checks.
   - `telegram_adapter.rs` — per-revision `TelegramV2Adapter` assembly + declared egress targets.
-  - `telegram_egress.rs` — policy-scoped egress with `{telegram_bot_token}` path-placeholder credential substitution.
+  - `egress.rs` — policy-scoped egress with `{telegram_bot_token}` path-placeholder credential substitution.
   - `telegram_channel_routes.rs` — admin setup + pairing HTTP route fragment (composition wraps it into its protected mount).
   - `telegram_connectable_channel.rs` — Settings connectable-channels + per-caller connection facades.
   - `telegram_outbound_targets.rs` — paired-DM delivery targets + `TelegramDeliveryProtocol`.

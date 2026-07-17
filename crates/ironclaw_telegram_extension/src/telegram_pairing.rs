@@ -575,9 +575,8 @@ mod tests {
 
     use super::*;
     use crate::state::FilesystemTelegramHostState;
-    use crate::telegram_bot_api::{TelegramBotApi, TelegramBotApiError, TelegramBotIdentity};
     use crate::telegram_setup::{TelegramInstallationSetupUpdate, TelegramSetupService};
-    use crate::test_support::{fault_injected_telegram_state, telegram_state};
+    use crate::test_support::{RecordingBotApi, fault_injected_telegram_state, telegram_state};
 
     #[derive(Debug, Default)]
     struct RecordingDispatcher {
@@ -616,47 +615,6 @@ mod tests {
         }
     }
 
-    #[derive(Debug)]
-    struct OkBotApi;
-
-    #[async_trait]
-    impl TelegramBotApi for OkBotApi {
-        async fn get_me(
-            &self,
-            _bot_token: &SecretString,
-        ) -> Result<TelegramBotIdentity, TelegramBotApiError> {
-            Ok(TelegramBotIdentity {
-                id: 777,
-                username: "ironclaw_qa_bot".to_string(),
-            })
-        }
-
-        async fn set_webhook(
-            &self,
-            _bot_token: &SecretString,
-            _url: &str,
-            _secret_token: &SecretString,
-        ) -> Result<(), TelegramBotApiError> {
-            Ok(())
-        }
-
-        async fn delete_webhook(
-            &self,
-            _bot_token: &SecretString,
-        ) -> Result<(), TelegramBotApiError> {
-            Ok(())
-        }
-
-        async fn send_message(
-            &self,
-            _bot_token: &SecretString,
-            _chat_id: i64,
-            _text: &str,
-        ) -> Result<(), TelegramBotApiError> {
-            Ok(())
-        }
-    }
-
     struct Fixture {
         service: TelegramPairingService,
         dispatcher: Arc<RecordingDispatcher>,
@@ -681,6 +639,8 @@ mod tests {
     ) -> Fixture {
         let tenant_id = TenantId::new("tenant-a").expect("tenant");
         let agent_id = AgentId::new("agent-a").expect("agent");
+        let bot_api = RecordingBotApi::default();
+        bot_api.set_bot_identity(777, "ironclaw_qa_bot");
         let setup = Arc::new(TelegramSetupService::new(
             tenant_id.clone(),
             agent_id.clone(),
@@ -688,7 +648,7 @@ mod tests {
             UserId::new("operator").expect("user"),
             Arc::clone(&state),
             Arc::new(InMemorySecretStore::new()),
-            Arc::new(OkBotApi),
+            bot_api.client(),
             Some("https://ironclaw.example".to_string()),
         ));
         if configured {

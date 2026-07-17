@@ -62,6 +62,8 @@ use ironclaw_channel_delivery::{
 };
 use ironclaw_channel_host::identity::RebornUserIdentityLookup;
 pub use ironclaw_telegram_extension::TelegramHostBuildError;
+use ironclaw_telegram_extension::bot_api::HostEgressTelegramBotApi;
+use ironclaw_telegram_extension::egress::TelegramProtocolHttpEgress;
 use ironclaw_telegram_extension::state::FilesystemTelegramHostState;
 use ironclaw_telegram_extension::telegram_actor_identity::{
     TELEGRAM_V2_ADAPTER_ID, TelegramUserIdentityActorResolver,
@@ -69,7 +71,6 @@ use ironclaw_telegram_extension::telegram_actor_identity::{
 use ironclaw_telegram_extension::telegram_adapter::{
     telegram_adapter_for_setup, telegram_bot_token_handle, telegram_declared_egress_targets,
 };
-use ironclaw_telegram_extension::telegram_bot_api::HostEgressTelegramBotApi;
 use ironclaw_telegram_extension::telegram_channel_routes::{
     TelegramChannelRouteConfig, TelegramChannelSetupActivation,
     TelegramChannelSetupActivationError, telegram_channel_route_parts,
@@ -77,13 +78,10 @@ use ironclaw_telegram_extension::telegram_channel_routes::{
 use ironclaw_telegram_extension::telegram_connectable_channel::{
     TelegramChannelConnectionFacade, TelegramConnectableChannelsProductFacade,
 };
-use ironclaw_telegram_extension::telegram_egress::{
-    SetupServiceTelegramEgressCredentialProvider, TelegramProtocolHttpEgress,
-};
 use ironclaw_telegram_extension::telegram_outbound_targets::TelegramOutboundTargetProvider;
 use ironclaw_telegram_extension::telegram_pairing::TelegramPairingService;
 use ironclaw_telegram_extension::telegram_serve::{
-    DynamicTelegramInstallationResolver, TelegramInstallationResolver, TelegramRevisionWorkflow,
+    DynamicTelegramInstallationResolver, TelegramRevisionWorkflow,
     TelegramRevisionWorkflowBuildError, TelegramRevisionWorkflowBuilder, TelegramUpdatesRouteState,
     telegram_updates_route_parts,
 };
@@ -320,10 +318,8 @@ pub async fn build_telegram_host_runtime_mounts(
         .host_runtime_http_egress
         .clone()
         .ok_or(TelegramHostBuildError::RuntimeHttpEgressUnavailable)?;
-    let bot_api = HostEgressTelegramBotApi::arced(
-        host_egress.clone(),
-        telegram_egress_scope_template(&config),
-    );
+    let bot_api =
+        HostEgressTelegramBotApi::arced(host_egress.clone(), egress_scope_template(&config));
     let setup_service = Arc::new(TelegramSetupService::new(
         config.tenant_id.clone(),
         config.agent_id.clone(),
@@ -376,11 +372,9 @@ pub async fn build_telegram_host_runtime_mounts(
         telegram_bot_token_handle().map_err(|error| invalid_config(error.field, error.reason))?;
     let egress: Arc<dyn ProtocolHttpEgress> = Arc::new(TelegramProtocolHttpEgress::new(
         host_egress,
-        Arc::new(SetupServiceTelegramEgressCredentialProvider::new(
-            Arc::clone(&setup_service),
-        )),
+        Arc::clone(&setup_service),
         EgressPolicy::new(telegram_declared_egress_targets(token_handle.clone())),
-        telegram_egress_scope_template(&config),
+        egress_scope_template(&config),
     ));
     // Shared across setup revisions: the durable ledger tree is keyed by the
     // host scope template (tenant/operator/agent), not the installation id,
@@ -390,7 +384,7 @@ pub async fn build_telegram_host_runtime_mounts(
     let idempotency_ledger: Arc<dyn IdempotencyLedger> = Arc::new(
         RebornFilesystemIdempotencyLedger::new(
             Arc::clone(&host_state_filesystem),
-            telegram_egress_scope_template(&config),
+            egress_scope_template(&config),
         )
         .with_settled_entry_limit(
             NonZeroUsize::new(TELEGRAM_IDEMPOTENCY_LEDGER_SETTLED_LIMIT).ok_or_else(|| {
@@ -418,13 +412,12 @@ pub async fn build_telegram_host_runtime_mounts(
         token_handle: token_handle.clone(),
     });
 
-    let resolver: Arc<dyn TelegramInstallationResolver> =
-        Arc::new(DynamicTelegramInstallationResolver::new(
-            Arc::clone(&setup_service),
-            Arc::clone(&pairing),
-            Arc::clone(&identity_lookup),
-            Arc::clone(&revision_parts) as Arc<dyn TelegramRevisionWorkflowBuilder>,
-        ));
+    let resolver = Arc::new(DynamicTelegramInstallationResolver::new(
+        Arc::clone(&setup_service),
+        Arc::clone(&pairing),
+        Arc::clone(&identity_lookup),
+        Arc::clone(&revision_parts) as Arc<dyn TelegramRevisionWorkflowBuilder>,
+    ));
     // The extension crate hands back the raw router + manifest-projected
     // descriptors; composition wraps them into its public-route mount shape
     // and installs the immediate-ack drain (the crate cannot name the mount
@@ -838,7 +831,7 @@ impl PostSubmitDeliveryHook for DynamicTelegramTriggeredRunDeliveryHook {
     }
 }
 
-fn telegram_egress_scope_template(config: &TelegramHostRuntimeConfig) -> ResourceScope {
+fn egress_scope_template(config: &TelegramHostRuntimeConfig) -> ResourceScope {
     ResourceScope {
         tenant_id: config.tenant_id.clone(),
         user_id: config.operator_user_id.clone(),

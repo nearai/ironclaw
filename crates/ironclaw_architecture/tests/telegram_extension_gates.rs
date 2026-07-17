@@ -53,6 +53,12 @@ fn rust_files(root: &Path) -> Vec<PathBuf> {
         .collect()
 }
 
+fn contains_rust_identifier(source: &str, expected: &str) -> bool {
+    source
+        .split(|character: char| !(character.is_ascii_alphanumeric() || character == '_'))
+        .any(|identifier| identifier == expected)
+}
+
 const DELETED_TELEGRAM_SYMBOLS: &[&str] = &[
     "TelegramInstallationSetupStore",
     "TelegramPairingStore",
@@ -107,7 +113,7 @@ fn deleted_telegram_abstractions_and_dtos_stay_deleted() {
     for file in rust_files(&source_root) {
         let source = std::fs::read_to_string(&file).expect("Telegram source readable");
         for symbol in DELETED_TELEGRAM_SYMBOLS {
-            if source.contains(symbol) {
+            if contains_rust_identifier(&source, symbol) {
                 offenders.push(format!("{}: {symbol}", file.display()));
             }
         }

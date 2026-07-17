@@ -393,7 +393,7 @@ pub struct TelegramDeliveryProtocol;
 const TELEGRAM_SEND_MESSAGE_PATH: &str = "/sendMessage";
 const TELEGRAM_DELETE_MESSAGE_PATH: &str = "/deleteMessage";
 /// Cap on the provider `description` text kept as a debug diagnostic; the
-/// text never rides an error value (mirrors `telegram_bot_api`).
+/// text never rides an error value (mirrors `bot_api`).
 const STATUS_DIAGNOSTIC_MAX_CHARS: usize = 160;
 
 /// Bot API envelope for the status-message calls. `result` stays raw JSON:
@@ -426,14 +426,14 @@ fn telegram_status_request(
         EgressRequest,
     };
     Ok(EgressRequest::new(
-        DeclaredEgressHost::new(crate::telegram_bot_api::TELEGRAM_API_HOST)?,
+        DeclaredEgressHost::new(crate::bot_api::TELEGRAM_API_HOST)?,
         EgressMethod::post(),
         EgressPath::new(path)?,
     )
     .with_header(EgressHeader::new("content-type", "application/json")?)
     .with_body(body)
     .with_credential_handle(Some(EgressCredentialHandle::new(
-        crate::telegram_egress::TELEGRAM_BOT_TOKEN_CREDENTIAL_HANDLE,
+        crate::egress::TELEGRAM_BOT_TOKEN_CREDENTIAL_HANDLE,
     )?)))
 }
 
@@ -606,8 +606,8 @@ mod telegram_delivery_protocol_tests {
     };
 
     use super::TelegramDeliveryProtocol;
-    use crate::telegram_bot_api::TELEGRAM_API_HOST;
-    use crate::telegram_egress::TELEGRAM_BOT_TOKEN_CREDENTIAL_HANDLE;
+    use crate::bot_api::TELEGRAM_API_HOST;
+    use crate::egress::TELEGRAM_BOT_TOKEN_CREDENTIAL_HANDLE;
     use ironclaw_channel_host::delivery_protocol::{
         ChannelDeliveryProtocol, FinalReplyDeliveryError, PostedChannelMessage,
     };

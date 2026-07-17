@@ -24,8 +24,8 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use tokio::sync::Mutex;
 
+use crate::bot_api::{HostEgressTelegramBotApi, TelegramBotApiError, TelegramBotIdentity};
 use crate::state::FilesystemTelegramHostState;
-use crate::telegram_bot_api::{TelegramBotApi, TelegramBotApiError, TelegramBotIdentity};
 
 const TELEGRAM_BOT_TOKEN_HANDLE_PREFIX: &str = "telegram_bot_token";
 const TELEGRAM_WEBHOOK_SECRET_HANDLE_PREFIX: &str = "telegram_webhook_secret";
@@ -112,7 +112,7 @@ pub struct TelegramSetupService {
     operator_user_id: UserId,
     state: Arc<FilesystemTelegramHostState>,
     secret_store: Arc<dyn SecretStore>,
-    bot_api: Arc<dyn TelegramBotApi>,
+    bot_api: Arc<HostEgressTelegramBotApi>,
     public_base_url: Option<String>,
     save_lock: Arc<Mutex<()>>,
 }
@@ -127,7 +127,7 @@ impl TelegramSetupService {
         operator_user_id: UserId,
         state: Arc<FilesystemTelegramHostState>,
         secret_store: Arc<dyn SecretStore>,
-        bot_api: Arc<dyn TelegramBotApi>,
+        bot_api: Arc<HostEgressTelegramBotApi>,
         public_base_url: Option<String>,
     ) -> Self {
         Self {
@@ -164,7 +164,7 @@ impl TelegramSetupService {
         &self.operator_user_id
     }
 
-    pub fn bot_api(&self) -> Arc<dyn TelegramBotApi> {
+    pub(crate) fn bot_api(&self) -> Arc<HostEgressTelegramBotApi> {
         Arc::clone(&self.bot_api)
     }
 
@@ -626,113 +626,14 @@ fn map_secret_error(error: SecretStoreError) -> TelegramSetupError {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Mutex as StdMutex;
-
     use ironclaw_secrets::InMemorySecretStore;
 
     use super::*;
     use crate::state::FilesystemTelegramHostState;
-    use crate::test_support::{fault_injected_telegram_state, telegram_state};
-
-    #[derive(Debug, Clone)]
-    enum BotApiCall {
-        GetMe,
-        SetWebhook { url: String, secret: String },
-        DeleteWebhook,
-        SendMessage { _chat_id: i64 },
-    }
-
-    #[derive(Debug)]
-    struct RecordingBotApi {
-        calls: StdMutex<Vec<BotApiCall>>,
-        get_me: StdMutex<Result<TelegramBotIdentity, TelegramBotApiError>>,
-        set_webhook: Result<(), TelegramBotApiError>,
-    }
-
-    impl RecordingBotApi {
-        fn ok() -> Self {
-            Self {
-                calls: StdMutex::new(Vec::new()),
-                get_me: StdMutex::new(Ok(TelegramBotIdentity {
-                    id: 4242,
-                    username: "ironclaw_qa_bot".to_string(),
-                })),
-                set_webhook: Ok(()),
-            }
-        }
-
-        fn failing_get_me(error: TelegramBotApiError) -> Self {
-            Self {
-                calls: StdMutex::new(Vec::new()),
-                get_me: StdMutex::new(Err(error)),
-                set_webhook: Ok(()),
-            }
-        }
-
-        fn calls(&self) -> Vec<BotApiCall> {
-            self.calls.lock().expect("lock").clone()
-        }
-
-        /// Point `getMe` at a different bot so the next save models a bot
-        /// swap (new installation identity).
-        fn set_identity(&self, id: i64, username: &str) {
-            *self.get_me.lock().expect("lock") = Ok(TelegramBotIdentity {
-                id,
-                username: username.to_string(),
-            });
-        }
-    }
-
-    #[async_trait]
-    impl TelegramBotApi for RecordingBotApi {
-        async fn get_me(
-            &self,
-            _bot_token: &SecretString,
-        ) -> Result<TelegramBotIdentity, TelegramBotApiError> {
-            self.calls.lock().expect("lock").push(BotApiCall::GetMe);
-            self.get_me.lock().expect("lock").clone()
-        }
-
-        async fn set_webhook(
-            &self,
-            _bot_token: &SecretString,
-            url: &str,
-            secret_token: &SecretString,
-        ) -> Result<(), TelegramBotApiError> {
-            self.calls
-                .lock()
-                .expect("lock")
-                .push(BotApiCall::SetWebhook {
-                    url: url.to_string(),
-                    secret: secret_token.expose_secret().to_string(),
-                });
-            self.set_webhook.clone()
-        }
-
-        async fn delete_webhook(
-            &self,
-            _bot_token: &SecretString,
-        ) -> Result<(), TelegramBotApiError> {
-            self.calls
-                .lock()
-                .expect("lock")
-                .push(BotApiCall::DeleteWebhook);
-            Ok(())
-        }
-
-        async fn send_message(
-            &self,
-            _bot_token: &SecretString,
-            chat_id: i64,
-            _text: &str,
-        ) -> Result<(), TelegramBotApiError> {
-            self.calls
-                .lock()
-                .expect("lock")
-                .push(BotApiCall::SendMessage { _chat_id: chat_id });
-            Ok(())
-        }
-    }
+    use crate::test_support::{
+        RecordedBotApiCall as BotApiCall, RecordingBotApi, fault_injected_telegram_state,
+        telegram_state,
+    };
 
     fn service_with(
         state: Arc<FilesystemTelegramHostState>,
@@ -760,7 +661,7 @@ mod tests {
             UserId::new("operator").expect("user"),
             state,
             secret_store,
-            bot_api,
+            bot_api.client(),
             public_base_url.map(str::to_string),
         )
     }
@@ -869,7 +770,7 @@ mod tests {
     #[tokio::test]
     async fn save_happy_path_validates_registers_and_persists() {
         let store = telegram_state();
-        let bot_api = Arc::new(RecordingBotApi::ok());
+        let bot_api = Arc::new(RecordingBotApi::default());
         let service = service_with(
             Arc::clone(&store),
             Arc::clone(&bot_api),
@@ -918,11 +819,8 @@ mod tests {
     #[tokio::test]
     async fn invalid_token_persists_nothing() {
         let store = telegram_state();
-        let bot_api = Arc::new(RecordingBotApi::failing_get_me(
-            TelegramBotApiError::Rejected {
-                kind: crate::telegram_bot_api::TelegramBotApiRejection::Unauthorized,
-            },
-        ));
+        let bot_api = Arc::new(RecordingBotApi::default());
+        bot_api.reject_get_me(401);
         let service = service_with(
             Arc::clone(&store),
             bot_api,
@@ -937,18 +835,30 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn malformed_get_me_response_persists_nothing() {
+        let store = telegram_state();
+        let bot_api = Arc::new(RecordingBotApi::default());
+        bot_api.malformed_get_me_response();
+        let service = service_with(
+            Arc::clone(&store),
+            bot_api,
+            Some("https://ironclaw.example"),
+        );
+
+        let error = service
+            .save_with_previous(update_with_token("123:abc"))
+            .await
+            .expect_err("malformed provider response fails closed");
+        assert!(matches!(error, TelegramSetupError::BotApi { .. }));
+        assert!(service.current_setup().await.expect("read").is_none());
+    }
+
+    #[tokio::test]
     async fn set_webhook_failure_persists_nothing() {
         let store = telegram_state();
-        let bot_api = Arc::new(RecordingBotApi {
-            calls: StdMutex::new(Vec::new()),
-            get_me: StdMutex::new(Ok(TelegramBotIdentity {
-                id: 1,
-                username: "b".to_string(),
-            })),
-            set_webhook: Err(TelegramBotApiError::Rejected {
-                kind: crate::telegram_bot_api::TelegramBotApiRejection::InvalidRequest,
-            }),
-        });
+        let bot_api = Arc::new(RecordingBotApi::default());
+        bot_api.set_bot_identity(1, "b");
+        bot_api.reject_set_webhook(400);
         let service = service_with(
             Arc::clone(&store),
             bot_api,
@@ -965,7 +875,7 @@ mod tests {
     #[tokio::test]
     async fn missing_public_base_url_fails_before_any_bot_api_call_after_validation() {
         let store = telegram_state();
-        let bot_api = Arc::new(RecordingBotApi::ok());
+        let bot_api = Arc::new(RecordingBotApi::default());
         let service = service_with(Arc::clone(&store), Arc::clone(&bot_api), None);
         let error = service
             .save_with_previous(update_with_token("123:abc"))
@@ -985,7 +895,7 @@ mod tests {
     #[tokio::test]
     async fn rotation_bumps_revision_and_keeps_installation_identity() {
         let store = telegram_state();
-        let bot_api = Arc::new(RecordingBotApi::ok());
+        let bot_api = Arc::new(RecordingBotApi::default());
         let service = service_with(
             Arc::clone(&store),
             bot_api,
@@ -1012,7 +922,7 @@ mod tests {
     #[tokio::test]
     async fn blank_token_keeps_existing_material() {
         let store = telegram_state();
-        let bot_api = Arc::new(RecordingBotApi::ok());
+        let bot_api = Arc::new(RecordingBotApi::default());
         let service = service_with(
             Arc::clone(&store),
             bot_api,
@@ -1036,7 +946,7 @@ mod tests {
     #[tokio::test]
     async fn clear_deletes_webhook_and_record() {
         let store = telegram_state();
-        let bot_api = Arc::new(RecordingBotApi::ok());
+        let bot_api = Arc::new(RecordingBotApi::default());
         let service = service_with(
             Arc::clone(&store),
             Arc::clone(&bot_api),
@@ -1060,7 +970,7 @@ mod tests {
     #[tokio::test]
     async fn rollback_restores_previous_record_and_previous_webhook_registration() {
         let store = telegram_state();
-        let bot_api = Arc::new(RecordingBotApi::ok());
+        let bot_api = Arc::new(RecordingBotApi::default());
         let service = service_with(
             Arc::clone(&store),
             Arc::clone(&bot_api),
@@ -1111,7 +1021,7 @@ mod tests {
         let store = telegram_state();
         let secret_store = Arc::new(FailingPutSecretStore::new());
         secret_store.fail_puts();
-        let bot_api = Arc::new(RecordingBotApi::ok());
+        let bot_api = Arc::new(RecordingBotApi::default());
         let service = service_with_secret_store(
             Arc::clone(&store),
             Arc::clone(&secret_store) as Arc<dyn SecretStore>,
@@ -1142,7 +1052,7 @@ mod tests {
     #[tokio::test]
     async fn failed_record_persist_restores_previous_webhook_for_same_bot() {
         let (store, filesystem) = fault_injected_telegram_state();
-        let bot_api = Arc::new(RecordingBotApi::ok());
+        let bot_api = Arc::new(RecordingBotApi::default());
         let service = service_with(
             Arc::clone(&store),
             Arc::clone(&bot_api),
@@ -1180,7 +1090,7 @@ mod tests {
     #[tokio::test]
     async fn rollback_after_bot_swap_deletes_the_new_bots_webhook() {
         let store = telegram_state();
-        let bot_api = Arc::new(RecordingBotApi::ok());
+        let bot_api = Arc::new(RecordingBotApi::default());
         let service = service_with(
             Arc::clone(&store),
             Arc::clone(&bot_api),
@@ -1190,7 +1100,7 @@ mod tests {
             .save_with_previous(update_with_token("123:abc"))
             .await
             .expect("first save");
-        bot_api.set_identity(5555, "other_bot");
+        bot_api.set_bot_identity(5555, "other_bot");
         let (previous, second) = service
             .save_with_previous(update_with_token("555:swap"))
             .await

@@ -186,24 +186,6 @@ impl std::fmt::Debug for ResolvedTelegramInstallation {
     }
 }
 
-/// Resolution outcome for a verified inbound update. Telegram has no
-/// URL-verification handshake, so — unlike `ResolvedSlackIngress` — there is
-/// exactly one shape: an authenticated event for the resolved installation.
-#[derive(Debug, Clone)]
-pub struct ResolvedTelegramIngress {
-    installation: ResolvedTelegramInstallation,
-}
-
-impl ResolvedTelegramIngress {
-    pub fn new(installation: ResolvedTelegramInstallation) -> Self {
-        Self { installation }
-    }
-
-    pub fn installation(&self) -> &ResolvedTelegramInstallation {
-        &self.installation
-    }
-}
-
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub enum TelegramIngressError {
     #[error(transparent)]
@@ -222,18 +204,6 @@ pub enum TelegramIngressError {
         tenant_id: TenantId,
         adapter_installation_id: AdapterInstallationId,
     },
-}
-
-pub trait TelegramInstallationResolver: Send + Sync {
-    fn resolve_ingress<'a>(
-        &'a self,
-        headers: &'a HeaderMap,
-        body: &'a [u8],
-    ) -> Pin<
-        Box<dyn Future<Output = Result<ResolvedTelegramIngress, TelegramIngressError>> + Send + 'a>,
-    >;
-
-    fn drain_installations<'a>(&'a self) -> Pin<Box<dyn Future<Output = ()> + Send + 'a>>;
 }
 
 /// Per-setup-revision workflow assembly: the product workflow the runner
@@ -442,31 +412,25 @@ impl DynamicTelegramInstallationResolver {
     }
 }
 
-impl TelegramInstallationResolver for DynamicTelegramInstallationResolver {
-    fn resolve_ingress<'a>(
-        &'a self,
-        headers: &'a HeaderMap,
-        body: &'a [u8],
-    ) -> Pin<
-        Box<dyn Future<Output = Result<ResolvedTelegramIngress, TelegramIngressError>> + Send + 'a>,
-    > {
-        Box::pin(async move {
-            let live = self.live_installation().await?;
-            let evidence = live.dispatcher.verify_webhook_auth(headers, body)?;
-            Ok(ResolvedTelegramIngress::new(
-                ResolvedTelegramInstallation::new(
-                    live.tenant_id,
-                    live.adapter_installation_id,
-                    evidence,
-                    live.dispatcher,
-                    live.workflow_observer,
-                ),
-            ))
-        })
+impl DynamicTelegramInstallationResolver {
+    pub async fn resolve_ingress(
+        &self,
+        headers: &HeaderMap,
+        body: &[u8],
+    ) -> Result<ResolvedTelegramInstallation, TelegramIngressError> {
+        let live = self.live_installation().await?;
+        let evidence = live.dispatcher.verify_webhook_auth(headers, body)?;
+        Ok(ResolvedTelegramInstallation::new(
+            live.tenant_id,
+            live.adapter_installation_id,
+            evidence,
+            live.dispatcher,
+            live.workflow_observer,
+        ))
     }
 
-    fn drain_installations<'a>(&'a self) -> Pin<Box<dyn Future<Output = ()> + Send + 'a>> {
-        Box::pin(async move { self.drain_live_installations().await })
+    pub async fn drain_installations(&self) {
+        self.drain_live_installations().await;
     }
 }
 
@@ -522,12 +486,12 @@ impl DynamicTelegramDispatcherLifecycle {
 
 #[derive(Clone)]
 pub struct TelegramIngressService {
-    resolver: Arc<dyn TelegramInstallationResolver>,
+    resolver: Arc<DynamicTelegramInstallationResolver>,
     installation_rate_limiter: ironclaw_channel_host::host_ingress::InstallationRateLimiter,
 }
 
 impl TelegramIngressService {
-    pub fn new(resolver: Arc<dyn TelegramInstallationResolver>) -> Self {
+    pub fn new(resolver: Arc<DynamicTelegramInstallationResolver>) -> Self {
         Self::with_rate_limit_config(
             resolver,
             ironclaw_channel_host::host_ingress::InstallationRateLimitConfig::new(
@@ -538,7 +502,7 @@ impl TelegramIngressService {
     }
 
     pub fn with_rate_limit_config(
-        resolver: Arc<dyn TelegramInstallationResolver>,
+        resolver: Arc<DynamicTelegramInstallationResolver>,
         rate_limit: ironclaw_channel_host::host_ingress::InstallationRateLimitConfig,
     ) -> Self {
         Self {
@@ -549,20 +513,19 @@ impl TelegramIngressService {
     }
 
     async fn handle_updates(&self, headers: HeaderMap, body: Bytes) -> Response {
-        let ingress = match self.resolver.resolve_ingress(&headers, body.as_ref()).await {
-            Ok(ingress) => ingress,
+        let installation = match self.resolver.resolve_ingress(&headers, body.as_ref()).await {
+            Ok(installation) => installation,
             Err(error) => return ingress_error_response(error),
         };
         if let Err(exceeded) = self.installation_rate_limiter.check(
-            &ingress.installation().tenant_id,
-            &ingress.installation().adapter_installation_id,
+            &installation.tenant_id,
+            &installation.adapter_installation_id,
         ) {
             return ingress_error_response(TelegramIngressError::InstallationRateLimited {
                 tenant_id: exceeded.tenant_id,
                 adapter_installation_id: exceeded.adapter_installation_id,
             });
         }
-        let installation = ingress.installation();
         match installation
             .dispatcher()
             .process_verified_update(
@@ -589,7 +552,7 @@ impl std::fmt::Debug for TelegramIngressService {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter
             .debug_struct("TelegramIngressService")
-            .field("resolver", &"Arc<dyn TelegramInstallationResolver>")
+            .field("resolver", &"DynamicTelegramInstallationResolver")
             .field("installation_rate_limiter", &self.installation_rate_limiter)
             .finish()
     }
@@ -608,7 +571,7 @@ impl TelegramUpdatesRouteState {
         Self { ingress }
     }
 
-    pub fn from_resolver(resolver: Arc<dyn TelegramInstallationResolver>) -> Self {
+    pub fn from_resolver(resolver: Arc<DynamicTelegramInstallationResolver>) -> Self {
         Self::new(TelegramIngressService::new(resolver))
     }
 
@@ -940,49 +903,6 @@ mod tests {
         }
     }
 
-    struct FakeTelegramResolver {
-        dispatcher: Arc<dyn TelegramUpdatesWebhookDispatcher>,
-    }
-
-    impl FakeTelegramResolver {
-        fn new(dispatcher: Arc<dyn TelegramUpdatesWebhookDispatcher>) -> Self {
-            Self { dispatcher }
-        }
-    }
-
-    impl TelegramInstallationResolver for FakeTelegramResolver {
-        fn resolve_ingress<'a>(
-            &'a self,
-            headers: &'a HeaderMap,
-            body: &'a [u8],
-        ) -> Pin<
-            Box<
-                dyn Future<Output = Result<ResolvedTelegramIngress, TelegramIngressError>>
-                    + Send
-                    + 'a,
-            >,
-        > {
-            Box::pin(async move {
-                let evidence = self.dispatcher.verify_webhook_auth(headers, body)?;
-                Ok(ResolvedTelegramIngress::new(
-                    ResolvedTelegramInstallation::new(
-                        TenantId::new("tenant-alpha").expect("valid tenant"),
-                        AdapterInstallationId::new("tg-bot-4242").expect("valid installation"),
-                        evidence,
-                        Arc::clone(&self.dispatcher),
-                        None,
-                    ),
-                ))
-            })
-        }
-
-        fn drain_installations<'a>(&'a self) -> Pin<Box<dyn Future<Output = ()> + Send + 'a>> {
-            Box::pin(async move {
-                self.dispatcher.drain_immediate_ack_tasks().await;
-            })
-        }
-    }
-
     async fn post_to_state(
         state: &TelegramUpdatesRouteState,
         body: String,
@@ -1007,9 +927,18 @@ mod tests {
         dispatcher: FakeTelegramDispatcher,
         body: &'static str,
     ) -> Response {
-        let resolver = Arc::new(FakeTelegramResolver::new(Arc::new(dispatcher)));
-        let state = TelegramUpdatesRouteState::from_resolver(resolver);
-        post_to_state(&state, body.to_string(), Vec::new()).await
+        let headers = HeaderMap::new();
+        let evidence = match dispatcher.verify_webhook_auth(&headers, body.as_bytes()) {
+            Ok(evidence) => evidence,
+            Err(error) => return ingress_error_response(TelegramIngressError::Runner(error)),
+        };
+        match dispatcher
+            .process_verified_update(body.as_bytes(), &evidence, None)
+            .await
+        {
+            Ok(_) => (StatusCode::OK, "ok").into_response(),
+            Err(error) => runner_error_response(error),
+        }
     }
 
     async fn assert_error_body(response: Response, expected: &str) {
@@ -1539,9 +1468,17 @@ mod tests {
 
     #[tokio::test]
     async fn telegram_updates_handler_rate_limits_per_installation() {
-        let dispatcher = FakeTelegramDispatcher::verified();
-        let calls = Arc::clone(&dispatcher.dispatch_calls);
-        let resolver = Arc::new(FakeTelegramResolver::new(Arc::new(dispatcher)));
+        let bot_api = Arc::new(RecordingBotApi::default());
+        let setup = configured_setup_service(bot_api).await;
+        let webhook_secret = current_webhook_secret(&setup).await;
+        let pairing = pairing_service_with(Arc::clone(&setup));
+        let resolver = Arc::new(DynamicTelegramInstallationResolver::new(
+            setup,
+            pairing,
+            Arc::new(FakeIdentityLookup::default()) as Arc<dyn RebornUserIdentityLookup>,
+            Arc::new(FakeRevisionWorkflowBuilder::default())
+                as Arc<dyn TelegramRevisionWorkflowBuilder>,
+        ));
         let state = TelegramUpdatesRouteState::new(TelegramIngressService::with_rate_limit_config(
             resolver,
             ironclaw_channel_host::host_ingress::InstallationRateLimitConfig::new(
@@ -1550,13 +1487,22 @@ mod tests {
             ),
         ));
 
-        let first = post_to_state(&state, r#"{"update_id":1}"#.to_string(), Vec::new()).await;
+        let first = post_to_state(
+            &state,
+            r#"{"update_id":1}"#.to_string(),
+            vec![(TELEGRAM_SECRET_TOKEN_HEADER, webhook_secret.clone())],
+        )
+        .await;
         assert_eq!(first.status(), StatusCode::OK);
 
-        let second = post_to_state(&state, r#"{"update_id":2}"#.to_string(), Vec::new()).await;
+        let second = post_to_state(
+            &state,
+            r#"{"update_id":2}"#.to_string(),
+            vec![(TELEGRAM_SECRET_TOKEN_HEADER, webhook_secret)],
+        )
+        .await;
         assert_eq!(second.status(), StatusCode::TOO_MANY_REQUESTS);
         assert_error_body(second, "capacity").await;
-        assert_eq!(calls.load(Ordering::SeqCst), 1);
     }
 
     #[test]

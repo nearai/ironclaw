@@ -36,10 +36,10 @@ use ironclaw_wasm_product_adapters::{
 use serde::Deserialize;
 use tokio::sync::Mutex;
 
+use crate::bot_api::HostEgressTelegramBotApi;
 use crate::telegram_actor_identity::{
     TELEGRAM_IDENTITY_PROVIDER, telegram_user_identity_provider_user_id,
 };
-use crate::telegram_bot_api::TelegramBotApi;
 use crate::telegram_pairing::{
     PAIRING_CODE_ALPHABET, PAIRING_CODE_LEN, PairingConsumeOutcome, TelegramPairingService,
 };
@@ -77,7 +77,7 @@ const IDENTITY_LOOKUP_UNAVAILABLE_REASON: &str = "telegram identity lookup unava
 pub struct TelegramInboundPreRouter {
     pairing: Arc<TelegramPairingService>,
     lookup: Arc<dyn RebornUserIdentityLookup>,
-    bot_api: Arc<dyn TelegramBotApi>,
+    bot_api: Arc<HostEgressTelegramBotApi>,
     setup: Arc<TelegramSetupService>,
     installation_id: AdapterInstallationId,
     hint_throttle: Mutex<HashMap<i64, Instant>>,
@@ -91,7 +91,7 @@ impl TelegramInboundPreRouter {
     pub fn new(
         pairing: Arc<TelegramPairingService>,
         lookup: Arc<dyn RebornUserIdentityLookup>,
-        bot_api: Arc<dyn TelegramBotApi>,
+        bot_api: Arc<HostEgressTelegramBotApi>,
         setup: Arc<TelegramSetupService>,
         installation_id: AdapterInstallationId,
         runner: Arc<dyn TelegramUpdatesWebhookDispatcher>,
@@ -472,104 +472,14 @@ pub mod test_fixtures {
 
     use super::*;
     use crate::state::FilesystemTelegramHostState;
-    use crate::telegram_bot_api::{TelegramBotApiError, TelegramBotIdentity};
     use crate::telegram_setup::TelegramInstallationSetupUpdate;
+    pub(crate) use crate::test_support::RecordingBotApi;
     use crate::test_support::telegram_state;
     use ironclaw_channel_host::auth_continuation::RebornAuthContinuationDispatcher;
     use ironclaw_channel_host::identity::RebornUserIdentityLookupError;
 
     pub const FIXTURE_BOT_ID: i64 = 4242;
     pub const FIXTURE_BOT_USERNAME: &str = "ironclaw_qa_bot";
-
-    /// Records `sendMessage` calls; setup-time calls (`getMe`, `setWebhook`,
-    /// `deleteWebhook`) succeed with a fixed bot identity unless a test swaps
-    /// it via [`RecordingBotApi::set_bot_identity`] (bot-swap scenarios).
-    #[derive(Debug)]
-    pub struct RecordingBotApi {
-        sends: StdMutex<Vec<(i64, String)>>,
-        fail_sends: AtomicBool,
-        identity: StdMutex<TelegramBotIdentity>,
-    }
-
-    impl Default for RecordingBotApi {
-        fn default() -> Self {
-            Self {
-                sends: StdMutex::new(Vec::new()),
-                fail_sends: AtomicBool::new(false),
-                identity: StdMutex::new(TelegramBotIdentity {
-                    id: FIXTURE_BOT_ID,
-                    username: FIXTURE_BOT_USERNAME.to_string(),
-                }),
-            }
-        }
-    }
-
-    impl RecordingBotApi {
-        pub fn sends(&self) -> Vec<(i64, String)> {
-            self.sends.lock().expect("lock").clone()
-        }
-
-        pub fn fail_sends(&self) {
-            self.fail_sends.store(true, Ordering::SeqCst);
-        }
-
-        pub fn succeed_sends(&self) {
-            self.fail_sends.store(false, Ordering::SeqCst);
-        }
-
-        /// Point `getMe` at a different bot so the next setup save models a
-        /// bot swap (new installation id).
-        pub fn set_bot_identity(&self, id: i64, username: &str) {
-            *self.identity.lock().expect("lock") = TelegramBotIdentity {
-                id,
-                username: username.to_string(),
-            };
-        }
-    }
-
-    #[async_trait]
-    impl TelegramBotApi for RecordingBotApi {
-        async fn get_me(
-            &self,
-            _bot_token: &SecretString,
-        ) -> Result<TelegramBotIdentity, TelegramBotApiError> {
-            Ok(self.identity.lock().expect("lock").clone())
-        }
-
-        async fn set_webhook(
-            &self,
-            _bot_token: &SecretString,
-            _url: &str,
-            _secret_token: &SecretString,
-        ) -> Result<(), TelegramBotApiError> {
-            Ok(())
-        }
-
-        async fn delete_webhook(
-            &self,
-            _bot_token: &SecretString,
-        ) -> Result<(), TelegramBotApiError> {
-            Ok(())
-        }
-
-        async fn send_message(
-            &self,
-            _bot_token: &SecretString,
-            chat_id: i64,
-            text: &str,
-        ) -> Result<(), TelegramBotApiError> {
-            self.sends
-                .lock()
-                .expect("lock")
-                .push((chat_id, text.to_string()));
-            if self.fail_sends.load(Ordering::SeqCst) {
-                return Err(TelegramBotApiError::Rejected {
-                    kind: crate::telegram_bot_api::TelegramBotApiRejection::Forbidden,
-                });
-            }
-            Ok(())
-        }
-    }
 
     #[derive(Debug, Default)]
     pub struct RecordingContinuationDispatcher {
@@ -683,11 +593,13 @@ pub mod test_fixtures {
         AgentId::new("agent-a").expect("valid agent")
     }
 
-    pub fn unconfigured_setup_service(bot_api: Arc<RecordingBotApi>) -> Arc<TelegramSetupService> {
+    pub(crate) fn unconfigured_setup_service(
+        bot_api: Arc<RecordingBotApi>,
+    ) -> Arc<TelegramSetupService> {
         unconfigured_setup_service_with_state(bot_api, telegram_state())
     }
 
-    pub fn unconfigured_setup_service_with_state(
+    pub(crate) fn unconfigured_setup_service_with_state(
         bot_api: Arc<RecordingBotApi>,
         state: Arc<FilesystemTelegramHostState>,
     ) -> Arc<TelegramSetupService> {
@@ -698,14 +610,14 @@ pub mod test_fixtures {
             UserId::new("operator").expect("valid user"),
             state,
             Arc::new(InMemorySecretStore::new()),
-            bot_api,
+            bot_api.client(),
             Some("https://ironclaw.example".to_string()),
         ))
     }
 
     /// A saved deployment bot (`tg-bot-4242`) with token + webhook secret in
     /// the in-memory secret store.
-    pub async fn configured_setup_service(
+    pub(crate) async fn configured_setup_service(
         bot_api: Arc<RecordingBotApi>,
     ) -> Arc<TelegramSetupService> {
         let setup = unconfigured_setup_service(bot_api);
@@ -852,7 +764,7 @@ mod tests {
         let pre_router = TelegramInboundPreRouter::new(
             Arc::clone(&pairing),
             lookup.clone() as Arc<dyn RebornUserIdentityLookup>,
-            bot_api.clone() as Arc<dyn TelegramBotApi>,
+            bot_api.client(),
             setup,
             fixture_installation_id(),
             runner,
