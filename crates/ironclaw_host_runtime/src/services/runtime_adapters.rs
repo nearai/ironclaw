@@ -59,6 +59,9 @@ where
     /// (`BoundCapabilityRequest` → here → `FirstPartyCapabilityRequest`) so a
     /// first-party handler can attribute the action to the acting user.
     pub authenticated_actor_user_id: Option<UserId>,
+    /// Loop turn-run identity forwarded from the dispatch request. `None`
+    /// for non-loop callers.
+    pub run_id: Option<ironclaw_host_api::RunId>,
     pub estimate: ResourceEstimate,
     pub mounts: Option<MountView>,
     pub resource_reservation: Option<ResourceReservation>,
@@ -561,6 +564,7 @@ where
             // in `scope`), threaded through so a first-party handler can
             // attribute the action to the acting user.
             authenticated_actor_user_id: request.authenticated_actor_user_id.clone(),
+            run_id: request.run_id,
             estimate: request.estimate,
             mounts: request.mounts,
             services,

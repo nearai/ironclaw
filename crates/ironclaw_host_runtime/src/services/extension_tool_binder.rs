@@ -153,6 +153,9 @@ where
                 // ToolCall carries actor authority within `scope`; this adapter
                 // interface has no separate human-actor handle.
                 authenticated_actor_user_id: None,
+                // ToolCall does not carry loop turn-run identity either; only
+                // the first-party coding lane consumes `run_id` today.
+                run_id: None,
                 estimate: call.resources.estimate,
                 mounts: call.resources.mounts,
                 resource_reservation: call.resources.reservation,

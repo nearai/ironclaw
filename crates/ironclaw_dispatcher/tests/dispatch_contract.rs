@@ -38,6 +38,7 @@ async fn dispatcher_routes_capability_through_resolved_binding() {
     let dispatcher = RuntimeDispatcher::new(&resolver, governor.as_ref());
     let result = dispatcher
         .dispatch_json(CapabilityDispatchRequest {
+            run_id: None,
             capability_id: CapabilityId::new("echo.say").unwrap(),
             scope: scope.clone(),
             authenticated_actor_user_id: None,
@@ -116,6 +117,7 @@ async fn dispatcher_fails_unknown_capability_before_any_binding_work() {
     let dispatcher = RuntimeDispatcher::new(&resolver, governor.as_ref());
     let err = dispatcher
         .dispatch_json(CapabilityDispatchRequest {
+            run_id: None,
             capability_id: CapabilityId::new("missing.say").unwrap(),
             scope,
             authenticated_actor_user_id: None,
@@ -146,6 +148,7 @@ async fn dispatcher_releases_prepared_reservation_when_resolution_fails() {
     let dispatcher = RuntimeDispatcher::new(&resolver, governor.as_ref());
     let err = dispatcher
         .dispatch_json(CapabilityDispatchRequest {
+            run_id: None,
             capability_id: CapabilityId::new("missing.say").unwrap(),
             scope,
             authenticated_actor_user_id: None,
@@ -182,6 +185,7 @@ async fn dispatcher_hands_prepared_reservation_to_the_binding() {
     let dispatcher = RuntimeDispatcher::new(&resolver, governor.as_ref());
     let result = dispatcher
         .dispatch_json(CapabilityDispatchRequest {
+            run_id: None,
             capability_id: CapabilityId::new("echo.say").unwrap(),
             scope,
             authenticated_actor_user_id: None,
@@ -394,6 +398,7 @@ impl BoundCapabilityAdapter for RecordingBinding {
 
 fn sample_request(capability_id: &str, input: Value) -> CapabilityDispatchRequest {
     CapabilityDispatchRequest {
+        run_id: None,
         capability_id: CapabilityId::new(capability_id).unwrap(),
         scope: sample_scope(),
         authenticated_actor_user_id: None,

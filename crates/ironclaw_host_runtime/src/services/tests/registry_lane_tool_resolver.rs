@@ -90,6 +90,7 @@ impl RuntimeAdapter<LocalFilesystem, InMemoryResourceGovernor> for EchoLane {
 
 fn wasm_capability_request(input: Value) -> CapabilityDispatchRequest {
     CapabilityDispatchRequest {
+        run_id: None,
         capability_id: CapabilityId::new("test-wasm.run").unwrap(),
         scope: sample_scope(),
         authenticated_actor_user_id: None,
@@ -186,6 +187,7 @@ async fn unconfigured_lane_fails_missing_backend_and_releases_prepared_reservati
 
     let err = dispatcher
         .dispatch_json(CapabilityDispatchRequest {
+            run_id: None,
             capability_id: CapabilityId::new("test-wasm.run").unwrap(),
             scope,
             authenticated_actor_user_id: None,
@@ -304,6 +306,7 @@ async fn resolved_binding_survives_registry_swap_mid_flight() {
     let adapter: Arc<dyn BoundCapabilityAdapter> = binding.adapter;
     let result = adapter
         .dispatch_json(BoundCapabilityRequest {
+            run_id: None,
             capability_id: echo_id,
             scope: sample_scope(),
             estimate: ResourceEstimate {

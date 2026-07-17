@@ -78,7 +78,7 @@ is_reborn_test_path() {
     crates/ironclaw_product_*/*|crates/ironclaw_slack_extension/*|crates/ironclaw_telegram_extension/*)
       return 0
       ;;
-    crates/ironclaw_webui_v2/*)
+    crates/ironclaw_webui/*)
       return 0
       ;;
     crates/ironclaw_conversations/*|crates/ironclaw_outbound/*|crates/ironclaw_triggers/*)

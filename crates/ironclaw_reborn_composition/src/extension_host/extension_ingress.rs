@@ -560,7 +560,7 @@ mod serve_mount {
     };
 
     use super::*;
-    use crate::webui::webui_serve::{PublicRouteDrain, PublicRouteMount};
+    use crate::webui::route_mounts::{PublicRouteDrain, PublicRouteMount};
 
     /// The canonical generic ingress route pattern (axum path params).
     pub const EXTENSION_INGRESS_ROUTE_PATTERN: &str =

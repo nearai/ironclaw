@@ -11,4 +11,4 @@ target/
 node_modules/
 **/node_modules/
 crates/ironclaw_webui_v2_static/static/dist/
-crates/ironclaw_webui_v2/frontend/dist/
+crates/ironclaw_webui/frontend/dist/

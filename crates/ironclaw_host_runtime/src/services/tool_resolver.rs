@@ -232,6 +232,7 @@ where
                 capability_id: &request.capability_id,
                 scope: request.scope,
                 authenticated_actor_user_id: request.authenticated_actor_user_id,
+                run_id: request.run_id,
                 estimate: request.estimate,
                 mounts: request.mounts,
                 resource_reservation: request.resource_reservation,

@@ -139,32 +139,32 @@ const PATH_TERM_COLLISIONS: &[(&str, &str, &str)] = &[
         "Gemini OAuth endpoints inside the multi-provider LLM crate",
     ),
     (
-        "crates/ironclaw_reborn_webui_ingress/src/auth/",
+        "crates/ironclaw_webui/src/auth/",
         "google",
         "WebUI browser-login SSO provider (OIDC), not the extensions vendor",
     ),
     (
-        "crates/ironclaw_reborn_webui_ingress/src/auth/",
+        "crates/ironclaw_webui/src/auth/",
         "github",
         "WebUI browser-login SSO provider, not the extensions vendor",
     ),
     (
-        "crates/ironclaw_reborn_webui_ingress/src/lib.rs",
+        "crates/ironclaw_webui/src/lib.rs",
         "google",
         "re-export of the SSO login providers",
     ),
     (
-        "crates/ironclaw_reborn_webui_ingress/src/lib.rs",
+        "crates/ironclaw_webui/src/lib.rs",
         "github",
         "re-export of the SSO login providers",
     ),
     (
-        "crates/ironclaw_reborn_webui_ingress/src/auth/",
+        "crates/ironclaw_webui/src/auth/",
         "accounts.google.com",
         "WebUI browser-login SSO (OIDC) endpoints, not the extensions vendor",
     ),
     (
-        "crates/ironclaw_reborn_webui_ingress/src/auth/",
+        "crates/ironclaw_webui/src/auth/",
         "oauth2.googleapis.com",
         "WebUI browser-login SSO (OIDC) endpoints, not the extensions vendor",
     ),
@@ -230,7 +230,7 @@ const PATH_TERM_COLLISIONS: &[(&str, &str, &str)] = &[
         "credential-prefix redaction (github_pat_)",
     ),
     (
-        "crates/ironclaw_webui_v2/frontend/src/pages/chat/lib/failureMessages.ts",
+        "crates/ironclaw_webui/frontend/src/pages/chat/lib/failureMessages.ts",
         "github",
         "credential-prefix redaction (github_pat_)",
     ),
@@ -435,14 +435,14 @@ const PATH_TERM_COLLISIONS: &[(&str, &str, &str)] = &[
          (issue-tracker profile); a safety denylist, not extension routing",
     ),
     (
-        "crates/ironclaw_webui_v2/frontend/src/i18n/",
+        "crates/ironclaw_webui/frontend/src/i18n/",
         "google",
         "Google named only as a NEAR AI browser-login SSO provider in localized \
          onboarding copy (onboarding.nearaiLocalSso: \"GitHub, Google, NEAR Wallet\"), \
          not the extensions vendor — localized UI copy must name the login providers",
     ),
     (
-        "crates/ironclaw_webui_v2/frontend/src/i18n/",
+        "crates/ironclaw_webui/frontend/src/i18n/",
         "github",
         "GitHub named only in localized UI copy (all 11 locales), never the github \
          extension: the NEAR AI browser-login SSO provider name (onboarding.nearaiLocalSso, \
@@ -454,62 +454,62 @@ const PATH_TERM_COLLISIONS: &[(&str, &str, &str)] = &[
          provider/source it refers to",
     ),
     (
-        "crates/ironclaw_webui_v2/frontend/src/pages/chat/lib/gates.ts",
+        "crates/ironclaw_webui/frontend/src/pages/chat/lib/gates.ts",
         "github",
         "WebUI browser-login SSO provider button/route, not the extensions vendor",
     ),
     (
-        "crates/ironclaw_webui_v2/frontend/src/pages/login/components/oauth-provider-buttons.tsx",
+        "crates/ironclaw_webui/frontend/src/pages/login/components/oauth-provider-buttons.tsx",
         "github",
         "WebUI browser-login SSO provider button/route, not the extensions vendor",
     ),
     (
-        "crates/ironclaw_webui_v2/frontend/src/pages/login/components/oauth-provider-buttons.tsx",
+        "crates/ironclaw_webui/frontend/src/pages/login/components/oauth-provider-buttons.tsx",
         "google",
         "WebUI browser-login SSO provider button/route, not the extensions vendor",
     ),
     (
-        "crates/ironclaw_webui_v2/frontend/src/pages/login/hooks/useOAuthProviders.ts",
+        "crates/ironclaw_webui/frontend/src/pages/login/hooks/useOAuthProviders.ts",
         "github",
         "WebUI browser-login SSO provider button/route, not the extensions vendor",
     ),
     (
-        "crates/ironclaw_webui_v2/frontend/src/pages/login/hooks/useOAuthProviders.ts",
+        "crates/ironclaw_webui/frontend/src/pages/login/hooks/useOAuthProviders.ts",
         "google",
         "WebUI browser-login SSO provider button/route, not the extensions vendor",
     ),
     (
-        "crates/ironclaw_webui_v2/frontend/src/pages/onboarding/onboarding-page.tsx",
+        "crates/ironclaw_webui/frontend/src/pages/onboarding/onboarding-page.tsx",
         "github",
         "WebUI browser-login SSO provider button/route, not the extensions vendor",
     ),
     (
-        "crates/ironclaw_webui_v2/frontend/src/pages/onboarding/onboarding-page.tsx",
+        "crates/ironclaw_webui/frontend/src/pages/onboarding/onboarding-page.tsx",
         "google",
         "WebUI browser-login SSO provider button/route, not the extensions vendor",
     ),
     (
-        "crates/ironclaw_webui_v2/frontend/src/pages/settings/components/provider-card.tsx",
+        "crates/ironclaw_webui/frontend/src/pages/settings/components/provider-card.tsx",
         "github",
         "WebUI browser-login SSO provider button/route, not the extensions vendor",
     ),
     (
-        "crates/ironclaw_webui_v2/frontend/src/pages/settings/components/provider-card.tsx",
+        "crates/ironclaw_webui/frontend/src/pages/settings/components/provider-card.tsx",
         "google",
         "WebUI browser-login SSO provider button/route, not the extensions vendor",
     ),
     (
-        "crates/ironclaw_webui_v2/frontend/src/pages/settings/hooks/useProviderLogin.ts",
+        "crates/ironclaw_webui/frontend/src/pages/settings/hooks/useProviderLogin.ts",
         "github",
         "WebUI browser-login SSO provider button/route, not the extensions vendor",
     ),
     (
-        "crates/ironclaw_webui_v2/frontend/src/pages/settings/hooks/useProviderLogin.ts",
+        "crates/ironclaw_webui/frontend/src/pages/settings/hooks/useProviderLogin.ts",
         "google",
         "WebUI browser-login SSO provider button/route, not the extensions vendor",
     ),
     (
-        "crates/ironclaw_webui_v2/frontend/src/pages/settings/hooks/useProviderLogin.ts",
+        "crates/ironclaw_webui/frontend/src/pages/settings/hooks/useProviderLogin.ts",
         "private.near.ai",
         "WebUI browser-login SSO provider button/route, not the extensions vendor",
     ),
@@ -932,7 +932,7 @@ fn collect_workspace_hits(root: &Path, terms: &BTreeSet<String>) -> BTreeSet<(St
         }
     }
     // The WebUI frontend ships from a non-src directory of a generic crate.
-    let frontend = root.join("crates/ironclaw_webui_v2/frontend/src");
+    let frontend = root.join("crates/ironclaw_webui/frontend/src");
     scan_dir(root, &frontend, terms, &mut hits);
 
     hits.into_iter()

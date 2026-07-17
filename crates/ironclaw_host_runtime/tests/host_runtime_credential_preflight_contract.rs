@@ -21,7 +21,7 @@ mod support;
 use std::sync::Arc;
 
 use chrono::Utc;
-use ironclaw_authorization::{GrantAuthorizer, InMemoryCapabilityLeaseStore};
+use ironclaw_authorization::{GrantAuthorizer, in_memory_backed_capability_lease_store};
 use ironclaw_extensions::{ExtensionManifest, ExtensionPackage, ExtensionRegistry, ManifestSource};
 use ironclaw_filesystem::LocalFilesystem;
 use ironclaw_host_api::*;
@@ -188,7 +188,7 @@ fn trust_decision_with_dispatch_authority() -> TrustDecision {
 async fn product_auth_account_credential_does_not_trip_preflight() {
     let run_state = Arc::new(InMemoryRunStateStore::new());
     let approval_requests = Arc::new(InMemoryApprovalRequestStore::new());
-    let capability_leases = Arc::new(InMemoryCapabilityLeaseStore::new());
+    let capability_leases = Arc::new(in_memory_backed_capability_lease_store());
     let secret_store = Arc::new(InMemorySecretStore::new());
     // Deliberately do NOT seed any secret under "google_oauth_token".
     // The secret store is empty. If the pre-flight incorrectly probes the
@@ -246,7 +246,7 @@ async fn product_auth_account_credential_does_not_trip_preflight() {
 async fn secret_handle_credential_absent_still_trips_preflight() {
     let run_state = Arc::new(InMemoryRunStateStore::new());
     let approval_requests = Arc::new(InMemoryApprovalRequestStore::new());
-    let capability_leases = Arc::new(InMemoryCapabilityLeaseStore::new());
+    let capability_leases = Arc::new(in_memory_backed_capability_lease_store());
     let secret_store = Arc::new(InMemorySecretStore::new());
     // No secret seeded — the SecretHandle pre-flight must fire.
 
@@ -306,7 +306,7 @@ async fn secret_handle_credential_absent_still_trips_preflight() {
 async fn tenant_shared_secret_satisfies_credential_preflight() {
     let run_state = Arc::new(InMemoryRunStateStore::new());
     let approval_requests = Arc::new(InMemoryApprovalRequestStore::new());
-    let capability_leases = Arc::new(InMemoryCapabilityLeaseStore::new());
+    let capability_leases = Arc::new(in_memory_backed_capability_lease_store());
     let secret_store = Arc::new(InMemorySecretStore::new());
 
     let services = HostRuntimeServices::new(
@@ -397,6 +397,7 @@ async fn invoke_capability_forged_scope_fails_before_preflight() {
     // fields. The invocation_id in the scope will not match context_a's
     // invocation_id.
     let forged_context = ExecutionContext {
+        run_id: None,
         resource_scope: context_b.resource_scope.clone(), // mismatched scope
         ..context_a
     };
@@ -458,6 +459,7 @@ async fn spawn_capability_forged_scope_fails_before_preflight() {
     let context_b = execution_context_without_grants();
 
     let forged_context = ExecutionContext {
+        run_id: None,
         resource_scope: context_b.resource_scope.clone(),
         ..context_a
     };

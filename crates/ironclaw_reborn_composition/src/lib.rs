@@ -69,7 +69,9 @@ pub use automation::facade::RebornAutomationProductFacade;
 pub use automation::trigger_poller::{NoopPostSubmitDeliveryHook, PostSubmitDeliveryHook};
 pub use error::RebornBuildError;
 pub use extension_host::channel_host::{ChannelHostIdentity, GenericChannelHostAssembly};
-pub use extension_host::channel_identity::ChannelIdentityBindingConfig;
+pub use extension_host::channel_identity::{
+    ChannelIdentityBindingConfig, channel_identity_binding_hook_factory,
+};
 pub use extension_host::extension_ingress::{
     ChannelInboundSinkConfig, ChannelIngressDrain, ChannelIngressRegistration,
     ExtensionIngressParts, ExtensionIngressRegistry, GenericChannelInboundSink,
@@ -143,6 +145,13 @@ pub use llm_admin::nearai_mcp::{
 };
 #[cfg(feature = "openai-compat-beta")]
 pub use llm_admin::openai_compat_serve::build_openai_compat_route_mount;
+// Re-exported for the host-owned `ironclaw_webui::webui_v2_app`
+// (hoisted up from this crate): its bearer-auth middleware mints tenant-scoped
+// verified-bearer evidence for protected OpenAI-compatible mounts. Ingress must
+// not depend on `ironclaw_product_adapters` directly (architecture boundary), so
+// it reaches this helper through composition's facade.
+#[cfg(feature = "openai-compat-beta")]
+pub use ironclaw_product_adapters::mark_bearer_token_verified_for_tenant;
 #[cfg(feature = "root-llm-provider")]
 pub use llm_admin::provider_admin::{
     RebornModelRoutesState, RebornProviderAdmin, RebornProviderAdminError, RebornProviderInfo,
@@ -178,6 +187,13 @@ pub use product_auth::api::auth::{
     RebornManualTokenSubmitRequest, RebornManualTokenSubmitResponse, RebornOAuthCallbackError,
     RebornOAuthCallbackOutcome, RebornOAuthCallbackRequest, RebornOAuthCallbackResponse,
     RebornProductAuthServicePorts, RebornProductAuthServices,
+};
+// Product-auth WebUI route-mount builders, exposed so the host-owned
+// `ironclaw_webui::webui_v2_app` (moved up from this crate) can
+// compose the Reborn-native product-auth surface into the WebChat v2 router.
+#[cfg(feature = "webui-v2-beta")]
+pub use product_auth::serve::{
+    ProductAuthRouteMount, ProductAuthRouteState, product_auth_route_mount,
 };
 #[cfg(any(feature = "libsql", feature = "postgres"))]
 pub use production_runtime_policy::RebornProductionRuntimePolicy;
@@ -217,13 +233,13 @@ pub use runtime_input::{
 pub use runtime_input::{RebornProviderFactory, ResolvedRebornLlm};
 pub use web_access::register_bundled_web_access_first_party_handlers;
 pub use webui::facade::{RebornWebuiBundle, build_webui_services};
+// Host-supplied route-mount vocabulary shared with composition's own route
+// builders (nearai login, OpenAI-compat) and the host-owned gateway assembly
+// in `ironclaw_webui`. The `WebuiServeConfig` / `webui_v2_app`
+// / `WebuiAuthenticator` surface moved up into that ingress crate.
 #[cfg(feature = "webui-v2-beta")]
-pub use webui::webui_rate_limit::RateLimitConfigError;
-#[cfg(feature = "webui-v2-beta")]
-pub use webui::webui_serve::{
+pub use webui::route_mounts::{
     ProtectedRouteMount, PublicRouteDrain, PublicRouteDrains, PublicRouteMount,
-    WebuiAuthentication, WebuiAuthenticator, WebuiServeConfig, WebuiServeConfigError,
-    WebuiServeError, WebuiV2App, webui_v2_app, webui_v2_app_with_lifecycle,
 };
 
 /// Re-exported identity vocabulary host binaries need to construct
@@ -537,10 +553,8 @@ use ironclaw_authorization::CapabilityLeaseError;
 use ironclaw_filesystem::LibSqlRootFilesystem;
 #[cfg(feature = "postgres")]
 use ironclaw_filesystem::PostgresRootFilesystem;
-#[cfg(any(feature = "libsql", feature = "postgres"))]
 use ironclaw_filesystem::{RootFilesystem, ScopedFilesystem};
 use ironclaw_host_api::ProcessBackendKind;
-#[cfg(any(feature = "libsql", feature = "postgres"))]
 use ironclaw_host_api::{
     MountAlias, MountGrant, MountPermissions, MountView, ResourceScope, VirtualPath,
 };
@@ -586,7 +600,6 @@ pub type PostgresProductionHostRuntimeServices = HostRuntimeServices<
 /// `/tenants/<tenant>/users/<user>/<alias>` for the caller's scope, so
 /// two tenants sharing one underlying [`RootFilesystem`] cannot collide
 /// on identically-shaped paths.
-#[cfg(any(feature = "libsql", feature = "postgres"))]
 const PER_USER_ALIASES: &[&str] = &[
     "/processes",
     "/secrets",
@@ -619,7 +632,6 @@ const PER_USER_ALIASES: &[&str] = &[
 /// `/tenants/__system__/users/__system__/<alias>`. Production code uses
 /// it for process-global records whose paths already encode per-tenant
 /// identity (event-log stream keys, conversation singleton state).
-#[cfg(any(feature = "libsql", feature = "postgres"))]
 pub fn invocation_mount_view(
     scope: &ResourceScope,
 ) -> Result<MountView, ironclaw_host_api::HostApiError> {
@@ -637,7 +649,6 @@ pub(crate) fn resource_scope_path_segment(value: &str) -> &str {
     }
 }
 
-#[cfg(any(feature = "libsql", feature = "postgres"))]
 fn invocation_mount_view_for_segments(
     tenant_id: &str,
     user_id: &str,
@@ -686,7 +697,6 @@ fn invocation_mount_view_for_segments(
 /// [`invocation_mount_view`]. The returned filesystem is the single
 /// production handle — every consumer-store call routes per-scope
 /// through this one instance.
-#[cfg(any(feature = "libsql", feature = "postgres"))]
 pub fn wrap_scoped<F>(root: Arc<F>) -> Arc<ScopedFilesystem<F>>
 where
     F: RootFilesystem,

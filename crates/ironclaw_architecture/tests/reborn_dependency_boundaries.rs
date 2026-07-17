@@ -474,8 +474,7 @@ fn untrusted_ingress_paths_cannot_submit_host_trusted_inbound() {
         "crates/ironclaw_product_adapters/src",
         "crates/ironclaw_product_adapter_registry/src",
         "crates/ironclaw_product_workflow/src",
-        "crates/ironclaw_reborn_webui_ingress/src",
-        "crates/ironclaw_webui_v2/src",
+        "crates/ironclaw_webui/src",
         "crates/ironclaw_telegram_extension/src",
         "crates/ironclaw_slack_extension/src",
     ];
@@ -569,11 +568,11 @@ fn reborn_cli_binary_crate_stays_separate_from_v1_root() {
             "ironclaw_reborn_composition",
             "ironclaw_reborn_config",
             "ironclaw_reborn_traces",
-            "ironclaw_reborn_webui_ingress",
+            "ironclaw_webui",
             "ironclaw_slack_extension",
             "ironclaw_telegram_extension",
         ],
-        "ironclaw_reborn_cli should enter Reborn through ironclaw_reborn_composition (assembled-runtime and provider-admin facade), ironclaw_reborn_config (boot-config contract), ironclaw_reborn_traces (contributor-side TraceCommons client extracted from the legacy monolith), and ironclaw_reborn_webui_ingress (host-owned WebUI serve lifecycle) — plus ironclaw_extension_host (the NativeExtensionFactory contract) and concrete extension crates for the binary-assembled native factory registry (DEL-7: only the binary and tests may link concrete extension crates). Adding any other workspace crate here re-opens speculative public API access to internal Reborn types.",
+        "ironclaw_reborn_cli should enter Reborn through ironclaw_reborn_composition (assembled-runtime and provider-admin facade), ironclaw_reborn_config (boot-config contract), ironclaw_reborn_traces (contributor-side TraceCommons client extracted from the legacy monolith), and ironclaw_webui (host-owned WebUI serve lifecycle) — plus ironclaw_extension_host (the NativeExtensionFactory contract) and concrete extension crates for the binary-assembled native factory registry (DEL-7: only the binary and tests may link concrete extension crates). Adding any other workspace crate here re-opens speculative public API access to internal Reborn types.",
     );
     assert_workspace_deps_exactly(
         &dependencies_all_kinds,
@@ -2077,7 +2076,6 @@ fn reborn_product_api_crates_do_not_bind_http_ingress() {
         // never bind sockets or call `axum::serve` itself — that is
         // host composition's job. Without this entry the contract fails
         // open for the new route crate.
-        "crates/ironclaw_webui_v2/src",
     ];
 
     let mut violations = Vec::new();
@@ -2591,60 +2589,12 @@ fn boundary_rules() -> Vec<BoundaryRule> {
                 "ironclaw_wasm",
             ],
         },
-        BoundaryRule {
-            // WebChat v2 route surface must only reach into Reborn through
-            // the host-facing facade and the ingress vocabulary; anything
-            // that lets a handler touch the dispatcher, runtime lane, run
-            // state, or a storage backend directly would defeat the
-            // single-facade discipline that this crate exists to enforce.
-            crate_name: "ironclaw_webui_v2",
-            forbidden: vec![
-                "ironclaw",
-                "ironclaw_capabilities",
-                "ironclaw_conversations",
-                "ironclaw_dispatcher",
-                "ironclaw_engine",
-                "ironclaw_event_projections",
-                "ironclaw_events",
-                "ironclaw_extensions",
-                "ironclaw_filesystem",
-                "ironclaw_gateway",
-                "ironclaw_host_runtime",
-                "ironclaw_llm",
-                "ironclaw_loop_host",
-                "ironclaw_mcp",
-                "ironclaw_memory",
-                "ironclaw_network",
-                "ironclaw_outbound",
-                "ironclaw_processes",
-                // Single-facade boundary: route handlers consume only the
-                // `ironclaw_product_workflow` facade plus the ingress + error
-                // vocabulary. Projection types are re-exported through the
-                // facade crate so handlers never reach into the adapter
-                // surface directly.
-                "ironclaw_product_adapters",
-                "ironclaw_runner",
-                "ironclaw_reborn_cli",
-                "ironclaw_reborn_composition",
-                "ironclaw_reborn_config",
-                "ironclaw_reborn_event_store",
-                "ironclaw_first_party_extensions",
-                "ironclaw_first_party_extension_ports",
-                "ironclaw_resources",
-                "ironclaw_run_state",
-                "ironclaw_runtime_policy",
-                "ironclaw_safety",
-                "ironclaw_scripts",
-                "ironclaw_secrets",
-                "ironclaw_skills",
-                "ironclaw_storage",
-                "ironclaw_threads",
-                "ironclaw_trust",
-                "ironclaw_tui",
-                "ironclaw_turns",
-                "ironclaw_wasm",
-            ],
-        },
+        // NOTE(webui-merge): the former `ironclaw_webui_v2` BoundaryRule was
+        // removed when that crate's route surface was folded into
+        // `ironclaw_webui` (as its `webui_v2` module). The
+        // "handlers do not touch adapters/dispatcher/runtime directly"
+        // invariant is now carried by the `ironclaw_webui`
+        // rule's forbidden list.
         BoundaryRule {
             // OpenAI-compatible route surface is a Reborn product/API facade.
             // It may depend on host ingress vocabulary and ProductWorkflow
@@ -2695,7 +2645,6 @@ fn boundary_rules() -> Vec<BoundaryRule> {
                 "ironclaw_tui",
                 "ironclaw_turns",
                 "ironclaw_wasm",
-                "ironclaw_webui_v2",
             ],
         },
         BoundaryRule {
@@ -2884,12 +2833,17 @@ fn boundary_rules() -> Vec<BoundaryRule> {
         },
         BoundaryRule {
             // Host-owned WebUI ingress: binds the TCP listener and runs
-            // the axum serve loop for the composed v2 Router. Deliberately
-            // narrow: it must not pull product/API internals, lower
-            // substrate handles, or v1 surface code into the binary path.
-            // Reaches Reborn through ironclaw_reborn_composition's facade
-            // only (Router + WebuiAuthenticator trait + WebuiServeConfig).
-            crate_name: "ironclaw_reborn_webui_ingress",
+            // the axum serve loop for the composed v2 Router. Since the
+            // `ironclaw_webui_v2` route surface was folded into this crate
+            // (as its `webui_v2` module), it now legitimately consumes the
+            // `ironclaw_product_workflow` `RebornServicesApi` facade the v2
+            // handlers dispatch through. It still must not pull lower
+            // substrate handles, product adapters, or v1 surface code into
+            // the binary path. Reaches the rest of Reborn through
+            // ironclaw_reborn_composition's facade (Router + WebuiAuthenticator
+            // trait + WebuiServeConfig + mount vocabulary + product-auth mount
+            // builders).
+            crate_name: "ironclaw_webui",
             forbidden: vec![
                 "ironclaw",
                 "ironclaw_authorization",
@@ -2911,7 +2865,6 @@ fn boundary_rules() -> Vec<BoundaryRule> {
                 "ironclaw_processes",
                 "ironclaw_product_adapters",
                 "ironclaw_product_adapter_registry",
-                "ironclaw_product_workflow",
                 "ironclaw_runner",
                 "ironclaw_reborn_cli",
                 "ironclaw_reborn_config",
@@ -2928,7 +2881,6 @@ fn boundary_rules() -> Vec<BoundaryRule> {
                 "ironclaw_tui",
                 "ironclaw_turns",
                 "ironclaw_wasm",
-                "ironclaw_webui_v2",
             ],
         },
         BoundaryRule {
@@ -3102,7 +3054,6 @@ fn boundary_rules() -> Vec<BoundaryRule> {
                 "ironclaw_trust",
                 "ironclaw_tui",
                 "ironclaw_wasm",
-                "ironclaw_webui_v2",
             ],
         },
         BoundaryRule {
@@ -3157,7 +3108,6 @@ fn boundary_rules() -> Vec<BoundaryRule> {
                 "ironclaw_trust",
                 "ironclaw_tui",
                 "ironclaw_wasm",
-                "ironclaw_webui_v2",
             ],
         },
         BoundaryRule {
@@ -3233,7 +3183,6 @@ fn boundary_rules() -> Vec<BoundaryRule> {
                 "ironclaw_trust",
                 "ironclaw_tui",
                 "ironclaw_wasm",
-                "ironclaw_webui_v2",
             ],
         },
         BoundaryRule {
@@ -3492,7 +3441,7 @@ fn boundary_rules() -> Vec<BoundaryRule> {
                 "ironclaw_reborn_config",
                 "ironclaw_reborn_event_store",
                 "ironclaw_reborn_traces",
-                "ironclaw_reborn_webui_ingress",
+                "ironclaw_webui",
                 "ironclaw_resources",
                 "ironclaw_run_state",
                 "ironclaw_runtime_policy",
@@ -3698,7 +3647,7 @@ const LAYER_MATRIX_EXCEPTIONS: &[LayerMatrixException] = &[
         reason: "the runner intentionally composes loop-host adapters until kernel consolidation introduces a neutral dispatch boundary",
     },
     LayerMatrixException {
-        crate_name: "ironclaw_reborn_webui_ingress",
+        crate_name: "ironclaw_webui",
         dependency_name: "ironclaw_reborn_composition",
         introduced: "2026-07-09",
         removes_in: "W3.6",

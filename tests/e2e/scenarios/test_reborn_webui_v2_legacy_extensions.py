@@ -418,7 +418,7 @@ async def _open_mocked_extensions_page(
     # Channel discovery is extension-surface data on the extensions wire —
     # there is no separate `/channels/connectable` registry route to mock.
     await page.route("**/api/webchat/v2/extensions**", handle_extensions)
-    await page.goto(f"{reborn_v2_server}/v2/extensions/{tab}?token={REBORN_V2_AUTH_TOKEN}")
+    await page.goto(f"{reborn_v2_server}/extensions/{tab}?token={REBORN_V2_AUTH_TOKEN}")
     await expect(page.get_by_text("Registry").first).to_be_visible(timeout=15000)
 
     return {
@@ -573,7 +573,7 @@ async def test_reborn_legacy_extensions_page_refetches_on_revisit(
 
         await page.get_by_role("link", name="Settings").first.click()
         await page.wait_for_function(
-            "() => location.pathname.startsWith('/v2/settings')",
+            "() => location.pathname.startsWith('/settings')",
             timeout=5000,
         )
 
@@ -631,7 +631,7 @@ async def test_reborn_legacy_extensions_catalog_failure_shows_retry(
 
     try:
         await page.goto(
-            f"{reborn_v2_server}/v2/extensions/registry?token={REBORN_V2_AUTH_TOKEN}"
+            f"{reborn_v2_server}/extensions/registry?token={REBORN_V2_AUTH_TOKEN}"
         )
         error_banner = page.get_by_role("alert")
         await expect(error_banner).to_contain_text(
@@ -641,7 +641,7 @@ async def test_reborn_legacy_extensions_catalog_failure_shows_retry(
         assert registry_requests >= 1
 
         await page.goto(
-            f"{reborn_v2_server}/v2/extensions/channels?token={REBORN_V2_AUTH_TOKEN}"
+            f"{reborn_v2_server}/extensions/channels?token={REBORN_V2_AUTH_TOKEN}"
         )
         await expect(page.get_by_text("Telegram Channel", exact=True)).to_be_visible(
             timeout=5000
@@ -658,7 +658,7 @@ async def test_reborn_legacy_extensions_catalog_failure_shows_retry(
         await expect(error_banner).to_have_count(0)
         await expect(page.get_by_text("Telegram Channel", exact=True)).to_be_visible()
         await page.goto(
-            f"{reborn_v2_server}/v2/extensions/registry?token={REBORN_V2_AUTH_TOKEN}"
+            f"{reborn_v2_server}/extensions/registry?token={REBORN_V2_AUTH_TOKEN}"
         )
         await expect(page.get_by_text("Registry Tool", exact=True)).to_be_visible(
             timeout=5000
@@ -707,7 +707,7 @@ async def test_reborn_legacy_extensions_enrichment_failure_preserves_registry(
 
     try:
         await page.goto(
-            f"{reborn_v2_server}/v2/extensions/registry?token={REBORN_V2_AUTH_TOKEN}"
+            f"{reborn_v2_server}/extensions/registry?token={REBORN_V2_AUTH_TOKEN}"
         )
         warning_banner = page.get_by_role("alert")
         await expect(page.get_by_text("Registry Tool", exact=True)).to_be_visible(
@@ -748,7 +748,7 @@ async def test_reborn_legacy_extensions_offline_attempts_catalog_requests(
     page.on("request", record_catalog_request)
 
     try:
-        await page.goto(f"{reborn_v2_server}/v2/settings?token={REBORN_V2_AUTH_TOKEN}")
+        await page.goto(f"{reborn_v2_server}/settings?token={REBORN_V2_AUTH_TOKEN}")
         await expect(page.get_by_role("link", name="Extensions").first).to_be_visible(
             timeout=15000
         )
@@ -1239,7 +1239,7 @@ async def test_reborn_legacy_extensions_reinstall_after_remove_requires_setup_ag
         assert harness["remove_requests"] == ["config-tool"]
 
         await page.goto(
-            f"{reborn_v2_server}/v2/extensions/registry?token={REBORN_V2_AUTH_TOKEN}"
+            f"{reborn_v2_server}/extensions/registry?token={REBORN_V2_AUTH_TOKEN}"
         )
         available_card = _card_by_title(page, "Config Tool")
         await expect(available_card).to_be_visible(timeout=5000)
@@ -2687,7 +2687,7 @@ async def test_reborn_legacy_extensions_channels_and_mcp_tabs_render(
 
         # The pre-unification `mcp` URL redirects onto the tools view — MCP is
         # a runtime badge, not a grouping axis.
-        await page.goto(f"{reborn_v2_server}/v2/extensions/mcp?token={REBORN_V2_AUTH_TOKEN}")
+        await page.goto(f"{reborn_v2_server}/extensions/mcp?token={REBORN_V2_AUTH_TOKEN}")
         await page.wait_for_function(
             "() => location.pathname.endsWith('/extensions/tools')",
             timeout=5000,

@@ -367,3 +367,8 @@ uuid_id!(ResourceReservationId);
 uuid_id!(ApprovalRequestId);
 uuid_id!(AuditEventId);
 uuid_id!(CorrelationId);
+// Prompt-visible run identity: identifies the loop turn-run an invocation
+// belongs to. Stamped host-side by loop orchestration (never caller-supplied
+// over untrusted input); `None` for non-loop callers. See
+// `ExecutionContext::run_id`.
+uuid_id!(RunId);

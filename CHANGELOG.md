@@ -10,6 +10,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 
 - *(reborn)* automations and `trigger_list` now surface why a scheduled trigger is currently held (approval/auth/in-progress) and how many scheduled occurrences elapsed while held ([#5886](https://github.com/nearai/ironclaw/issues/5886)).
+- *(reborn)* `ironclaw-reborn service install`/`start`/`stop`/`restart`/`status`/`uninstall` manage the standalone Reborn binary as an OS-native service (launchd user agent on macOS, systemd user unit on Linux), with a webui-token-file fallback for `serve` and atomic install with rollback on failure.
 
 ### Fixed
 
@@ -27,6 +28,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 
 - *(reborn-extensions)* every first-party integration (GitHub, Gmail, Google Calendar/Docs/Drive/Sheets/Slides, Notion, Slack, Telegram, Web Access) now ships as a self-contained module under `ironclaw_first_party_extensions::packages`, carrying its manifest/WASM embeds, onboarding copy, OAuth-setup credential, and host trust effects as opaque bundle data. Composition builds them via `bundled_packages()` and the built-in trust policy iterates the inventory generically — generic host code no longer names a concrete extension for package machinery (P7b, DEL-8 lane A).
+- *(webui-v2)* serve the Reborn WebUI from root-level browser routes, with temporary `/v2` compatibility redirects that preserve deep links and login query parameters; `/api/webchat/v2/*` remains unchanged ([#6142](https://github.com/nearai/ironclaw/issues/6142)).
 - *(reborn)* raise the default agent-loop runaway backstop from 256 to 1,024 iterations and the subagent ceiling from 16 to 256 ([#5959](https://github.com/nearai/ironclaw/pull/5959)).
 - *(reborn-cli)* document the standalone `config init` atomic-write dependency on `tempfile` and call out the default runner cadence change to 5s heartbeats / 200ms polling (down from 10s / 2s).
 - *(reborn)* expose runtime poll settings and document the standalone turn-runner cadence change for callers using `TurnRunnerSettings::default()`.

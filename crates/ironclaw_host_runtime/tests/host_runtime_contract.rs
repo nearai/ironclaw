@@ -1,3 +1,4 @@
+// arch-exempt: large_file, mechanical lease-store test repoint to FilesystemCapabilityLeaseStore<InMemoryBackend> helper (arch-simplification §4.3), no new test logic, plan #6168
 mod support;
 
 use support::legacy_capability_fixture_to_v2;
@@ -13,7 +14,8 @@ use std::{
 use async_trait::async_trait;
 use chrono::Utc;
 use ironclaw_authorization::{
-    GrantAuthorizer, InMemoryCapabilityLeaseStore, TrustAwareCapabilityDispatchAuthorizer,
+    GrantAuthorizer, TrustAwareCapabilityDispatchAuthorizer,
+    in_memory_backed_capability_lease_store,
 };
 use ironclaw_extensions::{
     ExtensionManifest, ExtensionPackage, ExtensionRegistry, ManifestSource, SharedExtensionRegistry,
@@ -116,7 +118,7 @@ async fn default_runtime_surfaces_approval_required_with_persisted_request_id() 
     let run_state = Arc::new(InMemoryRunStateStore::new());
     let approval_requests = Arc::new(InMemoryApprovalRequestStore::new());
     let leases: Arc<dyn ironclaw_authorization::CapabilityLeaseStore> =
-        Arc::new(InMemoryCapabilityLeaseStore::new());
+        Arc::new(in_memory_backed_capability_lease_store());
 
     let runtime = DefaultHostRuntime::new(
         registry,
@@ -161,7 +163,7 @@ async fn default_runtime_uses_combined_store_for_atomic_approval_block() {
     let authorizer: Arc<dyn TrustAwareCapabilityDispatchAuthorizer> = Arc::new(ApprovalAuthorizer);
     let combined_store = Arc::new(RecordingCombinedRunStateApprovalStore::new());
     let leases: Arc<dyn ironclaw_authorization::CapabilityLeaseStore> =
-        Arc::new(InMemoryCapabilityLeaseStore::new());
+        Arc::new(in_memory_backed_capability_lease_store());
 
     let runtime = DefaultHostRuntime::new(
         registry,
@@ -230,7 +232,7 @@ async fn default_runtime_propagates_unavailable_when_run_state_lookup_fails_duri
     });
     let approval_requests = Arc::new(InMemoryApprovalRequestStore::new());
     let leases: Arc<dyn ironclaw_authorization::CapabilityLeaseStore> =
-        Arc::new(InMemoryCapabilityLeaseStore::new());
+        Arc::new(in_memory_backed_capability_lease_store());
 
     let runtime = DefaultHostRuntime::new(
         registry,

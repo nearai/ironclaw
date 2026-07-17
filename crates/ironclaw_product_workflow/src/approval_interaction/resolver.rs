@@ -262,7 +262,7 @@ fn map_approval_resolution_error(error: ApprovalResolutionError) -> ProductWorkf
 
 #[cfg(test)]
 mod tests {
-    use ironclaw_authorization::InMemoryCapabilityLeaseStore;
+    use ironclaw_authorization::in_memory_backed_capability_lease_store;
     use ironclaw_host_api::{
         Action, ApprovalRequest, CapabilityId, CorrelationId, InvocationId, Principal,
         ResourceEstimate, UserId,
@@ -274,7 +274,7 @@ mod tests {
     #[tokio::test]
     async fn matching_lease_exists_rejects_pending_approval_as_stale() {
         let approvals = Arc::new(InMemoryApprovalRequestStore::new());
-        let leases = Arc::new(InMemoryCapabilityLeaseStore::new());
+        let leases = Arc::new(in_memory_backed_capability_lease_store());
         let scope = resource_scope();
         let request = approval_request(None);
         let request_id = request.id;
@@ -300,7 +300,7 @@ mod tests {
     #[tokio::test]
     async fn matching_lease_exists_rejects_approved_request_without_fingerprint_as_stale() {
         let approvals = Arc::new(InMemoryApprovalRequestStore::new());
-        let leases = Arc::new(InMemoryCapabilityLeaseStore::new());
+        let leases = Arc::new(in_memory_backed_capability_lease_store());
         let scope = resource_scope();
         let request = approval_request(None);
         let request_id = request.id;

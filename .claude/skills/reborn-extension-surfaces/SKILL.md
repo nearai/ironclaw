@@ -116,7 +116,7 @@ Re-verify the module list: `grep -n 'ID,' crates/ironclaw_first_party_extensions
    `[channel.config]` completeness + the auth account state. The WebUI channels
    tab renders every channel surface with the same generic components — there is
    no channel registry to update (frontend helpers:
-   `crates/ironclaw_webui_v2/frontend/src/pages/extensions/lib/extensions-schema.ts`,
+   `crates/ironclaw_webui/frontend/src/pages/extensions/lib/extensions-schema.ts`,
    `hasChannelSurface`). Editing `[channel.config]` while `Active` runs an
    automatic deactivate → reactivate cycle; there is no separate reconfigure
    state or channel-setup activation gate.
@@ -165,7 +165,7 @@ tool surface (overview §3.1). Worked example:
   the `ironclaw_auth` engine suite — run by every extension crate + the `acme`
   fixture (`tests/fixtures/extensions/acme-messenger/`). Real extensions add one
   end-to-end integration proof each (`tests/integration/`).
-- Frontend: `pnpm --dir crates/ironclaw_webui_v2/frontend test`.
+- Frontend: `pnpm --dir crates/ironclaw_webui/frontend test`.
 - Always finish with `cargo test -p ironclaw_architecture` — the specificity,
   dependency-direction, and retired-taxonomy gates are the machine reviewers.
   Generic code naming your extension trips

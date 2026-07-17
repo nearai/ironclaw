@@ -13,9 +13,23 @@ use ironclaw_filesystem::{
 use ironclaw_host_api::*;
 use ironclaw_trust::{AuthorityCeiling, EffectiveTrustClass, TrustDecision, TrustProvenance};
 
+/// The production `FilesystemCapabilityLeaseStore` over a fresh in-memory backend
+/// — the drop-in for the deleted `InMemoryCapabilityLeaseStore`
+/// (arch-simplification §4.3): "in-memory" is a filesystem backend, not a bespoke
+/// store. The fixed `/authorization` mount resolves every op to one subtree
+/// regardless of scope, which matches these single-scope state-machine tests;
+/// cross-scope *store visibility* isolation is exercised separately by the
+/// `filesystem_capability_lease_store_isolates_*` tests, which mount per user.
+fn in_memory_lease_store() -> FilesystemCapabilityLeaseStore<InMemoryBackend> {
+    FilesystemCapabilityLeaseStore::new(build_scoped_fs(
+        Arc::new(InMemoryBackend::new()),
+        "/engine/tenants/test/users/test/authorization",
+    ))
+}
+
 #[tokio::test]
 async fn lease_authorizer_allows_matching_active_lease_without_context_grant() {
-    let leases = InMemoryCapabilityLeaseStore::new();
+    let leases = in_memory_lease_store();
     let context = execution_context(CapabilitySet::default());
     let descriptor = descriptor(CapabilityId::new("echo.say").unwrap());
 
@@ -46,7 +60,7 @@ async fn lease_authorizer_allows_matching_active_lease_without_context_grant() {
 
 #[tokio::test]
 async fn lease_backed_authorizer_with_trust_denies_when_authority_ceiling_excludes_effect() {
-    let leases = InMemoryCapabilityLeaseStore::new();
+    let leases = in_memory_lease_store();
     let context = execution_context(CapabilitySet::default());
     let capability = CapabilityId::new("echo.say").unwrap();
     let mut descriptor = descriptor(capability.clone());
@@ -79,7 +93,7 @@ async fn lease_backed_authorizer_with_trust_denies_when_authority_ceiling_exclud
 
 #[tokio::test]
 async fn fingerprinted_approval_lease_does_not_authorize_plain_dispatch() {
-    let leases = InMemoryCapabilityLeaseStore::new();
+    let leases = in_memory_lease_store();
     let context = execution_context(CapabilitySet::default());
     let descriptor = descriptor(CapabilityId::new("echo.say").unwrap());
     let fingerprint = InvocationFingerprint::for_dispatch(
@@ -115,7 +129,7 @@ async fn fingerprinted_approval_lease_does_not_authorize_plain_dispatch() {
 
 #[tokio::test]
 async fn claim_marks_fingerprinted_lease_claimed_and_hides_it_from_authorizer() {
-    let leases = InMemoryCapabilityLeaseStore::new();
+    let leases = in_memory_lease_store();
     let context = execution_context(CapabilitySet::default());
     let descriptor = descriptor(CapabilityId::new("echo.say").unwrap());
     let fingerprint = InvocationFingerprint::for_dispatch(
@@ -157,7 +171,7 @@ async fn claim_marks_fingerprinted_lease_claimed_and_hides_it_from_authorizer() 
 
 #[tokio::test]
 async fn claim_rejects_fingerprint_mismatch_without_mutating_lease() {
-    let leases = InMemoryCapabilityLeaseStore::new();
+    let leases = in_memory_lease_store();
     let context = execution_context(CapabilitySet::default());
     let descriptor = descriptor(CapabilityId::new("echo.say").unwrap());
     let fingerprint = InvocationFingerprint::for_dispatch(
@@ -207,7 +221,7 @@ async fn claim_rejects_fingerprint_mismatch_without_mutating_lease() {
 
 #[tokio::test]
 async fn lease_authorizer_hides_leases_across_tenant_scope() {
-    let leases = InMemoryCapabilityLeaseStore::new();
+    let leases = in_memory_lease_store();
     let context = execution_context(CapabilitySet::default());
     let other_scope = ResourceScope {
         tenant_id: TenantId::new("tenant2").unwrap(),
@@ -247,7 +261,7 @@ async fn lease_authorizer_hides_leases_across_tenant_scope() {
 
 #[tokio::test]
 async fn lease_store_hides_leases_across_agent_scope() {
-    let leases = InMemoryCapabilityLeaseStore::new();
+    let leases = in_memory_lease_store();
     let mut context = execution_context(CapabilitySet::default());
     context.agent_id = Some(AgentId::new("agent-a").unwrap());
     context.resource_scope.agent_id = context.agent_id.clone();
@@ -275,7 +289,7 @@ async fn lease_store_hides_leases_across_agent_scope() {
 
 #[tokio::test]
 async fn lease_store_hides_leases_across_project_scope() {
-    let leases = InMemoryCapabilityLeaseStore::new();
+    let leases = in_memory_lease_store();
     let context = execution_context(CapabilitySet::default());
     let mut other_scope = context.resource_scope.clone();
     other_scope.project_id = Some(ProjectId::new("project2").unwrap());
@@ -301,7 +315,7 @@ async fn lease_store_hides_leases_across_project_scope() {
 
 #[tokio::test]
 async fn lease_authorizer_denies_other_agent_context() {
-    let leases = InMemoryCapabilityLeaseStore::new();
+    let leases = in_memory_lease_store();
     let mut context = execution_context(CapabilitySet::default());
     context.agent_id = Some(AgentId::new("agent-a").unwrap());
     context.resource_scope.agent_id = context.agent_id.clone();
@@ -337,7 +351,22 @@ async fn lease_authorizer_denies_other_agent_context() {
 
 #[tokio::test]
 async fn revocation_is_scoped_to_tenant_and_user() {
-    let leases = InMemoryCapabilityLeaseStore::new();
+    // Tenant scoping of `revoke` is now structural: each tenant resolves to a
+    // distinct `/authorization` mount subtree (arch-simplification §4.3 — the
+    // store no longer hand-keys by the full scope tuple). Model that with two
+    // per-tenant-mounted stores over one shared backend, exactly as
+    // `filesystem_capability_lease_store_isolates_two_tenants_*` does: a revoke
+    // issued against tenant2's mount cannot reach a lease issued under tenant1.
+    let backend = Arc::new(InMemoryBackend::new());
+    let store_tenant1 = FilesystemCapabilityLeaseStore::new(build_scoped_fs(
+        Arc::clone(&backend),
+        "/engine/tenants/tenant1/users/test/authorization",
+    ));
+    let store_tenant2 = FilesystemCapabilityLeaseStore::new(build_scoped_fs(
+        Arc::clone(&backend),
+        "/engine/tenants/tenant2/users/test/authorization",
+    ));
+
     let context = execution_context(CapabilitySet::default());
     let other_scope = ResourceScope {
         tenant_id: TenantId::new("tenant2").unwrap(),
@@ -358,16 +387,19 @@ async fn revocation_is_scoped_to_tenant_and_user() {
         ),
     );
     let lease_id = lease.grant.id;
-    leases.issue(lease.clone()).await.unwrap();
+    store_tenant1.issue(lease.clone()).await.unwrap();
 
-    let err = leases.revoke(&other_scope, lease_id).await.unwrap_err();
+    let err = store_tenant2
+        .revoke(&other_scope, lease_id)
+        .await
+        .unwrap_err();
 
     assert!(matches!(
         err,
         CapabilityLeaseError::UnknownLease { lease_id: id } if id == lease_id
     ));
     assert_eq!(
-        leases
+        store_tenant1
             .get(&context.resource_scope, lease_id)
             .await
             .unwrap()
@@ -378,7 +410,7 @@ async fn revocation_is_scoped_to_tenant_and_user() {
 
 #[tokio::test]
 async fn lease_authorizer_denies_invalid_context_before_grant_match() {
-    let leases = InMemoryCapabilityLeaseStore::new();
+    let leases = in_memory_lease_store();
     let mut context = execution_context(CapabilitySet::default());
     context.tenant_id = TenantId::new("tenant2").unwrap();
     let descriptor = descriptor(CapabilityId::new("echo.say").unwrap());
@@ -409,7 +441,7 @@ async fn lease_authorizer_denies_invalid_context_before_grant_match() {
 
 #[tokio::test]
 async fn one_off_lease_does_not_authorize_different_invocation_in_same_tenant() {
-    let leases = InMemoryCapabilityLeaseStore::new();
+    let leases = in_memory_lease_store();
     let context = execution_context(CapabilitySet::default());
     let mut next_invocation_context = execution_context(CapabilitySet::default());
     next_invocation_context.tenant_id = context.tenant_id.clone();
@@ -448,7 +480,7 @@ async fn one_off_lease_does_not_authorize_different_invocation_in_same_tenant() 
 
 #[tokio::test]
 async fn consume_decrements_remaining_invocations_and_consumes_one_shot_lease() {
-    let leases = InMemoryCapabilityLeaseStore::new();
+    let leases = in_memory_lease_store();
     let context = execution_context(CapabilitySet::default());
     let descriptor = descriptor(CapabilityId::new("echo.say").unwrap());
     let mut grant = grant_for(
@@ -484,7 +516,7 @@ async fn consume_decrements_remaining_invocations_and_consumes_one_shot_lease() 
 
 #[tokio::test]
 async fn consumed_lease_no_longer_authorizes_dispatch() {
-    let leases = InMemoryCapabilityLeaseStore::new();
+    let leases = in_memory_lease_store();
     let context = execution_context(CapabilitySet::default());
     let descriptor = descriptor(CapabilityId::new("echo.say").unwrap());
     let mut grant = grant_for(
@@ -516,7 +548,7 @@ async fn consumed_lease_no_longer_authorizes_dispatch() {
 
 #[tokio::test]
 async fn fingerprinted_lease_cannot_be_consumed_before_claim() {
-    let leases = InMemoryCapabilityLeaseStore::new();
+    let leases = in_memory_lease_store();
     let context = execution_context(CapabilitySet::default());
     let descriptor = descriptor(CapabilityId::new("echo.say").unwrap());
     let fingerprint = InvocationFingerprint::for_dispatch(
@@ -559,7 +591,7 @@ async fn fingerprinted_lease_cannot_be_consumed_before_claim() {
 
 #[tokio::test]
 async fn fingerprinted_lease_without_invocation_limit_is_consumed_after_one_use() {
-    let leases = InMemoryCapabilityLeaseStore::new();
+    let leases = in_memory_lease_store();
     let context = execution_context(CapabilitySet::default());
     let descriptor = descriptor(CapabilityId::new("echo.say").unwrap());
     let fingerprint = InvocationFingerprint::for_dispatch(
@@ -603,7 +635,7 @@ async fn fingerprinted_lease_without_invocation_limit_is_consumed_after_one_use(
 
 #[tokio::test]
 async fn expired_lease_no_longer_authorizes_or_consumes() {
-    let leases = InMemoryCapabilityLeaseStore::new();
+    let leases = in_memory_lease_store();
     let context = execution_context(CapabilitySet::default());
     let descriptor = descriptor(CapabilityId::new("echo.say").unwrap());
     let mut grant = grant_for(
@@ -635,7 +667,7 @@ async fn expired_lease_no_longer_authorizes_or_consumes() {
 
 #[tokio::test]
 async fn consume_is_scoped_to_exact_invocation() {
-    let leases = InMemoryCapabilityLeaseStore::new();
+    let leases = in_memory_lease_store();
     let context = execution_context(CapabilitySet::default());
     let mut next_invocation_scope = execution_context(CapabilitySet::default()).resource_scope;
     next_invocation_scope.tenant_id = context.resource_scope.tenant_id.clone();
@@ -1100,7 +1132,7 @@ async fn filesystem_capability_lease_store_writes_tenant_id_indexed_projection()
 
 #[tokio::test]
 async fn revoked_lease_no_longer_authorizes_dispatch() {
-    let leases = InMemoryCapabilityLeaseStore::new();
+    let leases = in_memory_lease_store();
     let context = execution_context(CapabilitySet::default());
     let descriptor = descriptor(CapabilityId::new("echo.say").unwrap());
     let lease = CapabilityLease::new(
@@ -1316,6 +1348,7 @@ fn execution_context(grants: CapabilitySet) -> ExecutionContext {
         invocation_id,
     };
     ExecutionContext {
+        run_id: None,
         invocation_id,
         correlation_id: CorrelationId::new(),
         process_id: None,

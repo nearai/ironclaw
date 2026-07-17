@@ -70,7 +70,7 @@ use sha2::{Digest, Sha256};
 
 use crate::RebornBuildError;
 use crate::RebornRuntime;
-use crate::webui::webui_serve::ProtectedRouteMount;
+use crate::webui::route_mounts::ProtectedRouteMount;
 
 #[cfg(test)]
 mod tests;

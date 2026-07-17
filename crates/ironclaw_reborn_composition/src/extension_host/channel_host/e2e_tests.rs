@@ -99,7 +99,7 @@ use crate::extension_host::extension_ingress::{
     build_extension_ingress, extension_ingress_route_mount,
 };
 use crate::extension_host::run_delivery_ports::ProductAuthBlockedAuthPromptSource;
-use crate::webui::webui_serve::PublicRouteMount;
+use crate::webui::route_mounts::PublicRouteMount;
 use crate::{AuthChallengeProvider, RebornUserIdentityLookup, RebornUserIdentityLookupError};
 use ironclaw_product_workflow::BlockedAuthPromptSource;
 

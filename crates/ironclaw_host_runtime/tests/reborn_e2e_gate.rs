@@ -11,8 +11,8 @@ use async_trait::async_trait;
 use chrono::Utc;
 use ironclaw_approvals::LeaseApproval;
 use ironclaw_authorization::{
-    CapabilityLeaseStatus, CapabilityLeaseStore, GrantAuthorizer, InMemoryCapabilityLeaseStore,
-    TrustAwareCapabilityDispatchAuthorizer,
+    CapabilityLeaseStatus, CapabilityLeaseStore, FilesystemCapabilityLeaseStore, GrantAuthorizer,
+    TrustAwareCapabilityDispatchAuthorizer, in_memory_backed_capability_lease_store,
 };
 use ironclaw_capabilities::CapabilityObligationHandler;
 use ironclaw_events::{
@@ -641,14 +641,14 @@ type InMemoryServices = HostRuntimeServices<
 struct ApprovalFixture {
     services: InMemoryServices,
     run_state: Arc<InMemoryRunStateStore>,
-    capability_leases: Arc<InMemoryCapabilityLeaseStore>,
+    capability_leases: Arc<FilesystemCapabilityLeaseStore<InMemoryBackend>>,
     events: InMemoryEventSink,
 }
 
 fn approval_resume_fixture() -> ApprovalFixture {
     let run_state = Arc::new(InMemoryRunStateStore::new());
     let approval_requests = Arc::new(InMemoryApprovalRequestStore::new());
-    let capability_leases = Arc::new(InMemoryCapabilityLeaseStore::new());
+    let capability_leases = Arc::new(in_memory_backed_capability_lease_store());
     let events = InMemoryEventSink::new();
     let services = HostRuntimeServices::new(
         Arc::new(registry_with_manifest(SCRIPT_MANIFEST)),

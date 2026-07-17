@@ -317,6 +317,7 @@ async fn snapshot_resolver_serves_activated_tools_and_stops_after_deactivate() {
     let outcome = in_flight
         .adapter
         .dispatch_json(ironclaw_dispatcher::BoundCapabilityRequest {
+            run_id: None,
             capability_id: ping.clone(),
             scope: sample_scope(),
             estimate: ironclaw_host_api::ResourceEstimate::default(),
@@ -377,6 +378,7 @@ async fn snapshot_resolver_maps_tool_auth_required_to_the_generic_gate() {
     let err = resolved
         .adapter
         .dispatch_json(ironclaw_dispatcher::BoundCapabilityRequest {
+            run_id: None,
             capability_id: CapabilityId::new("acme.ping").unwrap(),
             scope: sample_scope(),
             estimate: ironclaw_host_api::ResourceEstimate::default(),

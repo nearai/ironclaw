@@ -760,7 +760,7 @@ def server_env(
             "RUST_BACKTRACE": "1",
             "RUST_LOG": os.environ.get(
                 "RUST_LOG",
-                "ironclaw=warn,ironclaw_runner=warn,ironclaw_reborn_webui_ingress=info",
+                "ironclaw=warn,ironclaw_runner=warn,ironclaw_webui=info",
             ),
         }
     )
@@ -1521,7 +1521,7 @@ async def _live_chat_case(
     async def action(page: object) -> None:
         if extensions:
             await page.goto(
-                f"{ctx.base_url}/v2/extensions/registry?token={AUTH_TOKEN}",
+                f"{ctx.base_url}/extensions/registry?token={AUTH_TOKEN}",
                 wait_until="domcontentloaded",
             )  # type: ignore[attr-defined]
             await expect(page.locator("body")).to_contain_text(  # type: ignore[attr-defined]
@@ -1541,7 +1541,7 @@ async def _live_chat_case(
                 )
 
         await page.goto(
-            f"{ctx.base_url}/v2/?token={AUTH_TOKEN}",
+            f"{ctx.base_url}/?token={AUTH_TOKEN}",
             wait_until="domcontentloaded",
         )  # type: ignore[attr-defined]
         if await _dismiss_visible_connect_action(page):
@@ -3239,12 +3239,12 @@ async def _slack_connect_case(ctx: LiveQaContext, *, case_name: str) -> ProbeRes
     started = time.monotonic()
     observed: dict[str, object] = {
         "qa_sheet_prompt": _qa_sheet_prompt(case_name),
-        "slack_connect_surface": "/v2/extensions/channels",
+        "slack_connect_surface": "/extensions/channels",
     }
 
     async def action(page: object) -> None:
         await page.goto(
-            f"{ctx.base_url}/v2/extensions/channels?token={AUTH_TOKEN}",
+            f"{ctx.base_url}/extensions/channels?token={AUTH_TOKEN}",
             wait_until="domcontentloaded",
         )  # type: ignore[attr-defined]
         await expect(page.locator("body")).to_contain_text("Channels", timeout=15000)  # type: ignore[attr-defined]
@@ -3439,7 +3439,7 @@ async def _extension_authenticated_case(
 
     async def action(page: object) -> None:
         await page.goto(
-            f"{ctx.base_url}/v2/extensions/registry?token={AUTH_TOKEN}",
+            f"{ctx.base_url}/extensions/registry?token={AUTH_TOKEN}",
             wait_until="domcontentloaded",
         )  # type: ignore[attr-defined]
         await expect(page.locator("body")).to_contain_text("Extensions", timeout=15000)  # type: ignore[attr-defined]

@@ -151,7 +151,7 @@ const OAUTH_CALLBACK_SCOPES_MAX_BYTES: usize = 4 * 1024;
 const RAW_OAUTH_VALUE_MAX_BYTES: usize = 4 * 1024;
 
 #[derive(Clone)]
-pub(crate) struct ProductAuthRouteState {
+pub struct ProductAuthRouteState {
     product_auth: Arc<RebornProductAuthServices>,
     /// Installed-inventory guard for extension OAuth starts: a flow may be
     /// minted only for an extension the caller actually has installed
@@ -221,7 +221,7 @@ impl InstalledExtensionLookup for TestInstalledExtensionLookup {
 }
 
 impl ProductAuthRouteState {
-    pub(crate) fn new(
+    pub fn new(
         product_auth: Arc<RebornProductAuthServices>,
         tenant_id: TenantId,
         default_agent_id: Option<AgentId>,
@@ -243,7 +243,7 @@ impl ProductAuthRouteState {
 
     /// Wire the WebUI facade as the installed-extension inventory source for
     /// the extension OAuth start guard.
-    pub(crate) fn with_webui_api(mut self, webui_api: Arc<dyn RebornServicesApi>) -> Self {
+    pub fn with_webui_api(mut self, webui_api: Arc<dyn RebornServicesApi>) -> Self {
         self.installed_extension_lookup = Some(Arc::new(RebornServicesInstalledExtensionLookup {
             api: webui_api,
         }));
@@ -290,7 +290,7 @@ impl ProductAuthRouteState {
 
     /// Register the post-exchange provider-identity hook. The handler
     /// hands it the callback's vendor id — data lookup, no vendor branch.
-    pub(crate) fn with_provider_identity_hook(
+    pub fn with_provider_identity_hook(
         mut self,
         factory: Arc<ProviderIdentityHookFactory>,
     ) -> Self {
@@ -436,10 +436,10 @@ impl StoredPkceVerifier {
     }
 }
 
-pub(crate) struct ProductAuthRouteMount {
-    pub(crate) protected: Router,
-    pub(crate) public: Router,
-    pub(crate) descriptors: Vec<IngressRouteDescriptor>,
+pub struct ProductAuthRouteMount {
+    pub protected: Router,
+    pub public: Router,
+    pub descriptors: Vec<IngressRouteDescriptor>,
 }
 
 // Product-auth HTTP is a host-owned auth/secret-ingress boundary. Its
@@ -447,7 +447,7 @@ pub(crate) struct ProductAuthRouteMount {
 // tool calls and must not surface raw secrets through the model-visible
 // tool-dispatch path. Contract: `docs/reborn/contracts/auth-product.md`.
 // dispatch-exempt: host-owned auth/secret ingress, not in-turn tool dispatch
-pub(crate) fn product_auth_route_mount(state: ProductAuthRouteState) -> ProductAuthRouteMount {
+pub fn product_auth_route_mount(state: ProductAuthRouteState) -> ProductAuthRouteMount {
     let public = Router::new()
         .route(OAUTH_CALLBACK_PATH, get(oauth::oauth_callback_handler))
         .route(

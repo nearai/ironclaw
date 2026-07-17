@@ -315,7 +315,7 @@ pub(crate) async fn discover_channel_extensions(
 /// Build the provider-identity hook factory product-auth serve registers:
 /// vendor-blind, resolving the callback's provider against the installed
 /// channel extensions (plus lane overrides) at callback time.
-pub(crate) fn channel_identity_binding_hook_factory(
+pub fn channel_identity_binding_hook_factory(
     config: ChannelIdentityBindingConfig,
 ) -> Arc<ProviderIdentityHookFactory> {
     Arc::new(move |provider: &str, callback_scope: &AuthProductScope| {

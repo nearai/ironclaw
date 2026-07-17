@@ -85,7 +85,7 @@ scripts/run-reborn-webui.sh               # NEAR AI default
 PROVIDER=openai scripts/run-reborn-webui.sh
 ```
 
-It prints the login token and the `http://127.0.0.1:3000/v2` URL. Override
+It prints the login token and the `http://127.0.0.1:3000/` URL. Override
 `PROVIDER`, `MODEL`, `REBORN_HOST`, `REBORN_PORT`, or `IRONCLAW_REBORN_HOME` via
 the environment. The manual steps below are equivalent.
 
@@ -114,7 +114,7 @@ export IRONCLAW_REBORN_WEBUI_USER_ID="reborn-cli"             # must match [iden
 cargo run -q -p ironclaw_reborn_cli --features webui-v2-beta --bin ironclaw-reborn -- serve
 ```
 
-Then open **`http://127.0.0.1:3000/v2`** and log in with the
+Then open **`http://127.0.0.1:3000/`** and log in with the
 `IRONCLAW_REBORN_WEBUI_TOKEN` value.
 
 `--host` / `--port` override the defaults (`127.0.0.1` / `3000`), or set
@@ -218,8 +218,9 @@ A healthy run shows a `kind: "assistant"`, `status: "finalized"` message in
 `messages[]` with the model's reply (the first read right after sending may
 still show only the user message — repeat the timeline request until it
 finalizes). `GET /api/health` returns
-`{"status":"healthy","channel":"reborn"}` and `/v2` serves the UI; `/` is
-intentionally a 404. CORS is fail-closed with no allowed origins, so drive it
+`{"status":"healthy","channel":"reborn"}` and `/` serves the UI. Legacy
+`/v2` browser links temporarily redirect to their root equivalents. CORS is
+fail-closed with no allowed origins, so drive it
 from a browser on the same host against `127.0.0.1`.
 
 ## Commands

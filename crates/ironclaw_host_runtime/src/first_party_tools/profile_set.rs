@@ -119,6 +119,7 @@ mod tests {
         mounts: Option<MountView>,
     ) -> FirstPartyCapabilityRequest {
         FirstPartyCapabilityRequest {
+            run_id: None,
             capability_id: CapabilityId::new(PROFILE_SET_CAPABILITY_ID).unwrap(),
             scope: sample_scope(),
             authenticated_actor_user_id: None,
@@ -133,6 +134,7 @@ mod tests {
                 secret_store: None,
                 audit_sink: None,
                 unsafe_raw_diagnostics_allowed: false,
+                post_edit_check: None,
             },
             input,
         }

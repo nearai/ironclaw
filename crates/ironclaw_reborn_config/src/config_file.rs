@@ -79,7 +79,7 @@ pub struct RebornConfigFile {
     /// to populate `mission` ahead of time.
     pub llm: Option<std::collections::BTreeMap<String, LlmSlotSelection>>,
     /// WebChat v2 HTTP gateway settings. Consumed by
-    /// `ironclaw_reborn_webui_ingress` when the standalone CLI's
+    /// `ironclaw_webui` when the standalone CLI's
     /// `serve` subcommand is invoked. Optional — sparse configs
     /// fall back to compiled defaults documented on each field.
     pub webui: Option<WebuiSection>,

@@ -1,10 +1,11 @@
+// arch-exempt: large_file, mechanical approval-store migration only — InMemory*Store deleted, guard test repointed to Filesystem*Store<InMemoryBackend> (arch-simplification §4.3), no new test logic, plan #6168
 use std::{
     sync::{Arc, Mutex},
     time::Duration,
 };
 
 use async_trait::async_trait;
-use ironclaw_approvals::InMemoryPersistentApprovalPolicyStore;
+use ironclaw_approvals::test_support::in_memory_backed_persistent_approval_policy_store;
 use ironclaw_authorization::GrantAuthorizer;
 use ironclaw_capabilities::{
     CapabilityObligationCompletionRequest, CapabilityObligationError,
@@ -75,10 +76,18 @@ async fn production_wiring_reports_missing_persistent_approval_policies() {
     ));
 }
 
+// The volatile, in-memory-backed persistent-approval store must never satisfy
+// production wiring. `in_memory_backed_persistent_approval_policy_store()` returns
+// `FilesystemPersistentApprovalPolicyStore<InMemoryBackend>` — the exact concrete
+// type the no-durable-features composition wires (factory.rs
+// `LocalDevPersistentApprovalPolicyStore`), so this guards the real shape, not a
+// synthetic one. The durable libSQL/Postgres monomorphizations are distinct types
+// and fall through to `ProductionCandidate`.
 #[tokio::test]
 async fn production_wiring_reports_local_only_persistent_approval_policies() {
-    let services = test_services()
-        .with_persistent_approval_policies(Arc::new(InMemoryPersistentApprovalPolicyStore::new()));
+    let services = test_services().with_persistent_approval_policies(Arc::new(
+        in_memory_backed_persistent_approval_policy_store(),
+    ));
 
     let report = services
         .validate_production_wiring(&ProductionWiringConfig::new([]))
@@ -597,6 +606,7 @@ async fn host_runtime_services_with_security_audit_sink_records_leak_block() {
         invocation_id,
     };
     let context = ExecutionContext {
+        run_id: None,
         invocation_id,
         correlation_id: CorrelationId::new(),
         process_id: None,
@@ -694,6 +704,7 @@ async fn service_guard_releases_reservation_on_planner_denial() {
 
     let result = adapter
         .dispatch_json(RuntimeAdapterRequest {
+            run_id: None,
             package: &package,
             descriptor: &descriptor,
             filesystem: &filesystem,
@@ -749,6 +760,7 @@ async fn service_guard_rejects_resolution_before_wasm_dispatch() {
 
     let result = adapter
         .dispatch_json(RuntimeAdapterRequest {
+            run_id: None,
             package: &package,
             descriptor: &descriptor,
             filesystem: &filesystem,
@@ -810,6 +822,7 @@ async fn service_guard_releases_reservation_on_invocation_service_resolution_den
 
     let result = adapter
         .dispatch_json(RuntimeAdapterRequest {
+            run_id: None,
             package: &package,
             descriptor: &descriptor,
             filesystem: &filesystem,
@@ -866,6 +879,7 @@ async fn service_guard_rejects_required_secret_without_secret_store_before_dispa
 
     let result = adapter
         .dispatch_json(RuntimeAdapterRequest {
+            run_id: None,
             package: &package,
             descriptor: &descriptor,
             filesystem: &filesystem,
@@ -929,6 +943,7 @@ async fn first_party_adapter_releases_reservation_when_invocation_service_resolu
 
     let result = adapter
         .dispatch_json(RuntimeAdapterRequest {
+            run_id: None,
             package: &package,
             descriptor: &descriptor,
             filesystem: &filesystem,
@@ -1059,6 +1074,7 @@ async fn first_party_adapter_releases_reservation_when_planner_denies() {
 
     let result = adapter
         .dispatch_json(RuntimeAdapterRequest {
+            run_id: None,
             package: &package,
             descriptor: &descriptor,
             filesystem: &filesystem,
@@ -1214,6 +1230,7 @@ async fn assert_first_party_denies_before_handler(
 
     let result = adapter
         .dispatch_json(RuntimeAdapterRequest {
+            run_id: None,
             package: &package,
             descriptor: &descriptor,
             filesystem: &filesystem,

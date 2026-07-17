@@ -84,6 +84,7 @@ where
             turn_run_transition_port,
             turn_run_wake_notifier,
             extension_tool_resolver,
+            post_edit_check,
             mut component_types,
         } = self;
         component_types.filesystem = ProductionComponentType::of::<T>();
@@ -129,6 +130,7 @@ where
             turn_run_transition_port,
             turn_run_wake_notifier,
             extension_tool_resolver,
+            post_edit_check,
             component_types,
         }
     }
@@ -195,6 +197,7 @@ where
             turn_run_transition_port,
             turn_run_wake_notifier,
             extension_tool_resolver,
+            post_edit_check,
             mut component_types,
         } = self;
         let lifecycle_governor: Arc<dyn ResourceGovernor> = governor.clone();
@@ -250,6 +253,7 @@ where
             turn_run_transition_port,
             turn_run_wake_notifier,
             extension_tool_resolver,
+            post_edit_check,
             component_types,
         }
     }
@@ -729,6 +733,15 @@ where
         self.component_types.runtime_process_port = ProductionComponentType::of::<T>();
         self.process_port = process_port;
         self.managed_process_port = false;
+        self
+    }
+
+    /// Configure the operator post-edit check appended to successful
+    /// `builtin.write_file` / `builtin.apply_patch` output. Composition
+    /// resolves the config once (see `PostEditCheckConfig::from_env`) and
+    /// threads it here; the feature stays off when this is never called.
+    pub fn with_post_edit_check(mut self, post_edit_check: crate::PostEditCheckConfig) -> Self {
+        self.post_edit_check = Some(post_edit_check);
         self
     }
 
