@@ -115,6 +115,14 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
 uuid = { version = "1", features = ["v4", "v5", "serde"] }
 
+[target.'cfg(unix)'.dependencies]
+# O_NOFOLLOW for the single-handle, symlink-safe token file open in
+# `webui_token::read_token_file_checked` — the flag's raw value differs
+# across unix platforms (Linux vs macOS), so it must come from `libc`
+# rather than being hardcoded. Already present transitively; pinned here
+# as a direct dependency of the code that now uses it.
+libc = "0.2"
+
 [dev-dependencies]
 # Enable the composition crate's `test-support` seam for CLI unit tests so
 # `open_reborn_identity_resolver` (the test-only standalone resolver opener)

@@ -55,6 +55,99 @@ pub(crate) fn webui_token_file_path(reborn_home: &Path) -> PathBuf {
 /// silently reading as absent, which would let a caller like
 /// [`ensure_webui_token_file`] overwrite an existing-but-unreadable
 /// secret.
+///
+/// On unix this opens the path exactly once with `O_NOFOLLOW` and drives
+/// every subsequent check (regular-file type, size, contents) off that
+/// same handle's `fstat`/read — a symlink swapped in, or the target
+/// enlarged, after a separate `symlink_metadata()` call but before the
+/// read can't smuggle a different file through (TOCTOU), and a non-regular
+/// file (FIFO, device) that would otherwise pass a standalone length check
+/// and then block the read indefinitely is rejected before any read is
+/// attempted. Non-unix targets keep the previous best-effort
+/// stat-then-read shape (no `O_NOFOLLOW`/single-handle primitive in
+/// `std` there).
+#[cfg(unix)]
+fn read_token_file_checked(path: &Path) -> anyhow::Result<Option<String>> {
+    use std::io::Read as _;
+    use std::os::unix::fs::OpenOptionsExt as _;
+
+    // `O_NONBLOCK` alongside `O_NOFOLLOW`: a read-only open of a FIFO
+    // blocks until a writer connects, which would otherwise hang `serve`
+    // startup indefinitely on a FIFO planted at the token path (it would
+    // have passed a standalone pre-read length check too). `O_NONBLOCK`
+    // makes the open return immediately regardless of a writer; it has
+    // no effect on the regular-file case once we reach the read below
+    // (POSIX ignores O_NONBLOCK for regular files).
+    let mut options = fs::OpenOptions::new();
+    options
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK);
+    let file = match options.open(path) {
+        Ok(file) => file,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        // `O_NOFOLLOW` surfaces a symlink at `path` as `ELOOP`
+        // (`ErrorKind::FilesystemLoop` on recent stds, `Uncategorized`/
+        // `Other` on older ones) rather than a distinct error kind we can
+        // match reliably across platforms/std versions — so probe
+        // `symlink_metadata` only on open failure to produce the
+        // targeted message, instead of trusting `open`'s raw errno
+        // classification.
+        Err(open_error) => {
+            if fs::symlink_metadata(path)
+                .map(|metadata| metadata.file_type().is_symlink())
+                .unwrap_or(false)
+            {
+                anyhow::bail!(
+                    "{} is a symlink; refusing to read the WebChat v2 token file through it. \
+                     Remove it and re-run `ironclaw-reborn onboard` to provision a regular file.",
+                    path.display()
+                );
+            }
+            return Err(open_error).with_context(|| format!("open {}", path.display()));
+        }
+    };
+
+    let metadata = file
+        .metadata()
+        .with_context(|| format!("stat {}", path.display()))?;
+    if !metadata.is_file() {
+        anyhow::bail!(
+            "{} is not a regular file; refusing to read the WebChat v2 token file through it. \
+             Remove it and re-run `ironclaw-reborn onboard` to provision a regular file.",
+            path.display()
+        );
+    }
+    if metadata.len() > WEBUI_TOKEN_FILE_MAX_BYTES {
+        anyhow::bail!(
+            "{} is {} bytes, over the {WEBUI_TOKEN_FILE_MAX_BYTES}-byte cap for the \
+             WebChat v2 token file; refusing to read it.",
+            path.display(),
+            metadata.len()
+        );
+    }
+
+    // Bound the read itself (not just the pre-read `fstat`'d size) to
+    // `MAX_BYTES + 1`: a file that grows between the `fstat` above and
+    // this read (e.g. concurrently appended to) is still caught here
+    // instead of being read unbounded.
+    let mut buf = Vec::new();
+    (&file)
+        .take(WEBUI_TOKEN_FILE_MAX_BYTES + 1)
+        .read_to_end(&mut buf)
+        .with_context(|| format!("read {}", path.display()))?;
+    if buf.len() as u64 > WEBUI_TOKEN_FILE_MAX_BYTES {
+        anyhow::bail!(
+            "{} exceeds the {WEBUI_TOKEN_FILE_MAX_BYTES}-byte cap for the WebChat v2 token \
+             file; refusing to read it.",
+            path.display()
+        );
+    }
+    let contents = String::from_utf8(buf)
+        .map_err(|_| anyhow::anyhow!("{} is not valid UTF-8", path.display()))?;
+    Ok(Some(contents))
+}
+
+#[cfg(not(unix))]
 fn read_token_file_checked(path: &Path) -> anyhow::Result<Option<String>> {
     match fs::symlink_metadata(path) {
         Ok(metadata) => {
@@ -504,6 +597,34 @@ mod tests {
             .mode()
             & 0o777;
         assert_eq!(mode, 0o600, "mode must be repaired to 0600, got {mode:o}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn webui_token_file_is_valid_rejects_a_fifo_without_blocking() {
+        // Before the single-handle O_NONBLOCK|O_NOFOLLOW fix, a FIFO
+        // planted at the token path would pass a standalone
+        // `symlink_metadata().len()` check (FIFOs report length 0, well
+        // under the cap) and then a blocking `read_to_string` open would
+        // hang forever waiting for a writer — hanging `serve` startup
+        // indefinitely. This must return promptly with a "not a regular
+        // file" error instead.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = webui_token_file_path(dir.path());
+        let c_path = std::ffi::CString::new(path.as_os_str().as_encoded_bytes())
+            .expect("path has no interior NUL");
+        // SAFETY: `mkfifo` with a valid NUL-terminated path and a
+        // regular permission-bits argument; no aliasing/lifetime hazards.
+        let rc = unsafe { libc::mkfifo(c_path.as_ptr(), 0o600) };
+        assert_eq!(rc, 0, "mkfifo failed: {}", std::io::Error::last_os_error());
+
+        let error = webui_token_file_is_valid(dir.path()).expect_err(
+            "a FIFO at the token path must be rejected, not read through or blocked on",
+        );
+        assert!(
+            error.to_string().contains("not a regular file"),
+            "error: {error}"
+        );
     }
 
     #[test]
