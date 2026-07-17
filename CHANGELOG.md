@@ -14,6 +14,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- *(webui-v2)* show “Running” during an automation's first execution instead of incorrectly labeling its current run as a previous run still in progress ([#6127](https://github.com/nearai/ironclaw/issues/6127)).
 - *(webui-v2)* expose per-user secret provisioning in Admin user details with write-only values, handle-only listings, and confirmed deletion ([#6118](https://github.com/nearai/ironclaw/issues/6118)).
 - *(webui-v2)* render the Extensions Registry as soon as catalog data arrives instead of holding the skeleton screen for slower installed-extension enrichment ([#6052](https://github.com/nearai/ironclaw/issues/6052)).
 - *(webui-v2)* submit the latest composer value when Enter follows input before React rerenders, avoiding intermittently dropped follow-up messages ([#6044](https://github.com/nearai/ironclaw/issues/6044)).

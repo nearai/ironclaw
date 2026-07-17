@@ -358,10 +358,17 @@ function normalizeAutomation(automation, t, locale) {
 
   // #5886: an active_hold means a due trigger is being intentionally skipped
   // (blocked on approval/auth, or a prior run still in flight) rather than
-  // queued. When present it overrides the ordinary status pill so the user
-  // sees why nothing is running, plus a meta line with when/how-many
-  // scheduled occurrences have elapsed.
+  // queued. It normally overrides the ordinary status pill so the user sees
+  // why nothing is running, plus a meta line with when/how-many scheduled
+  // occurrences have elapsed. A first run is different: the only running run
+  // is current, not "previous", so keep the ordinary Running pill until there
+  // is completed history to frame it against (#6127).
   const activeHold = automation.active_hold || null;
+  const isFirstRunInProgress =
+    activeHold?.reason === "in_progress" &&
+    currentRun !== null &&
+    lastCompletedRun === null;
+  const statusHold = isFirstRunInProgress ? null : activeHold;
 
   return {
     ...normalized,
@@ -370,10 +377,10 @@ function normalizeAutomation(automation, t, locale) {
     schedule_label: automationScheduleLabel(automation.source, t, locale),
     state_label: stateLabel(automation.state, t),
     state_tone: stateTone(automation.state),
-    primary_status_label: activeHold
-      ? holdStatusLabel(activeHold, t)
+    primary_status_label: statusHold
+      ? holdStatusLabel(statusHold, t)
       : primaryStatusLabel(normalized, t),
-    primary_status_tone: activeHold ? holdStatusTone(activeHold) : primaryStatusTone(normalized),
+    primary_status_tone: statusHold ? holdStatusTone(statusHold) : primaryStatusTone(normalized),
     hold_meta_label: activeHold ? holdMetaLabel(activeHold, t, locale) : null,
     next_run_timestamp: parseTimestamp(automation.next_run_at),
     next_run_label: formatAutomationDate(
