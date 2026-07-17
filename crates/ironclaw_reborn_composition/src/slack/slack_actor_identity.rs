@@ -12,9 +12,7 @@ use ironclaw_product_workflow::{
 };
 use ironclaw_slack_v2_adapter::{SLACK_USER_ACTOR_KIND, SLACK_V2_ADAPTER_ID};
 
-pub use ironclaw_channel_host::identity::{
-    RebornUserIdentityLookup, RebornUserIdentityLookupError,
-};
+use ironclaw_channel_host::identity::RebornUserIdentityLookup;
 
 pub(crate) const SLACK_IDENTITY_PROVIDER: &str = "slack";
 
@@ -131,6 +129,7 @@ mod tests {
     use ironclaw_product_adapters::{AdapterInstallationId, ExternalActorRef, ProductAdapterId};
 
     use super::*;
+    use ironclaw_channel_host::identity::RebornUserIdentityLookupError;
 
     #[tokio::test]
     async fn slack_actor_identity_resolver_uses_installation_scoped_provider_user_id() {

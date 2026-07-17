@@ -55,9 +55,7 @@ use crate::outbound::channel_delivery::{
 };
 use crate::outbound::{OutboundDeliveryTargetProvider, OutboundDeliveryTargetRegistrationOutcome};
 use crate::product_auth::serve::SlackPersonalOAuthBindingConfig;
-use crate::slack::slack_actor_identity::{
-    RebornUserIdentityLookup, SlackUserIdentityActorResolver,
-};
+use crate::slack::slack_actor_identity::SlackUserIdentityActorResolver;
 use crate::slack::slack_channel_routes::{
     SlackChannelRouteAdminRouteConfig, SlackChannelRouteStore, SlackChannelRouteSubjectResolver,
 };
@@ -81,6 +79,7 @@ use crate::slack::slack_serve::{
     slack_events_route_mount,
 };
 use crate::webui::webui_serve::PublicRouteMount;
+use ironclaw_channel_host::identity::RebornUserIdentityLookup;
 
 const SLACK_BOT_TOKEN_HANDLE: &str = "slack_bot_token";
 const SLACK_SIGNATURE_HEADER: &str = "X-Slack-Signature";

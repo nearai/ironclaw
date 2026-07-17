@@ -29,10 +29,7 @@ use ironclaw_product_adapters::AdapterInstallationId;
 use rand::RngExt as _;
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 
-use crate::slack::slack_actor_identity::{
-    RebornUserIdentityLookup, RebornUserIdentityLookupError,
-    parse_slack_user_identity_provider_user_id,
-};
+use crate::slack::slack_actor_identity::parse_slack_user_identity_provider_user_id;
 use crate::slack::slack_channel_routes::{
     SlackChannelRoute, SlackChannelRouteAssignment, SlackChannelRouteError, SlackChannelRouteKey,
     SlackChannelRouteListPage, SlackChannelRouteStore,
@@ -52,6 +49,7 @@ use crate::slack::slack_serve::{SlackTeamId, SlackUserId};
 use crate::slack::slack_setup::{
     SlackInstallationSetup, SlackInstallationSetupStore, SlackSetupError,
 };
+use ironclaw_channel_host::identity::{RebornUserIdentityLookup, RebornUserIdentityLookupError};
 
 const SLACK_HOST_STATE_ROOT: &str = "/tenant-shared/slack-personal-binding";
 const SLACK_INSTALLATION_SETUP_PATH: &str = "/tenant-shared/slack-setup/installation.json";

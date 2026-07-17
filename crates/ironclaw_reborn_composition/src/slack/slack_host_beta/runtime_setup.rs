@@ -21,9 +21,7 @@ use crate::extension_host::extension_lifecycle::{
 use crate::outbound::channel_delivery::{PostSubmitDeliveryHook, TriggeredRunDeliveryDriver};
 use crate::outbound::outbound_preferences::OutboundDeliveryTargetEntry;
 use crate::outbound::{OutboundDeliveryTargetProvider, OutboundDeliveryTargetRegistrationOutcome};
-use crate::slack::slack_actor_identity::{
-    RebornUserIdentityLookup, SlackUserIdentityActorResolver,
-};
+use crate::slack::slack_actor_identity::SlackUserIdentityActorResolver;
 use crate::slack::slack_channel_routes::{
     SlackChannelRouteAdminRouteConfig, SlackChannelRouteAssignment, SlackChannelRouteError,
     SlackChannelRouteStore, SlackChannelRouteSubjectResolver, SlackChannelSetupActivation,
@@ -52,6 +50,7 @@ use crate::slack::slack_setup::{
     SlackInstallationSetup, SlackInstallationSetupStore, SlackInstallationSetupUpdate,
     SlackSetupService,
 };
+use ironclaw_channel_host::identity::RebornUserIdentityLookup;
 
 use super::{
     ProvisioningSlackPersonalUserBinder, SlackConversationServices, SlackHostBetaActorUserResolver,
@@ -668,7 +667,7 @@ impl DynamicSlackInstallationResolver {
             .map_err(map_build_error_to_ingress_not_found(
                 "build Slack setup config",
             ))?;
-        let identity_lookup: Arc<dyn crate::slack::slack_actor_identity::RebornUserIdentityLookup> =
+        let identity_lookup: Arc<dyn ironclaw_channel_host::identity::RebornUserIdentityLookup> =
             self.state.clone();
         let actor_user_resolver = Arc::new(SlackHostBetaActorUserResolver::new(Arc::new(
             SlackUserIdentityActorResolver::new(Arc::clone(&identity_lookup)),
