@@ -96,7 +96,7 @@ impl FilesystemTelegramHostState {
                         if current != next {
                             return Ok(CasApply::no_op(current, ()));
                         }
-                        let restored = prior.unwrap_or_else(|| StoredTelegramBinding {
+                        let restored = prior.unwrap_or(StoredTelegramBinding {
                             active: false,
                             ..next
                         });

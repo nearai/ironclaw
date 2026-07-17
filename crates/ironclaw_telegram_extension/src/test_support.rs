@@ -130,13 +130,15 @@ impl RecordingBotApi {
     }
 }
 
+type SetWebhookBarrier = Arc<Mutex<Option<(usize, Arc<tokio::sync::Barrier>)>>>;
+
 #[derive(Clone)]
 struct RecordingTelegramNetwork {
     requests: Arc<Mutex<Vec<NetworkHttpRequest>>>,
     get_me_response: Arc<Mutex<NetworkHttpResponse>>,
     set_webhook_response: Arc<Mutex<NetworkHttpResponse>>,
     delete_webhook_response: Arc<Mutex<NetworkHttpResponse>>,
-    set_webhook_barrier: Arc<Mutex<Option<(usize, Arc<tokio::sync::Barrier>)>>>,
+    set_webhook_barrier: SetWebhookBarrier,
     fail_sends: Arc<AtomicBool>,
 }
 

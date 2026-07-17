@@ -146,8 +146,9 @@ impl TelegramSetupService {
         // before either wins the setup-record CAS. Keep their secret handles
         // disjoint so the loser can clean up only its own material.
         let save_attempt = mint_save_attempt_id();
+        let record = self.build_record(&identity, webhook_url, revision, &save_attempt)?;
         self.bot_api
-            .set_webhook(&bot_token, &webhook_url, &webhook_secret)
+            .set_webhook(&bot_token, &record.webhook_url, &webhook_secret)
             .await?;
 
         // From here Telegram already points at the new registration; a local
@@ -155,15 +156,7 @@ impl TelegramSetupService {
         // previous registration, or delete the fresh one) so the durable
         // record and the remote webhook cannot diverge.
         match self
-            .persist_saved_record(
-                &identity,
-                webhook_url,
-                revision,
-                &save_attempt,
-                previous.as_ref(),
-                &bot_token,
-                &webhook_secret,
-            )
+            .persist_saved_record(record, previous.as_ref(), &bot_token, &webhook_secret)
             .await
         {
             Ok(record) => Ok((previous, record)),
@@ -180,15 +173,11 @@ impl TelegramSetupService {
     /// already written for this revision (best-effort) before surfacing.
     async fn persist_saved_record(
         &self,
-        identity: &TelegramBotIdentity,
-        webhook_url: String,
-        revision: u64,
-        save_attempt: &str,
+        record: TelegramInstallationSetup,
         previous: Option<&TelegramInstallationSetup>,
         bot_token: &SecretString,
         webhook_secret: &SecretString,
     ) -> Result<TelegramInstallationSetup, TelegramSetupError> {
-        let record = self.build_record(identity, webhook_url, revision, save_attempt)?;
         self.put_secret(record.bot_token_handle.clone(), bot_token.clone())
             .await?;
         if let Err(error) = self
@@ -294,7 +283,7 @@ impl TelegramSetupService {
         &self,
         setup: &TelegramInstallationSetup,
     ) -> Result<SecretString, TelegramSetupError> {
-        Ok(self.secret_material(&setup.webhook_secret_handle).await?)
+        self.secret_material(&setup.webhook_secret_handle).await
     }
 
     fn effective_webhook_url(
