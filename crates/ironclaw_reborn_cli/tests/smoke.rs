@@ -221,13 +221,46 @@ fn release_ci_compiles_reborn_for_all_supported_targets_without_docker_publish()
     assert!(
         compile_workflow.matches("musl: true").count() == 2
             && compile_workflow.contains("sudo apt-get install --yes musl-tools")
-            && compile_workflow.contains("CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_LINKER")
-            && compile_workflow.contains("CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_LINKER")
+            && compile_workflow.contains("CC_x86_64_unknown_linux_musl=musl-gcc")
+            && compile_workflow.contains("CC_aarch64_unknown_linux_musl=musl-gcc")
+            && !compile_workflow.contains("CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_LINKER")
+            && !compile_workflow.contains("CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_LINKER")
             && compile_workflow.contains("node-version: \"22\"")
             && compile_workflow.contains("corepack enable pnpm")
             && compile_workflow.contains("binary: ironclaw-reborn.exe")
             && compile_workflow.contains("core.longpaths true"),
-        "release CI must install the target-specific native and WebUI build prerequisites"
+        "release CI must use musl-gcc for C dependencies without overriding Rust's self-contained musl linker"
+    );
+    assert!(
+        compile_workflow.contains("name: Verify musl portability\n        if: matrix.musl")
+            && compile_workflow.contains("readelf --program-headers --wide")
+            && compile_workflow.contains("readelf --dynamic --wide")
+            && compile_workflow.contains("INTERP")
+            && compile_workflow.contains("(NEEDED)")
+            && compile_workflow.contains("name: Smoke compiled binary")
+            && compile_workflow.contains("\"$binary_path\" --version")
+            && compile_workflow.contains("\"$binary_path\" --help > /dev/null")
+            && compile_workflow.contains("\"$binary_path\" profile list --json > /dev/null"),
+        "release CI must reject non-portable musl binaries and smoke the exact native artifacts"
+    );
+
+    let build_position = compile_workflow
+        .find("name: Compile ironclaw-reborn")
+        .expect("compile step");
+    let linkage_position = compile_workflow
+        .find("name: Verify musl portability")
+        .expect("musl linkage step");
+    let smoke_position = compile_workflow
+        .find("name: Smoke compiled binary")
+        .expect("binary smoke step");
+    let upload_position = compile_workflow
+        .find("name: Upload compile evidence")
+        .expect("compile evidence upload step");
+    assert!(
+        build_position < linkage_position
+            && linkage_position < smoke_position
+            && smoke_position < upload_position,
+        "linkage and runtime validation must gate artifact upload"
     );
     assert!(
         compile_workflow.contains("name: reborn-compile-${{ matrix.target }}")

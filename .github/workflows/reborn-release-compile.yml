@@ -35,7 +35,6 @@ jobs:
             binary: ironclaw-reborn
             musl: true
             cc_env: CC_x86_64_unknown_linux_musl=musl-gcc
-            linker_env: CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_LINKER=musl-gcc
           - target: aarch64-unknown-linux-gnu
             runner: ubuntu-24.04-arm
             binary: ironclaw-reborn
@@ -45,7 +44,6 @@ jobs:
             binary: ironclaw-reborn
             musl: true
             cc_env: CC_aarch64_unknown_linux_musl=musl-gcc
-            linker_env: CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_LINKER=musl-gcc
           - target: x86_64-apple-darwin
             runner: macos-15-intel
             binary: ironclaw-reborn
@@ -89,15 +87,13 @@ jobs:
           sudo apt-get update
           sudo apt-get install --yes musl-tools
 
-      - name: Configure musl compiler
+      - name: Configure musl C compiler
         if: matrix.musl
         shell: bash
         env:
           CC_ENV: ${{ matrix.cc_env }}
-          LINKER_ENV: ${{ matrix.linker_env }}
         run: |
           echo "$CC_ENV" >> "$GITHUB_ENV"
-          echo "$LINKER_ENV" >> "$GITHUB_ENV"
 
       - name: Restore Rust cache
         uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
@@ -117,7 +113,48 @@ jobs:
             --target "$TARGET" \
             --features "$REBORN_RELEASE_FEATURES"
 
-      # These are compile evidence only. The reborn-compile-* prefix keeps the
+      # Rust's musl targets provide a self-contained static CRT. Do not set the
+      # final Rust linker to musl-gcc: Ubuntu 22's wrapper mishandles x86_64
+      # static PIE and can leave an otherwise-static binary with a PT_INTERP.
+      - id: linkage
+        name: Verify musl portability
+        if: matrix.musl
+        shell: bash
+        env:
+          TARGET: ${{ matrix.target }}
+          BINARY: ${{ matrix.binary }}
+        run: |
+          binary_path="target/$TARGET/dist/$BINARY"
+          program_headers="$(readelf --program-headers --wide "$binary_path")"
+          dynamic_tags="$(readelf --dynamic --wide "$binary_path")"
+
+          if grep -Eq '^[[:space:]]*INTERP[[:space:]]' <<< "$program_headers"; then
+            echo "::error::$TARGET must not require a musl program interpreter"
+            echo "$program_headers"
+            exit 1
+          fi
+
+          if grep -q '(NEEDED)' <<< "$dynamic_tags"; then
+            echo "::error::$TARGET must not contain dynamic library dependencies"
+            echo "$dynamic_tags"
+            exit 1
+          fi
+
+          file "$binary_path"
+
+      - id: smoke
+        name: Smoke compiled binary
+        shell: bash
+        env:
+          TARGET: ${{ matrix.target }}
+          BINARY: ${{ matrix.binary }}
+        run: |
+          binary_path="target/$TARGET/dist/$BINARY"
+          "$binary_path" --version
+          "$binary_path" --help > /dev/null
+          "$binary_path" profile list --json > /dev/null
+
+      # These are preflight evidence only. The reborn-compile-* prefix keeps the
       # existing release host's artifacts-* download pattern from publishing them.
       - id: upload
         name: Upload compile evidence
@@ -136,6 +173,8 @@ jobs:
           RUNNER: ${{ matrix.runner }}
           BINARY: ${{ matrix.binary }}
           BUILD_RESULT: ${{ steps.build.outcome || 'not-run' }}
+          LINKAGE_RESULT: ${{ steps.linkage.outcome || 'not-run' }}
+          SMOKE_RESULT: ${{ steps.smoke.outcome || 'not-run' }}
           UPLOAD_RESULT: ${{ steps.upload.outcome || 'not-run' }}
         run: |
           {
@@ -146,6 +185,8 @@ jobs:
             echo "- Features: \`$REBORN_RELEASE_FEATURES\`"
             echo "- Binary: \`target/$TARGET/dist/$BINARY\`"
             echo "- Build result: \`$BUILD_RESULT\`"
-            echo "- Compile evidence upload: \`$UPLOAD_RESULT\`"
+            echo "- musl portability: \`$LINKAGE_RESULT\`"
+            echo "- Native CLI smoke: \`$SMOKE_RESULT\`"
+            echo "- Preflight evidence upload: \`$UPLOAD_RESULT\`"
             echo "- Docker publish: skipped by the release workflow for #6160"
           } >> "$GITHUB_STEP_SUMMARY"

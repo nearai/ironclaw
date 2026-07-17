@@ -61,13 +61,13 @@ Rules for a roll-up job that is (or may become) required:
 
 ## Reborn release binary compile matrix
 
-`reborn-release-compile.yml` is a compile-only preflight for the shipping
+`reborn-release-compile.yml` is a compile-and-smoke preflight for the shipping
 `ironclaw-reborn` binary. The tag-driven `release.yml` calls it and will not run
 its `host` job unless every target succeeds. The existing `release.yml` also
 owns the pull-request trigger, so a PR can validate the reusable workflow before
 that new workflow file reaches the default branch. Pull-request runs skip the
 cargo-dist plan, packaging, host, and Docker jobs; those release jobs remain
-tag-only. After merge, the compile-only workflow can also run directly through
+tag-only. After merge, the preflight workflow can also run directly through
 `workflow_dispatch`.
 
 | Rust target | GitHub runner |
@@ -84,11 +84,15 @@ Each matrix entry performs a final `cargo build --locked --profile dist` link
 for `ironclaw_reborn_cli` / `ironclaw-reborn` with an explicit compile feature
 contract owned by this workflow:
 `webui-v2-beta,slack-v2-host-beta,libsql,postgres,inmemory-turn-state`.
-This proves compilation only; it does not provide runtime smoke coverage,
-installers, or cargo-dist release packaging. The feature list is intentionally
-not inferred from Docker or #6122.
+Before upload, the workflow executes that exact native binary with `--version`,
+`--help`, and `profile list --json`. The musl entries also use `readelf` to
+reject a program interpreter or dynamic-library dependency, which prevents an
+installed musl loader on the build runner from hiding a non-portable artifact.
+This is shallow CLI startup coverage; it does not validate `serve`, external
+services, installers, or cargo-dist release packaging. The feature list is
+intentionally not inferred from Docker or #6122.
 
-The uploaded `reborn-compile-*` artifacts are short-lived compile evidence.
+The uploaded `reborn-compile-*` artifacts are short-lived preflight evidence.
 Their prefix deliberately does not match the release host's `artifacts-*`
 download pattern, so they are not attached to the GitHub Release. Until #3483
 defines the standalone Reborn tag/version/installer contract,
