@@ -259,15 +259,26 @@ impl RebornProviderAdmin {
     ///
     /// Filters [`ironclaw_llm::ProviderRegistry::selectable`] down to
     /// providers whose [`ironclaw_llm::registry::SetupHint`] kind is
-    /// `ApiKey`, `OpenAiCompatible`, or `SessionToken` — this excludes
-    /// `ollama`, `bedrock`, `gemini_oauth`, `openai_codex`, and
-    /// `github_copilot` BY DESIGN (a onboarding-scope decision: those
-    /// providers stay reachable via `ironclaw-reborn config set` /
-    /// `models set-provider`, just not on the numbered menu). Every kind
-    /// except `github_copilot`'s is distinguishable by `SetupHint::kind()`
-    /// alone — `github_copilot` declares `kind: "api_key"` in
-    /// `providers.json` just like `openai`/`anthropic`/etc, so it is
-    /// excluded by id instead.
+    /// `ApiKey` or `SessionToken` — this excludes `ollama`, `bedrock`,
+    /// `gemini_oauth`, `openai_codex`, and `github_copilot` BY DESIGN (a
+    /// onboarding-scope decision: those providers stay reachable via
+    /// `ironclaw-reborn config set` / `models set-provider`, just not on the
+    /// numbered menu). Every kind except `github_copilot`'s is
+    /// distinguishable by `SetupHint::kind()` alone — `github_copilot`
+    /// declares `kind: "api_key"` in `providers.json` just like
+    /// `openai`/`anthropic`/etc, so it is excluded by id instead.
+    ///
+    /// `OpenAiCompatible` kind (`openai_compatible`, `cloudflare`) is also
+    /// excluded, distinctly from the onboarding-scope group above:
+    /// `openai_compatible` sets `base_url_required: true` in
+    /// `providers.json`, and the numbered menu never prompts for a base
+    /// URL — selecting it here would "succeed" at onboard time and then fail
+    /// `serve` boot with no base URL configured (`LLM_BASE_URL` unset).
+    /// `cloudflare` shares the same `open_ai_compatible` setup kind so it is
+    /// swept out by the same kind-level filter, even though it ships a fixed
+    /// default base URL and would otherwise be safe to onboard; it remains
+    /// configurable via `ironclaw-reborn config set` / `models
+    /// set-provider`, which do collect a base URL.
     ///
     /// Returns the serializable [`ProviderMenuEntry`] DTO rather than
     /// `&ironclaw_llm::registry::ProviderDefinition` directly: callers in
@@ -284,7 +295,7 @@ impl RebornProviderAdmin {
             .filter(|def| {
                 matches!(
                     def.setup.as_ref().map(|setup| setup.kind()),
-                    Some("api_key") | Some("open_ai_compatible") | Some("session_token")
+                    Some("api_key") | Some("session_token")
                 )
             })
             .map(|def| ProviderMenuEntry {
@@ -737,12 +748,32 @@ mod tests {
             "gemini_oauth",
             "openai_codex",
             "github_copilot",
+            "openai_compatible",
+            "cloudflare",
         ] {
             assert!(
                 !ids.contains(&excluded),
                 "{excluded} must be excluded from the onboard menu: {ids:?}"
             );
         }
+    }
+
+    /// `openai_compatible` requires a base URL (`base_url_required: true`
+    /// in `providers.json`) that the numbered menu never prompts for;
+    /// selecting it there would "succeed" at onboard time and then fail
+    /// `serve` boot with `LLM_BASE_URL` unset. Pinned separately from the
+    /// onboarding-scope exclusions above because the reason is a
+    /// correctness bug, not a scope decision — a regression here silently
+    /// reintroduces a broken onboarding path rather than just widening menu
+    /// scope.
+    #[test]
+    fn menu_entries_excludes_openai_compatible_base_url_trap() {
+        let admin = test_admin();
+        let entries = admin.menu_entries().expect("menu entries load");
+        assert!(
+            entries.iter().all(|entry| entry.id != "openai_compatible"),
+            "openai_compatible must never appear on the onboard menu: {entries:?}"
+        );
     }
 
     #[test]

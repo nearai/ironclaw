@@ -824,30 +824,38 @@ mod tests {
     /// (v) An excluded provider id typed at the menu (not a menu entry —
     /// `ollama`/`bedrock`/etc are excluded by `menu_entries()` by design)
     /// must be rejected as invalid, never resolved via the full registry.
+    /// Covers `bedrock` (onboarding-scope exclusion) and `openai_compatible`
+    /// (base-URL-trap exclusion — see `RebornProviderAdmin::menu_entries`'s
+    /// doc): both are real, resolvable registry providers, so this pins
+    /// that menu exclusion — not registry absence — is what blocks them.
     #[test]
     fn provision_llm_credentials_rejects_a_menu_excluded_provider_id() {
-        let (_tmp, context) = RebornCliContext::test_context();
-        let home = context.boot_config().home();
-        std::fs::create_dir_all(home.path()).expect("create reborn home");
+        for excluded_provider in ["bedrock", "openai_compatible"] {
+            let (_tmp, context) = RebornCliContext::test_context();
+            let home = context.boot_config().home();
+            std::fs::create_dir_all(home.path()).expect("create reborn home");
 
-        let mut prompts = FakePromptSource {
-            provider: "bedrock",
-            key: "unused",
-            model: None,
-        };
-        let error = provision_llm_credentials(
-            home,
-            context.boot_config(),
-            &mut prompts,
-            &LocalDevLlmKeyStoreOpener,
-            false,
-        )
-        .expect_err("a menu-excluded provider id must be rejected");
-        assert!(matches!(error, LlmCredentialPromptError::Other(_)));
-        assert!(
-            !home.config_file_path().exists(),
-            "a rejected menu selection must leave config.toml untouched"
-        );
+            let mut prompts = FakePromptSource {
+                provider: excluded_provider,
+                key: "unused",
+                model: None,
+            };
+            let error = provision_llm_credentials(
+                home,
+                context.boot_config(),
+                &mut prompts,
+                &LocalDevLlmKeyStoreOpener,
+                false,
+            )
+            .expect_err(&format!(
+                "menu-excluded provider `{excluded_provider}` must be rejected"
+            ));
+            assert!(matches!(error, LlmCredentialPromptError::Other(_)));
+            assert!(
+                !home.config_file_path().exists(),
+                "a rejected menu selection ({excluded_provider}) must leave config.toml untouched"
+            );
+        }
     }
 
     /// (iv) An empty model answer must land the catalog default in
