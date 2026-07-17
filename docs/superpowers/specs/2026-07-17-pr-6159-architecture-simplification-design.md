@@ -2,7 +2,7 @@
 
 **Date:** 2026-07-17
 
-**Status:** Approved for implementation
+**Status:** Implemented and verified
 
 **Baseline:** `nearai/ironclaw#6159` at `0575d3815d03fce0d43e6247f0bb3956af9e9ada`
 
@@ -444,14 +444,18 @@ after the named evidence is green.
   responsibility; the physical-file line-budget ratchet passes in commit `e1f660030`.
 - [x] **A8 — Ratchets:** all eight structural ratchets are committed and all nine tests in
   `telegram_extension_gates` pass (`219a03f86`, completed by `e1f660030`).
-- [ ] **A9 — Contract preservation:** Telegram setup, ingress, pairing, identity, delivery,
-  exclusivity, and default-off regression suites are green.
-- [ ] **A10 — Cross-channel preservation:** Slack and Telegram delivery tests are green
-  through the shared delivery engine with no channel-name branch in generic code.
-- [ ] **A11 — Quality gates:** targeted clippy, workspace clippy, architecture, Reborn E2E,
-  and pre-commit safety checks are green with zero new warnings.
-- [ ] **A12 — Scope audit:** final diff contains no rebase, schema/wire changes, full URT
-  migration, or unrelated cleanup; docs and crate guidance describe the new owners.
+- [x] **A9 — Contract preservation:** 108 Telegram owner tests, 60 adapter tests, 10
+  default-off tests, all 1,528 full-feature composition tests, and exact JSON/manifest
+  projection tests pass across setup, ingress, pairing, identity, and delivery.
+- [x] **A10 — Cross-channel preservation:** 87 shared delivery tests plus its public-API
+  contract and the full Slack/Telegram-enabled composition suite pass. Generic dispatch uses
+  `ChannelDeliveryProtocol`; compatibility-locked legacy idempotency-key text is not branching.
+- [x] **A11 — Quality gates:** all four targeted Clippy commands and workspace-wide
+  all-target/all-feature Clippy pass with zero Rust warnings; 51 architecture tests, all 50
+  Reborn E2E binaries, production source scans, and baseline-scoped pre-commit safety pass.
+- [x] **A12 — Scope audit:** the 102-file owner-move/module-split diff contains no rebase,
+  migration, manifest asset, route/wire, secret-handle, persistence-root, frontend, or full URT
+  change; contracts and crate guidance name the new owners.
 
 ## Rollback strategy
 

@@ -674,7 +674,7 @@ git commit -m "docs(reborn): record channel and Telegram architecture owners"
 **Interfaces:**
 - Produces: merge-ready evidence without claiming unavailable checks.
 
-- [ ] **Step 1: Run the contract regression matrix**
+- [x] **Step 1: Run the contract regression matrix**
 
 ```bash
 cargo test -p ironclaw_channel_delivery
@@ -689,7 +689,14 @@ bash scripts/reborn-e2e-rust.sh
 
 Expected: all commands pass. If an external service is genuinely required, capture the exact unavailable dependency and do not mark its row complete.
 
-- [ ] **Step 2: Run targeted and workspace Clippy**
+Observed on final source: `ironclaw_channel_delivery` passes 87 unit tests plus its public-API
+contract, `ironclaw_channel_host` passes 3 webhook-host tests, `ironclaw_telegram_extension`
+passes 108 tests, `ironclaw_telegram_v2_adapter` passes 60 tests, the full-feature composition
+suite passes 1,528 tests, the architecture crate passes 8 composition + 34 dependency + 9
+Telegram tests, and the default-off integration passes 10 tests. `scripts/reborn-e2e-rust.sh`
+passes all 50 deterministic contract binaries. No external service was required or skipped.
+
+- [x] **Step 2: Run targeted and workspace Clippy**
 
 ```bash
 cargo clippy -p ironclaw_channel_delivery --all-targets --all-features -- -D warnings
@@ -701,7 +708,11 @@ cargo clippy --workspace --all-targets --all-features -- -D warnings
 
 Expected: zero warnings.
 
-- [ ] **Step 3: Run source-safety and sibling-pattern audits**
+Observed: all four targeted commands and `cargo clippy --workspace --all-targets
+--all-features -- -D warnings` exit successfully with zero Rust/Clippy warnings. Cargo emits
+only the repository's pre-existing `net.retries` configuration-key notice, outside Clippy.
+
+- [x] **Step 3: Run source-safety and sibling-pattern audits**
 
 ```bash
 rg -n "\.unwrap\(|\.expect\(" crates/ironclaw_channel_delivery/src crates/ironclaw_telegram_extension/src
@@ -713,11 +724,28 @@ scripts/pre-commit-safety.sh
 
 Expected: production unwrap/expect scan is empty, deleted-symbol and test-store scans are empty outside ratchet text, diff check and safety script pass.
 
-- [ ] **Step 4: Audit exact scope and compatibility**
+Observed: the production-aware panic scan is empty; raw matches are confined to test files or
+`#[cfg(test)]` modules. Deleted Telegram names occur only in the architecture ratchet itself,
+the Telegram crate has no `InMemory*Store`, the old composition delivery file is absent, and
+both working-tree and baseline diff checks pass. Because `origin/pr-6159` was deleted during
+implementation, `pre-commit-safety.sh` was run with that upstream ref temporarily restored to
+the locked baseline `0575d381...`; it passes, including composition at 22.21% of production LOC
+and 1,109 non-exempt composition `Arc<dyn>` uses against the 1,156 ceiling. The audit also
+replaced both new SHA-256 byte-prefix slices with character-safe prefix extraction.
+
+- [x] **Step 4: Audit exact scope and compatibility**
 
 Inspect `git diff --stat origin/pr-6159...HEAD`, `git diff --name-status origin/pr-6159...HEAD`, public serde definitions, route constants, manifest files, secret-handle constants, and persistence path constants. Confirm no rebase, schema/wire/route/manifest/secret/persistence change, unrelated cleanup, or full URT migration entered the diff.
 
-- [ ] **Step 5: Complete A9-A12 and commit final evidence**
+Observed against locked baseline `0575d381...`: 102 files are changed by the documented owner
+moves and module splits. The Telegram manifest asset is byte-identical; route IDs/paths, webhook
+header, adapter/provider IDs, credential-handle strings, six filesystem roots, feature gates,
+and exact connected/pending status JSON remain unchanged. No migration, manifest asset, static
+frontend, persisted schema, or wire definition changed. The only new runtime identifiers are
+the provider-neutral extension registration key and a stable internal outbound-provider cache
+key. The branch is a descendant of the PR baseline; it contains no rebase or full URT migration.
+
+- [x] **Step 5: Complete A9-A12 and commit final evidence**
 
 Check A9 for Telegram contract suites, A10 for shared Slack/Telegram delivery, A11 for quality gates, and A12 for scope audit. Record exact commands and outcomes in the approved design and this plan.
 
@@ -744,7 +772,13 @@ git commit -m "docs(reborn): complete PR 6159 architecture evidence"
 - [x] **A7 — Focused files:** Tasks 5, 7, and 8; 999-line physical-file ratchet.
 - [x] **A8 — Ratchets:** Task 1, turned green by Tasks 3-8; all nine Telegram architecture
   tests pass.
-- [ ] **A9 — Contract preservation:** Task 10 Telegram setup/ingress/pairing/identity/delivery/default-off suites.
-- [ ] **A10 — Cross-channel preservation:** Tasks 3 and 10 shared-engine Slack/Telegram suites.
-- [ ] **A11 — Quality gates:** Task 10 Clippy, architecture, Reborn E2E, and safety script.
-- [ ] **A12 — Scope audit:** Tasks 9 and 10 final name-status, constants, docs, and diff review.
+- [x] **A9 — Contract preservation:** 108 Telegram owner tests, 60 adapter tests, 10
+  default-off tests, the full composition suite, and exact route JSON/manifest projections pass.
+- [x] **A10 — Cross-channel preservation:** 87 shared-engine tests plus its public API test and
+  all 1,528 Slack/Telegram-enabled composition tests pass; generic behavior dispatches through
+  `ChannelDeliveryProtocol` rather than a channel-name branch while legacy identity-key text is
+  deliberately preserved for compatibility.
+- [x] **A11 — Quality gates:** all targeted and workspace Clippy, 51 architecture tests, 50
+  Reborn E2E binaries, production safety scans, and baseline-scoped pre-commit safety pass.
+- [x] **A12 — Scope audit:** the final baseline diff, public constants, exact JSON tests,
+  manifest asset, secret handles, persistence roots, docs, and crate guidance are verified.
