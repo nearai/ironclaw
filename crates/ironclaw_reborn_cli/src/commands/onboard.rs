@@ -34,7 +34,7 @@ impl OnboardCommand {
         let marker_path = onboarding_marker_path(home);
 
         if self.dry_run {
-            print_dry_run(home, &marker_path, self.force, self.import_history);
+            print_dry_run(home, &marker_path, self.force, self.import_history)?;
             return Ok(());
         }
 
@@ -88,7 +88,12 @@ pub(crate) fn onboarding_marker_path(home: &RebornHome) -> PathBuf {
     home.path().join(ONBOARDING_MARKER_FILE)
 }
 
-fn print_dry_run(home: &RebornHome, marker_path: &Path, force: bool, import_history: bool) {
+fn print_dry_run(
+    home: &RebornHome,
+    marker_path: &Path,
+    force: bool,
+    import_history: bool,
+) -> anyhow::Result<()> {
     println!("IronClaw Reborn onboarding dry run");
     println!("reborn_home: {}", home.path().display());
     println!("home_source: {}", home.source_label());
@@ -101,7 +106,11 @@ fn print_dry_run(home: &RebornHome, marker_path: &Path, force: bool, import_hist
         "would_write_or_preserve: {}",
         home.providers_file_path().display()
     );
-    let webui_token_action = if crate::webui_token::webui_token_file_is_valid(home.path()) {
+    // Propagates rather than defaulting to "would_write" on an I/O error:
+    // an unreadable-but-present token file must be reported as an error,
+    // not silently promised a (destructive) overwrite that wouldn't
+    // actually happen the same way on a real run.
+    let webui_token_action = if crate::webui_token::webui_token_file_is_valid(home.path())? {
         "would_preserve"
     } else {
         "would_write"
@@ -118,6 +127,7 @@ fn print_dry_run(home: &RebornHome, marker_path: &Path, force: bool, import_hist
     println!("{marker_action}: {}", marker_path.display());
     println!("import_history_requested: {import_history}");
     println!("v1_state: not-used");
+    Ok(())
 }
 
 fn write_onboarding_marker(

@@ -152,14 +152,13 @@ fn unit_path() -> Result<PathBuf> {
 
 // ── Verb bodies ─────────────────────────────────────────────────
 
-pub(super) fn install(invocation: &ServeInvocation) -> Result<()> {
-    install_with_runner(invocation, &mut OsServiceCommandRunner).map(|_replaced| ())
-}
-
 /// Returns whether a pre-existing unit file at the target path was
 /// replaced by this install (captured before the write). Exposed for
-/// tests; production wraps this via [`install`], which discards the
-/// bool once the advisory line has been printed.
+/// tests, and for `super::ServicePlatform::install_with_runner` (the
+/// runner-injectable install path driven by the `service install`
+/// preflight-warning integration test); production reaches this through
+/// [`super::ServicePlatform::install`], which discards the bool once the
+/// advisory line has been printed.
 pub(super) fn install_with_runner(
     invocation: &ServeInvocation,
     runner: &mut dyn ServiceCommandRunner,
@@ -411,6 +410,28 @@ fn rollback_uninstall(
 }
 
 pub(super) fn uninstall_with_runner(runner: &mut dyn ServiceCommandRunner) -> Result<()> {
+    uninstall_with_runner_and_remover(runner, remove_unit_file)
+}
+
+/// Non-generic wrapper around `std::fs::remove_file` so it can be named as
+/// a concrete `fn(&Path) -> io::Result<()>` pointer (the generic
+/// `std::fs::remove_file::<P: AsRef<Path>>` item cannot itself coerce to a
+/// fixed fn-pointer type without an instantiation hint).
+fn remove_unit_file(path: &Path) -> std::io::Result<()> {
+    std::fs::remove_file(path)
+}
+
+/// Same as [`uninstall_with_runner`] but with the unit-file removal step
+/// itself injectable, mirroring how [`ServiceCommandRunner`] is already
+/// injected for the `systemctl` calls. Lets a test force a `remove_file`
+/// failure deterministically — unlike locking down the parent directory's
+/// permission bits (0o555), which a root-running process (some CI
+/// containers) bypasses entirely, making that regression test a silent
+/// no-op instead of a real red-before-green check.
+fn uninstall_with_runner_and_remover(
+    runner: &mut dyn ServiceCommandRunner,
+    remove_file: fn(&Path) -> std::io::Result<()>,
+) -> Result<()> {
     let file = unit_path()?;
     let previous = match std::fs::read(&file) {
         Ok(contents) => Some(contents),
@@ -429,8 +450,7 @@ pub(super) fn uninstall_with_runner(runner: &mut dyn ServiceCommandRunner) -> Re
         )?;
     }
     if previous.is_some()
-        && let Err(error) =
-            std::fs::remove_file(&file).with_context(|| format!("remove {}", file.display()))
+        && let Err(error) = remove_file(&file).with_context(|| format!("remove {}", file.display()))
     {
         let rollback_errors = rollback_uninstall(&file, previous.as_deref(), manager_state, runner);
         return Err(combined_failure(error, rollback_errors));
@@ -1017,7 +1037,6 @@ mod tests {
         );
     }
 
-    #[cfg(unix)]
     #[test]
     fn uninstall_remove_file_failure_rolls_back_like_reload_failure() {
         // Before this fix, a `remove_file` error after a successful
@@ -1026,27 +1045,29 @@ mod tests {
         // enabled) never got re-enabled. This pins that the failure now
         // goes through the same rollback path as a daemon-reload
         // failure.
-        use std::os::unix::fs::PermissionsExt;
+        //
+        // The failure is injected through `uninstall_with_runner_and_remover`
+        // rather than by chmod-locking the parent directory: a
+        // root-running test process (some CI containers) bypasses
+        // directory permission checks entirely, which made the old
+        // version of this test a silent no-op instead of a real
+        // red-before-green regression check.
         let _lock = crate::runtime::test_env::lock_runtime_env();
         let tmp = tempfile::tempdir().expect("tempdir");
         let prior = std::env::var_os("HOME");
         // SAFETY: serialized by `lock_runtime_env`; restored below.
         unsafe { std::env::set_var("HOME", tmp.path()) };
         let file = unit_path().expect("unit path");
-        let parent = file.parent().expect("unit parent").to_path_buf();
-        std::fs::create_dir_all(&parent).expect("create parent");
+        std::fs::create_dir_all(file.parent().expect("unit parent")).expect("create parent");
         std::fs::write(&file, "previous unit").expect("write unit");
-        // Strip write+execute on the parent dir so `remove_file` fails
-        // with a permission error while the file itself remains readable.
-        std::fs::set_permissions(&parent, std::fs::Permissions::from_mode(0o555))
-            .expect("lock parent dir");
         let mut runner = RecordingRunner {
             unit_state_output: Some("LoadState=loaded\nUnitFileState=enabled\n".to_string()),
             ..RecordingRunner::default()
         };
-        let result = uninstall_with_runner(&mut runner);
-        std::fs::set_permissions(&parent, std::fs::Permissions::from_mode(0o755))
-            .expect("restore parent dir perms for cleanup");
+        fn failing_remove_file(_path: &Path) -> std::io::Result<()> {
+            Err(std::io::Error::other("injected remove_file failure"))
+        }
+        let result = uninstall_with_runner_and_remover(&mut runner, failing_remove_file);
         // SAFETY: serialized by `lock_runtime_env`.
         unsafe {
             match prior {
@@ -1055,12 +1076,23 @@ mod tests {
             }
         }
 
-        if result.is_ok() {
-            // Running as root (some CI containers) bypasses directory
-            // permission checks entirely, so `remove_file` can succeed
-            // even with the parent locked down. Nothing to assert then.
-            return;
-        }
+        let error = result.expect_err("an injected remove_file failure must propagate");
+        // `Display` on `anyhow::Error` only prints the outermost context
+        // (`remove <path>`); the alternate `{:#}` form walks the full
+        // source chain down to the injected io::Error's own message.
+        let rendered = format!("{error:#}");
+        assert!(
+            rendered.contains("injected remove_file failure"),
+            "error: {rendered}"
+        );
+        assert!(
+            file.exists(),
+            "the unit file rollback must restore it after a failed removal"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&file).expect("read restored unit"),
+            "previous unit"
+        );
         assert!(
             runner
                 .labels

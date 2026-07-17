@@ -151,17 +151,26 @@ fn resolve_installed(file_exists: bool, loaded: bool) -> bool {
     file_exists || loaded
 }
 
-// ── Verb bodies ─────────────────────────────────────────────────
-
-pub(super) fn install(context: &RebornCliContext, invocation: &ServeInvocation) -> Result<()> {
-    install_with_runner(context, invocation, &mut OsServiceCommandRunner).map(|_replaced| ())
+/// Gate for the shared "keeps the OLD definition" advisory, launchd side.
+/// The unload/load/start reload `install_with_runner` runs when the label
+/// was already loaded makes the new definition live immediately, so the
+/// note (which claims a running process is still on the old definition)
+/// would be false in that case — suppress it. When the label was NOT
+/// loaded no reload ran, so a replaced file leaves the advisory accurate.
+fn launchd_install_advisory(replaced_existing: bool, was_loaded: bool) -> Option<&'static str> {
+    super::replaced_existing_service_file_note(replaced_existing && !was_loaded)
 }
+
+// ── Verb bodies ─────────────────────────────────────────────────
 
 /// Returns whether a pre-existing plist file at the target path was
 /// replaced by this install (captured before the write). Exposed for
-/// tests; production wraps this via [`install`], which discards the
-/// bool once the advisory line has been printed.
-fn install_with_runner(
+/// tests, and for `super::ServicePlatform::install_with_runner` (the
+/// runner-injectable install path driven by the `service install`
+/// preflight-warning integration test); production wraps this via
+/// [`install`], which discards the bool once the advisory line has been
+/// printed.
+pub(super) fn install_with_runner(
     context: &RebornCliContext,
     invocation: &ServeInvocation,
     runner: &mut dyn ServiceCommandRunner,
@@ -207,7 +216,7 @@ fn install_with_runner(
         )?;
     }
     println!("Installed launchd service: {}", file.display());
-    if let Some(note) = super::replaced_existing_service_file_note(replaced_existing) {
+    if let Some(note) = launchd_install_advisory(replaced_existing, was_loaded) {
         println!("{note}");
     }
     println!("  Start with: ironclaw-reborn service start");
@@ -437,7 +446,7 @@ mod tests {
             }
         }
 
-        result.expect("install must succeed");
+        let replaced = result.expect("install must succeed");
         assert_eq!(
             runner.labels,
             [
@@ -447,6 +456,79 @@ mod tests {
                 "launchctl start",
             ],
             "an already-loaded job must be reloaded so it picks up the new plist"
+        );
+        // The unload/load/start sequence above already makes the new
+        // definition live, so the "keeps the OLD definition until
+        // restart" advisory would be false here and must not print —
+        // even though this is a fresh install with no prior plist file
+        // (`replaced_existing` is false regardless).
+        assert!(
+            !replaced,
+            "a fresh install (no prior plist) must not report a replacement"
+        );
+    }
+
+    #[test]
+    fn install_suppresses_stale_definition_note_when_reload_already_happened() {
+        // Pins the launchd advisory fix: replacing an existing plist while
+        // the label is already loaded triggers the unload/load/start
+        // reload above, so the running process picks up the new
+        // definition immediately. The "keeps the OLD definition until
+        // `service restart`" note would be false in that case and must
+        // not print. `install_with_runner` only returns `replaced_existing`
+        // (not `was_loaded`), so this pins the actual gate
+        // `launchd_install_advisory` applies, driven by the same
+        // `replaced_existing = true` this scenario produces.
+        let _lock = crate::runtime::test_env::lock_runtime_env();
+        let home_tmp = tempfile::tempdir().expect("tempdir");
+        let prior = std::env::var_os("HOME");
+        // SAFETY: serialized by `lock_runtime_env`; restored below.
+        unsafe { std::env::set_var("HOME", home_tmp.path()) };
+        let (_ctx_tmp, context) = RebornCliContext::test_context();
+        let file = plist_path().expect("plist path");
+        std::fs::create_dir_all(file.parent().expect("plist parent")).expect("create parent");
+        std::fs::write(&file, "pre-existing plist").expect("write pre-existing plist");
+        let mut runner = RecordingRunner {
+            launchctl_list: format!("123\t0\t{SERVICE_LABEL}\n"),
+            ..RecordingRunner::default()
+        };
+        let result = install_with_runner(&context, &sample_invocation(), &mut runner);
+        // SAFETY: serialized by `lock_runtime_env`.
+        unsafe {
+            match prior {
+                Some(value) => std::env::set_var("HOME", value),
+                None => std::env::remove_var("HOME"),
+            }
+        }
+
+        let replaced = result.expect("install over a loaded label must succeed");
+        assert!(
+            replaced,
+            "a pre-existing plist was in fact replaced on disk"
+        );
+        assert!(
+            launchd_install_advisory(replaced, /* was_loaded */ true).is_none(),
+            "the note must be suppressed once the label was already loaded and reloaded in place"
+        );
+    }
+
+    #[test]
+    fn launchd_install_advisory_prints_only_when_replaced_and_not_reloaded() {
+        assert!(
+            launchd_install_advisory(true, false).is_some(),
+            "a replaced file with no in-place reload must keep the stale-definition advisory"
+        );
+        assert!(
+            launchd_install_advisory(true, true).is_none(),
+            "a replaced file that was reloaded in place must not claim a stale definition"
+        );
+        assert!(
+            launchd_install_advisory(false, false).is_none(),
+            "a fresh install has nothing to advise"
+        );
+        assert!(
+            launchd_install_advisory(false, true).is_none(),
+            "a fresh install has nothing to advise even if the label was already loaded"
         );
     }
 

@@ -100,7 +100,7 @@ impl ServiceCommand {
     pub(crate) fn execute(self, context: RebornCliContext) -> Result<()> {
         let platform = ServicePlatform::detect()?;
         match self.command {
-            ServiceVerb::Install => platform.install(&context),
+            ServiceVerb::Install => platform.install(&context).map(|_warnings| ()),
             ServiceVerb::Start => platform.start(),
             ServiceVerb::Stop => platform.stop(),
             ServiceVerb::Restart => platform.restart(),
@@ -132,15 +132,38 @@ impl ServicePlatform {
         }
     }
 
-    fn install(&self, context: &RebornCliContext) -> Result<()> {
-        for warning in preflight_warnings(context) {
+    /// Production install path: real `launchctl`/`systemctl` commands via
+    /// [`OsServiceCommandRunner`].
+    fn install(&self, context: &RebornCliContext) -> Result<Vec<String>> {
+        self.install_with_runner(context, &mut OsServiceCommandRunner)
+    }
+
+    /// Runner-injectable install path shared by production (via
+    /// [`Self::install`]) and the `service install` preflight-warning
+    /// integration test: computes and prints the same non-fatal
+    /// readiness warnings [`Self::install`] always has, then dispatches
+    /// to the platform-specific install with the given
+    /// [`ServiceCommandRunner`]. Returns the printed warnings (not just
+    /// `()`) so a test can assert on their content without reaching for
+    /// `preflight_warnings` directly — driving the assertion through the
+    /// same call site `service install` actually uses.
+    fn install_with_runner(
+        &self,
+        context: &RebornCliContext,
+        runner: &mut dyn ServiceCommandRunner,
+    ) -> Result<Vec<String>> {
+        let warnings = preflight_warnings(context)?;
+        for warning in &warnings {
             eprintln!("warning: {warning}");
         }
         let invocation = serve_invocation()?;
         match self {
-            Self::MacOs => launchd::install(context, &invocation),
-            Self::Linux => systemd::install(&invocation),
+            Self::MacOs => {
+                launchd::install_with_runner(context, &invocation, runner).map(|_replaced| ())?
+            }
+            Self::Linux => systemd::install_with_runner(&invocation, runner).map(|_replaced| ())?,
         }
+        Ok(warnings)
     }
 
     fn start(&self) -> Result<()> {
@@ -203,7 +226,13 @@ fn home_dir() -> Result<PathBuf> {
 /// WebUI token until `ironclaw-reborn onboard` runs. Checks the
 /// onboarding marker, `config.toml`, and the WebUI token file's entropy
 /// floor.
-fn preflight_warnings(context: &RebornCliContext) -> Vec<String> {
+///
+/// Fallible: a real I/O error reading the token file (unreadable,
+/// symlinked, oversized — see `webui_token::webui_token_file_is_valid`)
+/// is a genuine problem distinct from "token absent/too short" and must
+/// surface as an `install` error rather than being folded into the same
+/// generic warning text.
+fn preflight_warnings(context: &RebornCliContext) -> Result<Vec<String>> {
     let home = context.boot_config().home();
     let mut warnings = Vec::new();
 
@@ -224,7 +253,7 @@ fn preflight_warnings(context: &RebornCliContext) -> Vec<String> {
         ));
     }
 
-    if !crate::webui_token::webui_token_file_is_valid(home.path()) {
+    if !crate::webui_token::webui_token_file_is_valid(home.path())? {
         warnings.push(format!(
             "WebUI token not found or too short at {} — run `ironclaw-reborn onboard` first so \
              `serve` has a valid WebUI bearer token",
@@ -232,7 +261,7 @@ fn preflight_warnings(context: &RebornCliContext) -> Vec<String> {
         ));
     }
 
-    warnings
+    Ok(warnings)
 }
 
 // ── Restart decision tree ───────────────────────────────────────
@@ -298,15 +327,25 @@ fn status_label(installed: bool, running: bool) -> &'static str {
 // ── Install advisory ────────────────────────────────────────────
 
 /// Advisory line printed after `service install` when a pre-existing
-/// unit/plist file at the target path was replaced by this install —
-/// `None` when the install wrote a fresh file, nothing to advise. Shared
-/// by both platforms so the wording (and the "must `service restart`"
-/// guidance) can't drift between them. Covers both a prior install by
-/// this same CLI and one by the WebUI operator facade
-/// (`RebornLocalServiceLifecycle`, see the module doc): either way the
-/// write already happened atomically by the time this is read; a
-/// currently-running service process keeps running off the old
-/// definition until restarted.
+/// unit/plist file at the target path was replaced by this install, and
+/// a currently-running service process still keeps running off the OLD
+/// definition until `service restart` — `None` when there is nothing to
+/// advise. Shared by both platforms so the wording (and the "must
+/// `service restart`" guidance) can't drift between them. Covers both a
+/// prior install by this same CLI and one by the WebUI operator facade
+/// (`RebornLocalServiceLifecycle`, see the module doc).
+///
+/// Callers decide whether the "keeps the OLD definition" claim is true
+/// for their platform and pass that pre-resolved bool in: systemd never
+/// reloads a running unit as part of `install` (`daemon-reload` alone
+/// does not restart the service), so a replaced unit always leaves a
+/// running process on the old definition and `systemd::install_with_runner`
+/// passes `replaced_existing` through unchanged. launchd's `install`
+/// forces an unload/load/start reload when the label was already loaded
+/// (see `launchd::install_with_runner`), which makes the new definition
+/// live immediately — so `launchd::install_with_runner` passes
+/// `replaced_existing && !was_loaded`, suppressing the note exactly when
+/// it would be false.
 fn replaced_existing_service_file_note(replaced_existing: bool) -> Option<&'static str> {
     replaced_existing.then_some(
         "  Replaced an existing service definition at this path; if the service is currently \
@@ -429,6 +468,19 @@ mod tests {
             match label {
                 "launchctl list" => Ok(String::new()),
                 "id -u" => Ok("501\n".to_string()),
+                // `install_with_runner` (both platforms) now queries unit
+                // state before writing the unit/plist file (see
+                // `systemd::query_unit_state`). The strict `Key=Value`
+                // parser errors on a blank/malformed response rather than
+                // silently defaulting to "not loaded" (a malformed
+                // response must never read as `enabled=false`, which
+                // would make an install-failure rollback skip re-enabling
+                // a unit that actually was enabled) — so this mock must
+                // return well-formed output, mirroring the dedicated
+                // systemd tests' `unit_state_output` pattern.
+                "systemctl show unit state" => {
+                    Ok("LoadState=loaded\nUnitFileState=enabled\n".to_string())
+                }
                 _ => Ok(String::new()),
             }
         }
@@ -467,17 +519,63 @@ mod tests {
         )
         .expect("write webui token");
 
-        assert!(preflight_warnings(&context).is_empty());
+        assert!(
+            preflight_warnings(&context)
+                .expect("preflight_warnings must succeed")
+                .is_empty()
+        );
     }
 
     #[test]
     fn preflight_warnings_flags_missing_marker_config_and_webui_token() {
         let (_tmp, context) = RebornCliContext::test_context();
-        let warnings = preflight_warnings(&context);
+        let warnings =
+            preflight_warnings(&context).expect("preflight_warnings must succeed when absent");
         assert_eq!(warnings.len(), 3);
         assert!(warnings[0].contains("onboarding marker not found"));
         assert!(warnings[1].contains("config.toml not found"));
         assert!(warnings[2].contains("WebUI token not found or too short"));
+    }
+
+    #[test]
+    fn install_with_runner_surfaces_missing_webui_token_warning_through_the_real_path() {
+        // Per the repo's "test through the caller" rule: a unit test on
+        // `preflight_warnings` alone doesn't prove `service install`
+        // actually calls it with the right inputs and doesn't swallow
+        // the result. Drive `ServicePlatform::install_with_runner` (the
+        // same call `install()`/`ServiceCommand::execute` use) with a
+        // fake runner, marker + config present, and the WebUI token
+        // absent, and assert the token warning comes back from the real
+        // path.
+        let _lock = crate::runtime::test_env::lock_runtime_env();
+        let home_tmp = tempfile::tempdir().expect("tempdir");
+        let _home = TempHomeGuard::set(home_tmp.path());
+        let (_ctx_tmp, context) = RebornCliContext::test_context();
+        let reborn_home = context.boot_config().home();
+        std::fs::create_dir_all(reborn_home.path()).expect("create reborn home");
+        std::fs::write(
+            crate::commands::onboard::onboarding_marker_path(reborn_home),
+            "{}",
+        )
+        .expect("write marker");
+        std::fs::write(reborn_home.config_file_path(), "").expect("write config");
+        // WebUI token deliberately absent.
+
+        let platform = ServicePlatform::detect().expect("detect must resolve on macOS/Linux");
+        let mut runner = SuccessfulServiceCommandRunner;
+        let warnings = platform
+            .install_with_runner(&context, &mut runner)
+            .expect("install must succeed even with the token warning outstanding");
+
+        assert_eq!(
+            warnings.len(),
+            1,
+            "marker and config are present; only the token warning should fire: {warnings:?}"
+        );
+        assert!(
+            warnings[0].contains("WebUI token not found or too short"),
+            "warnings: {warnings:?}"
+        );
     }
 
     #[cfg(unix)]

@@ -47,6 +47,28 @@ const DEFAULT_ENV_USER_ID_VAR: &str = "IRONCLAW_REBORN_WEBUI_USER_ID";
 /// year: this is a long-lived programmatic credential, not a browser session.
 const ADMIN_API_TOKEN_LIFETIME_DAYS: i64 = 365;
 
+/// Read an env var, distinguishing "unset" from "set but not valid UTF-8".
+///
+/// `std::env::var(name).ok()` collapses both `VarError::NotPresent` and
+/// `VarError::NotUnicode` to `None` — which for the WebChat v2 bearer
+/// token env var is dangerous: an operator whose token value got mangled
+/// into invalid UTF-8 (a shell/CI export bug, a truncated byte sequence)
+/// would silently fall through to the `<reborn_home>/webui-token` file
+/// credential instead of failing loudly. Only `NotPresent` means "treat
+/// as unset"; `NotUnicode` is a real configuration error and must
+/// propagate with context naming the variable.
+fn present_unicode_env_var(name: &str) -> anyhow::Result<Option<String>> {
+    match env::var(name) {
+        Ok(value) => Ok(Some(value)),
+        Err(env::VarError::NotPresent) => Ok(None),
+        Err(env::VarError::NotUnicode(raw)) => Err(anyhow!(
+            "{name} is set but is not valid UTF-8 ({} raw bytes); refusing to silently treat it \
+             as unset, which would otherwise fall through to the WebChat v2 token file credential.",
+            raw.as_encoded_bytes().len()
+        )),
+    }
+}
+
 /// Mints the admin-created-user API bearer over a signed session store. The
 /// store is deterministic in its signing key (operator secret + tenant), so a
 /// token minted here validates under the SSO login surface's own store.
@@ -152,7 +174,7 @@ impl ServeCommand {
         // the value opaquely.
         let token_value = crate::webui_token::resolve_webui_token(
             env_token_var,
-            env::var(env_token_var).ok().as_deref(),
+            present_unicode_env_var(env_token_var)?.as_deref(),
             boot_config.home().path(),
         )?;
         let user_id_raw = env::var(env_user_id_var).map_err(|_| {
@@ -1069,6 +1091,65 @@ mod tests {
     use super::*;
 
     const WEBUI_BASE_URL_ENV: &str = "IRONCLAW_REBORN_WEBUI_BASE_URL";
+
+    #[test]
+    fn present_unicode_env_var_treats_unset_as_none() {
+        let _guard = crate::runtime::test_env::lock_runtime_env();
+        const VAR: &str = "IRONCLAW_REBORN_CLI_TEST_ABSENT_VAR";
+        // SAFETY: serialized by `lock_runtime_env`; no other thread touches
+        // this test-local var name.
+        unsafe { std::env::remove_var(VAR) };
+        assert_eq!(
+            present_unicode_env_var(VAR).expect("unset is not an error"),
+            None
+        );
+    }
+
+    #[test]
+    fn present_unicode_env_var_returns_a_present_value() {
+        let _guard = crate::runtime::test_env::lock_runtime_env();
+        const VAR: &str = "IRONCLAW_REBORN_CLI_TEST_PRESENT_VAR";
+        // SAFETY: serialized by `lock_runtime_env`; restored below.
+        unsafe { std::env::set_var(VAR, "a-token-value") };
+        let result = present_unicode_env_var(VAR);
+        // SAFETY: serialized by `lock_runtime_env`.
+        unsafe { std::env::remove_var(VAR) };
+        assert_eq!(
+            result.expect("present unicode value is not an error"),
+            Some("a-token-value".to_string())
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn present_unicode_env_var_propagates_not_unicode_instead_of_treating_it_as_unset() {
+        // Before this fix, `env::var(name).ok()` collapsed `NotUnicode`
+        // (a real configuration error — the bearer token env var got
+        // mangled into invalid UTF-8) into `None`, silently falling
+        // through to the WebChat v2 token file credential instead of
+        // failing loudly at startup.
+        use std::os::unix::ffi::OsStringExt as _;
+
+        let _guard = crate::runtime::test_env::lock_runtime_env();
+        const VAR: &str = "IRONCLAW_REBORN_CLI_TEST_NON_UNICODE_VAR";
+        let invalid_utf8 = std::ffi::OsString::from_vec(vec![0xFF, 0xFE, 0xFD]);
+        // SAFETY: serialized by `lock_runtime_env`; restored below.
+        unsafe { std::env::set_var(VAR, &invalid_utf8) };
+        let result = present_unicode_env_var(VAR);
+        // SAFETY: serialized by `lock_runtime_env`.
+        unsafe { std::env::remove_var(VAR) };
+
+        let error = result.expect_err("non-UTF-8 env value must be a real error, not `Ok(None)`");
+        let message = error.to_string();
+        assert!(
+            message.contains(VAR),
+            "error must name the variable: {message}"
+        );
+        assert!(
+            message.contains("not valid UTF-8"),
+            "error must explain why: {message}"
+        );
+    }
 
     fn clear_webui_env() {
         // SAFETY: tests are serialized by `the shared crate process-env lock`; no other
