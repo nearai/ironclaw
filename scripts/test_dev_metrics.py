@@ -94,7 +94,8 @@ def test_render_md_smoke():
     t3 = {"crate_count": 69, "composition_share_gate_pct": 23.98,
           "composition_kloc_now": 156.4, "v1_src_kloc_now": 290.0,
           "crates_kloc_now": 652.0, "trait_defs": 369, "trait_impls_for": 2882,
-          "impls_per_trait": 7.81, "files_over_1500": 164, "files_over_3000": 56,
+          "impls_per_trait": 7.81, "composition_arc_dyn": 1093,
+          "composition_dyn_types": 259, "files_over_1500": 164, "files_over_3000": 56,
           "boundary_test_count": 34, "arch_exempt_allows": 101,
           "size_trend": [{"date": "2026-07-16", "composition_kloc": 156.4,
                           "composition_byte_share_pct": 20.2, "v1_src_kloc": 268.5,
@@ -104,6 +105,9 @@ def test_render_md_smoke():
     assert "Tier 1 — Flow / Speed" in md
     assert "composition share (ratchet metric)" in md
     assert "23.98%" in md
+    # dispatch signal must render
+    assert "composition Arc<dyn> (governed, ratchet)" in md
+    assert "1093" in md
     # the byte trend must be explicitly disclaimed as not the ratchet metric
     assert "NOT the ratchet metric" in md
 

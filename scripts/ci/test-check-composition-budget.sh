@@ -64,13 +64,19 @@ make_fixture() {
 # 3000 comp / (3000+7000) = 30.00% = 3000 bp
 make_fixture "${tmp}/crates" 3000 7000
 
-budget() {  # write a budget file: enforce ceiling tolerance
+budget() {  # enforce ceiling_bp tolerance_bp [arc_ceiling=0] [arc_tol=0]
+    # arc_ceiling defaults to 0: mass-focused fixtures have no Arc<dyn>, so a
+    # 0 ceiling neither breaches nor emits a dispatch nudge, isolating the mass
+    # metric under test. Dispatch cases pass an explicit ceiling.
     cat > "${tmp}/budget.toml" <<EOF
 [gate]
 enforce = $1
 ceiling_bp = $2
 tolerance_bp = $3
 observed_bp = $2
+arc_dyn_ceiling = ${4:-0}
+arc_dyn_tolerance = ${5:-0}
+arc_dyn_observed = ${4:-0}
 observed_date = "2026-07-16"
 EOF
 }
@@ -85,13 +91,13 @@ run_gate() {
 # C1: observed 3000bp, ceiling 3000 + tol 30 -> effective 3030, within budget.
 budget true 3000 30; run_gate
 assert_rc       "C1 within budget exits 0" 0 "${CAP_RC}"
-assert_contains "C1 reports OK"            "${CAP_OUT}" "OK: composition share within budget"
+assert_contains "C1 reports OK"            "${CAP_OUT}" "OK: composition within mass + dispatch budget"
 assert_contains "C1 shows observed share"  "${CAP_OUT}" "30.00% (3000 bp)"
 
 # C2: observed 3000bp, ceiling 2900 + tol 30 -> effective 2930, BREACH, enforcing.
 budget true 2900 30; run_gate
 assert_rc       "C2 breach (enforce) exits 1"  1 "${CAP_RC}"
-assert_contains "C2 reports BUDGET EXCEEDED"   "${CAP_OUT}" "BUDGET EXCEEDED"
+assert_contains "C2 reports MASS EXCEEDED"    "${CAP_OUT}" "MASS EXCEEDED"
 assert_contains "C2 names carve-out guidance"  "${CAP_OUT}" "ironclaw-reborn-architecture-review"
 
 # C3: same breach but DRY-RUN -> exit 0, prefixed marker, no hard fail.
@@ -103,7 +109,7 @@ assert_contains "C3 banner shows DRY-RUN"      "${CAP_OUT}" "DRY-RUN"
 # C4: observed 3000bp exactly at effective ceiling (ceiling 2970 + tol 30 = 3000) -> inclusive pass.
 budget true 2970 30; run_gate
 assert_rc       "C4 boundary inclusive exits 0" 0 "${CAP_RC}"
-assert_contains "C4 reports OK"                 "${CAP_OUT}" "OK: composition share within budget"
+assert_contains "C4 reports OK"                 "${CAP_OUT}" "OK: composition within mass + dispatch budget"
 
 # C5: down-ratchet nudge when observed is >1pp under the ceiling (ceiling 3200, obs 3000 -> 2pp slack).
 budget true 3200 30; run_gate
@@ -165,6 +171,52 @@ BUDGET_FILE="${tmp}/budget.toml" \
 capture bash "${gate}" --print
 assert_rc       "C9 --print exits 0"      0 "${CAP_RC}"
 assert_contains "C9 --print shows share"  "${CAP_OUT}" "composition share: 30.00%"
+
+# ---------------------------------------------------------------------------
+# D. Dispatch (Arc<dyn>) sub-metric.
+# ---------------------------------------------------------------------------
+make_fixture "${tmp}/crates" 3000 7000
+comp_src="${tmp}/crates/ironclaw_reborn_composition/src"
+# 10 Arc<dyn> sites in a production file.
+printf 'let x: Arc<dyn Foo> = y;\n%.0s' $(seq 1 10) > "${comp_src}/dispatch.rs"
+
+# D1: arc_dyn 10, ceiling 10 + tol 0 -> within budget.
+budget true 3000 30 10 0; run_gate
+assert_rc       "D1 dispatch within exits 0"     0 "${CAP_RC}"
+assert_contains "D1 shows dispatch count"        "${CAP_OUT}" "Arc<dyn> (excl slack/extension_host): 10"
+
+# D2: ceiling 5 + tol 0 -> dispatch breach, enforcing.
+budget true 3000 30 5 0; run_gate
+assert_rc       "D2 dispatch breach exits 1"     1 "${CAP_RC}"
+assert_contains "D2 reports DISPATCH EXCEEDED"   "${CAP_OUT}" "DISPATCH EXCEEDED"
+
+# D3: same dispatch breach but DRY-RUN -> exit 0.
+budget false 3000 30 5 0; run_gate
+assert_rc       "D3 dispatch dry-run exits 0"    0 "${CAP_RC}"
+assert_contains "D3 dispatch would-fail marker"  "${CAP_OUT}" "[dry-run, would FAIL]"
+
+# D4: Arc<dyn> in slack/ and extension_host/ is NOT counted (separate workstream).
+mkdir -p "${comp_src}/slack" "${comp_src}/extension_host"
+printf 'Arc<dyn Bar>\n%.0s' $(seq 1 50) > "${comp_src}/slack/x.rs"
+printf 'Arc<dyn Baz>\n%.0s' $(seq 1 50) > "${comp_src}/extension_host/y.rs"
+# high mass ceiling: the slack/ext files add to the MASS count (which does not
+# exclude them) — this case only asserts the DISPATCH exclusion.
+budget true 4000 30 10 0; run_gate
+assert_rc       "D4 slack/ext dispatch excluded exits 0" 0 "${CAP_RC}"
+assert_contains "D4 count stays 10"              "${CAP_OUT}" "Arc<dyn> (excl slack/extension_host): 10"
+
+# D5: missing arc_dyn_ceiling reaches schema validation (not a crash).
+cat > "${tmp}/budget.toml" <<'EOF'
+[gate]
+enforce = true
+ceiling_bp = 3000
+tolerance_bp = 30
+EOF
+run_gate
+assert_rc       "D5 missing arc_dyn_ceiling exits 1"  1 "${CAP_RC}"
+assert_contains "D5 reports arc schema error"         "${CAP_OUT}" "arc_dyn_ceiling must be an integer"
+
+rm -rf "${comp_src}/dispatch.rs" "${comp_src}/slack" "${comp_src}/extension_host"
 
 # C10: guard against committing a red gate — the REAL repo budget file must pass
 #      against the REAL tree right now.

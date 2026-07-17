@@ -333,6 +333,12 @@ def tier3(now: datetime) -> dict:
     res["trait_impls_for"] = impls
     res["impls_per_trait"] = round(impls / traits, 2) if traits else 0.0
 
+    # Dispatch signals — the "reduce traits & dispatch" companion to the mass
+    # metric (#6168 / #4471). Governed scope = composition production code
+    # excluding slack/ and extension_host/, matching the dispatch ratchet.
+    res["composition_arc_dyn"] = _governed_arc_dyn()
+    res["composition_dyn_types"] = _governed_dyn_types()
+
     # file sprawl vs the 1500 / 3000 rule
     big = _files_over(1500)
     res["files_over_1500"] = len(big)
@@ -359,6 +365,33 @@ def _prod_lines(path_glob: str) -> int:
         f"| {{ grep -vE \"{TEST_FILE_RE}\" || true; }} "
         f"| tr '\\n' '\\0' | xargs -0 cat 2>/dev/null | wc -l"
     )
+    try:
+        return int(out.strip().split()[0])
+    except (ValueError, IndexError):
+        return 0
+
+
+def _governed_pipeline(inner: str) -> str:
+    """find composition production files (excl slack/extension_host — the separate
+    workstream) piped through `inner` — the exact scope the dispatch ratchet uses."""
+    return (
+        f"find {COMPOSITION} -name '*.rs' -type f 2>/dev/null "
+        f"| {{ grep -vE \"{TEST_FILE_RE}\" || true; }} "
+        f"| {{ grep -vE '/(slack|extension_host)/' || true; }} "
+        f"| tr '\\n' '\\0' | {{ xargs -0 {inner} 2>/dev/null || true; }}"
+    )
+
+
+def _governed_arc_dyn() -> int:
+    out = sh(_governed_pipeline("grep -ho 'Arc<dyn'") + " | wc -l")
+    try:
+        return int(out.strip().split()[0])
+    except (ValueError, IndexError):
+        return 0
+
+
+def _governed_dyn_types() -> int:
+    out = sh(_governed_pipeline("grep -hoE 'dyn [A-Za-z_:][A-Za-z0-9_:]*'") + " | sort -u | wc -l")
     try:
         return int(out.strip().split()[0])
     except (ValueError, IndexError):
@@ -444,6 +477,8 @@ def render_md(t1, t2, t3, now) -> str:
     L.append(f"| v1 `src/` KLOC (now) | {t3['v1_src_kloc_now']} |")
     L.append(f"| all `crates/` KLOC (now) | {t3['crates_kloc_now']} |")
     L.append(f"| trait defs / impls / impls-per-trait | {t3['trait_defs']} / {t3['trait_impls_for']} / {t3['impls_per_trait']} |")
+    L.append(f"| **composition Arc<dyn> (governed, ratchet)** | **{t3.get('composition_arc_dyn', '-')}** |")
+    L.append(f"| composition distinct dyn traits (governed) | {t3.get('composition_dyn_types', '-')} |")
     L.append(f"| files > 1500 / > 3000 lines | {t3['files_over_1500']} / {t3['files_over_3000']} |")
     L.append(f"| boundary tests | {t3['boundary_test_count']} |")
     L.append(f"| arch-exempt allows | {t3['arch_exempt_allows']} |")
