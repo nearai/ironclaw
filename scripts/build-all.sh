@@ -18,4 +18,4 @@ echo "Building IronClaw..."
 cargo build --release
 
 echo ""
-echo "Done. Binary: target/release/ironclaw"
+echo "Done. Binary: target/release/ironclaw-v1"
