@@ -628,6 +628,7 @@ registerPack("es", {
   "workspace.emptyDir": "Esta carpeta está vacía.",
   "workspace.noMatches": "Nada coincide con el filtro.",
   "workspace.download": "Descargar",
+  "workspace.downloadFailed": "No se pudo descargar este archivo. Inténtalo de nuevo.",
   "workspace.binaryPreviewUnavailable": "No hay vista previa para este tipo de archivo. Descárgalo para ver el contenido.",
   "workspace.fileMeta": "{mime} · {size}",
   "workspace.subtitle": "Memoria persistente",

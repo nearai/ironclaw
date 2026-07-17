@@ -25,6 +25,7 @@ function NavItem({ route, label, onNavigate }) {
   return (
     <NavLink
       to={route.path}
+      data-testid={`nav-${route.id}`}
       onClick={onNavigate}
       className={({ isActive }) =>
         cn(
