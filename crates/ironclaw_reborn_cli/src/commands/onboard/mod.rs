@@ -299,6 +299,13 @@ impl LlmCredentialProvisionOutcome {
 /// (secret stored before config is written; see
 /// [`provision_llm_credentials`]'s doc) without touching the real
 /// local-dev libsql-backed store.
+///
+/// Gated with the same `libsql`+`root-llm-provider` cfg as
+/// `ironclaw_reborn_composition::LlmKeyStore` itself: that type (and
+/// `open_local_dev_secret_store`) only exists behind those features, so this
+/// trait's return type can't compile without them. See the `#[cfg(not(...))]`
+/// stub below for the feature-off case.
+#[cfg(all(feature = "libsql", feature = "root-llm-provider"))]
 trait LlmKeyStoreOpener {
     fn open(&self, home_path: &Path) -> anyhow::Result<ironclaw_reborn_composition::LlmKeyStore>;
 }
@@ -307,8 +314,10 @@ trait LlmKeyStoreOpener {
 /// secret store `serve` later reads from (see
 /// `ironclaw_reborn_composition::open_local_dev_secret_store`'s doc for why
 /// this is the same physical storage `serve` opens).
+#[cfg(all(feature = "libsql", feature = "root-llm-provider"))]
 struct LocalDevLlmKeyStoreOpener;
 
+#[cfg(all(feature = "libsql", feature = "root-llm-provider"))]
 impl LlmKeyStoreOpener for LocalDevLlmKeyStoreOpener {
     fn open(&self, home_path: &Path) -> anyhow::Result<ironclaw_reborn_composition::LlmKeyStore> {
         let home_path = home_path.to_path_buf();
@@ -318,6 +327,27 @@ impl LlmKeyStoreOpener for LocalDevLlmKeyStoreOpener {
                 .map_err(anyhow::Error::from)?;
             Ok::<_, anyhow::Error>(ironclaw_reborn_composition::LlmKeyStore::new(store))
         })
+    }
+}
+
+/// Feature-off stub for [`LlmKeyStoreOpener`]/[`LocalDevLlmKeyStoreOpener`]:
+/// without both `libsql` and `root-llm-provider` there is no `LlmKeyStore`
+/// type to open at all. This stub exists solely so `execute()`'s
+/// unconditional `&LocalDevLlmKeyStoreOpener` call site compiles across every
+/// feature combination — the feature-off `provision_llm_credentials` below
+/// ignores its `store_opener` parameter entirely, so `open` is never called.
+#[cfg(not(all(feature = "libsql", feature = "root-llm-provider")))]
+trait LlmKeyStoreOpener {
+    fn open(&self, home_path: &Path) -> anyhow::Result<()>;
+}
+
+#[cfg(not(all(feature = "libsql", feature = "root-llm-provider")))]
+struct LocalDevLlmKeyStoreOpener;
+
+#[cfg(not(all(feature = "libsql", feature = "root-llm-provider")))]
+impl LlmKeyStoreOpener for LocalDevLlmKeyStoreOpener {
+    fn open(&self, _home_path: &Path) -> anyhow::Result<()> {
+        Ok(())
     }
 }
 
@@ -361,6 +391,15 @@ fn provision_llm_credentials(
 
     let provider = prompts.provider(DEFAULT_LLM_PROVIDER)?;
     let key = prompts.api_key(&provider)?;
+    // Defense in depth: `StdinPromptSource::api_key` already re-prompts on a
+    // blank answer, but this guards every `PromptSource` implementation —
+    // present or future — so a blank key can never reach the secret store
+    // regardless of where it slipped through.
+    if key.trim().is_empty() {
+        return Err(LlmCredentialPromptError::Other(anyhow::anyhow!(
+            "LLM API key must not be blank"
+        )));
+    }
 
     let canonical_provider_id = admin
         .resolve_provider_id(&provider)
@@ -396,6 +435,7 @@ fn provision_llm_credentials(
 /// actually been credentialed, so a later interactive rerun must still
 /// prompt). A store-open failure is treated as "can't tell" and falls
 /// through to prompting rather than erroring the whole run.
+#[cfg(all(feature = "libsql", feature = "root-llm-provider"))]
 fn already_configured_outcome(
     admin: &ironclaw_reborn_composition::RebornProviderAdmin,
     home: &RebornHome,
@@ -410,8 +450,16 @@ fn already_configured_outcome(
     let Some(provider_id) = selection.provider_id else {
         return Ok(None);
     };
-    let Ok(store) = store_opener.open(home.path()) else {
-        return Ok(None);
+    let store = match store_opener.open(home.path()) {
+        Ok(store) => store,
+        Err(error) => {
+            tracing::debug!(
+                %error,
+                "secret store open failed while checking already-configured LLM; falling \
+                 through to prompt"
+            );
+            return Ok(None);
+        }
     };
     let provider_id_for_check = provider_id.clone();
     let has_key = crate::runtime::block_on_cli(async move {
@@ -864,6 +912,38 @@ mod tests {
             !home.config_file_path().exists(),
             "a failed key-store write must leave config.toml untouched — store first, config \
              second"
+        );
+    }
+
+    /// RED (round-2 review item 3): a `PromptSource` whose `api_key()`
+    /// returns a whitespace-only answer (e.g. a fake standing in for an
+    /// implementation that didn't get the blank-rejection retry loop
+    /// `StdinPromptSource::api_key` has) must never reach the secret store —
+    /// `provision_llm_credentials`'s own blank guard is the backstop for
+    /// every `PromptSource`, not just the terminal-backed one.
+    #[test]
+    fn provision_llm_credentials_rejects_a_blank_api_key_without_touching_anything() {
+        let (_tmp, context) = RebornCliContext::test_context();
+        let home = context.boot_config().home();
+        std::fs::create_dir_all(home.path()).expect("create reborn home");
+        seed_cached_master_key(home);
+
+        let mut prompts = FakePromptSource {
+            provider: "nearai",
+            key: "   ",
+        };
+        let error = provision_llm_credentials(
+            home,
+            context.boot_config(),
+            &mut prompts,
+            &LocalDevLlmKeyStoreOpener,
+            false,
+        )
+        .expect_err("a blank API key must be rejected");
+        assert!(matches!(error, LlmCredentialPromptError::Other(_)));
+        assert!(
+            !home.config_file_path().exists(),
+            "a rejected blank API key must leave config.toml untouched"
         );
     }
 }

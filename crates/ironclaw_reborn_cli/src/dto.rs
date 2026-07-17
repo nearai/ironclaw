@@ -19,6 +19,15 @@ pub(crate) struct StatusDto {
     /// `webui-token` file exists under `reborn_home`. `None` on a build
     /// without the `webui-v2-beta` feature, where there is no `serve` to
     /// link into.
+    ///
+    /// `#[serde(skip_serializing)]`: this carries a live bearer token in the
+    /// query string (`/login?token=<bearer>`). `status --json` output is
+    /// diagnostic data that gets pasted into issues, logs, and support
+    /// threads — it must never leak a credential that grants webui access.
+    /// The human-readable text renderer (`Renderable::render_text_to` below)
+    /// reads this field directly, not through serde, so the terminal
+    /// `login_link:` line printed for a human operator is unaffected.
+    #[serde(skip_serializing)]
     pub login_link: Option<String>,
 }
 

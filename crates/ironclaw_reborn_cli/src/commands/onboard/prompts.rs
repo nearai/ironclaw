@@ -60,7 +60,11 @@ pub(crate) struct StdinPromptSource;
 
 impl PromptSource for StdinPromptSource {
     fn is_interactive(&self) -> bool {
-        std::io::stdin().is_terminal()
+        // Both streams matter: a redirected/piped stdout must not receive
+        // the masked `*` characters `api_key`'s raw-mode read writes as the
+        // operator types, even when stdin itself is a real terminal (e.g.
+        // `ironclaw-reborn onboard > log.txt` in an interactive shell).
+        std::io::stdin().is_terminal() && std::io::stdout().is_terminal()
     }
 
     fn provider(&mut self, default: &str) -> Result<String, LlmCredentialPromptError> {
@@ -87,14 +91,30 @@ impl PromptSource for StdinPromptSource {
         if !std::io::stdin().is_terminal() {
             return Err(LlmCredentialPromptError::NonInteractive);
         }
-        print!("{provider} API key (input hidden): ");
-        std::io::stdout()
-            .flush()
-            .map_err(|error| LlmCredentialPromptError::Other(error.into()))?;
-        let key =
-            read_masked_line().map_err(|error| LlmCredentialPromptError::Other(error.into()))?;
-        println!();
-        Ok(key)
+        // Re-prompt on a blank/whitespace-only answer rather than persisting
+        // an empty key — a mis-timed Enter or accidental paste-then-clear
+        // must never end up stored as `llm_provider_<id>_api_key`, silently
+        // leaving the provider "configured" with a key that will fail every
+        // request.
+        const MAX_ATTEMPTS: u8 = 3;
+        for attempt in 1..=MAX_ATTEMPTS {
+            print!("{provider} API key (input hidden): ");
+            std::io::stdout()
+                .flush()
+                .map_err(|error| LlmCredentialPromptError::Other(error.into()))?;
+            let key = read_masked_line()
+                .map_err(|error| LlmCredentialPromptError::Other(error.into()))?;
+            println!();
+            if !key.trim().is_empty() {
+                return Ok(key);
+            }
+            if attempt < MAX_ATTEMPTS {
+                println!("API key must not be blank; please try again.");
+            }
+        }
+        Err(LlmCredentialPromptError::Other(anyhow::anyhow!(
+            "no non-blank API key entered after {MAX_ATTEMPTS} attempts"
+        )))
     }
 }
 

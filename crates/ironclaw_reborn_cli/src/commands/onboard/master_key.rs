@@ -45,6 +45,17 @@ impl MasterKeyProvisionOutcome {
 /// keychain is reported via [`MasterKeyProvisionOutcome::Suppressed`] and
 /// onboarding continues, matching the resolver's own env/dotfile fallback
 /// (`crates/ironclaw_reborn_composition/src/factory.rs`).
+///
+/// Accepted risk (TOCTOU): the `dotfile_path.exists()` check below and the
+/// keychain's own internal `has_master_key()` check
+/// (`provision_local_dev_keychain_master_key`) are two separate
+/// check-then-act steps with no lock between them, so two concurrent
+/// `onboard` runs against the same home could both observe "absent" and
+/// both provision. This is accepted for LocalDev: onboarding is a
+/// single-operator, run-once-by-hand flow (never invoked concurrently by
+/// `serve`, which only reads keys, never writes the keychain), so the
+/// realistic worst case is a wrongly-regenerated key from running `onboard`
+/// twice at once by hand — recoverable by re-entering one API key.
 #[cfg(any(feature = "libsql", feature = "postgres"))]
 pub(crate) fn provision_master_key(home: &RebornHome) -> anyhow::Result<MasterKeyProvisionOutcome> {
     let dotfile_path = home

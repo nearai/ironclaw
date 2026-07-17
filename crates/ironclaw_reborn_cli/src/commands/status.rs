@@ -203,6 +203,37 @@ mod tests {
         );
     }
 
+    /// Security regression: `status --json` (`serde_json::to_string` over
+    /// `StatusDto`) must never leak the bearer token embedded in
+    /// `login_link`'s `/login?token=<bearer>` query string. The human
+    /// `status` text output legitimately prints it (see
+    /// `render_text_to` above); only the JSON/diagnostic path is redacted.
+    #[cfg(feature = "webui-v2-beta")]
+    #[test]
+    fn status_dto_json_excludes_the_login_link_token() {
+        let (_tmp, context) = RebornCliContext::test_context();
+        let home = context.boot_config().home();
+        std::fs::create_dir_all(home.path()).expect("create reborn home");
+        let token = "reborn-status-json-test-token-0123456789abcdef";
+        std::fs::write(home.path().join("webui-token"), token).expect("seed webui-token file");
+
+        let dto = build_status_dto(&context).expect("must build");
+        assert!(
+            dto.login_link.is_some(),
+            "sanity: the DTO must actually carry a login_link to make this test meaningful"
+        );
+
+        let json = serde_json::to_string(&dto).expect("StatusDto must serialize");
+        assert!(
+            !json.contains(token),
+            "status --json must not leak the webui bearer token: {json}"
+        );
+        assert!(
+            !json.contains("login_link"),
+            "status --json must not emit a login_link field at all: {json}"
+        );
+    }
+
     #[test]
     fn convert_component_status_failed_maps_correctly() {
         let status = RebornRuntimeComponentStatus::Failed("db connection refused".to_string());

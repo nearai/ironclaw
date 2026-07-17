@@ -110,6 +110,18 @@ fn status_json_round_trips() {
         parsed["drivers"]["subagent_planned"]["reason"],
         "missing loop family"
     );
+    // Security: `login_link` embeds a live webui bearer token in its query
+    // string and must never reach JSON/diagnostic output, even though
+    // `sample_status()` sets it and the text renderer legitimately prints it
+    // (see `status_render_text_contains_all_fields` below).
+    assert!(
+        parsed.get("login_link").is_none(),
+        "login_link must be skipped in JSON serialization: {json}"
+    );
+    assert!(
+        !json.contains("sample-token"),
+        "token leaked into JSON: {json}"
+    );
 }
 
 #[test]

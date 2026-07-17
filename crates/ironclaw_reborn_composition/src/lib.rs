@@ -84,14 +84,14 @@ pub use extension_host::skill_listing::{RebornSkillListError, list_reborn_local_
 pub use factory::AttachmentTestSupport;
 #[cfg(any(feature = "libsql", feature = "postgres"))]
 pub use factory::LOCAL_DEV_SECRETS_MASTER_KEY_PATH;
-#[cfg(any(feature = "libsql", feature = "postgres"))]
-pub use factory::{LocalDevKeychainMasterKeyOutcome, provision_local_dev_keychain_master_key};
 #[cfg(feature = "test-support")]
 pub use factory::RebornLocalDevApprovalTestParts;
 #[cfg(feature = "migration-support")]
 pub use factory::extension_installation_store_for_migration;
 #[cfg(feature = "libsql")]
 pub use factory::open_local_dev_secret_store;
+#[cfg(any(feature = "libsql", feature = "postgres"))]
+pub use factory::{LocalDevKeychainMasterKeyOutcome, provision_local_dev_keychain_master_key};
 pub use factory::{RebornServices, build_reborn_services, builtin_first_party_trust_policy};
 pub use failure_lane::{ALL_RUN_FAILURE_CATEGORIES, FailureLane, failure_lane};
 pub use failure_summary::reborn_failure_summary_for_category;

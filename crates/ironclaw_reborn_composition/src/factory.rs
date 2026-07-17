@@ -3692,6 +3692,18 @@ async fn resolve_local_dev_secret_master_key_with_env(
         Err(_) => {
             // Miss or error (including suppressed-under-test): fall through
             // to generating a fresh key, unchanged from prior behavior.
+            //
+            // Accepted risk: intentionally blanket — this collapses "no key
+            // in the keychain yet" and "keychain unreachable" into the same
+            // fallback. Headless containers (e.g. Railway) have no
+            // secret-service daemon at all, so `get_master_key` returns a
+            // generic `SecretError::KeychainError` there, not a distinguishable
+            // `NotFound`; narrowing this match to only fall through on
+            // `NotFound` would make every container boot fail closed instead
+            // of falling back to the dotfile. Worst case of the current
+            // broad match: a transient keychain error on a real desktop
+            // causes a wrongly-regenerated dotfile key, which just means
+            // re-entering one API key on the next `onboard`/`serve` run.
         }
     }
 
@@ -3821,7 +3833,14 @@ pub async fn provision_local_dev_keychain_master_key() -> LocalDevKeychainMaster
     let key = ironclaw_secrets::keychain::generate_master_key();
     match ironclaw_secrets::keychain::store_master_key(&key).await {
         Ok(()) => LocalDevKeychainMasterKeyOutcome::Provisioned,
-        Err(_) => LocalDevKeychainMasterKeyOutcome::Suppressed,
+        Err(error) => {
+            tracing::debug!(
+                %error,
+                "OS keychain store of local-dev secrets master key failed during onboarding; \
+                 falling back to env/dotfile resolution"
+            );
+            LocalDevKeychainMasterKeyOutcome::Suppressed
+        }
     }
 }
 
