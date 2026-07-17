@@ -19,7 +19,8 @@ use ironclaw_auth::{
     AuthSurface,
 };
 use ironclaw_conversations::{
-    AdapterKind, ConversationActorPairingService, ExpectedExternalActorOwner, ExternalActorRef,
+    AdapterKind, ConversationActorPairingService, ExpectedExternalActorOwner,
+    ExternalActorBindingEpoch, ExternalActorRef,
 };
 use ironclaw_host_api::{AgentId, InvocationId, ProjectId, ResourceScope, TenantId, UserId};
 use ironclaw_product_adapters::AdapterInstallationId;
@@ -465,7 +466,7 @@ impl TelegramPairingService {
                         binding_epoch: removed_binding
                             .epoch
                             .clone()
-                            .map(ironclaw_conversations::ExternalActorBindingEpoch::new)
+                            .map(ExternalActorBindingEpoch::new)
                             .transpose()
                             .map_err(|error| TelegramPairingError::StoreUnavailable {
                                 reason: format!("stored telegram binding epoch invalid: {error}"),

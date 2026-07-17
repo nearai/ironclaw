@@ -1161,26 +1161,53 @@ async fn telegram_dm_auth_deny_command_cancels_gate_and_frees_the_thread() {
         .await
         .expect("the in-chat decline must be acknowledged, not silent");
 
-    // The thread frees: a follow-up DM gets a real reply. Cancellation is
-    // asynchronous after the ack, so a fast follow-up can still draw one
-    // honest "please resend" bounce — the user (and this test) resends.
+    // The thread frees. Cancellation is asynchronous after the in-chat ack,
+    // so follow-ups sent while it settles draw the documented "please
+    // resend" bounce. The seam contract asserted here: EVERY attempt gets a
+    // visible outcome — the real reply or that explicit bounce, never
+    // silence — and the reply arrives within a bounded number of resends.
     let sends_before = stack.network.request_bodies_for("/sendMessage").len();
     let mut reply = None;
+    // Bound calibrated to the observed post-cancel settle window (~25-40s:
+    // the cancelled run releases the thread after its delivery loop drains);
+    // each attempt still asserts a visible outcome, so no iteration is
+    // silent.
     for attempt in 0..8 {
+        // Each attempt's outcome is read from sends captured AFTER that
+        // attempt (the capture log is cumulative; matching stale bounces
+        // from earlier attempts would break the every-attempt-visible seam).
+        let attempt_baseline = stack.network.request_bodies_for("/sendMessage").len();
         let status = stack
             .webhook_dm(&secret, 5 + attempt, "are you still there?")
             .await;
         assert_eq!(status, StatusCode::OK);
-        if let Ok(send) = stack
-            .wait_for_dm_send(|text| text.contains("thread is free again"))
-            .await
+        let mut outcome = None;
+        for _ in 0..200 {
+            if let Some(send) = stack.network.request_bodies_for("/sendMessage")[attempt_baseline..]
+                .iter()
+                .find(|body| {
+                    body["text"].as_str().is_some_and(|text| {
+                        text.contains("thread is free again") || text.contains("please resend")
+                    })
+                })
+                .cloned()
+            {
+                outcome = Some(send);
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+        let outcome = outcome
+            .expect("every post-decline DM draws a reply or the explicit resend notice — never silence");
+        if outcome["text"]
+            .as_str()
+            .is_some_and(|text| text.contains("thread is free again"))
         {
-            reply = Some(send);
+            reply = Some(outcome);
             break;
         }
     }
-    let reply =
-        reply.expect("after the acknowledged decline the thread must take new messages and reply");
+    let reply = reply.expect("the decline settles within the bounded resends and the thread replies");
     assert_eq!(reply["chat_id"], TG_CHAT_ID);
     let post_deny_sends: Vec<String> = stack.network.request_bodies_for("/sendMessage")
         [sends_before..]
