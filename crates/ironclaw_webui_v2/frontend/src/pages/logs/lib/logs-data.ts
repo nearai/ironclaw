@@ -17,7 +17,6 @@ export function normalizeLogEntry(entry) {
 
 export function buildScopedLogsPath(
   { threadId, runId, turnId, toolCallId, toolName, source } = {},
-  { absolute = false } = {},
 ) {
   const params = new URLSearchParams();
   if (threadId) params.set("thread_id", threadId);
@@ -28,7 +27,7 @@ export function buildScopedLogsPath(
   if (source) params.set("source", source);
   const suffix = params.toString();
   const path = `/logs${suffix ? `?${suffix}` : ""}`;
-  return absolute ? `/v2${path}` : path;
+  return path;
 }
 
 export function normalizeOperatorLogsResponse(response) {

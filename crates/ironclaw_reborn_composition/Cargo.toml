@@ -162,9 +162,9 @@ ironclaw_product_context = { path = "../ironclaw_product_context", version = "0.
 nix = { version = "0.30", default-features = false, features = ["process"] }
 # Unpacking uploaded WASM-tool bundles for the WebUI "Install Tool" import flow.
 zip = { version = "8", default-features = false, features = ["deflate"] }
-# WebUI v2 route surface — feature-gated; only used by `webui_serve`.
+# WebUI v2 JSON route surface and root-mounted static SPA — feature-gated;
+# only used by `webui_serve`.
 ironclaw_webui_v2 = { path = "../ironclaw_webui_v2", optional = true }
-# WebUI v2 static SPA bundle — feature-gated; mounted under `/v2`.
 ironclaw_wasm_product_adapters = { path = "../ironclaw_wasm_product_adapters", optional = true }
 libsql = { version = "0.9", optional = true, default-features = false, features = ["core", "replication", "remote", "tls"] }
 libc = "0.2"

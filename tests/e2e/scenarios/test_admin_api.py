@@ -147,7 +147,7 @@ async def test_admin_token_visibility_matches_user_creation_lifecycle(
 ):
     """Creation shows the one-time token; existing-user details do not."""
     await reborn_v2_page.goto(
-        f"{reborn_v2_server}/v2/admin/users?token={REBORN_V2_AUTH_TOKEN}"
+        f"{reborn_v2_server}/admin/users?token={REBORN_V2_AUTH_TOKEN}"
     )
     created_user_id = None
     try:

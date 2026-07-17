@@ -633,7 +633,7 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
             fake_page.gotos,
             [
                 (
-                    "http://127.0.0.1:3000/v2/extensions/channels?"
+                    "http://127.0.0.1:3000/extensions/channels?"
                     f"token={run_live_qa.AUTH_TOKEN}",
                     "domcontentloaded",
                 )
@@ -646,10 +646,10 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
         self.assertNotIn("Connect Slack with OAuth", observed_expectations)
         self.assertNotIn("Connect Slack", observed_expectations)
         self.assertNotIn("pairing code", observed_expectations)
-        self.assertFalse(any("/v2/chat" in url for url, _wait in fake_page.gotos))
+        self.assertFalse(any("/chat" in url for url, _wait in fake_page.gotos))
         self.assertEqual(
             result.details["slack_connect_surface"],
-            "/v2/extensions/channels",
+            "/extensions/channels",
         )
         self.assertEqual(
             result.details["slack_connect_title"],
@@ -1046,7 +1046,7 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
             self.assertEqual(prompt, run_live_qa.QA_SHEET_PROMPTS[case_name])
             self.assertNotIn("extension_search", prompt)
             self.assertNotIn(f"`{package_id}`", prompt)
-            self.assertNotIn("/v2/extensions/registry", prompt)
+            self.assertNotIn("/extensions/registry", prompt)
             self.assertIsNone(captured_chat[case_name]["marker"])
             extra_details = captured_chat[case_name]["extra_details"]
             self.assertIsInstance(extra_details, dict)
@@ -2260,12 +2260,12 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
             },
         )
         registry_index = events.index(
-            f"goto:{self._dummy_ctx().base_url}/v2/extensions/registry?token="
+            f"goto:{self._dummy_ctx().base_url}/extensions/registry?token="
             f"{run_live_qa.AUTH_TOKEN}"
         )
         auth_index = events.index("authenticate:slack")
         chat_index = events.index(
-            f"goto:{self._dummy_ctx().base_url}/v2/?token={run_live_qa.AUTH_TOKEN}"
+            f"goto:{self._dummy_ctx().base_url}/?token={run_live_qa.AUTH_TOKEN}"
         )
         submit_index = events.index("submit")
         self.assertLess(registry_index, auth_index)

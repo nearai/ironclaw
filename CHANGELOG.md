@@ -29,6 +29,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - *(reborn-cli)* **Breaking:** promote the shipping executable, completions, container entrypoint, and release artifacts from `ironclaw-reborn` to `ironclaw`; existing `IRONCLAW_REBORN_*` variables, Reborn state paths, and service identities remain unchanged. Existing background-service installs must run `ironclaw service install` once to rewrite the stored executable path ([#6143](https://github.com/nearai/ironclaw/issues/6143)).
 - *(release)* continue the product release line at 0.30.0 with the Reborn CLI as the release-plz, cargo-dist, and Docker version source, using unified `v*` tags while retaining v1 as a non-shipping `ironclaw-v1` target.
+- *(webui-v2)* serve the Reborn WebUI from root-level browser routes, with temporary `/v2` compatibility redirects that preserve deep links and login query parameters; `/api/webchat/v2/*` remains unchanged ([#6142](https://github.com/nearai/ironclaw/issues/6142)).
 - *(reborn)* raise the default agent-loop runaway backstop from 256 to 1,024 iterations and the subagent ceiling from 16 to 256 ([#5959](https://github.com/nearai/ironclaw/pull/5959)).
 - *(reborn-cli)* document the standalone `config init` atomic-write dependency on `tempfile` and call out the default runner cadence change to 5s heartbeats / 200ms polling (down from 10s / 2s).
 - *(reborn)* expose runtime poll settings and document the standalone turn-runner cadence change for callers using `TurnRunnerSettings::default()`.

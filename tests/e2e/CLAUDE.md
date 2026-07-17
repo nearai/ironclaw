@@ -5,7 +5,7 @@ Python/Playwright test suite that runs against a live ironclaw instance. Added i
 **Two surfaces are covered, not one.** The suite drives both:
 
 - the **legacy `ironclaw-v1` gateway** (`/`, `#auth-screen`, `/api/chat/*`) via the `ironclaw_binary` + `page` fixtures, and
-- the **Reborn `ironclaw serve` WebChat v2 SPA** (`/v2/`, `/api/webchat/v2/*`) via the `ironclaw_reborn_binary` + `reborn_v2_server` / `reborn_v2_browser` / `reborn_v2_page` fixtures.
+- the **Reborn `ironclaw serve` WebChat v2 SPA** (`/`, `/api/webchat/v2/*`) via the `ironclaw_reborn_binary` + `reborn_v2_server` / `reborn_v2_browser` / `reborn_v2_page` fixtures.
 
 When adding a browser test for the v2 SPA, use the `reborn_v2_*` fixtures and `SEL_V2` selectors — **not** the legacy `page`/`SEL`. See `test_reborn_webui_v2_smoke.py` for the canonical v2 example.
 
@@ -56,7 +56,7 @@ The suite has grown to ~65+ scenario files. The table below is a **representativ
 subset grouped by surface**, not an exhaustive list — run `pytest scenarios/ --co -q`
 from `tests/e2e/` for the full, current set.
 
-**Legacy `ironclaw` gateway (browser via `page` / `SEL`):**
+**Legacy `ironclaw-v1` gateway (browser via `page` / `SEL`):**
 
 | File | What it tests |
 |------|--------------|
@@ -73,7 +73,7 @@ from `tests/e2e/` for the full, current set.
 | File | What it tests |
 |------|--------------|
 | `test_reborn_webui_v2_smoke.py` | Canonical v2 smoke: serve boots, SPA renders authed shell, bearer auth + `?token=` shim scope, text turn persists/streams, thread list/delete, timeline pagination, composer-while-running, approval-gate send block, **new-chat-while-a-run-is-active (the #5256 `submitBusyRef` deadlock regression)** |
-| `test_reborn_gateway_smoke.py` | Legacy `ironclaw` web channel (`/api/chat/*`) under `ENGINE_V2` — NOT the reborn binary |
+| `test_reborn_gateway_smoke.py` | Legacy `ironclaw-v1` web channel (`/api/chat/*`) under `ENGINE_V2` — NOT the Reborn binary |
 | `test_reborn_v2_file_download.py` | Agent-produced workspace files are downloadable from the v2 UI |
 | `test_v2_activity_shell.py` | v2 activity shell rendering |
 | `test_v2_*_flow.py` / `test_v2_engine_*.py` | v2 auth/OAuth matrix (GitHub PAT, GSuite, Notion MCP) and v2-engine approval/auth/tool-lifecycle/error-handling |
@@ -122,7 +122,7 @@ All fixtures are defined in `tests/e2e/conftest.py`. Running `pytest scenarios/`
 |---------|-------------|
 | `ironclaw_binary` | Legacy gateway binary. Checks `target/debug/ironclaw-v1`; if absent, runs `cargo build -p ironclaw --bin ironclaw-v1 --no-default-features --features libsql` (timeout 600s). |
 | `ironclaw_reborn_binary` | Reborn v2 binary. Builds `target/debug/ironclaw` with `--features webui-v2-beta` (transitively `libsql`) when stale/missing. Used by the v2 SPA scenarios. |
-| `reborn_v2_server` | Starts `ironclaw serve` (v2 SPA under `/v2/`, `local-dev` profile) against `mock_llm_server`; config written via `_write_config_toml` (selects the `openai` provider pointed at the mock). Waits for `/api/health`; SIGINT teardown. (Module-scoped, defined in `test_reborn_webui_v2_smoke.py`.) |
+| `reborn_v2_server` | Starts `ironclaw serve` (v2 SPA at `/`, `local-dev` profile) against `mock_llm_server`; config written via `_write_config_toml` (selects the `openai` provider pointed at the mock). Waits for `/api/health`; SIGINT teardown. (Module-scoped, defined in `test_reborn_webui_v2_smoke.py`.) |
 | `reborn_v2_browser` | Chromium instance for the v2 scenarios, independent of the legacy `browser` fixture (generous launch timeout + retry). |
 | `mock_llm_server` | Starts `mock_llm.py --port 0`, reads the assigned port from stdout, waits for `/v1/models` to return 200. Yields the base URL. Serves canned responses including delayed ones (e.g. `"editable composer slow response"` → ~5s) so tests can act while a run is in flight. |
 | `emulate_google_server` | Starts `npx --yes emulate@0.7.0 --service google` with `fixtures/emulate/google_gmail.yaml`, waits for the Gmail messages endpoint to serve the seeded account, and yields the base URL for HTTP rewrite maps. The seed covers Gmail, Calendar, and Drive. Local runs skip if `npx` is unavailable; CI fails. |
@@ -142,7 +142,7 @@ All fixtures are defined in `tests/e2e/conftest.py`. Running `pytest scenarios/`
 | Fixture | What it does |
 |---------|-------------|
 | `page` | Legacy gateway. Creates a fresh browser **context** (viewport 1280×720) and **page** per test, navigates to `/?token=e2e-test-token`, and waits for `#auth-screen` to become hidden before yielding. Closes the context after each test. |
-| `reborn_v2_page` | Reborn v2 SPA. Fresh context/page navigated to `/v2/?token=<REBORN_V2_AUTH_TOKEN>`, waits for `SEL_V2["chat_composer"]` (authed `/chat` shell). Use this (not `page`) for v2 browser tests. |
+| `reborn_v2_page` | Reborn v2 SPA. Fresh context/page navigated to `/?token=<REBORN_V2_AUTH_TOKEN>`, waits for `SEL_V2["chat_composer"]` (authed `/chat` shell). Use this (not `page`) for v2 browser tests. |
 
 The function-scoped `page` fixture means **each test gets a clean browser context** (cookies, storage, etc.) but reuses the same ironclaw server and browser process. Tests that need the server URL directly (e.g., `test_auth_rejection`) accept `ironclaw_server` as an additional parameter.
 
