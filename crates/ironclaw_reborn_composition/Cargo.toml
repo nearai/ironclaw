@@ -201,6 +201,8 @@ hmac = "0.13"
 ironclaw_approvals = { path = "../ironclaw_approvals", features = ["test-support"] }
 # Enables the in-memory-backed capability-lease store constructor for tests only.
 ironclaw_authorization = { path = "../ironclaw_authorization", features = ["test-support"] }
+# Enables the in-memory-backed process store constructors for tests only.
+ironclaw_processes = { path = "../ironclaw_processes", features = ["test-support"] }
 http = "1"
 http-body-util = "0.1"
 # Admin-user-management e2e test drives the composed app with a real session

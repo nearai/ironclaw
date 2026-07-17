@@ -334,10 +334,16 @@ type LocalDevProcessServices = ProcessServices<
     ironclaw_processes::FilesystemProcessStore<LocalDevRootFilesystem>,
     ironclaw_processes::FilesystemProcessResultStore<LocalDevRootFilesystem>,
 >;
+// One process store pair, backend-injected — the production
+// `FilesystemProcess*Store<F>` every deployment uses, never a bespoke
+// `InMemory*Store` (arch-simplification §4.3). The no-durable-features build
+// backs it with `InMemoryBackend` directly, so the concrete type is
+// `<InMemoryBackend>`, which the host-runtime production-wiring guard
+// classifies `LocalOnly`.
 #[cfg(not(any(feature = "libsql", feature = "postgres")))]
 type LocalDevProcessServices = ProcessServices<
-    ironclaw_processes::InMemoryProcessStore,
-    ironclaw_processes::InMemoryProcessResultStore,
+    ironclaw_processes::FilesystemProcessStore<InMemoryBackend>,
+    ironclaw_processes::FilesystemProcessResultStore<InMemoryBackend>,
 >;
 
 fn apply_runtime_process_binding<F, G, S, R>(
@@ -2732,7 +2738,8 @@ async fn build_local_dev_store_graph(
         extension_registry: Arc::new(ExtensionRegistry::new()),
         shared_extension_registry: None,
     });
-    let process_services = ProcessServices::in_memory();
+    let process_services =
+        ProcessServices::filesystem(crate::wrap_scoped(Arc::new(InMemoryBackend::new())));
 
     Ok(RebornLocalDevStoreGraph {
         run_state,

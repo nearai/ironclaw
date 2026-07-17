@@ -25,6 +25,8 @@ chrono = "0.4"
 ironclaw_approvals = { path = "../ironclaw_approvals" }
 # Enables the in-memory-backed capability-lease store constructor for tests only.
 ironclaw_authorization = { path = "../ironclaw_authorization", features = ["test-support"] }
+# Enables the in-memory-backed process store constructors for tests only.
+ironclaw_processes = { path = "../ironclaw_processes", features = ["test-support"] }
 ironclaw_dispatcher = { path = "../ironclaw_dispatcher" }
 ironclaw_events = { path = "../ironclaw_events" }
 ironclaw_filesystem = { path = "../ironclaw_filesystem" }

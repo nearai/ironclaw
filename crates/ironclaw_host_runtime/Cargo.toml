@@ -79,6 +79,8 @@ ironclaw_approvals = { path = "../ironclaw_approvals", features = ["test-support
 # Enables the in-memory-backed capability-lease store constructor for tests only.
 ironclaw_authorization = { path = "../ironclaw_authorization", features = ["test-support"] }
 ironclaw_event_projections = { path = "../ironclaw_event_projections" }
+# Enables the in-memory-backed process store constructors for tests only.
+ironclaw_processes = { path = "../ironclaw_processes", features = ["test-support"] }
 sha2 = "0.11"
 tempfile = "3"
 tokio = { version = "1", features = ["macros", "rt", "sync", "time"] }

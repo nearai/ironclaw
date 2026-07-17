@@ -50,7 +50,7 @@ async fn host_runtime_invokes_first_party_handler_through_capability_host() {
         Arc::new(LocalFilesystem::new()),
         Arc::clone(&governor),
         Arc::new(GrantAuthorizer::new()),
-        ironclaw_processes::ProcessServices::in_memory(),
+        ironclaw_processes::in_memory_backed_process_services(),
         CapabilitySurfaceVersion::new("surface-v1").unwrap(),
     )
     .with_first_party_capabilities(Arc::new(first_party))
@@ -129,7 +129,7 @@ async fn first_party_handler_uses_staged_secret_through_production_host_egress()
         Arc::new(LocalFilesystem::new()),
         Arc::new(InMemoryResourceGovernor::new()),
         Arc::new(GrantAuthorizer::new()),
-        ironclaw_processes::ProcessServices::in_memory(),
+        ironclaw_processes::in_memory_backed_process_services(),
         CapabilitySurfaceVersion::new("surface-v1").unwrap(),
     )
     .with_secret_store(Arc::clone(&secret_store))
@@ -362,7 +362,7 @@ async fn production_wiring_rejects_first_party_registry_without_declared_handler
         Arc::new(LocalFilesystem::new()),
         Arc::new(InMemoryResourceGovernor::new()),
         Arc::new(GrantAuthorizer::new()),
-        ironclaw_processes::ProcessServices::in_memory(),
+        ironclaw_processes::in_memory_backed_process_services(),
         CapabilitySurfaceVersion::new("surface-v1").unwrap(),
     )
     .with_first_party_capabilities(Arc::new(FirstPartyCapabilityRegistry::new()));
@@ -387,7 +387,7 @@ async fn host_runtime_health_reports_missing_first_party_backend_for_empty_regis
         Arc::new(LocalFilesystem::new()),
         Arc::new(InMemoryResourceGovernor::new()),
         Arc::new(GrantAuthorizer::new()),
-        ironclaw_processes::ProcessServices::in_memory(),
+        ironclaw_processes::in_memory_backed_process_services(),
         CapabilitySurfaceVersion::new("surface-v1").unwrap(),
     )
     .with_first_party_capabilities(Arc::new(FirstPartyCapabilityRegistry::new()))
@@ -418,7 +418,7 @@ async fn first_party_handler_error_reconciles_reported_usage_after_side_effect()
         Arc::new(LocalFilesystem::new()),
         Arc::clone(&governor),
         Arc::new(GrantAuthorizer::new()),
-        ironclaw_processes::ProcessServices::in_memory(),
+        ironclaw_processes::in_memory_backed_process_services(),
         CapabilitySurfaceVersion::new("surface-v1").unwrap(),
     )
     .with_first_party_capabilities(Arc::new(first_party))
@@ -461,7 +461,7 @@ async fn first_party_handler_panic_fails_closed_and_releases_reservation() {
         Arc::new(LocalFilesystem::new()),
         Arc::clone(&governor),
         Arc::new(GrantAuthorizer::new()),
-        ironclaw_processes::ProcessServices::in_memory(),
+        ironclaw_processes::in_memory_backed_process_services(),
         CapabilitySurfaceVersion::new("surface-v1").unwrap(),
     )
     .with_first_party_capabilities(Arc::new(first_party))
@@ -514,7 +514,7 @@ async fn first_party_missing_handler_fails_closed_without_side_effect_handler() 
         Arc::new(LocalFilesystem::new()),
         Arc::new(InMemoryResourceGovernor::new()),
         Arc::new(GrantAuthorizer::new()),
-        ironclaw_processes::ProcessServices::in_memory(),
+        ironclaw_processes::in_memory_backed_process_services(),
         CapabilitySurfaceVersion::new("surface-v1").unwrap(),
     )
     .with_first_party_capabilities(Arc::new(first_party))
@@ -786,8 +786,8 @@ fn http_first_party_services(
 ) -> HostRuntimeServices<
     LocalFilesystem,
     InMemoryResourceGovernor,
-    ironclaw_processes::InMemoryProcessStore,
-    ironclaw_processes::InMemoryProcessResultStore,
+    ironclaw_processes::FilesystemProcessStore<ironclaw_filesystem::InMemoryBackend>,
+    ironclaw_processes::FilesystemProcessResultStore<ironclaw_filesystem::InMemoryBackend>,
 > {
     let handler = Arc::new(HttpFirstPartyHandler {
         handle: handle.clone(),
@@ -800,7 +800,7 @@ fn http_first_party_services(
         Arc::new(LocalFilesystem::new()),
         Arc::new(InMemoryResourceGovernor::new()),
         Arc::new(GrantAuthorizer::new()),
-        ironclaw_processes::ProcessServices::in_memory(),
+        ironclaw_processes::in_memory_backed_process_services(),
         CapabilitySurfaceVersion::new("surface-v1").unwrap(),
     )
     .with_first_party_capabilities(Arc::new(first_party))

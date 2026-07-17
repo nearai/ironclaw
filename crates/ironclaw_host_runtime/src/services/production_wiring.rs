@@ -5,13 +5,14 @@ use thiserror::Error;
 use ironclaw_approvals::FilesystemPersistentApprovalPolicyStore;
 use ironclaw_authorization::FilesystemCapabilityLeaseStore;
 use ironclaw_filesystem::InMemoryBackend;
+use ironclaw_processes::{FilesystemProcessResultStore, FilesystemProcessStore};
 
 use super::{
     DurableAuditSink, DurableEventSink, EmptyWasmRuntimeCredentials, InMemoryApprovalRequestStore,
     InMemoryAuditSink, InMemoryCredentialBroker, InMemoryDurableAuditLog, InMemoryDurableEventLog,
-    InMemoryEventSink, InMemoryProcessResultStore, InMemoryProcessStore, InMemoryResourceGovernor,
-    InMemoryRunStateStore, InMemorySecretStore, InMemoryTurnStateStore, LocalFilesystem,
-    LocalHostProcessPort, NoopTurnRunWakeNotifier, RebornEventStoreError, RuntimeKind,
+    InMemoryEventSink, InMemoryResourceGovernor, InMemoryRunStateStore, InMemorySecretStore,
+    InMemoryTurnStateStore, LocalFilesystem, LocalHostProcessPort, NoopTurnRunWakeNotifier,
+    RebornEventStoreError, RuntimeKind,
 };
 
 #[derive(Debug, Error)]
@@ -291,8 +292,13 @@ fn classify_component_type<T: ?Sized + 'static>() -> ProductionImplementationRea
     match () {
         () if type_id == TypeId::of::<LocalFilesystem>()
             || type_id == TypeId::of::<InMemoryResourceGovernor>()
-            || type_id == TypeId::of::<InMemoryProcessStore>()
-            || type_id == TypeId::of::<InMemoryProcessResultStore>()
+            // The process lifecycle/result stores no longer have bespoke
+            // in-memory implementations; "in-memory" is the `InMemoryBackend`
+            // behind the one production `FilesystemProcess*Store<F>`
+            // (arch-simplification §4.3). A store backed by `InMemoryBackend` is
+            // still local-only; libSQL/Postgres monomorphizations are distinct.
+            || type_id == TypeId::of::<FilesystemProcessStore<InMemoryBackend>>()
+            || type_id == TypeId::of::<FilesystemProcessResultStore<InMemoryBackend>>()
             || type_id == TypeId::of::<InMemoryRunStateStore>()
             || type_id == TypeId::of::<InMemoryApprovalRequestStore>()
             // The persistent-approval and capability-lease stores no longer have

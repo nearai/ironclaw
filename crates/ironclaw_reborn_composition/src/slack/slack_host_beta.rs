@@ -1345,7 +1345,7 @@ mod tests {
     use http_body_util::BodyExt;
     use ironclaw_authorization::GrantAuthorizer;
     use ironclaw_extensions::ExtensionRegistry;
-    use ironclaw_filesystem::LocalFilesystem;
+    use ironclaw_filesystem::{InMemoryBackend, LocalFilesystem};
     use ironclaw_host_runtime::{
         CapabilitySurfaceVersion, HostRuntimeHttpEgressPort, HostRuntimeServices,
     };
@@ -1356,7 +1356,7 @@ mod tests {
     use ironclaw_network::{
         NetworkHttpEgress, NetworkHttpError, NetworkHttpRequest, NetworkHttpResponse, NetworkUsage,
     };
-    use ironclaw_processes::{InMemoryProcessResultStore, InMemoryProcessStore, ProcessServices};
+    use ironclaw_processes::{FilesystemProcessResultStore, FilesystemProcessStore};
     use ironclaw_product_workflow::{
         LifecyclePackageKind, LifecyclePackageRef, ProductActorUserResolutionRequest,
         ProductWorkflowError, RebornExtensionOnboardingState, RebornOutboundDeliveryTargetId,
@@ -4044,15 +4044,15 @@ mod tests {
     fn test_host_runtime_services() -> HostRuntimeServices<
         LocalFilesystem,
         InMemoryResourceGovernor,
-        InMemoryProcessStore,
-        InMemoryProcessResultStore,
+        FilesystemProcessStore<InMemoryBackend>,
+        FilesystemProcessResultStore<InMemoryBackend>,
     > {
         HostRuntimeServices::new(
             Arc::new(ExtensionRegistry::new()),
             Arc::new(LocalFilesystem::new()),
             Arc::new(InMemoryResourceGovernor::new()),
             Arc::new(GrantAuthorizer::new()),
-            ProcessServices::in_memory(),
+            ironclaw_processes::in_memory_backed_process_services(),
             CapabilitySurfaceVersion::new("surface-v1").expect("surface version"),
         )
     }

@@ -20,7 +20,7 @@ use ironclaw_authorization::{
 use ironclaw_extensions::{
     ExtensionManifest, ExtensionPackage, ExtensionRegistry, ManifestSource, SharedExtensionRegistry,
 };
-use ironclaw_filesystem::{FilesystemError, FilesystemOperation};
+use ironclaw_filesystem::{FilesystemError, FilesystemOperation, InMemoryBackend};
 use ironclaw_host_api::*;
 use ironclaw_host_runtime::{
     CancelReason, CancelRuntimeWorkRequest, CapabilitySurfacePolicy, CapabilitySurfaceVersion,
@@ -29,7 +29,7 @@ use ironclaw_host_runtime::{
     VisibleCapabilityRequest,
 };
 use ironclaw_processes::{
-    InMemoryProcessResultStore, InMemoryProcessStore, ProcessCancellationRegistry, ProcessError,
+    FilesystemProcessResultStore, FilesystemProcessStore, ProcessCancellationRegistry, ProcessError,
     ProcessRecord, ProcessResultStore, ProcessStart, ProcessStatus, ProcessStore,
 };
 use ironclaw_run_state::{
@@ -482,7 +482,7 @@ async fn default_runtime_status_redacts_process_filesystem_errors() {
     let dispatcher = Arc::new(RecordingDispatcher::default());
     let authorizer: Arc<dyn TrustAwareCapabilityDispatchAuthorizer> = Arc::new(GrantAuthorizer);
     let process_store: Arc<dyn ProcessStore> = Arc::new(FailingRecordsProcessStore {
-        inner: Arc::new(InMemoryProcessStore::new()),
+        inner: Arc::new(ironclaw_processes::in_memory_backed_process_store()),
     });
     let runtime = DefaultHostRuntime::new(
         registry,
@@ -776,7 +776,7 @@ async fn default_runtime_cancel_kills_running_processes_and_cancels_tokens() {
     let registry = Arc::new(registry_with_echo_capability());
     let dispatcher = Arc::new(RecordingDispatcher::default());
     let authorizer: Arc<dyn TrustAwareCapabilityDispatchAuthorizer> = Arc::new(GrantAuthorizer);
-    let process_store = Arc::new(InMemoryProcessStore::new());
+    let process_store = Arc::new(ironclaw_processes::in_memory_backed_process_store());
     let cancellation_registry = Arc::new(ProcessCancellationRegistry::new());
     let runtime = DefaultHostRuntime::new(
         registry,
@@ -847,7 +847,7 @@ async fn default_runtime_status_includes_running_processes_from_process_store() 
     let registry = Arc::new(registry_with_echo_capability());
     let dispatcher = Arc::new(RecordingDispatcher::default());
     let authorizer: Arc<dyn TrustAwareCapabilityDispatchAuthorizer> = Arc::new(GrantAuthorizer);
-    let process_store = Arc::new(InMemoryProcessStore::new());
+    let process_store = Arc::new(ironclaw_processes::in_memory_backed_process_store());
     let runtime = DefaultHostRuntime::new(
         registry,
         dispatcher,
@@ -886,8 +886,9 @@ async fn default_runtime_cancel_writes_killed_process_result_record() {
     let registry = Arc::new(registry_with_echo_capability());
     let dispatcher = Arc::new(RecordingDispatcher::default());
     let authorizer: Arc<dyn TrustAwareCapabilityDispatchAuthorizer> = Arc::new(GrantAuthorizer);
-    let process_store = Arc::new(InMemoryProcessStore::new());
-    let result_store = Arc::new(InMemoryProcessResultStore::new());
+    let processes_filesystem = ironclaw_processes::in_memory_backed_processes_filesystem();
+    let process_store = Arc::new(FilesystemProcessStore::new(Arc::clone(&processes_filesystem)));
+    let result_store = Arc::new(FilesystemProcessResultStore::new(processes_filesystem));
     let cancellation_registry = Arc::new(ProcessCancellationRegistry::new());
     let runtime = DefaultHostRuntime::new(
         registry,
@@ -935,7 +936,7 @@ async fn default_runtime_status_does_not_duplicate_process_backed_invocations() 
     let dispatcher = Arc::new(RecordingDispatcher::default());
     let authorizer: Arc<dyn TrustAwareCapabilityDispatchAuthorizer> = Arc::new(GrantAuthorizer);
     let run_state = Arc::new(InMemoryRunStateStore::new());
-    let process_store = Arc::new(InMemoryProcessStore::new());
+    let process_store = Arc::new(ironclaw_processes::in_memory_backed_process_store());
     let runtime = DefaultHostRuntime::new(
         registry,
         dispatcher,
@@ -1134,11 +1135,11 @@ impl RunStateStore for FailingRecordsRunStateStore {
     }
 }
 
-/// Wraps an [`InMemoryProcessStore`] but fails every `records_for_scope` call
+/// Wraps a `FilesystemProcessStore` but fails every `records_for_scope` call
 /// so runtime-status exercises process-store error sanitization through the
 /// public host-runtime path.
 struct FailingRecordsProcessStore {
-    inner: Arc<InMemoryProcessStore>,
+    inner: Arc<FilesystemProcessStore<InMemoryBackend>>,
 }
 
 #[async_trait]

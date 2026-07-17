@@ -44,8 +44,8 @@ use ironclaw_host_runtime::{
     RuntimeStatusRequest, RuntimeWorkId, TenantSandboxProcessPort, builtin_first_party_handlers,
 };
 use ironclaw_processes::{
-    BackgroundProcessManager, InMemoryProcessResultStore, InMemoryProcessStore, ProcessError,
-    ProcessHost, ProcessManager, ProcessResultStore, ProcessServices, ProcessStatus, ProcessStore,
+    BackgroundProcessManager, FilesystemProcessResultStore, FilesystemProcessStore, ProcessError,
+    ProcessHost, ProcessManager, ProcessResultStore, ProcessStatus, ProcessStore,
 };
 use ironclaw_reborn_event_store::{
     RebornEventStoreConfig, RebornEventStoreError, RebornProfile, build_reborn_event_stores,
@@ -129,7 +129,7 @@ async fn production_wiring_validation_rejects_missing_components_and_local_only_
         Arc::new(LocalFilesystem::new()),
         Arc::new(InMemoryResourceGovernor::new()),
         Arc::new(GrantAuthorizer::new()),
-        ProcessServices::in_memory(),
+        ironclaw_processes::in_memory_backed_process_services(),
         CapabilitySurfaceVersion::new("surface-v1").unwrap(),
     );
 
@@ -252,7 +252,7 @@ async fn production_wiring_validation_rejects_local_only_runtime_policy() {
         Arc::new(LocalFilesystem::new()),
         Arc::new(InMemoryResourceGovernor::new()),
         Arc::new(GrantAuthorizer::new()),
-        ProcessServices::in_memory(),
+        ironclaw_processes::in_memory_backed_process_services(),
         CapabilitySurfaceVersion::new("surface-v1").unwrap(),
     )
     .with_runtime_policy(local_dev_runtime_policy());
@@ -304,7 +304,7 @@ async fn production_wiring_validation_accepts_production_safe_runtime_policy_sha
         Arc::new(LocalFilesystem::new()),
         Arc::new(InMemoryResourceGovernor::new()),
         Arc::new(GrantAuthorizer::new()),
-        ProcessServices::in_memory(),
+        ironclaw_processes::in_memory_backed_process_services(),
         CapabilitySurfaceVersion::new("surface-v1").unwrap(),
     )
     .with_runtime_policy(hosted_dev_runtime_policy());
@@ -333,7 +333,7 @@ async fn production_wiring_validation_accepts_persistent_resource_governor_compo
         Arc::new(LocalFilesystem::new()),
         governor,
         Arc::new(GrantAuthorizer::new()),
-        ProcessServices::in_memory(),
+        ironclaw_processes::in_memory_backed_process_services(),
         CapabilitySurfaceVersion::new("surface-v1").unwrap(),
     );
 
@@ -376,7 +376,7 @@ async fn with_filesystem_resource_governor_persists_reservations_across_handles(
         Arc::new(LocalFilesystem::new()),
         Arc::new(InMemoryResourceGovernor::new()),
         Arc::new(GrantAuthorizer::new()),
-        ProcessServices::in_memory(),
+        ironclaw_processes::in_memory_backed_process_services(),
         CapabilitySurfaceVersion::new("surface-v1").unwrap(),
     )
     .with_filesystem_resource_governor(Arc::clone(&scoped));
@@ -412,10 +412,7 @@ async fn with_filesystem_resource_governor_closes_process_reservations_on_cancel
         Arc::clone(&backend),
         mounts,
     ));
-    let process_services = ProcessServices::new(
-        Arc::new(InMemoryProcessStore::new()),
-        Arc::new(InMemoryProcessResultStore::new()),
-    );
+    let process_services = ironclaw_processes::in_memory_backed_process_services();
     let process_store = process_services.process_store();
 
     let services = HostRuntimeServices::new(
@@ -478,7 +475,7 @@ async fn production_wiring_validation_classifies_combined_store_as_run_state_and
         Arc::new(LocalFilesystem::new()),
         Arc::new(InMemoryResourceGovernor::new()),
         Arc::new(GrantAuthorizer::new()),
-        ProcessServices::in_memory(),
+        ironclaw_processes::in_memory_backed_process_services(),
         CapabilitySurfaceVersion::new("surface-v1").unwrap(),
     )
     .with_local_only_run_state_approval_store(Arc::new(
@@ -568,7 +565,7 @@ async fn production_wiring_validation_rejects_unsupported_runtime_requirements()
         Arc::new(LocalFilesystem::new()),
         Arc::new(InMemoryResourceGovernor::new()),
         Arc::new(GrantAuthorizer::new()),
-        ProcessServices::in_memory(),
+        ironclaw_processes::in_memory_backed_process_services(),
         CapabilitySurfaceVersion::new("surface-v1").unwrap(),
     );
 
@@ -617,7 +614,7 @@ async fn production_root_filesystem_selection_accepts_libsql_root_filesystem() {
         Arc::new(LocalFilesystem::new()),
         Arc::new(InMemoryResourceGovernor::new()),
         Arc::new(GrantAuthorizer::new()),
-        ProcessServices::in_memory(),
+        ironclaw_processes::in_memory_backed_process_services(),
         CapabilitySurfaceVersion::new("surface-v1").unwrap(),
     )
     .with_libsql_root_filesystem(Arc::clone(&filesystem));
@@ -651,7 +648,7 @@ async fn production_turn_state_selection_accepts_filesystem_turn_state_store() {
         Arc::new(LocalFilesystem::new()),
         Arc::new(InMemoryResourceGovernor::new()),
         Arc::new(GrantAuthorizer::new()),
-        ProcessServices::in_memory(),
+        ironclaw_processes::in_memory_backed_process_services(),
         CapabilitySurfaceVersion::new("surface-v1").unwrap(),
     )
     .with_filesystem_turn_state_store(scoped);
@@ -689,7 +686,7 @@ async fn production_turn_coordinator_uses_configured_store_and_notifier() {
         Arc::new(LocalFilesystem::new()),
         Arc::new(InMemoryResourceGovernor::new()),
         Arc::new(GrantAuthorizer::new()),
-        ProcessServices::in_memory(),
+        ironclaw_processes::in_memory_backed_process_services(),
         CapabilitySurfaceVersion::new("surface-v1").unwrap(),
     )
     .with_filesystem_turn_state_store(Arc::clone(&scoped))
@@ -729,7 +726,7 @@ async fn production_turn_coordinator_requires_explicit_run_profile_resolver() {
         Arc::new(LocalFilesystem::new()),
         Arc::new(InMemoryResourceGovernor::new()),
         Arc::new(GrantAuthorizer::new()),
-        ProcessServices::in_memory(),
+        ironclaw_processes::in_memory_backed_process_services(),
         CapabilitySurfaceVersion::new("surface-v1").unwrap(),
     )
     .with_filesystem_turn_state_store(scoped)
@@ -752,7 +749,7 @@ async fn production_wiring_validation_rejects_noop_turn_wake_notifier() {
         Arc::new(LocalFilesystem::new()),
         Arc::new(InMemoryResourceGovernor::new()),
         Arc::new(GrantAuthorizer::new()),
-        ProcessServices::in_memory(),
+        ironclaw_processes::in_memory_backed_process_services(),
         CapabilitySurfaceVersion::new("surface-v1").unwrap(),
     )
     .with_turn_run_wake_notifier(Arc::new(NoopTurnRunWakeNotifier));
@@ -776,7 +773,7 @@ async fn production_wiring_validation_accepts_configured_turn_wake_notifier() {
         Arc::new(LocalFilesystem::new()),
         Arc::new(InMemoryResourceGovernor::new()),
         Arc::new(GrantAuthorizer::new()),
-        ProcessServices::in_memory(),
+        ironclaw_processes::in_memory_backed_process_services(),
         CapabilitySurfaceVersion::new("surface-v1").unwrap(),
     )
     .with_turn_run_wake_notifier(Arc::new(RecordingTurnRunWakeNotifier::default()));
@@ -808,7 +805,7 @@ async fn production_event_store_config_rejects_jsonl_without_single_node_accepta
         Arc::new(LocalFilesystem::new()),
         Arc::new(InMemoryResourceGovernor::new()),
         Arc::new(GrantAuthorizer::new()),
-        ProcessServices::in_memory(),
+        ironclaw_processes::in_memory_backed_process_services(),
         CapabilitySurfaceVersion::new("surface-v1").unwrap(),
     );
 
@@ -836,7 +833,7 @@ async fn local_reborn_event_store_config_does_not_satisfy_production_wiring() {
         Arc::new(LocalFilesystem::new()),
         Arc::new(InMemoryResourceGovernor::new()),
         Arc::new(GrantAuthorizer::new()),
-        ProcessServices::in_memory(),
+        ironclaw_processes::in_memory_backed_process_services(),
         CapabilitySurfaceVersion::new("surface-v1").unwrap(),
     )
     .with_reborn_event_store_config(
@@ -877,7 +874,7 @@ async fn production_event_store_config_installs_verified_event_and_audit_sinks()
         Arc::new(LocalFilesystem::new()),
         Arc::new(InMemoryResourceGovernor::new()),
         Arc::new(GrantAuthorizer::new()),
-        ProcessServices::in_memory(),
+        ironclaw_processes::in_memory_backed_process_services(),
         CapabilitySurfaceVersion::new("surface-v1").unwrap(),
     )
     .with_reborn_event_store_config(
@@ -931,7 +928,7 @@ async fn production_wiring_validation_uses_configured_runtime_requirements() {
         Arc::new(LocalFilesystem::new()),
         Arc::new(InMemoryResourceGovernor::new()),
         Arc::new(GrantAuthorizer::new()),
-        ProcessServices::in_memory(),
+        ironclaw_processes::in_memory_backed_process_services(),
         CapabilitySurfaceVersion::new("surface-v1").unwrap(),
     );
     let config = ProductionWiringConfig::new([RuntimeKind::Script, RuntimeKind::Wasm])
@@ -979,7 +976,7 @@ async fn production_wiring_validation_sees_underlying_in_memory_durable_logs() {
         Arc::new(LocalFilesystem::new()),
         Arc::new(InMemoryResourceGovernor::new()),
         Arc::new(GrantAuthorizer::new()),
-        ProcessServices::in_memory(),
+        ironclaw_processes::in_memory_backed_process_services(),
         CapabilitySurfaceVersion::new("surface-v1").unwrap(),
     )
     .with_durable_event_log(Arc::new(InMemoryDurableEventLog::new()))
@@ -1014,7 +1011,7 @@ async fn production_wiring_validation_rejects_direct_durable_sink_wrappers_as_un
         Arc::new(LocalFilesystem::new()),
         Arc::new(InMemoryResourceGovernor::new()),
         Arc::new(GrantAuthorizer::new()),
-        ProcessServices::in_memory(),
+        ironclaw_processes::in_memory_backed_process_services(),
         CapabilitySurfaceVersion::new("surface-v1").unwrap(),
     )
     .with_event_sink(Arc::new(DurableEventSink::new(event_log)))
@@ -1047,7 +1044,7 @@ async fn production_wiring_validation_accepts_verified_host_http_egress_shape() 
         Arc::new(LocalFilesystem::new()),
         Arc::new(InMemoryResourceGovernor::new()),
         Arc::new(GrantAuthorizer::new()),
-        ProcessServices::in_memory(),
+        ironclaw_processes::in_memory_backed_process_services(),
         CapabilitySurfaceVersion::new("surface-v1").unwrap(),
     )
     .with_secret_store(Arc::new(InMemorySecretStore::new()));
@@ -1074,7 +1071,7 @@ async fn host_http_egress_helper_requires_graph_secret_store() {
         Arc::new(LocalFilesystem::new()),
         Arc::new(InMemoryResourceGovernor::new()),
         Arc::new(GrantAuthorizer::new()),
-        ProcessServices::in_memory(),
+        ironclaw_processes::in_memory_backed_process_services(),
         CapabilitySurfaceVersion::new("surface-v1").unwrap(),
     );
 
@@ -1096,7 +1093,7 @@ async fn production_wiring_validation_requires_credential_broker_when_configured
         Arc::new(LocalFilesystem::new()),
         Arc::new(InMemoryResourceGovernor::new()),
         Arc::new(GrantAuthorizer::new()),
-        ProcessServices::in_memory(),
+        ironclaw_processes::in_memory_backed_process_services(),
         CapabilitySurfaceVersion::new("surface-v1").unwrap(),
     );
 
@@ -1128,7 +1125,7 @@ async fn production_wiring_validation_rejects_local_only_credential_broker() {
         Arc::new(LocalFilesystem::new()),
         Arc::new(InMemoryResourceGovernor::new()),
         Arc::new(GrantAuthorizer::new()),
-        ProcessServices::in_memory(),
+        ironclaw_processes::in_memory_backed_process_services(),
         CapabilitySurfaceVersion::new("surface-v1").unwrap(),
     )
     .with_credential_broker(broker);
@@ -1160,7 +1157,7 @@ async fn production_wiring_validation_rejects_unverified_runtime_http_egress() {
         Arc::new(LocalFilesystem::new()),
         Arc::new(InMemoryResourceGovernor::new()),
         Arc::new(GrantAuthorizer::new()),
-        ProcessServices::in_memory(),
+        ironclaw_processes::in_memory_backed_process_services(),
         CapabilitySurfaceVersion::new("surface-v1").unwrap(),
     )
     .with_runtime_http_egress(Arc::new(RecordingRuntimeHttpEgress::new()));
@@ -1187,7 +1184,7 @@ async fn production_wiring_validation_tracks_process_port_for_builtin_shell() {
         Arc::new(LocalFilesystem::new()),
         Arc::new(InMemoryResourceGovernor::new()),
         Arc::new(GrantAuthorizer::new()),
-        ProcessServices::in_memory(),
+        ironclaw_processes::in_memory_backed_process_services(),
         CapabilitySurfaceVersion::new("surface-v1").unwrap(),
     )
     .with_first_party_capabilities(Arc::new(
@@ -1211,7 +1208,7 @@ async fn production_wiring_validation_tracks_process_port_for_builtin_shell() {
         Arc::new(LocalFilesystem::new()),
         Arc::new(InMemoryResourceGovernor::new()),
         Arc::new(GrantAuthorizer::new()),
-        ProcessServices::in_memory(),
+        ironclaw_processes::in_memory_backed_process_services(),
         CapabilitySurfaceVersion::new("surface-v1").unwrap(),
     )
     .with_first_party_capabilities(Arc::new(
@@ -1239,7 +1236,7 @@ async fn production_wiring_validation_tracks_tenant_sandbox_process_port_for_bui
         Arc::new(LocalFilesystem::new()),
         Arc::new(InMemoryResourceGovernor::new()),
         Arc::new(GrantAuthorizer::new()),
-        ProcessServices::in_memory(),
+        ironclaw_processes::in_memory_backed_process_services(),
         CapabilitySurfaceVersion::new("surface-v1").unwrap(),
     )
     .with_first_party_capabilities(Arc::new(
@@ -1264,7 +1261,7 @@ async fn production_wiring_validation_tracks_tenant_sandbox_process_port_for_bui
         Arc::new(LocalFilesystem::new()),
         Arc::new(InMemoryResourceGovernor::new()),
         Arc::new(GrantAuthorizer::new()),
-        ProcessServices::in_memory(),
+        ironclaw_processes::in_memory_backed_process_services(),
         CapabilitySurfaceVersion::new("surface-v1").unwrap(),
     )
     .with_first_party_capabilities(Arc::new(
@@ -1297,7 +1294,7 @@ async fn production_wiring_validation_tracks_tenant_sandbox_process_port_for_bui
         Arc::new(LocalFilesystem::new()),
         Arc::new(InMemoryResourceGovernor::new()),
         Arc::new(GrantAuthorizer::new()),
-        ProcessServices::in_memory(),
+        ironclaw_processes::in_memory_backed_process_services(),
         CapabilitySurfaceVersion::new("surface-v1").unwrap(),
     )
     .with_first_party_capabilities(Arc::new(
@@ -1331,7 +1328,7 @@ async fn production_wiring_validation_rejects_empty_verified_wasm_credentials() 
         Arc::new(LocalFilesystem::new()),
         Arc::new(InMemoryResourceGovernor::new()),
         Arc::new(GrantAuthorizer::new()),
-        ProcessServices::in_memory(),
+        ironclaw_processes::in_memory_backed_process_services(),
         CapabilitySurfaceVersion::new("surface-v1").unwrap(),
     )
     .with_verified_wasm_runtime_credentials(Arc::new(WasmStagedRuntimeCredentials::new(vec![])))
@@ -1360,7 +1357,7 @@ async fn production_wiring_validation_rejects_wasm_credentials_added_after_adapt
         Arc::new(LocalFilesystem::new()),
         Arc::new(InMemoryResourceGovernor::new()),
         Arc::new(GrantAuthorizer::new()),
-        ProcessServices::in_memory(),
+        ironclaw_processes::in_memory_backed_process_services(),
         CapabilitySurfaceVersion::new("surface-v1").unwrap(),
     )
     .try_with_wasm_runtime(WitToolRuntimeConfig::for_testing(), WitToolHost::deny_all())
@@ -1391,7 +1388,7 @@ async fn production_wiring_validation_rejects_wasm_credentials_replaced_after_ad
         Arc::new(LocalFilesystem::new()),
         Arc::new(InMemoryResourceGovernor::new()),
         Arc::new(GrantAuthorizer::new()),
-        ProcessServices::in_memory(),
+        ironclaw_processes::in_memory_backed_process_services(),
         CapabilitySurfaceVersion::new("surface-v1").unwrap(),
     )
     .with_wasm_runtime_credential_provider(Arc::new(WasmStagedRuntimeCredentials::new(vec![])))
@@ -1423,7 +1420,7 @@ async fn host_runtime_services_builds_dispatcher_runtime_and_health_from_registe
     let governor = Arc::new(InMemoryResourceGovernor::new());
     let authorizer: Arc<dyn TrustAwareCapabilityDispatchAuthorizer> =
         Arc::new(GrantAuthorizer::new());
-    let process_services = ProcessServices::in_memory();
+    let process_services = ironclaw_processes::in_memory_backed_process_services();
     let run_state = Arc::new(InMemoryRunStateStore::new());
     let approval_requests = Arc::new(InMemoryApprovalRequestStore::new());
     let capability_leases = Arc::new(in_memory_backed_capability_lease_store());
@@ -1498,7 +1495,7 @@ async fn host_runtime_services_wires_combined_store_for_atomic_approval_block() 
         Arc::new(LocalFilesystem::new()),
         Arc::new(InMemoryResourceGovernor::new()),
         Arc::new(ApprovalThenGrantAuthorizer),
-        ProcessServices::in_memory(),
+        ironclaw_processes::in_memory_backed_process_services(),
         CapabilitySurfaceVersion::new("surface-v1").unwrap(),
     );
 
@@ -1524,7 +1521,7 @@ async fn host_runtime_services_preserves_combined_store_after_root_filesystem_se
         Arc::new(LocalFilesystem::new()),
         Arc::new(InMemoryResourceGovernor::new()),
         Arc::new(ApprovalThenGrantAuthorizer),
-        ProcessServices::in_memory(),
+        ironclaw_processes::in_memory_backed_process_services(),
         CapabilitySurfaceVersion::new("surface-v1").unwrap(),
     )
     .with_libsql_root_filesystem(filesystem);
@@ -1553,7 +1550,7 @@ async fn host_runtime_services_writes_runtime_events_to_durable_event_log_metada
         filesystem,
         governor,
         authorizer,
-        ProcessServices::in_memory(),
+        ironclaw_processes::in_memory_backed_process_services(),
         CapabilitySurfaceVersion::new("surface-v1").unwrap(),
     )
     .with_trust_policy(Arc::new(local_manifest_trust_policy(
@@ -1655,7 +1652,7 @@ async fn host_runtime_services_consumes_reborn_jsonl_event_store_without_v1_comp
         Arc::new(LocalFilesystem::new()),
         Arc::new(InMemoryResourceGovernor::new()),
         Arc::new(GrantAuthorizer::new()),
-        ProcessServices::in_memory(),
+        ironclaw_processes::in_memory_backed_process_services(),
         CapabilitySurfaceVersion::new("surface-v1").unwrap(),
     )
     .with_trust_policy(Arc::new(local_manifest_trust_policy(
@@ -1721,7 +1718,7 @@ async fn host_runtime_services_durable_event_replay_cursor_and_gap_behavior() {
         Arc::new(LocalFilesystem::new()),
         Arc::new(InMemoryResourceGovernor::new()),
         Arc::new(GrantAuthorizer::new()),
-        ProcessServices::in_memory(),
+        ironclaw_processes::in_memory_backed_process_services(),
         CapabilitySurfaceVersion::new("surface-v1").unwrap(),
     )
     .with_trust_policy(Arc::new(local_manifest_trust_policy(
@@ -1808,7 +1805,7 @@ async fn host_runtime_services_runtime_events_project_through_replay_projection_
         Arc::new(LocalFilesystem::new()),
         Arc::new(InMemoryResourceGovernor::new()),
         Arc::new(GrantAuthorizer::new()),
-        ProcessServices::in_memory(),
+        ironclaw_processes::in_memory_backed_process_services(),
         CapabilitySurfaceVersion::new("surface-v1").unwrap(),
     )
     .with_trust_policy(Arc::new(local_manifest_trust_policy(
@@ -1896,7 +1893,7 @@ async fn host_runtime_services_projection_rejects_foreign_cursor_and_surfaces_re
         Arc::new(LocalFilesystem::new()),
         Arc::new(InMemoryResourceGovernor::new()),
         Arc::new(GrantAuthorizer::new()),
-        ProcessServices::in_memory(),
+        ironclaw_processes::in_memory_backed_process_services(),
         CapabilitySurfaceVersion::new("surface-v1").unwrap(),
     )
     .with_trust_policy(Arc::new(local_manifest_trust_policy(
@@ -2005,7 +2002,7 @@ async fn host_runtime_services_jsonl_event_store_projects_same_runtime_sequence_
         Arc::new(LocalFilesystem::new()),
         Arc::new(InMemoryResourceGovernor::new()),
         Arc::new(GrantAuthorizer::new()),
-        ProcessServices::in_memory(),
+        ironclaw_processes::in_memory_backed_process_services(),
         CapabilitySurfaceVersion::new("surface-v1").unwrap(),
     )
     .with_trust_policy(Arc::new(local_manifest_trust_policy(
@@ -2094,7 +2091,7 @@ async fn host_runtime_services_approval_resolution_projects_durable_audit_metada
         Arc::new(LocalFilesystem::new()),
         Arc::new(InMemoryResourceGovernor::new()),
         Arc::new(SentinelApprovalAuthorizer),
-        ProcessServices::in_memory(),
+        ironclaw_processes::in_memory_backed_process_services(),
         CapabilitySurfaceVersion::new("surface-v1").unwrap(),
     )
     .with_trust_policy(Arc::new(local_manifest_trust_policy(
@@ -2202,7 +2199,7 @@ async fn host_runtime_services_jsonl_approval_audit_projection_rejects_foreign_c
         Arc::new(LocalFilesystem::new()),
         Arc::new(InMemoryResourceGovernor::new()),
         Arc::new(SentinelApprovalAuthorizer),
-        ProcessServices::in_memory(),
+        ironclaw_processes::in_memory_backed_process_services(),
         CapabilitySurfaceVersion::new("surface-v1").unwrap(),
     )
     .with_trust_policy(Arc::new(local_manifest_trust_policy(
@@ -2293,7 +2290,8 @@ async fn host_runtime_services_jsonl_approval_audit_projection_rejects_foreign_c
 #[tokio::test]
 async fn process_lifecycle_projects_through_durable_replay_without_output_leaks() {
     let event_log = Arc::new(InMemoryDurableEventLog::new());
-    let inner_process_store = Arc::new(InMemoryProcessStore::new());
+    let processes_filesystem = ironclaw_processes::in_memory_backed_processes_filesystem();
+    let inner_process_store = Arc::new(FilesystemProcessStore::new(Arc::clone(&processes_filesystem)));
     let obligation_services = BuiltinObligationServices::new(
         Arc::new(InMemoryAuditSink::new()),
         Arc::new(InMemorySecretStore::new()),
@@ -2303,7 +2301,7 @@ async fn process_lifecycle_projects_through_durable_replay_without_output_leaks(
         Arc::new(obligation_services.process_obligation_lifecycle_store(inner_process_store));
     let durable_event_log: Arc<dyn DurableEventLog> = event_log.clone();
     process_store.set_event_sink(Arc::new(DurableEventSink::new(durable_event_log)));
-    let result_store = Arc::new(InMemoryProcessResultStore::new());
+    let result_store = Arc::new(FilesystemProcessResultStore::new(processes_filesystem));
     let manager = BackgroundProcessManager::new(
         Arc::clone(&process_store),
         Arc::new(BackgroundExecutor::success_with_output(json!({
@@ -2410,10 +2408,7 @@ async fn process_lifecycle_projects_through_durable_replay_without_output_leaks(
 #[tokio::test]
 async fn host_runtime_services_cancel_projects_kill_event_from_configured_event_sink() {
     let event_log = Arc::new(InMemoryDurableEventLog::new());
-    let process_services = ProcessServices::new(
-        Arc::new(InMemoryProcessStore::new()),
-        Arc::new(InMemoryProcessResultStore::new()),
-    );
+    let process_services = ironclaw_processes::in_memory_backed_process_services();
     let process_store = process_services.process_store();
     let result_store = process_services.result_store();
     let runtime = HostRuntimeServices::new(
@@ -2592,7 +2587,7 @@ async fn host_runtime_services_resume_missing_runtime_secret_returns_auth_gate()
         Arc::new(ApprovalThenSecretObligationAuthorizer {
             handle: secret_handle,
         }),
-        ProcessServices::in_memory(),
+        ironclaw_processes::in_memory_backed_process_services(),
         CapabilitySurfaceVersion::new("surface-v1").unwrap(),
     )
     .with_trust_policy(Arc::new(local_manifest_trust_policy(
@@ -3123,7 +3118,7 @@ async fn host_runtime_services_resume_spawn_rejects_changed_actor_before_input_a
     let run_state = Arc::new(InMemoryRunStateStore::new());
     let approval_requests = Arc::new(InMemoryApprovalRequestStore::new());
     let capability_leases = Arc::new(in_memory_backed_capability_lease_store());
-    let process_services = ProcessServices::in_memory();
+    let process_services = ironclaw_processes::in_memory_backed_process_services();
     let process_store = process_services.process_store();
     let sandbox_executor = Arc::new(RecordingSandboxProcessExecutor::default());
     let services = HostRuntimeServices::new(
@@ -3300,7 +3295,7 @@ async fn host_runtime_services_auth_resume_dispatches_blocked_auth_run() {
         Arc::new(ApprovalThenSecretObligationAuthorizer {
             handle: secret_handle.clone(),
         }),
-        ProcessServices::in_memory(),
+        ironclaw_processes::in_memory_backed_process_services(),
         CapabilitySurfaceVersion::new("surface-v1").unwrap(),
     )
     .with_trust_policy(Arc::new(local_manifest_trust_policy(
@@ -3608,7 +3603,7 @@ async fn host_runtime_services_resume_without_backing_stores_fails_closed() {
         Arc::new(LocalFilesystem::new()),
         Arc::new(InMemoryResourceGovernor::new()),
         Arc::new(ApprovalThenGrantAuthorizer),
-        ProcessServices::in_memory(),
+        ironclaw_processes::in_memory_backed_process_services(),
         CapabilitySurfaceVersion::new("surface-v1").unwrap(),
     )
     .with_trust_policy(Arc::new(local_manifest_trust_policy(
@@ -3651,7 +3646,7 @@ async fn host_runtime_services_registered_runtime_health_tracks_script_mcp_and_w
         Arc::new(LocalFilesystem::new()),
         Arc::new(InMemoryResourceGovernor::new()),
         Arc::new(GrantAuthorizer::new()),
-        ProcessServices::in_memory(),
+        ironclaw_processes::in_memory_backed_process_services(),
         CapabilitySurfaceVersion::new("surface-v1").unwrap(),
     )
     .with_script_runtime(script_runtime)
@@ -3673,7 +3668,7 @@ async fn host_runtime_services_health_fails_closed_for_unregistered_required_run
         Arc::new(LocalFilesystem::new()),
         Arc::new(InMemoryResourceGovernor::new()),
         Arc::new(GrantAuthorizer::new()),
-        ProcessServices::in_memory(),
+        ironclaw_processes::in_memory_backed_process_services(),
         CapabilitySurfaceVersion::new("surface-v1").unwrap(),
     )
     .host_runtime_for_local_testing();
@@ -3686,7 +3681,7 @@ async fn host_runtime_services_health_fails_closed_for_unregistered_required_run
 
 #[tokio::test]
 async fn host_runtime_routes_system_process_sandbox_to_configured_executor() {
-    let process_services = ProcessServices::in_memory();
+    let process_services = ironclaw_processes::in_memory_backed_process_services();
     let result_store = process_services.result_store();
     let sandbox_executor = Arc::new(RecordingSandboxProcessExecutor::default());
     let runtime = HostRuntimeServices::new(
@@ -3715,7 +3710,7 @@ async fn host_runtime_routes_system_process_sandbox_to_configured_executor() {
 
 #[tokio::test]
 async fn host_runtime_spawn_process_sandbox_routes_approved_request_to_configured_executor() {
-    let process_services = ProcessServices::in_memory();
+    let process_services = ironclaw_processes::in_memory_backed_process_services();
     let result_store = process_services.result_store();
     let sandbox_executor = Arc::new(RecordingSandboxProcessExecutor::default());
     let runtime = HostRuntimeServices::new(
@@ -3762,7 +3757,7 @@ async fn host_runtime_spawn_process_sandbox_rejects_invalid_plan_before_executor
         Arc::new(LocalFilesystem::new()),
         Arc::new(InMemoryResourceGovernor::new()),
         Arc::new(GrantAuthorizer::new()),
-        ProcessServices::in_memory(),
+        ironclaw_processes::in_memory_backed_process_services(),
         CapabilitySurfaceVersion::new("surface-v1").unwrap(),
     )
     .with_trust_policy(Arc::new(local_manifest_trust_policy(
@@ -3817,7 +3812,7 @@ async fn host_runtime_spawn_process_sandbox_runtime_policy_denial_fails_before_e
         Arc::new(LocalFilesystem::new()),
         Arc::new(InMemoryResourceGovernor::new()),
         Arc::new(GrantAuthorizer::new()),
-        ProcessServices::in_memory(),
+        ironclaw_processes::in_memory_backed_process_services(),
         CapabilitySurfaceVersion::new("surface-v1").unwrap(),
     )
     .with_trust_policy(Arc::new(local_manifest_trust_policy(
@@ -3851,7 +3846,7 @@ async fn host_runtime_spawn_process_sandbox_host_failure_fails_after_preflight()
         Arc::new(LocalFilesystem::new()),
         Arc::new(InMemoryResourceGovernor::new()),
         Arc::new(GrantAuthorizer::new()),
-        ProcessServices::in_memory(),
+        ironclaw_processes::in_memory_backed_process_services(),
         CapabilitySurfaceVersion::new("surface-v1").unwrap(),
     )
     .with_trust_policy(Arc::new(local_manifest_trust_policy(
@@ -3880,7 +3875,7 @@ async fn host_runtime_spawn_process_sandbox_blocks_for_approval_before_executor(
     let run_state = Arc::new(InMemoryRunStateStore::new());
     let approval_requests = Arc::new(InMemoryApprovalRequestStore::new());
     let capability_leases = Arc::new(in_memory_backed_capability_lease_store());
-    let process_services = ProcessServices::in_memory();
+    let process_services = ironclaw_processes::in_memory_backed_process_services();
     let result_store = process_services.result_store();
     let sandbox_executor = Arc::new(RecordingSandboxProcessExecutor::default());
     let services = HostRuntimeServices::new(
@@ -3964,7 +3959,7 @@ async fn host_runtime_spawn_process_sandbox_resume_changed_input_fails_before_ex
         Arc::new(LocalFilesystem::new()),
         Arc::new(InMemoryResourceGovernor::new()),
         Arc::new(ApprovalThenGrantAuthorizer),
-        ProcessServices::in_memory(),
+        ironclaw_processes::in_memory_backed_process_services(),
         CapabilitySurfaceVersion::new("surface-v1").unwrap(),
     )
     .with_trust_policy(Arc::new(local_manifest_trust_policy(
@@ -4039,7 +4034,7 @@ async fn host_runtime_spawn_process_sandbox_resume_invalid_plan_fails_before_exe
         Arc::new(LocalFilesystem::new()),
         Arc::new(InMemoryResourceGovernor::new()),
         Arc::new(ApprovalThenGrantAuthorizer),
-        ProcessServices::in_memory(),
+        ironclaw_processes::in_memory_backed_process_services(),
         CapabilitySurfaceVersion::new("surface-v1").unwrap(),
     )
     .with_trust_policy(Arc::new(local_manifest_trust_policy(
@@ -4133,7 +4128,7 @@ async fn host_runtime_spawn_process_sandbox_resume_host_failure_fails_after_appr
         Arc::new(LocalFilesystem::new()),
         Arc::new(InMemoryResourceGovernor::new()),
         Arc::new(ApprovalThenGrantAuthorizer),
-        ProcessServices::in_memory(),
+        ironclaw_processes::in_memory_backed_process_services(),
         CapabilitySurfaceVersion::new("surface-v1").unwrap(),
     )
     .with_trust_policy(Arc::new(local_manifest_trust_policy(
@@ -4205,7 +4200,7 @@ async fn host_runtime_services_installs_builtin_obligation_handler_with_audit_si
         filesystem,
         governor,
         authorizer,
-        ProcessServices::in_memory(),
+        ironclaw_processes::in_memory_backed_process_services(),
         CapabilitySurfaceVersion::new("surface-v1").unwrap(),
     )
     .with_audit_sink(Arc::clone(&audit))
@@ -4249,7 +4244,7 @@ async fn host_runtime_services_maps_script_exit_failure_through_private_adapter(
         Arc::new(LocalFilesystem::new()),
         Arc::new(InMemoryResourceGovernor::new()),
         Arc::new(ObligatingAuthorizer::new(Vec::new())),
-        ProcessServices::in_memory(),
+        ironclaw_processes::in_memory_backed_process_services(),
         CapabilitySurfaceVersion::new("surface-v1").unwrap(),
     )
     .with_script_runtime(script_runtime);
@@ -4276,7 +4271,7 @@ async fn host_runtime_services_maps_mcp_client_failure_through_private_adapter()
         Arc::new(LocalFilesystem::new()),
         Arc::new(InMemoryResourceGovernor::new()),
         Arc::new(ObligatingAuthorizer::new(Vec::new())),
-        ProcessServices::in_memory(),
+        ironclaw_processes::in_memory_backed_process_services(),
         CapabilitySurfaceVersion::new("surface-v1").unwrap(),
     )
     .with_runtime_http_egress(Arc::new(RecordingRuntimeHttpEgress::new()))
@@ -4320,7 +4315,7 @@ async fn host_runtime_services_applies_scoped_mount_obligation_to_script_runtime
                 mounts: scoped_mounts.clone(),
             },
         ])),
-        ProcessServices::in_memory(),
+        ironclaw_processes::in_memory_backed_process_services(),
         CapabilitySurfaceVersion::new("surface-v1").unwrap(),
     )
     .with_trust_policy(Arc::new(local_manifest_trust_policy(
@@ -4373,7 +4368,7 @@ async fn host_runtime_services_rejects_broader_scoped_mount_before_dispatch() {
                 ),
             },
         ])),
-        ProcessServices::in_memory(),
+        ironclaw_processes::in_memory_backed_process_services(),
         CapabilitySurfaceVersion::new("surface-v1").unwrap(),
     )
     .with_trust_policy(Arc::new(local_manifest_trust_policy(
@@ -4421,7 +4416,7 @@ async fn host_runtime_services_writes_obligation_audit_records_to_durable_log_me
         filesystem,
         governor,
         authorizer,
-        ProcessServices::in_memory(),
+        ironclaw_processes::in_memory_backed_process_services(),
         CapabilitySurfaceVersion::new("surface-v1").unwrap(),
     )
     .with_durable_audit_log(Arc::clone(&audit_log))
@@ -4531,7 +4526,7 @@ async fn host_runtime_services_projects_resource_network_secret_obligation_audit
         Arc::new(LocalFilesystem::new()),
         Arc::clone(&governor),
         authorizer,
-        ProcessServices::in_memory(),
+        ironclaw_processes::in_memory_backed_process_services(),
         CapabilitySurfaceVersion::new("surface-v1").unwrap(),
     )
     .with_trust_policy(Arc::new(local_manifest_trust_policy(
@@ -4662,7 +4657,7 @@ async fn host_runtime_services_enforces_output_limit_and_reconciles_resource_usa
         Arc::new(LocalFilesystem::new()),
         Arc::clone(&governor),
         authorizer,
-        ProcessServices::in_memory(),
+        ironclaw_processes::in_memory_backed_process_services(),
         CapabilitySurfaceVersion::new("surface-v1").unwrap(),
     )
     .with_run_state(Arc::clone(&run_state))
@@ -4723,7 +4718,7 @@ async fn host_runtime_services_releases_reservation_when_dispatch_preflight_fail
         Arc::new(ObligatingAuthorizer::new(vec![
             Obligation::ReserveResources { reservation_id },
         ])),
-        ProcessServices::in_memory(),
+        ironclaw_processes::in_memory_backed_process_services(),
         CapabilitySurfaceVersion::new("surface-v1").unwrap(),
     )
     .with_run_state(Arc::clone(&run_state))
@@ -4778,7 +4773,7 @@ async fn host_runtime_services_fails_closed_when_durable_obligation_audit_append
         filesystem,
         governor,
         authorizer,
-        ProcessServices::in_memory(),
+        ironclaw_processes::in_memory_backed_process_services(),
         CapabilitySurfaceVersion::new("surface-v1").unwrap(),
     )
     .with_durable_audit_log(Arc::new(FailingDurableAuditLog))
@@ -4836,7 +4831,7 @@ async fn host_runtime_services_routes_wasm_http_through_per_invocation_policy_ha
         filesystem,
         governor,
         authorizer,
-        ProcessServices::in_memory(),
+        ironclaw_processes::in_memory_backed_process_services(),
         CapabilitySurfaceVersion::new("surface-v1").unwrap(),
     )
     .with_runtime_http_egress(Arc::clone(&egress))
@@ -4898,7 +4893,7 @@ async fn host_runtime_services_routes_cached_wasm_http_through_per_invocation_po
         filesystem,
         governor,
         authorizer,
-        ProcessServices::in_memory(),
+        ironclaw_processes::in_memory_backed_process_services(),
         CapabilitySurfaceVersion::new("surface-v1").unwrap(),
     )
     .with_runtime_http_egress(Arc::clone(&egress))
@@ -4967,7 +4962,7 @@ async fn host_runtime_services_wasm_http_uses_production_staged_network_and_secr
         filesystem,
         governor,
         authorizer,
-        ProcessServices::in_memory(),
+        ironclaw_processes::in_memory_backed_process_services(),
         CapabilitySurfaceVersion::new("surface-v1").unwrap(),
     )
     .with_secret_store(Arc::clone(&secret_store))
@@ -5056,7 +5051,7 @@ async fn host_runtime_services_wasm_http_rejects_secret_store_lease_before_trans
         filesystem,
         governor,
         authorizer,
-        ProcessServices::in_memory(),
+        ironclaw_processes::in_memory_backed_process_services(),
         CapabilitySurfaceVersion::new("surface-v1").unwrap(),
     )
     .with_secret_store(Arc::clone(&secret_store))
@@ -5123,7 +5118,7 @@ async fn host_runtime_services_wasm_http_missing_staged_secret_stays_before_tran
         filesystem,
         governor,
         authorizer,
-        ProcessServices::in_memory(),
+        ironclaw_processes::in_memory_backed_process_services(),
         CapabilitySurfaceVersion::new("surface-v1").unwrap(),
     )
     .with_secret_store(Arc::new(InMemorySecretStore::new()))
@@ -5191,7 +5186,7 @@ async fn host_runtime_services_denies_wasm_http_when_shared_egress_has_no_policy
         filesystem,
         governor,
         Arc::new(AllowAllDispatchAuthorizer),
-        ProcessServices::in_memory(),
+        ironclaw_processes::in_memory_backed_process_services(),
         CapabilitySurfaceVersion::new("surface-v1").unwrap(),
     )
     .with_runtime_http_egress(Arc::clone(&egress))
@@ -5261,7 +5256,7 @@ async fn host_runtime_services_wasm_input_encode_releases_prepared_reservation()
 
 #[tokio::test]
 async fn host_runtime_services_cancel_and_status_share_process_result_and_cancellation_graph() {
-    let process_services = ProcessServices::in_memory();
+    let process_services = ironclaw_processes::in_memory_backed_process_services();
     let process_store = process_services.process_store();
     let result_store = process_services.result_store();
     let cancellation_registry = process_services.cancellation_registry();
@@ -5314,7 +5309,7 @@ async fn host_runtime_services_cancel_and_status_share_process_result_and_cancel
 
 #[tokio::test]
 async fn host_runtime_services_cancel_writes_killed_result_when_reservation_is_stale() {
-    let process_services = ProcessServices::in_memory();
+    let process_services = ironclaw_processes::in_memory_backed_process_services();
     let process_store = process_services.process_store();
     let result_store = process_services.result_store();
     let cancellation_registry = process_services.cancellation_registry();
@@ -5360,10 +5355,7 @@ async fn host_runtime_services_cancel_writes_killed_result_when_reservation_is_s
 
 #[tokio::test]
 async fn host_runtime_services_cancel_records_kill_side_effects_when_cleanup_fails() {
-    let process_services = ProcessServices::new(
-        Arc::new(InMemoryProcessStore::new()),
-        Arc::new(InMemoryProcessResultStore::new()),
-    );
+    let process_services = ironclaw_processes::in_memory_backed_process_services();
     let process_store = process_services.process_store();
     let result_store = process_services.result_store();
     let cancellation_registry = process_services.cancellation_registry();
@@ -5499,7 +5491,7 @@ async fn spawned_obligation_lifecycle_releases_resources_and_discards_handoffs_o
 async fn process_obligation_lifecycle_cleans_record_started_before_wrapper_exists() {
     let reservation_id = ResourceReservationId::new();
     let secret_handle = SecretHandle::new("api_token").unwrap();
-    let inner_store = Arc::new(InMemoryProcessStore::new());
+    let inner_store = Arc::new(ironclaw_processes::in_memory_backed_process_store());
     let governor = Arc::new(InMemoryResourceGovernor::new());
     let obligation_services = BuiltinObligationServices::new(
         Arc::new(InMemoryAuditSink::new()),
@@ -5544,7 +5536,7 @@ async fn process_obligation_lifecycle_cleans_record_started_before_wrapper_exist
 #[tokio::test]
 async fn process_obligation_lifecycle_cleans_legacy_handoffs_without_resource_reservation() {
     let secret_handle = SecretHandle::new("api_token").unwrap();
-    let inner_store = Arc::new(InMemoryProcessStore::new());
+    let inner_store = Arc::new(ironclaw_processes::in_memory_backed_process_store());
     let obligation_services = BuiltinObligationServices::new(
         Arc::new(InMemoryAuditSink::new()),
         Arc::new(InMemorySecretStore::new()),
@@ -5573,7 +5565,7 @@ async fn process_obligation_lifecycle_cleans_legacy_handoffs_without_resource_re
 
 #[tokio::test]
 async fn process_obligation_lifecycle_rejects_second_active_handoff_for_same_scope_capability() {
-    let inner_store = Arc::new(InMemoryProcessStore::new());
+    let inner_store = Arc::new(ironclaw_processes::in_memory_backed_process_store());
     let obligation_services = BuiltinObligationServices::new(
         Arc::new(InMemoryAuditSink::new()),
         Arc::new(InMemorySecretStore::new()),
@@ -5659,7 +5651,7 @@ async fn process_obligation_lifecycle_rejects_second_active_handoff_for_same_sco
 async fn process_obligation_lifecycle_does_not_clean_handoffs_twice_after_background_cleanup() {
     let reservation_id = ResourceReservationId::new();
     let secret_handle = SecretHandle::new("api_token").unwrap();
-    let inner_store = Arc::new(InMemoryProcessStore::new());
+    let inner_store = Arc::new(ironclaw_processes::in_memory_backed_process_store());
     let governor = Arc::new(InMemoryResourceGovernor::new());
     let obligation_services = BuiltinObligationServices::new(
         Arc::new(InMemoryAuditSink::new()),
@@ -5710,7 +5702,7 @@ async fn process_obligation_lifecycle_does_not_clean_handoffs_twice_after_backgr
 #[tokio::test]
 async fn process_obligation_lifecycle_surfaces_resource_cleanup_errors_after_terminal_transition() {
     let reservation_id = ResourceReservationId::new();
-    let inner_store = Arc::new(InMemoryProcessStore::new());
+    let inner_store = Arc::new(ironclaw_processes::in_memory_backed_process_store());
     let governor = Arc::new(FailingCleanupResourceGovernor);
     let obligation_services = BuiltinObligationServices::new(
         Arc::new(InMemoryAuditSink::new()),
@@ -5818,7 +5810,7 @@ async fn spawned_obligation_lifecycle_reconciles_when_store_complete_fails_after
         secret_handle.clone(),
         BackgroundExecutor::success(),
         Arc::clone(&inner_process_store),
-        Arc::new(InMemoryProcessResultStore::new()),
+        Arc::new(ironclaw_processes::in_memory_backed_process_result_store()),
     )
     .await;
 
@@ -5852,7 +5844,7 @@ async fn spawned_obligation_lifecycle_releases_when_store_fail_fails_after_resul
         secret_handle.clone(),
         BackgroundExecutor::failure("runtime_dispatch"),
         Arc::clone(&inner_process_store),
-        Arc::new(InMemoryProcessResultStore::new()),
+        Arc::new(ironclaw_processes::in_memory_backed_process_result_store()),
     )
     .await;
 
@@ -6058,7 +6050,7 @@ async fn invoke_capability_missing_credential_returns_auth_before_approval() {
         Arc::new(ApprovalThenSecretObligationAuthorizer {
             handle: secret_handle,
         }),
-        ProcessServices::in_memory(),
+        ironclaw_processes::in_memory_backed_process_services(),
         CapabilitySurfaceVersion::new("surface-v1").unwrap(),
     )
     .with_trust_policy(Arc::new(local_manifest_trust_policy(
@@ -6147,7 +6139,7 @@ async fn invoke_capability_present_credential_proceeds_to_approval() {
         Arc::new(ApprovalThenSecretObligationAuthorizer {
             handle: secret_handle,
         }),
-        ProcessServices::in_memory(),
+        ironclaw_processes::in_memory_backed_process_services(),
         CapabilitySurfaceVersion::new("surface-v1").unwrap(),
     )
     .with_trust_policy(Arc::new(local_manifest_trust_policy(
@@ -6230,7 +6222,7 @@ async fn spawn_capability_present_credential_proceeds_to_approval() {
         // are present. ApprovalThenSecretObligationAuthorizer only implements the dispatch
         // variant and would fall back to the default deny for spawn calls.
         Arc::new(ApprovalThenGrantAuthorizer),
-        ProcessServices::in_memory(),
+        ironclaw_processes::in_memory_backed_process_services(),
         CapabilitySurfaceVersion::new("surface-v1").unwrap(),
     )
     .with_trust_policy(Arc::new(local_manifest_trust_policy(
@@ -6326,7 +6318,7 @@ async fn spawn_capability_missing_credential_returns_auth_before_approval() {
         Arc::new(ApprovalThenSecretObligationAuthorizer {
             handle: secret_handle,
         }),
-        ProcessServices::in_memory(),
+        ironclaw_processes::in_memory_backed_process_services(),
         CapabilitySurfaceVersion::new("surface-v1").unwrap(),
     )
     .with_trust_policy(Arc::new(local_manifest_trust_policy(
@@ -6400,7 +6392,7 @@ async fn invoke_capability_no_credential_requirement_with_wired_store_proceeds_n
         Arc::new(ApprovalThenSecretObligationAuthorizer {
             handle: secret_handle,
         }),
-        ProcessServices::in_memory(),
+        ironclaw_processes::in_memory_backed_process_services(),
         CapabilitySurfaceVersion::new("surface-v1").unwrap(),
     )
     .with_trust_policy(Arc::new(local_manifest_trust_policy(
@@ -6484,7 +6476,7 @@ async fn invoke_capability_secret_store_error_skips_preflight() {
         // injects NO secret obligation of its own. Credential enforcement on the resume
         // path comes solely from the manifest runtime_credentials backstop.
         Arc::new(ApprovalThenGrantAuthorizer),
-        ProcessServices::in_memory(),
+        ironclaw_processes::in_memory_backed_process_services(),
         CapabilitySurfaceVersion::new("surface-v1").unwrap(),
     )
     .with_trust_policy(Arc::new(local_manifest_trust_policy(

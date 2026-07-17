@@ -89,7 +89,7 @@ ironclaw_authorization = { path = "../ironclaw_authorization", version = "0.1.0"
 ironclaw_event_projections = { path = "../ironclaw_event_projections", version = "0.1.0" }
 ironclaw_extensions = { path = "../ironclaw_extensions", version = "0.1.0" }
 ironclaw_filesystem = { path = "../ironclaw_filesystem", version = "0.1.0" }
-ironclaw_processes = { path = "../ironclaw_processes", version = "0.1.0" }
+ironclaw_processes = { path = "../ironclaw_processes", version = "0.1.0", features = ["test-support"] }
 ironclaw_reborn_event_store = { path = "../ironclaw_reborn_event_store", version = "0.1.0" }
 ironclaw_resources = { path = "../ironclaw_resources", version = "0.1.0" }
 ironclaw_scripts = { path = "../ironclaw_scripts", version = "0.1.0" }

@@ -311,7 +311,7 @@ ironclaw_outbound = { path = "crates/ironclaw_outbound", version = "0.1.0" }
 ironclaw_hooks = { path = "crates/ironclaw_hooks", version = "0.1.0" }
 ironclaw_host_runtime = { path = "crates/ironclaw_host_runtime", version = "0.1.0" }
 ironclaw_network = { path = "crates/ironclaw_network", version = "0.1.0" }
-ironclaw_processes = { path = "crates/ironclaw_processes", version = "0.1.0" }
+ironclaw_processes = { path = "crates/ironclaw_processes", version = "0.1.0", features = ["test-support"] }
 ironclaw_resources = { path = "crates/ironclaw_resources", version = "0.1.0" }
 ironclaw_secrets = { path = "crates/ironclaw_secrets", version = "0.1.0" }
 ironclaw_product_adapters = { path = "crates/ironclaw_product_adapters", version = "0.1.0", features = ["test-support"] }

@@ -13,7 +13,7 @@ use ironclaw_capabilities::{
     CapabilityObligationRequest,
 };
 use ironclaw_extensions::{ExtensionManifest, ExtensionPackage, ExtensionRegistry, ManifestSource};
-use ironclaw_filesystem::LocalFilesystem;
+use ironclaw_filesystem::{InMemoryBackend, LocalFilesystem};
 use ironclaw_host_api::{
     AgentId, CapabilityDescriptor, CapabilityDispatchResult, CapabilityId, CapabilitySet,
     CorrelationId, DispatchError, EffectKind, ExecutionContext, ExtensionId, HostPortCatalog,
@@ -26,7 +26,7 @@ use ironclaw_host_api::{
 use ironclaw_network::{
     NetworkHttpEgress, NetworkHttpError, NetworkHttpRequest, NetworkHttpResponse, NetworkUsage,
 };
-use ironclaw_processes::{InMemoryProcessResultStore, InMemoryProcessStore, ProcessServices};
+use ironclaw_processes::{FilesystemProcessResultStore, FilesystemProcessStore};
 use ironclaw_resources::{
     InMemoryResourceGovernor, ResourceAccount, ResourceGovernor, ResourceTally,
 };
@@ -1104,15 +1104,15 @@ async fn first_party_adapter_releases_reservation_when_planner_denies() {
 fn test_services() -> HostRuntimeServices<
     LocalFilesystem,
     InMemoryResourceGovernor,
-    InMemoryProcessStore,
-    InMemoryProcessResultStore,
+    FilesystemProcessStore<InMemoryBackend>,
+    FilesystemProcessResultStore<InMemoryBackend>,
 > {
     HostRuntimeServices::new(
         Arc::new(ExtensionRegistry::new()),
         Arc::new(LocalFilesystem::new()),
         Arc::new(InMemoryResourceGovernor::new()),
         Arc::new(GrantAuthorizer::new()),
-        ProcessServices::in_memory(),
+        ironclaw_processes::in_memory_backed_process_services(),
         CapabilitySurfaceVersion::new("surface-v1").unwrap(),
     )
 }
