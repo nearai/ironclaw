@@ -1509,46 +1509,7 @@ fn serve_boots_without_user_id_env_var() {
         .stderr(Stdio::piped())
         .spawn()
         .expect("ironclaw-reborn serve should start");
-    let stderr = child.stderr.take().expect("stderr should be piped");
-    let (stderr_tx, stderr_rx) = std::sync::mpsc::channel();
-    std::thread::spawn(move || {
-        for line in std::io::BufReader::new(stderr).lines() {
-            if stderr_tx.send(line).is_err() {
-                break;
-            }
-        }
-    });
-
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
-    let mut stderr_text = String::new();
-    loop {
-        if let Some(status) = child.try_wait().expect("serve child status") {
-            panic!(
-                "serve must not exit before binding when the user-id env var \
-                 is absent (must fall back to the config default); status \
-                 {status}; stderr: {stderr_text}"
-            );
-        }
-        if std::time::Instant::now() >= deadline {
-            let _ = child.kill();
-            let _ = child.wait();
-            panic!("serve did not reach listener banner; stderr: {stderr_text}");
-        }
-        match stderr_rx.recv_timeout(std::time::Duration::from_millis(100)) {
-            Ok(Ok(line)) => {
-                stderr_text.push_str(&line);
-                stderr_text.push('\n');
-                if stderr_text.contains("ironclaw-reborn: WebChat v2 listener") {
-                    break;
-                }
-            }
-            Ok(Err(error)) => panic!("failed to read serve stderr: {error}"),
-            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
-            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
-                panic!("serve stderr closed before banner; stderr: {stderr_text}");
-            }
-        }
-    }
+    wait_for_serve_banner(&mut child);
 
     let _ = child.kill();
     let _ = child.wait();
@@ -1590,45 +1551,7 @@ fn a_real_env_var_beats_the_config_default_end_to_end() {
         .stderr(Stdio::piped())
         .spawn()
         .expect("ironclaw-reborn serve should start");
-    let stderr = child.stderr.take().expect("stderr should be piped");
-    let (stderr_tx, stderr_rx) = std::sync::mpsc::channel();
-    std::thread::spawn(move || {
-        for line in std::io::BufReader::new(stderr).lines() {
-            if stderr_tx.send(line).is_err() {
-                break;
-            }
-        }
-    });
-
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
-    let mut stderr_text = String::new();
-    loop {
-        if let Some(status) = child.try_wait().expect("serve child status") {
-            panic!(
-                "env-user is a valid, set env var; serve must bind using it; \
-                 status {status}; stderr: {stderr_text}"
-            );
-        }
-        if std::time::Instant::now() >= deadline {
-            let _ = child.kill();
-            let _ = child.wait();
-            panic!("serve did not reach listener banner; stderr: {stderr_text}");
-        }
-        match stderr_rx.recv_timeout(std::time::Duration::from_millis(100)) {
-            Ok(Ok(line)) => {
-                stderr_text.push_str(&line);
-                stderr_text.push('\n');
-                if stderr_text.contains("ironclaw-reborn: WebChat v2 listener") {
-                    break;
-                }
-            }
-            Ok(Err(error)) => panic!("failed to read serve stderr: {error}"),
-            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
-            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
-                panic!("serve stderr closed before banner; stderr: {stderr_text}");
-            }
-        }
-    }
+    wait_for_serve_banner(&mut child);
 
     let _ = child.kill();
     let _ = child.wait();
@@ -2165,7 +2088,8 @@ fn http_response(port: u16, request: &str, label: &str) -> Result<HttpResponse, 
         }
     }
     let mut body = String::new();
-    let _ = std::io::Read::read_to_string(&mut reader, &mut body);
+    std::io::Read::read_to_string(&mut reader, &mut body)
+        .map_err(|error| format!("read {label} body failed: {error}"))?;
     Ok(HttpResponse {
         status_line: status_line.trim_end_matches(['\r', '\n']).to_string(),
         headers,
@@ -3859,19 +3783,63 @@ fn serve_fails_closed_when_neither_env_nor_store_has_the_key() {
     );
     // No `seed_stored_llm_key` call: the secret store stays empty.
 
-    let output = reborn_command()
+    // Not a blocking `.output()`: this test asserts an *expected* fail-closed
+    // exit, so a regression that makes `serve` bind a listener instead of
+    // exiting would otherwise hang this test (and CI) forever waiting on
+    // process exit. Spawn, poll `try_wait()` against a deadline, and kill on
+    // timeout instead.
+    let mut child = reborn_command()
         .args(["serve", "--host", "127.0.0.1", "--port", "0"])
         .env("HOME", &home)
         .env("IRONCLAW_REBORN_HOME", &reborn_home)
         // No OPENAI_API_KEY set.
-        .output()
-        .expect("ironclaw-reborn serve should run and exit");
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("ironclaw-reborn serve should start");
+
+    // Drain stdout/stderr on background threads while polling for exit, so a
+    // full pipe buffer can never block the child from exiting (and thus
+    // block `try_wait()` from ever observing that exit).
+    let mut stdout_reader = child.stdout.take().expect("stdout should be piped");
+    let stdout_thread = std::thread::spawn(move || {
+        let mut buf = Vec::new();
+        let _ = std::io::Read::read_to_end(&mut stdout_reader, &mut buf);
+        buf
+    });
+    let mut stderr_reader = child.stderr.take().expect("stderr should be piped");
+    let stderr_thread = std::thread::spawn(move || {
+        let mut buf = Vec::new();
+        let _ = std::io::Read::read_to_end(&mut stderr_reader, &mut buf);
+        buf
+    });
+
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
+    let status = loop {
+        if let Some(status) = child.try_wait().expect("serve child status") {
+            break status;
+        }
+        if std::time::Instant::now() >= deadline {
+            let _ = child.kill();
+            let _ = child.wait();
+            panic!(
+                "serve did not exit within the deadline; expected a fail-closed exit with \
+                 neither an env key nor a stored key — it may have regressed into binding a \
+                 listener instead"
+            );
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    };
+
+    let stdout_bytes = stdout_thread.join().expect("stdout reader thread panicked");
+    let stderr_bytes = stderr_thread.join().expect("stderr reader thread panicked");
+    let stderr = String::from_utf8_lossy(&stderr_bytes);
 
     assert!(
-        !output.status.success(),
-        "serve must fail closed with neither an env key nor a stored key"
+        !status.success(),
+        "serve must fail closed with neither an env key nor a stored key; stdout: {}",
+        String::from_utf8_lossy(&stdout_bytes)
     );
-    let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
         stderr
             .contains("llm provider `openai` requires API key env var `OPENAI_API_KEY` to be set"),
