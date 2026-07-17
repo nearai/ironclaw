@@ -4837,6 +4837,7 @@ dependencies = [
  "ironclaw_reborn_composition",
  "ironclaw_reborn_config",
  "ironclaw_reborn_traces",
+ "ironclaw_secrets",
  "ironclaw_webui",
  "libc",
  "rand 0.10.1",

@@ -46,6 +46,7 @@ impl OnboardCommand {
         let webui_token_action = crate::webui_token::ensure_webui_token_file(home.path())?;
         let marker_action =
             write_onboarding_marker(home, &marker_path, self.force, self.import_history)?;
+        let master_key_outcome = provision_master_key(home)?;
 
         println!("IronClaw Reborn onboarding");
         println!("reborn_home: {}", home.path().display());
@@ -62,6 +63,14 @@ impl OnboardCommand {
             marker_path.display(),
             marker_action
         );
+        println!("master_key: {}", master_key_outcome.display_line());
+        if let MasterKeyProvisionOutcome::Suppressed = master_key_outcome {
+            println!(
+                "master_key_note: OS keychain unavailable; set SECRETS_MASTER_KEY yourself or \
+                 let the first `serve`/`onboard` run auto-generate and cache \
+                 .reborn-local-dev-secrets-master-key in the Reborn home"
+            );
+        }
         println!("v1_state: not-used");
         println!();
         println!("completed:");
@@ -86,6 +95,78 @@ impl OnboardCommand {
 
 pub(crate) fn onboarding_marker_path(home: &RebornHome) -> PathBuf {
     home.path().join(ONBOARDING_MARKER_FILE)
+}
+
+/// Outcome of onboarding's OS-keychain master-key provisioning attempt.
+///
+/// Every variant is a successful `execute()` (exit 0) — this is a status
+/// enum, not an error type. `Suppressed` is expected and normal on headless
+/// Linux/CI (`IRONCLAW_DISABLE_OS_KEYCHAIN`) or when the OS denies the
+/// keychain prompt: the resolver chain
+/// (`ironclaw_reborn_composition::factory::resolve_local_dev_secret_master_key_with_env`)
+/// still has the dotfile auto-generation fallback, so onboarding must not
+/// fail just because the keychain step didn't provision anything.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MasterKeyProvisionOutcome {
+    /// A cached `.reborn-local-dev-secrets-master-key` dotfile already
+    /// exists under this Reborn home; nothing to provision.
+    DotfileAlreadyPresent,
+    /// The OS keychain already has a master key from a prior onboarding run.
+    KeychainAlreadyPresent,
+    /// A fresh key was generated and stored in the OS keychain.
+    Provisioned,
+    /// The OS keychain is unavailable (suppressed under test/CI, or the OS
+    /// denied the write). `serve`/`onboard` still work: the resolver falls
+    /// through to the `SECRETS_MASTER_KEY` env var, then to auto-generating
+    /// and caching the dotfile on first boot.
+    Suppressed,
+}
+
+impl MasterKeyProvisionOutcome {
+    fn display_line(self) -> &'static str {
+        match self {
+            Self::DotfileAlreadyPresent => "cached dotfile already present",
+            Self::KeychainAlreadyPresent => "already provisioned in OS keychain",
+            Self::Provisioned => "provisioned in OS keychain",
+            Self::Suppressed => "OS keychain unavailable; falling back to env/dotfile",
+        }
+    }
+}
+
+/// Provision a local-dev secrets master key in the OS keychain on a fresh
+/// desktop: if there is no cached dotfile AND the keychain has no key,
+/// generate one and store it. A second run (dotfile or keychain already
+/// populated) is a no-op. Never fails `execute()` — an unavailable/denied
+/// keychain is reported via [`MasterKeyProvisionOutcome::Suppressed`] and
+/// onboarding continues, matching the resolver's own env/dotfile fallback
+/// (`crates/ironclaw_reborn_composition/src/factory.rs`).
+#[cfg(any(feature = "libsql", feature = "postgres"))]
+fn provision_master_key(home: &RebornHome) -> anyhow::Result<MasterKeyProvisionOutcome> {
+    let dotfile_path = home
+        .path()
+        .join(ironclaw_reborn_composition::LOCAL_DEV_SECRETS_MASTER_KEY_PATH);
+    if dotfile_path.exists() {
+        return Ok(MasterKeyProvisionOutcome::DotfileAlreadyPresent);
+    }
+
+    crate::runtime::block_on_cli(async move {
+        if ironclaw_secrets::keychain::has_master_key().await {
+            return Ok::<_, anyhow::Error>(MasterKeyProvisionOutcome::KeychainAlreadyPresent);
+        }
+        let key = ironclaw_secrets::keychain::generate_master_key();
+        match ironclaw_secrets::keychain::store_master_key(&key).await {
+            Ok(()) => Ok(MasterKeyProvisionOutcome::Provisioned),
+            Err(_) => Ok(MasterKeyProvisionOutcome::Suppressed),
+        }
+    })
+}
+
+/// Without a storage backend feature there is no secret store to provision a
+/// master key for at all — the master-key resolver lives behind the same
+/// `libsql`/`postgres` feature gate in `ironclaw_reborn_composition`.
+#[cfg(not(any(feature = "libsql", feature = "postgres")))]
+fn provision_master_key(_home: &RebornHome) -> anyhow::Result<MasterKeyProvisionOutcome> {
+    Ok(MasterKeyProvisionOutcome::Suppressed)
 }
 
 fn print_dry_run(

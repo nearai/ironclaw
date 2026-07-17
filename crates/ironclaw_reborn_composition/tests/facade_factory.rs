@@ -1289,6 +1289,72 @@ async fn production_libsql_resolved_secret_master_key_rejects_invalid_env_key() 
     ));
 }
 
+/// With no cached `.reborn-local-dev-secrets-master-key` dotfile and no
+/// `SECRETS_MASTER_KEY` env var, `resolve_local_dev_secret_master_key`
+/// (`crates/ironclaw_reborn_composition/src/factory.rs`) now tries the OS
+/// keychain before generating a fresh key. Under
+/// `IRONCLAW_DISABLE_OS_KEYCHAIN` the keychain lookup is suppressed
+/// (`ironclaw_secrets::keychain::get_master_key` returns `NotFound`), so the
+/// resolver must fall through to its existing "generate + persist a dotfile"
+/// branch exactly as before the keychain step was added — and a second open
+/// over the same root must read the now-cached dotfile rather than
+/// re-generating.
+///
+/// Lives here rather than as a `factory.rs` inline unit test because proving
+/// the fallthrough requires actually setting the real process env var
+/// `IRONCLAW_DISABLE_OS_KEYCHAIN` (`ironclaw_secrets::keychain` reads raw
+/// `std::env`, not this crate's env-override overlay), and
+/// `ironclaw_reborn_composition` is `#![forbid(unsafe_code)]` — `std::env::set_var`
+/// is `unsafe` under edition 2024 and `forbid` cannot be locally downgraded,
+/// even inside `#[cfg(test)]` code. This `tests/*.rs` integration binary is a
+/// separate crate the `forbid` attribute does not reach, and already holds
+/// the established `EnvVarGuard`/`SECRETS_MASTER_KEY_ENV_LOCK` convention for
+/// this exact class of env-mutating test.
+#[cfg(feature = "libsql")]
+#[tokio::test]
+async fn local_dev_secret_store_falls_through_suppressed_keychain_to_dotfile() {
+    let _guard = SECRETS_MASTER_KEY_ENV_LOCK.lock().await;
+    let _env = EnvVarGuard::set("IRONCLAW_DISABLE_OS_KEYCHAIN", "1");
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    let key_path = root.join(".reborn-local-dev-secrets-master-key");
+    assert!(
+        !key_path.exists(),
+        "precondition: no cached dotfile before the first open"
+    );
+
+    let mut composite = ironclaw_filesystem::CompositeRootFilesystem::new();
+    ironclaw_reborn_composition::test_support::build_default_local_dev_database_roots_for_test(
+        root,
+        &mut composite,
+    )
+    .await
+    .expect("build default local-dev db roots");
+    let composite = std::sync::Arc::new(composite);
+    let scoped = ironclaw_reborn_composition::wrap_scoped(std::sync::Arc::clone(&composite));
+
+    ironclaw_reborn_composition::test_support::build_local_dev_secret_store_for_test(
+        root,
+        std::sync::Arc::clone(&scoped),
+    )
+    .await
+    .expect("first store build must fall through the suppressed keychain to a dotfile");
+    assert!(
+        key_path.exists(),
+        "the fallthrough must persist a dotfile so subsequent boots don't hit the keychain again"
+    );
+    let cached = std::fs::read_to_string(&key_path).expect("read generated dotfile");
+
+    ironclaw_reborn_composition::test_support::build_local_dev_secret_store_for_test(root, scoped)
+        .await
+        .expect("second store build must read the now-cached dotfile idempotently");
+    assert_eq!(
+        std::fs::read_to_string(&key_path).expect("read dotfile again"),
+        cached,
+        "the cached dotfile must not be rewritten on the idempotent second open"
+    );
+}
+
 #[cfg(feature = "libsql")]
 #[tokio::test]
 async fn production_libsql_services_wire_first_party_runtime_http_egress() {

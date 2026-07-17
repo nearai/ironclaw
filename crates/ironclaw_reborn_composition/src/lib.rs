@@ -82,6 +82,8 @@ pub use extension_host::gsuite::{
 pub use extension_host::skill_listing::{RebornSkillListError, list_reborn_local_skills};
 #[cfg(feature = "test-support")]
 pub use factory::AttachmentTestSupport;
+#[cfg(any(feature = "libsql", feature = "postgres"))]
+pub use factory::LOCAL_DEV_SECRETS_MASTER_KEY_PATH;
 #[cfg(feature = "test-support")]
 pub use factory::RebornLocalDevApprovalTestParts;
 #[cfg(feature = "migration-support")]

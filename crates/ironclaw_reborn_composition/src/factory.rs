@@ -239,8 +239,12 @@ type LocalDevWorkspaceFilesystems = (
 const LOCAL_DEV_DEFAULT_SYSTEM_PROMPT_PATH: &str = "system/prompts/default-system.md";
 const LOCAL_DEV_LEGACY_SKILLS_BACKFILL_MARKER: &str = ".legacy-skills-backfilled";
 const LOCAL_DEV_LEGACY_SKILLS_BACKFILL_MAX_DEPTH: usize = 64;
+/// Filename of the cached local-dev secrets master-key dotfile under a
+/// Reborn home / local-dev root directory. `pub` (re-exported from `lib.rs`)
+/// so onboarding (`ironclaw_reborn_cli::commands::onboard`) can check for its
+/// presence without duplicating the literal.
 #[cfg(any(feature = "libsql", feature = "postgres"))]
-const LOCAL_DEV_SECRETS_MASTER_KEY_PATH: &str = ".reborn-local-dev-secrets-master-key";
+pub const LOCAL_DEV_SECRETS_MASTER_KEY_PATH: &str = ".reborn-local-dev-secrets-master-key";
 
 #[cfg(any(test, feature = "test-support"))]
 #[derive(Clone)]
@@ -1655,7 +1659,8 @@ async fn build_local_runtime(input: RebornBuildInput) -> Result<RebornServices, 
         &root,
         Arc::clone(&local_dev_product_auth_filesystem),
         secret_master_key,
-    )?;
+    )
+    .await?;
     #[cfg(any(feature = "libsql", feature = "postgres"))]
     let secret_store: Arc<dyn SecretStore> = local_dev_secret_bundle.0.clone();
     #[cfg(not(any(feature = "libsql", feature = "postgres")))]
@@ -3467,7 +3472,7 @@ fn mount_local_dev_project_roots(
 }
 
 #[cfg(any(feature = "libsql", feature = "postgres"))]
-pub(crate) fn build_local_dev_secret_store<F>(
+pub(crate) async fn build_local_dev_secret_store<F>(
     root: &Path,
     scoped_filesystem: Arc<ScopedFilesystem<F>>,
     explicit_master_key: Option<ironclaw_secrets::SecretMaterial>,
@@ -3483,7 +3488,7 @@ where
 {
     let master_key = match explicit_master_key {
         Some(master_key) => master_key,
-        None => resolve_local_dev_secret_master_key(root)?,
+        None => resolve_local_dev_secret_master_key(root).await?,
     };
     // The crypto is returned alongside the store so the admin secret
     // provisioner (`admin_secrets.rs`) can build per-target-user stores that
@@ -3503,6 +3508,7 @@ where
 enum MasterKeySource {
     File(PathBuf),
     Env,
+    Keychain,
 }
 
 /// Validate a resolved master key against the same rules `SecretsCrypto::new`
@@ -3526,6 +3532,7 @@ fn validate_resolved_master_key(
                 "env var {}",
                 ironclaw_secrets::keychain::SECRETS_MASTER_KEY_ENV
             ),
+            MasterKeySource::Keychain => "the OS keychain".to_string(),
         };
         RebornBuildError::InvalidConfig {
             reason: format!(
@@ -3538,7 +3545,7 @@ fn validate_resolved_master_key(
 }
 
 #[cfg(any(feature = "libsql", feature = "postgres"))]
-fn resolve_local_dev_secret_master_key(
+async fn resolve_local_dev_secret_master_key(
     root: &Path,
 ) -> Result<ironclaw_secrets::SecretMaterial, RebornBuildError> {
     // Fail closed on an explicitly-set-but-unusable master key: only an
@@ -3558,15 +3565,23 @@ fn resolve_local_dev_secret_master_key(
             });
         }
     };
-    resolve_local_dev_secret_master_key_with_env(root, env_key)
+    resolve_local_dev_secret_master_key_with_env(root, env_key).await
 }
 
 /// Inner resolver that takes the `SECRETS_MASTER_KEY` env value as a parameter
 /// so the write-before-validate invariant can be exercised through this real
 /// caller in tests without mutating process-global env (which is racy under
 /// `cargo test`'s parallel harness).
+///
+/// Resolution order: explicit/env key (validated up front) -> cached dotfile
+/// -> OS keychain (suppressed under test/CI, see
+/// `ironclaw_secrets::keychain::get_master_key`) -> generate a fresh key and
+/// persist it to the dotfile. A keychain hit is returned as-is and never
+/// written to the dotfile — the dotfile and keychain are alternative sources
+/// for the same secret, not layered, so writing both would mean the two
+/// copies must agree forever.
 #[cfg(any(feature = "libsql", feature = "postgres"))]
-fn resolve_local_dev_secret_master_key_with_env(
+async fn resolve_local_dev_secret_master_key_with_env(
     root: &Path,
     env_key: Option<String>,
 ) -> Result<ironclaw_secrets::SecretMaterial, RebornBuildError> {
@@ -3612,19 +3627,41 @@ fn resolve_local_dev_secret_master_key_with_env(
         }
     }
 
-    // No cached file. Prefer the explicit (already-validated) env key; otherwise
-    // generate a fresh one.
-    match env_key {
-        Some(key) => {
-            write_local_dev_secret_master_key(&key_path, &key)?;
-            Ok(ironclaw_secrets::SecretMaterial::from(key))
+    // No cached file. Prefer the explicit (already-validated) env key.
+    if let Some(key) = env_key {
+        write_local_dev_secret_master_key(&key_path, &key)?;
+        return Ok(ironclaw_secrets::SecretMaterial::from(key));
+    }
+
+    // No env key either. Try the OS keychain next (suppressed under test/CI —
+    // see `ironclaw_secrets::keychain::get_master_key`, which returns
+    // `NotFound` when suppressed so this falls through exactly as it would
+    // for a genuinely empty keychain). Deliberately calling `get_master_key`
+    // directly rather than `resolve_master_key_material`: this resolver
+    // already owns the env-var branch above, and `resolve_master_key_material`
+    // re-checks the env var itself — calling it here would mean two
+    // independent env-precedence implementations that could disagree.
+    match ironclaw_secrets::keychain::get_master_key().await {
+        Ok(key_bytes) => {
+            let key_hex = key_bytes
+                .iter()
+                .map(|b| format!("{b:02x}"))
+                .collect::<String>();
+            validate_resolved_master_key(&key_hex, &MasterKeySource::Keychain)?;
+            // Keychain hit: return as-is, do not also write the dotfile — the
+            // dotfile and keychain are alternative sources, not layered.
+            return Ok(ironclaw_secrets::SecretMaterial::from(key_hex));
         }
-        None => {
-            let key = ironclaw_secrets::keychain::generate_master_key_hex();
-            write_local_dev_secret_master_key(&key_path, &key)?;
-            Ok(ironclaw_secrets::SecretMaterial::from(key))
+        Err(_) => {
+            // Miss or error (including suppressed-under-test): fall through
+            // to generating a fresh key, unchanged from prior behavior.
         }
     }
+
+    // No cached file, no env key, no keychain hit. Generate a fresh key.
+    let key = ironclaw_secrets::keychain::generate_master_key_hex();
+    write_local_dev_secret_master_key(&key_path, &key)?;
+    Ok(ironclaw_secrets::SecretMaterial::from(key))
 }
 
 #[cfg(any(feature = "libsql", feature = "postgres"))]
@@ -6155,6 +6192,7 @@ mod tests {
             local_dev_scoped_filesystem(rebuilt_filesystem),
             None,
         )
+        .await
         .expect("local-dev secret store rebuild");
         let lease = rebuilt_secret_store
             .lease_once(&scope.resource, &access_secret)
@@ -6267,8 +6305,8 @@ mod tests {
     /// real all-zeros key an `[env] SECRETS_MASTER_KEY = "000...0"` cargo
     /// override writes into the cached key file.
     #[cfg(any(feature = "libsql", feature = "postgres"))]
-    #[test]
-    fn resolve_local_dev_secret_master_key_rejects_malformed_file_with_path_context() {
+    #[tokio::test]
+    async fn resolve_local_dev_secret_master_key_rejects_malformed_file_with_path_context() {
         let dir = tempfile::tempdir().expect("tempdir");
         let root = dir.path();
         let key_path = root.join(LOCAL_DEV_SECRETS_MASTER_KEY_PATH);
@@ -6277,6 +6315,7 @@ mod tests {
         std::fs::write(&key_path, "0".repeat(64)).expect("write malformed key");
 
         let error = resolve_local_dev_secret_master_key(root)
+            .await
             .expect_err("malformed local-dev master key must be rejected");
 
         match error {
@@ -6301,8 +6340,8 @@ mod tests {
     /// write-before-validate invariant: a rejected env key must never be
     /// persisted to the cached `.reborn-local-dev-secrets-master-key` file.
     #[cfg(any(feature = "libsql", feature = "postgres"))]
-    #[test]
-    fn resolve_local_dev_secret_master_key_rejects_malformed_env_without_persisting() {
+    #[tokio::test]
+    async fn resolve_local_dev_secret_master_key_rejects_malformed_env_without_persisting() {
         let dir = tempfile::tempdir().expect("tempdir");
         let root = dir.path();
         let key_path = root.join(LOCAL_DEV_SECRETS_MASTER_KEY_PATH);
@@ -6314,6 +6353,7 @@ mod tests {
         // 64 zero chars: passes the length floor but has a single distinct byte,
         // so the entropy check rejects it.
         let error = resolve_local_dev_secret_master_key_with_env(root, Some("0".repeat(64)))
+            .await
             .expect_err("malformed env master key must be rejected");
 
         match error {
@@ -6339,9 +6379,9 @@ mod tests {
         );
     }
 
-    #[test]
+    #[tokio::test]
     #[cfg(any(feature = "libsql", feature = "postgres"))]
-    fn resolve_local_dev_secret_master_key_rejects_set_but_empty_env_without_persisting() {
+    async fn resolve_local_dev_secret_master_key_rejects_set_but_empty_env_without_persisting() {
         let dir = tempfile::tempdir().expect("tempdir");
         let root = dir.path();
         let key_path = root.join(LOCAL_DEV_SECRETS_MASTER_KEY_PATH);
@@ -6351,6 +6391,7 @@ mod tests {
         // generate + persist a fresh key the operator never chose.
         for empty in ["", "   ", "\n\t "] {
             let error = resolve_local_dev_secret_master_key_with_env(root, Some(empty.to_string()))
+                .await
                 .expect_err("set-but-empty env master key must be rejected");
             match error {
                 RebornBuildError::InvalidConfig { reason } => assert!(
@@ -6367,9 +6408,9 @@ mod tests {
         }
     }
 
-    #[test]
+    #[tokio::test]
     #[cfg(any(feature = "libsql", feature = "postgres"))]
-    fn resolve_local_dev_secret_master_key_rejects_empty_env_even_with_cached_file() {
+    async fn resolve_local_dev_secret_master_key_rejects_empty_env_even_with_cached_file() {
         // Regression: the empty-env rejection must run BEFORE the cached-file
         // read, so an explicitly-set-but-empty SECRETS_MASTER_KEY fails closed
         // on a rebuild even when `.reborn-local-dev-secrets-master-key` already
@@ -6378,13 +6419,24 @@ mod tests {
         let root = dir.path();
         let key_path = root.join(LOCAL_DEV_SECRETS_MASTER_KEY_PATH);
 
-        // Seed a valid cached key first (no env value -> generated + persisted).
-        resolve_local_dev_secret_master_key_with_env(root, None)
-            .expect("seed a valid cached master key");
+        // Seed a valid cached key directly (not through the resolver): this
+        // test is about the empty-env/cached-file precedence, not the
+        // keychain step, so seeding must not exercise
+        // `ironclaw_secrets::keychain::get_master_key` — this crate is
+        // `#![forbid(unsafe_code)]` and cannot suppress the OS keychain via
+        // `IRONCLAW_DISABLE_OS_KEYCHAIN` in-process (see the fallthrough
+        // test in `tests/facade_factory.rs`), so an unsuppressed call here
+        // would hit the real OS keychain.
+        std::fs::write(
+            &key_path,
+            ironclaw_secrets::keychain::generate_master_key_hex(),
+        )
+        .expect("seed a valid cached master key file");
         assert!(key_path.exists(), "precondition: cached key file exists");
         let cached_before = std::fs::read_to_string(&key_path).expect("read cached key");
 
         let error = resolve_local_dev_secret_master_key_with_env(root, Some("   ".to_string()))
+            .await
             .expect_err("empty env must fail closed even with a cached file");
         match error {
             RebornBuildError::InvalidConfig { reason } => assert!(
@@ -6401,9 +6453,9 @@ mod tests {
         );
     }
 
-    #[test]
+    #[tokio::test]
     #[cfg(any(feature = "libsql", feature = "postgres"))]
-    fn resolve_local_dev_secret_master_key_rejects_malformed_env_even_with_cached_file() {
+    async fn resolve_local_dev_secret_master_key_rejects_malformed_env_even_with_cached_file() {
         // A non-empty-but-malformed env value must also fail closed BEFORE the
         // cached-file read, so `SECRETS_MASTER_KEY=0000...` is not silently
         // ignored in favor of a valid cached key on a rebuild.
@@ -6411,12 +6463,20 @@ mod tests {
         let root = dir.path();
         let key_path = root.join(LOCAL_DEV_SECRETS_MASTER_KEY_PATH);
 
-        resolve_local_dev_secret_master_key_with_env(root, None)
-            .expect("seed a valid cached master key");
+        // Seed directly, not through the resolver — see the comment in
+        // `resolve_local_dev_secret_master_key_rejects_empty_env_even_with_cached_file`
+        // for why a `None`-env resolver call here would hit the real OS
+        // keychain in-process.
+        std::fs::write(
+            &key_path,
+            ironclaw_secrets::keychain::generate_master_key_hex(),
+        )
+        .expect("seed a valid cached master key file");
         let cached_before = std::fs::read_to_string(&key_path).expect("read cached key");
 
         // 64 zero chars: passes the length floor but fails the entropy check.
         let error = resolve_local_dev_secret_master_key_with_env(root, Some("0".repeat(64)))
+            .await
             .expect_err("malformed env must fail closed even with a cached file");
         match error {
             RebornBuildError::InvalidConfig { reason } => assert!(
@@ -6434,16 +6494,34 @@ mod tests {
 
     /// A well-formed cached key file passes through unchanged.
     #[cfg(any(feature = "libsql", feature = "postgres"))]
-    #[test]
-    fn resolve_local_dev_secret_master_key_accepts_valid_cached_file() {
+    #[tokio::test]
+    async fn resolve_local_dev_secret_master_key_accepts_valid_cached_file() {
         let dir = tempfile::tempdir().expect("tempdir");
         let root = dir.path();
         let valid = ironclaw_secrets::keychain::generate_master_key_hex();
         std::fs::write(root.join(LOCAL_DEV_SECRETS_MASTER_KEY_PATH), &valid)
             .expect("write valid key");
 
-        resolve_local_dev_secret_master_key(root).expect("valid cached key must be accepted");
+        resolve_local_dev_secret_master_key(root)
+            .await
+            .expect("valid cached key must be accepted");
     }
+
+    // The keychain-fallthrough + idempotency test for
+    // `resolve_local_dev_secret_master_key_with_env` lives in
+    // `tests/facade_factory.rs`
+    // (`local_dev_secret_store_falls_through_suppressed_keychain_to_dotfile`),
+    // not here: this crate is `#![forbid(unsafe_code)]`
+    // (`crates/ironclaw_reborn_composition/src/lib.rs:1`), and proving the
+    // fallthrough requires actually setting the real process env var
+    // `IRONCLAW_DISABLE_OS_KEYCHAIN` so `ironclaw_secrets::keychain::get_master_key`
+    // (which reads raw `std::env`, not this crate's env-override overlay)
+    // observes it — `std::env::set_var` is `unsafe` under edition 2024, which
+    // `forbid(unsafe_code)` blocks even inside `#[cfg(test)]` code in this
+    // module. `tests/*.rs` integration binaries are separate crates the
+    // `forbid` attribute does not reach, and already hold the established
+    // `EnvVarGuard`/unsafe-env-mutation convention for this exact class of
+    // test (see `facade_factory.rs`'s `SECRETS_MASTER_KEY_ENV_LOCK`).
 
     #[tokio::test]
     async fn local_dev_gsuite_installs_activates_and_dispatches_through_host_runtime() {
