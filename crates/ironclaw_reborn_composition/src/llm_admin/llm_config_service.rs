@@ -971,8 +971,8 @@ fn normalized_endpoint(value: Option<&str>) -> Option<String> {
 ///
 /// - Reuses [`RebornLlmConfigService::probe_provider`]'s `custom_definition`
 ///   + `resolve_against_registry` + `build_static_provider_chain` machinery,
-///   minus its stored-key fallback: nothing is persisted yet, so only the
-///   caller's inline candidate key (or none) can ever apply.
+///     minus its stored-key fallback: nothing is persisted yet, so only the
+///     caller's inline candidate key (or none) can ever apply.
 /// - Never returns `Err`: every failure folds into `ok: false` with a
 ///   user-safe `message`, matching `test_connection`/`list_models` — callers
 ///   (onboard's `provision_via_menu`) must not invent a separate error

@@ -138,7 +138,7 @@ fn resolve_service_state() -> ServiceStateDto {
 /// - Propagates an error when the token env var is set but not valid
 ///   UTF-8 — see `webui_token::env_token_is_active` — rather than silently
 ///   treating it as inactive, which would let `status` disagree with `serve`
-/// about which credential source is live.
+///   about which credential source is live.
 #[cfg(feature = "webui-v2-beta")]
 fn resolve_login_link_and_note(
     home: &ironclaw_reborn_config::RebornHome,
