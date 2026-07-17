@@ -46,17 +46,31 @@ impl LlmReloadTrigger for RebornLlmReloadAdapter {
         };
         let provider_id = resolved.provider_id().to_string();
         let mut config = resolved.config;
-        if let Some(stored) = self
+        let key_applied = match self
             .keys
             .read(&provider_id)
             .await
             .map_err(|error| error.to_string())?
         {
-            apply_stored_api_key(&mut config, stored);
-        }
-        self.reload_handle
+            Some(stored) => {
+                apply_stored_api_key(&mut config, stored);
+                true
+            }
+            None => false,
+        };
+        let result = self
+            .reload_handle
             .reload(&config, Arc::clone(&self.session))
             .await
-            .map_err(|error| error.to_string())
+            .map_err(|error| error.to_string());
+        // Never log key material — only provider id and whether a stored key
+        // was applied.
+        tracing::debug!(
+            provider_id = %provider_id,
+            key_applied,
+            succeeded = result.is_ok(),
+            "LLM reload applied to the live provider"
+        );
+        result
     }
 }

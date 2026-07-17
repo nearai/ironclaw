@@ -2762,6 +2762,66 @@ fn wait_for_serve_banner(child: &mut std::process::Child) -> String {
     stderr_text
 }
 
+/// Like [`wait_for_serve_banner`], but keeps capturing `child`'s stderr for
+/// the rest of the test (returned as a live-updating buffer) instead of
+/// dropping the reader once the banner line is seen. The real-turn tests
+/// that use this drive several more HTTP round trips after the banner and
+/// occasionally hit a `Connection refused` under CPU-contended parallel test
+/// runs — the banner line is flushed just before the listener starts
+/// accepting, not after, so a loaded box can have a brief gap. Keeping the
+/// capture alive (rather than a one-shot channel that's dropped as soon as
+/// the caller returns) means a failure can print what `serve` actually did
+/// in that window instead of only "connection refused".
+#[cfg(feature = "webui-v2-beta")]
+fn wait_for_serve_banner_with_capture(
+    child: &mut std::process::Child,
+    label: &str,
+) -> std::sync::Arc<std::sync::Mutex<String>> {
+    let stderr_all = std::sync::Arc::new(std::sync::Mutex::new(String::new()));
+    let stderr = child.stderr.take().expect("stderr should be piped");
+    let collector = std::sync::Arc::clone(&stderr_all);
+    std::thread::spawn(move || {
+        for line in std::io::BufReader::new(stderr)
+            .lines()
+            .map_while(Result::ok)
+        {
+            let mut guard = collector
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            guard.push_str(&line);
+            guard.push('\n');
+        }
+    });
+
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
+    loop {
+        if stderr_all
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .contains("ironclaw-reborn: WebChat v2 listener")
+        {
+            return stderr_all;
+        }
+        if let Some(status) = child.try_wait().expect("serve child status") {
+            panic!(
+                "{label}: serve exited before binding with {status}; stderr: {}",
+                stderr_all
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+            );
+        }
+        if std::time::Instant::now() >= deadline {
+            panic!(
+                "{label}: serve did not reach listener banner; stderr: {}",
+                stderr_all
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+            );
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+}
+
 // Note: port `0` is intentionally accepted now — it lets the kernel
 // pick a free port, which is the path the caller-level serve test
 // uses to avoid hard-coding a port. The earlier zero-port rejection
@@ -4199,6 +4259,468 @@ fn onboard_login_link_then_bearer_authorizes_a_protected_request() {
     );
 }
 
+/// Minimal blocking chat-completions stub standing in for a real LLM
+/// provider. Accepts NEAR AI-shaped (`POST /v1/chat/completions`) requests on
+/// an OS-assigned local port, captures each request's raw `Authorization`
+/// header on `auth_rx`, and answers with a fixed non-streaming completion —
+/// enough for the turn loop to finish successfully without ever reaching a
+/// real network endpoint. Any other path (e.g. a models-list probe) gets an
+/// empty JSON object so an unexpected preflight call doesn't hang the
+/// connection.
+///
+/// Runs on a background `std::thread` (not tokio) because `smoke.rs` tests
+/// spawn `ironclaw-reborn` as a real child process and drive it over plain
+/// blocking sockets, matching `http_response`'s style above.
+#[cfg(feature = "webui-v2-beta")]
+fn spawn_chat_completion_stub() -> (String, std::sync::mpsc::Receiver<Option<String>>) {
+    let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).expect("bind stub listener");
+    let base_url = format!(
+        "http://127.0.0.1:{}",
+        listener.local_addr().expect("stub local addr").port()
+    );
+    let (auth_tx, auth_rx) = std::sync::mpsc::channel();
+
+    std::thread::spawn(move || {
+        for stream in listener.incoming() {
+            let Ok(mut stream) = stream else { break };
+            stream
+                .set_read_timeout(Some(std::time::Duration::from_secs(10)))
+                .ok();
+            let mut reader = std::io::BufReader::new(&mut stream);
+            let mut request_line = String::new();
+            if std::io::BufRead::read_line(&mut reader, &mut request_line).unwrap_or(0) == 0 {
+                continue;
+            }
+            let mut headers = Vec::new();
+            let mut content_length = 0usize;
+            let mut auth_header = None;
+            loop {
+                let mut line = String::new();
+                if std::io::BufRead::read_line(&mut reader, &mut line).unwrap_or(0) == 0 {
+                    break;
+                }
+                let trimmed = line.trim_end_matches(['\r', '\n']);
+                if trimmed.is_empty() {
+                    break;
+                }
+                if let Some((name, value)) = trimmed.split_once(':') {
+                    let name = name.trim().to_ascii_lowercase();
+                    let value = value.trim().to_string();
+                    if name == "content-length" {
+                        content_length = value.parse().unwrap_or(0);
+                    }
+                    if name == "authorization" {
+                        auth_header = Some(value.clone());
+                    }
+                    headers.push((name, value));
+                }
+            }
+            let mut body = vec![0u8; content_length];
+            if content_length > 0 {
+                let _ = std::io::Read::read_exact(&mut reader, &mut body);
+            }
+            let _ = auth_tx.send(auth_header);
+
+            let is_chat_completion = request_line.starts_with("POST /v1/chat/completions");
+            // The reborn turn loop always drives the provider through its
+            // streaming method when a progress sink is wired (which it is for
+            // a real WebUI-driven turn, unlike an in-process `send_user_
+            // message` call) — it sends `"stream": true` and expects an SSE
+            // body, not a plain JSON one. Detect it and answer accordingly,
+            // mirroring `start_nearai_auth_capture_server` in
+            // `ironclaw_reborn_composition`'s runtime tests.
+            let wants_stream = serde_json::from_slice::<serde_json::Value>(&body)
+                .ok()
+                .and_then(|value| value.get("stream").and_then(serde_json::Value::as_bool))
+                .unwrap_or(false);
+
+            let response = if is_chat_completion && wants_stream {
+                let sse_body = concat!(
+                    r#"data: {"choices":[{"delta":{"content":"stub reply: stored key reached the live provider"},"finish_reason":"stop"}],"usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2}}"#,
+                    "\n\n",
+                    "data: [DONE]\n\n"
+                );
+                format!(
+                    "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ncache-control: no-cache\r\nconnection: close\r\n\r\n{sse_body}"
+                )
+            } else {
+                let response_body = if is_chat_completion {
+                    serde_json::json!({
+                        "id": "chatcmpl-smoke-stub",
+                        "choices": [{
+                            "message": {
+                                "role": "assistant",
+                                "content": "stub reply: stored key reached the live provider"
+                            },
+                            "finish_reason": "stop"
+                        }],
+                        "usage": { "prompt_tokens": 1, "completion_tokens": 1 }
+                    })
+                } else {
+                    serde_json::json!({})
+                };
+                let body_text = response_body.to_string();
+                format!(
+                    "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
+                    body_text.len(),
+                    body_text
+                )
+            };
+            let _ = std::io::Write::write_all(&mut stream, response.as_bytes());
+        }
+    });
+
+    (base_url, auth_rx)
+}
+
+/// Insert `base_url = "<stub_base_url>"` into the active (uncommented)
+/// `[llm.default]` section written by `models set-provider`, which never
+/// carries a `base_url` line itself (see the fixture dumped by that
+/// command). Targets the one active `api_key_env = "NEARAI_API_KEY"` line
+/// (the commented reference blocks further down the file are prefixed with
+/// `#` and don't match this exact, unindented text).
+#[cfg(feature = "webui-v2-beta")]
+fn patch_config_base_url(reborn_home: &Path, base_url: &str) {
+    let config_path = reborn_home.join("config.toml");
+    let original = std::fs::read_to_string(&config_path).expect("read config.toml to patch");
+    let anchor = "api_key_env = \"NEARAI_API_KEY\"\n";
+    assert!(
+        original.contains(anchor),
+        "expected an active `[llm.default]` NEAR AI selection to patch; config: {original}"
+    );
+    let patched = original.replacen(anchor, &format!("{anchor}base_url = \"{base_url}\"\n"), 1);
+    std::fs::write(&config_path, patched).expect("write patched config.toml");
+}
+
+/// Drive a real turn through the WebChat v2 HTTP API against a running
+/// `serve` process: exchange the onboard-provisioned webui token for a
+/// session bearer (mirrors `onboard_login_link_then_bearer_authorizes_a_
+/// protected_request`'s steps 1-2), create a thread, send a message, and
+/// poll the timeline until the assistant reply lands. Returns the reply
+/// text, or `Err` with the last observed timeline body on timeout.
+#[cfg(feature = "webui-v2-beta")]
+fn drive_real_turn_via_webui(port: u16, webui_token: &str, label: &str) -> Result<String, String> {
+    let login = http_response(
+        port,
+        &format!(
+            "GET /login?token={webui_token} HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n"
+        ),
+        "login-link probe",
+    )?;
+    let location = login
+        .header("location")
+        .ok_or_else(|| format!("redirect must carry a Location header, got: {login:?}"))?;
+    let ticket = location
+        .split("login_ticket=")
+        .nth(1)
+        .ok_or_else(|| format!("redirect must carry a login_ticket, got: {location}"))?
+        .to_string();
+
+    let exchange_body = format!(r#"{{"ticket":"{ticket}"}}"#);
+    let exchange_request = format!(
+        "POST /auth/session/exchange HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{exchange_body}",
+        exchange_body.len()
+    );
+    let exchange = http_response(port, &exchange_request, "session exchange probe")?;
+    let exchange_json: serde_json::Value =
+        serde_json::from_str(&exchange.body).map_err(|error| format!("exchange body: {error}"))?;
+    let bearer = exchange_json["token"]
+        .as_str()
+        .ok_or_else(|| format!("exchange response missing token: {exchange_json}"))?
+        .to_string();
+
+    let create_thread_body = format!(r#"{{"client_action_id":"smoke-create-thread-{label}"}}"#);
+    let create_thread_request = format!(
+        "POST /api/webchat/v2/threads HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer {bearer}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{create_thread_body}",
+        create_thread_body.len()
+    );
+    let created = http_response(port, &create_thread_request, "create thread")?;
+    let created_json: serde_json::Value = serde_json::from_str(&created.body)
+        .map_err(|error| format!("create-thread body: {error}"))?;
+    let thread_id = created_json["thread"]["thread_id"]
+        .as_str()
+        .ok_or_else(|| format!("create-thread response missing thread_id: {created_json}"))?
+        .to_string();
+
+    let message_body =
+        format!(r#"{{"content":"hi","client_action_id":"smoke-send-message-{label}"}}"#);
+    let send_request = format!(
+        "POST /api/webchat/v2/threads/{thread_id}/messages HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer {bearer}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{message_body}",
+        message_body.len()
+    );
+    let sent = http_response(port, &send_request, "send message")?;
+    let sent_json: serde_json::Value =
+        serde_json::from_str(&sent.body).map_err(|error| format!("send-message body: {error}"))?;
+    if let Some(outcome) = sent_json["outcome"].as_str()
+        && outcome != "submitted"
+    {
+        return Err(format!("turn was not submitted: {sent_json}"));
+    }
+
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
+    let mut last_timeline = String::new();
+    while std::time::Instant::now() < deadline {
+        let timeline_request = format!(
+            "GET /api/webchat/v2/threads/{thread_id}/timeline HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer {bearer}\r\nConnection: close\r\n\r\n"
+        );
+        let timeline = http_response(port, &timeline_request, "timeline poll")?;
+        last_timeline = timeline.body.clone();
+        if let Ok(timeline_json) = serde_json::from_str::<serde_json::Value>(&timeline.body)
+            && let Some(messages) = timeline_json["messages"].as_array()
+        {
+            for message in messages {
+                let kind = message["kind"].as_str().unwrap_or_default();
+                let status = message["status"].as_str().unwrap_or_default();
+                if kind == "assistant" && status == "finalized" {
+                    return Ok(message["content"].as_str().unwrap_or_default().to_string());
+                }
+                if kind == "assistant" && status == "interrupted" {
+                    return Err(format!(
+                        "turn failed (assistant message interrupted): {timeline_json}"
+                    ));
+                }
+            }
+        }
+        std::thread::sleep(std::time::Duration::from_millis(200));
+    }
+    Err(format!(
+        "timed out waiting for the assistant reply; last timeline: {last_timeline}"
+    ))
+}
+
+/// Journey-critical fix (PR #6174) regression pin: a provider selected
+/// through `config.toml` (mirrors `models set-provider` / onboard) with its
+/// key living ONLY in the encrypted secret store (never an env var) must
+/// reach the turn-serving provider for a REAL turn driven through the same
+/// WebUI HTTP API the browser uses — not just a boot-time trace.
+///
+/// Before the fix, cold boot resolved the LLM config, then a separate
+/// `apply_startup_stored_llm_key` mechanism was supposed to overlay the
+/// stored key onto the model gateway directly — but demonstrably never
+/// reached the turn-serving provider (see the runtime.rs fix). This test
+/// pins the fix: the stub HTTP server captures the `Authorization` header
+/// the live provider actually sends, and asserts it carries the stored key.
+#[cfg(feature = "webui-v2-beta")]
+#[test]
+fn stored_key_reaches_real_turn_via_webui_api() {
+    const STORED_KEY: &str = "sk-smoke-real-turn-stored-nearai-key";
+
+    let temp = tempfile::tempdir().expect("tempdir");
+    let reborn_home = temp.path().join("reborn-home");
+    let home = temp.path().join("home");
+    std::fs::create_dir_all(&home).expect("home dir");
+
+    let onboard_output = reborn_command()
+        .arg("onboard")
+        .env("HOME", &home)
+        .env("IRONCLAW_REBORN_HOME", &reborn_home)
+        .output()
+        .expect("ironclaw-reborn onboard should run");
+    assert!(
+        onboard_output.status.success(),
+        "onboard must succeed non-interactively; stderr: {}",
+        String::from_utf8_lossy(&onboard_output.stderr)
+    );
+    let onboard_stdout = String::from_utf8_lossy(&onboard_output.stdout);
+    let webui_token = std::fs::read_to_string(reborn_home.join("webui-token"))
+        .expect("read onboard-provisioned webui-token")
+        .trim()
+        .to_string();
+    assert!(
+        !webui_token.is_empty(),
+        "onboard-provisioned webui-token must not be empty; stdout: {onboard_stdout}"
+    );
+
+    let set_provider_output = reborn_command()
+        .args(["models", "set-provider", "nearai", "--model", "test-model"])
+        .env("IRONCLAW_REBORN_HOME", &reborn_home)
+        .output()
+        .expect("ironclaw-reborn models set-provider should run");
+    assert!(
+        set_provider_output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&set_provider_output.stderr)
+    );
+
+    // The stored key lives ONLY in the encrypted secret store — this is the
+    // onboard-style credential path (`onboard`'s interactive prompt / the
+    // webui settings surface), never an env var.
+    seed_stored_llm_key_at_runtime_root(&reborn_home, "nearai", STORED_KEY);
+
+    let (stub_base_url, auth_rx) = spawn_chat_completion_stub();
+    patch_config_base_url(&reborn_home, &stub_base_url);
+
+    let _serve_port_guard = SERVE_PORT_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let port = unused_local_port();
+    let mut child = reborn_command()
+        .args(["serve", "--host", "127.0.0.1", "--port"])
+        .arg(port.to_string())
+        .env("HOME", &home)
+        .env("IRONCLAW_REBORN_HOME", &reborn_home)
+        // No NEARAI_API_KEY / NEARAI_SESSION_TOKEN: the stored key is the
+        // ONLY thing that can authenticate the live provider.
+        .env_remove("NEARAI_API_KEY")
+        .env_remove("NEARAI_SESSION_TOKEN")
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("ironclaw-reborn serve should start");
+    let stderr_all = wait_for_serve_banner_with_capture(&mut child, "single-boot");
+
+    let turn_result = drive_real_turn_via_webui(port, &webui_token, "single-boot");
+    if turn_result.is_err() {
+        eprintln!("full stderr:\n{}", stderr_all.lock().unwrap());
+    }
+
+    let _ = child.kill();
+    let _ = child.wait();
+
+    let reply = turn_result.expect("real turn through the WebUI API must succeed");
+    assert!(
+        reply.contains("stub reply"),
+        "assistant reply should come from the stub provider; got: {reply}"
+    );
+
+    let captured_auth = auth_rx
+        .recv_timeout(std::time::Duration::from_millis(10))
+        .expect("stub must have captured at least one request's Authorization header");
+    let captured_auth = captured_auth.expect("captured request must carry an Authorization header");
+    assert_eq!(
+        captured_auth,
+        format!("Bearer {STORED_KEY}"),
+        "the live provider must authenticate with the stored key, not a session token or nothing"
+    );
+}
+
+/// Companion to `stored_key_reaches_real_turn_via_webui_api`: proves the
+/// stored-key path is not a one-boot fluke by driving TWO independent `serve`
+/// boots (fresh child process each time, same `reborn_home`, no `onboard` or
+/// `models set-provider` run again in between) and asserting the second boot
+/// also authenticates a real turn with the stored key. This is the cheaper,
+/// faithful stand-in for "save settings while serve is running, then
+/// restart": both scenarios exercise the same boot-reads-from-disk-and-store
+/// path with no env var and no in-process state carried over — driving the
+/// live `LlmConfigService` HTTP save route while `serve` is already up would
+/// additionally require standing up its multipart auth/session flow, which
+/// buys no extra coverage of the fix (the boot-time reload chokepoint is
+/// identical either way).
+#[cfg(feature = "webui-v2-beta")]
+#[test]
+fn stored_key_reaches_real_turn_across_fresh_boots() {
+    const STORED_KEY: &str = "sk-smoke-restart-stored-nearai-key";
+
+    let temp = tempfile::tempdir().expect("tempdir");
+    let reborn_home = temp.path().join("reborn-home");
+    let home = temp.path().join("home");
+    std::fs::create_dir_all(&home).expect("home dir");
+
+    let onboard_output = reborn_command()
+        .arg("onboard")
+        .env("HOME", &home)
+        .env("IRONCLAW_REBORN_HOME", &reborn_home)
+        .output()
+        .expect("ironclaw-reborn onboard should run");
+    assert!(
+        onboard_output.status.success(),
+        "onboard must succeed non-interactively; stderr: {}",
+        String::from_utf8_lossy(&onboard_output.stderr)
+    );
+    let webui_token = std::fs::read_to_string(reborn_home.join("webui-token"))
+        .expect("read onboard-provisioned webui-token")
+        .trim()
+        .to_string();
+
+    let set_provider_output = reborn_command()
+        .args(["models", "set-provider", "nearai", "--model", "test-model"])
+        .env("IRONCLAW_REBORN_HOME", &reborn_home)
+        .output()
+        .expect("ironclaw-reborn models set-provider should run");
+    assert!(
+        set_provider_output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&set_provider_output.stderr)
+    );
+
+    seed_stored_llm_key_at_runtime_root(&reborn_home, "nearai", STORED_KEY);
+
+    let _serve_port_guard = SERVE_PORT_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+
+    for boot in 1..=2 {
+        let (stub_base_url, auth_rx) = spawn_chat_completion_stub();
+        patch_config_base_url_replacing_previous(&reborn_home, &stub_base_url);
+
+        let port = unused_local_port();
+        let mut child = reborn_command()
+            .args(["serve", "--host", "127.0.0.1", "--port"])
+            .arg(port.to_string())
+            .env("HOME", &home)
+            .env("IRONCLAW_REBORN_HOME", &reborn_home)
+            .env_remove("NEARAI_API_KEY")
+            .env_remove("NEARAI_SESSION_TOKEN")
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap_or_else(|error| {
+                panic!("boot {boot}: ironclaw-reborn serve should start: {error}")
+            });
+        let stderr_all = wait_for_serve_banner_with_capture(&mut child, &format!("boot {boot}"));
+
+        let turn_result = drive_real_turn_via_webui(port, &webui_token, &format!("boot-{boot}"));
+        if turn_result.is_err() {
+            eprintln!("boot {boot} full stderr:\n{}", stderr_all.lock().unwrap());
+        }
+
+        let _ = child.kill();
+        let _ = child.wait();
+
+        turn_result.unwrap_or_else(|error| {
+            panic!("boot {boot}: real turn through the WebUI API must succeed: {error}")
+        });
+
+        let captured_auth = auth_rx
+            .recv_timeout(std::time::Duration::from_millis(10))
+            .unwrap_or_else(|_| panic!("boot {boot}: stub must have captured a request"))
+            .unwrap_or_else(|| {
+                panic!("boot {boot}: captured request missing Authorization header")
+            });
+        assert_eq!(
+            captured_auth,
+            format!("Bearer {STORED_KEY}"),
+            "boot {boot}: the live provider must authenticate with the stored key on every fresh \
+             boot, not just the first"
+        );
+    }
+}
+
+/// Like [`patch_config_base_url`], but replaces whichever `base_url` line is
+/// currently in `[llm.default]` — the previous boot's stub port is dead by
+/// the time the next boot patches it in, so the second call in
+/// `stored_key_reaches_real_turn_across_fresh_boots` must overwrite rather
+/// than duplicate the line `patch_config_base_url` already inserted.
+#[cfg(feature = "webui-v2-beta")]
+fn patch_config_base_url_replacing_previous(reborn_home: &Path, base_url: &str) {
+    let config_path = reborn_home.join("config.toml");
+    let original = std::fs::read_to_string(&config_path).expect("read config.toml to patch");
+    if let Some(start) = original.find("base_url = \"http://127.0.0.1:") {
+        let rest = &original[start..];
+        let end = rest
+            .find('\n')
+            .map(|index| start + index + 1)
+            .unwrap_or(original.len());
+        let mut patched = String::with_capacity(original.len());
+        patched.push_str(&original[..start]);
+        patched.push_str(&format!("base_url = \"{base_url}\"\n"));
+        patched.push_str(&original[end..]);
+        std::fs::write(&config_path, patched).expect("write patched config.toml");
+    } else {
+        patch_config_base_url(reborn_home, base_url);
+    }
+}
+
 /// Seed the local-dev encrypted secret store with an LLM API key for
 /// `provider_id`, through the same `open_local_dev_secret_store` +
 /// `LlmKeyStore::put` opener `onboard`'s interactive credential prompt uses
@@ -4230,6 +4752,29 @@ fn seed_stored_llm_key(reborn_home: &Path, provider_id: &str, key: &str) {
             .await
             .expect("seed provider key");
     });
+}
+
+/// Seed the stored LLM key at the SAME secret-store root `serve` actually
+/// reads from for a `local-dev` boot — `<reborn_home>/local-dev/…` (see
+/// `local_runtime_storage_root` / `RebornProfile::local_runtime_storage_
+/// subdir`), NOT the bare `reborn_home` root [`seed_stored_llm_key`] (and
+/// `onboard`'s own interactive credential prompt) write to.
+///
+/// This distinction matters for these real-turn tests specifically: they
+/// pin the fix to `RebornLlmReloadAdapter::reload`, which reads through
+/// `RebornRuntime`'s own `services.secret_store()` — rooted at the
+/// `local-dev` subdirectory. Seeding through the bare-root opener instead
+/// (matching `onboard`'s CLI path) would silently miss that store and fail
+/// for an unrelated reason (a pre-existing root mismatch between `onboard`'s
+/// credential prompt and the runtime's own store, out of scope here — filed
+/// as a follow-up). The webui settings-save path this fix's reload
+/// mechanism mirrors always writes through `services.secret_store()`
+/// directly, so this is the faithful root to seed for these tests.
+#[cfg(feature = "webui-v2-beta")]
+fn seed_stored_llm_key_at_runtime_root(reborn_home: &Path, provider_id: &str, key: &str) {
+    let runtime_root = reborn_home.join("local-dev");
+    std::fs::create_dir_all(&runtime_root).expect("runtime local-dev root dir");
+    seed_stored_llm_key(&runtime_root, provider_id, key);
 }
 
 /// A key stored via `onboard`/`models set-provider` for an

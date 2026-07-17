@@ -476,6 +476,8 @@ use crate::runtime_input::{
 };
 use crate::webui::facade::build_webui_services;
 use crate::{RebornCompositionProfile, RebornReadiness, RebornReadinessState, RebornRuntimeError};
+#[cfg(all(feature = "root-llm-provider", feature = "libsql"))]
+use ironclaw_reborn_config::{RebornBootConfig, RebornHome, RebornProfile};
 
 use super::{
     RebornSkillSourceKind, TRUSTED_LAPTOP_ACCESS_AUDIT_KIND, TRUSTED_LAPTOP_ACCESS_AUDIT_STATUS,
@@ -1696,9 +1698,11 @@ async fn root_llm_gateway_bootstraps_nearai_session_token_from_env() {
         response_cache_ttl_secs: 3600,
         response_cache_max_entries: 1000,
     };
-    let llm = crate::runtime_input::ResolvedRebornLlm::from_llm_config(config);
-
-    let bundle = super::build_llm_gateway(llm).await.expect("gateway builds");
+    let session = ironclaw_llm::create_session_manager(config.session.clone()).await;
+    let built = ironclaw_llm::build_static_provider_chain(&config, Arc::clone(&session))
+        .await
+        .expect("provider chain builds from config");
+    let bundle = super::wrap_swappable_gateway(built, session, None).expect("gateway builds");
     let response = bundle
         .gateway
         .stream_model(nearai_gateway_test_request())
@@ -2114,7 +2118,7 @@ impl ironclaw_llm::LlmProvider for CountingOverrideProvider {
 /// provider (dead endpoint) instead of returning the mock's sentinel.
 #[cfg(feature = "root-llm-provider")]
 #[tokio::test]
-async fn build_llm_gateway_applies_provider_factory() {
+async fn wrap_swappable_gateway_applies_provider_factory() {
     let session_dir = tempfile::tempdir().expect("session tempdir");
     let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let mock: Arc<dyn ironclaw_llm::LlmProvider> = Arc::new(CountingOverrideProvider {
@@ -2159,11 +2163,16 @@ async fn build_llm_gateway_applies_provider_factory() {
     };
 
     let factory_mock = Arc::clone(&mock);
-    let llm = crate::runtime_input::ResolvedRebornLlm::from_llm_config(config)
-        .with_provider_factory(Arc::new(move |_built| Arc::clone(&factory_mock)));
-    let bundle = super::build_llm_gateway(llm)
+    let session = ironclaw_llm::create_session_manager(config.session.clone()).await;
+    let built = ironclaw_llm::build_static_provider_chain(&config, Arc::clone(&session))
         .await
-        .expect("gateway builds with the provider factory");
+        .expect("provider chain builds from config");
+    let bundle = super::wrap_swappable_gateway(
+        built,
+        session,
+        Some(Arc::new(move |_built| Arc::clone(&factory_mock))),
+    )
+    .expect("gateway builds with the provider factory");
 
     let response = bundle
         .gateway
@@ -2285,10 +2294,11 @@ async fn provider_factory_survives_live_reload() {
     });
 
     let config = dead_endpoint_nearai_config(session_dir.path().join("session.json"));
-    let llm = crate::runtime_input::ResolvedRebornLlm::from_llm_config(config.clone())
-        .with_provider_factory(factory);
-    let bundle = super::build_llm_gateway(llm)
+    let session = ironclaw_llm::create_session_manager(config.session.clone()).await;
+    let built = ironclaw_llm::build_static_provider_chain(&config, Arc::clone(&session))
         .await
+        .expect("provider chain builds from config");
+    let bundle = super::wrap_swappable_gateway(built, session, Some(factory))
         .expect("gateway builds with the provider factory");
 
     // First model call routes through the instrumentation wrapper. The dead
@@ -2328,15 +2338,35 @@ async fn provider_factory_survives_live_reload() {
     );
 }
 
+/// Regression pin for the journey-critical fix (PR #6174): a provider
+/// selected purely through `config.toml` + a stored API key (no env var set)
+/// must reach the turn-serving provider. This exercises the ONLY mechanism
+/// that now applies a stored key to the live gateway — the post-construction
+/// `RebornLlmReloadAdapter::reload()` invoked once inside
+/// `build_reborn_runtime` — by supplying a real `boot` config (so the
+/// reload adapter can re-resolve `[llm.default]` from disk) instead of
+/// pre-baking the stored key into a directly-supplied `ResolvedRebornLlm`
+/// (which no longer feeds the gateway at all).
 #[cfg(all(feature = "root-llm-provider", feature = "libsql"))]
 #[tokio::test]
 async fn local_dev_runtime_startup_uses_stored_nearai_api_key_after_restart() {
+    // NOTE on isolation: this test does not need to override
+    // `NEARAI_SESSION_PATH` / `NEARAI_AUTH_URL` (both env-only inputs to
+    // `ironclaw_llm::resolution::nearai_session_config`, which the reload
+    // adapter's config-file re-resolution invokes). `NearAiChatProvider::
+    // resolve_bearer_token` checks `config.nearai.api_key` FIRST, before
+    // ever touching the session manager — and `apply_stored_api_key` (called
+    // by `RebornLlmReloadAdapter::reload`) sets exactly that field from the
+    // seeded key below. So the session/auth-url defaults are constructed but
+    // never read from disk or contacted over the network.
     let _env_guard =
         RuntimeEnvGuard::with([("NEARAI_SESSION_TOKEN", None), ("NEARAI_API_KEY", None)]).await;
+    let (base_url, auth_rx) = start_nearai_auth_capture_server().await;
+
     let root = tempfile::tempdir().expect("tempdir");
     let local_dev_root = root.path().join("local-dev");
-    let session_dir = tempfile::tempdir().expect("session tempdir");
-    let (base_url, auth_rx) = start_nearai_auth_capture_server().await;
+    let config_home_dir = root.path().join("config-home");
+    std::fs::create_dir_all(&config_home_dir).expect("config home dir");
 
     let services = crate::build_reborn_services(
         RebornBuildInput::local_dev("runtime-nearai-stored-key-owner", local_dev_root.clone())
@@ -2353,49 +2383,39 @@ async fn local_dev_runtime_startup_uses_stored_nearai_api_key_after_restart() {
         .expect("stored key seeded");
     drop(services);
 
-    let config = ironclaw_llm::LlmConfig {
-        backend: "nearai".to_string(),
-        session: ironclaw_llm::SessionConfig {
-            auth_base_url: base_url.clone(),
-            session_path: session_dir.path().join("session.json"),
-        },
-        nearai: ironclaw_llm::NearAiConfig {
-            model: "test-model".to_string(),
-            cheap_model: None,
-            base_url,
-            api_key: None,
-            fallback_model: None,
-            max_retries: 0,
-            circuit_breaker_threshold: None,
-            circuit_breaker_recovery_secs: 30,
-            response_cache_enabled: false,
-            response_cache_ttl_secs: 3600,
-            response_cache_max_entries: 1000,
-            failover_cooldown_secs: 300,
-            failover_cooldown_threshold: 3,
-            smart_routing_cascade: false,
-        },
-        provider: None,
-        bedrock: None,
-        gemini_oauth: None,
-        openai_codex: None,
-        request_timeout_secs: 5,
-        cheap_model: None,
-        smart_routing_cascade: false,
-        max_retries: 0,
-        circuit_breaker_threshold: None,
-        circuit_breaker_recovery_secs: 30,
-        response_cache_enabled: false,
-        response_cache_ttl_secs: 3600,
-        response_cache_max_entries: 1000,
-    };
-    let llm = crate::runtime_input::ResolvedRebornLlm::from_llm_config(config);
+    // Provider selection lives entirely in config.toml (mirrors an
+    // onboard-style setup): no env var carries the key, only the
+    // encrypted secret store does. `base_url` is overridden to the local
+    // capture server so the live reload's re-built provider chain actually
+    // calls it.
+    std::fs::write(
+        RebornHome::resolve_from_env_parts(
+            Some(config_home_dir.as_os_str().to_os_string()),
+            None,
+            None,
+        )
+        .expect("valid reborn home")
+        .config_file_path(),
+        format!(
+            "[llm.default]\nprovider_id = \"nearai\"\nmodel = \"test-model\"\nbase_url = \"{base_url}\"\n"
+        ),
+    )
+    .expect("write config.toml");
+    let boot = RebornBootConfig::new(
+        RebornHome::resolve_from_env_parts(
+            Some(config_home_dir.as_os_str().to_os_string()),
+            None,
+            None,
+        )
+        .expect("valid reborn home"),
+        RebornProfile::LocalDev,
+    );
 
     let input = RebornRuntimeInput::from_services(
         RebornBuildInput::local_dev("runtime-nearai-stored-key-owner", local_dev_root)
             .with_runtime_policy(local_dev_runtime_policy()),
     )
-    .with_resolved_llm(llm)
+    .with_boot_config(boot)
     .with_identity(RebornRuntimeIdentity {
         tenant_id: "runtime-nearai-stored-key-tenant".to_string(),
         agent_id: "runtime-nearai-stored-key-agent".to_string(),
