@@ -1664,6 +1664,104 @@ fn serve_boots_without_user_id_env_var() {
     let _ = child.wait();
 }
 
+/// Closes the test gap that let the launchd/systemd `WorkingDirectory` fix
+/// escape live to a user's machine: the unit-content tests only proved the
+/// directive was *present*, never that `serve` actually boots when launched
+/// from that cwd. Mirrors what the installed service now does — spawns the
+/// real binary with `.current_dir(<reborn_home>/workspace)`, exactly like
+/// `commands::service::{launchd,systemd}::install_with_runner` configure the
+/// unit/plist to do via `ensure_service_working_directory` — and asserts it
+/// reaches the ready banner.
+///
+/// Companion regression pin below
+/// (`serve_crash_loops_with_skill_root_overlap_when_cwd_is_reborn_home_itself`)
+/// proves this test actually discriminates: launching from the Reborn home
+/// itself (this crate's first, insufficient attempt at the fix) reproduces
+/// the exact "must not overlap default skill root" error this fix
+/// eliminates.
+#[cfg(feature = "webui-v2-beta")]
+#[test]
+fn serve_boots_from_the_workspace_subdir_the_installed_service_now_uses_as_cwd() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let reborn_home = temp.path().join("reborn-home");
+    let home = temp.path().join("home");
+    let working_directory = reborn_home.join("workspace");
+    std::fs::create_dir_all(&home).expect("home dir");
+    std::fs::create_dir_all(&working_directory).expect("working directory");
+    let port = unused_local_port();
+
+    let mut child = reborn_command()
+        .args(["serve", "--host", "127.0.0.1", "--port"])
+        .arg(port.to_string())
+        .current_dir(&working_directory)
+        .env("HOME", &home)
+        .env("IRONCLAW_REBORN_HOME", &reborn_home)
+        .env_remove("IRONCLAW_REBORN_PROFILE")
+        .env(
+            "IRONCLAW_REBORN_WEBUI_TOKEN",
+            "reborn-smoke-test-cwd-workspace-token-0123456789abcdef",
+        )
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("ironclaw-reborn serve should start");
+    wait_for_serve_banner(&mut child);
+
+    let _ = child.kill();
+    let _ = child.wait();
+}
+
+/// Regression pin, companion to the test above: proves the fix is real by
+/// reproducing the bug it replaces. `WorkingDirectory` = the Reborn home
+/// itself (rather than `<reborn_home>/workspace`) was this crate's first
+/// attempt at the launchd/systemd crash-loop fix — it looked plausible
+/// (the plist correctly carried `WorkingDirectory=<reborn_home>`) but the
+/// Reborn home is an ancestor of every default local-dev skill/extension
+/// root (`<reborn_home>/local-dev/{skills,tenant-shared/skills,
+/// system/skills,system/extensions}` — see
+/// `ironclaw_reborn_composition::factory::validate_local_dev_workspace_skill_isolation`),
+/// so composition's prefix-based `paths_overlap` check still refused to
+/// boot. If a future change reverts the installer to cwd=reborn_home
+/// without noticing, this test fails loudly with the same error users saw.
+#[cfg(feature = "webui-v2-beta")]
+#[test]
+fn serve_crash_loops_with_skill_root_overlap_when_cwd_is_reborn_home_itself() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let reborn_home = temp.path().join("reborn-home");
+    let home = temp.path().join("home");
+    std::fs::create_dir_all(&home).expect("home dir");
+    std::fs::create_dir_all(&reborn_home).expect("reborn home");
+    let port = unused_local_port();
+
+    let output = reborn_command()
+        .args(["serve", "--host", "127.0.0.1", "--port"])
+        .arg(port.to_string())
+        .current_dir(&reborn_home)
+        .env("HOME", &home)
+        .env("IRONCLAW_REBORN_HOME", &reborn_home)
+        .env_remove("IRONCLAW_REBORN_PROFILE")
+        .env(
+            "IRONCLAW_REBORN_WEBUI_TOKEN",
+            "reborn-smoke-test-cwd-reborn-home-token-0123456789abcdef",
+        )
+        .output()
+        .expect("ironclaw-reborn serve should run and exit");
+
+    assert!(
+        !output.status.success(),
+        "serve launched with cwd=reborn_home must fail closed on the skill-root overlap, \
+         not silently boot: stdout={} stderr={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("local-dev workspace root must not overlap default skill root"),
+        "expected the exact composition overlap error this fix eliminates for \
+         <reborn_home>/workspace: stderr={stderr}"
+    );
+}
+
 #[cfg(feature = "webui-v2-beta")]
 #[test]
 fn a_real_env_var_beats_the_config_default_end_to_end() {

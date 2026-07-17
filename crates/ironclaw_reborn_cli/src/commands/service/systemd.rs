@@ -38,7 +38,7 @@ fn unit_quote(value: &str, escape_dollar: bool) -> Result<String> {
 
 // ── Unit generation ─────────────────────────────────────────────
 
-fn unit_content(invocation: &ServeInvocation, reborn_home: &Path) -> Result<String> {
+fn unit_content(invocation: &ServeInvocation, working_directory: &Path) -> Result<String> {
     let environment_lines = invocation
         .env
         .iter()
@@ -54,13 +54,15 @@ fn unit_content(invocation: &ServeInvocation, reborn_home: &Path) -> Result<Stri
         .collect::<Result<Vec<_>>>()?
         .join(" ");
 
-    // WorkingDirectory anchors the launched `serve` process's cwd at the
-    // Reborn home. Without it, systemd defaults the unit's cwd to `/`
-    // (root user units) or the unit's own state directory, so `serve`'s
-    // local-dev workspace root (`current_dir()`, see `runtime/mod.rs`)
-    // resolves somewhere that overlaps the default skill root `/skills`
-    // and composition refuses to boot — mirrors the launchd fix.
-    let working_directory = unit_quote(&reborn_home.display().to_string(), false)?;
+    // WorkingDirectory anchors the launched `serve` process's cwd at
+    // `<reborn_home>/workspace` — not systemd's default (`/` for root user
+    // units, or the unit's own state directory), and deliberately not the
+    // Reborn home itself either. See `super::service_working_directory`'s
+    // doc: the Reborn home is an ancestor of every default skill/extension
+    // root, so using it directly (this crate's first attempt at this fix)
+    // still trips composition's `paths_overlap` prefix check and
+    // crash-loops the same way `/` did.
+    let working_directory = unit_quote(&working_directory.display().to_string(), false)?;
 
     Ok(format!(
         "[Unit]\n\
@@ -211,7 +213,8 @@ pub(super) fn install_with_runner(
     // write below atomically replaces it.
     let replaced_existing = previous.is_some();
     let reborn_home = context.boot_config().home().path();
-    let unit = unit_content(invocation, reborn_home)?;
+    let working_directory = super::ensure_service_working_directory(reborn_home)?;
+    let unit = unit_content(invocation, &working_directory)?;
     let previous_state = query_unit_state(runner)?;
     super::write_atomic(&file, unit.as_bytes())?;
     if let Err(error) = runner.run_checked(
@@ -771,14 +774,19 @@ mod tests {
         assert!(unit.contains("WantedBy=default.target"));
     }
 
-    /// Pins the crash-loop fix: without an explicit WorkingDirectory,
-    /// systemd's default cwd for the unit doesn't match `serve`'s Reborn
-    /// home, so `serve`'s local-dev workspace root resolves somewhere that
-    /// overlaps the default skill root `/skills` and composition refuses
-    /// to boot. WorkingDirectory must be set to the Reborn home, in the
-    /// `[Service]` section before `ExecStart`.
+    /// Pins the crash-loop fix's mechanism: without an explicit
+    /// WorkingDirectory, systemd's default cwd for the unit doesn't match
+    /// wherever `serve` needs to run from, so `serve`'s local-dev workspace
+    /// root resolves somewhere that overlaps a default skill root and
+    /// composition refuses to boot. `unit_content` itself is agnostic to
+    /// *which* directory that is — it just writes whatever caller-supplied
+    /// path faithfully into the `[Service]` section before `ExecStart`; see
+    /// `install_with_runner`'s use of `super::ensure_service_working_directory`
+    /// and the `<reborn_home>/workspace` regression test in `mod.rs`
+    /// (`install_then_uninstall_linux_writes_and_removes_unit_file`) for the
+    /// specific-path guarantee.
     #[test]
-    fn unit_content_includes_working_directory_at_reborn_home() {
+    fn unit_content_includes_working_directory_line() {
         let unit = unit_content(&sample_invocation(), &sample_reborn_home()).expect("valid unit");
         assert!(unit.contains(r#"WorkingDirectory="/home/op/.ironclaw/reborn""#));
         let working_dir_index = unit.find("WorkingDirectory=").unwrap();
