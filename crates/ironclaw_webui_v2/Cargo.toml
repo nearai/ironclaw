@@ -28,6 +28,7 @@ webui-v2-beta = [
     # Static SPA asset bundle (`static_assets`) embedding the prebuilt
     # frontend/dist tree. `rand` supplies the per-request CSP nonce.
     "dep:rand",
+    "dep:thiserror",
 ]
 
 [dependencies]
@@ -48,6 +49,7 @@ ironclaw_product_workflow = { path = "../ironclaw_product_workflow", version = "
 # (`default-features = false` keeps the surface minimal; `thread_rng` supplies
 # the process-local CSPRNG used by `rand::rng()`).
 rand = { version = "0.10", default-features = false, features = ["thread_rng"], optional = true }
+thiserror = { version = "2", optional = true }
 async-trait = { version = "0.1", optional = true }
 async-stream = { version = "0.3", optional = true }
 axum = { version = "0.8", optional = true, features = ["ws"] }
