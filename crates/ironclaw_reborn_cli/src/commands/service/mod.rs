@@ -12,13 +12,15 @@
 //! shared or reused.
 //!
 //! Platform dispatch happens once, in [`ServicePlatform::detect`], called
-//! a single time from [`ServiceCommand::execute`]. The five verbs are
-//! methods on [`ServicePlatform`] that each `match self` to delegate
-//! into the OS-specific implementation (`launchd` or `systemd`), rather
-//! than every verb re-checking `cfg!(target_os)`.
+//! a single time from [`ServiceCommand::execute`]. Each verb is a method
+//! on [`ServicePlatform`] that `match self`es to delegate into the
+//! OS-specific implementation (`launchd` or `systemd`), rather than every
+//! verb re-checking `cfg!(target_os)`.
 
-use std::path::PathBuf;
+use std::io::Write;
+use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use anyhow::{Context, Result, bail};
 use clap::{Args, Subcommand};
@@ -187,6 +189,108 @@ fn preflight_warnings(context: &RebornCliContext) -> Vec<String> {
     warnings
 }
 
+// ── Restart decision tree ───────────────────────────────────────
+
+/// Shared restart decision tree for both platforms: a running service is
+/// stopped then started, an already-stopped-but-installed service is just
+/// started, and a start failure after a successful stop is reported as
+/// leaving the service stopped rather than a silent half-restart. Each
+/// platform does its own installed/running detection, then delegates here.
+///
+/// `stop`/`start` are function pointers, not closures — closures would
+/// each need to capture (and thus mutably borrow) `runner`, but `runner`
+/// is already borrowed by this function's own `&mut dyn` parameter, so two
+/// closures over it would double-mutably-borrow. Plain `fn` items sidestep
+/// that: they capture nothing and take `runner` as an explicit argument.
+fn restart_generic(
+    runner: &mut dyn ServiceCommandRunner,
+    installed: bool,
+    was_running: bool,
+    stop: fn(&mut dyn ServiceCommandRunner) -> Result<()>,
+    start: fn(&mut dyn ServiceCommandRunner) -> Result<()>,
+) -> Result<()> {
+    if !installed {
+        bail!("Service not installed. Run `ironclaw-reborn service install` first.");
+    }
+    if was_running {
+        stop(runner)?;
+    }
+    if let Err(start_error) = start(runner) {
+        if was_running {
+            bail!(
+                "service restart: stop succeeded but start failed; the service is now \
+                 STOPPED: {start_error:#}"
+            );
+        }
+        return Err(start_error);
+    }
+    println!(
+        "{}",
+        if was_running {
+            "Service restarted"
+        } else {
+            "Service was not running; started"
+        }
+    );
+    Ok(())
+}
+
+// ── Status vocabulary ───────────────────────────────────────────
+
+/// Normalized `service status` line, shared by both platforms so the
+/// running/stopped/not-installed vocabulary can't drift between them.
+fn status_label(installed: bool, running: bool) -> &'static str {
+    if !installed {
+        "not installed"
+    } else if running {
+        "running"
+    } else {
+        "stopped"
+    }
+}
+
+// ── Atomic file writes ──────────────────────────────────────────
+
+static TEMP_FILE_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+/// Write `contents` to `path` via create-temp-then-rename in the same
+/// directory, so a reader never observes a partially written file and a
+/// crash mid-write never corrupts the previous contents. Used by both
+/// platforms' install paths (the systemd unit file and the launchd plist).
+fn write_atomic(path: &Path, contents: &[u8]) -> Result<()> {
+    let parent = path
+        .parent()
+        .context("service file path has no parent directory")?;
+    let file_name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("service-file");
+    for _ in 0..16 {
+        let suffix = TEMP_FILE_COUNTER.fetch_add(1, Ordering::Relaxed);
+        let temp = parent.join(format!(".{file_name}.tmp-{}-{suffix}", std::process::id()));
+        let mut options = std::fs::OpenOptions::new();
+        options.write(true).create_new(true);
+        let mut file = match options.open(&temp) {
+            Ok(file) => file,
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(error) => return Err(error).with_context(|| format!("create {}", temp.display())),
+        };
+        let result = (|| -> Result<()> {
+            file.write_all(contents)
+                .with_context(|| format!("write {}", temp.display()))?;
+            file.sync_all()
+                .with_context(|| format!("sync {}", temp.display()))?;
+            std::fs::rename(&temp, path).with_context(|| format!("replace {}", path.display()))?;
+            Ok(())
+        })();
+        if result.is_err() {
+            let _ = std::fs::remove_file(&temp);
+        }
+        return result;
+    }
+    bail!("could not allocate temporary service file")
+}
+
 // ── Shell helpers ───────────────────────────────────────────────
 
 /// Run `command`, treating a non-zero exit as an error. `label` names
@@ -254,6 +358,14 @@ mod tests {
                 _ => Ok(String::new()),
             }
         }
+    }
+
+    #[test]
+    fn status_label_covers_running_stopped_and_not_installed() {
+        assert_eq!(status_label(false, false), "not installed");
+        assert_eq!(status_label(false, true), "not installed");
+        assert_eq!(status_label(true, false), "stopped");
+        assert_eq!(status_label(true, true), "running");
     }
 
     #[test]

@@ -1,10 +1,8 @@
 //! Linux systemd user-unit generators, path resolution, and verb
 //! bodies for `ironclaw-reborn service`.
 
-use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::sync::atomic::{AtomicU64, Ordering};
 
 use anyhow::{Context, Result, bail};
 
@@ -72,44 +70,9 @@ fn unit_content(invocation: &ServeInvocation) -> Result<String> {
     ))
 }
 
-static TEMP_FILE_COUNTER: AtomicU64 = AtomicU64::new(0);
-
-fn write_atomic(path: &Path, contents: &[u8]) -> Result<()> {
-    let parent = path
-        .parent()
-        .context("systemd unit path has no parent directory")?;
-    for _ in 0..16 {
-        let suffix = TEMP_FILE_COUNTER.fetch_add(1, Ordering::Relaxed);
-        let temp = parent.join(format!(
-            ".{SYSTEMD_UNIT}.tmp-{}-{suffix}",
-            std::process::id()
-        ));
-        let mut options = std::fs::OpenOptions::new();
-        options.write(true).create_new(true);
-        let mut file = match options.open(&temp) {
-            Ok(file) => file,
-            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
-            Err(error) => return Err(error).with_context(|| format!("create {}", temp.display())),
-        };
-        let result = (|| -> Result<()> {
-            file.write_all(contents)
-                .with_context(|| format!("write {}", temp.display()))?;
-            file.sync_all()
-                .with_context(|| format!("sync {}", temp.display()))?;
-            std::fs::rename(&temp, path).with_context(|| format!("replace {}", path.display()))?;
-            Ok(())
-        })();
-        if result.is_err() {
-            let _ = std::fs::remove_file(&temp);
-        }
-        return result;
-    }
-    bail!("could not allocate temporary systemd unit file")
-}
-
 fn restore_previous_unit(path: &Path, previous: Option<&[u8]>) -> Result<()> {
     match previous {
-        Some(contents) => write_atomic(path, contents),
+        Some(contents) => super::write_atomic(path, contents),
         None if path.exists() => {
             std::fs::remove_file(path).with_context(|| format!("remove {}", path.display()))
         }
@@ -189,7 +152,7 @@ pub(super) fn install_with_runner(
     };
     let unit = unit_content(invocation)?;
     let previous_state = query_unit_state(runner)?;
-    write_atomic(&file, unit.as_bytes())?;
+    super::write_atomic(&file, unit.as_bytes())?;
     if let Err(error) = runner.run_checked(
         "systemctl daemon-reload",
         Command::new("systemctl").args(["--user", "daemon-reload"]),
@@ -282,44 +245,32 @@ pub(super) fn restart() -> Result<()> {
     restart_with_runner(&mut OsServiceCommandRunner)
 }
 
-/// Composes [`stop_with_runner`] and [`start_with_runner`]: a running
-/// service is stopped then started, an already-stopped service is just
-/// started, and a start failure after a successful stop is reported as
-/// leaving the service stopped rather than a silent half-restart.
+/// Detects install/running state, then delegates the stop/start decision
+/// tree to [`super::restart_generic`], which both platforms share.
 fn restart_with_runner(runner: &mut dyn ServiceCommandRunner) -> Result<()> {
-    if !unit_path()?.exists() {
-        bail!("Service not installed. Run `ironclaw-reborn service install` first.");
-    }
-    let active_state = runner.run_capture_checked(
-        "systemctl show ActiveState",
-        Command::new("systemctl").args([
-            "--user",
-            "show",
-            "--property=ActiveState",
-            "--value",
-            SYSTEMD_UNIT,
-        ]),
-    )?;
-    let was_running = active_state.trim() == "active";
-
-    if was_running {
-        stop_with_runner(runner)?;
-    }
-    if let Err(start_error) = start_with_runner(runner) {
-        if was_running {
-            bail!(
-                "service restart: stop succeeded but start failed; the service is now \
-                 STOPPED: {start_error:#}"
-            );
-        }
-        return Err(start_error);
-    }
-    if was_running {
-        println!("Service restarted");
+    let installed = unit_path()?.exists();
+    let was_running = if installed {
+        let active_state = runner.run_capture_checked(
+            "systemctl show ActiveState",
+            Command::new("systemctl").args([
+                "--user",
+                "show",
+                "--property=ActiveState",
+                "--value",
+                SYSTEMD_UNIT,
+            ]),
+        )?;
+        active_state.trim() == "active"
     } else {
-        println!("Service was not running; started");
-    }
-    Ok(())
+        false
+    };
+    super::restart_generic(
+        runner,
+        installed,
+        was_running,
+        stop_with_runner,
+        start_with_runner,
+    )
 }
 
 pub(super) fn status() -> Result<()> {
@@ -328,24 +279,26 @@ pub(super) fn status() -> Result<()> {
 
 fn status_with_runner(runner: &mut dyn ServiceCommandRunner) -> Result<()> {
     let file = unit_path()?;
-    if !file.exists() {
-        println!("Service state: not installed");
-        println!("Unit: {}", file.display());
-        return Ok(());
-    }
-    // `is-active` uses non-zero exits for ordinary inactive states. `show`
-    // returns those states in stdout and reserves failure for a broken query.
-    let state = runner.run_capture_checked(
-        "systemctl show ActiveState",
-        Command::new("systemctl").args([
-            "--user",
-            "show",
-            "--property=ActiveState",
-            "--value",
-            SYSTEMD_UNIT,
-        ]),
-    )?;
-    println!("Service state: {}", state.trim());
+    let installed = file.exists();
+    let running = if installed {
+        // `is-active` uses non-zero exits for ordinary inactive states.
+        // `show` returns those states in stdout and reserves failure for a
+        // broken query.
+        let state = runner.run_capture_checked(
+            "systemctl show ActiveState",
+            Command::new("systemctl").args([
+                "--user",
+                "show",
+                "--property=ActiveState",
+                "--value",
+                SYSTEMD_UNIT,
+            ]),
+        )?;
+        state.trim() == "active"
+    } else {
+        false
+    };
+    println!("Service: {}", super::status_label(installed, running));
     println!("Unit: {}", file.display());
     Ok(())
 }
@@ -1003,6 +956,30 @@ mod tests {
 
         assert!(result.is_err());
         assert_eq!(runner.labels, ["systemctl stop"]);
+    }
+
+    #[test]
+    fn status_reports_not_installed_and_skips_systemctl_query_when_unit_absent() {
+        let _lock = crate::runtime::test_env::lock_runtime_env();
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let prior = std::env::var_os("HOME");
+        // SAFETY: serialized by `lock_runtime_env`; restored below.
+        unsafe { std::env::set_var("HOME", tmp.path()) };
+        let mut runner = RecordingRunner::default();
+        let result = status_with_runner(&mut runner);
+        // SAFETY: serialized by `lock_runtime_env`.
+        unsafe {
+            match prior {
+                Some(value) => std::env::set_var("HOME", value),
+                None => std::env::remove_var("HOME"),
+            }
+        }
+
+        result.expect("status succeeds when not installed");
+        assert!(
+            runner.labels.is_empty(),
+            "must not query systemctl when the unit file is absent"
+        );
     }
 
     #[test]

@@ -109,7 +109,7 @@ pub(super) fn install(context: &RebornCliContext, invocation: &ServeInvocation) 
     let stdout_log = logs_dir.join("serve.stdout.log");
     let stderr_log = logs_dir.join("serve.stderr.log");
     let plist = plist_content(invocation, &stdout_log, &stderr_log);
-    std::fs::write(&file, plist).with_context(|| format!("write {}", file.display()))?;
+    super::write_atomic(&file, plist.as_bytes())?;
     println!("Installed launchd service: {}", file.display());
     println!("  Start with: ironclaw-reborn service start");
     Ok(())
@@ -171,37 +171,25 @@ pub(super) fn restart() -> Result<()> {
     restart_with_runner(&mut OsServiceCommandRunner)
 }
 
-/// Composes [`stop_with_runner`] and [`start_with_runner`]: a running
-/// service is stopped then started, an already-stopped service is just
-/// started, and a start failure after a successful stop is reported as
-/// leaving the service stopped rather than a silent half-restart.
+/// Detects install/running state, then delegates the stop/start decision
+/// tree to [`super::restart_generic`], which both platforms share.
 fn restart_with_runner(runner: &mut dyn ServiceCommandRunner) -> Result<()> {
     let plist = plist_path()?;
-    if !plist.exists() {
-        bail!("Service not installed. Run `ironclaw-reborn service install` first.");
-    }
-    let list =
-        runner.run_capture_checked("launchctl list", Command::new("launchctl").arg("list"))?;
-    let was_running = service_running(&list);
-
-    if was_running {
-        stop_with_runner(runner)?;
-    }
-    if let Err(start_error) = start_with_runner(runner) {
-        if was_running {
-            bail!(
-                "service restart: stop succeeded but start failed; the service is now \
-                 STOPPED: {start_error:#}"
-            );
-        }
-        return Err(start_error);
-    }
-    if was_running {
-        println!("Service restarted");
+    let installed = plist.exists();
+    let was_running = if installed {
+        let list =
+            runner.run_capture_checked("launchctl list", Command::new("launchctl").arg("list"))?;
+        service_running(&list)
     } else {
-        println!("Service was not running; started");
-    }
-    Ok(())
+        false
+    };
+    super::restart_generic(
+        runner,
+        installed,
+        was_running,
+        stop_with_runner,
+        start_with_runner,
+    )
 }
 
 pub(super) fn status() -> Result<()> {
@@ -209,17 +197,17 @@ pub(super) fn status() -> Result<()> {
 }
 
 fn status_with_runner(runner: &mut dyn ServiceCommandRunner) -> Result<()> {
-    let out =
-        runner.run_capture_checked("launchctl list", Command::new("launchctl").arg("list"))?;
-    println!(
-        "Service: {}",
-        if service_running(&out) {
-            "running/loaded"
-        } else {
-            "not loaded"
-        }
-    );
-    println!("Unit: {}", plist_path()?.display());
+    let plist = plist_path()?;
+    let installed = plist.exists();
+    let running = if installed {
+        let out =
+            runner.run_capture_checked("launchctl list", Command::new("launchctl").arg("list"))?;
+        service_running(&out)
+    } else {
+        false
+    };
+    println!("Service: {}", super::status_label(installed, running));
+    println!("Unit: {}", plist.display());
     Ok(())
 }
 
@@ -629,9 +617,13 @@ mod tests {
     #[test]
     fn status_propagates_launchctl_list_failure() {
         let _lock = crate::runtime::test_env::lock_runtime_env();
+        let tmp = tempfile::tempdir().expect("tempdir");
         let prior = std::env::var_os("HOME");
         // SAFETY: serialized by `lock_runtime_env`; restored below.
-        unsafe { std::env::set_var("HOME", "/home/op") };
+        unsafe { std::env::set_var("HOME", tmp.path()) };
+        let file = plist_path().expect("plist path");
+        std::fs::create_dir_all(file.parent().expect("plist parent")).expect("create parent");
+        std::fs::write(&file, "plist").expect("write plist");
         let mut runner = RecordingRunner {
             fail_capture_args: Some(vec!["list"]),
             ..RecordingRunner::default()
@@ -646,6 +638,30 @@ mod tests {
         }
 
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn status_reports_not_installed_and_skips_launchctl_query_when_plist_absent() {
+        let _lock = crate::runtime::test_env::lock_runtime_env();
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let prior = std::env::var_os("HOME");
+        // SAFETY: serialized by `lock_runtime_env`; restored below.
+        unsafe { std::env::set_var("HOME", tmp.path()) };
+        let mut runner = RecordingRunner::default();
+        let result = status_with_runner(&mut runner);
+        // SAFETY: serialized by `lock_runtime_env`.
+        unsafe {
+            match prior {
+                Some(value) => std::env::set_var("HOME", value),
+                None => std::env::remove_var("HOME"),
+            }
+        }
+
+        result.expect("status succeeds when not installed");
+        assert!(
+            runner.labels.is_empty(),
+            "must not query launchctl when the plist is absent"
+        );
     }
 
     // ── restart ─────────────────────────────────────────────────
@@ -781,9 +797,13 @@ mod tests {
     #[test]
     fn status_classifies_loaded_and_not_loaded_from_exact_list_command() {
         let _lock = crate::runtime::test_env::lock_runtime_env();
+        let tmp = tempfile::tempdir().expect("tempdir");
         let prior = std::env::var_os("HOME");
         // SAFETY: serialized by `lock_runtime_env`; restored below.
-        unsafe { std::env::set_var("HOME", "/home/op") };
+        unsafe { std::env::set_var("HOME", tmp.path()) };
+        let file = plist_path().expect("plist path");
+        std::fs::create_dir_all(file.parent().expect("plist parent")).expect("create parent");
+        std::fs::write(&file, "plist").expect("write plist");
         for output in [
             format!("123\t0\t{SERVICE_LABEL}\n"),
             "123\t0\tcom.apple.other\n".to_string(),
