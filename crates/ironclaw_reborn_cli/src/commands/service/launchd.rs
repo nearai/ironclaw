@@ -274,12 +274,16 @@ fn stop_with_runner_impl(runner: &mut dyn ServiceCommandRunner, verbose: bool) -
     }
     let list =
         runner.run_capture_checked("launchctl list", Command::new("launchctl").arg("list"))?;
-    if !service_running(&list) {
+    if !service_loaded(&list) {
         if verbose {
             println!("Service stopped");
         }
         return Ok(());
     }
+    // A loaded job — running or not (a `-` PID) — stays registered with
+    // launchd for respawn until unloaded; gating on `service_running` alone
+    // (the finding-1 bug, already fixed for `status`/`uninstall`) left a
+    // loaded-but-stopped KeepAlive job undisturbed.
     runner.run_checked(
         "launchctl stop",
         Command::new("launchctl").arg("stop").arg(SERVICE_LABEL),
@@ -299,20 +303,27 @@ fn stop_with_runner_impl(runner: &mut dyn ServiceCommandRunner, verbose: bool) -
 
 /// Detects install/running state, then delegates the stop/start decision
 /// tree to [`super::restart_generic`], which both platforms share.
+///
+/// Passes `service_loaded` (not `service_running`) as the "was active"
+/// flag: a loaded-but-not-running (`-` PID) job must go through the same
+/// stop-then-start reload as a running one, since launchd errors on a bare
+/// `launchctl load` of an already-loaded label. `service_running` implies
+/// `service_loaded`, so this subsumes the previously-running case without
+/// changing its behavior.
 pub(super) fn restart_with_runner(runner: &mut dyn ServiceCommandRunner) -> Result<()> {
     let plist = plist_path()?;
     let installed = plist.exists();
-    let was_running = if installed {
+    let was_active = if installed {
         let list =
             runner.run_capture_checked("launchctl list", Command::new("launchctl").arg("list"))?;
-        service_running(&list)
+        service_loaded(&list)
     } else {
         false
     };
     super::restart_generic(
         runner,
         installed,
-        was_running,
+        was_active,
         stop_with_runner_quiet,
         start_with_runner_quiet,
     )
@@ -901,6 +912,43 @@ mod tests {
     }
 
     #[test]
+    fn stop_unloads_loaded_job_with_dash_pid() {
+        // Mirrors the finding-1 gap already fixed for `status`/`uninstall`:
+        // a KeepAlive job with a `-` PID is loaded-but-not-running, and
+        // stays registered for respawn until unloaded. The old
+        // `stop_with_runner_impl` gated on `service_running` alone, so it
+        // read this state as "already stopped" and returned early without
+        // ever unloading the job.
+        let _lock = crate::runtime::test_env::lock_runtime_env();
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let prior = std::env::var_os("HOME");
+        // SAFETY: serialized by `lock_runtime_env`; restored below.
+        unsafe { std::env::set_var("HOME", tmp.path()) };
+        let file = plist_path().expect("plist path");
+        std::fs::create_dir_all(file.parent().expect("plist parent")).expect("create parent");
+        std::fs::write(&file, "plist").expect("write plist");
+        let mut runner = RecordingRunner {
+            launchctl_list: format!("-\t0\t{SERVICE_LABEL}\n"),
+            ..RecordingRunner::default()
+        };
+        let result = stop_with_runner(&mut runner);
+        // SAFETY: serialized by `lock_runtime_env`.
+        unsafe {
+            match prior {
+                Some(value) => std::env::set_var("HOME", value),
+                None => std::env::remove_var("HOME"),
+            }
+        }
+
+        result.expect("stop of a loaded-not-running job succeeds");
+        assert_eq!(
+            runner.labels,
+            ["launchctl list", "launchctl stop", "launchctl unload"],
+            "a loaded-but-not-running job must still be stopped/unloaded, not treated as already stopped"
+        );
+    }
+
+    #[test]
     fn stop_is_idempotent_when_plist_is_absent() {
         let _lock = crate::runtime::test_env::lock_runtime_env();
         let tmp = tempfile::tempdir().expect("tempdir");
@@ -1066,6 +1114,52 @@ mod tests {
         assert_eq!(
             runner.labels,
             ["launchctl list", "launchctl load", "launchctl start"]
+        );
+    }
+
+    #[test]
+    fn restart_loaded_not_running_reloads_instead_of_bare_load() {
+        // Mirrors the finding-1 gap fixed above for `stop`: a KeepAlive job
+        // with a `-` PID is loaded but not running. The old
+        // `restart_with_runner` derived `was_running` from `service_running`
+        // alone, so this state skipped the stop step entirely and issued a
+        // bare `launchctl load` on a label that's already loaded (which
+        // launchd errors on). It must instead go through the same
+        // stop-then-start reload sequence as the running case, so the
+        // already-loaded label is unloaded before it's reloaded.
+        let _lock = crate::runtime::test_env::lock_runtime_env();
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let prior = std::env::var_os("HOME");
+        // SAFETY: serialized by `lock_runtime_env`; restored below.
+        unsafe { std::env::set_var("HOME", tmp.path()) };
+        let file = plist_path().expect("plist path");
+        std::fs::create_dir_all(file.parent().expect("plist parent")).expect("create parent");
+        std::fs::write(&file, "plist").expect("write plist");
+        let mut runner = RecordingRunner {
+            launchctl_list: format!("-\t0\t{SERVICE_LABEL}\n"),
+            ..RecordingRunner::default()
+        };
+        let result = restart_with_runner(&mut runner);
+        // SAFETY: serialized by `lock_runtime_env`.
+        unsafe {
+            match prior {
+                Some(value) => std::env::set_var("HOME", value),
+                None => std::env::remove_var("HOME"),
+            }
+        }
+
+        result.expect("restart of a loaded-not-running job must succeed");
+        assert_eq!(
+            runner.labels,
+            [
+                "launchctl list",
+                "launchctl list",
+                "launchctl stop",
+                "launchctl unload",
+                "launchctl load",
+                "launchctl start",
+            ],
+            "a loaded-but-not-running label must be unloaded before reload, not bare-loaded"
         );
     }
 

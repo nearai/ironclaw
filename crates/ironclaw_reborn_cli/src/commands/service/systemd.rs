@@ -280,10 +280,18 @@ fn stop_with_runner_quiet(runner: &mut dyn ServiceCommandRunner) -> Result<()> {
 
 fn stop_with_runner_impl(runner: &mut dyn ServiceCommandRunner, verbose: bool) -> Result<()> {
     if !unit_path()?.exists() {
-        if verbose {
-            println!("Service stopped");
+        // The unit file is gone, but it may still be an orphan: removed
+        // out-of-band while systemd still shows it loaded/enabled (mirrors
+        // the manager-state check `status`/`uninstall` already do via
+        // `resolve_installed`/`query_unit_state`). Only skip the stop when
+        // the manager also shows nothing.
+        let unit_state = query_unit_state(runner)?;
+        if !unit_state.loaded && !unit_state.enabled {
+            if verbose {
+                println!("Service stopped");
+            }
+            return Ok(());
         }
-        return Ok(());
     }
     runner.run_checked(
         "systemctl stop",
@@ -1209,6 +1217,40 @@ mod tests {
 
         assert!(result.is_err());
         assert_eq!(runner.labels, ["systemctl stop"]);
+    }
+
+    #[test]
+    fn absent_stop_stops_loaded_or_enabled_manager_state() {
+        // Mirrors `absent_uninstall_disables_loaded_or_enabled_manager_state`:
+        // a unit file removed out-of-band while systemd still shows it
+        // loaded/enabled is an orphan that still needs tearing down. The old
+        // `stop_with_runner_impl` gated solely on `unit_path()?.exists()`,
+        // so this state printed "Service stopped" without ever calling
+        // `systemctl stop`.
+        let _lock = crate::runtime::test_env::lock_runtime_env();
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let prior = std::env::var_os("HOME");
+        // SAFETY: serialized by `lock_runtime_env`; restored below.
+        unsafe { std::env::set_var("HOME", tmp.path()) };
+        let mut runner = RecordingRunner {
+            unit_state_output: Some("LoadState=loaded\nUnitFileState=enabled\n".to_string()),
+            ..RecordingRunner::default()
+        };
+        let result = stop_with_runner(&mut runner);
+        // SAFETY: serialized by `lock_runtime_env`.
+        unsafe {
+            match prior {
+                Some(value) => std::env::set_var("HOME", value),
+                None => std::env::remove_var("HOME"),
+            }
+        }
+
+        result.expect("stop of an orphaned loaded unit succeeds");
+        assert_eq!(
+            runner.labels,
+            ["systemctl show unit state", "systemctl stop"],
+            "a unit file absent from disk but still loaded/enabled in the manager must still be stopped"
+        );
     }
 
     #[test]
