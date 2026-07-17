@@ -19,10 +19,10 @@ playwright install chromium
 
 ## Build ironclaw
 
-The tests need the ironclaw binary built with libsql support:
+The legacy gateway tests need the isolated v1 binary built with libsql support:
 
 ```bash
-cargo build --no-default-features --features libsql
+cargo build -p ironclaw --bin ironclaw-v1 --no-default-features --features libsql
 ```
 
 ## Run tests

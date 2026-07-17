@@ -389,13 +389,19 @@ class ManagedIronclawServer:
 
 @pytest.fixture(scope="session")
 def ironclaw_binary():
-    """Ensure ironclaw binary is built. Returns the binary path."""
+    """Ensure the legacy ironclaw-v1 binary is built. Returns its path."""
     target_dir = _cargo_target_dir()
-    binary = target_dir / "debug" / "ironclaw"
+    binary = target_dir / "debug" / "ironclaw-v1"
     if _binary_needs_rebuild(binary):
-        print("Building ironclaw (this may take a while)...")
+        print("Building legacy ironclaw-v1 (this may take a while)...")
         subprocess.run(
-            ["cargo", "build", "--no-default-features", "--features", "libsql"],
+            [
+                "cargo", "build",
+                "-p", "ironclaw",
+                "--bin", "ironclaw-v1",
+                "--no-default-features",
+                "--features", "libsql",
+            ],
             cwd=ROOT,
             check=True,
             timeout=600,

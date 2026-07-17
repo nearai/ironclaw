@@ -98,7 +98,20 @@ def install_playwright(python: Path, mode: str) -> None:
 
 
 def cargo_build() -> None:
-    run(["cargo", "build", "--no-default-features", "--features", "libsql"], cwd=ROOT)
+    run(
+        [
+            "cargo",
+            "build",
+            "-p",
+            "ironclaw",
+            "--bin",
+            "ironclaw-v1",
+            "--no-default-features",
+            "--features",
+            "libsql",
+        ],
+        cwd=ROOT,
+    )
 
 
 def env_str(name: str, default: str | None = None) -> str | None:
