@@ -580,23 +580,23 @@ pub struct TelegramHostParts {
 pub async fn build_telegram_host(input: TelegramHostInput) -> Result<TelegramHostParts, TelegramHostBuildError>;
 ```
 
-- [ ] **Step 1: Add Telegram-owner revision/hook tests**
+- [x] **Step 1: Add Telegram-owner revision/hook tests**
 
 Move the same-revision cache, newer-revision replacement, unconfigured skip, first-configure, bot-swap, target-provider key stability, and trigger-hook behavior tests into `host/revision.rs` and `delivery/triggered.rs`. Run them; expected unresolved owner types.
 
-- [ ] **Step 2: Move workflow construction and cache behavior**
+- [x] **Step 2: Move workflow construction and cache behavior**
 
 Move `TelegramRevisionWorkflowParts`, adapter construction, revision workflow implementation, dynamic trigger driver/cache, Telegram no-op binding/sink implementations, egress scope, and provider-key hashing into the Telegram crate. Depend on `ironclaw_channel_delivery`, `ironclaw_outbound`, `ironclaw_run_state`, `ironclaw_threads`, and `ironclaw_triggers`; do not add a composition dependency.
 
-- [ ] **Step 3: Implement the facade-shaped Telegram builder**
+- [x] **Step 3: Implement the facade-shaped Telegram builder**
 
 Construct state-dependent setup/pairing/egress/resolver/route/facade/provider/hook parts in `build_telegram_host`. Return only facade/port shapes; do not accept `RebornRuntime` or global listener/mount types.
 
-- [ ] **Step 4: Reduce composition to extraction, mounting, and registration**
+- [x] **Step 4: Reduce composition to extraction, mounting, and registration**
 
 Composition constructs the scoped filesystem, conversation/idempotency services, product-auth/approval ports, and optional setup activation adapter; calls `build_telegram_host`; wraps routes as `PublicRouteMount`/`ProtectedRouteMount`; registers target provider, account status, and keyed trigger hook. It contains no `TelegramRevisionWorkflowParts`, `DynamicTelegramTriggeredRunDeliveryHook`, cached driver, adapter construction, or Telegram no-op implementation.
 
-- [ ] **Step 5: Run owner and composition assembly tests**
+- [x] **Step 5: Run owner and composition assembly tests**
 
 ```bash
 cargo test -p ironclaw_telegram_extension host
@@ -606,7 +606,12 @@ cargo test -p ironclaw_architecture --test telegram_extension_gates telegram_com
 
 Expected: all pass and composition's production Telegram module stays within the ratcheted assembly budget.
 
-- [ ] **Step 6: Commit behavior ownership**
+Observed: 108 Telegram owner tests pass, including revision-cache reuse/replacement/stale-race,
+first-configure, bot-swap, and provider-key stability. Eleven Telegram-filtered composition tests
+pass with the full feature set. Targeted Telegram and composition Clippy are warning-free, all nine
+Telegram architecture ratchets pass, and composition's production adapter is 286 lines.
+
+- [x] **Step 6: Commit behavior ownership**
 
 ```bash
 git add crates/ironclaw_telegram_extension crates/ironclaw_reborn_composition crates/ironclaw_architecture

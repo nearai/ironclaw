@@ -242,6 +242,7 @@ mod tests {
             crate::extension_host::extension_lifecycle::channel_connection_requirement(
                 "slack_bot",
                 "Slack",
+                None,
             );
 
         assert_eq!(requirement.channel, descriptor.channel);

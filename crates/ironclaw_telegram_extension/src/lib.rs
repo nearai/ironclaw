@@ -22,6 +22,7 @@ pub mod bot_api;
 pub mod channel_routes;
 pub mod delivery;
 pub mod egress;
+pub mod host;
 pub mod ingress;
 pub mod pairing;
 pub mod setup;
