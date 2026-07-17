@@ -147,7 +147,7 @@ impl RebornOperatorToolCatalog for ActiveRegistryOperatorToolCatalog {
 /// by WebChat v2 and the optional product-auth OAuth routes. HTTP
 /// routing, auth middleware, static assets, and SSE transport stay in the
 /// WebUI crate (or, when the `webui-v2-beta` feature is on, the
-/// [`crate::webui::webui_serve`] module in this crate); lower runtime handles stay
+/// [`crate::webui::route_mounts`] module in this crate); lower runtime handles stay
 /// behind the existing Reborn runtime / composition services.
 #[derive(Clone)]
 pub struct RebornWebuiBundle {

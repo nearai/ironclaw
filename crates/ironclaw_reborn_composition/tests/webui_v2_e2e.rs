@@ -42,8 +42,10 @@ use ironclaw_loop_host::{
 };
 use ironclaw_reborn_composition::{
     PollSettings, RebornBuildInput, RebornRuntime, RebornRuntimeIdentity, RebornRuntimeInput,
-    WebuiAuthentication, WebuiAuthenticator, WebuiServeConfig, build_reborn_runtime,
-    build_webui_services, webui_v2_app,
+    build_reborn_runtime, build_webui_services,
+};
+use ironclaw_reborn_webui_ingress::{
+    WebuiAuthentication, WebuiAuthenticator, WebuiServeConfig, webui_v2_app,
 };
 use ironclaw_turns::run_profile::{
     CapabilityCallCandidate, LoopCapabilityPort, ProviderToolCall, RegisterProviderToolCallRequest,

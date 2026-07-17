@@ -1,6 +1,6 @@
 //! Contract tests for operator-wide WebUI route predicates.
 
-use ironclaw_webui_v2::{
+use ironclaw_reborn_webui_ingress::webui_v2::{
     WEBUI_V2_ROUTE_CREATE_THREAD, WEBUI_V2_ROUTE_IMPORT_EXTENSION,
     WEBUI_V2_ROUTE_INSTALL_EXTENSION, WEBUI_V2_ROUTE_LIST_SETTINGS_TOOLS,
     WEBUI_V2_ROUTE_OPERATOR_GET_CONFIG_KEY, WEBUI_V2_ROUTE_OPERATOR_LIST_CONFIG,

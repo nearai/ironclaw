@@ -33,8 +33,10 @@ use ironclaw_loop_host::{
 };
 use ironclaw_reborn_composition::{
     AdminApiTokenMinter, PollSettings, RebornBuildInput, RebornRuntime, RebornRuntimeIdentity,
-    RebornRuntimeInput, WebuiAuthentication, WebuiAuthenticator, WebuiServeConfig,
-    build_reborn_runtime, build_webui_services, webui_v2_app,
+    RebornRuntimeInput, build_reborn_runtime, build_webui_services,
+};
+use ironclaw_reborn_webui_ingress::{
+    WebuiAuthentication, WebuiAuthenticator, WebuiServeConfig, webui_v2_app,
 };
 use ironclaw_reborn_webui_ingress::{
     EnvBearerAuthenticator, SessionAuthenticator, SessionStore, signed_session_store,

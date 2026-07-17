@@ -58,8 +58,10 @@ migration-support = []
 # from its `serve` subcommand. Substrate-only callers (v1 `AppBuilder`,
 # diagnostic harnesses) stay off the feature and carry no WebUI code.
 webui-v2-beta = [
-    "dep:ironclaw_webui_v2",
-    "ironclaw_webui_v2/webui-v2-beta",
+    # The `ironclaw_webui_v2` route surface merged up into
+    # `ironclaw_reborn_webui_ingress` (as its `webui_v2` module); this crate no
+    # longer depends on it. Composition keeps this feature to gate the WebUI
+    # facade, identity, admin, and route-mount vocabulary it still owns.
     "dep:ironclaw_reborn_identity",
     "ironclaw_runner/webui-user-store",
     "libsql",
@@ -162,9 +164,8 @@ ironclaw_product_context = { path = "../ironclaw_product_context", version = "0.
 nix = { version = "0.30", default-features = false, features = ["process"] }
 # Unpacking uploaded WASM-tool bundles for the WebUI "Install Tool" import flow.
 zip = { version = "8", default-features = false, features = ["deflate"] }
-# WebUI v2 route surface — feature-gated; only used by `webui_serve`.
-ironclaw_webui_v2 = { path = "../ironclaw_webui_v2", optional = true }
-# WebUI v2 static SPA bundle — feature-gated; mounted under `/v2`.
+# WebUI v2 route surface + static SPA bundle merged up into
+# `ironclaw_reborn_webui_ingress`; no longer a composition dependency.
 ironclaw_wasm_product_adapters = { path = "../ironclaw_wasm_product_adapters", optional = true }
 libsql = { version = "0.9", optional = true, default-features = false, features = ["core", "replication", "remote", "tls"] }
 libc = "0.2"

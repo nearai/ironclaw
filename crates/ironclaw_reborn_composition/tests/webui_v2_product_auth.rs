@@ -44,8 +44,10 @@ use ironclaw_product_workflow::{
 };
 use ironclaw_reborn_composition::{
     GoogleOAuthRouteConfig, RebornAuthContinuationDispatcher, RebornProductAuthServices,
-    RebornReadiness, RebornWebuiBundle, WebuiAuthentication, WebuiAuthenticator, WebuiServeConfig,
-    webui_v2_app,
+    RebornReadiness, RebornWebuiBundle,
+};
+use ironclaw_reborn_webui_ingress::{
+    WebuiAuthentication, WebuiAuthenticator, WebuiServeConfig, webui_v2_app,
 };
 use serde_json::json;
 use tower::ServiceExt;

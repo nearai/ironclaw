@@ -124,7 +124,7 @@ fn dockerfile_reborn_builds_with_postgres_feature() {
     assert!(
         dockerfile.contains("corepack enable pnpm")
             && dockerfile.matches("pnpm install --frozen-lockfile").count() >= 2
-            && dockerfile.contains("crates/ironclaw_webui_v2/frontend"),
+            && dockerfile.contains("crates/ironclaw_reborn_webui_ingress/frontend"),
         "Dockerfile.reborn must install WebUI frontend dependencies before cargo-chef and final webui-v2-beta builds: {dockerfile}"
     );
     assert!(

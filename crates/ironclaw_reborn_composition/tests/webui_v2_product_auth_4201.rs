@@ -36,8 +36,10 @@ use ironclaw_product_workflow::{
     WebUiSetupExtensionRequest, rejecting_reborn_services_error,
 };
 use ironclaw_reborn_composition::{
-    RebornAuthContinuationDispatcher, RebornProductAuthServices, RebornReadiness,
-    RebornWebuiBundle, WebuiAuthentication, WebuiAuthenticator, WebuiServeConfig, webui_v2_app,
+    RebornAuthContinuationDispatcher, RebornProductAuthServices, RebornReadiness, RebornWebuiBundle,
+};
+use ironclaw_reborn_webui_ingress::{
+    WebuiAuthentication, WebuiAuthenticator, WebuiServeConfig, webui_v2_app,
 };
 use serde_json::{Value, json};
 use tower::ServiceExt;

@@ -1,7 +1,7 @@
 //! Descriptor-driven per-route rate-limit middleware for the WebChat v2
 //! native surface.
 //!
-//! `ironclaw_webui_v2::webui_v2_routes()` returns an
+//! `crate::webui_v2::webui_v2_routes()` returns an
 //! [`IngressRouteDescriptor`] per route, each carrying a
 //! [`RateLimitPolicy`] (mutation 60/60, read 120/60, stream 30/60 in
 //! the current beta). The v2 crate's CLAUDE.md explicitly designates
@@ -47,7 +47,7 @@ use ironclaw_host_api::ingress::{IngressRouteDescriptor, RateLimitPolicy, RateLi
 use ironclaw_product_workflow::WebUiAuthenticatedCaller;
 use lru::LruCache;
 
-use crate::webui::webui_route_match::{network_method_to_axum, parse_pattern, segments_match};
+use crate::webui_route_match::{network_method_to_axum, parse_pattern, segments_match};
 
 /// Number of sharded counter maps. Each authenticated request takes
 /// exactly one shard's mutex, so contention scales as 1/SHARD_COUNT in
@@ -505,7 +505,7 @@ mod tests {
 
     #[test]
     fn build_rate_limit_state_accepts_webui_v2_descriptors() {
-        let descriptors = ironclaw_webui_v2::webui_v2_routes();
+        let descriptors = crate::webui_v2::webui_v2_routes();
         let state = build_rate_limit_state(&descriptors).expect("v2 descriptors must be accepted");
         assert_eq!(
             state.routes.len(),

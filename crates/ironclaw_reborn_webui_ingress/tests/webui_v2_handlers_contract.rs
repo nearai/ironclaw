@@ -71,7 +71,7 @@ use ironclaw_threads::SessionThreadRecord;
 use ironclaw_turns::{
     EventCursor, ReplyTargetBindingRef, RunProfileId, RunProfileVersion, TurnRunId, TurnStatus,
 };
-use ironclaw_webui_v2::{
+use ironclaw_reborn_webui_ingress::webui_v2::{
     DEFAULT_SSE_MAX_CONCURRENT_PER_CALLER, WebUiV2Capabilities, WebUiV2RouteOptions, WebUiV2State,
     webui_v2_router, webui_v2_router_with_options,
 };

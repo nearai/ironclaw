@@ -17,7 +17,7 @@ use ironclaw_host_api::ingress::{
     StreamingMode, WebSocketOriginPolicy,
 };
 use ironclaw_host_api::{IngressScopeSource, NetworkMethod};
-use ironclaw_webui_v2::{
+use ironclaw_reborn_webui_ingress::webui_v2::{
     WEBUI_V2_ROUTE_ACTIVATE_EXTENSION, WEBUI_V2_ROUTE_ADD_PROJECT_MEMBER,
     WEBUI_V2_ROUTE_ADMIN_CREATE_USER, WEBUI_V2_ROUTE_ADMIN_DELETE_USER,
     WEBUI_V2_ROUTE_ADMIN_DELETE_USER_SECRET, WEBUI_V2_ROUTE_ADMIN_GET_USER,

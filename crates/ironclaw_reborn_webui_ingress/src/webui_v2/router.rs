@@ -2,7 +2,7 @@
 //! WebChat v2 handlers.
 //!
 //! Host composition is free to ignore this and mount each handler directly
-//! against its own router; the descriptors in [`crate::descriptors`] are
+//! against its own router; the descriptors in [`crate::webui_v2::descriptors`] are
 //! the canonical contract. This module exists so handler-level tests can
 //! drive the full route table without re-stating the path/method table.
 
@@ -13,7 +13,7 @@ use axum::routing::{delete, get, post, put};
 use ironclaw_product_workflow::RebornServicesApi;
 use serde::Serialize;
 
-use crate::descriptors::{
+use crate::webui_v2::descriptors::{
     WEBUI_V2_PATTERN_ACTIVATE_EXTENSION, WEBUI_V2_PATTERN_ADMIN_USER,
     WEBUI_V2_PATTERN_ADMIN_USER_ROLE, WEBUI_V2_PATTERN_ADMIN_USER_SECRET,
     WEBUI_V2_PATTERN_ADMIN_USER_SECRETS, WEBUI_V2_PATTERN_ADMIN_USER_STATUS,
@@ -49,8 +49,8 @@ use crate::descriptors::{
     WEBUI_V2_PATTERN_TRACE_ACCOUNT_TRACES, WEBUI_V2_PATTERN_TRACE_CREDITS,
     WEBUI_V2_PATTERN_TRACE_HOLD_AUTHORIZE,
 };
-use crate::handlers;
-use crate::sse_capacity::SseCapacity;
+use crate::webui_v2::handlers;
+use crate::webui_v2::sse_capacity::SseCapacity;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct WebUiV2RouteOptions {
@@ -136,7 +136,7 @@ impl WebUiV2State {
 
 /// Build a [`Router`] mounting the WebChat v2 routes against the supplied
 /// facade. Path patterns match
-/// [`crate::descriptors::webui_v2_routes`] exactly; host composition is
+/// [`crate::webui_v2::descriptors::webui_v2_routes`] exactly; host composition is
 /// expected to apply its own auth / CORS / body-limit middleware in front
 /// of this router.
 pub fn webui_v2_router(state: WebUiV2State) -> Router {

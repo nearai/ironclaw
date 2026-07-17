@@ -38,9 +38,8 @@ use ironclaw_product_workflow::{
     WebUiResolveGateRequest, WebUiRetryRunRequest, WebUiSendMessageRequest,
     WebUiSetupExtensionRequest, rejecting_reborn_services_error,
 };
-use ironclaw_reborn_composition::{
-    RebornReadiness, RebornWebuiBundle, WebuiServeConfig, webui_v2_app,
-};
+use ironclaw_reborn_composition::{RebornReadiness, RebornWebuiBundle};
+use ironclaw_reborn_webui_ingress::{WebuiServeConfig, webui_v2_app};
 use ironclaw_reborn_webui_ingress::{
     EnvBearerAuthenticator, OAuthProvider, OAuthProviderName, OAuthUserProfile,
     SignedSessionLoginConfig, UserDirectory, UserDirectoryError, build_signed_session_login,

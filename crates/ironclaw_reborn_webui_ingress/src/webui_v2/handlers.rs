@@ -67,10 +67,10 @@ use serde::{Deserialize, Serialize};
 
 use ironclaw_host_api::{SecretHandle, UserId};
 
-use crate::error::WebUiV2HttpError;
-use crate::router::{WebUiV2Capabilities, WebUiV2State};
-use crate::schema::WebChatV2EventFrame;
-use crate::sse_capacity::{SSE_MAX_LIFETIME, SseSlot};
+use crate::webui_v2::error::WebUiV2HttpError;
+use crate::webui_v2::router::{WebUiV2Capabilities, WebUiV2State};
+use crate::webui_v2::schema::WebChatV2EventFrame;
+use crate::webui_v2::sse_capacity::{SSE_MAX_LIFETIME, SseSlot};
 
 // Session bootstrap must stay cheap and non-blocking: this flag only tunes
 // initial approval UI state. It is mutable through `/settings/tools`, so do
@@ -883,9 +883,9 @@ fn sse_poll_interval_for_idle_polls(idle_polls: u32) -> Duration {
 /// stream directly. Older compositions fall back to drain/poll semantics,
 /// documented on [`RebornServicesApi::stream_events`].
 ///
-/// [`WebChatV2EventFrame`]: crate::schema::WebChatV2EventFrame
+/// [`WebChatV2EventFrame`]: crate::webui_v2::schema::WebChatV2EventFrame
 /// [`RebornServicesApi::stream_events`]: ironclaw_product_workflow::RebornServicesApi::stream_events
-/// [`SSE_MAX_LIFETIME`]: crate::sse_capacity::SSE_MAX_LIFETIME
+/// [`SSE_MAX_LIFETIME`]: crate::webui_v2::sse_capacity::SSE_MAX_LIFETIME
 pub async fn stream_events(
     State(state): State<WebUiV2State>,
     Extension(caller): Extension<WebUiAuthenticatedCaller>,

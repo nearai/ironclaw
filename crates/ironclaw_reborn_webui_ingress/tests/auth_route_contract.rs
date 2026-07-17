@@ -35,9 +35,8 @@ use axum::body::Body;
 use axum::http::{HeaderValue, Method, Request, StatusCode, header};
 use chrono::Duration as ChronoDuration;
 use ironclaw_host_api::{AgentId, ProjectId, TenantId, UserId};
-use ironclaw_reborn_composition::{
-    RebornReadiness, RebornWebuiBundle, WebuiAuthenticator, WebuiServeConfig, webui_v2_app,
-};
+use ironclaw_reborn_composition::{RebornReadiness, RebornWebuiBundle};
+use ironclaw_reborn_webui_ingress::{WebuiAuthenticator, WebuiServeConfig, webui_v2_app};
 use ironclaw_reborn_webui_ingress::{
     EnvBearerAuthenticator, InMemorySessionStore, OidcAuthenticator, OidcAuthenticatorConfig,
     SessionAuthenticator, SessionStore,

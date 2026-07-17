@@ -33,8 +33,6 @@
 //! surfaces to keep host auth host-owned and route/body/CORS security
 //! in gateway-owned code; the Reborn binary owns this stack itself.
 
-use std::future::Future;
-use std::pin::Pin;
 use std::sync::Arc;
 
 use axum::{
@@ -45,10 +43,16 @@ use axum::{
     response::{IntoResponse, Response},
     routing::get,
 };
-use ironclaw_auth::GoogleOAuthRouteConfig;
 use ironclaw_host_api::ingress::IngressRouteDescriptor;
 use ironclaw_host_api::{AgentId, ProjectId, TenantId, UserId};
-use ironclaw_webui_v2::{
+// Route surface + facade + product-auth mount builders now travel through the
+// composition facade (the mount vocabulary + product-auth serve items are
+// re-exported from `ironclaw_reborn_composition`).
+use ironclaw_reborn_composition::{
+    GoogleOAuthRouteConfig, ProductAuthRouteState, ProtectedRouteMount, PublicRouteDrains,
+    PublicRouteMount, RebornWebuiBundle, product_auth_route_mount,
+};
+use crate::webui_v2::{
     DEFAULT_SSE_MAX_CONCURRENT_PER_CALLER, WebUiV2Capabilities, WebUiV2RouteOptions, WebUiV2State,
     is_webui_v2_operator_webui_config_route_id, webui_v2_router_with_options,
 };
@@ -57,20 +61,23 @@ use tower_http::cors::{AllowHeaders, CorsLayer};
 use tower_http::limit::RequestBodyLimitLayer;
 use tower_http::set_header::SetResponseHeaderLayer;
 
+// TODO(slack-merge): the Slack host-beta personal-OAuth + channel-route admin
+// surface is gated on `slack-v2-host-beta`, a composition feature that is out
+// of scope for this merge. These `crate::slack::*` / composition-internal
+// paths compile out under this crate's default features; wiring the Slack
+// surface through the ingress crate is deferred.
 #[cfg(feature = "slack-v2-host-beta")]
-use crate::product_auth::serve::SlackPersonalOAuthBindingConfig;
-use crate::product_auth::serve::{ProductAuthRouteState, product_auth_route_mount};
+use ironclaw_reborn_composition::SlackPersonalOAuthBindingConfig;
 #[cfg(feature = "slack-v2-host-beta")]
 use crate::slack::slack_channel_routes::{
     SlackChannelRouteAdminRouteConfig, slack_channel_route_admin_route_mount,
 };
-use crate::webui::facade::RebornWebuiBundle;
-use crate::webui::webui_body_limit::{build_body_limit_state, enforce_body_limit};
-use crate::webui::webui_operator_auth::{
+use crate::webui_body_limit::{build_body_limit_state, enforce_body_limit};
+use crate::webui_operator_auth::{
     OperatorWebuiConfigRouteState, build_operator_webui_config_route_state,
 };
-use crate::webui::webui_rate_limit::{build_rate_limit_state, enforce_rate_limit};
-use crate::webui::webui_ws_origin::{build_websocket_origin_state, enforce_websocket_origin};
+use crate::webui_rate_limit::{build_rate_limit_state, enforce_rate_limit};
+use crate::webui_ws_origin::{build_websocket_origin_state, enforce_websocket_origin};
 use ironclaw_product_workflow::WebUiAuthenticatedCaller;
 use serde::Serialize;
 
@@ -199,7 +206,7 @@ pub struct WebuiServeConfig {
     /// paths that don't match any v2 descriptor (e.g. axum's 404
     /// fallback). v2 routes are additionally enforced against the
     /// per-route [`BodyLimitPolicy`](ironclaw_host_api::ingress::BodyLimitPolicy)
-    /// declared in `ironclaw_webui_v2::webui_v2_routes()`; that
+    /// declared in `crate::webui_v2::webui_v2_routes()`; that
     /// descriptor cap is always strictly tighter than this global
     /// fallback. Defaults to [`DEFAULT_WEBUI_MAX_BODY_BYTES`].
     pub(crate) max_body_bytes: usize,
@@ -264,77 +271,10 @@ pub struct WebuiServeConfig {
     pub(crate) slack_channel_routes: Option<SlackChannelRouteAdminRouteConfig>,
 }
 
-/// Async drain hook for public route mounts that schedule work outside the
-/// request/response future.
-pub trait PublicRouteDrain: Send + Sync {
-    fn drain<'a>(&'a self) -> Pin<Box<dyn Future<Output = ()> + Send + 'a>>;
-}
-
-/// A host-supplied public sub-router plus the descriptors composition
-/// needs to install the per-route policy middleware around it.
-/// Mirrors the shape `ProductAuthRouteMount` uses internally so the
-/// two public surfaces ride on the same machinery.
-#[derive(Clone)]
-pub struct PublicRouteMount {
-    pub router: Router,
-    pub descriptors: Vec<IngressRouteDescriptor>,
-    pub drain: Option<Arc<dyn PublicRouteDrain>>,
-}
-
-/// A host-supplied protected sub-router plus the descriptors composition
-/// needs to install the shared per-route policy middleware around it.
-#[derive(Clone)]
-pub struct ProtectedRouteMount {
-    pub router: Router,
-    pub descriptors: Vec<IngressRouteDescriptor>,
-}
-
-impl ProtectedRouteMount {
-    pub fn new(router: Router, descriptors: Vec<IngressRouteDescriptor>) -> Self {
-        Self {
-            router,
-            descriptors,
-        }
-    }
-}
-
-impl PublicRouteMount {
-    pub fn new(router: Router, descriptors: Vec<IngressRouteDescriptor>) -> Self {
-        Self {
-            router,
-            descriptors,
-            drain: None,
-        }
-    }
-
-    pub fn with_drain(mut self, drain: Arc<dyn PublicRouteDrain>) -> Self {
-        self.drain = Some(drain);
-        self
-    }
-}
-
-#[derive(Clone, Default)]
-pub struct PublicRouteDrains {
-    drains: Arc<Vec<Arc<dyn PublicRouteDrain>>>,
-}
-
-impl PublicRouteDrains {
-    fn new(drains: Vec<Arc<dyn PublicRouteDrain>>) -> Self {
-        Self {
-            drains: Arc::new(drains),
-        }
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.drains.is_empty()
-    }
-
-    pub async fn drain(&self) {
-        for drain in self.drains.iter() {
-            drain.drain().await;
-        }
-    }
-}
+// `PublicRouteDrain`, `PublicRouteMount`, `ProtectedRouteMount`, and
+// `PublicRouteDrains` are defined in `ironclaw_reborn_composition`
+// (`webui::route_mounts`) because composition's own route builders
+// (nearai login, OpenAI-compat) construct them; they are imported above.
 
 pub struct WebuiV2App {
     router: Router,
@@ -529,7 +469,7 @@ pub enum WebuiServeError {
     #[error("invalid CSP header value: {0}")]
     InvalidCspHeader(String),
     #[error("rate-limit composition failed: {0}")]
-    RateLimit(#[from] crate::webui::webui_rate_limit::RateLimitConfigError),
+    RateLimit(#[from] crate::webui_rate_limit::RateLimitConfigError),
 }
 
 /// Build the fully-composed Reborn WebChat v2 axum app:
@@ -549,7 +489,7 @@ pub enum WebuiServeError {
 ///   WebUI v2 descriptors plus product-auth descriptors when mounted
 ///   (authenticated WebUI routes are per caller; the public OAuth
 ///   callback is per peer IP)
-/// - WebChat v2 route set from `ironclaw_webui_v2::webui_v2_router`
+/// - WebChat v2 route set from `crate::webui_v2::webui_v2_router`
 ///
 /// The returned [`Router`] is the seam between this composition crate
 /// and host-owned ingress code: tests drive it via
@@ -625,7 +565,7 @@ pub fn webui_v2_app_with_lifecycle(
             .filter_map(|mount| mount.drain.clone())
             .collect(),
     );
-    let mut descriptors = ironclaw_webui_v2::webui_v2_routes();
+    let mut descriptors = crate::webui_v2::webui_v2_routes();
     let mut operator_descriptors: Vec<IngressRouteDescriptor> = descriptors
         .iter()
         .filter(|descriptor| {
@@ -774,7 +714,7 @@ pub fn webui_v2_app_with_lifecycle(
         // used because the factory already returns fully prefixed
         // routes — `nest` in axum 0.8 has quirky dispatch for the
         // exact prefix with/without trailing slash.
-        .merge(ironclaw_webui_v2::mount_at_prefix("/v2"))
+        .merge(crate::webui_v2::mount_at_prefix("/v2"))
         // Outer global cap: applies to unmatched paths (e.g. 404 fallback)
         // as defense in depth. v2 routes are tighter via the per-route
         // body-limit middleware above.

@@ -38,7 +38,7 @@ use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use chrono::{DateTime, Duration as ChronoDuration, Utc};
 use hmac::{Hmac, KeyInit, Mac};
 use ironclaw_host_api::{TenantId, UserId};
-use ironclaw_reborn_composition::{WebuiAuthentication, WebuiAuthenticator};
+use crate::{WebuiAuthentication, WebuiAuthenticator};
 use parking_lot::RwLock;
 use secrecy::{ExposeSecret, SecretString};
 use serde::{Deserialize, Serialize};

@@ -15,9 +15,8 @@ use ironclaw_reborn_composition::host_api::{
 use ironclaw_reborn_composition::{
     GoogleOAuthRouteConfig, LocalTriggerAccessReconciliation, LocalTriggerAccessRole,
     LocalTriggerAccessSource, LocalTriggerAccessStore, RebornBuildInput, RebornReadiness,
-    RebornRuntimeIdentity, RebornRuntimeInput, RebornWebuiBundle, WebuiAuthenticator,
-    WebuiServeConfig, build_reborn_runtime, local_trigger_access_fire_checker,
-    webui_v2_app_with_lifecycle,
+    RebornRuntimeIdentity, RebornRuntimeInput, RebornWebuiBundle, build_reborn_runtime,
+    local_trigger_access_fire_checker,
 };
 #[cfg(feature = "slack-v2-host-beta")]
 use ironclaw_reborn_composition::{
@@ -29,7 +28,8 @@ use ironclaw_reborn_config::{
 };
 use ironclaw_reborn_webui_ingress::{
     DeferredWebuiRouterHandle, EnvBearerAuthenticator, RebornWebuiServeError,
-    RebornWebuiServeOptions, deferred_webui_v2_startup_router, serve_webui_v2,
+    RebornWebuiServeOptions, WebuiAuthenticator, WebuiServeConfig,
+    deferred_webui_v2_startup_router, serve_webui_v2, webui_v2_app_with_lifecycle,
 };
 use secrecy::SecretString;
 
@@ -1346,7 +1346,7 @@ slack_user_id = "U123"
             async fn authenticate(
                 &self,
                 _token: &str,
-            ) -> Option<ironclaw_reborn_composition::WebuiAuthentication> {
+            ) -> Option<ironclaw_reborn_webui_ingress::WebuiAuthentication> {
                 None
             }
         }
@@ -1358,7 +1358,7 @@ slack_user_id = "U123"
             async fn authenticate(
                 &self,
                 _token: &str,
-            ) -> Option<ironclaw_reborn_composition::WebuiAuthentication> {
+            ) -> Option<ironclaw_reborn_webui_ingress::WebuiAuthentication> {
                 None
             }
 

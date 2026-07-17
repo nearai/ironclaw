@@ -10,7 +10,7 @@ use axum::extract::Request;
 use axum::http::Method;
 use ironclaw_host_api::ingress::IngressRouteDescriptor;
 
-use crate::webui::webui_route_match::{network_method_to_axum, parse_pattern, segments_match};
+use crate::webui_route_match::{network_method_to_axum, parse_pattern, segments_match};
 
 #[derive(Debug, Clone)]
 struct OperatorWebuiConfigRoute {
@@ -68,7 +68,7 @@ mod tests {
     use super::*;
     use axum::body::Body;
     use axum::http::Method;
-    use ironclaw_webui_v2::is_webui_v2_operator_webui_config_route_id;
+    use crate::webui_v2::is_webui_v2_operator_webui_config_route_id;
 
     fn request(method: Method, path: &str) -> Request {
         Request::builder()
@@ -80,7 +80,7 @@ mod tests {
 
     #[test]
     fn operator_routes_are_matched_from_descriptors() {
-        let descriptors: Vec<_> = ironclaw_webui_v2::webui_v2_routes()
+        let descriptors: Vec<_> = crate::webui_v2::webui_v2_routes()
             .into_iter()
             .filter(|descriptor| {
                 is_webui_v2_operator_webui_config_route_id(descriptor.route_id().as_str())

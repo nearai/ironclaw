@@ -1,7 +1,7 @@
 //! Descriptor-driven `Origin` enforcement for WebChat v2 routes that
 //! declare a [`WebSocketOriginPolicy`] other than `NotApplicable`.
 //!
-//! The CORS layer composed by [`crate::webui::webui_serve::webui_v2_app`]
+//! The CORS layer composed by [`crate::webui_serve::webui_v2_app`]
 //! handles ordinary XHR pre-flight, but the browser does NOT issue a
 //! pre-flight before a WebSocket upgrade — it just opens a new
 //! connection and sends `Origin` directly on the upgrade request.
@@ -20,7 +20,7 @@ use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
 use ironclaw_host_api::ingress::{IngressRouteDescriptor, StreamingMode, WebSocketOriginPolicy};
 
-use crate::webui::webui_route_match::{network_method_to_axum, parse_pattern, segments_match};
+use crate::webui_route_match::{network_method_to_axum, parse_pattern, segments_match};
 
 #[derive(Debug, Clone)]
 struct WsRouteOriginRule {
@@ -273,7 +273,7 @@ mod tests {
 
     #[test]
     fn build_state_collects_only_ws_descriptors() {
-        let descriptors = ironclaw_webui_v2::webui_v2_routes();
+        let descriptors = crate::webui_v2::webui_v2_routes();
         let state = build_websocket_origin_state(&descriptors, &[], None);
         assert!(
             !state.routes.is_empty(),

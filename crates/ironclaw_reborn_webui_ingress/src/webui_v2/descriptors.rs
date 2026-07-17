@@ -1,7 +1,7 @@
 //! Host-owned route descriptors for the Reborn WebChat v2 surface.
 //!
 //! Host composition consumes [`webui_v2_routes`] and mounts the matching
-//! handler from [`crate::handlers`] under each descriptor's pattern. The
+//! handler from [`crate::webui_v2::handlers`] under each descriptor's pattern. The
 //! descriptor is the contract: changing a route's policy here changes what
 //! host composition enforces before the handler runs.
 

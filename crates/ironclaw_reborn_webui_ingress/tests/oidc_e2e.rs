@@ -19,7 +19,7 @@ use axum::extract::State;
 use axum::response::IntoResponse;
 use axum::routing::get;
 use base64::Engine;
-use ironclaw_reborn_composition::WebuiAuthenticator;
+use ironclaw_reborn_webui_ingress::WebuiAuthenticator;
 use ironclaw_reborn_webui_ingress::{OidcAuthenticator, OidcAuthenticatorConfig};
 use jsonwebtoken::{Algorithm, EncodingKey, Header, encode};
 use rsa::pkcs8::{EncodePrivateKey, LineEnding};

@@ -1,7 +1,7 @@
 //! Descriptor-driven per-route body limit for the WebChat v2 native
 //! surface.
 //!
-//! `ironclaw_webui_v2::webui_v2_routes()` carries a [`BodyLimitPolicy`]
+//! `crate::webui_v2::webui_v2_routes()` carries a [`BodyLimitPolicy`]
 //! per route (16 KiB for `create_thread`, 14 MiB for `send_message`, 4
 //! KiB for `cancel_run`/`resolve_gate`, `NoBody` for the read /
 //! streaming routes). The v2 crate's CLAUDE.md designates enforcement
@@ -12,7 +12,7 @@
 //! - This middleware runs **before** auth so an oversized payload is
 //!   rejected without spending a bearer-validation step.
 //! - It runs **after** the outer `RequestBodyLimitLayer` global cap
-//!   that [`crate::webui::webui_serve::webui_v2_app`] keeps as a defense in
+//!   that [`crate::webui_serve::webui_v2_app`] keeps as a defense in
 //!   depth for paths that don't match any v2 descriptor (e.g. axum's
 //!   404 fallback). Per-route enforcement is strictly tighter than that
 //!   global cap.
@@ -31,7 +31,7 @@ use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
 use ironclaw_host_api::ingress::{BodyLimitPolicy, IngressRouteDescriptor};
 
-use crate::webui::webui_route_match::{network_method_to_axum, parse_pattern, segments_match};
+use crate::webui_route_match::{network_method_to_axum, parse_pattern, segments_match};
 
 #[derive(Debug, Clone)]
 struct RouteBodyLimit {
@@ -265,7 +265,7 @@ mod tests {
 
     #[test]
     fn build_body_limit_state_accepts_webui_v2_descriptors() {
-        let descriptors = ironclaw_webui_v2::webui_v2_routes();
+        let descriptors = crate::webui_v2::webui_v2_routes();
         let state = build_body_limit_state(&descriptors);
         assert_eq!(
             state.routes.len(),

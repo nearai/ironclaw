@@ -24,14 +24,23 @@ default = []
 dev-in-memory-session = []
 
 [dependencies]
+async-stream = "0.3"
 async-trait = "0.1"
-axum = "0.8"
+axum = { version = "0.8", features = ["ws"] }
 base64 = "0.22"
 chrono = { version = "0.4", default-features = false, features = ["clock", "serde", "std"] }
+futures = "0.3"
 hex = "0.4.3"
 hmac = "0.13"
 ironclaw_host_api = { path = "../ironclaw_host_api" }
+# Folded up from the former `ironclaw_webui_v2` crate: the v2 handlers consume
+# only the `RebornServicesApi` facade + ingress/error vocabulary.
+ironclaw_product_workflow = { path = "../ironclaw_product_workflow" }
 ironclaw_reborn_composition = { path = "../ironclaw_reborn_composition", features = ["webui-v2-beta"] }
+# Sliding-window per-route rate limiter (moved from composition's webui_rate_limit).
+lru = "0.18"
+# axum/tower-http middleware stack used by `webui_serve` (moved from composition).
+tower-http = { version = "0.6", features = ["cors", "set-header", "limit", "catch-panic"] }
 jsonwebtoken = { version = "10", features = ["aws_lc_rs"] }
 parking_lot = "0.12"
 rand = "0.10"
@@ -65,6 +74,9 @@ http-body-util = "0.1"
 # enables `webui-v2-beta`; the three crates below supply the trait
 # + DTO shapes the stub implements.
 ironclaw_product_workflow = { path = "../ironclaw_product_workflow", features = ["test-support"] }
+# Handler contract test (moved from ironclaw_webui_v2) constructs
+# `ProductOutboundEnvelope` fixtures with the canonical newtype constructors.
+ironclaw_product_adapters = { path = "../ironclaw_product_adapters" }
 ironclaw_threads = { path = "../ironclaw_threads" }
 ironclaw_turns = { path = "../ironclaw_turns" }
 # Generate test RSA keypairs at test time so the OIDC e2e test can
@@ -75,4 +87,20 @@ rand_core = { version = "0.6", features = ["getrandom"] }
 base64 = "0.22"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 serde_json = "1"
-tokio = { version = "1", features = ["macros", "rt", "rt-multi-thread", "net", "time", "io-util"] }
+tokio = { version = "1", features = ["macros", "rt", "rt-multi-thread", "net", "time", "io-util", "sync", "test-util"] }
+# Real WebSocket client for the moved `webui_v2_handlers_contract` stream_events_ws
+# frame-content test (oneshot cannot complete a true WS upgrade).
+tokio-tungstenite = { version = "0.29", default-features = false, features = ["connect"] }
+
+# The WebChat v2 gateway assembly (`webui_serve.rs`, folded up from composition)
+# still carries `#[cfg(feature = "slack-v2-host-beta")]` /
+# `#[cfg(feature = "openai-compat-beta")]` blocks that reference
+# composition-internal Slack / OpenAI-compat surfaces. Those features are NOT
+# defined on this crate (wiring the Slack/OpenAI host surface through ingress is
+# deferred — see TODO(slack-merge) in webui_serve.rs), so the blocks compile out
+# unconditionally. Declare the cfg values as known so the build stays
+# warning-clean under `-D warnings` without silently enabling the dead paths.
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = [
+    'cfg(feature, values("slack-v2-host-beta", "openai-compat-beta"))',
+] }

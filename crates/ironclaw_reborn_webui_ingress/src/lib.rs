@@ -25,6 +25,32 @@ mod auth;
 mod oidc;
 mod session;
 mod signed_session_login;
+// Folded in from the former `ironclaw_webui_v2` crate: the WebChat v2 HTTP
+// route surface + static SPA bundle. Public so this crate's own middleware,
+// composition's `#[cfg(test)]` unit tests, and downstream test crates can
+// reach the route/handler/descriptor items.
+pub mod webui_v2;
+// Reborn WebChat v2 HTTP gateway assembly + middleware, folded up from
+// `ironclaw_reborn_composition::webui`. `webui_v2_app` composes the fully
+// wired axum Router (auth + rate/body limit + CORS + security headers + the
+// v2 route surface); the middleware modules back it.
+mod webui_body_limit;
+mod webui_operator_auth;
+mod webui_rate_limit;
+mod webui_route_match;
+mod webui_serve;
+mod webui_ws_origin;
+
+// WebChat v2 gateway assembly + the host-auth vocabulary it carries. Folded up
+// from `ironclaw_reborn_composition::webui::webui_serve`. The mount vocabulary
+// (`PublicRouteMount`, `ProtectedRouteMount`) stays in composition;
+// `PublicRouteMount` is already re-exported through the `auth` module above,
+// and `ProtectedRouteMount` callers import it from composition directly.
+pub use webui_rate_limit::RateLimitConfigError;
+pub use webui_serve::{
+    WebuiAuthentication, WebuiAuthenticator, WebuiServeConfig, WebuiServeConfigError,
+    WebuiServeError, WebuiV2App, webui_v2_app, webui_v2_app_with_lifecycle,
+};
 
 #[cfg(any(test, feature = "dev-in-memory-session"))]
 pub use auth::EmailUserDirectory;
@@ -65,7 +91,6 @@ use axum::{
     routing::{any, get},
 };
 use ironclaw_host_api::UserId;
-use ironclaw_reborn_composition::WebuiAuthenticator;
 use secrecy::{ExposeSecret, SecretString};
 use serde::Serialize;
 use subtle::ConstantTimeEq;
@@ -270,7 +295,7 @@ impl WebuiAuthenticator for EnvBearerAuthenticator {
     async fn authenticate(
         &self,
         candidate: &str,
-    ) -> Option<ironclaw_reborn_composition::WebuiAuthentication> {
+    ) -> Option<WebuiAuthentication> {
         // Constant-time comparison so an attacker cannot use response
         // timing to learn the prefix of the configured token. Both
         // operands are coerced to `&[u8]` of the same length to make
@@ -280,7 +305,7 @@ impl WebuiAuthenticator for EnvBearerAuthenticator {
         let expected = self.token.expose_secret().as_bytes();
         let candidate = candidate.as_bytes();
         if expected.ct_eq(candidate).into() {
-            Some(ironclaw_reborn_composition::WebuiAuthentication::operator(
+            Some(WebuiAuthentication::operator(
                 self.user_id.clone(),
             ))
         } else {

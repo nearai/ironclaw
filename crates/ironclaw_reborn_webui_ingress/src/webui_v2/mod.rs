@@ -39,29 +39,19 @@
 //! [`WebUiAuthenticatedCaller`]: ironclaw_product_workflow::WebUiAuthenticatedCaller
 //! [`IngressRouteDescriptor`]: ironclaw_host_api::ingress::IngressRouteDescriptor
 
-#![forbid(unsafe_code)]
 
-#[cfg(feature = "webui-v2-beta")]
 mod descriptors;
-#[cfg(feature = "webui-v2-beta")]
 mod error;
-#[cfg(feature = "webui-v2-beta")]
 mod handlers;
-#[cfg(feature = "webui-v2-beta")]
 mod router;
-#[cfg(feature = "webui-v2-beta")]
 mod schema;
-#[cfg(feature = "webui-v2-beta")]
 mod sse_capacity;
 // Browser SPA asset bundle: the JSON route surface and the static bytes it
 // drives now ship from one crate behind the single `webui-v2-beta` feature.
-#[cfg(feature = "webui-v2-beta")]
 pub mod static_assets;
 
 #[allow(deprecated)]
-#[cfg(feature = "webui-v2-beta")]
 pub use descriptors::is_webui_v2_llm_config_route_id;
-#[cfg(feature = "webui-v2-beta")]
 pub use descriptors::{
     WEBUI_V2_ROUTE_ACTIVATE_EXTENSION, WEBUI_V2_ROUTE_ADD_PROJECT_MEMBER,
     WEBUI_V2_ROUTE_ADMIN_CREATE_USER, WEBUI_V2_ROUTE_ADMIN_DELETE_USER,
@@ -107,9 +97,7 @@ pub use descriptors::{
     WEBUI_V2_ROUTE_UPDATE_SKILL, WEBUI_V2_ROUTE_UPSERT_LLM_PROVIDER,
     is_webui_v2_operator_webui_config_route_id, webui_v2_routes,
 };
-#[cfg(feature = "webui-v2-beta")]
 pub use error::{WebUiV2HttpError, WebUiV2HttpErrorBody};
-#[cfg(feature = "webui-v2-beta")]
 pub use handlers::{
     activate_extension, browse_fs_dir, cancel_run, complete_nearai_wallet_login, create_thread,
     delete_automation, delete_llm_provider, delete_thread, get_attachment, get_extension_setup,
@@ -127,16 +115,12 @@ pub use handlers::{
     stream_events_ws, test_llm_connection, trace_account_traces, trace_credits, update_skill,
     upsert_llm_provider,
 };
-#[cfg(feature = "webui-v2-beta")]
 pub use router::{
     WebUiV2Capabilities, WebUiV2RouteOptions, WebUiV2State, webui_v2_router,
     webui_v2_router_with_options,
 };
-#[cfg(feature = "webui-v2-beta")]
 pub use schema::{WebChatV2Event, WebChatV2EventFrame};
 // Re-export the static-bundle router factory at the crate root so host
 // composition keeps calling `ironclaw_webui_v2::mount_at_prefix(...)`.
-#[cfg(feature = "webui-v2-beta")]
 pub use sse_capacity::DEFAULT_SSE_MAX_CONCURRENT_PER_CALLER;
-#[cfg(feature = "webui-v2-beta")]
 pub use static_assets::{mount_at_prefix, serve_root, serve_wildcard, static_router};
