@@ -96,7 +96,7 @@ A good rule of thumb: if a change adds new authority or persistence, put it in t
 | `ironclaw_engine` | `ironclaw_engine` | Unified thread-capability-CodeAct execution engine. It is closer to product/agent orchestration than low-level host policy. |
 | `ironclaw_skills` | `ironclaw_skills` | Skill selection, scoring, and management. |
 | `ironclaw_gateway` | `ironclaw_gateway` | Browser gateway frontend assets, layout configuration, and widget extension system. |
-| `ironclaw_webui_v2` | `ironclaw_webui_v2` | Reborn WebChat v2 HTTP route surface and route descriptors. Off by default; enable with `webui-v2-beta`. |
+| `ironclaw_webui` | `ironclaw_webui` | Reborn WebChat v2 HTTP route surface and route descriptors. Off by default; enable with `webui-v2-beta`. |
 | `ironclaw_tui` | `ironclaw_tui` | Modular Ratatui-based terminal UI. |
 | `ironclaw_telegram_v2_adapter` | `ironclaw_telegram_v2_adapter` | Telegram v2 channel adapter for the Reborn product surface. Maps Telegram traffic into Reborn capability and turn contracts. |
 | `ironclaw_silk_decoder` | `ironclaw_silk_decoder` | Standalone WeChat `audio/silk` decoder helper. Excluded from the default workspace build; needs `libclang` and a C toolchain. |
@@ -118,7 +118,7 @@ A good rule of thumb: if a change adds new authority or persistence, put it in t
 - **User-visible read models and live projection streams**: prefer `ironclaw_event_projections`, `ironclaw_event_streams`, or `ironclaw_product_adapters` over parsing storage rows in UI code.
 - **Product workflow persistence**: keep orchestration and durable ledger adapters in `ironclaw_product_workflow`; concrete adapters stay behind the `storage`/`libsql`/`postgres` features and the `IdempotencyLedger` port.
 - **Agent loop/product orchestration**: use `ironclaw_agent_loop`, `ironclaw_loop_host`, `ironclaw_turns`, `ironclaw_engine`, or `ironclaw_runner` depending on layer.
-- **Web or terminal UI**: use `ironclaw_gateway`, `ironclaw_webui_v2`, `ironclaw_webui`, or `ironclaw_tui`; keep authority and persistence in lower crates.
+- **Web or terminal UI**: use `ironclaw_gateway`, `ironclaw_webui`, `ironclaw_webui`, or `ironclaw_tui`; keep authority and persistence in lower crates.
 
 ## Boundary rules
 

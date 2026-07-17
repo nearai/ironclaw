@@ -12,7 +12,7 @@ import {
 // which the Rust handler never emits — so the SPA must register a
 // listener for every event name it cares about. The names below
 // mirror `WebChatV2Event::event_name()` in
-// `crates/ironclaw_webui_v2/src/schema.rs`.
+// `crates/ironclaw_webui/src/webui_v2/schema.rs`.
 const V2_EVENT_NAMES = [
   "accepted",
   "running",

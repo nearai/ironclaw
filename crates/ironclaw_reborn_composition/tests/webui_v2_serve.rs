@@ -2229,14 +2229,14 @@ fn expand_route_pattern(pattern: &str) -> String {
         .replace("{package_id}", "ext-fake")
 }
 
-// ─── static SPA mount (`ironclaw_webui_v2`) ────────────────────
+// ─── static SPA mount (`ironclaw_webui`) ────────────────────
 //
 // The composition mounts the embedded SPA bundle at the gateway root. These
 // tests drive that mount through the same composed router production uses, so
 // a regression that drops the static router (or accidentally routes the SPA
 // through the bearer-auth middleware) fails here. Per
 // `.claude/rules/testing.md` ("Test Through the
-// Caller") — the standalone router test in `ironclaw_webui_v2`
+// Caller") — the standalone router test in `ironclaw_webui`
 // does not exercise the composition seam, so this layer needs its
 // own coverage.
 

@@ -28,6 +28,6 @@ Layer discipline here is enforced by machines, not vibes: `cargo test -p ironcla
 
 ## Verify
 
-`cargo test -p ironclaw_architecture` · `bash scripts/check-boundaries.sh` (legacy inventory; may be noisy on HEAD, don't treat as the Reborn architecture gate) · `cargo clippy -p <crate> --all-targets --all-features -- -D warnings` · if routes changed: `cargo test -p ironclaw_webui_v2 --test webui_v2_descriptors_contract`.
+`cargo test -p ironclaw_architecture` · `bash scripts/check-boundaries.sh` (legacy inventory; may be noisy on HEAD, don't treat as the Reborn architecture gate) · `cargo clippy -p <crate> --all-targets --all-features -- -D warnings` · if routes changed: `cargo test -p ironclaw_webui --test webui_v2_descriptors_contract`.
 
 **Worked good/bad examples** (before/after shapes, live exemplars, re-verify commands): [references/worked-examples.md](references/worked-examples.md) — the living curriculum; update it as the code evolves.

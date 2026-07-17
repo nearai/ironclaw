@@ -78,7 +78,7 @@ async fn nearai_callback(
 }
 
 /// Build the public NEAR AI login callback mount for composition to merge via
-/// [`crate::webui::route_mounts::WebuiServeConfig::with_public_route_mount`].
+/// `ironclaw_webui::WebuiServeConfig::with_public_route_mount`.
 pub(crate) fn nearai_login_callback_mount(
     session: Arc<ironclaw_llm::SessionManager>,
     reload: Arc<dyn LlmReloadTrigger>,

@@ -79,9 +79,6 @@ case "${package}" in
     # DB paths without a Postgres server (which the crate-tests job has none of).
     printf '%s\n' "--features test-support,libsql"
     ;;
-  ironclaw_webui_v2)
-    printf '%s\n' "--features webui-v2-beta"
-    ;;
   ironclaw_reborn_openai_compat)
     # `openai-compat-beta` activates the route/workflow/streaming contract
     # suites; `libsql` also exercises the durable ref-store contract folded in

@@ -89,7 +89,7 @@ Inbound order (outer → inner → handler):
    capped, strictly tighter, by the per-route limit below.
 5. **Descriptor-driven per-route body limit**
    (`webui_body_limit::enforce_body_limit`) — reads each route's
-   `BodyLimitPolicy` from `ironclaw_webui_v2::webui_v2_routes()` and,
+   `BodyLimitPolicy` from `ironclaw_webui::webui_v2_routes()` and,
    when present, product-auth route descriptors at composition time and
    enforces it before auth runs (so an oversized payload never spends a
    bearer-validation step). Today: `create_thread`, product-auth OAuth
@@ -126,7 +126,7 @@ Inbound order (outer → inner → handler):
    crates must not mint this evidence.
 8. **Descriptor-driven per-route rate limit**
    (`webui_rate_limit::enforce_rate_limit`) — reads
-   `ironclaw_webui_v2::webui_v2_routes()` plus mounted product-auth
+   `ironclaw_webui::webui_v2_routes()` plus mounted product-auth
    descriptors at composition time and enforces the declared
    `RateLimitPolicy` with a sliding window. Authenticated WebUI/product
    auth start routes use `RateLimitScope::PerCaller`; the public OAuth
@@ -135,7 +135,7 @@ Inbound order (outer → inner → handler):
    Composition fails closed if a future descriptor declares an unsupported
    scope.
 9. `webui_v2_router(WebUiV2State::new(bundle.api))` — the v2
-   handlers from `ironclaw_webui_v2` (create-thread, list-threads, delete-thread,
+   handlers from `ironclaw_webui` (create-thread, list-threads, delete-thread,
    send-message, get-timeline, stream-events SSE, stream-events WS,
    cancel-run, resolve-gate, setup-extension, list/rename automations).
 
@@ -335,7 +335,7 @@ rows are inventoried here, not implemented in the current PR.
   preflight.
 - **Body limit** — descriptor-driven per-route via
   `webui_body_limit::enforce_body_limit`. Caps come from
-  `ironclaw_webui_v2::webui_v2_routes()`: `create_thread` 16 KiB,
+  `ironclaw_webui::webui_v2_routes()`: `create_thread` 16 KiB,
   `send_message` 14 MiB, `cancel_run` / `resolve_gate` 4 KiB,
   `get_timeline` / `stream_events` `NoBody`. The outer
   `RequestBodyLimitLayer` at `config.max_body_bytes` (14 MiB default)
@@ -348,7 +348,7 @@ rows are inventoried here, not implemented in the current PR.
   outer `SetResponseHeaderLayer`s; default CSP is
   `default-src 'self'; object-src 'none'; frame-ancestors 'none';
   base-uri 'self'`.
-- **Connection limit (SSE)** — bounded by `ironclaw_webui_v2`'s own
+- **Connection limit (SSE)** — bounded by `ironclaw_webui`'s own
   `SseCapacity` (3 streams per `(tenant, user)`, 5-minute max stream
   lifetime). No WS surface to bound.
 - **Caller construction** — `WebUiAuthenticatedCaller` is built from
@@ -450,7 +450,7 @@ axum::serve(listener, app).with_graceful_shutdown(shutdown).await?;
 - `src/webui/webui_rate_limit.rs::tests` — unit tests for the sliding-window
   policy resolver, a regression test that `build_rate_limit_state`
   accepts every descriptor returned by
-  `ironclaw_webui_v2::webui_v2_routes()`, and
+  `ironclaw_webui::webui_v2_routes()`, and
   `unsupported_scope_is_rejected_at_composition` locking the
   fail-closed branch for non-`PerCaller` scopes.
 - `src/webui/webui_body_limit.rs::tests` — composition-time tests that

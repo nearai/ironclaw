@@ -9,7 +9,7 @@ and `03-headers-errors.md` for headers + error sanitization.
 - **v2** controls are descriptor-driven middleware in
   `crates/ironclaw_reborn_composition/src/` (`webui_serve.rs`,
   `webui_ws_origin.rs`, `webui_rate_limit.rs`, `webui_body_limit.rs`),
-  reading per-route policy from `ironclaw_webui_v2::webui_v2_routes()`
+  reading per-route policy from `ironclaw_webui::webui_v2_routes()`
   and the host SSO mount descriptors from
   `ironclaw_webui::webui_v2_auth_router` (`auth/routes.rs`).
 
@@ -25,7 +25,7 @@ Decision legend as in `01-auth.md`: **Keep** / **Change** / **Beta-break**.
 | 4 | Redirect sanitization | v1 OAuth redirect handling | `?redirect_after=` must start `/`, reject `//`,`/\`, percent-decoded forms, CRLF, fragment markers (`auth/pending.rs`) | **Keep** (hardened) |
 | 5 | Request body limit | axum `DefaultBodyLimit` 14 MiB global; 128 KiB system-prompt route (`platform/router.rs:565,408`) | Outer `RequestBodyLimitLayer` 14 MiB default **plus** descriptor per-route caps: `create_thread` 16 KiB, `send_message` 1 MiB, `cancel_run`/`resolve_gate` 4 KiB, `get_timeline`/`stream_events` `NoBody`; SSO `session_exchange`/`logout` 1 KiB (`webui_body_limit.rs`, `auth/routes.rs:138`) | **Change** — strictly tighter; per-route descriptor caps replace one global limit |
 | 6 | Rate limiting | Sliding window: chat 30/60s per-user, webhook 10/60s global (`platform/state.rs:74-140`) | Descriptor-driven sliding window: mutation 60/60s, read 120/60s, stream 30/60s **PerCaller**; public SSO + OAuth callback **PerIp** 60–120/60s; unsupported scope fails closed at composition (`webui_rate_limit.rs`, `auth/routes.rs:140-258`) | **Change** — per-route + dual scope (PerCaller for the API, PerIp for the public surface) |
-| 7 | Connection limit | `GATEWAY_MAX_CONNECTIONS` (default 100, SSE+WS combined); `SSE_BROADCAST_BUFFER` (`platform/state.rs`) | `SseCapacity`: 3 concurrent streams per `(tenant,user)`, 5-min max lifetime; WS shares the pool (`ironclaw_webui_v2/src/sse_capacity.rs`) | **Beta-break** → #3615 follow-up — the per-caller cap is *stricter per caller*, but v1's **global** ceiling (total SSE+WS process connections) has no v2 analogue: many authenticated callers / source IPs can exceed v1's total. A global backstop must land in the host `serve` lifecycle; no test locks it yet (none exists to lock) |
+| 7 | Connection limit | `GATEWAY_MAX_CONNECTIONS` (default 100, SSE+WS combined); `SSE_BROADCAST_BUFFER` (`platform/state.rs`) | `SseCapacity`: 3 concurrent streams per `(tenant,user)`, 5-min max lifetime; WS shares the pool (`ironclaw_webui/src/sse_capacity.rs`) | **Beta-break** → #3615 follow-up — the per-caller cap is *stricter per caller*, but v1's **global** ceiling (total SSE+WS process connections) has no v2 analogue: many authenticated callers / source IPs can exceed v1's total. A global backstop must land in the host `serve` lifecycle; no test locks it yet (none exists to lock) |
 | 8 | Peer-IP source | n/a | PerIp limiter keys on host-injected `ConnectInfo<SocketAddr>`, never `X-Forwarded-For`/`X-Real-IP`; missing peer fails closed (`webui_rate_limit.rs`) | **Keep** — trusted transport peer only |
 
 ## Test coverage
@@ -61,7 +61,7 @@ default.
 - `ironclaw_reborn_composition/src/webui/webui_rate_limit.rs::tests`: PerIp
   uses transport peer not forwarded headers, fail-closed on missing
   peer, unsupported scope rejected at composition (rows 6, 8).
-- `ironclaw_webui_v2/src/sse_capacity.rs::tests`: 3-stream per-caller
+- `ironclaw_webui/src/sse_capacity.rs::tests`: 3-stream per-caller
   cap, independent per caller (row 7).
 
 ## Notes

@@ -58,10 +58,10 @@ migration-support = []
 # from its `serve` subcommand. Substrate-only callers (v1 `AppBuilder`,
 # diagnostic harnesses) stay off the feature and carry no WebUI code.
 webui-v2-beta = [
-    # The `ironclaw_webui_v2` route surface merged up into
-    # `ironclaw_webui` (as its `webui_v2` module); this crate no
-    # longer depends on it. Composition keeps this feature to gate the WebUI
-    # facade, identity, admin, and route-mount vocabulary it still owns.
+    # The WebChat v2 route surface + serve loop merged up into `ironclaw_webui`
+    # (as its `webui_v2` module + `webui_serve`); this crate no longer depends on
+    # that route crate. Composition keeps this feature to gate the WebUI facade,
+    # identity, admin, and route-mount vocabulary it still owns.
     "dep:ironclaw_reborn_identity",
     "ironclaw_runner/webui-user-store",
     "libsql",

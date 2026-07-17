@@ -40,7 +40,7 @@ pnpm --version
 
 echo "==> WebUI frontend build"
 (
-    cd crates/ironclaw_webui_v2/frontend
+    cd crates/ironclaw_webui/frontend
     pnpm install --frozen-lockfile
     pnpm build
 )
