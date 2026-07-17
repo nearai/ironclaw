@@ -1,7 +1,7 @@
 """Shared Reborn WebUI v2 E2E harness.
 
 The legacy Playwright suite has mature shared fixtures in ``conftest.py`` for
-the ``ironclaw`` gateway. Reborn WebUI v2 is a different product surface: it
+the ``ironclaw-v1`` gateway. Reborn WebUI v2 is a different product surface: it
 boots ``ironclaw serve``, serves the React SPA under ``/v2/``, and uses
 ``/api/webchat/v2/*`` endpoints. Keep that setup here so browser and served API
 scenarios exercise the real Reborn binary without duplicating process plumbing.
