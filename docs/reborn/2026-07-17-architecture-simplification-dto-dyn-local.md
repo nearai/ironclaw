@@ -10,8 +10,8 @@ security invariant:
 
 1. **DTO proliferation** — a single tool call is re-wrapped through ~14
    near-identical request/result structs.
-2. **`dyn` proliferation** — ~6 hot-path trait objects, most with exactly one
-   production implementation.
+2. **`dyn` proliferation** — ~6 hot-path trait objects, several with exactly one
+   production implementation (the rest kept for genuine polymorphism).
 3. **Local-specific structs** — a parallel `InMemory*` / `Filesystem*` store
    tree per domain, plus deployment-mode struct families that risk local-only
    shortcuts leaking into production.
@@ -52,6 +52,14 @@ Verified request types on the down-path, with what each hop actually adds or dro
 | 4 | `CapabilityDispatchRequest` (`ironclaw_host_api`) | `capability_id, scope, authenticated_actor_user_id?, estimate, mounts?, resource_reservation?, input` | decompose `context`→`scope`+`actor`; **drop `trust_decision`**; **+`mounts`, +`resource_reservation`** (authorization outputs) |
 | 5 | `RuntimeAdapterRequest<'a, F, G>` (`ironclaw_dispatcher`) | hop 4 + `package, descriptor, filesystem&, governor&, runtime_policy` | + resolved substrate handles for the lane |
 | — | lane requests (`ScriptExecutionRequest` / `WitToolRequest` / `FirstPartyCapabilityRequest`) | per-lane shapes | final re-wrap into the lane's own type |
+
+Definitions (verified against HEAD, 2026-07-17; cite the symbol — line numbers drift):
+`CapabilityInvocation` `ironclaw_turns/src/run_profile/host.rs:1722`, `RuntimeCapabilityRequest`
+`ironclaw_host_runtime/src/lib.rs:322`, `CapabilityInvocationRequest`
+`ironclaw_capabilities/src/requests.rs:8`, `CapabilityDispatchRequest`
+`ironclaw_host_api/src/dispatch.rs:22`, `RuntimeAdapterRequest` `ironclaw_dispatcher/src/lib.rs:56`.
+The `dyn` impl counts (§1.3) and the 30-day window (`merged:>=2026-06-17`, §1.5) were derived
+the same way.
 
 Four mechanisms produce this, each visible in the code above:
 
@@ -295,14 +303,14 @@ Separate the **data plane** (the payload, which never changes shape) from the
 ```rust
 // ── ironclaw_host_api (the bottom crate everyone already depends on) ──
 struct Invocation { capability: CapabilityId, input: Json, scope: Scope, estimate: Estimate } // the ONE payload
-struct Authority  { trust: TrustClass, approval: Option<ApprovalLease>,
-                    reservation: Reservation, mounts: ScopedMounts }                          // accreted decisions
+struct Authority  { trust: TrustClass, approval: Option<ApprovalLease>,          // SEALED: fields private,
+                    reservation: Reservation, mounts: ScopedMounts }             // constructed only by authorize()
 enum   Blocked    { Approval(GateRef), Auth(GateRef), Resource(GateRef) }
-struct Outcome    { /* sanitized refs + summary */ }                                          // the ONE result
+struct Outcome    { /* sanitized refs + summary; carries success OR recoverable failure */ }  // the ONE result
 
 // ── the host kernel (trusted, below the loop seam) ──
-fn authorize(inv: &Invocation, scope: &Scope) -> Result<Authority, Blocked>;  // ALL policy, ONE place
-fn dispatch (inv: &Invocation, auth: &Authority, lane: &RuntimeLane) -> Outcome;
+fn authorize(inv: &Invocation) -> Result<Authority, Blocked>;                    // scope from inv.scope; ALL policy, one place
+fn dispatch (inv: &Invocation, auth: &Authority, lane: &RuntimeLane) -> Outcome; // already authorized
 ```
 
 - The payload is `Invocation`, full stop. `RuntimeCapabilityRequest`,
@@ -313,10 +321,16 @@ fn dispatch (inv: &Invocation, auth: &Authority, lane: &RuntimeLane) -> Outcome;
   the boundary rule (and Golden Boundary #1: `host_api` stays vocabulary-only)
   instead of fighting it. This finishes a move that `CapabilityDispatchRequest`
   already half-made.
-- Authorization becomes a single `authorize()` body — the four scattered policy
-  checks collapse into one reviewable function with visible ordering. This also
-  removes the `Ok(Failed)` vs `Err(terminate)` ambiguity, because the single seam
-  returns one `Result<Outcome, Blocked>` shape.
+- `Authority` is **sealed**: private fields, no public constructor — the only way to
+  obtain one is to pass `authorize()` (host-minted, following the
+  `LoopExitValidationPolicy` witness pattern), so a caller cannot forge or retain an
+  unauthorized `Authority`.
+- Authorization becomes a single `authorize()` body — the four scattered policy checks
+  collapse into one reviewable function with visible ordering. The result contract is one
+  shape: `invoke` = `authorize` then `dispatch` = `Result<Outcome, Blocked>`, where
+  `Outcome` carries *both* success and recoverable tool failure and `Blocked` carries the
+  approval/auth/resource gates. There is no separate `Err(terminate)` channel — which is
+  what removes the `Ok(Failed)` vs `Err` ambiguity §1.2 flagged.
 
 **Type count on a capability call: ~14 → 3.**
 
@@ -397,8 +411,15 @@ So the move is subtractive, not additive:
 
 2. **Backend choice is deployment config, not a type.** Which `RootFilesystem`
    impl backs a run is one value in a `DeploymentConfig` fed to a single
-   `build_runtime(config)`. "Local may reduce authority, never increase it" is a
-   policy value, not a `Local*` code fork (§4.4).
+   `build_runtime(config)`; the runtime holds it as `Arc<dyn RootFilesystem>` (or a
+   concrete `F` fixed at `build_runtime`) — the existing `CompositeRootFilesystem` /
+   backend selection already does exactly this, so nothing new is invented and the
+   `RowBackend` trait an earlier draft floated is unnecessary. Deleting the
+   `InMemory*Store`s has **no persistence-compatibility impact**: they are
+   in-memory/test-only, and the durable libSQL/Postgres backends — with their own
+   transaction/locking semantics, which `RootFilesystem` already encapsulates — are
+   untouched. "Local may reduce authority, never increase it" is a policy value, not a
+   `Local*` code fork (§4.4).
 
 Why the in-memory stores exist today: they predate the generic
 `Filesystem*Store<F>` and were kept as the fast reference/test path. Now that a
@@ -430,7 +451,7 @@ const LOCAL_DEV: DeploymentConfig = DeploymentConfig {
     filesystem: Backend::InMemory,                 // or Backend::Disk
     approval:   ApprovalPolicy::AutoApproveEligible, // wider than hosted — a value
     network:    NetworkPolicy::AllowAll,           // vs Allowlist(..) in hosted
-    process:    ProcessPolicy::HostProcess,        // vs Sandboxed
+    process:    ProcessPolicy::HostUnsandboxed(LocalOnly), // vs Sandboxed; gated by a local-only token a served boot can't mint (§6)
     owner_seed: Some(OwnerSeed::EnvToken),          // was the local_trigger_access module
 };
 ```
@@ -623,11 +644,11 @@ selector — none add a method; they add a capability the loop can invoke and
 ```rust
 // host_api vocabulary — the frozen kernel types (§4.5)
 struct Invocation { capability: CapabilityId, input: Json, scope: Scope, estimate: Estimate }
-struct Authority  { trust: TrustClass, approval: Option<ApprovalLease>, reservation: Reservation, mounts: ScopedMounts }
+struct Authority  { /* trust, approval, reservation, mounts — SEALED: private fields, construct only via authorize() */ }
 enum   Blocked    { Approval(GateRef), Auth(GateRef), Resource(GateRef) }
-struct Outcome    { refs: OutcomeRefs, summary: SafeSummary }
+struct Outcome    { refs: OutcomeRefs, summary: SafeSummary }  // carries success OR recoverable failure
 
-fn authorize(inv: &Invocation, scope: &Scope) -> Result<Authority, Blocked>;   // one authority pass
+fn authorize(inv: &Invocation) -> Result<Authority, Blocked>;                    // scope derived from inv.scope
 fn dispatch (inv: &Invocation, auth: &Authority, lane: &RuntimeLane) -> Outcome; // already authorized
 ```
 
@@ -1056,10 +1077,13 @@ regression test that pins it (the commit-msg hook already requires one).
 
 1. Should `TurnRun` and `ironclaw_processes` converge on a shared leased-work-unit
    abstraction, or stay deliberately separate with a documented rationale?
-2. Does `Authority` accrete as one value, or should trust/approval/reservation
-   remain separately-typed witnesses passed as a tuple to preserve sealed
-   construction guarantees (see the trust-boundary stack note,
-   `docs/reborn/2026-05-11-trust-boundary-stack-note.md`)?
+2. ~~Does `Authority` accrete as one value, or stay separate witnesses?~~ **Resolved
+   (§3):** it accretes as one value but is **sealed** — private fields, host-only
+   construction via `authorize()`, following the `LoopExitValidationPolicy`
+   private-field / host-witness pattern
+   (`docs/reborn/2026-05-11-trust-boundary-stack-note.md`), so no caller can forge or
+   retain an unauthorized `Authority`. Open sub-question: whether any field needs a
+   narrowed public projection for a product adapter, or all stay crate-private.
 3. ~~Is `DeploymentConfig` expressive enough to encode every current
    LocalDev/HostedDev/EnterpriseDev difference as data?~~ **Answered (§4.4.1):** it
    expresses every *selection*; the `LocalDev*` code residue is not all config — part
