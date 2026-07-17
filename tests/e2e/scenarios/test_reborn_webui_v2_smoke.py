@@ -434,9 +434,16 @@ async def test_reborn_v2_automation_action_error_is_safe_dismissible_and_cleared
     retry_started = asyncio.Event()
     release_retry = asyncio.Event()
     retry_completed = asyncio.Event()
+    raw_error_logged = asyncio.Event()
 
     context = await reborn_v2_browser.new_context(viewport={"width": 1280, "height": 720})
     page = await context.new_page()
+
+    def capture_console_error(message) -> None:
+        if message.type == "error" and raw_error in message.text:
+            raw_error_logged.set()
+
+    page.on("console", capture_console_error)
 
     async def handle_automations(route) -> None:
         nonlocal attempt_count
@@ -508,6 +515,7 @@ async def test_reborn_v2_automation_action_error_is_safe_dismissible_and_cleared
             "Unable to update the automation. Please try again."
         )
         await expect(error_banner).not_to_contain_text(raw_error)
+        await asyncio.wait_for(raw_error_logged.wait(), timeout=10)
 
         await error_banner.get_by_role("button", name="Dismiss").click()
         await expect(error_banner).to_have_count(0)

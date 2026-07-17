@@ -77,7 +77,8 @@ export function useAutomations(includeCompleted = false) {
   const clearActionError = React.useCallback(() => {
     setHasActionError(false);
   }, []);
-  const showActionError = React.useCallback(() => {
+  const showActionError = React.useCallback((error: unknown) => {
+    console.error("Automation action failed:", error);
     setHasActionError(true);
   }, []);
   const handleActionSuccess = React.useCallback(() => {
