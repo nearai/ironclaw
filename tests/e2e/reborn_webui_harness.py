@@ -196,6 +196,16 @@ async def close_reborn_server(proc) -> None:
             await stop_process(proc, sig=signal.SIGTERM, timeout=5)
 
 
+async def kill_reborn_server(proc) -> None:
+    """Hard-kill (SIGKILL) the reborn process, skipping graceful shutdown entirely.
+
+    Used by durability scenarios that need to prove on-disk state survives an
+    unclean process death, as opposed to `close_reborn_server`'s SIGINT/SIGTERM path.
+    """
+    if proc is not None and proc.returncode is None:
+        await stop_process(proc, sig=signal.SIGKILL, timeout=5)
+
+
 async def enable_reborn_global_auto_approve(base_url: str) -> None:
     """Enable the Tools settings global auto-approve switch for this test user."""
     async with httpx.AsyncClient(headers=reborn_bearer_headers()) as client:
@@ -271,7 +281,13 @@ async def reborn_v2_private_installs_yolo_server(
 async def reborn_v2_restartable_server(
     ironclaw_reborn_binary, mock_llm_server, tmp_path_factory
 ):
-    """Start/stop Reborn against one persistent home directory."""
+    """Start/stop Reborn against one persistent home directory.
+
+    `stop(hard=True)` SIGKILLs the process instead of shutting it down
+    gracefully, for durability scenarios that need to prove on-disk state
+    survives an unclean death — the caller can read the killed PID off
+    `state["proc"].pid` beforehand for a post-kill leak check.
+    """
     home_dir = tmp_path_factory.mktemp("ironclaw-reborn-v2-restartable-home")
     state = {"proc": None, "base_url": None}
 
@@ -287,8 +303,11 @@ async def reborn_v2_restartable_server(
         state["base_url"] = base_url
         return base_url
 
-    async def stop() -> None:
-        await close_reborn_server(state["proc"])
+    async def stop(*, hard: bool = False) -> None:
+        if hard:
+            await kill_reborn_server(state["proc"])
+        else:
+            await close_reborn_server(state["proc"])
         state["proc"] = None
 
     await start()
