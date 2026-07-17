@@ -153,7 +153,31 @@ impl TelegramInboundPreRouter {
                 Ok(handled_silently_ack())
             }
             InboundTextClass::StartWithoutPayload => {
-                self.send_throttled_hint(chat_id).await;
+                // qa-telegram:C6 — a paired sender's bare /start is a static
+                // no-op (re-opening the chat must not pitch pairing to an
+                // already-paired account); only unpaired senders get the
+                // throttled onboarding hint. A pairedness-lookup outage acks
+                // silently: neither misleading copy nor a redelivery loop is
+                // worth a greeting.
+                let provider_user_id = telegram_user_identity_provider_user_id(
+                    &self.installation_id,
+                    &from.id.to_string(),
+                );
+                match self
+                    .lookup
+                    .resolve_user_identity(TELEGRAM_IDENTITY_PROVIDER, &provider_user_id)
+                    .await
+                {
+                    Ok(Some(_)) => {}
+                    Ok(None) => self.send_throttled_hint(chat_id).await,
+                    Err(error) => {
+                        tracing::debug!(
+                            target = TRACING_TARGET,
+                            reason = %error,
+                            "pairedness lookup failed on /start; acked without a reply"
+                        );
+                    }
+                }
                 Ok(handled_silently_ack())
             }
             InboundTextClass::Ordinary => {
@@ -1255,6 +1279,46 @@ mod tests {
             Some(&(555, PAIRED_REPLY.to_string())),
             "the success confirmation is never throttled"
         );
+    }
+
+    /// qa-telegram:C6 — a PAIRED sender's bare `/start` is a static no-op:
+    /// no turn, no reply (re-opening the chat must not pitch pairing to an
+    /// already-paired account). Unpaired `/start` keeps the throttled hint
+    /// (pinned above).
+    #[tokio::test]
+    async fn paired_start_without_payload_is_a_silent_no_op() {
+        let fixture = fixture().await;
+        fixture.bind_paired(42, "ben");
+
+        let outcome = fixture
+            .process(&private_text_update_body(42, 555, Some("/start")))
+            .await
+            .expect("acked");
+
+        assert_silently_handled(&outcome);
+        assert_eq!(fixture.runner_calls.load(Ordering::SeqCst), 0, "no turn");
+        assert_eq!(
+            fixture.bot_api.sends(),
+            Vec::<(i64, String)>::new(),
+            "no reply of any kind to a paired /start"
+        );
+    }
+
+    /// A pairedness-lookup outage on `/start` acks silently rather than
+    /// pitching the pairing hint to a possibly-paired sender or asking
+    /// Telegram to redeliver a greeting.
+    #[tokio::test]
+    async fn start_without_payload_acks_silently_when_lookup_is_down() {
+        let fixture = fixture().await;
+        fixture.lookup.fail();
+
+        let outcome = fixture
+            .process(&private_text_update_body(42, 555, Some("/start")))
+            .await
+            .expect("acked");
+
+        assert_silently_handled(&outcome);
+        assert_eq!(fixture.bot_api.sends(), Vec::<(i64, String)>::new());
     }
 
     // Row (c): bare `/start` and unpaired ordinary text hint, throttled per

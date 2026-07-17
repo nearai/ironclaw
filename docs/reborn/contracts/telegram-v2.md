@@ -126,6 +126,7 @@ Operator-managed, one bot per deployment
   | non-private chat (group/supergroup), `channel_post`, `edited_message`, sender is a bot | ignored — no turn, no reply |
   | private DM from an **unpaired** sender | fail closed, no turn; the bot replies with a **static** throttled pairing hint (never LLM-generated, at most once per chat per throttle window) |
   | private `/start <CODE>` or a bare message exactly matching a live code | pairing consume (below) |
+  | private bare `/start` (no payload) | paired sender: silent ack — no turn, no reply (re-opening the chat must not pitch pairing); unpaired sender: the static throttled pairing hint; pairedness-lookup outage: silent ack |
   | private text from a **paired** sender | workflow turn (continuous conversation) |
 
 - **Identity per message:** `telegram_actor_identity.rs` resolves

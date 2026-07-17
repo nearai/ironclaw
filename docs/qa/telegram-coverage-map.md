@@ -53,7 +53,7 @@ by exact test name — `cargo test <name>` locates each.
 | `qa-telegram:C3`<br>Telegram splits responses over 4096 characters into ordered lossless messages | **gap-product** | NOT IMPLEMENTED: no 4096 chunking exists in `render_final_reply` (one sendMessage per reply; >4096 gets Telegram 400 → honest FailedPermanent). #6116's descendant render has the same shape, so implementing main-side would diverge the adapter from its fold target. Owner call: implement at the fold or accept truncation-by-failure. No test written (would pin a missing feature). |
 | `qa-telegram:C4`<br>Telegram sends deterministic plain text without parse_mode | **covered** | `cargo test -p ironclaw_telegram_v2_adapter` render::final_reply_renders_with_topic_and_reply_target (body carries chat_id/text only — no parse_mode key) + `cargo test --test reborn_integration_telegram_journey` rendered-reply asserts |
 | `qa-telegram:C5`<br>Telegram routes attachment captions but refuses captionless media without a model turn | **partial** | `cargo test -p ironclaw_telegram_v2_adapter` payload::private_chat_with_photo_emits_attachment_descriptor_no_bytes (caption routing) + `cargo test -p ironclaw_telegram_extension` telegram_dispatch::textless_message_follows_pairing_split. The 'model-visible attachment note for captionless media' half is model-behavior — Recorded-Model tier. |
-| `qa-telegram:C6`<br>A paired Telegram start command is a static no-op | **divergence** | SHIPPED ≠ ROW: a paired `/start` (no payload) currently receives the throttled static pairing hint (`telegram_dispatch.rs` StartWithoutPayload arm is pairedness-agnostic); the row drafts a silent no-op for paired senders. Harmless but confusing copy for a paired user. Owner adjudication: make the hint pairedness-aware or accept the hint. Behavior IS pinned (classify + throttle tests); no test asserts the drafted no-op. |
+| `qa-telegram:C6`<br>A paired Telegram start command is a static no-op | **covered** | Implemented 2026-07-17 (was a shipped-vs-row divergence — the hint was pairedness-agnostic): `cargo test -p ironclaw_telegram_extension` telegram_dispatch::{paired_start_without_payload_is_a_silent_no_op, start_without_payload_acks_silently_when_lookup_is_down}. |
 | `qa-telegram:C7`<br>Telegram preserves valid Unicode and escaped controls through the conversation path | **partial** | `cargo test -p ironclaw_telegram_v2_adapter` payload::slice_tests::multibyte_slice_respects_utf16_offsets (+ command-argument control-char rejection via shared validation). A full unicode round-trip through the composed stack is not separately pinned; the journey drives ASCII. |
 | `qa-telegram:C9`<br>DRAFT — qa-telegram:C9 | **draft** | DRAFT placeholder — no executable sub-rows yet |
 | `qa-telegram:D1`<br>DRAFT — qa-telegram:D1 | **draft** | DRAFT parent — carried by D1:01/D1:02 |
@@ -222,8 +222,8 @@ by exact test name — `cargo test <name>` locates each.
 
 ## Tally
 
-- **covered**: 70
-- **divergence**: 2
+- **covered**: 71
+- **divergence**: 1
 - **draft**: 19
 - **gap-product**: 1
 - **needs-test**: 2
