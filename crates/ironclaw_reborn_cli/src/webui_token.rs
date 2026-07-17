@@ -392,7 +392,7 @@ fn validate_token_entropy(
 /// per caller.
 #[cfg(feature = "webui-v2-beta")]
 pub(crate) fn login_link(home: &ironclaw_reborn_config::RebornHome) -> Option<String> {
-    if !webui_token_file_is_valid(home.path()) {
+    if !webui_token_file_is_valid(home.path()).unwrap_or(false) {
         return None;
     }
     let token = fs::read_to_string(webui_token_file_path(home.path())).ok()?;
