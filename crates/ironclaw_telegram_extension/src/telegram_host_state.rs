@@ -22,8 +22,8 @@ use ironclaw_product_adapters::AdapterInstallationId;
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 
 use crate::telegram_pairing::{
-    TelegramBindingError, TelegramDmTarget, TelegramDmTargetStore, TelegramPairingError,
-    TelegramPairingRecord, TelegramPairingStore, TelegramUserBindingStore,
+    RemovedTelegramBinding, TelegramBindingError, TelegramDmTarget, TelegramDmTargetStore,
+    TelegramPairingError, TelegramPairingRecord, TelegramPairingStore, TelegramUserBindingStore,
 };
 use crate::telegram_setup::{
     TelegramInstallationSetup, TelegramInstallationSetupStore, TelegramSetupError,
@@ -459,7 +459,7 @@ where
         &self,
         user_id: &UserId,
         installation: Option<&AdapterInstallationId>,
-    ) -> Result<Vec<String>, TelegramBindingError> {
+    ) -> Result<Vec<RemovedTelegramBinding>, TelegramBindingError> {
         let index_path = Self::binding_user_index_path(user_id).map_err(map_fs_binding)?;
         let Some((index, _)) = self
             .read_record::<StoredTelegramBindingUserIndex>(&index_path)
@@ -482,9 +482,20 @@ where
                 continue;
             }
             let path = Self::binding_path(&provider_user_id).map_err(map_fs_binding)?;
+            // Read the record's epoch before deleting: the conversation-actor
+            // pairing cleanup needs it for the owned-by check. Unreadable
+            // record -> epoch None (cleanup fails safe as owner-changed).
+            let epoch = self
+                .read_record::<StoredTelegramBinding>(&path)
+                .await
+                .map_err(map_fs_binding)?
+                .map(|(record, _)| record.epoch);
             match self.delete_record(&path).await {
                 Ok(()) | Err(FilesystemError::NotFound { .. }) => {
-                    removed.push(provider_user_id);
+                    removed.push(RemovedTelegramBinding {
+                        provider_user_id,
+                        epoch,
+                    });
                 }
                 Err(error) => return Err(map_fs_binding(error)),
             }
@@ -808,13 +819,21 @@ mod tests {
             removed.is_empty(),
             "tg-bot-1 scope must not remove tg-bot-10 bindings"
         );
+        let removed = state
+            .unbind_telegram_users_for_user(&ben, None)
+            .await
+            .expect("unscoped unbind");
         assert_eq!(
-            state
-                .unbind_telegram_users_for_user(&ben, None)
-                .await
-                .expect("unscoped unbind"),
-            vec!["tg-bot-10:555".to_string()],
+            removed
+                .iter()
+                .map(|binding| binding.provider_user_id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["tg-bot-10:555"],
             "None scope removes the user's bindings across installations"
+        );
+        assert!(
+            removed[0].epoch.is_some(),
+            "removed bindings surface their epoch for pairing cleanup"
         );
     }
 }

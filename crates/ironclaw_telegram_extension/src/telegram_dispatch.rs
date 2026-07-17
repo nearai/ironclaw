@@ -684,9 +684,10 @@ pub mod test_fixtures {
             &self,
             user_id: &UserId,
             installation: Option<&AdapterInstallationId>,
-        ) -> Result<Vec<String>, TelegramBindingError> {
+        ) -> Result<Vec<crate::telegram_pairing::RemovedTelegramBinding>, TelegramBindingError>
+        {
             let mut bindings = self.bindings.lock().expect("lock");
-            let removed: Vec<String> = bindings
+            let removed: Vec<crate::telegram_pairing::RemovedTelegramBinding> = bindings
                 .iter()
                 .filter(|(key, (bound, _))| {
                     bound == user_id
@@ -697,10 +698,15 @@ pub mod test_fixtures {
                             )
                         })
                 })
-                .map(|(key, _)| key.clone())
+                .map(
+                    |(key, (_, epoch))| crate::telegram_pairing::RemovedTelegramBinding {
+                        provider_user_id: key.clone(),
+                        epoch: Some(epoch.clone()),
+                    },
+                )
                 .collect();
-            for key in &removed {
-                bindings.remove(key);
+            for binding in &removed {
+                bindings.remove(&binding.provider_user_id);
             }
             Ok(removed)
         }
@@ -920,6 +926,7 @@ pub mod test_fixtures {
             Arc::new(InMemoryBindingStore::default()),
             Arc::new(InMemoryDmTargetStore::default()),
             Arc::new(RecordingContinuationDispatcher::default()),
+            crate::telegram_pairing::pairing_test_support::RecordingActorPairings::shared(),
         ))
     }
 

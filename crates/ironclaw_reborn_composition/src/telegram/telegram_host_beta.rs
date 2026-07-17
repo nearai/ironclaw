@@ -364,17 +364,6 @@ pub async fn build_telegram_host_runtime_mounts(
         .as_ref()
         .ok_or(TelegramHostBuildError::ProductAuthUnavailable)?
         .continuation_dispatcher();
-    let pairing = Arc::new(TelegramPairingService::new(
-        config.tenant_id.clone(),
-        config.agent_id.clone(),
-        config.project_id.clone(),
-        Arc::clone(&setup_service),
-        pairing_store,
-        binding_store,
-        Arc::clone(&dm_target_store),
-        continuation_dispatcher,
-    ));
-
     // Durable, filesystem-backed conversation binding store so Telegram
     // conversation continuity survives a process restart. Backend
     // (libSQL / Postgres / local disk) is a property of the telegram
@@ -392,6 +381,17 @@ pub async fn build_telegram_host_runtime_mounts(
         conversation_services.clone();
     let actor_pairings: Arc<dyn ironclaw_conversations::ConversationActorPairingService> =
         conversation_services.clone();
+    let pairing = Arc::new(TelegramPairingService::new(
+        config.tenant_id.clone(),
+        config.agent_id.clone(),
+        config.project_id.clone(),
+        Arc::clone(&setup_service),
+        pairing_store,
+        binding_store,
+        Arc::clone(&dm_target_store),
+        continuation_dispatcher,
+        Arc::clone(&actor_pairings),
+    ));
     let actor_user_resolver: Arc<dyn ProductActorUserResolver> = Arc::new(
         TelegramUserIdentityActorResolver::new(Arc::clone(&identity_lookup)),
     );

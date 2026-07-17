@@ -237,18 +237,21 @@ pub fn render_auth_prompt(
     Ok(render_text_message_chunks(reply, &text, credential_handle))
 }
 
-/// Render a `BlockedApproval` prompt as `sendMessage` requests. Telegram's
-/// inbound dispatch has no `approve`/`deny` parsing yet, so the honest copy
-/// directs the decision to the web app instead of claiming an in-chat reply
-/// works.
+/// Render a `BlockedApproval` prompt as `sendMessage` requests. The copy
+/// advertises the in-chat reply because inbound genuinely parses it — the
+/// channel-neutral grammar in
+/// `ironclaw_product_adapters::interaction_commands`, the same one the
+/// shared busy hint advertises. Keep copy and grammar in lockstep.
 pub fn render_gate_prompt(
     reply: &TelegramReplyTarget,
     view: &GatePromptView,
     credential_handle: EgressCredentialHandle,
 ) -> Result<Vec<EgressRequest>, TelegramRenderError> {
     let text = format!(
-        "{}\n\n{}\n\nApprove or deny this from the IronClaw web app — I can't take approvals in this chat yet.",
-        view.headline, view.body
+        "{headline}\n\n{body}\n\nReply approve or deny in this chat to respond. If several requests are pending here, use approve {gate_ref} or deny {gate_ref}. You can also decide from the IronClaw web app.",
+        headline = view.headline,
+        body = view.body,
+        gate_ref = view.gate_ref
     );
     Ok(render_text_message_chunks(reply, &text, credential_handle))
 }

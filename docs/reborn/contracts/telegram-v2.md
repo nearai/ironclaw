@@ -230,8 +230,13 @@ provider consent → the OAuth callback resumes the parked run; nothing secret
 enters the chat). Credential-entry challenges never reach the adapter — the
 shared delivery driver's deny arm cancels the run and posts the
 "set this up in the web app" notice directly. A `BlockedApproval` run's
-`GatePrompt` renders with copy directing the approve/deny decision to the web
-app (Telegram inbound has no `approve`/`deny` parsing yet). Both prompts ride
+`GatePrompt` renders with copy advertising the in-chat reply plus the web-app
+fallback. In-chat gate commands (`approve`/`deny`/`approve gate:<ref>`/`deny
+gate:<ref>`/`auth deny gate:<ref>`) parse through the channel-neutral grammar
+in `ironclaw_product_adapters::interaction_commands` — the same grammar Slack
+uses and the same commands the shared busy hints advertise; drift guards
+round-trip the advertised copy through the parser at both the driver and
+adapter tiers. Both prompts ride
 the same chunking + honesty mapping above and record `Delivered` with the
 originating `run_id`. (Regression 2026-07-17: the adapter used to record
 these `Deferred`, so an auth-gated DM watched "thinking…" get deleted and

@@ -5330,6 +5330,30 @@ mod tests {
             !body.contains("authentication step"),
             "deferred-busy hint for BlockedAuth must not mention 'authentication step', got: {body}"
         );
+
+        // Drift guard: the command this hint ADVERTISES must parse through
+        // the channel-neutral interaction grammar every adapter feeds its
+        // chat text into. The 2026-07-17 Telegram phantom-affordance loop
+        // was exactly this drift — hint copy promising a command no parser
+        // recognized. Extract the advertised command verbatim and round-trip
+        // it (with the backticks a user would paste).
+        let start = body.find("auth deny gate:").expect("advertised command");
+        let advertised: &str = body[start..]
+            .split('`')
+            .next()
+            .expect("command ends at the closing backtick");
+        let parsed = ironclaw_product_adapters::parse_interaction_resolution_text(
+            ironclaw_product_adapters::strip_wrapping_inline_code(advertised),
+            ironclaw_product_adapters::ProductTriggerReason::DirectChat,
+        )
+        .expect("advertised command must be grammatical");
+        assert!(
+            matches!(
+                parsed,
+                Some(ironclaw_product_adapters::ProductInboundPayload::AuthResolution(_))
+            ),
+            "the hint's advertised command must parse as an auth resolution, got {parsed:?}"
+        );
     }
 
     /// Accepted ack + BlockedAuth state → cancel_run is called and CHANNEL_AUTH_UNAVAILABLE_MESSAGE

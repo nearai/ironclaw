@@ -1292,9 +1292,11 @@ mod tests {
     }
 
     /// Companion to the auth-prompt regression: a `BlockedApproval` run's
-    /// `GatePrompt` also rendered to nothing. Telegram's inbound dispatch has
-    /// no `approve`/`deny` parsing yet, so the prompt must say the decision
-    /// happens in the web app — but it must SAY it, not stay silent.
+    /// `GatePrompt` also rendered to nothing. The prompt advertises the
+    /// in-chat `approve`/`deny` reply (parsed by the shared grammar in
+    /// `ironclaw_product_adapters::interaction_commands`) plus the web-app
+    /// fallback — and the advertised command is round-tripped through that
+    /// grammar below so copy and parser cannot drift.
     #[tokio::test]
     async fn render_outbound_gate_prompt_sends_webapp_redirect_and_records_delivered() {
         let adapter = TelegramV2Adapter::new(config(false));
@@ -1334,8 +1336,34 @@ mod tests {
         let text = body["text"].as_str().expect("text");
         assert!(text.contains("Approval needed"), "headline: {text}");
         assert!(
+            text.contains("Reply approve or deny in this chat"),
+            "the prompt advertises the in-chat reply: {text}"
+        );
+        assert!(
             text.contains("IronClaw web app"),
-            "the prompt directs the decision to the web app: {text}"
+            "the prompt keeps the web-app fallback: {text}"
+        );
+        // Drift guard at the adapter tier: the targeted command this copy
+        // advertises must parse through the shared interaction grammar.
+        let start = text
+            .find("approve gate:")
+            .expect("advertised targeted command");
+        let advertised: String = text[start..]
+            .split_whitespace()
+            .take(2)
+            .collect::<Vec<_>>()
+            .join(" ");
+        let parsed = ironclaw_product_adapters::parse_interaction_resolution_text(
+            &advertised,
+            ironclaw_product_adapters::ProductTriggerReason::DirectChat,
+        )
+        .expect("advertised command is grammatical");
+        assert!(
+            matches!(
+                parsed,
+                Some(ironclaw_product_adapters::ProductInboundPayload::ApprovalResolution(_))
+            ),
+            "advertised command parses as an approval resolution, got {parsed:?}"
         );
         let statuses = sink.statuses();
         assert_eq!(statuses.len(), 1);

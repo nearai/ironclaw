@@ -1090,6 +1090,192 @@ async fn telegram_dm_gated_install_posts_oauth_authorization_link_not_silence() 
     stack.runtime.shutdown().await.expect("runtime shuts down");
 }
 
+/// Ben's third regression (2026-07-17): the busy-on-auth hint tells the user
+/// to reply `auth deny gate:<ref>` in this chat, but that reply used to parse
+/// as a plain user message and bounce off the busy thread with the same hint
+/// — an advertised affordance with no implementation (the phantom loop). This
+/// pins the whole decline journey at user seams only: park on auth → busy
+/// hint advertises the command → the user sends exactly what the hint said →
+/// the gate dies and the thread takes new messages again.
+#[tokio::test]
+async fn telegram_dm_auth_deny_command_cancels_gate_and_frees_the_thread() {
+    // FIFO: install + activate park the run; the deny CANCELS (no resume
+    // model call), so the two trailing entries serve the post-deny turns.
+    // Both carry the same text so the assertion is deterministic regardless
+    // of which entry the next turn consumes.
+    let stack = build_journey_stack_with_google_oauth([
+        RebornScriptedReply::tool_call(
+            "builtin.extension_install",
+            json!({"extension_id": "gmail"}),
+        ),
+        RebornScriptedReply::tool_call(
+            "builtin.extension_activate",
+            json!({"extension_id": "gmail"}),
+        ),
+        RebornScriptedReply::text("thread is free again"),
+        RebornScriptedReply::text("thread is free again"),
+        RebornScriptedReply::text("thread is free again"),
+    ])
+    .await;
+
+    let secret = admin_save(&stack).await;
+    pair_via_webhook(&stack, &secret, 1).await;
+
+    let status = stack.webhook_dm(&secret, 2, "can you set up gmail?").await;
+    assert_eq!(status, StatusCode::OK);
+    stack
+        .wait_for_dm_send(|text| text.contains("accounts.google.com"))
+        .await
+        .expect("the gated install DMs the authorization link first");
+
+    // A message while the run is parked draws the busy hint that advertises
+    // the in-chat decline command, gate ref included.
+    let status = stack.webhook_dm(&secret, 3, "hello?").await;
+    assert_eq!(status, StatusCode::OK);
+    let hint = stack
+        .wait_for_dm_send(|text| text.contains("auth deny gate:"))
+        .await
+        .expect("the busy thread advertises the decline command");
+    let hint_text = hint["text"].as_str().expect("hint text");
+    let command_start = hint_text.find("auth deny gate:").expect("command in hint");
+    let command: String = hint_text[command_start..]
+        .chars()
+        .take_while(|c| !c.is_whitespace() || *c == ' ')
+        .collect::<String>()
+        .split('`')
+        .next()
+        .expect("command before closing backtick")
+        .trim()
+        .to_string();
+    assert!(
+        command.starts_with("auth deny gate:") && command.len() > "auth deny gate:".len(),
+        "extracted a concrete command from the hint: {command:?}"
+    );
+
+    // The user does exactly what the hint said, and the decline is
+    // acknowledged in the chat.
+    let status = stack.webhook_dm(&secret, 4, &command).await;
+    assert_eq!(status, StatusCode::OK);
+    stack
+        .wait_for_dm_send(|text| text.contains("Authentication canceled"))
+        .await
+        .expect("the in-chat decline must be acknowledged, not silent");
+
+    // The thread frees: a follow-up DM gets a real reply. Cancellation is
+    // asynchronous after the ack, so a fast follow-up can still draw one
+    // honest "please resend" bounce — the user (and this test) resends.
+    let sends_before = stack.network.request_bodies_for("/sendMessage").len();
+    let mut reply = None;
+    for attempt in 0..8 {
+        let status = stack
+            .webhook_dm(&secret, 5 + attempt, "are you still there?")
+            .await;
+        assert_eq!(status, StatusCode::OK);
+        if let Ok(send) = stack
+            .wait_for_dm_send(|text| text.contains("thread is free again"))
+            .await
+        {
+            reply = Some(send);
+            break;
+        }
+    }
+    let reply =
+        reply.expect("after the acknowledged decline the thread must take new messages and reply");
+    assert_eq!(reply["chat_id"], TG_CHAT_ID);
+    let post_deny_sends: Vec<String> = stack.network.request_bodies_for("/sendMessage")
+        [sends_before..]
+        .iter()
+        .filter_map(|body| body["text"].as_str().map(str::to_string))
+        .collect();
+    assert!(
+        !post_deny_sends
+            .iter()
+            .any(|text| text.contains("waiting on authentication")),
+        "no auth-busy-hint loop after the decline: {post_deny_sends:?}"
+    );
+
+    stack.runtime.shutdown().await.expect("runtime shuts down");
+}
+
+/// Ben's fourth regression (2026-07-17): unpair → re-pair resurrected the OLD
+/// thread — including its parked BlockedAuth run, whose busy hint greeted the
+/// freshly re-paired user. Telegram's `unpair` cleaned pairing codes,
+/// identity bindings, and DM targets but never the conversation-actor
+/// pairing (Slack's disconnect cleans all four), so the chat re-attached to
+/// the stale thread. Pins the fresh-slate journey: park a run → self-service
+/// disconnect → re-pair → the next DM starts a FRESH conversation (real
+/// reply), not the old run's busy hint.
+#[tokio::test]
+async fn telegram_unpair_then_repair_starts_fresh_thread_not_the_old_blocked_one() {
+    let stack = build_journey_stack_with_google_oauth([
+        RebornScriptedReply::tool_call(
+            "builtin.extension_install",
+            json!({"extension_id": "gmail"}),
+        ),
+        RebornScriptedReply::tool_call(
+            "builtin.extension_activate",
+            json!({"extension_id": "gmail"}),
+        ),
+        RebornScriptedReply::text("fresh conversation reply"),
+        RebornScriptedReply::text("fresh conversation reply"),
+    ])
+    .await;
+
+    let secret = admin_save(&stack).await;
+    pair_via_webhook(&stack, &secret, 1).await;
+
+    // Park a run on the auth gate in the paired conversation.
+    let status = stack.webhook_dm(&secret, 2, "can you set up gmail?").await;
+    assert_eq!(status, StatusCode::OK);
+    stack
+        .wait_for_dm_send(|text| text.contains("accounts.google.com"))
+        .await
+        .expect("the gated install parks with a visible auth prompt");
+
+    // Self-service disconnect through the production route.
+    let (status, body) = call_route(
+        stack.mounts.protected_routes().router,
+        Method::DELETE,
+        "/api/webchat/v2/channels/telegram/pairing",
+        Some(stack.caller.clone()),
+        &[],
+        None,
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::NO_CONTENT,
+        "disconnect response: {body}"
+    );
+
+    // Re-pair with a fresh code.
+    pair_via_webhook(&stack, &secret, 3).await;
+
+    // The re-paired user's first message must start a fresh conversation —
+    // a real reply, never the resurrected run's auth-busy hint.
+    let sends_before = stack.network.request_bodies_for("/sendMessage").len();
+    let status = stack.webhook_dm(&secret, 4, "hello again!").await;
+    assert_eq!(status, StatusCode::OK);
+    let reply = stack
+        .wait_for_dm_send(|text| text.contains("fresh conversation reply"))
+        .await
+        .expect("a re-paired user's DM must start fresh, not hit the old blocked thread");
+    assert_eq!(reply["chat_id"], TG_CHAT_ID);
+    let post_repair_sends: Vec<String> = stack.network.request_bodies_for("/sendMessage")
+        [sends_before..]
+        .iter()
+        .filter_map(|body| body["text"].as_str().map(str::to_string))
+        .collect();
+    assert!(
+        !post_repair_sends
+            .iter()
+            .any(|text| text.contains("waiting on authentication")),
+        "the old parked run must not greet the re-paired user: {post_repair_sends:?}"
+    );
+
+    stack.runtime.shutdown().await.expect("runtime shuts down");
+}
+
 /// Multi-user identity isolation through the production stack.
 ///
 /// Covers (docs/qa/telegram-coverage-map.md): qa-telegram:D1:01 (threads

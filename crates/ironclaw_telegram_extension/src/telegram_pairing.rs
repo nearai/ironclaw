@@ -18,6 +18,9 @@ use ironclaw_auth::{
     AuthContinuationEvent, AuthContinuationRef, AuthFlowId, AuthProductScope, AuthProviderId,
     AuthSurface,
 };
+use ironclaw_conversations::{
+    AdapterKind, ConversationActorPairingService, ExpectedExternalActorOwner, ExternalActorRef,
+};
 use ironclaw_host_api::{AgentId, InvocationId, ProjectId, ResourceScope, TenantId, UserId};
 use ironclaw_product_adapters::AdapterInstallationId;
 use serde::{Deserialize, Serialize};
@@ -129,18 +132,29 @@ pub trait TelegramUserBindingStore: Send + Sync + std::fmt::Debug {
     /// one installation's identity namespace (exact segment match — never a
     /// raw string prefix, so `tg-bot-1` cannot bleed into `tg-bot-10`);
     /// `None` removes the user's bindings across every installation. Returns
-    /// the removed provider user ids.
+    /// the removed bindings with their epochs so unpair can clear the
+    /// matching conversation-actor pairings (the pairing's epoch equals the
+    /// identity binding's epoch — both minted by the same consume).
     async fn unbind_telegram_users_for_user(
         &self,
         user_id: &UserId,
         installation: Option<&AdapterInstallationId>,
-    ) -> Result<Vec<String>, TelegramBindingError>;
+    ) -> Result<Vec<RemovedTelegramBinding>, TelegramBindingError>;
 
     /// The bound user for a provider id, if any (conflict checks + consume).
     async fn bound_user_for(
         &self,
         provider_user_id: &str,
     ) -> Result<Option<UserId>, TelegramBindingError>;
+}
+
+/// A binding removed by [`TelegramUserBindingStore::unbind_telegram_users_for_user`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RemovedTelegramBinding {
+    pub provider_user_id: String,
+    /// `None` only when the stored record was unreadable at removal time; the
+    /// conditional pairing cleanup then fails safe (owner-changed no-op).
+    pub epoch: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -201,6 +215,10 @@ pub struct TelegramPairingService {
     binding_store: Arc<dyn TelegramUserBindingStore>,
     dm_target_store: Arc<dyn TelegramDmTargetStore>,
     continuation: Arc<dyn RebornAuthContinuationDispatcher>,
+    /// Conversation-actor pairing cleanup on unpair (Slack disconnect
+    /// parity): without it a re-paired chat resurrects its old thread and
+    /// any run parked there.
+    conversation_actor_pairings: Arc<dyn ConversationActorPairingService>,
 }
 
 impl std::fmt::Debug for TelegramPairingService {
@@ -221,6 +239,7 @@ impl TelegramPairingService {
         binding_store: Arc<dyn TelegramUserBindingStore>,
         dm_target_store: Arc<dyn TelegramDmTargetStore>,
         continuation: Arc<dyn RebornAuthContinuationDispatcher>,
+        conversation_actor_pairings: Arc<dyn ConversationActorPairingService>,
     ) -> Self {
         Self {
             tenant_id,
@@ -231,6 +250,7 @@ impl TelegramPairingService {
             binding_store,
             dm_target_store,
             continuation,
+            conversation_actor_pairings,
         }
     }
 
@@ -409,9 +429,57 @@ impl TelegramPairingService {
             .map_err(|error| TelegramPairingError::StoreUnavailable {
                 reason: error.to_string(),
             })?;
+        // Conversation-actor pairing cleanup (Slack disconnect parity,
+        // 2026-07-17): the workflow paired this chat's external actor to the
+        // caller at inbound; leaving that pairing behind re-attaches a
+        // re-paired user to their old thread — and any run parked on it.
+        let adapter_kind = AdapterKind::new(crate::telegram_actor_identity::TELEGRAM_V2_ADAPTER_ID)
+            .map_err(|error| TelegramPairingError::StoreUnavailable {
+                reason: format!("telegram adapter kind invalid: {error}"),
+            })?;
+        for removed_binding in &removed {
+            let Some((installation, telegram_user_id)) =
+                removed_binding.provider_user_id.split_once(':')
+            else {
+                continue;
+            };
+            let installation_id = ironclaw_conversations::AdapterInstallationId::new(installation)
+                .map_err(|error| TelegramPairingError::StoreUnavailable {
+                    reason: format!("stored telegram binding installation invalid: {error}"),
+                })?;
+            let actor_ref = ExternalActorRef::new(
+                ironclaw_telegram_v2_adapter::TELEGRAM_USER_ACTOR_KIND,
+                telegram_user_id,
+            )
+            .map_err(|error| TelegramPairingError::StoreUnavailable {
+                reason: format!("stored telegram binding actor invalid: {error}"),
+            })?;
+            self.conversation_actor_pairings
+                .unpair_external_actor_if_owned_by(
+                    &self.tenant_id,
+                    &adapter_kind,
+                    &installation_id,
+                    &actor_ref,
+                    &ExpectedExternalActorOwner {
+                        user_id: caller.clone(),
+                        binding_epoch: removed_binding
+                            .epoch
+                            .clone()
+                            .map(ironclaw_conversations::ExternalActorBindingEpoch::new)
+                            .transpose()
+                            .map_err(|error| TelegramPairingError::StoreUnavailable {
+                                reason: format!("stored telegram binding epoch invalid: {error}"),
+                            })?,
+                    },
+                )
+                .await
+                .map_err(|error| TelegramPairingError::StoreUnavailable {
+                    reason: error.to_string(),
+                })?;
+        }
         let mut installations: BTreeSet<String> = removed
             .iter()
-            .filter_map(|provider_user_id| provider_user_id.split_once(':'))
+            .filter_map(|binding| binding.provider_user_id.split_once(':'))
             .map(|(installation, _)| installation.to_string())
             .collect();
         if let Some(setup) = self.setup.current_setup().await? {
@@ -508,6 +576,87 @@ impl ironclaw_channel_host::paired_status::ChannelPairedStatusSource for Telegra
             ironclaw_channel_host::paired_status::ChannelPairedStatusError::new(error.to_string())
         })?;
         Ok(status.connected)
+    }
+}
+
+/// Recording fake for the conversation-actor pairing port, shared by this
+/// module's and `telegram_dispatch`'s tests.
+#[cfg(test)]
+pub(crate) mod pairing_test_support {
+    use std::sync::{Arc, Mutex};
+
+    use async_trait::async_trait;
+    use ironclaw_conversations::{
+        AdapterInstallationId, AdapterKind, ConditionalUnpairOutcome,
+        ConversationActorPairingService, ExpectedExternalActorOwner, ExternalActorBindingEpoch,
+        ExternalActorRef, InboundTurnError,
+    };
+    use ironclaw_host_api::{TenantId, UserId};
+
+    #[derive(Default)]
+    pub(crate) struct RecordingActorPairings {
+        pub(crate) conditional_unpairs: Mutex<Vec<(String, String, String)>>,
+    }
+
+    impl RecordingActorPairings {
+        pub(crate) fn shared() -> Arc<Self> {
+            Arc::new(Self::default())
+        }
+    }
+
+    #[async_trait]
+    impl ConversationActorPairingService for RecordingActorPairings {
+        async fn pair_external_actor(
+            &self,
+            _tenant_id: TenantId,
+            _adapter_kind: AdapterKind,
+            _adapter_installation_id: AdapterInstallationId,
+            _external_actor_ref: ExternalActorRef,
+            _user_id: UserId,
+        ) -> Result<(), InboundTurnError> {
+            Ok(())
+        }
+
+        async fn pair_external_actor_with_epoch(
+            &self,
+            _tenant_id: TenantId,
+            _adapter_kind: AdapterKind,
+            _adapter_installation_id: AdapterInstallationId,
+            _external_actor_ref: ExternalActorRef,
+            _user_id: UserId,
+            _binding_epoch: ExternalActorBindingEpoch,
+        ) -> Result<(), InboundTurnError> {
+            Ok(())
+        }
+
+        async fn unpair_external_actor(
+            &self,
+            _tenant_id: TenantId,
+            _adapter_kind: AdapterKind,
+            _adapter_installation_id: AdapterInstallationId,
+            _external_actor_ref: ExternalActorRef,
+        ) -> Result<(), InboundTurnError> {
+            Ok(())
+        }
+
+        async fn unpair_external_actor_if_owned_by(
+            &self,
+            _tenant_id: &TenantId,
+            _adapter_kind: &AdapterKind,
+            adapter_installation_id: &AdapterInstallationId,
+            external_actor_ref: &ExternalActorRef,
+            expected: &ExpectedExternalActorOwner,
+        ) -> Result<ConditionalUnpairOutcome, InboundTurnError> {
+            self.conditional_unpairs
+                .lock()
+                .expect("recording lock")
+                .push((
+                    adapter_installation_id.as_str().to_string(),
+                    external_actor_ref.id().to_string(),
+                    expected.user_id.as_str().to_string(),
+                ));
+            Ok(ConditionalUnpairOutcome::Unpaired)
+        }
     }
 }
 
@@ -674,9 +823,9 @@ mod tests {
             &self,
             user_id: &UserId,
             installation: Option<&AdapterInstallationId>,
-        ) -> Result<Vec<String>, TelegramBindingError> {
+        ) -> Result<Vec<RemovedTelegramBinding>, TelegramBindingError> {
             let mut bindings = self.bindings.lock().expect("lock");
-            let removed: Vec<String> = bindings
+            let removed: Vec<RemovedTelegramBinding> = bindings
                 .iter()
                 .filter(|(key, (bound, _))| {
                     bound == user_id
@@ -687,10 +836,13 @@ mod tests {
                             )
                         })
                 })
-                .map(|(key, _)| key.clone())
+                .map(|(key, (_, epoch))| RemovedTelegramBinding {
+                    provider_user_id: key.clone(),
+                    epoch: Some(epoch.clone()),
+                })
                 .collect();
-            for key in &removed {
-                bindings.remove(key);
+            for binding in &removed {
+                bindings.remove(&binding.provider_user_id);
             }
             Ok(removed)
         }
@@ -869,6 +1021,7 @@ mod tests {
         dispatcher: Arc<RecordingDispatcher>,
         binding_store: Arc<InMemoryBindingStore>,
         setup: Arc<TelegramSetupService>,
+        actor_pairings: Arc<super::pairing_test_support::RecordingActorPairings>,
     }
 
     async fn fixture(configured: bool) -> Fixture {
@@ -907,6 +1060,7 @@ mod tests {
                 .expect("setup saves");
         }
         let binding_store = Arc::new(InMemoryBindingStore::default());
+        let actor_pairings = super::pairing_test_support::RecordingActorPairings::shared();
         let service = TelegramPairingService::new(
             tenant_id,
             agent_id,
@@ -916,12 +1070,15 @@ mod tests {
             Arc::clone(&binding_store) as Arc<dyn TelegramUserBindingStore>,
             Arc::new(InMemoryDmTargetStore::default()),
             Arc::clone(&dispatcher) as Arc<dyn RebornAuthContinuationDispatcher>,
+            Arc::clone(&actor_pairings)
+                as Arc<dyn ironclaw_conversations::ConversationActorPairingService>,
         );
         Fixture {
             service,
             dispatcher,
             binding_store,
             setup,
+            actor_pairings,
         }
     }
 
@@ -1207,6 +1364,22 @@ mod tests {
             .await
             .expect("re-pair after unpair");
         assert!(matches!(outcome, PairingConsumeOutcome::Paired { .. }));
+        let unpairs = fixture
+            .actor_pairings
+            .conditional_unpairs
+            .lock()
+            .expect("recording lock")
+            .clone();
+        assert_eq!(
+            unpairs.len(),
+            1,
+            "unpair clears the conversation-actor pairing (Slack disconnect parity) — \
+             leaving it re-attaches a re-paired chat to its old thread"
+        );
+        assert!(
+            unpairs[0].0.starts_with("tg-bot-"),
+            "cleanup targets the stored installation: {unpairs:?}"
+        );
         drop(fixture.setup);
     }
 
