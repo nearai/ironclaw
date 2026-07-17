@@ -8,8 +8,8 @@
 //! verified-email-domain admission allowlist. The auth/session model
 //! itself — the signed-token session store, the composite authenticator,
 //! and the route wiring — lives in
-//! `ironclaw_reborn_webui_ingress` (see
-//! [`ironclaw_reborn_webui_ingress::build_signed_session_login`]), which
+//! `ironclaw_webui` (see
+//! [`ironclaw_webui::build_signed_session_login`]), which
 //! is where this crate's guardrails place `WebuiAuthenticator` /
 //! `SessionStore` implementations. `serve.rs` calls
 //! [`sso_startup_config_from_env`] and, when it returns `Some`, hands
@@ -21,7 +21,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Context, anyhow};
-use ironclaw_reborn_webui_ingress::{
+use ironclaw_webui::{
     GitHubOAuthConfig, GitHubProvider, GoogleOAuthConfig, GoogleProvider, OAuthProvider,
 };
 use secrecy::SecretString;

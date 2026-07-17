@@ -123,7 +123,7 @@ jobs:
                         or (.name == "ironclaw_slack_v2_adapter")
                         or (.name == "ironclaw_telegram_v2_adapter")
                         or (.name == "ironclaw_wasm_product_adapters")
-                        or (.name | startswith("ironclaw_webui_v2"))
+                        or (.name | startswith("ironclaw_webui"))
                       )
                     | .name
                   ]
@@ -226,7 +226,7 @@ jobs:
             fi
 
             case "${package}" in
-              ironclaw_first_party_extension_ports|ironclaw_host_runtime|ironclaw_loop_host|ironclaw_product_workflow|ironclaw_runner|ironclaw_reborn_cli|ironclaw_reborn_composition|ironclaw_reborn_webui_ingress|ironclaw_wasm|ironclaw_wasm_product_adapters|ironclaw_wasm_sandbox_core)
+              ironclaw_first_party_extension_ports|ironclaw_host_runtime|ironclaw_loop_host|ironclaw_product_workflow|ironclaw_runner|ironclaw_reborn_cli|ironclaw_reborn_composition|ironclaw_webui|ironclaw_wasm|ironclaw_wasm_product_adapters|ironclaw_wasm_sandbox_core)
                 sccache_dist_enabled=false
                 ;;
             esac
@@ -245,7 +245,7 @@ jobs:
         with:
           node-version: "22"
           cache: "pnpm"
-          cache-dependency-path: crates/ironclaw_webui_v2/frontend/pnpm-lock.yaml
+          cache-dependency-path: crates/ironclaw_webui/frontend/pnpm-lock.yaml
 
       - name: Enable pnpm
         if: ${{ steps.bucket-settings.outputs.needs_webui_node == 'true' }}
@@ -254,7 +254,7 @@ jobs:
       - name: Install WebUI frontend dependencies
         if: ${{ steps.bucket-settings.outputs.needs_webui_node == 'true' }}
         run: |
-          cd crates/ironclaw_webui_v2/frontend
+          cd crates/ironclaw_webui/frontend
           pnpm install --frozen-lockfile
 
       - name: Install mold and clang
@@ -724,7 +724,7 @@ jobs:
 
       - name: Run Reborn WebUI frontend tests
         run: |
-          cd crates/ironclaw_webui_v2/frontend
+          cd crates/ironclaw_webui/frontend
           pnpm install --frozen-lockfile
           pnpm test
 

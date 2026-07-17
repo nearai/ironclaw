@@ -132,6 +132,13 @@ pub use llm_admin::nearai_mcp::{
 };
 #[cfg(feature = "openai-compat-beta")]
 pub use llm_admin::openai_compat_serve::build_openai_compat_route_mount;
+// Re-exported for the host-owned `ironclaw_webui::webui_v2_app`
+// (hoisted up from this crate): its bearer-auth middleware mints tenant-scoped
+// verified-bearer evidence for protected OpenAI-compatible mounts. Ingress must
+// not depend on `ironclaw_product_adapters` directly (architecture boundary), so
+// it reaches this helper through composition's facade.
+#[cfg(feature = "openai-compat-beta")]
+pub use ironclaw_product_adapters::mark_bearer_token_verified_for_tenant;
 #[cfg(feature = "root-llm-provider")]
 pub use llm_admin::provider_admin::{
     RebornModelRoutesState, RebornProviderAdmin, RebornProviderAdminError, RebornProviderInfo,
@@ -170,6 +177,13 @@ pub use product_auth::api::auth::{
 };
 #[cfg(feature = "slack-v2-host-beta")]
 pub use product_auth::serve::SlackPersonalOAuthBindingConfig;
+// Product-auth WebUI route-mount builders, exposed so the host-owned
+// `ironclaw_webui::webui_v2_app` (moved up from this crate) can
+// compose the Reborn-native product-auth surface into the WebChat v2 router.
+#[cfg(feature = "webui-v2-beta")]
+pub use product_auth::serve::{
+    ProductAuthRouteMount, ProductAuthRouteState, product_auth_route_mount,
+};
 #[cfg(any(feature = "libsql", feature = "postgres"))]
 pub use production_runtime_policy::RebornProductionRuntimePolicy;
 pub use readiness::{
@@ -207,8 +221,9 @@ pub use slack::slack_actor_identity::{
 };
 #[cfg(feature = "slack-v2-host-beta")]
 pub use slack::slack_channel_routes::{
-    SlackChannelRouteAdminRouteConfig, WEBUI_V2_CHANNELS_SLACK_ALLOWED_PATH,
-    WEBUI_V2_CHANNELS_SLACK_ROUTES_PATH, WEBUI_V2_CHANNELS_SLACK_SUBJECTS_PATH,
+    SlackChannelRouteAdminRouteConfig, SlackChannelRouteAdminRouteMount,
+    WEBUI_V2_CHANNELS_SLACK_ALLOWED_PATH, WEBUI_V2_CHANNELS_SLACK_ROUTES_PATH,
+    WEBUI_V2_CHANNELS_SLACK_SUBJECTS_PATH, slack_channel_route_admin_route_mount,
 };
 #[cfg(feature = "slack-v2-host-beta")]
 pub use slack::slack_connectable_channel::{
@@ -248,13 +263,13 @@ pub use slack::slack_serve::{
 pub use slack::slack_setup::SlackPersonalSetupServiceSlot;
 pub use web_access::register_bundled_web_access_first_party_handlers;
 pub use webui::facade::{RebornWebuiBundle, build_webui_services};
+// Host-supplied route-mount vocabulary shared with composition's own route
+// builders (nearai login, OpenAI-compat) and the host-owned gateway assembly
+// in `ironclaw_webui`. The `WebuiServeConfig` / `webui_v2_app`
+// / `WebuiAuthenticator` surface moved up into that ingress crate.
 #[cfg(feature = "webui-v2-beta")]
-pub use webui::webui_rate_limit::RateLimitConfigError;
-#[cfg(feature = "webui-v2-beta")]
-pub use webui::webui_serve::{
+pub use webui::route_mounts::{
     ProtectedRouteMount, PublicRouteDrain, PublicRouteDrains, PublicRouteMount,
-    WebuiAuthentication, WebuiAuthenticator, WebuiServeConfig, WebuiServeConfigError,
-    WebuiServeError, WebuiV2App, webui_v2_app, webui_v2_app_with_lifecycle,
 };
 
 /// Re-exported identity vocabulary host binaries need to construct

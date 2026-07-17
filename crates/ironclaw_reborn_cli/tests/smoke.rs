@@ -124,7 +124,7 @@ fn dockerfile_reborn_builds_with_postgres_feature() {
     assert!(
         dockerfile.contains("corepack enable pnpm")
             && dockerfile.matches("pnpm install --frozen-lockfile").count() >= 2
-            && dockerfile.contains("crates/ironclaw_webui_v2/frontend"),
+            && dockerfile.contains("crates/ironclaw_webui/frontend"),
         "Dockerfile.reborn must install WebUI frontend dependencies before cargo-chef and final webui-v2-beta builds: {dockerfile}"
     );
     assert!(
@@ -2011,7 +2011,7 @@ fn serve_fails_closed_when_session_token_lacks_entropy_without_sso() {
 //
 // Banner formatting (IPv6 / IPv4 / config readout) is exercised by
 // the caller-level test in
-// `ironclaw_reborn_webui_ingress::tests` rather than from the binary
+// `ironclaw_webui::tests` rather than from the binary
 // smoke test, because the banner is printed AFTER env-token resolution
 // + runtime build, both of which require a configured environment.
 

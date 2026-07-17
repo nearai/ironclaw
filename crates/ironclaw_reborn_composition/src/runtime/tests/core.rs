@@ -5182,7 +5182,9 @@ async fn local_dev_webui_bundle_exposes_outbound_preferences_facade() {
 async fn webui_route_rejects_list_automations_without_agent_binding() {
     use axum::body::Body;
     use axum::http::{Request, StatusCode};
-    use ironclaw_webui_v2::{DEFAULT_SSE_MAX_CONCURRENT_PER_CALLER, WebUiV2State, webui_v2_router};
+    use ironclaw_webui::webui_v2::{
+        DEFAULT_SSE_MAX_CONCURRENT_PER_CALLER, WebUiV2State, webui_v2_router,
+    };
     use tower::ServiceExt;
 
     let root = tempfile::tempdir().expect("tempdir");
@@ -5342,7 +5344,7 @@ async fn open_reborn_identity_resolver_migrates_legacy_webui_identities_through_
 async fn webui_operator_diagnostics_route_exposes_composed_readiness_evidence() {
     use axum::body::{Body, to_bytes};
     use axum::http::{Request, StatusCode};
-    use ironclaw_webui_v2::{
+    use ironclaw_webui::webui_v2::{
         DEFAULT_SSE_MAX_CONCURRENT_PER_CALLER, WebUiV2Capabilities, WebUiV2State, webui_v2_router,
     };
     use tower::ServiceExt;
