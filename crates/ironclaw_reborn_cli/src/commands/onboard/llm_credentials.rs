@@ -8,13 +8,6 @@ use ironclaw_reborn_config::RebornHome;
 
 use super::prompts::{LlmCredentialPromptError, PromptSource};
 
-/// Default LLM provider offered by the onboarding prompt. Reuses
-/// `config::init`'s [`DEFAULT_LLM_PROVIDER_ID`](crate::commands::config::init::DEFAULT_LLM_PROVIDER_ID)
-/// — the same constant the `config.toml` stub seeds — so the interactive
-/// prompt default and the non-interactive stub can never drift apart on
-/// which provider a fresh install boots against.
-use crate::commands::config::init::DEFAULT_LLM_PROVIDER_ID as DEFAULT_LLM_PROVIDER;
-
 /// Outcome of onboard's LLM provider/API-key prompt step. Every variant is a
 /// successful `execute()` (exit 0) — mirrors [`super::master_key::MasterKeyProvisionOutcome`]'s
 /// shape: `SkippedNonInteractive` is expected and normal, not a failure.
@@ -111,26 +104,27 @@ impl LlmKeyStoreOpener for LocalDevLlmKeyStoreOpener {
     }
 }
 
-/// Prompt for an LLM provider + API key and persist both: the key value goes
-/// into the encrypted secret store via the canonical `LlmKeyStore` handle
-/// (`llm_provider_<id>_api_key`) FIRST — the same handle the webui2 settings
-/// surface writes and `apply_startup_stored_llm_key` reads at boot — and
-/// only once that succeeds does the provider selection land in
-/// `[llm.default]` in `config.toml` SECOND (existing
-/// `RebornProviderAdmin::set_provider` config machinery, the same one
-/// `ironclaw-reborn models set-provider` uses). This ordering means
-/// `config.toml` can never point at a provider whose key failed to persist
-/// durably: a `LlmKeyStore::put` failure returns an error before
-/// `set_provider` is ever called, leaving `config.toml` exactly as it was.
-///
-/// Gathers both prompt answers before writing anything: a non-interactive
-/// `provider()` or `api_key()` failure must leave config.toml and the secret
-/// store untouched, not partially written.
+/// Prompt for an LLM provider (via the numbered menu — see
+/// [`super::prompts::PromptSource::provider_menu`]), its API key when the
+/// selected provider requires one, and a model override, then persist
+/// what's needed: any API key value goes into the encrypted secret store via
+/// the canonical `LlmKeyStore` handle (`llm_provider_<id>_api_key`) FIRST —
+/// the same handle the webui2 settings surface writes and
+/// `apply_startup_stored_llm_key` reads at boot — and only once that
+/// succeeds does the provider selection land in `[llm.default]` in
+/// `config.toml` SECOND (existing `RebornProviderAdmin::set_provider` config
+/// machinery, the same one `ironclaw-reborn models set-provider` uses).
+/// This ordering means `config.toml` can never point at a provider whose key
+/// failed to persist durably: a `LlmKeyStore::put` failure returns an error
+/// before `set_provider` is ever called, leaving `config.toml` exactly as it
+/// was. A provider whose menu entry has `api_key_required: false` (e.g.
+/// `nearai`) skips the key prompt and secret-store write entirely — there is
+/// nothing to persist there.
 ///
 /// Skips prompting entirely (an idempotent no-op) on a rerun where
-/// `[llm.default]` is already user-configured AND the store already has a
-/// key for that provider, unless `force` is set — see
-/// [`already_configured_outcome`].
+/// `[llm.default]` is already user-configured AND (the provider doesn't
+/// require a key OR the store already has a key for it), unless `force` is
+/// set — see [`already_configured_outcome`].
 #[cfg(all(feature = "libsql", feature = "root-llm-provider"))]
 pub(crate) fn provision_llm_credentials(
     home: &RebornHome,
@@ -149,36 +143,63 @@ pub(crate) fn provision_llm_credentials(
         return Ok(outcome);
     }
 
-    let provider = prompts.provider(DEFAULT_LLM_PROVIDER)?;
-    let key = prompts.api_key(&provider)?;
-    // Defense in depth: `StdinPromptSource::api_key` already re-prompts on a
-    // blank answer, but this guards every `PromptSource` implementation —
-    // present or future — so a blank key can never reach the secret store
-    // regardless of where it slipped through.
-    if key.trim().is_empty() {
-        return Err(LlmCredentialPromptError::Other(anyhow::anyhow!(
-            "LLM API key must not be blank"
-        )));
+    let entries = admin
+        .menu_entries()
+        .map_err(|error| LlmCredentialPromptError::Other(error.into()))?;
+    let selection = prompts.provider_menu(&entries)?;
+    // Canonical second check: the menu already only offers canonical ids,
+    // but re-resolving here keeps this call site's provider id agreeing
+    // with `set_provider`'s own resolution, exactly like the pre-menu code
+    // did for its free-text answer.
+    let canonical_provider_id = admin
+        .resolve_provider_id(&selection)
+        .map_err(|error| LlmCredentialPromptError::Other(error.into()))?;
+    let entry = entries
+        .iter()
+        .find(|entry| entry.id == canonical_provider_id)
+        .ok_or_else(|| {
+            LlmCredentialPromptError::Other(anyhow::anyhow!(
+                "selected provider `{canonical_provider_id}` is not on the onboarding menu"
+            ))
+        })?;
+
+    if entry.api_key_required {
+        let key = prompts.api_key(&canonical_provider_id)?;
+        // Defense in depth: `StdinPromptSource::api_key` already re-prompts
+        // on a blank answer, but this guards every `PromptSource`
+        // implementation — present or future — so a blank key can never
+        // reach the secret store regardless of where it slipped through.
+        if key.trim().is_empty() {
+            return Err(LlmCredentialPromptError::Other(anyhow::anyhow!(
+                "LLM API key must not be blank"
+            )));
+        }
+
+        let store = store_opener
+            .open(home.path())
+            .map_err(LlmCredentialPromptError::Other)?;
+        let provider_id_for_store = canonical_provider_id.clone();
+        crate::runtime::block_on_cli(async move {
+            store
+                .put_plaintext(&provider_id_for_store, key)
+                .await
+                .map_err(anyhow::Error::from)
+        })
+        .map_err(LlmCredentialPromptError::Other)?;
     }
 
-    let canonical_provider_id = admin
-        .resolve_provider_id(&provider)
-        .map_err(|error| LlmCredentialPromptError::Other(error.into()))?;
-
-    let store = store_opener
-        .open(home.path())
-        .map_err(LlmCredentialPromptError::Other)?;
-    let provider_id_for_store = canonical_provider_id.clone();
-    crate::runtime::block_on_cli(async move {
-        store
-            .put_plaintext(&provider_id_for_store, key)
-            .await
-            .map_err(anyhow::Error::from)
-    })
-    .map_err(LlmCredentialPromptError::Other)?;
+    let default_model = admin
+        .list(Some(&canonical_provider_id), false)
+        .map_err(|error| LlmCredentialPromptError::Other(error.into()))?
+        .providers
+        .into_iter()
+        .next()
+        .map(|info| info.default_model)
+        .unwrap_or_default();
+    let model = prompts.model(&canonical_provider_id, &default_model)?;
 
     let write_outcome = admin
-        .set_provider(&provider, None)
+        .set_provider(&canonical_provider_id, model.as_deref())
         .map_err(|error| LlmCredentialPromptError::Other(error.into()))?;
 
     Ok(LlmCredentialProvisionOutcome::Configured {
@@ -187,14 +208,24 @@ pub(crate) fn provision_llm_credentials(
     })
 }
 
-/// `Some` when `[llm.default]` already names a provider AND the encrypted
-/// secret store already has a key stored for it — the idempotent-rerun
-/// case [`provision_llm_credentials`] must skip prompting for (a bare
-/// stub-seeded `[llm.default]` with no stored key, e.g. right after a fresh
-/// `onboard` on a headless box, does NOT count: that provider has never
-/// actually been credentialed, so a later interactive rerun must still
-/// prompt). A store-open failure is treated as "can't tell" and falls
-/// through to prompting rather than erroring the whole run.
+/// `Some` when `[llm.default]` already names a provider AND that provider is
+/// durably credentialed — either it doesn't require an API key at all (e.g.
+/// `nearai`), or the encrypted secret store already has a key stored for it
+/// — the idempotent-rerun case [`provision_llm_credentials`] must skip
+/// prompting for (a bare stub-seeded `[llm.default]` with no stored key for
+/// a key-requiring provider, e.g. right after a fresh `onboard` on a
+/// headless box, does NOT count: that provider has never actually been
+/// credentialed, so a later interactive rerun must still prompt).
+///
+/// Before this fix, a no-key provider like `nearai` was *never* recognized
+/// as already-configured (the store-key check always came back empty for
+/// it), so every rerun re-prompted even though there was nothing left to
+/// configure — see the regression test
+/// `provision_llm_credentials_is_idempotent_for_a_no_key_provider`.
+///
+/// A store-open failure, or a failure to look up whether the configured
+/// provider requires a key, is treated as "can't tell" and falls through to
+/// prompting rather than erroring the whole run.
 #[cfg(all(feature = "libsql", feature = "root-llm-provider"))]
 fn already_configured_outcome(
     admin: &ironclaw_reborn_composition::RebornProviderAdmin,
@@ -210,6 +241,17 @@ fn already_configured_outcome(
     let Some(provider_id) = selection.provider_id else {
         return Ok(None);
     };
+
+    let Some(api_key_required) = provider_api_key_required(admin, &provider_id) else {
+        return Ok(None);
+    };
+    if !api_key_required {
+        return Ok(Some(LlmCredentialProvisionOutcome::AlreadyConfigured {
+            provider_id,
+            model: selection.model.unwrap_or_default(),
+        }));
+    }
+
     let store = match store_opener.open(home.path()) {
         Ok(store) => store,
         Err(error) => {
@@ -238,6 +280,26 @@ fn already_configured_outcome(
     }))
 }
 
+/// Whether `provider_id` requires an API key, per the full provider
+/// registry (not menu-restricted — `[llm.default]` may name a provider
+/// that's excluded from the onboard menu, e.g. one set via `models
+/// set-provider`). `None` when the lookup itself fails (unknown provider,
+/// registry load error), signalling "can't tell" to the caller.
+#[cfg(all(feature = "libsql", feature = "root-llm-provider"))]
+fn provider_api_key_required(
+    admin: &ironclaw_reborn_composition::RebornProviderAdmin,
+    provider_id: &str,
+) -> Option<bool> {
+    admin
+        .list(Some(provider_id), true)
+        .ok()?
+        .providers
+        .into_iter()
+        .next()?
+        .metadata
+        .map(|metadata| metadata.api_key_required)
+}
+
 /// Without both `libsql` (the store opener) and `root-llm-provider`
 /// (`RebornProviderAdmin`/`LlmKeyStore`) the LLM credential step has nothing
 /// to write to — same reasoning as `provision_master_key`'s
@@ -260,9 +322,14 @@ mod tests {
     use super::*;
     use crate::context::RebornCliContext;
 
+    /// Selects `provider` on the menu (matched by id), answers `key` for the
+    /// API-key prompt (only reached when the selected entry requires one),
+    /// and answers `model` for the model prompt (`None` means an empty
+    /// answer — use the catalog default).
     struct FakePromptSource {
         provider: &'static str,
         key: &'static str,
+        model: Option<&'static str>,
     }
 
     impl PromptSource for FakePromptSource {
@@ -270,12 +337,32 @@ mod tests {
             true
         }
 
-        fn provider(&mut self, _default: &str) -> Result<String, LlmCredentialPromptError> {
-            Ok(self.provider.to_string())
+        fn provider_menu(
+            &mut self,
+            entries: &[ironclaw_reborn_composition::ProviderMenuEntry],
+        ) -> Result<String, LlmCredentialPromptError> {
+            entries
+                .iter()
+                .find(|entry| entry.id == self.provider)
+                .map(|entry| entry.id.clone())
+                .ok_or_else(|| {
+                    LlmCredentialPromptError::Other(anyhow::anyhow!(
+                        "fake-selected provider `{}` is not on the menu",
+                        self.provider
+                    ))
+                })
         }
 
         fn api_key(&mut self, _provider: &str) -> Result<String, LlmCredentialPromptError> {
             Ok(self.key.to_string())
+        }
+
+        fn model(
+            &mut self,
+            _provider_id: &str,
+            _default_model: &str,
+        ) -> Result<Option<String>, LlmCredentialPromptError> {
+            Ok(self.model.map(str::to_string))
         }
     }
 
@@ -286,12 +373,23 @@ mod tests {
             false
         }
 
-        fn provider(&mut self, _default: &str) -> Result<String, LlmCredentialPromptError> {
-            unreachable!("provider() must not be called once is_interactive() is false")
+        fn provider_menu(
+            &mut self,
+            _entries: &[ironclaw_reborn_composition::ProviderMenuEntry],
+        ) -> Result<String, LlmCredentialPromptError> {
+            unreachable!("provider_menu() must not be called once is_interactive() is false")
         }
 
         fn api_key(&mut self, _provider: &str) -> Result<String, LlmCredentialPromptError> {
-            unreachable!("api_key must not be prompted once provider() has already failed")
+            unreachable!("api_key must not be prompted once provider_menu() has already failed")
+        }
+
+        fn model(
+            &mut self,
+            _provider_id: &str,
+            _default_model: &str,
+        ) -> Result<Option<String>, LlmCredentialPromptError> {
+            unreachable!("model must not be prompted once provider_menu() has already failed")
         }
     }
 
@@ -305,12 +403,23 @@ mod tests {
             true
         }
 
-        fn provider(&mut self, _default: &str) -> Result<String, LlmCredentialPromptError> {
-            panic!("provider() must not be called on an idempotent, already-configured rerun")
+        fn provider_menu(
+            &mut self,
+            _entries: &[ironclaw_reborn_composition::ProviderMenuEntry],
+        ) -> Result<String, LlmCredentialPromptError> {
+            panic!("provider_menu() must not be called on an idempotent, already-configured rerun")
         }
 
         fn api_key(&mut self, _provider: &str) -> Result<String, LlmCredentialPromptError> {
             panic!("api_key() must not be called on an idempotent, already-configured rerun")
+        }
+
+        fn model(
+            &mut self,
+            _provider_id: &str,
+            _default_model: &str,
+        ) -> Result<Option<String>, LlmCredentialPromptError> {
+            panic!("model() must not be called on an idempotent, already-configured rerun")
         }
     }
 
@@ -418,16 +527,60 @@ mod tests {
         .expect("seed cached master key");
     }
 
-    /// RED (B2 step 1): a fake interactive `PromptSource` answering
-    /// `("nearai", "sk-test-value")` must land the provider selection in
+    /// A [`PromptSource`] that selects `provider` on the menu and answers
+    /// `model`, but panics if `api_key()` is ever called — used to prove a
+    /// no-API-key provider (e.g. `nearai`) never reaches the key prompt.
+    struct KeyPanicsIfCalledPromptSource {
+        provider: &'static str,
+        model: Option<&'static str>,
+    }
+
+    impl PromptSource for KeyPanicsIfCalledPromptSource {
+        fn is_interactive(&self) -> bool {
+            true
+        }
+
+        fn provider_menu(
+            &mut self,
+            entries: &[ironclaw_reborn_composition::ProviderMenuEntry],
+        ) -> Result<String, LlmCredentialPromptError> {
+            entries
+                .iter()
+                .find(|entry| entry.id == self.provider)
+                .map(|entry| entry.id.clone())
+                .ok_or_else(|| {
+                    LlmCredentialPromptError::Other(anyhow::anyhow!(
+                        "fake-selected provider `{}` is not on the menu",
+                        self.provider
+                    ))
+                })
+        }
+
+        fn api_key(&mut self, _provider: &str) -> Result<String, LlmCredentialPromptError> {
+            panic!("api_key() must not be called for a provider that doesn't require one")
+        }
+
+        fn model(
+            &mut self,
+            _provider_id: &str,
+            _default_model: &str,
+        ) -> Result<Option<String>, LlmCredentialPromptError> {
+            Ok(self.model.map(str::to_string))
+        }
+    }
+
+    /// RED (B2 step 1, adapted for the menu): a fake interactive
+    /// `PromptSource` selecting `openai` (a key-requiring menu entry) and
+    /// answering `"sk-test-value"` must land the provider selection in
     /// `config.toml` and the key value in the encrypted secret store,
     /// readable back through a *fresh* open of the same root — proving the
     /// opener and `LlmKeyStore::put`/`read` agree on physical storage.
     ///
-    /// Also proves item 3's idempotent-rerun guard: a second call with a
-    /// `PanickingPromptSource` (whose prompt methods panic if invoked) must
-    /// return `AlreadyConfigured` without ever calling `provider()`/
-    /// `api_key()` — proving the rerun is skipped, not merely tolerated.
+    /// Also proves item 3's idempotent-rerun guard for a key-requiring
+    /// provider: a second call with a `PanickingPromptSource` (whose prompt
+    /// methods panic if invoked) must return `AlreadyConfigured` without
+    /// ever calling `provider_menu()`/`api_key()` — proving the rerun is
+    /// skipped, not merely tolerated.
     #[test]
     fn provision_llm_credentials_writes_config_and_secret_store_through_fake_prompts() {
         let (_tmp, context) = RebornCliContext::test_context();
@@ -436,8 +589,9 @@ mod tests {
         seed_cached_master_key(home);
 
         let mut prompts = FakePromptSource {
-            provider: "nearai",
+            provider: "openai",
             key: "sk-test-value",
+            model: None,
         };
         let outcome = provision_llm_credentials(
             home,
@@ -450,8 +604,8 @@ mod tests {
         assert_eq!(
             outcome,
             LlmCredentialProvisionOutcome::Configured {
-                provider_id: "nearai".to_string(),
-                model: "deepseek-ai/DeepSeek-V4-Flash".to_string(),
+                provider_id: "openai".to_string(),
+                model: "gpt-5-mini".to_string(),
             }
         );
 
@@ -461,7 +615,7 @@ mod tests {
                 .await
                 .map_err(anyhow::Error::from)?;
             ironclaw_reborn_composition::LlmKeyStore::new(store)
-                .read("nearai")
+                .read("openai")
                 .await
                 .map_err(anyhow::Error::from)
         })
@@ -475,12 +629,84 @@ mod tests {
         let config_text =
             std::fs::read_to_string(home.config_file_path()).expect("read config.toml");
         assert!(
-            config_text.contains("provider_id = \"nearai\""),
+            config_text.contains("provider_id = \"openai\""),
             "config.toml: {config_text}"
         );
 
         // Item 3: a rerun with an already-configured provider + stored key
         // must skip prompting entirely.
+        let mut second_prompts = PanickingPromptSource;
+        let second_outcome = provision_llm_credentials(
+            home,
+            context.boot_config(),
+            &mut second_prompts,
+            &LocalDevLlmKeyStoreOpener,
+            false,
+        )
+        .expect("an idempotent rerun must succeed without prompting");
+        assert_eq!(
+            second_outcome,
+            LlmCredentialProvisionOutcome::AlreadyConfigured {
+                provider_id: "openai".to_string(),
+                model: "gpt-5-mini".to_string(),
+            }
+        );
+    }
+
+    /// RED (thermo-caught idempotency bug): a no-API-key provider (`nearai`)
+    /// must skip the key prompt and secret-store write entirely on first
+    /// run, AND a rerun must recognize it as already configured without
+    /// prompting — before this fix, `already_configured_outcome` only ever
+    /// looked at the store for a stored key, so a no-key provider was
+    /// *never* recognized as configured and every `onboard` rerun
+    /// re-prompted even though there was nothing left to configure.
+    #[test]
+    fn provision_llm_credentials_is_idempotent_for_a_no_key_provider() {
+        let (_tmp, context) = RebornCliContext::test_context();
+        let home = context.boot_config().home();
+        std::fs::create_dir_all(home.path()).expect("create reborn home");
+        seed_cached_master_key(home);
+
+        let mut prompts = KeyPanicsIfCalledPromptSource {
+            provider: "nearai",
+            model: None,
+        };
+        let outcome = provision_llm_credentials(
+            home,
+            context.boot_config(),
+            &mut prompts,
+            &LocalDevLlmKeyStoreOpener,
+            false,
+        )
+        .expect("provision must succeed without ever calling api_key()");
+        assert_eq!(
+            outcome,
+            LlmCredentialProvisionOutcome::Configured {
+                provider_id: "nearai".to_string(),
+                model: "deepseek-ai/DeepSeek-V4-Flash".to_string(),
+            }
+        );
+
+        let home_path = home.path().to_path_buf();
+        let has_key = crate::runtime::block_on_cli(async move {
+            let store = ironclaw_reborn_composition::open_local_dev_secret_store(&home_path)
+                .await
+                .map_err(anyhow::Error::from)?;
+            ironclaw_reborn_composition::LlmKeyStore::new(store)
+                .exists("nearai")
+                .await
+                .map_err(anyhow::Error::from)
+        })
+        .expect("read back through a fresh open of the same root");
+        assert!(
+            !has_key,
+            "a provider that doesn't require an API key must never write to the secret store"
+        );
+
+        // The regression this test pins: a rerun must recognize `nearai` as
+        // already configured — with no stored key to check, the old
+        // `already_configured_outcome` fell through to prompting every
+        // time.
         let mut second_prompts = PanickingPromptSource;
         let second_outcome = provision_llm_credentials(
             home,
@@ -501,11 +727,11 @@ mod tests {
 
     /// RED (B2 step 2): a non-interactive fake source must surface as a
     /// typed [`LlmCredentialPromptError::NonInteractive`] — never a panic or
-    /// process exit — and must not write anything: `provider()`/`api_key()`
-    /// are `unreachable!()` (proving the interactivity check short-circuits
-    /// before either prompt runs) and `config.toml` must not exist
-    /// afterward (proving no store/config touch happens before both prompts
-    /// have succeeded).
+    /// process exit — and must not write anything: `provider_menu()`/
+    /// `api_key()` are `unreachable!()` (proving the interactivity check
+    /// short-circuits before either prompt runs) and `config.toml` must not
+    /// exist afterward (proving no store/config touch happens before both
+    /// prompts have succeeded).
     #[test]
     fn provision_llm_credentials_propagates_non_interactive_error_without_touching_anything() {
         let (_tmp, context) = RebornCliContext::test_context();
@@ -532,7 +758,9 @@ mod tests {
     /// leave `config.toml` completely untouched — proving the secret is
     /// written BEFORE the provider selection, not after. Under the old
     /// ordering (config first, store second) `config.toml` would already
-    /// carry `provider_id = "nearai"` by the time the store write failed.
+    /// carry `provider_id = "openai"` by the time the store write failed.
+    /// Uses `openai` (key-requiring), not `nearai` — a no-key provider never
+    /// opens the store at all, so it couldn't exercise this ordering.
     #[test]
     fn provision_llm_credentials_leaves_config_untouched_when_the_store_put_fails() {
         let (_tmp, context) = RebornCliContext::test_context();
@@ -540,8 +768,9 @@ mod tests {
         std::fs::create_dir_all(home.path()).expect("create reborn home");
 
         let mut prompts = FakePromptSource {
-            provider: "nearai",
+            provider: "openai",
             key: "sk-test-value",
+            model: None,
         };
         let error = provision_llm_credentials(
             home,
@@ -573,8 +802,9 @@ mod tests {
         seed_cached_master_key(home);
 
         let mut prompts = FakePromptSource {
-            provider: "nearai",
+            provider: "openai",
             key: "   ",
+            model: None,
         };
         let error = provision_llm_credentials(
             home,
@@ -588,6 +818,67 @@ mod tests {
         assert!(
             !home.config_file_path().exists(),
             "a rejected blank API key must leave config.toml untouched"
+        );
+    }
+
+    /// (v) An excluded provider id typed at the menu (not a menu entry —
+    /// `ollama`/`bedrock`/etc are excluded by `menu_entries()` by design)
+    /// must be rejected as invalid, never resolved via the full registry.
+    #[test]
+    fn provision_llm_credentials_rejects_a_menu_excluded_provider_id() {
+        let (_tmp, context) = RebornCliContext::test_context();
+        let home = context.boot_config().home();
+        std::fs::create_dir_all(home.path()).expect("create reborn home");
+
+        let mut prompts = FakePromptSource {
+            provider: "bedrock",
+            key: "unused",
+            model: None,
+        };
+        let error = provision_llm_credentials(
+            home,
+            context.boot_config(),
+            &mut prompts,
+            &LocalDevLlmKeyStoreOpener,
+            false,
+        )
+        .expect_err("a menu-excluded provider id must be rejected");
+        assert!(matches!(error, LlmCredentialPromptError::Other(_)));
+        assert!(
+            !home.config_file_path().exists(),
+            "a rejected menu selection must leave config.toml untouched"
+        );
+    }
+
+    /// (iv) An empty model answer must land the catalog default in
+    /// `[llm.default].model`, not a blank string.
+    #[test]
+    fn provision_llm_credentials_empty_model_answer_uses_catalog_default() {
+        let (_tmp, context) = RebornCliContext::test_context();
+        let home = context.boot_config().home();
+        std::fs::create_dir_all(home.path()).expect("create reborn home");
+        seed_cached_master_key(home);
+
+        let mut prompts = FakePromptSource {
+            provider: "openai",
+            key: "sk-test-value",
+            model: None,
+        };
+        let outcome = provision_llm_credentials(
+            home,
+            context.boot_config(),
+            &mut prompts,
+            &LocalDevLlmKeyStoreOpener,
+            false,
+        )
+        .expect("provision must succeed");
+        assert_eq!(
+            outcome,
+            LlmCredentialProvisionOutcome::Configured {
+                provider_id: "openai".to_string(),
+                model: "gpt-5-mini".to_string(),
+            },
+            "an empty model answer must resolve to openai's catalog default model"
         );
     }
 }

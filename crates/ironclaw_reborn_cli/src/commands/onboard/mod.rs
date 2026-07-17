@@ -371,8 +371,6 @@ fn pending_steps(import_history: bool, llm_configured: bool) -> Vec<&'static str
 
 #[cfg(all(test, feature = "libsql", feature = "root-llm-provider"))]
 mod tests {
-    use std::sync::Arc;
-
     use super::*;
 
     /// RED (B4 step 6 truth-up): the marker's `steps_pending` must only list
