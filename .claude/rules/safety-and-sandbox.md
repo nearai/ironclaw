@@ -114,8 +114,9 @@ Case study and target design: `docs/reborn/2026-07-17-architecture-simplificatio
   deployment that authenticates more than one user MUST route process spawns through
   the sandboxed port (`TenantSandboxProcessPort`, backed by `ironclaw_process_sandbox`)
   whose mount is derived from the turn scope — never through the unsandboxed
-  `LocalHostProcessPort`. `LocalHostProcessPort` / `ProcessBackendKind::LocalHost` is
-  for genuinely single-user-local deployments only.
+  `HostProcessPort` (renamed from `LocalHostProcessPort`, §4.4 Bucket 2 — `Host`
+  names the boundary: a process run directly on the host). `HostProcessPort` /
+  `ProcessBackendKind::LocalHost` is for genuinely single-user-local deployments only.
 - **Deployment mode must reflect the fact of multi-user serving.** A served instance
   (SSO on, >1 admitted `UserId`, non-loopback bind) must not resolve to
   `LocalSingleUser` / host-shell semantics. The #6170 root cause was a composition
@@ -131,4 +132,4 @@ Any change touching process ports, the planner's process/filesystem backend rule
 or the composition-profile → `(DeploymentMode, RuntimeProfile)` mapping requires a
 **two-user cross-tenant escape test** driven through the caller: user B runs a shell
 command and the test asserts it cannot read user A's files. Re-verify the current
-wiring with `rg -n "LocalHostProcessPort|TenantSandboxProcessPort|ProcessBackendKind::LocalHost|DeploymentMode::LocalSingleUser" crates/ironclaw_host_runtime crates/ironclaw_reborn_composition crates/ironclaw_runtime_policy`.
+wiring with `rg -n "HostProcessPort|TenantSandboxProcessPort|ProcessBackendKind::LocalHost|DeploymentMode::LocalSingleUser" crates/ironclaw_host_runtime crates/ironclaw_reborn_composition crates/ironclaw_runtime_policy`.
