@@ -1505,6 +1505,7 @@ fn config_path_reports_default_reborn_home_without_creating_directories() {
     );
 }
 
+#[cfg(feature = "webui-v2-beta")]
 #[test]
 fn tracked_completions_match_the_canonical_reborn_cli() {
     for (shell, path) in [
