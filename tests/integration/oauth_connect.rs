@@ -180,6 +180,27 @@ async fn oauth_connect_flow_persists_credential_account() {
     );
 }
 
+/// Cross-implementation conformance: the durable `FilesystemAuthProductServices`
+/// must satisfy the same observable OAuth-callback state machine
+/// (`ironclaw_auth::test_support::conformance`) as the in-memory fake most consumer tests
+/// run against; the fake's invocation lives in
+/// `crates/ironclaw_auth/tests/auth_product_contract/oauth_flow_contract.rs`.
+/// The suite drives `AuthFlowManager` directly with pre-exchanged outcomes,
+/// so no token-exchange egress is involved — the exchange leg is covered by
+/// the surrounding tests in this file.
+#[tokio::test]
+async fn durable_flow_manager_satisfies_shared_oauth_flow_conformance() {
+    let bundle = build_oauth_product_auth_for_test();
+    let scope = test_scope();
+    let provider = AuthProviderId::new("test-oauth-provider").unwrap();
+    ironclaw_auth::test_support::conformance::assert_auth_flow_callback_conformance(
+        bundle.services.flow_manager().as_ref(),
+        &scope,
+        &provider,
+    )
+    .await;
+}
+
 /// Guard test: attempting an OAuth callback for a non-existent flow must fail
 /// with `UnknownOrExpiredFlow`.  No credential account must be created, and no
 /// token-exchange call should be made.

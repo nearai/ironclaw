@@ -89,6 +89,22 @@ Resolution order for an existing mirror:
    This is the same exception CLAUDE.md's "no `pub use` re-exports unless
    exposing to downstream consumers" already draws.
 
+## Relocating a shared module — update imports, don't leave a re-export
+
+When a type or module used by several crates has to move to a lower crate so
+they can all reach it (the canonical case: a pure primitive shared across
+layers moves into `ironclaw_common`, and CLAUDE.md already permits *depending on
+`common`* from anywhere), **move it and update every consumer's import to the
+new path**. Do NOT leave a `pub use old_path::* ` shim in the original crate to
+preserve `old_crate::thing` call sites — that shim is exactly the
+path-preservation re-export §-item-1 and item-4 above forbid. A plain private
+`use new_crate::module as old_name;` alias at a call site is fine (it is an
+import, not a re-export); a crate-root `pub use` that keeps the old public path
+alive is not. Worked example: the LLM cost table moved
+`ironclaw_llm::costs` → `ironclaw_common::llm_costs`, and each consumer
+(`ironclaw_llm` providers, `ironclaw_runner`, `ironclaw_reborn_composition`,
+the root crate) had its import repointed — no shim was left behind.
+
 ## Duplicate detection — signatures, not names
 
 Duplicates are types doing the **same DTO job**, which usually means
