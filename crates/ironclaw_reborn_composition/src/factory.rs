@@ -9,15 +9,9 @@ use std::{
 #[cfg(any(feature = "libsql", feature = "postgres"))]
 use crate::product_auth::durable::{FilesystemAuthProductServices, UnavailableAuthProviderClient};
 use crate::support::fs::RebornProjectService;
-#[cfg(any(feature = "libsql", feature = "postgres"))]
 use ironclaw_approvals::{
     FilesystemAutoApproveSettingStore, FilesystemPersistentApprovalPolicyStore,
     FilesystemToolPermissionOverrideStore,
-};
-#[cfg(not(any(feature = "libsql", feature = "postgres")))]
-use ironclaw_approvals::{
-    InMemoryAutoApproveSettingStore, InMemoryPersistentApprovalPolicyStore,
-    InMemoryToolPermissionOverrideStore,
 };
 #[cfg(any(feature = "libsql", feature = "postgres"))]
 use ironclaw_auth::AuthProviderClient;
@@ -298,23 +292,17 @@ pub(crate) type LocalDevCapabilityLeaseStore =
 #[cfg(not(any(feature = "libsql", feature = "postgres")))]
 pub(crate) type LocalDevCapabilityLeaseStore = InMemoryCapabilityLeaseStore;
 
-#[cfg(any(feature = "libsql", feature = "postgres"))]
+// One store per approval domain, backend-injected. Local-dev runs the same
+// production `Filesystem*Store<F>` every deployment uses, over the local-dev
+// root filesystem (in-memory when no durable backend feature is enabled,
+// libSQL/Postgres otherwise) — no bespoke `InMemory*Store` type
+// (arch-simplification §4.3).
 pub(crate) type LocalDevPersistentApprovalPolicyStore =
     FilesystemPersistentApprovalPolicyStore<LocalDevRootFilesystem>;
-#[cfg(not(any(feature = "libsql", feature = "postgres")))]
-pub(crate) type LocalDevPersistentApprovalPolicyStore = InMemoryPersistentApprovalPolicyStore;
-
-#[cfg(any(feature = "libsql", feature = "postgres"))]
 pub(crate) type LocalDevToolPermissionOverrideStore =
     FilesystemToolPermissionOverrideStore<LocalDevRootFilesystem>;
-#[cfg(not(any(feature = "libsql", feature = "postgres")))]
-pub(crate) type LocalDevToolPermissionOverrideStore = InMemoryToolPermissionOverrideStore;
-
-#[cfg(any(feature = "libsql", feature = "postgres"))]
 pub(crate) type LocalDevAutoApproveSettingStore =
     FilesystemAutoApproveSettingStore<LocalDevRootFilesystem>;
-#[cfg(not(any(feature = "libsql", feature = "postgres")))]
-pub(crate) type LocalDevAutoApproveSettingStore = InMemoryAutoApproveSettingStore;
 
 #[cfg(any(feature = "libsql", feature = "postgres"))]
 type LocalDevProcessServices = ProcessServices<
@@ -2566,12 +2554,18 @@ async fn build_local_dev_store_graph(
         project_repository,
         turn_state_store_limits,
     } = input;
+    // Approval stores run the production `Filesystem*Store<F>` over the local-dev
+    // root filesystem (here backed by `InMemoryBackend`, since no durable backend
+    // feature is enabled) — no bespoke `InMemory*Store` (arch-simplification §4.3).
+    let scoped_filesystem = local_dev_scoped_filesystem(Arc::clone(&filesystem));
     let event_log = local_dev_event_log(Arc::clone(&filesystem))?;
     let audit_log = local_dev_audit_log(Arc::clone(&filesystem))?;
     let run_state = Arc::new(InMemoryRunStateStore::new());
     let approval_requests = Arc::new(InMemoryApprovalRequestStore::new());
     let capability_leases = Arc::new(InMemoryCapabilityLeaseStore::new());
-    let persistent_approval_policies = Arc::new(InMemoryPersistentApprovalPolicyStore::new());
+    let persistent_approval_policies = Arc::new(FilesystemPersistentApprovalPolicyStore::new(
+        Arc::clone(&scoped_filesystem),
+    ));
     let turn_state = Arc::new(InMemoryTurnStateStore::with_limits(turn_state_store_limits));
     let checkpoint_state_store: Arc<dyn CheckpointStateStore> =
         Arc::new(InMemoryCheckpointStateStore::default());
@@ -2597,8 +2591,12 @@ async fn build_local_dev_store_graph(
             reason: format!("local-dev capability policy is invalid: {error}"),
         }
     })?);
-    let tool_permission_overrides = Arc::new(LocalDevToolPermissionOverrideStore::new());
-    let auto_approve_settings = Arc::new(LocalDevAutoApproveSettingStore::new());
+    let tool_permission_overrides = Arc::new(LocalDevToolPermissionOverrideStore::new(Arc::clone(
+        &scoped_filesystem,
+    )));
+    let auto_approve_settings = Arc::new(LocalDevAutoApproveSettingStore::new(Arc::clone(
+        &scoped_filesystem,
+    )));
     let memory_mounts =
         memory_mount_view(MountPermissions::read_write_list_delete()).map_err(|error| {
             RebornBuildError::InvalidConfig {
@@ -3680,7 +3678,6 @@ fn local_dev_mount_descriptor(
     })
 }
 
-#[cfg(any(feature = "libsql", feature = "postgres"))]
 fn local_dev_scoped_filesystem(
     filesystem: Arc<LocalDevRootFilesystem>,
 ) -> Arc<ScopedFilesystem<LocalDevRootFilesystem>> {

@@ -15,9 +15,10 @@ use std::sync::Mutex as StdMutex;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use async_trait::async_trait;
-use ironclaw_approvals::{
-    InMemoryAutoApproveSettingStore, InMemoryCapabilityPermissionOverrideStore,
-    InMemoryPersistentApprovalPolicyStore,
+use ironclaw_approvals::test_support::{
+    in_memory_backed_auto_approve_setting_store,
+    in_memory_backed_capability_permission_override_store,
+    in_memory_backed_persistent_approval_policy_store,
 };
 use ironclaw_authorization::InMemoryCapabilityLeaseStore;
 use ironclaw_host_api::{
@@ -401,9 +402,9 @@ fn test_parts(
         trajectory_observer: None,
         outbound_preferences_facade: None,
         outbound_delivery_target_set_requires_approval: false,
-        tool_permission_overrides: Arc::new(InMemoryCapabilityPermissionOverrideStore::new()),
-        auto_approve_settings: Arc::new(InMemoryAutoApproveSettingStore::new()),
-        persistent_approval_policies: Arc::new(InMemoryPersistentApprovalPolicyStore::new()),
+        tool_permission_overrides: Arc::new(in_memory_backed_capability_permission_override_store()),
+        auto_approve_settings: Arc::new(in_memory_backed_auto_approve_setting_store()),
+        persistent_approval_policies: Arc::new(in_memory_backed_persistent_approval_policy_store()),
         approval_requests: Arc::new(InMemoryApprovalRequestStore::new()),
         capability_leases: Arc::new(InMemoryCapabilityLeaseStore::new()),
         capability_execution_mount_overrides,

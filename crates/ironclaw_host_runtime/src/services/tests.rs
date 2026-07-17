@@ -1,10 +1,11 @@
+// arch-exempt: large_file, mechanical approval-store migration only — InMemory*Store deleted, guard test repointed to Filesystem*Store<InMemoryBackend> (arch-simplification §4.3), no new test logic, plan #6168
 use std::{
     sync::{Arc, Mutex},
     time::Duration,
 };
 
 use async_trait::async_trait;
-use ironclaw_approvals::InMemoryPersistentApprovalPolicyStore;
+use ironclaw_approvals::test_support::in_memory_backed_persistent_approval_policy_store;
 use ironclaw_authorization::GrantAuthorizer;
 use ironclaw_capabilities::{
     CapabilityObligationCompletionRequest, CapabilityObligationError,
@@ -75,8 +76,9 @@ async fn production_wiring_reports_missing_persistent_approval_policies() {
 
 #[tokio::test]
 async fn production_wiring_reports_local_only_persistent_approval_policies() {
-    let services = test_services()
-        .with_persistent_approval_policies(Arc::new(InMemoryPersistentApprovalPolicyStore::new()));
+    let services = test_services().with_persistent_approval_policies(Arc::new(
+        in_memory_backed_persistent_approval_policy_store(),
+    ));
 
     let report = services
         .validate_production_wiring(&ProductionWiringConfig::new([]))
