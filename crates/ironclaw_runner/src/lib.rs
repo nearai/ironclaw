@@ -20,7 +20,18 @@ pub mod app_loop_family;
 mod context_shadow;
 pub mod driver_registry;
 pub mod failure_categories;
+pub mod failure_lane;
+pub mod failure_summary;
 pub mod hook_gate_refs;
+pub mod retry_disposition;
+
+// Run-failure classification/summarization over `failure_categories` (moved from
+// ironclaw_reborn_composition; they classify runner-owned categories). Re-exported
+// at the crate root so intra-cluster `crate::FailureLane` refs resolve and
+// composition can re-export them through its facade for the CLI.
+pub use failure_lane::{ALL_RUN_FAILURE_CATEGORIES, FailureLane, failure_lane};
+pub use failure_summary::reborn_failure_summary_for_category;
+pub use retry_disposition::{RetryDisposition, retry_disposition};
 #[cfg(any(
     feature = "webui-user-store",
     feature = "filesystem-local-trigger-access"

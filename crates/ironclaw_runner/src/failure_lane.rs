@@ -19,7 +19,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use ironclaw_runner::failure_categories::BUDGET_ACCOUNTING_FAILED_CATEGORY;
+use crate::failure_categories::BUDGET_ACCOUNTING_FAILED_CATEGORY;
 
 /// The lane a terminal run failure (or ingress refusal) belongs to.
 ///

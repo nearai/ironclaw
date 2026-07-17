@@ -1,4 +1,4 @@
-use ironclaw_runner::failure_categories::{
+use crate::failure_categories::{
     BUDGET_ACCOUNTING_FAILED_CATEGORY, MODEL_CREDENTIALS_UNAVAILABLE_CATEGORY,
     MODEL_CREDITS_EXHAUSTED_CATEGORY,
 };
@@ -160,7 +160,7 @@ pub fn reborn_failure_summary_for_category(category: Option<&str>) -> &'static s
     }
 }
 
-pub(crate) fn reborn_failure_summary_for_category_and_detail(
+pub fn reborn_failure_summary_for_category_and_detail(
     category: Option<&str>,
     detail: Option<ModelInvalidOutputDetailReason>,
 ) -> &'static str {
@@ -216,7 +216,7 @@ impl ModelInvalidOutputFailureSummary for ModelInvalidOutputDetailReason {
     }
 }
 
-pub(crate) fn pinned_failure_summary_for_category(category: &str) -> Option<&'static str> {
+pub fn pinned_failure_summary_for_category(category: &str) -> Option<&'static str> {
     match category {
         MODEL_CREDITS_EXHAUSTED_CATEGORY => Some(
             "The AI provider account is out of credits. Add credits or switch providers and try again.",
