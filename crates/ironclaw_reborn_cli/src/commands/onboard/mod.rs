@@ -206,10 +206,14 @@ impl OnboardCommand {
         // itself is still the authority that fails closed on real config
         // errors when it boots. Mirrors `status`'s own resolver, which
         // swallows the same load failure for the same reason.
+        // silent-ok: a config.toml that fails to parse (or predates this
+        // repo's schema) must not abort an otherwise-successful onboarding
+        // run; falling back to the default env var name is a fine
+        // degradation for this purely informational courtesy.
         let config_file = ironclaw_reborn_config::RebornConfigFile::load(&home.config_file_path())
             .ok()
             .flatten();
-        match crate::webui_token::resolve_login_link_announcement(home, config_file.as_ref()) {
+        match crate::webui_token::resolve_login_link_announcement(home, config_file.as_ref())? {
             crate::webui_token::LoginLinkAnnouncement::Link(login_link) => {
                 println!("login_link: {login_link}");
             }
