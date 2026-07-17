@@ -1,0 +1,9 @@
+{
+  "cursor": "cursor:capability_progress",
+  "progress": {
+    "generated_at": "2026-01-01T00:00:00Z",
+    "kind": "tool_running",
+    "turn_run_id": "00000000-0000-0000-0000-000000000001"
+  },
+  "type": "capability_progress"
+}

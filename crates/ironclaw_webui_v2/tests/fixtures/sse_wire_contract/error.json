@@ -1,0 +1,5 @@
+{
+  "error": "forbidden",
+  "kind": "participant_denied",
+  "retryable": false
+}

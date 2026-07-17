@@ -1,0 +1,33 @@
+{
+  "cursor": "cursor:projection_update",
+  "state": {
+    "items": [
+      {
+        "run_status": {
+          "run_id": "00000000-0000-0000-0000-000000000001",
+          "status": "blocked_approval"
+        }
+      },
+      {
+        "text": {
+          "body": "Working on it...",
+          "id": "message-1",
+          "run_id": "00000000-0000-0000-0000-000000000001"
+        }
+      },
+      {
+        "gate": {
+          "allow_always": false,
+          "body": "This action needs your approval.",
+          "gate_kind": "approval",
+          "gate_ref": "gate:projection-fixture",
+          "headline": "Approve the fixture action",
+          "invocation_id": "00000000-0000-0000-0000-000000000002",
+          "run_id": "00000000-0000-0000-0000-000000000001"
+        }
+      }
+    ],
+    "thread_id": "thread-fixture"
+  },
+  "type": "projection_update"
+}

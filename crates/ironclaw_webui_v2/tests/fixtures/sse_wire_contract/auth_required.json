@@ -1,0 +1,22 @@
+{
+  "cursor": "cursor:auth_required",
+  "prompt": {
+    "account_label": "user@example.test",
+    "auth_request_ref": "auth:fixture",
+    "body": "Paste the code from the connection screen.",
+    "challenge_kind": "manual_token",
+    "connection": {
+      "channel": "telegram",
+      "error_message": "That code did not match.",
+      "input_placeholder": "Pairing code",
+      "instructions": "Open the Telegram bot and send /pair.",
+      "strategy": "inbound_proof_code",
+      "submit_label": "Connect"
+    },
+    "expires_at": "2026-01-01T00:00:00Z",
+    "headline": "Connect your Google account",
+    "provider": "google",
+    "turn_run_id": "00000000-0000-0000-0000-000000000001"
+  },
+  "type": "auth_required"
+}

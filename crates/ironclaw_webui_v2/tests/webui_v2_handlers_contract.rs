@@ -79,6 +79,9 @@ use serde_json::Value;
 use tokio::sync::{Notify, mpsc};
 use tower::ServiceExt;
 
+#[path = "support/golden_json.rs"]
+mod golden_json;
+
 fn caller() -> WebUiAuthenticatedCaller {
     caller_for_user("user-alpha")
 }
@@ -5875,6 +5878,60 @@ async fn stream_events_facade_error_emits_redacted_error_event_and_closes() {
         closed,
         "facade error must close the SSE stream, but body.frame() yielded another chunk"
     );
+}
+
+// Part of the SSE wire-contract fixture set pinned in
+// `webui_v2_schema_contract.rs`'s `sse_wire_contract_fixtures_match_-
+// committed_json` (see that test's doc comment for the full scope and the
+// `UPDATE_SSE_FIXTURES=1` regeneration command). The `error` frame lives
+// here instead of there because it is not a `WebChatV2Event` — it is the
+// standalone `SseErrorPayload` built by `sse_error_event`, only reachable
+// by actually driving the facade-error path through the real handler, the
+// same path `stream_events_facade_error_emits_redacted_error_event_and_-
+// closes` above already proves in detail (redaction, stream closure). This
+// test only adds the fixture dump so the frontend Vitest suite has an
+// `error` frame to round-trip through the real `useSSE`/`useChatEvents`
+// parsing code.
+#[tokio::test]
+async fn stream_events_facade_error_emits_error_fixture() {
+    let services = Arc::new(StubServices::default());
+    services.enqueue_stream_events(Err(RebornServicesError {
+        code: RebornServicesErrorCode::Forbidden,
+        kind: RebornServicesErrorKind::ParticipantDenied,
+        status_code: 403,
+        retryable: false,
+        field: Some("thread_id".into()),
+        validation_code: None,
+    }));
+
+    let router = router_with(services.clone());
+    let response = router
+        .oneshot(
+            Request::builder()
+                .method(Method::GET)
+                .uri("/api/webchat/v2/threads/thread-x/events")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("oneshot");
+
+    let mut body = response.into_body();
+    let bytes = collect_sse_until(&mut body, Duration::from_secs(2), |buf| {
+        buf.windows(b"event: error".len())
+            .any(|w| w == b"event: error")
+            && buf.windows(2).any(|w| w == b"\n\n")
+    })
+    .await;
+
+    let events = parse_sse_events(&bytes);
+    let error_event = events
+        .iter()
+        .find(|event| event.event.as_deref() == Some("error"))
+        .unwrap_or_else(|| panic!("expected an SSE `error` event, got: {events:?}"));
+    let payload: Value = serde_json::from_str(error_event.data.as_deref().expect("error data"))
+        .expect("error data is JSON");
+    golden_json::assert_or_update_json_fixture("error", &payload);
 }
 
 #[tokio::test]
