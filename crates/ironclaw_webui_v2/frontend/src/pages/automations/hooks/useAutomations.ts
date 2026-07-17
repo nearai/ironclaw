@@ -1,4 +1,10 @@
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import {
+  type MutationFunction,
+  type UseMutationOptions,
+  useMutation,
+  useQuery,
+  useQueryClient,
+} from "@tanstack/react-query";
 import React from "react";
 import {
   deleteAutomation,
@@ -27,15 +33,83 @@ type RenameAutomationVariables = {
   name: string;
 };
 
-type ActionMutationContext = {
+export type ActionMutationContext = {
   sequence: number;
 };
 
-function isLatestAutomationAction(
-  context: ActionMutationContext | undefined,
-  latestSequence: number
-) {
-  return context?.sequence === latestSequence;
+type MutableRef<T> = {
+  current: T;
+};
+
+export type AutomationMutationLifecycle = {
+  onMutate: (_variables: unknown) => ActionMutationContext;
+  onError: (
+    _error: unknown,
+    _variables: unknown,
+    context: ActionMutationContext | undefined
+  ) => void;
+  onSuccess: (
+    _data: unknown,
+    _variables: unknown,
+    context: ActionMutationContext | undefined
+  ) => void;
+};
+
+type AutomationMutationLifecycleOptions = {
+  latestActionSequence: MutableRef<number>;
+  actionErrorToastId: MutableRef<string | null>;
+  dismissErrorToast: (id: string | null | undefined) => void;
+  showErrorToast: () => string;
+  invalidateAutomations: () => void;
+};
+
+export function createAutomationMutationLifecycle({
+  latestActionSequence,
+  actionErrorToastId,
+  dismissErrorToast,
+  showErrorToast,
+  invalidateAutomations,
+}: AutomationMutationLifecycleOptions): AutomationMutationLifecycle {
+  const clearActionError = () => {
+    if (actionErrorToastId.current !== null) {
+      dismissErrorToast(actionErrorToastId.current);
+    }
+    actionErrorToastId.current = null;
+  };
+
+  return {
+    onMutate: () => {
+      const sequence = latestActionSequence.current + 1;
+      latestActionSequence.current = sequence;
+      clearActionError();
+      return { sequence };
+    },
+    onError: (_error, _variables, context) => {
+      // A newer action deliberately supersedes older results: a late failure
+      // must neither dismiss nor replace the latest action's toast.
+      if (context?.sequence !== latestActionSequence.current) return;
+      clearActionError();
+      actionErrorToastId.current = showErrorToast();
+    },
+    onSuccess: (_data, _variables, context) => {
+      if (context?.sequence === latestActionSequence.current) {
+        clearActionError();
+      }
+      invalidateAutomations();
+    },
+  };
+}
+
+export function createAutomationMutationConfig<TData, TVariables>(
+  mutationFn: MutationFunction<TData, TVariables>,
+  lifecycle: AutomationMutationLifecycle
+): UseMutationOptions<TData, unknown, TVariables, ActionMutationContext> {
+  return {
+    mutationFn,
+    onMutate: lifecycle.onMutate,
+    onError: lifecycle.onError,
+    onSuccess: lifecycle.onSuccess,
+  };
 }
 
 export function useAutomations(includeCompleted = false) {
@@ -87,65 +161,49 @@ export function useAutomations(includeCompleted = false) {
   const invalidateAutomations = React.useCallback(() => {
     queryClient.invalidateQueries({ queryKey: ["automations"] });
   }, [queryClient]);
-  const clearActionError = React.useCallback(() => {
-    dismissToast(actionErrorToastId.current);
-    actionErrorToastId.current = null;
-  }, []);
-  const beginAction = React.useCallback((): ActionMutationContext => {
-    const sequence = latestActionSequence.current + 1;
-    latestActionSequence.current = sequence;
-    clearActionError();
-    return { sequence };
-  }, [clearActionError]);
-  const showActionError = React.useCallback((
-    _error: unknown,
-    _variables: unknown,
-    context: ActionMutationContext | undefined
-  ) => {
-    // A newer action deliberately supersedes older results: starting any
-    // action clears the toast, and a late completion must not resurrect it.
-    if (isLatestAutomationAction(context, latestActionSequence.current)) {
-      clearActionError();
-      actionErrorToastId.current = toast(t("automations.error.actionFailed"), {
+  const showActionErrorToast = React.useCallback(
+    () =>
+      toast(t("automations.error.actionFailed"), {
         tone: "error",
-      });
-    }
-  }, [clearActionError, t]);
-  const handleActionSuccess = React.useCallback((
-    _data: unknown,
-    _variables: unknown,
-    context: ActionMutationContext | undefined
-  ) => {
-    if (isLatestAutomationAction(context, latestActionSequence.current)) {
-      clearActionError();
-    }
-    invalidateAutomations();
-  }, [clearActionError, invalidateAutomations]);
-  const pauseMutation = useMutation({
-    mutationFn: (automationId: string) => pauseAutomation({ automationId }),
-    onMutate: beginAction,
-    onError: showActionError,
-    onSuccess: handleActionSuccess,
-  });
-  const resumeMutation = useMutation({
-    mutationFn: (automationId: string) => resumeAutomation({ automationId }),
-    onMutate: beginAction,
-    onError: showActionError,
-    onSuccess: handleActionSuccess,
-  });
-  const renameMutation = useMutation({
-    mutationFn: ({ automationId, name }: RenameAutomationVariables) =>
-      renameAutomation({ automationId, name }),
-    onMutate: beginAction,
-    onError: showActionError,
-    onSuccess: handleActionSuccess,
-  });
-  const deleteMutation = useMutation({
-    mutationFn: (automationId: string) => deleteAutomation({ automationId }),
-    onMutate: beginAction,
-    onError: showActionError,
-    onSuccess: handleActionSuccess,
-  });
+      }),
+    [t]
+  );
+  const mutationLifecycle = React.useMemo(
+    () =>
+      createAutomationMutationLifecycle({
+        latestActionSequence,
+        actionErrorToastId,
+        dismissErrorToast: dismissToast,
+        showErrorToast: showActionErrorToast,
+        invalidateAutomations,
+      }),
+    [invalidateAutomations, showActionErrorToast]
+  );
+  const pauseMutation = useMutation(
+    createAutomationMutationConfig(
+      (automationId: string) => pauseAutomation({ automationId }),
+      mutationLifecycle
+    )
+  );
+  const resumeMutation = useMutation(
+    createAutomationMutationConfig(
+      (automationId: string) => resumeAutomation({ automationId }),
+      mutationLifecycle
+    )
+  );
+  const renameMutation = useMutation(
+    createAutomationMutationConfig(
+      ({ automationId, name }: RenameAutomationVariables) =>
+        renameAutomation({ automationId, name }),
+      mutationLifecycle
+    )
+  );
+  const deleteMutation = useMutation(
+    createAutomationMutationConfig(
+      (automationId: string) => deleteAutomation({ automationId }),
+      mutationLifecycle
+    )
+  );
 
   return {
     automations,
