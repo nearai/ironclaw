@@ -474,6 +474,155 @@ fn docker_reborn_entrypoint_rejects_stale_local_dev_config_for_production() {
     assert!(stderr.contains("stale local-dev seed"), "stderr: {stderr}");
 }
 
+/// The exact `[llm.default]` bytes every shipped Docker profile config used
+/// to bake in before this change (`docker/reborn/config.toml`,
+/// `config.hosted-single-tenant.toml`,
+/// `config.hosted-single-tenant-volume.toml`, `config.production.toml` all
+/// carried this identical block) — a persistent Railway volume from before
+/// this change still has it verbatim in its own `config.toml`, since the
+/// entrypoint only installs a default config when `$config_path` doesn't
+/// exist yet.
+#[cfg(unix)]
+const STALE_BAKED_LLM_DEFAULT_STUB: &str = "[llm.default]\nprovider_id = \"nearai\"\nmodel = \"deepseek-ai/DeepSeek-V4-Flash\"\napi_key_env = \"NEARAI_API_KEY\"\n";
+
+/// RED (entrypoint one-time volume migration): a persistent volume's
+/// `config.toml` carrying the EXACT old baked-in `[llm.default]` stub must
+/// have that section stripped on boot, with the pre-migration file backed
+/// up alongside as `config.toml.pre-llm-migration` — proving an existing
+/// Railway deployment converges onto the "no implicit LLM slot" behavior
+/// without an operator having to intervene.
+#[cfg(unix)]
+#[test]
+fn docker_reborn_entrypoint_migrates_a_stale_baked_llm_default_stub() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let bin_dir = temp.path().join("bin");
+    fake_reborn_bin(&bin_dir);
+    let reborn_home = temp.path().join("reborn-home");
+    std::fs::create_dir_all(&reborn_home).expect("reborn home");
+    let original_config = format!(
+        "api_version = \"ironclaw.runtime/v1\"\n\n[boot]\nprofile = \"local-dev\"\n\n{STALE_BAKED_LLM_DEFAULT_STUB}\n[slack]\nenabled = false\n"
+    );
+    let config_path = reborn_home.join("config.toml");
+    std::fs::write(&config_path, &original_config).expect("write stale config");
+
+    let output = Command::new("/bin/sh")
+        .arg(workspace_root().join("docker/reborn/entrypoint.sh"))
+        .arg("--help")
+        .env_clear()
+        .env("IRONCLAW_DISABLE_OS_KEYCHAIN", "1")
+        .env("PATH", fake_bin_path(&bin_dir))
+        .env("HOME", temp.path().join("home"))
+        .env("IRONCLAW_REBORN_HOME", &reborn_home)
+        .output()
+        .expect("entrypoint should run");
+
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("Migrated a stale baked-in [llm.default] stub"),
+        "entrypoint must report the migration on stderr: {stderr}"
+    );
+
+    let migrated_config = std::fs::read_to_string(&config_path).expect("read migrated config");
+    assert!(
+        !migrated_config.contains("[llm.default]"),
+        "the stale [llm.default] section must be stripped: {migrated_config}"
+    );
+    assert!(
+        migrated_config.contains("profile = \"local-dev\"") && migrated_config.contains("[slack]"),
+        "unrelated sections must survive the migration untouched: {migrated_config}"
+    );
+
+    let backup_path = reborn_home.join("config.toml.pre-llm-migration");
+    let backup_config = std::fs::read_to_string(&backup_path).expect("read backup config");
+    assert_eq!(
+        backup_config, original_config,
+        "the backup must be a byte-for-byte copy of the pre-migration file"
+    );
+
+    // A second boot (backup already exists) must not clobber the backup
+    // with the now-already-migrated file, and must not re-run the
+    // migration (nothing left to strip).
+    let second_output = Command::new("/bin/sh")
+        .arg(workspace_root().join("docker/reborn/entrypoint.sh"))
+        .arg("--help")
+        .env_clear()
+        .env("IRONCLAW_DISABLE_OS_KEYCHAIN", "1")
+        .env("PATH", fake_bin_path(&bin_dir))
+        .env("HOME", temp.path().join("home"))
+        .env("IRONCLAW_REBORN_HOME", &reborn_home)
+        .output()
+        .expect("entrypoint should run a second time");
+    assert!(
+        second_output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&second_output.stderr)
+    );
+    let second_stderr = String::from_utf8_lossy(&second_output.stderr);
+    assert!(
+        !second_stderr.contains("Migrated a stale baked-in [llm.default] stub"),
+        "a second boot must not re-run the migration: {second_stderr}"
+    );
+    let backup_after_second_boot =
+        std::fs::read_to_string(&backup_path).expect("read backup config after second boot");
+    assert_eq!(
+        backup_after_second_boot, original_config,
+        "the backup must never be overwritten once written"
+    );
+}
+
+/// Negative case: an operator-modified `[llm.default]` section (here, a
+/// deliberately different model) must be left COMPLETELY untouched — the
+/// migration only strips an EXACT match of the old baked-in stub, never a
+/// section an operator has since edited in any way.
+#[cfg(unix)]
+#[test]
+fn docker_reborn_entrypoint_does_not_migrate_an_operator_modified_llm_default() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let bin_dir = temp.path().join("bin");
+    fake_reborn_bin(&bin_dir);
+    let reborn_home = temp.path().join("reborn-home");
+    std::fs::create_dir_all(&reborn_home).expect("reborn home");
+    let original_config = "api_version = \"ironclaw.runtime/v1\"\n\n[boot]\nprofile = \"local-dev\"\n\n[llm.default]\nprovider_id = \"nearai\"\nmodel = \"an-operator-chosen-model\"\napi_key_env = \"NEARAI_API_KEY\"\n\n[slack]\nenabled = false\n";
+    let config_path = reborn_home.join("config.toml");
+    std::fs::write(&config_path, original_config).expect("write operator-modified config");
+
+    let output = Command::new("/bin/sh")
+        .arg(workspace_root().join("docker/reborn/entrypoint.sh"))
+        .arg("--help")
+        .env_clear()
+        .env("IRONCLAW_DISABLE_OS_KEYCHAIN", "1")
+        .env("PATH", fake_bin_path(&bin_dir))
+        .env("HOME", temp.path().join("home"))
+        .env("IRONCLAW_REBORN_HOME", &reborn_home)
+        .output()
+        .expect("entrypoint should run");
+
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        !stderr.contains("Migrated a stale baked-in [llm.default] stub"),
+        "an operator-modified [llm.default] must never be migrated: {stderr}"
+    );
+    let unchanged_config = std::fs::read_to_string(&config_path).expect("read config");
+    assert_eq!(
+        unchanged_config, original_config,
+        "an operator-modified [llm.default] must be byte-for-byte unchanged"
+    );
+    assert!(
+        !reborn_home.join("config.toml.pre-llm-migration").exists(),
+        "no backup should be written when nothing was migrated"
+    );
+}
+
 #[test]
 fn help_mentions_reborn_commands() {
     let output = Command::new(reborn_bin())
@@ -1836,6 +1985,19 @@ fn serve_env_slack_enabled_mounts_slack_events_route() {
         !status_line.contains(" 404 "),
         "env-enabled Slack route should be mounted, got status line: {status_line}"
     );
+}
+
+/// `true` when `config_text` carries a live (uncommented) `provider_id =`
+/// line — used to assert a de-seeded `config.toml` has no `[llm.default]`
+/// slot. A plain `.contains("provider_id =")` also matches the stub's own
+/// commented-out `# provider_id = "nearai"` example line, so this only
+/// counts a line whose first non-whitespace character isn't `#`.
+#[cfg(feature = "webui-v2-beta")]
+fn config_text_has_live_provider_id(config_text: &str) -> bool {
+    config_text.lines().any(|line| {
+        let trimmed = line.trim_start();
+        trimmed.starts_with("provider_id =") || trimmed.starts_with("provider_id=")
+    })
 }
 
 #[cfg(feature = "webui-v2-beta")]
@@ -3489,35 +3651,36 @@ fn onboard_is_idempotent_for_the_webui_token_file() {
     );
 }
 
-/// RED (B4 step 5, capstone): the full daemon-case journey through the real
-/// binary — `onboard` non-interactively (so it soft-skips LLM-credential
-/// prompts and OS-service install, matching a headless CI/first-boot
-/// environment with no terminal), then `serve` spawned with `env_clear()`
-/// and only `HOME`/`IRONCLAW_REBORN_HOME`/`IRONCLAW_DISABLE_OS_KEYCHAIN` —
-/// no `IRONCLAW_REBORN_WEBUI_TOKEN`/`_USER_ID` overrides — must still bind.
-/// `serve` reads the bearer from onboard's provisioned `webui-token` file
-/// and the default owner id from `RebornHome`'s seeded config.
+/// RED (B4 step 5, capstone — rewritten for the de-seeded `[llm.default]`
+/// stub, thermo-approved design "config.toml is the single source of truth,
+/// written ONLY by explicit acts — no implicit seeding"): the full
+/// daemon-case journey through the real binary — `onboard` non-interactively
+/// (so it soft-skips LLM-credential prompts and OS-service install, matching
+/// a headless CI/first-boot environment with no terminal) with NO LLM
+/// environment variables set at all, then `serve` spawned with `env_clear()`
+/// and only `HOME`/`IRONCLAW_REBORN_HOME`/`IRONCLAW_DISABLE_OS_KEYCHAIN` — no
+/// `IRONCLAW_REBORN_WEBUI_TOKEN`/`_USER_ID` overrides.
 ///
-/// `config.toml`'s stub now seeds `nearai` — `commands/config/init.rs`'s
-/// `DEFAULT_LLM_PROVIDER_ID`, shared with onboard's own interactive prompt
-/// default, so the two paths can't drift apart — which carries
-/// `"api_key_required": false` in `providers.json` (session-token auth, not
-/// a bearer key). `serve` resolves the `[llm.default]` slot at startup, not
-/// lazily on first `send_user_message` (`resolve_reborn_runtime_llm`, called
-/// from `build_runtime_input_with_options` before the async runtime even
-/// starts), so this test must boot against the stub exactly as onboard wrote
-/// it — no config surgery. A key is still seeded through the same
-/// `open_local_dev_secret_store` + `LlmKeyStore::put` opener
-/// `provision_llm_credentials` uses (bypassing the prompt UI, matching
-/// `provision_llm_credentials_writes_config_and_secret_store_through_fake_prompts`'s
-/// seeding pattern) to exercise the stored-key overlay path a real
-/// interactive onboarding run would also take; it is not required for
-/// `serve` to boot since `api_key_required = false`.
-/// This is the config+files-only daemon case `service install` produces: no
-/// env vars carried through the launchd/systemd unit environment at all.
+/// Before this fix, `config.toml`'s stub always seeded a hardcoded `nearai`
+/// slot, so this test's old assertions pinned that stub-seeding bug: it
+/// asserted `provider_id = "nearai"` appeared in a fresh `config.toml` an
+/// operator never asked for. Now `onboard` writes NO `[llm.default]` slot
+/// when nothing was detected in the environment (see
+/// `commands::onboard::llm_credentials::provision_llm_credentials`'s
+/// doc) — non-LLM artifacts (webui-token, onboarding marker, login link)
+/// are still provisioned, and the printed output teaches how to configure
+/// an LLM afterward. `serve`'s runtime-LLM resolution is UNCHANGED (slot →
+/// env fallback → per-request fail-closed — see
+/// `runtime::build_runtime_input_with_options`): with neither a slot nor an
+/// env-resolvable provider, `resolve_reborn_runtime_llm` returns `Ok(None)`,
+/// which is NOT a boot-time hard failure — `serve` still binds its listener
+/// (matching `run`'s own `run_warns_when_falling_back_to_stub_gateway`
+/// degraded-boot behavior) but logs a `warn!` that runs will fail until an
+/// LLM is configured. This test pins BOTH halves: onboard's teaching output
+/// and de-seeded config, and serve's warn-but-still-bind runtime behavior.
 #[cfg(feature = "webui-v2-beta")]
 #[test]
-fn onboard_then_serve_boots_with_an_empty_environment() {
+fn onboard_then_serve_boots_in_degraded_mode_with_an_empty_environment() {
     let temp = tempfile::tempdir().expect("tempdir");
     let reborn_home = temp.path().join("reborn-home");
     let home = temp.path().join("home");
@@ -3531,7 +3694,7 @@ fn onboard_then_serve_boots_with_an_empty_environment() {
         .expect("ironclaw-reborn onboard should run");
     assert!(
         onboard_output.status.success(),
-        "onboard must succeed non-interactively; stderr: {}",
+        "onboard must succeed non-interactively even with no LLM configured; stderr: {}",
         String::from_utf8_lossy(&onboard_output.stderr)
     );
     let onboard_stdout = String::from_utf8_lossy(&onboard_output.stdout);
@@ -3541,7 +3704,18 @@ fn onboard_then_serve_boots_with_an_empty_environment() {
     );
     assert!(
         onboard_stdout.contains("login_link: http://127.0.0.1:3000/login?token="),
-        "onboard must print the CLI-token login link; stdout: {onboard_stdout}"
+        "onboard must print the CLI-token login link even with no LLM configured; stdout: \
+         {onboard_stdout}"
+    );
+    assert!(
+        onboard_stdout.contains("llm_credentials: skipped (non-interactive session)"),
+        "onboard must report the LLM step as skipped (nothing detected in env); stdout: \
+         {onboard_stdout}"
+    );
+    assert!(
+        onboard_stdout.contains("configure LLM credentials:")
+            && onboard_stdout.contains("export a provider's LLM environment variables"),
+        "onboard must teach how to configure an LLM afterward; stdout: {onboard_stdout}"
     );
     assert!(
         reborn_home.join("webui-token").exists(),
@@ -3551,55 +3725,11 @@ fn onboard_then_serve_boots_with_an_empty_environment() {
     let config_path = reborn_home.join("config.toml");
     let config_text = std::fs::read_to_string(&config_path).expect("read seeded config.toml");
     assert!(
-        config_text.contains("provider_id = \"nearai\""),
-        "the config stub must default to the zero-friction nearai slot so serve boots headless \
-         with no LLM env vars set: {config_text}"
+        !config_text_has_live_provider_id(&config_text),
+        "config.toml is the single source of truth for `[llm.default]`, written only by an \
+         explicit act — a fresh headless onboard with nothing detected in env must not seed a \
+         provider: {config_text}"
     );
-
-    // Land the LLM key the stub's `[llm.default]` can use (not required —
-    // `api_key_required = false` — but seeded anyway to exercise the same
-    // stored-key overlay path a real onboarding run would), through the same
-    // opener onboard's own interactive path uses — no env var, no terminal.
-    // `os_keychain_suppressed`'s `cfg!(test)` half only fires for
-    // `ironclaw_secrets`'s OWN unit tests — evaluated against the crate being
-    // COMPILED, not the caller — so from this integration-test binary
-    // (`ironclaw_secrets` linked in as an ordinary, non-`cfg(test)`
-    // dependency) it is false, and hitting the store opener without a cached
-    // master key would fall through to a real macOS Keychain
-    // `SecItemCopyMatching` call that hangs forever waiting on a GUI prompt
-    // no headless run can answer (confirmed via `sample` on the wedged
-    // process during this test's own development). Seed the cached dotfile
-    // directly first — same pattern as
-    // `provision_llm_credentials_writes_config_and_secret_store_through_fake_prompts`'s
-    // unit test above — so the resolver never reaches the keychain step at
-    // all, deterministically, regardless of `IRONCLAW_DISABLE_OS_KEYCHAIN`.
-    std::fs::write(
-        reborn_home.join(ironclaw_reborn_composition::LOCAL_DEV_SECRETS_MASTER_KEY_PATH),
-        ironclaw_secrets::keychain::generate_master_key_hex(),
-    )
-    .expect("seed cached master key dotfile");
-    // `new_current_thread`, not the multi-thread default: matches
-    // `crate::runtime::block_on_cli_future`'s own runtime shape (the
-    // production seam `provision_llm_credentials` runs under), which this
-    // seeding step is standing in for outside a terminal. The libsql/rusqlite
-    // path underneath `open_local_dev_secret_store` deadlocks when driven
-    // from a plain `Runtime::new()` multi-thread runtime instead.
-    let seed_rt = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .expect("current-thread tokio runtime for LLM key seed");
-    seed_rt.block_on(async {
-        let store = ironclaw_reborn_composition::open_local_dev_secret_store(&reborn_home)
-            .await
-            .expect("open local dev secret store");
-        ironclaw_reborn_composition::LlmKeyStore::new(store)
-            .put(
-                "nearai",
-                ironclaw_secrets::SecretMaterial::from("nearai-smoke-test-session".to_string()),
-            )
-            .await
-            .expect("seed nearai key");
-    });
 
     let port = unused_local_port();
     let mut child = reborn_command()
@@ -3611,7 +3741,114 @@ fn onboard_then_serve_boots_with_an_empty_environment() {
         .stderr(Stdio::piped())
         .spawn()
         .expect("ironclaw-reborn serve should start");
-    wait_for_serve_banner(&mut child);
+    let pre_banner_stderr = wait_for_serve_banner(&mut child);
+    assert!(
+        pre_banner_stderr.contains("no LLM selection configured"),
+        "serve must still bind (runtime resolution is unchanged: Ok(None) is not a boot-time \
+         hard failure) but warn that runs will fail until an LLM is wired; stderr: \
+         {pre_banner_stderr}"
+    );
+
+    let _ = child.kill();
+    let _ = child.wait();
+}
+
+/// Sibling of `onboard_then_serve_boots_in_degraded_mode_with_an_empty_environment`,
+/// closing the coverage gap that test's name implies: a headless onboard
+/// run WITH a complete `openai`-shape LLM environment (`OPENAI_API_KEY` AND
+/// `OPENAI_MODEL` set) must silently seed `[llm.default]` from it
+/// (`provision_headless_from_env`'s `ConfiguredFromEnv` branch, WRITING the
+/// slot to `config.toml`), and `serve` — booted later WITHOUT `OPENAI_MODEL`
+/// set — must resolve the PERSISTED model from that written slot, not a
+/// fresh env re-resolution (which would fall back to `openai`'s catalog
+/// default model, `gpt-5-mini`, once `OPENAI_MODEL` is gone). This is the
+/// bootable-daemon-case capstone that
+/// `onboard_then_serve_boots_in_degraded_mode_with_an_empty_environment`
+/// used to (incorrectly) exercise via a stub-baked `nearai` default.
+///
+/// Uses `openai` rather than `nearai`: `nearai`'s `api_key_required =
+/// false` means a fully env-resolvable `nearai` also satisfies the
+/// PRE-EXISTING idempotency short-circuit in `already_configured_outcome`
+/// (`RebornProviderAdmin::status`'s `active_llm_selection` already falls
+/// back to resolving straight from env when no slot is persisted) — that
+/// path reports `AlreadyConfigured` and returns before ever reaching the
+/// new env-detect-and-seed step, so nothing gets WRITTEN to `config.toml`
+/// (env alone stays sufficient every future boot too, so there is nothing
+/// to persist). `openai`'s idempotency check only ever looks at the
+/// persisted secret store, never at env, so a fresh store (this test's)
+/// lets the flow reach the new `ConfiguredFromEnv` branch and prove the
+/// WRITE actually happens.
+#[cfg(feature = "webui-v2-beta")]
+#[test]
+fn onboard_with_complete_llm_env_then_serve_boots_from_the_env_seeded_slot() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let reborn_home = temp.path().join("reborn-home");
+    let home = temp.path().join("home");
+    std::fs::create_dir_all(&home).expect("home dir");
+    const ENV_DETECTED_MODEL: &str = "gpt-test-env-detected-model";
+
+    let onboard_output = reborn_command()
+        .arg("onboard")
+        .env("HOME", &home)
+        .env("IRONCLAW_REBORN_HOME", &reborn_home)
+        .env("OPENAI_API_KEY", "sk-smoke-test-env-detected-openai-key")
+        .env("OPENAI_MODEL", ENV_DETECTED_MODEL)
+        .output()
+        .expect("ironclaw-reborn onboard should run");
+    assert!(
+        onboard_output.status.success(),
+        "onboard must succeed non-interactively; stderr: {}",
+        String::from_utf8_lossy(&onboard_output.stderr)
+    );
+    let onboard_stdout = String::from_utf8_lossy(&onboard_output.stdout);
+    assert!(
+        onboard_stdout.contains("llm_credentials: configured provider `openai`")
+            && onboard_stdout.contains("from environment"),
+        "onboard must report the env-detected provider was silently seeded; stdout: \
+         {onboard_stdout}"
+    );
+
+    let config_path = reborn_home.join("config.toml");
+    let config_text = std::fs::read_to_string(&config_path).expect("read env-seeded config.toml");
+    assert!(
+        config_text.contains("provider_id = \"openai\"")
+            && config_text.contains(&format!("model = \"{ENV_DETECTED_MODEL}\"")),
+        "headless onboard with a complete openai-shape env must seed the openai slot with the \
+         env-detected model: {config_text}"
+    );
+
+    // `serve`, booted WITHOUT `OPENAI_MODEL` set (only the key, which the
+    // slot's `api_key_env` still resolves from env — no key is ever
+    // stored, see `provision_llm_credentials`'s doc) must resolve the
+    // PERSISTED model from `config.toml`'s written slot, not silently fall
+    // back to `openai`'s catalog default. `IRONCLAW_REBORN_LOG` scopes the
+    // resolved-LLM `debug!` trace into view the same way
+    // `onboard_openai_key_then_serve_boots_with_env_var_unset` does.
+    let port = unused_local_port();
+    let mut child = reborn_command()
+        .args(["serve", "--host", "127.0.0.1", "--port"])
+        .arg(port.to_string())
+        .env("HOME", &home)
+        .env("IRONCLAW_REBORN_HOME", &reborn_home)
+        .env("OPENAI_API_KEY", "sk-smoke-test-env-detected-openai-key")
+        .env("IRONCLAW_REBORN_LOG", "info,ironclaw_reborn=debug")
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("ironclaw-reborn serve should start");
+    let pre_banner_stderr = strip_ansi(&wait_for_serve_banner(&mut child));
+    assert!(
+        !pre_banner_stderr.contains("no LLM selection configured"),
+        "serve must boot against the env-seeded slot without the degraded-mode warning; \
+         stderr: {pre_banner_stderr}"
+    );
+    assert!(
+        pre_banner_stderr.contains(&format!("model={ENV_DETECTED_MODEL}")),
+        "serve must resolve the model PERSISTED in the env-seeded slot, not a fresh \
+         env-fallback re-resolution (`OPENAI_MODEL` is deliberately unset at `serve` time, so \
+         a fresh env-fallback would resolve openai's catalog default `gpt-5-mini` instead); \
+         stderr: {pre_banner_stderr}"
+    );
 
     let _ = child.kill();
     let _ = child.wait();
@@ -3620,11 +3857,16 @@ fn onboard_then_serve_boots_with_an_empty_environment() {
 /// Full-chain capstone: `onboard`'s printed CLI-token login link must
 /// actually WORK once `serve` is up, and the session it mints must
 /// authorize a real request against the WebChat v2 API — not just bind a
-/// listener. Builds on `onboard_then_serve_boots_with_an_empty_environment`'s
-/// setup (same seeding rationale — see that test's doc comment for why the
-/// master-key dotfile and stored `nearai` key are seeded through
-/// `seed_stored_llm_key` rather than env vars or a terminal prompt), then
-/// drives the HTTP mechanics `serve_mounts_cli_login_route_without_sso`
+/// listener. Builds on
+/// `onboard_with_complete_llm_env_then_serve_boots_from_the_env_seeded_slot`'s
+/// setup — `NEARAI_MODEL` seeds the `[llm.default]` slot via onboard's
+/// headless env-detect step (`config.toml` is the single source of truth,
+/// written only by an explicit act — no implicit stub seeding), and
+/// `seed_stored_llm_key` additionally lands a key in the encrypted secret
+/// store to exercise the stored-key overlay path a real interactive
+/// onboarding run would also take (not required for `serve` to boot here:
+/// `nearai`'s `api_key_required` is `false`), then drives the HTTP
+/// mechanics `serve_mounts_cli_login_route_without_sso`
 /// already exercises (`GET /login?token=` → 302/303 with a `login_ticket` →
 /// `POST /auth/session/exchange` → bearer) starting from onboard's OWN
 /// provisioned token file instead of a hand-seeded one, and goes one step
@@ -3645,6 +3887,7 @@ fn onboard_login_link_then_bearer_authorizes_a_protected_request() {
         .arg("onboard")
         .env("HOME", &home)
         .env("IRONCLAW_REBORN_HOME", &reborn_home)
+        .env("NEARAI_MODEL", "deepseek-ai/DeepSeek-V4-Flash")
         .output()
         .expect("ironclaw-reborn onboard should run");
     assert!(
@@ -3671,12 +3914,10 @@ fn onboard_login_link_then_bearer_authorizes_a_protected_request() {
         "onboard-provisioned webui-token must not be empty"
     );
 
-    // Same stored-key seeding `onboard_then_serve_boots_with_an_empty_
-    // environment` performs, through the shared `seed_stored_llm_key`
-    // helper below — exercises the stored-key overlay path a real
-    // interactive onboarding run would also take (not required for `serve`
-    // to boot: the stub's `[llm.default]` is `nearai`, `api_key_required =
-    // false`).
+    // Additional stored-key seeding (not required for `serve` to boot here:
+    // the env-seeded `[llm.default]` slot is `nearai`, `api_key_required =
+    // false`) — exercises the stored-key overlay path a real interactive
+    // onboarding run would also take.
     seed_stored_llm_key(&reborn_home, "nearai", "nearai-smoke-test-session");
 
     let port = unused_local_port();
@@ -3792,11 +4033,11 @@ fn onboard_login_link_then_bearer_authorizes_a_protected_request() {
 /// Seed the local-dev encrypted secret store with an LLM API key for
 /// `provider_id`, through the same `open_local_dev_secret_store` +
 /// `LlmKeyStore::put` opener `onboard`'s interactive credential prompt uses
-/// — bypassing the prompt UI, matching
-/// `onboard_then_serve_boots_with_an_empty_environment`'s own seeding
-/// pattern. Also seeds the cached master-key dotfile first so the resolver
-/// never reaches the OS keychain (see that test's comment for why: a
-/// headless run would otherwise hang on a GUI keychain prompt).
+/// — bypassing the prompt UI. Also seeds the cached master-key dotfile first
+/// so the resolver never reaches the OS keychain (a headless run would
+/// otherwise hang on a GUI keychain prompt — see
+/// `onboard_with_complete_llm_env_then_serve_boots_from_the_env_seeded_slot`'s
+/// call site for the same rationale).
 #[cfg(feature = "webui-v2-beta")]
 fn seed_stored_llm_key(reborn_home: &Path, provider_id: &str, key: &str) {
     std::fs::write(
@@ -3832,11 +4073,13 @@ fn seed_stored_llm_key(reborn_home: &Path, provider_id: &str, key: &str) {
 /// stores), so the bug only surfaced at the next `serve` boot — silently
 /// stranding an operator who had just "successfully" onboarded. `nearai`
 /// (`api_key_required = false`) never hit this path, which is why the
-/// existing daemon-case capstone (`onboard_then_serve_boots_with_an_empty_
-/// environment`) didn't catch it.
+/// existing daemon-case capstones
+/// (`onboard_then_serve_boots_in_degraded_mode_with_an_empty_environment` /
+/// `onboard_with_complete_llm_env_then_serve_boots_from_the_env_seeded_slot`)
+/// didn't catch it.
 ///
-/// Crate smoke tier (spawns the real `ironclaw-reborn` binary), matching
-/// `onboard_then_serve_boots_with_an_empty_environment`'s tier: the bug lives
+/// Crate smoke tier (spawns the real `ironclaw-reborn` binary), matching this
+/// file's other onboard/serve capstones' tier: the bug lives
 /// in `serve`'s pre-async-runtime boot sequence
 /// (`build_runtime_input_with_options`, called before `build_reborn_services`
 /// even starts), so only a real-process boot proves the ordering is fixed —
@@ -3973,12 +4216,16 @@ fn serve_boots_with_env_api_key_set_and_empty_secret_store() {
         "onboard must succeed non-interactively; stderr: {}",
         String::from_utf8_lossy(&onboard_output.stderr)
     );
-    // Sanity: the config stub defaults to `nearai`, matching Railway's
-    // deployment shape, and the secret store is never touched by this test.
+    // Sanity: the de-seeded config stub carries no `[llm.default]` slot at
+    // all (config.toml is the single source of truth, written only by an
+    // explicit act) — this scenario boots purely off `NEARAI_API_KEY` at
+    // `serve` time via the env-fallback path (`resolve_reborn_runtime_llm`),
+    // matching Railway's env-var-driven deployment shape, and the secret
+    // store is never touched by this test.
     let config_text =
         std::fs::read_to_string(reborn_home.join("config.toml")).expect("read seeded config.toml");
     assert!(
-        config_text.contains("provider_id = \"nearai\""),
+        !config_text_has_live_provider_id(&config_text),
         "config: {config_text}"
     );
 
