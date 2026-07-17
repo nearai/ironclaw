@@ -239,6 +239,18 @@ pub(super) fn install_with_runner(
 }
 
 pub(super) fn start_with_runner(runner: &mut dyn ServiceCommandRunner) -> Result<()> {
+    start_with_runner_impl(runner, true)
+}
+
+/// Same start sequence, but without the "Service started" line — used by
+/// [`restart_with_runner`] via [`super::restart_generic`], which prints its
+/// own single restart summary instead of letting the inner start/stop calls
+/// print their own lines too.
+fn start_with_runner_quiet(runner: &mut dyn ServiceCommandRunner) -> Result<()> {
+    start_with_runner_impl(runner, false)
+}
+
+fn start_with_runner_impl(runner: &mut dyn ServiceCommandRunner, verbose: bool) -> Result<()> {
     if !unit_path()?.exists() {
         bail!("Service not installed. Run `ironclaw-reborn service install` first.");
     }
@@ -250,20 +262,36 @@ pub(super) fn start_with_runner(runner: &mut dyn ServiceCommandRunner) -> Result
         "systemctl start",
         Command::new("systemctl").args(["--user", "start", SYSTEMD_UNIT]),
     )?;
-    println!("Service started");
+    if verbose {
+        println!("Service started");
+    }
     Ok(())
 }
 
 pub(super) fn stop_with_runner(runner: &mut dyn ServiceCommandRunner) -> Result<()> {
+    stop_with_runner_impl(runner, true)
+}
+
+/// Same stop sequence, but without the "Service stopped" line — see
+/// [`start_with_runner_quiet`].
+fn stop_with_runner_quiet(runner: &mut dyn ServiceCommandRunner) -> Result<()> {
+    stop_with_runner_impl(runner, false)
+}
+
+fn stop_with_runner_impl(runner: &mut dyn ServiceCommandRunner, verbose: bool) -> Result<()> {
     if !unit_path()?.exists() {
-        println!("Service stopped");
+        if verbose {
+            println!("Service stopped");
+        }
         return Ok(());
     }
     runner.run_checked(
         "systemctl stop",
         Command::new("systemctl").args(["--user", "stop", SYSTEMD_UNIT]),
     )?;
-    println!("Service stopped");
+    if verbose {
+        println!("Service stopped");
+    }
     Ok(())
 }
 
@@ -290,8 +318,8 @@ pub(super) fn restart_with_runner(runner: &mut dyn ServiceCommandRunner) -> Resu
         runner,
         installed,
         was_running,
-        stop_with_runner,
-        start_with_runner,
+        stop_with_runner_quiet,
+        start_with_runner_quiet,
     )
 }
 
