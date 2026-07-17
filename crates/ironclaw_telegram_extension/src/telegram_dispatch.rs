@@ -268,7 +268,13 @@ impl TelegramInboundPreRouter {
         if !self.hint_allowed(chat_id).await {
             return;
         }
-        self.send_static_reply(chat_id, UNPAIRED_HINT_REPLY).await;
+        if !self.send_static_reply(chat_id, UNPAIRED_HINT_REPLY).await {
+            // The hint never reached the user — release the throttle slot so
+            // the next message retries instead of inheriting up to a full
+            // window of silence from one failed send (live-observed
+            // 2026-07-17 as "DMing the disconnected bot gets no reply").
+            self.hint_throttle.lock().await.remove(&chat_id);
+        }
     }
 
     /// At most one hint per chat per window. Entries older than the window
@@ -277,7 +283,9 @@ impl TelegramInboundPreRouter {
         throttle_allows(&self.hint_throttle, self.hint_throttle_window, chat_id).await
     }
 
-    async fn send_static_reply(&self, chat_id: i64, text: &str) {
+    /// Returns `true` when the reply reached the Bot API successfully;
+    /// best-effort — failures are logged at debug and the webhook still acks.
+    async fn send_static_reply(&self, chat_id: i64, text: &str) -> bool {
         let bot_token = match self.setup.bot_token().await {
             Ok(Some(token)) => token,
             Ok(None) => {
@@ -285,7 +293,7 @@ impl TelegramInboundPreRouter {
                     target = TRACING_TARGET,
                     "telegram bot token not configured; static reply skipped"
                 );
-                return;
+                return false;
             }
             Err(error) => {
                 tracing::debug!(
@@ -293,7 +301,7 @@ impl TelegramInboundPreRouter {
                     reason = %error,
                     "telegram bot token unavailable; static reply skipped"
                 );
-                return;
+                return false;
             }
         };
         if let Err(error) = self.bot_api.send_message(&bot_token, chat_id, text).await {
@@ -302,7 +310,9 @@ impl TelegramInboundPreRouter {
                 reason = %error,
                 "telegram static reply send failed; webhook still acked"
             );
+            return false;
         }
+        true
     }
 }
 
@@ -500,6 +510,10 @@ pub mod test_fixtures {
 
         pub fn fail_sends(&self) {
             self.fail_sends.store(true, Ordering::SeqCst);
+        }
+
+        pub fn succeed_sends(&self) {
+            self.fail_sends.store(false, Ordering::SeqCst);
         }
 
         /// Point `getMe` at a different bot so the next setup save models a
@@ -1333,6 +1347,40 @@ mod tests {
 
     // Row (c): bare `/start` and unpaired ordinary text hint, throttled per
     // chat within the window.
+    /// A hint send that FAILS must release the chat's throttle slot: the
+    /// throttle marks before sending, so without the release one Telegram
+    /// hiccup silences the chat's onboarding hint for the full window —
+    /// live-observed as "DMing the disconnected bot gets no reply at all"
+    /// (2026-07-17).
+    #[tokio::test]
+    async fn failed_hint_send_releases_the_throttle_for_the_next_message() {
+        let fixture = fixture().await;
+
+        fixture.bot_api.fail_sends();
+        fixture
+            .process(&private_text_update_body(42, 555, Some("hello?")))
+            .await
+            .expect("acked despite failed hint send");
+
+        fixture.bot_api.succeed_sends();
+        fixture
+            .process(&private_text_update_body(43, 555, Some("anyone there?")))
+            .await
+            .expect("acked");
+
+        let sends = fixture.bot_api.sends();
+        assert_eq!(
+            sends.len(),
+            2,
+            "the failed first hint must not consume the throttle window;              the second message retries the hint: {sends:?}"
+        );
+        assert!(
+            sends[1].1.contains("Pair your account"),
+            "the retried hint is the onboarding hint: {:?}",
+            sends[1].1
+        );
+    }
+
     #[tokio::test]
     async fn unpaired_hints_are_throttled_per_chat() {
         let fixture = fixture().await;
