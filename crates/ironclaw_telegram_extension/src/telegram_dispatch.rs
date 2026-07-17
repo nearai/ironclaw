@@ -51,6 +51,10 @@ const TRACING_TARGET: &str = "ironclaw::reborn::telegram_updates";
 const PRIVATE_CHAT_KIND: &str = "private";
 const START_COMMAND: &str = "/start";
 const HINT_THROTTLE_WINDOW: Duration = Duration::from_secs(10 * 60);
+/// Shorter than the hint window: a legitimate user who mistyped gets fresh
+/// feedback quickly, while repeated invalid guesses in one chat stop earning
+/// replies (the consume itself is never gated — see `handle_pairing_attempt`).
+const INVALID_CODE_REPLY_THROTTLE_WINDOW: Duration = Duration::from_secs(30);
 
 const PAIRED_REPLY: &str = "✅ Paired. You can talk to IronClaw right here.";
 const ALREADY_PAIRED_SAME_USER_REPLY: &str = "You're already paired — just send me a message.";
@@ -72,6 +76,8 @@ pub struct TelegramInboundPreRouter {
     installation_id: AdapterInstallationId,
     hint_throttle: Mutex<HashMap<i64, Instant>>,
     hint_throttle_window: Duration,
+    invalid_code_reply_throttle: Mutex<HashMap<i64, Instant>>,
+    invalid_code_reply_throttle_window: Duration,
     runner: Arc<dyn TelegramUpdatesWebhookDispatcher>,
 }
 
@@ -92,6 +98,8 @@ impl TelegramInboundPreRouter {
             installation_id,
             hint_throttle: Mutex::new(HashMap::new()),
             hint_throttle_window: HINT_THROTTLE_WINDOW,
+            invalid_code_reply_throttle: Mutex::new(HashMap::new()),
+            invalid_code_reply_throttle_window: INVALID_CODE_REPLY_THROTTLE_WINDOW,
             runner,
         }
     }
@@ -199,7 +207,22 @@ impl TelegramInboundPreRouter {
                 ALREADY_PAIRED_SAME_USER_REPLY
             }
             Ok(PairingConsumeOutcome::AlreadyBoundToOtherUser) => ALREADY_BOUND_TO_OTHER_USER_REPLY,
-            Ok(PairingConsumeOutcome::ExpiredOrUnknown) => EXPIRED_OR_UNKNOWN_REPLY,
+            Ok(PairingConsumeOutcome::ExpiredOrUnknown) => {
+                // Failed attempts are rate-limited per chat (contract §pairing):
+                // the guess was still checked above — only the REPLY is
+                // suppressed, so a valid code (e.g. the deep-link retry right
+                // after a typo) always consumes and always confirms.
+                if !throttle_allows(
+                    &self.invalid_code_reply_throttle,
+                    self.invalid_code_reply_throttle_window,
+                    chat_id,
+                )
+                .await
+                {
+                    return;
+                }
+                EXPIRED_OR_UNKNOWN_REPLY
+            }
             Err(error) => {
                 // Infra fault (store/continuation): ack without a reply — no
                 // copy fits, and a code re-send retries cleanly.
@@ -224,15 +247,7 @@ impl TelegramInboundPreRouter {
     /// At most one hint per chat per window. Entries older than the window
     /// are pruned on every check so the map stays bounded by active chats.
     async fn hint_allowed(&self, chat_id: i64) -> bool {
-        let now = Instant::now();
-        let mut throttle = self.hint_throttle.lock().await;
-        let window = self.hint_throttle_window;
-        throttle.retain(|_, sent_at| now.duration_since(*sent_at) < window);
-        if throttle.contains_key(&chat_id) {
-            return false;
-        }
-        throttle.insert(chat_id, now);
-        true
+        throttle_allows(&self.hint_throttle, self.hint_throttle_window, chat_id).await
     }
 
     async fn send_static_reply(&self, chat_id: i64, text: &str) {
@@ -298,6 +313,24 @@ impl TelegramUpdatesWebhookDispatcher for TelegramInboundPreRouter {
 
 /// Handled without forwarding: the webhook acks 200 and the workflow never
 /// sees the update.
+/// Shared per-chat reply throttle: at most one reply per chat per window.
+/// Entries older than the window are pruned on every check so each map stays
+/// bounded by recently active chats.
+async fn throttle_allows(
+    throttle: &Mutex<HashMap<i64, Instant>>,
+    window: Duration,
+    chat_id: i64,
+) -> bool {
+    let now = Instant::now();
+    let mut throttle = throttle.lock().await;
+    throttle.retain(|_, sent_at| now.duration_since(*sent_at) < window);
+    if throttle.contains_key(&chat_id) {
+        return false;
+    }
+    throttle.insert(chat_id, now);
+    true
+}
+
 fn handled_silently_ack() -> WebhookProcessOutcome {
     WebhookProcessOutcome::Acknowledged {
         ack: ProductInboundAck::NoOp,
@@ -1224,6 +1257,8 @@ mod tests {
         );
     }
 
+    // Row (c): bare `/start` and unpaired ordinary text hint, throttled per
+    // chat within the window.
     #[tokio::test]
     async fn unpaired_hints_are_throttled_per_chat() {
         let fixture = fixture().await;
