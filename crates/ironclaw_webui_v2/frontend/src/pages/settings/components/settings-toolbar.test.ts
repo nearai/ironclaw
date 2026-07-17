@@ -1,8 +1,11 @@
-// @ts-nocheck
 import assert from "node:assert/strict";
 import { test } from "vitest";
 
 import { runVmModuleForTest } from "../../../test-support/vm-module-harness";
+import {
+  SettingsImportError,
+  SettingsImportFailureReason,
+} from "../lib/settings-api";
 
 function visit(node, fn) {
   if (Array.isArray(node)) {
@@ -42,9 +45,12 @@ function createHarness(onImport) {
   let stateCursor = 0;
 
   class FileReader {
-    readAsText(file) {
+    result: string | null = null;
+    onload: (() => void) | null = null;
+
+    readAsText(file: { contents: string }) {
       this.result = file.contents;
-      this.onload();
+      this.onload?.();
     }
   }
 
@@ -74,9 +80,9 @@ function createHarness(onImport) {
     FileReader,
     Icon: "Icon",
     React,
-    SETTINGS_IMPORT_NO_SUPPORTED_REASON: "no_supported_settings",
+    SettingsImportError,
     saveBlob: () => {},
-    useT: () => (key, values = {}) => {
+    useT: () => (key: string, values: Record<string, string> = {}) => {
       if (key === "settings.importNoSupported") return "No supported settings found";
       if (key === "settings.importFailed") return `Import failed: ${values.message}`;
       return key;
@@ -113,9 +119,13 @@ function createHarness(onImport) {
 
 test("SettingsToolbar reports unsupported imports as an error instead of success", async () => {
   const harness = createHarness(async () => {
-    const error = new Error("No supported settings were found in the selected file");
-    error.reason = "no_supported_settings";
-    throw error;
+    throw new SettingsImportError({
+      success: false,
+      imported: 0,
+      results: [],
+      reason: SettingsImportFailureReason.NoSupportedSettings,
+      message: "No supported settings were found in the selected file",
+    });
   });
   let rendered = harness.render();
   const fileInput = findElement(

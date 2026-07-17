@@ -3,7 +3,6 @@ import { apiFetch } from "../../../lib/api";
 const OPERATOR_CONFIG_BASE = "/api/webchat/v2/operator/config";
 const SETTINGS_TOOLS_BASE = "/api/webchat/v2/settings/tools";
 const AUTO_APPROVE_KEY = "agent.auto_approve_tools";
-export const SETTINGS_IMPORT_NO_SUPPORTED_REASON = "no_supported_settings";
 const TOOL_PREFIX = "tool.";
 const TOOL_PERMISSION_STATES = new Set(["always_allow", "ask_each_time", "disabled"]);
 const TOOL_PERMISSION_UPDATE_STATES = new Set([
@@ -82,9 +81,44 @@ export async function updateSetting(key, value) {
   });
   return { success: true, entry: data.entry, value: data.entry?.value };
 }
-export async function importSettings(payload) {
+
+export enum SettingsImportFailureReason {
+  NoSupportedSettings = "no_supported_settings",
+}
+
+type SettingsImportUpdateResult = Awaited<ReturnType<typeof updateSetting>>;
+
+export type SettingsImportSuccess = {
+  success: true;
+  imported: number;
+  results: SettingsImportUpdateResult[];
+};
+
+export type SettingsImportFailure = {
+  success: false;
+  imported: 0;
+  results: SettingsImportUpdateResult[];
+  reason: SettingsImportFailureReason;
+  message: string;
+};
+
+export type SettingsImportResult = SettingsImportSuccess | SettingsImportFailure;
+
+export class SettingsImportError extends Error {
+  readonly reason: SettingsImportFailureReason;
+
+  constructor(failure: SettingsImportFailure) {
+    super(failure.message);
+    this.name = "SettingsImportError";
+    this.reason = failure.reason;
+  }
+}
+
+export async function importSettings(
+  payload: { settings?: Record<string, unknown> } | null | undefined
+): Promise<SettingsImportResult> {
   const settings = payload?.settings || {};
-  const imported = [];
+  const imported: SettingsImportUpdateResult[] = [];
   if (Object.prototype.hasOwnProperty.call(settings, AUTO_APPROVE_KEY)) {
     imported.push(await updateSetting(AUTO_APPROVE_KEY, Boolean(settings[AUTO_APPROVE_KEY])));
   }
@@ -93,7 +127,7 @@ export async function importSettings(payload) {
       success: false,
       imported: 0,
       results: imported,
-      reason: SETTINGS_IMPORT_NO_SUPPORTED_REASON,
+      reason: SettingsImportFailureReason.NoSupportedSettings,
       message: "No supported settings were found in the selected file",
     };
   }

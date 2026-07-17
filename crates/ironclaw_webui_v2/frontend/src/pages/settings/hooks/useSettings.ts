@@ -4,6 +4,7 @@ import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import {
   fetchSettingsExport,
   importSettings as importSettingsPayload,
+  SettingsImportError,
   updateSetting,
 } from "../lib/settings-api";
 import { throwIfApiFailed } from "../lib/api-result";
@@ -60,11 +61,8 @@ export function useSettings() {
   const importMutation = useMutation({
     mutationFn: async (payload) => {
       const result = await importSettingsPayload(payload);
-      if (result?.success === false) {
-        const error = Object.assign(new Error(result.message || "Import failed"), {
-          reason: result.reason,
-        });
-        throw error;
+      if (result.success === false) {
+        throw new SettingsImportError(result);
       }
       return result;
     },

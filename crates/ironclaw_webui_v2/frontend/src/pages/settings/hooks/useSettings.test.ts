@@ -1,8 +1,11 @@
-// @ts-nocheck
 import assert from "node:assert/strict";
 import { test } from "vitest";
 
 import { runVmModuleForTest } from "../../../test-support/vm-module-harness";
+import {
+  SettingsImportError,
+  SettingsImportFailureReason,
+} from "../lib/settings-api";
 
 test("settings import mutation rejects when no supported settings were imported", async () => {
   let importMutationOptions;
@@ -12,13 +15,13 @@ test("settings import mutation rejects when no supported settings were imported"
       useState: (initial) => [initial, () => {}],
     },
     RESTART_REQUIRED_KEYS: new Set(),
-    SETTINGS_IMPORT_NO_SUPPORTED_REASON: "no_supported_settings",
+    SettingsImportError,
     fetchSettingsExport: () => {},
     importSettingsPayload: async () => ({
       success: false,
       imported: 0,
       results: [],
-      reason: "no_supported_settings",
+      reason: SettingsImportFailureReason.NoSupportedSettings,
       message: "No supported settings were found in the selected file",
     }),
     updateSetting: () => {},
@@ -52,7 +55,8 @@ test("settings import mutation rejects when no supported settings were imported"
   await assert.rejects(
     () => settings.importSettings({ settings: {} }),
     (error) => {
-      assert.equal(error.reason, "no_supported_settings");
+      assert.ok(error instanceof SettingsImportError);
+      assert.equal(error.reason, SettingsImportFailureReason.NoSupportedSettings);
       assert.match(error.message, /No supported settings/);
       return true;
     }

@@ -3,7 +3,7 @@ import { test } from "vitest";
 
 import {
   importSettings,
-  SETTINGS_IMPORT_NO_SUPPORTED_REASON,
+  SettingsImportFailureReason,
   settingsFromOperatorConfig,
   toolFromConfigEntry,
 } from "./settings-api";
@@ -16,7 +16,7 @@ test.each([
     success: false,
     imported: 0,
     results: [],
-    reason: SETTINGS_IMPORT_NO_SUPPORTED_REASON,
+    reason: SettingsImportFailureReason.NoSupportedSettings,
     message: "No supported settings were found in the selected file",
   });
 });
