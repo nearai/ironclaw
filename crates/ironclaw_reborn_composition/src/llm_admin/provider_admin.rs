@@ -253,6 +253,54 @@ impl RebornProviderAdmin {
         })
     }
 
+    /// Providers offered on the interactive `onboard` numbered menu, in
+    /// `providers.json` order (`nearai` is entry 0 in the file, so it is
+    /// always menu item 1).
+    ///
+    /// Filters [`ironclaw_llm::ProviderRegistry::selectable`] down to
+    /// providers whose [`ironclaw_llm::registry::SetupHint`] kind is
+    /// `ApiKey`, `OpenAiCompatible`, or `SessionToken` — this excludes
+    /// `ollama`, `bedrock`, `gemini_oauth`, `openai_codex`, and
+    /// `github_copilot` BY DESIGN (a onboarding-scope decision: those
+    /// providers stay reachable via `ironclaw-reborn config set` /
+    /// `models set-provider`, just not on the numbered menu). Every kind
+    /// except `github_copilot`'s is distinguishable by `SetupHint::kind()`
+    /// alone — `github_copilot` declares `kind: "api_key"` in
+    /// `providers.json` just like `openai`/`anthropic`/etc, so it is
+    /// excluded by id instead.
+    ///
+    /// Returns the serializable [`ProviderMenuEntry`] DTO rather than
+    /// `&ironclaw_llm::registry::ProviderDefinition` directly: callers in
+    /// `ironclaw_reborn_cli` must never see the `ironclaw_llm` setup-hint
+    /// taxonomy (the architecture boundary test
+    /// `ironclaw_architecture::reborn_dependency_boundaries` pins the CLI
+    /// crate's dependency graph to exclude `ironclaw_llm`).
+    pub fn menu_entries(&self) -> Result<Vec<ProviderMenuEntry>, RebornProviderAdminError> {
+        let registry = self.load_registry()?;
+        Ok(registry
+            .selectable()
+            .into_iter()
+            .filter(|def| def.id != "github_copilot")
+            .filter(|def| {
+                matches!(
+                    def.setup.as_ref().map(|setup| setup.kind()),
+                    Some("api_key") | Some("open_ai_compatible") | Some("session_token")
+                )
+            })
+            .map(|def| ProviderMenuEntry {
+                id: def.id.clone(),
+                display_name: def
+                    .setup
+                    .as_ref()
+                    .map(|setup| setup.display_name().to_string())
+                    .unwrap_or_else(|| def.id.clone()),
+                api_key_required: def.api_key_required,
+                description: def.description.clone(),
+                aliases: def.aliases.clone(),
+            })
+            .collect())
+    }
+
     fn load_registry(&self) -> Result<ironclaw_llm::ProviderRegistry, RebornProviderAdminError> {
         let providers_path = self.boot.home().providers_file_path();
         ironclaw_llm::ProviderRegistry::try_load_from_path(Some(providers_path.as_path())).map_err(
@@ -332,6 +380,17 @@ pub struct RebornProviderWriteOutcome {
     #[serde(skip_serializing)]
     pub config_file: PathBuf,
     pub v1_state: RebornV1State,
+}
+
+/// One entry on the interactive `onboard` numbered provider menu — see
+/// [`RebornProviderAdmin::menu_entries`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct ProviderMenuEntry {
+    pub id: String,
+    pub display_name: String,
+    pub api_key_required: bool,
+    pub description: String,
+    pub aliases: Vec<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -631,5 +690,74 @@ mod tests {
             active_llm_selection(Some(&config), &registry, None).expect("slot selection present");
         assert_eq!(active.provider_id.as_deref(), Some("anthropic"));
         assert_eq!(active.model.as_deref(), Some("claude-pinned-by-config"));
+    }
+
+    fn test_admin() -> RebornProviderAdmin {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let home = ironclaw_reborn_config::RebornHome::resolve_from_env_parts(
+            Some(temp.path().join("reborn-home").as_os_str().to_os_string()),
+            None,
+            None,
+        )
+        .expect("valid reborn home");
+        // Leak the tempdir so the on-disk providers.json/config.toml stub
+        // outlive this function — `menu_entries` only reads the built-in
+        // registry (no config.toml required), so nothing is ever written
+        // here; the tempdir just needs to exist as a valid, empty root.
+        std::mem::forget(temp);
+        RebornProviderAdmin::new(RebornBootConfig::new(
+            home,
+            ironclaw_reborn_config::RebornProfile::LocalDev,
+        ))
+    }
+
+    #[test]
+    fn menu_entries_lists_nearai_first_with_no_api_key_required() {
+        let admin = test_admin();
+        let entries = admin.menu_entries().expect("menu entries load");
+        let first = entries.first().expect("at least one menu entry");
+        assert_eq!(
+            first.id, "nearai",
+            "nearai must be menu item 1: {entries:?}"
+        );
+        assert!(
+            !first.api_key_required,
+            "nearai must not require an API key: {first:?}"
+        );
+    }
+
+    #[test]
+    fn menu_entries_excludes_non_menu_setup_kinds() {
+        let admin = test_admin();
+        let entries = admin.menu_entries().expect("menu entries load");
+        let ids: Vec<&str> = entries.iter().map(|entry| entry.id.as_str()).collect();
+        for excluded in [
+            "ollama",
+            "bedrock",
+            "gemini_oauth",
+            "openai_codex",
+            "github_copilot",
+        ] {
+            assert!(
+                !ids.contains(&excluded),
+                "{excluded} must be excluded from the onboard menu: {ids:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn menu_entries_populate_aliases() {
+        let admin = test_admin();
+        let entries = admin.menu_entries().expect("menu entries load");
+        let github_copilot_absent = entries.iter().find(|entry| entry.id == "github_copilot");
+        assert!(github_copilot_absent.is_none());
+        let openai = entries
+            .iter()
+            .find(|entry| entry.id == "openai")
+            .expect("openai present on menu");
+        assert!(
+            !openai.aliases.is_empty(),
+            "openai should carry its registry aliases: {openai:?}"
+        );
     }
 }
