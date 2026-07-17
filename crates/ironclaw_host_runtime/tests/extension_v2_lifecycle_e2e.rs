@@ -5,7 +5,7 @@ use std::{
 
 use async_trait::async_trait;
 use ironclaw_dispatcher::{
-    BoundCapabilityAdapter, BoundCapabilityRequest, CapabilityDispatcher, DispatchError,
+    BoundCapabilityAdapter, CapabilityDispatchRequest, CapabilityDispatcher, DispatchError,
     ResolvedCapability, RuntimeAdapterResult, RuntimeDispatchErrorKind, RuntimeDispatcher,
     ToolResolver,
 };
@@ -500,7 +500,7 @@ impl ToolResolver for SingleCapabilityResolver {
 impl BoundCapabilityAdapter for RecordingAdapter {
     async fn dispatch_json(
         &self,
-        request: BoundCapabilityRequest,
+        request: CapabilityDispatchRequest,
     ) -> Result<RuntimeAdapterResult, DispatchError> {
         self.requests.lock().unwrap().push(RecordedAdapterRequest {
             capability_id: request.capability_id.clone(),

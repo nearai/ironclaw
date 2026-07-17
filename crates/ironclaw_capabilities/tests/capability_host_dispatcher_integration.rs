@@ -6,7 +6,7 @@ use ironclaw_approvals::{ApprovalResolver, LeaseApproval};
 use ironclaw_authorization::*;
 use ironclaw_capabilities::*;
 use ironclaw_dispatcher::{
-    BoundCapabilityAdapter, BoundCapabilityRequest, ResolvedCapability, RuntimeAdapterResult,
+    BoundCapabilityAdapter, CapabilityDispatchRequest, ResolvedCapability, RuntimeAdapterResult,
     RuntimeDispatcher, ToolResolver,
 };
 use ironclaw_events::{InMemoryEventSink, RuntimeEventKind};
@@ -386,7 +386,7 @@ impl RecordingRuntimeAdapter {
 impl BoundCapabilityAdapter for RecordingRuntimeAdapter {
     async fn dispatch_json(
         &self,
-        request: BoundCapabilityRequest,
+        request: CapabilityDispatchRequest,
     ) -> Result<RuntimeAdapterResult, DispatchError> {
         self.requests.lock().unwrap().push(RecordedRuntimeRequest {
             capability_id: request.capability_id.clone(),

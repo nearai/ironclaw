@@ -311,7 +311,7 @@ struct EchoBinding {
 impl BoundCapabilityAdapter for EchoBinding {
     async fn dispatch_json(
         &self,
-        request: BoundCapabilityRequest,
+        request: CapabilityDispatchRequest,
     ) -> Result<RuntimeAdapterResult, DispatchError> {
         let output: Value = request.input;
         let output_bytes = serde_json::to_vec(&output).unwrap().len() as u64;
@@ -360,7 +360,7 @@ where
 {
     async fn dispatch_json(
         &self,
-        _request: BoundCapabilityRequest,
+        _request: CapabilityDispatchRequest,
     ) -> Result<RuntimeAdapterResult, DispatchError> {
         Err((self.error)())
     }

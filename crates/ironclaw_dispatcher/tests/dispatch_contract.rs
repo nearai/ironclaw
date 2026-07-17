@@ -353,7 +353,7 @@ impl RecordingBinding {
 impl BoundCapabilityAdapter for RecordingBinding {
     async fn dispatch_json(
         &self,
-        request: BoundCapabilityRequest,
+        request: CapabilityDispatchRequest,
     ) -> Result<RuntimeAdapterResult, DispatchError> {
         self.requests.lock().unwrap().push(RecordedBindingRequest {
             capability_id: request.capability_id.clone(),

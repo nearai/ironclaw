@@ -67,29 +67,15 @@ pub struct ResolvedCapability {
     pub adapter: Arc<dyn BoundCapabilityAdapter>,
 }
 
-/// Per-invocation inputs to a prebound adapter. Everything static — package,
-/// descriptor, execution plan, filesystem, ports — was captured when the
-/// binding was constructed.
+/// A prebound capability implementation behind [`ToolResolver`].
 ///
-/// If `resource_reservation` is present, the binding owns the
+/// The adapter receives the already-authorized [`CapabilityDispatchRequest`]
+/// unchanged — everything static (package, descriptor, execution plan,
+/// filesystem, ports) was captured when the binding was constructed. If
+/// `resource_reservation` is present, the binding owns the
 /// reconcile-or-release leg for it (same legs as the runtime lanes always
 /// had); the dispatcher only releases a reservation when resolution fails
 /// before any binding takes it.
-#[derive(Debug)]
-pub struct BoundCapabilityRequest {
-    pub capability_id: CapabilityId,
-    pub scope: ResourceScope,
-    pub authenticated_actor_user_id: Option<ironclaw_host_api::UserId>,
-    /// Loop turn-run identity forwarded from the dispatch request. `None`
-    /// for non-loop callers.
-    pub run_id: Option<ironclaw_host_api::RunId>,
-    pub estimate: ResourceEstimate,
-    pub mounts: Option<MountView>,
-    pub resource_reservation: Option<ResourceReservation>,
-    pub input: Value,
-}
-
-/// A prebound capability implementation behind [`ToolResolver`].
 ///
 /// Implementations must not perform caller-facing authorization or approval
 /// resolution and must surface only redacted [`DispatchError`] categories.
@@ -97,7 +83,7 @@ pub struct BoundCapabilityRequest {
 pub trait BoundCapabilityAdapter: Send + Sync {
     async fn dispatch_json(
         &self,
-        request: BoundCapabilityRequest,
+        request: CapabilityDispatchRequest,
     ) -> Result<RuntimeAdapterResult, DispatchError>;
 }
 
@@ -224,15 +210,9 @@ where
 
         let execution = match resolved
             .adapter
-            .dispatch_json(BoundCapabilityRequest {
-                capability_id: request.capability_id,
-                scope: request.scope,
-                authenticated_actor_user_id: request.authenticated_actor_user_id,
-                run_id: request.run_id,
-                estimate: request.estimate,
-                mounts: request.mounts,
+            .dispatch_json(CapabilityDispatchRequest {
                 resource_reservation: reservation_guard.take(),
-                input: request.input,
+                ..request
             })
             .await
         {

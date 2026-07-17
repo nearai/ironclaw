@@ -9,7 +9,7 @@ use std::{
 
 use async_trait::async_trait;
 use ironclaw_dispatcher::{
-    BoundCapabilityAdapter, BoundCapabilityRequest, ResolvedCapability, RuntimeAdapterResult,
+    BoundCapabilityAdapter, CapabilityDispatchRequest, ResolvedCapability, RuntimeAdapterResult,
     RuntimeDispatcher, ToolResolver,
 };
 use ironclaw_events::{InMemoryEventSink, RuntimeEventKind};
@@ -753,7 +753,7 @@ struct RegistryBoundWasmCapability {
 impl BoundCapabilityAdapter for RegistryBoundWasmCapability {
     async fn dispatch_json(
         &self,
-        request: BoundCapabilityRequest,
+        request: CapabilityDispatchRequest,
     ) -> Result<RuntimeAdapterResult, DispatchError> {
         self.adapter
             .dispatch_lane(LocalLaneRequest {

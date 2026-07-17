@@ -56,7 +56,7 @@ where
     pub scope: ResourceScope,
     /// The authenticated human actor who initiated this invocation, distinct
     /// from the resource subject carried in `scope`. Threaded end-to-end
-    /// (`BoundCapabilityRequest` → here → `FirstPartyCapabilityRequest`) so a
+    /// (`CapabilityDispatchRequest` → here → `FirstPartyCapabilityRequest`) so a
     /// first-party handler can attribute the action to the acting user.
     pub authenticated_actor_user_id: Option<UserId>,
     /// Loop turn-run identity forwarded from the dispatch request. `None`

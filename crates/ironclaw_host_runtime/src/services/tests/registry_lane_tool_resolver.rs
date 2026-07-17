@@ -5,7 +5,7 @@
 //! `ironclaw_dispatcher` per-invocation-selection tests.
 
 use ironclaw_dispatcher::{
-    BoundCapabilityAdapter, BoundCapabilityRequest, CapabilityDispatchRequest, RuntimeDispatcher,
+    BoundCapabilityAdapter, CapabilityDispatchRequest, RuntimeDispatcher,
     ToolResolver,
 };
 use ironclaw_events::{InMemoryEventSink, RuntimeEventKind};
@@ -305,7 +305,7 @@ async fn resolved_binding_survives_registry_swap_mid_flight() {
 
     let adapter: Arc<dyn BoundCapabilityAdapter> = binding.adapter;
     let result = adapter
-        .dispatch_json(BoundCapabilityRequest {
+        .dispatch_json(CapabilityDispatchRequest {
             run_id: None,
             capability_id: echo_id,
             scope: sample_scope(),

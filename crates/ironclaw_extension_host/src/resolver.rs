@@ -20,7 +20,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use ironclaw_dispatcher::{
-    BoundCapabilityAdapter, BoundCapabilityRequest, ResolvedCapability, RuntimeAdapterResult,
+    BoundCapabilityAdapter, CapabilityDispatchRequest, ResolvedCapability, RuntimeAdapterResult,
     ToolResolver,
 };
 use ironclaw_host_api::{
@@ -67,7 +67,7 @@ struct SnapshotBoundCapability {
 impl BoundCapabilityAdapter for SnapshotBoundCapability {
     async fn dispatch_json(
         &self,
-        request: BoundCapabilityRequest,
+        request: CapabilityDispatchRequest,
     ) -> Result<RuntimeAdapterResult, DispatchError> {
         let capability_id = request.capability_id.clone();
         let scope = request.scope.clone();
