@@ -520,6 +520,48 @@ async fn production_wiring_validation_classifies_combined_store_as_run_state_and
 }
 
 #[tokio::test]
+async fn production_wiring_validation_classifies_in_memory_backed_lease_store_as_local_only() {
+    // Regression guard for arch-simplification §4.3 (deleting
+    // `InMemoryCapabilityLeaseStore`): the production-wiring classifier keyed the
+    // now-deleted store as an explicit `LocalOnly` type, and unknown component
+    // types default to `ProductionCandidate`. Its replacement — the production
+    // `FilesystemCapabilityLeaseStore<InMemoryBackend>` the no-durable build and
+    // every test seam wire — must classify the same way, or a volatile in-memory
+    // lease store could silently satisfy production readiness. Drive the real
+    // `HostRuntimeServices` caller so the classification is exercised through the
+    // monomorphized `with_capability_leases::<T>` type capture, not just the
+    // classifier helper.
+    let services = HostRuntimeServices::new(
+        Arc::new(registry_with_manifest(SCRIPT_MANIFEST)),
+        Arc::new(LocalFilesystem::new()),
+        Arc::new(InMemoryResourceGovernor::new()),
+        Arc::new(GrantAuthorizer::new()),
+        ProcessServices::in_memory(),
+        CapabilitySurfaceVersion::new("surface-v1").unwrap(),
+    )
+    .with_capability_leases(Arc::new(in_memory_backed_capability_lease_store()));
+
+    let report = services
+        .validate_production_wiring(&ProductionWiringConfig::new([]))
+        .expect_err("in-memory-backed lease store must not pass production validation");
+
+    assert!(
+        report.contains(
+            ProductionWiringComponent::CapabilityLeases,
+            ProductionWiringIssueKind::LocalOnlyImplementation,
+        ),
+        "FilesystemCapabilityLeaseStore<InMemoryBackend> must classify local-only: {report:?}"
+    );
+    assert!(
+        !report.contains(
+            ProductionWiringComponent::CapabilityLeases,
+            ProductionWiringIssueKind::Missing,
+        ),
+        "a wired lease store must satisfy capability-lease presence: {report:?}"
+    );
+}
+
+#[tokio::test]
 async fn production_wiring_validation_rejects_unsupported_runtime_requirements() {
     let services = HostRuntimeServices::new(
         Arc::new(registry_with_manifest(SCRIPT_MANIFEST)),

@@ -13,7 +13,7 @@
 
 - Grant matching, capability-lease state, and dispatch/spawn authorization decisions (default-deny), currently:
 - Authorizer ports and implementations: `CapabilityDispatchAuthorizer` / `TrustAwareCapabilityDispatchAuthorizer` traits, `GrantAuthorizer`, `LeaseBackedAuthorizer`, and the `grant_exceeds_authority_ceiling` check.
-- Capability-lease state: `CapabilityLease` (+ `CapabilityLeaseStatus`/`CapabilityLeaseError`), the `CapabilityLeaseStore` trait, and its `InMemoryCapabilityLeaseStore` / `FilesystemCapabilityLeaseStore` backends (the filesystem backend writes via bounded compare-and-swap — `CasExpectation::Version` with a retry budget — over versioned roots for cross-process safety, plus per-owner process-local mutation locks; only byte-only/`Unsupported` roots degrade to process-local serialization alone).
+- Capability-lease state: `CapabilityLease` (+ `CapabilityLeaseStatus`/`CapabilityLeaseError`), the `CapabilityLeaseStore` trait, and the one production `FilesystemCapabilityLeaseStore<F>` backend (writes via bounded compare-and-swap — `CasExpectation::Version` with a retry budget — over versioned roots for cross-process safety, plus per-owner process-local mutation locks; only byte-only/`Unsupported` roots degrade to process-local serialization alone). Tests instantiate that same store over an in-memory backend through the `test-support` `in_memory_backed_capability_lease_store()` constructor — "in-memory" is a filesystem backend (`InMemoryBackend`), not a bespoke store (arch-simplification §4.3); the hand-written `InMemoryCapabilityLeaseStore` was deleted.
 - Crate-local public API, tests, and fixtures needed to prove that ownership.
 
 ## Do Not Move In Here
