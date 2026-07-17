@@ -16,7 +16,7 @@ use hmac::{Hmac, KeyInit, Mac};
 use sha2::Sha256;
 
 use ironclaw_extension_host::ingress::{
-    ExtensionIngressRouter, ExtensionIngressRouterDeps, InMemoryReplyContextStore,
+    ExtensionIngressRouter, ExtensionIngressRouterDeps,
     InboundAdmission, InboundAdmissionAck, InboundSink, InboundSinkError, IngressPortError,
     IngressRateLimitConfig, IngressRequest, IngressRouterConfig, IngressSecretsPort,
     ReplyContextKey, ReplyContextStore, VerificationCandidate, canonical_ingress_path,
@@ -282,7 +282,32 @@ struct Harness {
     adapter_seen: Arc<std::sync::Mutex<Vec<SeenInbound>>>,
     secrets_calls: Arc<AtomicUsize>,
     admitted: Arc<std::sync::Mutex<Vec<(String, String, String)>>>,
-    reply_context: Arc<InMemoryReplyContextStore>,
+    reply_context: Arc<TestReplyContextStore>,
+}
+
+/// Process-local reply-context fake for router contract tests (production
+/// wires the filesystem-backed store in composition).
+#[derive(Default)]
+struct TestReplyContextStore {
+    entries: std::sync::Mutex<Vec<(ReplyContextKey, Vec<u8>)>>,
+}
+
+#[async_trait::async_trait]
+impl ReplyContextStore for TestReplyContextStore {
+    async fn put(&self, key: ReplyContextKey, context: Vec<u8>) -> Result<(), IngressPortError> {
+        let mut entries = self.entries.lock().expect("reply-context fake lock");
+        entries.retain(|(existing, _)| existing != &key);
+        entries.push((key, context));
+        Ok(())
+    }
+
+    async fn get(&self, key: &ReplyContextKey) -> Result<Option<Vec<u8>>, IngressPortError> {
+        let entries = self.entries.lock().expect("reply-context fake lock");
+        Ok(entries
+            .iter()
+            .find(|(existing, _)| existing == key)
+            .map(|(_, context)| context.clone()))
+    }
 }
 
 struct HarnessOptions {
@@ -341,7 +366,7 @@ async fn harness(options: HarnessOptions) -> Harness {
     );
     let secrets_calls = Arc::new(AtomicUsize::new(0));
     let admitted = Arc::new(std::sync::Mutex::new(Vec::new()));
-    let reply_context = Arc::new(InMemoryReplyContextStore::default());
+    let reply_context = Arc::new(TestReplyContextStore::default());
     let router = ExtensionIngressRouter::new(
         host.snapshot_watch(),
         ExtensionIngressRouterDeps {

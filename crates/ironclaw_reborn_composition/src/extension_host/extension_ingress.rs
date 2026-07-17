@@ -510,12 +510,14 @@ pub struct ExtensionIngressParts {
 }
 
 /// Build the generic ingress router over the generic host's snapshot watch.
+/// `reply_context` is the durable ING-11 store (production: the
+/// filesystem-backed [`crate::extension_host::reply_contexts::FilesystemReplyContextStore`],
+/// so contexts stored before admission survive a restart to delivery time).
 pub(crate) fn build_extension_ingress(
     watch: ironclaw_extension_host::SnapshotWatch,
+    reply_context: Arc<dyn ironclaw_extension_host::ingress::ReplyContextStore>,
 ) -> ExtensionIngressParts {
     let registry = Arc::new(ExtensionIngressRegistry::default());
-    let reply_context: Arc<dyn ironclaw_extension_host::ingress::ReplyContextStore> =
-        Arc::new(ironclaw_extension_host::ingress::InMemoryReplyContextStore::default());
     let router = Arc::new(ExtensionIngressRouter::new(
         watch,
         ironclaw_extension_host::ingress::ExtensionIngressRouterDeps {

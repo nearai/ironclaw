@@ -2377,6 +2377,13 @@ async fn build_local_runtime(input: RebornBuildInput) -> Result<RebornServices, 
         // the host's snapshot watch; the serve layer mounts it once.
         let ingress_parts = crate::extension_host::extension_ingress::build_extension_ingress(
             generic.host.snapshot_watch(),
+            Arc::new(
+                crate::extension_host::reply_contexts::FilesystemReplyContextStore::new(
+                    Arc::clone(&fold_filesystem),
+                    channel_egress_scope.tenant_id.clone(),
+                    channel_egress_scope.user_id.clone(),
+                ),
+            ),
         );
         // The delivery coordinator (§5.4): sole delivery-state writer over
         // the SAME transport the host's channel hooks egress through and the

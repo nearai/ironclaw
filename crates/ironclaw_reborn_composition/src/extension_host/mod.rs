@@ -43,6 +43,7 @@ pub(crate) mod host_api_contracts;
 pub(crate) mod lifecycle;
 pub(crate) mod mcp;
 pub(crate) mod mcp_discovery;
+pub(crate) mod reply_contexts;
 pub(crate) mod run_delivery_ports;
 pub(crate) mod skill_learning;
 pub(crate) mod skill_listing;

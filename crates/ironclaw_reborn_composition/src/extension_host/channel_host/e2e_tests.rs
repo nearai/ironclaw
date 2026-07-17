@@ -366,7 +366,16 @@ async fn build_harness_with_options(options: HarnessOptions) -> Harness {
     let egress = RecordingEgress::default();
 
     let host = slack_test_extension_host().await;
-    let ingress = build_extension_ingress(host.snapshot_watch());
+    let ingress = build_extension_ingress(
+        host.snapshot_watch(),
+        Arc::new(
+            crate::extension_host::reply_contexts::FilesystemReplyContextStore::new(
+                Arc::new(InMemoryBackend::new()),
+                TenantId::new(TENANT).expect("tenant"), // safety: static test tenant id is valid.
+                UserId::new(USER).expect("user"),       // safety: static test user id is valid.
+            ),
+        ),
+    );
     let delivery_coordinator = Arc::new(DeliveryCoordinator::new(
         Arc::clone(&outbound_store),
         Arc::new(SnapshotChannelDeliveryResolver::new(

@@ -21,7 +21,7 @@ mod router;
 mod verifier;
 
 pub use router::{
-    ExtensionIngressRouter, ExtensionIngressRouterDeps, InMemoryReplyContextStore,
+    ExtensionIngressRouter, ExtensionIngressRouterDeps,
     InboundAdmission, InboundAdmissionAck, InboundSink, InboundSinkError, IngressPortError,
     IngressRateLimitConfig, IngressRequest, IngressResponse, IngressRouterConfig,
     IngressSecretsPort, ReplyContextKey, ReplyContextStore, canonical_ingress_path,

@@ -8,7 +8,7 @@
 
 use std::collections::HashMap;
 use std::panic::{AssertUnwindSafe, catch_unwind};
-use std::sync::{Arc, Mutex, RwLock};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
@@ -104,50 +104,6 @@ pub struct ReplyContextKey {
 pub trait ReplyContextStore: Send + Sync {
     async fn put(&self, key: ReplyContextKey, context: Vec<u8>) -> Result<(), IngressPortError>;
     async fn get(&self, key: &ReplyContextKey) -> Result<Option<Vec<u8>>, IngressPortError>;
-}
-
-/// Bounded in-memory reply-context store (latest context per conversation;
-/// FIFO eviction beyond the cap).
-pub struct InMemoryReplyContextStore {
-    entries: RwLock<Vec<(ReplyContextKey, Vec<u8>)>>,
-    cap: usize,
-}
-
-impl Default for InMemoryReplyContextStore {
-    fn default() -> Self {
-        Self {
-            entries: RwLock::new(Vec::new()),
-            cap: 1024,
-        }
-    }
-}
-
-#[async_trait]
-impl ReplyContextStore for InMemoryReplyContextStore {
-    async fn put(&self, key: ReplyContextKey, context: Vec<u8>) -> Result<(), IngressPortError> {
-        let mut entries = match self.entries.write() {
-            Ok(entries) => entries,
-            Err(poisoned) => poisoned.into_inner(),
-        };
-        entries.retain(|(existing, _)| existing != &key);
-        entries.push((key, context));
-        if entries.len() > self.cap {
-            let excess = entries.len() - self.cap;
-            entries.drain(0..excess);
-        }
-        Ok(())
-    }
-
-    async fn get(&self, key: &ReplyContextKey) -> Result<Option<Vec<u8>>, IngressPortError> {
-        let entries = match self.entries.read() {
-            Ok(entries) => entries,
-            Err(poisoned) => poisoned.into_inner(),
-        };
-        Ok(entries
-            .iter()
-            .find(|(existing, _)| existing == key)
-            .map(|(_, context)| context.clone()))
-    }
 }
 
 /// Per-installation token-bucket rate limit (defaults match the previous
