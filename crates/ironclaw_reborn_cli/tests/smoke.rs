@@ -1589,6 +1589,64 @@ fn config_path_reports_default_reborn_home_without_creating_directories() {
 }
 
 #[test]
+fn config_set_google_client_id_writes_config_toml() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let reborn_home = temp.path().join("reborn-home");
+
+    let output = reborn_command()
+        .args([
+            "config",
+            "set",
+            "google.client_id",
+            "abc123.apps.googleusercontent.com",
+            "--no-restart",
+        ])
+        .env("IRONCLAW_REBORN_HOME", &reborn_home)
+        .env("HOME", temp.path().join("home"))
+        .output()
+        .expect("ironclaw-reborn config set google.client_id should run");
+
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("google.client_id: saved"),
+        "stdout: {stdout}"
+    );
+
+    let config = std::fs::read_to_string(reborn_home.join("config.toml")).expect("read config");
+    assert!(config.contains("[google]"), "config: {config}");
+    assert!(
+        config.contains("client_id = \"abc123.apps.googleusercontent.com\""),
+        "config: {config}"
+    );
+}
+
+#[test]
+fn config_set_rejects_unknown_key() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let reborn_home = temp.path().join("reborn-home");
+
+    let output = reborn_command()
+        .args(["config", "set", "nonsense.key", "value"])
+        .env("IRONCLAW_REBORN_HOME", &reborn_home)
+        .env("HOME", temp.path().join("home"))
+        .output()
+        .expect("ironclaw-reborn config set should run");
+
+    assert!(!output.status.success(), "unknown key must fail");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("unknown config key"), "stderr: {stderr}");
+    assert!(
+        !reborn_home.join("config.toml").exists(),
+        "an unknown key must not seed config.toml"
+    );
+}
+
+#[test]
 fn completion_generates_zsh_script_without_reborn_home() {
     let output = reborn_command()
         .arg("completion")

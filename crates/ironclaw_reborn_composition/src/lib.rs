@@ -32,6 +32,7 @@ mod blocked_auth_resume;
 mod error;
 mod extension_host;
 mod factory;
+mod google_oauth_secret_store;
 mod input;
 mod lifecycle_auth_continuation;
 mod llm_admin;
@@ -89,6 +90,7 @@ pub use factory::open_local_dev_secret_store;
 #[cfg(any(feature = "libsql", feature = "postgres"))]
 pub use factory::{KeychainMasterKeyOutcome, provision_local_dev_keychain_master_key};
 pub use factory::{RebornServices, build_reborn_services, builtin_first_party_trust_policy};
+pub use google_oauth_secret_store::{GoogleOauthSecretStore, GoogleOauthSecretStoreError};
 pub use input::{OAuthClientConfig, RebornBuildInput, RebornRuntimeProcessBinding};
 #[cfg(feature = "webui-v2-beta")]
 pub use ironclaw_auth::GoogleOAuthRouteConfig;

@@ -545,7 +545,10 @@ fn render_menu(
 /// `drain_pending_events()` discards keystrokes buffered before raw mode was
 /// entered (e.g. a stray Enter from the preceding plain-line prompt) so they
 /// can't be replayed into the masked read.
-fn read_masked_line() -> std::io::Result<String> {
+///
+/// `pub(crate)` — reused by `commands::config::set` for secret-valued
+/// `config set` keys so a plaintext secret never echoes to the terminal.
+pub(crate) fn read_masked_line() -> std::io::Result<String> {
     use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
     use crossterm::{execute, style::Print, terminal};
 

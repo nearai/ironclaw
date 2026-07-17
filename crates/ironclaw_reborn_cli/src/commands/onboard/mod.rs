@@ -9,7 +9,7 @@ use crate::file_write::{FileWriteAction, write_atomic};
 
 mod llm_credentials;
 mod master_key;
-mod prompts;
+pub(crate) mod prompts;
 
 use llm_credentials::{
     EncryptedLlmKeyStoreOpener, LiveLlmProbe, LlmCredentialProvisionOutcome,

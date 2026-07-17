@@ -360,6 +360,29 @@ pub(super) fn restart_with_runner(runner: &mut dyn ServiceCommandRunner) -> Resu
     )
 }
 
+/// `(installed, running)` without printing anything — factored out of
+/// [`restart_with_runner`]'s own detection so any future caller can share
+/// one source of truth for "is the systemd unit loaded and active".
+pub(super) fn installed_and_running(runner: &mut dyn ServiceCommandRunner) -> Result<(bool, bool)> {
+    let installed = unit_path()?.exists();
+    let running = if installed {
+        let active_state = runner.run_capture_checked(
+            "systemctl show ActiveState",
+            Command::new("systemctl").args([
+                "--user",
+                "show",
+                "--property=ActiveState",
+                "--value",
+                SYSTEMD_UNIT,
+            ]),
+        )?;
+        active_state.trim() == "active"
+    } else {
+        false
+    };
+    Ok((installed, running))
+}
+
 /// Secondary detail line for a non-`active` raw `ActiveState`, e.g. a
 /// crashed unit (`failed`) versus one that was simply never started
 /// (`inactive`). `None` when the raw state doesn't warrant a detail line
@@ -1429,6 +1452,84 @@ mod tests {
         let result = status_with_runner(&mut runner);
 
         assert!(result.is_err());
+    }
+
+    // ── installed_and_running ───────────────────────────────────
+
+    #[test]
+    fn installed_and_running_reports_both_true_for_an_active_unit() {
+        let _lock = crate::runtime::test_env::lock_runtime_env();
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let prior = std::env::var_os("HOME");
+        // SAFETY: serialized by `lock_runtime_env`; restored below.
+        unsafe { std::env::set_var("HOME", tmp.path()) };
+        let file = unit_path().expect("unit path");
+        std::fs::create_dir_all(file.parent().expect("unit parent")).expect("create parent");
+        std::fs::write(&file, "unit").expect("write unit");
+        let mut runner = RecordingRunner {
+            active_state_output: Some("active\n".to_string()),
+            ..RecordingRunner::default()
+        };
+        let result = installed_and_running(&mut runner);
+        // SAFETY: serialized by `lock_runtime_env`.
+        unsafe {
+            match prior {
+                Some(value) => std::env::set_var("HOME", value),
+                None => std::env::remove_var("HOME"),
+            }
+        }
+
+        assert_eq!(result.expect("query must succeed"), (true, true));
+    }
+
+    #[test]
+    fn installed_and_running_reports_installed_not_running_for_an_inactive_unit() {
+        let _lock = crate::runtime::test_env::lock_runtime_env();
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let prior = std::env::var_os("HOME");
+        // SAFETY: serialized by `lock_runtime_env`; restored below.
+        unsafe { std::env::set_var("HOME", tmp.path()) };
+        let file = unit_path().expect("unit path");
+        std::fs::create_dir_all(file.parent().expect("unit parent")).expect("create parent");
+        std::fs::write(&file, "unit").expect("write unit");
+        let mut runner = RecordingRunner {
+            active_state_output: Some("inactive\n".to_string()),
+            ..RecordingRunner::default()
+        };
+        let result = installed_and_running(&mut runner);
+        // SAFETY: serialized by `lock_runtime_env`.
+        unsafe {
+            match prior {
+                Some(value) => std::env::set_var("HOME", value),
+                None => std::env::remove_var("HOME"),
+            }
+        }
+
+        assert_eq!(result.expect("query must succeed"), (true, false));
+    }
+
+    #[test]
+    fn installed_and_running_reports_both_false_when_unit_is_absent() {
+        let _lock = crate::runtime::test_env::lock_runtime_env();
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let prior = std::env::var_os("HOME");
+        // SAFETY: serialized by `lock_runtime_env`; restored below.
+        unsafe { std::env::set_var("HOME", tmp.path()) };
+        let mut runner = RecordingRunner::default();
+        let result = installed_and_running(&mut runner);
+        // SAFETY: serialized by `lock_runtime_env`.
+        unsafe {
+            match prior {
+                Some(value) => std::env::set_var("HOME", value),
+                None => std::env::remove_var("HOME"),
+            }
+        }
+
+        assert_eq!(result.expect("query must succeed"), (false, false));
+        assert!(
+            runner.labels.is_empty(),
+            "must not query systemctl when the unit is absent"
+        );
     }
 
     // ── restart ─────────────────────────────────────────────────

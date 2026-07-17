@@ -21,14 +21,20 @@ enum ConfigSubcommand {
     List(ConfigListCommand),
     /// Get a single configuration value by dot-separated key.
     Get(ConfigGetCommand),
+    /// Set a single configuration value by dot-separated key, routed
+    /// through the alias table to its destination (config.toml, the
+    /// encrypted secret store, or the WebChat v2 token file).
+    Set(set::ConfigSetCommand),
 }
 
 #[derive(Debug, Args)]
 struct ConfigPathCommand;
 
+mod capability_config;
 mod get;
 mod list;
 mod read;
+mod set;
 
 use self::get::ConfigGetCommand;
 use self::list::ConfigListCommand;
@@ -40,6 +46,7 @@ impl ConfigCommand {
             ConfigSubcommand::Init(command) => command.execute(context),
             ConfigSubcommand::List(command) => command.execute(context),
             ConfigSubcommand::Get(command) => command.execute(context),
+            ConfigSubcommand::Set(command) => command.execute(context),
         }
     }
 }
