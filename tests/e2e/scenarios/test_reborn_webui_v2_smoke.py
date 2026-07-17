@@ -424,6 +424,109 @@ async def test_reborn_v2_automation_rename_persists_from_ui(
         assert renamed["automation_id"] == automation_id
 
 
+async def test_reborn_v2_automation_action_error_is_safe_dismissible_and_cleared_on_retry(
+    reborn_v2_server, reborn_v2_browser
+):
+    """Automation mutations never expose raw errors and clear stale failures."""
+    automation_id = "11111111-2222-3333-4444-555555555555"
+    raw_error = "postgres failed: secret_internal_automation_table"
+    attempt_count = 0
+    retry_started = asyncio.Event()
+    release_retry = asyncio.Event()
+    retry_completed = asyncio.Event()
+
+    context = await reborn_v2_browser.new_context(viewport={"width": 1280, "height": 720})
+    page = await context.new_page()
+
+    async def handle_automations(route) -> None:
+        nonlocal attempt_count
+        if route.request.method == "GET":
+            await route.fulfill(
+                status=200,
+                content_type="application/json",
+                body=json.dumps(
+                    {
+                        "scheduler_enabled": True,
+                        "automations": [
+                            {
+                                "automation_id": automation_id,
+                                "name": "Safe action error regression",
+                                "source": {
+                                    "type": "schedule",
+                                    "cron": "0 9 * * *",
+                                    "timezone": "UTC",
+                                },
+                                "state": "active",
+                                "next_run_at": "2026-07-18T09:00:00Z",
+                                "recent_runs": [],
+                            }
+                        ],
+                    }
+                ),
+            )
+            return
+
+        attempt_count += 1
+        if attempt_count <= 2:
+            await route.fulfill(
+                status=500,
+                content_type="text/plain",
+                body=raw_error,
+            )
+            return
+
+        retry_started.set()
+        await release_retry.wait()
+        await route.fulfill(
+            status=200,
+            content_type="application/json",
+            body=json.dumps({"updated": True}),
+        )
+        retry_completed.set()
+
+    await page.route("**/api/webchat/v2/automations**", handle_automations)
+    row_selector = SEL_V2["automation_row_for"].format(id=automation_id)
+    error_banner = page.locator(SEL_V2["automation_action_error"])
+
+    async def submit_rename(name: str) -> None:
+        row = page.locator(row_selector)
+        await expect(row).to_be_visible(timeout=15000)
+        await row.locator(
+            SEL_V2["automation_name_button_for"].format(id=automation_id)
+        ).click()
+        await page.locator(SEL_V2["automation_rename_button"]).click()
+        rename_input = page.locator(SEL_V2["automation_rename_input"])
+        await rename_input.fill(name)
+        await page.locator(SEL_V2["automation_rename_save"]).click()
+
+    try:
+        await page.goto(f"{reborn_v2_server}/v2/automations?token={REBORN_V2_AUTH_TOKEN}")
+
+        await submit_rename("First failed rename")
+        await expect(error_banner).to_be_visible(timeout=10000)
+        await expect(error_banner).to_have_text(
+            "Unable to update the automation. Please try again."
+        )
+        await expect(error_banner).not_to_contain_text(raw_error)
+
+        await error_banner.get_by_role("button", name="Dismiss").click()
+        await expect(error_banner).to_have_count(0)
+
+        await submit_rename("Second failed rename")
+        await expect(error_banner).to_be_visible(timeout=10000)
+
+        await submit_rename("Successful retry")
+        await asyncio.wait_for(retry_started.wait(), timeout=10)
+        await expect(error_banner).to_have_count(0)
+
+        release_retry.set()
+        await asyncio.wait_for(retry_completed.wait(), timeout=10)
+        await expect(error_banner).to_have_count(0)
+    finally:
+        release_retry.set()
+        await context.close()
+
+
 async def test_reborn_v2_automation_failed_run_actions_are_clickable(
     reborn_v2_server, reborn_v2_browser
 ):
