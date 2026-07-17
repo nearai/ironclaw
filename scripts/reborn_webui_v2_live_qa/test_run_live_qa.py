@@ -90,12 +90,16 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
         response_payloads: list[dict[str, object] | None],
         user_bubble_failures: int = 0,
         terminal_failure: run_live_qa.TerminalRunFailureObservation | None = None,
-    ) -> tuple[run_live_qa.ProbeResult, dict[str, int]]:
+        assistant_replies: list[str] | None = None,
+        routine_confirmation_follow_up: bool = False,
+    ) -> tuple[run_live_qa.ProbeResult, dict[str, object]]:
         state = {
             "presses": 0,
             "dismissals": 0,
             "user_bubble_assertions": 0,
             "response_waiters": 0,
+            "assistant_waits": 0,
+            "current_content": "",
         }
 
         class FakeLocator:
@@ -110,7 +114,8 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
                 return 0
 
         class FakeComposer(FakeLocator):
-            async def fill(self, _text):
+            async def fill(self, text):
+                state["current_content"] = text
                 return None
 
             async def press(self, _key):
@@ -130,26 +135,30 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
             async def click(self):
                 state["dismissals"] += 1
 
+        assistant_replies = assistant_replies or ["Slack answer."]
+
         class FakeRequest:
             method = "POST"
-            post_data_json = {"content": "Read Slack."}
+
+            def __init__(self, content):
+                self.post_data_json = {"content": content}
 
         class FakeResponse:
             url = (
                 "http://127.0.0.1:9/api/webchat/v2/threads/"
                 "thread-current/messages"
             )
-            request = FakeRequest()
-
-            def __init__(self, payload):
+            def __init__(self, payload, content):
                 self.payload = payload
+                self.request = FakeRequest(content)
 
             async def json(self):
                 return self.payload
 
         class FakeResponseInfo:
-            def __init__(self, payload):
+            def __init__(self, payload, predicate):
                 self.payload = payload
+                self.predicate = predicate
 
             async def __aenter__(self):
                 return self
@@ -162,7 +171,9 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
                 async def get_response():
                     if self.payload is None:
                         raise TimeoutError("no matching submission response")
-                    return FakeResponse(self.payload)
+                    response = FakeResponse(self.payload, state["current_content"])
+                    self_outer.assertTrue(self.predicate(response))
+                    return response
 
                 return get_response()
 
@@ -174,9 +185,7 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
                 index = state["response_waiters"]
                 state["response_waiters"] += 1
                 payload = response_payloads[index]
-                if payload is not None:
-                    self_outer.assertTrue(predicate(FakeResponse(payload)))
-                return FakeResponseInfo(payload)
+                return FakeResponseInfo(payload, predicate)
 
             def locator(self, selector):
                 if selector == "[aria-label='Dismiss connect action']":
@@ -204,9 +213,12 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
         async def fake_wait(_page, **_kwargs):
             if terminal_failure is not None:
                 raise run_live_qa.TerminalRunFailure(terminal_failure)
+            reply_index = min(state["assistant_waits"], len(assistant_replies) - 1)
+            state["assistant_waits"] += 1
+            reply_text = assistant_replies[reply_index]
             return run_live_qa.AssistantReplyWaitResult(
-                text_excerpt="Slack answer.",
-                full_text="Slack answer.",
+                text_excerpt=reply_text,
+                full_text=reply_text,
                 semantic_judge_used=False,
                 semantic_judge_reason="literal_required_text_matched",
                 final_reply_wait_ms=0,
@@ -237,6 +249,7 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
                     required_text=[],
                     capture_submission_identity=True,
                     enforce_marker=False,
+                    routine_confirmation_follow_up=routine_confirmation_follow_up,
                 )
             )
         return result, state
@@ -262,6 +275,20 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
         self.assertFalse(behavioral.blocking)
         with self.assertRaisesRegex(ValueError, "tier"):
             run_live_qa.CaseSpec(fake_case, tier="advisory", blocking=False)
+
+    def test_result_preserves_explicit_nonblocking_infrastructure_classification(self):
+        result = run_live_qa._result(
+            "qa_9b_routine_dm_delivery_exactly_once",
+            False,
+            run_live_qa.time.monotonic(),
+            {
+                "blocking": False,
+                "failure_class": "infrastructure",
+                "failure_status": "inconclusive",
+            },
+        )
+
+        self.assertFalse(result.details["blocking"])
 
     def _fake_assistant_reply_page(
         self,
@@ -3080,6 +3107,42 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
             },
         )
 
+    def test_follow_up_already_submitted_records_its_own_identity(self):
+        submitted = {
+            "outcome": "submitted",
+            "thread_id": "thread-current",
+            "accepted_message_ref": "msg:message-primary",
+            "turn_id": "turn-primary",
+            "run_id": "run-primary",
+        }
+        replayed_follow_up = {
+            "outcome": "already_submitted",
+            "thread_id": "thread-current",
+            "accepted_message_ref": "msg:message-follow-up",
+            "run_id": "run-follow-up",
+            "status": "running",
+        }
+
+        result, state = self._drive_submission_capture_state(
+            response_payloads=[submitted, replayed_follow_up],
+            assistant_replies=[
+                "I can create that routine. Would you like me to go ahead?",
+                "Routine created.",
+            ],
+            routine_confirmation_follow_up=True,
+        )
+
+        self.assertTrue(result.success, result.details)
+        self.assertEqual(state["presses"], 2)
+        self.assertEqual(
+            result.details["submission_identity"]["run_id"],
+            "run-primary",
+        )
+        self.assertEqual(
+            [identity["run_id"] for identity in result.details["submission_identities"]],
+            ["run-primary", "run-follow-up"],
+        )
+
     def test_submission_capture_rejects_busy_retry_without_prior_identity(self):
         rejected_busy = {
             "outcome": "rejected_busy",
@@ -5014,6 +5077,138 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
             "sheet-123",
         )
 
+    def test_qa_6d_uses_unique_sheet_fixture_in_routine_prompt(self):
+        captured_fixture: dict[str, object] = {}
+        captured_routine: dict[str, object] = {}
+
+        async def fake_create_google_spreadsheet_fixture(**kwargs):
+            captured_fixture.update(kwargs)
+            return {
+                "spreadsheet_id": "crm-sheet-123",
+                "spreadsheet_url": (
+                    "https://docs.google.com/spreadsheets/d/crm-sheet-123/edit"
+                ),
+                "title": kwargs["title"],
+                "sheet_name": "Sheet1",
+                "values_written": True,
+            }
+
+        async def fake_routine_creation_case(_ctx, **kwargs):
+            captured_routine.update(kwargs)
+            return run_live_qa.ProbeResult(
+                provider="test",
+                mode="live:qa_6d_gmail_to_sheet_routine",
+                success=True,
+                latency_ms=1,
+                details=kwargs.get("extra_details") or {},
+            )
+
+        with (
+            patch.object(
+                run_live_qa,
+                "_google_runtime_access_token",
+                return_value=("fresh-access-token", {"source": "test"}),
+            ),
+            patch.object(
+                run_live_qa,
+                "_create_google_spreadsheet_fixture",
+                side_effect=fake_create_google_spreadsheet_fixture,
+            ),
+            patch.object(
+                run_live_qa,
+                "_routine_creation_case",
+                side_effect=fake_routine_creation_case,
+            ),
+        ):
+            result = asyncio.run(
+                run_live_qa.case_qa_6d_gmail_to_sheet_routine(self._dummy_ctx())
+            )
+
+        self.assertTrue(result.success)
+        self.assertEqual(captured_fixture["access_token"], "fresh-access-token")
+        self.assertEqual(
+            captured_fixture["values"],
+            [["Source", "Summary", "QA Marker"]],
+        )
+        self.assertRegex(str(captured_fixture["title"]), r"^REBORN_QA_6D_CRM_SHEET_\d+$")
+        prompt = str(captured_routine["prompt"])
+        self.assertIn("crm-sheet-123", prompt)
+        self.assertIn(str(captured_fixture["title"]), prompt)
+        self.assertIn("Do not search for a sheet named ABC", prompt)
+        self.assertEqual(
+            captured_routine["extra_details"]["crm_sheet_fixture"]["spreadsheet_id"],
+            "crm-sheet-123",
+        )
+
+    def test_qa_7e_uses_direct_fixture_and_exact_append_instruction(self):
+        captured_event: dict[str, object] = {}
+
+        async def fake_create_google_spreadsheet_fixture(**kwargs):
+            return {
+                "spreadsheet_id": "bug-sheet-123",
+                "spreadsheet_url": (
+                    "https://docs.google.com/spreadsheets/d/bug-sheet-123/edit"
+                ),
+                "title": kwargs["title"],
+                "sheet_name": "Sheet1",
+                "values_written": True,
+            }
+
+        async def fake_post_signed_slack_dm_event(_ctx, **kwargs):
+            captured_event.update(kwargs)
+            return {"event_id": kwargs["event_id"], "status_code": 200}
+
+        async def fake_wait_for_google_sheet_marker(*_args, **_kwargs):
+            return {"found": True, "row_count": 2}
+
+        with (
+            patch.object(
+                run_live_qa,
+                "_google_runtime_access_token",
+                return_value=("fresh-access-token", {"source": "test"}),
+            ),
+            patch.object(
+                run_live_qa,
+                "_create_google_spreadsheet_fixture",
+                side_effect=fake_create_google_spreadsheet_fixture,
+            ),
+            patch.object(
+                run_live_qa,
+                "_live_chat_with_extensions_case",
+                side_effect=AssertionError("QA 7E fixture setup must not use chat"),
+            ),
+            patch.object(
+                run_live_qa,
+                "_slack_preflight",
+                return_value={"inbound_user_id": "U0REBORNQA"},
+            ),
+            patch.object(run_live_qa, "_slack_delivery_channel_id", return_value="D123"),
+            patch.object(
+                run_live_qa,
+                "_post_signed_slack_dm_event",
+                side_effect=fake_post_signed_slack_dm_event,
+            ),
+            patch.object(
+                run_live_qa,
+                "_wait_for_google_sheet_marker_after_slack_event",
+                side_effect=fake_wait_for_google_sheet_marker,
+            ),
+        ):
+            result = asyncio.run(
+                run_live_qa.case_qa_7e_slack_bug_sheet_delivery(self._dummy_ctx())
+            )
+
+        self.assertTrue(result.success)
+        event_text = str(captured_event["text"])
+        self.assertIn("google-sheets.append_values", event_text)
+        self.assertIn('"spreadsheet_id":"bug-sheet-123"', event_text)
+        self.assertIn('"range":"Sheet1!A:E"', event_text)
+        self.assertIn("Do not inspect spreadsheet metadata first", event_text)
+        self.assertEqual(
+            result.details["sheet_fixture"]["spreadsheet_id"],
+            "bug-sheet-123",
+        )
+
     def test_qa_7d_accepts_signed_slack_event_into_reborn_run(self):
         captured_event: dict[str, object] = {}
 
@@ -5292,6 +5487,13 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
         self.assertIn('"to":"qa@example.test"', prompt_4e)
         self.assertIn('"body":"REBORN_QA_4E_GITHUB_RELEASE_EMAIL_DELIVERED_', prompt_4e)
         self.assertIn("ironclaw-v0.test", prompt_4e)
+        self.assertEqual(
+            captured["qa_4e_github_release_email_delivery"]["required_text"],
+            [],
+        )
+        self.assertFalse(
+            captured["qa_4e_github_release_email_delivery"]["enforce_marker"]
+        )
 
         self.assertEqual(
             captured["qa_6e_gmail_to_sheet_delivery"]["required_text"],
@@ -5554,7 +5756,7 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
 
         self.assertEqual(attempts, 1)
 
-    def test_slack_side_effect_setup_prompts_avoid_connect_action_trigger(self):
+    def test_slack_strategy_setup_prompt_avoids_connect_action_trigger(self):
         captured_prompts: dict[str, str] = {}
         captured_slack_required_text: list[str] = []
         document_id = "1DocCdEfGhIjKlMnOpQrStUvWxYz_1234567890"
@@ -5627,15 +5829,9 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
             self.assertTrue(
                 asyncio.run(run_live_qa.case_qa_5d_slack_strategy_doc_answer(ctx)).success
             )
-            self.assertTrue(
-                asyncio.run(run_live_qa.case_qa_7e_slack_bug_sheet_delivery(ctx)).success
-            )
 
         trigger = re.compile(r"(^|\s)(connect|link|pair|setup|set up)(\s|$)")
-        for case_name in (
-            "qa_5d_slack_strategy_doc_answer",
-            "qa_7e_slack_bug_sheet_delivery",
-        ):
+        for case_name in ("qa_5d_slack_strategy_doc_answer",):
             prompt = captured_prompts[case_name].lower()
             self.assertIsNone(
                 trigger.search(prompt),
@@ -9812,6 +10008,124 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
         self.assertTrue(result.details["inconclusive"])
         self.assertFalse(result.details["blocking"])
         self.assertEqual(result.details["delivery_readback_evidence"], evidence)
+
+    def test_slack_delivery_exhausted_evidence_reads_are_inconclusive(self):
+        async def fake_creation(_ctx, **kwargs):
+            return run_live_qa.ProbeResult(
+                provider="test",
+                mode=f"live:{kwargs['case_name']}",
+                success=True,
+                latency_ms=1,
+                details={"creation": "ok"},
+            )
+
+        async def fake_delivery(*_args, **_kwargs):
+            return {
+                "slack_history": {"found": True},
+                "trigger_run": {"run_id": "run-1"},
+                "delivery_outcome": {"outcome": "delivered"},
+            }
+
+        async def unreadable_history(*_args, **_kwargs):
+            return {"found": False, "error": "transient Slack read failure"}
+
+        with (
+            patch.object(run_live_qa, "_routine_creation_case", side_effect=fake_creation),
+            patch.object(
+                run_live_qa,
+                "_wait_for_slack_delivery_marker",
+                side_effect=fake_delivery,
+            ),
+            patch.object(run_live_qa, "_slack_delivery_channel_id", return_value="D123"),
+            patch.object(
+                run_live_qa,
+                "_slack_history_contains_marker",
+                side_effect=unreadable_history,
+            ),
+            patch.object(run_live_qa.asyncio, "sleep", new=AsyncMock()),
+        ):
+            result = asyncio.run(
+                run_live_qa._slack_delivery_routine_case(
+                    self._dummy_ctx(),
+                    case_name="qa_9b_routine_dm_delivery_exactly_once",
+                    routine_prefix="qa-9b",
+                    marker_prefix="QA_9B",
+                    routine_instruction="send the marker to Slack",
+                    required_delivery_text=["status"],
+                    exactly_once_grace_seconds=0.0,
+                )
+            )
+
+        self.assertFalse(result.success)
+        self.assertEqual(result.details["failure_class"], "infrastructure")
+        self.assertEqual(result.details["failure_status"], "inconclusive")
+        self.assertFalse(result.details["blocking"])
+
+    def test_slack_delivery_exhausted_workspace_sweep_is_inconclusive(self):
+        async def fake_creation(_ctx, **kwargs):
+            return run_live_qa.ProbeResult(
+                provider="test",
+                mode=f"live:{kwargs['case_name']}",
+                success=True,
+                latency_ms=1,
+                details={"creation": "ok"},
+            )
+
+        async def fake_delivery(*_args, **_kwargs):
+            return {
+                "slack_history": {"found": True},
+                "trigger_run": {"run_id": "run-1"},
+                "delivery_outcome": {"outcome": "delivered"},
+            }
+
+        with (
+            patch.object(run_live_qa, "_routine_creation_case", side_effect=fake_creation),
+            patch.object(
+                run_live_qa,
+                "_wait_for_slack_delivery_marker",
+                side_effect=fake_delivery,
+            ),
+            patch.object(run_live_qa, "_slack_delivery_channel_id", return_value="D123"),
+            patch.object(
+                run_live_qa,
+                "_slack_history_contains_marker",
+                new=AsyncMock(
+                    return_value={
+                        "found": True,
+                        "marker_matches": 1,
+                        "human_authored_marker_matches": 0,
+                    }
+                ),
+            ),
+            patch.object(
+                run_live_qa,
+                "_slack_search_marker_hits",
+                new=AsyncMock(
+                    return_value={
+                        "checked": False,
+                        "permanent": False,
+                        "error": "transient search failure",
+                    }
+                ),
+            ),
+            patch.object(run_live_qa.asyncio, "sleep", new=AsyncMock()),
+        ):
+            result = asyncio.run(
+                run_live_qa._slack_delivery_routine_case(
+                    self._dummy_ctx(),
+                    case_name="qa_9b_routine_dm_delivery_exactly_once",
+                    routine_prefix="qa-9b",
+                    marker_prefix="QA_9B",
+                    routine_instruction="send the marker to Slack",
+                    required_delivery_text=["status"],
+                    exactly_once_grace_seconds=0.0,
+                )
+            )
+
+        self.assertFalse(result.success)
+        self.assertEqual(result.details["failure_class"], "infrastructure")
+        self.assertEqual(result.details["failure_status"], "inconclusive")
+        self.assertFalse(result.details["blocking"])
 
     def test_slack_delivery_routine_fixture_precondition_is_inconclusive(self):
         async def fake_creation(_ctx, **kwargs):

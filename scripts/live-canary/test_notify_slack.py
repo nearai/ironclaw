@@ -358,6 +358,37 @@ class RebornQaSlackReportTests(unittest.TestCase):
         primary_table = github.split("\n\n", 1)[1].split("\n\n", 1)[0]
         self.assertNotIn("3/5", primary_table)
 
+    def test_string_false_success_value_fails_closed(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            lane_dir = Path(tmpdir) / "reborn-webui-v2-live-qa" / "provider" / "run"
+            lane_dir.mkdir(parents=True)
+            (lane_dir / "results.json").write_text(
+                json.dumps(
+                    {
+                        "results": [
+                            {
+                                "provider": "provider",
+                                "mode": "live:contract_case",
+                                "success": "false",
+                                "details": {
+                                    "case": "contract_case",
+                                    "case_tier": "contract",
+                                    "blocking": True,
+                                    "error": "malformed success type",
+                                },
+                            }
+                        ]
+                    }
+                ),
+                encoding="utf-8",
+            )
+            report = notify.collect_lane(lane_dir)
+
+        self.assertEqual(report.passed, 0)
+        self.assertEqual(report.failed, 1)
+        self.assertEqual((report.contract_passed, report.contract_total), (0, 1))
+        self.assertFalse(report.reborn_qa_cases[0].success)
+
     def test_infrastructure_results_do_not_increment_tier_totals(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             lane_dir = (

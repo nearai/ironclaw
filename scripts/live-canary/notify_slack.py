@@ -146,6 +146,11 @@ class _ResultClassification:
     inconclusive: bool
 
 
+def _result_succeeded(entry: dict) -> bool:
+    """Accept only the runner's documented JSON boolean success value."""
+    return entry.get("success") is True
+
+
 def _normalize_result_classification(entry: dict) -> _ResultClassification:
     details = entry.get("details") or {}
     if not isinstance(details, dict):
@@ -170,7 +175,7 @@ def _normalize_result_classification(entry: dict) -> _ResultClassification:
     failure_status = typed_string("failure_status")
     inconclusive = bool(
         tier_is_valid
-        and not entry.get("success")
+        and not _result_succeeded(entry)
         and (
             details.get("inconclusive") is True
             or failure_class in ("infrastructure", "precondition")
@@ -262,13 +267,13 @@ def parse_results_json(path: Path, report: LaneReport) -> None:
         if not classification.inconclusive:
             if classification.tier == "behavioral":
                 report.behavioral_total += 1
-                if entry.get("success"):
+                if _result_succeeded(entry):
                     report.behavioral_passed += 1
             else:
                 report.contract_total += 1
-                if entry.get("success"):
+                if _result_succeeded(entry):
                     report.contract_passed += 1
-        if entry.get("success"):
+        if _result_succeeded(entry):
             report.passed += 1
         else:
             name = (
@@ -334,7 +339,7 @@ def _reborn_case_from_result(entry: dict) -> str:
 
 
 def _reborn_failure_message(entry: dict) -> str:
-    if entry.get("success"):
+    if _result_succeeded(entry):
         return ""
     details = entry.get("details") or {}
     if not isinstance(details, dict):
@@ -486,7 +491,7 @@ def parse_reborn_qa_case_reports(lane_dir: Path, report: LaneReport) -> None:
         latency = entry.get("latency_ms")
         tool_calls = parse_reborn_trace_tool_calls(lane_dir / "traces" / f"{case}.json")
         debug_paths = []
-        if not entry.get("success"):
+        if not _result_succeeded(entry):
             debug_paths = [
                 f"{artifact_path_prefix}/results.json",
                 f"{artifact_path_prefix}/test-output.log",
@@ -498,7 +503,7 @@ def parse_reborn_qa_case_reports(lane_dir: Path, report: LaneReport) -> None:
                 rows=row_tuple,
                 case=case,
                 feature=_trim_slack_text(feature, 120),
-                success=bool(entry.get("success")),
+                success=_result_succeeded(entry),
                 latency_ms=latency if isinstance(latency, (int, float)) else None,
                 message=_reborn_failure_message(entry),
                 case_tier=classification.tier,
