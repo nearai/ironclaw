@@ -30,6 +30,13 @@ impl ConfigInitCommand {
         println!("{}", outcome.config.display_line());
         println!("{}", outcome.providers.display_line());
         println!();
+        println!(
+            "hint: config.toml ships with `[llm.default]` commented out, so `run`/`serve` fall \
+             back to LLM environment variables until you configure a slot — run `ironclaw-reborn \
+             onboard` interactively, `ironclaw-reborn models set-provider <provider>`, or edit \
+             config.toml and uncomment `[llm.default]` with a `provider_id` (and usually a \
+             `model`) to pin an explicit provider."
+        );
         println!("edit them, then run `ironclaw-reborn run`.");
         Ok(())
     }
@@ -59,19 +66,23 @@ impl ConfigFileWrite {
     }
 }
 
-/// Canonical zero-friction LLM default: the provider the `config.toml` stub
-/// seeds AND the default interactive `onboard` offers
-/// (`commands::onboard::provision_llm_credentials`'s prompt default via
-/// `DEFAULT_LLM_PROVIDER`) come from these three constants so the two paths
-/// cannot drift out of agreement about which provider a fresh install boots
-/// against — see the `run_warns_when_falling_back_to_stub_gateway` /
-/// `onboard_then_serve_boots_with_an_empty_environment` smoke coverage that
-/// exercises the stub as-written with no LLM env vars set.
+/// Canonical zero-friction LLM default: the provider named in the
+/// `config.toml` stub's commented-out `[llm.default]` example, and the
+/// numbered `onboard` menu's first (unnumbered-preferred) entry.
+///
+/// `config.toml` is the single source of truth for `[llm.default]`: it is
+/// written ONLY by an explicit act (`onboard`'s interactive/headless-detect
+/// seeding, `config set` / `models set-provider`, or the WebUI settings
+/// page) — never seeded implicitly by `config init` / `onboard`'s stub
+/// write. See `onboard::llm_credentials` for the seeding paths and
+/// `RebornLlmCatalogError::MissingProviderId` / `resolve_reborn_runtime_llm`
+/// for the env fallback a commented-out (or altogether absent)
+/// `[llm.default]` section falls through to.
 ///
 /// `nearai` requires no upfront third-party account (session-token auth via
 /// a NEAR account, `api_key_required = false` in `providers.json`), which is
-/// why it is the zero-friction default for a fresh desktop install rather
-/// than a provider that hard-requires an API key before it will boot.
+/// why it remains the example/preferred provider for a fresh desktop install
+/// rather than a provider that hard-requires an API key before it will boot.
 pub(crate) const DEFAULT_LLM_PROVIDER_ID: &str = "nearai";
 /// Mirrors `providers.json`'s `nearai` entry's `default_model`.
 pub(crate) const DEFAULT_LLM_MODEL: &str = "deepseek-ai/DeepSeek-V4-Flash";
@@ -223,16 +234,25 @@ regex_activation_enabled = true
 # # session-pool cap after reserving capacity for restarts/operator sessions.
 # pool_max_size = 2
 
-[llm.default]
-# LLM slot selection. `provider_id` references an entry in
-# providers.json (built-in or user-overlay). `model` / `base_url` /
-# `api_key_env` override the catalog defaults for this deployment.
-# `nearai` needs no upfront API key (session-token auth) so this stub
-# boots as-is; run `ironclaw-reborn models set-provider <provider>` to
-# switch to a different provider.
-provider_id = "{default_llm_provider_id}"
-model       = "{default_llm_model}"
-api_key_env = "{default_llm_api_key_env}"
+# [llm.default]
+# # LLM slot selection. `provider_id` references an entry in
+# # providers.json (built-in or user-overlay). `model` / `base_url` /
+# # `api_key_env` override the catalog defaults for this deployment.
+# # No slot is seeded by default: leaving this section commented means the
+# # runtime falls back to LLM environment variables (`LLM_BACKEND`, or a
+# # provider whose own env vars are set — see `ironclaw-reborn onboard` and
+# # `.env.example`). Run `ironclaw-reborn onboard` interactively, `ironclaw-
+# # reborn config set` / `models set-provider`, or the WebUI settings page to
+# # write an explicit slot here.
+# #
+# # CAUTION: uncommenting only the `[llm.default]` header with no fields
+# # below it does NOT fall through to the environment — an empty slot is
+# # still "present" and resolution fails closed with a missing-provider-id
+# # error. Always set `provider_id` (and usually `model`) together with the
+# # header, or leave the whole section commented.
+# provider_id = "{default_llm_provider_id}"
+# model       = "{default_llm_model}"
+# api_key_env = "{default_llm_api_key_env}"
 
 # [llm.mission]
 # # Reserved for the future planned-driver "mission" slot.
@@ -281,3 +301,52 @@ const PROVIDERS_STUB: &str = r#"[
   }
 ]
 "#;
+
+#[cfg(all(test, feature = "root-llm-provider"))]
+mod tests {
+    use super::*;
+    use crate::context::RebornCliContext;
+
+    /// RED (de-seed the stub): the config stub written by `onboard`/`config
+    /// init` must carry NO `[llm.default]` selection at all —
+    /// `RebornConfigFile::default_llm_slot()` must return `None` (not
+    /// `Some` with empty fields — a bare header is still "present" and
+    /// fails closed with `MissingProviderId`, see this file's
+    /// `DEFAULT_LLM_PROVIDER_ID` doc) — so `resolve_reborn_runtime_llm`
+    /// reaches the environment fallback instead of a stub-seeded slot.
+    #[test]
+    fn deseeded_stub_has_no_default_llm_slot_and_reaches_env_fallback() {
+        let (_tmp, context) = RebornCliContext::test_context();
+        let home = context.boot_config().home();
+        let outcome = write_default_config_files(home, false, ExistingConfigPolicy::FailIfPresent)
+            .expect("write stub config files");
+        assert_eq!(outcome.config.action, FileWriteAction::Wrote);
+
+        let config_text =
+            fs::read_to_string(home.config_file_path()).expect("read stub config.toml");
+        let config_file = ironclaw_reborn_config::RebornConfigFile::parse_text(
+            &config_text,
+            &home.config_file_path(),
+        )
+        .expect("stub config.toml must parse");
+        assert!(
+            config_file.default_llm_slot().is_none(),
+            "de-seeded stub must carry no `[llm.default]` slot at all: {config_text}"
+        );
+
+        // No LLM env vars are set in this test process by default; a
+        // pre-existing `LLM_BACKEND`/provider env var in the ambient test
+        // environment would make this assertion environment-dependent, so
+        // this only pins the *shape* of the result (env fallback path is
+        // reached, not a stub-seeded slot short-circuiting it) rather than
+        // a specific `Some`/`None` outcome.
+        let resolved = ironclaw_reborn_composition::resolve_reborn_runtime_llm(
+            context.boot_config(),
+            Some(&config_file),
+        );
+        assert!(
+            resolved.is_ok(),
+            "a de-seeded stub must not fail with MissingProviderId; got: {resolved:?}"
+        );
+    }
+}
