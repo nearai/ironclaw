@@ -1,5 +1,4 @@
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 
 use clap::Args;
 use ironclaw_reborn_config::RebornHome;
@@ -301,7 +300,7 @@ impl LlmCredentialProvisionOutcome {
 /// [`provision_llm_credentials`]'s doc) without touching the real
 /// local-dev libsql-backed store.
 trait LlmKeyStoreOpener {
-    fn open(&self, home_path: &Path) -> anyhow::Result<Arc<dyn ironclaw_secrets::SecretStore>>;
+    fn open(&self, home_path: &Path) -> anyhow::Result<ironclaw_reborn_composition::LlmKeyStore>;
 }
 
 /// Production [`LlmKeyStoreOpener`]: opens the real local-dev encrypted
@@ -311,12 +310,13 @@ trait LlmKeyStoreOpener {
 struct LocalDevLlmKeyStoreOpener;
 
 impl LlmKeyStoreOpener for LocalDevLlmKeyStoreOpener {
-    fn open(&self, home_path: &Path) -> anyhow::Result<Arc<dyn ironclaw_secrets::SecretStore>> {
+    fn open(&self, home_path: &Path) -> anyhow::Result<ironclaw_reborn_composition::LlmKeyStore> {
         let home_path = home_path.to_path_buf();
         crate::runtime::block_on_cli(async move {
-            ironclaw_reborn_composition::open_local_dev_secret_store(&home_path)
+            let store = ironclaw_reborn_composition::open_local_dev_secret_store(&home_path)
                 .await
-                .map_err(anyhow::Error::from)
+                .map_err(anyhow::Error::from)?;
+            Ok::<_, anyhow::Error>(ironclaw_reborn_composition::LlmKeyStore::new(store))
         })
     }
 }
@@ -371,11 +371,8 @@ fn provision_llm_credentials(
         .map_err(LlmCredentialPromptError::Other)?;
     let provider_id_for_store = canonical_provider_id.clone();
     crate::runtime::block_on_cli(async move {
-        ironclaw_reborn_composition::LlmKeyStore::new(store)
-            .put(
-                &provider_id_for_store,
-                ironclaw_secrets::SecretMaterial::from(key),
-            )
+        store
+            .put_plaintext(&provider_id_for_store, key)
             .await
             .map_err(anyhow::Error::from)
     })
@@ -418,7 +415,7 @@ fn already_configured_outcome(
     };
     let provider_id_for_check = provider_id.clone();
     let has_key = crate::runtime::block_on_cli(async move {
-        ironclaw_reborn_composition::LlmKeyStore::new(store)
+        store
             .exists(&provider_id_for_check)
             .await
             .map_err(anyhow::Error::from)
@@ -544,6 +541,8 @@ fn pending_steps(import_history: bool, llm_configured: bool) -> Vec<&'static str
 
 #[cfg(all(test, feature = "libsql", feature = "root-llm-provider"))]
 mod tests {
+    use std::sync::Arc;
+
     use super::*;
 
     /// RED (B4 step 6 truth-up): the marker's `steps_pending` must only list
@@ -632,8 +631,10 @@ mod tests {
         fn open(
             &self,
             _home_path: &Path,
-        ) -> anyhow::Result<Arc<dyn ironclaw_secrets::SecretStore>> {
-            Ok(Arc::new(FailingSecretStore))
+        ) -> anyhow::Result<ironclaw_reborn_composition::LlmKeyStore> {
+            Ok(ironclaw_reborn_composition::LlmKeyStore::new(Arc::new(
+                FailingSecretStore,
+            )))
         }
     }
 

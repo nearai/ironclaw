@@ -55,14 +55,18 @@ pub(crate) fn provision_master_key(home: &RebornHome) -> anyhow::Result<MasterKe
     }
 
     crate::runtime::block_on_cli(async move {
-        if ironclaw_secrets::keychain::has_master_key().await {
-            return Ok::<_, anyhow::Error>(MasterKeyProvisionOutcome::KeychainAlreadyPresent);
-        }
-        let key = ironclaw_secrets::keychain::generate_master_key();
-        match ironclaw_secrets::keychain::store_master_key(&key).await {
-            Ok(()) => Ok(MasterKeyProvisionOutcome::Provisioned),
-            Err(_) => Ok(MasterKeyProvisionOutcome::Suppressed),
-        }
+        let outcome = ironclaw_reborn_composition::provision_local_dev_keychain_master_key().await;
+        Ok::<_, anyhow::Error>(match outcome {
+            ironclaw_reborn_composition::LocalDevKeychainMasterKeyOutcome::AlreadyPresent => {
+                MasterKeyProvisionOutcome::KeychainAlreadyPresent
+            }
+            ironclaw_reborn_composition::LocalDevKeychainMasterKeyOutcome::Provisioned => {
+                MasterKeyProvisionOutcome::Provisioned
+            }
+            ironclaw_reborn_composition::LocalDevKeychainMasterKeyOutcome::Suppressed => {
+                MasterKeyProvisionOutcome::Suppressed
+            }
+        })
     })
 }
 

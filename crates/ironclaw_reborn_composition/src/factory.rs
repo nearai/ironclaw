@@ -3784,6 +3784,47 @@ fn write_local_dev_secret_master_key(path: &Path, key: &str) -> Result<(), Rebor
     }
 }
 
+/// Outcome of provisioning a local-dev secrets master key directly into the
+/// OS keychain (as opposed to `resolve_local_dev_secret_master_key_with_env`'s
+/// full resolution chain, which is only consulted at boot time). Used by
+/// `onboard`'s standalone keychain-provisioning step.
+#[cfg(any(feature = "libsql", feature = "postgres"))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LocalDevKeychainMasterKeyOutcome {
+    /// The OS keychain already has a master key from a prior onboarding run.
+    AlreadyPresent,
+    /// A fresh key was generated and stored in the OS keychain.
+    Provisioned,
+    /// The OS keychain is unavailable (suppressed under test/CI, or the OS
+    /// denied the write).
+    Suppressed,
+}
+
+/// Facade over `ironclaw_secrets::keychain` for onboarding's OS-keychain
+/// master-key provisioning step, so callers outside this crate (namely
+/// `ironclaw_reborn_cli`) don't need their own dependency on
+/// `ironclaw_secrets` just to provision a keychain-backed key — see
+/// `crates/ironclaw_architecture/tests/reborn_dependency_boundaries.rs::reborn_cli_binary_crate_stays_separate_from_v1_root`,
+/// which pins `ironclaw_reborn_cli`'s allowed workspace dependency set.
+///
+/// If there is no key in the keychain yet, generates and stores one; a
+/// second call (keychain already populated) is a no-op returning
+/// `AlreadyPresent`. Never returns an error: an unavailable/denied keychain
+/// is reported via `Suppressed`, matching
+/// `resolve_local_dev_secret_master_key_with_env`'s own env/dotfile
+/// fallback.
+#[cfg(any(feature = "libsql", feature = "postgres"))]
+pub async fn provision_local_dev_keychain_master_key() -> LocalDevKeychainMasterKeyOutcome {
+    if ironclaw_secrets::keychain::has_master_key().await {
+        return LocalDevKeychainMasterKeyOutcome::AlreadyPresent;
+    }
+    let key = ironclaw_secrets::keychain::generate_master_key();
+    match ironclaw_secrets::keychain::store_master_key(&key).await {
+        Ok(()) => LocalDevKeychainMasterKeyOutcome::Provisioned,
+        Err(_) => LocalDevKeychainMasterKeyOutcome::Suppressed,
+    }
+}
+
 // Intentionally uncfg'd: called from both libsql and no-libsql local-dev root
 // filesystem paths.
 fn local_dev_mount_descriptor(
