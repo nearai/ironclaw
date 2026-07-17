@@ -108,9 +108,9 @@ by exact test name — `cargo test <name>` locates each.
 | `qa-telegram:S1`<br>A configured Telegram webhook rejects a missing secret header before parsing | **covered** | `cargo test -p ironclaw_telegram_extension` telegram_serve::telegram_updates_handler_returns_401_on_missing_secret_header |
 | `qa-telegram:S2`<br>DRAFT — qa-telegram:S2 | **draft** | DRAFT placeholder — no executable sub-rows yet |
 | `qa-telegram:S3`<br>Telegram rejects duplicate verification headers without first-or-last wins behavior | **covered** | `cargo test -p ironclaw_wasm_product_adapters` auth_verifier duplicate-header rejection (landed with fix 04df727ff) |
-| `qa-telegram:S4`<br>Telegram rejects webhook bodies over the configured limit before JSON parsing | **needs-test** | Body-limit enforcement is descriptor-driven at the composed listener (1 MiB in the manifest-projected descriptor); the raw route fragment doesn't enforce it. Needs a webui_v2_serve-tier case POSTing >1 MiB to the mounted public telegram route → 413. Descriptor value itself is pinned by telegram_serve::telegram_updates_route_descriptor_matches_manifest_projection. |
+| `qa-telegram:S4`<br>Telegram rejects webhook bodies over the configured limit before JSON parsing | **covered** | composition tests/webui_v2_serve.rs telegram_public_mount_enforces_descriptor_body_limit_and_404s_path_probes (>1 MiB → 413 through the COMPOSED listener before verification; in-budget control reaches the fail-closed verifier). Descriptor value pinned by telegram_serve::telegram_updates_route_descriptor_matches_manifest_projection. |
 | `qa-telegram:S5`<br>Malformed Telegram JSON fails safely without a turn or unsanitized log | **divergence** | SHIPPED ≠ ROW: verified-but-unparseable JSON is deliberately acked 200 with no turn/reply/body-echo (anti-redelivery — Telegram retries non-2xx forever); the row drafts a 4xx. Pinned by `cargo test -p ironclaw_telegram_extension` telegram_serve::telegram_updates_handler_acks_malformed_json_without_turn_or_reply. Unverified malformed bodies are 401 before parsing. |
-| `qa-telegram:S6`<br>Telegram path probes fail before extension resolution or store access | **needs-test** | Unknown paths under the public mount 404 at the axum router before any resolver/store access; worth a one-line webui_v2_serve-tier probe (e.g. /webhooks/extensions/telegram/bogus → 404 with zero setup-store reads). |
+| `qa-telegram:S6`<br>Telegram path probes fail before extension resolution or store access | **covered** | composition tests/webui_v2_serve.rs telegram_public_mount_enforces_descriptor_body_limit_and_404s_path_probes (/webhooks/extensions/telegram/bogus → 404 at the router; an unmounted path never reaches the installation resolver). |
 | `qa-telegram:S7`<br>DRAFT — qa-telegram:S7 | **draft** | DRAFT parent — carried by S7:01/S7:02 |
 | `qa-telegram:S7:01:setup-api-secret-redaction`<br>Telegram setup status returns readiness without secret values | **covered** | `cargo test -p ironclaw_telegram_extension` telegram_channel_routes::handler_tests::get_setup_returns_redacted_status_without_secret_values |
 | `qa-telegram:S7:02:trace-secret-redaction`<br>Telegram egress failures redact credentials from logs and traces | **covered** | `cargo test -p ironclaw_telegram_extension` telegram_egress::{telegram_bot_api_url_carries_placeholder_and_never_raw_token, rejects_control_chars, rejects_unknown_handle} + telegram_bot_api::{parse_garbage_is_invalid_response_without_body_echo, parse_not_ok_envelope_maps_to_stable_rejection_category} (provider text never rides errors) |
@@ -222,11 +222,11 @@ by exact test name — `cargo test <name>` locates each.
 
 ## Tally
 
-- **covered**: 67
+- **covered**: 69
 - **divergence**: 2
 - **draft**: 19
 - **gap-product**: 2
-- **needs-test**: 4
+- **needs-test**: 2
 - **not-automated**: 59
 - **partial**: 7
 
