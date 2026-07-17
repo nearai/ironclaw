@@ -188,7 +188,7 @@ impl RebornLlmConfigService {
             let metadata = info.metadata;
             let env_key_set = metadata.as_ref().is_some_and(metadata_env_key_set);
             let api_key_set = stored_key_set || env_key_set;
-            let base_url = provider_snapshot_base_url(&info.id, metadata.as_ref(), api_key_set);
+            let base_url = provider_snapshot_base_url(&info.id, metadata.as_ref());
             if info.active && active.is_none() {
                 active = Some(LlmActiveSelection {
                     provider_id: info.id.clone(),
@@ -937,7 +937,6 @@ fn env_var_present(name: &str) -> bool {
 fn provider_snapshot_base_url(
     provider_id: &str,
     metadata: Option<&crate::RebornProviderMetadata>,
-    api_key_set: bool,
 ) -> Option<String> {
     if let Some(base_url) = metadata
         .and_then(|meta| meta.base_url.as_deref())
@@ -949,7 +948,6 @@ fn provider_snapshot_base_url(
 
     if provider_id.eq_ignore_ascii_case("nearai") {
         return Some(default_nearai_base_url(
-            api_key_set,
             ironclaw_common::env_helpers::env_or_override("NEARAI_BASE_URL"),
         ));
     }
@@ -1220,7 +1218,7 @@ mod tests {
 
     use super::*;
     use ironclaw_host_api::{AgentId, ProjectId, ResourceScope, SecretHandle, TenantId, UserId};
-    use ironclaw_llm::{NEARAI_CLOUD_DEFAULT_BASE_URL, NEARAI_PRIVATE_DEFAULT_BASE_URL};
+    use ironclaw_llm::NEARAI_CLOUD_DEFAULT_BASE_URL;
     use ironclaw_reborn_config::{RebornHome, RebornProfile};
     use ironclaw_secrets::{
         InMemorySecretStore, SecretLease, SecretLeaseId, SecretMaterial, SecretMetadata,
@@ -1520,26 +1518,20 @@ mod tests {
         }
     }
 
+    /// nearai has exactly one default now — cloud — regardless of whether an
+    /// API key is present at resolve time. This is what fixes the runtime
+    /// twin of the `candidate_probe_base_url` bug: a key stored through the
+    /// secret store (applied *after* resolution) no longer needs to win a
+    /// race with base-URL selection, because there is nothing left to race.
     #[test]
-    fn nearai_default_base_url_selects_private_without_api_key() {
-        assert_eq!(
-            default_nearai_base_url(false, None),
-            NEARAI_PRIVATE_DEFAULT_BASE_URL
-        );
-    }
-
-    #[test]
-    fn nearai_default_base_url_selects_cloud_with_api_key() {
-        assert_eq!(
-            default_nearai_base_url(true, None),
-            NEARAI_CLOUD_DEFAULT_BASE_URL
-        );
+    fn nearai_default_base_url_always_selects_cloud() {
+        assert_eq!(default_nearai_base_url(None), NEARAI_CLOUD_DEFAULT_BASE_URL);
     }
 
     #[test]
     fn nearai_default_base_url_prefers_explicit_base_url() {
         assert_eq!(
-            default_nearai_base_url(false, Some("https://nearai.example.test/v1".to_string())),
+            default_nearai_base_url(Some("https://nearai.example.test/v1".to_string())),
             "https://nearai.example.test/v1"
         );
     }
@@ -2044,6 +2036,8 @@ mod tests {
         );
     }
 
+    /// NEAR AI has one default base URL — cloud — whether or not a key is
+    /// configured yet, so a fresh (keyless) snapshot must already show it.
     #[tokio::test]
     #[allow(clippy::await_holding_lock)]
     async fn nearai_snapshot_exposes_effective_default_base_url() {
@@ -2059,11 +2053,15 @@ mod tests {
 
         assert_eq!(
             nearai.base_url.as_deref(),
-            Some(NEARAI_PRIVATE_DEFAULT_BASE_URL),
+            Some(NEARAI_CLOUD_DEFAULT_BASE_URL),
             "NEAR AI snapshot should show the same effective default base URL the runtime resolves"
         );
     }
 
+    /// Same cloud default holds once a key is stored — proving stored-key
+    /// presence never changes the base URL (the runtime twin of this: a key
+    /// stored via `onboard`/`models set-provider`, applied after config
+    /// resolution, no longer races the base-URL default).
     #[tokio::test]
     #[allow(clippy::await_holding_lock)]
     async fn nearai_snapshot_uses_cloud_default_with_stored_api_key() {

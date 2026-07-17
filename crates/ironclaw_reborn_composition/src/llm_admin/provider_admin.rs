@@ -392,7 +392,7 @@ impl RebornProviderAdmin {
                 known: known_provider_ids(&registry),
             }
         })?;
-        let base_url = candidate_probe_base_url(definition, api_key.is_some());
+        let base_url = candidate_probe_base_url(definition);
         let request = ironclaw_product_workflow::LlmProbeRequest {
             adapter: provider_protocol_wire_name(definition.protocol),
             base_url,
@@ -779,26 +779,21 @@ fn provider_protocol_wire_name(protocol: ironclaw_llm::registry::ProviderProtoco
 ///
 /// `providers.json` leaves `default_base_url` unset for protocols whose
 /// default lives in code rather than the catalog (today: only `nearai`,
-/// which picks cloud vs. private NEAR AI by API-key presence — see
+/// which defaults to the cloud NEAR AI endpoint — see
 /// [`ironclaw_llm::default_nearai_base_url`]). Passing `None` straight
-/// through here makes the resolver derive an empty base URL for those
-/// protocols, and — for `nearai` specifically — re-derive the coded
-/// default *before* the candidate key has been applied to the resolved
-/// config, always landing on the keyless (private) endpoint even for a
-/// valid key. Every other protocol either carries its own
+/// through here would make the resolver derive an empty base URL for those
+/// protocols. Every other protocol either carries its own
 /// `default_base_url` in the catalog or (Bedrock, GeminiOauth,
 /// OpenAiCodex) never consumes `base_url` at all, so they need no
 /// fallback here.
 fn candidate_probe_base_url(
     definition: &ironclaw_llm::registry::ProviderDefinition,
-    has_key: bool,
 ) -> Option<String> {
     if let Some(base_url) = definition.default_base_url.clone() {
         return Some(base_url);
     }
     if definition.protocol == ironclaw_llm::registry::ProviderProtocol::NearAi {
         return Some(ironclaw_llm::default_nearai_base_url(
-            has_key,
             ironclaw_common::env_helpers::env_or_override("NEARAI_BASE_URL"),
         ));
     }
@@ -1066,12 +1061,13 @@ mod tests {
     }
 
     /// `nearai`'s catalog entry carries no `default_base_url` — its default
-    /// lives in code (cloud vs. private by key presence). A keyed candidate
-    /// probe must resolve to the cloud endpoint, not `None`/empty, or the
-    /// resolver falls through to the keyless private endpoint and every
-    /// valid-key probe reports "could not reach the provider endpoint".
+    /// lives in code and is now unconditionally the cloud endpoint (no more
+    /// has-key branch to thread through the probe). A candidate probe must
+    /// resolve to the cloud endpoint, not `None`/empty, or the resolver
+    /// falls through to an empty base URL and every probe reports "could
+    /// not reach the provider endpoint".
     #[test]
-    fn candidate_probe_base_url_defaults_nearai_to_cloud_when_keyed() {
+    fn candidate_probe_base_url_defaults_nearai_to_cloud() {
         let registry = ProviderRegistry::try_load_from_path(None).expect("builtin registry");
         let nearai = registry.find("nearai").expect("nearai in builtin registry");
         assert_eq!(
@@ -1079,28 +1075,12 @@ mod tests {
             "fixture assumption: nearai's catalog entry has no default_base_url"
         );
 
-        let base_url = candidate_probe_base_url(nearai, true);
+        let base_url = candidate_probe_base_url(nearai);
 
         assert_eq!(
             base_url.as_deref(),
             Some(ironclaw_llm::NEARAI_CLOUD_DEFAULT_BASE_URL),
-            "a keyed nearai probe must target the cloud endpoint, got {base_url:?}"
-        );
-    }
-
-    /// Without a candidate key (NEAR AI session-token login, no API key
-    /// entered yet) the probe should fall to the same private endpoint the
-    /// runtime resolver would pick — mirroring `default_nearai_base_url`.
-    #[test]
-    fn candidate_probe_base_url_defaults_nearai_to_private_when_keyless() {
-        let registry = ProviderRegistry::try_load_from_path(None).expect("builtin registry");
-        let nearai = registry.find("nearai").expect("nearai in builtin registry");
-
-        let base_url = candidate_probe_base_url(nearai, false);
-
-        assert_eq!(
-            base_url.as_deref(),
-            Some(ironclaw_llm::NEARAI_PRIVATE_DEFAULT_BASE_URL)
+            "a nearai probe must target the cloud endpoint, got {base_url:?}"
         );
     }
 
@@ -1116,7 +1096,7 @@ mod tests {
                 continue;
             }
             assert_eq!(
-                candidate_probe_base_url(definition, true),
+                candidate_probe_base_url(definition),
                 definition.default_base_url.clone(),
                 "provider `{}` must not gain a synthesized probe base URL",
                 definition.id

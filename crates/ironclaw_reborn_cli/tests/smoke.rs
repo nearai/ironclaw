@@ -4166,6 +4166,95 @@ fn onboard_openai_key_then_serve_boots_with_env_var_unset() {
     );
 }
 
+/// Regression pin: nearai's coded default base URL used to key on API-key
+/// presence at resolve time (cloud when a key was already attached, private
+/// otherwise). An operator-stored key (attached to the runtime *after*
+/// config resolution, via `apply_startup_stored_llm_key`) always missed that
+/// window, so a key stored through `onboard`/`models set-provider` — the
+/// exact path the webui settings surface uses — left the live runtime
+/// pinned to the keyless private endpoint even though the same key made the
+/// admin `test_connection` probe and the settings-panel catalog snapshot
+/// correctly report cloud. Fixed by making nearai's coded default
+/// unconditionally cloud (`ironclaw_llm::resolution::default_nearai_base_url`),
+/// so resolution order no longer matters.
+///
+/// `nearai`'s `api_key_required = false`, so unlike `openai` this boots
+/// successfully either way — the only observable symptom was the wrong base
+/// URL — asserted here on the resolved-LLM `debug!` trace's `base_url`
+/// field, which fires during boot-time config resolution (no stored-key
+/// application needed to observe the fix: it holds even in the fully
+/// keyless case this test drives).
+#[cfg(feature = "webui-v2-beta")]
+#[test]
+fn onboard_nearai_then_serve_boots_with_cloud_base_url() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let reborn_home = temp.path().join("reborn-home");
+    let home = temp.path().join("home");
+    std::fs::create_dir_all(&home).expect("home dir");
+
+    let onboard_output = reborn_command()
+        .arg("onboard")
+        .env("HOME", &home)
+        .env("IRONCLAW_REBORN_HOME", &reborn_home)
+        .output()
+        .expect("ironclaw-reborn onboard should run");
+    assert!(
+        onboard_output.status.success(),
+        "onboard must succeed non-interactively; stderr: {}",
+        String::from_utf8_lossy(&onboard_output.stderr)
+    );
+
+    let set_provider_output = reborn_command()
+        .args(["models", "set-provider", "nearai"])
+        .env("IRONCLAW_REBORN_HOME", &reborn_home)
+        .output()
+        .expect("ironclaw-reborn models set-provider should run");
+    assert!(
+        set_provider_output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&set_provider_output.stderr)
+    );
+
+    let port = unused_local_port();
+    let mut child = reborn_command()
+        .args(["serve", "--host", "127.0.0.1", "--port"])
+        .arg(port.to_string())
+        .env("HOME", &home)
+        .env("IRONCLAW_REBORN_HOME", &reborn_home)
+        // No NEARAI_API_KEY, no NEARAI_BASE_URL: nothing pins the base URL —
+        // proving the coded default itself is cloud, not a key-presence race.
+        .env_remove("NEARAI_API_KEY")
+        .env_remove("NEARAI_BASE_URL")
+        .env("IRONCLAW_REBORN_LOG", "info,ironclaw_reborn=debug")
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("ironclaw-reborn serve should start");
+    let pre_banner_stderr = strip_ansi(&wait_for_serve_banner(&mut child));
+
+    let _ = child.kill();
+    let _ = child.wait();
+
+    assert!(
+        pre_banner_stderr.contains("resolved LLM selection for Reborn runtime"),
+        "serve must emit the resolved-LLM debug trace before binding; stderr: {pre_banner_stderr}"
+    );
+    assert!(
+        pre_banner_stderr.contains("provider_id=nearai"),
+        "resolved-LLM trace must name the nearai provider; stderr: {pre_banner_stderr}"
+    );
+    assert!(
+        pre_banner_stderr.contains("base_url=https://cloud-api.near.ai"),
+        "nearai's coded default must be the cloud endpoint even fully keyless; \
+         stderr: {pre_banner_stderr}"
+    );
+    assert!(
+        !pre_banner_stderr.contains("base_url=https://private.near.ai"),
+        "resolved-LLM trace must never carry the retired keyless-private default; \
+         stderr: {pre_banner_stderr}"
+    );
+}
+
 /// RAILWAY PIN 1: the production Railway deployment boots with an
 /// `api_key_required = false` provider (`nearai`) and its API key env var
 /// (`NEARAI_API_KEY`) set — never a stored key, never an unset-key error.

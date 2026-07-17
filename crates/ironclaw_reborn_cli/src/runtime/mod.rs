@@ -657,6 +657,7 @@ pub(crate) fn build_runtime_input_with_options(
                 tracing::debug!(
                     provider_id = %llm.provider_id(),
                     model = %llm.model(),
+                    base_url = %llm.base_url().unwrap_or_default(),
                     "resolved LLM selection for Reborn runtime"
                 );
                 runtime_input = runtime_input.with_resolved_llm(llm);

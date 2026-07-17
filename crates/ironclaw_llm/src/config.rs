@@ -458,6 +458,31 @@ impl LlmConfig {
                 .unwrap_or_else(|| self.nearai.model.clone()),
         }
     }
+
+    /// Resolve the base URL of the backend `serve` actually boots with, when
+    /// the backend has one.
+    ///
+    /// Mirrors `active_model_name`'s per-backend dispatch. Exists so callers
+    /// outside this crate (the boot-time resolved-LLM debug trace, tests)
+    /// can observe the base URL without reaching into backend-specific
+    /// fields directly. `bedrock` and `gemini_oauth` authenticate via the AWS
+    /// credential chain / a fixed Google OAuth endpoint rather than an
+    /// operator-configurable base URL, so they return `None`.
+    pub fn active_base_url(&self) -> Option<String> {
+        match self.backend.as_str() {
+            "nearai" | "near_ai" | "near" => Some(self.nearai.base_url.clone()),
+            "bedrock" | "aws_bedrock" | "aws" | "gemini_oauth" | "gemini-oauth" => None,
+            "openai_codex" | "openai-codex" | "codex" => self
+                .openai_codex
+                .as_ref()
+                .map(|cfg| cfg.api_base_url.clone()),
+            _ => self
+                .provider
+                .as_ref()
+                .map(|cfg| cfg.base_url.clone())
+                .or_else(|| Some(self.nearai.base_url.clone())),
+        }
+    }
 }
 
 /// NEAR AI configuration.
