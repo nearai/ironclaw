@@ -11,13 +11,15 @@ mod delivery_resolution;
 mod error;
 mod filesystem_store;
 mod ids;
-mod memory;
 mod resolution_engine;
 mod service;
 mod store;
 mod triggered_run_delivery;
 mod types;
 mod validation;
+
+#[cfg(any(test, feature = "test-support"))]
+pub mod test_support;
 
 pub use communication_preferences::{
     CommunicationPreferenceKey, CommunicationPreferenceRecord, CommunicationPreferenceRepository,
@@ -41,7 +43,6 @@ pub use ids::{
     OutboundDeliveryId, ProjectionSubscriptionId, ProjectionUpdateRef, TriggerFireSlot,
     TriggerOriginRef,
 };
-pub use memory::InMemoryOutboundStateStore;
 pub use service::{
     OutboundPolicyService, ReplyTargetBindingValidator, ThreadProjectionAccessPolicy,
 };

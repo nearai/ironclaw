@@ -214,6 +214,8 @@ uuid = { version = "1", features = ["v4"] }
 async-trait = "0.1"
 chrono = "0.4"
 hmac = "0.13"
+# Enables the in-memory-backed outbound-state store constructor for tests only.
+ironclaw_outbound = { path = "../ironclaw_outbound", features = ["test-support"] }
 # Enables the in-memory-backed approval store constructors for tests only.
 ironclaw_approvals = { path = "../ironclaw_approvals", features = ["test-support"] }
 # Enables the in-memory-backed capability-lease store constructor for tests only.

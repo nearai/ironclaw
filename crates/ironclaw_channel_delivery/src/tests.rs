@@ -144,9 +144,12 @@ mod tests {
     };
     use ironclaw_outbound::{
         CommunicationPreferenceRecord, DeliveryDefaultScope, InMemoryDeliveredGateRouteStore,
-        InMemoryOutboundStateStore, InMemoryTriggeredRunDeliveryStore,
+        InMemoryTriggeredRunDeliveryStore,
         WriteCommunicationPreferenceRequest,
     };
+    use ironclaw_outbound::test_support::in_memory_backed_outbound_state_store;
+    use ironclaw_outbound::FilesystemOutboundStateStore;
+    use ironclaw_filesystem::InMemoryBackend;
     use ironclaw_product_adapters::redaction::RedactedString;
     use ironclaw_product_adapters::{
         DeclaredEgressHost, DeclaredEgressTarget, DeliveryStatus, EgressCredentialHandle,
@@ -790,7 +793,7 @@ mod tests {
     /// Seed a personal communication preference pointing at a Slack DM channel
     /// with a correctly encoded binding ref.
     async fn seed_personal_preference(
-        store: &InMemoryOutboundStateStore,
+        store: &FilesystemOutboundStateStore<InMemoryBackend>,
         scope: &TurnScope,
         binding_ref: ReplyTargetBindingRef,
     ) {
@@ -824,7 +827,7 @@ mod tests {
     /// the EFFECTIVE auth target (`auth_prompt_target.or(final_reply_target)`),
     /// not "any stored target".
     async fn seed_personal_preference_with_auth_target(
-        store: &InMemoryOutboundStateStore,
+        store: &FilesystemOutboundStateStore<InMemoryBackend>,
         scope: &TurnScope,
         auth_prompt_target: ReplyTargetBindingRef,
         final_reply_target: ReplyTargetBindingRef,
@@ -862,7 +865,7 @@ mod tests {
         coordinator: Arc<dyn TurnCoordinator>,
         thread_service: Arc<dyn ironclaw_threads::SessionThreadService>,
         egress: Arc<FakeProtocolHttpEgress>,
-        outbound: Arc<InMemoryOutboundStateStore>,
+        outbound: Arc<FilesystemOutboundStateStore<InMemoryBackend>>,
         installation_id: &str,
     ) -> FinalReplyDeliveryServices {
         make_services_with_canceller(
@@ -882,7 +885,7 @@ mod tests {
         coordinator: Arc<dyn TurnCoordinator>,
         thread_service: Arc<dyn ironclaw_threads::SessionThreadService>,
         egress: Arc<FakeProtocolHttpEgress>,
-        outbound: Arc<InMemoryOutboundStateStore>,
+        outbound: Arc<FilesystemOutboundStateStore<InMemoryBackend>>,
         installation_id: &str,
         auth_flow_canceller: Option<Arc<dyn BlockedAuthFlowCanceller>>,
     ) -> FinalReplyDeliveryServices {
@@ -999,7 +1002,7 @@ mod tests {
         seed_finalized_assistant_message(&thread_service, &scope, run_id, "Hello from Ironclaw")
             .await;
 
-        let outbound = Arc::new(InMemoryOutboundStateStore::default());
+        let outbound = Arc::new(in_memory_backed_outbound_state_store());
         seed_personal_preference(&outbound, &scope, binding_ref).await;
 
         let egress = Arc::new(FakeProtocolHttpEgress::new(vec!["slack.com".to_string()]));
@@ -1121,7 +1124,7 @@ mod tests {
             "Test completion message",
         )
         .await;
-        let outbound = Arc::new(InMemoryOutboundStateStore::default());
+        let outbound = Arc::new(in_memory_backed_outbound_state_store());
         // No preference seeded → resolution engine returns PreferenceTargetMissing.
 
         let egress = Arc::new(FakeProtocolHttpEgress::new(vec!["slack.com".to_string()]));
@@ -1252,7 +1255,7 @@ mod tests {
         let thread_service = Arc::new(InMemorySessionThreadService::default());
         seed_finalized_assistant_message(&thread_service, &scope, run_id, "Routed result").await;
 
-        let outbound = Arc::new(InMemoryOutboundStateStore::default());
+        let outbound = Arc::new(in_memory_backed_outbound_state_store());
         seed_personal_preference(&outbound, &scope, preference_ref).await;
 
         let egress = Arc::new(FakeProtocolHttpEgress::new(vec!["slack.com".to_string()]));
@@ -1331,7 +1334,7 @@ mod tests {
         ));
         let thread_service = Arc::new(InMemorySessionThreadService::default());
         seed_finalized_assistant_message(&thread_service, &scope, run_id, "Routed result").await;
-        let outbound = Arc::new(InMemoryOutboundStateStore::default());
+        let outbound = Arc::new(in_memory_backed_outbound_state_store());
         // No preference seeded.
 
         let egress = Arc::new(FakeProtocolHttpEgress::new(vec!["slack.com".to_string()]));
@@ -1400,7 +1403,7 @@ mod tests {
         ));
         let thread_service = Arc::new(InMemorySessionThreadService::default());
         seed_finalized_assistant_message(&thread_service, &scope, run_id, "Routed result").await;
-        let outbound = Arc::new(InMemoryOutboundStateStore::default());
+        let outbound = Arc::new(in_memory_backed_outbound_state_store());
 
         let egress = Arc::new(FakeProtocolHttpEgress::new(vec!["slack.com".to_string()]));
         egress.allow_credential_handle("slack_bot_token");
@@ -1481,7 +1484,7 @@ mod tests {
             .expect("projection ref"),
             requires_reply_target_revalidation: true,
         };
-        let outbound_store = ironclaw_outbound::InMemoryOutboundStateStore::default();
+        let outbound_store = ironclaw_outbound::test_support::in_memory_backed_outbound_state_store();
         let policy = ironclaw_outbound::OutboundPolicyService::new(
             &outbound_store,
             &AllowNoProjectionAccess,
@@ -1518,7 +1521,7 @@ mod tests {
         ));
         let thread_service = Arc::new(InMemorySessionThreadService::default());
         seed_finalized_assistant_message(&thread_service, &scope, run_id, "No evidence").await;
-        let outbound = Arc::new(InMemoryOutboundStateStore::default());
+        let outbound = Arc::new(in_memory_backed_outbound_state_store());
         seed_personal_preference(&outbound, &scope, binding_ref).await;
         let egress = Arc::new(FakeProtocolHttpEgress::new(vec!["slack.com".to_string()]));
         egress.allow_credential_handle("slack_bot_token");
@@ -1584,7 +1587,7 @@ mod tests {
         )
         .await;
 
-        let outbound = Arc::new(InMemoryOutboundStateStore::default());
+        let outbound = Arc::new(in_memory_backed_outbound_state_store());
         seed_personal_preference(&outbound, &scope, binding_ref).await;
 
         let egress = Arc::new(FakeProtocolHttpEgress::new(vec!["slack.com".to_string()]));
@@ -1684,7 +1687,7 @@ mod tests {
             TurnStatus::Completed,
         ));
         let thread_service = Arc::new(InMemorySessionThreadService::default());
-        let outbound = Arc::new(InMemoryOutboundStateStore::default());
+        let outbound = Arc::new(in_memory_backed_outbound_state_store());
         let egress = Arc::new(FakeProtocolHttpEgress::new(vec!["slack.com".to_string()]));
         egress.allow_credential_handle("slack_bot_token");
 
@@ -1757,7 +1760,7 @@ mod tests {
             )),
             Arc::new(InMemorySessionThreadService::default()),
             Arc::new(FakeProtocolHttpEgress::new(vec!["slack.com".to_string()])),
-            Arc::new(InMemoryOutboundStateStore::default()),
+            Arc::new(in_memory_backed_outbound_state_store()),
             "test-install",
         );
         let driver = TriggeredRunDeliveryDriver::new(
@@ -1793,7 +1796,7 @@ mod tests {
             TurnStatus::Completed,
         ));
         let thread_service = Arc::new(InMemorySessionThreadService::default());
-        let outbound = Arc::new(InMemoryOutboundStateStore::default());
+        let outbound = Arc::new(in_memory_backed_outbound_state_store());
         let egress = Arc::new(FakeProtocolHttpEgress::new(vec!["slack.com".to_string()]));
         let delivery_store = Arc::new(InMemoryTriggeredRunDeliveryStore::default());
         let route_store = Arc::new(InMemoryDeliveredGateRouteStore::default());
@@ -1840,7 +1843,7 @@ mod tests {
         )
         .await;
 
-        let outbound = Arc::new(InMemoryOutboundStateStore::default());
+        let outbound = Arc::new(in_memory_backed_outbound_state_store());
         seed_personal_preference(&outbound, &scope, binding_ref).await;
 
         let egress = Arc::new(FakeProtocolHttpEgress::new(vec!["slack.com".to_string()]));
@@ -1928,7 +1931,7 @@ mod tests {
             TurnStatus::Running,
         ));
         let thread_service = Arc::new(InMemorySessionThreadService::default());
-        let outbound = Arc::new(InMemoryOutboundStateStore::default());
+        let outbound = Arc::new(in_memory_backed_outbound_state_store());
         let egress = Arc::new(FakeProtocolHttpEgress::new(vec!["slack.com".to_string()]));
         egress.allow_credential_handle("slack_bot_token");
 
@@ -1988,7 +1991,7 @@ mod tests {
             TurnStatus::RecoveryRequired,
         ));
         let thread_service = Arc::new(InMemorySessionThreadService::default());
-        let outbound = Arc::new(InMemoryOutboundStateStore::default());
+        let outbound = Arc::new(in_memory_backed_outbound_state_store());
         let egress = Arc::new(FakeProtocolHttpEgress::new(vec!["slack.com".to_string()]));
         egress.allow_credential_handle("slack_bot_token");
 
@@ -2051,7 +2054,7 @@ mod tests {
             TurnStatus::Completed,
         ));
         let thread_service = Arc::new(InMemorySessionThreadService::default());
-        let outbound = Arc::new(InMemoryOutboundStateStore::default());
+        let outbound = Arc::new(in_memory_backed_outbound_state_store());
         let egress = Arc::new(FakeProtocolHttpEgress::new(vec!["slack.com".to_string()]));
         egress.allow_credential_handle("slack_bot_token");
 
@@ -2113,7 +2116,7 @@ mod tests {
     fn make_observer(
         coordinator: Arc<dyn TurnCoordinator>,
         egress: Arc<FakeProtocolHttpEgress>,
-        outbound: Arc<InMemoryOutboundStateStore>,
+        outbound: Arc<FilesystemOutboundStateStore<InMemoryBackend>>,
         installation_id: &str,
     ) -> FinalReplyDeliveryObserver {
         make_observer_with_canceller(coordinator, egress, outbound, installation_id, None)
@@ -2122,7 +2125,7 @@ mod tests {
     fn make_observer_with_canceller(
         coordinator: Arc<dyn TurnCoordinator>,
         egress: Arc<FakeProtocolHttpEgress>,
-        outbound: Arc<InMemoryOutboundStateStore>,
+        outbound: Arc<FilesystemOutboundStateStore<InMemoryBackend>>,
         installation_id: &str,
         auth_flow_canceller: Option<Arc<dyn BlockedAuthFlowCanceller>>,
     ) -> FinalReplyDeliveryObserver {
@@ -2201,7 +2204,7 @@ mod tests {
         let egress = Arc::new(FakeProtocolHttpEgress::new(vec!["slack.com".to_string()]));
         egress.allow_credential_handle("slack_bot_token");
 
-        let outbound = Arc::new(InMemoryOutboundStateStore::default());
+        let outbound = Arc::new(in_memory_backed_outbound_state_store());
         // The resolved run is not in this conversation scope — it lives in the
         // trigger's scope, delivered by its own triggered-delivery loop.
         let coordinator = Arc::new(ScriptedTurnCoordinator::scope_not_found());
@@ -2238,7 +2241,7 @@ mod tests {
             )),
         );
 
-        let outbound = Arc::new(InMemoryOutboundStateStore::default());
+        let outbound = Arc::new(in_memory_backed_outbound_state_store());
         let coordinator = Arc::new(ScriptedTurnCoordinator::with_single_status(
             TurnStatus::Running,
         ));
@@ -2280,7 +2283,7 @@ mod tests {
             )),
         );
 
-        let outbound = Arc::new(InMemoryOutboundStateStore::default());
+        let outbound = Arc::new(in_memory_backed_outbound_state_store());
         let coordinator = Arc::new(ScriptedTurnCoordinator::with_single_status(
             TurnStatus::Running,
         ));
@@ -2323,7 +2326,7 @@ mod tests {
             )),
         );
 
-        let outbound = Arc::new(InMemoryOutboundStateStore::default());
+        let outbound = Arc::new(in_memory_backed_outbound_state_store());
         let coordinator = Arc::new(ScriptedTurnCoordinator::with_single_status(
             TurnStatus::Running,
         ));
@@ -2369,7 +2372,7 @@ mod tests {
             )),
         );
 
-        let outbound = Arc::new(InMemoryOutboundStateStore::default());
+        let outbound = Arc::new(in_memory_backed_outbound_state_store());
         let coordinator = Arc::new(ScriptedTurnCoordinator::with_single_status(
             TurnStatus::Running,
         ));
@@ -2413,7 +2416,7 @@ mod tests {
             )),
         );
 
-        let outbound = Arc::new(InMemoryOutboundStateStore::default());
+        let outbound = Arc::new(in_memory_backed_outbound_state_store());
         let coordinator = Arc::new(ScriptedTurnCoordinator::with_single_status(
             TurnStatus::Running,
         ));
@@ -2475,7 +2478,7 @@ mod tests {
             )),
         );
 
-        let outbound = Arc::new(InMemoryOutboundStateStore::default());
+        let outbound = Arc::new(in_memory_backed_outbound_state_store());
         // BlockedApproval with concrete gate_ref → hint embeds the actionable command.
         let gate_ref_str = "gate:approval-abc123";
         let coordinator = Arc::new(ScriptedTurnCoordinator::with_states(vec![scripted_state(
@@ -2566,7 +2569,7 @@ mod tests {
             TurnStatus::BlockedApproval,
             Some(gate_ref_str),
         )]));
-        let outbound = Arc::new(InMemoryOutboundStateStore::default());
+        let outbound = Arc::new(in_memory_backed_outbound_state_store());
         let services = FinalReplyDeliveryServices {
             channel_protocol: Arc::new(
                 ironclaw_telegram_extension::delivery::TelegramDeliveryProtocol,
@@ -2658,7 +2661,7 @@ mod tests {
         let egress = Arc::new(FakeProtocolHttpEgress::new(vec!["slack.com".to_string()]));
         egress.allow_credential_handle("slack_bot_token");
 
-        let outbound = Arc::new(InMemoryOutboundStateStore::default());
+        let outbound = Arc::new(in_memory_backed_outbound_state_store());
         let coordinator = Arc::new(ScriptedTurnCoordinator::with_single_status(
             TurnStatus::Running,
         ));
@@ -2696,7 +2699,7 @@ mod tests {
             )),
         );
 
-        let outbound = Arc::new(InMemoryOutboundStateStore::default());
+        let outbound = Arc::new(in_memory_backed_outbound_state_store());
         let coordinator = Arc::new(ScriptedTurnCoordinator::with_single_status(
             TurnStatus::BlockedApproval,
         ));
@@ -2746,7 +2749,7 @@ mod tests {
             )),
         );
 
-        let outbound = Arc::new(InMemoryOutboundStateStore::default());
+        let outbound = Arc::new(in_memory_backed_outbound_state_store());
         // BlockedApproval so the state-aware lookup returns the approval copy for both.
         let coordinator = Arc::new(ScriptedTurnCoordinator::with_single_status(
             TurnStatus::BlockedApproval,
@@ -2804,7 +2807,7 @@ mod tests {
             )),
         );
 
-        let outbound = Arc::new(InMemoryOutboundStateStore::default());
+        let outbound = Arc::new(in_memory_backed_outbound_state_store());
         let coordinator = Arc::new(ScriptedTurnCoordinator::with_states(vec![scripted_state(
             TurnStatus::BlockedAuth,
             Some("gate:auth-slack-hint"),
@@ -2876,7 +2879,7 @@ mod tests {
             )),
         );
 
-        let outbound = Arc::new(InMemoryOutboundStateStore::default());
+        let outbound = Arc::new(in_memory_backed_outbound_state_store());
         let coordinator = Arc::new(ScriptedTurnCoordinator::with_states(vec![scripted_state(
             TurnStatus::BlockedAuth,
             Some("gate:auth-cancel-test"),
@@ -2983,7 +2986,7 @@ mod tests {
             )),
         );
 
-        let outbound = Arc::new(InMemoryOutboundStateStore::default());
+        let outbound = Arc::new(in_memory_backed_outbound_state_store());
         let coordinator = Arc::new(ScriptedTurnCoordinator::with_states(vec![scripted_state(
             TurnStatus::BlockedAuth,
             Some("gate:auth-cancel-test"),
@@ -3073,7 +3076,7 @@ mod tests {
         egress.allow_credential_handle("slack_bot_token");
         // No HTTP response programmed: the cancel fails before any post is made.
 
-        let outbound = Arc::new(InMemoryOutboundStateStore::default());
+        let outbound = Arc::new(in_memory_backed_outbound_state_store());
         let coordinator = Arc::new(ScriptedTurnCoordinator::with_states(vec![scripted_state(
             TurnStatus::BlockedAuth,
             Some("gate:cancel-fail-intact"),
@@ -3178,7 +3181,7 @@ mod tests {
             )),
         );
 
-        let outbound = Arc::new(InMemoryOutboundStateStore::default());
+        let outbound = Arc::new(in_memory_backed_outbound_state_store());
         // cancel_run SUCCEEDS (cancel_should_fail is NOT set, matching the default).
         let coordinator = Arc::new(ScriptedTurnCoordinator::with_states(vec![scripted_state(
             TurnStatus::BlockedAuth,
@@ -3251,7 +3254,7 @@ mod tests {
             )),
         );
 
-        let outbound = Arc::new(InMemoryOutboundStateStore::default());
+        let outbound = Arc::new(in_memory_backed_outbound_state_store());
         // BlockedApproval with no gate_ref → static fallback.
         let coordinator = Arc::new(ScriptedTurnCoordinator::with_states(vec![scripted_state(
             TurnStatus::BlockedApproval,
@@ -3294,7 +3297,7 @@ mod tests {
             )),
         );
 
-        let outbound = Arc::new(InMemoryOutboundStateStore::default());
+        let outbound = Arc::new(in_memory_backed_outbound_state_store());
         // Running → state-aware lookup returns generic wording.
         let coordinator = Arc::new(ScriptedTurnCoordinator::with_single_status(
             TurnStatus::Running,
@@ -3336,7 +3339,7 @@ mod tests {
         let egress = Arc::new(FakeProtocolHttpEgress::new(vec!["slack.com".to_string()]));
         egress.allow_credential_handle("slack_bot_token");
 
-        let outbound = Arc::new(InMemoryOutboundStateStore::default());
+        let outbound = Arc::new(in_memory_backed_outbound_state_store());
         let coordinator = Arc::new(ScriptedTurnCoordinator::with_single_status(
             TurnStatus::BlockedApproval,
         ));
@@ -3423,7 +3426,7 @@ mod tests {
             )),
         );
 
-        let outbound = Arc::new(InMemoryOutboundStateStore::default());
+        let outbound = Arc::new(in_memory_backed_outbound_state_store());
         let gate_ref_str = "gate:approval-rb123";
         let coordinator = Arc::new(ScriptedTurnCoordinator::with_states(vec![scripted_state(
             TurnStatus::BlockedApproval,
@@ -3471,7 +3474,7 @@ mod tests {
             )),
         );
 
-        let outbound = Arc::new(InMemoryOutboundStateStore::default());
+        let outbound = Arc::new(in_memory_backed_outbound_state_store());
         let coordinator = Arc::new(ScriptedTurnCoordinator::with_states(vec![scripted_state(
             TurnStatus::BlockedAuth,
             Some("gate:auth-rb456"),
@@ -3513,7 +3516,7 @@ mod tests {
         let egress = Arc::new(FakeProtocolHttpEgress::new(vec!["slack.com".to_string()]));
         egress.allow_credential_handle("slack_bot_token");
 
-        let outbound = Arc::new(InMemoryOutboundStateStore::default());
+        let outbound = Arc::new(in_memory_backed_outbound_state_store());
         let coordinator = Arc::new(ScriptedTurnCoordinator::with_single_status(
             TurnStatus::BlockedApproval,
         ));
@@ -3550,7 +3553,7 @@ mod tests {
             )),
         );
 
-        let outbound = Arc::new(InMemoryOutboundStateStore::default());
+        let outbound = Arc::new(in_memory_backed_outbound_state_store());
         let gate_ref_str = "gate:approval-dup-rb001";
         let coordinator = Arc::new(ScriptedTurnCoordinator::with_states(vec![scripted_state(
             TurnStatus::BlockedApproval,
@@ -3609,7 +3612,7 @@ mod tests {
             )),
         );
 
-        let outbound = Arc::new(InMemoryOutboundStateStore::default());
+        let outbound = Arc::new(in_memory_backed_outbound_state_store());
         let coordinator = Arc::new(ScriptedTurnCoordinator::with_single_status(
             TurnStatus::BlockedApproval,
         ));
@@ -3652,7 +3655,7 @@ mod tests {
         let egress = Arc::new(FakeProtocolHttpEgress::new(vec!["slack.com".to_string()]));
         egress.allow_credential_handle("slack_bot_token");
 
-        let outbound = Arc::new(InMemoryOutboundStateStore::default());
+        let outbound = Arc::new(in_memory_backed_outbound_state_store());
         // The coordinator is a no-op because Duplicate{Accepted} has no submitted_run_id.
         let coordinator = Arc::new(ScriptedTurnCoordinator::with_single_status(
             TurnStatus::Running,
@@ -3683,7 +3686,7 @@ mod tests {
         let egress = Arc::new(FakeProtocolHttpEgress::new(vec!["slack.com".to_string()]));
         egress.allow_credential_handle("slack_bot_token");
 
-        let outbound = Arc::new(InMemoryOutboundStateStore::default());
+        let outbound = Arc::new(in_memory_backed_outbound_state_store());
         let coordinator = Arc::new(ScriptedTurnCoordinator::with_single_status(
             TurnStatus::Running,
         ));
@@ -3746,7 +3749,7 @@ mod tests {
         let egress = Arc::new(FakeProtocolHttpEgress::new(vec!["slack.com".to_string()]));
         egress.allow_credential_handle("slack_bot_token");
 
-        let outbound = Arc::new(InMemoryOutboundStateStore::default());
+        let outbound = Arc::new(in_memory_backed_outbound_state_store());
         let coordinator = Arc::new(ScriptedTurnCoordinator::with_single_status(
             TurnStatus::Running,
         ));
@@ -3796,7 +3799,7 @@ mod tests {
             )),
         );
 
-        let outbound = Arc::new(InMemoryOutboundStateStore::default());
+        let outbound = Arc::new(in_memory_backed_outbound_state_store());
         // Always Running → wait_for_actionable times out after max_wait=1ms.
         let coordinator = Arc::new(ScriptedTurnCoordinator::with_single_status(
             TurnStatus::Running,
@@ -3879,7 +3882,7 @@ mod tests {
             )),
         );
 
-        let outbound = Arc::new(InMemoryOutboundStateStore::default());
+        let outbound = Arc::new(in_memory_backed_outbound_state_store());
         let coordinator = Arc::new(ScriptedTurnCoordinator::with_single_status(
             TurnStatus::Running,
         ));
@@ -3959,7 +3962,7 @@ mod tests {
             )),
         );
 
-        let outbound = Arc::new(InMemoryOutboundStateStore::default());
+        let outbound = Arc::new(in_memory_backed_outbound_state_store());
         let coordinator = Arc::new(ScriptedTurnCoordinator::with_single_status(
             TurnStatus::Running,
         ));
@@ -4042,7 +4045,7 @@ mod tests {
             )),
         );
 
-        let outbound = Arc::new(InMemoryOutboundStateStore::default());
+        let outbound = Arc::new(in_memory_backed_outbound_state_store());
         let coordinator = Arc::new(ScriptedTurnCoordinator::with_single_status(
             TurnStatus::Running,
         ));
@@ -4086,7 +4089,7 @@ mod tests {
         let egress = Arc::new(FakeProtocolHttpEgress::new(vec!["slack.com".to_string()]));
         egress.allow_credential_handle("slack_bot_token");
 
-        let outbound = Arc::new(InMemoryOutboundStateStore::default());
+        let outbound = Arc::new(in_memory_backed_outbound_state_store());
         let coordinator = Arc::new(ScriptedTurnCoordinator::with_single_status(
             TurnStatus::Running,
         ));
@@ -4150,7 +4153,7 @@ mod tests {
             )),
         );
 
-        let outbound = Arc::new(InMemoryOutboundStateStore::default());
+        let outbound = Arc::new(in_memory_backed_outbound_state_store());
         // Always BlockedApproval with the same gate_ref: the first poll exits
         // `wait_for_actionable` immediately (new blocked state, different from
         // `delivered_blocked_marker=None`), delivering the approval prompt.
@@ -4373,7 +4376,7 @@ mod tests {
         )
         .await;
 
-        let outbound = Arc::new(InMemoryOutboundStateStore::default());
+        let outbound = Arc::new(in_memory_backed_outbound_state_store());
         seed_personal_preference(&outbound, &scope, binding_ref).await;
 
         let egress = Arc::new(FakeProtocolHttpEgress::new(vec!["slack.com".to_string()]));
@@ -4503,7 +4506,7 @@ mod tests {
         )
         .await;
 
-        let outbound = Arc::new(InMemoryOutboundStateStore::default());
+        let outbound = Arc::new(in_memory_backed_outbound_state_store());
         seed_personal_preference(&outbound, &scope, binding_ref).await;
 
         let egress = Arc::new(FakeProtocolHttpEgress::new(vec!["slack.com".to_string()]));
@@ -4629,7 +4632,7 @@ mod tests {
         // No finalized assistant message needed: the terminal delivery is the
         // auth-unavailable notice, not a Completed assistant reply.
 
-        let outbound = Arc::new(InMemoryOutboundStateStore::default());
+        let outbound = Arc::new(in_memory_backed_outbound_state_store());
         seed_personal_preference(&outbound, &scope, binding_ref).await;
 
         let egress = Arc::new(FakeProtocolHttpEgress::new(vec!["slack.com".to_string()]));
@@ -4726,7 +4729,7 @@ mod tests {
             scripted_state(TurnStatus::Cancelled, None),
         ]));
 
-        let outbound = Arc::new(InMemoryOutboundStateStore::default());
+        let outbound = Arc::new(in_memory_backed_outbound_state_store());
         seed_personal_preference(&outbound, &scope, binding_ref).await;
 
         let egress = Arc::new(FakeProtocolHttpEgress::new(vec!["slack.com".to_string()]));
@@ -4838,7 +4841,7 @@ mod tests {
             .cancel_should_fail
             .store(true, std::sync::atomic::Ordering::Release);
 
-        let outbound = Arc::new(InMemoryOutboundStateStore::default());
+        let outbound = Arc::new(in_memory_backed_outbound_state_store());
         // Seed preference with the shared-channel binding so the OAuth guard trips.
         seed_personal_preference(&outbound, &scope, binding_ref).await;
 
@@ -4943,7 +4946,7 @@ mod tests {
         ]));
         // cancel_run must succeed so the backstop posts the unavailable notice.
 
-        let outbound = Arc::new(InMemoryOutboundStateStore::default());
+        let outbound = Arc::new(in_memory_backed_outbound_state_store());
         // Seed preference with the shared-channel binding so the OAuth guard trips.
         seed_personal_preference(&outbound, &scope, binding_ref).await;
 
@@ -5109,7 +5112,7 @@ mod tests {
         )
         .await;
 
-        let outbound = Arc::new(InMemoryOutboundStateStore::default());
+        let outbound = Arc::new(in_memory_backed_outbound_state_store());
         // Seed the preference with a SHARED CHANNEL binding ref (not a DM).
         seed_personal_preference(&outbound, &scope, binding_ref).await;
 
@@ -5229,7 +5232,7 @@ mod tests {
         )
         .await;
 
-        let outbound = Arc::new(InMemoryOutboundStateStore::default());
+        let outbound = Arc::new(in_memory_backed_outbound_state_store());
         seed_personal_preference(&outbound, &scope, binding_ref).await;
 
         let egress = Arc::new(FakeProtocolHttpEgress::new(vec!["slack.com".to_string()]));
@@ -5343,7 +5346,7 @@ mod tests {
         let thread_service = Arc::new(InMemorySessionThreadService::default());
         seed_finalized_assistant_message(&thread_service, &scope, run_id, "Run complete.").await;
 
-        let outbound = Arc::new(InMemoryOutboundStateStore::default());
+        let outbound = Arc::new(in_memory_backed_outbound_state_store());
         seed_personal_preference_with_auth_target(&outbound, &scope, auth_target, final_target)
             .await;
 
@@ -5657,7 +5660,7 @@ mod tests {
             )),
         );
 
-        let outbound = Arc::new(InMemoryOutboundStateStore::default());
+        let outbound = Arc::new(in_memory_backed_outbound_state_store());
         let coordinator = Arc::new(ScriptedTurnCoordinator::with_single_status(
             TurnStatus::BlockedApproval,
         ));
@@ -5727,7 +5730,7 @@ mod tests {
             )),
         );
 
-        let outbound = Arc::new(InMemoryOutboundStateStore::default());
+        let outbound = Arc::new(in_memory_backed_outbound_state_store());
 
         use ironclaw_product_workflow::FakeConversationBindingService;
         let thread_service = Arc::new(InMemorySessionThreadService::default());
@@ -5794,7 +5797,7 @@ mod tests {
             )),
         );
 
-        let outbound = Arc::new(InMemoryOutboundStateStore::default());
+        let outbound = Arc::new(in_memory_backed_outbound_state_store());
         let coordinator = Arc::new(ScriptedTurnCoordinator::with_single_status(
             TurnStatus::BlockedApproval,
         ));
@@ -5838,7 +5841,7 @@ mod tests {
             )),
         );
 
-        let outbound = Arc::new(InMemoryOutboundStateStore::default());
+        let outbound = Arc::new(in_memory_backed_outbound_state_store());
         let coordinator = Arc::new(ScriptedTurnCoordinator::with_single_status(
             TurnStatus::BlockedApproval,
         ));
@@ -5897,7 +5900,7 @@ mod tests {
             )),
         );
 
-        let outbound = Arc::new(InMemoryOutboundStateStore::default());
+        let outbound = Arc::new(in_memory_backed_outbound_state_store());
         let coordinator = Arc::new(ScriptedTurnCoordinator::with_single_status(
             TurnStatus::BlockedApproval,
         ));
@@ -5955,7 +5958,7 @@ mod tests {
             )),
         );
 
-        let outbound = Arc::new(InMemoryOutboundStateStore::default());
+        let outbound = Arc::new(in_memory_backed_outbound_state_store());
 
         // Recording coordinator: captures every GetRunStateRequest it receives.
         struct RecordingTurnCoordinator {
@@ -6074,7 +6077,7 @@ mod tests {
         ));
         let egress = Arc::new(FakeProtocolHttpEgress::new(vec!["slack.com".to_string()]));
         egress.allow_credential_handle("slack_bot_token");
-        let outbound = Arc::new(InMemoryOutboundStateStore::default());
+        let outbound = Arc::new(in_memory_backed_outbound_state_store());
 
         // Build an observer with a very short max_wait so delivery times out quickly.
         let thread_service = Arc::new(InMemorySessionThreadService::default());
@@ -6162,7 +6165,7 @@ mod tests {
         ));
         let egress = Arc::new(FakeProtocolHttpEgress::new(vec!["slack.com".to_string()]));
         egress.allow_credential_handle("slack_bot_token");
-        let outbound = Arc::new(InMemoryOutboundStateStore::default());
+        let outbound = Arc::new(in_memory_backed_outbound_state_store());
         let thread_service = Arc::new(InMemorySessionThreadService::default());
         let services = FinalReplyDeliveryServices {
             channel_protocol: Arc::new(TestChannelDeliveryProtocol),
@@ -6304,7 +6307,7 @@ mod tests {
             );
         }
 
-        let outbound = Arc::new(InMemoryOutboundStateStore::default());
+        let outbound = Arc::new(in_memory_backed_outbound_state_store());
         let blocking_run_id = TurnRunId::new();
         let coordinator = Arc::new(ScriptedTurnCoordinator::with_single_status(
             TurnStatus::BlockedApproval,
@@ -6356,7 +6359,7 @@ mod tests {
             )),
         );
 
-        let outbound = Arc::new(InMemoryOutboundStateStore::default());
+        let outbound = Arc::new(in_memory_backed_outbound_state_store());
         let blocking_run_id = TurnRunId::new();
         let coordinator = Arc::new(ScriptedTurnCoordinator::with_single_status(
             TurnStatus::BlockedApproval,
@@ -6436,7 +6439,7 @@ mod tests {
         )
         .await;
 
-        let outbound = Arc::new(InMemoryOutboundStateStore::default());
+        let outbound = Arc::new(in_memory_backed_outbound_state_store());
         seed_personal_preference(&outbound, &scope, shared_binding).await;
 
         let egress = Arc::new(FakeProtocolHttpEgress::new(vec!["slack.com".to_string()]));
@@ -6626,7 +6629,7 @@ mod tests {
         let thread_service = Arc::new(InMemorySessionThreadService::default());
         // No finalized assistant message: the run never completes.
 
-        let outbound = Arc::new(InMemoryOutboundStateStore::default());
+        let outbound = Arc::new(in_memory_backed_outbound_state_store());
         seed_personal_preference(&outbound, &scope, binding_ref).await;
 
         let egress = Arc::new(FakeProtocolHttpEgress::new(vec!["slack.com".to_string()]));
@@ -6728,7 +6731,7 @@ mod tests {
         let thread_service = Arc::new(InMemorySessionThreadService::default());
         // No finalized assistant message: the run never completes.
 
-        let outbound = Arc::new(InMemoryOutboundStateStore::default());
+        let outbound = Arc::new(in_memory_backed_outbound_state_store());
         seed_personal_preference(&outbound, &scope, binding_ref).await;
 
         let egress = Arc::new(FakeProtocolHttpEgress::new(vec!["slack.com".to_string()]));
@@ -6824,7 +6827,7 @@ mod tests {
         ));
         let thread_service = Arc::new(InMemorySessionThreadService::default());
 
-        let outbound = Arc::new(InMemoryOutboundStateStore::default());
+        let outbound = Arc::new(in_memory_backed_outbound_state_store());
         seed_personal_preference(&outbound, &scope, binding_ref).await;
 
         let egress = Arc::new(FakeProtocolHttpEgress::new(vec!["slack.com".to_string()]));
@@ -6909,7 +6912,7 @@ mod tests {
         )]));
         let thread_service = Arc::new(InMemorySessionThreadService::default());
 
-        let outbound = Arc::new(InMemoryOutboundStateStore::default());
+        let outbound = Arc::new(in_memory_backed_outbound_state_store());
         seed_personal_preference(&outbound, &scope, binding_ref).await;
 
         let egress = Arc::new(FakeProtocolHttpEgress::new(vec!["slack.com".to_string()]));

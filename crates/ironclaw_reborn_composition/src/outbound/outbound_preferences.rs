@@ -1,3 +1,4 @@
+// arch-exempt: large_file, mechanical InMemoryOutboundStateStore -> FilesystemOutboundStateStore<InMemoryBackend> §4.3 store consolidation, no logic change, plan #6168
 use std::{
     collections::BTreeMap,
     sync::{Arc, RwLock},
@@ -477,9 +478,10 @@ mod tests {
     use std::{collections::HashMap, sync::Mutex};
 
     use ironclaw_host_api::{TenantId, UserId};
+    use ironclaw_outbound::test_support::in_memory_backed_outbound_state_store;
     use ironclaw_outbound::{
         CommunicationModality, CommunicationPreferenceRepository, CommunicationPreferenceVersion,
-        DeliveryDefaultScope, InMemoryOutboundStateStore, VersionedCommunicationPreferenceRecord,
+        DeliveryDefaultScope, VersionedCommunicationPreferenceRecord,
     };
     use ironclaw_product_workflow::RebornOutboundDeliveryTargetCapabilities;
 
@@ -727,7 +729,7 @@ mod tests {
 
     #[tokio::test]
     async fn get_preferences_projects_stored_final_target_for_authenticated_user() {
-        let store = Arc::new(InMemoryOutboundStateStore::default());
+        let store = Arc::new(in_memory_backed_outbound_state_store());
         let provider = Arc::new(FakeTargetProvider::default());
         provider.insert(
             "user-alpha",
@@ -772,7 +774,7 @@ mod tests {
 
     #[tokio::test]
     async fn get_preferences_returns_none_when_stored_target_not_in_provider() {
-        let store = Arc::new(InMemoryOutboundStateStore::default());
+        let store = Arc::new(in_memory_backed_outbound_state_store());
         let provider = Arc::new(FakeTargetProvider::default());
         seed_record(
             store.as_ref(),
@@ -812,7 +814,7 @@ mod tests {
 
     #[tokio::test]
     async fn set_preferences_validates_target_id_before_writing_reply_target() {
-        let store = Arc::new(InMemoryOutboundStateStore::default());
+        let store = Arc::new(in_memory_backed_outbound_state_store());
         let provider = Arc::new(FakeTargetProvider::default());
         provider.insert(
             "user-alpha",
@@ -952,7 +954,7 @@ mod tests {
 
     #[tokio::test]
     async fn set_preferences_with_none_target_on_new_user_creates_empty_record() {
-        let store = Arc::new(InMemoryOutboundStateStore::default());
+        let store = Arc::new(in_memory_backed_outbound_state_store());
         let provider = Arc::new(FakeTargetProvider::default());
         let facade = RebornOutboundPreferencesFacade::new(store.clone(), provider);
 
@@ -988,7 +990,7 @@ mod tests {
 
     #[tokio::test]
     async fn target_provider_errors_are_propagated_by_get_set_and_list() {
-        let store = Arc::new(InMemoryOutboundStateStore::default());
+        let store = Arc::new(in_memory_backed_outbound_state_store());
         seed_record(
             store.as_ref(),
             "tenant-alpha",
@@ -1024,7 +1026,7 @@ mod tests {
 
     #[tokio::test]
     async fn clear_preferences_preserves_non_final_slots() {
-        let store = Arc::new(InMemoryOutboundStateStore::default());
+        let store = Arc::new(in_memory_backed_outbound_state_store());
         let provider = Arc::new(FakeTargetProvider::default());
         seed_record(
             store.as_ref(),
@@ -1091,7 +1093,7 @@ mod tests {
 
     #[tokio::test]
     async fn list_targets_is_scoped_to_caller_and_final_reply_capability() {
-        let store = Arc::new(InMemoryOutboundStateStore::default());
+        let store = Arc::new(in_memory_backed_outbound_state_store());
         let provider = Arc::new(FakeTargetProvider::default());
         provider.insert(
             "user-alpha",
@@ -1119,7 +1121,7 @@ mod tests {
 
     #[tokio::test]
     async fn preference_facade_uses_authority_resolver_not_public_target_list_for_write_and_read() {
-        let store = Arc::new(InMemoryOutboundStateStore::default());
+        let store = Arc::new(in_memory_backed_outbound_state_store());
         let provider = Arc::new(ResolvingOnlyTargetProvider {
             entry: target_entry("slack-alpha", "reply:slack-alpha", true),
         });
@@ -1181,7 +1183,7 @@ mod tests {
 
     #[tokio::test]
     async fn target_registry_aggregates_channel_neutral_providers_for_default_selection() {
-        let store = Arc::new(InMemoryOutboundStateStore::default());
+        let store = Arc::new(in_memory_backed_outbound_state_store());
         let slack_provider = Arc::new(FakeTargetProvider::default());
         slack_provider.insert(
             "user-alpha",
@@ -1252,7 +1254,7 @@ mod tests {
 
     #[tokio::test]
     async fn target_registry_filters_non_final_reply_resolver_results() {
-        let store = Arc::new(InMemoryOutboundStateStore::default());
+        let store = Arc::new(in_memory_backed_outbound_state_store());
         let registry = Arc::new(OutboundDeliveryTargetRegistry::new(vec![Arc::new(
             ResolvingOnlyTargetProvider {
                 entry: target_entry("slack-progress", "reply:slack-progress", false),
@@ -1335,7 +1337,7 @@ mod tests {
 
     #[tokio::test]
     async fn target_registry_propagates_resolver_failure_for_get_and_set() {
-        let store = Arc::new(InMemoryOutboundStateStore::default());
+        let store = Arc::new(in_memory_backed_outbound_state_store());
         seed_record(
             store.as_ref(),
             "tenant-alpha",

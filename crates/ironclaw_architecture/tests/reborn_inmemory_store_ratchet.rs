@@ -62,7 +62,6 @@ const FROZEN_INMEMORY_STORES: &[&str] = &[
     "InMemoryDeliveredGateRouteStore",
     "InMemoryExtensionInstallationStore",
     "InMemoryOpenAiCompatRefStore",
-    "InMemoryOutboundStateStore",
     "InMemorySecretStore",
     "InMemorySessionStore",
     "InMemoryTriggeredRunDeliveryStore",
