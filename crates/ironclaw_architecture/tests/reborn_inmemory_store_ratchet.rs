@@ -16,9 +16,11 @@
 //!   domain lands, and a reviewer sees the list get shorter (§10: "compare set
 //!   membership, never an aggregate count").
 //!
-//! The scanner strips comments and string literals before matching, and scans
-//! production code only (a crate's `tests/` tree holds test doubles, not the
-//! §4.3 debt this ratchet inventories).
+//! The scanner strips comments and string literals before matching. It skips
+//! `tests/`, `examples/`, and `benches/` trees (test doubles there are not §4.3
+//! debt) but is line-based, not cfg-aware: a pub-visible store defined in an
+//! inline `#[cfg(test)]` module in src IS inventoried — keep test doubles under
+//! `tests/` (or justify an allowlist entry in review).
 //!
 //! Definition of done for this axis (§10): the allowlist reaches the empty set —
 //! every store is `Filesystem*Store<InMemoryBackend>` in tests. Until then this
@@ -126,20 +128,25 @@ fn inmemory_store_def_scanner_self_test() {
         pub(crate) struct InMemoryCrateStore;   // restricted visibility -> still inventoried
         pub(in crate::foo) struct InMemoryInPathStore; // restricted visibility -> still inventoried
         pub(crate)fn not_a_struct() {}          // no `struct` after visibility -> ignored
+        #[cfg(test)]
+        mod tests {
+            // The scanner is line-based, not cfg-aware: an inline cfg(test)
+            // double in src IS inventoried (keep doubles under `tests/`).
+            pub struct InMemoryCfgTestStore;
+        }
     "##;
-    let mut out = BTreeSet::new();
-    scan_source_for_inmemory_store_defs(sample, &mut out);
-    let got: Vec<&str> = out.iter().map(String::as_str).collect();
+    let got = scan_source_for_inmemory_store_defs(sample);
     assert_eq!(
         got,
         vec![
+            "InMemoryWidgetStore",
+            "InMemorySpacedStore",
             "InMemoryCrateStore",
             "InMemoryInPathStore",
-            "InMemorySpacedStore",
-            "InMemoryWidgetStore"
+            "InMemoryCfgTestStore"
         ],
-        "scanner must match only pub-visible `struct InMemory*Store` definitions \
-         outside comments and strings"
+        "scanner must match pub-visible `struct InMemory*Store` definitions \
+         outside comments and strings, in source order"
     );
 }
 
@@ -149,9 +156,7 @@ fn inmemory_store_def_scanner_self_test() {
 fn inmemory_store_duplicate_detection_self_test() {
     let mut found: BTreeMap<String, Vec<PathBuf>> = BTreeMap::new();
     for path in ["crate_a/src/lib.rs", "crate_b/src/lib.rs"] {
-        let mut idents = BTreeSet::new();
-        scan_source_for_inmemory_store_defs("pub struct InMemoryDupStore;", &mut idents);
-        for ident in idents {
+        for ident in scan_source_for_inmemory_store_defs("pub struct InMemoryDupStore;") {
             found.entry(ident).or_default().push(PathBuf::from(path));
         }
     }
@@ -162,6 +167,42 @@ fn inmemory_store_duplicate_detection_self_test() {
         "two same-named definitions must be flagged"
     );
     assert_eq!(duplicated[0].0, "InMemoryDupStore");
+    assert_eq!(duplicated[0].1.len(), 2);
+}
+
+/// Self-test for same-file multiplicity: two same-named definitions in
+/// different modules of ONE file must also be reported — the scan preserves
+/// occurrences instead of deduplicating per file.
+#[test]
+fn inmemory_store_same_file_duplicate_detection_self_test() {
+    let sample = r#"
+        mod first {
+            pub struct InMemoryDupStore;
+        }
+        mod second {
+            pub struct InMemoryDupStore;
+        }
+    "#;
+    let occurrences = scan_source_for_inmemory_store_defs(sample);
+    assert_eq!(
+        occurrences,
+        vec!["InMemoryDupStore", "InMemoryDupStore"],
+        "same-file duplicates must be preserved by the scan"
+    );
+
+    let mut found: BTreeMap<String, Vec<PathBuf>> = BTreeMap::new();
+    for ident in occurrences {
+        found
+            .entry(ident)
+            .or_default()
+            .push(PathBuf::from("crate_a/src/lib.rs"));
+    }
+    let duplicated = duplicate_definitions(&found);
+    assert_eq!(
+        duplicated.len(),
+        1,
+        "a same-file duplicate must be flagged by the multiplicity check"
+    );
     assert_eq!(duplicated[0].1.len(), 2);
 }
 
@@ -180,12 +221,15 @@ fn collect_inmemory_store_defs(dir: &Path, out: &mut BTreeMap<String, Vec<PathBu
         let entry = entry.unwrap_or_else(|err| panic!("failed to read dir entry: {err}"));
         let path = entry.path();
         if path.is_dir() {
-            // Skip build artifacts, and integration-test trees: doubles defined
-            // under a crate's `tests/` directory (e.g. recording stores in
-            // tests/support/) are test seams, not the §4.3 production-store debt
-            // this ratchet inventories.
+            // Skip build artifacts and non-production trees: doubles defined
+            // under `tests/` (e.g. recording stores in tests/support/),
+            // `examples/`, or `benches/` are not the §4.3 production-store debt
+            // this ratchet inventories. NOTE: an inline `#[cfg(test)]` module in
+            // src IS still scanned — the scanner is line-based, not cfg-aware —
+            // so keep test doubles under `tests/` (or justify an allowlist
+            // entry in review).
             let dir_name = path.file_name().and_then(|n| n.to_str());
-            if dir_name == Some("target") || dir_name == Some("tests") {
+            if matches!(dir_name, Some("target" | "tests" | "examples" | "benches")) {
                 continue;
             }
             collect_inmemory_store_defs(&path, out);
@@ -202,9 +246,7 @@ fn collect_inmemory_store_defs(dir: &Path, out: &mut BTreeMap<String, Vec<PathBu
         }
         let contents = std::fs::read_to_string(&path)
             .unwrap_or_else(|err| panic!("failed to read {}: {err}", path.display()));
-        let mut idents = BTreeSet::new();
-        scan_source_for_inmemory_store_defs(&contents, &mut idents);
-        for ident in idents {
+        for ident in scan_source_for_inmemory_store_defs(&contents) {
             out.entry(ident).or_default().push(path.clone());
         }
     }
@@ -215,8 +257,11 @@ fn collect_inmemory_store_defs(dir: &Path, out: &mut BTreeMap<String, Vec<PathBu
 /// restricted-visibility store is the same debt class, just crate-private).
 /// Comments and string literals are stripped first, so definition-shaped text
 /// inside them is not matched. Matches the definition form, not references.
-fn scan_source_for_inmemory_store_defs(source: &str, out: &mut BTreeSet<String>) {
+/// Returns every occurrence in source order (no dedup) so same-file duplicate
+/// definitions in different modules stay visible to the multiplicity check.
+fn scan_source_for_inmemory_store_defs(source: &str) -> Vec<String> {
     let stripped = strip_comments_and_strings(source);
+    let mut out = Vec::new();
     for line in stripped.lines() {
         let trimmed = line.trim_start();
         let Some(after_pub) = trimmed.strip_prefix("pub") else {
@@ -239,9 +284,10 @@ fn scan_source_for_inmemory_store_defs(source: &str, out: &mut BTreeSet<String>)
             .take_while(|c| c.is_alphanumeric() || *c == '_')
             .collect();
         if ident.starts_with("InMemory") && ident.ends_with("Store") {
-            out.insert(ident);
+            out.push(ident);
         }
     }
+    out
 }
 
 /// Replace line comments, block comments (nested), plain/raw string literal
