@@ -61,8 +61,9 @@ export function useSettings() {
     mutationFn: async (payload) => {
       const result = await importSettingsPayload(payload);
       if (result?.success === false) {
-        const error = new Error(result.message || "Import failed");
-        error.reason = result.reason;
+        const error = Object.assign(new Error(result.message || "Import failed"), {
+          reason: result.reason,
+        });
         throw error;
       }
       return result;
