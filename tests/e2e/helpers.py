@@ -227,7 +227,7 @@ EMULATE_GITHUB_SECONDARY_BEARER = "ghp_emulate_github_secondary_token"
 # which targets the legacy `ironclaw` web channel.
 REBORN_V2_AUTH_TOKEN = "e2e-reborn-v2-bearer-token-0123456789abcdef"
 
-# Selectors for the Reborn WebUI v2 React SPA (served under /v2/). The shell
+# Selectors for the Reborn WebUI v2 React SPA (served at /). The shell
 # DOM differs entirely from the legacy gateway in SEL, so keep these separate.
 SEL_V2 = {
     "root":           "#v2-root",          # SPA mount point (index.html)
@@ -273,6 +273,8 @@ SEL_V2 = {
     "confirm_dialog_confirm": '[data-testid="confirm-dialog-confirm"]',
     "sidebar_toggle": "button[aria-label='Toggle sidebar']",
     "sign_out_button": "button[title='Sign out']",
+    "appearance_theme_light": "[data-testid='appearance-theme-light']",
+    "appearance_theme_dark": "[data-testid='appearance-theme-dark']",
     "chat_composer":  "[data-testid='chat-composer']",  # message textarea on /chat
     "attachment_file_input": "input[type=file][multiple]",
     "typing_indicator": "[data-testid='typing-indicator']",
@@ -291,6 +293,9 @@ SEL_V2 = {
     "notification_panel": "[data-testid='notification-panel']",
     "notification_row": "[data-testid='notification-row']",
     "notification_unread_dot": "[data-testid='notification-unread-dot']",
+    "toast": "[data-testid='toast']",
+    "toast_dismiss": "[data-testid='toast-dismiss']",
+    "toast_viewport": "[data-rht-toaster]",
     "header_logs_link": "[data-testid='header-logs-link']",
     "header_docs_link": "[data-testid='header-docs-link']",
     "command_palette_dialog_name": "Command palette",

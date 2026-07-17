@@ -10,7 +10,7 @@ const rustStaticDir = resolve(here, "..", "static");
 const require = createRequire(import.meta.url);
 
 export default defineConfig({
-  base: "/v2/",
+  base: "/",
   plugins: [tailwindcss(), react()],
   publicDir: "public",
   resolve: {
@@ -34,10 +34,10 @@ export default defineConfig({
       "/api/webchat/v2": "http://127.0.0.1:3000",
       "/api/reborn": "http://127.0.0.1:3000",
       "/auth": "http://127.0.0.1:3000",
-      "/v2/assets": "http://127.0.0.1:3000",
-      "/v2/js": "http://127.0.0.1:3000",
-      "/v2/vendor": "http://127.0.0.1:3000",
-      "/v2/wallet/connect": "http://127.0.0.1:3000",
+      "/assets": "http://127.0.0.1:3000",
+      "/vendor": "http://127.0.0.1:3000",
+      "/wallet/connect": "http://127.0.0.1:3000",
+      "/wallet-connect.js": "http://127.0.0.1:3000",
     },
   },
   build: {
