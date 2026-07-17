@@ -60,9 +60,8 @@ const PAIRED_REPLY: &str = "✅ Paired. You can talk to IronClaw right here.";
 const ALREADY_PAIRED_SAME_USER_REPLY: &str = "You're already paired — just send me a message.";
 const ALREADY_BOUND_TO_OTHER_USER_REPLY: &str =
     "This Telegram account is already paired to another IronClaw user.";
-const EXPIRED_OR_UNKNOWN_REPLY: &str =
-    "That code has expired or was already used — get a fresh link from IronClaw.";
-const UNPAIRED_HINT_REPLY: &str = "This bot is IronClaw. Pair your account from IronClaw → Extensions → Telegram, then message me here.";
+const EXPIRED_OR_UNKNOWN_REPLY: &str = "That code has expired or was already used — get a fresh one from IronClaw → Extensions → Telegram and send it here.";
+const UNPAIRED_HINT_REPLY: &str = "This bot is IronClaw. Pair your account from IronClaw → Extensions → Telegram, then message me here. Already have a pairing code? Just send it in this chat (or /start <code>).";
 
 const IDENTITY_LOOKUP_UNAVAILABLE_REASON: &str = "telegram identity lookup unavailable";
 

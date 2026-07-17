@@ -507,7 +507,7 @@ impl ironclaw_channel_host::delivery_protocol::ChannelDeliveryProtocol
         // Unreachable in practice (the pairing-aware pre-router intercepts
         // unpaired senders before the workflow), kept consistent with the
         // pre-router's static hint.
-        "This bot is IronClaw. Pair your account from IronClaw → Extensions → Telegram, then message me here."
+        "This bot is IronClaw. Pair your account from IronClaw → Extensions → Telegram, then message me here. Already have a pairing code? Just send it in this chat (or /start <code>)."
     }
 
     fn is_direct_message_conversation(&self, conversation_id: &str) -> bool {
