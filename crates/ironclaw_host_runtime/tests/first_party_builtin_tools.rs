@@ -6546,7 +6546,13 @@ async fn builtin_http_uses_tool_call_port_for_model_visible_partial_response() {
 }
 
 #[tokio::test]
-async fn builtin_http_returns_redirects_without_following_private_location() {
+async fn builtin_http_blocks_redirect_to_private_location() {
+    // #6140: redirect following is host-mediated and re-authorizes every hop.
+    // A 302 whose `Location` points at the link-local metadata address
+    // (169.254.169.254) is followed but denied by the private-IP policy at the
+    // second hop — before any request reaches it, so the SSRF target is never
+    // contacted. (Previously the egress did not follow and surfaced the raw 302;
+    // the SSRF outcome is preserved, now as an explicit block.)
     let transport = RecordingTransport::ok(NetworkHttpResponse {
         status: 302,
         headers: vec![(
@@ -6563,16 +6569,18 @@ async fn builtin_http_returns_redirects_without_following_private_location() {
     );
     let runtime = runtime_with_host_http_egress(network);
 
-    let output = invoke_with_context(
+    let error = invoke_with_context(
         &runtime,
         HTTP_CAPABILITY_ID,
         json!({"url": "https://api.example.test/v1/items"}),
         execution_context_with_network([HTTP_CAPABILITY_ID], http_test_policy()),
     )
     .await
-    .unwrap();
+    .unwrap_err();
 
-    assert_eq!(output["status"], json!(302));
+    assert_eq!(error, RuntimeFailureKind::PolicyDenied);
+    // Only the initial request was attempted; the redirect's link-local target
+    // was rejected at re-authorization, never contacted.
     let recorded = requests.lock().unwrap();
     assert_eq!(recorded.len(), 1);
     assert_eq!(recorded[0].url, "https://api.example.test/v1/items");
