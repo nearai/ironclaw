@@ -16,7 +16,7 @@
 //! inbound parsing, the product workflow's installation scope, and the
 //! delivery observer's rendering adapter — rebuilds per setup revision inside
 //! [`DynamicTelegramInstallationResolver`] via the
-//! [`ironclaw_telegram_extension::telegram_serve::TelegramRevisionWorkflowBuilder`]
+//! [`ironclaw_telegram_extension::ingress::TelegramRevisionWorkflowBuilder`]
 //! this module implements over revision-independent runtime parts. Configuring the
 //! bot for the first time after boot, or swapping to a different bot, takes
 //! effect on the next webhook without a process restart. A token rotation for
@@ -63,7 +63,19 @@ use ironclaw_channel_delivery::{
 use ironclaw_channel_host::identity::RebornUserIdentityLookup;
 pub use ironclaw_telegram_extension::TelegramHostBuildError;
 use ironclaw_telegram_extension::bot_api::HostEgressTelegramBotApi;
+use ironclaw_telegram_extension::channel_routes::{
+    TelegramChannelRouteConfig, TelegramChannelSetupActivation,
+    TelegramChannelSetupActivationError, telegram_channel_route_parts,
+};
+use ironclaw_telegram_extension::delivery::TelegramOutboundTargetProvider;
 use ironclaw_telegram_extension::egress::TelegramProtocolHttpEgress;
+use ironclaw_telegram_extension::ingress::{
+    DynamicTelegramInstallationResolver, TelegramRevisionWorkflow,
+    TelegramRevisionWorkflowBuildError, TelegramRevisionWorkflowBuilder, TelegramUpdatesRouteState,
+    telegram_updates_route_parts,
+};
+use ironclaw_telegram_extension::pairing::TelegramPairingService;
+use ironclaw_telegram_extension::setup::{TelegramInstallationSetup, TelegramSetupService};
 use ironclaw_telegram_extension::state::FilesystemTelegramHostState;
 use ironclaw_telegram_extension::telegram_actor_identity::{
     TELEGRAM_V2_ADAPTER_ID, TelegramUserIdentityActorResolver,
@@ -71,22 +83,8 @@ use ironclaw_telegram_extension::telegram_actor_identity::{
 use ironclaw_telegram_extension::telegram_adapter::{
     telegram_adapter_for_setup, telegram_bot_token_handle, telegram_declared_egress_targets,
 };
-use ironclaw_telegram_extension::telegram_channel_routes::{
-    TelegramChannelRouteConfig, TelegramChannelSetupActivation,
-    TelegramChannelSetupActivationError, telegram_channel_route_parts,
-};
 use ironclaw_telegram_extension::telegram_connectable_channel::{
     TelegramChannelConnectionFacade, TelegramConnectableChannelsProductFacade,
-};
-use ironclaw_telegram_extension::telegram_outbound_targets::TelegramOutboundTargetProvider;
-use ironclaw_telegram_extension::telegram_pairing::TelegramPairingService;
-use ironclaw_telegram_extension::telegram_serve::{
-    DynamicTelegramInstallationResolver, TelegramRevisionWorkflow,
-    TelegramRevisionWorkflowBuildError, TelegramRevisionWorkflowBuilder, TelegramUpdatesRouteState,
-    telegram_updates_route_parts,
-};
-use ironclaw_telegram_extension::telegram_setup::{
-    TelegramInstallationSetup, TelegramSetupService,
 };
 
 const TELEGRAM_IDEMPOTENCY_LEDGER_SETTLED_LIMIT: usize = 10_000;
@@ -631,7 +629,7 @@ impl TelegramRevisionWorkflowBuilder for TelegramRevisionWorkflowParts {
         let observer = Arc::new(FinalReplyDeliveryObserver::with_settings(
             FinalReplyDeliveryServices {
                 channel_protocol: Arc::new(
-                    ironclaw_telegram_extension::telegram_outbound_targets::TelegramDeliveryProtocol,
+                    ironclaw_telegram_extension::delivery::TelegramDeliveryProtocol,
                 ),
                 binding_service: Arc::new(binding),
                 thread_service: Arc::clone(&self.parts.thread_service),
@@ -781,7 +779,7 @@ impl DynamicTelegramTriggeredRunDeliveryHook {
             Arc::clone(&parts.local_runtime.delivered_gate_routes);
         let services = FinalReplyDeliveryServices {
             channel_protocol: Arc::new(
-                ironclaw_telegram_extension::telegram_outbound_targets::TelegramDeliveryProtocol,
+                ironclaw_telegram_extension::delivery::TelegramDeliveryProtocol,
             ),
             binding_service: Arc::new(NoopTelegramConversationBindingService),
             thread_service: Arc::clone(&parts.thread_service),
@@ -866,7 +864,7 @@ mod tests {
         RebornBuildInput, RebornRuntimeIdentity, RebornRuntimeInput, build_reborn_runtime,
         local_dev_runtime_policy,
     };
-    use ironclaw_telegram_extension::telegram_serve::TELEGRAM_UPDATES_PATH;
+    use ironclaw_telegram_extension::ingress::TELEGRAM_UPDATES_PATH;
 
     const TENANT: &str = "telegram-host-tenant";
     const AGENT: &str = "telegram-host-agent";
@@ -972,7 +970,7 @@ mod tests {
                 .descriptors
                 .iter()
                 .any(|descriptor| descriptor.route_pattern().as_str()
-                    == ironclaw_telegram_extension::telegram_channel_routes::WEBUI_V2_CHANNELS_TELEGRAM_SETUP_PATH),
+                    == ironclaw_telegram_extension::channel_routes::WEBUI_V2_CHANNELS_TELEGRAM_SETUP_PATH),
             "setup route must be mounted"
         );
         assert!(
@@ -980,7 +978,7 @@ mod tests {
                 .descriptors
                 .iter()
                 .any(|descriptor| descriptor.route_pattern().as_str()
-                    == ironclaw_telegram_extension::telegram_channel_routes::WEBUI_V2_CHANNELS_TELEGRAM_PAIRING_PATH),
+                    == ironclaw_telegram_extension::channel_routes::WEBUI_V2_CHANNELS_TELEGRAM_PAIRING_PATH),
             "pairing route must be mounted"
         );
 

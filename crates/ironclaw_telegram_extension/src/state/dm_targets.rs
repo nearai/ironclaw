@@ -4,7 +4,7 @@ use ironclaw_product_adapters::AdapterInstallationId;
 
 use super::FilesystemTelegramHostState;
 use super::records::dm_target_path;
-use crate::telegram_pairing::{TelegramDmTarget, TelegramPairingError};
+use crate::pairing::{TelegramDmTarget, TelegramPairingError};
 
 impl FilesystemTelegramHostState {
     pub async fn upsert_dm_target(

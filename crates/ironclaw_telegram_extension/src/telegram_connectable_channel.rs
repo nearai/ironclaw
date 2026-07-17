@@ -17,8 +17,8 @@ use ironclaw_product_workflow::{
     RebornConnectableChannelListResponse, RebornServicesError, WebUiAuthenticatedCaller,
 };
 
-use crate::telegram_pairing::TelegramPairingService;
-use crate::telegram_setup::TelegramSetupService;
+use crate::pairing::TelegramPairingService;
+use crate::setup::TelegramSetupService;
 
 pub struct TelegramConnectableChannelsProductFacade {
     setup: Arc<TelegramSetupService>,

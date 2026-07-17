@@ -2339,7 +2339,7 @@ mod tests {
         use ironclaw_telegram_extension::telegram_adapter::{
             telegram_adapter_for_setup, telegram_bot_token_handle,
         };
-        use ironclaw_telegram_extension::telegram_setup::TelegramInstallationSetup;
+        use ironclaw_telegram_extension::setup::TelegramInstallationSetup;
 
         let telegram_egress = Arc::new(FakeProtocolHttpEgress::new(vec![
             "api.telegram.org".to_string(),
@@ -2383,7 +2383,7 @@ mod tests {
         let outbound = Arc::new(InMemoryOutboundStateStore::default());
         let services = FinalReplyDeliveryServices {
             channel_protocol: Arc::new(
-                ironclaw_telegram_extension::telegram_outbound_targets::TelegramDeliveryProtocol,
+                ironclaw_telegram_extension::delivery::TelegramDeliveryProtocol,
             ),
             binding_service: Arc::new(
                 ironclaw_product_workflow::FakeConversationBindingService::new(),

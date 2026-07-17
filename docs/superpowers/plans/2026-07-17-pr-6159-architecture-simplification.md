@@ -495,23 +495,23 @@ git commit -m "refactor(telegram): remove test-only client and resolver traits"
 **Interfaces:**
 - Preserves public behavior types `TelegramInstallationSetup`, `TelegramInstallationSetupUpdate`, `TelegramInstallationSetupStatus`, `TelegramPairingStatus`, `PairingIssue`, `PairingConsumeOutcome`, `ResolvedTelegramInstallation`, `TelegramDeliveryProtocol`, and `TelegramOutboundTargetProvider`.
 
-- [ ] **Step 1: Add route JSON compatibility assertions before deleting the DTO**
+- [x] **Step 1: Add route JSON compatibility assertions before deleting the DTO**
 
 In `channel_routes.rs` handler tests, serialize `TelegramPairingStatus` for connected and pending cases and compare exact JSON objects to the existing route response. Run the two tests and verify they pass against the current mirror response.
 
-- [ ] **Step 2: Return the owned projection directly**
+- [x] **Step 2: Return the owned projection directly**
 
 Delete `TelegramPairingStatusResponse`; make `pairing_status_handler` return `Json<TelegramPairingStatus>`. Remove unused `agent_id`, `project_id`, `bot_api`, and other public accessors proven to have no production caller by `rg`.
 
-- [ ] **Step 3: Split each module by the locked responsibility**
+- [x] **Step 3: Split each module by the locked responsibility**
 
 Move record definitions without changing serde names. Keep service orchestration in `service.rs`, code mint/validation in `code.rs`, HTTP parsing/routing in `route.rs`, revision resolution/cache in `resolver.rs`, protocol rendering in `protocol.rs`, target authority in `targets.rs`, and persistence operations in state-specific modules.
 
-- [ ] **Step 4: Narrow visibility and preserve deliberate re-exports**
+- [x] **Step 4: Narrow visibility and preserve deliberate re-exports**
 
 Use `pub(crate)` for cross-module-only helpers. `lib.rs` exports focused modules; temporary old-path re-exports are allowed only when a real downstream crate still imports the symbol and are deleted after that consumer migrates in this task.
 
-- [ ] **Step 5: Enforce line and DTO ratchets**
+- [x] **Step 5: Enforce line and DTO ratchets**
 
 ```bash
 cargo test -p ironclaw_telegram_extension
@@ -521,7 +521,12 @@ cargo test -p ironclaw_architecture --test telegram_extension_gates deleted_tele
 
 Expected: all pass; every touched production Telegram `.rs` file is at most 999 lines.
 
-- [ ] **Step 6: Commit the focused layout**
+Observed: all 104 Telegram tests pass; targeted Clippy is warning-free; the focused line-budget
+and deleted-symbol architecture ratchets pass. The Telegram composition feature compiles after all
+downstream imports moved to the focused namespaces. The full Telegram architecture test now fails
+only on the intentionally red Task 8 composition-ownership ratchet.
+
+- [x] **Step 6: Commit the focused layout**
 
 ```bash
 git add crates/ironclaw_telegram_extension crates/ironclaw_reborn_composition crates/ironclaw_architecture

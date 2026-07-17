@@ -7,7 +7,7 @@ use super::FilesystemTelegramHostState;
 use super::records::{
     StoredTelegramBinding, StoredTelegramBindingUserIndex, binding_path, binding_user_index_path,
 };
-use crate::telegram_pairing::{RemovedTelegramBinding, TelegramBindingError};
+use crate::pairing::{RemovedTelegramBinding, TelegramBindingError};
 use ironclaw_channel_host::identity::{RebornUserIdentityLookup, RebornUserIdentityLookupError};
 
 impl FilesystemTelegramHostState {

@@ -31,7 +31,7 @@ use ironclaw_secrets::SecretMaterial;
 use ironclaw_wasm_product_adapters::{EgressPolicy, EgressPolicyError, EgressPolicyTarget};
 use secrecy::{ExposeSecret, SecretString};
 
-use crate::telegram_setup::TelegramSetupService;
+use crate::setup::TelegramSetupService;
 
 const TELEGRAM_EGRESS_TIMEOUT_MS: u32 = 10_000;
 const TELEGRAM_EGRESS_RESPONSE_BODY_LIMIT_BYTES: u64 = 64 * 1024;
@@ -346,7 +346,7 @@ mod tests {
     use ironclaw_secrets::{InMemorySecretStore, SecretStore};
 
     use super::*;
-    use crate::telegram_setup::TelegramInstallationSetup;
+    use crate::setup::TelegramInstallationSetup;
     use crate::test_support::{RecordingBotApi, telegram_state};
 
     struct RecordingNetworkHttpEgress {

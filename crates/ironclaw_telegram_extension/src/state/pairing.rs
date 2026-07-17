@@ -4,7 +4,7 @@ use ironclaw_host_api::UserId;
 
 use super::FilesystemTelegramHostState;
 use super::records::{StoredPairingUserPointer, pairing_code_path, pairing_user_path};
-use crate::telegram_pairing::{TelegramPairingError, TelegramPairingRecord};
+use crate::pairing::{TelegramPairingError, TelegramPairingRecord};
 
 impl FilesystemTelegramHostState {
     pub async fn upsert_pending_pairing(

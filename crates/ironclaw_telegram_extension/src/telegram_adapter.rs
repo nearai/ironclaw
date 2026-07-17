@@ -17,9 +17,9 @@ use ironclaw_telegram_v2_adapter::{
 use thiserror::Error;
 
 use crate::egress::TELEGRAM_BOT_TOKEN_CREDENTIAL_HANDLE;
+use crate::ingress::TELEGRAM_SECRET_TOKEN_HEADER;
+use crate::setup::TelegramInstallationSetup;
 use crate::telegram_actor_identity::TELEGRAM_V2_ADAPTER_ID;
-use crate::telegram_serve::TELEGRAM_SECRET_TOKEN_HEADER;
-use crate::telegram_setup::TelegramInstallationSetup;
 
 #[derive(Debug, Error)]
 #[error("invalid Telegram adapter config field {field}: {reason}")]

@@ -19,19 +19,18 @@
 #![warn(unreachable_pub)]
 
 pub mod bot_api;
+pub mod channel_routes;
+pub mod delivery;
 pub mod egress;
+pub mod ingress;
+pub mod pairing;
+pub mod setup;
 pub mod state;
 pub mod telegram_account_setup;
 pub mod telegram_actor_identity;
 pub mod telegram_adapter;
-pub mod telegram_channel_routes;
 pub mod telegram_connectable_channel;
-pub mod telegram_dispatch;
 pub mod telegram_manifest;
-pub mod telegram_outbound_targets;
-pub mod telegram_pairing;
-pub mod telegram_serve;
-pub mod telegram_setup;
 #[cfg(test)]
 mod test_support;
 

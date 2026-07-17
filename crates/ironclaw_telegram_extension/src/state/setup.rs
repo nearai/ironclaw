@@ -2,7 +2,7 @@ use ironclaw_filesystem::{CasExpectation, FilesystemError};
 
 use super::FilesystemTelegramHostState;
 use super::records::setup_path;
-use crate::telegram_setup::{TelegramInstallationSetup, TelegramSetupError};
+use crate::setup::{TelegramInstallationSetup, TelegramSetupError};
 
 impl FilesystemTelegramHostState {
     pub async fn get_telegram_installation_setup(
