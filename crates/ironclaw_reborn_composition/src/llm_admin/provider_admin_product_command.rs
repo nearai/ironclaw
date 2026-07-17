@@ -172,6 +172,9 @@ fn provider_admin_workflow_error(error: RebornProviderAdminError) -> ProductWork
                 config_update_error_reason(source.as_ref())
             ),
         },
+        RebornProviderAdminError::EnvDetection { reason } => ProductWorkflowError::Transient {
+            reason: format!("environment LLM configuration is incomplete: {reason}"),
+        },
     }
 }
 

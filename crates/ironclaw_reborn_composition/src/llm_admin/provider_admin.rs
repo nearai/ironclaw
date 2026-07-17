@@ -313,6 +313,43 @@ impl RebornProviderAdmin {
             .collect())
     }
 
+    /// Detect an LLM provider configured purely through environment
+    /// variables — the same env resolution `resolve_reborn_runtime_llm`'s
+    /// fallback path and `run`/`serve`'s stub-gateway warning both use
+    /// (`ironclaw_llm::resolve_provider_config_from_env`), wrapped here so
+    /// `ironclaw_reborn_cli` (which may not depend on `ironclaw_llm`
+    /// directly — see the `reborn_dependency_boundaries` architecture test)
+    /// can offer onboard's env-detect-and-confirm/silent-seed step without
+    /// reaching into that crate itself.
+    ///
+    /// Three outcomes, matching onboard's three branches:
+    /// - `Ok(Some(detected))`: a complete provider configuration was found
+    ///   in the environment (either `LLM_BACKEND` naming a known provider,
+    ///   Codex CLI auth, or a provider whose own env vars — API key, base
+    ///   URL, or model — are set).
+    /// - `Ok(None)`: no LLM environment variables are set at all.
+    /// - `Err(_)`: some LLM environment configuration was present (e.g. a
+    ///   provider's `*_MODEL` env var set) but incomplete or invalid (e.g.
+    ///   the same provider's required API key env var unset, or
+    ///   `LLM_BACKEND` naming an unknown provider) — a "partial env" state
+    ///   onboard must not silently seed from.
+    ///
+    /// Never writes anything — pure detection, mirroring
+    /// [`Self::resolve_provider_id`]'s read-only contract.
+    pub fn detect_env_llm(&self) -> Result<Option<DetectedEnvLlm>, RebornProviderAdminError> {
+        let providers_path = self.boot.home().providers_file_path();
+        ironclaw_llm::resolve_provider_config_from_env(Some(providers_path.as_path()))
+            .map(|resolved| {
+                resolved.map(|resolved| DetectedEnvLlm {
+                    provider_id: resolved.provider_id().to_string(),
+                    model: resolved.model().to_string(),
+                })
+            })
+            .map_err(|source| RebornProviderAdminError::EnvDetection {
+                reason: source.to_string(),
+            })
+    }
+
     fn load_registry(&self) -> Result<ironclaw_llm::ProviderRegistry, RebornProviderAdminError> {
         let providers_path = self.boot.home().providers_file_path();
         ironclaw_llm::ProviderRegistry::try_load_from_path(Some(providers_path.as_path())).map_err(
@@ -394,6 +431,14 @@ pub struct RebornProviderWriteOutcome {
     pub v1_state: RebornV1State,
 }
 
+/// An LLM provider fully resolvable from environment variables alone — see
+/// [`RebornProviderAdmin::detect_env_llm`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct DetectedEnvLlm {
+    pub provider_id: String,
+    pub model: String,
+}
+
 /// One entry on the interactive `onboard` numbered provider menu — see
 /// [`RebornProviderAdmin::menu_entries`].
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -470,6 +515,10 @@ pub enum RebornProviderAdminError {
         path: PathBuf,
         source: Box<ironclaw_reborn_config::RebornConfigFileUpdateError>,
     },
+    /// [`RebornProviderAdmin::detect_env_llm`]'s "partial env" outcome: some
+    /// LLM environment configuration was present but incomplete or invalid.
+    #[error("environment LLM configuration is incomplete: {reason}")]
+    EnvDetection { reason: String },
 }
 
 #[derive(Debug, Clone)]
@@ -790,6 +839,29 @@ mod tests {
         assert!(
             !openai.aliases.is_empty(),
             "openai should carry its registry aliases: {openai:?}"
+        );
+    }
+
+    /// `detect_env_llm` must return `Ok(None)` when no LLM environment
+    /// variables are set — the common case for a fresh interactive
+    /// `onboard` run on a developer's machine, which must fall through to
+    /// the full numbered menu rather than a confirm prompt. This test
+    /// cannot cover the `Ok(Some(_))`/`Err(_)` branches in-process: this
+    /// crate is `#![forbid(unsafe_code)]` and `std::env::set_var` is
+    /// `unsafe` (edition 2024), so those branches are covered at the CLI
+    /// smoke tier instead, where a real child process's environment can be
+    /// set via `Command::env` without touching this process's own env —
+    /// see `ironclaw_reborn_cli`'s smoke tests for the env-detected and
+    /// partial-env onboard scenarios.
+    #[test]
+    fn detect_env_llm_is_none_with_no_llm_env_vars_set() {
+        let admin = test_admin();
+        let detected = admin
+            .detect_env_llm()
+            .expect("detection must not error with a clean environment");
+        assert!(
+            detected.is_none(),
+            "detect_env_llm must report no detection with no LLM env vars set: {detected:?}"
         );
     }
 }

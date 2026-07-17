@@ -1110,9 +1110,10 @@ fn map_admin_error(error: crate::RebornProviderAdminError) -> LlmConfigServiceEr
             field: None,
             reason,
         },
-        E::LoadRegistry { .. } | E::LoadConfig { .. } | E::UpdateConfig { .. } => {
-            LlmConfigServiceError::Unavailable
-        }
+        E::LoadRegistry { .. }
+        | E::LoadConfig { .. }
+        | E::UpdateConfig { .. }
+        | E::EnvDetection { .. } => LlmConfigServiceError::Unavailable,
     }
 }
 
