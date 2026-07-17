@@ -739,6 +739,7 @@ registerPack("uk", {
   "automations.filter.completed": "Завершені",
   "automations.refresh": "Оновити автоматизації",
   "automations.error.loadFailed": "Неможливо завантажити автоматизації",
+  "automations.error.actionFailed": "Не вдалося оновити автоматизацію. Спробуйте ще раз.",
   "automations.rename.action": "Перейменувати автоматизацію",
   "automations.rename.nameLabel": "Назва автоматизації",
   "automations.rename.nameRequired": "Назва автоматизації обов'язкова.",

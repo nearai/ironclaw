@@ -739,6 +739,7 @@ registerPack("zh-CN", {
   "automations.filter.completed": "已完成",
   "automations.refresh": "更新最新自动化",
   "automations.error.loadFailed": "提取系统自动化计划列表不成功！",
+  "automations.error.actionFailed": "无法更新自动化。请重试。",
   "automations.rename.action": "重命名自动化",
   "automations.rename.nameLabel": "自动化名称",
   "automations.rename.nameRequired": "自动化名称不能为空。",

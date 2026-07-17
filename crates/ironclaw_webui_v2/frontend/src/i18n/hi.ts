@@ -739,6 +739,7 @@ registerPack("hi", {
   "automations.filter.completed": "पूर्ण",
   "automations.refresh": "ऑटोमेशन ताज़ा करें",
   "automations.error.loadFailed": "ऑटोमेशन लोड करने में असमर्थ",
+  "automations.error.actionFailed": "ऑटोमेशन अपडेट नहीं किया जा सका। फिर से कोशिश करें।",
   "automations.rename.action": "ऑटोमेशन का नाम बदलें",
   "automations.rename.nameLabel": "ऑटोमेशन नाम",
   "automations.rename.nameRequired": "ऑटोमेशन नाम आवश्यक है.",

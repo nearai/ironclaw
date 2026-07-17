@@ -739,6 +739,7 @@ registerPack("ja", {
   "automations.filter.completed": "完了",
   "automations.refresh": "自動化の更新",
   "automations.error.loadFailed": "自動化をロードできません",
+  "automations.error.actionFailed": "自動化を更新できませんでした。もう一度お試しください。",
   "automations.rename.action": "自動化名を変更",
   "automations.rename.nameLabel": "自動化名",
   "automations.rename.nameRequired": "自動化名は必須です。",

@@ -29,6 +29,7 @@ type RenameAutomationVariables = {
 export function useAutomations(includeCompleted = false) {
   const { t, lang } = useI18n();
   const queryClient = useQueryClient();
+  const [hasActionError, setHasActionError] = React.useState(false);
   const query = useQuery({
     queryKey: ["automations", { includeCompleted }],
     queryFn: () =>
@@ -73,22 +74,40 @@ export function useAutomations(includeCompleted = false) {
   const invalidateAutomations = React.useCallback(() => {
     queryClient.invalidateQueries({ queryKey: ["automations"] });
   }, [queryClient]);
+  const clearActionError = React.useCallback(() => {
+    setHasActionError(false);
+  }, []);
+  const showActionError = React.useCallback(() => {
+    setHasActionError(true);
+  }, []);
+  const handleActionSuccess = React.useCallback(() => {
+    clearActionError();
+    invalidateAutomations();
+  }, [clearActionError, invalidateAutomations]);
   const pauseMutation = useMutation({
     mutationFn: (automationId: string) => pauseAutomation({ automationId }),
-    onSuccess: invalidateAutomations,
+    onMutate: clearActionError,
+    onError: showActionError,
+    onSuccess: handleActionSuccess,
   });
   const resumeMutation = useMutation({
     mutationFn: (automationId: string) => resumeAutomation({ automationId }),
-    onSuccess: invalidateAutomations,
+    onMutate: clearActionError,
+    onError: showActionError,
+    onSuccess: handleActionSuccess,
   });
   const renameMutation = useMutation({
     mutationFn: ({ automationId, name }: RenameAutomationVariables) =>
       renameAutomation({ automationId, name }),
-    onSuccess: invalidateAutomations,
+    onMutate: clearActionError,
+    onError: showActionError,
+    onSuccess: handleActionSuccess,
   });
   const deleteMutation = useMutation({
     mutationFn: (automationId: string) => deleteAutomation({ automationId }),
-    onSuccess: invalidateAutomations,
+    onMutate: clearActionError,
+    onError: showActionError,
+    onSuccess: handleActionSuccess,
   });
 
   return {
@@ -103,12 +122,8 @@ export function useAutomations(includeCompleted = false) {
       renameMutation.isPending ||
       deleteMutation.isPending,
     error: query.error || null,
-    actionError:
-      pauseMutation.error ||
-      resumeMutation.error ||
-      renameMutation.error ||
-      deleteMutation.error ||
-      null,
+    actionError: hasActionError,
+    dismissActionError: clearActionError,
     pauseAutomation: pauseMutation.mutate,
     resumeAutomation: resumeMutation.mutate,
     renameAutomation: renameMutation.mutate,

@@ -739,6 +739,7 @@ registerPack("de", {
   "automations.filter.completed": "Abgeschlossen",
   "automations.refresh": "Automatisierungen aktualisieren",
   "automations.error.loadFailed": "Automatisierungen können nicht geladen werden",
+  "automations.error.actionFailed": "Die Automatisierung konnte nicht aktualisiert werden. Versuche es erneut.",
   "automations.rename.action": "Automatisierung umbenennen",
   "automations.rename.nameLabel": "Automatisierungsname",
   "automations.rename.nameRequired": "Automatisierungsname ist erforderlich.",

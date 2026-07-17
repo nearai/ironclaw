@@ -739,6 +739,7 @@ registerPack("es", {
   "automations.filter.completed": "Completadas",
   "automations.refresh": "Actualizar automatizaciones",
   "automations.error.loadFailed": "No se pueden cargar automatizaciones",
+  "automations.error.actionFailed": "No se pudo actualizar la automatización. Inténtalo de nuevo.",
   "automations.rename.action": "Cambiar nombre de automatización",
   "automations.rename.nameLabel": "Nombre de automatización",
   "automations.rename.nameRequired": "El nombre de la automatización es obligatorio.",
