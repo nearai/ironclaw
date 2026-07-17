@@ -17,8 +17,7 @@
 //! delivery observer's rendering adapter — rebuilds per setup revision inside
 //! [`DynamicTelegramInstallationResolver`] via the
 //! [`ironclaw_telegram_extension::telegram_serve::TelegramRevisionWorkflowBuilder`]
-//! this
-//! module implements over revision-independent runtime parts. Configuring the
+//! this module implements over revision-independent runtime parts. Configuring the
 //! bot for the first time after boot, or swapping to a different bot, takes
 //! effect on the next webhook without a process restart. A token rotation for
 //! the SAME bot keeps its installation id, so bindings and conversations
