@@ -410,13 +410,18 @@ async def test_reborn_v2_settings_import_rejects_unsupported_payloads(
             settings_reads += 1
 
     reborn_v2_page.on("request", count_settings_reads)
-    origin = await reborn_v2_page.evaluate("location.origin")
-    await reborn_v2_page.goto(
-        f"{origin}/settings/language?token={REBORN_V2_AUTH_TOKEN}"
+    await reborn_v2_page.keyboard.press("Control+K")
+    command_palette = reborn_v2_page.get_by_role(
+        "dialog", name=SEL_V2["command_palette_dialog_name"]
     )
-    file_input = reborn_v2_page.locator(
-        'input[type="file"][accept=".json,application/json"]'
+    await expect(command_palette).to_be_visible()
+    await command_palette.get_by_role(
+        "button", name=SEL_V2["command_palette_go_settings_name"]
+    ).click()
+    await reborn_v2_page.wait_for_url(
+        re.compile(r".*/settings(?:[?#].*)?$")
     )
+    file_input = reborn_v2_page.locator(SEL_V2["settings_import_file"])
     await expect(file_input).to_have_count(1, timeout=15000)
     await reborn_v2_page.wait_for_timeout(250)
     initial_settings_reads = settings_reads
