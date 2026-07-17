@@ -354,6 +354,10 @@ mod tests {
         assert_eq!(body["text"], "hello!");
         assert_eq!(body["message_thread_id"], 7);
         assert_eq!(body["reply_to_message_id"], 42);
+        assert!(
+            body.get("parse_mode").is_none(),
+            "final replies are deterministic plain text — no parse_mode (qa-telegram:C4)"
+        );
         assert_eq!(
             request
                 .credential_handle()

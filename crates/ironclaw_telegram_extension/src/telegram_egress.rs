@@ -170,7 +170,13 @@ const TELEGRAM_RETRY_AFTER_CAP_SECS: u64 = 5;
 /// Telegram's 429 envelope declares the wait in `parameters.retry_after`
 /// (seconds). `None` when absent or unparseable — nothing to honor.
 fn flood_wait_retry_after_secs(body: &[u8]) -> Option<u64> {
-    let envelope: serde_json::Value = serde_json::from_slice(body).ok()?;
+    // silent-ok: a malformed 429 body means no declared flood wait — the
+    // caller surfaces the 429 honestly instead of blind-retrying, so the
+    // parse failure IS the domain outcome here, not a swallowed error.
+    let envelope: serde_json::Value = match serde_json::from_slice(body) {
+        Ok(value) => value,
+        Err(_) => return None,
+    };
     envelope.get("parameters")?.get("retry_after")?.as_u64()
 }
 

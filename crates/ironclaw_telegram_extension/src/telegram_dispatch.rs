@@ -170,6 +170,10 @@ impl TelegramInboundPreRouter {
                     Ok(Some(_)) => {}
                     Ok(None) => self.send_throttled_hint(chat_id).await,
                     Err(error) => {
+                        // silent-ok: /start is a greeting — during an
+                        // identity-store outage neither the misleading
+                        // pairing hint nor a redelivery loop is worth it;
+                        // the outage is logged and the update is acked.
                         tracing::debug!(
                             target = TRACING_TARGET,
                             reason = %error,

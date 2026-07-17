@@ -327,20 +327,33 @@ impl ProductAdapter for TelegramV2Adapter {
         // failure status per attempt beats a hole in the middle of a reply.
         // Chunks already delivered stand — Telegram has no transaction — so
         // the failure status is the truthful record of a partial delivery.
+        // Once ANY chunk has been delivered, every subsequent failure is
+        // TERMINAL for the attempt (FailedPermanent + a non-transient
+        // error): re-delivering the envelope restarts from chunk zero and
+        // would duplicate user-visible text. Only a first-chunk failure —
+        // which delivered nothing — keeps its normal retryable mapping.
+        let mut any_chunk_delivered = false;
         for request in requests {
             let response = match egress.send(request).await {
                 Ok(resp) => resp,
                 Err(egress_err) => {
-                    record_status(
-                        delivery_sink,
-                        egress_err_to_delivery_status(
-                            &egress_err,
-                            attempt_id,
-                            target_binding.clone(),
-                            run_id,
-                        ),
-                    )
-                    .await;
+                    let status = egress_err_to_delivery_status(
+                        &egress_err,
+                        attempt_id,
+                        target_binding.clone(),
+                        run_id,
+                    );
+                    let status = if any_chunk_delivered {
+                        demote_to_permanent_after_partial_delivery(status)
+                    } else {
+                        status
+                    };
+                    record_status(delivery_sink, status).await;
+                    if any_chunk_delivered {
+                        return Err(ProductAdapterError::EgressDenied {
+                            reason: RedactedString::new(egress_err.to_string()),
+                        });
+                    }
                     return Err(map_egress_error(egress_err));
                 }
             };
@@ -354,6 +367,20 @@ impl ProductAdapter for TelegramV2Adapter {
                     "telegram bot api returned status {}",
                     response.status()
                 ));
+                if any_chunk_delivered {
+                    // Partial delivery: terminal, never re-deliverable.
+                    record_status(
+                        delivery_sink,
+                        DeliveryStatus::FailedPermanent {
+                            attempt_id,
+                            target: target_binding.clone(),
+                            run_id,
+                            reason: reason.clone(),
+                        },
+                    )
+                    .await;
+                    return Err(ProductAdapterError::EgressDenied { reason });
+                }
                 // Group transient HTTP outcomes (5xx, 429) into the retryable
                 // bucket so the host glue can re-deliver. 4xx (except 429) is
                 // a deterministic policy-denied result and should NOT be
@@ -397,6 +424,7 @@ impl ProductAdapter for TelegramV2Adapter {
                 }
                 return Err(ProductAdapterError::EgressDenied { reason });
             }
+            any_chunk_delivered = true;
         }
 
         record_status(
@@ -409,6 +437,32 @@ impl ProductAdapter for TelegramV2Adapter {
         )
         .await;
         Ok(ProductRenderOutcome::DeliveryRecorded)
+    }
+}
+
+/// After a chunk has already been delivered, retryable statuses demote to
+/// permanent: automatic re-delivery restarts from chunk zero and would
+/// duplicate the already-delivered text. Non-retryable statuses pass through.
+fn demote_to_permanent_after_partial_delivery(status: DeliveryStatus) -> DeliveryStatus {
+    match status {
+        DeliveryStatus::FailedRetryable {
+            attempt_id,
+            target,
+            run_id,
+            reason,
+        }
+        | DeliveryStatus::FailedUnauthorized {
+            attempt_id,
+            target,
+            run_id,
+            reason,
+        } => DeliveryStatus::FailedPermanent {
+            attempt_id,
+            target,
+            run_id,
+            reason,
+        },
+        other => other,
     }
 }
 
@@ -657,11 +711,12 @@ mod tests {
         );
     }
 
-    /// qa-telegram:C3 — a failure mid-sequence stops further chunks and
-    /// records ONE honest retryable failure for the attempt (never an
-    /// optimistic Delivered over a partial reply).
+    /// qa-telegram:C3 — once ANY chunk has been delivered, a later failure
+    /// is TERMINAL for the attempt (FailedPermanent): re-delivering the
+    /// envelope would resend the already-delivered chunks and duplicate
+    /// user-visible text, so the host must never auto-retry it.
     #[tokio::test]
-    async fn render_outbound_records_retryable_when_a_middle_chunk_fails() {
+    async fn render_outbound_partial_chunk_failure_is_terminal_not_retryable() {
         let adapter = TelegramV2Adapter::new(config(false));
         let egress = FakeProtocolHttpEgress::new(["api.telegram.org".to_string()]);
         egress.allow_credential_handle("telegram_bot_token");
@@ -700,10 +755,10 @@ mod tests {
             .render_outbound(envelope, &egress, &sink)
             .await
             .expect_err("mid-sequence failure surfaces");
-        assert!(matches!(
-            error,
-            ProductAdapterError::WorkflowTransient { .. }
-        ));
+        assert!(
+            !matches!(error, ProductAdapterError::WorkflowTransient { .. }),
+            "a partial delivery must not surface as transient/retryable: {error:?}"
+        );
         assert_eq!(
             egress.calls().len(),
             2,
@@ -712,8 +767,55 @@ mod tests {
         let statuses = sink.statuses();
         assert_eq!(statuses.len(), 1, "one honest status for the attempt");
         assert!(
+            matches!(statuses[0], DeliveryStatus::FailedPermanent { .. }),
+            "500 AFTER a delivered chunk -> FailedPermanent (re-delivery would duplicate text), got {:?}",
+            statuses[0]
+        );
+    }
+
+    /// qa-telegram:C3 — a FIRST-chunk failure delivered nothing, so it stays
+    /// honestly retryable: re-delivery cannot duplicate anything.
+    #[tokio::test]
+    async fn render_outbound_first_chunk_failure_stays_retryable() {
+        let adapter = TelegramV2Adapter::new(config(false));
+        let egress = FakeProtocolHttpEgress::new(["api.telegram.org".to_string()]);
+        egress.allow_credential_handle("telegram_bot_token");
+        egress.program_response(
+            "api.telegram.org",
+            Ok(ironclaw_product_adapters::EgressResponse::new(
+                500,
+                br#"{"ok":false,"description":"scripted outage"}"#.to_vec(),
+            )),
+        );
+        let sink = ironclaw_product_adapters::FakeOutboundDeliverySink::new();
+        let envelope = ProductOutboundEnvelope {
+            adapter_id: adapter.adapter_id().clone(),
+            installation_id: adapter.installation_id().clone(),
+            target: test_outbound_target(),
+            projection_cursor: test_projection_cursor(),
+            payload: ProductOutboundPayload::FinalReply(
+                ironclaw_product_adapters::FinalReplyView {
+                    turn_run_id: ironclaw_turns::TurnRunId::new(),
+                    text: "z".repeat(9000),
+                    generated_at: chrono::Utc::now(),
+                },
+            ),
+            delivery_attempt_id: uuid::Uuid::new_v4(),
+        };
+        let error = adapter
+            .render_outbound(envelope, &egress, &sink)
+            .await
+            .expect_err("first-chunk failure surfaces");
+        assert!(matches!(
+            error,
+            ProductAdapterError::WorkflowTransient { .. }
+        ));
+        assert_eq!(egress.calls().len(), 1, "nothing delivered, sequence stops");
+        let statuses = sink.statuses();
+        assert_eq!(statuses.len(), 1);
+        assert!(
             matches!(statuses[0], DeliveryStatus::FailedRetryable { .. }),
-            "500 mid-sequence -> FailedRetryable, got {:?}",
+            "500 with zero delivered chunks stays retryable, got {:?}",
             statuses[0]
         );
     }

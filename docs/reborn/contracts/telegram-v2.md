@@ -209,7 +209,11 @@ message cap split into **ordered lossless `sendMessage` chunks** (never inside
 a character), sent sequentially; a mid-sequence failure stops the remaining
 chunks and records ONE honest failure status for the attempt — already-sent
 chunks stand, and the attempt is never reported `Delivered` over a partial
-reply. The adapter's `DeliveryStatus` mapping is the honesty contract:
+reply. **Once any chunk has been delivered, that failure is terminal for the
+attempt (`FailedPermanent`)** — automatic re-delivery restarts from chunk
+zero and would duplicate user-visible text; only a first-chunk failure (which
+delivered nothing) keeps the retryable/unauthorized mapping below. The
+adapter's `DeliveryStatus` mapping is the honesty contract:
 
 | Telegram response | DeliveryStatus |
 |---|---|
