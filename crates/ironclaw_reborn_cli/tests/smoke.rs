@@ -3605,6 +3605,224 @@ fn onboard_then_serve_boots_with_an_empty_environment() {
     let _ = child.wait();
 }
 
+/// Seed the local-dev encrypted secret store with an LLM API key for
+/// `provider_id`, through the same `open_local_dev_secret_store` +
+/// `LlmKeyStore::put` opener `onboard`'s interactive credential prompt uses
+/// — bypassing the prompt UI, matching
+/// `onboard_then_serve_boots_with_an_empty_environment`'s own seeding
+/// pattern. Also seeds the cached master-key dotfile first so the resolver
+/// never reaches the OS keychain (see that test's comment for why: a
+/// headless run would otherwise hang on a GUI keychain prompt).
+#[cfg(feature = "webui-v2-beta")]
+fn seed_stored_llm_key(reborn_home: &Path, provider_id: &str, key: &str) {
+    std::fs::write(
+        reborn_home.join(ironclaw_reborn_composition::LOCAL_DEV_SECRETS_MASTER_KEY_PATH),
+        ironclaw_secrets::keychain::generate_master_key_hex(),
+    )
+    .expect("seed cached master key dotfile");
+    let seed_rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("current-thread tokio runtime for LLM key seed");
+    let provider_id = provider_id.to_string();
+    let key = key.to_string();
+    let reborn_home = reborn_home.to_path_buf();
+    seed_rt.block_on(async move {
+        let store = ironclaw_reborn_composition::open_local_dev_secret_store(&reborn_home)
+            .await
+            .expect("open local dev secret store");
+        ironclaw_reborn_composition::LlmKeyStore::new(store)
+            .put(&provider_id, ironclaw_secrets::SecretMaterial::from(key))
+            .await
+            .expect("seed provider key");
+    });
+}
+
+/// REGRESSION (review comments #4/#6): before the fix,
+/// `build_runtime_input_with_options` called `resolve_reborn_runtime_llm`
+/// directly, which fails closed on `ApiKeyEnvUnset` for an
+/// `api_key_required = true` provider (openai/anthropic) *before*
+/// `apply_startup_stored_llm_key` ever gets a chance to inject the key an
+/// operator stored through `onboard`/`models set-provider`. `onboard` itself
+/// never fails (it doesn't resolve the runtime LLM, just prompts and
+/// stores), so the bug only surfaced at the next `serve` boot — silently
+/// stranding an operator who had just "successfully" onboarded. `nearai`
+/// (`api_key_required = false`) never hit this path, which is why the
+/// existing daemon-case capstone (`onboard_then_serve_boots_with_an_empty_
+/// environment`) didn't catch it.
+///
+/// Crate smoke tier (spawns the real `ironclaw-reborn` binary), matching
+/// `onboard_then_serve_boots_with_an_empty_environment`'s tier: the bug lives
+/// in `serve`'s pre-async-runtime boot sequence
+/// (`build_runtime_input_with_options`, called before `build_reborn_services`
+/// even starts), so only a real-process boot proves the ordering is fixed —
+/// an in-process integration-tier test would have to reconstruct that same
+/// boot sequence and couldn't observe the actual "does the process bind"
+/// outcome any more directly than spawning it does.
+#[cfg(feature = "webui-v2-beta")]
+#[test]
+fn onboard_openai_key_then_serve_boots_with_env_var_unset() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let reborn_home = temp.path().join("reborn-home");
+    let home = temp.path().join("home");
+    std::fs::create_dir_all(&home).expect("home dir");
+
+    let onboard_output = reborn_command()
+        .arg("onboard")
+        .env("HOME", &home)
+        .env("IRONCLAW_REBORN_HOME", &reborn_home)
+        .output()
+        .expect("ironclaw-reborn onboard should run");
+    assert!(
+        onboard_output.status.success(),
+        "onboard must succeed non-interactively; stderr: {}",
+        String::from_utf8_lossy(&onboard_output.stderr)
+    );
+
+    // Point `[llm.default]` at `openai` (api_key_required = true), the same
+    // way an operator who ran `onboard`'s interactive credential prompt
+    // would have ended up configured — `models set-provider` is the
+    // non-interactive equivalent this test drives instead of a terminal.
+    let set_provider_output = reborn_command()
+        .args(["models", "set-provider", "openai", "--model", "gpt-5-mini"])
+        .env("IRONCLAW_REBORN_HOME", &reborn_home)
+        .output()
+        .expect("ironclaw-reborn models set-provider should run");
+    assert!(
+        set_provider_output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&set_provider_output.stderr)
+    );
+
+    // Store the key the same way `onboard`'s interactive prompt would have
+    // — never in config.toml or the environment.
+    seed_stored_llm_key(&reborn_home, "openai", "sk-smoke-test-stored-openai-key");
+
+    let port = unused_local_port();
+    let mut child = reborn_command()
+        .args(["serve", "--host", "127.0.0.1", "--port"])
+        .arg(port.to_string())
+        .env("HOME", &home)
+        .env("IRONCLAW_REBORN_HOME", &reborn_home)
+        // No OPENAI_API_KEY: the stored key must be what makes this boot.
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("ironclaw-reborn serve should start");
+    wait_for_serve_banner(&mut child);
+
+    let _ = child.kill();
+    let _ = child.wait();
+}
+
+/// RAILWAY PIN 1: the production Railway deployment boots with an
+/// `api_key_required = false` provider (`nearai`) and its API key env var
+/// (`NEARAI_API_KEY`) set — never a stored key, never an unset-key error.
+/// This pins that the stored-key fallback added for the regression above is
+/// additive only: the ordinary env-var-set boot path must behave exactly as
+/// before, with the secret store never even opened (an empty store, as
+/// Railway's is, must not matter here — it is only ever consulted on the
+/// `ApiKeyEnvUnset` error path, which this scenario never reaches).
+#[cfg(feature = "webui-v2-beta")]
+#[test]
+fn serve_boots_with_env_api_key_set_and_empty_secret_store() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let reborn_home = temp.path().join("reborn-home");
+    let home = temp.path().join("home");
+    std::fs::create_dir_all(&home).expect("home dir");
+
+    let onboard_output = reborn_command()
+        .arg("onboard")
+        .env("HOME", &home)
+        .env("IRONCLAW_REBORN_HOME", &reborn_home)
+        .output()
+        .expect("ironclaw-reborn onboard should run");
+    assert!(
+        onboard_output.status.success(),
+        "onboard must succeed non-interactively; stderr: {}",
+        String::from_utf8_lossy(&onboard_output.stderr)
+    );
+    // Sanity: the config stub defaults to `nearai`, matching Railway's
+    // deployment shape, and the secret store is never touched by this test.
+    let config_text =
+        std::fs::read_to_string(reborn_home.join("config.toml")).expect("read seeded config.toml");
+    assert!(
+        config_text.contains("provider_id = \"nearai\""),
+        "config: {config_text}"
+    );
+
+    let port = unused_local_port();
+    let mut child = reborn_command()
+        .args(["serve", "--host", "127.0.0.1", "--port"])
+        .arg(port.to_string())
+        .env("HOME", &home)
+        .env("IRONCLAW_REBORN_HOME", &reborn_home)
+        .env("NEARAI_API_KEY", "railway-shape-smoke-test-nearai-key")
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("ironclaw-reborn serve should start");
+    wait_for_serve_banner(&mut child);
+
+    let _ = child.kill();
+    let _ = child.wait();
+}
+
+/// RAILWAY PIN 2: an `api_key_required = true` provider with neither the env
+/// var set nor a key in the secret store must still fail closed at boot with
+/// the same `ApiKeyEnvUnset` error text as before this fix — the
+/// stored-key fallback must never mask a genuine misconfiguration.
+#[cfg(feature = "webui-v2-beta")]
+#[test]
+fn serve_fails_closed_when_neither_env_nor_store_has_the_key() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let reborn_home = temp.path().join("reborn-home");
+    let home = temp.path().join("home");
+    std::fs::create_dir_all(&home).expect("home dir");
+
+    let onboard_output = reborn_command()
+        .arg("onboard")
+        .env("HOME", &home)
+        .env("IRONCLAW_REBORN_HOME", &reborn_home)
+        .output()
+        .expect("ironclaw-reborn onboard should run");
+    assert!(
+        onboard_output.status.success(),
+        "onboard must succeed non-interactively; stderr: {}",
+        String::from_utf8_lossy(&onboard_output.stderr)
+    );
+    let set_provider_output = reborn_command()
+        .args(["models", "set-provider", "openai", "--model", "gpt-5-mini"])
+        .env("IRONCLAW_REBORN_HOME", &reborn_home)
+        .output()
+        .expect("ironclaw-reborn models set-provider should run");
+    assert!(
+        set_provider_output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&set_provider_output.stderr)
+    );
+    // No `seed_stored_llm_key` call: the secret store stays empty.
+
+    let output = reborn_command()
+        .args(["serve", "--host", "127.0.0.1", "--port", "0"])
+        .env("HOME", &home)
+        .env("IRONCLAW_REBORN_HOME", &reborn_home)
+        // No OPENAI_API_KEY set.
+        .output()
+        .expect("ironclaw-reborn serve should run and exit");
+
+    assert!(
+        !output.status.success(),
+        "serve must fail closed with neither an env key nor a stored key"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr
+            .contains("llm provider `openai` requires API key env var `OPENAI_API_KEY` to be set"),
+        "stderr must carry the same ApiKeyEnvUnset error text as before this fix: {stderr}"
+    );
+}
+
 #[test]
 fn onboard_dry_run_is_read_only() {
     let temp = tempfile::tempdir().expect("tempdir");

@@ -543,6 +543,102 @@ fn apply_credential_refresh_override(
     Ok(settings)
 }
 
+/// Resolve the Reborn runtime's default LLM selection, tolerating a
+/// required-but-unset API key env var when a key is already durably stored
+/// for that provider in the local secret store.
+///
+/// Without this, an operator who provisioned an `openai`/`anthropic` key
+/// through `onboard` (stored in the encrypted secret store, never written
+/// into `config.toml` or the environment) could `onboard` successfully but
+/// have `serve` refuse to boot: `resolve_reborn_runtime_llm` fails closed on
+/// the missing env var here, before `apply_startup_stored_llm_key` (which
+/// runs later, once the async runtime and `build_reborn_services` are up)
+/// ever gets a chance to inject the stored key. A provider with
+/// `api_key_required = false` (e.g. `nearai`) never hits this path —
+/// resolution succeeds outright, which is why this bug didn't show up for
+/// the zero-friction default provider.
+///
+/// Only the `ApiKeyEnvUnset` error variant is treated specially: every
+/// other resolution failure (unknown provider, malformed catalog fields,
+/// missing base URL, ...) surfaces unchanged, and so does `ApiKeyEnvUnset`
+/// itself when the store doesn't have a key either — this only ever turns a
+/// real fix (a stored key) into a successful boot, never masks a real
+/// misconfiguration.
+///
+/// Scoped to `RuntimeInputCaller::Serve` only: `run` keeps today's exact
+/// fail-fast behavior. Opening the local-dev secret store needs the local
+/// master key, which — absent a cached dotfile — falls through to the OS
+/// keychain; on an interactive dev machine that can mean a GUI prompt (or,
+/// with no GUI session at all, an indefinite block) before this even gets to
+/// check whether a key is stored. `onboard`'s own credential-prompt seam
+/// takes on that same cost deliberately, in an interactive step the operator
+/// is already present for. `serve` is the one other caller worth paying it
+/// for — it's the boot path this fix exists to unblock. `run` is a
+/// synchronous one-shot CLI invocation with no such boot-time contract, and
+/// widening this to it would make an ordinary "forgot to export the key"
+/// mistake hang instead of failing fast with today's clear error.
+#[cfg(all(feature = "libsql", feature = "root-llm-provider"))]
+fn resolve_reborn_runtime_llm_with_stored_key_fallback(
+    config: &RebornBootConfig,
+    config_file: Option<&ironclaw_reborn_config::RebornConfigFile>,
+    caller: RuntimeInputCaller,
+) -> anyhow::Result<Option<ironclaw_reborn_composition::ResolvedRebornLlm>> {
+    let error = match ironclaw_reborn_composition::resolve_reborn_runtime_llm(config, config_file) {
+        Ok(resolved) => return Ok(resolved),
+        Err(error) => error,
+    };
+    if caller != RuntimeInputCaller::Serve {
+        return Err(error.into());
+    }
+    let ironclaw_reborn_composition::RebornLlmCatalogError::ApiKeyEnvUnset { ref provider, .. } =
+        error
+    else {
+        return Err(error.into());
+    };
+    // `ApiKeyEnvUnset` can only come from the config-file-selection branch of
+    // `resolve_reborn_runtime_llm` (the env-fallback branch never returns
+    // this variant), so a selection must be present to retry against.
+    // Defensive: if it somehow isn't, surface the original error unchanged
+    // rather than reach for a selection that doesn't exist.
+    let Some(selection) = config_file.and_then(|file| file.default_llm_slot()) else {
+        return Err(error.into());
+    };
+    let provider_id = provider.clone();
+    let home_path = config.home().path().to_path_buf();
+    let has_stored_key = block_on_cli(async move {
+        let store = ironclaw_reborn_composition::open_local_dev_secret_store(&home_path)
+            .await
+            .map_err(anyhow::Error::from)?;
+        ironclaw_reborn_composition::LlmKeyStore::new(store)
+            .exists(&provider_id)
+            .await
+            .map_err(anyhow::Error::from)
+    })?;
+    if !has_stored_key {
+        return Err(error.into());
+    }
+    ironclaw_reborn_composition::resolve_llm_selection_allow_missing_key(
+        selection,
+        Some(config.home().providers_file_path().as_path()),
+    )
+    .map(ironclaw_reborn_composition::ResolvedRebornLlm::from_llm_config)
+    .map(Some)
+    .map_err(Into::into)
+}
+
+/// Feature-off fallback: without `libsql` there is no local-dev secret store
+/// to check, so behavior here is byte-identical to calling
+/// `resolve_reborn_runtime_llm` directly — a required-but-unset API key
+/// still fails closed with `ApiKeyEnvUnset`.
+#[cfg(all(feature = "root-llm-provider", not(feature = "libsql")))]
+fn resolve_reborn_runtime_llm_with_stored_key_fallback(
+    config: &RebornBootConfig,
+    config_file: Option<&ironclaw_reborn_config::RebornConfigFile>,
+    _caller: RuntimeInputCaller,
+) -> anyhow::Result<Option<ironclaw_reborn_composition::ResolvedRebornLlm>> {
+    ironclaw_reborn_composition::resolve_reborn_runtime_llm(config, config_file).map_err(Into::into)
+}
+
 pub(crate) fn build_runtime_input_with_options(
     config: &RebornBootConfig,
     caller: RuntimeInputCaller,
@@ -571,9 +667,10 @@ pub(crate) fn build_runtime_input_with_options(
 
     #[cfg(feature = "root-llm-provider")]
     {
-        match ironclaw_reborn_composition::resolve_reborn_runtime_llm(
+        match resolve_reborn_runtime_llm_with_stored_key_fallback(
             config,
             runtime_services.config_file.as_ref(),
+            caller,
         )? {
             Some(llm) => {
                 tracing::debug!(

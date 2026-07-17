@@ -155,6 +155,60 @@ pub fn resolve_llm_selection_against_catalog(
     resolve_against_registry(selection, &registry)
 }
 
+/// Resolve a selection the same way [`resolve_llm_selection_against_catalog`]
+/// does, except a required-but-unset API key env var does not fail
+/// resolution: the selected provider is treated as keyless for this
+/// resolution only, producing a config with no API key set.
+///
+/// This exists for the CLI runtime seam
+/// (`ironclaw_reborn_cli::runtime::build_runtime_input_with_options`), which
+/// calls it only after independently confirming a key is durably stored in
+/// the local secret store for this provider — the same store
+/// `apply_startup_stored_llm_key` reads from moments later at startup to
+/// overlay the stored key onto the config this function returns. This
+/// function itself stays store-agnostic (pure catalog/selection resolution)
+/// so the store lookup lives in exactly one place: the CLI call site.
+pub fn resolve_llm_selection_allow_missing_key(
+    selection: &LlmSlotSelection,
+    user_providers_path: Option<&Path>,
+) -> Result<ironclaw_llm::LlmConfig, RebornLlmCatalogError> {
+    let registry = ProviderRegistry::try_load_from_path(user_providers_path)
+        .map_err(|source| RebornLlmCatalogError::CatalogLoad { source })?;
+    let provider_id = selection
+        .provider_id
+        .as_deref()
+        .ok_or(RebornLlmCatalogError::MissingProviderId)?;
+    let keyless_registry = registry_with_provider_treated_as_keyless(&registry, provider_id);
+    resolve_against_registry(selection, &keyless_registry)
+}
+
+/// Clone `registry`, marking the catalog entry matching `provider_id`
+/// (by id or alias, case-insensitively — matching [`ProviderRegistry::find`]'s
+/// own lookup) as `api_key_required = false`. Every other entry, and every
+/// other field on the matched entry, is unchanged.
+fn registry_with_provider_treated_as_keyless(
+    registry: &ProviderRegistry,
+    provider_id: &str,
+) -> ProviderRegistry {
+    let providers = registry
+        .all()
+        .iter()
+        .cloned()
+        .map(|mut provider| {
+            if provider.id.eq_ignore_ascii_case(provider_id)
+                || provider
+                    .aliases
+                    .iter()
+                    .any(|alias| alias.eq_ignore_ascii_case(provider_id))
+            {
+                provider.api_key_required = false;
+            }
+            provider
+        })
+        .collect();
+    ProviderRegistry::new(providers)
+}
+
 /// Validate provider-overlay bytes with the same typed definitions and
 /// Reborn-specific catalog checks used by runtime composition.
 #[derive(Debug, thiserror::Error)]
@@ -548,6 +602,53 @@ mod tests {
         };
         let err = resolve_against_registry(&selection, &registry).expect_err("must error");
         assert!(matches!(err, RebornLlmCatalogError::ApiKeyEnvUnset { .. }));
+    }
+
+    /// Companion to `missing_required_api_key_env_fails_closed`: the same
+    /// unset-env-var setup must resolve successfully (with no API key on
+    /// the resulting config) once the CLI runtime seam's keyless override
+    /// is applied. This is the seam `build_runtime_input_with_options`
+    /// exercises after confirming a stored key exists.
+    #[test]
+    fn allow_missing_key_resolves_a_required_key_provider_without_the_env_var_set() {
+        let env_name = "REBORN_TEST_UNSET_API_KEY_ALLOW_MISSING_DO_NOT_SET_7d2b";
+        debug_assert!(
+            std::env::var(env_name).is_err(),
+            "test depends on `{env_name}` being unset"
+        );
+        let registry = ProviderRegistry::new(vec![provider_with_required_key("alpha", env_name)]);
+        let selection = LlmSlotSelection {
+            provider_id: Some("alpha".to_string()),
+            ..Default::default()
+        };
+        let keyless_registry = registry_with_provider_treated_as_keyless(&registry, "alpha");
+        let config = resolve_against_registry(&selection, &keyless_registry)
+            .expect("keyless resolution must succeed even though the API key env var is unset");
+        let provider = config.provider.expect("registry provider config");
+        assert!(
+            provider.api_key.is_none(),
+            "no api key should be resolved from the (still-unset) env var"
+        );
+    }
+
+    #[test]
+    fn registry_with_provider_treated_as_keyless_only_affects_the_matched_provider() {
+        let registry = ProviderRegistry::new(vec![
+            provider_with_required_key("alpha", "REBORN_TEST_ALPHA_KEY_DO_NOT_SET_7d2b"),
+            provider_with_required_key("beta", "REBORN_TEST_BETA_KEY_DO_NOT_SET_7d2b"),
+        ]);
+        let keyless = registry_with_provider_treated_as_keyless(&registry, "alpha");
+        assert!(
+            !keyless
+                .find("alpha")
+                .expect("alpha present")
+                .api_key_required,
+            "the requested provider must be treated as keyless"
+        );
+        assert!(
+            keyless.find("beta").expect("beta present").api_key_required,
+            "every other provider's api_key_required must be untouched"
+        );
     }
 
     #[test]
