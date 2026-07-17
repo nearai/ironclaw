@@ -1388,10 +1388,11 @@ async def _wasm_channel_auth_url(server: dict) -> tuple[str, str]:
         ("gmail-channel", "gmail_channel"),
     )
     extension_name = extension["name"]
+    # Activation is the supported auth-start path. Posting an empty setup form
+    # correctly fails validation because it claims to submit no required token.
     response = await api_post(
         server["base_url"],
-        f"/api/extensions/{extension_name}/setup",
-        json={"secrets": {}},
+        f"/api/extensions/{extension_name}/activate",
         timeout=30,
     )
     assert response.status_code == 200, response.text

@@ -1278,7 +1278,9 @@ jobs:
     permissions:
       contents: read
       issues: write
-      pull-requests: read
+      # GitHub rejects PR issue-comment creation with issues:write alone in
+      # this repository (403 Resource not accessible by integration).
+      pull-requests: write
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
         with:

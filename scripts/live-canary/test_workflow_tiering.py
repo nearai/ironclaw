@@ -230,6 +230,14 @@ class WorkflowTieringTests(unittest.TestCase):
             LIVE_LANES | {"preflight-reborn-webui-v2-google-oauth"},
         )
 
+    def test_live_report_can_comment_on_target_pr(self) -> None:
+        report = job_block(self.live, "canary-report")
+        permissions = mapping_block(report, "permissions", 4)
+        self.assertEqual(
+            scalar_value(permissions, "pull-requests", 6),
+            "write",
+        )
+
     def test_reborn_ci_owns_mock_auth_matrix(self) -> None:
         mock_auth = job_block(self.reborn, "mock-auth-e2e")
         self.assertTrue(mock_auth)

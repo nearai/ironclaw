@@ -8,9 +8,11 @@ What this probe asserts
 -----------------------
 
 1. **Chat send succeeds** (HTTP 202 from `/api/chat/send`).
-2. **The agent actually invokes `tool_install`** for the requested
-   extension within ``TIMEOUT_S``. Asserted directly from history —
-   no inference from secondary effects.
+2. **The agent actually invokes `tool_install`** within ``TIMEOUT_S``.
+   When history exposes arguments, the call is bound directly to the
+   requested extension. Completed history intentionally redacts arguments,
+   so that shape is correlated with a clean pre-chat state and target
+   extension readback instead.
 3. **The extension reaches `installed=true`** via `GET /api/extensions`.
 4. **No forbidden error/panic substrings** in the rendered history.
 
@@ -226,6 +228,61 @@ def _history_has_tool_install_call_for(
     return _walk(history)
 
 
+def _history_has_tool_install_summary(history: dict[str, Any]) -> bool:
+    """Recognize the redacted call-summary shape from chat history.
+
+    ``GET /api/chat/history`` deliberately returns ``ToolCallInfo`` summaries
+    without tool arguments. Installation can still be followed by an auth
+    error, so result/error flags do not prove whether registration happened;
+    the target readback does. Match only a named entry inside ``tool_calls`` so
+    prose or a tool output mentioning ``tool_install`` cannot satisfy the
+    invocation signal.
+    """
+
+    def _walk(node: Any) -> bool:
+        if isinstance(node, dict):
+            calls = node.get("tool_calls")
+            if isinstance(calls, list) and any(
+                isinstance(call, dict) and call.get("name") == "tool_install"
+                for call in calls
+            ):
+                return True
+            return any(_walk(value) for value in node.values())
+        if isinstance(node, list):
+            return any(_walk(value) for value in node)
+        return False
+
+    return _walk(history)
+
+
+def _tool_install_evidence(
+    history: dict[str, Any],
+    target: str,
+    *,
+    target_absent_before_chat: bool,
+    target_registered_after_chat: bool,
+) -> str | None:
+    """Return the authoritative evidence path for a chat-driven install.
+
+    Prefer an argument-bearing invocation when the history surface provides
+    one. For the normal redacted history shape, require all three causal
+    signals together: the target was absent immediately before chat, a
+    ``tool_install`` call summary is recorded in that chat, and the target is
+    registered afterward. The clean-slate requirement prevents a prior probe's
+    installation from being mistaken for this chat's side effect.
+    """
+
+    if _history_has_tool_install_call_for(history, target):
+        return "target_bound_history"
+    if (
+        target_absent_before_chat
+        and target_registered_after_chat
+        and _history_has_tool_install_summary(history)
+    ):
+        return "clean_slate_readback"
+    return None
+
+
 # When the probe fails, we want enough breadcrumbs in the artifact to
 # diagnose what the agent actually did without re-running the canary.
 # The slack notifier surfaces `details.error` plus the structured
@@ -383,6 +440,10 @@ async def run(
                 await _remove_extension_if_present(
                     client, base_url, TARGET_EXTENSION
                 )
+            target_absent_before_chat = (
+                await _get_extension(client, base_url, TARGET_EXTENSION)
+                is None
+            )
 
             thread_id = await _open_thread(client, base_url)
             send_status = await _send_chat(
@@ -418,9 +479,13 @@ async def run(
         # reasons (e.g. seeded by a prior probe) would falsely pass.
         # See _history_has_tool_install_call_for for the recognised
         # envelope shapes.
-        tool_install_seen = _history_has_tool_install_call_for(
-            history, TARGET_EXTENSION
+        tool_install_evidence = _tool_install_evidence(
+            history,
+            TARGET_EXTENSION,
+            target_absent_before_chat=target_absent_before_chat,
+            target_registered_after_chat=registered,
         )
+        tool_install_seen = tool_install_evidence is not None
         forbidden_hits = [frag for frag in FORBIDDEN_FRAGMENTS if frag in text]
 
         latency_ms = int((time.perf_counter() - started) * 1000)
@@ -433,8 +498,10 @@ async def run(
             "trigger_prompt": TRIGGER_PROMPT,
             "target_extension": TARGET_EXTENSION,
             "pre_existing_before_probe": pre_existing,
+            "target_absent_before_chat": target_absent_before_chat,
             "extension_registered": registered,
             "tool_install_seen_in_history": tool_install_seen,
+            "tool_install_evidence": tool_install_evidence,
             "extension_state": (
                 {k: ext.get(k) for k in ("authenticated", "active", "needs_setup")}
                 if ext is not None
@@ -467,9 +534,9 @@ async def run(
                 )
             if not tool_install_seen:
                 reasons.append(
-                    "no tool_install invocation observed in history — "
-                    "agent surface regression (tool_install hidden from "
-                    "callable surface)"
+                    "no authoritative tool_install evidence observed — "
+                    "expected a target-bound invocation or a call summary "
+                    "correlated with clean-slate target readback"
                 )
             if forbidden_hits:
                 reasons.append(f"forbidden fragments: {forbidden_hits}")
