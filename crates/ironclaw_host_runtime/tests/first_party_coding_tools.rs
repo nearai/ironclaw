@@ -1417,12 +1417,14 @@ async fn builtin_edit_tools_disable_post_edit_check_when_process_backend_is_none
 }
 
 #[tokio::test]
-async fn builtin_edit_tools_disable_post_edit_check_under_tenant_sandbox_policy() {
-    // Regression (PR #5979 review): under a tenant-sandbox process policy the
-    // default process port handed to non-process plans is still the raw local
-    // host port, so a configured check used to escape the sandbox onto the
-    // provider host. The check must be withheld outright — not spawned on the
-    // local host port, and not silently rerouted to the sandbox port either.
+async fn builtin_edit_tools_run_post_edit_check_in_tenant_sandbox_not_on_local_host() {
+    // Regression (PR #5978 review): the edit plans declare no process effect, so
+    // the default process port handed to them is the deployment-blind local host
+    // port. Running the configured check through it would escape the sandbox onto
+    // the shared provider host under a tenant-sandbox policy. The resolver instead
+    // bundles the check with the port matching the plan's process backend, so
+    // under a tenant-sandbox policy the check runs ISOLATED in the tenant's own
+    // sandbox — never on the local host port.
     let temp = tempfile::tempdir().unwrap();
 
     let (filesystem, mounts) = mounted_filesystem(temp.path(), MountPermissions::read_write());
@@ -1452,9 +1454,13 @@ async fn builtin_edit_tools_disable_post_edit_check_under_tenant_sandbox_policy(
         json!(true),
         "edit must succeed"
     );
-    assert!(
-        completed.output.get("post_edit_check").is_none(),
-        "a tenant-sandbox process policy must disable the post-edit check"
+    assert_eq!(
+        completed.output["post_edit_check"]["new_output"]
+            .as_str()
+            .expect("the sandbox-run check surfaces its diagnostics as new_output"),
+        "sandbox diagnostics",
+        "a tenant-sandbox policy runs the check ISOLATED in the tenant sandbox \
+         and surfaces its output to the model"
     );
     assert!(
         local_port.requests().is_empty(),
@@ -1462,10 +1468,13 @@ async fn builtin_edit_tools_disable_post_edit_check_under_tenant_sandbox_policy(
     );
     assert_eq!(
         sandbox_transport.request_count(),
-        0,
-        "the withheld check must not be rerouted through the sandbox port"
+        1,
+        "the check runs through the tenant sandbox port, never the local host"
     );
-    assert_eq!(completed.usage.process_count, 0);
+    assert_eq!(
+        completed.usage.process_count, 1,
+        "the sandbox-run check is accounted as one spawned process"
+    );
 }
 
 fn assert_aggregate_scan_limit(output: &Value) {
@@ -1704,7 +1713,8 @@ fn tenant_sandbox_runtime_policy() -> EffectiveRuntimePolicy {
 }
 
 /// Sandbox transport double that counts requests; the tenant-sandbox test
-/// asserts the withheld post-edit check is not rerouted through it.
+/// asserts the post-edit check runs through it (isolated in the tenant
+/// sandbox) rather than escaping onto the local host port.
 #[derive(Default)]
 struct RecordingSandboxTransport {
     requests: std::sync::Mutex<Vec<CommandExecutionRequest>>,
