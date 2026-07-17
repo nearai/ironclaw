@@ -1454,6 +1454,13 @@ async fn build_local_runtime(input: RebornBuildInput) -> Result<RebornServices, 
         turn_state_store_limits,
         ..
     } = input;
+    // Computed before `oauth_provider_configs` is consumed by
+    // `compose_provider_client` below — the cheap composition-side signal
+    // `GsuiteFirstPartyHandler` uses to short-circuit dispatch with a "not
+    // configured" tool result instead of reaching credential resolution.
+    let google_oauth_configured = oauth_provider_configs
+        .iter()
+        .any(|config| config.spec.provider_id == ironclaw_auth::GOOGLE_PROVIDER_ID);
     let local_runtime_identity_for_nearai_mcp = local_runtime_identity.clone();
     let (
         root,
@@ -2079,6 +2086,7 @@ async fn build_local_runtime(input: RebornBuildInput) -> Result<RebornServices, 
         Arc::new(ProductAuthRuntimeGsuiteCredentialStager::new(
             product_auth_runtime_ports.clone(),
         )),
+        google_oauth_configured,
     )
     .map_err(|error| RebornBuildError::InvalidConfig {
         reason: format!("GSuite first-party handlers are invalid: {error}"),
@@ -5231,6 +5239,12 @@ where
         turn_state_store_limits,
         scheduler_wake_wiring,
     } = context;
+    // Computed before `oauth_provider_configs` is consumed by
+    // `compose_provider_client` below — see the mirrored comment in
+    // `build_local_runtime`.
+    let google_oauth_configured = oauth_provider_configs
+        .iter()
+        .any(|config| config.spec.provider_id == ironclaw_auth::GOOGLE_PROVIDER_ID);
     let owner_user_id = UserId::new(owner_id).map_err(|error| RebornBuildError::InvalidConfig {
         reason: error.to_string(),
     })?;
@@ -5443,6 +5457,7 @@ where
         Arc::new(ProductAuthRuntimeGsuiteCredentialStager::new(
             product_auth_runtime_ports.clone(),
         )),
+        google_oauth_configured,
     )
     .map_err(|error| RebornBuildError::InvalidConfig {
         reason: format!("GSuite first-party handlers are invalid: {error}"),

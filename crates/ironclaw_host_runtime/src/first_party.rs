@@ -191,6 +191,31 @@ impl FirstPartyCapabilityError {
         }
     }
 
+    /// Construct a dispatch failure carrying free-text remediation on the
+    /// model-visible diagnostic detail channel rather than `safe_summary`.
+    ///
+    /// Use this when the guidance text itself would fail the strict
+    /// `safe_summary` validator (e.g. it names a `config set` key containing
+    /// the substring "secret", or a URL) — the diagnostic channel scrubs
+    /// secret *values*, not vocabulary, so remediation text naming a config
+    /// key or a console URL survives intact. `safe_summary` may still be set
+    /// to a short validator-safe headline; the full guidance always rides in
+    /// `diagnostic_text`.
+    pub fn dispatch_with_diagnostic(
+        kind: RuntimeDispatchErrorKind,
+        safe_summary: Option<String>,
+        diagnostic_text: impl Into<String>,
+    ) -> Self {
+        Self::Dispatch {
+            kind,
+            safe_summary,
+            detail: Some(Box::new(DispatchFailureDetail::Diagnostic {
+                text: diagnostic_text.into(),
+            })),
+            usage: None,
+        }
+    }
+
     /// Construct an auth-required failure with no specific secret handles.
     pub fn auth_required() -> Self {
         Self::AuthRequired {
@@ -434,5 +459,29 @@ mod tests {
         assert_eq!(error.kind(), Some(RuntimeDispatchErrorKind::Backend));
         assert_eq!(error.required_secrets(), None);
         assert!(!error.is_auth_required());
+    }
+
+    #[test]
+    fn dispatch_with_diagnostic_carries_free_text_detail_and_optional_safe_summary() {
+        use ironclaw_host_api::RuntimeDispatchErrorKind;
+        let error = FirstPartyCapabilityError::dispatch_with_diagnostic(
+            RuntimeDispatchErrorKind::OperationFailed,
+            None,
+            "config set google.client_secret <value>".to_string(),
+        );
+        assert_eq!(
+            error.kind(),
+            Some(RuntimeDispatchErrorKind::OperationFailed)
+        );
+        assert_eq!(error.safe_summary(), None);
+        let FirstPartyCapabilityError::Dispatch { detail, .. } = &error else {
+            panic!("expected Dispatch variant");
+        };
+        let ironclaw_host_api::DispatchFailureDetail::Diagnostic { text } =
+            detail.as_deref().expect("diagnostic detail must be set")
+        else {
+            panic!("expected Diagnostic detail");
+        };
+        assert!(text.contains("client_secret"));
     }
 }

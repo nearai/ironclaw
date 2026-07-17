@@ -1,22 +1,16 @@
 //! Single chokepoint: `config set` alias -> canonical destination, shape
 //! validation, and remediation text for LLM/Google/Slack capability setup.
 //!
-//! [`super::set::ConfigSetCommand`] is the only consumer today. A later
-//! capability-requirements pass (tracked separately, not built in this
-//! change) is expected to reuse the same alias/remediation data to
-//! generate tool-result error text when a capability is invoked without
-//! its required config/secrets present.
-//!
-//! **Cross-crate note for that follow-up:** `ironclaw_reborn_cli` sits
-//! above `ironclaw_reborn_composition` in the dependency graph (`cli`
-//! depends on `composition`, never the reverse), so composition-layer
-//! code cannot import this module directly. If a later change needs this
-//! table from composition (e.g. to build a "not configured" tool-result
-//! message before dispatching a Gmail/Slack capability), the *table*
-//! (not the CLI wiring around it) has to move down into a crate
-//! composition can depend on — `ironclaw_reborn_config` is the natural
-//! home, since `GoogleSection`/`SlackSection` already live there. That
-//! move is deliberately not done here — flagged rather than guessed at.
+//! [`super::set::ConfigSetCommand`] is the only consumer of the alias/shape
+//! machinery in this module. The Google remediation text itself has moved to
+//! `ironclaw_reborn_config::google_remediation_text` (this module just
+//! re-exports it as [`google_remediation_text`]) so
+//! `ironclaw_reborn_composition::extension_host::gsuite`'s "not configured"
+//! tool-result error can share the exact same wording without depending on
+//! this crate — `ironclaw_reborn_cli` sits above `composition` in the
+//! dependency graph (`cli` depends on `composition`, never the reverse), so
+//! composition-layer code cannot import CLI modules directly, but both
+//! already depend on `ironclaw_reborn_config`.
 
 /// Where a `config set` value physically lands.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -164,19 +158,13 @@ pub(super) fn validate_shape(key: &ConfigKey, value: &str) -> ShapeVerdict {
 }
 
 /// BYO (bring-your-own) console-steps remediation text for Google OAuth
-/// setup, printed by `config set` guidance and (later) by a capability's
-/// "not configured" tool-result message — see the module doc's
-/// cross-crate note for why that consumer isn't wired yet.
+/// setup, printed by `config set` guidance. Delegates to
+/// `ironclaw_reborn_config::google_remediation_text` — the single shared
+/// source of this text — so this crate's re-export point stays a stable
+/// call site for `set.rs` even though the wording itself lives lower in the
+/// dependency graph. See the module doc for why the text moved.
 pub(super) fn google_remediation_text() -> String {
-    "Google OAuth setup (one-time, per instance):\n  \
-     1. https://console.cloud.google.com/apis/credentials -> Create Credentials -> OAuth \
-     client ID -> Desktop app\n  \
-     2. Enable the Gmail API (and Calendar/Drive as needed) for the project\n  \
-     3. ironclaw-reborn config set google.client_id <id>.apps.googleusercontent.com\n  \
-     4. ironclaw-reborn config set google.client_secret   (prompts, hidden input)\n  \
-     5. ironclaw-reborn config set google.redirect_uri <redirect-uri-from-the-oauth-client>\n  \
-     6. ironclaw-reborn service restart   (config set never restarts the service for you)"
-        .to_string()
+    ironclaw_reborn_config::google_remediation_text()
 }
 
 /// Slack remediation text: per Correction A in the PR-C plan, Slack has
