@@ -1,0 +1,61 @@
+# Composition mass budget — ratchet gate for the ironclaw_reborn_composition crate.
+#
+# Enforced by scripts/ci/check-composition-budget.sh (CI: .github/workflows/code_style.yml;
+# local: scripts/pre-commit-safety.sh when composition files are staged).
+#
+# WHY THIS EXISTS
+#   ironclaw_reborn_composition's charter is service-graph *assembly*
+#   (build_*/with_* wiring) — see .claude/skills/ironclaw-reborn-architecture-review.
+#   In practice it has accreted behavior (slack delivery, product_auth, extension
+#   lifecycle, projections) and is now ~27% of ALL production crate code. The
+#   dependency-boundary tests police edges *between* crates; they are blind to
+#   mass piling up *inside* one crate. This gate is that missing guard.
+#
+# THE METRIC
+#   observed_bp = 10000 * (LOC of crates/ironclaw_reborn_composition/src/**.rs)
+#                       / (LOC of all crates/*/src/**.rs)
+#   Production src only, in basis points (1 bp = 0.01 percentage point).
+#   Test-only FILES are excluded from both numerator and denominator (basenames
+#   tests.rs/test.rs/test_*.rs/*_test.rs/*_tests.rs, and any /tests/ dir — see
+#   TEST_FILE_RE in check-composition-budget.sh). Inline `#[cfg(test)]` modules
+#   inside otherwise-production files are still counted (a line-counter cannot
+#   parse them); this residual is symmetric across numerator and denominator, so
+#   it does not bias the share. Splitting inline test modules into their own
+#   files (carve-out Phase 0) therefore also lowers the number honestly.
+#
+# HOW IT RATCHETS
+#   The gate FAILS when observed_bp > ceiling_bp + tolerance_bp. It is
+#   one-directional: it only trips on *growth* past the ceiling. As behavior is
+#   carved out of composition into owning crates and the share drops, lower
+#   ceiling_bp here to lock the improvement in (the gate prints a NUDGE when
+#   slack exceeds ~1pp). Raising ceiling_bp is allowed but must carry a one-line
+#   rationale in the PR — it is a visible, reviewed decision, not a silent drift.
+
+[gate]
+# false = DRY-RUN (prints "[dry-run, would FAIL]" but never fails the build).
+# true  = ENFORCING (a breach exits non-zero and fails CI / the hook).
+enforce = true
+
+# Ceiling on composition's share of production crate code, in basis points.
+# 2398 bp = 23.98%, the observed value on the date below (a true ratchet: set to
+# current, not padded). tolerance_bp gives working slack for in-flight PRs.
+ceiling_bp = 2398
+tolerance_bp = 30
+
+# Informational — the observed share when this file was last updated. Lets a
+# reviewer see the baseline and lets the gate emit a down-ratchet nudge. Not
+# consulted for the pass/fail decision.
+observed_bp = 2398
+observed_date = "2026-07-16"
+
+# --- Dispatch (Arc<dyn>) ratchet ------------------------------------------
+# A companion metric for the "reduce traits & dispatch" goal (issue #6168 / the
+# runtime-decomposition plan #4471). Counts Arc<dyn> sites in composition's
+# PRODUCTION code, EXCLUDING src/slack and src/extension_host (owned by the
+# separate channel/extension refactor — this gate must not govern their work).
+# One-directional like the mass ratchet: it only trips on GROWTH. Prefer concrete
+# types for single-impl seams; introduce a dyn boundary only at a real second impl
+# or genuine test-fake seam, and raise arc_dyn_ceiling with a PR rationale if so.
+arc_dyn_ceiling = 1093
+arc_dyn_tolerance = 15
+arc_dyn_observed = 1093
