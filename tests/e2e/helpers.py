@@ -265,7 +265,6 @@ SEL_V2 = {
     "workspace_directory_entry_for": (
         "[data-testid='workspace-directory-entry'][data-entry-path='{path}']"
     ),
-    "toast": "[data-testid='toast']",
     "thread_delete_for": (
         '[data-testid="thread-delete"][data-thread-id="{id}"]'
     ),
@@ -382,7 +381,6 @@ SEL_V2 = {
     "automation_rename_button": "[data-testid='automation-rename-button']",
     "automation_rename_input": "[data-testid='automation-rename-input']",
     "automation_rename_save": "[data-testid='automation-rename-save']",
-    "toast": "[data-testid='toast']",
     "automation_run_open": "[data-testid='automation-run-open']",
     "automation_run_logs": "[data-testid='automation-run-logs']",
     "skills_card": "#skills-list .ext-card",

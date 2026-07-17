@@ -517,7 +517,7 @@ async def test_reborn_v2_automation_rename_persists_from_ui(
 
 
 async def test_reborn_v2_automation_action_error_toast_is_safe_dismissible_and_cleared_on_retry(
-    reborn_v2_server, reborn_v2_browser
+    reborn_v2_server, reborn_v2_page
 ):
     """Automation mutation toasts stay visible, private, and clear on retry."""
     automation_id = "11111111-2222-3333-4444-555555555555"
@@ -530,8 +530,7 @@ async def test_reborn_v2_automation_action_error_toast_is_safe_dismissible_and_c
     release_retry = asyncio.Event()
     retry_completed = asyncio.Event()
 
-    context = await reborn_v2_browser.new_context(viewport={"width": 1280, "height": 720})
-    page = await context.new_page()
+    page = reborn_v2_page
     page.on("console", lambda message: console_messages.append(message.text))
 
     async def handle_automations(route) -> None:
@@ -644,7 +643,6 @@ async def test_reborn_v2_automation_action_error_toast_is_safe_dismissible_and_c
         ]
     finally:
         release_retry.set()
-        await context.close()
 
 
 async def test_reborn_v2_automation_failed_run_actions_are_clickable(
