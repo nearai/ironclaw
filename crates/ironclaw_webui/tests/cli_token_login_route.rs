@@ -13,13 +13,16 @@
 use std::sync::Arc;
 
 use axum::body::Body;
+use axum::extract::State;
 use axum::http::{Request, StatusCode, header};
+use axum::middleware::{self, Next};
+use axum::response::{IntoResponse, Response};
 use chrono::Duration as ChronoDuration;
 use http_body_util::BodyExt;
 use ironclaw_host_api::{TenantId, UserId};
 use ironclaw_webui::{
-    CliTokenLoginConfig, EnvBearerAuthenticator, SessionStore, build_cli_token_login,
-    signed_session_store,
+    CliTokenLoginConfig, EnvBearerAuthenticator, SessionAuthenticator, SessionStore,
+    build_cli_token_login, signed_session_store,
 };
 use secrecy::SecretString;
 use serde::Deserialize;
@@ -174,4 +177,122 @@ async fn missing_token_is_rejected() {
         .await
         .expect("oneshot");
     assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+}
+
+// ─── post-exchange bearer authorizes a protected route ────────────────
+//
+// `build_router` above only proves the ticket exchange returns a
+// well-formed bearer — it never proves that bearer actually
+// authenticates anything. Compose the SAME `session_store` the login
+// mount mints through with the real production auth-verifying layer,
+// [`SessionAuthenticator`] (the one `serve.rs` wires into
+// `WebuiServeConfig` — see `session_round_trip.rs`'s `build_app` for the
+// analogous OAuth-side wiring), fronting a minimal protected route. This
+// is deliberately NOT the full `webui_v2_app` + `RebornServicesApi`
+// composition `session_round_trip.rs` uses — that facade stub is
+// scoped to proving the OAuth session round-trip through a real v2
+// handler, and duplicating its ~30-method trait impl here just to prove
+// "does this bearer authenticate" would be machinery this test doesn't
+// need. `SessionAuthenticator` IS the seam that decides that question in
+// production; a route behind it is enough to prove the login mount's
+// bearer is a real, working session and not just an opaque string.
+
+const PROTECTED_PATH: &str = "/protected/ping";
+
+async fn require_session_bearer(
+    State(authenticator): State<Arc<SessionAuthenticator>>,
+    request: Request<Body>,
+    next: Next,
+) -> Response {
+    let token = request
+        .headers()
+        .get(header::AUTHORIZATION)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.strip_prefix("Bearer "));
+    let Some(token) = token else {
+        return StatusCode::UNAUTHORIZED.into_response();
+    };
+    // Reuses the real `WebuiAuthenticator::authenticate` contract — the
+    // same call `authenticate_request` makes in
+    // `ironclaw_reborn_composition::webui::webui_serve` — rather than
+    // reimplementing session validation.
+    if ironclaw_reborn_composition::WebuiAuthenticator::authenticate(&*authenticator, token)
+        .await
+        .is_none()
+    {
+        return StatusCode::UNAUTHORIZED.into_response();
+    }
+    next.run(request).await
+}
+
+fn build_protected_router(session_store: Arc<dyn SessionStore>) -> axum::Router {
+    let authenticator = Arc::new(SessionAuthenticator::new(session_store));
+    axum::Router::new()
+        .route(
+            PROTECTED_PATH,
+            axum::routing::get(|| async { StatusCode::OK }),
+        )
+        .route_layer(middleware::from_fn_with_state(
+            authenticator,
+            require_session_bearer,
+        ))
+}
+
+fn protected_request(bearer: Option<&str>) -> Request<Body> {
+    let mut builder = Request::builder().method("GET").uri(PROTECTED_PATH);
+    if let Some(bearer) = bearer {
+        builder = builder.header(header::AUTHORIZATION, format!("Bearer {bearer}"));
+    }
+    builder.body(Body::empty()).expect("request")
+}
+
+#[tokio::test]
+async fn exchanged_bearer_authenticates_a_protected_route() {
+    let (login_router, session_store) = build_router();
+    let protected_router = build_protected_router(session_store);
+    let app = login_router.merge(protected_router.clone());
+
+    // RED first: an unauthenticated request against the protected route
+    // must 401 — proves the route actually enforces the auth-verifying
+    // layer before the rest of this test relies on a 200 meaning
+    // something.
+    let unauthenticated = protected_router
+        .clone()
+        .oneshot(protected_request(None))
+        .await
+        .expect("oneshot");
+    assert_eq!(unauthenticated.status(), StatusCode::UNAUTHORIZED);
+
+    let login = app
+        .clone()
+        .oneshot(login_request(CLI_TOKEN))
+        .await
+        .expect("oneshot");
+    assert_eq!(login.status(), StatusCode::SEE_OTHER);
+    let location = login
+        .headers()
+        .get(header::LOCATION)
+        .expect("Location header")
+        .to_str()
+        .expect("utf-8")
+        .to_string();
+    let ticket = ticket_from_location(&location);
+
+    let exchange = exchange_ticket(app.clone(), &ticket).await;
+    assert_eq!(exchange.status(), StatusCode::OK);
+    let body = body_string(exchange.into_body()).await;
+    let payload: SessionExchangeResponse = serde_json::from_str(&body).expect("json");
+    assert!(!payload.token.is_empty());
+
+    // GREEN: the exchanged bearer must authenticate the protected route.
+    let authenticated = app
+        .oneshot(protected_request(Some(&payload.token)))
+        .await
+        .expect("oneshot");
+    assert_eq!(
+        authenticated.status(),
+        StatusCode::OK,
+        "the login mount's exchanged bearer must authorize a request through the real \
+         SessionAuthenticator layer, not just decode as JSON",
+    );
 }

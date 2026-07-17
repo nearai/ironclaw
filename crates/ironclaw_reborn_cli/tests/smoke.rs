@@ -2334,11 +2334,42 @@ fn serve_with_sso_does_not_double_mount_session_exchange() {
     );
 }
 
+/// Strip ANSI SGR escape sequences (`\x1b[...m`) from `text`. `init_tracing`'s
+/// stderr `fmt::layer()` colorizes its output unconditionally — it does not
+/// gate on the writer being a real terminal — so a piped `Child::stderr`
+/// still carries color codes interleaved between field names and values
+/// (e.g. `provider_id` and `=openai` are split by a reset/dim escape pair).
+/// Assertions on structured-log field text must strip these first or a
+/// plain `contains("provider_id=openai")` silently never matches.
+#[cfg(feature = "webui-v2-beta")]
+fn strip_ansi(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut chars = text.chars();
+    while let Some(ch) = chars.next() {
+        if ch == '\u{1b}' && chars.clone().next() == Some('[') {
+            chars.next(); // consume '['
+            for next in chars.by_ref() {
+                if next == 'm' {
+                    break;
+                }
+            }
+        } else {
+            out.push(ch);
+        }
+    }
+    out
+}
+
 /// Spawn-and-poll helper shared by the CLI-token-login tests above: block
 /// until `child`'s stderr carries the ready banner, matching the polling
 /// shape every other `serve` smoke test in this file hand-rolls inline.
+/// Returns everything captured on stderr up to and including the banner
+/// line, so callers that need to assert on pre-banner diagnostics (e.g. the
+/// resolved-LLM `debug!` trace emitted during boot, before
+/// `print_serve_banner` runs — see `runtime::build_runtime_input_with_options`)
+/// don't need their own stderr-draining thread.
 #[cfg(feature = "webui-v2-beta")]
-fn wait_for_serve_banner(child: &mut std::process::Child) {
+fn wait_for_serve_banner(child: &mut std::process::Child) -> String {
     let stderr = child.stderr.take().expect("stderr should be piped");
     let (stderr_tx, stderr_rx) = std::sync::mpsc::channel();
     std::thread::spawn(move || {
@@ -2375,6 +2406,7 @@ fn wait_for_serve_banner(child: &mut std::process::Child) {
             }
         }
     }
+    stderr_text
 }
 
 // Note: port `0` is intentionally accepted now — it lets the kernel
@@ -3585,6 +3617,178 @@ fn onboard_then_serve_boots_with_an_empty_environment() {
     let _ = child.wait();
 }
 
+/// Full-chain capstone: `onboard`'s printed CLI-token login link must
+/// actually WORK once `serve` is up, and the session it mints must
+/// authorize a real request against the WebChat v2 API — not just bind a
+/// listener. Builds on `onboard_then_serve_boots_with_an_empty_environment`'s
+/// setup (same seeding rationale — see that test's doc comment for why the
+/// master-key dotfile and stored `nearai` key are seeded through
+/// `seed_stored_llm_key` rather than env vars or a terminal prompt), then
+/// drives the HTTP mechanics `serve_mounts_cli_login_route_without_sso`
+/// already exercises (`GET /login?token=` → 302/303 with a `login_ticket` →
+/// `POST /auth/session/exchange` → bearer) starting from onboard's OWN
+/// provisioned token file instead of a hand-seeded one, and goes one step
+/// further: the exchanged bearer is used to authenticate a real
+/// `GET /api/webchat/v2/threads` call against the actually-composed
+/// `webui_v2_app` (real `RebornServicesApi`, not a stub), asserting a
+/// non-401/403 response — proving the login link's session is not just
+/// mintable but usable.
+#[cfg(feature = "webui-v2-beta")]
+#[test]
+fn onboard_login_link_then_bearer_authorizes_a_protected_request() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let reborn_home = temp.path().join("reborn-home");
+    let home = temp.path().join("home");
+    std::fs::create_dir_all(&home).expect("home dir");
+
+    let onboard_output = reborn_command()
+        .arg("onboard")
+        .env("HOME", &home)
+        .env("IRONCLAW_REBORN_HOME", &reborn_home)
+        .output()
+        .expect("ironclaw-reborn onboard should run");
+    assert!(
+        onboard_output.status.success(),
+        "onboard must succeed non-interactively; stderr: {}",
+        String::from_utf8_lossy(&onboard_output.stderr)
+    );
+    let onboard_stdout = String::from_utf8_lossy(&onboard_output.stdout);
+    assert!(
+        onboard_stdout.contains("login_link: http://127.0.0.1:3000/login?token="),
+        "onboard must print the CLI-token login link; stdout: {onboard_stdout}"
+    );
+    let token_path = reborn_home.join("webui-token");
+    assert!(
+        token_path.exists(),
+        "onboard must provision the webui-token file `serve` reads as a fallback"
+    );
+    let webui_token = std::fs::read_to_string(&token_path)
+        .expect("read onboard-provisioned webui-token")
+        .trim()
+        .to_string();
+    assert!(
+        !webui_token.is_empty(),
+        "onboard-provisioned webui-token must not be empty"
+    );
+
+    // Same stored-key seeding `onboard_then_serve_boots_with_an_empty_
+    // environment` performs, through the shared `seed_stored_llm_key`
+    // helper below — exercises the stored-key overlay path a real
+    // interactive onboarding run would also take (not required for `serve`
+    // to boot: the stub's `[llm.default]` is `nearai`, `api_key_required =
+    // false`).
+    seed_stored_llm_key(&reborn_home, "nearai", "nearai-smoke-test-session");
+
+    let port = unused_local_port();
+    let mut child = reborn_command()
+        .args(["serve", "--host", "127.0.0.1", "--port"])
+        .arg(port.to_string())
+        .env("HOME", &home)
+        .env("IRONCLAW_REBORN_HOME", &reborn_home)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("ironclaw-reborn serve should start");
+    wait_for_serve_banner(&mut child);
+
+    // 1. The onboard-provisioned token, presented at `/login?token=`,
+    //    must redirect into the ticket hand-off — this is the exact URL
+    //    `onboard` printed as `login_link:` above (minus the placeholder
+    //    port).
+    let login = http_response(
+        port,
+        &format!(
+            "GET /login?token={webui_token} HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n"
+        ),
+        "onboard login-link probe",
+    );
+    let login = match login {
+        Ok(response) => response,
+        Err(error) => {
+            let _ = child.kill();
+            let _ = child.wait();
+            panic!("login-link probe failed: {error}");
+        }
+    };
+    assert!(
+        login.status_line.contains(" 302 ") || login.status_line.contains(" 303 "),
+        "onboard's login link must redirect into the ticket hand-off, got: {}",
+        login.status_line
+    );
+    let location = login
+        .header("location")
+        .expect("redirect must carry a Location header");
+    assert!(
+        location.starts_with("/v2?login_ticket="),
+        "redirect must land on the SPA with a login_ticket, got: {location}"
+    );
+    let ticket = location
+        .split("login_ticket=")
+        .nth(1)
+        .expect("redirect Location must carry a login_ticket query param");
+
+    // 2. Exchange the ticket for the real session bearer.
+    let exchange_body = format!(r#"{{"ticket":"{ticket}"}}"#);
+    let exchange_request = format!(
+        "POST /auth/session/exchange HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{exchange_body}",
+        exchange_body.len()
+    );
+    let exchange = http_response(port, &exchange_request, "session exchange probe");
+    let exchange = match exchange {
+        Ok(response) => response,
+        Err(error) => {
+            let _ = child.kill();
+            let _ = child.wait();
+            panic!("session exchange probe failed: {error}");
+        }
+    };
+    assert!(
+        exchange.status_line.contains(" 200 "),
+        "ticket must exchange for a real bearer, got: {}; body: {}",
+        exchange.status_line,
+        exchange.body
+    );
+    #[derive(serde::Deserialize)]
+    struct ExchangeResponse {
+        token: String,
+    }
+    let bearer: ExchangeResponse =
+        serde_json::from_str(&exchange.body).expect("exchange response body must be valid JSON");
+    assert!(
+        !bearer.token.is_empty(),
+        "exchanged bearer must not be empty"
+    );
+
+    // 3. The exchanged bearer must authorize a REAL request against the
+    //    composed WebChat v2 API surface (production `RebornServicesApi`,
+    //    the same one `serve` wires for real traffic) — not merely be a
+    //    well-formed token. A regression that mints a bearer the auth
+    //    middleware then rejects (or that never reaches the real facade)
+    //    would slip past a test that stops at the exchange response.
+    let api_request = format!(
+        "GET /api/webchat/v2/threads HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer {}\r\nConnection: close\r\n\r\n",
+        bearer.token
+    );
+    let api_response = http_response(port, &api_request, "authenticated protected-route probe");
+
+    let _ = child.kill();
+    let _ = child.wait();
+
+    let api_response = api_response.expect("authenticated protected-route probe must complete");
+    assert!(
+        !api_response.status_line.contains(" 401 ") && !api_response.status_line.contains(" 403 "),
+        "the login link's exchanged bearer must authorize a real WebChat v2 request, got: {}; body: {}",
+        api_response.status_line,
+        api_response.body
+    );
+    assert!(
+        api_response.status_line.contains(" 200 "),
+        "GET /api/webchat/v2/threads with a valid bearer should succeed, got: {}; body: {}",
+        api_response.status_line,
+        api_response.body
+    );
+}
+
 /// Seed the local-dev encrypted secret store with an LLM API key for
 /// `provider_id`, through the same `open_local_dev_secret_store` +
 /// `LlmKeyStore::put` opener `onboard`'s interactive credential prompt uses
@@ -3639,6 +3843,20 @@ fn seed_stored_llm_key(reborn_home: &Path, provider_id: &str, key: &str) {
 /// an in-process integration-tier test would have to reconstruct that same
 /// boot sequence and couldn't observe the actual "does the process bind"
 /// outcome any more directly than spawning it does.
+///
+/// Also closes a coverage gap: the model an operator scripts through
+/// `models set-provider --model <model>` (the non-interactive equivalent of
+/// onboard's own model prompt — see the comment below) must be the model
+/// `serve` actually resolves for the runtime, not just A model. Asserted
+/// via the `debug!` trace `build_runtime_input_with_options` already emits
+/// at `runtime/mod.rs:676-680` (`"resolved LLM selection for Reborn
+/// runtime"`, fields `provider_id`/`model`) once scoped into view with
+/// `IRONCLAW_REBORN_LOG` (the crate's own env knob — see
+/// `runtime::init_tracing` — not `RUST_LOG`, and never `info!`/`warn!` for
+/// this per the REPL/TUI logging-level rule: `debug!` only). A deliberately
+/// non-default model name (`gpt-test-model`, distinct from `openai`'s
+/// catalog default) proves the resolved value flows all the way from the
+/// scripted answer, not a hardcoded fallback.
 #[cfg(feature = "webui-v2-beta")]
 #[test]
 fn onboard_openai_key_then_serve_boots_with_env_var_unset() {
@@ -3659,12 +3877,20 @@ fn onboard_openai_key_then_serve_boots_with_env_var_unset() {
         String::from_utf8_lossy(&onboard_output.stderr)
     );
 
-    // Point `[llm.default]` at `openai` (api_key_required = true), the same
-    // way an operator who ran `onboard`'s interactive credential prompt
-    // would have ended up configured — `models set-provider` is the
+    // Point `[llm.default]` at `openai` (api_key_required = true) with a
+    // deliberately non-default model name, the same way an operator who ran
+    // `onboard`'s interactive credential prompt (which also asks for a
+    // model) would have ended up configured — `models set-provider` is the
     // non-interactive equivalent this test drives instead of a terminal.
+    const SCRIPTED_MODEL: &str = "gpt-test-model";
     let set_provider_output = reborn_command()
-        .args(["models", "set-provider", "openai", "--model", "gpt-5-mini"])
+        .args([
+            "models",
+            "set-provider",
+            "openai",
+            "--model",
+            SCRIPTED_MODEL,
+        ])
         .env("IRONCLAW_REBORN_HOME", &reborn_home)
         .output()
         .expect("ironclaw-reborn models set-provider should run");
@@ -3685,14 +3911,39 @@ fn onboard_openai_key_then_serve_boots_with_env_var_unset() {
         .env("HOME", &home)
         .env("IRONCLAW_REBORN_HOME", &reborn_home)
         // No OPENAI_API_KEY: the stored key must be what makes this boot.
+        // Scoped to this crate (not a blanket `debug`) so the resolved-LLM
+        // trace is observable without flooding stderr with third-party
+        // crate noise `protect_reborn_log_filter` would otherwise still
+        // clamp anyway.
+        // Target is `ironclaw_reborn::runtime`: `tracing`'s default target
+        // is the compiled crate name, which for the `ironclaw-reborn`
+        // binary target (no separate lib crate) is the dash-to-underscore
+        // normalized BIN name — `ironclaw_reborn` — not the Cargo package
+        // name `ironclaw_reborn_cli` this test crate itself is compiled as.
+        .env("IRONCLAW_REBORN_LOG", "info,ironclaw_reborn=debug")
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
         .expect("ironclaw-reborn serve should start");
-    wait_for_serve_banner(&mut child);
+    let pre_banner_stderr = strip_ansi(&wait_for_serve_banner(&mut child));
 
     let _ = child.kill();
     let _ = child.wait();
+
+    assert!(
+        pre_banner_stderr.contains("resolved LLM selection for Reborn runtime"),
+        "serve must emit the resolved-LLM debug trace before binding; stderr: {pre_banner_stderr}"
+    );
+    assert!(
+        pre_banner_stderr.contains("provider_id=openai"),
+        "resolved-LLM trace must name the openai provider; stderr: {pre_banner_stderr}"
+    );
+    assert!(
+        pre_banner_stderr.contains(&format!("model={SCRIPTED_MODEL}")),
+        "resolved-LLM trace must carry the scripted model `{SCRIPTED_MODEL}`, proving the \
+         operator's `models set-provider --model` answer reached the runtime `serve` actually \
+         boots with, not a hardcoded default; stderr: {pre_banner_stderr}"
+    );
 }
 
 /// RAILWAY PIN 1: the production Railway deployment boots with an
