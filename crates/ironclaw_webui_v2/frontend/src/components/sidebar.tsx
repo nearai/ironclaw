@@ -30,7 +30,7 @@ export function Sidebar({
           className="flex items-center gap-2.5 opacity-90 hover:opacity-100"
           aria-label="IronClaw"
         >
-          <img src="/v2/assets/logo.jpg" alt="IronClaw" className="h-7 w-auto" />
+          <img src="/assets/logo.jpg" alt="IronClaw" className="h-7 w-auto" />
         </Link>
       </div>
 

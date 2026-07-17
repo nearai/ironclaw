@@ -20,9 +20,20 @@ Compiling this crate into a binary is not enough to expose the v2
 routes to a browser. Host composition (gateway / app startup) still
 owns:
 
-1. **Mounting the router.** Call `webui_v2_router(state)` and merge
-   the resulting `axum::Router` into the gateway's main router under
-   the same path prefix the descriptors declare.
+1. **Mounting the routers.** Call `webui_v2_router(state)` and merge
+   the resulting API `axum::Router` under the paths its descriptors
+   declare. Merge `static_router()` once at the gateway root for the
+   SPA, owned assets, wallet popup, and `/v2` compatibility redirects.
+   The former public `mount_at_prefix(prefix)` factory was deleted by
+   the root-mount migration: callers must replace
+   `mount_at_prefix("/v2")` with `static_router()` and must not nest the
+   returned router under `/v2`. Hosts that merge additional typed route
+   mounts must use `static_router_with_config(...)` and reserve the
+   mounts' literal root namespaces through
+   `StaticRouterConfig::try_with_additional_reserved_root_namespaces`;
+   percent-encoded/dynamic, malformed, or static-owned roots fail
+   configuration. `webui_v2_app` derives and validates those roots from its
+   final descriptor set automatically.
 2. **Bearer-token middleware.** Authenticate `Authorization: Bearer
    …` (or the matching session form) and inject a
    `WebUiAuthenticatedCaller` and request-scoped
@@ -72,6 +83,7 @@ browser-reachable.
 | `webui.v2.list_extensions` | GET | `/api/webchat/v2/extensions` | None | `ProjectionOnly` |
 | `webui.v2.list_extension_registry` | GET | `/api/webchat/v2/extensions/registry` | None | `ProjectionOnly` |
 | `webui.v2.install_extension` | POST | `/api/webchat/v2/extensions/install` | None | `ProductWorkflow` |
+| `webui.v2.import_extension` | POST | `/api/webchat/v2/extensions/import` (operator-only; raw zip body, 8 MiB cap) | None | `ProductWorkflow` |
 | `webui.v2.activate_extension` | POST | `/api/webchat/v2/extensions/{package_id}/activate` | None | `ProductWorkflow` |
 | `webui.v2.remove_extension` | POST | `/api/webchat/v2/extensions/{package_id}/remove` | None | `ProductWorkflow` |
 | `webui.v2.get_extension_setup` | GET | `/api/webchat/v2/extensions/{package_id}/setup` | None | `ProjectionOnly` |
@@ -138,8 +150,9 @@ settings so regular multi-user sessions can read and update global
 auto-approve plus per-tool overrides without access to the operator command
 plane.
 
-The LLM configuration and operator setup/config/service-control routes are
-operator-wide. Host composition mounts them only when the authenticator says
+The LLM configuration, operator setup/config/service-control, and extension
+zip-import (`webui.v2.import_extension`, #5499) routes are operator-wide.
+Host composition mounts them only when the authenticator says
 the deployment has an operator configuration surface, and must still authorize
 each request from the matched token's `operator_webui_config` capability.
 Multi-user session/OIDC authenticators should leave those routes unmounted or

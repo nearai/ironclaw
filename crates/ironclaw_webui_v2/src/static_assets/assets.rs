@@ -2,8 +2,8 @@
 //!
 //! Populated at compile time by `build.rs` from the crate-owned WebUI bundle
 //! and committed public assets. Each file becomes one
-//! `Asset` row keyed by its URL path (relative to the `/v2` mount
-//! prefix). `index.html` is handled separately — see
+//! `Asset` row keyed by its URL path (relative to the gateway root).
+//! `index.html` is handled separately — see
 //! [`INDEX_HTML_TEMPLATE`].
 
 pub(crate) struct Asset {
@@ -439,7 +439,9 @@ mod tests {
         assert!(detail_panel.contains("automation.state === \"scheduled\""));
         assert!(detail_panel.contains("primary_status_label"));
         assert!(detail_panel.contains("primary_status_tone"));
-        assert!(detail_panel.contains("window.confirm"));
+        assert!(detail_panel.contains("import { ConfirmDialog }"));
+        assert!(detail_panel.contains("<ConfirmDialog"));
+        assert!(!detail_panel.contains("window.confirm"));
 
         let app_bundle = bundled_javascript();
         let app_bundle_contains_encoded_automation_route = |suffix: &str| {
@@ -497,6 +499,31 @@ mod tests {
 
         assert!(sidebar_nav.contains("<span className=\"text-[13px] font-medium\""));
         assert!(sidebar_nav.contains("t(\"chat.newThread\")"));
+    }
+
+    #[test]
+    fn sidebar_thread_delete_assets_are_wired() {
+        let sidebar = source_text("components/sidebar.tsx");
+        assert!(sidebar.contains("onDeleteThread"));
+        assert!(sidebar.contains("onDelete={onDeleteThread}"));
+
+        let sidebar_threads = source_text("components/sidebar-threads.tsx");
+        assert!(sidebar_threads.contains("data-testid=\"thread-delete\""));
+        assert!(sidebar_threads.contains("data-thread-id={thread.id}"));
+        assert!(sidebar_threads.contains("t(\"common.deleteChat\")"));
+        assert!(sidebar_threads.contains("t(\"thread.deleteConfirm\")"));
+        assert!(sidebar_threads.contains("deleteThreadErrorMessage"));
+        assert!(sidebar_threads.contains("window.alert"));
+
+        let api = source_text("lib/api.ts");
+        assert!(api.contains("export function deleteThread"));
+        assert!(api.contains("/threads/${encodeURIComponent(threadId)}"));
+        assert!(api.contains("method: \"DELETE\""));
+
+        let bundle = bundled_javascript();
+        assert!(bundle.contains("thread-delete"));
+        assert!(bundle.contains("common.deleteChat"));
+        assert!(bundle.contains("thread.deleteConfirm"));
     }
 
     #[test]

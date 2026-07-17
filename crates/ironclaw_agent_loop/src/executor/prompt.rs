@@ -1,6 +1,6 @@
 use async_trait::async_trait;
 use ironclaw_turns::{
-    LoopExit, LoopFailureKind, SanitizedFailure,
+    LoopExit,
     run_profile::{
         CapabilitySurfaceVersion, CompactionInitiator, LoopCompactionError, LoopCompactionMode,
         LoopCompactionOutcome, LoopCompactionRequest, LoopContextCompactionKind,
@@ -9,7 +9,6 @@ use ironclaw_turns::{
         VisibleCapabilityRequest, VisibleCapabilitySurface,
     },
 };
-use std::time::Duration;
 use tracing::debug;
 
 use crate::state::{
@@ -21,10 +20,10 @@ use crate::strategies::{
 };
 
 use super::{
-    AgentLoopExecutorError, CancelCheck, CheckpointStage, ExecutorStage, FailedExitDetails,
-    HostStage, PendingInputAck, StageContext, apply_capability_filter, attach_failure_explanation,
-    cancelled_exit, debug_host_unavailable, failed_exit, pending_approval_resume_candidate,
-    pending_auth_resume_candidate, pending_external_tool_resume_candidate,
+    AgentLoopExecutorError, CancelCheck, CheckpointStage, ExecutorStage, HostStage,
+    PendingInputAck, StageContext, apply_capability_filter, cancelled_exit, debug_host_unavailable,
+    pending_approval_resume_candidate, pending_auth_resume_candidate,
+    pending_external_tool_resume_candidate,
 };
 
 #[derive(Debug, Default, Clone, Copy)]
@@ -327,6 +326,12 @@ impl<'a> PromptPlanningPipeline<'a> {
             capability_view.clone(),
         )
         .await?;
+        // The candidate bundle refreshed compaction_prompt from a real prompt
+        // build, so a compaction completed on an earlier iteration (SkipModel
+        // compaction-only turn, forced-shrink retry) can now be judged with
+        // its summary included — before the strategy decides whether to
+        // compact again below.
+        observe_pending_compaction_effectiveness(&mut self.state);
         if let Some(exit) = self.cancel_boundary().await? {
             return Ok(PromptStep::Exit(exit));
         }
@@ -349,6 +354,10 @@ impl<'a> PromptPlanningPipeline<'a> {
                     capability_view.clone(),
                 )
                 .await?;
+                // The rebuilt bundle's prompt estimate includes the injected
+                // summary — judge the compaction that just ran against its
+                // trigger-kind baseline.
+                observe_pending_compaction_effectiveness(&mut self.state);
                 if let Some(exit) = self.cancel_boundary().await? {
                     return Ok(PromptStep::Exit(exit));
                 }
@@ -361,6 +370,12 @@ impl<'a> PromptPlanningPipeline<'a> {
         let rendered_repeated_call_warning = final_bundle.rendered_repeated_call_warning();
 
         let (messages, inline_messages) = final_bundle.into_model_parts();
+        // Consume the one-shot completion-nudge flag: when set, its directive was
+        // injected into this iteration's prompt bundle by
+        // `build_prompt_bundle_for_surface` (with the full tool surface still
+        // available). Clearing here bounds the nudge to exactly this iteration and
+        // keeps a later model-error retry from re-injecting it.
+        self.state.completion_nudge_pending = false;
 
         Ok(PromptStep::Prepared(Box::new(PromptOutput {
             state: self.state,
@@ -468,6 +483,7 @@ impl<'a, 'b> PromptCompactionStep<'a, 'b> {
             drop_through_seq,
             preserve_tail_tokens,
             deadline_ms,
+            effectiveness_baseline,
         } = decision
         else {
             return Ok(PromptCompactionOutcome::Skipped(state));
@@ -506,7 +522,6 @@ impl<'a, 'b> PromptCompactionStep<'a, 'b> {
         };
         let compaction_result = await_compaction_with_cancellation(
             self.ctx,
-            Duration::from_millis(deadline_ms),
             self.ctx.host.compact_loop_context(compaction_request),
         )
         .await;
@@ -521,49 +536,20 @@ impl<'a, 'b> PromptCompactionStep<'a, 'b> {
                     %safe_summary,
                     "agent loop compaction deferred; continuing with the existing prompt"
                 );
-                state.compaction_state.force_compact_on_next_iteration = false;
-                state.compaction_state.last_deferred = Some(DeferredCompactionWatermark {
-                    through_seq: drop_through_seq,
-                    prompt_fingerprint: state.compaction_prompt.fingerprint(),
-                });
-                state = match CheckpointStage
-                    .cancel_if_requested_after_pending_input_ack(
-                        self.ctx,
-                        state,
-                        self.pending_input_ack,
-                    )
-                    .await?
-                {
-                    CancelCheck::Continue(state) => *state,
-                    CancelCheck::Exit(exit) => {
-                        return Ok(PromptCompactionOutcome::Exited(exit));
-                    }
-                };
-                return Ok(PromptCompactionOutcome::Skipped(state));
+                return defer_compaction(self.ctx, state, self.pending_input_ack, drop_through_seq)
+                    .await;
             }
             CompactionCallOutcome::Completed(Err(LoopCompactionError::Cancelled))
             | CompactionCallOutcome::Cancelled => {
                 return compaction_cancelled_exit(self.ctx, state, self.pending_input_ack).await;
             }
             CompactionCallOutcome::Completed(Err(error)) => {
-                return compaction_failed_exit(
+                return compaction_failed_continue(
                     self.ctx,
                     state,
                     self.pending_input_ack,
                     task_id,
-                    &error,
-                )
-                .await;
-            }
-            CompactionCallOutcome::TimedOut => {
-                let error = LoopCompactionError::InferenceFailed {
-                    safe_summary: safe("compaction deadline exceeded"),
-                };
-                return compaction_failed_exit(
-                    self.ctx,
-                    state,
-                    self.pending_input_ack,
-                    task_id,
+                    drop_through_seq,
                     &error,
                 )
                 .await;
@@ -586,6 +572,19 @@ impl<'a, 'b> PromptCompactionStep<'a, 'b> {
         state
             .compaction_prompt
             .retain_after_sequence(drop_through_seq);
+        // Circuit-breaker accounting is deferred: the retained prompt
+        // estimate here excludes the injected summary (the rebuilt bundle
+        // isn't known yet), so judging effectiveness now would mark a
+        // compaction whose huge summary keeps the prompt oversized as
+        // "effective". Stash the trigger-kind-specific baseline; the
+        // executor consumes it via observe_pending_compaction_effectiveness
+        // once the prompt bundle is next rebuilt and observed_prompt_tokens
+        // includes the summary. After `INEFFECTIVE_COMPACTION_TRIP_LIMIT`
+        // consecutive ineffective runs the strategies stop threshold-
+        // triggered compaction for the remainder of the run — Claude Code
+        // measured ~250K wasted API calls/day from exactly this
+        // compact-recompact doom loop before adding a breaker.
+        state.compaction_state.pending_effectiveness_baseline = Some(effectiveness_baseline);
         CheckpointStage
             .emit_progress(
                 self.ctx,
@@ -605,13 +604,18 @@ impl<'a, 'b> PromptCompactionStep<'a, 'b> {
 
 enum CompactionCallOutcome {
     Completed(Result<LoopCompactionOutcome, ironclaw_turns::run_profile::LoopCompactionError>),
-    TimedOut,
     Cancelled,
 }
 
+/// Races the compaction call against run cancellation only. The deadline is
+/// enforced solely by the inner `ModelGatewayBackedSystemInferencePort`
+/// timeout (which surfaces as `SystemInferenceError::Timeout` ->
+/// `LoopCompactionError::InferenceFailed`); a second, outer timeout here
+/// would drop the call future on the same deadline and detach the
+/// `GuardedSystemInferencePort` worker it spawned, leaking a task per
+/// timed-out compaction.
 async fn await_compaction_with_cancellation<F>(
     ctx: StageContext<'_>,
-    deadline: Duration,
     call: F,
 ) -> CompactionCallOutcome
 where
@@ -619,14 +623,11 @@ where
 {
     let call = call;
     tokio::pin!(call);
-    let timeout = tokio::time::sleep(deadline);
-    tokio::pin!(timeout);
     let cancellation = ctx.host.cancellation_requested();
     tokio::pin!(cancellation);
 
     tokio::select! {
         result = &mut call => CompactionCallOutcome::Completed(result),
-        _ = &mut timeout => CompactionCallOutcome::TimedOut,
         _signal = &mut cancellation => {
             CompactionCallOutcome::Cancelled
         }
@@ -646,23 +647,49 @@ async fn compaction_cancelled_exit(
     Ok(PromptCompactionOutcome::Exited(exit))
 }
 
-async fn compaction_failed_exit(
+async fn compaction_failed_continue(
     ctx: StageContext<'_>,
     state: LoopExecutionState,
     pending_input_ack: &mut PendingInputAck,
     task_id: SystemInferenceTaskId,
+    drop_through_seq: u64,
     error: &LoopCompactionError,
 ) -> Result<PromptCompactionOutcome, AgentLoopExecutorError> {
+    let reason_kind = loop_compaction_reason(error);
+    tracing::debug!(
+        task_id = ?task_id,
+        %reason_kind,
+        "compaction failed; continuing run with uncompacted prompt"
+    );
     CheckpointStage
         .emit_progress(
             ctx,
             LoopProgressEvent::CompactionFailed {
                 task_id,
-                reason_kind: loop_compaction_reason(error),
+                reason_kind,
             },
         )
         .await;
+    defer_compaction(ctx, state, pending_input_ack, drop_through_seq).await
+}
+
+/// Shared tail for both compaction-deferral paths (explicit `Deferred`
+/// outcome and failure-fallback continue): clears the force-compact flag,
+/// records the deferred watermark, and honors cancellation. The
+/// mutate-then-cancel-check order is intentional — the watermark persists
+/// via the `Final` checkpoint even if the run is cancelled right after.
+async fn defer_compaction(
+    ctx: StageContext<'_>,
+    state: LoopExecutionState,
+    pending_input_ack: &mut PendingInputAck,
+    drop_through_seq: u64,
+) -> Result<PromptCompactionOutcome, AgentLoopExecutorError> {
     let mut state = state;
+    state.compaction_state.force_compact_on_next_iteration = false;
+    state.compaction_state.last_deferred = Some(DeferredCompactionWatermark {
+        through_seq: drop_through_seq,
+        prompt_fingerprint: state.compaction_prompt.fingerprint(),
+    });
     state = match CheckpointStage
         .cancel_if_requested_after_pending_input_ack(ctx, state, pending_input_ack)
         .await?
@@ -670,24 +697,7 @@ async fn compaction_failed_exit(
         CancelCheck::Continue(state) => *state,
         CancelCheck::Exit(exit) => return Ok(PromptCompactionOutcome::Exited(exit)),
     };
-    let explanation_message_ref =
-        attach_failure_explanation(ctx, &mut state, LoopFailureKind::CompactionUnavailable).await?;
-    let checked = CheckpointStage
-        .write(ctx, state, CheckpointKind::Final)
-        .await?;
-    pending_input_ack.ack(ctx.host).await?;
-    let exit = failed_exit(
-        ctx.host,
-        checked.state,
-        LoopFailureKind::CompactionUnavailable,
-        Some(checked.checkpoint_id),
-        FailedExitDetails {
-            diagnostic_ref: None,
-            safe_summary: Some(compaction_failure_category(error)?),
-            explanation_message_ref,
-        },
-    )?;
-    Ok(PromptCompactionOutcome::Exited(exit))
+    Ok(PromptCompactionOutcome::Skipped(state))
 }
 
 pub(super) async fn build_prompt_bundle_for_surface(
@@ -708,6 +718,15 @@ pub(super) async fn build_prompt_bundle_for_surface(
         context_request
             .inline_messages
             .push(invalid_model_output_repair_control_message());
+    }
+    // Tools-capable completion nudge scheduled by the stop handling on the prior
+    // turn: inject its directive so the model finishes the task (e.g. writes a
+    // required output file) this iteration. The flag is consumed by
+    // `PromptStage::run` after the bundle is built.
+    if state.completion_nudge_pending {
+        context_request
+            .inline_messages
+            .push(super::completion_nudge_control_message()?);
     }
     let inline_messages = context_request.inline_messages.clone();
     let prompt_mode = context_request.mode;
@@ -747,6 +766,36 @@ pub(super) async fn build_prompt_bundle_for_surface(
     })
 }
 
+/// Consumes a completed compaction's pending effectiveness baseline against
+/// the freshly rebuilt prompt estimate (which now includes the injected
+/// summary) and updates the circuit-breaker accounting.
+///
+/// Callers must only invoke this after `compaction_prompt` was refreshed from
+/// a real prompt bundle; a no-op when no compaction is awaiting judgement.
+fn observe_pending_compaction_effectiveness(state: &mut LoopExecutionState) {
+    let Some(baseline) = state.compaction_state.pending_effectiveness_baseline.take() else {
+        return;
+    };
+    let post_compaction_prompt_tokens = state.compaction_prompt.observed_prompt_tokens;
+    let circuit_was_open = state.compaction_state.compaction_circuit_open;
+    // `take()` already cleared the pending slot, so the cloned successor state
+    // carries no stale baseline.
+    state.compaction_state = state
+        .compaction_state
+        .with_compaction_effectiveness_observed(post_compaction_prompt_tokens, baseline);
+    if !circuit_was_open && state.compaction_state.compaction_circuit_open {
+        // debug!, not warn!: internal loop diagnostics — info!/warn! render in
+        // the REPL/TUI and corrupt the interactive display.
+        debug!(
+            consecutive_ineffective_compactions =
+                state.compaction_state.consecutive_ineffective_compactions,
+            post_compaction_prompt_tokens,
+            effectiveness_baseline_tokens = baseline.tokens(),
+            "context compaction circuit breaker opened after repeated ineffective compactions; threshold-triggered compaction disabled for the remainder of this run"
+        );
+    }
+}
+
 fn refresh_compaction_prompt_from_index(
     state: &mut LoopExecutionState,
     index: &[LoopContextCompactionMetadata],
@@ -778,26 +827,5 @@ fn loop_compaction_reason(error: &LoopCompactionError) -> LoopSafeSummary {
         LoopCompactionError::Cancelled => "cancelled",
         LoopCompactionError::PersistenceFailed { .. } => "persistence failed",
     };
-    LoopSafeSummary::new(value).unwrap_or_else(|_| LoopSafeSummary::model_gateway_failed())
-}
-
-fn compaction_failure_category(
-    error: &LoopCompactionError,
-) -> Result<SanitizedFailure, AgentLoopExecutorError> {
-    let category = match error {
-        LoopCompactionError::InvalidCutPoint => "compaction_invalid_cut_point",
-        LoopCompactionError::UnsupportedMode => "compaction_unsupported_mode",
-        LoopCompactionError::InputTooLarge => "compaction_input_too_large",
-        LoopCompactionError::SecurityRejected { .. } => "compaction_security_rejected",
-        LoopCompactionError::InferenceFailed { .. } => "compaction_inference_failed",
-        LoopCompactionError::Cancelled => "compaction_cancelled",
-        LoopCompactionError::PersistenceFailed { .. } => "compaction_persistence_failed",
-    };
-    SanitizedFailure::new(category).map_err(|_| AgentLoopExecutorError::PlannerContract {
-        detail: "static compaction failure category was invalid",
-    })
-}
-
-fn safe(value: &'static str) -> LoopSafeSummary {
     LoopSafeSummary::new(value).unwrap_or_else(|_| LoopSafeSummary::model_gateway_failed())
 }

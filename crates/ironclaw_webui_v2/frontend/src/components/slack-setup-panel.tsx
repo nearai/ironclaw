@@ -117,7 +117,7 @@ export function SlackSetupPanel({ action, setupQuery }) {
           </p>
         </div>
         {status?.configured &&
-        (<span className="shrink-0 rounded-md border border-emerald-400/20 px-2 py-1 text-[10px] text-emerald-300">
+        (<span className="shrink-0 rounded-md border border-[color-mix(in_srgb,var(--v2-positive-text)_30%,var(--v2-panel-border))] px-2 py-1 text-[10px] text-[var(--v2-positive-text)]">
           {t("common.configured")}
         </span>)}
       </div>
@@ -217,7 +217,7 @@ export function SlackSetupPanel({ action, setupQuery }) {
           {slackSetupError(saveMutation.error, copy.errorMessage)}
         </p>)}
         {saveMutation.isSuccess &&
-        (<p className="text-xs text-emerald-300">{copy.successMessage}</p>)}
+        (<p className="text-xs text-[var(--v2-positive-text)]">{copy.successMessage}</p>)}
       </div>
     </div>
   );
@@ -258,7 +258,7 @@ function translateOptional(t, key, fallback) {
 function textInput(label, value, onChange, placeholder = "", help = null, t = null) {
   return (
     <label className="min-w-0">
-      <span className="mb-1 block text-[11px] text-iron-500">{label}</span>
+      <span className="mb-1 block text-[11px] text-[var(--v2-text-muted)]">{label}</span>
       <input
         type="text"
         value={value}
@@ -274,7 +274,7 @@ function textInput(label, value, onChange, placeholder = "", help = null, t = nu
 function secretInput(label, value, onChange, configured, help = null, t = null) {
   return (
     <label className="min-w-0">
-      <span className="mb-1 block text-[11px] text-iron-500">{label}</span>
+      <span className="mb-1 block text-[11px] text-[var(--v2-text-muted)]">{label}</span>
       <input
         type="password"
         autoComplete="off"

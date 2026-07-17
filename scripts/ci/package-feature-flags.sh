@@ -83,9 +83,10 @@ case "${package}" in
     printf '%s\n' "--features webui-v2-beta"
     ;;
   ironclaw_reborn_openai_compat)
-    # `libsql` compiles + runs the durable ref-store contract folded in from the
-    # former ironclaw_reborn_openai_compat_storage crate (enables `storage`).
-    printf '%s\n' "--features libsql"
+    # `openai-compat-beta` activates the route/workflow/streaming contract
+    # suites; `libsql` also exercises the durable ref-store contract folded in
+    # from the former ironclaw_reborn_openai_compat_storage crate.
+    printf '%s\n' "--features openai-compat-beta,libsql"
     ;;
   ironclaw_architecture | \
   ironclaw_product_adapter_registry | \

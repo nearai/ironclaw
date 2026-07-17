@@ -58,12 +58,13 @@ blake3 = "1"
 chrono = "0.4"
 futures-util = { version = "0.3", default-features = false }
 ironclaw_agent_loop = { path = "../ironclaw_agent_loop", version = "0.1.0" }
+ironclaw_common = { path = "../ironclaw_common", version = "0.4.2" }
 ironclaw_events = { path = "../ironclaw_events", version = "0.1.0" }
 ironclaw_hooks = { path = "../ironclaw_hooks", version = "0.1.0" }
 ironclaw_host_api = { path = "../ironclaw_host_api", version = "0.1.0" }
 ironclaw_host_runtime = { path = "../ironclaw_host_runtime", version = "0.1.0" }
 ironclaw_llm = { path = "../ironclaw_llm", version = "0.1.0", optional = true, default-features = false }
-ironclaw_loop_support = { path = "../ironclaw_loop_support", version = "0.1.0" }
+ironclaw_loop_host = { path = "../ironclaw_loop_host", version = "0.1.0" }
 ironclaw_observability = { path = "../ironclaw_observability" }
 ironclaw_safety = { path = "../ironclaw_safety", version = "0.2.2" }
 ironclaw_secrets = { path = "../ironclaw_secrets", version = "0.1.0", optional = true }

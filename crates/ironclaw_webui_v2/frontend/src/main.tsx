@@ -5,7 +5,7 @@ import { App } from "./app/app";
 import { queryClient } from "./lib/query-client";
 import { I18nProvider } from "./lib/i18n";
 // Only the English fallback is bundled eagerly; every other locale is
-// lazy-loaded on demand by I18nProvider (see lib/i18n.js `loaders`).
+// lazy-loaded on demand by I18nProvider (see lib/i18n.tsx `loaders`).
 import "./i18n/en";
 
 // The SPA lives under the /v2 namespace: host composition mounts the

@@ -1,3 +1,4 @@
+// arch-exempt: large_file, caller-level failure propagation stays at the turn executor seam, plan #4088
 //! Concrete `TurnRunExecutor` for the Reborn planned agent loop.
 //!
 //! Adapts `RebornLoopDriverHostFactory` + `DriverRegistry` + `LoopExitApplier`
@@ -442,6 +443,7 @@ mod tests {
 
     use crate::{
         driver_registry::{DriverKind, DriverRegistry, DriverRequirements},
+        failure_categories::BUDGET_ACCOUNTING_FAILED_CATEGORY,
         loop_exit_applier::{InMemoryLoopExitEvidencePort, LoopExitApplier},
         turn_runner::HostFactoryError,
     };
@@ -482,6 +484,7 @@ mod tests {
             resolved_run_profile_id: ironclaw_turns::RunProfileId::default_profile(),
             resolved_run_profile_version: RunProfileVersion::new(1),
             resolved_model_route: None,
+            model_usage: None,
             received_at: chrono::Utc::now(),
             checkpoint_id: None,
             gate_ref: None,
@@ -654,6 +657,7 @@ mod tests {
             resolved_run_profile_id: RunProfileId::default_profile(),
             resolved_run_profile_version: RunProfileVersion::new(1),
             resolved_model_route: None,
+            model_usage: None,
             received_at: chrono::Utc::now(),
             checkpoint_id: None,
             gate_ref: None,
@@ -751,7 +755,7 @@ mod tests {
                 reply_message_refs: vec![LoopMessageRef::new("msg:test").expect("valid")],
                 result_refs: vec![],
                 final_checkpoint_id: None,
-                usage_summary_ref: None,
+                model_usage: None,
                 exit_id: LoopExitId::new("exit:test").expect("valid"),
             }))
         }
@@ -766,7 +770,7 @@ mod tests {
                 reply_message_refs: vec![LoopMessageRef::new("msg:test").expect("valid")],
                 result_refs: vec![],
                 final_checkpoint_id: None,
-                usage_summary_ref: None,
+                model_usage: None,
                 exit_id: LoopExitId::new("exit:test").expect("valid"),
             }))
         }
@@ -1216,6 +1220,30 @@ mod tests {
             0,
             "executor must NOT call fail_run; scheduler owns terminal failure recording"
         );
+    }
+
+    #[tokio::test]
+    async fn driver_failed_preserves_budget_accounting_category_on_executor_error() {
+        let executor = make_executor_with_failing_driver(AgentLoopDriverError::Failed {
+            reason_kind: BUDGET_ACCOUNTING_FAILED_CATEGORY.to_string(),
+            detail: Some("resource accounting storage is unavailable".to_string()),
+        });
+        let transitions = Arc::new(RecordingTransitionPort::default());
+
+        let error = executor
+            .execute_claimed_run(
+                test_claimed_run(),
+                transitions.clone() as Arc<dyn TurnRunTransitionPort>,
+            )
+            .await
+            .expect_err("accounting failure must remain terminal and typed");
+
+        assert_eq!(error.failure_category(), BUDGET_ACCOUNTING_FAILED_CATEGORY);
+        assert_eq!(
+            error.failure().detail(),
+            Some("resource accounting storage is unavailable")
+        );
+        assert_eq!(transitions.fail_run_call_count(), 0);
     }
 
     /// A `TurnRunTransitionPort` that fails on both `apply_validated_loop_exit`

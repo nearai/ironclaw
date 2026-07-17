@@ -189,9 +189,13 @@ async def _open_mocked_pending_page(
     await page.route(f"**/api/webchat/v2/threads/{THREAD_ID}/messages", handle_send)
 
     await page.goto(
-        f"{reborn_v2_server}/v2/chat/{initial_thread_id}?token={REBORN_V2_AUTH_TOKEN}"
+        f"{reborn_v2_server}/chat/{initial_thread_id}?token={REBORN_V2_AUTH_TOKEN}"
     )
     await expect(page.locator(SEL_V2["chat_composer"])).to_be_visible(timeout=15000)
+    # Composer visibility alone does not prove the route's thread has hydrated.
+    # Wait for the thread-scoped timeline request so sends cannot race through
+    # useChat's new-conversation path with a still-null activeThreadId.
+    await _wait_for_request_count(timeline_requests, 0)
 
     return {
         "context": context,
@@ -554,7 +558,7 @@ async def test_reborn_legacy_sidebar_cache_keeps_active_thread_outside_summary_w
         page = harness["page"]
         composer = page.locator(SEL_V2["chat_composer"])
         await expect(composer).to_be_visible(timeout=15000)
-        assert await page.evaluate("() => location.pathname") == f"/v2/chat/{THREAD_ID}"
+        assert await page.evaluate("() => location.pathname") == f"/chat/{THREAD_ID}"
 
         harness["threads"][:] = [
             {
@@ -580,7 +584,7 @@ async def test_reborn_legacy_sidebar_cache_keeps_active_thread_outside_summary_w
             harness["send_requests"][0]["content"]
             == "Summary refresh should keep this Reborn thread"
         )
-        assert await page.evaluate("() => location.pathname") == f"/v2/chat/{THREAD_ID}"
+        assert await page.evaluate("() => location.pathname") == f"/chat/{THREAD_ID}"
         await expect(composer).to_be_visible(timeout=5000)
         await expect(
             page.locator(SEL_V2["sidebar"]).get_by_role("button").filter(
@@ -781,7 +785,7 @@ async def test_reborn_legacy_processing_indicator_does_not_leak_after_thread_swi
 
         await quiet_thread.click()
         await page.wait_for_function(
-            "(threadId) => location.pathname === `/v2/chat/${threadId}`",
+            "(threadId) => location.pathname === `/chat/${threadId}`",
             arg=OTHER_THREAD_ID,
             timeout=10000,
         )

@@ -2,23 +2,68 @@
 // The browser then drills in by area.
 export const DEFAULT_WORKSPACE_PATH = "";
 
-// Display names for the storage areas shown at the root. Internally the first
-// path segment is the backend area id (used for routing and the URL); the UI
-// renders these friendlier names instead — the local project directory shows
-// as "home", memory stays "memory".
-export const AREA_DISPLAY_NAMES = { workspace: "home" };
+// Translation keys for the storage areas shown at the root. Internally the
+// first path segment remains the backend area id used for routing and URLs.
+// Unknown future areas deliberately fall back to that id until their owning
+// feature adds a user-facing label.
+export const AREA_DISPLAY_KEYS = {
+  workspace: "workspace.area.home",
+  memory: "workspace.area.memory",
+};
 
-export function areaDisplayName(areaId) {
-  return AREA_DISPLAY_NAMES[areaId] || areaId;
+export function areaDisplayName(areaId, t) {
+  const key = Object.hasOwn(AREA_DISPLAY_KEYS, areaId) ? AREA_DISPLAY_KEYS[areaId] : null;
+  return key && typeof t === "function" ? t(key) : areaId;
+}
+
+// Format the binary byte counts returned by the filesystem API into compact,
+// locale-aware labels. The product has historically used KB/MB wording for
+// 1024-based thresholds, so retain that user-facing convention here.
+export function formatWorkspaceFileSize(bytes, locale = "en") {
+  if (bytes == null) return "";
+  const size = Number(bytes);
+  if (!Number.isFinite(size) || size < 0) return "";
+
+  const units = ["byte", "kilobyte", "megabyte", "gigabyte", "terabyte", "petabyte"];
+  let unitIndex = 0;
+  let value = size;
+  while (value >= 1024 && unitIndex < units.length - 1) {
+    value /= 1024;
+    unitIndex += 1;
+  }
+
+  const maximumFractionDigits = value >= 10 || Number.isInteger(value) ? 0 : 1;
+  const options: Intl.NumberFormatOptions = {
+    style: "unit",
+    unit: units[unitIndex],
+    unitDisplay: unitIndex === 0 ? "long" : "short",
+    maximumFractionDigits,
+  };
+  try {
+    return new Intl.NumberFormat(locale || "en", options).format(value);
+  } catch {
+    try {
+      return new Intl.NumberFormat("en", options).format(value);
+    } catch {
+      // Older browsers may not support every unit. Keep the render tree alive
+      // with a dependency-free label even when the English retry also fails.
+      const precision = 10 ** maximumFractionDigits;
+      const rounded = Math.round(value * precision) / precision;
+      const fallbackUnits = [size === 1 ? "byte" : "bytes", "KB", "MB", "GB", "TB", "PB"];
+      return `${rounded} ${fallbackUnits[unitIndex]}`;
+    }
+  }
 }
 
 // Canonical entry ordering, applied in every panel so the tree and the main
 // listing never disagree: directories first, then files, each group sorted
 // alphabetically (case-insensitive, locale-aware) by display name.
-export function sortEntries(entries) {
+export function sortEntries(entries, displayName = (entry) => entry.name) {
   return [...(entries || [])].sort((a, b) => {
     if (a.is_dir !== b.is_dir) return a.is_dir ? -1 : 1;
-    return a.name.localeCompare(b.name, undefined, { sensitivity: "base" });
+    const left = String(displayName(a) ?? "");
+    const right = String(displayName(b) ?? "");
+    return left.localeCompare(right, undefined, { sensitivity: "base" });
   });
 }
 

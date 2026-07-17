@@ -38,7 +38,7 @@ use ironclaw_host_runtime::{
     RuntimeProcessHandle, RuntimeResourceGate, RuntimeStatusRequest, SurfaceKind,
     VisibleCapability, VisibleCapabilityAccess,
 };
-use ironclaw_loop_support::{
+use ironclaw_loop_host::{
     AwaitEdgeSettler, CapabilityAllowSet, CapabilityResolveError, CapabilityResultWrite,
     CapabilitySurfaceProfileResolver, CapabilityWriteResult, EmptyLoopCapabilityPort,
     EmptyUserProfileSource, HostIdentityContextBuildError, HostIdentityContextCandidate,
@@ -54,7 +54,7 @@ use ironclaw_loop_support::{
 };
 use ironclaw_processes::ProcessServices;
 use ironclaw_resources::InMemoryResourceGovernor;
-use ironclaw_runner::app_loop_family::build_loop_family_registry;
+use ironclaw_runner::app_loop_family::build_loop_family_registry_with_overrides;
 use ironclaw_runner::driver_registry::{
     DriverKind, DriverRegistry, DriverRequirements, LoopDriverRegistryKey, RequirementLevel,
 };
@@ -1985,6 +1985,7 @@ async fn turn_runner_worker_completes_after_libsql_turn_and_thread_services_reop
         let submit = turn_store
             .submit_turn(
                 SubmitTurnRequest {
+                    requested_model: None,
                     scope: turn_scope.clone(),
                     actor: TurnActor::new(user_id),
                     accepted_message_ref: AcceptedMessageRef::new("accepted-libsql-restart")
@@ -3562,7 +3563,7 @@ async fn default_planned_runtime_composes_no_profile_coordinator_and_profiled_ho
         subagent_await_edge_evidence: await_edge_store as Arc<dyn AwaitDependentRunEvidenceStore>,
         subagent_definition_resolver: Arc::new(StaticSubagentDefinitionResolver),
         subagent_spawn_input_codec: Arc::new(JsonSpawnSubagentInputCodec::new(io.clone())),
-        subagent_spawn_limits: ironclaw_loop_support::SubagentSpawnLimits::default(),
+        subagent_spawn_limits: ironclaw_loop_host::SubagentSpawnLimits::default(),
         loop_exit_evidence: evidence,
         config: DefaultPlannedRuntimeConfig {
             heartbeat_interval: std::time::Duration::from_millis(20),
@@ -3589,6 +3590,7 @@ async fn default_planned_runtime_composes_no_profile_coordinator_and_profiled_ho
     let SubmitTurnResponse::Accepted { run_id, status, .. } = composition
         .coordinator
         .submit_turn(SubmitTurnRequest {
+            requested_model: None,
             scope: fixture.context.scope.clone(),
             actor: TurnActor::new(UserId::new("user-text-host").unwrap()),
             accepted_message_ref: AcceptedMessageRef::new("accepted-runtime-planned").unwrap(),
@@ -3727,7 +3729,7 @@ async fn pre_minted_scheduler_wake_wiring_drives_scheduler_on_coordinator_submit
         subagent_await_edge_evidence: await_edge_store as Arc<dyn AwaitDependentRunEvidenceStore>,
         subagent_definition_resolver: Arc::new(StaticSubagentDefinitionResolver),
         subagent_spawn_input_codec: Arc::new(JsonSpawnSubagentInputCodec::new(io.clone())),
-        subagent_spawn_limits: ironclaw_loop_support::SubagentSpawnLimits::default(),
+        subagent_spawn_limits: ironclaw_loop_host::SubagentSpawnLimits::default(),
         loop_exit_evidence: evidence,
         config: DefaultPlannedRuntimeConfig {
             heartbeat_interval: std::time::Duration::from_millis(20),
@@ -3761,6 +3763,7 @@ async fn pre_minted_scheduler_wake_wiring_drives_scheduler_on_coordinator_submit
     let SubmitTurnResponse::Accepted { run_id, .. } = composition
         .coordinator
         .submit_turn(SubmitTurnRequest {
+            requested_model: None,
             scope: fixture.context.scope.clone(),
             actor: TurnActor::new(UserId::new("user-preminted-wake").unwrap()),
             accepted_message_ref: AcceptedMessageRef::new("accepted-preminted").unwrap(),
@@ -3900,7 +3903,7 @@ async fn build_runtime_host_with_optional_hooks(
         subagent_await_edge_evidence: await_edge_store as Arc<dyn AwaitDependentRunEvidenceStore>,
         subagent_definition_resolver: Arc::new(StaticSubagentDefinitionResolver),
         subagent_spawn_input_codec: Arc::new(JsonSpawnSubagentInputCodec::new(io.clone())),
-        subagent_spawn_limits: ironclaw_loop_support::SubagentSpawnLimits::default(),
+        subagent_spawn_limits: ironclaw_loop_host::SubagentSpawnLimits::default(),
         loop_exit_evidence: evidence,
         config: DefaultPlannedRuntimeConfig::default(),
         model_route_resolver: None,
@@ -4258,7 +4261,7 @@ async fn product_live_runtime_builds_when_all_required_adapters_are_present() {
             as Arc<dyn AwaitDependentRunEvidenceStore>,
         subagent_definition_resolver: Arc::new(StaticSubagentDefinitionResolver),
         subagent_spawn_input_codec: Arc::new(JsonSpawnSubagentInputCodec::new(io.clone())),
-        subagent_spawn_limits: ironclaw_loop_support::SubagentSpawnLimits::default(),
+        subagent_spawn_limits: ironclaw_loop_host::SubagentSpawnLimits::default(),
         loop_exit_evidence: Arc::new(ThreadCheckpointLoopExitEvidencePort::new(
             fixture.thread_service.clone(),
             turn_state_store_dyn(&turn_store),
@@ -4386,7 +4389,7 @@ async fn product_live_parts_for_gate_test(
             as Arc<dyn AwaitDependentRunEvidenceStore>,
         subagent_definition_resolver: Arc::new(StaticSubagentDefinitionResolver),
         subagent_spawn_input_codec: Arc::new(JsonSpawnSubagentInputCodec::new(io.clone())),
-        subagent_spawn_limits: ironclaw_loop_support::SubagentSpawnLimits::default(),
+        subagent_spawn_limits: ironclaw_loop_host::SubagentSpawnLimits::default(),
         loop_exit_evidence: Arc::new(ThreadCheckpointLoopExitEvidencePort::new(
             fixture.thread_service.clone(),
             turn_state_store_dyn(&turn_store),
@@ -4576,6 +4579,39 @@ async fn text_only_host_factory_rejects_persisted_model_route_snapshot_without_r
         error
             .to_string()
             .contains("model route resolver is required")
+    );
+}
+
+#[tokio::test]
+async fn text_only_host_factory_passes_advisory_model_route_snapshot_without_resolver() {
+    // A caller-requested model reaches the default (resolver-less) product
+    // runtime as an *advisory* snapshot. Unlike an operator route, it must pass
+    // through unvalidated so the non-routed gateway can honor the requested
+    // model id, rather than failing closed the way an operator route does.
+    let fixture = HostFixture::new("thread-host-advisory-no-resolver", "hello routed host").await;
+    let advisory_snapshot =
+        LoopModelRouteSnapshot::advisory("gpt-4o").expect("valid advisory model");
+    let context = fixture
+        .context
+        .clone()
+        .with_resolved_model_route(advisory_snapshot.clone());
+    let mut claimed = fixture.claimed.clone();
+    claimed.state.resolved_model_route = Some(advisory_snapshot.clone());
+
+    let host = fixture
+        .factory()
+        .build_text_only_host(RebornLoopDriverHostRequest {
+            claimed_run: claimed,
+            loop_run_context: context,
+        })
+        .await
+        .expect("advisory snapshot passes through a resolver-less host");
+
+    let host_dyn: &(dyn AgentLoopDriverHost + Send + Sync) = &host;
+    assert_eq!(
+        host_dyn.run_context().resolved_model_route,
+        Some(advisory_snapshot),
+        "the advisory model id must survive on the run context for the gateway to honor it"
     );
 }
 
@@ -8033,6 +8069,7 @@ fn capability_descriptor(id: &str) -> CapabilityDescriptor {
         effects: vec![EffectKind::DispatchCapability],
         default_permission: PermissionMode::Allow,
         runtime_credentials: Vec::new(),
+        network_targets: Vec::new(),
         resource_profile: None,
     }
 }
@@ -8440,7 +8477,7 @@ impl AgentLoopDriver for ScriptCapabilityFinalReplyDriver {
             reply_message_refs: vec![reply_ref],
             result_refs: vec![],
             final_checkpoint_id: None,
-            usage_summary_ref: None,
+            model_usage: None,
             exit_id: LoopExitId::new("exit:turn-runner-script-capability-e2e").unwrap(),
         }))
     }
@@ -8565,7 +8602,7 @@ impl AgentLoopDriver for TextOnlyFinalReplyDriver {
             reply_message_refs: vec![reply_ref],
             result_refs: vec![],
             final_checkpoint_id: None,
-            usage_summary_ref: None,
+            model_usage: None,
             exit_id: LoopExitId::new("exit:turn-runner-e2e").unwrap(),
         }))
     }
@@ -8614,7 +8651,14 @@ fn loop_exit_applier_for_fixture(
 }
 
 fn planned_driver_for_full_reborn_test() -> Arc<PlannedDriver> {
-    let registry = build_loop_family_registry().expect("loop family registry should build");
+    // Scripted-outage tests pin retry-then-fail behavior; keep >= 2
+    // availability retries but far below the production budget so a
+    // deliberately offline provider reaches Failed in seconds.
+    let registry = build_loop_family_registry_with_overrides(
+        None,
+        Some(std::num::NonZeroU32::new(2).expect("nonzero")),
+    )
+    .expect("loop family registry should build");
     Arc::new(PlannedDriver::default_from_registry(&registry).expect("planned driver should build"))
 }
 
@@ -8691,6 +8735,7 @@ async fn queue_fixture_turn(
     let submit = turn_store
         .submit_turn(
             SubmitTurnRequest {
+                requested_model: None,
                 scope: fixture.context.scope.clone(),
                 actor: TurnActor::new(UserId::new("user-text-host").unwrap()),
                 accepted_message_ref: AcceptedMessageRef::new(format!(
@@ -8828,6 +8873,7 @@ impl HostFixture {
             resolved_run_profile_id: RunProfileId::default_profile(),
             resolved_run_profile_version: RunProfileVersion::new(1),
             resolved_model_route: None,
+            model_usage: None,
             received_at: Utc::now(),
             checkpoint_id: None,
             gate_ref: None,

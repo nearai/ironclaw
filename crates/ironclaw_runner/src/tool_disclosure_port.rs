@@ -7,8 +7,9 @@ use async_trait::async_trait;
 use ironclaw_host_api::{
     AgentId, CapabilityId, InvocationId, ProjectId, ProviderToolName, TenantId, ThreadId,
 };
-use ironclaw_loop_support::{
-    CapabilityResultWrite, LoopCapabilityPortDecorator, LoopCapabilityResultWriter,
+use ironclaw_loop_host::{
+    CapabilityResultWrite, DurablePersistence, LoopCapabilityPortDecorator,
+    LoopCapabilityResultWriter,
 };
 use ironclaw_turns::{
     CapabilityActivityId, TurnId,
@@ -44,7 +45,7 @@ const DISCLOSURE_INPUT_PREFIX: &str = "input:tool-disclosure:";
 const DESCRIBE_FIRST_BRIDGE_NAME: &str = "tool_disclosure:auto_schema";
 
 /// Provider tool name of the loop's `capability_info` inspector (mirrors
-/// `ironclaw_loop_support::capability_info::TOOL_NAME`). Inspecting a deferred
+/// `ironclaw_loop_host::capability_info::TOOL_NAME`). Inspecting a deferred
 /// tool via `capability_info` is treated as intent to use it: the target is
 /// disclosed + promoted so it becomes directly callable — the `tool_search` →
 /// `capability_info` → direct-call discovery path.
@@ -1036,6 +1037,7 @@ impl ToolDisclosureCapabilityPort {
                 capability_id: &request.capability_id,
                 output,
                 display_preview: None,
+                durable_persistence: DurablePersistence::Persist,
             })
             .await?;
         Ok(CapabilityOutcome::Completed(CapabilityResultMessage {
@@ -1045,6 +1047,7 @@ impl ToolDisclosureCapabilityPort {
             terminate_hint: false,
             byte_len: write.byte_len,
             output_digest: write.output_digest,
+            model_observation: write.model_observation,
         }))
     }
 
@@ -1334,7 +1337,7 @@ mod tests {
     }
 
     use ironclaw_host_api::{AgentId, ProjectId, TenantId, ThreadId};
-    use ironclaw_loop_support::CapabilityWriteResult;
+    use ironclaw_loop_host::CapabilityWriteResult;
     use ironclaw_turns::{
         InMemoryRunProfileResolver, LoopResultRef, RunProfileResolver, TurnRunId, TurnScope,
         run_profile::{
@@ -1477,6 +1480,7 @@ mod tests {
                 terminate_hint: false,
                 byte_len: 2,
                 output_digest: None,
+                model_observation: None,
             }))
         }
 

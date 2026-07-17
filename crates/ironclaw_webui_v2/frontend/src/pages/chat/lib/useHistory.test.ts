@@ -41,7 +41,7 @@ function useHistorySourceForTest() {
   }
   return `${helperLines.join("\n")}\n${lines.join(
     "\n",
-  )}\nglobalThis.__testExports = { clearHistoryCache, useHistory, mergeFullRefresh };`;
+  )}\nglobalThis.__testExports = { clearHistoryCache, useHistory, mergeFullRefresh, nextCursorAfterFullRefresh, cursorPageCanMerge };`;
 }
 
 function createReactStub({ setCalls = [] } = {}) {
@@ -104,6 +104,16 @@ async function flushMicrotasks() {
   await Promise.resolve();
 }
 
+function deferred() {
+  let resolve;
+  let reject;
+  const promise = new Promise((res, rej) => {
+    resolve = res;
+    reject = rej;
+  });
+  return { promise, resolve, reject };
+}
+
 test("useHistory records a load error when timeline fetch fails", async () => {
   const setCalls = [];
   const consoleErrors = [];
@@ -132,6 +142,320 @@ test("useHistory records a load error when timeline fetch fails", async () => {
     "chat.history.loadFailed",
   );
   assert.equal(consoleErrors.length, 1);
+});
+
+test("useHistory starts an older-page load while latest refresh is in flight", async () => {
+  const latestPage = deferred();
+  const olderPage = deferred();
+  const fetchCalls = [];
+  const context = {
+    console,
+    fetchTimeline: ({ cursor }) => {
+      fetchCalls.push(cursor || null);
+      return cursor ? olderPage.promise : latestPage.promise;
+    },
+    globalThis: {},
+    messagesFromTimeline: (records) =>
+      records.map((record) => ({
+        id: record.id,
+        role: "user",
+        sequence: record.sequence,
+      })),
+    React: createReactStub(),
+    authScope: () => "test-user",
+  };
+
+  vm.runInNewContext(useHistorySourceForTest(), context);
+  context.globalThis.__testExports.clearHistoryCache();
+  const history = context.globalThis.__testExports.useHistory("thread-page", {});
+
+  assert.deepEqual(fetchCalls, [null]);
+
+  const loadOlder = history.loadHistory("cursor-older");
+  assert.deepEqual(
+    fetchCalls,
+    [null, "cursor-older"],
+    "a background latest-page refresh must not drop an explicit cursor load",
+  );
+
+  latestPage.resolve({
+    messages: [{ id: "newer", sequence: 20 }],
+    next_cursor: "cursor-older",
+  });
+  olderPage.resolve({
+    messages: [{ id: "older", sequence: 10 }],
+    next_cursor: null,
+  });
+  await loadOlder;
+  await flushMicrotasks();
+});
+
+test("useHistory discards stale cursor pages after a refresh changes cursor windows", async () => {
+  const initialLatest = deferred();
+  const staleOlderPage = deferred();
+  const refreshedLatest = deferred();
+  const fetchCalls = [];
+  const setCalls = [];
+  let latestCalls = 0;
+  const context = {
+    console,
+    fetchTimeline: ({ cursor }) => {
+      fetchCalls.push(cursor || null);
+      if (!cursor) {
+        latestCalls += 1;
+        return latestCalls === 1
+          ? initialLatest.promise
+          : refreshedLatest.promise;
+      }
+      if (cursor === "cursor-before-151") return staleOlderPage.promise;
+      throw new Error(`unexpected cursor ${cursor}`);
+    },
+    globalThis: {},
+    messagesFromTimeline: (records) =>
+      records.map((record) => ({
+        id: record.id,
+        role: "user",
+        sequence: record.sequence,
+      })),
+    React: createReactStub({ setCalls }),
+    authScope: () => "test-user",
+  };
+
+  vm.runInNewContext(useHistorySourceForTest(), context);
+  context.globalThis.__testExports.clearHistoryCache();
+  const history = context.globalThis.__testExports.useHistory(
+    "thread-stale-cursor",
+    {},
+  );
+
+  initialLatest.resolve({
+    messages: [
+      { id: "msg-151", sequence: 151 },
+      { id: "msg-200", sequence: 200 },
+    ],
+    next_cursor: "cursor-before-151",
+  });
+  await flushMicrotasks();
+
+  const loadOlder = history.loadHistory("cursor-before-151");
+  const refresh = history.loadHistory();
+  refreshedLatest.resolve({
+    messages: [
+      { id: "msg-251", sequence: 251 },
+      { id: "msg-300", sequence: 300 },
+    ],
+    next_cursor: "cursor-before-251",
+  });
+  await refresh;
+  await flushMicrotasks();
+
+  staleOlderPage.resolve({
+    messages: [
+      { id: "msg-101", sequence: 101 },
+      { id: "msg-150", sequence: 150 },
+    ],
+    next_cursor: null,
+  });
+  await loadOlder;
+  await flushMicrotasks();
+
+  assert.deepEqual(fetchCalls, [
+    null,
+    "cursor-before-151",
+    null,
+  ]);
+  assert.equal(setCalls.at(-1).nextCursor, "cursor-before-251");
+  assert.deepEqual(
+    setCalls.at(-1).messages.map((message) => message.id),
+    ["msg-251", "msg-300"],
+  );
+  assert.equal(setCalls.at(-1).isLoading, false);
+});
+
+test("useHistory merges cursor pages connected by raw filtered boundary records", async () => {
+  const setCalls = [];
+  const fetchCalls = [];
+  const context = {
+    console,
+    fetchTimeline: async ({ cursor }) => {
+      fetchCalls.push(cursor || null);
+      if (!cursor) {
+        return {
+          messages: [
+            {
+              id: "hidden-current-boundary",
+              kind: "tool_result_reference",
+              sequence: 151,
+            },
+            { id: "current-visible", sequence: 152 },
+          ],
+          next_cursor: "cursor-before-151-new",
+        };
+      }
+      assert.equal(cursor, "cursor-before-151-old");
+      return {
+        messages: [
+          { id: "older-visible", sequence: 149 },
+          {
+            id: "hidden-older-boundary",
+            kind: "tool_result_reference",
+            sequence: 150,
+          },
+        ],
+        next_cursor: "cursor-before-101",
+      };
+    },
+    globalThis: {},
+    messagesFromTimeline: (records) =>
+      records
+        .filter((record) => record.kind !== "tool_result_reference")
+        .map((record) => ({
+          id: record.id,
+          role: "user",
+          sequence: record.sequence,
+        })),
+    React: createReactStub({ setCalls }),
+    authScope: () => "test-user",
+  };
+
+  vm.runInNewContext(useHistorySourceForTest(), context);
+  context.globalThis.__testExports.clearHistoryCache();
+  const history = context.globalThis.__testExports.useHistory(
+    "thread-filtered-cursor",
+    {},
+  );
+  await flushMicrotasks();
+
+  await history.loadHistory("cursor-before-151-old");
+  await flushMicrotasks();
+
+  assert.deepEqual(fetchCalls, [null, "cursor-before-151-old"]);
+  assert.equal(setCalls.at(-1).nextCursor, "cursor-before-101");
+  assert.deepEqual(
+    JSON.parse(
+      JSON.stringify(setCalls.at(-1).messages.map((message) => message.id)),
+    ),
+    ["older-visible", "current-visible"],
+  );
+});
+
+test("cursor page merge guard requires the current cursor or a connected page", () => {
+  const context = { globalThis: {}, React: createReactStub() };
+  vm.runInNewContext(useHistorySourceForTest(), context);
+  const { cursorPageCanMerge } = context.globalThis.__testExports;
+
+  assert.equal(
+    cursorPageCanMerge(
+      "cursor-before-151",
+      [{ id: "msg-101", sequence: 101 }],
+      [{ id: "msg-251", sequence: 251 }],
+      "cursor-before-251",
+    ),
+    false,
+  );
+  assert.equal(
+    cursorPageCanMerge(
+      "cursor-before-151",
+      [{ id: "msg-101", sequence: 101 }],
+      [{ id: "msg-251", sequence: 251 }],
+      "cursor-before-151",
+    ),
+    true,
+  );
+  assert.equal(
+    cursorPageCanMerge(
+      "cursor-before-151",
+      [
+        { id: "msg-101", sequence: 101 },
+        { id: "msg-150", sequence: 150 },
+      ],
+      [{ id: "msg-151", sequence: 151 }],
+      "cursor-before-101",
+    ),
+    true,
+  );
+  assert.equal(
+    cursorPageCanMerge(
+      "cursor-before-151-old",
+      [{ id: "msg-149", sequence: 149 }],
+      [{ id: "msg-152", sequence: 152 }],
+      "cursor-before-151-new",
+      {
+        pageSequenceWindow: { oldest: 101, newest: 150 },
+        currentSequenceWindow: { oldest: 151, newest: 200 },
+      },
+    ),
+    true,
+  );
+});
+
+test("useHistory full refresh preserves older rows and cursor across raw filtered boundaries", async () => {
+  const setCalls = [];
+  const fetchCalls = [];
+  let latestCalls = 0;
+  const context = {
+    console,
+    fetchTimeline: async ({ cursor }) => {
+      fetchCalls.push(cursor || null);
+      assert.equal(cursor || null, null);
+      latestCalls += 1;
+      if (latestCalls === 1) {
+        return {
+          messages: [
+            { id: "current-visible", sequence: 99 },
+            {
+              id: "hidden-current-boundary",
+              kind: "tool_result_reference",
+              sequence: 100,
+            },
+          ],
+          next_cursor: "cursor-before-99",
+        };
+      }
+      return {
+        messages: [
+          {
+            id: "hidden-fresh-boundary",
+            kind: "tool_result_reference",
+            sequence: 101,
+          },
+          { id: "fresh-visible", sequence: 102 },
+        ],
+        next_cursor: "cursor-before-101",
+      };
+    },
+    globalThis: {},
+    messagesFromTimeline: (records) =>
+      records
+        .filter((record) => record.kind !== "tool_result_reference")
+        .map((record) => ({
+          id: record.id,
+          role: "user",
+          sequence: record.sequence,
+        })),
+    React: createReactStub({ setCalls }),
+    authScope: () => "test-user",
+  };
+
+  vm.runInNewContext(useHistorySourceForTest(), context);
+  context.globalThis.__testExports.clearHistoryCache();
+  const history = context.globalThis.__testExports.useHistory(
+    "thread-filtered-refresh",
+    {},
+  );
+  await flushMicrotasks();
+
+  await history.loadHistory();
+  await flushMicrotasks();
+
+  assert.deepEqual(fetchCalls, [null, null]);
+  assert.equal(setCalls.at(-1).nextCursor, "cursor-before-99");
+  assert.deepEqual(
+    JSON.parse(
+      JSON.stringify(setCalls.at(-1).messages.map((message) => message.id)),
+    ),
+    ["current-visible", "fresh-visible"],
+  );
 });
 
 test("useHistory tags messages with the thread they belong to (messagesThreadId)", async () => {
@@ -564,6 +888,137 @@ test("mergeFullRefresh anchors preserved runtime bubbles at their original posit
   assert.equal(
     merged.map((m) => m.id).join(","),
     "msg-user-1,thinking-live,msg-assistant-1,msg-user-2,err-run-1",
+  );
+});
+
+test("mergeFullRefresh preserves paginated older timeline messages", () => {
+  const context = { globalThis: {}, React: createReactStub() };
+  vm.runInNewContext(useHistorySourceForTest(), context);
+  const { mergeFullRefresh } = context.globalThis.__testExports;
+
+  const merged = mergeFullRefresh(
+    [
+      { id: "msg-newer-user", role: "user", sequence: 50 },
+      { id: "tool-newer", role: "tool_activity", sequence: 51 },
+      { id: "msg-newer-assistant", role: "assistant", sequence: 52 },
+    ],
+    [
+      { id: "msg-older-user", role: "user", sequence: 10 },
+      { id: "tool-older", role: "tool_activity", sequence: 11 },
+      { id: "msg-newer-user", role: "user", sequence: 50 },
+    ],
+  );
+
+  assert.equal(
+    merged.map((message) => message.id).join(","),
+    "msg-older-user,tool-older,msg-newer-user,tool-newer,msg-newer-assistant",
+  );
+});
+
+test("mergeFullRefresh sorts preserved older timeline messages before pending rows", () => {
+  const context = { globalThis: {}, React: createReactStub() };
+  vm.runInNewContext(useHistorySourceForTest(), context);
+  const { mergeFullRefresh } = context.globalThis.__testExports;
+
+  const merged = mergeFullRefresh(
+    [
+      { id: "msg-newer-user", role: "user", sequence: 50 },
+      { id: "pending-1", role: "user", isOptimistic: true },
+    ],
+    [
+      { id: "msg-older-user", role: "user", sequence: 10 },
+      { id: "msg-newer-user", role: "user", sequence: 50 },
+      { id: "pending-1", role: "user", isOptimistic: true },
+    ],
+  );
+
+  assert.equal(
+    merged.map((message) => message.id).join(","),
+    "msg-older-user,msg-newer-user,pending-1",
+  );
+});
+
+test("mergeFullRefresh drops older timeline messages when the fresh page skipped ahead", () => {
+  const context = { globalThis: {}, React: createReactStub() };
+  vm.runInNewContext(useHistorySourceForTest(), context);
+  const { mergeFullRefresh } = context.globalThis.__testExports;
+
+  const merged = mergeFullRefresh(
+    [
+      { id: "msg-fresh-user", role: "user", sequence: 151 },
+      { id: "msg-fresh-assistant", role: "assistant", sequence: 200 },
+    ],
+    [
+      { id: "msg-stale-user", role: "user", sequence: 51 },
+      { id: "tool-stale", role: "tool_activity", sequence: 75 },
+      { id: "msg-stale-assistant", role: "assistant", sequence: 100 },
+    ],
+  );
+
+  assert.equal(
+    merged.map((message) => message.id).join(","),
+    "msg-fresh-user,msg-fresh-assistant",
+  );
+});
+
+test("nextCursorAfterFullRefresh does not rewind past loaded older pages", () => {
+  const context = { globalThis: {}, React: createReactStub() };
+  vm.runInNewContext(useHistorySourceForTest(), context);
+  const { nextCursorAfterFullRefresh } = context.globalThis.__testExports;
+
+  assert.equal(
+    nextCursorAfterFullRefresh(
+      [{ id: "msg-newer", sequence: 50 }],
+      [
+        { id: "msg-older", sequence: 10 },
+        { id: "msg-newer", sequence: 50 },
+      ],
+      "cursor-for-page-two",
+      "cursor-for-page-three",
+    ),
+    "cursor-for-page-three",
+  );
+
+  assert.equal(
+    nextCursorAfterFullRefresh(
+      [{ id: "msg-newer", sequence: 50 }],
+      [{ id: "msg-newer", sequence: 50 }],
+      "cursor-for-page-two",
+      null,
+    ),
+    "cursor-for-page-two",
+  );
+});
+
+test("nextCursorAfterFullRefresh uses the fresh cursor after a non-overlapping refresh", () => {
+  const context = { globalThis: {}, React: createReactStub() };
+  vm.runInNewContext(useHistorySourceForTest(), context);
+  const { nextCursorAfterFullRefresh } = context.globalThis.__testExports;
+
+  assert.equal(
+    nextCursorAfterFullRefresh(
+      [
+        { id: "msg-fresh-start", sequence: 151 },
+        { id: "msg-fresh-end", sequence: 200 },
+      ],
+      [
+        { id: "msg-current-start", sequence: 51 },
+        { id: "msg-current-end", sequence: 100 },
+      ],
+      "cursor-before-151",
+      "cursor-before-51",
+    ),
+    "cursor-before-151",
+  );
+
+  assert.equal(
+    nextCursorAfterFullRefresh(
+      [{ id: "msg-fresh", sequence: 151 }],
+      [{ id: "msg-current-adjacent", sequence: 150 }],
+      "cursor-before-151",
+      "cursor-before-150",
+    ),
+    "cursor-before-150",
   );
 });
 

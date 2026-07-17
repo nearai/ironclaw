@@ -435,7 +435,7 @@ async fn session_minted_via_oauth_callback_authenticates_protected_v2_route() {
         .oneshot(with_peer(
             Request::builder()
                 .method(Method::GET)
-                .uri("/auth/login/google?redirect_after=%2Fv2")
+                .uri("/auth/login/google?redirect_after=%2F")
                 .body(Body::empty())
                 .expect("request"),
         ))

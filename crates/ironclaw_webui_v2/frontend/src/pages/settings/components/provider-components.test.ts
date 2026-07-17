@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { test } from "vitest";
 
 import { groupProvidersByStatus } from "../lib/llm-providers";
-import { runVmModuleForTest } from "../../../test-support/vm-module-harness.ts";
+import { runVmModuleForTest } from "../../../test-support/vm-module-harness";
 
 const PROVIDER_GROUP_LABELS = [
   "llm.groupActive",
@@ -742,6 +742,11 @@ test("startNearaiWallet proceeds on a loopback origin (wallet is not hosted SSO)
   const run = runProviderLogin({ hostname: "127.0.0.1" });
   await run.hook.startNearaiWallet();
   assert.ok(run.httpCalls.includes("open"), "wallet popup opens on localhost");
+  assert.equal(
+    run.openedUrls[0],
+    "/wallet/connect?channel=nearai-wallet-login%3Auuid",
+    "wallet popup uses the root-path route",
+  );
   assert.ok(
     !run.nearaiErrors().includes("onboarding.nearaiLocalSso"),
     "no hosted-SSO local block for the wallet path"

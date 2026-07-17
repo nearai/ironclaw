@@ -289,6 +289,8 @@ impl TurnRunTransitionPort for LockingTransitionPort {
     async fn heartbeat(&self, _request: HeartbeatRequest) -> Result<EventCursor, TurnError> {
         self.heartbeat_count.fetch_add(1, Ordering::SeqCst);
         if let Some(tx) = self.heartbeat_started_tx.lock().await.take() {
+            #[allow(clippy::let_underscore_must_use)]
+            // notify-only oneshot; receiver drop is expected
             let _ = tx.send(());
         }
         let _guard = self.state_lock.lock().await;
@@ -359,12 +361,17 @@ impl TurnRunExecutor for LockHoldingExecutor {
     ) -> Result<(), TurnRunExecutorError> {
         let _guard = self.state_lock.lock().await;
         if let Some(tx) = self.locked_tx.lock().await.take() {
+            #[allow(clippy::let_underscore_must_use)]
+            // notify-only oneshot; receiver drop is expected
             let _ = tx.send(());
         }
         if let Some(rx) = self.release_rx.lock().await.take() {
+            #[allow(clippy::let_underscore_must_use)] // release signal; sender drop just proceeds
             let _ = rx.await;
         }
         if let Some(tx) = self.done_tx.lock().await.take() {
+            #[allow(clippy::let_underscore_must_use)]
+            // notify-only oneshot; receiver drop is expected
             let _ = tx.send(());
         }
         Ok(())
@@ -397,6 +404,7 @@ async fn claimed_test_run(thread_id: &str) -> ClaimedTurnRun {
         resolved_run_profile_id: RunProfileId::interactive_default(),
         resolved_run_profile_version: RunProfileVersion::new(1),
         resolved_model_route: None,
+        model_usage: None,
         received_at: Utc::now(),
         checkpoint_id: None,
         gate_ref: None,
@@ -557,6 +565,8 @@ async fn is_stopped_reflects_scheduler_lifecycle() {
         handle.shutdown().await;
         // After shutdown() the supervisor has been joined → is_finished()
         // is guaranteed true; we use `true` as a sentinel for "stopped".
+        #[allow(clippy::let_underscore_must_use)]
+        // receiver awaited by test; nothing to signal on drop
         let _ = tx.send((was_running, true));
     });
 
@@ -653,9 +663,19 @@ async fn drop_with_saturated_queue_still_cancels_token() {
         status: TurnStatus::Queued,
         event_cursor: EventCursor::default(),
     };
-    use ironclaw_turns::TurnRunWakeNotifier;
-    for _ in 0..4 {
-        let _ = notifier.notify_queued_run(fake_wake.clone());
+    use ironclaw_turns::{TurnRunWakeNotifier, TurnRunWakeNotifyError};
+    // The first send must succeed, establishing the saturated-queue
+    // precondition the rest of the test relies on. Only the subsequent sends
+    // are expected to bounce with DeliveryUnavailable.
+    notifier
+        .notify_queued_run(fake_wake.clone())
+        .expect("first enqueue must succeed to saturate the capacity-1 queue");
+    for _ in 0..3 {
+        match notifier.notify_queued_run(fake_wake.clone()) {
+            Err(TurnRunWakeNotifyError::DeliveryUnavailable) => {}
+            Ok(()) => panic!("saturated queue must reject further enqueues"),
+            Err(other) => panic!("unexpected wake notify error: {other}"),
+        }
     }
 
     let scheduler =

@@ -71,7 +71,7 @@ use ironclaw_host_api::{
     AgentId, CapabilityId, InvocationId, ProjectId, ResourceScope, RuntimeKind, TenantId, ThreadId,
     UserId,
 };
-use ironclaw_loop_support::{
+use ironclaw_loop_host::{
     HostManagedModelError, HostManagedModelGateway, HostManagedModelRequest,
     HostManagedModelResponse, LoopCapabilityInputResolver,
 };
@@ -230,6 +230,7 @@ impl LoopCapabilityPort for RecordingCapabilityPort {
             terminate_hint: false,
             byte_len: 0,
             output_digest: None,
+            model_observation: None,
         }))
     }
 
@@ -304,6 +305,7 @@ impl LoopCapabilityPort for ProviderAwareCapabilityPort {
             terminate_hint: false,
             byte_len: 0,
             output_digest: None,
+            model_observation: None,
         }))
     }
 
@@ -1085,6 +1087,7 @@ impl Fixture {
             resolved_run_profile_id: RunProfileId::default_profile(),
             resolved_run_profile_version: RunProfileVersion::new(1),
             resolved_model_route: None,
+            model_usage: None,
             received_at: Utc::now(),
             checkpoint_id: None,
             gate_ref: None,
@@ -1257,6 +1260,8 @@ async fn wait_for_seen_events(seen: &Arc<SeenLog>, expected: usize) -> Vec<SeenR
         // stores a permit when racing the waiter's parking, so an event
         // arriving between `snapshot()` and `notified().await` still
         // wakes us immediately.
+        #[allow(clippy::let_underscore_must_use)]
+        // timeout is a wait cap; elapsed/result intentionally ignored, loop re-checks snapshot
         let _ = tokio::time::timeout(remaining, seen.notify.notified()).await;
     }
 }
@@ -4379,10 +4384,11 @@ async fn before_prompt_hook_message_is_resolvable_via_factory_wiring() {
             _ctx: &ironclaw_hooks::points::BeforePromptHookContext,
             sink: &mut dyn RestrictedMutatorSink,
         ) {
-            let _ = sink.add_envelope_snippet(
+            sink.add_envelope_snippet(
                 "injected hook context".to_string(),
                 ironclaw_hooks::kinds::mutator::PatchOrdinalHint::Last,
-            );
+            )
+            .expect("add_envelope_snippet should accept test hook context");
         }
     }
 

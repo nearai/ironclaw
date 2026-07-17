@@ -96,6 +96,7 @@ fn submit_request(
 ) -> SubmitTurnRequest {
     let owner = scope.explicit_owner_user_id().unwrap().clone();
     SubmitTurnRequest {
+        requested_model: None,
         actor: actor_for(&owner),
         accepted_message_ref: AcceptedMessageRef::new(format!("message-{key}")).unwrap(),
         source_binding_ref: SourceBindingRef::new("source-web").unwrap(),
@@ -420,6 +421,7 @@ async fn trigger_counter_decrements_via_apply_validated_loop_exit() {
 
     store
         .apply_validated_loop_exit(ApplyValidatedLoopExitRequest {
+            model_usage: None,
             run_id,
             runner_id,
             lease_token,
@@ -463,6 +465,7 @@ async fn trigger_counter_decrements_via_apply_validated_loop_exit_cancelled() {
     // apply_validated_loop_exit Cancelled → cancel_or_fail_claimed_record → cancel_claimed_record.
     store
         .apply_validated_loop_exit(ApplyValidatedLoopExitRequest {
+            model_usage: None,
             run_id,
             runner_id,
             lease_token,

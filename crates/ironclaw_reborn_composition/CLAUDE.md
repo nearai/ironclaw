@@ -95,8 +95,9 @@ Inbound order (outer → inner → handler):
    bearer-validation step). Today: `create_thread`, product-auth OAuth
    start, manual-token setup/secret-submit, accounts list/select/recovery/
    refresh, and lifecycle cleanup — all 16 KiB; `send_message` 14 MiB
-   (text + base64 inline attachments); `cancel_run`, `resolve_gate`, and
-   `rename_automation` 4 KiB; `get_timeline`,
+   (text + base64 inline attachments); `import_extension` 8 MiB (zip tool
+   bundle: WASM module + manifest/schemas/prompts); `cancel_run`,
+   `resolve_gate`, and `rename_automation` 4 KiB; `get_timeline`,
    `stream_events`, and product-auth OAuth callback `NoBody`.
    `BodyLimitPolicy` is an exhaustive `match`, so a new variant added
    upstream fails the build rather than silently disabling
@@ -137,6 +138,14 @@ Inbound order (outer → inner → handler):
    handlers from `ironclaw_webui_v2` (create-thread, list-threads, delete-thread,
    send-message, get-timeline, stream-events SSE, stream-events WS,
    cancel-run, resolve-gate, setup-extension, list/rename automations).
+
+After the complete descriptor set is assembled, composition derives every
+literal root namespace and supplies it to `static_router_with_config`. Exact
+host routes still win through Axum routing, while unknown paths in any
+host-owned namespace return 404 instead of the SPA shell. A descriptor whose
+first segment is dynamic, percent-encoded/noncanonical, missing, or already
+owned by a static asset or explicit static route fails composition: no finite
+fail-closed reservation can represent those overlaps safely.
 
 ### Product-auth routes
 
@@ -246,7 +255,7 @@ Reborn-native auth router. v1 gateway code remains untouched —
 ### Session transport decision (#4116)
 
 The OAuth callback returns a short-lived, one-time login ticket to
-the SPA via the URL query (`/v2?login_ticket=<ticket>`), not the
+the SPA via the URL query (`/?login_ticket=<ticket>`), not the
 session bearer itself and not an `HttpOnly` cookie. The SPA
 immediately POSTs that ticket to `/auth/session/exchange` and stores
 the returned bearer in `sessionStorage`.
@@ -294,6 +303,7 @@ rows are inventoried here, not implemented in the current PR.
 | Approval shim | `POST /api/chat/approval` | (Subsumed by `resolve_gate`) | Mapped |
 | Auth-token / auth-cancel | `POST /api/chat/auth-{token,cancel}` | (Engine v1 compatibility shim; delete with v1) | v1-only (legacy) |
 | Extensions registry/list/install/activate/remove/setup | `GET\|POST /api/extensions/*` | `GET /api/webchat/v2/extensions`, `GET /api/webchat/v2/extensions/registry`, `POST /api/webchat/v2/extensions/install`, `POST /api/webchat/v2/extensions/{package_id}/{activate,remove,setup}` | Mapped to lifecycle package refs and registry projections; setup projects credential requirements and product-auth OAuth start is mounted under the extension setup surface |
+| Extension import from zip (#5459) | (none — v2-only surface) | `POST /api/webchat/v2/extensions/import` | Admin-only (`operator_webui_config` capability on the matched bearer): uploads a standalone WASM tool bundle (zip with `manifest.toml` + `wasm/` + `schemas/` + `prompts/`). Validated as `ManifestSource::InstalledLocal` (never first-party/system trust or runtime, wasm runtime only, all manifest-declared assets required, duplicate zip entries rejected), then materialized under `/system/extensions/<id>/` and added to the catalog under the catalog-write + operation locks; duplicate installed/catalog ids are rejected. Restart-safe: startup filesystem discovery stamps everything it finds `InstalledLocal` (`HostBundled` is reserved for binary-compiled extensions), so a restart cannot relabel an upload into the first-party trust tier. 8 MiB body cap, mutation rate limit |
 | LLM provider config | v1 settings/provider config surface | `GET /api/webchat/v2/llm/providers`, `POST /api/webchat/v2/llm/providers`, `POST /api/webchat/v2/llm/providers/{provider_id}/delete`, `POST /api/webchat/v2/llm/active`, `POST /api/webchat/v2/llm/{test-connection,list-models}` | Mapped for trusted operator-token deployments; left unmounted for multi-user authenticators until an admin role boundary exists |
 | Operator status/readiness | v1 doctor/readiness surfaces | `GET /api/webchat/v2/operator/status` | Mapped to Reborn readiness projection through the product facade; left unmounted with other operator routes for multi-user authenticators |
 | Operator logs | `src/cli/logs.rs` command path | `GET /api/webchat/v2/operator/logs` | Mapped to the in-process operator log buffer with bounded query, tail, follow, filter, cursor, and redaction behavior |

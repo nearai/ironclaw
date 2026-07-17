@@ -175,7 +175,7 @@ where
 
 #[cfg(feature = "filesystem-goal-store")]
 #[async_trait]
-impl<F> ironclaw_loop_support::SubagentSpawnGoalStore for FilesystemSubagentGoalStore<F>
+impl<F> ironclaw_loop_host::SubagentSpawnGoalStore for FilesystemSubagentGoalStore<F>
 where
     F: RootFilesystem + 'static,
 {
@@ -183,7 +183,7 @@ where
         &self,
         scope: &TurnScope,
         run_id: TurnRunId,
-        goal: ironclaw_loop_support::SubagentGoalRecord,
+        goal: ironclaw_loop_host::SubagentGoalRecord,
     ) -> Result<(), ironclaw_turns::run_profile::AgentLoopHostError> {
         <Self as SubagentGoalStore>::put_goal(
             self,
@@ -363,12 +363,12 @@ impl SubagentGoalStore for InMemoryBoundedSubagentGoalStore {
 }
 
 #[async_trait]
-impl ironclaw_loop_support::SubagentSpawnGoalStore for InMemoryBoundedSubagentGoalStore {
+impl ironclaw_loop_host::SubagentSpawnGoalStore for InMemoryBoundedSubagentGoalStore {
     async fn put_goal(
         &self,
         scope: &TurnScope,
         run_id: TurnRunId,
-        goal: ironclaw_loop_support::SubagentGoalRecord,
+        goal: ironclaw_loop_host::SubagentGoalRecord,
     ) -> Result<(), ironclaw_turns::run_profile::AgentLoopHostError> {
         self.put(
             scope,

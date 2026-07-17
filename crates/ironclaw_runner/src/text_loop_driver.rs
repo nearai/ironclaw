@@ -163,7 +163,7 @@ fn completed_final_reply(
         reply_message_refs: vec![reply_ref],
         result_refs: Vec::new(),
         final_checkpoint_id: None,
-        usage_summary_ref: None,
+        model_usage: None,
         exit_id,
     })
 }
@@ -325,6 +325,25 @@ mod tests {
             AgentLoopDriverError::Failed {
                 reason_kind: MODEL_CREDENTIALS_UNAVAILABLE_CATEGORY.to_string(),
                 detail: Some("model credentials are unavailable".to_string()),
+            }
+        );
+    }
+
+    #[test]
+    fn model_budget_accounting_failure_preserves_distinct_failure_category() {
+        let mapped = map_host_error(
+            "model",
+            AgentLoopHostError::new(
+                AgentLoopHostErrorKind::BudgetAccountingFailed,
+                "resource accounting storage is unavailable",
+            ),
+        );
+
+        assert_eq!(
+            mapped,
+            AgentLoopDriverError::Failed {
+                reason_kind: "budget_accounting_failed".to_string(),
+                detail: Some("resource accounting storage is unavailable".to_string()),
             }
         );
     }

@@ -38,7 +38,7 @@ use ironclaw_llm::{
         ReplayingHttpInterceptor,
     },
 };
-use ironclaw_loop_support::HostManagedModelGateway;
+use ironclaw_loop_host::HostManagedModelGateway;
 use ironclaw_network::{
     NetworkHttpEgress, NetworkHttpError, NetworkHttpRequest, NetworkHttpResponse, NetworkUsage,
     PolicyNetworkHttpEgress, ReqwestNetworkTransport,
@@ -1753,7 +1753,7 @@ mod tests {
     use ironclaw_host_api::{
         AgentId, InvocationId, NetworkMethod, NetworkPolicy, ResourceScope, TenantId, UserId,
     };
-    use ironclaw_loop_support::{
+    use ironclaw_loop_host::{
         HostManagedModelError, HostManagedModelErrorKind, HostManagedModelRequest,
         HostManagedModelResponse,
     };

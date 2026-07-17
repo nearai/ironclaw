@@ -25,6 +25,7 @@ import {
   fetchOauthFlowStatus,
   fetchPairingRequests,
   approvePairingCode,
+  importExtension,
 } from "../lib/extensions-api";
 
 const OAUTH_SETUP_REFRESH_MS = 2000;
@@ -32,7 +33,7 @@ const OAUTH_SETUP_TIMEOUT_MS = 10 * 60 * 1000;
 
 // OAuth callback constants, HTTPS-auth-URL/popup helpers, and completion
 // parsing/matching are the shared product-auth OAuth event contract — see
-// `lib/product-auth-oauth-events.js`. This hook keeps only its setup-watcher
+// `lib/product-auth-oauth-events.ts`. This hook keeps only its setup-watcher
 // state machine below.
 
 function authPopupFailureMessage(reason) {
@@ -60,7 +61,7 @@ function extensionListItemIsConfigured(extension) {
     return true;
   }
   // Same snake/camel fallback chain as `extensionLifecycleState`
-  // (lib/extension-actions.js) so a camelCase snapshot cannot read as
+  // (lib/extension-actions.ts) so a camelCase snapshot cannot read as
   // "not configured" here while the rest of the page treats it as active.
   const state =
     extension.onboarding_state ||
@@ -103,12 +104,17 @@ export function useExtensions() {
   const extensionsQuery = useQuery({
     queryKey: ["extensions"],
     queryFn: fetchExtensions,
+    // The page must distinguish an offline request from a successful empty
+    // catalog. TanStack's default online mode pauses without calling queryFn,
+    // leaving both data and error empty and reproducing the misleading state.
+    networkMode: "always",
     refetchOnMount: "always",
   });
 
   const registryQuery = useQuery({
     queryKey: ["extension-registry"],
     queryFn: fetchExtensionRegistry,
+    networkMode: "always",
     refetchOnMount: "always",
   });
 
@@ -117,6 +123,11 @@ export function useExtensions() {
     queryFn: listConnectableChannels,
     refetchOnMount: "always",
   });
+
+  const refetch = React.useCallback(
+    () => Promise.all([extensionsQuery.refetch(), registryQuery.refetch()]),
+    [extensionsQuery.refetch, registryQuery.refetch]
+  );
 
   const invalidate = React.useCallback(() => {
     queryClient.invalidateQueries({ queryKey: ["extensions"] });
@@ -297,16 +308,26 @@ export function useExtensions() {
       !e.installed
   );
 
-  const isLoading = extensionsQuery.isLoading || registryQuery.isLoading;
-  const isBusy = installMutation.isPending || activateMutation.isPending || removeMutation.isPending;
-  const remove = React.useCallback(
-    (extension) => {
-      const name = extension?.displayName || extension?.packageRef?.id || "this extension";
-      if (!window.confirm(`Remove ${name}?`)) return;
-      removeMutation.mutate(extension);
+  const importMutation = useMutation({
+    mutationFn: ({ file }) => importExtension(file),
+    onSuccess: (res) => {
+      if (res.success) {
+        setActionResult({
+          type: "success",
+          message: res.message || t("ext.registry.importSuccess"),
+        });
+      } else {
+        setActionResult({ type: "error", message: res.message || t("ext.registry.importFailed") });
+      }
+      invalidate();
     },
-    [removeMutation]
-  );
+    onError: (err) => {
+      setActionResult({ type: "error", message: err.message });
+    },
+  });
+
+  const isLoading = extensionsQuery.isLoading || registryQuery.isLoading;
+  const isBusy = installMutation.isPending || activateMutation.isPending || removeMutation.isPending || importMutation.isPending;
 
   return {
     status,
@@ -320,13 +341,23 @@ export function useExtensions() {
     registry,
     catalogEntries,
     connectableChannels,
+    isExtensionsLoading: extensionsQuery.isLoading,
+    isRegistryLoading: registryQuery.isLoading,
     isLoading,
+    extensionsError: extensionsQuery.error || null,
+    registryError: registryQuery.error || null,
+    error: extensionsQuery.error || registryQuery.error || null,
+    refetch,
+    isRefetching: extensionsQuery.isRefetching || registryQuery.isRefetching,
     isBusy,
     actionResult,
     clearResult,
     install: installMutation.mutate,
     activate: activateMutation.mutate,
-    remove,
+    remove: removeMutation.mutate,
+    isRemoving: removeMutation.isPending,
+    importTool: (payload) => importMutation.mutate(payload),
+    isImporting: importMutation.isPending,
     invalidate,
   };
 }
@@ -371,6 +402,7 @@ export function useOauthSetup(packageRef, { onConfigured } = {}) {
   const queryClient = useQueryClient();
   const packageKey = packageRef?.id || packageRef;
   const watcherRef = React.useRef(null);
+  const oauthGenerationRef = React.useRef(0);
   const configuredRef = React.useRef(false);
   const [isAuthorizing, setIsAuthorizing] = React.useState(false);
   // Retryable error surfaced when the callback popup reports a flow-matched
@@ -416,7 +448,16 @@ export function useOauthSetup(packageRef, { onConfigured } = {}) {
   }, [packageKey, queryClient]);
 
   const watchOauthProgress = React.useCallback(
-    (popup, { flowId = null, invocationId = null, requireCallbackCompletion = false } = {}) => {
+    (
+      popup,
+      {
+        flowId = null,
+        invocationId = null,
+        requireCallbackCompletion = false,
+        generation,
+      } = {},
+    ) => {
+      if (generation !== oauthGenerationRef.current) return;
       clearWatcher();
       configuredRef.current = false;
       const browserWindow =
@@ -439,13 +480,14 @@ export function useOauthSetup(packageRef, { onConfigured } = {}) {
       // Guard against overlapping in-flight status polls so a slow request
       // cannot stack fetches across interval ticks.
       let flowStatusPending = false;
+      const isCurrentGeneration = () => generation === oauthGenerationRef.current;
 
       function cleanup() {
         if (stopped) return;
         stopped = true;
         if (timer) browserWindow.clearInterval(timer);
         unsubscribe();
-        setIsAuthorizing(false);
+        if (isCurrentGeneration()) setIsAuthorizing(false);
       }
 
       function stopWatcher() {
@@ -454,7 +496,7 @@ export function useOauthSetup(packageRef, { onConfigured } = {}) {
       }
 
       function complete() {
-        if (stopped) return;
+        if (stopped || !isCurrentGeneration()) return;
         if (!configuredRef.current) {
           configuredRef.current = true;
           Promise.resolve(onConfigured?.()).catch(() => {});
@@ -464,7 +506,15 @@ export function useOauthSetup(packageRef, { onConfigured } = {}) {
       }
 
       function handleCompletion(payload) {
+        if (!isCurrentGeneration()) return false;
         if (failureMatchesFlow(payload, flowId)) {
+          if (invocationId) {
+            pollFlowStatus();
+            // Durable status owns terminal reconciliation when an invocation
+            // id is available. Keep the interval's timeout path alive if the
+            // status endpoint remains unavailable.
+            return false;
+          }
           setAuthError("Authorization failed. Try connecting again.");
           stopWatcher();
           refreshSetupState();
@@ -487,12 +537,18 @@ export function useOauthSetup(packageRef, { onConfigured } = {}) {
         flowStatusPending = true;
         Promise.resolve(fetchOauthFlowStatus(flowId, invocationId))
           .then((result) => {
-            if (stopped) return;
+            if (stopped || !isCurrentGeneration()) return;
             const status = result?.status;
             if (status === "completed") {
               complete();
-            } else if (status === "failed") {
-              setAuthError("Authorization failed. Try connecting again.");
+            } else if (["failed", "canceled", "expired"].includes(status)) {
+              setAuthError(
+                status === "expired"
+                  ? "Authorization expired. Try connecting again."
+                  : status === "canceled"
+                    ? "Authorization was canceled. Try connecting again."
+                    : "Authorization failed. Try connecting again.",
+              );
               stopWatcher();
               refreshSetupState();
             }
@@ -506,6 +562,10 @@ export function useOauthSetup(packageRef, { onConfigured } = {}) {
       unsubscribe = subscribeProductAuthOAuthCompletion(browserWindow, handleCompletion);
 
       timer = browserWindow.setInterval(() => {
+        if (!isCurrentGeneration()) {
+          cleanup();
+          return;
+        }
         refreshSetupState();
         if (handleCompletion(readLatestProductAuthOAuthCompletion(browserWindow))) {
           return;
@@ -543,17 +603,32 @@ export function useOauthSetup(packageRef, { onConfigured } = {}) {
   React.useEffect(() => clearWatcher, [clearWatcher]);
 
   const mutation = useMutation({
-    mutationFn: ({ secret, popup }) =>
-      startExtensionOauth(packageRef, secret).then((res) => {
+    mutationFn: (variables) => {
+      const { secret, popup } = variables;
+      const generation = oauthGenerationRef.current + 1;
+      oauthGenerationRef.current = generation;
+      variables.oauthGeneration = generation;
+      clearWatcher();
+      return startExtensionOauth(packageRef, secret).then((res) => {
         if (res.success === false) {
           throw new Error(res.message || "OAuth setup failed");
         }
         if (res.authorization_url && !isHttpsAuthUrl(res.authorization_url)) {
           throw new Error("Authorization URL must use HTTPS.");
         }
-        return { res, popup };
-      }),
-    onSuccess: ({ res, popup }, variables) => {
+        return { res, popup, generation };
+      });
+    },
+    onSuccess: ({ res, popup, generation }, variables) => {
+      // React Query always receives `generation` from mutationFn. The fallbacks
+      // keep direct unit invocation and older cached mutation results harmless
+      // without weakening the current-generation fence.
+      const resultGeneration =
+        generation ?? variables?.oauthGeneration ?? oauthGenerationRef.current;
+      if (resultGeneration !== oauthGenerationRef.current) {
+        if (popup && !popup.closed) popup.close();
+        return;
+      }
       let authPopup = popup;
       if (res.authorization_url) {
         const opened = openAuthPopup(res.authorization_url, popup);
@@ -571,10 +646,18 @@ export function useOauthSetup(packageRef, { onConfigured } = {}) {
           flowId,
           invocationId: oauthResponseInvocationId(res),
           requireCallbackCompletion: Boolean(flowId && variables?.secret?.provided),
+          generation: resultGeneration,
         });
       }
     },
     onError: (_err, variables) => {
+      const failedGeneration =
+        variables?.oauthGeneration ?? oauthGenerationRef.current;
+      if (failedGeneration !== oauthGenerationRef.current) {
+        const stalePopup = variables?.popup;
+        if (stalePopup && !stalePopup.closed) stalePopup.close();
+        return;
+      }
       clearWatcher();
       const popup = variables?.popup;
       if (popup && !popup.closed) popup.close();

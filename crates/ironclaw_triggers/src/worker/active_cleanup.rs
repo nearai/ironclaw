@@ -139,7 +139,7 @@ impl TriggerPollerWorker {
                 )),
                 // Missing remains conservative until recovery can prove the
                 // active run lookup is not merely stale or temporarily empty.
-                TriggerActiveRunState::Blocked
+                TriggerActiveRunState::Blocked { .. }
                 | TriggerActiveRunState::Missing
                 | TriggerActiveRunState::Nonterminal => None,
             };

@@ -167,7 +167,7 @@ const PLANNER_DIRECTION: &str = include_str!("planner.md");
 // drop: const RESEARCHER_DIRECTION: &str = include_str!("researcher.md");
 ```
 
-### Tool schema (`crates/ironclaw_loop_support/src/subagent_spawn_port.rs`)
+### Tool schema (`crates/ironclaw_loop_host/src/subagent_spawn_port.rs`)
 
 `SpawnSubagentArgs` — wire rename with backwards-compatible alias:
 
@@ -230,7 +230,7 @@ Single-line change: pass `flavors::builtin_flavor_catalog()` into the existing
 | `crates/ironclaw_runner/src/subagent/directions/mod.rs` | drop `RESEARCHER_DIRECTION`, add `PLANNER_DIRECTION` |
 | `crates/ironclaw_runner/src/subagent/directions/researcher.md` | DELETE |
 | `crates/ironclaw_runner/src/subagent/directions/planner.md` | NEW |
-| `crates/ironclaw_loop_support/src/subagent_spawn_port.rs` | wire rename + alias, port `new` takes catalog, dynamic schema, description rewrite |
+| `crates/ironclaw_loop_host/src/subagent_spawn_port.rs` | wire rename + alias, port `new` takes catalog, dynamic schema, description rewrite |
 | `crates/ironclaw_runner/src/model_gateway.rs` | pass catalog into constructor |
 | `crates/ironclaw_runner/src/subagent/capability_surface.rs` | verify `http` capability resolves for planner allowlist (no behavior change expected) |
 
@@ -257,7 +257,7 @@ Single-line change: pass `flavors::builtin_flavor_catalog()` into the existing
 5. **Integration**: existing subagent E2E tests pass; substitute `planner` for
    `researcher` in fixtures.
 
-Commands: `cargo test -p ironclaw_runner -p ironclaw_loop_support` +
+Commands: `cargo test -p ironclaw_runner -p ironclaw_loop_host` +
 `cargo clippy --all --tests`.
 
 ## Risks + mitigations

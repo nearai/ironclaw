@@ -385,6 +385,7 @@ mod tests {
             status: TurnStatus::BlockedAuth,
             profile: TurnRunProfile::from_resolved(resolved_run_profile()),
             resolved_model_route: None,
+            model_usage: None,
             checkpoint_id: None,
             gate_ref: Some(GateRef::new(format!("gate-{run_id}")).expect("gate ref")),
             blocked_activity_id: None,

@@ -671,13 +671,16 @@ registerPack("en", {
   "workspace.noFiles": "No files here.",
   "workspace.noMatches": "Nothing matches that filter.",
   "workspace.breadcrumbRoot": "workspace",
+  "workspace.area.home": "Home",
+  "workspace.area.memory": "Memory",
   "workspace.pickFileTitle": "Pick a file",
   "workspace.pickFileDesc": "Choose a file from the tree to preview or download it. This viewer is read-only.",
   "workspace.parent": "Parent: {path}",
   "workspace.download": "Download",
+  "workspace.downloadFailed": "Couldn't download this file. Please try again.",
   "workspace.binaryPreviewUnavailable":
     "No inline preview for this file type. Download it to view the contents.",
-  "workspace.fileMeta": "{mime} · {size} bytes",
+  "workspace.fileMeta": "{mime} · {size}",
   "workspace.unableOpenDirectory": "Unable to open directory",
 
   // Jobs page
@@ -906,6 +909,18 @@ registerPack("en", {
   "automations.runs.showingOf": "Showing {shown} of {total} recent runs",
   "automations.status.running": "Running",
   "automations.status.needsReview": "Needs review",
+  "automations.hold.approval": "Waiting for your approval",
+  "automations.hold.auth": "Waiting for you to reconnect an account",
+  "automations.hold.inProgress": "Previous run still in progress",
+  "automations.hold.other": "Previous run hasn't finished",
+  "automations.hold.meta.paused":
+    "Paused since {since} · {count} scheduled occurrences elapsed while held",
+  "automations.hold.meta.pausedUnknownCount":
+    "Paused since {since} · scheduled occurrence count unavailable",
+  "automations.hold.meta.inProgress":
+    "Started {since} · next run starts after it finishes · {count} scheduled occurrences elapsed while held",
+  "automations.hold.meta.inProgressUnknownCount":
+    "Started {since} · next run starts after it finishes · scheduled occurrence count unavailable",
   "automations.detail.emptyTitle": "Select an automation",
   "automations.detail.emptyDescription":
     "Choose a schedule to inspect recent runs.",
@@ -940,6 +955,18 @@ registerPack("en", {
     "All available extensions are already installed, or no registry is configured.",
   "ext.registry.availableTitle": "Available extensions",
   "ext.registry.noMatch": "No extensions match the filter.",
+  "ext.registry.import": "Import",
+  "ext.registry.importing": "Importing…",
+  "ext.registry.importSuccess": "Tool imported — install it from the registry.",
+  "ext.registry.importFailed": "Import failed",
+  "ext.catalog.loadErrorTitle": "Extension catalog unavailable",
+  "ext.catalog.loadErrorDesc":
+    "The extension catalog could not be loaded. Check your connection and try again.",
+  "ext.catalog.partialErrorTitle": "Some extension data is unavailable",
+  "ext.catalog.partialErrorDesc":
+    "The available extension data is shown, but some details could not be loaded. Check your connection and try again.",
+  "ext.catalog.retry": "Retry",
+  "ext.catalog.retrying": "Retrying…",
 
   // Chat — history
   "chat.history.loading": "Loading...",
@@ -1232,6 +1259,24 @@ registerPack("en", {
   "admin.user.saveRole": "Save role",
   "admin.user.usage30Days": "Usage (last 30 days)",
   "admin.user.noUsage": "No usage data.",
+  "admin.user.secrets.title": "Secrets",
+  "admin.user.secrets.description": "Provision credentials for this user without exposing stored values.",
+  "admin.user.secrets.loading": "Loading secrets…",
+  "admin.user.secrets.loadFailed": "Failed to load secrets: {message}",
+  "admin.user.secrets.empty": "No secrets configured.",
+  "admin.user.secrets.handle": "Secret handle",
+  "admin.user.secrets.value": "Secret value (write-only)",
+  "admin.user.secrets.writeOnlyHint": "Values are write-only and cannot be viewed after saving.",
+  "admin.user.secrets.replace": "Replace",
+  "admin.user.secrets.delete": "Delete",
+  "admin.user.secrets.save": "Save secret",
+  "admin.user.secrets.saving": "Saving…",
+  "admin.user.secrets.saved": "Saved secret “{handle}”.",
+  "admin.user.secrets.deleted": "Deleted secret “{handle}”.",
+  "admin.user.secrets.actionFailed": "Secret action failed: {message}",
+  "admin.user.secrets.deleteTitle": "Delete secret",
+  "admin.user.secrets.deleteDesc": "Delete “{handle}”? This cannot be undone.",
+  "admin.user.secrets.deleting": "Deleting…",
 
   // Admin — usage tab
   "admin.usage.overview": "Usage overview",
@@ -1299,6 +1344,8 @@ registerPack("en", {
   "extensions.connect": "Connect",
   "extensions.configureName": "Configure {name}",
   "extensions.allInstalled": "All installed extensions",
+  "extensions.scope.shared": "shared",
+  "extensions.scope.private": "mine",
   "mcp.installed": "Installed MCP servers",
   "extensions.oneCapability": "1 capability",
   "extensions.pluralCapabilities": "{count} capabilities",

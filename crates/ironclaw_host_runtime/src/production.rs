@@ -104,7 +104,7 @@ use crate::{
     RuntimeCapabilityCompleted, RuntimeCapabilityFailure, RuntimeCapabilityOutcome,
     RuntimeCapabilityRequest, RuntimeCapabilityResumeRequest, RuntimeFailureKind, RuntimeGateId,
     RuntimeStatusRequest, RuntimeWorkId, RuntimeWorkSummary, VisibleCapabilityRequest,
-    VisibleCapabilitySurface, obligations::secret_present, plan_capability,
+    VisibleCapabilitySurface, obligations::secret_owner_scope, plan_capability,
     surface::CapabilityCatalog,
 };
 
@@ -1734,13 +1734,17 @@ impl DefaultHostRuntime {
         }
 
         for handle in &required_secrets {
-            // `secret_present` is the single owner of the presence rule, shared with
-            // the dispatch-time obligation backstop (obligations::preflight_secret_injection)
-            // so the two paths cannot drift on "what counts as a present credential".
-            // The happy path intentionally re-checks at dispatch time; this pre-flight
-            // read is only for gate ordering. (Accepted double-read; the backstop is the
-            // authority — see the thread on collapsing it.)
-            match secret_present(secret_store.as_ref(), scope, handle).await {
+            // `secret_owner_scope` is the single owner of the presence+ownership rule,
+            // shared with the dispatch-time obligation backstop
+            // (obligations::preflight_secret_injection / inject_secrets) so the paths
+            // cannot drift on "what counts as a present credential" or "which scope owns
+            // it". Here we only need presence (Some vs None) for gate ordering; the happy
+            // path intentionally re-checks at dispatch time, where the backstop is the
+            // authority. (Accepted double-read.)
+            match secret_owner_scope(secret_store.as_ref(), scope, handle)
+                .await
+                .map(|owner| owner.is_some())
+            {
                 Ok(true) => {
                     // Secret present — continue checking.
                 }
@@ -2253,7 +2257,15 @@ fn failure_from(
     let kind = failure_kind_from(&error);
     let message = sanitized_failure_message(&error);
     let detail = match error {
-        CapabilityInvocationError::Dispatch { detail, .. } => detail,
+        CapabilityInvocationError::Dispatch {
+            detail: Some(detail),
+            ..
+        } => Some(detail),
+        CapabilityInvocationError::Dispatch {
+            detail: None,
+            safe_summary: Some(summary),
+            ..
+        } => rejected_summary_diagnostic(summary),
         _ => None,
     };
     let mut failure = RuntimeCapabilityFailure::new(capability_id, kind, message);
@@ -2261,6 +2273,35 @@ fn failure_from(
         failure = failure.with_detail(detail);
     }
     failure
+}
+
+/// Preserve a host-authored failure reason that the strict loop safe-summary
+/// validator rejects (paths, payload delimiters, newlines).
+///
+/// [`dispatch_failure_message`] degrades such reasons to the fixed category
+/// sentence, which is correct for the summary — but the reason itself is what
+/// the model needs to repair its call (e.g. which path was out of scope), so
+/// it must ride the model-visible diagnostic detail channel instead of being
+/// dropped. Secret VALUES are scrubbed and disallowed control characters
+/// normalized at the loop boundary before the model observes the text.
+fn rejected_summary_diagnostic(
+    summary: String,
+) -> Option<ironclaw_host_api::DispatchFailureDetail> {
+    if LoopSafeSummary::new(summary.clone()).is_ok() {
+        // The reason survives into `message`; the loop layer derives the
+        // model-visible diagnostic from it directly, so attaching it here
+        // would only duplicate it.
+        return None;
+    }
+    const MAX_DIAGNOSTIC_CHARS: usize = 512;
+    let text = if summary.chars().count() <= MAX_DIAGNOSTIC_CHARS {
+        summary
+    } else {
+        let mut text: String = summary.chars().take(MAX_DIAGNOSTIC_CHARS - 3).collect();
+        text.push_str("...");
+        text
+    };
+    Some(ironclaw_host_api::DispatchFailureDetail::Diagnostic { text })
 }
 
 /// Returns a stable, redacted summary message for a capability invocation
@@ -2852,6 +2893,75 @@ output_schema_ref = "schemas/test.output.json"
         // host-authored human summary for the kind (not the raw category token).
         assert_eq!(message, "the tool operation failed");
         assert!(!message.contains("api_key"));
+    }
+
+    #[test]
+    fn failure_from_carries_rejected_safe_summary_on_the_diagnostic_detail() {
+        // A path-bearing (or newline-bearing) failure reason fails the strict
+        // loop safe-summary validator, so the message degrades to the fixed
+        // category sentence. The raw reason must NOT be dropped: it rides the
+        // model-visible diagnostic detail channel, which is exactly how the
+        // model learns what to repair (e.g. which path was denied).
+        let raw = "shell execution failed: cannot read /etc/passwd\nsecond line".to_string();
+        let error = CapabilityInvocationError::Dispatch {
+            kind: DispatchFailureKind::Runtime(RuntimeDispatchErrorKind::Executor),
+            safe_summary: Some(raw.clone()),
+            detail: None,
+        };
+
+        let failure = failure_from(error, cap());
+
+        assert_eq!(
+            failure.message.as_deref(),
+            Some("the tool executor failed"),
+            "message must stay the fixed category sentence"
+        );
+        assert_eq!(
+            failure.detail,
+            Some(ironclaw_host_api::DispatchFailureDetail::Diagnostic { text: raw }),
+            "the raw reason must ride the diagnostic detail"
+        );
+    }
+
+    #[test]
+    fn failure_from_bounds_rejected_summary_diagnostic_on_char_boundaries() {
+        let raw = format!("/{}", "é".repeat(600));
+        let error = CapabilityInvocationError::Dispatch {
+            kind: DispatchFailureKind::Runtime(RuntimeDispatchErrorKind::Executor),
+            safe_summary: Some(raw),
+            detail: None,
+        };
+
+        let failure = failure_from(error, cap());
+        let Some(ironclaw_host_api::DispatchFailureDetail::Diagnostic { text }) = failure.detail
+        else {
+            panic!("expected bounded diagnostic detail");
+        };
+        assert_eq!(text.chars().count(), 512);
+        assert!(text.ends_with("..."));
+    }
+
+    #[test]
+    fn failure_from_leaves_validator_safe_summaries_on_the_message_alone() {
+        // When the reason already passes the strict validator it travels via
+        // `message` (the loop layer derives the model-visible diagnostic from
+        // it directly), so no duplicate diagnostic detail is attached.
+        let error = CapabilityInvocationError::Dispatch {
+            kind: DispatchFailureKind::Runtime(RuntimeDispatchErrorKind::OperationFailed),
+            safe_summary: Some(
+                "apply_patch failed for path workspace main.rs: old_string matched 0 times"
+                    .to_string(),
+            ),
+            detail: None,
+        };
+
+        let failure = failure_from(error, cap());
+
+        assert_eq!(
+            failure.message.as_deref(),
+            Some("apply_patch failed for path workspace main.rs: old_string matched 0 times")
+        );
+        assert_eq!(failure.detail, None);
     }
 
     #[test]

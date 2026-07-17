@@ -140,7 +140,7 @@ fn default_origins() -> Vec<HeaderValue> {
 fn login_builder() -> Request<Body> {
     Request::builder()
         .method(Method::GET)
-        .uri(format!("/auth/login/{PROVIDER}?redirect_after=%2Fv2"))
+        .uri(format!("/auth/login/{PROVIDER}?redirect_after=%2F"))
         .body(Body::empty())
         .expect("request")
 }

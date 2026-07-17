@@ -66,6 +66,7 @@ fn send_message_maps_body_to_turn_scope_actor_and_content() {
         actor,
         client_action_id,
         content,
+        requested_model,
     } = command
     else {
         panic!("expected send-message command");
@@ -77,6 +78,46 @@ fn send_message_maps_body_to_turn_scope_actor_and_content() {
     assert_eq!(actor.user_id.as_str(), "user-alpha");
     assert_eq!(client_action_id.as_str(), "send-1");
     assert_eq!(content, "hello\nworld");
+    // No `model` in the request → no requested-model hint.
+    assert_eq!(requested_model, None);
+}
+
+#[test]
+fn send_message_carries_requested_model_and_drops_default_alias() {
+    // A concrete model is carried through as a requested-model hint.
+    let request = WebUiSendMessageRequest {
+        client_action_id: Some("send-model".to_string()),
+        thread_id: Some("thread-alpha".to_string()),
+        content: Some("hi".to_string()),
+        attachments: Vec::new(),
+        model: Some("gpt-4o".to_string()),
+    };
+    let WebUiInboundCommand::SendMessage {
+        requested_model, ..
+    } = request.into_command(caller()).expect("valid command")
+    else {
+        panic!("expected send-message command");
+    };
+    assert_eq!(requested_model.as_deref(), Some("gpt-4o"));
+
+    // The "default" alias (and empty) are dropped to `None` so a default-model
+    // request falls back to the deployment's active model.
+    for alias in ["default", "DEFAULT", "  ", ""] {
+        let request = WebUiSendMessageRequest {
+            client_action_id: Some("send-default".to_string()),
+            thread_id: Some("thread-alpha".to_string()),
+            content: Some("hi".to_string()),
+            attachments: Vec::new(),
+            model: Some(alias.to_string()),
+        };
+        let WebUiInboundCommand::SendMessage {
+            requested_model, ..
+        } = request.into_command(caller()).expect("valid command")
+        else {
+            panic!("expected send-message command");
+        };
+        assert_eq!(requested_model, None, "alias {alias:?} must drop to None");
+    }
 }
 
 #[test]
@@ -296,6 +337,7 @@ fn command_serializes_with_stable_command_tag() {
         thread_id: Some("thread-alpha".to_string()),
         content: Some("hello".to_string()),
         attachments: Vec::new(),
+        model: None,
     };
     let command = request.into_command(caller()).expect("valid command");
 
@@ -313,6 +355,7 @@ fn token_fields_reject_control_characters() {
         thread_id: Some("thread-alpha".to_string()),
         content: Some("hello".to_string()),
         attachments: Vec::new(),
+        model: None,
     };
 
     let err = request.into_command(caller()).expect_err("control char");
@@ -396,6 +439,7 @@ fn send_with_attachments(attachments: Vec<WebUiInboundAttachment>) -> WebUiSendM
         thread_id: Some("thread-alpha".to_string()),
         content: Some("see attached".to_string()),
         attachments,
+        model: None,
     }
 }
 

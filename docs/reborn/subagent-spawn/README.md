@@ -6,7 +6,7 @@
 **Date:** 2026-05-19
 **Branch:** `subagent-spawn-design`
 **Scope:** `crates/ironclaw_agent_loop`, `crates/ironclaw_turns`,
-`crates/ironclaw_loop_support`, `crates/ironclaw_runner`,
+`crates/ironclaw_loop_host`, `crates/ironclaw_runner`,
 `crates/ironclaw_reborn_composition`
 
 This is the **overarching design doc**. Per-phase implementation docs (detailed,
@@ -177,7 +177,7 @@ ironclaw_turns         + CapabilityOutcome::AwaitDependentRun
                           (ironclaw_turns lifecycle.rs) + the
                           TurnCommittedEventObserver hook]
 
-ironclaw_loop_support  + spawn handling in the capability-port impl
+ironclaw_loop_host  + spawn handling in the capability-port impl
 (host I/O glue)        ~ prompt/context port: direction system msg + user-role goal
                        + attenuation (CapabilityAllowSet) + hard allow_nesting gate
 
@@ -301,7 +301,7 @@ that approvals already use.
 
 ### 7.2 Spawn flow — blocking
 
-`spawn_subagent` is an ordinary capability; the `ironclaw_loop_support` capability
+`spawn_subagent` is an ordinary capability; the `ironclaw_loop_host` capability
 port handles it and returns an `AwaitDependentRun` gate. Background branches in
 the diagram are historical design context, are not exposed by the current
 schema, and are architecturally superseded — background delivery is now
@@ -469,7 +469,7 @@ mitigations below are **load-bearing**, not optional.
 |---|---|---|---|
 | `ironclaw_agent_loop` | sealed; product-agnostic; refs not raw prompts | one `subagent` family; `GateKind::AwaitDependentRun` is neutral; executor gains only outcome-to-existing-gate/result mapping | ✅ |
 | `ironclaw_turns` | coordination contracts; lifecycle metadata + refs | `CapabilityOutcome` variants, blocked-kind variants, lineage fields, `prepare_turn` API, atomic descendant reservation query | ✅ |
-| `ironclaw_loop_support` | host-port adapter glue; no stateful stores | blocking spawn handling in the capability port; concrete stores and projection sinks are injected by composition | ✅ |
+| `ironclaw_loop_host` | host-port adapter glue; no stateful stores | blocking spawn handling in the capability port; concrete stores and projection sinks are injected by composition | ✅ |
 | `ironclaw_runner` | generic loop library; driver/profile/readiness; no root `src/` adapters | family driver, profiles, flavors, directions, Reborn-neutral goal/tombstone traits, observer/reconciler logic, and readiness metadata | ✅ |
 | `ironclaw_reborn_composition` | concrete product-live assembly; still no root `src/` imports | DB-backed store construction, root-provided `PendingGateProjectionSink`, composite event sink, and runtime assembly | ✅ |
 | `ironclaw_host_runtime` / `ironclaw_host_api` | — | untouched | ✅ |

@@ -1,8 +1,10 @@
 import { NavLink } from "react-router";
 import React from "react";
 import { Icon } from "../design-system/icons";
+import { ConfirmDialog } from "../design-system/confirm-dialog";
 import { useT } from "../lib/i18n";
 import { getPinnedIds, subscribePins, togglePin } from "../lib/pin-store";
+import { deleteThreadErrorMessage } from "../lib/thread-errors";
 
 /* React adapter for the pinned-thread store. Lives here (not in pin-store.ts)
  * so the store stays a pure, unit-testable module free of a React import. */
@@ -71,6 +73,8 @@ function stateFromThreadSummary(thread) {
 
 function ThreadItem({ thread, isActive, isPinned, presentation, onSelect, onDelete }) {
   const t = useT();
+  const [deleteDialogOpen, setDeleteDialogOpen] = React.useState(false);
+  const [isDeleting, setIsDeleting] = React.useState(false);
   const activityIso = threadActivityIso(thread);
   const timeLabel = formatThreadActivityLabel(activityIso);
   const timeTitle = formatThreadActivityTooltip(activityIso);
@@ -81,10 +85,22 @@ function ThreadItem({ thread, isActive, isPinned, presentation, onSelect, onDele
     (event) => {
       event.preventDefault();
       event.stopPropagation();
-      if (!window.confirm(t("thread.deleteConfirm"))) return;
-      Promise.resolve(onDelete?.(thread.id)).catch((err) => {
-        window.alert(err?.message || t("chat.deleteFailed"));
-      });
+      setDeleteDialogOpen(true);
+    },
+    []
+  );
+
+  const handleConfirmDelete = React.useCallback(
+    () => {
+      setIsDeleting(true);
+      void Promise.resolve()
+        .then(() => onDelete?.(thread.id))
+        .then(() => setDeleteDialogOpen(false))
+        .catch((error) => {
+          console.error("Failed to delete thread:", error);
+          window.alert(deleteThreadErrorMessage(error, t));
+        })
+        .finally(() => setIsDeleting(false));
     },
     [onDelete, thread.id, t]
   );
@@ -159,14 +175,25 @@ function ThreadItem({ thread, isActive, isPinned, presentation, onSelect, onDele
         onClick={handleDelete}
         title={t("common.deleteChat")}
         aria-label={t("common.deleteChat")}
+        data-testid="thread-delete"
+        data-thread-id={thread.id}
         className={cn(
           "my-1 mr-1 flex h-7 w-7 shrink-0 items-center justify-center rounded-[6px]",
-          "opacity-0 transition group-hover:opacity-100 focus:opacity-100",
+          "opacity-70 transition hover:opacity-100 focus:opacity-100",
           "text-[var(--v2-text-faint)] hover:bg-[var(--v2-danger-soft)] hover:text-[var(--v2-danger-text)]"
         )}
       >
         <Icon name="trash" className="h-3.5 w-3.5" strokeWidth={2} />
       </button>)}
+      <ConfirmDialog
+        open={deleteDialogOpen}
+        title={t("common.deleteChat")}
+        description={t("thread.deleteConfirm")}
+        confirmLabel={t("common.delete")}
+        isConfirming={isDeleting}
+        onConfirm={handleConfirmDelete}
+        onCancel={() => setDeleteDialogOpen(false)}
+      />
     </div>
   );
 }

@@ -1,0 +1,35 @@
+schema_version = "reborn.extension_manifest.v2"
+id = "ascii-renderer"
+name = "ASCII Renderer"
+version = "0.1.0"
+# Test fixture — the pure-compute case: no network, no credential; once an
+# admin installs it, every user can use it with no obligations at all.
+description = "Render a small piece of canned ASCII art (cat, dog, or robot). Pure compute: no network access and no credentials."
+# Uploaded bundles are validated as ManifestSource::InstalledLocal, which
+# forbids first_party/system trust claims and legacy top-level [[capabilities]];
+# installed manifests declare third_party trust and the capability_provider
+# host_api shape.
+trust = "third_party"
+
+[runtime]
+kind = "wasm"
+module = "wasm/ascii_renderer_tool.wasm"
+
+[[host_api]]
+id = "ironclaw.capability_provider/v1"
+section = "capability_provider.tools"
+
+[capability_provider.tools]
+
+# No-network, no-key capability: declares only `dispatch_capability`, so it gets
+# NO ApplyNetworkPolicy and NO secret obligation. (The v2 parser rejects
+# `network_targets` here because there is no `network` effect.)
+[[capability_provider.tools.capabilities]]
+id = "ascii-renderer.draw"
+description = "Render a small piece of ASCII art. Optional `subject` selects the drawing (cat, dog, robot); defaults to robot. Takes no network access."
+effects = ["dispatch_capability"]
+default_permission = "allow"
+visibility = "model"
+input_schema_ref = "schemas/ascii-renderer/draw.input.v1.json"
+output_schema_ref = "schemas/ascii-renderer/draw.output.v1.json"
+prompt_doc_ref = "prompts/ascii-renderer/draw.md"

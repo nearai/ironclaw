@@ -24,7 +24,6 @@ use sha2::{Digest, Sha256};
 use std::collections::HashSet;
 use std::str::FromStr;
 
-use crate::costs;
 use crate::error::LlmError;
 use crate::provider::{
     ChatMessage, CompletionRequest, CompletionResponse, FinishReason, LlmProvider,
@@ -36,6 +35,7 @@ use crate::provider::{
 use crate::tool_schema::{ToolSchemaPolicy, shape_tool_schema};
 #[cfg(test)]
 use crate::tool_schema::{normalize_schema_strict, serialize_json_capped};
+use ironclaw_common::llm_costs as costs;
 
 /// Adapter that wraps a rig-core `CompletionModel` and implements `LlmProvider`.
 pub struct RigAdapter<M: CompletionModel> {

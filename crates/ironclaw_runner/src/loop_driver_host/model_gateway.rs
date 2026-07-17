@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use ironclaw_loop_support::{
+use ironclaw_loop_host::{
     HostIdentityContextSource, HostManagedModelGateway, HostManagedModelStreamSink,
     HostSkillContextSource, LoopAttachmentReadPort, ThreadBackedLoopModelPort,
     ThreadContextWindowCache,

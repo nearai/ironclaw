@@ -35,7 +35,7 @@ function LoginPage({ auth }) {
   const from = fromLocation
     ? `${fromLocation.pathname || defaultRoute}${fromLocation.search || ""}${fromLocation.hash || ""}`
     : defaultRoute;
-  const redirectAfter = `/v2${from === "/" ? "" : from}`;
+  const redirectAfter = from;
 
   const handleSubmit = React.useCallback(
     (token) => {
@@ -102,7 +102,7 @@ export function App() {
   const auth = useAuthSession();
 
   return (
-    <BrowserRouter basename="/v2">
+    <BrowserRouter>
       <Routes>
         <Route path="/login" element={(<LoginPage auth={auth} />)} />
         {/* Design-system workbench. Lives outside the authenticated
@@ -129,8 +129,8 @@ export function App() {
           <Route path="routines" element={(<RoutinesPage />)} />
           <Route path="routines/:routineId" element={(<RoutinesPage />)} />
           <Route path="automations" element={(<AutomationsPage />)} />
-          <Route path="extensions" element={(<ExtensionsPage />)} />
-          <Route path="extensions/:tab" element={(<ExtensionsPage />)} />
+          <Route path="extensions" element={(<ExtensionsPage isAdmin={auth.isAdmin} />)} />
+          <Route path="extensions/:tab" element={(<ExtensionsPage isAdmin={auth.isAdmin} />)} />
           <Route path="logs" element={(<LogsPage />)} />
           <Route path="settings" element={(<SettingsPage />)} />
           <Route path="settings/:tab" element={(<SettingsPage />)} />

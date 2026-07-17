@@ -267,6 +267,22 @@ pub(crate) trait SlackUserBindingLifecycleStore: Send + Sync {
         owner: &SlackConnectionOwner,
     ) -> Result<SlackDisconnectFence, SlackUserBindingLifecycleError>;
 
+    /// Fence a failed OAuth generation from ingress while retaining enough
+    /// owner/epoch state for retryable identity cleanup.
+    async fn begin_failed_connection_cleanup(
+        &self,
+        owner: &SlackConnectionOwner,
+        epoch: SlackConnectionEpoch,
+    ) -> Result<(), SlackUserBindingLifecycleError>;
+
+    /// Settle a previously fenced failed OAuth generation after its derived
+    /// identity state has been removed and verified.
+    async fn complete_failed_connection_cleanup(
+        &self,
+        owner: &SlackConnectionOwner,
+        epoch: SlackConnectionEpoch,
+    ) -> Result<(), SlackUserBindingLifecycleError>;
+
     async fn complete_disconnect(
         &self,
         owner: &SlackConnectionOwner,

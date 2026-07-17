@@ -4,6 +4,8 @@
 //! instead of reaching into turn coordination, thread stores, runtime lanes, DB
 //! stores, dispatchers, or capability hosts directly.
 
+// arch-exempt: large_file, holds the ~70-method RebornServicesApi god interface awaiting the JIT domain-port split, plan #5985
+
 use std::{
     collections::{HashMap, HashSet},
     net::{IpAddr, Ipv4Addr, Ipv6Addr},
@@ -107,10 +109,11 @@ use ironclaw_approvals::{
     ToolPermissionOverrideStore, ToolPermissionState, permission_mode_allows_persistent_approval,
 };
 pub use llm_config::{
-    CodexLoginStart, LlmActiveSelection, LlmConfigService, LlmConfigServiceError,
-    LlmConfigSnapshot, LlmModelsResult, LlmProbeRequest, LlmProbeResult, LlmProviderView,
-    NearAiAuthProvider, NearAiLoginRequest, NearAiLoginStart, NearAiWalletLoginRequest,
-    NearAiWalletLoginResult, SetActiveLlmRequest, UpsertLlmProviderRequest,
+    ActiveModelReader, CodexLoginStart, LlmActiveSelection, LlmConfigService,
+    LlmConfigServiceError, LlmConfigSnapshot, LlmModelsResult, LlmProbeRequest, LlmProbeResult,
+    LlmProviderView, NearAiAuthProvider, NearAiLoginRequest, NearAiLoginStart,
+    NearAiWalletLoginRequest, NearAiWalletLoginResult, SetActiveLlmRequest,
+    UpsertLlmProviderRequest,
 };
 pub use project_fs::{
     ProjectFilesystemReader, ProjectFsEntry, ProjectFsEntryKind, ProjectFsError, ProjectFsFile,
@@ -126,11 +129,11 @@ pub use projects::{
     RebornRemoveMemberRequest, RebornUpdateMemberRoleRequest, RebornUpdateProjectRequest,
 };
 pub use types::{
-    RebornAttachmentBytes, RebornAttachmentRequest, RebornAutomationInfo,
-    RebornAutomationMutationResponse, RebornAutomationRecentRunInfo,
-    RebornAutomationRecentRunStatus, RebornAutomationRunStatus, RebornAutomationSource,
-    RebornAutomationState, RebornCancelRunResponse, RebornChannelConnectAction,
-    RebornChannelConnectStrategy, RebornConnectableChannelInfo,
+    RebornAttachmentBytes, RebornAttachmentRequest, RebornAutomationActiveHold,
+    RebornAutomationHoldReason, RebornAutomationInfo, RebornAutomationMutationResponse,
+    RebornAutomationRecentRunInfo, RebornAutomationRecentRunStatus, RebornAutomationRunStatus,
+    RebornAutomationSource, RebornAutomationState, RebornCancelRunResponse,
+    RebornChannelConnectAction, RebornChannelConnectStrategy, RebornConnectableChannelInfo,
     RebornConnectableChannelListResponse, RebornCreateThreadResponse, RebornDeleteThreadRequest,
     RebornDeleteThreadResponse, RebornExtensionActionResponse, RebornExtensionCredentialSetup,
     RebornExtensionInfo, RebornExtensionListResponse, RebornExtensionOnboardingPayload,
@@ -180,8 +183,18 @@ pub struct RebornOperatorToolInfo {
     pub effects: Arc<[EffectKind]>,
 }
 
+#[async_trait]
 pub trait RebornOperatorToolCatalog: Send + Sync {
-    fn list_operator_tools(&self) -> Vec<RebornOperatorToolInfo>;
+    /// Tools visible to `caller` in the operator/settings surface (#5459 P1).
+    ///
+    /// The settings/tools routes are authenticated-caller routes (not
+    /// operator-gated), so a member reads this catalog. It MUST therefore be
+    /// filtered by installation owner exactly like the model capability
+    /// surface: tenant-shared tools for everyone, user-private tools only for
+    /// their owner. An unfiltered catalog would disclose another user's
+    /// private install (its capability id, description, effects) — the leak
+    /// this parameter closes.
+    async fn list_operator_tools(&self, caller: &UserId) -> Vec<RebornOperatorToolInfo>;
 }
 
 #[derive(Clone)]
@@ -1087,13 +1100,18 @@ async fn auto_approve_config_entry(
     })
 }
 
-fn find_operator_tool(
+async fn find_operator_tool(
     config: &RebornOperatorApprovalConfig,
     raw_capability_id: &str,
+    caller: &UserId,
 ) -> Result<RebornOperatorToolInfo, RebornServicesError> {
+    // Look up within the CALLER-filtered catalog so a foreign user-private
+    // tool reads as an unknown key (same masking as list), never disclosing
+    // that it exists or letting a member set a permission on it (#5459 P1).
     config
         .tool_catalog
-        .list_operator_tools()
+        .list_operator_tools(caller)
+        .await
         .into_iter()
         .find(|tool| tool.capability_id.as_str() == raw_capability_id)
         .ok_or_else(|| operator_config_unknown_key_error("key"))
@@ -2287,6 +2305,17 @@ pub trait RebornServicesApi: Send + Sync {
         package_ref: LifecyclePackageRef,
     ) -> Result<RebornExtensionActionResponse, RebornServicesError>;
 
+    /// Import a standalone extension from an uploaded bundle (zip bytes) — the
+    /// WebUI "Install Tool" path. Default is unavailable so non-local impls and
+    /// test stubs need no change.
+    async fn import_extension(
+        &self,
+        _caller: WebUiAuthenticatedCaller,
+        _bundle: Vec<u8>,
+    ) -> Result<RebornExtensionActionResponse, RebornServicesError> {
+        Err(RebornServicesError::service_unavailable(false))
+    }
+
     async fn activate_extension(
         &self,
         caller: WebUiAuthenticatedCaller,
@@ -2687,6 +2716,8 @@ pub struct RebornServices {
     skill_activation_recorder: Option<Arc<SkillActivationRecorder>>,
     skill_activation_clearer: Option<Arc<SkillActivationClearer>>,
     llm_config: Option<Arc<dyn LlmConfigService>>,
+    // arch-exempt: optional_arc, genuinely optional — the active-model reader is wired only under the root-llm-provider feature; cold-boot/no-LLM builds and tests run without it (mirrors the sibling optional llm_config field), plan #5985
+    active_model_reader: Option<Arc<dyn ActiveModelReader>>,
     operator_approval_config: Option<RebornOperatorApprovalConfig>,
     thread_operation_locks: Arc<ThreadOperationLocks>,
 }
@@ -2725,6 +2756,7 @@ impl RebornServices {
             skill_activation_recorder: None,
             skill_activation_clearer: None,
             llm_config: None,
+            active_model_reader: None,
             operator_approval_config: None,
             thread_operation_locks: Arc::new(StdMutex::new(HashMap::new())),
         }
@@ -2790,6 +2822,18 @@ impl RebornServices {
 
     pub fn with_llm_config_service(mut self, llm_config: Arc<dyn LlmConfigService>) -> Self {
         self.llm_config = Some(llm_config);
+        self
+    }
+
+    /// Wire the read-only port exposing the runtime's live active/default model
+    /// id. Without it, `get_run_state` cannot price a default-model run (one
+    /// submitted without an explicit `model`, so it carries no
+    /// `resolved_model_route`): such a run reports token `usage` but no `cost`.
+    pub fn with_active_model_reader(
+        mut self,
+        active_model_reader: Arc<dyn ActiveModelReader>,
+    ) -> Self {
+        self.active_model_reader = Some(active_model_reader);
         self
     }
 
@@ -3428,13 +3472,15 @@ impl RebornServicesApi for RebornServices {
         &self,
         caller: WebUiAuthenticatedCaller,
     ) -> Result<RebornOperatorConfigListResponse, RebornServicesError> {
-        let _ = caller;
         let Some(config) = &self.operator_approval_config else {
             return Ok(operator_config_not_wired_response());
         };
         let scope = caller_resource_scope(&caller);
         let mut entries = vec![auto_approve_config_entry(config, &scope).await?];
-        let tools = config.tool_catalog.list_operator_tools();
+        let tools = config
+            .tool_catalog
+            .list_operator_tools(&scope.user_id)
+            .await;
         let tool_context = operator_tool_permission_context(config, &scope, &tools).await?;
         entries.extend(
             try_join_all(
@@ -3469,7 +3515,7 @@ impl RebornServicesApi for RebornServices {
         let entry = if key == AUTO_APPROVE_CONFIG_KEY {
             auto_approve_config_entry(config, &scope).await?
         } else if let Some(capability_id) = key.strip_prefix(TOOL_CONFIG_PREFIX) {
-            let tool = find_operator_tool(config, capability_id)?;
+            let tool = find_operator_tool(config, capability_id, &scope.user_id).await?;
             tool_config_entry(config, &scope, &tool).await?
         } else {
             return Err(operator_config_unknown_key_error("key"));
@@ -3506,7 +3552,7 @@ impl RebornServicesApi for RebornServices {
                 .map_err(operator_config_store_error)?;
             auto_approve_config_entry(config, &scope).await?
         } else if let Some(capability_id) = key.strip_prefix(TOOL_CONFIG_PREFIX) {
-            let tool = find_operator_tool(config, capability_id)?;
+            let tool = find_operator_tool(config, capability_id, &scope.user_id).await?;
             if tool_permission_locked(&tool) {
                 return Err(operator_config_invalid_value("state"));
             }
@@ -3593,6 +3639,7 @@ impl RebornServicesApi for RebornServices {
             actor,
             client_action_id,
             content,
+            requested_model,
         } = command
         else {
             return Err(RebornServicesError::internal_invariant());
@@ -3727,6 +3774,7 @@ impl RebornServicesApi for RebornServices {
         )?;
         let product_context = ironclaw_product_context::resolve_web_ui(scope.product_owner(&actor));
         let submit = SubmitTurnRequest {
+            requested_model,
             scope: scope.clone(),
             actor,
             accepted_message_ref: accepted_message_ref.clone(),
@@ -3942,8 +3990,9 @@ impl RebornServicesApi for RebornServices {
         request: RebornFsListRequest,
     ) -> Result<RebornFsListResponse, RebornServicesError> {
         let browser = self.require_filesystem_browser(request.mount)?;
-        // Scope is derived from the authenticated caller, never the request.
-        let scope = caller_browse_scope(&caller);
+        let scope = self
+            .authorize_browse_scope(caller, request.project_id)
+            .await?;
         // dispatch-exempt: read-only, caller-scoped internal-filesystem listing
         // through the facade's own port — not an in-turn mutating tool call.
         let entries = browser
@@ -3963,7 +4012,9 @@ impl RebornServicesApi for RebornServices {
         request: RebornFsStatRequest,
     ) -> Result<RebornFsStatResponse, RebornServicesError> {
         let browser = self.require_filesystem_browser(request.mount)?;
-        let scope = caller_browse_scope(&caller);
+        let scope = self
+            .authorize_browse_scope(caller, request.project_id)
+            .await?;
         // dispatch-exempt: read-only, caller-scoped internal-filesystem stat.
         let stat = browser
             .stat(&scope, request.mount, &request.path)
@@ -3978,7 +4029,9 @@ impl RebornServicesApi for RebornServices {
         request: RebornFsReadRequest,
     ) -> Result<ProjectFsFile, RebornServicesError> {
         let browser = self.require_filesystem_browser(request.mount)?;
-        let scope = caller_browse_scope(&caller);
+        let scope = self
+            .authorize_browse_scope(caller, request.project_id)
+            .await?;
         // dispatch-exempt: read-only, caller-scoped internal-filesystem download.
         browser
             .read_file(&scope, request.mount, &request.path)
@@ -4476,7 +4529,18 @@ impl RebornServicesApi for RebornServices {
             })
             .await
             .map_err(map_turn_error)?;
-        Ok(state.into())
+        // Price a default-model run (no `resolved_model_route`) against the
+        // runtime's live active model. Cheap synchronous read; `None` when no
+        // reader is wired or no concrete model is configured, in which case the
+        // run reports usage without cost (unchanged behavior).
+        let active_model = self
+            .active_model_reader
+            .as_ref()
+            .and_then(|reader| reader.active_model_id());
+        Ok(RebornGetRunStateResponse::from_run_state(
+            state,
+            active_model.as_deref(),
+        ))
     }
 
     async fn list_threads(
@@ -4743,6 +4807,14 @@ impl RebornServicesApi for RebornServices {
         package_ref: LifecyclePackageRef,
     ) -> Result<RebornExtensionActionResponse, RebornServicesError> {
         extensions::install_extension(self.lifecycle_facade.as_ref(), caller, package_ref).await
+    }
+
+    async fn import_extension(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+        bundle: Vec<u8>,
+    ) -> Result<RebornExtensionActionResponse, RebornServicesError> {
+        extensions::import_extension(self.lifecycle_facade.as_ref(), caller, bundle).await
     }
 
     async fn activate_extension(
@@ -5956,7 +6028,7 @@ impl RebornServices {
     /// scope is returned unchanged.
     async fn authorize_create_thread_project(
         &self,
-        mut caller: WebUiAuthenticatedCaller,
+        caller: WebUiAuthenticatedCaller,
         requested_project_id: Option<String>,
     ) -> Result<WebUiAuthenticatedCaller, RebornServicesError> {
         let Some(raw) = requested_project_id else {
@@ -5972,6 +6044,16 @@ impl RebornServices {
                 WebUiInboundValidationCode::InvalidId,
             ))
         })?;
+        self.authorize_project_caller(caller, project_id).await
+    }
+
+    /// Authorize a project selector through the project service and adopt it
+    /// only after the access probe succeeds.
+    async fn authorize_project_caller(
+        &self,
+        mut caller: WebUiAuthenticatedCaller,
+        project_id: ProjectId,
+    ) -> Result<WebUiAuthenticatedCaller, RebornServicesError> {
         self.get_project(
             caller.clone(),
             RebornGetProjectRequest {
@@ -5981,6 +6063,20 @@ impl RebornServices {
         .await?;
         caller.project_id = Some(project_id);
         Ok(caller)
+    }
+
+    /// Resolve the one authorized scope used by all standalone browse reads.
+    /// An omitted selector preserves the caller's existing project scope.
+    async fn authorize_browse_scope(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+        project_id: Option<ProjectId>,
+    ) -> Result<ResourceScope, RebornServicesError> {
+        let caller = match project_id {
+            Some(project_id) => self.authorize_project_caller(caller, project_id).await?,
+            None => caller,
+        };
+        Ok(caller_browse_scope(&caller))
     }
 
     /// Verify the caller may access the thread and return the project-scoped

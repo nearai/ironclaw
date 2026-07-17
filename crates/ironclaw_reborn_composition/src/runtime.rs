@@ -37,14 +37,14 @@ use ironclaw_extensions::ExtensionRegistry;
 use ironclaw_filesystem::RootFilesystem;
 use ironclaw_first_party_extension_ports::{
     FirstPartySkillsExtension, FirstPartySkillsExtensionHandles, SelectableSkillContextSource,
-    SkillActivationSelectorConfig, SkillExecutionAdapter,
+    SkillActivationSelectorConfig, SkillExecutionAdapter, SkillInjectionMode,
 };
 use ironclaw_host_api::{
     ActionResultSummary, ActionSummary, AgentId, ApprovalRequestId, AuditEnvelope, AuditEventId,
     AuditStage, CapabilityId, CorrelationId, DecisionSummary, EffectKind, ExtensionId,
     InvocationId, Principal, ResourceScope, TenantId, ThreadId, UserId,
 };
-use ironclaw_loop_support::{
+use ironclaw_loop_host::{
     AwaitEdgeSettler, AwaitEdgeWriter, CapabilityAllowSet, CapabilityResolveError,
     CapabilitySurfaceProfileResolver, EmptyUserProfileSource, FilesystemSkillBundleSource,
     HostIdentityContextSource, HostSkillContextSource, HostUserProfileSource,
@@ -159,12 +159,12 @@ use production::{
 const MAX_DESCENDANT_CANCEL_NODES: usize = 1_000;
 
 // Adapter: wraps `MemoryBackedUserProfileSource` (in `ironclaw_host_runtime`) and
-// implements `HostUserProfileSource` (in `ironclaw_loop_support`). A direct
+// implements `HostUserProfileSource` (in `ironclaw_loop_host`). A direct
 // `impl HostUserProfileSource for MemoryBackedUserProfileSource` is forbidden by
 // the orphan rule — neither the trait nor the type is defined in this crate. The
 // newtype wrapper is defined here, so the impl is allowed. This mirrors how
 // `WorkspaceIdentityContextSource` (defined in `src/workspace/`) implements
-// `HostIdentityContextSource` (defined in `ironclaw_loop_support`) — the impl
+// `HostIdentityContextSource` (defined in `ironclaw_loop_host`) — the impl
 // lives in the crate that owns the *concrete type* and can see the trait.
 //
 // `pub(crate)` so the `test_support::build_user_profile_source_for_test`
@@ -230,11 +230,9 @@ impl AwaitEdgeSettler for NonDurableAwaitEdgeSettler {
     async fn on_child_terminal(
         &self,
         _event: &ironclaw_turns::TurnLifecycleEvent,
-    ) -> Result<
-        ironclaw_loop_support::ResolveOutcome,
-        ironclaw_turns::run_profile::AgentLoopHostError,
-    > {
-        Ok(ironclaw_loop_support::ResolveOutcome::NotApplicable)
+    ) -> Result<ironclaw_loop_host::ResolveOutcome, ironclaw_turns::run_profile::AgentLoopHostError>
+    {
+        Ok(ironclaw_loop_host::ResolveOutcome::NotApplicable)
     }
 
     fn bind_coordinator(
@@ -318,8 +316,7 @@ fn local_runtime_parts(
         )));
         let resolver = Arc::new(AwaitEdgeResolver::new_unbound_deferred_result_writer(
             Arc::clone(&store),
-            Arc::clone(&subagent_goal_store)
-                as Arc<dyn ironclaw_loop_support::SubagentSpawnGoalStore>,
+            Arc::clone(&subagent_goal_store) as Arc<dyn ironclaw_loop_host::SubagentSpawnGoalStore>,
             Arc::clone(&local_runtime.turn_state)
                 as Arc<dyn ironclaw_turns::TurnSpawnTreeStateStore>,
             Arc::clone(&local_runtime.thread_service),
@@ -336,7 +333,7 @@ fn local_runtime_parts(
     };
     #[cfg(not(any(feature = "libsql", feature = "postgres")))]
     let (subagent_await_edge_writer, subagent_await_edge_settler, subagent_await_edge_evidence) = (
-        Arc::new(ironclaw_loop_support::InMemoryAwaitEdgeWriter::default())
+        Arc::new(ironclaw_loop_host::InMemoryAwaitEdgeWriter::default())
             as Arc<dyn AwaitEdgeWriter>,
         Arc::new(NonDurableAwaitEdgeSettler) as Arc<dyn AwaitEdgeSettler>,
         Arc::new(NonDurableAwaitDependentRunEvidence) as Arc<dyn AwaitDependentRunEvidenceStore>,
@@ -377,7 +374,7 @@ where
     )));
     let await_edge_resolver = Arc::new(AwaitEdgeResolver::new_unbound_deferred_result_writer(
         Arc::clone(&await_edge_store),
-        Arc::clone(&subagent_goal_store) as Arc<dyn ironclaw_loop_support::SubagentSpawnGoalStore>,
+        Arc::clone(&subagent_goal_store) as Arc<dyn ironclaw_loop_host::SubagentSpawnGoalStore>,
         Arc::clone(&graph.turn_state) as Arc<dyn ironclaw_turns::TurnSpawnTreeStateStore>,
         Arc::clone(&graph.thread_service),
     ));
@@ -516,6 +513,8 @@ mod test_support;
 
 #[cfg(feature = "test-support")]
 pub(crate) use local_dev::PROJECT_CREATE_CAPABILITY_ID;
+#[cfg(feature = "test-support")]
+pub(crate) use local_dev::RESULT_READ_CAPABILITY_ID_FOR_TEST;
 #[cfg(any(test, feature = "test-support"))]
 pub(crate) use local_dev::SKILL_ACTIVATE_CAPABILITY_ID;
 
@@ -1058,25 +1057,25 @@ pub(crate) fn build_local_dev_approval_gate_evidence_for_test(
     std::sync::Arc::new(LocalDevApprovalGateEvidence { approval_requests })
 }
 
-/// Test-support forwarder for the `project_create` synthetic-capability wrap
-/// (E-PROJ seam). Bridges the private `local_dev` module to `test_support.rs`
-/// without widening any production type's visibility; mirrors the
-/// approval-gate-evidence forwarder above.
+/// Test-support forwarder for the `result_read` synthetic-capability wrap
+/// (durable tool-result projection seam, issue #5838). Bridges the private
+/// `local_dev` module to `test_support.rs`; mirrors the `project_create`
+/// forwarder above.
 #[cfg(feature = "test-support")]
-pub(crate) fn wrap_project_create_capability_for_test(
+pub(crate) fn wrap_result_read_capability_for_test(
     inner: std::sync::Arc<dyn ironclaw_turns::run_profile::LoopCapabilityPort>,
-    project_service: std::sync::Arc<dyn ironclaw_product_workflow::ProjectService>,
+    thread_service: std::sync::Arc<dyn ironclaw_threads::SessionThreadService>,
     fallback_user_id: ironclaw_host_api::UserId,
     run_context: ironclaw_turns::run_profile::LoopRunContext,
-    input_resolver: std::sync::Arc<dyn ironclaw_loop_support::LoopCapabilityInputResolver>,
-    result_writer: std::sync::Arc<dyn ironclaw_loop_support::LoopCapabilityResultWriter>,
+    input_resolver: std::sync::Arc<dyn ironclaw_loop_host::LoopCapabilityInputResolver>,
+    result_writer: std::sync::Arc<dyn ironclaw_loop_host::LoopCapabilityResultWriter>,
 ) -> Result<
     std::sync::Arc<dyn ironclaw_turns::run_profile::LoopCapabilityPort>,
     ironclaw_turns::run_profile::AgentLoopHostError,
 > {
-    local_dev::wrap_project_create_capability_for_test(
+    local_dev::wrap_result_read_capability_for_test(
         inner,
-        project_service,
+        thread_service,
         fallback_user_id,
         run_context,
         input_resolver,
@@ -1113,42 +1112,38 @@ pub(crate) fn local_dev_filesystem_skill_context_source_for_test(
     Ok((built.source, built.activation_source))
 }
 
-/// Test-support forwarder (E-SKILL seam) for the `skill_activate`
-/// synthetic-capability wrap. Bridges the private `local_dev` module to
-/// `test_support.rs`; mirrors the `project_create` forwarder above. Tests only.
+/// Test-support forwarder (harness-port-seam P1 seam) for
+/// `create_refreshing_local_dev_capability_port`
+/// (`refreshing_capability_port.rs:75`), production's sole capability-port
+/// factory. Bridges the private `local_dev` module to `test_support`; mirrors
+/// the `outbound_delivery` forwarder above. For tests only -- gated behind
+/// `test-support`, ships zero bytes in production builds.
 #[cfg(feature = "test-support")]
-pub(crate) fn wrap_skill_activation_capability_for_test(
-    inner: std::sync::Arc<dyn ironclaw_turns::run_profile::LoopCapabilityPort>,
-    skill_activation_source: std::sync::Arc<LocalDevSelectableSkillContextSource>,
-    run_context: ironclaw_turns::run_profile::LoopRunContext,
-    input_resolver: std::sync::Arc<dyn ironclaw_loop_support::LoopCapabilityInputResolver>,
-    result_writer: std::sync::Arc<dyn ironclaw_loop_support::LoopCapabilityResultWriter>,
+pub(crate) async fn create_refreshing_local_dev_capability_port_for_test(
+    parts: crate::test_support::RefreshingLocalDevCapabilityPortTestParts,
 ) -> Result<
     std::sync::Arc<dyn ironclaw_turns::run_profile::LoopCapabilityPort>,
     ironclaw_turns::run_profile::AgentLoopHostError,
 > {
-    local_dev::wrap_skill_activation_capability_for_test(
-        inner,
-        skill_activation_source,
-        run_context,
-        input_resolver,
-        result_writer,
-    )
+    local_dev::create_refreshing_local_dev_capability_port_for_test(parts).await
 }
 
-/// Test-support forwarder (C-SYNTH outbound seam) for the two
-/// `outbound_delivery_*` synthetic-capability wraps. Bridges the private
-/// `local_dev` module to `test_support`; mirrors the `project_create` /
-/// `skill_activate` forwarders above. Tests only.
+/// Test-support forwarder exposing production's real `LocalDevCapabilityIo`
+/// wiring (`local_dev.rs`'s `local_dev_capability_io_for_test`, which mirrors
+/// `capability_wiring`'s `new_with_durable_previews` call). Bridges the
+/// private `local_dev` module to `test_support`; mirrors the
+/// `create_refreshing_local_dev_capability_port_for_test` forwarder above.
+/// For tests only -- gated behind `test-support`, ships zero bytes in
+/// production builds.
 #[cfg(feature = "test-support")]
-pub(crate) fn wrap_outbound_delivery_capabilities_for_test(
-    inner: std::sync::Arc<dyn ironclaw_turns::run_profile::LoopCapabilityPort>,
-    parts: crate::test_support::OutboundDeliveryCapabilityTestParts,
-) -> Result<
-    std::sync::Arc<dyn ironclaw_turns::run_profile::LoopCapabilityPort>,
-    ironclaw_turns::run_profile::AgentLoopHostError,
-> {
-    local_dev::wrap_outbound_delivery_capabilities_for_test(inner, parts)
+pub(crate) fn local_dev_capability_io_for_test(
+    thread_service: std::sync::Arc<dyn ironclaw_threads::SessionThreadService>,
+    fallback_user_id: ironclaw_host_api::UserId,
+) -> (
+    std::sync::Arc<dyn ironclaw_loop_host::LoopCapabilityInputResolver>,
+    std::sync::Arc<dyn ironclaw_loop_host::LoopCapabilityResultWriter>,
+) {
+    local_dev::local_dev_capability_io_for_test(thread_service, fallback_user_id)
 }
 
 #[async_trait::async_trait]
@@ -1402,6 +1397,31 @@ impl RebornRuntime {
         &self.services
     }
 
+    /// Seed a bare `secret_handle` secret for an owner scope so keyed
+    /// capabilities (network + `use_secret`) can resolve their
+    /// `InjectSecretOnce` obligation. `serve` uses this to write the value of
+    /// an `IRONCLAW_REBORN_DEV_SECRET__<handle>` env var into the tenant-shared
+    /// admin-managed scope, so one operator-provisioned key serves every user of
+    /// the tenant (SSO users included) without per-user provisioning. The secret
+    /// store is composition-private, so this is the single narrow write seam.
+    pub async fn seed_local_dev_secret(
+        &self,
+        owner: ResourceScope,
+        handle: ironclaw_host_api::SecretHandle,
+        secret_value: String,
+    ) -> Result<(), ironclaw_secrets::SecretStoreError> {
+        self.services
+            .secret_store()
+            .put(
+                owner,
+                handle,
+                ironclaw_secrets::SecretMaterial::from(secret_value),
+                None,
+            )
+            .await
+            .map(|_| ())
+    }
+
     pub(crate) fn webui_tenant_id(&self) -> &TenantId {
         &self.thread_scope.tenant_id
     }
@@ -1477,6 +1497,23 @@ impl RebornRuntime {
                 Arc::clone(&parts.reload_handle),
                 Arc::clone(&parts.session),
                 crate::LlmKeyStore::new(self.services.secret_store()),
+            ),
+        ))
+    }
+
+    /// Read-only reader exposing the live active/default model id so the WebUI
+    /// facade can price a default-model run (one with no `resolved_model_route`)
+    /// against the model that actually ran. Backed by the same hot-swappable
+    /// primary provider the model gateway drives, so it tracks operator model
+    /// swaps. `None` when no LLM provider was wired at boot.
+    #[cfg(feature = "root-llm-provider")]
+    pub(crate) fn webui_active_model_reader(
+        &self,
+    ) -> Option<Arc<dyn ironclaw_product_workflow::ActiveModelReader>> {
+        let parts = self.llm_reload.as_ref()?;
+        Some(Arc::new(
+            crate::llm_admin::active_model::ProviderActiveModelReader::new(
+                parts.reload_handle.primary_provider(),
             ),
         ))
     }
@@ -1832,8 +1869,9 @@ impl RebornRuntime {
 
     /// Read-only scoped filesystem spanning every mount the standalone WebUI
     /// filesystem viewer can browse (workspace files + persistent memory), over
-    /// the same composite root the agent's tools resolve through. `None` when no
-    /// local runtime is composed, or when the browse mount view can't be built.
+    /// the same composite root the agent's tools resolve through. `None` only
+    /// when no local runtime is composed; scope-specific mount resolution errors
+    /// surface during browse operations.
     ///
     /// Distinct from [`Self::webui_workspace_filesystem`]: that handle is the
     /// read-write workspace-only view used to land attachments, whereas this is
@@ -1843,26 +1881,10 @@ impl RebornRuntime {
     ) -> Option<Arc<ironclaw_filesystem::ScopedFilesystem<crate::factory::LocalDevRootFilesystem>>>
     {
         let rt = self.services.local_runtime.as_ref()?;
-        let view = match crate::local_dev_mounts::browse_mount_view() {
-            Ok(view) => view,
-            Err(error) => {
-                // Built from static aliases/targets, so this should never fail;
-                // if it does, log loudly rather than silently disabling the
-                // filesystem viewer with a bare `None`.
-                tracing::error!(
-                    target = "ironclaw_reborn_composition::webui",
-                    %error,
-                    "failed to build webui browse mount view; filesystem viewer unavailable",
-                );
-                return None;
-            }
-        };
-        Some(Arc::new(
-            ironclaw_filesystem::ScopedFilesystem::with_fixed_view(
-                Arc::clone(&rt.extension_filesystem),
-                view,
-            ),
-        ))
+        Some(Arc::new(ironclaw_filesystem::ScopedFilesystem::new(
+            Arc::clone(&rt.extension_filesystem),
+            crate::local_dev_mounts::scoped_browse_mount_view,
+        )))
     }
 
     /// Test-only handle on the resource governor backing the budget
@@ -2326,6 +2348,7 @@ impl RebornRuntime {
         let response = match self
             .turn_coordinator
             .submit_turn(SubmitTurnRequest {
+                requested_model: None,
                 scope: scope.clone(),
                 actor: TurnActor::new(self.actor_user_id.clone()),
                 accepted_message_ref: accepted_message_ref.clone(),
@@ -3031,6 +3054,8 @@ pub async fn build_reborn_runtime(
         model_gateway_override,
         #[cfg(any(test, feature = "test-support"))]
         model_cost_table_override,
+        #[cfg(any(test, feature = "test-support"))]
+        model_availability_retry_attempts_override,
     } = input;
 
     let mut services_input = services_input.ok_or(RebornRuntimeError::InvalidArgument {
@@ -3298,8 +3323,8 @@ pub async fn build_reborn_runtime(
     // accountant doesn't get built (no spend, no cascade). The test
     // override (when set) wins over the LLM-derived table — the test is
     // being explicit about the prices it wants.
-    let llm_cost_table_arc: Option<Arc<dyn ironclaw_loop_support::ModelCostTable>> = llm_cost_table
-        .map(|table| Arc::new(table) as Arc<dyn ironclaw_loop_support::ModelCostTable>);
+    let llm_cost_table_arc: Option<Arc<dyn ironclaw_loop_host::ModelCostTable>> =
+        llm_cost_table.map(|table| Arc::new(table) as Arc<dyn ironclaw_loop_host::ModelCostTable>);
     #[cfg(any(test, feature = "test-support"))]
     let resolved_cost_table = model_cost_table_override.or(llm_cost_table_arc);
     #[cfg(not(any(test, feature = "test-support")))]
@@ -3700,7 +3725,7 @@ pub async fn build_reborn_runtime(
         attachment_read_port: local_runtime.map(|rt| {
             Arc::new(crate::support::fs::ProjectScopedAttachmentReader::new(
                 Arc::clone(&rt.workspace_filesystem),
-            )) as Arc<dyn ironclaw_loop_support::LoopAttachmentReadPort>
+            )) as Arc<dyn ironclaw_loop_host::LoopAttachmentReadPort>
         }),
         model_gateway: Arc::clone(&model_gateway),
         checkpoint_state_store: Arc::clone(&checkpoint_state_store)
@@ -3719,7 +3744,7 @@ pub async fn build_reborn_runtime(
         subagent_spawn_input_codec: Arc::new(JsonSpawnSubagentInputCodec::new(
             capability_input_resolver,
         )),
-        subagent_spawn_limits: ironclaw_loop_support::SubagentSpawnLimits::default(),
+        subagent_spawn_limits: ironclaw_loop_host::SubagentSpawnLimits::default(),
         loop_exit_evidence,
         config: DefaultPlannedRuntimeConfig {
             heartbeat_interval: runner.heartbeat_interval,
@@ -3733,6 +3758,19 @@ pub async fn build_reborn_runtime(
             planned_default_iteration_limit: optional_nonzero_u32_env(
                 "IRONCLAW_REBORN_PLANNED_DEFAULT_ITERATION_LIMIT",
             )?,
+            planned_model_availability_retry_attempts: {
+                #[cfg(any(test, feature = "test-support"))]
+                let resolved = match model_availability_retry_attempts_override {
+                    Some(attempts) => Some(attempts),
+                    None => optional_nonzero_u32_env(
+                        "IRONCLAW_REBORN_MODEL_AVAILABILITY_RETRY_ATTEMPTS",
+                    )?,
+                };
+                #[cfg(not(any(test, feature = "test-support")))]
+                let resolved =
+                    optional_nonzero_u32_env("IRONCLAW_REBORN_MODEL_AVAILABILITY_RETRY_ATTEMPTS")?;
+                resolved
+            },
         },
         model_route_resolver: None,
         cancellation_factory: None,
@@ -4199,6 +4237,7 @@ fn optional_nonzero_u32_env(
 /// through silently.
 fn local_dev_selector_config(
     regex_skill_activation_enabled: bool,
+    injection_mode: SkillInjectionMode,
 ) -> SkillActivationSelectorConfig {
     SkillActivationSelectorConfig {
         max_context_tokens: LOCAL_DEV_MAX_SKILL_CONTEXT_TOKENS,
@@ -4208,11 +4247,42 @@ fn local_dev_selector_config(
         // the learn→reuse loop: a skill distilled from one task is applied
         // automatically on the next similar task. Explicit mentions still
         // force-activate; criteria selection is additive and bounded by
-        // `max_active_skills` / `max_context_tokens`.
+        // `max_active_skills` / `max_context_tokens`. Under the default
+        // `Listing` injection mode a criteria match ranks the skill in the
+        // one-line listing instead of injecting its body.
         selection_mode:
             ironclaw_first_party_extension_ports::SkillActivationSelectionMode::ExplicitAndCriteria,
         regex_activation_enabled: regex_skill_activation_enabled,
+        injection_mode,
         ..SkillActivationSelectorConfig::default()
+    }
+}
+
+/// Parse the Reborn skill-injection mode from the
+/// `IRONCLAW_REBORN_SKILL_INJECTION` env switch. Defaults to `listing`
+/// (one-line skill listing; bodies load on `builtin.skill_activate`);
+/// `full` restores the legacy inject-bodies-by-score behavior.
+fn skill_injection_mode_env() -> Result<SkillInjectionMode, RebornRuntimeError> {
+    match std::env::var(SKILL_INJECTION_MODE_ENV_KEY) {
+        Ok(value) => skill_injection_mode_from(&value),
+        Err(std::env::VarError::NotPresent) => Ok(SkillInjectionMode::Listing),
+        Err(error) => Err(RebornRuntimeError::InvalidArgument {
+            reason: format!("could not read {SKILL_INJECTION_MODE_ENV_KEY}: {error}"),
+        }),
+    }
+}
+
+const SKILL_INJECTION_MODE_ENV_KEY: &str = "IRONCLAW_REBORN_SKILL_INJECTION";
+
+fn skill_injection_mode_from(value: &str) -> Result<SkillInjectionMode, RebornRuntimeError> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "" | "listing" => Ok(SkillInjectionMode::Listing),
+        "full" => Ok(SkillInjectionMode::Full),
+        other => Err(RebornRuntimeError::InvalidArgument {
+            reason: format!(
+                "{SKILL_INJECTION_MODE_ENV_KEY} must be \"listing\" or \"full\", got {other:?}"
+            ),
+        }),
     }
 }
 
@@ -4233,7 +4303,8 @@ fn local_dev_filesystem_skill_context_source(
     .map_err(|reason| RebornRuntimeError::InvalidArgument {
         reason: format!("first-party skills extension source: {reason}"),
     })?;
-    let selector_config = local_dev_selector_config(regex_skill_activation_enabled);
+    let selector_config =
+        local_dev_selector_config(regex_skill_activation_enabled, skill_injection_mode_env()?);
     let selectable_skills = extension.selectable_skill_runtime_with_setup_markers(
         selector_config,
         Arc::clone(&local_runtime.workspace_filesystem),
@@ -4374,8 +4445,8 @@ async fn build_production_model_gateway(
     llm: Option<crate::runtime_input::ResolvedRebornLlm>,
 ) -> Result<
     (
-        Arc<dyn ironclaw_loop_support::HostManagedModelGateway>,
-        Option<ironclaw_loop_support::StaticModelCostTable>,
+        Arc<dyn ironclaw_loop_host::HostManagedModelGateway>,
+        Option<ironclaw_loop_host::StaticModelCostTable>,
         Option<RebornLlmReloadParts>,
     ),
     RebornRuntimeError,
@@ -4448,8 +4519,8 @@ async fn build_skill_learning_provider(
 #[cfg(not(feature = "root-llm-provider"))]
 fn build_production_model_gateway() -> Result<
     (
-        Arc<dyn ironclaw_loop_support::HostManagedModelGateway>,
-        Option<ironclaw_loop_support::StaticModelCostTable>,
+        Arc<dyn ironclaw_loop_host::HostManagedModelGateway>,
+        Option<ironclaw_loop_host::StaticModelCostTable>,
     ),
     RebornRuntimeError,
 > {
@@ -4458,7 +4529,7 @@ fn build_production_model_gateway() -> Result<
 
 #[cfg(feature = "root-llm-provider")]
 struct LlmGatewayBundle {
-    gateway: Arc<dyn ironclaw_loop_support::HostManagedModelGateway>,
+    gateway: Arc<dyn ironclaw_loop_host::HostManagedModelGateway>,
     /// Policy used to derive the budget accountant's cost table — kept
     /// alongside the gateway so the composer doesn't re-derive the
     /// `ModelProfileId → provider-model` mapping in two places.
@@ -4594,7 +4665,7 @@ impl ironclaw_llm::LlmProvider for PlaceholderLlmProvider {
 #[cfg(feature = "root-llm-provider")]
 fn placeholder_unconfigured_error() -> ironclaw_llm::LlmError {
     ironclaw_llm::LlmError::RequestFailed {
-        provider: "unconfigured".to_string(),
+        provider: ironclaw_llm::UNCONFIGURED_PROVIDER_ID.to_string(),
         reason: "no LLM provider is configured yet; choose one in Settings → Inference".to_string(),
     }
 }
@@ -4603,9 +4674,9 @@ fn placeholder_unconfigured_error() -> ironclaw_llm::LlmError {
 // stub gateway. With the LLM provider compiled in, a cold boot uses a
 // placeholder-backed swappable gateway instead (see `build_placeholder_llm_gateway`).
 #[cfg(not(feature = "root-llm-provider"))]
-fn build_stub_gateway() -> Arc<dyn ironclaw_loop_support::HostManagedModelGateway> {
+fn build_stub_gateway() -> Arc<dyn ironclaw_loop_host::HostManagedModelGateway> {
     use async_trait::async_trait;
-    use ironclaw_loop_support::{
+    use ironclaw_loop_host::{
         HostManagedModelError, HostManagedModelErrorKind, HostManagedModelGateway,
         HostManagedModelRequest, HostManagedModelResponse,
     };
@@ -4619,8 +4690,12 @@ fn build_stub_gateway() -> Arc<dyn ironclaw_loop_support::HostManagedModelGatewa
             &self,
             _request: HostManagedModelRequest,
         ) -> Result<HostManagedModelResponse, HostManagedModelError> {
+            // A missing gateway is a build-configuration fault, not an
+            // availability blip: CredentialUnavailable is unclassified in
+            // loop recovery, so runs fail fast instead of riding the
+            // availability backoff budget.
             Err(HostManagedModelError::safe(
-                HostManagedModelErrorKind::Unavailable,
+                HostManagedModelErrorKind::CredentialUnavailable,
                 "no LLM gateway wired (build with `root-llm-provider` feature)",
             ))
         }
@@ -4809,7 +4884,10 @@ output_schema_ref = "schemas/write.output.json"
     /// [`local_dev_filesystem_skill_context_source`] depends on.
     #[test]
     fn local_dev_selector_config_propagates_regex_activation_disabled() {
-        let cfg = super::local_dev_selector_config(false);
+        let cfg = super::local_dev_selector_config(
+            false,
+            ironclaw_first_party_extension_ports::SkillInjectionMode::Listing,
+        );
         assert!(
             !cfg.regex_activation_enabled,
             "regex_skill_activation_enabled=false must propagate into SkillActivationSelectorConfig"
@@ -4826,7 +4904,10 @@ output_schema_ref = "schemas/write.output.json"
 
     #[test]
     fn local_dev_selector_config_propagates_regex_activation_enabled() {
-        let cfg = super::local_dev_selector_config(true);
+        let cfg = super::local_dev_selector_config(
+            true,
+            ironclaw_first_party_extension_ports::SkillInjectionMode::Listing,
+        );
         assert!(
             cfg.regex_activation_enabled,
             "regex_skill_activation_enabled=true must propagate into SkillActivationSelectorConfig"
@@ -4835,10 +4916,51 @@ output_schema_ref = "schemas/write.output.json"
 
     #[test]
     fn local_dev_selector_config_uses_large_skill_context_budget() {
-        let cfg = super::local_dev_selector_config(true);
+        let cfg = super::local_dev_selector_config(
+            true,
+            ironclaw_first_party_extension_ports::SkillInjectionMode::Listing,
+        );
         assert_eq!(
             cfg.max_context_tokens, 6000,
             "local-dev Reborn skill activation should match the legacy 6000-token skill budget"
+        );
+    }
+
+    /// Wiring guard for the `IRONCLAW_REBORN_SKILL_INJECTION` env switch: the
+    /// parsed injection mode must reach
+    /// [`SkillActivationSelectorConfig::injection_mode`] unchanged (not get
+    /// clobbered by the `..default()` spread), and the parser must default to
+    /// `listing` while still accepting the `full` legacy escape hatch.
+    #[test]
+    fn local_dev_selector_config_propagates_injection_mode() {
+        for mode in [
+            ironclaw_first_party_extension_ports::SkillInjectionMode::Listing,
+            ironclaw_first_party_extension_ports::SkillInjectionMode::Full,
+        ] {
+            let cfg = super::local_dev_selector_config(true, mode);
+            assert_eq!(cfg.injection_mode, mode);
+        }
+    }
+
+    #[test]
+    fn skill_injection_mode_parses_listing_full_and_defaults() {
+        use ironclaw_first_party_extension_ports::SkillInjectionMode;
+        for (value, expected) in [
+            ("", SkillInjectionMode::Listing),
+            ("listing", SkillInjectionMode::Listing),
+            (" Listing ", SkillInjectionMode::Listing),
+            ("full", SkillInjectionMode::Full),
+            ("FULL", SkillInjectionMode::Full),
+        ] {
+            assert_eq!(
+                super::skill_injection_mode_from(value).expect("valid mode parses"),
+                expected,
+                "value {value:?}"
+            );
+        }
+        assert!(
+            super::skill_injection_mode_from("bodies").is_err(),
+            "unknown values must fail loud, not silently pick a mode"
         );
     }
 
@@ -5035,11 +5157,12 @@ output_schema_ref = "schemas/write.output.json"
             FilesystemBackendKind, NetworkMode, ProcessBackendKind, RuntimeProfile, SecretMode,
         },
     };
-    use ironclaw_loop_support::{
+    use ironclaw_loop_host::{
         HostManagedModelError, HostManagedModelErrorKind, HostManagedModelGateway,
-        HostManagedModelMessageRole, HostManagedModelRequest, HostManagedModelResponse,
-        HostSkillContextBuildError, HostSkillContextCandidate, HostSkillContextSource, ModelCost,
-        SpawnSubagentMode, SubagentKindId, SubagentThreadKind, SubagentThreadMetadata,
+        HostManagedModelMessage, HostManagedModelMessageRole, HostManagedModelRequest,
+        HostManagedModelResponse, HostManagedToolResultContent, HostSkillContextBuildError,
+        HostSkillContextCandidate, HostSkillContextSource, ModelCost, SpawnSubagentMode,
+        SubagentKindId, SubagentThreadKind, SubagentThreadMetadata,
     };
     use ironclaw_product_adapters::{ProductOutboundPayload, ProductProjectionItem};
     use ironclaw_product_workflow::{
@@ -5054,7 +5177,8 @@ output_schema_ref = "schemas/write.output.json"
     use ironclaw_skills::SkillTrust;
     use ironclaw_threads::{
         AppendToolResultReferenceRequest, EnsureThreadRequest, LoadContextMessagesRequest,
-        MessageKind, MessageStatus, ThreadHistoryRequest, ThreadScope, ToolResultSafeSummary,
+        MessageKind, MessageStatus, TOOL_RESULT_RECORD_READ_MAX_BYTES, ThreadHistoryRequest,
+        ThreadScope, ToolResultSafeSummary,
     };
     use ironclaw_turns::{
         AcceptedMessageRef, AllowAllTurnAdmissionPolicy, BlockedReason, GetRunStateRequest,
@@ -5146,6 +5270,44 @@ output_schema_ref = "schemas/write.output.json"
     struct WorkspaceListingGateway {
         calls: StdMutex<usize>,
         requests: StdMutex<Vec<HostManagedModelRequest>>,
+    }
+
+    // Local-dev model replay is a bounded reference observation: for a
+    // result under the inline first-look preview cap (issue #5838,
+    // `LOCAL_DEV_RESULT_PREVIEW_MAX_BYTES`), the raw content legitimately
+    // appears inline in `detail.preview` so the model does not need a
+    // follow-up `result_read` call; only content beyond the cap requires one.
+    // Both fixtures below are well under the cap.
+    fn assert_local_dev_result_reference(tool_result: &HostManagedModelMessage, raw_marker: &str) {
+        assert!(
+            tool_result.content.contains(raw_marker),
+            "a result under the first-look preview cap should appear inline in model replay: {}",
+            tool_result.content
+        );
+        let Some(HostManagedToolResultContent::Reference { envelope }) =
+            tool_result.tool_result_content.as_ref()
+        else {
+            panic!(
+                "model replay should carry a result-reference envelope, got {:?}",
+                tool_result.tool_result_content
+            );
+        };
+        assert_eq!(envelope.version, 1);
+        assert!(envelope.result_ref.starts_with("result:"));
+        let observation = envelope
+            .model_observation
+            .as_ref()
+            .expect("result-reference replay should include a model observation");
+        assert_eq!(observation["schema_version"], serde_json::json!(1));
+        assert_eq!(observation["status"], serde_json::json!("success"));
+        assert_eq!(
+            observation["detail"]["kind"],
+            serde_json::json!("result_reference")
+        );
+        assert_eq!(
+            observation["detail"]["result_ref"],
+            serde_json::json!(envelope.result_ref)
+        );
     }
 
     struct StaticSkillContextSource {
@@ -5257,17 +5419,13 @@ output_schema_ref = "schemas/write.output.json"
                 .lock()
                 .expect("tool gateway requests lock poisoned")
                 .push(request.clone());
-            if call_index > 0 {
+            if call_index == 1 {
                 let tool_result = request
                     .messages
                     .iter()
                     .find(|message| message.role == HostManagedModelMessageRole::ToolResult)
                     .expect("second model call should include tool result");
-                assert!(
-                    tool_result.content.contains("hello from tool"),
-                    "tool result should expose hydrated capability output, got {}",
-                    tool_result.content
-                );
+                assert_local_dev_result_reference(tool_result, "hello from tool");
                 let provider_call = tool_result
                     .tool_result_provider_call
                     .as_ref()
@@ -5321,10 +5479,20 @@ output_schema_ref = "schemas/write.output.json"
         }
     }
 
-    /// A long echo argument (well over the safe-preview 512-byte string cap) so
-    /// the default-observer test can prove the payload is truncated before the
-    /// observer sees it.
+    /// A long echo argument, sized well over `TOOL_RESULT_RECORD_READ_MAX_BYTES`
+    /// (not just the old hardcoded 2KiB), so the default-observer test can
+    /// prove the payload is truncated before the observer sees it.
     const LARGE_ECHO_MESSAGE: &str = "PAYLOAD0123456789ABCDEF_";
+    const LARGE_ECHO_TAIL: &str = "UNREPLAYED_RAW_TOOL_RESULT_TAIL";
+
+    fn large_echo_message() -> String {
+        let repeat_count = TOOL_RESULT_RECORD_READ_MAX_BYTES / LARGE_ECHO_MESSAGE.len() + 1;
+        format!(
+            "Secretary of the Treasury: {}{}",
+            LARGE_ECHO_MESSAGE.repeat(repeat_count),
+            LARGE_ECHO_TAIL
+        )
+    }
 
     #[derive(Debug, Default)]
     struct LargeEchoToolCallingGateway {
@@ -5345,7 +5513,7 @@ output_schema_ref = "schemas/write.output.json"
 
         async fn stream_model_with_capabilities(
             &self,
-            _request: HostManagedModelRequest,
+            request: HostManagedModelRequest,
             capabilities: Arc<dyn LoopCapabilityPort>,
         ) -> Result<HostManagedModelResponse, HostManagedModelError> {
             let call_index = {
@@ -5354,7 +5522,110 @@ output_schema_ref = "schemas/write.output.json"
                 *calls += 1;
                 call_index
             };
-            if call_index > 0 {
+            if call_index == 1 {
+                let tool_result = request
+                    .messages
+                    .iter()
+                    .find(|message| message.role == HostManagedModelMessageRole::ToolResult)
+                    .expect("second model call should include tool result");
+                assert!(
+                    !tool_result.content.contains(LARGE_ECHO_TAIL),
+                    "raw tail must remain out of the model replay; got {} bytes",
+                    tool_result.content.len()
+                );
+                assert!(
+                    tool_result.content.contains("result_reference"),
+                    "model replay must carry a bounded result-reference observation"
+                );
+                assert!(
+                    tool_result.content.len() <= TOOL_RESULT_RECORD_READ_MAX_BYTES * 2,
+                    "tool result replay must stay within the envelope bound, got {} bytes",
+                    tool_result.content.len()
+                );
+                assert!(
+                    tool_result.content.contains("Secretary of the Treasury"),
+                    "the initial result-reference preview must retain ordinary document text"
+                );
+                let result_ref = match tool_result.tool_result_content.as_ref() {
+                    Some(HostManagedToolResultContent::Reference { envelope }) => {
+                        envelope.result_ref.clone()
+                    }
+                    other => panic!("expected a result reference, got {other:?}"),
+                };
+                let result_read_id = CapabilityId::new("builtin.result_read").expect("reader id");
+                let result_read_tool = capabilities
+                    .tool_definitions()
+                    .map_err(model_capability_error)?
+                    .into_iter()
+                    .find(|definition| definition.capability_id == result_read_id)
+                    .expect("result_read provider tool definition");
+                let candidate = capabilities
+                    .register_provider_tool_call(RegisterProviderToolCallRequest::new(
+                        ProviderToolCall {
+                            provider_id: "test-provider".to_string(),
+                            provider_model_id: "test-model".to_string(),
+                            turn_id: Some("provider-turn-2".to_string()),
+                            id: "call-2".to_string(),
+                            name: result_read_tool.name,
+                            arguments: serde_json::json!({
+                                "result_ref": result_ref,
+                                "offset": 0,
+                                "max_bytes": 2048,
+                            }),
+                            response_reasoning: None,
+                            reasoning: None,
+                            signature: None,
+                        },
+                    ))
+                    .await
+                    .map_err(model_capability_error)?;
+                return Ok(HostManagedModelResponse::capability_calls(
+                    vec![candidate],
+                    "",
+                ));
+            }
+            if call_index == 2 {
+                let tool_result = request
+                    .messages
+                    .iter()
+                    .rev()
+                    .find(|message| {
+                        message.role == HostManagedModelMessageRole::ToolResult
+                            && message
+                                .tool_result_provider_call
+                                .as_ref()
+                                .is_some_and(|call| {
+                                    call.capability_id.as_str() == "builtin.result_read"
+                                })
+                    })
+                    .expect("third model call should include result_read output");
+                assert!(
+                    tool_result.content.contains(LARGE_ECHO_MESSAGE),
+                    "result_read must expose its bounded chunk to the model"
+                );
+                assert!(
+                    !tool_result.content.contains(LARGE_ECHO_TAIL),
+                    "the result_read response must remain bounded"
+                );
+                let observation: serde_json::Value =
+                    serde_json::from_str(&tool_result.content).expect("result_read observation");
+                let detail = &observation["model_observation"]["detail"];
+                assert_ne!(
+                    detail["result_ref"], observation["result_ref"],
+                    "result_read replay must retain the original result reference, not its own output ref"
+                );
+                assert!(
+                    detail["total_bytes"]
+                        .as_u64()
+                        .is_some_and(|total_bytes| total_bytes > 2048),
+                    "result_read replay must expose total bytes for continuation: {}",
+                    tool_result.content
+                );
+                assert_eq!(
+                    detail["next_offset"].as_u64(),
+                    Some(2048),
+                    "result_read replay must expose the next offset for continuation"
+                );
                 return Ok(HostManagedModelResponse::assistant_reply("tool ok"));
             }
             let echo_id = CapabilityId::new("builtin.echo").expect("echo id");
@@ -5364,8 +5635,8 @@ output_schema_ref = "schemas/write.output.json"
                 .into_iter()
                 .find(|definition| definition.capability_id == echo_id)
                 .expect("echo provider tool definition");
-            // ~2.4 KB message: far over the 512-byte string preview cap.
-            let big_message = LARGE_ECHO_MESSAGE.repeat(100);
+            // Larger than both the observer preview and model replay preview.
+            let big_message = large_echo_message();
             let candidate = capabilities
                 .register_provider_tool_call(RegisterProviderToolCallRequest::new(
                     ProviderToolCall {
@@ -5482,11 +5753,7 @@ output_schema_ref = "schemas/write.output.json"
                     .iter()
                     .find(|message| message.role == HostManagedModelMessageRole::ToolResult)
                     .expect("second model call should include tool result");
-                assert!(
-                    tool_result.content.contains("workspace-sentinel.txt"),
-                    "workspace listing should expose configured workspace root, got {}",
-                    tool_result.content
-                );
+                assert_local_dev_result_reference(tool_result, "workspace-sentinel.txt");
                 return Ok(HostManagedModelResponse::assistant_reply("workspace ok"));
             }
 
@@ -5585,9 +5852,48 @@ output_schema_ref = "schemas/write.output.json"
     }
 
     #[cfg(feature = "root-llm-provider")]
+    const NEARAI_AUTH_CAPTURE_MAX_REQUEST_BYTES: usize = 50 * 1024 * 1024;
+    #[cfg(feature = "root-llm-provider")]
+    const NEARAI_AUTH_CAPTURE_IO_TIMEOUT: Duration = Duration::from_secs(5);
+    #[cfg(feature = "root-llm-provider")]
+    const NEARAI_AUTH_CAPTURE_IDLE_TIMEOUT: Duration = Duration::from_secs(30);
+
+    #[cfg(feature = "root-llm-provider")]
+    async fn write_nearai_auth_capture_bytes(
+        stream: &mut tokio::net::TcpStream,
+        response: &[u8],
+    ) -> Result<(), String> {
+        use tokio::io::AsyncWriteExt;
+
+        match tokio::time::timeout(NEARAI_AUTH_CAPTURE_IO_TIMEOUT, stream.write_all(response)).await
+        {
+            Ok(Ok(())) => Ok(()),
+            Ok(Err(error)) => Err(format!("write auth capture response failed: {error}")),
+            Err(_) => Err(format!(
+                "write auth capture response timed out after {:?}",
+                NEARAI_AUTH_CAPTURE_IO_TIMEOUT
+            )),
+        }
+    }
+
+    #[cfg(feature = "root-llm-provider")]
+    async fn write_nearai_auth_capture_response(
+        stream: &mut tokio::net::TcpStream,
+        status: &str,
+        content_type: &str,
+        body: &str,
+    ) -> Result<(), String> {
+        let response = format!(
+            "HTTP/1.1 {status}\r\ncontent-type: {content_type}\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+            body.len()
+        );
+        write_nearai_auth_capture_bytes(stream, response.as_bytes()).await
+    }
+
+    #[cfg(feature = "root-llm-provider")]
     async fn start_nearai_auth_capture_server() -> (String, tokio::sync::oneshot::Receiver<String>)
     {
-        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::io::AsyncReadExt;
         use tokio::net::TcpSocket;
 
         let socket = TcpSocket::new_v4().expect("test server socket");
@@ -5600,24 +5906,189 @@ output_schema_ref = "schemas/write.output.json"
 
         tokio::spawn(async move {
             let mut auth_tx = Some(auth_tx);
-            loop {
-                let (mut stream, _) = listener.accept().await.expect("accept test request");
+            'connections: loop {
+                let (mut stream, _) =
+                    match tokio::time::timeout(NEARAI_AUTH_CAPTURE_IDLE_TIMEOUT, listener.accept())
+                        .await
+                    {
+                        Ok(Ok(accepted)) => accepted,
+                        Ok(Err(error)) => panic!("accept test request: {error}"),
+                        Err(_) => break,
+                    };
                 let mut buffer = Vec::new();
+                let mut header_end = None;
                 loop {
                     let mut chunk = [0_u8; 1024];
-                    let read = stream.read(&mut chunk).await.expect("read test request");
+                    let read = match tokio::time::timeout(
+                        NEARAI_AUTH_CAPTURE_IO_TIMEOUT,
+                        stream.read(&mut chunk),
+                    )
+                    .await
+                    {
+                        Ok(Ok(read)) => read,
+                        Ok(Err(error)) => panic!("read test request: {error}"),
+                        Err(_) => {
+                            write_nearai_auth_capture_response(
+                                &mut stream,
+                                "408 Request Timeout",
+                                "text/plain",
+                                "request read timed out",
+                            )
+                            .await
+                            .expect("write auth capture read timeout response");
+                            continue 'connections;
+                        }
+                    };
                     if read == 0 {
                         break;
                     }
+                    if buffer.len().saturating_add(read) > NEARAI_AUTH_CAPTURE_MAX_REQUEST_BYTES {
+                        write_nearai_auth_capture_response(
+                            &mut stream,
+                            "413 Payload Too Large",
+                            "text/plain",
+                            "request too large",
+                        )
+                        .await
+                        .expect("write auth capture oversized request response");
+                        continue 'connections;
+                    }
                     buffer.extend_from_slice(&chunk[..read]);
-                    if buffer.windows(4).any(|window| window == b"\r\n\r\n") {
+                    if let Some(index) = buffer.windows(4).position(|window| window == b"\r\n\r\n")
+                    {
+                        header_end = Some(index + 4);
                         break;
                     }
                 }
 
-                let request = String::from_utf8_lossy(&buffer);
-                let request_line = request.lines().next().unwrap_or_default();
-                let auth_header = request
+                let Some(header_end) = header_end else {
+                    write_nearai_auth_capture_response(
+                        &mut stream,
+                        "400 Bad Request",
+                        "text/plain",
+                        "incomplete request headers",
+                    )
+                    .await
+                    .expect("write auth capture incomplete headers response");
+                    continue;
+                };
+                let headers = String::from_utf8_lossy(&buffer[..header_end]).into_owned();
+                let content_length = match headers
+                    .lines()
+                    .filter_map(|line| line.split_once(':'))
+                    .find(|(name, _)| name.eq_ignore_ascii_case("content-length"))
+                {
+                    Some((_, value)) => match value.trim().parse::<usize>() {
+                        Ok(length) => length,
+                        Err(_) => {
+                            write_nearai_auth_capture_response(
+                                &mut stream,
+                                "400 Bad Request",
+                                "text/plain",
+                                "invalid content-length",
+                            )
+                            .await
+                            .expect("write auth capture invalid content-length response");
+                            continue;
+                        }
+                    },
+                    None => {
+                        write_nearai_auth_capture_response(
+                            &mut stream,
+                            "400 Bad Request",
+                            "text/plain",
+                            "missing content-length",
+                        )
+                        .await
+                        .expect("write auth capture missing content-length response");
+                        continue;
+                    }
+                };
+                let Some(request_len) = header_end.checked_add(content_length) else {
+                    write_nearai_auth_capture_response(
+                        &mut stream,
+                        "413 Payload Too Large",
+                        "text/plain",
+                        "request too large",
+                    )
+                    .await
+                    .expect("write auth capture overflow response");
+                    continue;
+                };
+                if request_len > NEARAI_AUTH_CAPTURE_MAX_REQUEST_BYTES {
+                    write_nearai_auth_capture_response(
+                        &mut stream,
+                        "413 Payload Too Large",
+                        "text/plain",
+                        "request too large",
+                    )
+                    .await
+                    .expect("write auth capture oversized content-length response");
+                    continue;
+                }
+                while buffer.len() < request_len {
+                    let mut chunk = [0_u8; 1024];
+                    let read = match tokio::time::timeout(
+                        NEARAI_AUTH_CAPTURE_IO_TIMEOUT,
+                        stream.read(&mut chunk),
+                    )
+                    .await
+                    {
+                        Ok(Ok(read)) => read,
+                        Ok(Err(error)) => panic!("read test body: {error}"),
+                        Err(_) => {
+                            write_nearai_auth_capture_response(
+                                &mut stream,
+                                "408 Request Timeout",
+                                "text/plain",
+                                "request body read timed out",
+                            )
+                            .await
+                            .expect("write auth capture body timeout response");
+                            continue 'connections;
+                        }
+                    };
+                    if read == 0 {
+                        write_nearai_auth_capture_response(
+                            &mut stream,
+                            "400 Bad Request",
+                            "text/plain",
+                            "incomplete request body",
+                        )
+                        .await
+                        .expect("write auth capture incomplete body response");
+                        continue 'connections;
+                    }
+                    let remaining = request_len - buffer.len();
+                    buffer.extend_from_slice(&chunk[..read.min(remaining)]);
+                }
+
+                let body = &buffer[header_end..request_len];
+                let request_json = if body.is_empty() {
+                    None
+                } else {
+                    match serde_json::from_slice::<serde_json::Value>(body) {
+                        Ok(value) => Some(value),
+                        Err(_) => {
+                            write_nearai_auth_capture_response(
+                                &mut stream,
+                                "400 Bad Request",
+                                "text/plain",
+                                "invalid json body",
+                            )
+                            .await
+                            .expect("write auth capture invalid json response");
+                            continue;
+                        }
+                    }
+                };
+                let wants_stream = request_json
+                    .as_ref()
+                    .and_then(|value| value.get("stream"))
+                    .and_then(serde_json::Value::as_bool)
+                    .unwrap_or(false);
+                let request_line = headers.lines().next().unwrap_or_default();
+                let auth_header = headers
                     .lines()
                     .filter_map(|line| line.split_once(':'))
                     .find(|(name, _)| name.eq_ignore_ascii_case("authorization"))
@@ -5625,23 +6096,39 @@ output_schema_ref = "schemas/write.output.json"
                     .unwrap_or_default()
                     .to_string();
                 let is_chat_completion = request_line.contains("/v1/chat/completions");
-                let body = if is_chat_completion {
-                    r#"{"choices":[{"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}],"usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2}}"#
+                if is_chat_completion && wants_stream {
+                    let body = concat!(
+                        r#"data: {"choices":[{"delta":{"content":"ok"},"finish_reason":"stop"}],"usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2}}"#,
+                        "\n\n",
+                        "data: [DONE]\n\n"
+                    );
+                    let response = format!(
+                        "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ncache-control: no-cache\r\nconnection: close\r\n\r\n{}",
+                        body
+                    );
+                    write_nearai_auth_capture_bytes(&mut stream, response.as_bytes())
+                        .await
+                        .expect("write test streaming response");
                 } else {
-                    r#"{"data":[]}"#
-                };
-                let response = format!(
-                    "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
-                    body.len(),
-                    body
-                );
-                stream
-                    .write_all(response.as_bytes())
-                    .await
-                    .expect("write test response");
+                    let body = if is_chat_completion {
+                        r#"{"choices":[{"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}],"usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2}}"#
+                    } else {
+                        r#"{"data":[]}"#
+                    };
+                    let response = format!(
+                        "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
+                        body.len(),
+                        body
+                    );
+                    write_nearai_auth_capture_bytes(&mut stream, response.as_bytes())
+                        .await
+                        .expect("write test response");
+                }
 
                 if is_chat_completion {
                     if let Some(auth_tx) = auth_tx.take() {
+                        #[allow(clippy::let_underscore_must_use)]
+                        // oneshot send; dropped receiver is expected
                         let _ = auth_tx.send(auth_header);
                     }
                     break;
@@ -5653,11 +6140,91 @@ output_schema_ref = "schemas/write.output.json"
     }
 
     #[cfg(feature = "root-llm-provider")]
+    async fn send_nearai_auth_capture_raw_request(base_url: &str, request: String) -> String {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let address = base_url
+            .strip_prefix("http://")
+            .expect("capture server URL has http prefix");
+        let mut stream = tokio::net::TcpStream::connect(address)
+            .await
+            .expect("connect to capture server");
+        stream
+            .write_all(request.as_bytes())
+            .await
+            .expect("write raw capture request");
+        stream.shutdown().await.expect("finish raw capture request");
+
+        let mut response = String::new();
+        stream
+            .read_to_string(&mut response)
+            .await
+            .expect("read raw capture response");
+        response
+    }
+
+    #[cfg(feature = "root-llm-provider")]
+    #[tokio::test]
+    async fn nearai_auth_capture_server_rejects_incomplete_body() {
+        let (base_url, _auth_rx) = start_nearai_auth_capture_server().await;
+        let response = send_nearai_auth_capture_raw_request(
+            &base_url,
+            "POST /v1/chat/completions HTTP/1.1\r\nhost: localhost\r\ncontent-length: 32\r\n\r\n{\"stream\":true"
+                .to_string(),
+        )
+        .await;
+
+        assert!(
+            response.starts_with("HTTP/1.1 400 Bad Request"),
+            "expected incomplete body to be rejected, got: {response:?}"
+        );
+    }
+
+    #[cfg(feature = "root-llm-provider")]
+    #[tokio::test]
+    async fn nearai_auth_capture_server_rejects_oversized_content_length() {
+        let (base_url, _auth_rx) = start_nearai_auth_capture_server().await;
+        let response = send_nearai_auth_capture_raw_request(
+            &base_url,
+            format!(
+                "POST /v1/chat/completions HTTP/1.1\r\nhost: localhost\r\ncontent-length: {}\r\n\r\n",
+                NEARAI_AUTH_CAPTURE_MAX_REQUEST_BYTES + 1
+            ),
+        )
+        .await;
+
+        assert!(
+            response.starts_with("HTTP/1.1 413 Payload Too Large"),
+            "expected oversized body to be rejected, got: {response:?}"
+        );
+    }
+
+    #[cfg(feature = "root-llm-provider")]
+    #[tokio::test]
+    async fn nearai_auth_capture_server_rejects_missing_content_length() {
+        let (base_url, _auth_rx) = start_nearai_auth_capture_server().await;
+        let response = send_nearai_auth_capture_raw_request(
+            &base_url,
+            "POST /v1/chat/completions HTTP/1.1\r\nhost: localhost\r\n\r\n{}".to_string(),
+        )
+        .await;
+
+        assert!(
+            response.starts_with("HTTP/1.1 400 Bad Request"),
+            "expected missing content-length to be rejected, got: {response:?}"
+        );
+        assert!(
+            response.contains("missing content-length"),
+            "expected missing content-length diagnostic, got: {response:?}"
+        );
+    }
+
+    #[cfg(feature = "root-llm-provider")]
     fn nearai_gateway_test_request() -> HostManagedModelRequest {
         HostManagedModelRequest {
             model_profile_id: ironclaw_turns::run_profile::ModelProfileId::new("interactive_model")
                 .expect("model profile id"),
-            messages: vec![ironclaw_loop_support::HostManagedModelMessage {
+            messages: vec![ironclaw_loop_host::HostManagedModelMessage {
                 role: HostManagedModelMessageRole::User,
                 content: "hello model".to_string(),
                 content_ref: ironclaw_turns::LoopMessageRef::new(
@@ -5971,7 +6538,10 @@ output_schema_ref = "schemas/write.output.json"
         let nearai_ref =
             LifecyclePackageRef::new(LifecyclePackageKind::Extension, "nearai").expect("valid ref");
         let projection = extension_management
-            .project(nearai_ref)
+            .project(
+                nearai_ref,
+                extension_management.tenant_operator_user_id_for_test(),
+            )
             .await
             .expect("NEAR AI MCP projected");
         assert_eq!(projection.phase, LifecyclePhase::Active);
@@ -6076,7 +6646,10 @@ output_schema_ref = "schemas/write.output.json"
         let nearai_ref =
             LifecyclePackageRef::new(LifecyclePackageKind::Extension, "nearai").expect("valid ref");
         let projection = extension_management
-            .project(nearai_ref)
+            .project(
+                nearai_ref,
+                extension_management.tenant_operator_user_id_for_test(),
+            )
             .await
             .expect("NEAR AI MCP projected");
         assert_eq!(projection.phase, LifecyclePhase::Active);
@@ -6475,6 +7048,8 @@ output_schema_ref = "schemas/write.output.json"
         // First model call routes through the instrumentation wrapper. The dead
         // endpoint makes the underlying call error, but the wrapper counts before
         // delegating, so the result is irrelevant — only that it was observed.
+        #[allow(clippy::let_underscore_must_use)]
+        // dead endpoint errors by design; only the wrapper's observation count matters
         let _ = bundle
             .gateway
             .stream_model(nearai_gateway_test_request())
@@ -6494,6 +7069,8 @@ output_schema_ref = "schemas/write.output.json"
             .await
             .expect("live reload rebuilds the provider chain");
 
+        #[allow(clippy::let_underscore_must_use)]
+        // dead endpoint errors by design; only the wrapper's observation count matters
         let _ = bundle
             .gateway
             .stream_model(nearai_gateway_test_request())
@@ -7125,7 +7702,7 @@ output_schema_ref = "schemas/write.output.json"
             reply: "yolo budget bypass reply".to_string(),
             requests: Arc::clone(&requests),
         });
-        let cost_table = ironclaw_loop_support::StaticModelCostTable::new().with_entry(
+        let cost_table = ironclaw_loop_host::StaticModelCostTable::new().with_entry(
             ModelProfileId::new("interactive_model").expect("model profile id"),
             ModelCost {
                 input_per_token: dec!(1.00),
@@ -7261,7 +7838,10 @@ output_schema_ref = "schemas/write.output.json"
             interval: Duration::from_millis(10),
             max_total: RUNTIME_POLL_TIMEOUT,
         })
-        .with_model_gateway_override(gateway.clone());
+        .with_model_gateway_override(gateway.clone())
+        // Keep >= 2 retries (the test pins retry-then-fail) but well under
+        // the production budget so the deliberate outage fails in seconds.
+        .with_model_availability_retry_attempts(std::num::NonZeroU32::new(2).expect("nonzero"));
 
         let runtime = build_reborn_runtime(input).await.expect("runtime builds");
         let conversation = runtime.new_conversation().await.expect("conversation");
@@ -7395,6 +7975,7 @@ output_schema_ref = "schemas/write.output.json"
         assert_eq!(envelope["outcome"]["task_success"], "success");
 
         runtime.shutdown().await.expect("runtime shutdown");
+        #[allow(clippy::let_underscore_must_use)] // best-effort per-test scope dir cleanup
         let _ = std::fs::remove_dir_all(trace_contribution::trace_contribution_dir_for_scope(
             Some(&scope),
         ));
@@ -7600,7 +8181,10 @@ output_schema_ref = "schemas/write.output.json"
         let notion_ref = LifecyclePackageRef::new(LifecyclePackageKind::Extension, "notion")
             .expect("valid notion ref");
         extension_management
-            .install(notion_ref.clone())
+            .install(
+                notion_ref.clone(),
+                extension_management.tenant_operator_user_id_for_test(),
+            )
             .await
             .expect("install Notion MCP");
         extension_management
@@ -7686,6 +8270,7 @@ output_schema_ref = "schemas/write.output.json"
         let parent = runtime
             .turn_coordinator
             .submit_turn(SubmitTurnRequest {
+                requested_model: None,
                 scope: parent_scope.clone(),
                 actor: actor.clone(),
                 accepted_message_ref: AcceptedMessageRef::new("msg:cancel-parent").unwrap(),
@@ -7912,7 +8497,7 @@ output_schema_ref = "schemas/write.output.json"
         .expect("runtime send should finish")
         .expect("runtime send should succeed");
 
-        assert_eq!(reply.status, TurnStatus::Completed);
+        assert_eq!(reply.status, TurnStatus::Completed, "reply: {reply:?}");
         assert_eq!(reply.text.as_deref(), Some("tool ok"));
         assert_eq!(
             *gateway
@@ -8059,7 +8644,7 @@ output_schema_ref = "schemas/write.output.json"
         .await
         .expect("runtime send should finish")
         .expect("runtime send should succeed");
-        assert_eq!(reply.status, TurnStatus::Completed);
+        assert_eq!(reply.status, TurnStatus::Completed, "reply: {reply:?}");
         // Shut down before inspecting the recorded callbacks so the std-Mutex
         // guards are never held across an `.await` (clippy::await_holding_lock).
         runtime.shutdown().await.expect("runtime shutdown");
@@ -8132,28 +8717,30 @@ output_schema_ref = "schemas/write.output.json"
         .await
         .expect("runtime send should finish")
         .expect("runtime send should succeed");
-        assert_eq!(reply.status, TurnStatus::Completed);
+        assert_eq!(reply.status, TurnStatus::Completed, "reply: {reply:?}");
         // Shut down before inspecting the recorded callbacks so the std-Mutex
         // guards are never held across an `.await` (clippy::await_holding_lock).
         runtime.shutdown().await.expect("runtime shutdown");
 
-        let original_len = LARGE_ECHO_MESSAGE.repeat(100).len();
+        let original_len = large_echo_message().len();
 
         let inputs = observer.inputs.lock().expect("inputs lock");
-        assert_eq!(inputs.len(), 1, "exactly one capability input observed");
+        assert_eq!(inputs.len(), 2, "echo and result_read inputs observed");
         let observed_message = inputs[0].2["message"].as_str().expect("message string");
         assert!(
             observed_message.len() < original_len && observed_message.contains("[truncated"),
             "observer should receive a truncated preview of the large argument, got {} bytes",
             observed_message.len()
         );
+        assert_eq!(inputs[1].1, "builtin.result_read");
 
         let results = observer.results.lock().expect("results lock");
-        assert_eq!(results.len(), 1, "exactly one capability result observed");
+        assert_eq!(results.len(), 2, "echo and result_read outputs observed");
         assert!(
             results[0].2.to_string().contains("[truncated"),
             "observer should receive a truncated preview of the large result"
         );
+        assert_eq!(results[1].1, "builtin.result_read");
     }
 
     #[tokio::test]
@@ -8409,13 +8996,20 @@ output_schema_ref = "schemas/write.output.json"
                 .collect::<Vec<_>>()
         };
         let combined_skill_context = skill_messages.join("\n");
-        assert_eq!(skill_messages.len(), 2);
+        // Default `listing` injection: the two explicitly-mentioned skills load
+        // their full bodies, and every other visible skill (the bundled system
+        // skills) collapses into ONE `available-skills` listing message.
+        assert_eq!(skill_messages.len(), 3);
         assert!(combined_skill_context.contains("system helper description"));
         assert!(combined_skill_context.contains("SYSTEM_HELPER_PROMPT_SENTINEL"));
         assert!(combined_skill_context.contains("local helper description"));
         assert!(combined_skill_context.contains("USER_HELPER_PROMPT_SENTINEL"));
         assert!(!combined_skill_context.contains("tenant shared helper description"));
         assert!(!combined_skill_context.contains("TENANT_SHARED_PROMPT_SENTINEL"));
+        assert!(
+            combined_skill_context.contains("builtin.skill_activate"),
+            "available-skills listing message must reach the model"
+        );
 
         runtime.shutdown().await.expect("runtime shutdown");
     }
@@ -8704,7 +9298,12 @@ output_schema_ref = "schemas/write.output.json"
 
         assert_eq!(result.reply.status, TurnStatus::Completed);
         assert!(result.plan.activations().is_empty());
-        let skill_messages = {
+        // The setup skill's body must not reach the model when its marker is
+        // already satisfied. The always-present one-line available-skills
+        // listing snippet (`msg:snippet.skill.available-skills.*`) may still
+        // advertise the skill's short description, but the full SKILL.md body —
+        // pinned by MARKER_HELPER_PROMPT_SENTINEL — only ships on activation.
+        let skill_context = {
             let requests = requests
                 .lock()
                 .expect("recording gateway requests lock poisoned");
@@ -8718,9 +9317,14 @@ output_schema_ref = "schemas/write.output.json"
                             .as_str()
                             .starts_with("msg:snippet.skill.")
                 })
-                .count()
+                .map(|message| message.content.as_str())
+                .collect::<Vec<_>>()
+                .join("\n")
         };
-        assert_eq!(skill_messages, 0);
+        assert!(
+            !skill_context.contains("MARKER_HELPER_PROMPT_SENTINEL"),
+            "suppressed setup skill body must not be injected, got: {skill_context}"
+        );
 
         runtime.shutdown().await.expect("runtime shutdown");
     }
@@ -8950,7 +9554,7 @@ output_schema_ref = "schemas/write.output.json"
         .expect("runtime send should finish")
         .expect("runtime send should succeed");
 
-        assert_eq!(reply.status, TurnStatus::Completed);
+        assert_eq!(reply.status, TurnStatus::Completed, "reply: {reply:?}");
         assert_eq!(reply.text.as_deref(), Some("workspace ok"));
         let request_count = {
             let requests = gateway
@@ -9020,6 +9624,7 @@ output_schema_ref = "schemas/write.output.json"
                     thread_id: Some(created.thread.thread_id.to_string()),
                     content: Some("hello webui stream".to_string()),
                     attachments: Vec::new(),
+                    model: None,
                 },
             )
             .await
@@ -9165,7 +9770,7 @@ output_schema_ref = "schemas/write.output.json"
             .as_deref()
             .expect("landed attachment carries a storage_key");
 
-        let read_back = ironclaw_loop_support::LoopAttachmentReadPort::read_attachment_bytes(
+        let read_back = ironclaw_loop_host::LoopAttachmentReadPort::read_attachment_bytes(
             &read_port,
             &thread_scope.to_resource_scope(),
             storage_key,
@@ -10028,6 +10633,7 @@ output_schema_ref = "schemas/write.output.json"
         let submitted = runtime
             .turn_coordinator
             .submit_turn(SubmitTurnRequest {
+                requested_model: None,
                 scope: scope.clone(),
                 actor: actor.clone(),
                 accepted_message_ref: AcceptedMessageRef::new("msg:audit").unwrap(),
@@ -10258,6 +10864,7 @@ output_schema_ref = "schemas/write.output.json"
                     thread_id: Some(created.thread.thread_id.to_string()),
                     content: Some("$webui-helper please help".to_string()),
                     attachments: Vec::new(),
+                    model: None,
                 },
             )
             .await
@@ -10301,9 +10908,21 @@ output_schema_ref = "schemas/write.output.json"
             .map(|candidate| candidate.loaded_skill_md().unwrap_or(""))
             .collect::<Vec<_>>()
             .join("\n");
-        assert_eq!(selected.len(), 1);
+        // Default `listing` injection: the explicitly-mentioned skill loads its
+        // full body; the bundled system skills collapse into one additional
+        // `available-skills` listing candidate (description-only).
         assert!(combined_skill_context.contains("webui helper description"));
         assert!(combined_skill_context.contains("WEBUI_HELPER_PROMPT_SENTINEL"));
+        let listing = selected
+            .iter()
+            .filter_map(|candidate| candidate.discoverable_metadata())
+            .find(|(name, _)| *name == "available-skills")
+            .map(|(_, listing)| listing.to_string())
+            .expect("available-skills listing candidate");
+        assert!(
+            !listing.contains("WEBUI_HELPER_PROMPT_SENTINEL"),
+            "listing must not carry skill bodies"
+        );
 
         runtime.shutdown().await.expect("runtime shutdown");
     }
@@ -10416,9 +11035,12 @@ output_schema_ref = "schemas/write.output.json"
                 let package_ref =
                     LifecyclePackageRef::new(LifecyclePackageKind::Extension, "github")
                         .expect("valid github ref");
+                // #5459 P1: act as the runtime owner (the tenant operator) so
+                // the install is tenant-shared and visible to the run's
+                // surface user — a non-operator install would now be private.
                 let ctx = LifecycleProductContext::Surface(LifecycleProductSurfaceContext {
                     tenant_id: TenantId::new("tenant-multi-tool-surface").expect("tenant id"),
-                    user_id: UserId::new("user-multi-tool-surface").expect("user id"),
+                    user_id: UserId::new("runtime-multi-tool-surface-owner").expect("user id"),
                     agent_id: None,
                     project_id: None,
                 });
@@ -10606,6 +11228,7 @@ output_schema_ref = "schemas/write.output.json"
         let submitted_a = runtime
             .turn_coordinator
             .submit_turn(SubmitTurnRequest {
+                requested_model: None,
                 scope: scope.clone(),
                 actor: actor.clone(),
                 accepted_message_ref: AcceptedMessageRef::new("msg:rejected-busy-a").unwrap(),
@@ -10637,6 +11260,7 @@ output_schema_ref = "schemas/write.output.json"
                     thread_id: Some(thread_id.to_string()),
                     content: Some("message B while thread is busy".to_string()),
                     attachments: Vec::new(),
+                    model: None,
                 },
             )
             .await
@@ -10747,6 +11371,7 @@ output_schema_ref = "schemas/write.output.json"
                     thread_id: Some(thread_id.to_string()),
                     content: Some("message C after thread is free".to_string()),
                     attachments: Vec::new(),
+                    model: None,
                 },
             )
             .await

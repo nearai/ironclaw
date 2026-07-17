@@ -1131,9 +1131,12 @@ where
                 };
                 let cleanup_process_store = Arc::clone(&cleanup_process_store);
                 tokio::spawn(async move {
-                    let _ = cleanup_process_store
+                    if let Err(error) = cleanup_process_store
                         .cleanup_process_obligations(&failure.scope, failure.process_id, reconcile)
-                        .await;
+                        .await
+                    {
+                        tracing::debug!(?error, "best-effort process obligation cleanup failed");
+                    }
                 });
             }),
     );
@@ -2261,6 +2264,7 @@ pub(crate) fn http_without_body_then_operation_failed_wat() -> String {
 #[cfg(feature = "libsql")]
 pub(crate) fn submit_turn_request(thread: &str, idempotency_key: &str) -> SubmitTurnRequest {
     SubmitTurnRequest {
+        requested_model: None,
         scope: TurnScope::new(
             TenantId::new("tenant1").unwrap(),
             Some(AgentId::new("agent1").unwrap()),
