@@ -629,7 +629,7 @@ cargo run -q -p ironclaw_reborn_cli --bin ironclaw-reborn -- --help
 # channels/hooks/logs are disabled — these are expected to exit non-zero
 # with "is not implemented yet", not to succeed.
 cargo run -q -p ironclaw_reborn_cli --bin ironclaw-reborn -- channels list; echo "exit: $?"
-cargo run -q -p ironclaw_reborn_cli --bin ironclaw-reborn -- completion --shell zsh >/tmp/ironclaw-reborn.zsh
+cargo run -q -p ironclaw_reborn_cli --bin ironclaw-reborn -- completion --shell zsh >"$(mktemp -d)/ironclaw-reborn.zsh"
 IRONCLAW_REBORN_HOME="$(mktemp -d)/reborn-home" \
   cargo run -q -p ironclaw_reborn_cli --bin ironclaw-reborn -- config path
 cargo run -q -p ironclaw_reborn_cli --bin ironclaw-reborn -- hooks list; echo "exit: $?"
