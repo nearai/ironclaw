@@ -205,6 +205,8 @@ ironclaw_authorization = { path = "../ironclaw_authorization", features = ["test
 ironclaw_processes = { path = "../ironclaw_processes", features = ["test-support"] }
 # Enables the in-memory-backed run-state/approval store constructors for tests only.
 ironclaw_run_state = { path = "../ironclaw_run_state", features = ["test-support"] }
+# Enables the in-memory-backed budget-gate store constructor for tests only.
+ironclaw_resources = { path = "../ironclaw_resources", features = ["test-support"] }
 http = "1"
 http-body-util = "0.1"
 # Admin-user-management e2e test drives the composed app with a real session
