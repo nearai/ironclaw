@@ -395,6 +395,63 @@ async def test_reborn_v2_appearance_theme_selection_persists(reborn_v2_page):
     )
 
 
+async def test_reborn_v2_settings_import_rejects_unsupported_payloads(
+    reborn_v2_page,
+):
+    """Unsupported imports show one localized error and do not refresh settings."""
+    settings_reads = 0
+
+    def count_settings_reads(request) -> None:
+        nonlocal settings_reads
+        if (
+            request.method == "GET"
+            and urlparse(request.url).path == "/api/webchat/v2/settings/tools"
+        ):
+            settings_reads += 1
+
+    reborn_v2_page.on("request", count_settings_reads)
+    origin = await reborn_v2_page.evaluate("location.origin")
+    await reborn_v2_page.goto(
+        f"{origin}/settings/language?token={REBORN_V2_AUTH_TOKEN}"
+    )
+    file_input = reborn_v2_page.locator(
+        'input[type="file"][accept=".json,application/json"]'
+    )
+    await expect(file_input).to_have_count(1, timeout=15000)
+    await reborn_v2_page.wait_for_timeout(250)
+    initial_settings_reads = settings_reads
+
+    for filename, settings in [
+        ("empty-settings.json", {}),
+        ("unsupported-settings.json", {"agent.model": "example-model"}),
+    ]:
+        await file_input.set_input_files(
+            {
+                "name": filename,
+                "mimeType": "application/json",
+                "buffer": json.dumps({"settings": settings}).encode(),
+            }
+        )
+        status = reborn_v2_page.get_by_role("status").filter(
+            has_text="No supported settings found in the selected file"
+        )
+        await expect(status).to_have_count(1)
+        await expect(status).to_have_text(
+            "No supported settings found in the selected file"
+        )
+        await expect(
+            reborn_v2_page.get_by_text("Settings imported", exact=True)
+        ).to_have_count(0)
+        await expect(
+            reborn_v2_page.get_by_text(re.compile(r"^Import failed:"))
+        ).to_have_count(0)
+
+    await reborn_v2_page.wait_for_timeout(250)
+    assert settings_reads == initial_settings_reads, (
+        "failed settings imports unexpectedly invalidated the settings query"
+    )
+
+
 async def test_reborn_v2_text_turn_persists(reborn_v2_server):
     """A text turn over /api/webchat/v2/* completes and persists one assistant reply."""
     headers = {"Authorization": f"Bearer {REBORN_V2_AUTH_TOKEN}"}
