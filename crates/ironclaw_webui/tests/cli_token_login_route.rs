@@ -205,7 +205,7 @@ async fn require_session_bearer(
     };
     // Reuses the real WebuiAuthenticator::authenticate contract (same call
     // as webui_serve's authenticate_request) rather than reimplementing.
-    if ironclaw_reborn_composition::WebuiAuthenticator::authenticate(&*authenticator, token)
+    if ironclaw_webui::WebuiAuthenticator::authenticate(&*authenticator, token)
         .await
         .is_none()
     {
@@ -264,12 +264,9 @@ async fn exchanged_bearer_from_cli_token_login_is_operator_capable() {
     let body = body_string(exchange.into_body()).await;
     let payload: SessionExchangeResponse = serde_json::from_str(&body).expect("json");
 
-    let auth = ironclaw_reborn_composition::WebuiAuthenticator::authenticate(
-        &authenticator,
-        &payload.token,
-    )
-    .await
-    .expect("exchanged bearer must authenticate");
+    let auth = ironclaw_webui::WebuiAuthenticator::authenticate(&authenticator, &payload.token)
+        .await
+        .expect("exchanged bearer must authenticate");
     assert!(
         auth.capabilities.operator_webui_config,
         "a session minted via the CLI-token /login link, from a token that \

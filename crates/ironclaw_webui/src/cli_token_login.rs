@@ -37,12 +37,13 @@ use ironclaw_host_api::ingress::{
     IngressJustification, IngressPolicy, IngressPolicyParts, IngressRouteDescriptor, ListenerClass,
     RateLimitPolicy, RateLimitScope, StreamingMode, WebSocketOriginPolicy,
 };
-use ironclaw_reborn_composition::{PublicRouteMount, WebuiAuthenticator};
+use ironclaw_reborn_composition::PublicRouteMount;
 use parking_lot::Mutex;
 use rand::RngExt as _;
 use secrecy::{ExposeSecret, SecretString};
 use serde::{Deserialize, Serialize};
 
+use crate::WebuiAuthenticator;
 use crate::session::SessionStore;
 
 /// Matches the OAuth callback's default so the SPA lands in the same
