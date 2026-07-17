@@ -325,7 +325,15 @@ ironclaw_runner = { path = "crates/ironclaw_runner", version = "0.1.0", features
 # all 17 gated modules into every int-tier test binary — real, one-time
 # build-time cost for the lane, behaviorally inert for suites that never
 # reference Slack types.
-ironclaw_reborn_composition = { path = "crates/ironclaw_reborn_composition", version = "0.1.0", features = ["test-support", "libsql", "webui-v2-beta", "slack-v2-host-beta"] }
+# `root-llm-provider` unlocks `RebornRuntimeInput::with_boot_config` and the
+# real `RebornLlmConfigService` (operator LLM-provider CRUD) for int-tier —
+# needed by tests/integration/operator_llm_config.rs. Dev-dependency only;
+# the shipped `ironclaw-reborn` binary already carries this feature via
+# `ironclaw_reborn_cli`'s own `default = ["root-llm-provider"]`, so this adds
+# no new production surface, only compile-time reach for tests. Feature
+# unification recompiles the crate's `llm_admin`/openai-compat modules into
+# every int-tier test binary — real, one-time build-time cost for the lane.
+ironclaw_reborn_composition = { path = "crates/ironclaw_reborn_composition", version = "0.1.0", features = ["test-support", "libsql", "webui-v2-beta", "slack-v2-host-beta", "root-llm-provider"] }
 # Direct dev-dep: composition deliberately does NOT re-export the bare
 # `webui_v2_router`/`WebUiV2State` (facade-only rule), and the router smoke
 # drives the bare router, not the `webui_v2_app` wrapper.
@@ -520,6 +528,10 @@ path = "tests/integration/mcp.rs"
 [[test]]
 name = "reborn_integration_oauth_connect"
 path = "tests/integration/oauth_connect.rs"
+
+[[test]]
+name = "reborn_integration_operator_llm_config"
+path = "tests/integration/operator_llm_config.rs"
 
 [[test]]
 name = "reborn_integration_outbound_store_durability"

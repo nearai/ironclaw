@@ -10,9 +10,10 @@ mod reborn_support;
 mod support;
 
 use ironclaw_threads::MessageKind;
-use reborn_support::builder::RebornIntegrationHarness;
+use reborn_support::builder::{RebornIntegrationHarness, StorageMode};
 use reborn_support::group::RebornIntegrationGroup;
 use reborn_support::reply::RebornScriptedReply;
+use rstest::rstest;
 use serde_json::json;
 
 const SLACK_PERSONAL_SCOPES: &[&str] = &[
@@ -547,9 +548,20 @@ async fn durable_large_read_file_result_reaches_model_as_truncated_preview() {
 /// byte-exactly from the SAME canonical serialization `tool_result_output`
 /// returns for `read_file` — no gap, no overlap — and reports the true
 /// `total_bytes` of the durable record.
+///
+/// Backend-parametrized (design §7, `backend_matrix.rs`'s matrix exemplar):
+/// `.with_durable_capability_io_file_tools()` wires the durable-preview seam
+/// to the group's REAL thread service (`install_durable_capability_io`),
+/// which is backed by whichever `RootFilesystem` `StorageMode` selects — so
+/// this byte-offset continuation genuinely round-trips through LibSql's real
+/// SQL storage on that case, not just `InMemory`'s `Vec<u8>` staging store.
+#[rstest]
+#[case(StorageMode::InMemory)]
+#[case(StorageMode::LibSql)]
 #[tokio::test]
-async fn result_read_continues_a_durable_result_byte_exactly() {
+async fn result_read_continues_a_durable_result_byte_exactly(#[case] storage: StorageMode) {
     let h = RebornIntegrationHarness::test_default()
+        .storage(storage)
         .with_durable_capability_io_file_tools()
         .script([
             RebornScriptedReply::tool_call(
