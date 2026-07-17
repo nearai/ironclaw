@@ -50,7 +50,13 @@ use ironclaw_channel_host::identity::RebornUserIdentityLookup;
 const TRACING_TARGET: &str = "ironclaw::reborn::telegram_updates";
 const PRIVATE_CHAT_KIND: &str = "private";
 const START_COMMAND: &str = "/start";
-const HINT_THROTTLE_WINDOW: Duration = Duration::from_secs(10 * 60);
+// Anti-amplification guard, not a UX pacing choice: the hint is an
+// auto-reply to UNAUTHENTICATED senders, so an unthrottled version turns any
+// inbound flood into an equal outbound flood (Telegram bot quota + spam
+// flags). 30s bounds the loop (<= 2 hints/min/chat) while a real user never
+// waits long enough to conclude the bot is dead — the prior 10-minute window
+// read as total silence in live testing (2026-07-17).
+const HINT_THROTTLE_WINDOW: Duration = Duration::from_secs(30);
 /// Shorter than the hint window: a legitimate user who mistyped gets fresh
 /// feedback quickly, while repeated invalid guesses in one chat stop earning
 /// replies (the consume itself is never gated — see `handle_pairing_attempt`).
