@@ -7,7 +7,7 @@ import {
   SettingsImportFailureReason,
 } from "../lib/settings-api";
 
-test("settings import mutation rejects when no supported settings were imported", async () => {
+test("settings import mutation rejects without exposing duplicate page feedback", async () => {
   let importMutationOptions;
   const context = {
     React: {
@@ -52,6 +52,7 @@ test("settings import mutation rejects when no supported settings were imported"
   );
 
   const settings = useSettings();
+  assert.equal(Object.hasOwn(settings, "importError"), false);
   await assert.rejects(
     () => settings.importSettings({ settings: {} }),
     (error) => {
