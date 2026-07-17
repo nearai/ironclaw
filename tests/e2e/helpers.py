@@ -259,6 +259,13 @@ SEL_V2 = {
     "admin_secret_delete_confirm": "[data-testid='admin-secret-delete-confirm']",
     "sidebar":        "#gateway-sidebar",  # app navigation sidebar
     "sidebar_button": "#gateway-sidebar button",
+    "nav_workspace": "[data-testid='nav-workspace']",
+    "workspace_heading": "[data-testid='workspace-heading']",
+    "workspace_download": "[data-testid='workspace-download']",
+    "workspace_directory_entry_for": (
+        "[data-testid='workspace-directory-entry'][data-entry-path='{path}']"
+    ),
+    "toast": "[data-testid='toast']",
     "thread_delete_for": (
         '[data-testid="thread-delete"][data-thread-id="{id}"]'
     ),
