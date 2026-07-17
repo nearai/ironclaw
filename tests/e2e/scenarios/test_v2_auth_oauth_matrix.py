@@ -1542,13 +1542,9 @@ async def test_wasm_tool_first_chat_auth_attempt_emits_auth_url(auth_matrix_serv
         auth = payload["resume_kind"]["Authentication"]
         assert auth.get("credential_name") in {"gmail", "google_oauth_token"}, payload
 
-    history = await _wait_for_auth_prompt(server["base_url"], thread_id, timeout=90)
-    all_text = " ".join(turn.get("response") or "" for turn in history.get("turns", []))
-    pending = history.get("pending_gate")
-    assert (
-        "authentication required" in all_text.lower()
-        or (pending and pending.get("gate_name") == "authentication")
-    ), history
+    readiness = await _wait_for_extension_readiness(server["base_url"], "gmail")
+    assert readiness["phase"] == "needs_auth", readiness
+    assert readiness["authenticated"] is False, readiness
 
 
 async def test_mcp_oauth_roundtrip_via_browser(browser, auth_matrix_server):
@@ -1690,7 +1686,6 @@ async def test_chat_first_gmail_installs_prompts_and_retries(
 
     card = await _wait_for_auth_card(page)
     assert await card.get_attribute("data-extension-name") in {"gmail", "google_oauth_token"}
-    assert await card.get_attribute("data-request-id"), "expected auth gate request id"
 
     extension = await _wait_for_extension(server["base_url"], "gmail")
     assert extension["authenticated"] is False, extension
@@ -1702,8 +1697,14 @@ async def test_chat_first_gmail_installs_prompts_and_retries(
     await card.wait_for(state="hidden", timeout=20000)
 
     thread_id = await _current_thread_id(page)
+    # Engine-v2 callback replay was intentionally removed with that runtime.
+    # Exercise the supported legacy flow: once OAuth marks the extension
+    # ready, the user retries the original request and Gmail executes with the
+    # stored credential.
+    await chat_input.fill("check gmail unread")
+    await chat_input.press("Enter")
     tokens = await _wait_for_mock_google_tokens(server["mock_api_url"], timeout=60.0)
-    assert tokens, "expected Gmail to hit the mock Google API after OAuth replay"
+    assert tokens, "expected Gmail to hit the mock Google API after the authenticated retry"
     history = await _wait_for_response_contains(
         server["base_url"], thread_id, "Quarterly update", timeout=60.0
     )
@@ -1735,8 +1736,8 @@ async def test_chat_install_approval_then_auth_card(
       5. Install completes, gmail registers; the engine retries the next
          turn with the **Authentication gate** that surfaces the
          `.auth-card`.
-      6. Test completes OAuth via `/oauth/callback`.
-      7. Gmail tool runs against the mock Google API and the final
+      6. Test completes OAuth via `/oauth/callback` and retries the request.
+      7. Gmail runs against the mock Google API and the final
          response contains the canned subject line.
     """
     server = auth_matrix_server_no_auto_approve
@@ -1793,8 +1794,13 @@ async def test_chat_install_approval_then_auth_card(
     await auth_card.wait_for(state="hidden", timeout=20000)
 
     thread_id = await _current_thread_id(page)
+    # OAuth completion no longer replays the paused tool after Engine v2 was
+    # removed. Retry through the supported chat path and retain provider-side
+    # evidence that the authenticated Gmail tool actually ran.
+    await chat_input.fill("check gmail unread")
+    await chat_input.press("Enter")
     tokens = await _wait_for_mock_google_tokens(server["mock_api_url"], timeout=60.0)
-    assert tokens, "expected Gmail to hit the mock Google API after OAuth replay"
+    assert tokens, "expected Gmail to hit the mock Google API after the authenticated retry"
     history = await _wait_for_response_contains(
         server["base_url"], thread_id, "Quarterly update", timeout=60.0
     )

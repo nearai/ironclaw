@@ -554,13 +554,12 @@ function filterSlashCommands(value) {
 function sendApprovalAction(requestId, action, threadId) {
   const card = document.querySelector('.approval-card[data-request-id="' + requestId + '"]');
   const targetThreadId = threadId || (card ? card.getAttribute('data-thread-id') : null) || currentThreadId;
-  apiFetch('/api/chat/gate/resolve', {
+  apiFetch('/api/chat/approval', {
     method: 'POST',
     body: {
       request_id: requestId,
       thread_id: targetThreadId,
-      resolution: action === 'deny' ? 'denied' : 'approved',
-      always: action === 'always',
+      action: action,
     },
   }).catch((err) => {
     addMessage('system', 'Failed to send approval: ' + err.message);

@@ -1480,8 +1480,9 @@ def match_tool_call(messages: list[dict], has_tools: bool) -> list[dict] | None:
     #         execution context" (post-#3533, engine-side preflight rejection,
     #         tool_install restored on the agent surface).
     # Turn 2: this branch fires — call `tool_install("gmail")`.
-    # Turn 3: install succeeded → call `gmail` again, this time the engine's
-    #         auth preflight raises an Authentication gate.
+    # Turn 3: install succeeded → call `gmail` again. The current WASM wrapper
+    #         returns a missing-credentials error, so call `tool_auth("gmail")`
+    #         to initiate OAuth and surface the auth card.
     # Turn 4 (after OAuth completes): mock LLM falls through to the
     #         tool-result-summary path returning the "Quarterly update" text.
     if "check gmail unread" in lower or "gmail unread" in lower:
@@ -1495,7 +1496,7 @@ def match_tool_call(messages: list[dict], has_tools: bool) -> list[dict] | None:
         # `tool_install`. Mirror that — restricting to the first two
         # made the workflow-canary `tool_install_chat` probe fall
         # through to text and never recover.
-        gmail_error = next(
+        gmail_unavailable_error = next(
             (
                 tr
                 for tr in recent_tool_results
@@ -1508,26 +1509,50 @@ def match_tool_call(messages: list[dict], has_tools: bool) -> list[dict] | None:
             ),
             None,
         )
+        gmail_credential_error = next(
+            (
+                tr
+                for tr in recent_tool_results
+                if tr["name"] == "gmail"
+                and (
+                    "requires credentials that are not configured" in tr["content"]
+                    or "Configure the missing credentials" in tr["content"]
+                )
+            ),
+            None,
+        )
         install_done = any(
             tr["name"] == "tool_install"
             and "error" not in tr["content"].lower()
             for tr in recent_tool_results
         )
-        if gmail_error and not install_done:
+        auth_started = any(
+            tr["name"] == "tool_auth"
+            and "error" not in tr["content"].lower()
+            for tr in recent_tool_results
+        )
+        if gmail_unavailable_error and not install_done:
             return [{
                 "tool_name": "tool_install",
+                "arguments": {"name": "gmail"},
+            }]
+        if gmail_credential_error and not auth_started:
+            return [{
+                "tool_name": "tool_auth",
                 "arguments": {"name": "gmail"},
             }]
         if install_done and not any(
             tr["name"] == "gmail" and "is not callable" not in tr["content"]
             and "Extension not installed" not in tr["content"]
             and "Tool gmail not found" not in tr["content"]
+            and "requires credentials that are not configured" not in tr["content"]
+            and "Configure the missing credentials" not in tr["content"]
             for tr in recent_tool_results
         ):
-            # Retry gmail after install — the engine's auth preflight will
-            # raise an Authentication gate, which surfaces the auth card.
-            # After OAuth completes, this re-fires and reaches the actual
-            # gmail tool with the correct `list_messages` action.
+            # Retry gmail after install. If credentials are still missing, the
+            # branch above converts that concrete wrapper error into a
+            # tool_auth call. After OAuth completes, this reaches the actual
+            # Gmail tool with the correct `list_messages` action.
             return [{
                 "tool_name": "gmail",
                 "arguments": {"action": "list_messages"},
