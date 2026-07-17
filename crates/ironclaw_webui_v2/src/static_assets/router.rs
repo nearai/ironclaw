@@ -9,13 +9,16 @@
 //! the router's concern — host composition wraps this Router with
 //! its own middleware stack.
 
+use std::sync::Arc;
+
 use axum::Router;
 use axum::body::Body;
-use axum::extract::Path as AxumPath;
-use axum::http::{HeaderValue, StatusCode, header};
-use axum::response::{IntoResponse, Response};
+use axum::extract::{Path as AxumPath, State};
+use axum::http::{HeaderValue, StatusCode, Uri, header};
+use axum::response::{IntoResponse, Redirect, Response};
 use axum::routing::get;
 use rand::RngExt as _;
+use thiserror::Error;
 
 use super::assets::{self, INDEX_HTML_TEMPLATE};
 
@@ -27,70 +30,203 @@ const NONCE_PLACEHOLDER: &str = "__IRONCLAW_CSP_NONCE__";
 /// characters, well above the CSP-3 recommendation of 128 bits.
 const NONCE_BYTES: usize = 16;
 
-/// Build the SPA static-asset router with no path prefix.
+/// Lower-case hexadecimal alphabet used to encode CSP nonce bytes without a
+/// temporary allocation per byte.
+const HEX_DIGITS: &[u8; 16] = b"0123456789abcdef";
+
+/// Server-owned root namespaces that stay fail-closed even when optional host
+/// route mounts are disabled. Composition adds roots derived from every route
+/// descriptor it actually mounts.
+const DEFAULT_RESERVED_ROOT_NAMESPACES: &[&str] = &["api", "auth", "v1", "webhooks"];
+
+/// Root namespaces with explicit Rust routes owned by the static WebUI surface.
 ///
-/// Standalone consumers (the crate's own tests) mount this at `/`.
-/// Host composition should call [`mount_at_prefix`] instead so the
-/// SPA lives under a stable URL prefix without dragging the SPA
-/// shell handler onto the gateway root.
-///
-/// The router owns no per-instance state; each request generates a
-/// fresh nonce.
-pub fn static_router() -> Router {
-    // Three explicit routes keep `axum::Router::nest` out of the
-    // picture — nest in 0.8 has quirky dispatch for the exact prefix
-    // with/without trailing slash. The wildcard handler reads the
-    // matched suffix via `Path` so the path passed downstream is
-    // already prefix-stripped, no matter what mount the caller used.
-    Router::new()
-        .route("/", get(serve_root))
-        .route("/{*path}", get(serve_wildcard))
+/// React routes intentionally share the wildcard and may be replaced when host
+/// composition explicitly reserves their root. Embedded asset roots are
+/// checked from the generated asset table separately so adding a new top-level
+/// asset cannot silently create a host route collision.
+const EXPLICIT_STATIC_ROOT_NAMESPACES: &[&str] = &["v2", "wallet"];
+
+/// Invalid root namespace supplied to [`StaticRouterConfig`].
+#[derive(Clone, Debug, Eq, Error, PartialEq)]
+pub enum StaticRouterConfigError {
+    /// The value is not one canonical literal URL path segment.
+    #[error("root namespace {namespace:?} must be one canonical ASCII URL path segment")]
+    NonCanonicalRootNamespace { namespace: String },
+    /// The static WebUI already owns behavior or assets below this root.
+    #[error("root namespace {namespace:?} is owned by the static WebUI surface")]
+    StaticRootNamespaceConflict { namespace: String },
 }
 
-/// Build the SPA static-asset router wired under `prefix`.
+/// Static SPA fallback policy supplied by host composition.
 ///
-/// This is the factory host composition should use — owning the
-/// prefixed route shape inside the static crate means a future
-/// fourth route is picked up automatically by every mount site.
-/// Composition merges the returned `Router` into the gateway's main
-/// router; it must not also enumerate individual handlers from this
-/// crate.
-///
-/// `prefix` must begin with `/` and must not end with `/`. Passing
-/// `"/v2"` mounts the SPA at `/v2`, `/v2/`, and `/v2/<anything>`.
-///
-/// # Panics
-///
-/// Panics if `prefix` is empty, doesn't start with `/`, or ends with
-/// `/`. The factory is called at composition-startup, so failing loud
-/// there is preferable to silently building broken routes that only
-/// surface as request-time 404s in production.
-pub fn mount_at_prefix(prefix: &str) -> Router {
-    let valid = !prefix.is_empty() && prefix.starts_with('/') && !prefix.ends_with('/');
-    if !valid {
-        panic!("mount_at_prefix expects a path like \"/v2\" — got {prefix:?}"); // safety: composition-startup factory — failing loud on bad prefix is preferable to silently building broken routes
+/// The default preserves the server namespaces that must never render the SPA
+/// shell. Composition should add the first literal segment from every mounted
+/// route descriptor so a future host-owned namespace automatically inherits
+/// the same fail-closed behavior.
+#[derive(Clone, Debug)]
+pub struct StaticRouterConfig {
+    reserved_root_namespaces: Vec<String>,
+}
+
+impl Default for StaticRouterConfig {
+    fn default() -> Self {
+        Self {
+            reserved_root_namespaces: DEFAULT_RESERVED_ROOT_NAMESPACES
+                .iter()
+                .copied()
+                .map(String::from)
+                .collect(),
+        }
     }
-    // Three explicit routes (no `nest`) for the same reason
-    // `static_router` keeps `nest` out of the picture: axum 0.8's
-    // nest dispatch for the exact prefix with/without trailing
-    // slash is quirky and was the source of regressions in the
-    // earlier inline wiring this factory replaces.
-    Router::new()
-        .route(prefix, get(serve_root))
-        .route(&format!("{prefix}/"), get(serve_root))
-        // Isolated NEAR-wallet connect popup. It needs a far looser CSP than the
-        // hardened SPA shell (the wallet connector loads remote executor code in
-        // sandboxed iframes and talks to wallet relays / NEAR RPC), so it gets a
-        // dedicated route and a scoped policy instead of widening the app CSP.
-        // The page takes only a random BroadcastChannel name and posts the
-        // resulting signature back on that same-origin channel, so the blast
-        // radius of the looser policy is this one popup page. Registered before
-        // the wildcard so it wins.
-        .route(
-            &format!("{prefix}/wallet/connect"),
-            get(serve_wallet_connect),
+}
+
+impl StaticRouterConfig {
+    /// Add literal root path segments owned by host routes.
+    ///
+    /// Each namespace must be one non-empty ASCII RFC 3986 `pchar` segment,
+    /// excluding percent-encoding, `.` and `..`. Static-owned roots are
+    /// rejected because reserving one would either shadow an asset/route or be
+    /// bypassed by a more specific static route.
+    pub fn try_with_additional_reserved_root_namespaces<I, S>(
+        mut self,
+        namespaces: I,
+    ) -> Result<Self, StaticRouterConfigError>
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        for namespace in namespaces {
+            let namespace = namespace.into();
+            if !is_canonical_root_namespace(&namespace) {
+                return Err(StaticRouterConfigError::NonCanonicalRootNamespace { namespace });
+            }
+            if static_router_owns_root_namespace(&namespace) {
+                return Err(StaticRouterConfigError::StaticRootNamespaceConflict { namespace });
+            }
+            self.reserved_root_namespaces.push(namespace);
+        }
+        self.reserved_root_namespaces.sort_unstable();
+        self.reserved_root_namespaces.dedup();
+        Ok(self)
+    }
+}
+
+fn is_canonical_root_namespace(namespace: &str) -> bool {
+    !namespace.is_empty()
+        && namespace != "."
+        && namespace != ".."
+        && namespace.bytes().all(is_unencoded_ascii_pchar)
+}
+
+fn is_unencoded_ascii_pchar(byte: u8) -> bool {
+    byte.is_ascii_alphanumeric()
+        || matches!(
+            byte,
+            b'-' | b'.'
+                | b'_'
+                | b'~'
+                | b'!'
+                | b'$'
+                | b'&'
+                | b'\''
+                | b'('
+                | b')'
+                | b'*'
+                | b'+'
+                | b','
+                | b';'
+                | b'='
+                | b':'
+                | b'@'
         )
-        .route(&format!("{prefix}/{{*path}}"), get(serve_wildcard))
+}
+
+fn static_router_owns_root_namespace(namespace: &str) -> bool {
+    EXPLICIT_STATIC_ROOT_NAMESPACES.contains(&namespace)
+        || assets::ASSETS
+            .iter()
+            .any(|(path, _)| path.split('/').next().is_some_and(|root| root == namespace))
+}
+
+#[derive(Clone)]
+struct StaticRouterState {
+    reserved_root_namespaces: Arc<[String]>,
+}
+
+/// Build the SPA static-asset router at the gateway root.
+///
+/// The canonical browser routes live at `/chat`, `/settings`, and the other
+/// root-level SPA paths. The legacy `/v2` surface redirects to the matching
+/// root path while preserving its query string so bookmarked URLs and OAuth
+/// login tickets keep working during the migration. Host-owned namespaces
+/// such as `/api`, `/auth`, `/v1`, and `/webhooks` remain fail-closed.
+///
+/// The router state contains only the immutable fallback namespace set; each
+/// request still generates a fresh nonce.
+pub fn static_router() -> Router {
+    static_router_with_config(StaticRouterConfig::default())
+}
+
+/// Build the root SPA router with additional host-owned root namespaces.
+pub fn static_router_with_config(config: StaticRouterConfig) -> Router {
+    let state = StaticRouterState {
+        reserved_root_namespaces: config.reserved_root_namespaces.into(),
+    };
+    // Explicit routes keep `axum::Router::nest` out of the picture — nest in
+    // 0.8 has quirky dispatch for exact prefixes with/without trailing slash.
+    // The wildcard handler receives the root-relative path via `Path`.
+    Router::new()
+        .route("/", get(serve_root))
+        // Keep the isolated wallet page ahead of the SPA wildcard. It carries
+        // a deliberately different CSP and must never render the app shell.
+        .route("/wallet/connect", get(serve_wallet_connect))
+        .route("/v2", get(redirect_legacy_v2))
+        .route("/v2/", get(redirect_legacy_v2))
+        .route("/v2/{*path}", get(redirect_legacy_v2))
+        // A custom method fallback keeps unmounted POST/PUT API paths at 404.
+        // Without it, this root wildcard would turn them into 405 responses
+        // merely because the SPA owns GET for the same catch-all path.
+        .route(
+            "/{*path}",
+            get(serve_configured_wildcard).fallback(|| async { StatusCode::NOT_FOUND }),
+        )
+        .with_state(state)
+}
+
+/// Redirect a legacy `/v2` URL to its root-mounted equivalent.
+///
+/// A temporary redirect is intentional: it keeps compatibility links working
+/// without leaving a browser-cached permanent redirect behind if the root mount
+/// ever needs to be rolled back. Leading slashes in the suffix are collapsed
+/// so an input such as `/v2//example.com` cannot become a protocol-relative
+/// redirect target. Backslashes are normalized as path separators as well:
+/// WHATWG URL parsing treats them like slashes for HTTP(S), so forwarding a
+/// raw backslash could otherwise turn a same-origin `Location` into an
+/// external navigation.
+///
+/// Only literal `/` and `\` need normalization here. Hyper parses the request
+/// target into `http::Uri` before Axum calls this handler, and that parser
+/// rejects raw ASCII whitespace and control characters. Percent-encoded bytes
+/// remain encoded in `Uri::path()` and therefore stay ordinary same-origin path
+/// data after the owned leading `/` below. Do not refactor this helper to use a
+/// percent-decoded `Path<String>` without preserving those invariants.
+async fn redirect_legacy_v2(uri: Uri) -> Redirect {
+    Redirect::temporary(&legacy_v2_target(&uri))
+}
+
+fn legacy_v2_target(uri: &Uri) -> String {
+    let suffix = match uri.path().strip_prefix("/v2") {
+        Some(suffix) => suffix.trim_start_matches(['/', '\\']),
+        None => "",
+    };
+    let mut target = String::from("/");
+    target.push_str(&suffix.replace('\\', "/"));
+    if let Some(query) = uri.query() {
+        target.push('?');
+        target.push_str(query);
+    }
+    target
 }
 
 /// Serve the isolated NEAR-wallet connect popup with its own relaxed CSP.
@@ -143,15 +279,47 @@ pub async fn serve_root() -> Response {
 /// path that has no file extension), 404 for unknown asset paths
 /// that do look like asset requests.
 pub async fn serve_wildcard(AxumPath(path): AxumPath<String>) -> Response {
-    serve_for_path(&path)
+    serve_for_path(&path, DEFAULT_RESERVED_ROOT_NAMESPACES)
 }
 
-fn serve_for_path(path: &str) -> Response {
+async fn serve_configured_wildcard(
+    State(state): State<StaticRouterState>,
+    AxumPath(path): AxumPath<String>,
+) -> Response {
+    serve_for_path(&path, &state.reserved_root_namespaces)
+}
+
+fn serve_for_path<T>(path: &str, reserved_root_namespaces: &[T]) -> Response
+where
+    T: AsRef<str>,
+{
+    // Axum strips exactly one slash from a wildcard capture. A request with
+    // repeated leading slashes therefore reaches this helper with a leading
+    // slash still present (for example, `//api/x` becomes `/api/x`). Its Path
+    // extractor also percent-decodes backslashes, which browsers may treat as
+    // path separators. Reject either non-canonical form instead of normalizing
+    // it: otherwise the namespace check below could be bypassed and render the
+    // SPA shell for a server-owned path.
+    if path.starts_with('/') || path.contains('\\') {
+        return StatusCode::BAD_REQUEST.into_response();
+    }
+
     // Sanitize against `..` traversal segments even though the URL
     // table is a closed set; defense in depth keeps a future routing
     // change from leaking arbitrary file content if a host
     // misconfiguration ever permits raw query paths.
     if path.split('/').any(|seg| seg == ".." || seg == ".") {
+        return StatusCode::NOT_FOUND.into_response();
+    }
+
+    // Root-mounting the SPA must not turn unknown host/API requests into a
+    // successful HTML response. Exact registered routes still win in axum;
+    // unmatched requests in these server-owned namespaces fail closed here.
+    if path.split('/').next().is_some_and(|root| {
+        reserved_root_namespaces
+            .iter()
+            .any(|reserved| reserved.as_ref() == root)
+    }) {
         return StatusCode::NOT_FOUND.into_response();
     }
 
@@ -201,13 +369,13 @@ fn render_index_with_nonce() -> Response {
     // header we set here instead of overwriting it.
     //
     // Every sub-resource the shell loads is same-origin: Vite emits the app
-    // bundle and CSS under `/v2/assets/`, and the web fonts are vendored under
-    // `/v2/vendor/` (see `frontend/public`). So `script-src` / `style-src` /
+    // bundle and CSS under `/assets/`, and the web fonts are vendored under
+    // `/vendor/` (see `frontend/public`). So `script-src` / `style-src` /
     // `font-src` collapse to `'self'` — no CDN origins, no third-party fetches.
     // `'unsafe-inline'` stays on `style-src` only: the Tailwind browser
     // runtime injects a generated `<style>` and the shell carries an
-    // inline `text/tailwindcss` theme block; scripts still rely on the
-    // per-request nonce, never `'unsafe-inline'`.
+    // inline theme styles; inline scripts rely on the per-request nonce,
+    // never `'unsafe-inline'` (same-origin external bundles use `'self'`).
     let csp = format!(
         "default-src 'self'; \
          script-src 'self' 'nonce-{nonce}'; \
@@ -257,7 +425,8 @@ fn generate_nonce() -> String {
     rand::rng().fill(&mut buf);
     let mut out = String::with_capacity(NONCE_BYTES * 2);
     for byte in &buf {
-        out.push_str(&format!("{byte:02x}"));
+        out.push(HEX_DIGITS[(byte >> 4) as usize] as char);
+        out.push(HEX_DIGITS[(byte & 0x0f) as usize] as char);
     }
     out
 }
@@ -301,6 +470,73 @@ mod tests {
         let body = body_string(response).await;
         assert!(body.contains("v2-root"));
         assert!(!body.contains("__IRONCLAW_CSP_NONCE__"));
+    }
+
+    #[tokio::test]
+    async fn legacy_v2_routes_redirect_to_root_and_preserve_query() {
+        let app = static_router();
+        for (source, target) in [
+            ("/v2", "/"),
+            ("/v2/", "/"),
+            ("/v2?login_ticket=ticket%2B1", "/?login_ticket=ticket%2B1"),
+            (
+                "/v2/settings/skills?token=old%2Btoken&tab=installed",
+                "/settings/skills?token=old%2Btoken&tab=installed",
+            ),
+            // Repeated leading slashes must not produce a protocol-relative
+            // Location header (an open redirect to `evil.example`).
+            ("/v2//evil.example?keep=1", "/evil.example?keep=1"),
+            // Browsers normalize backslashes as URL path separators. Keep a
+            // raw backslash from becoming a network-path redirect target.
+            (r"/v2/\evil.example", "/evil.example"),
+            (r"/v2/path\segment", "/path/segment"),
+            // `http::Uri` preserves percent-encoded bytes. Even encoded ASCII
+            // whitespace or separators therefore remain path data after the
+            // same-origin leading slash instead of becoming a URL authority.
+            ("/v2/%09//evil.example", "/%09//evil.example"),
+            ("/v2/%0A//evil.example", "/%0A//evil.example"),
+            ("/v2/%0D//evil.example", "/%0D//evil.example"),
+            ("/v2/%0C//evil.example", "/%0C//evil.example"),
+            ("/v2/%20//evil.example", "/%20//evil.example"),
+            ("/v2/%2F%2Fevil.example", "/%2F%2Fevil.example"),
+            ("/v2/%5C%5Cevil.example", "/%5C%5Cevil.example"),
+        ] {
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method(Method::GET)
+                        .uri(source)
+                        .body(Body::empty())
+                        .expect("request"),
+                )
+                .await
+                .expect("oneshot");
+            assert_eq!(
+                response.status(),
+                StatusCode::TEMPORARY_REDIRECT,
+                "GET {source}",
+            );
+            assert_eq!(
+                response
+                    .headers()
+                    .get(header::LOCATION)
+                    .and_then(|value| value.to_str().ok()),
+                Some(target),
+                "GET {source}",
+            );
+        }
+    }
+
+    #[test]
+    fn legacy_v2_raw_ascii_whitespace_is_rejected_by_uri_parser() {
+        for character in ['\t', '\n', '\r', '\u{000c}', ' '] {
+            let source = format!("/v2/{character}//evil.example");
+            assert!(
+                source.parse::<Uri>().is_err(),
+                "raw ASCII whitespace must not reach redirect construction: {source:?}",
+            );
+        }
     }
 
     #[tokio::test]
@@ -369,8 +605,8 @@ mod tests {
     #[tokio::test]
     async fn spa_document_csp_allowlist_is_locked() {
         // Every sub-resource the SPA loads is now same-origin (the Vite
-        // bundle under `/v2/assets/` plus self-hosted fonts under
-        // `/v2/vendor/`). Lock that in:
+        // bundle under `/assets/` plus self-hosted fonts under `/vendor/`).
+        // Lock that in:
         // a regression that re-introduced a third-party CDN origin, added
         // `unsafe-eval`, or allowed `'unsafe-inline'` scripts must fail
         // here, not ship silently. (security-parity 03 row 3b.)
@@ -486,7 +722,7 @@ mod tests {
 
     #[tokio::test]
     async fn wallet_connect_popup_gets_relaxed_csp_and_spa_shell_stays_strict() {
-        let app = mount_at_prefix("/v2");
+        let app = static_router();
 
         // The isolated wallet popup carries a deliberately relaxed CSP so the
         // wallet connector can load remote executors and reach wallet relays.
@@ -495,7 +731,7 @@ mod tests {
             .oneshot(
                 Request::builder()
                     .method(Method::GET)
-                    .uri("/v2/wallet/connect")
+                    .uri("/wallet/connect")
                     .body(Body::empty())
                     .expect("request"),
             )
@@ -521,7 +757,7 @@ mod tests {
             .oneshot(
                 Request::builder()
                     .method(Method::GET)
-                    .uri("/v2")
+                    .uri("/")
                     .body(Body::empty())
                     .expect("request"),
             )
@@ -572,6 +808,153 @@ mod tests {
                 response.status(),
                 StatusCode::NOT_FOUND,
                 "path `{path}` must be rejected with 404",
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn standalone_reserved_host_namespaces_do_not_fall_back_to_spa() {
+        let app = static_router();
+        for (method, path) in [
+            (Method::GET, "/api/not-a-route"),
+            (Method::POST, "/api/not-a-route"),
+            (Method::GET, "/auth/not-a-route"),
+            (Method::POST, "/auth/not-a-route"),
+            (Method::GET, "/v1/not-a-route"),
+            (Method::POST, "/v1/not-a-route"),
+            (Method::GET, "/webhooks/not-a-route"),
+            (Method::POST, "/webhooks/not-a-route"),
+        ] {
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method(method.clone())
+                        .uri(path)
+                        .body(Body::empty())
+                        .expect("request"),
+                )
+                .await
+                .expect("oneshot");
+            assert_eq!(
+                response.status(),
+                StatusCode::NOT_FOUND,
+                "{method} reserved host path `{path}` must not render the SPA shell",
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn configured_host_namespace_does_not_fall_back_to_spa() {
+        let app = static_router_with_config(
+            StaticRouterConfig::default()
+                .try_with_additional_reserved_root_namespaces(["future-host"])
+                .expect("canonical unowned namespace"),
+        );
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method(Method::GET)
+                    .uri("/future-host/not-a-route")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("oneshot");
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[test]
+    fn static_router_config_rejects_noncanonical_root_namespaces() {
+        for namespace in [
+            "",
+            "/future-host",
+            "future-host/child",
+            r"future\host",
+            ".",
+            "..",
+            "%66uture-host",
+            "{namespace}",
+            "future{namespace}",
+            "future host",
+            "future\nroot",
+            "futuré-host",
+        ] {
+            let error = StaticRouterConfig::default()
+                .try_with_additional_reserved_root_namespaces([namespace])
+                .expect_err("noncanonical namespace must fail closed");
+            assert_eq!(
+                error,
+                StaticRouterConfigError::NonCanonicalRootNamespace {
+                    namespace: namespace.to_string(),
+                },
+            );
+        }
+    }
+
+    #[test]
+    fn static_router_config_accepts_unencoded_ascii_pchar_namespaces() {
+        StaticRouterConfig::default()
+            .try_with_additional_reserved_root_namespaces([
+                "foo@bar",
+                "oauth:callback",
+                "foo!$&'()*+,;=bar",
+            ])
+            .expect("unencoded RFC 3986 pchar namespaces are canonical");
+    }
+
+    #[test]
+    fn static_router_config_rejects_static_owned_root_namespaces() {
+        for namespace in [
+            "v2",
+            "wallet",
+            "assets",
+            "vendor",
+            "wallet-connect.html",
+            "wallet-connect.js",
+        ] {
+            let error = StaticRouterConfig::default()
+                .try_with_additional_reserved_root_namespaces([namespace])
+                .expect_err("static-owned namespace must fail closed");
+            assert_eq!(
+                error,
+                StaticRouterConfigError::StaticRootNamespaceConflict {
+                    namespace: namespace.to_string(),
+                },
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn standalone_noncanonical_path_separators_are_rejected() {
+        let app = static_router();
+        for path in [
+            "//api/not-a-route",
+            "///auth/not-a-route",
+            "//v1/not-a-route",
+            "//webhooks/not-a-route",
+            "/%2Fapi/not-a-route",
+            r"/\api/not-a-route",
+            "/%5Capi/not-a-route",
+            r"/api\not-a-route",
+            "/api%5Cnot-a-route",
+            "//chat",
+        ] {
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method(Method::GET)
+                        .uri(path)
+                        .body(Body::empty())
+                        .expect("request"),
+                )
+                .await
+                .expect("oneshot");
+            assert_eq!(
+                response.status(),
+                StatusCode::BAD_REQUEST,
+                "malformed path `{path}` must be rejected before SPA fallback",
             );
         }
     }
@@ -657,30 +1040,15 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "mount_at_prefix expects a path like")]
-    fn mount_at_prefix_panics_on_empty_prefix() {
-        let _ = mount_at_prefix("");
-    }
-
-    #[test]
-    #[should_panic(expected = "mount_at_prefix expects a path like")]
-    fn mount_at_prefix_panics_on_trailing_slash() {
-        let _ = mount_at_prefix("/v2/");
-    }
-
-    #[test]
-    #[should_panic(expected = "mount_at_prefix expects a path like")]
-    fn mount_at_prefix_panics_without_leading_slash() {
-        let _ = mount_at_prefix("v2");
-    }
-
-    #[test]
     fn nonce_is_unique_per_call() {
         let a = generate_nonce();
         let b = generate_nonce();
         assert_ne!(a, b);
         assert_eq!(a.len(), NONCE_BYTES * 2);
-        assert!(a.chars().all(|c| c.is_ascii_hexdigit()));
+        assert!(
+            a.bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+        );
     }
 
     #[test]
@@ -689,6 +1057,10 @@ mod tests {
             INDEX_HTML_TEMPLATE.contains(NONCE_PLACEHOLDER),
             "index.html must include `{}` so CSP nonce substitution has a target",
             NONCE_PLACEHOLDER,
+        );
+        assert!(
+            !INDEX_HTML_TEMPLATE.contains("/v2/"),
+            "root-mounted SPA shell must not reference legacy /v2 assets",
         );
     }
 
@@ -727,6 +1099,26 @@ mod tests {
         }
     }
 
+    #[test]
+    fn pwa_manifest_uses_root_scope_and_assets() {
+        let manifest = assets::lookup("assets/site.webmanifest")
+            .expect("PWA manifest is embedded in the asset table");
+        let value: serde_json::Value =
+            serde_json::from_slice(manifest.bytes).expect("PWA manifest is valid JSON");
+        // Preserve the identity of installations created while the app lived
+        // at `/v2/`, even though launches and navigation now use root paths.
+        assert_eq!(value["id"], "/v2/");
+        assert_eq!(value["start_url"], "/");
+        assert_eq!(value["scope"], "/");
+        let icons = value["icons"].as_array().expect("manifest icons array");
+        assert!(!icons.is_empty(), "manifest must keep install icons");
+        assert!(icons.iter().all(|icon| {
+            icon["src"]
+                .as_str()
+                .is_some_and(|source| source.starts_with("/assets/"))
+        }));
+    }
+
     fn source_text(path: &str) -> String {
         let full = format!("{}/frontend/src/{path}", env!("CARGO_MANIFEST_DIR"));
         std::fs::read_to_string(&full).unwrap_or_else(|e| panic!("read {full}: {e}"))
@@ -735,7 +1127,7 @@ mod tests {
     // Locks the WebChat v2 SSO login-ticket contract documented
     // in `frontend/src/app/auth.ts` (issue #4116 review finding #11). The
     // user-visible OAuth login path is "callback redirects to
-    // `/v2?login_ticket=<ticket>` → SPA strips the ticket from the
+    // `/?login_ticket=<ticket>` → SPA strips the ticket from the
     // URL → exchanges it via `/auth/session/exchange` → stores the
     // returned bearer in sessionStorage".
     //
@@ -786,7 +1178,7 @@ mod tests {
         // 3. Refuses to overwrite an existing stored token for raw
         //    bearer URLs — `consumeTokenFromUrl` must early-return when
         //    `readStoredToken()` is truthy. This guards against the
-        //    `/v2#token=BAD` lock-out scenario the doc-comment
+        //    `/#token=BAD` lock-out scenario the doc-comment
         //    calls out.
         let guard_index = consume_token
             .find("if (readStoredToken())")

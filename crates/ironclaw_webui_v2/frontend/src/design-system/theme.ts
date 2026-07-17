@@ -2,7 +2,9 @@ import React from "react";
 
 const THEME_STORAGE_KEY = "ironclaw:v2-theme";
 
-function getInitialTheme() {
+export type InterfaceTheme = "light" | "dark";
+
+function getInitialTheme(): InterfaceTheme {
   try {
     if (window.__IRONCLAW_INITIAL_THEME__ === "light" || window.__IRONCLAW_INITIAL_THEME__ === "dark") {
       return window.__IRONCLAW_INITIAL_THEME__;
@@ -18,7 +20,7 @@ function getInitialTheme() {
 }
 
 export function useInterfaceTheme() {
-  const [theme, setTheme] = React.useState(getInitialTheme);
+  const [theme, setThemeState] = React.useState(getInitialTheme);
 
   React.useEffect(() => {
     document.documentElement.dataset.theme = theme;
@@ -28,8 +30,14 @@ export function useInterfaceTheme() {
   }, [theme]);
 
   const toggleTheme = React.useCallback(() => {
-    setTheme((current) => (current === "dark" ? "light" : "dark"));
+    setThemeState((current) => (current === "dark" ? "light" : "dark"));
   }, []);
 
-  return { theme, toggleTheme };
+  const setTheme = React.useCallback((nextTheme: InterfaceTheme) => {
+    if (nextTheme === "light" || nextTheme === "dark") {
+      setThemeState(nextTheme);
+    }
+  }, []);
+
+  return { theme, setTheme, toggleTheme };
 }

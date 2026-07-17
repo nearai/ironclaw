@@ -11,9 +11,7 @@ mod process_executor;
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
-use ironclaw_approvals::{
-    ApprovalResolver, InMemoryPersistentApprovalPolicyStore, PersistentApprovalPolicyStore,
-};
+use ironclaw_approvals::{ApprovalResolver, PersistentApprovalPolicyStore};
 use ironclaw_authorization::{
     CapabilityLeaseStore, InMemoryCapabilityLeaseStore, TrustAwareCapabilityDispatchAuthorizer,
 };

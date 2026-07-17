@@ -175,7 +175,7 @@ async def _open_mocked_tools_page(
         await route.continue_()
 
     await page.route("**/api/webchat/v2/settings/tools**", handle_settings_tools)
-    await page.goto(f"{reborn_v2_server}/v2/settings/tools?token={REBORN_V2_AUTH_TOKEN}")
+    await page.goto(f"{reborn_v2_server}/settings/tools?token={REBORN_V2_AUTH_TOKEN}")
     await expect(
         page.get_by_placeholder(SEL_V2["settings_search_placeholder"])
     ).to_be_visible(timeout=15000)
@@ -401,7 +401,7 @@ async def test_reborn_legacy_auto_approve_real_api_persists_across_browser_conte
         assert update["entry"]["value"] is True
 
         await page.goto(
-            f"{reborn_v2_server}/v2/settings/tools?token={REBORN_V2_AUTH_TOKEN}"
+            f"{reborn_v2_server}/settings/tools?token={REBORN_V2_AUTH_TOKEN}"
         )
         await expect(
             page.get_by_placeholder(SEL_V2["settings_search_placeholder"])
