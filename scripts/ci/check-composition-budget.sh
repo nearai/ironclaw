@@ -58,9 +58,11 @@ count_denominator() {
 }
 
 # Dispatch (Arc<dyn>) sub-metric is scoped to composition PRODUCTION files, but
-# EXCLUDES slack/ and extension_host/ — those subtrees are owned by the separate
-# channel/extension refactor, so this gate must not trip on or govern their work.
-DISPATCH_EXCLUDE_RE='/(slack|extension_host)/'
+# EXCLUDES slack/, telegram/ and extension_host/ — those subtrees are owned by
+# the separate channel/extension refactor, so this gate must not trip on or
+# govern their work. (telegram/ holds only the thin telegram_host_beta wiring
+# layer; the host domain itself lives in crates/ironclaw_telegram_extension.)
+DISPATCH_EXCLUDE_RE='/(slack|telegram|extension_host)/'
 
 # --- count Arc<dyn> dispatch sites in governed composition production code ----
 count_arc_dyn() {

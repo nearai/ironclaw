@@ -56,6 +56,13 @@ observed_date = "2026-07-16"
 # One-directional like the mass ratchet: it only trips on GROWTH. Prefer concrete
 # types for single-impl seams; introduce a dyn boundary only at a real second impl
 # or genuine test-fake seam, and raise arc_dyn_ceiling with a PR rationale if so.
-arc_dyn_ceiling = 1093
+# PR #6159 (telegram channel): +63 governed sites over the 1093 calibration —
+# NOT new dispatch: the vendor de-tangle moved the adapter-generic final-reply
+# delivery machinery out of the EXCLUDED slack/ subtree into the shared
+# outbound/channel_delivery module (FinalReplyDeliveryServices' injected ports
+# and the observer/driver internals), making previously-unGoverned Arc<dyn>
+# sites visible to this gate. The telegram host wiring itself is excluded by
+# subtree parity with slack/ (see DISPATCH_EXCLUDE_RE).
+arc_dyn_ceiling = 1156
 arc_dyn_tolerance = 15
-arc_dyn_observed = 1093
+arc_dyn_observed = 1156
