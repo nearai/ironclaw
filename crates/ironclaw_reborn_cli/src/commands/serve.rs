@@ -45,7 +45,12 @@ use crate::runtime::{
 // (see `commands/onboard.rs`).
 pub(crate) const DEFAULT_SERVE_HOST: &str = "127.0.0.1";
 pub(crate) const DEFAULT_SERVE_PORT: u16 = 3000;
-const DEFAULT_ENV_TOKEN_VAR: &str = "IRONCLAW_REBORN_WEBUI_TOKEN";
+// `pub(crate)`: `onboard`'s finale and `status`'s login-link resolver both
+// need to know which env var name to check for `env_token_is_active`
+// (see `webui_token.rs`), so they reuse this default rather than
+// re-deriving it (the `[webui].env_token_var` override, when present, is
+// read from config.toml directly by each caller).
+pub(crate) const DEFAULT_ENV_TOKEN_VAR: &str = "IRONCLAW_REBORN_WEBUI_TOKEN";
 const DEFAULT_ENV_USER_ID_VAR: &str = "IRONCLAW_REBORN_WEBUI_USER_ID";
 /// Lifetime of the one-time API bearer minted when an admin creates a user. A
 /// year: this is a long-lived programmatic credential, not a browser session.
@@ -176,11 +181,13 @@ impl ServeCommand {
         // `session_signing_secret` below) so a weak or missing token fails
         // closed here rather than starting the server and having it reject
         // the value opaquely.
-        let token_value = crate::webui_token::resolve_webui_token(
+        let resolved_token = crate::webui_token::resolve_webui_token(
             env_token_var,
             present_unicode_env_var(env_token_var)?.as_deref(),
             boot_config.home().path(),
         )?;
+        let webui_token_source = resolved_token.source;
+        let token_value = resolved_token.value;
         let user_id_raw = resolve_webui_user_id_raw(env_user_id_var, config_file.as_ref());
         let user_id = UserId::new(&user_id_raw)
             .map_err(|err| anyhow!("{env_user_id_var} value `{user_id_raw}` is invalid: {err}"))?;
@@ -592,23 +599,35 @@ impl ServeCommand {
 
             // CLI-token-login mount (`GET /login?token=`, printed by `onboard`
             // at the end of setup) — built only when no SSO provider is
-            // configured. `build_webui_auth_surface` above already mounted
-            // `POST /auth/session/exchange` in both its no-SSO branch (the
-            // inert `empty_webui_v2_auth_providers_mount`, which does NOT
-            // claim that path — see its own test coverage) and its SSO
-            // branch (`build_signed_session_login`, which DOES claim it).
-            // `build_cli_token_login` mounts its own `/auth/session/exchange`
-            // unconditionally, so attaching it whenever SSO is configured
-            // would register that path twice and panic at router-merge time
-            // (see `cli_token_login.rs`'s own module doc, which calls this
-            // out explicitly). There is no "no exchange handler" constructor
-            // knob on `CliTokenLoginConfig` to share the SSO surface's ticket
-            // store instead (its `session_tickets` map is private to
-            // `auth::routes`), so the simplest correct rule is: CLI-token
-            // login is available exactly when SSO is not, matching the
-            // deployment shape it targets (a single-operator desktop/CLI
-            // install, not an SSO-admitted multi-user host).
-            let cli_login_mount = if sso_enabled {
+            // configured AND the resolved webui token came from the token
+            // FILE, not the environment. `build_webui_auth_surface` above
+            // already mounted `POST /auth/session/exchange` in both its
+            // no-SSO branch (the inert `empty_webui_v2_auth_providers_mount`,
+            // which does NOT claim that path — see its own test coverage)
+            // and its SSO branch (`build_signed_session_login`, which DOES
+            // claim it). `build_cli_token_login` mounts its own
+            // `/auth/session/exchange` unconditionally, so attaching it
+            // whenever SSO is configured would register that path twice and
+            // panic at router-merge time (see `cli_token_login.rs`'s own
+            // module doc, which calls this out explicitly). There is no "no
+            // exchange handler" constructor knob on `CliTokenLoginConfig` to
+            // share the SSO surface's ticket store instead (its
+            // `session_tickets` map is private to `auth::routes`), so the
+            // simplest correct rule is: CLI-token login is available exactly
+            // when SSO is not, matching the deployment shape it targets (a
+            // single-operator desktop/CLI install, not an SSO-admitted
+            // multi-user host).
+            //
+            // The file-source condition is additional: when the token comes
+            // from an env var (e.g. a Railway-style deployment with
+            // `IRONCLAW_REBORN_WEBUI_TOKEN` set), mounting this route would
+            // put that same master bearer into a public route's query
+            // string, where it travels through edge/proxy access logs. A
+            // file-sourced token has no such deployment-shape reason to stay
+            // off this route, so it keeps the existing CLI-login UX.
+            let cli_login_mount = if sso_enabled
+                || webui_token_source != crate::webui_token::WebuiTokenSource::File
+            {
                 None
             } else {
                 Some(ironclaw_webui::build_cli_token_login(

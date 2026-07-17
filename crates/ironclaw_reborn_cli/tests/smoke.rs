@@ -2191,8 +2191,12 @@ impl HttpResponse {
     }
 }
 
-/// RED (B4 step 1 / exchange-handler collision): with no SSO provider
-/// configured, `serve` must mount the CLI-printed `/login?token=` route
+/// RED (B4 step 1 / exchange-handler collision), narrowed by the
+/// file-vs-env token-source fix: with no SSO provider configured AND the
+/// resolved webui token sourced from the token FILE (not an env var —
+/// `serve` only mounts the CLI-login route for a file-sourced token; see
+/// `commands::serve::execute`'s `cli_login_mount` condition), `serve` must
+/// mount the CLI-printed `/login?token=` route
 /// (`ironclaw_reborn_webui_ingress::build_cli_token_login`) alongside its own
 /// `POST /auth/session/exchange`. A valid token redirects into the ticket
 /// hand-off; the ticket then resolves to a real session bearer through the
@@ -2206,13 +2210,16 @@ fn serve_mounts_cli_login_route_without_sso() {
     std::fs::create_dir_all(&home).expect("home dir");
     let port = unused_local_port();
     let webui_token = "reborn-smoke-test-token-0123456789abcdef";
+    // File-sourced token, not `IRONCLAW_REBORN_WEBUI_TOKEN` — this is the
+    // one source `cli_login_mount` still mounts the route for.
+    std::fs::create_dir_all(&reborn_home).expect("reborn home dir");
+    std::fs::write(reborn_home.join("webui-token"), webui_token).expect("seed webui-token file");
 
     let mut child = reborn_command()
         .args(["serve", "--host", "127.0.0.1", "--port"])
         .arg(port.to_string())
         .env("HOME", &home)
         .env("IRONCLAW_REBORN_HOME", &reborn_home)
-        .env("IRONCLAW_REBORN_WEBUI_TOKEN", webui_token)
         .env("IRONCLAW_REBORN_WEBUI_USER_ID", "test-user")
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -2281,6 +2288,55 @@ fn serve_mounts_cli_login_route_without_sso() {
         exchange.body.contains("\"token\""),
         "exchange response must carry the minted bearer: {}",
         exchange.body
+    );
+}
+
+/// Security fix: when the webui bearer token comes from the env var
+/// (`IRONCLAW_REBORN_WEBUI_TOKEN`, the Railway deployment shape — profile
+/// local-dev, no SSO, the env var set), `serve` must NOT mount the
+/// CLI-token `/login?token=` route. That route puts the bearer in a public
+/// route's URL query string, where an edge/proxy would capture it in access
+/// logs; a file-sourced token has no such env-carried master credential to
+/// protect. Port-contention flaky like its file-token sibling above — same
+/// spawn-and-poll isolation pattern.
+#[cfg(feature = "webui-v2-beta")]
+#[test]
+fn serve_does_not_mount_cli_login_route_when_token_is_env_sourced() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let reborn_home = temp.path().join("reborn-home");
+    let home = temp.path().join("home");
+    std::fs::create_dir_all(&home).expect("home dir");
+    let port = unused_local_port();
+
+    let mut child = reborn_command()
+        .args(["serve", "--host", "127.0.0.1", "--port"])
+        .arg(port.to_string())
+        .env("HOME", &home)
+        .env("IRONCLAW_REBORN_HOME", &reborn_home)
+        .env(
+            "IRONCLAW_REBORN_WEBUI_TOKEN",
+            "reborn-smoke-test-env-token-0123456789abcdef",
+        )
+        .env("IRONCLAW_REBORN_WEBUI_USER_ID", "test-user")
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("ironclaw-reborn serve should start");
+    wait_for_serve_banner(&mut child);
+
+    let login_status = http_status_line(
+        port,
+        "GET /login?token=irrelevant HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n",
+        "cli login probe with env-sourced token",
+    );
+
+    let _ = child.kill();
+    let _ = child.wait();
+
+    let login_status = login_status.expect("login probe must complete");
+    assert!(
+        login_status.contains(" 404 "),
+        "the CLI-only /login route must not mount for an env-sourced token, got: {login_status}"
     );
 }
 
@@ -3820,6 +3876,95 @@ fn serve_fails_closed_when_neither_env_nor_store_has_the_key() {
         stderr
             .contains("llm provider `openai` requires API key env var `OPENAI_API_KEY` to be set"),
         "stderr must carry the same ApiKeyEnvUnset error text as before this fix: {stderr}"
+    );
+}
+
+/// Security fix companion: `onboard`'s finale must not print a CLI-token
+/// login link when the operator's env var is active — that link would point
+/// at a route `serve` no longer mounts for an env-sourced token (see
+/// `serve_does_not_mount_cli_login_route_when_token_is_env_sourced`). It
+/// must instead note that the env token is in charge.
+#[cfg(feature = "webui-v2-beta")]
+#[test]
+fn onboard_prints_env_token_note_instead_of_login_link_when_env_token_is_set() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let reborn_home = temp.path().join("reborn-home");
+    let home = temp.path().join("home");
+    std::fs::create_dir_all(&home).expect("home dir");
+
+    let onboard_output = reborn_command()
+        .arg("onboard")
+        .env("HOME", &home)
+        .env("IRONCLAW_REBORN_HOME", &reborn_home)
+        .env(
+            "IRONCLAW_REBORN_WEBUI_TOKEN",
+            "reborn-smoke-test-onboard-env-token-0123456789abcdef",
+        )
+        .output()
+        .expect("ironclaw-reborn onboard should run");
+    assert!(
+        onboard_output.status.success(),
+        "onboard must succeed non-interactively; stderr: {}",
+        String::from_utf8_lossy(&onboard_output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&onboard_output.stdout);
+    assert!(
+        stdout.contains("login_note: IRONCLAW_REBORN_WEBUI_TOKEN is set"),
+        "stdout must note the active env var instead of a login link: {stdout}"
+    );
+    assert!(
+        !stdout.contains("login_link:"),
+        "stdout must not print a login link that points at an unmounted route: {stdout}"
+    );
+}
+
+/// `status` companion to the onboard test above: reprinting the login link
+/// after onboarding must also respect the env-token precedence.
+#[cfg(feature = "webui-v2-beta")]
+#[test]
+fn status_prints_env_token_note_instead_of_login_link_when_env_token_is_set() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let reborn_home = temp.path().join("reborn-home");
+    let home = temp.path().join("home");
+    std::fs::create_dir_all(&home).expect("home dir");
+
+    let onboard_output = reborn_command()
+        .arg("onboard")
+        .env("HOME", &home)
+        .env("IRONCLAW_REBORN_HOME", &reborn_home)
+        .output()
+        .expect("ironclaw-reborn onboard should run");
+    assert!(
+        onboard_output.status.success(),
+        "onboard must succeed non-interactively; stderr: {}",
+        String::from_utf8_lossy(&onboard_output.stderr)
+    );
+
+    let status_output = reborn_command()
+        .arg("status")
+        .env("HOME", &home)
+        .env("IRONCLAW_REBORN_HOME", &reborn_home)
+        .env(
+            "IRONCLAW_REBORN_WEBUI_TOKEN",
+            "reborn-smoke-test-status-env-token-0123456789abcdef",
+        )
+        .output()
+        .expect("ironclaw-reborn status should run");
+    assert!(
+        status_output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&status_output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&status_output.stdout);
+    assert!(
+        stdout.contains("login_note:") && stdout.contains("IRONCLAW_REBORN_WEBUI_TOKEN is set"),
+        "stdout must note the active env var instead of a login link: {stdout}"
+    );
+    assert!(
+        !stdout.contains("login_link:"),
+        "stdout must not print a login link that points at an unmounted route \
+         (a valid webui-token file exists from onboard, but the env var takes \
+         precedence): {stdout}"
     );
 }
 

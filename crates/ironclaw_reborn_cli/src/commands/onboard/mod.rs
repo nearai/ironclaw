@@ -192,8 +192,31 @@ impl OnboardCommand {
             );
         }
 
-        if let Some(login_link) = crate::webui_token::login_link(home) {
-            println!("login_link: {login_link}");
+        // `.ok().flatten()`, not `?`: this step only needs config.toml to
+        // read `[webui].env_token_var` for the login-link-vs-note decision
+        // below, a purely informational courtesy. A config.toml that fails
+        // to parse (or predates this repo's schema — legacy/custom content
+        // is preserved as-is by `write_default_config_files` above) must
+        // not abort an otherwise-successful onboarding run; falling back to
+        // the default env var name is a fine degradation here, and `serve`
+        // itself is still the authority that fails closed on real config
+        // errors when it boots. Mirrors `status`'s own resolver, which
+        // swallows the same load failure for the same reason.
+        let config_file = ironclaw_reborn_config::RebornConfigFile::load(&home.config_file_path())
+            .ok()
+            .flatten();
+        match crate::webui_token::resolve_login_link_announcement(home, config_file.as_ref()) {
+            crate::webui_token::LoginLinkAnnouncement::Link(login_link) => {
+                println!("login_link: {login_link}");
+            }
+            crate::webui_token::LoginLinkAnnouncement::EnvTokenActive { env_var_name } => {
+                println!(
+                    "login_note: {env_var_name} is set; `serve` authenticates with that env \
+                     token directly (no login link — the CLI-token login route only mounts for \
+                     a file-sourced token)"
+                );
+            }
+            crate::webui_token::LoginLinkAnnouncement::Unavailable => {}
         }
         println!("hint: add Gmail or Slack any time: ironclaw-reborn config set --help");
         Ok(())

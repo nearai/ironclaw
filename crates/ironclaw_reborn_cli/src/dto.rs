@@ -29,6 +29,11 @@ pub(crate) struct StatusDto {
     /// `login_link:` line printed for a human operator is unaffected.
     #[serde(skip_serializing)]
     pub login_link: Option<String>,
+    /// `Some` when `serve` will authenticate off an active env var rather
+    /// than the token file (see `webui_token::LoginLinkAnnouncement`) —
+    /// mutually exclusive with `login_link`. Carries no secret, unlike
+    /// `login_link`, so it is not `skip_serializing`.
+    pub login_note: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]

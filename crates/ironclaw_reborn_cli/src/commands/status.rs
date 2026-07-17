@@ -31,6 +31,9 @@ fn build_status_dto(context: &RebornCliContext) -> anyhow::Result<StatusDto> {
     let home = context.boot_config().home();
     let profile = context.boot_config().profile();
     let config_path = home.config_file_path();
+    // Cloned before `config_path` moves into `FilePresence` below —
+    // `resolve_login_link_and_note` needs it to check `[webui].env_token_var`.
+    let config_path_for_webui_lookup = config_path.clone();
     let providers_path = home.providers_file_path();
 
     let snapshot = reborn_runtime_readiness_snapshot();
@@ -38,6 +41,7 @@ fn build_status_dto(context: &RebornCliContext) -> anyhow::Result<StatusDto> {
         .into_iter()
         .map(|s| s.to_string())
         .collect();
+    let (login_link, login_note) = resolve_login_link_and_note(home, &config_path_for_webui_lookup);
 
     Ok(StatusDto {
         version: env!("CARGO_PKG_VERSION").to_string(),
@@ -59,25 +63,53 @@ fn build_status_dto(context: &RebornCliContext) -> anyhow::Result<StatusDto> {
             subagent_planned: convert_component_status(&snapshot.subagent_planned_driver),
             planned_default_profile: convert_component_status(&snapshot.planned_default_profile),
         },
-        login_link: resolve_login_link(home),
+        login_link,
+        login_note,
     })
 }
 
 /// `status` reprints the CLI-token login link `onboard` originally printed
 /// — the returning-user story: `sessionStorage` is per-browser-session, so
 /// a closed browser needs a fresh link, and `status` is the way to get one
-/// without rerunning `onboard`. Reuses the shared `webui_token::login_link`
-/// resolver (also used by `commands::onboard`) rather than re-deriving the
-/// host:port/token construction here — see this repo's shared-resolver
-/// convention for auth-adjacent links.
+/// without rerunning `onboard`. Reuses the shared
+/// `webui_token::resolve_login_link_announcement` resolver (also used by
+/// `commands::onboard`) rather than re-deriving the host:port/token
+/// construction here — see this repo's shared-resolver convention for
+/// auth-adjacent links.
+///
+/// Returns `(login_link, login_note)`, mutually exclusive: a file-sourced
+/// token yields `(Some(link), None)`; an active env var yields
+/// `(None, Some(note))` — printing the file-token link in that case would
+/// advertise a route `serve` doesn't mount for an env-sourced token (see
+/// `commands::serve::execute`'s `cli_login_mount` condition). Neither source
+/// available yet yields `(None, None)`.
 #[cfg(feature = "webui-v2-beta")]
-fn resolve_login_link(home: &ironclaw_reborn_config::RebornHome) -> Option<String> {
-    crate::webui_token::login_link(home)
+fn resolve_login_link_and_note(
+    home: &ironclaw_reborn_config::RebornHome,
+    config_path: &std::path::Path,
+) -> (Option<String>, Option<String>) {
+    let config_file = ironclaw_reborn_config::RebornConfigFile::load(config_path)
+        .ok()
+        .flatten();
+    match crate::webui_token::resolve_login_link_announcement(home, config_file.as_ref()) {
+        crate::webui_token::LoginLinkAnnouncement::Link(link) => (Some(link), None),
+        crate::webui_token::LoginLinkAnnouncement::EnvTokenActive { env_var_name } => (
+            None,
+            Some(format!(
+                "{env_var_name} is set; serve authenticates with that env token directly (no \
+                 login link — the CLI-token login route only mounts for a file-sourced token)"
+            )),
+        ),
+        crate::webui_token::LoginLinkAnnouncement::Unavailable => (None, None),
+    }
 }
 
 #[cfg(not(feature = "webui-v2-beta"))]
-fn resolve_login_link(_home: &ironclaw_reborn_config::RebornHome) -> Option<String> {
-    None
+fn resolve_login_link_and_note(
+    _home: &ironclaw_reborn_config::RebornHome,
+    _config_path: &std::path::Path,
+) -> (Option<String>, Option<String>) {
+    (None, None)
 }
 
 pub(super) fn convert_component_status(status: &RebornRuntimeComponentStatus) -> ComponentStatus {
@@ -126,6 +158,9 @@ impl Renderable for StatusDto {
         kv(w, "model_slots", &self.model_slots.join(", "))?;
         if let Some(login_link) = &self.login_link {
             kv(w, "login_link", login_link)?;
+        }
+        if let Some(login_note) = &self.login_note {
+            kv(w, "login_note", login_note)?;
         }
         writeln!(w)?;
         writeln!(w, "drivers:")?;

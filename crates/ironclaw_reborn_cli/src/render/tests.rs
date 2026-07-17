@@ -36,6 +36,7 @@ fn sample_status() -> StatusDto {
             planned_default_profile: ComponentStatus::Initialized,
         },
         login_link: Some("http://127.0.0.1:3000/login?token=sample-token".to_string()),
+        login_note: None,
     }
 }
 
