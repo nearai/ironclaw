@@ -46,6 +46,152 @@ fn rust_and_frontend_files(root: &Path) -> Vec<PathBuf> {
     files
 }
 
+fn rust_files(root: &Path) -> Vec<PathBuf> {
+    rust_and_frontend_files(root)
+        .into_iter()
+        .filter(|path| path.extension().and_then(|extension| extension.to_str()) == Some("rs"))
+        .collect()
+}
+
+const DELETED_TELEGRAM_SYMBOLS: &[&str] = &[
+    "TelegramInstallationSetupStore",
+    "TelegramPairingStore",
+    "TelegramUserBindingStore",
+    "TelegramDmTargetStore",
+    "TelegramEgressCredentialProvider",
+    "TelegramInstallationResolver",
+    "TelegramBotApi",
+    "TelegramPairingStatusResponse",
+    "ResolvedTelegramIngress",
+];
+
+const TELEGRAM_PRODUCTION_LINE_BUDGET: usize = 999;
+
+#[test]
+fn generic_channel_delivery_is_not_owned_by_composition() {
+    let old_owner = workspace_root()
+        .join("crates/ironclaw_reborn_composition/src/outbound/channel_delivery.rs");
+    assert!(
+        !old_owner.exists(),
+        "generic channel-delivery behavior must be owned by ironclaw_channel_delivery, not {}",
+        old_owner.display()
+    );
+}
+
+#[test]
+fn generic_extension_lifecycle_has_no_telegram_knowledge() {
+    let path = workspace_root()
+        .join("crates/ironclaw_reborn_composition/src/extension_host/extension_lifecycle.rs");
+    let source = std::fs::read_to_string(&path).expect("extension lifecycle source readable");
+    let forbidden = [
+        "telegram_paired_source",
+        "telegram_paired_status_slot",
+        "with_telegram_pairing_requirement",
+        "telegram_pairing_auth_requirement",
+        "TELEGRAM_EXTENSION_ID",
+    ];
+    let offenders = forbidden
+        .into_iter()
+        .filter(|symbol| source.contains(symbol))
+        .collect::<Vec<_>>();
+    assert!(
+        offenders.is_empty(),
+        "generic extension lifecycle contains Telegram-only policy symbols: {offenders:?}"
+    );
+}
+
+#[test]
+fn deleted_telegram_abstractions_and_dtos_stay_deleted() {
+    let source_root = workspace_root().join("crates/ironclaw_telegram_extension/src");
+    let mut offenders = Vec::new();
+    for file in rust_files(&source_root) {
+        let source = std::fs::read_to_string(&file).expect("Telegram source readable");
+        for symbol in DELETED_TELEGRAM_SYMBOLS {
+            if source.contains(symbol) {
+                offenders.push(format!("{}: {symbol}", file.display()));
+            }
+        }
+    }
+    assert!(
+        offenders.is_empty(),
+        "deleted Telegram abstractions/DTOs reappeared:\n{}",
+        offenders.join("\n")
+    );
+}
+
+#[test]
+fn telegram_tests_use_the_real_filesystem_state() {
+    let source_root = workspace_root().join("crates/ironclaw_telegram_extension/src");
+    let mut offenders = Vec::new();
+    for file in rust_files(&source_root) {
+        let source = std::fs::read_to_string(&file).expect("Telegram source readable");
+        for (line_number, line) in source.lines().enumerate() {
+            let Some(struct_name) = line.trim_start().strip_prefix("struct InMemory") else {
+                continue;
+            };
+            if struct_name
+                .split(|character: char| !character.is_ascii_alphanumeric())
+                .next()
+                .is_some_and(|name| name.ends_with("Store"))
+            {
+                offenders.push(format!("{}:{}", file.display(), line_number + 1));
+            }
+        }
+    }
+    assert!(
+        offenders.is_empty(),
+        "Telegram tests must exercise FilesystemTelegramHostState over an in-memory filesystem; parallel domain stores found:\n{}",
+        offenders.join("\n")
+    );
+}
+
+#[test]
+fn telegram_production_files_meet_the_line_budget() {
+    let source_root = workspace_root().join("crates/ironclaw_telegram_extension/src");
+    let mut offenders = Vec::new();
+    for file in rust_files(&source_root) {
+        let line_count = std::fs::read_to_string(&file)
+            .expect("Telegram source readable")
+            .lines()
+            .count();
+        if line_count > TELEGRAM_PRODUCTION_LINE_BUDGET {
+            offenders.push(format!("{}: {line_count} lines", file.display()));
+        }
+    }
+    assert!(
+        offenders.is_empty(),
+        "Telegram production files exceed the {TELEGRAM_PRODUCTION_LINE_BUDGET}-line budget:\n{}",
+        offenders.join("\n")
+    );
+}
+
+#[test]
+fn telegram_composition_is_assembly_only() {
+    let path = workspace_root()
+        .join("crates/ironclaw_reborn_composition/src/telegram/telegram_host_beta.rs");
+    let source = std::fs::read_to_string(&path).expect("Telegram composition source readable");
+    let production = source
+        .split_once("\n#[cfg(test)]\nmod tests")
+        .map_or(source.as_str(), |(production, _)| production);
+    let forbidden = [
+        "TelegramRevisionWorkflowParts",
+        "DynamicTelegramTriggeredRunDeliveryHook",
+        "CachedTelegramTriggeredRunDriver",
+        "NoopTelegramDeliverySink",
+        "NoopTelegramConversationBindingService",
+        "impl TelegramRevisionWorkflowBuilder",
+    ];
+    let offenders = forbidden
+        .into_iter()
+        .filter(|symbol| production.contains(symbol))
+        .collect::<Vec<_>>();
+    let line_count = production.lines().count();
+    assert!(
+        offenders.is_empty() && line_count <= 450,
+        "Telegram composition must contain assembly only; behavior symbols={offenders:?}, production lines={line_count} (budget 450)"
+    );
+}
+
 /// Retired identifiers with the legitimate longer-identifier continuations
 /// that may embed them: `telegram_bot_token` (the credential handle) and the
 /// `telegram_bot_api` module are not the retired `telegram_bot` extension

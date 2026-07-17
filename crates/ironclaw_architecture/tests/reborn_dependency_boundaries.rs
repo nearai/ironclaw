@@ -2819,6 +2819,18 @@ fn boundary_rules() -> Vec<BoundaryRule> {
             ],
         },
         BoundaryRule {
+            // Product-neutral delivery orchestration consumes channel-host
+            // contracts but never a concrete channel or an application root.
+            crate_name: "ironclaw_channel_delivery",
+            forbidden: vec![
+                "ironclaw_reborn_composition",
+                "ironclaw_reborn_cli",
+                "ironclaw_webui_v2",
+                "ironclaw_slack_v2_adapter",
+                "ironclaw_telegram_extension",
+            ],
+        },
+        BoundaryRule {
             // Product auth is a Reborn contract/facade vocabulary. It may
             // describe behavior-compatible v1 inventory, but implementation
             // code must not reach into v1 routes, extension managers, secret

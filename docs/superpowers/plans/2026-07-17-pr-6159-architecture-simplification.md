@@ -67,7 +67,7 @@ The existing `telegram_*` public module names are re-exported only where downstr
 - Consumes: repository paths and workspace Cargo metadata.
 - Produces: exact-path/symbol ratchets named below; later tasks turn each failure green without weakening its assertion.
 
-- [ ] **Step 1: Add exact symbol/path scanners**
+- [x] **Step 1: Add exact symbol/path scanners**
 
 Add constants and tests with these exact target sets:
 
@@ -107,7 +107,7 @@ fn telegram_composition_is_assembly_only() { /* enforce symbol denylist and 450-
 
 Add `ironclaw_channel_delivery` to `SUBSTRATE_CRATES`, and add a `BoundaryRule` forbidding dependencies on `ironclaw_reborn_composition`, `ironclaw_reborn_cli`, `ironclaw_webui_v2`, `ironclaw_slack_v2_adapter`, and `ironclaw_telegram_extension`.
 
-- [ ] **Step 2: Run each ratchet and record the intended baseline failure**
+- [x] **Step 2: Run each ratchet and record the intended baseline failure**
 
 Run:
 
@@ -117,9 +117,9 @@ cargo test -p ironclaw_architecture --test reborn_dependency_boundaries
 cargo test -p ironclaw_architecture --test reborn_composition_boundaries
 ```
 
-Expected: the new Telegram gate tests fail on the old composition delivery path, lifecycle Telegram symbols, deleted-symbol set, in-memory store fakes, oversized files, and composition behavior; the dependency tests fail because the new crate is not yet a workspace member.
+Observed: the new Telegram gate tests fail on the old composition delivery path, lifecycle Telegram symbols, deleted-symbol set, in-memory store fakes, oversized files, and composition behavior. The dependency tests pass because their rules activate only for workspace crates; adding `ironclaw_channel_delivery` in Task 3 activates its already-declared rule.
 
-- [ ] **Step 3: Commit the red ratchets**
+- [x] **Step 3: Commit the red ratchets**
 
 ```bash
 git add crates/ironclaw_architecture/tests
