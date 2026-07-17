@@ -234,6 +234,34 @@ The implementation split that trusted region into ~6 crates and gave each:
 
 None of those six internal boundaries is a trust boundary.
 
+### 2.1 The operating-system lens: mechanism vs policy
+
+State it the way an OS does. A kernel provides **mechanism** — a small, stable set
+of primitives (files, processes, address spaces, syscalls) — and is deliberately
+*slow-moving*: adding an application does not change the kernel. **Policy** — which
+app runs, what it may touch, how much it gets — lives outside, as configuration and
+userland.
+
+Reborn's kernel boundary must obey the same rule: **adding a feature, or a
+deployment target, must not change the kernel.** Everything above collapses to one
+violation of it — *policy encoded as kernel types*:
+
+- **Deployment mode is a kernel enum.** `RuntimeProfile::{LocalDev, HostedDev,
+  EnterpriseDev}` and `DeploymentMode` live in `ironclaw_host_api` — the vocabulary
+  crate — and code across the host branches on them. Mode is the definition of
+  policy; putting it in the kernel forces every mode to grow its own type family
+  (the ~66-identifier `LocalDev*` shadow runtime, §4.4).
+- **Storage medium is a domain type.** Each domain hand-writes an in-memory store
+  *and* a durable store (§1.4); the medium — a deployment choice — is baked into the
+  type instead of injected. The kernel should name *"a store"*; the config should
+  pick the medium (§4.3).
+
+So the simplification is one idea applied consistently: **the kernel is mechanism —
+a small, frozen authority vocabulary plus a few real seams; everything that varies
+by feature or deployment is policy, resolved to data at the composition edge.** The
+`Invocation` / `Authority` / `Outcome` triple below is what feature-agnostic
+mechanism looks like; §4.3–§4.5 remove the policy that leaked into types.
+
 ---
 
 ## 3. Proposed model: one payload, authority as a fold, one seam
@@ -323,32 +351,140 @@ goes to zero because nothing mirrors.
 
 **Hot-path `dyn`: 6+ → ~2, plus one lane enum.**
 
-### 4.3 No structs specific to local — backend-generic stores, and "local" as a config value
+### 4.3 Delete every in-memory store; the storage seam already exists
 
-- Make each durable store generic over a single storage backend:
+The realization that reshapes this move: **the single storage seam is already in
+the tree — it is `RootFilesystem`** (`ironclaw_filesystem`). It already has four
+production-grade backends — `InMemoryBackend`, on-disk (`LocalFilesystem`),
+`LibSqlRootFilesystem`, `PostgresRootFilesystem` — and the durable stores are
+**already generic over it**: `FilesystemTurnStateStore<F>`,
+`FilesystemProcessStore<F>`, `FilesystemCapabilityLeaseStore<F>`,
+`FilesystemRunStateStore<F>`, `FilesystemAutoApproveSettingStore<F>`, and so on. The
+`RowBackend` I earlier proposed inventing already exists and is already wired.
 
-  ```rust
-  struct TurnStore<B: RowBackend> { backend: B }        // domain logic written ONCE
-  enum Backend { Memory(MemBackend), Sqlite(..), Postgres(..) } // 3 backends shared by ALL domains
-  ```
+So the move is subtractive, not additive:
 
-  The domain logic (turns, processes, approvals, authorization, run-state) lives
-  once; `Memory` / `Sqlite` / `Postgres` are three small `RowBackend`
-  implementations reused everywhere. This deletes the entire `InMemory*` /
-  `Filesystem*` parallel tree. The existing `filesystem_store/row_store/journal`
-  layer in `ironclaw_turns` already gestures at this abstraction — this finishes
-  it rather than inventing it.
+1. **Delete every hand-written `InMemory*Store`.** Tests instantiate the *same*
+   store the deployment runs — `FilesystemTurnStateStore<InMemoryBackend>` — so
+   "in-memory" stops being a store and becomes a **filesystem backend**
+   (`InMemoryBackend`, which already implements `RootFilesystem`). One store
+   implementation per domain, exercised in tests over the in-memory backend and in
+   production over libSQL/Postgres. The ~4,260-LOC `InMemoryTurnStateStore` becomes
+   deletable once `FilesystemTurnStateStore<InMemoryBackend>` covers its cases.
 
-- Delete **composition mode as a type**. `LocalDev` / `HostedDev` / `EnterpriseDev`
-  become one `DeploymentConfig { backend, approval_policy, network_policy }`
-  value fed to a single `build_runtime(config)`. "Local may reduce authority,
-  never increase it" becomes a policy value enforced in one place — not a fork in
-  the struct graph where a local shortcut can silently leak into production.
+2. **Backend choice is deployment config, not a type.** Which `RootFilesystem`
+   impl backs a run is one value in a `DeploymentConfig` fed to a single
+   `build_runtime(config)`. "Local may reduce authority, never increase it" is a
+   policy value, not a `Local*` code fork (§4.4).
 
-- Consider a shared "leased recoverable work-unit" abstraction over `TurnRun` and
-  `ironclaw_processes`, or explicitly document why the two lifecycles stay
-  separate. (This split is a layering choice, not migration debris — it will not
-  evaporate when v1 retires — so it deserves an explicit decision.)
+Why the in-memory stores exist today: they predate the generic
+`Filesystem*Store<F>` and were kept as the fast reference/test path. Now that a
+first-class `InMemoryBackend: RootFilesystem` exists, they are redundant — a whole
+second implementation per domain, kept alive only for tests that a memory-backed
+filesystem serves for free. (Honest caveat: the turn store's ~4,260-LOC in-memory
+impl is larger than the ~1,710-LOC filesystem one, so consolidation is *reconcile
+then delete*, not a blind delete — but the target is one store, backend-injected.)
+
+Open follow-on: consider a shared "leased recoverable work-unit" abstraction over
+`TurnRun` and `ironclaw_processes` (§1.4, mechanism 2), or explicitly document why
+the two lifecycles stay separate.
+
+### 4.4 Eliminate `Local*`: deployment mode is policy, not a kernel type
+
+**Local-dev is a policy, so it must be a policy *config* — a value — not an
+implementation with its own structs and code.** That is the whole rule. Today the
+tree has ~66 `LocalDev*` identifiers across **42 files in
+`ironclaw_reborn_composition`** — a whole shadow local-dev *runtime*
+(`LocalDevApprovalGatePolicy`, `LocalDevCapabilityLeaseStore`,
+`LocalDevAutoApproveSettingStore`, `LocalDevMountProfile`, `LocalDevNetworkProfile`,
+`LocalDevOutboundStores`, `LocalDevLoopCapabilityPortFactory`,
+`LocalDevConstraintSource`, …). All of it collapses to a single config literal that
+selects the *same* substrates every deployment uses:
+
+```rust
+// The entirety of "local dev" — data, not types. No LocalDev* structs, no code path.
+const LOCAL_DEV: DeploymentConfig = DeploymentConfig {
+    filesystem: Backend::InMemory,                 // or Backend::Disk
+    approval:   ApprovalPolicy::AutoApproveEligible, // wider than hosted — a value
+    network:    NetworkPolicy::AllowAll,           // vs Allowlist(..) in hosted
+    process:    ProcessPolicy::HostProcess,        // vs Sandboxed
+    owner_seed: Some(OwnerSeed::EnvToken),          // was the local_trigger_access module
+};
+```
+
+`build_runtime(LOCAL_DEV)` wires the ordinary `FilesystemTurnStateStore<InMemoryBackend>`,
+the ordinary approval/capability/lease substrates, and the ordinary ports — with
+these values. There is no `LocalDev*` type because there is nothing local-dev
+*implements*; it only *chooses*. The same is true of hosted and enterprise: each is a
+`DeploymentConfig` constant, and the difference between them is data a reviewer can
+read in one place, not a struct family spread across 42 files.
+
+The `LocalDev*` identifiers fall in three buckets:
+
+**Bucket 1 — deployment-mode-as-type leaks (delete).** They exist *only* because
+`RuntimeProfile::{LocalDev, HostedDev, EnterpriseDev}` / `DeploymentMode` are kernel
+enums that code branches on — the `DeploymentMode` doc comment literally says a
+variant decides whether "`Local*` profiles" are allowed — so local-dev was built as
+its own parallel wiring of approval, capability, lease, mount, network, and outbound
+policy. **Fix:** resolve mode to policy *data* at the composition edge. The kernel
+consumes the already-existing `EffectiveRuntimePolicy` (`ironclaw_runtime_policy`) —
+an allowlist, an approval width, a sandbox requirement, a mount profile — and never
+names a mode. The `local_trigger_access` module
+(`LocalTriggerAccessSource::LocalDev{Env,Sso,Run}Bootstrap`) becomes "seed the owner
+grant from config at boot," a policy value, not a module. Local-dev then wires the
+*same* substrates with a config that selects `InMemoryBackend`/disk, a wider approval
+width, and a permissive allowlist — no `LocalDev*` types.
+
+**Bucket 2 — genuine resource/trust names mis-prefixed `Local` (rename).** Two types
+describe a real resource or trust boundary and only *look* like mode leaks:
+
+- `LocalFilesystem` → `DiskFilesystem` / `OnDiskBackend`: it names the storage
+  medium (disk vs memory vs libSQL vs Postgres), a backend, not a deployment mode.
+- `LocalHostProcessPort` → `HostProcessPort`: it names the trust boundary (a process
+  on the host vs a sandboxed process). The trust-boundary baseline already requires
+  that "sandbox/native/host names accurately describe the trust boundary"
+  (`docs/reborn/2026-05-11-trust-boundary-stack-note.md`); `Local` obscures it,
+  `Host` states it.
+
+**Bucket 3 — false positives (leave).** `Locale`/`LocaleError` (localization),
+`HookLocalId`, `LocalTraceSubmissionRecord` (this-node submission to Trace Commons;
+rename to `NodeTraceSubmission*` only if convenient).
+
+Enforce it with an `ironclaw_architecture` test: **no public type name contains
+`Local`/`LocalDev`/`Hosted`/`Enterprise`.** A deployment mode is a config value that
+selects backends and policy; it is never a type the kernel or a substrate names.
+
+### 4.5 Name and freeze the kernel boundary
+
+The boundary is what every feature and reviewer must hold in their head, so it is
+the thing to make small and stable. Enumerated today it is:
+
+- **Vocabulary — `ironclaw_host_api`: 21 files, ~124 public types** (67 structs, 55
+  enums) and only 2 traits (`CapabilityDispatcher`, `RuntimeHttpEgress`). Concern
+  files: `action, approval, audit, capability, capability_profile, decision,
+  dispatch, dotted_id, error, host_port, http, ids, ingress, mount, path, resource,
+  runtime_policy, runtime, scope, trust`.
+- **The loop ↔ kernel seam — `AgentLoopDriverHost`**: ~13 fine-grained ports
+  (`LoopRunInfoPort, LoopContextPort, LoopInputPort, LoopPromptPort, LoopModelPort,
+  LoopCapabilityPort, LoopTranscriptPort, LoopCheckpointPort, LoopProgressPort,
+  LoopCancellationPort`, plus model sub-ports).
+- **The host mediators**: `HostRuntime`, `CapabilityHost`, `CapabilityDispatcher`
+  (collapsing per §4.2).
+
+Two cleanups make it a *kernel*:
+
+1. **`runtime_policy.rs` does not belong in the vocabulary.** `DeploymentMode` /
+   `RuntimeProfile` are deployment policy, not authority vocabulary. The kernel
+   should speak `EffectiveRuntimePolicy` (resolved data) and let mode resolve at the
+   edge (§4.4). Moving it out is the first concrete shrink.
+2. **~124 types is too large for a "slow-moving" boundary.** Audit the 124 into
+   (a) mode/policy types that belong at the edge, (b) product/feature-shaped types
+   that leaked down, (c) genuinely neutral authority vocabulary — IDs, scopes, paths,
+   decisions, mounts, resources, trust. Only (c) stays, and gets **frozen by a
+   boundary test**, so a new feature that wants to add a `host_api` type must justify
+   that it is authority vocabulary, not policy. That freeze is the operational
+   meaning of "slow-moving kernel": the boundary changes when the *security model*
+   changes, never when a feature ships.
 
 ---
 
@@ -359,8 +495,11 @@ goes to zero because nothing mirrors.
 | Types per capability call | ~14 | 3 (`Invocation` / `Authority` / `Outcome`) |
 | Hot-path `dyn` seams | 6+ | 2 + 1 lane enum |
 | Policy decision sites | 4 crates | 1 `authorize()` |
-| Store impls per domain | 2–4 | 1 generic + 3 shared backends |
-| Deployment modes | struct family | 1 `DeploymentConfig` value |
+| Store impls per domain | 2–4 hand-written | 1 (`FsStore<F>`); in-memory is a backend, not a store |
+| `InMemory*Store` structs | one per domain | 0 (tests use `FsStore<InMemoryBackend>`) |
+| `LocalDev*` identifiers | ~66 across 42 files | 0 (one `DeploymentConfig` value) |
+| Deployment modes | struct family (`Local*`/`Hosted*`) | `DeploymentConfig` constants (data) |
+| `host_api` boundary | ~124 types incl. mode/policy | neutral authority vocab, frozen by test |
 
 ---
 
@@ -390,39 +529,48 @@ across the host-kernel chain. Same goal, orthogonal axes — no conflict.
 
 ## 7. Migration: incremental, not a rewrite
 
-This is the hottest path in the system, so it must land in verifiable slices with
-`ironclaw_architecture` boundary tests green at every step.
+Land in verifiable slices with `ironclaw_architecture` boundary tests green at
+every step. The moves have very different risk, so sequence by risk, not by section
+order. Two are low-risk and independently valuable — start there:
 
-**First slice (proof of concept):** the capability down-path for the first-party
-lane only.
+**Slice A (lowest risk — delete in-memory stores).** The seam already exists
+(§4.3), so this is subtractive: pick one domain (say approvals), delete its
+`InMemory*Store`, repoint its tests to `Filesystem*Store<InMemoryBackend>`, confirm
+green. Repeat per domain. No hot-path change, immediate deletion of a whole
+implementation per domain, and it de-risks the store story before anything else.
+
+**Slice B (low risk — `Local*` → config).** Add an `ironclaw_architecture` test
+banning `Local`/`Hosted`/`Enterprise` in public type names; introduce the
+`DeploymentConfig` constants; migrate the `LocalDev*` family in
+`ironclaw_reborn_composition` to wire shared substrates from a config value. Mostly
+mechanical, concentrated in one crate, and it directly shrinks the god-crate (#6168).
+
+**Slice C (proof of concept for the DTO/`dyn` collapse — capability down-path,
+first-party lane only).**
 
 1. Define `Invocation` / `Authority` / `Outcome` in `ironclaw_host_api`.
 2. Write `authorize()` as the single policy pass (initially delegating to the
    existing four checks, then inlining them).
 3. Make the four mediators accept `(&Invocation, &Authority)` instead of
    re-wrapping — *without merging any crates yet*.
-4. Measure: type count on one real call, `dyn` count, and the diff to boundary
-   tests.
+4. Measure: type count on one real call, `dyn` count, diff to boundary tests.
 
-If the slice drops the type count on one call with green boundary tests, roll it
-across the remaining lanes, then tackle the `RuntimeLane` enum, then the
-`RowBackend` store collapse (hardest — the backend trait must express
-transactions/locks, since in-memory and durable stores differ in more than
-storage today), then the `DeploymentConfig` collapse.
+If C drops the type count with green boundary tests, roll it across the remaining
+lanes, then the `RuntimeLane` enum, then the mediator-trait collapse (§4.2).
 
 ### Risks and honest caveats
 
-- **`RowBackend` is the hard part.** In-memory vs durable stores differ in
-  locking and overlay semantics (e.g. the runner-lease in-memory overlay in
-  `ironclaw_turns`), so the backend trait must model transactions and locks, not
-  just get/put. If that abstraction gets leaky, the collapse is not worth it.
-- **Closed `RuntimeLane` enum** trades open extensibility for exhaustiveness. This
-  is a deliberate choice: new *lanes* are rare and security-sensitive; new *tools*
-  (the common case) are data behind the existing lanes and stay open.
-- **Crate topology is out of scope here.** Reducing DTOs and `dyn` is about types
-  and traits, not crate count; it can be done without merging crates. Merging
-  crates has its own compile-parallelism trade-offs and should be a separate
-  decision.
+- **The turn store consolidation is the trickiest store case.** The in-memory turn
+  store is larger than the filesystem one and the runner-lease uses an in-memory
+  overlay; consolidating onto `FilesystemTurnStateStore<InMemoryBackend>` is
+  reconcile-then-delete, not a blind delete. Do the small domains (Slice A) first to
+  build confidence, turns last.
+- **Closed `RuntimeLane` enum** trades open extensibility for exhaustiveness — a
+  deliberate choice: new *lanes* are rare and security-sensitive; new *tools* (the
+  common case) are data behind the existing lanes and stay open.
+- **Crate topology is out of scope here.** Reducing DTOs, `dyn`, and `Local*` is
+  about types, not crate count; it can be done without merging crates. Crate merges
+  have their own compile-parallelism trade-offs and are a separate decision.
 
 ---
 
@@ -445,6 +593,10 @@ storage today), then the `DeploymentConfig` collapse.
 - `crates/Architecture.md` — Reborn kernel-boundary / substrate architecture thesis.
 - `docs/reborn/2026-05-11-trust-boundary-stack-note.md` — trust-boundary baseline invariants.
 - `docs/reborn/2026-04-25-storage-catalog-and-placement.md` — storage placement.
-- `crates/ironclaw_host_api/` — the neutral vocabulary crate (target home for `Invocation`/`Authority`/`Outcome`).
-- `crates/ironclaw_architecture/tests/reborn_dependency_boundaries.rs` — boundary tests that must stay green.
+- `crates/ironclaw_host_api/` — the neutral vocabulary crate (target home for `Invocation`/`Authority`/`Outcome`); ~124 public types across 21 files (§4.5).
+- `crates/ironclaw_host_api/src/runtime_policy.rs` — `DeploymentMode` / `RuntimeProfile`: the deployment-mode enums that leaked into the kernel vocabulary (§4.4–§4.5).
+- `crates/ironclaw_runtime_policy/` — `EffectiveRuntimePolicy`: the resolved policy *data* the kernel should consume instead of a mode enum.
+- `crates/ironclaw_filesystem/src/in_memory.rs` — `InMemoryBackend: RootFilesystem`: the existing seam that makes every `InMemory*Store` deletable (§4.3).
+- `crates/ironclaw_reborn_composition/src/local_dev_capability_policy.rs` — `LocalDevConstraintSource` and the ~66-identifier `LocalDev*` shadow runtime to collapse to config (§4.4).
+- `crates/ironclaw_architecture/tests/reborn_dependency_boundaries.rs` — boundary tests that must stay green; home for the "no `Local*` type names" and "freeze `host_api`" checks.
 - Issues: #6168 (composition god-crate), #6144 (unenforced budget), #6137 / #6138 (gate-resume / capability-path).
