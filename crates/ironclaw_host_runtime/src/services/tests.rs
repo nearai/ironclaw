@@ -38,11 +38,11 @@ use serde_json::{Value, json};
 
 use super::{
     CapabilitySurfaceVersion, DeploymentMode, EffectiveRuntimePolicy, FilesystemBackendKind,
-    FirstPartyCapabilityRegistry, FirstPartyRuntimeAdapter, HostRuntimeHttpEgressPort,
-    HostRuntimeServices, LocalHostProcessPort, LocalInvocationServicesResolver, McpRuntimeAdapter,
-    NetworkMode, ProcessBackendKind, ProcessResultStore, ProcessStore, ProductionWiringComponent,
-    ProductionWiringConfig, ProductionWiringIssueKind, RootFilesystem, RuntimeAdapter,
-    RuntimeAdapterRequest, RuntimeAdapterResult, RuntimeProfile, SecretMode,
+    FirstPartyCapabilityRegistry, FirstPartyRuntimeAdapter, HostProcessPort,
+    HostRuntimeHttpEgressPort, HostRuntimeServices, LocalInvocationServicesResolver,
+    McpRuntimeAdapter, NetworkMode, ProcessBackendKind, ProcessResultStore, ProcessStore,
+    ProductionWiringComponent, ProductionWiringConfig, ProductionWiringIssueKind, RootFilesystem,
+    RuntimeAdapter, RuntimeAdapterRequest, RuntimeAdapterResult, RuntimeProfile, SecretMode,
     ServiceResolvedRuntimeAdapter,
 };
 #[cfg(unix)]
@@ -677,7 +677,7 @@ async fn service_guard_releases_reservation_on_planner_denial() {
         Arc::new(LocalInvocationServicesResolver::new(
             Arc::new(LocalFilesystem::new()),
             None,
-            Arc::new(LocalHostProcessPort::new()),
+            Arc::new(HostProcessPort::new()),
             None,
         )),
     );
@@ -739,7 +739,7 @@ async fn service_guard_rejects_resolution_before_wasm_dispatch() {
         Arc::new(LocalInvocationServicesResolver::new(
             Arc::new(LocalFilesystem::new()),
             None,
-            Arc::new(LocalHostProcessPort::new()),
+            Arc::new(HostProcessPort::new()),
             None,
         )),
     );
@@ -792,7 +792,7 @@ async fn service_guard_releases_reservation_on_invocation_service_resolution_den
         Arc::new(LocalInvocationServicesResolver::new(
             Arc::new(LocalFilesystem::new()),
             None,
-            Arc::new(LocalHostProcessPort::new()),
+            Arc::new(HostProcessPort::new()),
             None,
         )),
     );
@@ -858,7 +858,7 @@ async fn service_guard_rejects_required_secret_without_secret_store_before_dispa
         Arc::new(LocalInvocationServicesResolver::new(
             Arc::new(LocalFilesystem::new()),
             None,
-            Arc::new(LocalHostProcessPort::new()),
+            Arc::new(HostProcessPort::new()),
             None,
         )),
     );
@@ -915,7 +915,7 @@ async fn first_party_adapter_releases_reservation_when_invocation_service_resolu
         Arc::new(LocalInvocationServicesResolver::new(
             Arc::new(LocalFilesystem::new()),
             None,
-            Arc::new(LocalHostProcessPort::new()),
+            Arc::new(HostProcessPort::new()),
             None,
         )),
     );
@@ -1046,7 +1046,7 @@ async fn first_party_adapter_releases_reservation_when_planner_denies() {
         Arc::new(LocalInvocationServicesResolver::new(
             Arc::new(LocalFilesystem::new()),
             None,
-            Arc::new(LocalHostProcessPort::new()),
+            Arc::new(HostProcessPort::new()),
             None,
         )),
     );
@@ -1217,7 +1217,7 @@ async fn assert_first_party_denies_before_handler(
         Arc::new(LocalInvocationServicesResolver::new(
             Arc::new(LocalFilesystem::new()),
             None,
-            Arc::new(LocalHostProcessPort::new()),
+            Arc::new(HostProcessPort::new()),
             Some(Arc::new(InMemorySecretStore::new())),
         )),
     );

@@ -24,7 +24,7 @@ use super::{
     build_reborn_event_stores, production_wiring_report, set_runtime_http_egress,
     set_tool_call_http_egress,
 };
-use crate::LocalHostProcessPort;
+use crate::HostProcessPort;
 use crate::RuntimeHttpBodyStore;
 use crate::http_body::UnsupportedRuntimeHttpBodyStore;
 use crate::wasm_credentials::SharedHostWasmRuntimeCredentials;
@@ -831,15 +831,15 @@ where
             return;
         }
         self.component_types.runtime_process_port =
-            ProductionComponentType::of::<LocalHostProcessPort>();
+            ProductionComponentType::of::<HostProcessPort>();
         self.process_port = if matches!(policy.secret_mode, SecretMode::InheritedEnv) {
             tracing::warn!(
                 host_access = "full-local",
                 "runtime policy selected inherited local host process environment"
             );
-            Arc::new(LocalHostProcessPort::new_inherited_env())
+            Arc::new(HostProcessPort::new_inherited_env())
         } else {
-            Arc::new(LocalHostProcessPort::new())
+            Arc::new(HostProcessPort::new())
         };
     }
 

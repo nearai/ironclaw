@@ -71,7 +71,7 @@ pub(super) enum ShellMode {
     /// spawns no OS process.
     #[default]
     Inert,
-    /// The real `LocalHostProcessPort` runs a (hermetic) command for real.
+    /// The real `HostProcessPort` runs a (hermetic) command for real.
     Live,
     /// The inert recording port returns a scripted result (error-path coverage):
     /// a non-zero exit code or a `run_command` error.
@@ -125,7 +125,7 @@ impl RebornCapabilityBackend {
         Ok(match self {
             RebornCapabilityBackend::Echo => GroupCapability::Recording,
             RebornCapabilityBackend::BuiltinHttpTools => {
-                // Slice 5: `.with_live_shell()` opts into the real LocalHostProcessPort;
+                // Slice 5: `.with_live_shell()` opts into the real HostProcessPort;
                 // `Inert`/`Scripted` both use the inert RecordingProcessPort (the
                 // latter with a canned result installed below).
                 let host_runtime = match shell_mode {

@@ -9,10 +9,10 @@ use ironclaw_processes::{FilesystemProcessResultStore, FilesystemProcessStore};
 use ironclaw_run_state::{FilesystemApprovalRequestStore, FilesystemRunStateStore};
 
 use super::{
-    DurableAuditSink, DurableEventSink, EmptyWasmRuntimeCredentials, InMemoryAuditSink,
-    InMemoryCredentialBroker, InMemoryDurableAuditLog, InMemoryDurableEventLog, InMemoryEventSink,
-    InMemoryResourceGovernor, InMemorySecretStore, InMemoryTurnStateStore, LocalFilesystem,
-    LocalHostProcessPort, NoopTurnRunWakeNotifier, RebornEventStoreError, RuntimeKind,
+    DurableAuditSink, DurableEventSink, EmptyWasmRuntimeCredentials, HostProcessPort,
+    InMemoryAuditSink, InMemoryCredentialBroker, InMemoryDurableAuditLog, InMemoryDurableEventLog,
+    InMemoryEventSink, InMemoryResourceGovernor, InMemorySecretStore, InMemoryTurnStateStore,
+    LocalFilesystem, NoopTurnRunWakeNotifier, RebornEventStoreError, RuntimeKind,
 };
 
 #[derive(Debug, Error)]
@@ -323,7 +323,7 @@ fn classify_component_type<T: ?Sized + 'static>() -> ProductionImplementationRea
             || type_id == TypeId::of::<EmptyWasmRuntimeCredentials>()
             || type_id == TypeId::of::<InMemoryTurnStateStore>()
             || type_id == TypeId::of::<NoopTurnRunWakeNotifier>()
-            || type_id == TypeId::of::<LocalHostProcessPort>() =>
+            || type_id == TypeId::of::<HostProcessPort>() =>
         {
             ProductionImplementationReadiness::LocalOnly
         }

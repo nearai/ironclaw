@@ -102,7 +102,7 @@ pub(crate) fn local_dev_host_runtime_with_registry_and_runtime_http_egress(
     .with_first_party_http_egress(egress)
     .with_trust_policy(Arc::new(first_party_trust_policy()?));
     // Inject the recording process port when provided; `None` defaults to
-    // `LocalHostProcessPort` (real execution).
+    // `HostProcessPort` (real execution).
     if let Some(port) = process_port {
         services = services.with_runtime_process_port_dyn(port);
     }
@@ -272,7 +272,7 @@ pub(crate) fn local_dev_host_runtime_with_real_egress_pipeline(
     })?
     .with_trust_policy(Arc::new(first_party_trust_policy()?));
     // Inject the recording process port when provided; `None` defaults to
-    // `LocalHostProcessPort` (real execution).
+    // `HostProcessPort` (real execution).
     if let Some(port) = process_port {
         services = services.with_runtime_process_port_dyn(port);
     }

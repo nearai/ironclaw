@@ -24,7 +24,7 @@ async fn first_party_handler_receives_authenticated_actor_distinct_from_subject_
         Arc::new(LocalInvocationServicesResolver::new(
             Arc::new(LocalFilesystem::new()),
             None,
-            Arc::new(LocalHostProcessPort::new()),
+            Arc::new(HostProcessPort::new()),
             None,
         )),
     );
@@ -106,7 +106,7 @@ async fn first_party_adapter_maps_handler_auth_required_to_dispatch_auth_require
         Arc::new(LocalInvocationServicesResolver::new(
             Arc::new(LocalFilesystem::new()),
             None,
-            Arc::new(LocalHostProcessPort::new()),
+            Arc::new(HostProcessPort::new()),
             None,
         )),
     );
@@ -169,7 +169,7 @@ async fn first_party_adapter_releases_reservation_when_handler_returns_auth_requ
         Arc::new(LocalInvocationServicesResolver::new(
             Arc::new(LocalFilesystem::new()),
             None,
-            Arc::new(LocalHostProcessPort::new()),
+            Arc::new(HostProcessPort::new()),
             None,
         )),
     );
@@ -226,7 +226,7 @@ async fn first_party_adapter_forwards_required_secrets_from_auth_required_handle
         Arc::new(LocalInvocationServicesResolver::new(
             Arc::new(LocalFilesystem::new()),
             None,
-            Arc::new(LocalHostProcessPort::new()),
+            Arc::new(HostProcessPort::new()),
             None,
         )),
     );
@@ -291,7 +291,7 @@ async fn first_party_adapter_forwards_credential_requirements_from_auth_required
         Arc::new(LocalInvocationServicesResolver::new(
             Arc::new(LocalFilesystem::new()),
             None,
-            Arc::new(LocalHostProcessPort::new()),
+            Arc::new(HostProcessPort::new()),
             None,
         )),
     );
@@ -347,7 +347,7 @@ async fn first_party_adapter_maps_panicking_handler_to_backend() {
         Arc::new(LocalInvocationServicesResolver::new(
             Arc::new(LocalFilesystem::new()),
             None,
-            Arc::new(LocalHostProcessPort::new()),
+            Arc::new(HostProcessPort::new()),
             None,
         )),
     );
@@ -534,7 +534,7 @@ async fn first_party_adapter_releases_reservation_when_reconcile_fails_after_suc
         Arc::new(LocalInvocationServicesResolver::new(
             Arc::new(LocalFilesystem::new()),
             None,
-            Arc::new(LocalHostProcessPort::new()),
+            Arc::new(HostProcessPort::new()),
             None,
         )),
     );
@@ -634,7 +634,7 @@ async fn first_party_adapter_releases_reservation_when_dispatch_future_is_cancel
         Arc::new(LocalInvocationServicesResolver::new(
             Arc::new(LocalFilesystem::new()),
             None,
-            Arc::new(LocalHostProcessPort::new()),
+            Arc::new(HostProcessPort::new()),
             None,
         )),
     );
@@ -748,7 +748,7 @@ async fn first_party_adapter_preserves_handler_error_when_account_failed_reconci
         Arc::new(LocalInvocationServicesResolver::new(
             Arc::new(LocalFilesystem::new()),
             None,
-            Arc::new(LocalHostProcessPort::new()),
+            Arc::new(HostProcessPort::new()),
             None,
         )),
     );

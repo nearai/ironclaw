@@ -119,7 +119,7 @@ pub use post_edit_check::{
 };
 pub use process_output::{SavedCommandOutput, SavedCommandOutputSanitization};
 pub use process_port::{
-    CommandExecutionOutput, CommandExecutionRequest, LocalHostProcessPort, RuntimeProcessError,
+    CommandExecutionOutput, CommandExecutionRequest, HostProcessPort, RuntimeProcessError,
     RuntimeProcessPort, SandboxCommandTransport, TenantSandboxProcessPort,
 };
 pub use production::DefaultHostRuntime;

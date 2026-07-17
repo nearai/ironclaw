@@ -67,8 +67,8 @@ use ironclaw_host_api::{
 #[cfg(any(feature = "libsql", feature = "postgres"))]
 use ironclaw_host_api::{HostApiError, MountAlias, MountGrant};
 use ironclaw_host_runtime::{
-    CapabilitySurfaceVersion, FirstPartyCapabilityRegistry, HostRuntimeHttpEgressPort,
-    HostRuntimeServices, LocalHostProcessPort, PostEditCheckConfig,
+    CapabilitySurfaceVersion, FirstPartyCapabilityRegistry, HostProcessPort,
+    HostRuntimeHttpEgressPort, HostRuntimeServices, PostEditCheckConfig,
     ProductAuthProviderRuntimePorts, TriggerCreateHook,
     builtin_first_party_handlers_with_trigger_create_hook, builtin_first_party_package,
 };
@@ -396,15 +396,15 @@ fn local_dev_process_port_for_policy(
     runtime_policy: &Option<ironclaw_host_api::runtime_policy::EffectiveRuntimePolicy>,
     workspace_root: &Path,
     host_home_root: Option<&LocalDevHostHomeRoot>,
-) -> Option<LocalHostProcessPort> {
+) -> Option<HostProcessPort> {
     let runtime_policy = runtime_policy.as_ref()?;
     if runtime_policy.process_backend != ProcessBackendKind::LocalHost {
         return None;
     }
     let mut process_port = if runtime_policy.secret_mode == SecretMode::InheritedEnv {
-        LocalHostProcessPort::new_inherited_env()
+        HostProcessPort::new_inherited_env()
     } else {
-        LocalHostProcessPort::new()
+        HostProcessPort::new()
     }
     .with_workdir_alias("/workspace", workspace_root);
     if let Some(host_home_root) = host_home_root {
