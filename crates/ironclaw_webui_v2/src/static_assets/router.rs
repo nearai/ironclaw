@@ -9,7 +9,6 @@
 //! the router's concern — host composition wraps this Router with
 //! its own middleware stack.
 
-use std::fmt;
 use std::sync::Arc;
 
 use axum::Router;
@@ -19,6 +18,7 @@ use axum::http::{HeaderValue, StatusCode, Uri, header};
 use axum::response::{IntoResponse, Redirect, Response};
 use axum::routing::get;
 use rand::RngExt as _;
+use thiserror::Error;
 
 use super::assets::{self, INDEX_HTML_TEMPLATE};
 
@@ -48,30 +48,15 @@ const DEFAULT_RESERVED_ROOT_NAMESPACES: &[&str] = &["api", "auth", "v1", "webhoo
 const EXPLICIT_STATIC_ROOT_NAMESPACES: &[&str] = &["v2", "wallet"];
 
 /// Invalid root namespace supplied to [`StaticRouterConfig`].
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, Error, PartialEq)]
 pub enum StaticRouterConfigError {
     /// The value is not one canonical literal URL path segment.
+    #[error("root namespace {namespace:?} must be one canonical ASCII URL path segment")]
     NonCanonicalRootNamespace { namespace: String },
     /// The static WebUI already owns behavior or assets below this root.
+    #[error("root namespace {namespace:?} is owned by the static WebUI surface")]
     StaticRootNamespaceConflict { namespace: String },
 }
-
-impl fmt::Display for StaticRouterConfigError {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::NonCanonicalRootNamespace { namespace } => write!(
-                formatter,
-                "root namespace {namespace:?} must be one canonical ASCII URL path segment",
-            ),
-            Self::StaticRootNamespaceConflict { namespace } => write!(
-                formatter,
-                "root namespace {namespace:?} is owned by the static WebUI surface",
-            ),
-        }
-    }
-}
-
-impl std::error::Error for StaticRouterConfigError {}
 
 /// Static SPA fallback policy supplied by host composition.
 ///
