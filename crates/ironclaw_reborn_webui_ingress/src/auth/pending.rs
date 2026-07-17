@@ -283,7 +283,7 @@ mod tests {
     #[test]
     fn insert_then_take_returns_same_flow() {
         let store = PendingFlowStore::new();
-        let (state, flow) = store.insert(google(), Some("/v2".to_string()));
+        let (state, flow) = store.insert(google(), Some("/".to_string()));
         assert!(!state.is_empty());
         let taken = store.take(&state).expect("flow present");
         assert_eq!(taken.provider, google());
@@ -292,7 +292,7 @@ mod tests {
             flow.code_verifier.expose_secret()
         );
         assert_eq!(taken.code_challenge, flow.code_challenge);
-        assert_eq!(taken.redirect_after.as_deref(), Some("/v2"));
+        assert_eq!(taken.redirect_after.as_deref(), Some("/"));
     }
 
     // Regression: the challenge stored on the flow MUST equal the
@@ -330,7 +330,7 @@ mod tests {
                     provider: google(),
                     code_verifier: SecretString::from("expired-verifier".to_string()),
                     code_challenge: "expired-challenge".to_string(),
-                    redirect_after: Some("/v2".to_string()),
+                    redirect_after: Some("/".to_string()),
                     created_at: Instant::now() - STATE_TTL - Duration::from_secs(1),
                 },
             );
@@ -419,6 +419,9 @@ mod tests {
     #[test]
     fn safe_redirects_pass_validation() {
         assert!(is_safe_redirect("/"));
+        // Cached pre-root-migration clients may still request the legacy SPA
+        // mount. Keep accepting it so the compatibility redirect can preserve
+        // the one-time login ticket on the way to `/`.
         assert!(is_safe_redirect("/v2"));
         assert!(is_safe_redirect("/v2/threads/abc"));
         assert!(is_safe_redirect("/v2?tab=settings"));
@@ -458,8 +461,8 @@ mod tests {
     #[test]
     fn sanitize_redirect_strips_unsafe_inputs() {
         assert_eq!(
-            sanitize_redirect(Some("/v2".to_string())),
-            Some("/v2".to_string())
+            sanitize_redirect(Some("/".to_string())),
+            Some("/".to_string())
         );
         assert_eq!(sanitize_redirect(Some("//attacker".to_string())), None);
         assert_eq!(

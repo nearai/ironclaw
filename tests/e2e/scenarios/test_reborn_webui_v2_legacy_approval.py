@@ -161,7 +161,7 @@ async def _open_stubbed_approval_thread(
         handle_resolve,
     )
 
-    await page.goto(f"{reborn_v2_server}/v2/chat/{THREAD_ID}?token={REBORN_V2_AUTH_TOKEN}")
+    await page.goto(f"{reborn_v2_server}/chat/{THREAD_ID}?token={REBORN_V2_AUTH_TOKEN}")
     await expect(page.locator(SEL_V2["chat_composer"])).to_be_visible(timeout=15000)
     await expect(page.locator(SEL_V2["msg_user"]).first).to_contain_text(
         "run a gated command", timeout=15000

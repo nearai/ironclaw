@@ -17,6 +17,9 @@
 #  10. Newly-added pub fn/type/struct/enum/trait with zero callers (dead/speculative API)
 #  11. Architecture sprawl smoke alarms without arch-exempt tracking plan
 #  12. Unscoped SSE broadcast in multi-tenant-reachable code
+#  13. Composition mass ratchet — blocks growth of ironclaw_reborn_composition's
+#      share of production crate code past the committed budget (runs only when
+#      composition or the gate is staged). See scripts/ci/check-composition-budget.sh.
 #
 # Also runs check-i18n-parity.sh when crates/ironclaw_gateway/static/i18n/*.js
 # files are staged, to ensure every language pack has the same key set.
@@ -128,6 +131,46 @@ if [ -n "$GATEWAY_APP_JS_CHANGED" ]; then
         echo ""
         echo "Commit blocked: one or more gateway JS modules failed syntax validation."
         echo "Fix the parse error(s) above or bypass with git commit --no-verify"
+        exit 1
+    fi
+fi
+
+# Composition mass ratchet: block commits that push ironclaw_reborn_composition's
+# share of production crate code past the committed ceiling
+# (scripts/ci/composition-budget.toml). Triggers on ANY staged crates/**.rs change
+# (composition growth OR another crate shrinking both lift the share — the metric
+# is a ratio) or a change to the gate itself.
+#
+# LIMITATION: the gate measures the WORKING TREE, not the staged index, so an
+# unstaged edit can mask a staged breach or cause a false block. This hook is a
+# fast local advisory; CI (.github/workflows/code_style.yml) runs the gate on the
+# actual merge commit and is the authoritative check.
+if [ "$HAS_STAGED_CHANGES" -eq 1 ]; then
+    COMPOSITION_STAGED=$(git diff --cached --name-only -- \
+        'crates/**/*.rs' \
+        'scripts/ci/composition-budget.toml' \
+        'scripts/ci/check-composition-budget.sh' 2>/dev/null || true)
+else
+    COMPOSITION_STAGED=$(git diff --name-only -- \
+        'crates/**/*.rs' \
+        'scripts/ci/composition-budget.toml' \
+        'scripts/ci/check-composition-budget.sh' 2>/dev/null || true)
+fi
+if [ -n "$COMPOSITION_STAGED" ]; then
+    SOURCE="${BASH_SOURCE[0]:-$0}"
+    while [ -L "$SOURCE" ]; do
+        LINK_TARGET="$(readlink "$SOURCE")"
+        case "$LINK_TARGET" in
+            /*) SOURCE="$LINK_TARGET" ;;
+            *)  SOURCE="$(cd "$(dirname "$SOURCE")" && pwd)/$LINK_TARGET" ;;
+        esac
+    done
+    PCS_SCRIPT_DIR="$(cd "$(dirname "$SOURCE")" && pwd)"
+    if ! "$PCS_SCRIPT_DIR/ci/check-composition-budget.sh"; then
+        echo ""
+        echo "Commit blocked: composition mass budget exceeded (see above)."
+        echo "Carve behavior out of ironclaw_reborn_composition, or raise the ceiling in"
+        echo "scripts/ci/composition-budget.toml with a rationale. Bypass: git commit --no-verify"
         exit 1
     fi
 fi

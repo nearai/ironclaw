@@ -49,8 +49,10 @@ use ironclaw_auth::GoogleOAuthRouteConfig;
 use ironclaw_host_api::ingress::IngressRouteDescriptor;
 use ironclaw_host_api::{AgentId, ProjectId, TenantId, UserId};
 use ironclaw_webui_v2::{
-    DEFAULT_SSE_MAX_CONCURRENT_PER_CALLER, WebUiV2Capabilities, WebUiV2RouteOptions, WebUiV2State,
-    is_webui_v2_operator_webui_config_route_id, webui_v2_router_with_options,
+    DEFAULT_SSE_MAX_CONCURRENT_PER_CALLER, StaticRouterConfig, StaticRouterConfigError,
+    WebUiV2Capabilities, WebUiV2RouteOptions, WebUiV2State,
+    is_webui_v2_operator_webui_config_route_id, static_router_with_config,
+    webui_v2_router_with_options,
 };
 use tower_http::catch_panic::CatchPanicLayer;
 use tower_http::cors::{AllowHeaders, CorsLayer};
@@ -530,6 +532,65 @@ pub enum WebuiServeError {
     InvalidCspHeader(String),
     #[error("rate-limit composition failed: {0}")]
     RateLimit(#[from] crate::webui::webui_rate_limit::RateLimitConfigError),
+    #[error(
+        "route descriptor `{route_id}` must begin with a literal root namespace: `{route_pattern}`"
+    )]
+    NonLiteralRootNamespace {
+        route_id: String,
+        route_pattern: String,
+    },
+    #[error(
+        "route descriptor `{route_id}` has noncanonical root namespace `{root_namespace}`: `{route_pattern}`"
+    )]
+    NonCanonicalRootNamespace {
+        route_id: String,
+        route_pattern: String,
+        root_namespace: String,
+    },
+    #[error(
+        "route descriptor `{route_id}` conflicts with static WebUI root namespace `{root_namespace}`: `{route_pattern}`"
+    )]
+    StaticRootNamespaceConflict {
+        route_id: String,
+        route_pattern: String,
+        root_namespace: String,
+    },
+}
+
+fn static_router_config_from_descriptors(
+    descriptors: &[IngressRouteDescriptor],
+) -> Result<StaticRouterConfig, WebuiServeError> {
+    let mut config = StaticRouterConfig::default();
+    for descriptor in descriptors {
+        let route_pattern = descriptor.route_pattern().as_str();
+        let root_namespace = route_pattern
+            .strip_prefix('/')
+            .and_then(|path| path.split('/').next())
+            .filter(|segment| !segment.is_empty())
+            .ok_or_else(|| WebuiServeError::NonLiteralRootNamespace {
+                route_id: descriptor.route_id().as_str().to_string(),
+                route_pattern: route_pattern.to_string(),
+            })?;
+        config = match config.try_with_additional_reserved_root_namespaces([root_namespace]) {
+            Ok(config) => config,
+            Err(StaticRouterConfigError::NonCanonicalRootNamespace { namespace }) => {
+                return Err(WebuiServeError::NonCanonicalRootNamespace {
+                    route_id: descriptor.route_id().as_str().to_string(),
+                    route_pattern: route_pattern.to_string(),
+                    root_namespace: namespace,
+                });
+            }
+            Err(StaticRouterConfigError::StaticRootNamespaceConflict { namespace }) => {
+                return Err(WebuiServeError::StaticRootNamespaceConflict {
+                    route_id: descriptor.route_id().as_str().to_string(),
+                    route_pattern: route_pattern.to_string(),
+                    root_namespace: namespace,
+                });
+            }
+        };
+    }
+
+    Ok(config)
 }
 
 /// Build the fully-composed Reborn WebChat v2 axum app:
@@ -655,6 +716,7 @@ pub fn webui_v2_app_with_lifecycle(
     for mount in &protected_mounts {
         descriptors.extend(mount.descriptors.iter().cloned());
     }
+    let static_router_config = static_router_config_from_descriptors(&descriptors)?;
     let rate_limit_state = build_rate_limit_state(&descriptors)?;
     let body_limit_state = build_body_limit_state(&descriptors);
     let ws_origin_state = build_websocket_origin_state(
@@ -767,14 +829,11 @@ pub fn webui_v2_app_with_lifecycle(
         // CORS, panic boundary, and the global body-limit
         // (`.layer(...)` calls below) still apply, defense in depth.
         //
-        // The static crate's `mount_at_prefix` factory owns the
-        // routing surface (root, trailing-slash, wildcard, and any
-        // future routes it adds) so the composition layer never
-        // enumerates individual handlers. `merge` (not `nest`) is
-        // used because the factory already returns fully prefixed
-        // routes — `nest` in axum 0.8 has quirky dispatch for the
-        // exact prefix with/without trailing slash.
-        .merge(ironclaw_webui_v2::mount_at_prefix("/v2"))
+        // The static crate owns the complete browser surface: root SPA
+        // routes, assets, the isolated wallet popup, and compatibility
+        // redirects from the former `/v2` mount. Composition merges that
+        // surface as a unit so it never re-implements route policy.
+        .merge(static_router_with_config(static_router_config))
         // Outer global cap: applies to unmatched paths (e.g. 404 fallback)
         // as defense in depth. v2 routes are tighter via the per-route
         // body-limit middleware above.
