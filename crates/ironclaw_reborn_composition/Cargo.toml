@@ -201,7 +201,13 @@ http = "1"
 http-body-util = "0.1"
 # Admin-user-management e2e test drives the composed app with a real session
 # authenticator so a minted API token can be validated (login-with-token).
-ironclaw_reborn_webui_ingress = { path = "../ironclaw_reborn_webui_ingress" }
+# `slack-v2-host-beta` is enabled because composition's own WebUI integration
+# tests (`tests/webui_v2_product_auth*.rs`) exercise
+# `#[cfg(feature = "slack-v2-host-beta")]` blocks that call the
+# `WebuiServeConfig::with_slack_*` setters — which moved into this ingress crate
+# and are gated on the ingress slack feature. Cargo features cannot reach a
+# dev-dependency, so the dev-dep must request the feature directly.
+ironclaw_reborn_webui_ingress = { path = "../ironclaw_reborn_webui_ingress", features = ["slack-v2-host-beta"] }
 secrecy = { version = "0.10", features = ["serde"] }
 ironclaw_common = { path = "../ironclaw_common" }
 ironclaw_host_api = { path = "../ironclaw_host_api" }

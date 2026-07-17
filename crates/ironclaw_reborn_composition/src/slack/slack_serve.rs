@@ -25,7 +25,7 @@ use ironclaw_wasm_product_adapters::{
 };
 use serde::Serialize;
 
-use crate::webui::webui_serve::{PublicRouteDrain, PublicRouteMount};
+use crate::webui::route_mounts::{PublicRouteDrain, PublicRouteMount};
 
 mod installation;
 pub use installation::{

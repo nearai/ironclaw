@@ -132,6 +132,13 @@ pub use llm_admin::nearai_mcp::{
 };
 #[cfg(feature = "openai-compat-beta")]
 pub use llm_admin::openai_compat_serve::build_openai_compat_route_mount;
+// Re-exported for the host-owned `ironclaw_reborn_webui_ingress::webui_v2_app`
+// (hoisted up from this crate): its bearer-auth middleware mints tenant-scoped
+// verified-bearer evidence for protected OpenAI-compatible mounts. Ingress must
+// not depend on `ironclaw_product_adapters` directly (architecture boundary), so
+// it reaches this helper through composition's facade.
+#[cfg(feature = "openai-compat-beta")]
+pub use ironclaw_product_adapters::mark_bearer_token_verified_for_tenant;
 #[cfg(feature = "root-llm-provider")]
 pub use llm_admin::provider_admin::{
     RebornModelRoutesState, RebornProviderAdmin, RebornProviderAdminError, RebornProviderInfo,
@@ -214,8 +221,9 @@ pub use slack::slack_actor_identity::{
 };
 #[cfg(feature = "slack-v2-host-beta")]
 pub use slack::slack_channel_routes::{
-    SlackChannelRouteAdminRouteConfig, WEBUI_V2_CHANNELS_SLACK_ALLOWED_PATH,
-    WEBUI_V2_CHANNELS_SLACK_ROUTES_PATH, WEBUI_V2_CHANNELS_SLACK_SUBJECTS_PATH,
+    SlackChannelRouteAdminRouteConfig, SlackChannelRouteAdminRouteMount,
+    WEBUI_V2_CHANNELS_SLACK_ALLOWED_PATH, WEBUI_V2_CHANNELS_SLACK_ROUTES_PATH,
+    WEBUI_V2_CHANNELS_SLACK_SUBJECTS_PATH, slack_channel_route_admin_route_mount,
 };
 #[cfg(feature = "slack-v2-host-beta")]
 pub use slack::slack_connectable_channel::{

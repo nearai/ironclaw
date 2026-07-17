@@ -48,30 +48,25 @@ use ironclaw_host_api::{AgentId, ProjectId, TenantId, UserId};
 // Route surface + facade + product-auth mount builders now travel through the
 // composition facade (the mount vocabulary + product-auth serve items are
 // re-exported from `ironclaw_reborn_composition`).
-use ironclaw_reborn_composition::{
-    GoogleOAuthRouteConfig, ProductAuthRouteState, ProtectedRouteMount, PublicRouteDrains,
-    PublicRouteMount, RebornWebuiBundle, product_auth_route_mount,
-};
 use crate::webui_v2::{
     DEFAULT_SSE_MAX_CONCURRENT_PER_CALLER, WebUiV2Capabilities, WebUiV2RouteOptions, WebUiV2State,
     is_webui_v2_operator_webui_config_route_id, webui_v2_router_with_options,
+};
+use ironclaw_reborn_composition::{
+    GoogleOAuthRouteConfig, ProductAuthRouteState, ProtectedRouteMount, PublicRouteDrains,
+    PublicRouteMount, RebornWebuiBundle, product_auth_route_mount,
 };
 use tower_http::catch_panic::CatchPanicLayer;
 use tower_http::cors::{AllowHeaders, CorsLayer};
 use tower_http::limit::RequestBodyLimitLayer;
 use tower_http::set_header::SetResponseHeaderLayer;
 
-// TODO(slack-merge): the Slack host-beta personal-OAuth + channel-route admin
-// surface is gated on `slack-v2-host-beta`, a composition feature that is out
-// of scope for this merge. These `crate::slack::*` / composition-internal
-// paths compile out under this crate's default features; wiring the Slack
-// surface through the ingress crate is deferred.
-#[cfg(feature = "slack-v2-host-beta")]
-use ironclaw_reborn_composition::SlackPersonalOAuthBindingConfig;
-#[cfg(feature = "slack-v2-host-beta")]
-use crate::slack::slack_channel_routes::{
-    SlackChannelRouteAdminRouteConfig, slack_channel_route_admin_route_mount,
-};
+// The Slack host-beta personal-OAuth + channel-route admin surface is gated on
+// `slack-v2-host-beta`, which this crate forwards to
+// `ironclaw_reborn_composition/slack-v2-host-beta` (see Cargo.toml). Because the
+// `webui_v2_app` gateway assembly was hoisted up here from composition, these
+// Slack setup/route types are consumed through composition's public surface,
+// not a `crate::slack::*` module (this crate has none).
 use crate::webui_body_limit::{build_body_limit_state, enforce_body_limit};
 use crate::webui_operator_auth::{
     OperatorWebuiConfigRouteState, build_operator_webui_config_route_state,
@@ -79,6 +74,11 @@ use crate::webui_operator_auth::{
 use crate::webui_rate_limit::{build_rate_limit_state, enforce_rate_limit};
 use crate::webui_ws_origin::{build_websocket_origin_state, enforce_websocket_origin};
 use ironclaw_product_workflow::WebUiAuthenticatedCaller;
+#[cfg(feature = "slack-v2-host-beta")]
+use ironclaw_reborn_composition::{
+    SlackChannelRouteAdminRouteConfig, SlackPersonalOAuthBindingConfig,
+    slack_channel_route_admin_route_mount,
+};
 use serde::Serialize;
 
 /// Default per-request body limit (14 MiB) — sized to cover ~10 MiB of
@@ -260,7 +260,7 @@ pub struct WebuiServeConfig {
     pub(crate) google_oauth: Option<GoogleOAuthRouteConfig>,
     #[cfg(feature = "slack-v2-host-beta")]
     pub(crate) slack_personal_oauth:
-        Option<crate::slack::slack_setup::SlackPersonalSetupServiceSlot>,
+        Option<ironclaw_reborn_composition::SlackPersonalSetupServiceSlot>,
     /// Optional host hook that binds a successful Slack personal OAuth identity
     /// to the authenticated Reborn user.
     #[cfg(feature = "slack-v2-host-beta")]
@@ -325,7 +325,7 @@ impl WebuiServeConfig {
     #[cfg(feature = "slack-v2-host-beta")]
     pub fn with_slack_personal_oauth(
         mut self,
-        slot: crate::slack::slack_setup::SlackPersonalSetupServiceSlot,
+        slot: ironclaw_reborn_composition::SlackPersonalSetupServiceSlot,
     ) -> Self {
         self.slack_personal_oauth = Some(slot);
         self
@@ -831,7 +831,7 @@ async fn authenticate_request(
             state.default_agent_id.clone(),
             state.default_project_id.clone(),
         );
-        let auth_evidence = ironclaw_product_adapters::mark_bearer_token_verified_for_tenant(
+        let auth_evidence = ironclaw_reborn_composition::mark_bearer_token_verified_for_tenant(
             openai_user_id.as_str(),
             state.tenant_id.clone(),
         );

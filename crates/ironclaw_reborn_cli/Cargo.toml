@@ -68,10 +68,12 @@ webui-v2-beta = [
 slack-v2-host-beta = [
     "webui-v2-beta",
     "ironclaw_reborn_composition/slack-v2-host-beta",
+    "ironclaw_reborn_webui_ingress/slack-v2-host-beta",
 ]
 openai-compat-beta = [
     "webui-v2-beta",
     "ironclaw_reborn_composition/openai-compat-beta",
+    "ironclaw_reborn_webui_ingress/openai-compat-beta",
 ]
 # Enable production PostgreSQL storage composition for `ironclaw-reborn`.
 postgres = [
