@@ -1147,25 +1147,60 @@ regressions that a fast in-memory store hides.
 
 ---
 
-## 13. Open questions
+## 13. Decisions (formerly open questions)
 
-1. Should `TurnRun` and `ironclaw_processes` converge on a shared leased-work-unit
-   abstraction, or stay deliberately separate with a documented rationale?
-2. ~~Does `Authority` accrete as one value, or stay separate witnesses?~~ **Resolved
-   (§3):** it accretes as one value but is **sealed** — private fields, host-only
-   construction via `authorize()`, following the `LoopExitValidationPolicy`
-   private-field / host-witness pattern
-   (`docs/reborn/2026-05-11-trust-boundary-stack-note.md`), so no caller can forge or
-   retain an unauthorized `Authority`. Open sub-question: whether any field needs a
-   narrowed public projection for a product adapter, or all stay crate-private.
-3. ~~Is `DeploymentConfig` expressive enough to encode every current
-   LocalDev/HostedDev/EnterpriseDev difference as data?~~ **Answered (§4.4.1):** it
-   expresses every *selection*; the `LocalDev*` code residue is not all config — part
-   de-prefixes into shared substrates, part becomes config-*gated* shared middleware,
-   and the four synthetic product-ops should be promoted to first-party capabilities.
-   Remaining sub-question: which `DeploymentConfig` fields gate the local-only
-   decorators, and does promoting the synthetic capabilities to a real lane change any
-   hosted capability surface?
+**1. Do `TurnRun` and `ironclaw_processes` converge? — Converge the *mechanism*, keep
+the *policy*.** They duplicate six machinery layers (status enum, store, in-memory +
+filesystem stores, cancellation, eventing decorator, resource accounting; §1.4), but
+they diverge where it matters: a `TurnRun` resumes from a checkpoint after a lease
+expiry, whereas a crashed OS process cannot be resumed — it is terminal and re-spawned.
+So:
+
+- **Share the mechanism.** §4.3 already collapses the store layer for free (both become
+  `Filesystem*Store<RootFilesystem>` over one backend). Extract the remaining common
+  substrate — a leased, resource-accounted work record with a cancellation registry and
+  an eventing decorator — as one `LeasedWorkUnit`. This deletes roughly half the
+  duplication.
+- **Keep the policy distinct.** Do **not** force one status enum or one recovery model.
+  `TurnRun` recovery = resume-from-checkpoint; process recovery = terminal + re-spawn (a
+  new unit). That divergence is real and load-bearing; unifying it would corrupt one of
+  the two.
+- **Bonus fix:** the shared lease-recovery mechanism gives `ironclaw_processes` the
+  reconciler it currently lacks (§1.4, mechanism 2 — orphaned processes leak at
+  `Running`). Convergence closes that gap instead of preserving it.
+
+This is the mechanism-vs-policy rule (§2.1) applied to the two lifecycles: share what is
+identical, keep what genuinely differs.
+
+**2. Is `Authority` one value or separate witnesses? — One *sealed* value (§3).**
+Private fields, host-only construction via `authorize()` (the `LoopExitValidationPolicy`
+witness pattern; `docs/reborn/2026-05-11-trust-boundary-stack-note.md`); no caller can
+forge or retain an unauthorized `Authority`. If a product adapter ever needs a field,
+expose a narrowed read projection, never the constructor.
+
+**3. Does `DeploymentConfig` express everything? — Yes for selection (§4.4.1); the
+decorator gating and synthetic-capability promotion are settled here.**
+
+- **Surface-disclosure decorator** (shell runs on the real host; `/host` aliases) is
+  **derived from `process: HostUnsandboxed`** — no separate flag; if the process policy
+  is host-unsandboxed, the disclosure is on.
+- **Mid-run surface-refresh** is gated by a `session: LongLived | PerRun` config value:
+  a local long-lived process must re-read live extension installs; hosted rebuilds the
+  port per run and needs no refresh.
+- **Synthetic product tools** (`project_create`, `skill_activate`, `result_read`,
+  `outbound_delivery_*`) are **not** decorators — promote them to first-party
+  capabilities on the normal lane (§4.4.1). Visibility is capability-surface policy
+  (default **hidden in hosted**, visible in local). Promotion is a *security
+  improvement*, not a risk: as real capabilities they pass `authorize()` and gain
+  scope-binding/mounts for free — closing the scope-binding gap the synthetic handlers
+  have (e.g. `result_read` / `outbound_delivery` must be user-scoped). The only
+  pre-promotion check is that each descriptor declares the correct scope and defaults
+  hidden until reviewed for the hosted surface.
+
+**Genuinely remaining (tuning/ops, not architecture):** the lease-TTL latency multiplier
+`k` in `lease_ttl ≥ k × backend_p99_write` (§12), and the default `RootFilesystem` backend
+per deployment tier (in-memory/disk local, libSQL small, Postgres multi-tenant). These are
+knobs to calibrate against measured latency, not open architectural questions.
 
 ---
 
