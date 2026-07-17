@@ -3086,21 +3086,32 @@ mod tests {
         };
 
         // A start-time slot record plus its crash-window identity row, exactly
-        // as the old binary could leave them.
+        // as the old binary could leave them. The record is written as the raw
+        // legacy JSON — including the retired `pending_connection` object no
+        // current struct can express — so this pins serde's unknown-field
+        // tolerance, not just the `connecting` state mapping.
         let connection_path = FilesystemSlackHostState::<InMemoryBackend>::connection_path(&owner)
             .expect("connection path");
+        let mut legacy_record = serde_json::to_value(StoredSlackConnection::new(
+            &owner,
+            legacy_epoch,
+            SlackConnectionState::Connecting,
+            Utc::now(),
+            connection_expiry(),
+        ))
+        .expect("legacy record serializes");
+        legacy_record
+            .as_object_mut()
+            .expect("legacy record is a JSON object")
+            .insert(
+                "pending_connection".to_string(),
+                serde_json::json!({
+                    "epoch": legacy_epoch,
+                    "expires_at": connection_expiry(),
+                }),
+            );
         legacy
-            .write_record(
-                &connection_path,
-                &StoredSlackConnection::new(
-                    &owner,
-                    legacy_epoch,
-                    SlackConnectionState::Connecting,
-                    Utc::now(),
-                    connection_expiry(),
-                ),
-                CasExpectation::Absent,
-            )
+            .write_record(&connection_path, &legacy_record, CasExpectation::Absent)
             .await
             .expect("legacy connecting record is durable");
         let identity_path = FilesystemSlackHostState::<InMemoryBackend>::identity_path(

@@ -115,6 +115,33 @@ pub async fn run(g: &RebornIntegrationGroup) -> HarnessResult<()> {
     if drive_run == calendar_run {
         return Err("each OAuth install must park its own run, not join calendar's".into());
     }
+    let drive_state = drive
+        .wait_for_status(drive_run, TurnStatus::BlockedAuth)
+        .await?;
+    let drive_requirement = drive_state
+        .credential_requirements
+        .iter()
+        .find(|requirement| requirement.provider == google_provider)
+        .ok_or_else(|| {
+            format!(
+                "drive activation must park a renderable google requirement; got {:?}",
+                drive_state.credential_requirements
+            )
+        })?;
+    for expected_scope in [GOOGLE_DRIVE_READONLY_SCOPE, GOOGLE_DRIVE_SCOPE] {
+        if !drive_requirement
+            .provider_scopes
+            .iter()
+            .any(|scope| scope == expected_scope)
+        {
+            return Err(format!(
+                "the parked drive requirement must carry the SELECTED capability's drive \
+                 scopes; missing {expected_scope}; got {:?}",
+                drive_requirement.provider_scopes
+            )
+            .into());
+        }
+    }
     // Both gates are parked at once; resolving drive's must not touch
     // calendar's.
     drive.deny_auth_gate(drive_run, &drive_gate).await?;
@@ -138,6 +165,10 @@ pub async fn run(g: &RebornIntegrationGroup) -> HarnessResult<()> {
     calendar
         .wait_for_status(calendar_run, TurnStatus::Completed)
         .await?;
+    // No post-denial `assert_no_error_shaped_tool_result` here: an explicit
+    // user denial legitimately lands as an error-status observation ("auth
+    // gate denied by user") so the model knows authorization was refused. The
+    // #5878 shape rule bans errors standing in for GATES, not denial markers.
 
     // ── Phase 4: one correctly-scoped google account unlocks BOTH packages ──
     // Retire the gmail-scoped account so account selection is unambiguous,

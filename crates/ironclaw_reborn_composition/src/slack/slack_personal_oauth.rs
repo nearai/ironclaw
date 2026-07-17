@@ -348,7 +348,7 @@ fn slack_personal_oauth_abandon_hook(
                     return Ok(());
                 }
                 Err(error) => {
-                    tracing::warn!(
+                    tracing::debug!(
                         %error,
                         flow_id = %flow_id,
                         "failed to resolve Slack connection scope for terminal cleanup"

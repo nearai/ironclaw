@@ -148,8 +148,9 @@ So a two-turn thread where both turns raise and resolve a gate needs 4 entries
   model-prompt assertion `assert_system_prompt_contains` (reads the scripted
   `TraceLlm`'s captured requests via `captured_system_prompts`, not the egress
   log).
-- Tests live as `tests/integration/<name>.rs` bins, each registered as its own
-  `[[test]]` in the workspace `Cargo.toml` with
+- Tests live as bins anywhere under `tests/integration/` — flat
+  (`tests/integration/<name>.rs`) or inside a domain folder — each registered
+  as its own `[[test]]` in the workspace `Cargo.toml` with
   `name = "reborn_integration_<name>"`. Domain folders group related bins by
   pointing the `[[test]]` `path` into the folder — `tests/integration/auth/`
   holds the auth user-journey bins (`oauth_connect`, `oauth_popup_journeys`,
@@ -160,9 +161,10 @@ So a two-turn thread where both turns raise and resolve a gate needs 4 entries
   `#[path = "../../support/mod.rs"]`. Extension-lifecycle journeys live as
   scenarios under `group_extensions/` (see Group tests below).
 
-Module paths: each `tests/integration/<name>.rs` declares both
+Module paths: each flat `tests/integration/<name>.rs` declares both
 `#[path = "support/mod.rs"] mod reborn_support;` and
-`#[path = "../support/mod.rs"] mod support;`, then
+`#[path = "../support/mod.rs"] mod support;` (bins one folder deeper prepend
+one more `../` to each, as above), then
 `use reborn_support::builder::RebornIntegrationHarness;` /
 `use reborn_support::reply::RebornScriptedReply;`. Inside the support tree,
 siblings reference each other via `super::` and `trace_llm` via
