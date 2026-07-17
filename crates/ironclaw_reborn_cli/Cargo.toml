@@ -19,7 +19,24 @@ layer = "app"
 dist = false
 
 [features]
-default = ["root-llm-provider"]
+# libsql is the default storage backend: a file-backed local database needs
+# no external server, so a default `ironclaw-reborn` build is runnable as-is.
+# `postgres` remains opt-in for deployments that point `[storage]` at a server.
+default = ["root-llm-provider", "libsql"]
+# Everything a full-fat local/desktop build ships: the WebChat v2 HTTP
+# gateway (and with it `serve` + `service`), the Slack and OpenAI-compat
+# host mounts, and every storage backend so the binary can honor whatever
+# `[storage]` the operator's config selects at runtime rather than being
+# pinned at compile time.
+full = [
+    "webui-v2-beta",
+    "slack-v2-host-beta",
+    "libsql",
+    "postgres",
+    "inmemory-turn-state",
+    "openai-compat-beta",
+    "root-llm-provider",
+]
 # Wire a real LLM provider into the assembled runtime. Mirrors the same
 # `root-llm-provider` feature on `ironclaw_reborn_composition` /
 # `ironclaw_runner`, so building without it produces a CLI binary that
@@ -85,6 +102,7 @@ ironclaw_reborn_composition = { path = "../ironclaw_reborn_composition", version
 ironclaw_reborn_config = { path = "../ironclaw_reborn_config", version = "0.1.0" }
 ironclaw_reborn_traces = { path = "../ironclaw_reborn_traces", version = "0.1.0" }
 ironclaw_reborn_webui_ingress = { path = "../ironclaw_reborn_webui_ingress", version = "0.1.0", optional = true }
+rand = "0.10"
 reqwest = { version = "0.12", default-features = false, features = ["json", "multipart", "rustls-tls-native-roots", "stream"] }
 secrecy = "0.10"
 serde = { version = "1", features = ["derive"] }
@@ -96,6 +114,14 @@ tokio-util = { version = "0.7", features = ["rt"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
 uuid = { version = "1", features = ["v4", "v5", "serde"] }
+
+[target.'cfg(unix)'.dependencies]
+# O_NOFOLLOW for the single-handle, symlink-safe token file open in
+# `webui_token::read_token_file_checked` — the flag's raw value differs
+# across unix platforms (Linux vs macOS), so it must come from `libc`
+# rather than being hardcoded. Already present transitively; pinned here
+# as a direct dependency of the code that now uses it.
+libc = "0.2"
 
 [dev-dependencies]
 # Enable the composition crate's `test-support` seam for CLI unit tests so
