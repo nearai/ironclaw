@@ -827,9 +827,10 @@ mod tests {
     use crate::telegram_dispatch::test_fixtures::{
         CountingWorkflow, FakeIdentityLookup, RecordingBotApi, configured_setup_service,
         fixture_installation_id, pairing_service_with, private_text_update_body,
-        unconfigured_setup_service,
+        unconfigured_setup_service, unconfigured_setup_service_with_state,
     };
     use crate::telegram_setup::TelegramInstallationSetupUpdate;
+    use crate::test_support::fault_injected_telegram_state;
     use secrecy::SecretString;
 
     /// Rebuild the Telegram ingress descriptor as a Rust literal so the
@@ -1173,39 +1174,10 @@ mod tests {
     /// is the 401 shape.
     #[tokio::test]
     async fn telegram_updates_handler_returns_503_when_setup_store_is_down() {
-        #[derive(Debug)]
-        struct FailingSetupStore;
-
-        #[async_trait::async_trait]
-        impl crate::telegram_setup::TelegramInstallationSetupStore for FailingSetupStore {
-            async fn get_telegram_installation_setup(
-                &self,
-            ) -> Result<Option<TelegramInstallationSetup>, TelegramSetupError> {
-                Err(TelegramSetupError::StoreUnavailable)
-            }
-
-            async fn put_telegram_installation_setup(
-                &self,
-                _setup: &TelegramInstallationSetup,
-            ) -> Result<(), TelegramSetupError> {
-                Err(TelegramSetupError::StoreUnavailable)
-            }
-
-            async fn delete_telegram_installation_setup(&self) -> Result<(), TelegramSetupError> {
-                Err(TelegramSetupError::StoreUnavailable)
-            }
-        }
-
-        let setup = Arc::new(TelegramSetupService::new(
-            TenantId::new("tenant-a").expect("tenant"),
-            ironclaw_host_api::AgentId::new("agent-a").expect("agent"),
-            None,
-            ironclaw_host_api::UserId::new("operator").expect("user"),
-            Arc::new(FailingSetupStore),
-            Arc::new(ironclaw_secrets::InMemorySecretStore::new()),
-            Arc::new(RecordingBotApi::default()),
-            Some("https://ironclaw.example".to_string()),
-        ));
+        let (state, filesystem) = fault_injected_telegram_state();
+        filesystem.fail_reads();
+        let setup =
+            unconfigured_setup_service_with_state(Arc::new(RecordingBotApi::default()), state);
         let pairing = pairing_service_with(Arc::clone(&setup));
         let resolver = Arc::new(DynamicTelegramInstallationResolver::new(
             setup,

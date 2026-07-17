@@ -417,9 +417,10 @@ after the named evidence is green.
 - [x] **A1 — Delivery ownership:** generic live/triggered/actionable delivery behavior is
   owned by `ironclaw_channel_delivery`; its 87 unit tests, public API test, targeted Clippy,
   and Reborn dependency/composition boundary suites pass, and the old composition path is gone.
-- [ ] **A2 — Concrete Telegram state:** setup, pairing, binding, and DM-target services use
-  one filesystem-backed state; the six named same-crate store/provider/resolver traits are
-  gone.
+- [x] **A2 — Concrete Telegram state:** setup, pairing, binding, and DM-target services use
+  one filesystem-backed state; the four parallel state-store traits and all Telegram
+  `InMemory*Store` fakes are gone. Eight state tests, the 100-test Telegram suite, targeted
+  Clippy, the real-state architecture ratchet, and the Telegram composition feature check pass.
 - [ ] **A3 — Concrete Bot API:** `TelegramBotApi` is gone and tests use mediated HTTP, or a
   security-boundary exception is documented with evidence that deletion would expose
   credentials or bypass network mediation.

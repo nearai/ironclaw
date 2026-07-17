@@ -36,11 +36,11 @@ use ironclaw_product_adapters::{
 use ironclaw_product_workflow::{
     AccountConnectionStatusSource, ApprovalInteractionService, AuthInteractionService,
     ChannelConnectionFacade, ConnectableChannelsProductFacade, ConversationBindingService,
-    DefaultInboundTurnService, DefaultProductWorkflow, LifecyclePackageKind, LifecyclePackageRef,
-    LifecyclePhase, ProductActorUserResolver, ProductConversationBindingService,
-    ProductInstallationKey, ProductInstallationScope, ProductWorkflowError,
-    RebornFilesystemIdempotencyLedger, ResolveBindingRequest, ResolvedBinding,
-    StaticProductInstallationResolver,
+    DefaultInboundTurnService, DefaultProductWorkflow, IdempotencyLedger, LifecyclePackageKind,
+    LifecyclePackageRef, LifecyclePhase, ProductActorUserResolver,
+    ProductConversationBindingService, ProductInstallationKey, ProductInstallationScope,
+    ProductWorkflowError, RebornFilesystemIdempotencyLedger, ResolveBindingRequest,
+    ResolvedBinding, StaticProductInstallationResolver,
 };
 use ironclaw_safety::{SafetyConfig, SafetyLayer};
 use ironclaw_threads::SessionThreadService;
@@ -62,6 +62,7 @@ use ironclaw_channel_delivery::{
 };
 use ironclaw_channel_host::identity::RebornUserIdentityLookup;
 pub use ironclaw_telegram_extension::TelegramHostBuildError;
+use ironclaw_telegram_extension::state::FilesystemTelegramHostState;
 use ironclaw_telegram_extension::telegram_actor_identity::{
     TELEGRAM_V2_ADAPTER_ID, TelegramUserIdentityActorResolver,
 };
@@ -79,18 +80,15 @@ use ironclaw_telegram_extension::telegram_connectable_channel::{
 use ironclaw_telegram_extension::telegram_egress::{
     SetupServiceTelegramEgressCredentialProvider, TelegramProtocolHttpEgress,
 };
-use ironclaw_telegram_extension::telegram_host_state::FilesystemTelegramHostState;
 use ironclaw_telegram_extension::telegram_outbound_targets::TelegramOutboundTargetProvider;
-use ironclaw_telegram_extension::telegram_pairing::{
-    TelegramDmTargetStore, TelegramPairingService, TelegramPairingStore, TelegramUserBindingStore,
-};
+use ironclaw_telegram_extension::telegram_pairing::TelegramPairingService;
 use ironclaw_telegram_extension::telegram_serve::{
     DynamicTelegramInstallationResolver, TelegramInstallationResolver, TelegramRevisionWorkflow,
     TelegramRevisionWorkflowBuildError, TelegramRevisionWorkflowBuilder, TelegramUpdatesRouteState,
     telegram_updates_route_parts,
 };
 use ironclaw_telegram_extension::telegram_setup::{
-    TelegramInstallationSetup, TelegramInstallationSetupStore, TelegramSetupService,
+    TelegramInstallationSetup, TelegramSetupService,
 };
 
 const TELEGRAM_IDEMPOTENCY_LEDGER_SETTLED_LIMIT: usize = 10_000;
@@ -315,10 +313,6 @@ pub async fn build_telegram_host_runtime_mounts(
         config.agent_id.clone(),
         config.project_id.clone(),
     ));
-    let setup_store: Arc<dyn TelegramInstallationSetupStore> = state.clone();
-    let pairing_store: Arc<dyn TelegramPairingStore> = state.clone();
-    let binding_store: Arc<dyn TelegramUserBindingStore> = state.clone();
-    let dm_target_store: Arc<dyn TelegramDmTargetStore> = state.clone();
     let identity_lookup: Arc<dyn RebornUserIdentityLookup> = state.clone();
 
     let host_egress = parts
@@ -335,7 +329,7 @@ pub async fn build_telegram_host_runtime_mounts(
         config.agent_id.clone(),
         config.project_id.clone(),
         config.operator_user_id.clone(),
-        setup_store,
+        Arc::clone(&state),
         runtime.services().secret_store(),
         bot_api,
         config.public_base_url.clone(),
@@ -370,9 +364,7 @@ pub async fn build_telegram_host_runtime_mounts(
         config.agent_id.clone(),
         config.project_id.clone(),
         Arc::clone(&setup_service),
-        pairing_store,
-        binding_store,
-        Arc::clone(&dm_target_store),
+        Arc::clone(&state),
         continuation_dispatcher,
         Arc::clone(&actor_pairings),
     ));
@@ -395,7 +387,7 @@ pub async fn build_telegram_host_runtime_mounts(
     // so sharing one instance keeps inbound dedup continuous across a
     // first-configure or bot swap instead of resetting its in-memory
     // settled-entry accounting per revision.
-    let idempotency_ledger = Arc::new(
+    let idempotency_ledger: Arc<dyn IdempotencyLedger> = Arc::new(
         RebornFilesystemIdempotencyLedger::new(
             Arc::clone(&host_state_filesystem),
             telegram_egress_scope_template(&config),
@@ -450,7 +442,7 @@ pub async fn build_telegram_host_runtime_mounts(
         Arc::new(TelegramOutboundTargetProvider::new(
             config.tenant_id.clone(),
             Arc::clone(&setup_service),
-            Arc::clone(&dm_target_store),
+            Arc::clone(&state),
         ));
     let provider_key = telegram_outbound_delivery_target_provider_key(&config);
     let provider_already_registered = runtime
@@ -568,8 +560,7 @@ struct TelegramRevisionWorkflowParts {
     conversation_port: Arc<dyn ironclaw_conversations::ConversationBindingService>,
     actor_pairings: Arc<dyn ironclaw_conversations::ConversationActorPairingService>,
     actor_user_resolver: Arc<dyn ProductActorUserResolver>,
-    idempotency_ledger:
-        Arc<RebornFilesystemIdempotencyLedger<crate::factory::LocalDevRootFilesystem>>,
+    idempotency_ledger: Arc<dyn IdempotencyLedger>,
     egress: Arc<dyn ProtocolHttpEgress>,
     token_handle: EgressCredentialHandle,
 }

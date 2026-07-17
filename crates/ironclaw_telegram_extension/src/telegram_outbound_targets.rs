@@ -21,7 +21,8 @@ use ironclaw_product_workflow::{
 };
 use ironclaw_telegram_v2_adapter::build_reply_target_binding;
 
-use crate::telegram_pairing::{TelegramDmTarget, TelegramDmTargetStore, TelegramPairingError};
+use crate::state::FilesystemTelegramHostState;
+use crate::telegram_pairing::{TelegramDmTarget, TelegramPairingError};
 use crate::telegram_setup::{TelegramSetupError, TelegramSetupService};
 use ironclaw_channel_host::delivery_protocol::FinalReplyDeliveryError;
 use ironclaw_channel_host::outbound_targets::OutboundDeliveryTargetEntry;
@@ -33,19 +34,19 @@ use ironclaw_channel_host::outbound_targets::OutboundDeliveryTargetProvider;
 pub struct TelegramOutboundTargetProvider {
     tenant_id: TenantId,
     setup_service: Arc<TelegramSetupService>,
-    dm_target_store: Arc<dyn TelegramDmTargetStore>,
+    state: Arc<FilesystemTelegramHostState>,
 }
 
 impl TelegramOutboundTargetProvider {
     pub fn new(
         tenant_id: TenantId,
         setup_service: Arc<TelegramSetupService>,
-        dm_target_store: Arc<dyn TelegramDmTargetStore>,
+        state: Arc<FilesystemTelegramHostState>,
     ) -> Self {
         Self {
             tenant_id,
             setup_service,
-            dm_target_store,
+            state,
         }
     }
 
@@ -118,7 +119,7 @@ impl OutboundDeliveryTargetProvider for TelegramOutboundTargetProvider {
             .installation_id()
             .map_err(map_telegram_setup_error("derive Telegram installation id"))?;
         let Some(target) = self
-            .dm_target_store
+            .state
             .dm_target_for_user(&installation_id, &caller.user_id)
             .await
             .map_err(map_telegram_pairing_error)?
@@ -177,9 +178,12 @@ mod tests {
 
     use super::*;
     use crate::telegram_dispatch::test_fixtures::{
-        FIXTURE_BOT_USERNAME, InMemoryDmTargetStore, RecordingBotApi, configured_setup_service,
-        fixture_installation_id, unconfigured_setup_service,
+        FIXTURE_BOT_USERNAME, RecordingBotApi, fixture_installation_id,
+        unconfigured_setup_service_with_state,
     };
+    use crate::telegram_setup::TelegramInstallationSetupUpdate;
+    use crate::test_support::telegram_state;
+    use secrecy::SecretString;
 
     const TENANT: &str = "tenant-a";
     const USER: &str = "ben";
@@ -194,9 +198,9 @@ mod tests {
         )
     }
 
-    async fn paired_dm_store() -> Arc<InMemoryDmTargetStore> {
-        let store = Arc::new(InMemoryDmTargetStore::default());
-        store
+    async fn paired_state() -> Arc<FilesystemTelegramHostState> {
+        let state = telegram_state();
+        state
             .upsert_dm_target(
                 &fixture_installation_id(),
                 TelegramDmTarget {
@@ -206,25 +210,36 @@ mod tests {
             )
             .await
             .expect("dm target stores");
-        store
+        state
     }
 
     async fn configured_provider(
-        dm_target_store: Arc<InMemoryDmTargetStore>,
+        state: Arc<FilesystemTelegramHostState>,
     ) -> TelegramOutboundTargetProvider {
-        TelegramOutboundTargetProvider::new(
-            TenantId::new(TENANT).expect("tenant"),
-            configured_setup_service(Arc::new(RecordingBotApi::default())).await,
-            dm_target_store,
-        )
+        let setup = unconfigured_setup_service_with_state(
+            Arc::new(RecordingBotApi::default()),
+            Arc::clone(&state),
+        );
+        setup
+            .save_with_previous(TelegramInstallationSetupUpdate {
+                bot_token: Some(SecretString::from("123:abc".to_string())),
+                webhook_url_override: None,
+            })
+            .await
+            .expect("test setup saves");
+        TelegramOutboundTargetProvider::new(TenantId::new(TENANT).expect("tenant"), setup, state)
     }
 
     #[tokio::test]
     async fn list_is_empty_when_unconfigured() {
+        let state = paired_state().await;
         let provider = TelegramOutboundTargetProvider::new(
             TenantId::new(TENANT).expect("tenant"),
-            unconfigured_setup_service(Arc::new(RecordingBotApi::default())),
-            paired_dm_store().await,
+            unconfigured_setup_service_with_state(
+                Arc::new(RecordingBotApi::default()),
+                Arc::clone(&state),
+            ),
+            state,
         );
 
         let targets = provider
@@ -239,7 +254,7 @@ mod tests {
 
     #[tokio::test]
     async fn list_is_empty_when_caller_is_unpaired() {
-        let provider = configured_provider(Arc::new(InMemoryDmTargetStore::default())).await;
+        let provider = configured_provider(telegram_state()).await;
 
         let targets = provider
             .list_outbound_delivery_targets(&caller())
@@ -253,7 +268,7 @@ mod tests {
 
     #[tokio::test]
     async fn list_is_empty_for_cross_tenant_caller() {
-        let provider = configured_provider(paired_dm_store().await).await;
+        let provider = configured_provider(paired_state().await).await;
         let cross_tenant = WebUiAuthenticatedCaller::new(
             TenantId::new("tenant-other").expect("tenant"),
             UserId::new(USER).expect("user"),
@@ -273,7 +288,7 @@ mod tests {
 
     #[tokio::test]
     async fn paired_caller_gets_dm_entry_with_canonical_binding_ref() {
-        let provider = configured_provider(paired_dm_store().await).await;
+        let provider = configured_provider(paired_state().await).await;
 
         let targets = provider
             .list_outbound_delivery_targets(&caller())
@@ -308,7 +323,7 @@ mod tests {
 
     #[tokio::test]
     async fn resolve_outbound_delivery_target_default_impl_matches_own_id_only() {
-        let provider = configured_provider(paired_dm_store().await).await;
+        let provider = configured_provider(paired_state().await).await;
         let own_id = RebornOutboundDeliveryTargetId::new(format!(
             "telegram:dm:{}:{USER}",
             fixture_installation_id().as_str()
@@ -339,7 +354,7 @@ mod tests {
 
     #[tokio::test]
     async fn resolve_reply_target_binding_default_impl_matches_stored_ref() {
-        let provider = configured_provider(paired_dm_store().await).await;
+        let provider = configured_provider(paired_state().await).await;
         let stored_ref =
             ReplyTargetBindingRef::new(format!("tg:{CHAT_ID}:_:_")).expect("binding ref");
         let other_ref = ReplyTargetBindingRef::new("tg:999999:_:_").expect("binding ref");

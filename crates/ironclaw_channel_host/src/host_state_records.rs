@@ -44,7 +44,7 @@ pub async fn read_json_record<F, T>(
     label: &'static str,
 ) -> Result<Option<(T, RecordVersion)>, FilesystemError>
 where
-    F: RootFilesystem + 'static,
+    F: RootFilesystem + ?Sized + 'static,
     T: DeserializeOwned,
 {
     let Some(versioned) = filesystem.get(scope, path).await? else {
@@ -68,7 +68,7 @@ pub async fn write_json_record<F, T>(
     label: &'static str,
 ) -> Result<RecordVersion, FilesystemError>
 where
-    F: RootFilesystem + 'static,
+    F: RootFilesystem + ?Sized + 'static,
     T: Serialize,
 {
     let body =

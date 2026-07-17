@@ -387,25 +387,25 @@ impl FilesystemTelegramHostState {
 }
 ```
 
-- [ ] **Step 1: Rewrite state tests against production state plus InMemoryBackend**
+- [x] **Step 1: Rewrite state tests against production state plus InMemoryBackend**
 
 Add `test_support::telegram_state()` that erases `Arc<InMemoryBackend>` to `Arc<dyn RootFilesystem>` before constructing `ScopedFilesystem`. Move serialization, CAS single-claim, rotation, binding scope, and DM-target tests to the split state modules.
 
-- [ ] **Step 2: Run the focused state tests and observe trait-dependent compile failures**
+- [x] **Step 2: Run the focused state tests and observe trait-dependent compile failures**
 
 Run: `cargo test -p ironclaw_telegram_extension state`
 
 Expected: compile failures identify services still accepting `dyn Telegram*Store`.
 
-- [ ] **Step 3: Convert all four store trait implementations into inherent methods**
+- [x] **Step 3: Convert all four store trait implementations into inherent methods**
 
 Delete `TelegramInstallationSetupStore`, `TelegramPairingStore`, `TelegramUserBindingStore`, and `TelegramDmTargetStore`. Give `TelegramSetupService`, `TelegramPairingService`, and `TelegramOutboundTargetProvider` one shared `Arc<FilesystemTelegramHostState>` and preserve existing lock/CAS/error behavior.
 
-- [ ] **Step 4: Replace domain store fakes with lower-seam failure injection**
+- [x] **Step 4: Replace domain store fakes with lower-seam failure injection**
 
 Implement a test-only `RootFilesystem` decorator that delegates all methods and can fail selected read/write/delete/CAS calls or hold a read barrier. Rewrite setup rollback, pairing outage, and concurrent claim tests to use the concrete state over that decorator.
 
-- [ ] **Step 5: Run state, pairing, setup, and architecture tests**
+- [x] **Step 5: Run state, pairing, setup, and architecture tests**
 
 ```bash
 cargo test -p ironclaw_telegram_extension state
@@ -416,7 +416,13 @@ cargo test -p ironclaw_architecture --test telegram_extension_gates telegram_tes
 
 Expected: all pass and `rg -n "(TelegramInstallationSetupStore|TelegramPairingStore|TelegramUserBindingStore|TelegramDmTargetStore|struct InMemory.*Store)" crates/ironclaw_telegram_extension` prints nothing.
 
-- [ ] **Step 6: Commit concrete state**
+Observed: all eight concrete state tests, all 100 Telegram crate tests, the real-state
+architecture ratchet, Telegram/channel-host/conversation/product-workflow targeted Clippy,
+and the Telegram composition feature check pass. The deleted-trait/test-store scan prints
+nothing. Failure and contention coverage now injects read, write, delete, versioned-write,
+and read-barrier behavior below the concrete state at the `RootFilesystem` seam.
+
+- [x] **Step 6: Commit concrete state**
 
 ```bash
 git add crates/ironclaw_telegram_extension crates/ironclaw_reborn_composition
@@ -703,7 +709,9 @@ git commit -m "docs(reborn): complete PR 6159 architecture evidence"
 ## Material Acceptance Matrix
 
 - [x] **A1 — Delivery ownership:** Task 3; `cargo test -p ironclaw_channel_delivery`, targeted Clippy, both Reborn boundary suites, and the deleted composition path ratchet pass.
-- [ ] **A2 — Concrete Telegram state:** Task 5; state tests plus deleted-trait/test-store ratchets.
+- [x] **A2 — Concrete Telegram state:** Task 5; eight concrete-state tests, the 100-test
+  Telegram suite, targeted Clippy, the deleted-trait/test-store scan, real-state ratchet, and
+  Telegram composition feature check pass.
 - [ ] **A3 — Concrete Bot API:** Task 6; mediated HTTP tests plus deleted-symbol ratchet.
 - [ ] **A4 — DTO cleanup:** Tasks 2, 6, and 7; exact JSON tests plus deleted-symbol/accessor audit.
 - [x] **A5 — Generic lifecycle:** Task 4; six registry transition tests, 101 focused

@@ -460,7 +460,6 @@ pub mod test_fixtures {
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
     use async_trait::async_trait;
-    use chrono::Utc;
     use ironclaw_auth::AuthContinuationEvent;
     use ironclaw_auth::AuthProductError;
     use ironclaw_host_api::{AgentId, TenantId, UserId};
@@ -472,15 +471,10 @@ pub mod test_fixtures {
     use secrecy::SecretString;
 
     use super::*;
+    use crate::state::FilesystemTelegramHostState;
     use crate::telegram_bot_api::{TelegramBotApiError, TelegramBotIdentity};
-    use crate::telegram_pairing::{
-        TelegramBindingError, TelegramDmTarget, TelegramDmTargetStore, TelegramPairingError,
-        TelegramPairingRecord, TelegramPairingStore, TelegramUserBindingStore,
-    };
-    use crate::telegram_setup::{
-        TelegramInstallationSetup, TelegramInstallationSetupStore, TelegramInstallationSetupUpdate,
-        TelegramSetupError,
-    };
+    use crate::telegram_setup::TelegramInstallationSetupUpdate;
+    use crate::test_support::telegram_state;
     use ironclaw_channel_host::auth_continuation::RebornAuthContinuationDispatcher;
     use ironclaw_channel_host::identity::RebornUserIdentityLookupError;
 
@@ -573,225 +567,6 @@ pub mod test_fixtures {
                     kind: crate::telegram_bot_api::TelegramBotApiRejection::Forbidden,
                 });
             }
-            Ok(())
-        }
-    }
-
-    #[derive(Debug, Default)]
-    pub struct InMemorySetupStore {
-        record: StdMutex<Option<TelegramInstallationSetup>>,
-    }
-
-    #[async_trait]
-    impl TelegramInstallationSetupStore for InMemorySetupStore {
-        async fn get_telegram_installation_setup(
-            &self,
-        ) -> Result<Option<TelegramInstallationSetup>, TelegramSetupError> {
-            Ok(self.record.lock().expect("lock").clone())
-        }
-
-        async fn put_telegram_installation_setup(
-            &self,
-            setup: &TelegramInstallationSetup,
-        ) -> Result<(), TelegramSetupError> {
-            *self.record.lock().expect("lock") = Some(setup.clone());
-            Ok(())
-        }
-
-        async fn delete_telegram_installation_setup(&self) -> Result<(), TelegramSetupError> {
-            *self.record.lock().expect("lock") = None;
-            Ok(())
-        }
-    }
-
-    #[derive(Debug, Default)]
-    pub struct InMemoryPairingStore {
-        records: StdMutex<Vec<TelegramPairingRecord>>,
-    }
-
-    #[async_trait]
-    impl TelegramPairingStore for InMemoryPairingStore {
-        async fn upsert_pending_pairing(
-            &self,
-            record: TelegramPairingRecord,
-        ) -> Result<(), TelegramPairingError> {
-            let mut records = self.records.lock().expect("lock");
-            records.retain(|existing| {
-                existing.user_id != record.user_id || existing.consumed_at.is_some()
-            });
-            records.push(record);
-            Ok(())
-        }
-
-        async fn pairing_for_code(
-            &self,
-            code: &str,
-        ) -> Result<Option<TelegramPairingRecord>, TelegramPairingError> {
-            Ok(self
-                .records
-                .lock()
-                .expect("lock")
-                .iter()
-                .find(|record| record.code.eq_ignore_ascii_case(code))
-                .cloned())
-        }
-
-        async fn live_pairing_for_user(
-            &self,
-            user_id: &UserId,
-        ) -> Result<Option<TelegramPairingRecord>, TelegramPairingError> {
-            let now = Utc::now();
-            Ok(self
-                .records
-                .lock()
-                .expect("lock")
-                .iter()
-                .find(|record| &record.user_id == user_id && record.is_live(now))
-                .cloned())
-        }
-
-        async fn claim_pairing(
-            &self,
-            code: &str,
-        ) -> Result<Option<TelegramPairingRecord>, TelegramPairingError> {
-            let mut records = self.records.lock().expect("lock");
-            let now = Utc::now();
-            for record in records.iter_mut() {
-                if record.code.eq_ignore_ascii_case(code) {
-                    if !record.is_live(now) {
-                        return Ok(None);
-                    }
-                    record.consumed_at = Some(now);
-                    return Ok(Some(record.clone()));
-                }
-            }
-            Ok(None)
-        }
-
-        async fn invalidate_for_user(&self, user_id: &UserId) -> Result<(), TelegramPairingError> {
-            let mut records = self.records.lock().expect("lock");
-            records.retain(|record| &record.user_id != user_id);
-            Ok(())
-        }
-    }
-
-    #[derive(Debug, Default)]
-    pub struct InMemoryBindingStore {
-        bindings: StdMutex<HashMap<String, (UserId, String)>>,
-    }
-
-    #[async_trait]
-    impl TelegramUserBindingStore for InMemoryBindingStore {
-        async fn bind_telegram_user(
-            &self,
-            provider_user_id: &str,
-            user_id: &UserId,
-            epoch: &str,
-        ) -> Result<(), TelegramBindingError> {
-            let mut bindings = self.bindings.lock().expect("lock");
-            if let Some((existing, _)) = bindings.get(provider_user_id)
-                && existing != user_id
-            {
-                return Err(TelegramBindingError::AlreadyBoundToOtherUser);
-            }
-            bindings.insert(
-                provider_user_id.to_string(),
-                (user_id.clone(), epoch.to_string()),
-            );
-            Ok(())
-        }
-
-        async fn unbind_telegram_users_for_user(
-            &self,
-            user_id: &UserId,
-            installation: Option<&AdapterInstallationId>,
-        ) -> Result<Vec<crate::telegram_pairing::RemovedTelegramBinding>, TelegramBindingError>
-        {
-            let mut bindings = self.bindings.lock().expect("lock");
-            let removed: Vec<crate::telegram_pairing::RemovedTelegramBinding> = bindings
-                .iter()
-                .filter(|(key, (bound, _))| {
-                    bound == user_id
-                        && installation.is_none_or(|installation| {
-                            crate::telegram_actor_identity::provider_user_id_in_installation(
-                                key,
-                                installation,
-                            )
-                        })
-                })
-                .map(
-                    |(key, (_, epoch))| crate::telegram_pairing::RemovedTelegramBinding {
-                        provider_user_id: key.clone(),
-                        epoch: Some(epoch.clone()),
-                    },
-                )
-                .collect();
-            for binding in &removed {
-                bindings.remove(&binding.provider_user_id);
-            }
-            Ok(removed)
-        }
-
-        async fn bound_user_for(
-            &self,
-            provider_user_id: &str,
-        ) -> Result<Option<UserId>, TelegramBindingError> {
-            Ok(self
-                .bindings
-                .lock()
-                .expect("lock")
-                .get(provider_user_id)
-                .map(|(user, _)| user.clone()))
-        }
-    }
-
-    #[derive(Debug, Default)]
-    pub struct InMemoryDmTargetStore {
-        targets: StdMutex<HashMap<(String, String), TelegramDmTarget>>,
-    }
-
-    #[async_trait]
-    impl TelegramDmTargetStore for InMemoryDmTargetStore {
-        async fn upsert_dm_target(
-            &self,
-            installation_id: &AdapterInstallationId,
-            target: TelegramDmTarget,
-        ) -> Result<(), TelegramPairingError> {
-            self.targets.lock().expect("lock").insert(
-                (
-                    installation_id.as_str().to_string(),
-                    target.user_id.as_str().to_string(),
-                ),
-                target,
-            );
-            Ok(())
-        }
-
-        async fn dm_target_for_user(
-            &self,
-            installation_id: &AdapterInstallationId,
-            user_id: &UserId,
-        ) -> Result<Option<TelegramDmTarget>, TelegramPairingError> {
-            Ok(self
-                .targets
-                .lock()
-                .expect("lock")
-                .get(&(
-                    installation_id.as_str().to_string(),
-                    user_id.as_str().to_string(),
-                ))
-                .cloned())
-        }
-
-        async fn delete_dm_target_for_user(
-            &self,
-            installation_id: &AdapterInstallationId,
-            user_id: &UserId,
-        ) -> Result<(), TelegramPairingError> {
-            self.targets.lock().expect("lock").remove(&(
-                installation_id.as_str().to_string(),
-                user_id.as_str().to_string(),
-            ));
             Ok(())
         }
     }
@@ -909,12 +684,19 @@ pub mod test_fixtures {
     }
 
     pub fn unconfigured_setup_service(bot_api: Arc<RecordingBotApi>) -> Arc<TelegramSetupService> {
+        unconfigured_setup_service_with_state(bot_api, telegram_state())
+    }
+
+    pub fn unconfigured_setup_service_with_state(
+        bot_api: Arc<RecordingBotApi>,
+        state: Arc<FilesystemTelegramHostState>,
+    ) -> Arc<TelegramSetupService> {
         Arc::new(TelegramSetupService::new(
             tenant_id(),
             agent_id(),
             None,
             UserId::new("operator").expect("valid user"),
-            Arc::new(InMemorySetupStore::default()),
+            state,
             Arc::new(InMemorySecretStore::new()),
             bot_api,
             Some("https://ironclaw.example".to_string()),
@@ -938,14 +720,13 @@ pub mod test_fixtures {
     }
 
     pub fn pairing_service_with(setup: Arc<TelegramSetupService>) -> Arc<TelegramPairingService> {
+        let state = setup.state_for_test();
         Arc::new(TelegramPairingService::new(
             tenant_id(),
             agent_id(),
             None,
             setup,
-            Arc::new(InMemoryPairingStore::default()),
-            Arc::new(InMemoryBindingStore::default()),
-            Arc::new(InMemoryDmTargetStore::default()),
+            state,
             Arc::new(RecordingContinuationDispatcher::default()),
             crate::telegram_pairing::pairing_test_support::RecordingActorPairings::shared(),
         ))

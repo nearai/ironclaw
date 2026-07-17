@@ -1107,7 +1107,7 @@ pub(crate) struct RebornLocalRuntimeServices {
         any(feature = "libsql", feature = "postgres"),
         feature = "telegram-v2-host-beta"
     ))]
-    pub(crate) telegram_host_state_filesystem: Arc<ScopedFilesystem<LocalDevRootFilesystem>>,
+    pub(crate) telegram_host_state_filesystem: Arc<ScopedFilesystem<dyn RootFilesystem>>,
     #[cfg(any(feature = "libsql", feature = "postgres"))]
     pub(crate) subagent_goal_filesystem: Arc<ScopedFilesystem<LocalDevRootFilesystem>>,
     /// Tenant-scoped root filesystem used for third-party extension hook
@@ -3858,7 +3858,8 @@ fn local_dev_slack_host_state_filesystem(
 ))]
 fn local_dev_telegram_host_state_filesystem(
     filesystem: Arc<LocalDevRootFilesystem>,
-) -> Arc<ScopedFilesystem<LocalDevRootFilesystem>> {
+) -> Arc<ScopedFilesystem<dyn RootFilesystem>> {
+    let filesystem: Arc<dyn RootFilesystem> = filesystem;
     Arc::new(ScopedFilesystem::new(
         filesystem,
         crate::telegram_host_state_mount_view,
