@@ -225,7 +225,7 @@ impl WebhookAuthVerifier for SharedSecretHeaderAuth {
             };
         }
         let mut values = headers.get_all(self.header_name.as_str()).iter();
-        let Some(received) = values.next().and_then(|v| v.to_str().ok()) else {
+        let Some(first) = values.next() else {
             return VerificationOutcome::Failed {
                 failure: ProtocolAuthFailure::Missing,
             };
@@ -233,11 +233,19 @@ impl WebhookAuthVerifier for SharedSecretHeaderAuth {
         // Duplicate occurrences are an ambiguity vector (proxies disagree on
         // which one "counts"), so they are malformed outright — never
         // first-or-last-wins, even if one copy carries the correct secret.
+        // Counted BEFORE decoding the value: a non-text first copy must not
+        // reclassify a duplicate as missing.
         if values.next().is_some() {
             return VerificationOutcome::Failed {
                 failure: ProtocolAuthFailure::Malformed,
             };
         }
+        // A present-but-undecodable value is malformed, not missing.
+        let Ok(received) = first.to_str() else {
+            return VerificationOutcome::Failed {
+                failure: ProtocolAuthFailure::Malformed,
+            };
+        };
         if !bool::from(received.as_bytes().ct_eq(self.expected_secret.as_bytes())) {
             return VerificationOutcome::Failed {
                 failure: ProtocolAuthFailure::SharedSecretMismatch,
@@ -327,6 +335,44 @@ mod tests {
                 }
                 other => panic!("expected Failed for duplicates {values:?}, got {other:?}"),
             }
+        }
+    }
+
+    /// The duplicate rule must hold even when the FIRST occurrence is not
+    /// decodable text: occurrence counting runs before value decoding, so a
+    /// garbage first copy plus a second copy stays `Malformed` (a duplicate),
+    /// never `Missing`. A single non-text value is likewise `Malformed` — the
+    /// header is present, just unusable.
+    #[test]
+    fn shared_secret_header_duplicate_rule_runs_before_value_decoding() {
+        let verifier = SharedSecretHeaderAuth {
+            header_name: "X-Telegram-Bot-Api-Secret-Token".into(),
+            expected_secret: "topsecret".into(),
+            subject: "telegram_install_alpha".into(),
+        };
+        let name = http::header::HeaderName::from_bytes(b"X-Telegram-Bot-Api-Secret-Token")
+            .expect("name");
+        let non_text = HeaderValue::from_bytes(&[0xFF, 0xFE]).expect("opaque header value");
+
+        let mut duplicated = HeaderMap::new();
+        duplicated.append(name.clone(), non_text.clone());
+        duplicated.append(name.clone(), HeaderValue::from_static("topsecret"));
+        match verifier.verify(&duplicated, b"") {
+            VerificationOutcome::Failed { failure } => assert!(
+                matches!(failure, ProtocolAuthFailure::Malformed),
+                "a duplicate with a non-text first copy is still a duplicate, got {failure:?}"
+            ),
+            other => panic!("expected Failed for non-text duplicate, got {other:?}"),
+        }
+
+        let mut single_garbage = HeaderMap::new();
+        single_garbage.append(name, non_text);
+        match verifier.verify(&single_garbage, b"") {
+            VerificationOutcome::Failed { failure } => assert!(
+                matches!(failure, ProtocolAuthFailure::Malformed),
+                "a present-but-undecodable header is malformed, not missing, got {failure:?}"
+            ),
+            other => panic!("expected Failed for non-text single value, got {other:?}"),
         }
     }
 
