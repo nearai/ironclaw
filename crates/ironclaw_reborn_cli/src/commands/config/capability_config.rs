@@ -169,7 +169,8 @@ pub(super) fn google_remediation_text() -> String {
      2. Enable the Gmail API (and Calendar/Drive as needed) for the project\n  \
      3. ironclaw-reborn config set google.client_id <id>.apps.googleusercontent.com\n  \
      4. ironclaw-reborn config set google.client_secret   (prompts, hidden input)\n  \
-     5. ironclaw-reborn config set google.redirect_uri <redirect-uri-from-the-oauth-client>"
+     5. ironclaw-reborn config set google.redirect_uri <redirect-uri-from-the-oauth-client>\n  \
+     6. ironclaw-reborn service restart   (config set never restarts the service for you)"
         .to_string()
 }
 
@@ -180,7 +181,9 @@ pub(super) fn slack_remediation_text(base_url: &str) -> String {
     format!(
         "Slack setup is WebUI-only: finish connecting Slack at {base_url}/v2/extensions \
          (config set slack.enabled true|false only toggles whether the route mounts; it does \
-         not configure Slack app identity or credentials)"
+         not configure Slack app identity or credentials). After `config set slack.enabled`, \
+         run `ironclaw-reborn service restart` to apply it — config set never restarts the \
+         service for you."
     )
 }
 
@@ -357,9 +360,17 @@ mod tests {
         assert!(google.contains("config set google.client_id"));
         assert!(google.contains("config set google.client_secret"));
         assert!(google.contains("config set google.redirect_uri"));
+        assert!(
+            google.contains("ironclaw-reborn service restart"),
+            "config set never auto-restarts; remediation text must spell out the apply step"
+        );
 
         let slack = slack_remediation_text("http://127.0.0.1:3000");
         assert!(slack.contains("http://127.0.0.1:3000/v2/extensions"));
         assert!(!slack.contains("config set slack.bot_token"));
+        assert!(
+            slack.contains("ironclaw-reborn service restart"),
+            "config set never auto-restarts; remediation text must spell out the apply step"
+        );
     }
 }

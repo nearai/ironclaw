@@ -251,52 +251,6 @@ impl ServicePlatform {
             Self::Linux => systemd::current_state_with_runner(runner),
         }
     }
-
-    /// `(installed, running)` without printing anything. Used by
-    /// [`restart_if_running`] to decide whether `config set`'s
-    /// auto-restart step has anything to do.
-    fn installed_and_running(&self) -> Result<(bool, bool)> {
-        let mut runner = OsServiceCommandRunner;
-        match self {
-            Self::MacOs => launchd::installed_and_running(&mut runner),
-            Self::Linux => systemd::installed_and_running(&mut runner),
-        }
-    }
-}
-
-/// Outcome of [`restart_if_running`] — what `config set`'s auto-restart
-/// step actually did, so the caller can print an accurate status line.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum ServiceRestartOutcome {
-    /// No OS service is installed; nothing to restart. The caller's
-    /// change takes effect the next time the service (or a manually run
-    /// `serve`) starts.
-    NotInstalled,
-    /// The service is installed but was not running; left as-is (a
-    /// `config set` auto-restart only restarts a service that is
-    /// currently serving traffic, it does not start a stopped one).
-    InstalledNotRunning,
-    /// The service was installed and running; it has been restarted.
-    Restarted,
-}
-
-/// `config set`'s auto-restart seam: if the OS service is installed and
-/// currently running, restart it so the just-written config takes effect
-/// immediately; otherwise report why nothing happened. Distinct from the
-/// `service restart` CLI verb (which always requires the service to be
-/// installed and bails otherwise) — this is a best-effort "apply now if
-/// there's something running to apply to" call, never a hard failure.
-pub(crate) fn restart_if_running() -> Result<ServiceRestartOutcome> {
-    let platform = ServicePlatform::detect()?;
-    let (installed, running) = platform.installed_and_running()?;
-    if !installed {
-        return Ok(ServiceRestartOutcome::NotInstalled);
-    }
-    if !running {
-        return Ok(ServiceRestartOutcome::InstalledNotRunning);
-    }
-    platform.restart()?;
-    Ok(ServiceRestartOutcome::Restarted)
 }
 
 /// Install then start the OS service in one call — used by `onboard`'s
@@ -911,20 +865,6 @@ mod tests {
                 }
             }
         }
-    }
-
-    #[test]
-    fn restart_if_running_reports_not_installed_when_no_service_registered() {
-        // No `run_in_background`, no polling: `installed_and_running` short-
-        // circuits on `plist.exists()`/`unit_path.exists()` being false and
-        // never spawns launchctl/systemctl, so this is safe to run for real
-        // against a fresh temp $HOME on any supported host.
-        let _lock = crate::runtime::test_env::lock_runtime_env();
-        let tmp = tempfile::tempdir().expect("tempdir");
-        let _home = TempHomeGuard::set(tmp.path());
-
-        let outcome = restart_if_running().expect("restart_if_running must succeed");
-        assert_eq!(outcome, ServiceRestartOutcome::NotInstalled);
     }
 
     #[cfg(target_os = "linux")]

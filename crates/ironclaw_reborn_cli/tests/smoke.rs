@@ -1599,7 +1599,6 @@ fn config_set_google_client_id_writes_config_toml() {
             "set",
             "google.client_id",
             "abc123.apps.googleusercontent.com",
-            "--no-restart",
         ])
         .env("IRONCLAW_REBORN_HOME", &reborn_home)
         .env("HOME", temp.path().join("home"))
@@ -1615,6 +1614,10 @@ fn config_set_google_client_id_writes_config_toml() {
     assert!(
         stdout.contains("google.client_id: saved"),
         "stdout: {stdout}"
+    );
+    assert!(
+        stdout.contains("to apply: ironclaw-reborn service restart"),
+        "config set must never auto-restart; it must print the explicit apply step: {stdout}"
     );
 
     let config = std::fs::read_to_string(reborn_home.join("config.toml")).expect("read config");

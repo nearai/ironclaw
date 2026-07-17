@@ -23,11 +23,6 @@ pub(super) struct ConfigSetCommand {
     /// Value to set. Omit for a secret-destination key (`<provider>.api_key`,
     /// `google.client_secret`) to be prompted for instead, with input hidden.
     value: Option<String>,
-    /// Skip restarting the installed OS service after a successful write.
-    /// Ignored (a no-op) on a binary built without the `webui-v2-beta`
-    /// feature, since there is no service surface to restart.
-    #[arg(long = "no-restart")]
-    no_restart: bool,
     /// `webui.token` only: rotate the WebChat v2 bearer token. Invalidates
     /// every existing browser session (the token doubles as the
     /// session-signing key).
@@ -42,7 +37,7 @@ impl ConfigSetCommand {
         };
 
         if matches!(key, ConfigKey::WebuiToken) {
-            return execute_webui_token(&context, self.value, self.rotate, self.no_restart);
+            return execute_webui_token(&context, self.value, self.rotate);
         }
         if self.rotate {
             anyhow::bail!("--rotate is only valid for `config set webui.token`");
@@ -52,7 +47,6 @@ impl ConfigSetCommand {
             &context,
             key,
             self.value,
-            self.no_restart,
             &mut StdinSecretValueSource,
             &LocalDevSecretStoreOpener,
         )
@@ -82,7 +76,8 @@ fn describe_key(key: &ConfigKey) -> String {
 
 /// Core routing: resolve a value (arg or hidden prompt), apply shape
 /// validation, refuse a secret-shaped value headed for `config.toml`,
-/// write to the alias's destination, then run the auto-restart step.
+/// write to the alias's destination, then print the explicit apply step
+/// (`config set` never restarts anything itself — see `print_apply_step`).
 /// Free function (not a method) so tests can inject a fake prompt source
 /// and secret-store opener — the same shape `onboard`'s
 /// `provision_llm_credentials` already established.
@@ -90,7 +85,6 @@ fn set_value_key(
     context: &RebornCliContext,
     key: ConfigKey,
     value_arg: Option<String>,
-    no_restart: bool,
     prompt: &mut dyn SecretValueSource,
     store_opener: &dyn SecretStoreOpener,
 ) -> anyhow::Result<()> {
@@ -140,7 +134,8 @@ fn set_value_key(
 
     println!("{label}: saved");
     print_remaining_setup_guidance(&key);
-    apply_restart(no_restart)
+    print_apply_step();
+    Ok(())
 }
 
 /// After a successful write, print the remaining BYO setup steps for the
@@ -268,36 +263,18 @@ fn write_google_client_secret(
     )
 }
 
-// ── Auto-restart ────────────────────────────────────────────────
+// ── Apply step ──────────────────────────────────────────────────
 
-#[cfg(feature = "webui-v2-beta")]
-fn apply_restart(no_restart: bool) -> anyhow::Result<()> {
-    if no_restart {
-        println!("restart: skipped (--no-restart)");
-        return Ok(());
-    }
-    match crate::commands::service::restart_if_running()? {
-        crate::commands::service::ServiceRestartOutcome::NotInstalled => {
-            println!(
-                "restart: service not installed; the change will apply when the service starts"
-            );
-        }
-        crate::commands::service::ServiceRestartOutcome::InstalledNotRunning => {
-            println!(
-                "restart: service installed but not running; the change will apply on next start"
-            );
-        }
-        crate::commands::service::ServiceRestartOutcome::Restarted => {
-            println!("restart: service restarted");
-        }
-    }
-    Ok(())
-}
-
-#[cfg(not(feature = "webui-v2-beta"))]
-fn apply_restart(_no_restart: bool) -> anyhow::Result<()> {
-    println!("restart: not applicable (binary built without the `webui-v2-beta` feature)");
-    Ok(())
+/// `config set` never restarts anything itself: this CLI invocation may be
+/// running from inside a live `serve` process's own tool-call loop (an
+/// agent shelling out to its own CLI), and auto-restarting would let that
+/// process kill itself mid-turn. A running `ironclaw-reborn` service (or a
+/// manually run `serve`) keeps serving the old value until this step is
+/// run — one explicit, unconditional line for every caller (human, an
+/// agent's own shell tool, a script) rather than branching on TTY-ness or
+/// service state.
+fn print_apply_step() {
+    println!("  to apply: ironclaw-reborn service restart");
 }
 
 // ── webui.token --rotate ────────────────────────────────────────
@@ -306,7 +283,6 @@ fn execute_webui_token(
     context: &RebornCliContext,
     value: Option<String>,
     rotate: bool,
-    no_restart: bool,
 ) -> anyhow::Result<()> {
     if value.is_some() {
         anyhow::bail!(
@@ -326,10 +302,14 @@ fn execute_webui_token(
     let home = context.boot_config().home();
     crate::webui_token::rotate_webui_token_file(home.path())?;
     println!("webui.token: rotated");
-    apply_restart(no_restart)?;
+    print_apply_step();
+    // The token file on disk is already rotated, but a running `serve`
+    // process keeps the old token in memory until it restarts — so the
+    // login link below (already built from the new token) only becomes
+    // valid once `ironclaw-reborn service restart` (printed above) runs.
     #[cfg(feature = "webui-v2-beta")]
     if let Some(link) = crate::webui_token::login_link(home) {
-        println!("login_link: {link}");
+        println!("login_link: {link} (valid after restart)");
     }
     Ok(())
 }
@@ -480,7 +460,6 @@ mod tests {
             &context,
             ConfigKey::GoogleClientId,
             Some("abc123.apps.googleusercontent.com".to_string()),
-            true,
             &mut NeverPromptSource,
             &FailingStoreOpener,
         )
@@ -500,7 +479,6 @@ mod tests {
             &context,
             ConfigKey::GoogleClientId,
             Some("not-a-client-id".to_string()),
-            true,
             &mut NeverPromptSource,
             &FailingStoreOpener,
         )
@@ -515,7 +493,6 @@ mod tests {
             &context,
             ConfigKey::GoogleRedirectUri,
             Some("http://127.0.0.1:3000/oauth/google/callback".to_string()),
-            true,
             &mut NeverPromptSource,
             &FailingStoreOpener,
         )
@@ -535,7 +512,6 @@ mod tests {
             &context,
             ConfigKey::SlackEnabled,
             Some("true".to_string()),
-            true,
             &mut NeverPromptSource,
             &FailingStoreOpener,
         )
@@ -553,7 +529,6 @@ mod tests {
             &context,
             ConfigKey::GoogleRedirectUri,
             Some("https://sk-proj-1234567890abcdef1234567890.example.test/cb".to_string()),
-            true,
             &mut NeverPromptSource,
             &FailingStoreOpener,
         )
@@ -572,7 +547,6 @@ mod tests {
             &context,
             ConfigKey::GoogleClientSecret,
             Some("GOCSPX-abc123".to_string()),
-            true,
             &mut NeverPromptSource,
             &opener,
         )
@@ -607,7 +581,6 @@ mod tests {
             &context,
             ConfigKey::GoogleClientSecret,
             None,
-            true,
             &mut prompts,
             &opener,
         )
@@ -638,7 +611,6 @@ mod tests {
                 provider_id: "openai".to_string(),
             },
             Some("sk-test-value-1234567890".to_string()),
-            true,
             &mut NeverPromptSource,
             &opener,
         )
@@ -663,13 +635,12 @@ mod tests {
     }
 
     #[test]
-    fn no_restart_flag_skips_restart_and_missing_value_errors() {
+    fn missing_value_errors_for_a_config_toml_destination_key() {
         let (_tmp, context) = RebornCliContext::test_context();
         let err = set_value_key(
             &context,
             ConfigKey::GoogleClientId,
             None,
-            true,
             &mut NeverPromptSource,
             &FailingStoreOpener,
         )
@@ -680,15 +651,15 @@ mod tests {
     #[test]
     fn webui_token_requires_rotate_flag() {
         let (_tmp, context) = RebornCliContext::test_context();
-        let err = execute_webui_token(&context, None, false, true)
-            .expect_err("without --rotate must fail");
+        let err =
+            execute_webui_token(&context, None, false).expect_err("without --rotate must fail");
         assert!(err.to_string().contains("--rotate"));
     }
 
     #[test]
     fn webui_token_rejects_a_value_argument() {
         let (_tmp, context) = RebornCliContext::test_context();
-        let err = execute_webui_token(&context, Some("x".to_string()), true, true)
+        let err = execute_webui_token(&context, Some("x".to_string()), true)
             .expect_err("a value argument must be rejected");
         assert!(err.to_string().contains("does not accept a value"));
     }
@@ -699,7 +670,7 @@ mod tests {
         let home = context.boot_config().home();
         std::fs::create_dir_all(home.path()).expect("mkdir");
 
-        execute_webui_token(&context, None, true, true).expect("rotate must succeed");
+        execute_webui_token(&context, None, true).expect("rotate must succeed");
 
         assert!(crate::webui_token::webui_token_file_is_valid(home.path()));
     }
