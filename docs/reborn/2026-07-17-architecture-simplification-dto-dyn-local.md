@@ -816,6 +816,39 @@ Two refinements this doc adopts from the URT: **(a)** auth is recipe data + one 
 per-adapter code (§5.8, above); **(b)** the URT's Deletion / Addition / retired-taxonomy tests
 are the concrete enforcement for the products-in-composition ratchet (§10).
 
+**Integration points — name the seam so neither implementation collides at it:**
+
+1. **One `RuntimeLane` enum; the extension runtime-kind is a subset of it.** Reconcile the
+   two "runtime" vocabularies into one closed *execution* enum
+   `RuntimeLane = { FirstParty | Wasm | Mcp | Process }`. The URT's extension-declarable
+   runtime *kinds* map to a **strict subset**: `first_party → FirstParty`, `wasm → Wasm`,
+   `[mcp] → Mcp`. The **`Process`** lane (the OS-subprocess / script sandbox, §5.5, §6) is
+   **host-only** — no extension manifest can select it; only host built-in capabilities
+   (shell, script) dispatch to it, and only through `ProcessSandbox`. This keeps "runtime
+   kind is a loading detail" (the URT) and "manifests cannot self-assign a raw process lane"
+   (§6) simultaneously true: what an extension *declares* (load kind) is a subset of what the
+   kernel *dispatches to* (execution lane). Note the vocabulary split: the URT's "runtime
+   kind" is a **load** detail; this doc's `RuntimeLane` is an **execution** substrate — a
+   first-party or WASM `invoke` may itself request the `Process` lane via a host capability,
+   so the two are different axes and must not be merged into one field.
+
+2. **`ToolPorts` is *derived from* `Authority`, never constructed independently.** The URT's
+   `ToolPorts` (restricted egress + scoped state + logging) is exactly the narrowed effect
+   surface that `dispatch()` materializes from `(&Invocation, &Authority, resolved
+   descriptor)` before handing it to a lane's `invoke`:
+   - `ToolPorts.egress` = `NetworkPolicy::resolve(…)` bounded by the descriptor's declared
+     egress, with a `SecretBroker` one-shot lease injected **host-side at the egress
+     boundary** (the adapter never sees bytes);
+   - `ToolPorts.state` = a `ScopedFilesystem` mount = `Authority.mounts`;
+   - `ToolPorts.logging` = the redaction-obligated event sink.
+
+   The invariant both sides must hold: **`ToolPorts` cannot be wider than `Authority`
+   grants** — it is built only by `dispatch()`, which holds a verified, sealed `Authority`
+   (§3), and the adapter receives only the derived handles, never `Authority` itself, so it
+   cannot re-authorize or widen. So the URT's `ToolAdapter::invoke(call, ports)` **is** the
+   body of this doc's `dispatch(inv, auth, lane)` for the FirstParty/Wasm/Mcp lanes; the
+   `Process` lane is the same shape with a `ProcessSandbox` handle in place of raw egress.
+
 ---
 
 ## 6. Case study: the shell cross-tenant escape (issue #6170)
