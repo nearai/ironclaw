@@ -496,11 +496,10 @@ jobs:
           # shellcheck disable=SC2086  # PRERELEASE_FLAG is '--prerelease' or empty
           gh release create "$RELEASE_TAG" --target "$RELEASE_COMMIT" $PRERELEASE_FLAG --title "$ANNOUNCEMENT_TITLE" --notes-file "$RUNNER_TEMP/notes.txt" artifacts/*
 
-  # Keep the Docker caller visible but disabled while #6160 validates release
-  # binaries. docker.yml remains available through its own manual/scheduled runs.
+  # Build and push Docker Hub images (:version, :latest, :sha-*) after the GitHub Release exists.
   docker-image:
     needs: host
-    if: ${{ false }}
+    if: ${{ always() && needs.host.result == 'success' }}
     permissions:
       contents: read
       packages: read

@@ -173,15 +173,13 @@ fn dockerfile_reborn_builds_with_production_features() {
 }
 
 #[test]
-fn release_ci_compiles_reborn_for_all_supported_targets_without_docker_publish() {
+fn release_ci_compiles_reborn_for_all_supported_targets() {
     let root = workspace_root();
     let compile_workflow =
         std::fs::read_to_string(root.join(".github/workflows/reborn-release-compile.yml"))
             .expect("Reborn release compile workflow");
     let release_workflow = std::fs::read_to_string(root.join(".github/workflows/release.yml"))
         .expect("release workflow");
-    let docker_workflow = std::fs::read_to_string(root.join(".github/workflows/docker.yml"))
-        .expect("Docker workflow");
     let cli_manifest = std::fs::read_to_string(root.join("crates/ironclaw_reborn_cli/Cargo.toml"))
         .expect("Reborn CLI manifest");
 
@@ -284,20 +282,6 @@ fn release_ci_compiles_reborn_for_all_supported_targets_without_docker_publish()
             )
             && compile_workflow.contains("permissions:\n  contents: read"),
         "PR compile validation must remain read-only and must skip cargo-dist planning and release publishing"
-    );
-    let docker_job = release_workflow
-        .split_once("  docker-image:\n")
-        .and_then(|(_, jobs)| jobs.split_once("\n  update-registry-checksums:"))
-        .map(|(job, _)| job)
-        .expect("release workflow should retain the Docker caller job");
-    assert!(
-        docker_job.contains("if: ${{ false }}")
-            && docker_job.contains("uses: ./.github/workflows/docker.yml"),
-        "release CI must retain but skip its Docker caller"
-    );
-    assert!(
-        docker_workflow.contains("workflow_dispatch:") && docker_workflow.contains("schedule:"),
-        "the independent Docker workflow must remain manually and periodically runnable"
     );
     assert!(
         cli_manifest.contains("[package.metadata.dist]\ndist = false"),

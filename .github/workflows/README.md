@@ -98,10 +98,6 @@ download pattern, so they are not attached to the GitHub Release. Until #3483
 defines the standalone Reborn tag/version/installer contract,
 `ironclaw_reborn_cli` remains `dist = false`.
 
-For #6160, the `release.yml` Docker caller remains present but has a constant
-false condition. This skips Docker build/publish on the release path without
-changing `docker.yml`; its manual and scheduled entry points remain available.
-
 ## Deep tier (nightly)
 
 `nightly-deep-ci.yml` (04:00 UTC) reuses `platform-and-compat.yml`,

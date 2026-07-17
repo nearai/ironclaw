@@ -188,5 +188,4 @@ jobs:
             echo "- musl portability: \`$LINKAGE_RESULT\`"
             echo "- Native CLI smoke: \`$SMOKE_RESULT\`"
             echo "- Preflight evidence upload: \`$UPLOAD_RESULT\`"
-            echo "- Docker publish: skipped by the release workflow for #6160"
           } >> "$GITHUB_STEP_SUMMARY"
