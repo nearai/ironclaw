@@ -240,10 +240,19 @@ fn start_with_runner_impl(runner: &mut dyn ServiceCommandRunner, verbose: bool) 
     if !plist.exists() {
         bail!("Service not installed. Run `ironclaw-reborn service install` first.");
     }
-    runner.run_checked(
-        "launchctl load",
-        Command::new("launchctl").arg("load").arg("-w").arg(&plist),
-    )?;
+    // A bare `launchctl load -w` fails when the label is already loaded
+    // (loaded-but-stopped, i.e. a `-` PID) — the same condition `install`
+    // already reloads around. Query first and skip straight to `start`
+    // when the label is already registered with launchd; only a
+    // not-loaded label needs the `load` step.
+    let list =
+        runner.run_capture_checked("launchctl list", Command::new("launchctl").arg("list"))?;
+    if !service_loaded(&list) {
+        runner.run_checked(
+            "launchctl load",
+            Command::new("launchctl").arg("load").arg("-w").arg(&plist),
+        )?;
+    }
     runner.run_checked(
         "launchctl start",
         Command::new("launchctl").arg("start").arg(SERVICE_LABEL),
@@ -405,6 +414,19 @@ mod tests {
                     .eq(expected.iter().copied())
             }) {
                 anyhow::bail!("injected argv failure: {label}");
+            }
+            // Keep `launchctl_list` (read back by subsequent
+            // `run_capture_checked("launchctl list", ...)` calls) in sync
+            // with the label/unload/bootout operations this mock just
+            // recorded, so a test spanning multiple `launchctl list`
+            // queries (e.g. `restart` composing `stop` then `start`, both
+            // of which query the label's loaded state) observes the same
+            // state transitions the real `launchctl` daemon would report,
+            // instead of a stale snapshot from before this call.
+            match label {
+                "launchctl unload" | "launchctl bootout" => self.launchctl_list.clear(),
+                "launchctl load" => self.launchctl_list = format!("123\t0\t{SERVICE_LABEL}\n"),
+                _ => {}
             }
             Ok(())
         }
@@ -1051,6 +1073,73 @@ mod tests {
         );
     }
 
+    // ── start ───────────────────────────────────────────────────
+
+    #[test]
+    fn start_on_already_loaded_label_skips_bare_load_and_goes_straight_to_start() {
+        // RED-then-green: a bare `launchctl load -w` errors on an
+        // already-loaded label, while `install` over a loaded job
+        // literally tells the operator to run `service start` next. This
+        // pins that `start` queries `launchctl list` first and, when the
+        // label is already loaded, issues only `launchctl start` — no
+        // `load` call that would fail against launchd.
+        let _lock = crate::runtime::test_env::lock_runtime_env();
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let prior = std::env::var_os("HOME");
+        // SAFETY: serialized by `lock_runtime_env`; restored below.
+        unsafe { std::env::set_var("HOME", tmp.path()) };
+        let file = plist_path().expect("plist path");
+        std::fs::create_dir_all(file.parent().expect("plist parent")).expect("create parent");
+        std::fs::write(&file, "plist").expect("write plist");
+        let mut runner = RecordingRunner {
+            launchctl_list: format!("-\t0\t{SERVICE_LABEL}\n"),
+            ..RecordingRunner::default()
+        };
+        let result = start_with_runner(&mut runner);
+        // SAFETY: serialized by `lock_runtime_env`.
+        unsafe {
+            match prior {
+                Some(value) => std::env::set_var("HOME", value),
+                None => std::env::remove_var("HOME"),
+            }
+        }
+
+        result.expect("start on an already-loaded label must succeed");
+        assert_eq!(
+            runner.labels,
+            ["launchctl list", "launchctl start"],
+            "an already-loaded label must not be re-loaded with a bare `launchctl load`"
+        );
+    }
+
+    #[test]
+    fn start_on_not_loaded_label_loads_then_starts() {
+        let _lock = crate::runtime::test_env::lock_runtime_env();
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let prior = std::env::var_os("HOME");
+        // SAFETY: serialized by `lock_runtime_env`; restored below.
+        unsafe { std::env::set_var("HOME", tmp.path()) };
+        let file = plist_path().expect("plist path");
+        std::fs::create_dir_all(file.parent().expect("plist parent")).expect("create parent");
+        std::fs::write(&file, "plist").expect("write plist");
+        let mut runner = RecordingRunner::default();
+        let result = start_with_runner(&mut runner);
+        // SAFETY: serialized by `lock_runtime_env`.
+        unsafe {
+            match prior {
+                Some(value) => std::env::set_var("HOME", value),
+                None => std::env::remove_var("HOME"),
+            }
+        }
+
+        result.expect("start on a not-loaded label must succeed");
+        assert_eq!(
+            runner.labels,
+            ["launchctl list", "launchctl load", "launchctl start"],
+            "a not-loaded label must still be loaded before starting"
+        );
+    }
+
     // ── restart ─────────────────────────────────────────────────
 
     #[test]
@@ -1084,6 +1173,12 @@ mod tests {
                 "launchctl list",
                 "launchctl stop",
                 "launchctl unload",
+                // `start`'s own label-loaded check (the launchd
+                // start-on-loaded guard): by this point `stop` has
+                // unloaded the label, so this query correctly reports
+                // not-loaded and `start` proceeds to `load` + `start`
+                // rather than skipping straight to `start`.
+                "launchctl list",
                 "launchctl load",
                 "launchctl start",
             ]
@@ -1113,7 +1208,14 @@ mod tests {
         result.expect("restart of a stopped service must succeed without error");
         assert_eq!(
             runner.labels,
-            ["launchctl list", "launchctl load", "launchctl start"]
+            [
+                "launchctl list",
+                // `start`'s own label-loaded check — see the comment in
+                // `restart_running_service_stops_then_starts`.
+                "launchctl list",
+                "launchctl load",
+                "launchctl start",
+            ]
         );
     }
 
@@ -1156,6 +1258,9 @@ mod tests {
                 "launchctl list",
                 "launchctl stop",
                 "launchctl unload",
+                // `start`'s own label-loaded check — see the comment in
+                // `restart_running_service_stops_then_starts`.
+                "launchctl list",
                 "launchctl load",
                 "launchctl start",
             ],
@@ -1221,6 +1326,9 @@ mod tests {
                 "launchctl list",
                 "launchctl stop",
                 "launchctl unload",
+                // `start`'s own label-loaded check — see the comment in
+                // `restart_running_service_stops_then_starts`.
+                "launchctl list",
                 "launchctl load",
                 "launchctl start",
             ]

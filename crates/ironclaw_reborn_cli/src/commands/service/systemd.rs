@@ -146,11 +146,29 @@ fn combined_failure(primary: anyhow::Error, rollback_errors: Vec<String>) -> any
 // ── Path helpers ────────────────────────────────────────────────
 
 fn unit_path() -> Result<PathBuf> {
-    Ok(home_dir()?
-        .join(".config")
+    Ok(config_home()?
         .join("systemd")
         .join("user")
         .join(SYSTEMD_UNIT))
+}
+
+/// The base config directory for the user systemd unit search path, per
+/// systemd's own rule: prefer `$XDG_CONFIG_HOME` when it is set and
+/// non-empty, otherwise fall back to `$HOME/.config` (systemd's
+/// documented default when `XDG_CONFIG_HOME` is unset). An empty
+/// `XDG_CONFIG_HOME` is treated as unset, matching the XDG base directory
+/// spec.
+fn config_home() -> Result<PathBuf> {
+    match std::env::var_os("XDG_CONFIG_HOME") {
+        Some(value) if !value.is_empty() => {
+            let path = PathBuf::from(value);
+            if !path.is_absolute() {
+                bail!("XDG_CONFIG_HOME must be an absolute path to manage an OS service");
+            }
+            Ok(path)
+        }
+        _ => Ok(home_dir()?.join(".config")),
+    }
 }
 
 // ── Verb bodies ─────────────────────────────────────────────────
@@ -683,15 +701,87 @@ mod tests {
     #[test]
     fn unit_path_ends_with_expected_suffix() {
         let _lock = crate::runtime::test_env::lock_runtime_env();
-        let prior = std::env::var_os("HOME");
+        let prior_home = std::env::var_os("HOME");
+        let prior_xdg = std::env::var_os("XDG_CONFIG_HOME");
         // SAFETY: serialized by `lock_runtime_env`; restored before returning.
-        unsafe { std::env::set_var("HOME", "/home/op") };
+        unsafe {
+            std::env::set_var("HOME", "/home/op");
+            std::env::remove_var("XDG_CONFIG_HOME");
+        }
         let path = unit_path();
         // SAFETY: see above.
         unsafe {
-            match prior {
+            match prior_home {
                 Some(v) => std::env::set_var("HOME", v),
                 None => std::env::remove_var("HOME"),
+            }
+            match prior_xdg {
+                Some(v) => std::env::set_var("XDG_CONFIG_HOME", v),
+                None => std::env::remove_var("XDG_CONFIG_HOME"),
+            }
+        }
+        assert_eq!(
+            path.expect("must resolve"),
+            PathBuf::from("/home/op/.config/systemd/user/ironclaw-reborn.service")
+        );
+    }
+
+    #[test]
+    fn unit_path_honors_xdg_config_home_when_set_and_nonempty() {
+        // RED-then-green: systemd's user-unit search path prefers
+        // `$XDG_CONFIG_HOME/systemd/user` over `$HOME/.config/systemd/user`
+        // when `XDG_CONFIG_HOME` is set and non-empty. Before this fix,
+        // `unit_path()` ignored `XDG_CONFIG_HOME` entirely and always wrote
+        // under `$HOME/.config`, which a systemd install with a customized
+        // `XDG_CONFIG_HOME` would never look at.
+        let _lock = crate::runtime::test_env::lock_runtime_env();
+        let prior_home = std::env::var_os("HOME");
+        let prior_xdg = std::env::var_os("XDG_CONFIG_HOME");
+        // SAFETY: serialized by `lock_runtime_env`; restored before returning.
+        unsafe {
+            std::env::set_var("HOME", "/home/op");
+            std::env::set_var("XDG_CONFIG_HOME", "/custom/xdg-config");
+        }
+        let path = unit_path();
+        // SAFETY: see above.
+        unsafe {
+            match prior_home {
+                Some(v) => std::env::set_var("HOME", v),
+                None => std::env::remove_var("HOME"),
+            }
+            match prior_xdg {
+                Some(v) => std::env::set_var("XDG_CONFIG_HOME", v),
+                None => std::env::remove_var("XDG_CONFIG_HOME"),
+            }
+        }
+        assert_eq!(
+            path.expect("must resolve"),
+            PathBuf::from("/custom/xdg-config/systemd/user/ironclaw-reborn.service")
+        );
+    }
+
+    #[test]
+    fn unit_path_falls_back_to_home_config_when_xdg_config_home_is_empty() {
+        // An empty `XDG_CONFIG_HOME` must be treated as unset (XDG base
+        // directory spec), not as a literal empty-string base path.
+        let _lock = crate::runtime::test_env::lock_runtime_env();
+        let prior_home = std::env::var_os("HOME");
+        let prior_xdg = std::env::var_os("XDG_CONFIG_HOME");
+        // SAFETY: serialized by `lock_runtime_env`; restored before returning.
+        unsafe {
+            std::env::set_var("HOME", "/home/op");
+            std::env::set_var("XDG_CONFIG_HOME", "");
+        }
+        let path = unit_path();
+        // SAFETY: see above.
+        unsafe {
+            match prior_home {
+                Some(v) => std::env::set_var("HOME", v),
+                None => std::env::remove_var("HOME"),
+            }
+            match prior_xdg {
+                Some(v) => std::env::set_var("XDG_CONFIG_HOME", v),
+                None => std::env::remove_var("XDG_CONFIG_HOME"),
             }
         }
         assert_eq!(
