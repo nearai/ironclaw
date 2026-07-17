@@ -93,11 +93,23 @@ struct SignedSessionTokenMinter {
 #[async_trait::async_trait]
 impl ironclaw_reborn_composition::AdminApiTokenMinter for SignedSessionTokenMinter {
     async fn mint(&self, tenant: &TenantId, user_id: &UserId) -> Result<SecretString, String> {
+        // Non-operator: this mints a bearer FOR a newly admin-created user,
+        // identified by `user_id` — not a session for the acting operator's
+        // own identity. That user's authorization is governed by its own
+        // `AdminUserRole` (Owner/Admin/Member, a per-user product-workflow
+        // RBAC axis), which is a distinct system from the single-box
+        // `operator_webui_config` capability this session field gates (raw
+        // `Authorization: Bearer` / `/login?token=` only, per the
+        // USER-DECIDED LAW in `cli_token_login.rs`). Stamping `true` here
+        // would let every admin-created user — even a Member-role one —
+        // bypass `require_operator_webui_config`, which the crate docs'
+        // "SSO/multi-user sessions stay non-operator" rule forbids.
         self.session_store
             .create_session(
                 tenant.clone(),
                 user_id.clone(),
                 chrono::Duration::days(ADMIN_API_TOKEN_LIFETIME_DAYS),
+                false,
             )
             .await
             .map_err(|error| error.to_string())

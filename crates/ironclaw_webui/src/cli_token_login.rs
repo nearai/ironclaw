@@ -269,12 +269,21 @@ async fn login_handler(
         return StatusCode::UNAUTHORIZED.into_response();
     };
 
+    // USER-DECIDED LAW: authenticating with the webui token = operator/admin,
+    // whether via raw `Authorization: Bearer` or this `/login?token=` link.
+    // `auth` above is the outcome of verifying the presented token against the
+    // host's operator-capable authenticator (`EnvBearerAuthenticator` in
+    // production), so its `operator_webui_config` bit is exactly the
+    // provenance signal `SessionStore::create_session` wants — never
+    // hardcode `true` here, and never re-derive operator-ness later from the
+    // bearer at validation time.
     let bearer = match state
         .session_store
         .create_session(
             state.tenant_id.clone(),
             auth.user_id,
             state.session_lifetime,
+            auth.capabilities.operator_webui_config,
         )
         .await
     {

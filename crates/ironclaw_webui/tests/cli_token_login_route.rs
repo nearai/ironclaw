@@ -246,6 +246,56 @@ fn protected_request(bearer: Option<&str>) -> Request<Body> {
     builder.body(Body::empty()).expect("request")
 }
 
+// USER-DECIDED LAW: authenticating with the webui token = operator/admin,
+// whether via raw `Authorization: Bearer` OR this `/login?token=` link. A
+// session minted through this route (which verifies the presented token
+// against the same operator-capable `EnvBearerAuthenticator` a raw bearer
+// check uses) must authenticate with `operator_webui_config = true` so the
+// caller sees the same admin capabilities (settings/provider nav) that
+// `Authorization: Bearer <token>` gets. Before the fix, `create_session` had
+// no way to carry that provenance and `SessionAuthenticator` hardcoded
+// `WebuiAuthentication::user(...)` for every session bearer, so this
+// asserted `false` even though the login route verified the token against
+// the operator-capable authenticator.
+#[tokio::test]
+async fn exchanged_bearer_from_cli_token_login_is_operator_capable() {
+    let (router, session_store) = build_router();
+    let authenticator = SessionAuthenticator::new(session_store);
+
+    let login = router
+        .clone()
+        .oneshot(login_request(CLI_TOKEN))
+        .await
+        .expect("oneshot");
+    assert_eq!(login.status(), StatusCode::SEE_OTHER);
+    let location = login
+        .headers()
+        .get(header::LOCATION)
+        .expect("Location header")
+        .to_str()
+        .expect("utf-8")
+        .to_string();
+    let ticket = ticket_from_location(&location);
+
+    let exchange = exchange_ticket(router, &ticket).await;
+    assert_eq!(exchange.status(), StatusCode::OK);
+    let body = body_string(exchange.into_body()).await;
+    let payload: SessionExchangeResponse = serde_json::from_str(&body).expect("json");
+
+    let auth = ironclaw_reborn_composition::WebuiAuthenticator::authenticate(
+        &authenticator,
+        &payload.token,
+    )
+    .await
+    .expect("exchanged bearer must authenticate");
+    assert!(
+        auth.capabilities.operator_webui_config,
+        "a session minted via the CLI-token /login link, from a token that \
+         verified against the operator-capable authenticator, must \
+         authenticate with operator capabilities",
+    );
+}
+
 #[tokio::test]
 async fn exchanged_bearer_authenticates_a_protected_route() {
     let (login_router, session_store) = build_router();

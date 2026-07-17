@@ -4110,6 +4110,23 @@ fn onboard_login_link_then_bearer_authorizes_a_protected_request() {
     );
     let api_response = http_response(port, &api_request, "authenticated protected-route probe");
 
+    // 4. USER-DECIDED LAW: authenticating with the webui token = operator/
+    //    admin, whether via raw `Authorization: Bearer` OR this
+    //    `/login?token=` link. So the exchanged bearer must ALSO authorize
+    //    an operator-gated route (`require_operator_webui_config` in
+    //    `crates/ironclaw_webui_v2/src/handlers.rs`), not just an ordinary
+    //    authenticated one — proving the login-link session actually
+    //    carries operator capabilities end to end, not merely a valid
+    //    identity. RED before the fix: `SessionAuthenticator::authenticate`
+    //    hardcoded `WebuiAuthentication::user(...)` for every session
+    //    bearer, so this 403'd even though the token that minted the
+    //    session verified against the operator-capable authenticator.
+    let operator_request = format!(
+        "GET /api/webchat/v2/operator/setup HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer {}\r\nConnection: close\r\n\r\n",
+        bearer.token
+    );
+    let operator_response = http_response(port, &operator_request, "operator-gated route probe");
+
     let _ = child.kill();
     let _ = child.wait();
 
@@ -4125,6 +4142,16 @@ fn onboard_login_link_then_bearer_authorizes_a_protected_request() {
         "GET /api/webchat/v2/threads with a valid bearer should succeed, got: {}; body: {}",
         api_response.status_line,
         api_response.body
+    );
+
+    let operator_response = operator_response.expect("operator-gated route probe must complete");
+    assert!(
+        !operator_response.status_line.contains(" 403 "),
+        "the login link's exchanged bearer must authorize an operator-gated \
+         request per the USER-DECIDED LAW (webui-token auth = operator), \
+         got: {}; body: {}",
+        operator_response.status_line,
+        operator_response.body
     );
 }
 
