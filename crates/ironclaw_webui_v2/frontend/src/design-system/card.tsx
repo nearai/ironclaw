@@ -6,7 +6,7 @@
  * light ↔ dark theme switching is automatic.
  *
  * Props
- *   variant   "default" | "bordered" | "subtle" | "inset"
+ *   variant   "default" | "bordered" | "flat" | "subtle" | "inset"
  *   radius    "sm" | "md" (default) | "lg"
  *   padding   "none" (default) | "sm" | "md" | "lg"
  *   as        element tag, default "div"
@@ -24,13 +24,18 @@ import { cn } from "../utils/cn";
 /* ─── Variant ─────────────────────────────────────────────────────── */
 // --v2-card-bg     : solid panel surface
 // --v2-card-border : transparent in dark (shadow-only), subtle in light
-// --v2-card-shadow : drop shadow in dark, none in light
+// --v2-card-shadow : minimal 1px lift (both themes); borders separate
+// flat             : border-defined surface with no shadow at all — use for
+//                    in-page cards (tables, stat grids) that should sit flush
+//                    on the canvas
 
 const VARIANTS = {
   default:
     "bg-[var(--v2-card-bg)] border border-[var(--v2-card-border)] shadow-[var(--v2-card-shadow)]",
   bordered:
     "bg-[var(--v2-card-bg)] border border-[var(--v2-panel-border)] shadow-[var(--v2-card-shadow)]",
+  flat:
+    "bg-[var(--v2-card-bg)] border border-[var(--v2-panel-border)]",
   subtle:
     "bg-[var(--v2-surface-soft)] border border-[var(--v2-panel-border)]",
   inset:
@@ -39,10 +44,11 @@ const VARIANTS = {
 
 /* ─── Radius ──────────────────────────────────────────────────────── */
 
+/* nux card radii: 16px standard cards, up to 24px hero/modal surfaces */
 const RADII = {
-  sm: "rounded-[14px]",
-  md: "rounded-[1.25rem] md:rounded-[1.5rem]",
-  lg: "rounded-[1.5rem]",
+  sm: "rounded-[var(--v2-radius-lg)]",
+  md: "rounded-[var(--v2-radius-xl)] md:rounded-[var(--v2-radius-2xl)]",
+  lg: "rounded-[var(--v2-radius-2xl)]",
 };
 
 /* ─── Padding ─────────────────────────────────────────────────────── */
@@ -125,12 +131,12 @@ export function CardFooter({ children, className = "", divider = true }) {
 
 /* ─── CardLabel ───────────────────────────────────────────────────── */
 
-/** Mono-caps eyebrow label — sits above section headings. */
+/** Pixel-face eyebrow label — sits above section headings (nux tag language). */
 export function CardLabel({ children, className = "" }) {
   return (
     <div
       className={cn(
-        "font-mono text-[0.6875rem] font-semibold uppercase tracking-[0.22em] text-[var(--v2-text-faint)]",
+        "v2-tag-face text-[length:var(--v2-font-size-label)] text-[var(--v2-text-faint)]",
         className
       )}
     >

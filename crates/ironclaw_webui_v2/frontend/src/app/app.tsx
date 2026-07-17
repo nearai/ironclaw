@@ -17,6 +17,7 @@ import { ExtensionsPage } from "../pages/extensions/extensions-page";
 import { SettingsPage } from "../pages/settings/settings-page";
 import { AdminPage } from "../pages/admin/admin-page";
 import { LogsPage } from "../pages/logs/logs-page";
+import { PlaygroundPage } from "../pages/playground/playground-page";
 
 function AuthLoading() {
   const t = useT();
@@ -34,7 +35,7 @@ function LoginPage({ auth }) {
   const from = fromLocation
     ? `${fromLocation.pathname || defaultRoute}${fromLocation.search || ""}${fromLocation.hash || ""}`
     : defaultRoute;
-  const redirectAfter = `/v2${from === "/" ? "" : from}`;
+  const redirectAfter = from;
 
   const handleSubmit = React.useCallback(
     (token) => {
@@ -101,9 +102,14 @@ export function App() {
   const auth = useAuthSession();
 
   return (
-    <BrowserRouter basename="/v2">
+    <BrowserRouter>
       <Routes>
         <Route path="/login" element={(<LoginPage auth={auth} />)} />
+        {/* Design-system workbench. Lives outside the authenticated
+            layout (like /login) so it renders full-bleed with no app
+            chrome. Static reference surface only: it makes no API
+            calls and exposes no data. See DESIGN_SYSTEM.md. */}
+        <Route path="/playground" element={(<PlaygroundPage />)} />
         <Route path="/" element={(<AuthenticatedLayout auth={auth} />)}>
           <Route index element={(<Navigate to={defaultRoute} replace />)} />
           <Route path="overview" element={(<Navigate to={defaultRoute} replace />)} />

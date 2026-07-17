@@ -9,7 +9,7 @@ import { cn } from "../../utils/cn";
 import { OAuthProviderButtons } from "./components/oauth-provider-buttons";
 import { useOAuthProviders } from "./hooks/useOAuthProviders";
 
-export function LoginPage({ initialToken, error, oauthRedirectAfter = "/v2", onSubmit }) {
+export function LoginPage({ initialToken, error, oauthRedirectAfter = "/", onSubmit }) {
   const t = useT();
   const { theme, toggleTheme } = useInterfaceTheme();
   const oauthProviders = useOAuthProviders();

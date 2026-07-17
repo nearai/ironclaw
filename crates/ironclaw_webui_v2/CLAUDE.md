@@ -20,9 +20,20 @@ Compiling this crate into a binary is not enough to expose the v2
 routes to a browser. Host composition (gateway / app startup) still
 owns:
 
-1. **Mounting the router.** Call `webui_v2_router(state)` and merge
-   the resulting `axum::Router` into the gateway's main router under
-   the same path prefix the descriptors declare.
+1. **Mounting the routers.** Call `webui_v2_router(state)` and merge
+   the resulting API `axum::Router` under the paths its descriptors
+   declare. Merge `static_router()` once at the gateway root for the
+   SPA, owned assets, wallet popup, and `/v2` compatibility redirects.
+   The former public `mount_at_prefix(prefix)` factory was deleted by
+   the root-mount migration: callers must replace
+   `mount_at_prefix("/v2")` with `static_router()` and must not nest the
+   returned router under `/v2`. Hosts that merge additional typed route
+   mounts must use `static_router_with_config(...)` and reserve the
+   mounts' literal root namespaces through
+   `StaticRouterConfig::try_with_additional_reserved_root_namespaces`;
+   percent-encoded/dynamic, malformed, or static-owned roots fail
+   configuration. `webui_v2_app` derives and validates those roots from its
+   final descriptor set automatically.
 2. **Bearer-token middleware.** Authenticate `Authorization: Bearer
    …` (or the matching session form) and inject a
    `WebUiAuthenticatedCaller` and request-scoped

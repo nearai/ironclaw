@@ -261,10 +261,14 @@ test("locale packs include admin write-only secret management copy", () => {
   }
 });
 
-test("locale packs include workspace area labels and accept a formatted size", () => {
+test("locale packs include workspace labels and accept a formatted size", () => {
   for (const locale of LOCALES) {
     const pack = loadLocalePack(locale);
-    for (const key of ["workspace.area.home", "workspace.area.memory"]) {
+    for (const key of [
+      "workspace.area.home",
+      "workspace.area.memory",
+      "workspace.downloadFailed",
+    ]) {
       assert.equal(typeof pack[key], "string", `${locale} missing ${key}`);
       assert.notEqual(pack[key].trim(), "", `${locale} ${key} should not be empty`);
     }

@@ -34,7 +34,7 @@ export function SidebarFooter({ theme, toggleTheme, profile, onSignOut }) {
       (
         <div
           className={cn(
-            "absolute bottom-full left-3 right-3 mb-2 rounded-[10px] border p-3 shadow-lg",
+            "absolute bottom-full left-3 right-3 mb-2 rounded-[10px] border p-3 shadow-[var(--v2-shadow-menu)]",
             "border-[var(--v2-panel-border)] bg-[var(--v2-surface)]"
           )}
         >

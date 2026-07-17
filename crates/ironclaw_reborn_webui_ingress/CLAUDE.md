@@ -65,7 +65,7 @@ Routes mounted by `webui_v2_auth_router`:
   cross-provider replay guard, code exchange via the matching
   `OAuthProvider`, user resolution via `UserDirectory`, session
   mint via `SessionStore`, and redirect to
-  `{redirect_after}?login_ticket=<ticket>` (default `/v2`). The
+  `{redirect_after}?login_ticket=<ticket>` (default `/`). The
   ticket is short-lived and single-use; the SPA redeems it over
   same-origin JSON so the bearer never appears in a redirect
   `Location` header.
@@ -136,7 +136,7 @@ pub trait OAuthProvider: Send + Sync + 'static {
 - **Hosted-domain restriction** is enforced server-side from the
   ID token's `hd` claim, not from the `hd=` URL hint.
 - **Error mapping**: every failure path redirects to
-  `/v2?login_error=<code>` where `<code>` is an opaque enum
+  `/?login_error=<code>` where `<code>` is an opaque enum
   (`invalid_state`, `provider_mismatch`, `denied`,
   `unauthorized`, `exchange_failed`, `server_error`,
   `invalid_request`). Provider error bodies, JWT decode messages,

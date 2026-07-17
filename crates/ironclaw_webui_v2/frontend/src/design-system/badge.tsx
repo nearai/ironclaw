@@ -37,8 +37,8 @@ const toneClasses = {
 };
 
 const sizeClasses = {
-  sm: "h-6 gap-1.5 rounded-full px-2 text-[0.625rem] tracking-[0.12em]",
-  md: "h-7 gap-2 rounded-full px-2.5 text-[0.6875rem] tracking-[0.12em]",
+  sm: "h-6 gap-1.5 rounded-full px-2 text-[0.625rem]",
+  md: "h-7 gap-2 rounded-full px-2.5 text-[length:var(--v2-font-size-label)]",
 };
 
 export function Badge({ tone = "muted", label, dot = true, size = "md", className = "" }) {
@@ -50,7 +50,9 @@ export function Badge({ tone = "muted", label, dot = true, size = "md", classNam
         // other space-free scripts wrap between any two characters, so a
         // translated tone label like "信号" would otherwise stack vertically
         // inside the fixed-height pill.
-        "inline-flex shrink-0 items-center whitespace-nowrap border font-mono uppercase",
+        // `.v2-tag-face` is the nux tag language: Geist Pixel Square,
+        // uppercase, 0.08em tracking (see app.css).
+        "v2-tag-face inline-flex shrink-0 items-center whitespace-nowrap border",
         sizeClasses[size] ?? sizeClasses.md,
         toneClasses[tone] ?? toneClasses.muted,
         className

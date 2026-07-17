@@ -56,7 +56,7 @@ export function TeeShield() {
           className={cn(
             "absolute right-0 top-full z-40 mt-2 w-[min(22rem,calc(100vw-2rem))]",
             "rounded-[14px] border border-[var(--v2-panel-border)]",
-            "bg-[var(--v2-surface)] p-3 shadow-[0_18px_48px_rgba(0,0,0,0.35)]"
+            "bg-[var(--v2-surface)] p-3 shadow-[var(--v2-shadow-menu)]"
           )}
         >
           <div className="flex items-center gap-2">

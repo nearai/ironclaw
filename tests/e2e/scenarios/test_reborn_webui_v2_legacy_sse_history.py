@@ -43,7 +43,7 @@ async def test_reborn_legacy_message_persists_across_page_reload(
     context = await reborn_v2_browser.new_context(viewport={"width": 1280, "height": 720})
     page = await context.new_page()
     try:
-        await page.goto(f"{reborn_v2_server}/v2/chat/{thread_id}?token={REBORN_V2_AUTH_TOKEN}")
+        await page.goto(f"{reborn_v2_server}/chat/{thread_id}?token={REBORN_V2_AUTH_TOKEN}")
         await expect(page.locator(SEL_V2["msg_user"]).filter(has_text="What is 2+2?")).to_be_visible(
             timeout=15000
         )
@@ -170,7 +170,7 @@ async def test_reborn_legacy_sse_resume_reuses_last_cursor_without_history_reloa
     await page.route(f"**/api/webchat/v2/threads/{THREAD_ID}/timeline**", handle_timeline)
 
     try:
-        await page.goto(f"{reborn_v2_server}/v2/chat/{THREAD_ID}?token={REBORN_V2_AUTH_TOKEN}")
+        await page.goto(f"{reborn_v2_server}/chat/{THREAD_ID}?token={REBORN_V2_AUTH_TOKEN}")
         user_message = page.locator(SEL_V2["msg_user"]).first
         await expect(user_message).to_contain_text(
             "SSE reconnect should preserve this message", timeout=15000
@@ -336,7 +336,7 @@ async def test_reborn_legacy_sse_error_reconnect_resumes_after_last_cursor(
     await page.route(f"**/api/webchat/v2/threads/{THREAD_ID}/timeline**", handle_timeline)
 
     try:
-        await page.goto(f"{reborn_v2_server}/v2/chat/{THREAD_ID}?token={REBORN_V2_AUTH_TOKEN}")
+        await page.goto(f"{reborn_v2_server}/chat/{THREAD_ID}?token={REBORN_V2_AUTH_TOKEN}")
         await expect(
             page.locator(SEL_V2["msg_user"]).filter(
                 has_text="Reconnect should resume after this cursor"
@@ -462,7 +462,7 @@ async def test_reborn_legacy_usage_event_does_not_render_message_badge(
     await page.route(f"**/api/webchat/v2/threads/{thread_id}/timeline**", handle_timeline)
 
     try:
-        await page.goto(f"{reborn_v2_server}/v2/chat/{thread_id}?token={REBORN_V2_AUTH_TOKEN}")
+        await page.goto(f"{reborn_v2_server}/chat/{thread_id}?token={REBORN_V2_AUTH_TOKEN}")
         assistant = page.locator(SEL_V2["msg_assistant"]).first
         await expect(assistant).to_contain_text("No footer please", timeout=15000)
         await expect(page.locator(".turn-cost-badge")).to_have_count(0)
@@ -605,7 +605,7 @@ async def test_reborn_legacy_stale_replay_timeline_refresh_dedupes_messages(
 
     try:
         await page.goto(
-            f"{reborn_v2_server}/v2/chat/{STALE_REPLAY_THREAD_ID}?token={REBORN_V2_AUTH_TOKEN}"
+            f"{reborn_v2_server}/chat/{STALE_REPLAY_THREAD_ID}?token={REBORN_V2_AUTH_TOKEN}"
         )
         user_message = page.locator(SEL_V2["msg_user"]).filter(
             has_text="Question before stale replay"
@@ -757,7 +757,7 @@ async def test_reborn_legacy_late_projection_text_dedupes_history_response(
 
     try:
         await page.goto(
-            f"{reborn_v2_server}/v2/chat/{LATE_TEXT_PROJECTION_THREAD_ID}"
+            f"{reborn_v2_server}/chat/{LATE_TEXT_PROJECTION_THREAD_ID}"
             f"?token={REBORN_V2_AUTH_TOKEN}"
         )
         answer = page.locator(SEL_V2["msg_assistant"]).filter(
@@ -919,7 +919,7 @@ async def test_reborn_legacy_sse_thread_switch_drops_prior_thread_cursor(
     await page.route(f"**/api/webchat/v2/threads/{THREAD_B_ID}/timeline**", handle_timeline_b)
 
     try:
-        await page.goto(f"{reborn_v2_server}/v2/chat/{THREAD_A_ID}?token={REBORN_V2_AUTH_TOKEN}")
+        await page.goto(f"{reborn_v2_server}/chat/{THREAD_A_ID}?token={REBORN_V2_AUTH_TOKEN}")
         thread_a_message = page.locator(SEL_V2["msg_user"]).filter(has_text="Message from thread A")
         await expect(thread_a_message).to_be_visible(timeout=15000)
         await page.wait_for_function("() => window.__v2SseUrls.length === 1", timeout=5000)
@@ -953,7 +953,7 @@ async def test_reborn_legacy_multiple_tabs_receive_same_response(
     page_a = await context.new_page()
     page_b = await context.new_page()
     try:
-        url = f"{reborn_v2_server}/v2/chat/{thread_id}?token={REBORN_V2_AUTH_TOKEN}"
+        url = f"{reborn_v2_server}/chat/{thread_id}?token={REBORN_V2_AUTH_TOKEN}"
         await page_a.goto(url)
         await page_b.goto(url)
         await expect(page_a.locator(SEL_V2["chat_composer"])).to_be_visible(
