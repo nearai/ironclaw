@@ -2,7 +2,7 @@
 //! host-supplied route-mount vocabulary. The middleware/assembly that
 //! composes the WebChat v2 gateway (`webui_v2_app` + its per-route
 //! body/rate/origin middleware) moved up into
-//! `ironclaw_reborn_webui_ingress`, which owns the host serve lifecycle;
+//! `ironclaw_webui`, which owns the host serve lifecycle;
 //! only the facade (`RebornWebuiBundle`) and the mount vocabulary that
 //! composition's own route builders need stay here.
 

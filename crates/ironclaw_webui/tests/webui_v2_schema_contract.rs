@@ -11,7 +11,7 @@ use ironclaw_turns::{
     AcceptedMessageRef, EventCursor, RunProfileId, RunProfileVersion, SanitizedFailure, TurnRunId,
     TurnStatus,
 };
-use ironclaw_reborn_webui_ingress::webui_v2::{WebChatV2Event, WebChatV2EventFrame};
+use ironclaw_webui::webui_v2::{WebChatV2Event, WebChatV2EventFrame};
 use serde_json::Value;
 
 fn cursor() -> ProjectionCursor {

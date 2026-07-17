@@ -132,7 +132,7 @@ pub use llm_admin::nearai_mcp::{
 };
 #[cfg(feature = "openai-compat-beta")]
 pub use llm_admin::openai_compat_serve::build_openai_compat_route_mount;
-// Re-exported for the host-owned `ironclaw_reborn_webui_ingress::webui_v2_app`
+// Re-exported for the host-owned `ironclaw_webui::webui_v2_app`
 // (hoisted up from this crate): its bearer-auth middleware mints tenant-scoped
 // verified-bearer evidence for protected OpenAI-compatible mounts. Ingress must
 // not depend on `ironclaw_product_adapters` directly (architecture boundary), so
@@ -178,7 +178,7 @@ pub use product_auth::api::auth::{
 #[cfg(feature = "slack-v2-host-beta")]
 pub use product_auth::serve::SlackPersonalOAuthBindingConfig;
 // Product-auth WebUI route-mount builders, exposed so the host-owned
-// `ironclaw_reborn_webui_ingress::webui_v2_app` (moved up from this crate) can
+// `ironclaw_webui::webui_v2_app` (moved up from this crate) can
 // compose the Reborn-native product-auth surface into the WebChat v2 router.
 #[cfg(feature = "webui-v2-beta")]
 pub use product_auth::serve::{
@@ -265,7 +265,7 @@ pub use web_access::register_bundled_web_access_first_party_handlers;
 pub use webui::facade::{RebornWebuiBundle, build_webui_services};
 // Host-supplied route-mount vocabulary shared with composition's own route
 // builders (nearai login, OpenAI-compat) and the host-owned gateway assembly
-// in `ironclaw_reborn_webui_ingress`. The `WebuiServeConfig` / `webui_v2_app`
+// in `ironclaw_webui`. The `WebuiServeConfig` / `webui_v2_app`
 // / `WebuiAuthenticator` surface moved up into that ingress crate.
 #[cfg(feature = "webui-v2-beta")]
 pub use webui::route_mounts::{

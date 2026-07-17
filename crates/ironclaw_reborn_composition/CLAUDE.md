@@ -220,7 +220,7 @@ merged into the composed app OUTSIDE the bearer-auth layer but
 INSIDE the outer security-header / CORS / global-body-limit
 stack. The seam exists for the WebChat v2 SSO login surface
 shipped by
-`ironclaw_reborn_webui_ingress::webui_v2_auth_router`, which
+`ironclaw_webui::webui_v2_auth_router`, which
 mounts `/auth/providers`, `/auth/login/{provider}`,
 `/auth/callback/{provider}`, and `/auth/logout`. The browser must
 reach those routes without a session (the whole point of login),
@@ -266,7 +266,7 @@ Rationale:
   `Referrer-Policy: no-referrer` as defense in depth.
 - **Logout actually revokes.** `POST /auth/logout` calls
   `SessionStore::revoke`; the regression in
-  `crates/ironclaw_reborn_webui_ingress/tests/session_round_trip.rs`
+  `crates/ironclaw_webui/tests/session_round_trip.rs`
   locks that a post-revoke bearer fails on `/api/webchat/v2/threads`.
 
 This is a deliberate divergence from the v1 gateway, which sets a
@@ -300,7 +300,7 @@ rows are inventoried here, not implemented in the current PR.
 | Operator status/readiness | v1 doctor/readiness surfaces | `GET /api/webchat/v2/operator/status` | Mapped to Reborn readiness projection through the product facade; left unmounted with other operator routes for multi-user authenticators |
 | Operator logs | `src/cli/logs.rs` command path | `GET /api/webchat/v2/operator/logs` | Mapped to the in-process operator log buffer with bounded query, tail, follow, filter, cursor, and redaction behavior |
 | Operator service lifecycle | `src/cli/service.rs` command path | `POST /api/webchat/v2/operator/service` | Mapped to a Reborn composition lifecycle backend; launchd/systemd user services are supported, other OS targets report unsupported |
-| SSO login (Google) | `GET /auth/providers`, `GET /auth/login/{p}`, `GET /auth/callback/{p}`, `POST /auth/logout` | Same paths on the v2 listener via `ironclaw_reborn_webui_ingress::webui_v2_auth_router`, merged into `webui_v2_app` through [`WebuiServeConfig::with_public_route_mount`] (typed `{ router, descriptors }` so the per-route body-limit / rate-limit middleware applies) | Mapped (Google); GitHub + NEAR follow under #4116 |
+| SSO login (Google) | `GET /auth/providers`, `GET /auth/login/{p}`, `GET /auth/callback/{p}`, `POST /auth/logout` | Same paths on the v2 listener via `ironclaw_webui::webui_v2_auth_router`, merged into `webui_v2_app` through [`WebuiServeConfig::with_public_route_mount`] (typed `{ router, descriptors }` so the per-route body-limit / rate-limit middleware applies) | Mapped (Google); GitHub + NEAR follow under #4116 |
 
 ### Security invariants on every "Mapped" row
 
@@ -364,7 +364,7 @@ Per Path A in `docs/reborn/how-to-port-channel-to-reborn.md`:
 
 The `serve` subcommand builds a full local-dev `RebornRuntime`, asks
 `build_webui_services(&runtime, None)` for the WebUI bundle, and hands
-the resulting router to the host-owned `ironclaw_reborn_webui_ingress`
+the resulting router to the host-owned `ironclaw_webui`
 listener lifecycle. The bundle's default projection stream is backed by
 the runtime-owned durable event log plus `EventStreamManager`, so
 `/events` and `/ws` no longer advertise routes that only return

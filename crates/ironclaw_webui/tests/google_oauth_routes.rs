@@ -23,7 +23,7 @@ use axum::http::{Request, StatusCode, header};
 use chrono::Duration as ChronoDuration;
 use http_body_util::BodyExt;
 use ironclaw_host_api::TenantId;
-use ironclaw_reborn_webui_ingress::{
+use ironclaw_webui::{
     EmailUserDirectory, InMemorySessionStore, OAuthError, OAuthProvider, OAuthProviderName,
     OAuthRouterConfig, OAuthUserProfile, SessionStore, webui_v2_auth_router,
 };
@@ -1082,7 +1082,7 @@ mod user_directory_branches {
     use super::*;
     use async_trait::async_trait;
     use ironclaw_host_api::UserId;
-    use ironclaw_reborn_webui_ingress::{UserDirectory, UserDirectoryError};
+    use ironclaw_webui::{UserDirectory, UserDirectoryError};
 
     struct AlwaysUnknown;
 
@@ -1195,7 +1195,7 @@ mod session_store_failure {
     use async_trait::async_trait;
     use chrono::Duration as ChronoDuration;
     use ironclaw_host_api::{TenantId, UserId};
-    use ironclaw_reborn_webui_ingress::{
+    use ironclaw_webui::{
         SessionRecord, SessionStore, SessionStoreError, UserDirectory,
     };
     use secrecy::SecretString;
@@ -1296,7 +1296,7 @@ mod logout_revoke_failure {
     use async_trait::async_trait;
     use chrono::Duration as ChronoDuration;
     use ironclaw_host_api::{TenantId, UserId};
-    use ironclaw_reborn_webui_ingress::{
+    use ironclaw_webui::{
         SessionRecord, SessionStore, SessionStoreError, UserDirectory,
     };
     use secrecy::SecretString;

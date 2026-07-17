@@ -26,7 +26,7 @@ use ironclaw_reborn_composition::{
     LocalTriggerAccessStore, ProviderKind, RebornIdentityError, RebornIdentityResolver,
     ResolveExternalIdentity, SurfaceKind,
 };
-use ironclaw_reborn_webui_ingress::{
+use ironclaw_webui::{
     OAuthProviderName, OAuthUserProfile, UserDirectory, UserDirectoryError,
 };
 

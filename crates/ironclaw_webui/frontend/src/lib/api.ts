@@ -3,7 +3,7 @@
 //
 // Every function in this module targets a `/api/webchat/v2/*` route
 // defined by issue #3815, a v2-owned `/auth/*` route mounted by
-// `ironclaw_reborn_webui_ingress::webui_v2_auth_router`, or a
+// `ironclaw_webui::webui_v2_auth_router`, or a
 // Reborn product-auth route mounted by host composition. The module
 // deliberately contains no `/api/chat`, `/api/engine`, or
 // `/api/profile` paths — the hard non-goal of issue #3886 still
@@ -713,7 +713,7 @@ export function gatewayStatus() {
 // --- v2 auth surface ---
 //
 // The host mounts `webui_v2_auth_router` from
-// `ironclaw_reborn_webui_ingress` at the same origin as the SPA. The
+// `ironclaw_webui` at the same origin as the SPA. The
 // providers endpoint is public; the login + callback routes are
 // reached via `<a href>` navigations from the login page (the SPA
 // does not invoke them via fetch). The callback redirects back with

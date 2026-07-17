@@ -11,7 +11,7 @@ and `03-headers-errors.md` for headers + error sanitization.
   `webui_ws_origin.rs`, `webui_rate_limit.rs`, `webui_body_limit.rs`),
   reading per-route policy from `ironclaw_webui_v2::webui_v2_routes()`
   and the host SSO mount descriptors from
-  `ironclaw_reborn_webui_ingress::webui_v2_auth_router` (`auth/routes.rs`).
+  `ironclaw_webui::webui_v2_auth_router` (`auth/routes.rs`).
 
 Decision legend as in `01-auth.md`: **Keep** / **Change** / **Beta-break**.
 
@@ -36,7 +36,7 @@ gaps on the host-owned public SSO surface plus the CORS fail-closed
 default.
 
 **This PR** —
-`crates/ironclaw_reborn_webui_ingress/tests/network_limits_contract.rs`:
+`crates/ironclaw_webui/tests/network_limits_contract.rs`:
 
 - `sso_login_enforces_per_ip_rate_limit` — `/auth/login/{provider}` →
   60× 307 then 429 (row 6, PerIp scope).
@@ -52,10 +52,10 @@ default.
   and NoBody-on-read; rate-limit 429 after the 60/60s budget +
   per-caller independence; WS same-origin 101/403 (missing, mismatched,
   canonical-host); static security headers (rows 1, 2, 5, 6).
-- `ironclaw_reborn_webui_ingress/tests/google_oauth_routes.rs` /
+- `ironclaw_webui/tests/google_oauth_routes.rs` /
   `github_oauth_routes.rs`: CSRF state single-use replay, cross-provider
   replay (`provider_mismatch`), open-redirect fallback (rows 3, 4).
-- `ironclaw_reborn_webui_ingress/src/auth/pending.rs::tests`: state TTL,
+- `ironclaw_webui/src/auth/pending.rs::tests`: state TTL,
   1024-entry eviction, single-use, redirect/CRLF/fragment sanitization
   (rows 3, 4).
 - `ironclaw_reborn_composition/src/webui/webui_rate_limit.rs::tests`: PerIp

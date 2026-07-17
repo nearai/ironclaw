@@ -35,10 +35,10 @@ use ironclaw_reborn_composition::{
     AdminApiTokenMinter, PollSettings, RebornBuildInput, RebornRuntime, RebornRuntimeIdentity,
     RebornRuntimeInput, build_reborn_runtime, build_webui_services,
 };
-use ironclaw_reborn_webui_ingress::{
+use ironclaw_webui::{
     WebuiAuthentication, WebuiAuthenticator, WebuiServeConfig, webui_v2_app,
 };
-use ironclaw_reborn_webui_ingress::{
+use ironclaw_webui::{
     EnvBearerAuthenticator, SessionAuthenticator, SessionStore, signed_session_store,
 };
 use secrecy::{ExposeSecret, SecretString};

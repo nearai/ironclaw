@@ -474,7 +474,7 @@ fn untrusted_ingress_paths_cannot_submit_host_trusted_inbound() {
         "crates/ironclaw_product_adapters/src",
         "crates/ironclaw_product_adapter_registry/src",
         "crates/ironclaw_product_workflow/src",
-        "crates/ironclaw_reborn_webui_ingress/src",
+        "crates/ironclaw_webui/src",
         "crates/ironclaw_wasm_product_adapters/src",
         "crates/ironclaw_telegram_v2_adapter/src",
         "crates/ironclaw_slack_v2_adapter/src",
@@ -568,9 +568,9 @@ fn reborn_cli_binary_crate_stays_separate_from_v1_root() {
             "ironclaw_reborn_composition",
             "ironclaw_reborn_config",
             "ironclaw_reborn_traces",
-            "ironclaw_reborn_webui_ingress",
+            "ironclaw_webui",
         ],
-        "ironclaw_reborn_cli should enter Reborn through ironclaw_reborn_composition (assembled-runtime and provider-admin facade), ironclaw_reborn_config (boot-config contract), ironclaw_reborn_traces (contributor-side TraceCommons client extracted from the legacy monolith), and ironclaw_reborn_webui_ingress (host-owned WebUI serve lifecycle) only. Adding any other workspace crate here re-opens speculative public API access to internal Reborn types.",
+        "ironclaw_reborn_cli should enter Reborn through ironclaw_reborn_composition (assembled-runtime and provider-admin facade), ironclaw_reborn_config (boot-config contract), ironclaw_reborn_traces (contributor-side TraceCommons client extracted from the legacy monolith), and ironclaw_webui (host-owned WebUI serve lifecycle) only. Adding any other workspace crate here re-opens speculative public API access to internal Reborn types.",
     );
     assert_workspace_deps_exactly(
         &dependencies_all_kinds,
@@ -2866,9 +2866,9 @@ fn boundary_rules() -> Vec<BoundaryRule> {
         },
         // NOTE(webui-merge): the former `ironclaw_webui_v2` BoundaryRule was
         // removed when that crate's route surface was folded into
-        // `ironclaw_reborn_webui_ingress` (as its `webui_v2` module). The
+        // `ironclaw_webui` (as its `webui_v2` module). The
         // "handlers do not touch adapters/dispatcher/runtime directly"
-        // invariant is now carried by the `ironclaw_reborn_webui_ingress`
+        // invariant is now carried by the `ironclaw_webui`
         // rule's forbidden list.
         BoundaryRule {
             // OpenAI-compatible route surface is a Reborn product/API facade.
@@ -3122,7 +3122,7 @@ fn boundary_rules() -> Vec<BoundaryRule> {
             // ironclaw_reborn_composition's facade (Router + WebuiAuthenticator
             // trait + WebuiServeConfig + mount vocabulary + product-auth mount
             // builders).
-            crate_name: "ironclaw_reborn_webui_ingress",
+            crate_name: "ironclaw_webui",
             forbidden: vec![
                 "ironclaw",
                 "ironclaw_authorization",
@@ -3754,7 +3754,7 @@ fn boundary_rules() -> Vec<BoundaryRule> {
                 "ironclaw_reborn_config",
                 "ironclaw_reborn_event_store",
                 "ironclaw_reborn_traces",
-                "ironclaw_reborn_webui_ingress",
+                "ironclaw_webui",
                 "ironclaw_resources",
                 "ironclaw_run_state",
                 "ironclaw_runtime_policy",
@@ -3967,7 +3967,7 @@ const LAYER_MATRIX_EXCEPTIONS: &[LayerMatrixException] = &[
         reason: "the runner intentionally composes loop-host adapters until kernel consolidation introduces a neutral dispatch boundary",
     },
     LayerMatrixException {
-        crate_name: "ironclaw_reborn_webui_ingress",
+        crate_name: "ironclaw_webui",
         dependency_name: "ironclaw_reborn_composition",
         introduced: "2026-07-09",
         removes_in: "W3.6",

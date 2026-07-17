@@ -102,7 +102,7 @@ function consumeLoginTicketFromUrl() {
 
 // Map opaque error codes the OAuth callback emits (`?login_error=...`)
 // to short user-facing messages. Keeps the SPA's surface in sync with
-// `error_code_for` in `crates/ironclaw_reborn_webui_ingress/src/auth/routes.rs`.
+// `error_code_for` in `crates/ironclaw_webui/src/auth/routes.rs`.
 // An unknown code falls back to a generic message so a future
 // backend addition does not render a blank banner.
 const LOGIN_ERROR_MESSAGES = {

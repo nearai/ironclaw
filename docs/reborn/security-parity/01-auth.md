@@ -9,7 +9,7 @@ session, OIDC, and the query-token exception). Sibling files
 - **v1** auth lives in `src/channels/web/platform/auth.rs` (wired by
   `src/channels/web/platform/router.rs`).
 - **v2** auth is the three `WebuiAuthenticator` impls in
-  `crates/ironclaw_reborn_webui_ingress/` (`lib.rs`, `session.rs`,
+  `crates/ironclaw_webui/` (`lib.rs`, `session.rs`,
   `oidc.rs`), selected by the host and enforced by the composition
   middleware in `crates/ironclaw_reborn_composition/src/webui/webui_serve.rs`.
   v2 shares **zero** code with v1 by contract (#3886).
@@ -53,7 +53,7 @@ listener never re-introduces v1 `/auth/*` handlers.
 
 ## Test coverage
 
-- **v2 route-layer** (`crates/ironclaw_reborn_webui_ingress/tests/`):
+- **v2 route-layer** (`crates/ironclaw_webui/tests/`):
   - `auth_route_contract.rs` — env-bearer accept/reject, missing /
     empty-token / no-prefix → 401, case-insensitive prefix parity,
     revoke-then-reject, expired-session rejection, `?token=` SSE shim

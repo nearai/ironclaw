@@ -28,7 +28,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("cargo:rerun-if-changed=build.rs");
 
     // The WebChat v2 route surface + SPA bundle is folded unconditionally into
-    // this crate (it is the whole reason `ironclaw_reborn_webui_ingress`
+    // this crate (it is the whole reason `ironclaw_webui`
     // exists), so the frontend is always built. This replaces the former
     // `webui-v2-beta` feature gate the standalone `ironclaw_webui_v2` crate
     // used before the merge.

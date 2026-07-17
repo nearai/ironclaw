@@ -38,7 +38,7 @@ use ironclaw_product_workflow::{
 use ironclaw_reborn_composition::{
     RebornAuthContinuationDispatcher, RebornProductAuthServices, RebornReadiness, RebornWebuiBundle,
 };
-use ironclaw_reborn_webui_ingress::{
+use ironclaw_webui::{
     WebuiAuthentication, WebuiAuthenticator, WebuiServeConfig, webui_v2_app,
 };
 use serde_json::{Value, json};

@@ -1,7 +1,7 @@
 use axum::body::Body;
 use http::{Method, Request, StatusCode};
 use http_body_util::BodyExt;
-use ironclaw_reborn_webui_ingress::empty_webui_v2_auth_providers_mount;
+use ironclaw_webui::empty_webui_v2_auth_providers_mount;
 use tower::ServiceExt;
 
 #[tokio::test]

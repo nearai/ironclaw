@@ -1,26 +1,36 @@
-//! Caller-level production-chain test for multi-user WebChat v2 SSO.
+//! End-to-end caller-level test: a session minted via the WebChat
+//! v2 OAuth callback is accepted as a bearer on a protected v2 route
+//! and stops working after `POST /auth/logout`.
 //!
-//! Unlike `session_round_trip.rs` (which uses the dev `InMemorySessionStore`),
-//! this drives the REAL production session path the `ironclaw-reborn serve`
-//! binary wires: `build_signed_session_login` → `SignedTokenSessionStore`
-//! (stateless HMAC) → `CompositeAuthenticator` → composed `webui_v2_app`.
+//! Per the issue #4116 acceptance criteria — "session use on a
+//! protected WebChat v2 route" — this test composes the full
+//! `webui_v2_app` (`ironclaw_reborn_composition`) with:
 //!
-//! It logs in TWO distinct OAuth identities through the SAME app, mints two
-//! signed session bearers, and asserts each bearer reaches the protected v2
-//! surface as its OWN `WebUiAuthenticatedCaller.user_id` — never the other's
-//! and never the env operator. That per-user identity is exactly what the
-//! facade's owner-scoped thread isolation builds on, so a regression that
-//! collapsed both logins onto one user (or onto the operator) would fail
-//! here.
+//! - the OAuth public router from `webui_v2_auth_router` (mints
+//!   sessions),
+//! - a `SessionAuthenticator` backed by the SAME
+//!   `InMemorySessionStore` (validates bearers),
+//! - a minimal `RebornServicesApi` stub that only implements
+//!   `create_thread` for the round-trip assertion.
+//!
+//! The chain it locks: OAuth callback → SessionStore::create_session
+//! → one-time `login_ticket` exchange → SessionAuthenticator → v2
+//! route handler → facade call. A regression that loses any link
+//! (e.g. store mismatch, bearer exchange drift, missing user_id
+//! stamp) would break exactly the path users hit when they sign in
+//! with Google.
 
-use std::collections::VecDeque;
-use std::net::SocketAddr;
+#![cfg(feature = "dev-in-memory-session")]
+
 use std::sync::{Arc, Mutex};
+
+use std::net::SocketAddr;
 
 use async_trait::async_trait;
 use axum::body::Body;
 use axum::extract::ConnectInfo;
 use axum::http::{HeaderValue, Method, Request, StatusCode, header};
+use chrono::Duration as ChronoDuration;
 use http_body_util::BodyExt;
 use ironclaw_host_api::{AgentId, ProjectId, TenantId, ThreadId, UserId};
 use ironclaw_product_workflow::{
@@ -39,14 +49,13 @@ use ironclaw_product_workflow::{
     WebUiSetupExtensionRequest, rejecting_reborn_services_error,
 };
 use ironclaw_reborn_composition::{RebornReadiness, RebornWebuiBundle};
-use ironclaw_reborn_webui_ingress::{WebuiServeConfig, webui_v2_app};
-use ironclaw_reborn_webui_ingress::{
-    EnvBearerAuthenticator, OAuthProvider, OAuthProviderName, OAuthUserProfile,
-    SignedSessionLoginConfig, UserDirectory, UserDirectoryError, build_signed_session_login,
+use ironclaw_webui::{WebuiServeConfig, webui_v2_app};
+use ironclaw_webui::{
+    EmailUserDirectory, InMemorySessionStore, OAuthProvider, OAuthProviderName, OAuthRouterConfig,
+    OAuthUserProfile, SessionAuthenticator, SessionStore, webui_v2_auth_router,
 };
 use ironclaw_threads::{SessionThreadRecord, ThreadScope};
 use parking_lot::Mutex as PlMutex;
-use secrecy::SecretString;
 use serde::Deserialize;
 use tower::ServiceExt;
 
@@ -54,23 +63,26 @@ const TENANT: &str = "tenant-a";
 const AGENT: &str = "agent-default";
 const PROJECT: &str = "project-default";
 
-// ─── facade stub: records the caller per create_thread ───────────────────
+// ─── stub facade ──────────────────────────────────────────────────────
 
+/// `RebornServicesApi` stub — only `create_thread` returns Ok with a
+/// fake thread (the protected route this test exercises). Every
+/// other method panics with `unreachable!()` because the test
+/// deliberately drives a single mutation; a future expansion that
+/// hits another route would fail loudly here, locking the test
+/// scope.
 #[derive(Default)]
-struct RecordingServices {
+struct StubServices {
     create_thread_callers: Mutex<Vec<WebUiAuthenticatedCaller>>,
 }
 
 #[async_trait]
-impl RebornServicesApi for RecordingServices {
+impl RebornServicesApi for StubServices {
     async fn create_thread(
         &self,
         caller: WebUiAuthenticatedCaller,
         _request: WebUiCreateThreadRequest,
     ) -> Result<RebornCreateThreadResponse, RebornServicesError> {
-        // Return a thread owned by the calling user, mirroring the real
-        // facade's `owner = caller.user_id` rule.
-        let owner = caller.user_id.clone();
         self.create_thread_callers
             .lock()
             .expect("lock")
@@ -82,10 +94,10 @@ impl RebornServicesApi for RecordingServices {
                     tenant_id: TenantId::new(TENANT).expect("tenant"),
                     agent_id: AgentId::new("agent.fake").expect("agent"),
                     project_id: Some(ProjectId::new("project.fake").expect("project")),
-                    owner_user_id: Some(owner),
+                    owner_user_id: Some(UserId::new("alice@example.com").expect("user")),
                     mission_id: None,
                 },
-                created_by_actor_id: "actor".to_string(),
+                created_by_actor_id: "alice@example.com".to_string(),
                 title: None,
                 metadata_json: None,
                 goal: None,
@@ -102,6 +114,7 @@ impl RebornServicesApi for RecordingServices {
     ) -> Result<RebornSubmitTurnResponse, RebornServicesError> {
         unreachable!("test does not drive submit_turn")
     }
+
     async fn get_timeline(
         &self,
         _caller: WebUiAuthenticatedCaller,
@@ -109,6 +122,7 @@ impl RebornServicesApi for RecordingServices {
     ) -> Result<RebornTimelineResponse, RebornServicesError> {
         unreachable!("test does not drive get_timeline")
     }
+
     async fn stream_events(
         &self,
         _caller: WebUiAuthenticatedCaller,
@@ -116,6 +130,7 @@ impl RebornServicesApi for RecordingServices {
     ) -> Result<RebornStreamEventsResponse, RebornServicesError> {
         unreachable!("test does not drive stream_events")
     }
+
     async fn get_run_state(
         &self,
         _caller: WebUiAuthenticatedCaller,
@@ -123,6 +138,7 @@ impl RebornServicesApi for RecordingServices {
     ) -> Result<RebornGetRunStateResponse, RebornServicesError> {
         unreachable!("test does not drive get_run_state")
     }
+
     async fn cancel_run(
         &self,
         _caller: WebUiAuthenticatedCaller,
@@ -138,6 +154,7 @@ impl RebornServicesApi for RecordingServices {
     ) -> Result<RebornRetryRunResponse, RebornServicesError> {
         unreachable!("test does not drive retry_run")
     }
+
     async fn resolve_gate(
         &self,
         _caller: WebUiAuthenticatedCaller,
@@ -145,16 +162,22 @@ impl RebornServicesApi for RecordingServices {
     ) -> Result<RebornResolveGateResponse, RebornServicesError> {
         unreachable!("test does not drive resolve_gate")
     }
+
     async fn list_threads(
         &self,
         _caller: WebUiAuthenticatedCaller,
         _request: WebUiListThreadsRequest,
     ) -> Result<RebornListThreadsResponse, RebornServicesError> {
+        // Defensive: a future composition layer that pre-warms by
+        // listing threads would fall here rather than into the
+        // `create_thread` arm. Return an empty page instead of
+        // panicking so the test is robust to incidental calls.
         Ok(RebornListThreadsResponse {
             threads: Vec::new(),
             next_cursor: None,
         })
     }
+
     async fn delete_thread(
         &self,
         _caller: WebUiAuthenticatedCaller,
@@ -162,6 +185,7 @@ impl RebornServicesApi for RecordingServices {
     ) -> Result<RebornDeleteThreadResponse, RebornServicesError> {
         unreachable!("test does not drive delete_thread")
     }
+
     async fn list_automations(
         &self,
         _caller: WebUiAuthenticatedCaller,
@@ -169,12 +193,14 @@ impl RebornServicesApi for RecordingServices {
     ) -> Result<RebornListAutomationsResponse, RebornServicesError> {
         Err(rejecting_reborn_services_error())
     }
+
     async fn get_outbound_preferences(
         &self,
         _caller: WebUiAuthenticatedCaller,
     ) -> Result<RebornOutboundPreferencesResponse, RebornServicesError> {
         Err(rejecting_reborn_services_error())
     }
+
     async fn set_outbound_preferences(
         &self,
         _caller: WebUiAuthenticatedCaller,
@@ -182,24 +208,28 @@ impl RebornServicesApi for RecordingServices {
     ) -> Result<RebornOutboundPreferencesResponse, RebornServicesError> {
         Err(rejecting_reborn_services_error())
     }
+
     async fn list_outbound_delivery_targets(
         &self,
         _caller: WebUiAuthenticatedCaller,
     ) -> Result<RebornOutboundDeliveryTargetListResponse, RebornServicesError> {
         Err(rejecting_reborn_services_error())
     }
+
     async fn list_extensions(
         &self,
         _caller: WebUiAuthenticatedCaller,
     ) -> Result<RebornExtensionListResponse, RebornServicesError> {
         Err(rejecting_reborn_services_error())
     }
+
     async fn list_skills(
         &self,
         _caller: WebUiAuthenticatedCaller,
     ) -> Result<RebornSkillListResponse, RebornServicesError> {
         Err(rejecting_reborn_services_error())
     }
+
     async fn search_skills(
         &self,
         _caller: WebUiAuthenticatedCaller,
@@ -207,6 +237,7 @@ impl RebornServicesApi for RecordingServices {
     ) -> Result<RebornSkillSearchResponse, RebornServicesError> {
         Err(rejecting_reborn_services_error())
     }
+
     async fn install_skill(
         &self,
         _caller: WebUiAuthenticatedCaller,
@@ -215,6 +246,7 @@ impl RebornServicesApi for RecordingServices {
     ) -> Result<RebornSkillActionResponse, RebornServicesError> {
         Err(rejecting_reborn_services_error())
     }
+
     async fn read_skill_content(
         &self,
         _caller: WebUiAuthenticatedCaller,
@@ -222,6 +254,7 @@ impl RebornServicesApi for RecordingServices {
     ) -> Result<RebornSkillContentResponse, RebornServicesError> {
         Err(rejecting_reborn_services_error())
     }
+
     async fn update_skill(
         &self,
         _caller: WebUiAuthenticatedCaller,
@@ -230,6 +263,7 @@ impl RebornServicesApi for RecordingServices {
     ) -> Result<RebornSkillActionResponse, RebornServicesError> {
         Err(rejecting_reborn_services_error())
     }
+
     async fn remove_skill(
         &self,
         _caller: WebUiAuthenticatedCaller,
@@ -237,12 +271,14 @@ impl RebornServicesApi for RecordingServices {
     ) -> Result<RebornSkillActionResponse, RebornServicesError> {
         Err(rejecting_reborn_services_error())
     }
+
     async fn list_extension_registry(
         &self,
         _caller: WebUiAuthenticatedCaller,
     ) -> Result<RebornExtensionRegistryResponse, RebornServicesError> {
         Err(rejecting_reborn_services_error())
     }
+
     async fn install_extension(
         &self,
         _caller: WebUiAuthenticatedCaller,
@@ -250,6 +286,7 @@ impl RebornServicesApi for RecordingServices {
     ) -> Result<RebornExtensionActionResponse, RebornServicesError> {
         Err(rejecting_reborn_services_error())
     }
+
     async fn activate_extension(
         &self,
         _caller: WebUiAuthenticatedCaller,
@@ -257,6 +294,7 @@ impl RebornServicesApi for RecordingServices {
     ) -> Result<RebornExtensionActionResponse, RebornServicesError> {
         Err(rejecting_reborn_services_error())
     }
+
     async fn remove_extension(
         &self,
         _caller: WebUiAuthenticatedCaller,
@@ -264,6 +302,7 @@ impl RebornServicesApi for RecordingServices {
     ) -> Result<RebornExtensionActionResponse, RebornServicesError> {
         Err(rejecting_reborn_services_error())
     }
+
     async fn setup_extension(
         &self,
         _caller: WebUiAuthenticatedCaller,
@@ -274,42 +313,24 @@ impl RebornServicesApi for RecordingServices {
     }
 }
 
-// ─── distinct-user directory: one user per provider subject ──────────────
+// ─── stub OAuth provider ──────────────────────────────────────────────
 
-/// Maps each provider subject to its own `UserId`, mirroring the real
-/// reborn-owned store's distinct-user behavior without a database.
-struct DistinctUserDirectory;
-
-#[async_trait]
-impl UserDirectory for DistinctUserDirectory {
-    async fn resolve(
-        &self,
-        _provider: &OAuthProviderName,
-        profile: &OAuthUserProfile,
-    ) -> Result<UserId, UserDirectoryError> {
-        UserId::new(format!("user-{}", profile.provider_user_id))
-            .map_err(|err| UserDirectoryError::Backend(err.to_string()))
-    }
-}
-
-// ─── OAuth provider that yields a queue of profiles ──────────────────────
-
-struct QueueProvider {
+struct StubProvider {
     name: OAuthProviderName,
-    profiles: PlMutex<VecDeque<OAuthUserProfile>>,
+    profile: PlMutex<Option<OAuthUserProfile>>,
 }
 
-impl QueueProvider {
-    fn new(profiles: Vec<OAuthUserProfile>) -> Arc<Self> {
+impl StubProvider {
+    fn new(profile: OAuthUserProfile) -> Arc<Self> {
         Arc::new(Self {
             name: OAuthProviderName::new("google").expect("name"),
-            profiles: PlMutex::new(profiles.into()),
+            profile: PlMutex::new(Some(profile)),
         })
     }
 }
 
 #[async_trait]
-impl OAuthProvider for QueueProvider {
+impl OAuthProvider for StubProvider {
     fn name(&self) -> &OAuthProviderName {
         &self.name
     }
@@ -325,68 +346,26 @@ impl OAuthProvider for QueueProvider {
         _code: &str,
         _callback_url: &str,
         _verifier: &str,
-    ) -> Result<OAuthUserProfile, ironclaw_reborn_webui_ingress::OAuthError> {
+    ) -> Result<OAuthUserProfile, ironclaw_webui::OAuthError> {
         Ok(self
-            .profiles
+            .profile
             .lock()
-            .pop_front()
-            .expect("a queued profile per login"))
+            .take()
+            .expect("profile already consumed"))
     }
 }
 
-fn profile(sub: &str, email: &str) -> OAuthUserProfile {
+// ─── harness ──────────────────────────────────────────────────────────
+
+fn alice_profile() -> OAuthUserProfile {
     OAuthUserProfile {
-        provider_user_id: sub.to_string(),
-        email: Some(email.to_string()),
+        provider_user_id: "google-sub-123".to_string(),
+        email: Some("alice@example.com".to_string()),
         email_verified: true,
-        verified_emails: vec![email.to_string()],
-        display_name: None,
+        verified_emails: vec!["alice@example.com".to_string()],
+        display_name: Some("Alice".to_string()),
     }
 }
-
-fn with_peer(mut req: Request<Body>) -> Request<Body> {
-    req.extensions_mut()
-        .insert(ConnectInfo(SocketAddr::from(([127, 0, 0, 1], 1234))));
-    req
-}
-
-fn build_app(profiles: Vec<OAuthUserProfile>) -> (axum::Router, Arc<RecordingServices>) {
-    let env_authenticator = Arc::new(
-        EnvBearerAuthenticator::new(
-            SecretString::from("env-operator-token".to_string()),
-            UserId::new("operator").expect("operator"),
-        )
-        .expect("env authenticator"),
-    );
-    let wiring = build_signed_session_login(SignedSessionLoginConfig {
-        tenant_id: TenantId::new(TENANT).expect("tenant"),
-        user_directory: Arc::new(DistinctUserDirectory),
-        operator_secret: SecretString::from("operator-secret".to_string()),
-        base_url: "https://gateway.example".to_string(),
-        providers: vec![QueueProvider::new(profiles) as Arc<dyn OAuthProvider>],
-        env_authenticator,
-    })
-    .expect("login wiring");
-
-    let services = Arc::new(RecordingServices::default());
-    let bundle = RebornWebuiBundle {
-        api: services.clone(),
-        product_auth: None,
-        readiness: RebornReadiness::disabled(),
-    };
-    let config = WebuiServeConfig::new(
-        TenantId::new(TENANT).expect("tenant"),
-        wiring.authenticator,
-        vec![HeaderValue::from_static("http://localhost:1234")],
-    )
-    .with_default_agent_id(AgentId::new(AGENT).expect("agent"))
-    .with_default_project_id(ProjectId::new(PROJECT).expect("project"))
-    .with_public_route_mount(wiring.mount);
-    let app = webui_v2_app(bundle, config).expect("webui v2 app");
-    (app, services)
-}
-
-// ─── login helpers ───────────────────────────────────────────────────────
 
 fn state_from_location(location: &str) -> String {
     let query = location.split_once('?').expect("query").1;
@@ -398,24 +377,58 @@ fn state_from_location(location: &str) -> String {
     panic!("no state in {location}");
 }
 
-fn ticket_from_landing(landing: &str) -> String {
-    let query = landing.split_once('?').expect("query").1;
-    let query = query.split_once('#').map(|(q, _)| q).unwrap_or(query);
-    for pair in query.split('&') {
-        if let Some(value) = pair.strip_prefix("login_ticket=") {
-            return urlencoding::decode(value).expect("decode").into_owned();
-        }
-    }
-    panic!("no login_ticket in {landing}");
+fn build_app() -> (axum::Router, Arc<StubServices>, Arc<InMemorySessionStore>) {
+    let session_store: Arc<InMemorySessionStore> = Arc::new(InMemorySessionStore::new());
+    let bearer_authenticator = Arc::new(SessionAuthenticator::new(session_store.clone()));
+
+    let oauth_mount = webui_v2_auth_router(
+        OAuthRouterConfig::new(
+            TenantId::new(TENANT).expect("tenant"),
+            session_store.clone() as Arc<dyn SessionStore>,
+            Arc::new(EmailUserDirectory),
+            vec![StubProvider::new(alice_profile()) as Arc<dyn OAuthProvider>],
+            "https://gateway.example",
+        )
+        .with_session_lifetime(ChronoDuration::hours(1)),
+    );
+
+    let services = Arc::new(StubServices::default());
+    let bundle = RebornWebuiBundle {
+        api: services.clone(),
+        product_auth: None,
+        readiness: RebornReadiness::disabled(),
+    };
+    let config = WebuiServeConfig::new(
+        TenantId::new(TENANT).expect("tenant"),
+        bearer_authenticator,
+        vec![HeaderValue::from_static("http://localhost:1234")],
+    )
+    .with_default_agent_id(AgentId::new(AGENT).expect("agent"))
+    .with_default_project_id(ProjectId::new(PROJECT).expect("project"))
+    .with_public_route_mount(oauth_mount);
+    let app = webui_v2_app(bundle, config).expect("webui v2 app");
+    (app, services, session_store)
 }
 
-#[derive(Deserialize)]
-struct SessionExchangeResponse {
-    token: String,
+/// Helper: tag a request with `ConnectInfo` so the descriptor-
+/// driven PerIp rate-limit middleware can resolve a peer address.
+/// In production, host composition injects this through
+/// `into_make_service_with_connect_info`; the `oneshot` harness
+/// has to do it explicitly.
+fn with_peer(mut req: Request<Body>) -> Request<Body> {
+    req.extensions_mut()
+        .insert(ConnectInfo(SocketAddr::from(([127, 0, 0, 1], 1234))));
+    req
 }
 
-/// Drive one full login → callback → ticket-exchange and return the bearer.
-async fn login(app: &axum::Router) -> String {
+// ─── test ─────────────────────────────────────────────────────────────
+
+#[tokio::test]
+async fn session_minted_via_oauth_callback_authenticates_protected_v2_route() {
+    let (app, services, session_store) = build_app();
+
+    // 1. Login → capture CSRF state from the stub provider's
+    //    authorization URL.
     let login = app
         .clone()
         .oneshot(with_peer(
@@ -437,6 +450,8 @@ async fn login(app: &axum::Router) -> String {
         .to_string();
     let state = state_from_location(&auth_url);
 
+    // 2. Callback mints a session — extract the one-time ticket from
+    //    the SPA-bound redirect, then exchange it for the bearer.
     let callback = app
         .clone()
         .oneshot(with_peer(
@@ -459,10 +474,112 @@ async fn login(app: &axum::Router) -> String {
         .to_str()
         .expect("utf-8")
         .to_string();
+    assert!(
+        !landing.contains("#token="),
+        "callback Location must not carry the bearer: {landing}",
+    );
     let ticket = ticket_from_landing(&landing);
+    let bearer = redeem_ticket(app.clone(), &ticket).await;
+    assert_eq!(session_store.len(), 1, "session must be persisted");
 
-    let response = app
+    // 3. Use the bearer on a protected WebChat v2 route. This is
+    //    the contract the issue #4116 acceptance criterion calls
+    //    out by name: "session use on a protected WebChat v2
+    //    route". The stub `create_thread` records the caller so we
+    //    can also assert the `UserId` resolved through
+    //    `EmailUserDirectory` made it onto the
+    //    `WebUiAuthenticatedCaller` stamped by the bearer
+    //    middleware.
+    let create = app
         .clone()
+        .oneshot(with_peer(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/api/webchat/v2/threads")
+                .header(header::AUTHORIZATION, format!("Bearer {bearer}"))
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(r#"{"client_action_id":"act-1"}"#))
+                .expect("request"),
+        ))
+        .await
+        .expect("oneshot");
+    assert_eq!(
+        create.status(),
+        StatusCode::OK,
+        "OAuth-issued bearer must authenticate on the v2 surface",
+    );
+    let callers = services.create_thread_callers.lock().expect("lock").clone();
+    assert_eq!(callers.len(), 1, "facade reached exactly once");
+    assert_eq!(callers[0].tenant_id.as_str(), TENANT);
+    assert_eq!(callers[0].user_id.as_str(), "alice@example.com");
+    assert_eq!(
+        callers[0].agent_id.as_ref().map(|id| id.as_str()),
+        Some(AGENT),
+        "host-installation default agent_id must be stamped",
+    );
+
+    // 4. Logout revokes the session — the SAME bearer must stop
+    //    working on the protected v2 route. This is the third
+    //    bullet of the acceptance criterion: "Logout revokes the
+    //    active server-side session... and prevents subsequent v2
+    //    API access with that session."
+    let logout = app
+        .clone()
+        .oneshot(with_peer(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/auth/logout")
+                .header(header::AUTHORIZATION, format!("Bearer {bearer}"))
+                .body(Body::empty())
+                .expect("request"),
+        ))
+        .await
+        .expect("oneshot");
+    assert_eq!(logout.status(), StatusCode::NO_CONTENT);
+    assert_eq!(session_store.len(), 0, "session must be revoked");
+
+    let post_logout = app
+        .oneshot(with_peer(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/api/webchat/v2/threads")
+                .header(header::AUTHORIZATION, format!("Bearer {bearer}"))
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(r#"{"client_action_id":"act-2"}"#))
+                .expect("request"),
+        ))
+        .await
+        .expect("oneshot");
+    assert_eq!(
+        post_logout.status(),
+        StatusCode::UNAUTHORIZED,
+        "post-logout bearer must NOT authenticate",
+    );
+    assert_eq!(
+        services.create_thread_callers.lock().expect("lock").len(),
+        1,
+        "facade must not be reached after revoke",
+    );
+}
+
+#[derive(Deserialize)]
+struct SessionExchangeResponse {
+    token: String,
+}
+
+fn ticket_from_landing(landing: &str) -> String {
+    let query = landing.split_once('?').expect("query").1;
+    let query = query.split_once('#').map(|(q, _)| q).unwrap_or(query);
+    for pair in query.split('&') {
+        if let Some(value) = pair.strip_prefix("login_ticket=") {
+            return urlencoding::decode(value).expect("decode").into_owned();
+        }
+    }
+    panic!("no login_ticket in {landing}");
+}
+
+async fn redeem_ticket(app: axum::Router, ticket: &str) -> String {
+    let response = app
         .oneshot(with_peer(
             Request::builder()
                 .method(Method::POST)
@@ -483,156 +600,6 @@ async fn login(app: &axum::Router) -> String {
         .expect("body")
         .to_bytes();
     let payload: SessionExchangeResponse = serde_json::from_slice(&bytes).expect("json");
+    assert!(!payload.token.is_empty());
     payload.token
-}
-
-async fn create_thread(app: &axum::Router, bearer: &str) -> StatusCode {
-    app.clone()
-        .oneshot(with_peer(
-            Request::builder()
-                .method(Method::POST)
-                .uri("/api/webchat/v2/threads")
-                .header(header::AUTHORIZATION, format!("Bearer {bearer}"))
-                .header(header::CONTENT_TYPE, "application/json")
-                .body(Body::from(r#"{"client_action_id":"act-1"}"#))
-                .expect("request"),
-        ))
-        .await
-        .expect("oneshot")
-        .status()
-}
-
-async fn session_payload(app: &axum::Router, bearer: &str) -> serde_json::Value {
-    let response = app
-        .clone()
-        .oneshot(with_peer(
-            Request::builder()
-                .method(Method::GET)
-                .uri("/api/webchat/v2/session")
-                .header(header::AUTHORIZATION, format!("Bearer {bearer}"))
-                .body(Body::empty())
-                .expect("request"),
-        ))
-        .await
-        .expect("oneshot");
-    assert_eq!(response.status(), StatusCode::OK);
-    let bytes = response
-        .into_body()
-        .collect()
-        .await
-        .expect("body")
-        .to_bytes();
-    serde_json::from_slice(&bytes).expect("session json")
-}
-
-async fn llm_providers_status(app: &axum::Router, bearer: &str, method: Method) -> StatusCode {
-    app.clone()
-        .oneshot(with_peer(
-            Request::builder()
-                .method(method)
-                .uri("/api/webchat/v2/llm/providers")
-                .header(header::AUTHORIZATION, format!("Bearer {bearer}"))
-                .body(Body::empty())
-                .expect("request"),
-        ))
-        .await
-        .expect("oneshot")
-        .status()
-}
-
-// ─── test ─────────────────────────────────────────────────────────────────
-
-#[tokio::test]
-async fn two_oauth_users_reach_protected_routes_as_distinct_callers() {
-    // alice and bob log in through the real signed-session production
-    // chain; each must reach the protected v2 surface as its own user.
-    let (app, services) = build_app(vec![
-        profile("alice-sub", "alice@example.com"),
-        profile("bob-sub", "bob@example.com"),
-    ]);
-
-    let alice_bearer = login(&app).await;
-    let bob_bearer = login(&app).await;
-    assert_ne!(
-        alice_bearer, bob_bearer,
-        "two distinct logins must mint two distinct session bearers"
-    );
-
-    assert_eq!(create_thread(&app, &alice_bearer).await, StatusCode::OK);
-    assert_eq!(create_thread(&app, &bob_bearer).await, StatusCode::OK);
-
-    let callers = services.create_thread_callers.lock().expect("lock").clone();
-    assert_eq!(callers.len(), 2, "facade reached once per user");
-    assert_eq!(
-        callers[0].user_id.as_str(),
-        "user-alice-sub",
-        "alice's bearer must reach the facade as alice"
-    );
-    assert_eq!(
-        callers[1].user_id.as_str(),
-        "user-bob-sub",
-        "bob's bearer must reach the facade as bob — never collapsed onto one user or the operator"
-    );
-    // Both callers carry the host-trusted tenant, never a browser value.
-    assert!(callers.iter().all(|c| c.tenant_id.as_str() == TENANT));
-}
-
-#[tokio::test]
-async fn sso_sessions_stay_non_operator_while_env_token_can_configure_operator_routes() {
-    // This mirrors the Railway deployment shape: SSO login is enabled,
-    // but the env bearer remains the separate operator credential.
-    let (app, _services) = build_app(vec![profile("alice-sub", "alice@example.com")]);
-    let sso_bearer = login(&app).await;
-
-    let sso_session = session_payload(&app, &sso_bearer).await;
-    assert_eq!(sso_session["user_id"], "user-alice-sub");
-    assert_eq!(
-        sso_session["capabilities"]["operator_webui_config"], false,
-        "SSO session tokens must not inherit operator privileges"
-    );
-    assert_eq!(
-        llm_providers_status(&app, &sso_bearer, Method::GET).await,
-        StatusCode::FORBIDDEN,
-        "SSO session tokens must be denied on operator LLM config routes"
-    );
-    assert_eq!(
-        llm_providers_status(&app, &sso_bearer, Method::HEAD).await,
-        StatusCode::FORBIDDEN,
-        "SSO session tokens must be denied on operator LLM config routes before Axum routes HEAD through GET"
-    );
-
-    let operator_session = session_payload(&app, "env-operator-token").await;
-    assert_eq!(operator_session["user_id"], "operator");
-    assert_eq!(
-        operator_session["capabilities"]["operator_webui_config"], true,
-        "the env bearer token must keep operator capability when SSO is mounted"
-    );
-    let operator_status = llm_providers_status(&app, "env-operator-token", Method::GET).await;
-    assert_ne!(operator_status, StatusCode::UNAUTHORIZED);
-    assert_ne!(operator_status, StatusCode::FORBIDDEN);
-    assert_ne!(
-        operator_status,
-        StatusCode::NOT_FOUND,
-        "operator routes must be mounted when the composite authenticator contains an env operator token"
-    );
-}
-
-#[tokio::test]
-async fn one_users_bearer_is_rejected_after_tampering() {
-    // A signed session bearer must not be malleable into another identity:
-    // flipping a byte breaks the HMAC and the protected route rejects it,
-    // so a user cannot forge a token for a different user.
-    let (app, _services) = build_app(vec![profile("alice-sub", "alice@example.com")]);
-    let bearer = login(&app).await;
-
-    let mut tampered = bearer.clone();
-    let last = tampered.pop().expect("non-empty");
-    tampered.push(if last == 'A' { 'B' } else { 'A' });
-
-    let status = create_thread(&app, &tampered).await;
-    assert_eq!(
-        status,
-        StatusCode::UNAUTHORIZED,
-        "a tampered session bearer must not authenticate"
-    );
 }

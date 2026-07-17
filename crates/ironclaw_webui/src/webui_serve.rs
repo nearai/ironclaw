@@ -242,7 +242,7 @@ pub struct WebuiServeConfig {
     pub(crate) default_project_id: Option<ProjectId>,
     /// Host-supplied public (unauthenticated) route mounts merged
     /// into the composed app outside the bearer auth layer. Used
-    /// by `ironclaw_reborn_webui_ingress::webui_v2_auth_router`
+    /// by `ironclaw_webui::webui_v2_auth_router`
     /// to mount the WebChat v2 OAuth login surface and by protocol
     /// webhooks such as Slack Events API. Both the `Router` and the
     /// `Vec<IngressRouteDescriptor>` are required so the descriptor-driven
@@ -357,7 +357,7 @@ impl WebuiServeConfig {
     /// on the same Reborn listener.
     ///
     /// Today this is the seam
-    /// `ironclaw_reborn_webui_ingress::webui_v2_auth_router` plugs
+    /// `ironclaw_webui::webui_v2_auth_router` plugs
     /// into; future host-owned public surfaces can reuse the same
     /// hook by returning a [`PublicRouteMount`].
     ///

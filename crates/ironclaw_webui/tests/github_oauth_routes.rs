@@ -33,7 +33,7 @@ use axum::routing::{get, post};
 use chrono::Duration as ChronoDuration;
 use http_body_util::BodyExt;
 use ironclaw_host_api::TenantId;
-use ironclaw_reborn_webui_ingress::{
+use ironclaw_webui::{
     EmailUserDirectory, GitHubOAuthConfig, GitHubProvider, InMemorySessionStore, OAuthProvider,
     OAuthRouterConfig, SessionStore, webui_v2_auth_router,
 };

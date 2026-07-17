@@ -47,7 +47,7 @@ use ironclaw_product_workflow::{
     WebUiSetupExtensionRequest, rejecting_reborn_services_error,
 };
 use ironclaw_threads::{SessionThreadRecord, ThreadScope};
-use ironclaw_reborn_webui_ingress::webui_v2::{
+use ironclaw_webui::webui_v2::{
     DEFAULT_SSE_MAX_CONCURRENT_PER_CALLER, WebUiV2Capabilities, WebUiV2State, webui_v2_router,
 };
 use serde_json::Value;

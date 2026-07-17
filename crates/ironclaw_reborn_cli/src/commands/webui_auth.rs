@@ -17,7 +17,7 @@ use ironclaw_reborn_composition::host_api::{AgentId, ProjectId, TenantId};
 use ironclaw_reborn_composition::{
     LocalTriggerAccessStore, PublicRouteMount, RebornIdentityResolver,
 };
-use ironclaw_reborn_webui_ingress::{
+use ironclaw_webui::{
     CompositeAuthenticator, SessionAuthenticator, SignedSessionLoginConfig, WebuiAuthenticator,
     build_signed_session_login, empty_webui_v2_auth_providers_mount, signed_session_store,
 };
@@ -158,8 +158,8 @@ mod tests {
     use super::*;
 
     use async_trait::async_trait;
-    use ironclaw_reborn_webui_ingress::WebuiAuthentication;
-    use ironclaw_reborn_webui_ingress::{
+    use ironclaw_webui::WebuiAuthentication;
+    use ironclaw_webui::{
         OAuthError, OAuthProvider, OAuthProviderName, OAuthUserProfile,
     };
 

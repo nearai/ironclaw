@@ -69,7 +69,7 @@ case "${package}" in
     # fallback would otherwise add now that the crate declares a `libsql` feature.
     printf '%s\n' "--features contract-tests"
     ;;
-  ironclaw_reborn_webui_ingress)
+  ironclaw_webui)
     printf '%s\n' "--features dev-in-memory-session"
     ;;
   ironclaw_host_runtime)

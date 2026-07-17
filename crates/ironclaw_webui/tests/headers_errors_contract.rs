@@ -34,8 +34,8 @@ use axum::http::{HeaderValue, Method, Request, StatusCode, header};
 use http_body_util::BodyExt;
 use ironclaw_host_api::{AgentId, ProjectId, TenantId, UserId};
 use ironclaw_reborn_composition::{RebornReadiness, RebornWebuiBundle};
-use ironclaw_reborn_webui_ingress::{WebuiServeConfig, webui_v2_app};
-use ironclaw_reborn_webui_ingress::EnvBearerAuthenticator;
+use ironclaw_webui::{WebuiServeConfig, webui_v2_app};
+use ironclaw_webui::EnvBearerAuthenticator;
 use secrecy::SecretString;
 use tower::ServiceExt;
 

@@ -1,6 +1,6 @@
 //! Host-supplied route-mount vocabulary shared between composition's own
 //! route builders (nearai login, OpenAI-compat) and the host-owned WebChat v2
-//! gateway assembly in `ironclaw_reborn_webui_ingress`.
+//! gateway assembly in `ironclaw_webui`.
 //!
 //! These types carry only `axum::Router` + `IngressRouteDescriptor`; they do
 //! not depend on the WebChat v2 route surface, so they stay in composition

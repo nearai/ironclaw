@@ -9958,7 +9958,7 @@ output_schema_ref = "schemas/write.output.json"
     async fn webui_route_rejects_list_automations_without_agent_binding() {
         use axum::body::Body;
         use axum::http::{Request, StatusCode};
-        use ironclaw_reborn_webui_ingress::webui_v2::{
+        use ironclaw_webui::webui_v2::{
             DEFAULT_SSE_MAX_CONCURRENT_PER_CALLER, WebUiV2State, webui_v2_router,
         };
         use tower::ServiceExt;
@@ -10120,7 +10120,7 @@ output_schema_ref = "schemas/write.output.json"
     async fn webui_operator_diagnostics_route_exposes_composed_readiness_evidence() {
         use axum::body::{Body, to_bytes};
         use axum::http::{Request, StatusCode};
-        use ironclaw_reborn_webui_ingress::webui_v2::{
+        use ironclaw_webui::webui_v2::{
             DEFAULT_SSE_MAX_CONCURRENT_PER_CALLER, WebUiV2Capabilities, WebUiV2State,
             webui_v2_router,
         };

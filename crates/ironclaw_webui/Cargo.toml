@@ -1,5 +1,5 @@
 [package]
-name = "ironclaw_reborn_webui_ingress"
+name = "ironclaw_webui"
 version = "0.1.0"
 edition = "2024"
 rust-version.workspace = true

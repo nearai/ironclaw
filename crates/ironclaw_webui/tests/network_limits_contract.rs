@@ -47,8 +47,8 @@ use axum::body::Body;
 use axum::http::{HeaderValue, Method, Request, StatusCode, header};
 use ironclaw_host_api::{AgentId, ProjectId, TenantId};
 use ironclaw_reborn_composition::{RebornReadiness, RebornWebuiBundle};
-use ironclaw_reborn_webui_ingress::{WebuiServeConfig, webui_v2_app};
-use ironclaw_reborn_webui_ingress::{
+use ironclaw_webui::{WebuiServeConfig, webui_v2_app};
+use ironclaw_webui::{
     EmailUserDirectory, InMemorySessionStore, OAuthError, OAuthProvider, OAuthProviderName,
     OAuthRouterConfig, OAuthUserProfile, SessionAuthenticator, SessionStore, webui_v2_auth_router,
 };

@@ -59,7 +59,7 @@ migration-support = []
 # diagnostic harnesses) stay off the feature and carry no WebUI code.
 webui-v2-beta = [
     # The `ironclaw_webui_v2` route surface merged up into
-    # `ironclaw_reborn_webui_ingress` (as its `webui_v2` module); this crate no
+    # `ironclaw_webui` (as its `webui_v2` module); this crate no
     # longer depends on it. Composition keeps this feature to gate the WebUI
     # facade, identity, admin, and route-mount vocabulary it still owns.
     "dep:ironclaw_reborn_identity",
@@ -165,7 +165,7 @@ nix = { version = "0.30", default-features = false, features = ["process"] }
 # Unpacking uploaded WASM-tool bundles for the WebUI "Install Tool" import flow.
 zip = { version = "8", default-features = false, features = ["deflate"] }
 # WebUI v2 route surface + static SPA bundle merged up into
-# `ironclaw_reborn_webui_ingress`; no longer a composition dependency.
+# `ironclaw_webui`; no longer a composition dependency.
 ironclaw_wasm_product_adapters = { path = "../ironclaw_wasm_product_adapters", optional = true }
 libsql = { version = "0.9", optional = true, default-features = false, features = ["core", "replication", "remote", "tls"] }
 libc = "0.2"
@@ -207,7 +207,7 @@ http-body-util = "0.1"
 # `WebuiServeConfig::with_slack_*` setters — which moved into this ingress crate
 # and are gated on the ingress slack feature. Cargo features cannot reach a
 # dev-dependency, so the dev-dep must request the feature directly.
-ironclaw_reborn_webui_ingress = { path = "../ironclaw_reborn_webui_ingress", features = ["slack-v2-host-beta"] }
+ironclaw_webui = { path = "../ironclaw_webui", features = ["slack-v2-host-beta"] }
 secrecy = { version = "0.10", features = ["serde"] }
 ironclaw_common = { path = "../ironclaw_common" }
 ironclaw_host_api = { path = "../ironclaw_host_api" }

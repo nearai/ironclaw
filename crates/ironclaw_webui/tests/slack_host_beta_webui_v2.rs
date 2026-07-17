@@ -29,7 +29,7 @@ use ironclaw_reborn_composition::{
     build_reborn_runtime, build_slack_host_beta_mounts,
     build_webui_services_with_slack_host_beta_mounts, local_dev_runtime_policy,
 };
-use ironclaw_reborn_webui_ingress::{
+use ironclaw_webui::{
     WebuiAuthentication, WebuiAuthenticator, WebuiServeConfig, webui_v2_app,
 };
 use ironclaw_turns::run_profile::LoopCapabilityPort;

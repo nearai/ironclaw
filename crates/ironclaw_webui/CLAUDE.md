@@ -1,16 +1,54 @@
-# ironclaw_reborn_webui_ingress guardrails
+# ironclaw_webui guardrails
 
-Host-owned counterpart to `ironclaw_reborn_composition::webui_v2_app`.
-Owns the listener binding + serve loop, the bearer authenticators
-(`EnvBearerAuthenticator`, `SessionAuthenticator`, `OidcAuthenticator`),
-the durable / in-memory `SessionStore` trait + impl, and the WebChat
-v2 OAuth login surface that mints sessions.
+The **WebUI host stack** for Reborn WebChat v2 — the single `products`-layer
+crate, above `ironclaw_reborn_composition`, that turns composition's product/API
+surface into a running HTTP server a browser can talk to. It owns three
+subsystems that used to live apart (see `README.md` for the fold-in map):
 
-Path A of `docs/reborn/how-to-port-channel-to-reborn.md` rules apply:
-host auth stays host-owned in this crate, no `src/` (v1) imports, no
-v1 secrets / settings / DB.
+1. **WebChat v2 route surface + SPA** (`src/webui_v2/`, from the former
+   `ironclaw_webui_v2` crate) — the axum handlers over `RebornServicesApi`, the
+   `webui_v2_routes()` descriptor table, the `WebUiV2HttpError` redacted wire
+   shape, SSE/WebSocket streaming, and the Vite SPA bundle.
+2. **Gateway assembly + middleware** (`src/webui_serve.rs`, `src/webui_*.rs`,
+   from `ironclaw_reborn_composition::webui`) — `webui_v2_app(bundle, config)`
+   composes the full `Router` and layers the fixed middleware stack; owns the
+   `WebuiAuthenticator` / `WebuiAuthentication` host-auth vocabulary and the
+   feature-gated Slack / OpenAI-compat mounts.
+3. **Serve loop + host authentication** (`src/lib.rs`, `src/auth/`,
+   `src/session.rs`, `src/oidc.rs`) — `serve_webui_v2` binds the listener and
+   runs `axum::serve`; the `Env`/`Session`/`Oidc` authenticators, the
+   `SessionStore`, and the `/auth/*` OAuth login surface that mints sessions.
+
+Composition deliberately stops at the
+`reborn_product_api_crates_do_not_bind_http_ingress` boundary — it returns a
+fully composed `Router` but must never bind a socket. This crate is the
+host-owned counterpart that binds the `TcpListener` and drives the serve loop.
+
+Path A of `docs/reborn/how-to-port-channel-to-reborn.md` rules apply: host auth
+stays host-owned in this crate, no `src/` (v1) imports, no v1 secrets / settings
+/ DB, and no direct `ironclaw_product_adapters` edge (reach it through
+composition's facade). Enforced by `ironclaw_architecture`
+(`tests/reborn_dependency_boundaries.rs`).
 
 ## Surface
+
+### Route surface + gateway assembly
+
+| Symbol | Role |
+|---|---|
+| `webui_v2_router(state)` / `webui_v2_router_with_options(state, opts)` | Build the WebChat v2 `axum::Router` from a `WebUiV2State`. |
+| `webui_v2_routes() -> Vec<IngressRouteDescriptor>` | The route descriptor table (id, method, pattern, auth, rate/body limit, streaming). Locked by `tests/webui_v2_descriptors_contract.rs`. |
+| `WebUiV2State` | Handler state: the `RebornServicesApi` facade + `SseCapacity` + route options. |
+| `WebUiV2HttpError` / `WebUiV2HttpErrorBody` | The only path handlers return HTTP errors through — keeps the redacted-error vocabulary intact. |
+| `webui_v2_app(bundle, config) -> WebuiV2App` | Compose composition's `RebornWebuiBundle` + a host `WebuiServeConfig` into the full middleware-wrapped `Router` (also `webui_v2_app_with_lifecycle`). |
+| `WebuiServeConfig` | Host-owned serve config (tenant, authenticator, default agent/project, public/protected mounts, Google OAuth, and — under `slack-v2-host-beta` — the Slack setup/route slots). |
+| `WebuiAuthenticator` trait / `WebuiAuthentication` | Host-auth vocabulary the bearer middleware resolves each token through. |
+
+Middleware modules (`src/webui_*.rs`) layer in a fixed order —
+**ws-origin → per-route body limit → bearer auth → rate limit → handler** —
+turning the `webui_v2_routes()` descriptors into tower layers.
+
+### Serve loop + host authentication
 
 | Symbol | Role |
 |---|---|
@@ -28,6 +66,82 @@ v1 secrets / settings / DB.
 | `OAuthRouterConfig` | Tenant + `SessionStore` + `UserDirectory` + provider list + base URL |
 | `UserDirectory` trait | Host-supplied mapping from `(provider, OAuthUserProfile)` to `UserId` |
 | `EmailUserDirectory` | Local-dev default impl (verified email → `UserId`); gated on `dev-in-memory-session` |
+
+## WebChat v2 route surface (folded from `ironclaw_webui_v2`)
+
+Handlers consume only `ironclaw_product_workflow::RebornServicesApi`. The bearer
+middleware (in this crate's `webui_v2_app`) constructs the
+`WebUiAuthenticatedCaller`, carries the matched token's `WebUiV2Capabilities`,
+and injects both as axum `Extension`s before the handler runs; handlers fail
+closed (`500`) if that layer is missing (locked by
+`missing_caller_extension_returns_500`).
+
+| Route ID | Method | Pattern | Streaming | Effect path |
+|---|---|---|---|---|
+| `webui.v2.get_session` | GET | `/api/webchat/v2/session` | — | `ProjectionOnly` |
+| `webui.v2.create_thread` | POST | `/api/webchat/v2/threads` | — | `ProductWorkflow` |
+| `webui.v2.list_threads` | GET | `/api/webchat/v2/threads` (`?limit&cursor`) | — | `ProjectionOnly` |
+| `webui.v2.delete_thread` | DELETE | `/api/webchat/v2/threads/{thread_id}` | — | `ProductWorkflow` |
+| `webui.v2.send_message` | POST | `/api/webchat/v2/threads/{thread_id}/messages` | — | `TurnCoordinator` |
+| `webui.v2.get_timeline` | GET | `/api/webchat/v2/threads/{thread_id}/timeline` (`?limit&cursor`) | — | `ProjectionOnly` |
+| `webui.v2.logs` | GET | `/api/webchat/v2/logs` | — | `ProjectionOnly` |
+| `webui.v2.stream_events` | GET | `/api/webchat/v2/threads/{thread_id}/events` | **SSE** | `ProjectionOnly` |
+| `webui.v2.stream_events_ws` | GET | `/api/webchat/v2/threads/{thread_id}/ws` | **WebSocket** | `ProjectionOnly` |
+| `webui.v2.cancel_run` / `retry_run` / `resolve_gate` | POST | `…/runs/{run_id}/…` | — | `TurnCoordinator` |
+| `webui.v2.list/pause/resume/rename/delete_automation` | GET/POST/DELETE | `/api/webchat/v2/automations…` | — | `ProductWorkflow` |
+| `webui.v2.list_connectable_channels` | GET | `/api/webchat/v2/channels/connectable` | — | `ProjectionOnly` |
+| `webui.v2.list/install/import/activate/remove/get_setup/setup_extension` | GET/POST | `/api/webchat/v2/extensions…` | — | `ProjectionOnly` / `ProductWorkflow` |
+| `webui.v2.*_llm_*` | GET/POST | `/api/webchat/v2/llm/…` | — | `ProjectionOnly` / `ProductWorkflow` |
+| `webui.v2.settings.list_tools` / `set_tools_auto_approve` / `set_tool_permission` | GET/POST | `/api/webchat/v2/settings/tools…` | — | `ProjectionOnly` / `ProductWorkflow` |
+| `webui.v2.operator.*` (setup, config, config/{key}, validate, diagnostics, status, logs, service) | GET/POST | `/api/webchat/v2/operator/…` | — | `ProjectionOnly` / `ProductWorkflow` |
+| `webui.v2.admin.*` (users CRUD, status, role, secrets) | GET/POST/PATCH/PUT/DELETE | `/api/webchat/v2/admin/users…` | — | `ProductWorkflow` |
+| `webui.v2.trace_*` (credit, account, account-login-link, holds/authorize) | GET/POST | `/api/webchat/v2/traces/…` | — | `ProductWorkflow` |
+
+The exact per-route set (methods, query params, auth, rate/body limits) is the
+descriptor table in `src/webui_v2/descriptors.rs`; the count/shape is locked by
+`tests/webui_v2_descriptors_contract.rs`. Add a route → add a handler **and** a
+`webui_v2_routes()` entry, or that test fails.
+
+**Operator-gating.** LLM config, operator setup/config/service-control, and
+extension zip-import routes are operator-wide: `webui_v2_app` mounts them only
+when the authenticator advertises an operator config surface, and each handler
+still rejects with `403` when the injected `WebUiV2Capabilities` lacks
+`operator_webui_config`. Multi-user session/OIDC authenticators return
+non-operator capabilities. `webui.v2.admin.*` user management is
+admin/operator-gated server-side in `RebornServicesApi` (`AdminUserService`,
+last-admin protection); `create_user` returns the one-time API bearer exactly
+once in `api_token`. `webui.v2.settings.tools` is a normal authenticated-caller
+route (tenant/user-scoped tool-approval settings), not an operator route.
+
+### Streaming model (SSE + WebSocket)
+
+- `stream_events` (SSE) and `stream_events_ws` (WebSocket) render each
+  `ProductOutboundEnvelope` into the redacted `WebChatV2EventFrame` schema
+  (never raw adapter routing/delivery metadata) with the projection cursor as
+  the SSE `id`; the browser resumes via `Last-Event-ID` (preferred over
+  `?after_cursor=`).
+- Both transports share **one** `SseCapacity` budget keyed by `(tenant, user)`
+  (default 3 concurrent; override via `WebUiV2State::with_sse_concurrency_limit`)
+  — a caller cannot bypass the cap by mixing SSE and WS. Exhaustion returns
+  `429` with `retryable: true`.
+- Every stream is closed after a max lifetime (5 min) and every `socket.send` /
+  drain await is `timeout`-bounded, so a back-pressuring client or a stalled
+  facade cannot pin a slot past the budget. Slots are RAII (`SseSlot`), released
+  on disconnect / expiry / error. Regressions locked by
+  `stream_events_ws_shares_capacity_with_sse_streams` and
+  `stream_events_releases_slot_when_facade_drain_stalls_past_max_lifetime`.
+- `capability_activity` / `capability_display_preview` frames carry only
+  bounded, secret-redacted input/output *summaries* (host paths rejected, URLs
+  stripped, byte-bounded) — never raw args/results. Full output stays behind the
+  scoped `result_ref` fetch path. See `.claude/rules/gateway-events.md`.
+
+### SPA bundle
+
+The Vite/TypeScript frontend under `frontend/` is compiled by `build.rs` into
+Cargo's `OUT_DIR` and served from `src/webui_v2/static_assets/`.
+`Dockerfile.reborn` installs `frontend/` deps before the `cargo build` so the
+release image bundles compiled assets; `frontend/README.md` covers the JS
+toolchain.
 
 ## Why the OAuth login router lives here
 
@@ -163,6 +277,27 @@ pub trait OAuthProvider: Send + Sync + 'static {
 
 ## Test layout
 
+**Route surface + gateway assembly** (folded from `ironclaw_webui_v2` +
+composition):
+
+- `tests/webui_v2_descriptors_contract.rs` — locks the descriptor table
+  (count / methods / patterns / auth / rate limits / SSE).
+- `tests/webui_v2_handlers_contract.rs` — drives a real axum router from
+  `webui_v2_router` against a stub `RebornServicesApi` (test-through-the-caller).
+- `tests/webui_v2_schema_contract.rs`, `tests/webui_v2_operator_config_key_contract.rs`,
+  `tests/webui_v2_operator_route_predicate_contract.rs` — wire schema + operator
+  gating.
+- `tests/headers_errors_contract.rs`, `tests/network_limits_contract.rs`,
+  `tests/auth_route_contract.rs` — middleware stack (security headers, body/rate
+  limits, bearer auth) over the composed `webui_v2_app`.
+- `tests/serve_loop.rs` — listener bind + graceful shutdown.
+- `tests/slack_host_beta_webui_v2.rs` — Slack host-beta channel-route /
+  connectable surfaces composed into `webui_v2_app` (gated on
+  `slack-v2-host-beta`; relocated here because `webui_v2_app` lives in this
+  crate).
+
+**Host authentication:**
+
 - `src/{auth, oidc, session}/tests` — unit tests per module
   (provider URL building, PKCE math, ID-token decode, pending
   store, redirect sanitization, session lookup).
@@ -192,6 +327,6 @@ pub trait OAuthProvider: Send + Sync + 'static {
 ## Validation
 
 ```bash
-cargo test -p ironclaw_reborn_webui_ingress --all-features
-cargo clippy -p ironclaw_reborn_webui_ingress --all-features --tests -- -D warnings
+cargo test -p ironclaw_webui --all-features
+cargo clippy -p ironclaw_webui --all-features --tests -- -D warnings
 ```

@@ -34,7 +34,7 @@ Decision legend as in `01-auth.md`: **Keep** / **Change** / **Beta-break**.
 ## Test coverage
 
 **This PR** —
-`crates/ironclaw_reborn_webui_ingress/tests/headers_errors_contract.rs`:
+`crates/ironclaw_webui/tests/headers_errors_contract.rs`:
 
 - `static_security_headers_present_on_error_response` — an
   unauthenticated 401 still carries `nosniff`, `DENY`, CSP, and

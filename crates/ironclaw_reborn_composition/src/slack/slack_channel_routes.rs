@@ -743,7 +743,7 @@ fn sort_routable_team_subjects(subjects: &mut [subjects::SlackRoutableTeamSubjec
 }
 
 // `pub` (not `pub(crate)`) because the sole caller — `webui_v2_app` — was
-// hoisted up into `ironclaw_reborn_webui_ingress` when the WebUI host stack was
+// hoisted up into `ironclaw_webui` when the WebUI host stack was
 // merged; the moved caller composes this admin mount into the v2 router, so its
 // builder and return type (with its two fields) are part of composition's public
 // surface, mirroring the already-public `PublicRouteMount` / `ProtectedRouteMount`.

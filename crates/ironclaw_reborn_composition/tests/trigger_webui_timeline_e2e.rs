@@ -64,7 +64,7 @@ use ironclaw_reborn_composition::{
     RebornRuntimeIdentity, RebornRuntimeInput, RebornWebuiBundle, TriggerPollerSettings,
     build_reborn_runtime, build_webui_services, local_runtime_build_input_with_options,
 };
-use ironclaw_reborn_webui_ingress::{
+use ironclaw_webui::{
     WebuiAuthentication, WebuiAuthenticator, WebuiServeConfig, webui_v2_app,
 };
 use ironclaw_triggers::{

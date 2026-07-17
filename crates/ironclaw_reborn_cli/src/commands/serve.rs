@@ -26,7 +26,7 @@ use ironclaw_reborn_composition::{
 use ironclaw_reborn_config::{
     IdentitySection, RebornConfigFile, seed_default_config_file_if_missing,
 };
-use ironclaw_reborn_webui_ingress::{
+use ironclaw_webui::{
     DeferredWebuiRouterHandle, EnvBearerAuthenticator, RebornWebuiServeError,
     RebornWebuiServeOptions, WebuiAuthenticator, WebuiServeConfig,
     deferred_webui_v2_startup_router, serve_webui_v2, webui_v2_app_with_lifecycle,
@@ -73,7 +73,7 @@ fn present_unicode_env_var(name: &str) -> anyhow::Result<Option<String>> {
 /// store is deterministic in its signing key (operator secret + tenant), so a
 /// token minted here validates under the SSO login surface's own store.
 struct SignedSessionTokenMinter {
-    session_store: Arc<dyn ironclaw_reborn_webui_ingress::SessionStore>,
+    session_store: Arc<dyn ironclaw_webui::SessionStore>,
 }
 
 #[async_trait::async_trait]
@@ -239,7 +239,7 @@ impl ServeCommand {
         // the SSO login surface. The store is stateless and deterministic in its
         // signing key, so this sibling instance (built before the login surface)
         // mints tokens that validate under the login surface's own store.
-        let admin_session_store = ironclaw_reborn_webui_ingress::signed_session_store(
+        let admin_session_store = ironclaw_webui::signed_session_store(
             &session_signing_secret,
             &tenant_id,
         );
@@ -1346,7 +1346,7 @@ slack_user_id = "U123"
             async fn authenticate(
                 &self,
                 _token: &str,
-            ) -> Option<ironclaw_reborn_webui_ingress::WebuiAuthentication> {
+            ) -> Option<ironclaw_webui::WebuiAuthentication> {
                 None
             }
         }
@@ -1358,7 +1358,7 @@ slack_user_id = "U123"
             async fn authenticate(
                 &self,
                 _token: &str,
-            ) -> Option<ironclaw_reborn_webui_ingress::WebuiAuthentication> {
+            ) -> Option<ironclaw_webui::WebuiAuthentication> {
                 None
             }
 
