@@ -2,7 +2,7 @@
 //! binary as an OS-native service.
 //!
 //! - **macOS**: launchd user agent at
-//!   `~/Library/LaunchAgents/com.ironclaw.reborn.daemon.plist`.
+//!   `~/Library/LaunchAgents/com.ironclaw.reborn.plist`.
 //! - **Linux**: systemd user unit at
 //!   `~/.config/systemd/user/ironclaw-reborn.service`.
 //!
@@ -16,6 +16,28 @@
 //! on [`ServicePlatform`] that `match self`es to delegate into the
 //! OS-specific implementation (`launchd` or `systemd`), rather than every
 //! verb re-checking `cfg!(target_os)`.
+//!
+//! ## Canonical service identity, shared with the WebUI operator facade
+//!
+//! [`SERVICE_LABEL`] and [`SYSTEMD_UNIT`] name the **one** OS service
+//! identity for the standalone Reborn binary. Two surfaces install and
+//! manage it today: this CLI (`ironclaw-reborn service install`), and the
+//! WebUI operator facade (`RebornLocalServiceLifecycle` in
+//! `ironclaw_reborn_composition::observability::operator_service_lifecycle`,
+//! behind `POST /api/webchat/v2/operator/service`). Both target the same
+//! plist/unit path, so an install from either surface atomically replaces
+//! whatever the other last wrote there — see [`write_atomic`].
+//!
+//! The two implementations are not yet unified: `composition` cannot
+//! depend on this CLI crate (dependency direction runs the other way), so
+//! there is no shared crate to host one implementation today. Until that
+//! consolidation lands, this CLI's unit is the target state — it is
+//! secret-free (only `HOME`/profile env, no bearer token; `serve` reads
+//! the WebUI token from the 0600 token file at start), where the facade's
+//! generated unit bakes the WebUI bearer token directly into the unit
+//! file's `Environment=` lines. A CLI install replacing a facade-installed
+//! unit is therefore a security improvement, not just a collision to
+//! avoid.
 
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -31,7 +53,15 @@ use crate::serve_invocation::serve_invocation;
 mod launchd;
 mod systemd;
 
-const SERVICE_LABEL: &str = "com.ironclaw.reborn.daemon";
+/// launchd label / systemd unit name for the canonical Reborn service
+/// identity. Shared, deliberately, with `RebornLocalServiceLifecycle` in
+/// `ironclaw_reborn_composition::observability::operator_service_lifecycle`
+/// (the WebUI operator-service facade) — see the module doc above. An
+/// install from either surface atomically replaces the other's file at
+/// this same path; do not fork these constants to "avoid collisions"
+/// without updating both sides together.
+const SERVICE_LABEL: &str = "com.ironclaw.reborn";
+/// See [`SERVICE_LABEL`] — same shared-identity contract, Linux side.
 const SYSTEMD_UNIT: &str = "ironclaw-reborn.service";
 const UNSUPPORTED_OS_MESSAGE: &str = "Service management is only supported on macOS and Linux";
 
@@ -263,6 +293,25 @@ fn status_label(installed: bool, running: bool) -> &'static str {
     } else {
         "stopped"
     }
+}
+
+// ── Install advisory ────────────────────────────────────────────
+
+/// Advisory line printed after `service install` when a pre-existing
+/// unit/plist file at the target path was replaced by this install —
+/// `None` when the install wrote a fresh file, nothing to advise. Shared
+/// by both platforms so the wording (and the "must `service restart`"
+/// guidance) can't drift between them. Covers both a prior install by
+/// this same CLI and one by the WebUI operator facade
+/// (`RebornLocalServiceLifecycle`, see the module doc): either way the
+/// write already happened atomically by the time this is read; a
+/// currently-running service process keeps running off the old
+/// definition until restarted.
+fn replaced_existing_service_file_note(replaced_existing: bool) -> Option<&'static str> {
+    replaced_existing.then_some(
+        "  Replaced an existing service definition at this path; if the service is currently \
+         running, it keeps the OLD definition until `ironclaw-reborn service restart`.",
+    )
 }
 
 // ── Atomic file writes ──────────────────────────────────────────
@@ -527,7 +576,8 @@ mod tests {
         let _home = TempHomeGuard::set(tmp.path());
         let invocation = serve_invocation().expect("serve invocation");
         let mut runner = SuccessfulServiceCommandRunner;
-        systemd::install_with_runner(&invocation, &mut runner).expect("install must succeed");
+        let fresh_replaced =
+            systemd::install_with_runner(&invocation, &mut runner).expect("install must succeed");
         let unit_path = tmp
             .path()
             .join(".config/systemd/user/ironclaw-reborn.service");
@@ -535,10 +585,27 @@ mod tests {
         let contents = std::fs::read_to_string(&unit_path).expect("read unit file");
         assert!(contents.contains("ExecStart="));
         assert!(contents.contains("IRONCLAW_REBORN_HOME="));
+        assert!(
+            !fresh_replaced,
+            "a fresh install must not report a replaced unit"
+        );
+        assert!(replaced_existing_service_file_note(fresh_replaced).is_none());
 
-        // Idempotent reinstall: overwrites cleanly, no fail or duplicate.
-        systemd::install_with_runner(&invocation, &mut runner).expect("reinstall must succeed");
+        // Idempotent reinstall: overwrites cleanly, no fail or duplicate —
+        // and, per the shared-identity contract with the WebUI operator
+        // facade (`RebornLocalServiceLifecycle`), must now report that it
+        // replaced an existing unit (this reinstall stands in for the
+        // facade's unit being atomically replaced by the CLI's).
+        let reinstall_replaced =
+            systemd::install_with_runner(&invocation, &mut runner).expect("reinstall must succeed");
         assert!(unit_path.exists());
+        assert!(
+            reinstall_replaced,
+            "reinstalling over an existing unit must report the replacement"
+        );
+        let note = replaced_existing_service_file_note(reinstall_replaced)
+            .expect("a replaced install must carry an advisory line");
+        assert!(note.contains("service restart"));
 
         systemd::uninstall_with_runner(&mut runner).expect("uninstall must succeed");
         assert!(!unit_path.exists(), "unit file must be removed");
@@ -560,7 +627,7 @@ mod tests {
             .expect("install must succeed");
         let plist_path = tmp
             .path()
-            .join("Library/LaunchAgents/com.ironclaw.reborn.daemon.plist");
+            .join("Library/LaunchAgents/com.ironclaw.reborn.plist");
         assert!(plist_path.exists(), "plist file must be written");
         let contents = std::fs::read_to_string(&plist_path).expect("read plist file");
         assert!(contents.contains(SERVICE_LABEL));

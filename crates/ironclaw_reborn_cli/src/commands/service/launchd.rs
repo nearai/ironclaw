@@ -154,14 +154,18 @@ fn resolve_installed(file_exists: bool, loaded: bool) -> bool {
 // ── Verb bodies ─────────────────────────────────────────────────
 
 pub(super) fn install(context: &RebornCliContext, invocation: &ServeInvocation) -> Result<()> {
-    install_with_runner(context, invocation, &mut OsServiceCommandRunner)
+    install_with_runner(context, invocation, &mut OsServiceCommandRunner).map(|_replaced| ())
 }
 
+/// Returns whether a pre-existing plist file at the target path was
+/// replaced by this install (captured before the write). Exposed for
+/// tests; production wraps this via [`install`], which discards the
+/// bool once the advisory line has been printed.
 fn install_with_runner(
     context: &RebornCliContext,
     invocation: &ServeInvocation,
     runner: &mut dyn ServiceCommandRunner,
-) -> Result<()> {
+) -> Result<bool> {
     let file = plist_path()?;
     if let Some(parent) = file.parent() {
         std::fs::create_dir_all(parent).with_context(|| format!("create {}", parent.display()))?;
@@ -176,6 +180,12 @@ fn install_with_runner(
     let list =
         runner.run_capture_checked("launchctl list", Command::new("launchctl").arg("list"))?;
     let was_loaded = service_loaded(&list);
+    // Captured before the write: a pre-existing file at this path may
+    // have been installed by this CLI's own prior run, or by the WebUI
+    // operator facade (`RebornLocalServiceLifecycle`) — both surfaces
+    // target the same label/path by design (see the module doc). Either
+    // way the write below atomically replaces it.
+    let replaced_existing = file.exists();
     let plist = plist_content(invocation, &stdout_log, &stderr_log);
     super::write_atomic(&file, plist.as_bytes())?;
     if was_loaded {
@@ -197,8 +207,11 @@ fn install_with_runner(
         )?;
     }
     println!("Installed launchd service: {}", file.display());
+    if let Some(note) = super::replaced_existing_service_file_note(replaced_existing) {
+        println!("{note}");
+    }
     println!("  Start with: ironclaw-reborn service start");
-    Ok(())
+    Ok(replaced_existing)
 }
 
 pub(super) fn start() -> Result<()> {
@@ -455,11 +468,67 @@ mod tests {
             }
         }
 
-        result.expect("install must succeed");
+        let replaced = result.expect("install must succeed");
         assert_eq!(
             runner.labels,
             ["launchctl list"],
             "a fresh (not-loaded) install must not issue a reload sequence"
+        );
+        assert!(
+            !replaced,
+            "a fresh install (no prior plist) must not report a replacement"
+        );
+        assert!(
+            super::super::replaced_existing_service_file_note(replaced).is_none(),
+            "fresh install must not carry a replaced-file advisory"
+        );
+    }
+
+    #[test]
+    fn install_reports_replaced_existing_when_plist_already_present() {
+        // Covers the shared-identity collision case (design doc: "adopt
+        // identity"): a plist at this path may have been written by a
+        // prior CLI install, or by the WebUI operator facade
+        // (`RebornLocalServiceLifecycle`) — both target the same label/
+        // path. Either way, `install` must report the replacement so the
+        // operator knows a currently-running service (if any) keeps the
+        // OLD definition until `service restart`.
+        let _lock = crate::runtime::test_env::lock_runtime_env();
+        let home_tmp = tempfile::tempdir().expect("tempdir");
+        let prior = std::env::var_os("HOME");
+        // SAFETY: serialized by `lock_runtime_env`; restored below.
+        unsafe { std::env::set_var("HOME", home_tmp.path()) };
+        let (_ctx_tmp, context) = RebornCliContext::test_context();
+        let file = plist_path().expect("plist path");
+        std::fs::create_dir_all(file.parent().expect("plist parent")).expect("create parent");
+        // Simulate a pre-existing unit — e.g. one written by the WebUI
+        // operator facade with a baked-in secret — that this install
+        // must atomically overwrite.
+        std::fs::write(&file, "pre-existing plist with a baked-in secret")
+            .expect("write pre-existing plist");
+        let mut runner = RecordingRunner::default();
+        let result = install_with_runner(&context, &sample_invocation(), &mut runner);
+        // SAFETY: serialized by `lock_runtime_env`.
+        unsafe {
+            match prior {
+                Some(value) => std::env::set_var("HOME", value),
+                None => std::env::remove_var("HOME"),
+            }
+        }
+
+        let replaced = result.expect("install over an existing plist must succeed");
+        assert!(
+            replaced,
+            "install must report that a pre-existing plist was replaced"
+        );
+        let note = super::super::replaced_existing_service_file_note(replaced)
+            .expect("a replaced install must carry an advisory line");
+        assert!(note.contains("Replaced an existing service definition"));
+        assert!(note.contains("service restart"));
+        let contents = std::fs::read_to_string(&file).expect("read plist after install");
+        assert!(
+            !contents.contains("baked-in secret"),
+            "the pre-existing file's contents must be fully replaced"
         );
     }
 
@@ -566,13 +635,13 @@ mod tests {
         }
         assert_eq!(
             path.expect("must resolve"),
-            PathBuf::from("/home/op/Library/LaunchAgents/com.ironclaw.reborn.daemon.plist")
+            PathBuf::from("/home/op/Library/LaunchAgents/com.ironclaw.reborn.plist")
         );
     }
 
     #[test]
     fn service_running_matches_only_the_label_line() {
-        let output = "-\t0\tcom.apple.something\n123\t0\tcom.ironclaw.reborn.daemon\n";
+        let output = "-\t0\tcom.apple.something\n123\t0\tcom.ironclaw.reborn\n";
         assert!(service_running(output));
     }
 
@@ -625,7 +694,7 @@ mod tests {
             runner.args[3],
             [
                 "bootout".to_string(),
-                "gui/501/com.ironclaw.reborn.daemon".to_string()
+                "gui/501/com.ironclaw.reborn".to_string()
             ]
         );
     }
@@ -642,7 +711,7 @@ mod tests {
         std::fs::write(&file, "plist").expect("write plist");
         let mut runner = RecordingRunner {
             launchctl_list: format!("123\t0\t{SERVICE_LABEL}\n"),
-            fail_args: Some(vec!["bootout", "gui/501/com.ironclaw.reborn.daemon"]),
+            fail_args: Some(vec!["bootout", "gui/501/com.ironclaw.reborn"]),
             ..RecordingRunner::default()
         };
         let result = uninstall_with_runner(&mut runner);
@@ -706,7 +775,7 @@ mod tests {
                 vec!["list"],
                 vec!["stop", SERVICE_LABEL],
                 vec!["-u"],
-                vec!["bootout", "gui/501/com.ironclaw.reborn.daemon"]
+                vec!["bootout", "gui/501/com.ironclaw.reborn"]
             ]
         );
     }

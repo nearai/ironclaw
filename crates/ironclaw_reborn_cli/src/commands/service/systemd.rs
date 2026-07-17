@@ -153,13 +153,17 @@ fn unit_path() -> Result<PathBuf> {
 // ── Verb bodies ─────────────────────────────────────────────────
 
 pub(super) fn install(invocation: &ServeInvocation) -> Result<()> {
-    install_with_runner(invocation, &mut OsServiceCommandRunner)
+    install_with_runner(invocation, &mut OsServiceCommandRunner).map(|_replaced| ())
 }
 
+/// Returns whether a pre-existing unit file at the target path was
+/// replaced by this install (captured before the write). Exposed for
+/// tests; production wraps this via [`install`], which discards the
+/// bool once the advisory line has been printed.
 pub(super) fn install_with_runner(
     invocation: &ServeInvocation,
     runner: &mut dyn ServiceCommandRunner,
-) -> Result<()> {
+) -> Result<bool> {
     let file = unit_path()?;
     if let Some(parent) = file.parent() {
         std::fs::create_dir_all(parent).with_context(|| format!("create {}", parent.display()))?;
@@ -169,6 +173,12 @@ pub(super) fn install_with_runner(
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
         Err(error) => return Err(error).with_context(|| format!("read {}", file.display())),
     };
+    // Captured before the write: a pre-existing file at this path may
+    // have been installed by this CLI's own prior run, or by the WebUI
+    // operator facade (`RebornLocalServiceLifecycle`) — both surfaces
+    // target the same unit name/path by design (see the module doc). The
+    // write below atomically replaces it.
+    let replaced_existing = previous.is_some();
     let unit = unit_content(invocation)?;
     let previous_state = query_unit_state(runner)?;
     super::write_atomic(&file, unit.as_bytes())?;
@@ -219,8 +229,11 @@ pub(super) fn install_with_runner(
         return Err(combined_failure(error, rollback_errors));
     }
     println!("Installed systemd user service: {}", file.display());
+    if let Some(note) = super::replaced_existing_service_file_note(replaced_existing) {
+        println!("{note}");
+    }
     println!("  Start with: ironclaw-reborn service start");
-    Ok(())
+    Ok(replaced_existing)
 }
 
 pub(super) fn start() -> Result<()> {
