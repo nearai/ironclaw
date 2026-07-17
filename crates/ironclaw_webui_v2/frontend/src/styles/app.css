@@ -204,7 +204,7 @@
    what the design-system components (button.js / card.js / input.js /
    modal.js / badge.js) already render — not aspirational values.
    New UI must reference these instead of restating raw px/rem/z
-   numbers. Browse them live at /v2/playground; rules and do/don't
+   numbers. Browse them live at /playground; rules and do/don't
    guidance live in crates/ironclaw_webui_v2/DESIGN_SYSTEM.md. */
 :root {
   /* Radii — nux scale (6/8/10/16/24). xs: inline chips; sm: compact

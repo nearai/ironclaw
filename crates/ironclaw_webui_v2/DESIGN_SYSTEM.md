@@ -76,8 +76,9 @@ aliases are documented in §2 + flagged by the token ratchet, which
 now also counts legacy alias utilities (grandfathered per file in
 the baseline).
 
-**Live reference:** open `/v2/playground` in any running WebUI — it
+**Live reference:** open `/playground` in any running WebUI — it
 renders every token and every component state below, in both themes.
+(`/v2/playground` still works: the SPA strips the legacy `/v2` prefix.)
 
 **Enforcement:** `node scripts/check-design-tokens.mjs` flags new
 hardcoded colors outside the token system (see
@@ -94,7 +95,7 @@ hardcoded colors outside the token system (see
 | Token index (machine-readable) | `frontend/src/design-system/tokens.js` |
 | Components | `frontend/src/design-system/*.tsx` |
 | Composites | `frontend/src/design-system/primitives.tsx` |
-| Live gallery | `/v2/playground` (`frontend/src/pages/playground/`) |
+| Live gallery | `/playground` (`frontend/src/pages/playground/`) |
 
 Everything else derives from these. If a value you need is missing,
 add a token first — do not inline the raw value.
