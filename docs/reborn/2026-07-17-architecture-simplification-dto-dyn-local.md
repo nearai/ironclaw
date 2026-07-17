@@ -290,7 +290,7 @@ violation of it — *policy encoded as kernel types*:
 So the simplification is one idea applied consistently: **the kernel is mechanism —
 a small, frozen authority vocabulary plus a few real seams; everything that varies
 by feature or deployment is policy, resolved to data at the composition edge.** The
-`Invocation` / `Authority` / `Outcome` triple below is what feature-agnostic
+`Invocation` / `Authorized` / `Outcome` triple below is what feature-agnostic
 mechanism looks like; §4.3–§4.5 remove the policy that leaked into types.
 
 ---
@@ -302,37 +302,47 @@ Separate the **data plane** (the payload, which never changes shape) from the
 
 ```rust
 // ── ironclaw_host_api (the bottom crate everyone already depends on) ──
-struct Invocation { capability: CapabilityId, input: Json, scope: Scope, estimate: Estimate } // the ONE payload
-struct Authority  { trust: TrustClass, approval: Option<ApprovalLease>,          // SEALED: fields private,
-                    reservation: Reservation, mounts: ScopedMounts }             // constructed only by authorize()
-enum   Blocked    { Approval(GateRef), Auth(GateRef), Resource(GateRef) }
-struct Outcome    { /* sanitized refs + summary; carries success OR recoverable failure */ }  // the ONE result
+// The loop's pre-trust request — the one genuine loop→host transition (§1.1):
+struct LoopRequest { activity_id: ActivityId, capability: CapabilityId, input_ref: InputRef, resume: Option<ResumeToken> }
+// The host-side payload, resolved at the membrane (input deref'd, actor+scope bound):
+struct Invocation  { activity_id: ActivityId, capability: CapabilityId, input: Json, scope: Scope, actor: ActorId, estimate: Estimate }
+struct Authorized  { /* Invocation + trust/approval/reservation/mounts — SEALED: private, built only by authorize() */ }
+enum   Blocked     { Approval(GateRef), Auth(GateRef), Resource(GateRef) }  // re-entrant gates
+enum   HostFailure { Transient(ErrRef), Permanent(ErrRef) }                 // infra/storage/obligation-cleanup failure
+struct Outcome     { /* sanitized refs + summary; carries tool success OR recoverable tool failure */ }
 
 // ── the host kernel (trusted, below the loop seam) ──
-fn authorize(inv: &Invocation) -> Result<Authority, Blocked>;                    // scope from inv.scope; ALL policy, one place
-fn dispatch (inv: &Invocation, auth: &Authority, lane: &RuntimeLane) -> Outcome; // already authorized
+fn resolve  (req: LoopRequest, scope: &Scope) -> Invocation;                // membrane: deref input, bind actor+scope
+fn authorize(inv: Invocation) -> Result<Authorized, Blocked>;              // ALL policy, one place; consumes inv
+fn dispatch (auth: &Authorized, lane: &RuntimeLane) -> Result<Outcome, HostFailure>; // inv is inside auth — can't mismatch
 ```
 
-- The payload is `Invocation`, full stop. `RuntimeCapabilityRequest`,
-  `CapabilityInvocationRequest`, `CapabilityDispatchRequest`, and
-  `RuntimeAdapterRequest` disappear — they were `Invocation` plus a field that
-  now lives in `Authority`, threaded by reference.
-- Because `host_api` is the bottom crate, putting the vocabulary there *satisfies*
-  the boundary rule (and Golden Boundary #1: `host_api` stays vocabulary-only)
-  instead of fighting it. This finishes a move that `CapabilityDispatchRequest`
-  already half-made.
-- `Authority` is **sealed**: private fields, no public constructor — the only way to
-  obtain one is to pass `authorize()` (host-minted, following the
-  `LoopExitValidationPolicy` witness pattern), so a caller cannot forge or retain an
-  unauthorized `Authority`.
-- Authorization becomes a single `authorize()` body — the four scattered policy checks
-  collapse into one reviewable function with visible ordering. The result contract is one
-  shape: `invoke` = `authorize` then `dispatch` = `Result<Outcome, Blocked>`, where
-  `Outcome` carries *both* success and recoverable tool failure and `Blocked` carries the
-  approval/auth/resource gates. There is no separate `Err(terminate)` channel — which is
-  what removes the `Ok(Failed)` vs `Err` ambiguity §1.2 flagged.
+- The loop expresses a `LoopRequest` (input by **ref**, resume tokens, pre-trust); the host
+  `resolve`s it to `Invocation` at the membrane — the one genuine loop→host transition
+  (§1.1). Below that, `RuntimeCapabilityRequest`, `CapabilityInvocationRequest`,
+  `CapabilityDispatchRequest`, and `RuntimeAdapterRequest` disappear — they were `Invocation`
+  plus fields now carried inside `Authorized`.
+- Because `host_api` is the bottom crate, putting the vocabulary there *satisfies* the
+  boundary rule (Golden Boundary #1: `host_api` stays vocabulary-only) — finishing a move
+  `CapabilityDispatchRequest` already half-made.
+- **`Authorized` is sealed *and* invocation-bound.** Private fields, host-only construction
+  by `authorize()` (the `LoopExitValidationPolicy` witness pattern), *and* it carries the
+  exact `Invocation` it authorized — including its `activity_id`, `scope`, and `actor`
+  provenance. So a caller can neither forge an authority nor pair a valid one with a
+  *different* invocation: `dispatch` takes `&Authorized`, not a loose `(inv, auth)` pair.
+- **Three distinct outcome channels — no `Ok(Failed)` vs `Err` ambiguity (§1.2).** `Blocked`
+  = re-entrant approval/auth/resource gates; `HostFailure` = infra/storage/obligation-cleanup
+  failure (`Transient` retryable vs `Permanent`); `Outcome` = the tool's own success or
+  recoverable failure (model-visible). `invoke = Result<Outcome, InvokeError>` with
+  `InvokeError = Blocked | HostFailure` — each failure class in its own channel.
+- **`activity_id` is the invocation's idempotency identity** — what §1.1's "dead-future
+  `idempotency_key`" *becomes* (unified with the existing `activity_id`, not deleted). The
+  host records the authorize/outcome against `activity_id` **before** dispatch; a retry of
+  the same `activity_id` replays the recorded `Outcome` and never re-runs the side effect —
+  the durable guarantee §11.3 requires for capability `invoke`.
 
-**Type count on a capability call: ~14 → 3.**
+**Type count on a capability call: ~14 request/result shapes → 4** (`LoopRequest`,
+`Invocation`, `Authorized`, `Outcome`) plus a two-variant error split.
 
 ### 3.1 The three real states, named
 
@@ -342,21 +352,21 @@ the dead fields disappear with them:
 
 | Real state | Carried as | Replaces |
 | --- | --- | --- |
-| loop-expressed (pre-trust) | `Invocation` (input by ref, resume tokens) | `CapabilityInvocation` |
-| authorized | `Invocation` + `&Authority` (trust, approval lease, reservation, mounts) | `RuntimeCapabilityRequest`, `CapabilityInvocationRequest`, `CapabilityDispatchRequest` |
-| resolved-for-a-lane | `Invocation` + `&Authority` + resolved handles (package, descriptor, filesystem, governor) | `RuntimeAdapterRequest` |
+| loop-expressed (pre-trust) | `LoopRequest` (input by ref, resume tokens, `activity_id`) | `CapabilityInvocation` |
+| authorized | `Authorized` (the resolved `Invocation` bound to trust/approval/reservation/mounts) | `RuntimeCapabilityRequest`, `CapabilityInvocationRequest`, `CapabilityDispatchRequest` |
+| resolved-for-a-lane | `Authorized` + resolved handles (package, descriptor, filesystem, governor) | `RuntimeAdapterRequest` |
 
 - **Mechanism 1 (DAG re-declaration) is eliminated:** the one authorized shape is
-  `Invocation` + `&Authority`, both defined in `host_api`, so `host_runtime` and
-  `capabilities` reference it instead of each re-declaring it.
-- **Mechanism 3 (dead fields) is eliminated:** `trust_decision` vanishes because
-  trust is *computed inside* `authorize()` and lands in `Authority.trust`, never
-  carried as a request field; `idempotency_key` is either implemented once in the
-  authorization pass or deleted.
-- **Mechanism 2 (blurred states) becomes explicit:** the three transitions are
-  now named — `Invocation`, then `+ Authority`, then `+ resolved handles` — rather
-  than five near-identical structs. Mechanism 4 (compose/decompose `context`) goes
-  away because `Authority` carries `scope`/`actor` in one shape end to end.
+  `Authorized`, defined in `host_api`, so `host_runtime` and `capabilities` reference it
+  instead of each re-declaring it.
+- **Mechanism 3 (dead fields) is eliminated:** `trust_decision` vanishes because trust is
+  *computed inside* `authorize()` and lands in `Authorized`, never carried as a request
+  field. `idempotency_key` is **not** deleted — it unifies with the existing `activity_id`
+  (§3), the durable operation identity that makes `invoke` replay-safe (§11.3).
+- **Mechanism 2 (blurred states) becomes explicit:** the three transitions are now named —
+  `LoopRequest`, then `Authorized`, then `+ resolved handles` — rather than five
+  near-identical structs. Mechanism 4 (compose/decompose `context`) goes away because
+  `Authorized` carries `scope`/`actor` in one shape end to end.
 
 ---
 
@@ -364,9 +374,9 @@ the dead fields disappear with them:
 
 ### 4.1 Less DTO — `authorize`/`dispatch` over one payload
 
-Define `Invocation` / `Authority` / `Outcome` in `ironclaw_host_api`. Every layer
+Define `Invocation` / `Authorized` / `Outcome` in `ironclaw_host_api`. Every layer
 references those instead of re-declaring; extra per-layer context is threaded by
-reference (`&Authority`), not by re-wrapping the payload. The mirror-struct tax
+reference (`&Authorized`), not by re-wrapping the payload. The mirror-struct tax
 goes to zero because nothing mirrors.
 
 ### 4.2 Less `dyn` — a trait earns a trait object only if it has ≥2 production impls or is the trust boundary
@@ -600,7 +610,7 @@ exactly two interfaces; and **deployment** as a config value.
 | --- | --- | --- | --- | --- |
 | Product | CLI / WebUI / Slack / Telegram | UX, transport, rendering | *consumes* `ProductSurface` | a surface's UX changes |
 | **Kernel** | Turn coordinator + runner | durable turns, leases, active-lock, recovery | exposes `ProductSurface`, `AgentLoopHost` | the recovery model changes |
-| **Kernel** | Capability mediation | `authorize` + `dispatch` over `Invocation`/`Authority`/`Outcome` | `AgentLoopHost::invoke` | the authority model changes |
+| **Kernel** | Capability mediation | `authorize` + `dispatch` over `Invocation`/`Authorized`/`Outcome` | `AgentLoopHost::invoke` | the authority model changes |
 | **Kernel** | Vocabulary (`host_api`) | neutral authority types, frozen by test (§4.5) | — (types) | the security model changes |
 | Loop | Agent loop driver(s) | agent behavior, prompt/model/tool strategy | implements `AgentLoopDriver` | agent behavior changes |
 | Substrate | Filesystem | scoped/contained storage | `RootFilesystem` | a backend is added |
@@ -643,13 +653,14 @@ selector — none add a method; they add a capability the loop can invoke and
 
 ```rust
 // host_api vocabulary — the frozen kernel types (§4.5)
-struct Invocation { capability: CapabilityId, input: Json, scope: Scope, estimate: Estimate }
-struct Authority  { /* trust, approval, reservation, mounts — SEALED: private fields, construct only via authorize() */ }
+struct Invocation { activity_id: ActivityId, capability: CapabilityId, input: Json, scope: Scope, actor: ActorId, estimate: Estimate }
+struct Authorized { /* the Invocation bound to trust/approval/reservation/mounts — SEALED: private, built only by authorize() */ }
 enum   Blocked    { Approval(GateRef), Auth(GateRef), Resource(GateRef) }
-struct Outcome    { refs: OutcomeRefs, summary: SafeSummary }  // carries success OR recoverable failure
+enum   HostFailure { Transient(ErrRef), Permanent(ErrRef) }
+struct Outcome    { refs: OutcomeRefs, summary: SafeSummary }  // tool success OR recoverable tool failure
 
-fn authorize(inv: &Invocation) -> Result<Authority, Blocked>;                    // scope derived from inv.scope
-fn dispatch (inv: &Invocation, auth: &Authority, lane: &RuntimeLane) -> Outcome; // already authorized
+fn authorize(inv: Invocation) -> Result<Authorized, Blocked>;                    // consumes inv; binds actor/scope/activity_id
+fn dispatch (auth: &Authorized, lane: &RuntimeLane) -> Result<Outcome, HostFailure>; // inv is inside auth
 ```
 
 ### 5.4 The loop interface — the loop's trust membrane (one of several)
@@ -663,7 +674,7 @@ trait AgentLoopDriver {                      // userland: agent behavior, replac
 trait AgentLoopHost {
     fn prompt(&self) -> PromptContext;
     fn model(&self, req: ModelRequest) -> ModelResult;
-    fn invoke(&self, inv: Invocation) -> Result<Outcome, Blocked>;   // → authorize → dispatch
+    fn invoke(&self, req: LoopRequest) -> Result<Outcome, InvokeError>; // → resolve → authorize → dispatch (§3)
     fn transcript(&self) -> &dyn TranscriptPort;
     fn checkpoint(&self, state: LoopState) -> CheckpointRef;
     fn input(&self) -> &dyn InputPort;
@@ -781,10 +792,13 @@ adapters (their deliver / auth side) or the kernel, not the assembler:
 
 The invariant, enforceable by an `ironclaw_architecture` test: **no
 `slack` / `webui` / `telegram` / `openai` / HTTP-route / transport identifier appears in
-`ironclaw_reborn_composition`.** A product is added by writing an adapter and adding it to
-the `DeploymentConfig` adapter list — never by editing composition. That collapses the
-channel-generation multiplicity into one uniform shape (§4.4) and shrinks the god-crate to
-the assembler it should be (#6168).
+`ironclaw_reborn_composition`.** A product is added by writing an adapter, registering it in
+a **product-neutral factory registry keyed by `ExtensionId`** (the URT's native-factory
+registry, §5.9) that composition receives as *input* — composition never names or links a
+concrete adapter — and enabling its id in the `DeploymentConfig` adapter list. Never by
+editing composition. That keeps the "data-only" boundary intact (the config lists *ids*, not
+types), collapses the channel-generation multiplicity into one uniform shape (§4.4), and
+shrinks the god-crate to the assembler it should be (#6168).
 
 ### 5.9 Relationship to the in-progress Unified Extension Runtime
 
@@ -832,19 +846,19 @@ are the concrete enforcement for the products-in-composition ratchet (§10).
    first-party or WASM `invoke` may itself request the `Process` lane via a host capability,
    so the two are different axes and must not be merged into one field.
 
-2. **`ToolPorts` is *derived from* `Authority`, never constructed independently.** The URT's
+2. **`ToolPorts` is *derived from* `Authorized`, never constructed independently.** The URT's
    `ToolPorts` (restricted egress + scoped state + logging) is exactly the narrowed effect
-   surface that `dispatch()` materializes from `(&Invocation, &Authority, resolved
+   surface that `dispatch()` materializes from `(&Authorized, resolved
    descriptor)` before handing it to a lane's `invoke`:
    - `ToolPorts.egress` = `NetworkPolicy::resolve(…)` bounded by the descriptor's declared
      egress, with a `SecretBroker` one-shot lease injected **host-side at the egress
      boundary** (the adapter never sees bytes);
-   - `ToolPorts.state` = a `ScopedFilesystem` mount = `Authority.mounts`;
+   - `ToolPorts.state` = a `ScopedFilesystem` mount = `Authorized.mounts`;
    - `ToolPorts.logging` = the redaction-obligated event sink.
 
-   The invariant both sides must hold: **`ToolPorts` cannot be wider than `Authority`
-   grants** — it is built only by `dispatch()`, which holds a verified, sealed `Authority`
-   (§3), and the adapter receives only the derived handles, never `Authority` itself, so it
+   The invariant both sides must hold: **`ToolPorts` cannot be wider than `Authorized`
+   grants** — it is built only by `dispatch()`, which holds a verified, sealed `Authorized`
+   (§3), and the adapter receives only the derived handles, never `Authorized` itself, so it
    cannot re-authorize or widen. So the URT's `ToolAdapter::invoke(call, ports)` **is** the
    body of this doc's `dispatch(inv, auth, lane)` for the FirstParty/Wasm/Mcp lanes; the
    `Process` lane is the same shape with a `ProcessSandbox` handle in place of raw egress.
@@ -904,7 +918,7 @@ plus a test that *proves* containment. That is the entire thesis in one incident
 
 | | Now | After |
 | --- | --- | --- |
-| Types per capability call | ~14 | 3 (`Invocation` / `Authority` / `Outcome`) |
+| Types per capability call | ~14 | 4 (`LoopRequest` / `Invocation` / `Authorized` / `Outcome`) |
 | Hot-path `dyn` seams | 6+ | 2 + 1 lane enum |
 | Policy decision sites | 4 crates | 1 `authorize()` |
 | Store impls per domain | 2–4 hand-written | 1 (`FsStore<F>`); in-memory is a backend, not a store |
@@ -965,11 +979,11 @@ mechanical, concentrated in one crate, and it directly shrinks the god-crate (#6
 **Slice C (proof of concept for the DTO/`dyn` collapse — capability down-path,
 first-party lane only).**
 
-1. Define `Invocation` / `Authority` / `Outcome` in `ironclaw_host_api`.
+1. Define `Invocation` / `Authorized` / `Outcome` in `ironclaw_host_api`.
 2. Write `authorize()` as the single policy pass (initially delegating to the
    existing four checks, then inlining them).
-3. Make the four mediators accept `(&Invocation, &Authority)` instead of
-   re-wrapping — *without merging any crates yet*.
+3. Make the four mediators accept `&Authorized` instead of re-wrapping — *without merging
+   any crates yet*.
 4. Measure: type count on one real call, `dyn` count, diff to boundary tests.
 
 If C drops the type count with green boundary tests, roll it across the remaining
@@ -1005,12 +1019,12 @@ type duplication in `scripts/check-type-duplicates.py`, cross-tenant behavior in
 
 | Axis (§) | Check | Home | Ratchet now | Hard ban when the axis lands |
 | --- | --- | --- | --- | --- |
-| Process isolation (§6, #6170) | two-user shell cannot read another user's files; no served profile resolves to `ProcessBackendKind::LocalHost` | `tests/integration/`, `ironclaw_architecture` | **add the two-user escape test now** (red today, green on fix) | host process port unreachable from any hosted composition; `SandboxMount` has no host-path constructor |
-| Mirror DTOs (§3, §4.1) | cross-crate structural duplicate count | `scripts/check-type-duplicates.py` (exists) | wire to CI; freeze at the current backlog count (~32) | one canonical capability request shape (`Invocation`); the five mirrors deleted |
+| Process isolation (§6, #6170) | two-user shell cannot read another user's files; no served profile resolves to `ProcessBackendKind::LocalHost` | `tests/integration/`, `ironclaw_architecture` | **add the two-user escape test now, quarantined** — `#[ignore]` / expected-fail baseline (red today), flipped to blocking when the containment fix merges | host process port unreachable from any hosted composition; `SandboxMount` has no host-path constructor |
+| Mirror DTOs (§3, §4.1) | cross-crate structural duplicates | `scripts/check-type-duplicates.py` (exists) | wire to CI; freeze a checked-in **allowlist of fully-qualified symbols** (set membership, not a count) | one canonical capability request shape (`Invocation`); the five mirrors deleted |
 | `dyn` mediators (§4.2) | production-impl count per mediator trait; `Option<Arc<…>>` + always-set `with_*` | `ironclaw_architecture`; `pre-commit-safety.sh` | freeze the single-prod-impl set; flag new `Option<Arc<` builders | `RuntimeAdapter` is a closed enum; `HostRuntime` / `CapabilityDispatcher` traits deleted |
 | `InMemory*Store` (§4.3) | `pub struct InMemory\w*Store` allowlist | `ironclaw_architecture` | freeze the current list; fail on any new one | list empty; tests use `Fs<InMemoryBackend>` |
 | `Local*` types (§4.4) | no `Local` / `LocalDev` / `Hosted` / `Enterprise` in public type names | `ironclaw_architecture` | freeze the ~66-identifier allowlist; fail on any new one | allowlist empty |
-| `host_api` freeze (§4.5) | public-type-count snapshot; `runtime_policy` mode enums absent from `host_api` | `ironclaw_architecture` | freeze at ~124; require a justification comment for additions | mode enums moved to the edge; only neutral authority vocab remains |
+| `host_api` freeze (§4.5) | checked-in allowlist of public type names; `runtime_policy` mode enums absent from `host_api` | `ironclaw_architecture` | freeze the allowlist (set membership); a new type needs a justified allowlist entry | mode enums moved to the edge; only neutral authority vocab remains |
 | Products in composition (§5.8) | no `slack` / `webui` / `telegram` / `openai` / HTTP-route / transport identifier in `ironclaw_reborn_composition` | `ironclaw_architecture` | freeze the current product footprint; fail on new product/transport code landing in composition | composition is assembler-only; products are adapters + a `DeploymentConfig` list |
 
 Each axis's "hard ban" column is also its **definition of done**: the migration slice for
@@ -1027,6 +1041,9 @@ Two rules from the guidance layer apply, because a guardrail is itself code
 - **No `Local*`-style hard ban can land today** — 66 identifiers exist; it must start as a
   frozen allowlist and shrink. The same holds for `InMemory*Store` and the composition
   product footprint. Asserting a hard ban before the debt is paid just breaks the build.
+- **Ratchets freeze a checked-in allowlist / symbol-fingerprint set and compare set
+  membership — never an aggregate count.** A count lets a new violation silently replace a
+  retired one; only set membership catches a *swap*. Keep counts as telemetry, not the gate.
 
 For the products-in-composition axis (§5.8), the in-progress Unified Extension Runtime
 (§5.9) supplies a stronger check than a grep ban: a **Deletion test** (remove a product
@@ -1055,7 +1072,7 @@ states where the bugs live*.
 (Flows described in `crates/Architecture.md`; the tests make them enforceable.)
 
 - **Turn/run lifecycle:** `Queued → Running → {BlockedApproval | BlockedAuth | WaitingProcess} → Queued(resume) → … → {Completed | Failed | Cancelled}`, plus lease-expiry and crash/recover edges.
-- **Capability invocation:** `candidate → authorize → {Authority | Blocked} → dispatch(lane) → Outcome`, with resume / auth-resume re-entry.
+- **Capability invocation:** `LoopRequest → resolve → authorize → {Authorized | Blocked} → dispatch(lane) → {Outcome | HostFailure}`, with resume / auth-resume re-entry.
 - **Lease:** `unclaimed → claimed(runner, token) → heartbeat* → {released | expired}`; expiry terminal.
 - **Gate/resume:** `blocked(gate_ref, checkpoint) → resolved → requeue(same run/checkpoint)`.
 
@@ -1069,7 +1086,7 @@ Each is asserted after *every* step of a generated sequence, not only on a happy
 4. **A `LoopExit` is trusted only with host-owned evidence**; a syntactically valid but unverified exit maps to a sanitized terminal failure — from every exit variant.
 5. **No capability effect runs without a completed `authorize()`**; deny/blocked fails closed from any surface, including direct invocation of a hidden or denied capability.
 6. **Lease state has a single truth** — durable and in-memory representations never disagree (post-refactor: one representation, true by construction).
-7. **Cross-tenant isolation holds from any deployment state**: user B's shell/filesystem cannot read user A's data (§6).
+7. **Cross-tenant isolation holds in every multi-user / served deployment** (SSO on, >1 `UserId`, or `HostedMultiTenant`): user B's shell/filesystem cannot read user A's data (§6). A single-user local deployment legitimately permits `HostUnsandboxed`; the invariant is that a host-process backend is *impossible* once more than one user is served — proved by a `(deployment, backend)` matrix test, not asserted unconditionally.
 
 ### 11.3 Idempotency contract
 
@@ -1164,7 +1181,7 @@ because centralizing on one seam optimizes everything at once — or bottlenecks
 | **libSQL single-writer** | every write | `BEGIN IMMEDIATE` global write lock + a connection pool (`libsql_pool`; the #5751 `SQLITE_MISUSE` fix) | all writes serialize through one writer; §4.3 funnels *every* domain's writes there | already shipped as pain (#6089 governor contention). Prefer Postgres (row-level locking) for multi-tenant/high-concurrency; or shard the libSQL writer by tenant/scope |
 | **Capability `authorize()` reads** | every tool call | reads trust/approval/mounts; resource reservation is write + reconcile (2 writes) | multiple round-trips before dispatch, per call | the §3 single `authorize()` is where to batch the reads and **cache** the read-mostly ones (trust policy, descriptors), scope-keyed per the safety cache rule |
 | **Active-thread lock** | every transition | one active run per canonical thread; durable record | acquire/release + blocked-run hold = remote ops | inherent serialization (a conversation is sequential); keep the lock op a single cheap write |
-| **Event append + projection fan-out** | high (progress, tool calls) | durable event-log append; SSE/WS fan-out to N subscribers | append latency × event volume | milestone coalescing exists (`MilestoneModelProgressSink`); delivery is decoupled with bounded buffers + `Lagged`/rebase (`event_streams`). Keep durable append async off the transition's critical path; a slow client must never block a transition |
+| **Event append + projection fan-out** | high (progress, tool calls) | durable event-log append; SSE/WS fan-out to N subscribers | append latency × event volume | milestone coalescing exists (`MilestoneModelProgressSink`); delivery is decoupled with bounded buffers + `Lagged`/rebase (`event_streams`). Keep the durable append **atomic with the state transition** (same transaction / outbox) so a crash can't commit state without its events; decouple only the *subscriber fan-out*, where a slow client must never block a transition |
 | **Scheduler recovery poll** | every ~10s | `recover_expired_leases` scan | a periodic query scaling with active runs | index the scan by lease-expiry; bound its cost |
 
 ### 12.2 The async footgun: never hold a lock across remote I/O
@@ -1206,8 +1223,10 @@ separately.
 - **Cache read-mostly authority data** (trust policy, capability descriptors, approval
   policy) with scope-aware keys (safety cache rule); `authorize()` hits the cache, not the
   remote DB, per tool call.
-- **Durable event append is async and coalesced**; projection fan-out stays bounded-buffer
-  + `Lagged`, decoupled from the transition (delivery failure must not corrupt turn state).
+- **Durable event append is atomic with the state transition** (same transaction or an
+  outbox) — a crash must not leave state committed without its events (recovery/audit/
+  projections depend on it). Only the *subscriber fan-out* is async + coalesced +
+  bounded-buffer + `Lagged`, decoupled so delivery failure never corrupts turn state.
 - **Writer concurrency is the throughput ceiling**: document libSQL single-writer; prefer
   Postgres or shard by tenant/scope for high concurrency.
 - **No lock across remote I/O** — enforced mechanically.
@@ -1243,10 +1262,10 @@ So:
 This is the mechanism-vs-policy rule (§2.1) applied to the two lifecycles: share what is
 identical, keep what genuinely differs.
 
-**2. Is `Authority` one value or separate witnesses? — One *sealed* value (§3).**
+**2. Is `Authorized` one value or separate witnesses? — One *sealed* value (§3).**
 Private fields, host-only construction via `authorize()` (the `LoopExitValidationPolicy`
 witness pattern; `docs/reborn/2026-05-11-trust-boundary-stack-note.md`); no caller can
-forge or retain an unauthorized `Authority`. If a product adapter ever needs a field,
+forge or retain an unauthorized `Authorized`. If a product adapter ever needs a field,
 expose a narrowed read projection, never the constructor.
 
 **3. Does `DeploymentConfig` express everything? — Yes for selection (§4.4.1); the
@@ -1280,7 +1299,7 @@ knobs to calibrate against measured latency, not open architectural questions.
 - `crates/Architecture.md` — Reborn kernel-boundary / substrate architecture thesis.
 - `docs/reborn/2026-05-11-trust-boundary-stack-note.md` — trust-boundary baseline invariants.
 - `docs/reborn/2026-04-25-storage-catalog-and-placement.md` — storage placement.
-- `crates/ironclaw_host_api/` — the neutral vocabulary crate (target home for `Invocation`/`Authority`/`Outcome`); ~124 public types across 21 files (§4.5).
+- `crates/ironclaw_host_api/` — the neutral vocabulary crate (target home for `Invocation`/`Authorized`/`Outcome`); ~124 public types across 21 files (§4.5).
 - `crates/ironclaw_host_api/src/runtime_policy.rs` — `DeploymentMode` / `RuntimeProfile`: the deployment-mode enums that leaked into the kernel vocabulary (§4.4–§4.5).
 - `crates/ironclaw_runtime_policy/` — `EffectiveRuntimePolicy`: the resolved policy *data* the kernel should consume instead of a mode enum.
 - `crates/ironclaw_filesystem/src/in_memory.rs` — `InMemoryBackend: RootFilesystem`: the existing seam that makes every `InMemory*Store` deletable (§4.3).
