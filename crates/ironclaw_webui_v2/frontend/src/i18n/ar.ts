@@ -278,6 +278,7 @@ registerPack("ar", {
   "settings.exportSuccess": "تم تصدير الإعدادات",
   "settings.importSuccess": "تم استيراد الإعدادات",
   "settings.importInvalid": "يجب أن يحتوي الملف المحدد على كائن إعدادات",
+  "settings.importNoSupported": "لا يحتوي الملف المحدد على إعدادات مدعومة",
   "settings.importFailed": "فشل الاستيراد: {message}",
 
   // Settings — restart banner

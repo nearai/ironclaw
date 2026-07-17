@@ -278,6 +278,7 @@ registerPack("fr", {
   "settings.exportSuccess": "Paramètres exportés",
   "settings.importSuccess": "Paramètres importés",
   "settings.importInvalid": "Le fichier sélectionné doit contenir un objet de paramètres",
+  "settings.importNoSupported": "Aucun paramètre pris en charge dans le fichier sélectionné",
   "settings.importFailed": "Échec de l'importation : {message}",
 
   // Settings — restart banner

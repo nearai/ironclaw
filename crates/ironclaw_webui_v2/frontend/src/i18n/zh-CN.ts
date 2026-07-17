@@ -278,6 +278,7 @@ registerPack("zh-CN", {
   "settings.exportSuccess": "设置已导出",
   "settings.importSuccess": "设置已导入",
   "settings.importInvalid": "所选文件必须包含设置对象",
+  "settings.importNoSupported": "所选文件中没有受支持的设置",
   "settings.importFailed": "导入失败：{message}",
 
   // Settings — restart banner

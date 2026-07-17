@@ -1,7 +1,25 @@
 import assert from "node:assert/strict";
 import { test } from "vitest";
 
-import { settingsFromOperatorConfig, toolFromConfigEntry } from "./settings-api";
+import {
+  importSettings,
+  SETTINGS_IMPORT_NO_SUPPORTED_REASON,
+  settingsFromOperatorConfig,
+  toolFromConfigEntry,
+} from "./settings-api";
+
+test.each([
+  ["empty", {}],
+  ["unsupported", { "agent.model": "example-model" }],
+])("importSettings rejects %s settings payloads when nothing can be imported", async (_case, settings) => {
+  assert.deepEqual(await importSettings({ settings }), {
+    success: false,
+    imported: 0,
+    results: [],
+    reason: SETTINGS_IMPORT_NO_SUPPORTED_REASON,
+    message: "No supported settings were found in the selected file",
+  });
+});
 
 test("settingsFromOperatorConfig maps the global auto-approve key", () => {
   const settings = settingsFromOperatorConfig({

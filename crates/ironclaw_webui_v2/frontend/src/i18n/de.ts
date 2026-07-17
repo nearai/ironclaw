@@ -278,6 +278,7 @@ registerPack("de", {
   "settings.exportSuccess": "Einstellungen exportiert",
   "settings.importSuccess": "Einstellungen importiert",
   "settings.importInvalid": "Ausgewählte Datei muss ein Einstellungsobjekt enthalten",
+  "settings.importNoSupported": "Die ausgewählte Datei enthält keine unterstützten Einstellungen",
   "settings.importFailed": "Import fehlgeschlagen: {message}",
 
   // Settings — restart banner

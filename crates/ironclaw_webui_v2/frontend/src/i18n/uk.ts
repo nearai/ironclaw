@@ -278,6 +278,7 @@ registerPack("uk", {
   "settings.exportSuccess": "Налаштування експортовано",
   "settings.importSuccess": "Налаштування імпортовано",
   "settings.importInvalid": "Вибраний файл має містити об’єкт налаштувань",
+  "settings.importNoSupported": "У вибраному файлі немає підтримуваних налаштувань",
   "settings.importFailed": "Помилка імпорту: {message}",
 
   // Settings — restart banner

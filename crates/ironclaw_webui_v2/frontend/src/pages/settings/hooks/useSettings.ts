@@ -58,7 +58,15 @@ export function useSettings() {
   );
 
   const importMutation = useMutation({
-    mutationFn: importSettingsPayload,
+    mutationFn: async (payload) => {
+      const result = await importSettingsPayload(payload);
+      if (result?.success === false) {
+        const error = new Error(result.message || "Import failed");
+        error.reason = result.reason;
+        throw error;
+      }
+      return result;
+    },
     onSuccess: (_data, payload) => {
       queryClient.invalidateQueries({ queryKey: ["settings-export"] });
       const importedKeys = Object.keys(payload?.settings || {});

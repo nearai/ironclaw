@@ -278,6 +278,7 @@ registerPack("ko", {
   "settings.exportSuccess": "내보낸 설정",
   "settings.importSuccess": "가져온 설정",
   "settings.importInvalid": "선택한 파일에 설정 개체가 포함되어야 함",
+  "settings.importNoSupported": "선택한 파일에 지원되는 설정이 없습니다",
   "settings.importFailed": "가져오기 실패: {message}",
 
   // Settings — restart banner

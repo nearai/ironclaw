@@ -3,6 +3,7 @@ import { apiFetch } from "../../../lib/api";
 const OPERATOR_CONFIG_BASE = "/api/webchat/v2/operator/config";
 const SETTINGS_TOOLS_BASE = "/api/webchat/v2/settings/tools";
 const AUTO_APPROVE_KEY = "agent.auto_approve_tools";
+export const SETTINGS_IMPORT_NO_SUPPORTED_REASON = "no_supported_settings";
 const TOOL_PREFIX = "tool.";
 const TOOL_PERMISSION_STATES = new Set(["always_allow", "ask_each_time", "disabled"]);
 const TOOL_PERMISSION_UPDATE_STATES = new Set([
@@ -86,6 +87,15 @@ export async function importSettings(payload) {
   const imported = [];
   if (Object.prototype.hasOwnProperty.call(settings, AUTO_APPROVE_KEY)) {
     imported.push(await updateSetting(AUTO_APPROVE_KEY, Boolean(settings[AUTO_APPROVE_KEY])));
+  }
+  if (imported.length === 0) {
+    return {
+      success: false,
+      imported: 0,
+      results: imported,
+      reason: SETTINGS_IMPORT_NO_SUPPORTED_REASON,
+      message: "No supported settings were found in the selected file",
+    };
   }
   return { success: true, imported: imported.length, results: imported };
 }

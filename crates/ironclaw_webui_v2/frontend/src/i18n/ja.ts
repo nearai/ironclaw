@@ -278,6 +278,7 @@ registerPack("ja", {
   "settings.exportSuccess": "エクスポートされた設定",
   "settings.importSuccess": "インポートされた設定",
   "settings.importInvalid": "選択したファイルには設定オブジェクトが含まれている必要があります",
+  "settings.importNoSupported": "選択したファイルにサポートされている設定がありません",
   "settings.importFailed": "インポートに失敗しました: {message}",
 
   // Settings — restart banner

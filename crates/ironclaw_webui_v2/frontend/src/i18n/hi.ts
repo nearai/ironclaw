@@ -278,6 +278,7 @@ registerPack("hi", {
   "settings.exportSuccess": "निर्यात की गई सेटिंग्स",
   "settings.importSuccess": "आयातित सेटिंग्स",
   "settings.importInvalid": "चयनित फ़ाइल में एक सेटिंग ऑब्जेक्ट होना चाहिए",
+  "settings.importNoSupported": "चयनित फ़ाइल में कोई समर्थित सेटिंग नहीं मिली",
   "settings.importFailed": "आयात विफल: {message}",
 
   // Settings — restart banner
