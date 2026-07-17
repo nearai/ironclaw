@@ -121,6 +121,12 @@ pub use router::{
 };
 pub use schema::{WebChatV2Event, WebChatV2EventFrame};
 // Re-export the static-bundle router factory at the crate root so host
-// composition keeps calling `ironclaw_webui_v2::mount_at_prefix(...)`.
+// composition can mount the canonical root surface as one owned unit. This
+// crate folds the former `ironclaw_webui_v2` module in unconditionally, so the
+// re-exports are not gated on the `webui-v2-beta` feature (which lived on the
+// standalone crate).
 pub use sse_capacity::DEFAULT_SSE_MAX_CONCURRENT_PER_CALLER;
-pub use static_assets::{mount_at_prefix, serve_root, serve_wildcard, static_router};
+pub use static_assets::{
+    StaticRouterConfig, StaticRouterConfigError, serve_root, serve_wildcard, static_router,
+    static_router_with_config,
+};

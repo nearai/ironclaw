@@ -226,7 +226,7 @@ async fn login_redirects_to_provider_with_state_and_callback_url() {
         .oneshot(
             Request::builder()
                 .method("GET")
-                .uri("/auth/login/google?redirect_after=%2Fv2")
+                .uri("/auth/login/google?redirect_after=%2F")
                 .body(Body::empty())
                 .expect("request"),
         )
@@ -259,7 +259,7 @@ async fn login_from_non_canonical_host_redirects_before_state_creation() {
         .oneshot(
             Request::builder()
                 .method("GET")
-                .uri("/auth/login/google?redirect_after=%2Fv2")
+                .uri("/auth/login/google?redirect_after=%2F")
                 .header(header::HOST, "preview.example")
                 .body(Body::empty())
                 .expect("request"),
@@ -275,7 +275,7 @@ async fn login_from_non_canonical_host_redirects_before_state_creation() {
         .expect("utf-8");
     assert_eq!(
         location,
-        "https://gateway.example/auth/login/google?redirect_after=%2Fv2"
+        "https://gateway.example/auth/login/google?redirect_after=%2F"
     );
 }
 
@@ -374,7 +374,7 @@ async fn callback_success_creates_session_and_redirects_with_login_ticket() {
         .oneshot(
             Request::builder()
                 .method("GET")
-                .uri("/auth/login/google?redirect_after=%2Fv2")
+                .uri("/auth/login/google?redirect_after=%2F")
                 .body(Body::empty())
                 .expect("request"),
         )
@@ -414,7 +414,7 @@ async fn callback_success_creates_session_and_redirects_with_login_ticket() {
         .to_str()
         .expect("utf-8")
         .to_string();
-    assert!(landing.starts_with("/v2?login_ticket="), "got {landing}",);
+    assert!(landing.starts_with("/?login_ticket="), "got {landing}",);
     assert!(
         !landing.contains("#token="),
         "callback Location must not carry the bearer: {landing}",
@@ -457,6 +457,71 @@ async fn callback_success_creates_session_and_redirects_with_login_ticket() {
         .expect("lookup")
         .expect("session");
     assert_eq!(session.user_id.as_str(), "alice@example.com");
+}
+
+#[tokio::test]
+async fn callback_preserves_legacy_v2_redirect_after_through_ticket_exchange() {
+    // A cached pre-migration SPA can still start OAuth with `/v2` as its
+    // redirect target. The callback must preserve that safe same-origin path;
+    // the root router's compatibility redirect then carries the ticket query
+    // to `/`. This crate owns the callback half of that rolling-upgrade seam.
+    let store_inner = Arc::new(InMemorySessionStore::new());
+    let session_store: Arc<dyn SessionStore> = store_inner.clone();
+    let provider = StubProvider::google_with_profile(alice_profile());
+    let router = build_router(vec![provider as Arc<dyn OAuthProvider>], session_store);
+
+    let login = router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/auth/login/google?redirect_after=%2Fv2")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("oneshot");
+    let state = state_from_location(
+        login
+            .headers()
+            .get(header::LOCATION)
+            .expect("Location")
+            .to_str()
+            .expect("utf-8"),
+    );
+
+    let callback = router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri(format!(
+                    "/auth/callback/google?code=legacy-code&state={}",
+                    urlencoding::encode(&state)
+                ))
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("oneshot");
+    assert_eq!(callback.status(), StatusCode::SEE_OTHER);
+    let landing = callback
+        .headers()
+        .get(header::LOCATION)
+        .expect("Location")
+        .to_str()
+        .expect("utf-8");
+    assert!(
+        landing.starts_with("/v2?login_ticket="),
+        "legacy redirect_after must be preserved; got {landing}",
+    );
+
+    let ticket = ticket_from_landing(landing);
+    let bearer = redeem_ticket(router, &ticket).await;
+    assert!(
+        store_inner.lookup(&bearer).await.expect("lookup").is_some(),
+        "legacy landing ticket must still exchange for a live session",
+    );
 }
 
 fn ticket_from_landing(landing: &str) -> String {
@@ -520,7 +585,7 @@ async fn callback_with_unknown_state_redirects_with_error_code() {
         .expect("Location")
         .to_str()
         .expect("utf-8");
-    assert_eq!(location, "/v2?login_error=invalid_state");
+    assert_eq!(location, "/?login_error=invalid_state");
 }
 
 #[tokio::test]
@@ -583,7 +648,7 @@ async fn callback_with_state_replay_fails_closed() {
         .to_str()
         .unwrap();
     assert!(
-        first_location.starts_with("/v2?login_ticket="),
+        first_location.starts_with("/?login_ticket="),
         "first callback must succeed; got {first_location}"
     );
     assert_eq!(store_inner.len(), 1, "first callback must mint a session");
@@ -612,7 +677,7 @@ async fn callback_with_state_replay_fails_closed() {
         .unwrap()
         .to_str()
         .unwrap();
-    assert_eq!(replay_location, "/v2?login_error=invalid_state");
+    assert_eq!(replay_location, "/?login_error=invalid_state");
     assert_eq!(
         store_inner.len(),
         1,
@@ -643,7 +708,7 @@ async fn callback_with_provider_error_param_redirects_with_denied() {
         .unwrap()
         .to_str()
         .unwrap();
-    assert_eq!(location, "/v2?login_error=denied");
+    assert_eq!(location, "/?login_error=denied");
 }
 
 #[tokio::test]
@@ -693,7 +758,7 @@ async fn callback_when_provider_rejects_hosted_domain_yields_unauthorized() {
         .unwrap()
         .to_str()
         .unwrap();
-    assert_eq!(location, "/v2?login_error=unauthorized");
+    assert_eq!(location, "/?login_error=unauthorized");
     assert_eq!(store_inner.len(), 0, "no session must be created");
 }
 
@@ -708,7 +773,7 @@ async fn login_open_redirect_attempt_falls_back_to_default() {
     );
 
     // Protocol-relative redirect target: sanitize_redirect must
-    // strip it, and the callback must land on the default `/v2`.
+    // strip it, and the callback must land on the default `/`.
     let login = router
         .clone()
         .oneshot(
@@ -749,7 +814,7 @@ async fn login_open_redirect_attempt_falls_back_to_default() {
         .unwrap()
         .to_str()
         .unwrap();
-    assert!(location.starts_with("/v2?login_ticket="));
+    assert!(location.starts_with("/?login_ticket="));
 }
 
 // ─── logout ───────────────────────────────────────────────────────────
@@ -890,7 +955,7 @@ async fn callback_missing_code_or_state_redirects_invalid_request() {
             .unwrap()
             .to_str()
             .unwrap();
-        assert_eq!(location, "/v2?login_error=invalid_request", "uri={uri}");
+        assert_eq!(location, "/?login_error=invalid_request", "uri={uri}");
     }
 }
 
@@ -955,7 +1020,7 @@ async fn callback_with_state_for_different_provider_redirects_provider_mismatch(
         .unwrap()
         .to_str()
         .unwrap();
-    assert_eq!(location, "/v2?login_error=provider_mismatch");
+    assert_eq!(location, "/?login_error=provider_mismatch");
     assert_eq!(
         store_inner.len(),
         0,
@@ -1017,7 +1082,7 @@ async fn callback_when_provider_exchange_fails_redirects_exchange_failed() {
         .unwrap()
         .to_str()
         .unwrap();
-    assert_eq!(location, "/v2?login_error=exchange_failed");
+    assert_eq!(location, "/?login_error=exchange_failed");
     assert_eq!(store_inner.len(), 0);
 }
 
@@ -1071,7 +1136,7 @@ async fn callback_when_profile_fetch_fails_redirects_exchange_failed() {
             .unwrap()
             .to_str()
             .unwrap(),
-        "/v2?login_error=exchange_failed",
+        "/?login_error=exchange_failed",
     );
 }
 
@@ -1174,7 +1239,7 @@ mod user_directory_branches {
     async fn unknown_user_redirects_unauthorized() {
         let (router, store) = build_router_with_directory(Arc::new(AlwaysUnknown));
         let location = drive_callback(router).await;
-        assert_eq!(location, "/v2?login_error=unauthorized");
+        assert_eq!(location, "/?login_error=unauthorized");
         assert_eq!(store.len(), 0);
     }
 
@@ -1182,7 +1247,7 @@ mod user_directory_branches {
     async fn backend_failure_redirects_server_error() {
         let (router, store) = build_router_with_directory(Arc::new(AlwaysBackendFail));
         let location = drive_callback(router).await;
-        assert_eq!(location, "/v2?login_error=server_error");
+        assert_eq!(location, "/?login_error=server_error");
         assert_eq!(store.len(), 0);
     }
 }
@@ -1283,7 +1348,7 @@ mod session_store_failure {
                 .unwrap()
                 .to_str()
                 .unwrap(),
-            "/v2?login_error=server_error",
+            "/?login_error=server_error",
         );
     }
 }

@@ -139,6 +139,14 @@ Inbound order (outer → inner → handler):
    send-message, get-timeline, stream-events SSE, stream-events WS,
    cancel-run, resolve-gate, setup-extension, list/rename automations).
 
+After the complete descriptor set is assembled, composition derives every
+literal root namespace and supplies it to `static_router_with_config`. Exact
+host routes still win through Axum routing, while unknown paths in any
+host-owned namespace return 404 instead of the SPA shell. A descriptor whose
+first segment is dynamic, percent-encoded/noncanonical, missing, or already
+owned by a static asset or explicit static route fails composition: no finite
+fail-closed reservation can represent those overlaps safely.
+
 ### Product-auth routes
 
 When `bundle.product_auth` is present, `webui_v2_app` also mounts the
@@ -247,7 +255,7 @@ Reborn-native auth router. v1 gateway code remains untouched —
 ### Session transport decision (#4116)
 
 The OAuth callback returns a short-lived, one-time login ticket to
-the SPA via the URL query (`/v2?login_ticket=<ticket>`), not the
+the SPA via the URL query (`/?login_ticket=<ticket>`), not the
 session bearer itself and not an `HttpOnly` cookie. The SPA
 immediately POSTs that ticket to `/auth/session/exchange` and stores
 the returned bearer in `sessionStorage`.

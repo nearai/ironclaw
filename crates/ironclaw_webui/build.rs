@@ -2,7 +2,7 @@
 //!
 //! Builds the Vite frontend into Cargo's `OUT_DIR` when `webui-v2-beta` is
 //! enabled, then emits Rust source that declares one `ASSETS` slice keyed by
-//! URL path (relative to the mount prefix). Each entry pairs an
+//! URL path (relative to the gateway root). Each entry pairs an
 //! `include_bytes!` reference with a content-type string picked from the file
 //! extension.
 //!
