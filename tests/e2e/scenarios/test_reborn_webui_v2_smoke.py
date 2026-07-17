@@ -427,23 +427,20 @@ async def test_reborn_v2_automation_rename_persists_from_ui(
 async def test_reborn_v2_automation_action_error_is_safe_dismissible_and_cleared_on_retry(
     reborn_v2_server, reborn_v2_browser
 ):
-    """Automation mutations never expose raw errors and clear stale failures."""
+    """Automation mutations keep raw errors private and clear stale failures."""
     automation_id = "11111111-2222-3333-4444-555555555555"
+    automation_name = "Safe action error regression"
     raw_error = "postgres failed: secret_internal_automation_table"
     attempt_count = 0
+    mutation_requests: list[tuple[str, str]] = []
+    console_messages: list[str] = []
     retry_started = asyncio.Event()
     release_retry = asyncio.Event()
     retry_completed = asyncio.Event()
-    raw_error_logged = asyncio.Event()
 
     context = await reborn_v2_browser.new_context(viewport={"width": 1280, "height": 720})
     page = await context.new_page()
-
-    def capture_console_error(message) -> None:
-        if message.type == "error" and raw_error in message.text:
-            raw_error_logged.set()
-
-    page.on("console", capture_console_error)
+    page.on("console", lambda message: console_messages.append(message.text))
 
     async def handle_automations(route) -> None:
         nonlocal attempt_count
@@ -457,7 +454,7 @@ async def test_reborn_v2_automation_action_error_is_safe_dismissible_and_cleared
                         "automations": [
                             {
                                 "automation_id": automation_id,
-                                "name": "Safe action error regression",
+                                "name": automation_name,
                                 "source": {
                                     "type": "schedule",
                                     "cron": "0 9 * * *",
@@ -473,6 +470,9 @@ async def test_reborn_v2_automation_action_error_is_safe_dismissible_and_cleared
             )
             return
 
+        mutation_requests.append(
+            (route.request.method, urlparse(route.request.url).path)
+        )
         attempt_count += 1
         if attempt_count <= 2:
             await route.fulfill(
@@ -515,21 +515,40 @@ async def test_reborn_v2_automation_action_error_is_safe_dismissible_and_cleared
             "Unable to update the automation. Please try again."
         )
         await expect(error_banner).not_to_contain_text(raw_error)
-        await asyncio.wait_for(raw_error_logged.wait(), timeout=10)
+        assert not any(raw_error in message for message in console_messages)
 
         await error_banner.get_by_role("button", name="Dismiss").click()
         await expect(error_banner).to_have_count(0)
 
-        await submit_rename("Second failed rename")
+        pause_button = page.get_by_role(
+            "button", name=f"Pause: {automation_name}", exact=True
+        )
+        await pause_button.click()
         await expect(error_banner).to_be_visible(timeout=10000)
+        assert not any(raw_error in message for message in console_messages)
 
-        await submit_rename("Successful retry")
+        await pause_button.click()
         await asyncio.wait_for(retry_started.wait(), timeout=10)
         await expect(error_banner).to_have_count(0)
 
         release_retry.set()
         await asyncio.wait_for(retry_completed.wait(), timeout=10)
         await expect(error_banner).to_have_count(0)
+        assert not any(raw_error in message for message in console_messages)
+        assert mutation_requests == [
+            (
+                "POST",
+                f"/api/webchat/v2/automations/{automation_id}",
+            ),
+            (
+                "POST",
+                f"/api/webchat/v2/automations/{automation_id}/pause",
+            ),
+            (
+                "POST",
+                f"/api/webchat/v2/automations/{automation_id}/pause",
+            ),
+        ]
     finally:
         release_retry.set()
         await context.close()
