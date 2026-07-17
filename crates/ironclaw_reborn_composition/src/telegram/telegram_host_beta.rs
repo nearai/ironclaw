@@ -17,8 +17,8 @@ use crate::extension_host::extension_lifecycle::{
 use crate::outbound::OutboundDeliveryTargetRegistrationOutcome;
 use crate::webui::webui_serve::{ProtectedRouteMount, PublicRouteDrain, PublicRouteMount};
 use ironclaw_telegram_extension::channel_routes::{
-    TelegramChannelRouteConfig, TelegramChannelSetupActivation,
-    TelegramChannelSetupActivationError, telegram_channel_route_parts,
+    TelegramChannelSetupActivation, TelegramChannelSetupActivationError,
+    telegram_channel_route_parts,
 };
 use ironclaw_telegram_extension::host::{
     TelegramDeliveryServicePorts, TelegramHostInput, TelegramHostParts, build_telegram_host,
@@ -39,15 +39,14 @@ const TELEGRAM_IDEMPOTENCY_LEDGER_PRUNE_INTERVAL: usize = 1_000;
 #[non_exhaustive]
 pub struct TelegramHostMounts {
     pub events: PublicRouteMount,
-    channel_routes: TelegramChannelRouteConfig,
+    protected: ProtectedRouteMount,
     connectable: Arc<dyn ironclaw_product_workflow::ConnectableChannelsProductFacade>,
     channel_connection: Arc<dyn ironclaw_product_workflow::ChannelConnectionFacade>,
 }
 
 impl TelegramHostMounts {
     pub fn protected_routes(&self) -> ProtectedRouteMount {
-        let (router, descriptors) = telegram_channel_route_parts(self.channel_routes.clone());
-        ProtectedRouteMount::new(router, descriptors)
+        self.protected.clone()
     }
 
     pub(crate) fn connectable_channels(
@@ -206,6 +205,9 @@ pub async fn build_telegram_host_runtime_mounts(
     })
     .await?;
 
+    let (protected_router, protected_descriptors) = telegram_channel_route_parts(channel_routes)
+        .map_err(|error| invalid_config("channel_routes", error.to_string()))?;
+    let protected = ProtectedRouteMount::new(protected_router, protected_descriptors);
     let (updates_router, updates_descriptors) = telegram_updates_route_parts(updates.clone());
     let events = PublicRouteMount::new(updates_router, updates_descriptors)
         .with_drain(Arc::new(TelegramUpdatesRouteDrain(updates)));
@@ -238,7 +240,7 @@ pub async fn build_telegram_host_runtime_mounts(
 
     Ok(TelegramHostMounts {
         events,
-        channel_routes,
+        protected,
         connectable,
         channel_connection,
     })

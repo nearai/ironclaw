@@ -108,7 +108,8 @@ fn routed_app(
     caller: WebUiAuthenticatedCaller,
 ) -> axum::Router {
     let config = TelegramChannelRouteConfig::new(setup, pairing, safety_layer());
-    let (router, _descriptors) = telegram_channel_route_parts(config);
+    let (router, _descriptors) =
+        telegram_channel_route_parts(config).expect("static route descriptors validate");
     router.layer(axum::Extension(caller))
 }
 
@@ -303,7 +304,8 @@ async fn save_setup_rolls_back_when_activation_fails() {
     });
     let config = TelegramChannelRouteConfig::new(Arc::clone(&setup), pairing, safety_layer())
         .with_setup_activation(Arc::clone(&activation) as Arc<dyn TelegramChannelSetupActivation>);
-    let (router, _descriptors) = telegram_channel_route_parts(config);
+    let (router, _descriptors) =
+        telegram_channel_route_parts(config).expect("static route descriptors validate");
     let app = router.layer(axum::Extension(operator_caller()));
 
     // The save genuinely mutates observable state (a NEW webhook URL and

@@ -7,6 +7,7 @@
 //! descriptor-driven body/rate limits apply exactly like every other
 //! bearer-authed v2 route.
 
+use std::num::{NonZeroU32, NonZeroU64};
 use std::sync::Arc;
 
 use axum::{
@@ -16,13 +17,13 @@ use axum::{
     response::{IntoResponse, Response},
     routing::{get, post},
 };
-use ironclaw_host_api::NetworkMethod;
 use ironclaw_host_api::ingress::{
     AllowedEffectPath, AuditTraceClass, BodyLimitPolicy, CorsPolicy, IngressAuthPolicy,
     IngressAuthScheme, IngressPolicy, IngressPolicyParts, IngressRouteDescriptor,
     IngressScopeSource, ListenerClass, RateLimitPolicy, RateLimitScope, StreamingMode,
     WebSocketOriginPolicy,
 };
+use ironclaw_host_api::{HostApiError, NetworkMethod};
 use ironclaw_product_workflow::WebUiAuthenticatedCaller;
 use ironclaw_safety::SafetyLayer;
 use secrecy::SecretString;
@@ -47,12 +48,18 @@ const TELEGRAM_PAIRING_START_ROUTE_ID: &str = "webui.v2.channels.telegram.pairin
 const TELEGRAM_PAIRING_STATUS_ROUTE_ID: &str = "webui.v2.channels.telegram.pairing.status";
 const TELEGRAM_PAIRING_DISCONNECT_ROUTE_ID: &str = "webui.v2.channels.telegram.pairing.disconnect";
 
-const TELEGRAM_ROUTES_BODY_LIMIT_BYTES: std::num::NonZeroU64 =
-    std::num::NonZeroU64::new(16 * 1024).expect("non-zero body limit"); // safety: const evaluated at compile time; a zero literal fails the build, never a runtime panic.
-const TELEGRAM_ROUTES_MAX_REQUESTS: std::num::NonZeroU32 =
-    std::num::NonZeroU32::new(60).expect("non-zero rate limit"); // safety: const evaluated at compile time; a zero literal fails the build, never a runtime panic.
-const TELEGRAM_ROUTES_RATE_WINDOW_SECONDS: std::num::NonZeroU32 =
-    std::num::NonZeroU32::new(60).expect("non-zero rate window"); // safety: const evaluated at compile time; a zero literal fails the build, never a runtime panic.
+const TELEGRAM_ROUTES_BODY_LIMIT_BYTES: NonZeroU64 = match NonZeroU64::new(16 * 1024) {
+    Some(value) => value,
+    None => NonZeroU64::MIN,
+};
+const TELEGRAM_ROUTES_MAX_REQUESTS: NonZeroU32 = match NonZeroU32::new(60) {
+    Some(value) => value,
+    None => NonZeroU32::MIN,
+};
+const TELEGRAM_ROUTES_RATE_WINDOW_SECONDS: NonZeroU32 = match NonZeroU32::new(60) {
+    Some(value) => value,
+    None => NonZeroU32::MIN,
+};
 
 /// Post-save extension activation trigger (mirrors the Slack setup
 /// activation): the telegram host mounts wire it to lifecycle `activate` on
@@ -119,7 +126,7 @@ impl TelegramChannelRouteConfig {
 /// mount types without a cycle.
 pub fn telegram_channel_route_parts(
     config: TelegramChannelRouteConfig,
-) -> (Router, Vec<IngressRouteDescriptor>) {
+) -> Result<(Router, Vec<IngressRouteDescriptor>), HostApiError> {
     let router = Router::new()
         .route(
             WEBUI_V2_CHANNELS_TELEGRAM_SETUP_PATH,
@@ -134,17 +141,17 @@ pub fn telegram_channel_route_parts(
                 .delete(disconnect_pairing_handler),
         )
         .with_state(config);
-    (router, telegram_channel_route_descriptors())
+    Ok((router, telegram_channel_route_descriptors()?))
 }
 
-fn telegram_channel_route_descriptors() -> Vec<IngressRouteDescriptor> {
-    vec![
+fn telegram_channel_route_descriptors() -> Result<Vec<IngressRouteDescriptor>, HostApiError> {
+    Ok(vec![
         descriptor(
             TELEGRAM_SETUP_GET_ROUTE_ID,
             NetworkMethod::Get,
             WEBUI_V2_CHANNELS_TELEGRAM_SETUP_PATH,
             BodyLimitPolicy::NoBody,
-        ),
+        )?,
         descriptor(
             TELEGRAM_SETUP_SAVE_ROUTE_ID,
             NetworkMethod::Put,
@@ -152,13 +159,13 @@ fn telegram_channel_route_descriptors() -> Vec<IngressRouteDescriptor> {
             BodyLimitPolicy::Limited {
                 max_bytes: TELEGRAM_ROUTES_BODY_LIMIT_BYTES,
             },
-        ),
+        )?,
         descriptor(
             TELEGRAM_SETUP_CLEAR_ROUTE_ID,
             NetworkMethod::Delete,
             WEBUI_V2_CHANNELS_TELEGRAM_SETUP_PATH,
             BodyLimitPolicy::NoBody,
-        ),
+        )?,
         descriptor(
             TELEGRAM_PAIRING_START_ROUTE_ID,
             NetworkMethod::Post,
@@ -166,20 +173,20 @@ fn telegram_channel_route_descriptors() -> Vec<IngressRouteDescriptor> {
             BodyLimitPolicy::Limited {
                 max_bytes: TELEGRAM_ROUTES_BODY_LIMIT_BYTES,
             },
-        ),
+        )?,
         descriptor(
             TELEGRAM_PAIRING_STATUS_ROUTE_ID,
             NetworkMethod::Get,
             WEBUI_V2_CHANNELS_TELEGRAM_PAIRING_PATH,
             BodyLimitPolicy::NoBody,
-        ),
+        )?,
         descriptor(
             TELEGRAM_PAIRING_DISCONNECT_ROUTE_ID,
             NetworkMethod::Delete,
             WEBUI_V2_CHANNELS_TELEGRAM_PAIRING_PATH,
             BodyLimitPolicy::NoBody,
-        ),
-    ]
+        )?,
+    ])
 }
 
 fn descriptor(
@@ -187,12 +194,11 @@ fn descriptor(
     method: NetworkMethod,
     path: &'static str,
     body_limit: BodyLimitPolicy,
-) -> IngressRouteDescriptor {
-    IngressRouteDescriptor::new(route_id, method, path, route_policy(body_limit))
-        .expect("telegram channel route descriptor must validate at startup") // safety: route id, method, path, and policy are static typed literals.
+) -> Result<IngressRouteDescriptor, HostApiError> {
+    IngressRouteDescriptor::new(route_id, method, path, route_policy(body_limit)?)
 }
 
-fn route_policy(body_limit: BodyLimitPolicy) -> IngressPolicy {
+fn route_policy(body_limit: BodyLimitPolicy) -> Result<IngressPolicy, HostApiError> {
     IngressPolicy::new(IngressPolicyParts {
         listener_class: ListenerClass::LocalGateway,
         auth: IngressAuthPolicy::Required {
@@ -211,7 +217,6 @@ fn route_policy(body_limit: BodyLimitPolicy) -> IngressPolicy {
         audit: AuditTraceClass::UserAction,
         effect_path: AllowedEffectPath::ProductWorkflow,
     })
-    .expect("telegram channel route policy must validate") // safety: policy fields are typed static literals with non-zero limits.
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Error)]

@@ -1,12 +1,12 @@
 //! The per-channel protocol seam of the adapter-generic delivery machinery.
 //!
-//! Composition's `outbound::channel_delivery` module owns the generic
+//! `ironclaw_channel_delivery` owns the generic
 //! final-reply delivery observer and triggered-run delivery driver; the types
 //! here are the contract a channel host implements to plug into them:
 //! stored reply-target ref decoding, personal-DM classification, and the
 //! lightweight status/notification messages posted around the adapter render
-//! path. They live below composition so a channel host crate can implement
-//! [`ChannelDeliveryProtocol`] without depending on composition.
+//! path. They live in this contract crate so a channel host can implement
+//! [`ChannelDeliveryProtocol`] without depending on the delivery engine.
 
 use async_trait::async_trait;
 use ironclaw_product_adapters::{ExternalConversationRef, ProductAdapterError, ProtocolHttpEgress};
