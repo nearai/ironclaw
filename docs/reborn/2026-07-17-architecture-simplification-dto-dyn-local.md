@@ -1073,7 +1073,81 @@ regression test that pins it (the commit-msg hook already requires one).
 
 ---
 
-## 12. Open questions
+## 12. Performance-critical paths: locking, remote-store latency, event fan-out
+
+One consequence of §4.3 deserves its own treatment: **consolidating every domain store
+onto `RootFilesystem` makes the backend's latency profile the *kernel's* latency
+profile.** That backend can be in-memory (a `Mutex<HashMap>`), on disk, or **remote**
+(libSQL/Turso, Postgres). On a remote backend every kernel operation pays a network
+round-trip, and the turn machinery is round-trip-heavy. The architecture already has the
+right primitives (batched snapshot/delta writes, pooled libSQL, milestone-coalesced
+progress, bounded projection buffers); the refactor must preserve and *generalize* them,
+because centralizing on one seam optimizes everything at once — or bottlenecks it.
+
+### 12.1 The critical paths (ranked by risk)
+
+| Path | Frequency | Locking / store ops | Remote-latency exposure | Mitigation |
+| --- | --- | --- | --- | --- |
+| **Per-turn state fan-out** | every transition | ~11 durable collections (turn/run/lock/lease/checkpoint/idempotency/events) | 11 sequential round-trips if unbatched | one batched snapshot/delta write per transition — the `filesystem_store/row_store` journal already does this for turns; §4.3 must make it the norm, not per-domain |
+| **Lease heartbeat ↔ store lock** | every heartbeat, per active run | heartbeat contends on the *same* store lock as the executor (`turn_scheduler.rs:881`); lease TTL (90s) budgets the write | a slow remote store delays the heartbeat past the TTL → false expiry → killed run (the 2026-06-24 wedge) | heartbeat is a tiny isolated write on its own connection, never behind the executor's store work; TTL ≥ k × backend p99 write latency (not a hardcoded 90s) |
+| **libSQL single-writer** | every write | `BEGIN IMMEDIATE` global write lock + a connection pool (`libsql_pool`; the #5751 `SQLITE_MISUSE` fix) | all writes serialize through one writer; §4.3 funnels *every* domain's writes there | already shipped as pain (#6089 governor contention). Prefer Postgres (row-level locking) for multi-tenant/high-concurrency; or shard the libSQL writer by tenant/scope |
+| **Capability `authorize()` reads** | every tool call | reads trust/approval/mounts; resource reservation is write + reconcile (2 writes) | multiple round-trips before dispatch, per call | the §3 single `authorize()` is where to batch the reads and **cache** the read-mostly ones (trust policy, descriptors), scope-keyed per the safety cache rule |
+| **Active-thread lock** | every transition | one active run per canonical thread; durable record | acquire/release + blocked-run hold = remote ops | inherent serialization (a conversation is sequential); keep the lock op a single cheap write |
+| **Event append + projection fan-out** | high (progress, tool calls) | durable event-log append; SSE/WS fan-out to N subscribers | append latency × event volume | milestone coalescing exists (`MilestoneModelProgressSink`); delivery is decoupled with bounded buffers + `Lagged`/rebase (`event_streams`). Keep durable append async off the transition's critical path; a slow client must never block a transition |
+| **Scheduler recovery poll** | every ~10s | `recover_expired_leases` scan | a periodic query scaling with active runs | index the scan by lease-expiry; bound its cost |
+
+### 12.2 The async footgun: never hold a lock across remote I/O
+
+The in-memory backend guards a `HashMap` with a synchronous lock; a remote backend uses
+connections and transactions. The discipline the refactor must enforce for **every**
+backend: **a store must never hold a synchronous lock across an `.await` that does
+network I/O.** Holding the in-memory overlay lock (the lease-in-two-places, §1.4) or an
+executor-held store lock is harmless over a memory map but a serialization disaster if the
+same code path awaits a remote write while holding it — which is exactly why heartbeats
+already run in child tasks and the scheduler tolerates a "store is slow" timeout
+(`turn_scheduler.rs:787`). Structure stores so the lock guards only the in-memory index and
+the I/O happens outside it, and assert it mechanically (clippy `await_holding_lock`).
+
+### 12.3 What the refactor helps, and what it risks
+
+**Helps.** §3's single `authorize()` batches/caches the authority reads once instead of
+four layers each hitting stores. §4.1 removes ~8 DTO copies per call (alloc/CPU — small,
+but real at high tool-call rates). §4.3's one store seam is one place to add
+batching/caching/pooling, versus 2–4 per-domain reimplementations each optimized
+separately.
+
+**Risks — call them out.**
+- §4.3 **centralizes** backend latency and the libSQL single-writer contention onto one
+  seam everything uses. The "optimize once" upside only materializes if that seam batches
+  per-transition writes and pools/shards the writer; otherwise it bottlenecks the whole
+  kernel.
+- The **lease-TTL ↔ store-latency coupling** must be explicit: a deployment on a
+  high-latency remote store needs a larger TTL and a matching model-call timeout hierarchy
+  (today `provider 60s < wrapper 75s < lease 90s`), or heartbeats false-expire. Make the
+  hierarchy a function of the backend's p99 write latency, not a constant.
+
+### 12.4 Design guidance to carry into implementation
+
+- **One batched write per transition** (snapshot/delta), not N per-store round-trips —
+  generalize the turn `row_store` journal to all domains.
+- **Heartbeat = a tiny isolated write** on its own connection, never behind the executor's
+  store lock; `lease_ttl ≥ k × backend_p99_write`.
+- **Cache read-mostly authority data** (trust policy, capability descriptors, approval
+  policy) with scope-aware keys (safety cache rule); `authorize()` hits the cache, not the
+  remote DB, per tool call.
+- **Durable event append is async and coalesced**; projection fan-out stays bounded-buffer
+  + `Lagged`, decoupled from the transition (delivery failure must not corrupt turn state).
+- **Writer concurrency is the throughput ceiling**: document libSQL single-writer; prefer
+  Postgres or shard by tenant/scope for high concurrency.
+- **No lock across remote I/O** — enforced mechanically.
+
+These are performance *invariants* the §11 suite should also guard: a latency-injecting
+backend fake in the property tests surfaces held-lock-across-I/O and heartbeat-vs-TTL
+regressions that a fast in-memory store hides.
+
+---
+
+## 13. Open questions
 
 1. Should `TurnRun` and `ironclaw_processes` converge on a shared leased-work-unit
    abstraction, or stay deliberately separate with a documented rationale?
