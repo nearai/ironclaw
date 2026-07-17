@@ -725,27 +725,36 @@ mod tests {
     // ── Command-level file lifecycle (temp-$HOME) ──────────────────
 
     /// RAII guard pointing the OS home (`$HOME`, read by `home_dir()`)
-    /// at a tempdir, and clearing IRONCLAW_REBORN_HOME so the derived
+    /// at a tempdir, clearing IRONCLAW_REBORN_HOME so the derived
     /// Reborn home nests under the same tempdir (RebornHome falls back
-    /// to `$HOME/.ironclaw/reborn` when unset). Restores both on drop.
-    /// Caller must hold `lock_runtime_env()`.
+    /// to `$HOME/.ironclaw/reborn` when unset), and clearing
+    /// `$XDG_CONFIG_HOME` so `systemd::unit_path()` resolves under the
+    /// tempdir too instead of a real XDG path that may already exist on
+    /// the host (CI runners have been observed setting
+    /// `XDG_CONFIG_HOME=$HOME/.config`, which `config_home()` correctly
+    /// prefers over `$HOME`). Restores all three on drop. Caller must
+    /// hold `lock_runtime_env()`.
     struct TempHomeGuard {
         prior_home: Option<std::ffi::OsString>,
         prior_reborn_home: Option<std::ffi::OsString>,
+        prior_xdg: Option<std::ffi::OsString>,
     }
 
     impl TempHomeGuard {
         fn set(tmp: &std::path::Path) -> Self {
             let prior_home = std::env::var_os("HOME");
             let prior_reborn_home = std::env::var_os("IRONCLAW_REBORN_HOME");
+            let prior_xdg = std::env::var_os("XDG_CONFIG_HOME");
             // SAFETY: caller holds `lock_runtime_env()` for this guard's lifetime.
             unsafe {
                 std::env::set_var("HOME", tmp);
                 std::env::remove_var("IRONCLAW_REBORN_HOME");
+                std::env::remove_var("XDG_CONFIG_HOME");
             }
             Self {
                 prior_home,
                 prior_reborn_home,
+                prior_xdg,
             }
         }
     }
@@ -761,6 +770,10 @@ mod tests {
                 match self.prior_reborn_home.take() {
                     Some(v) => std::env::set_var("IRONCLAW_REBORN_HOME", v),
                     None => std::env::remove_var("IRONCLAW_REBORN_HOME"),
+                }
+                match self.prior_xdg.take() {
+                    Some(v) => std::env::set_var("XDG_CONFIG_HOME", v),
+                    None => std::env::remove_var("XDG_CONFIG_HOME"),
                 }
             }
         }

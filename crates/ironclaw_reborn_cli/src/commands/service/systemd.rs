@@ -510,6 +510,50 @@ fn uninstall_with_runner_and_remover(
 mod tests {
     use super::*;
 
+    /// RAII guard pointing `$HOME` at a tempdir and clearing
+    /// `$XDG_CONFIG_HOME` for the guard's lifetime, so `unit_path()`
+    /// resolves under the tempdir instead of a real XDG path that may
+    /// already exist on the host (CI runners have been observed setting
+    /// `XDG_CONFIG_HOME=$HOME/.config`, which `config_home()` correctly
+    /// prefers over `$HOME` — see `unit_path_honors_xdg_config_home_when_set_and_nonempty`
+    /// below). Restores both on drop. Caller must hold `lock_runtime_env()`.
+    struct TempHomeGuard {
+        prior_home: Option<std::ffi::OsString>,
+        prior_xdg: Option<std::ffi::OsString>,
+    }
+
+    impl TempHomeGuard {
+        fn set(tmp: &Path) -> Self {
+            let prior_home = std::env::var_os("HOME");
+            let prior_xdg = std::env::var_os("XDG_CONFIG_HOME");
+            // SAFETY: caller holds `lock_runtime_env()` for this guard's lifetime.
+            unsafe {
+                std::env::set_var("HOME", tmp);
+                std::env::remove_var("XDG_CONFIG_HOME");
+            }
+            Self {
+                prior_home,
+                prior_xdg,
+            }
+        }
+    }
+
+    impl Drop for TempHomeGuard {
+        fn drop(&mut self) {
+            // SAFETY: see `set`.
+            unsafe {
+                match self.prior_home.take() {
+                    Some(v) => std::env::set_var("HOME", v),
+                    None => std::env::remove_var("HOME"),
+                }
+                match self.prior_xdg.take() {
+                    Some(v) => std::env::set_var("XDG_CONFIG_HOME", v),
+                    None => std::env::remove_var("XDG_CONFIG_HOME"),
+                }
+            }
+        }
+    }
+
     #[derive(Default)]
     struct RecordingRunner {
         labels: Vec<String>,
@@ -794,21 +838,12 @@ mod tests {
     fn install_propagates_daemon_reload_failure_before_enable() {
         let _lock = crate::runtime::test_env::lock_runtime_env();
         let tmp = tempfile::tempdir().expect("tempdir");
-        let prior = std::env::var_os("HOME");
-        // SAFETY: serialized by `lock_runtime_env`; restored below.
-        unsafe { std::env::set_var("HOME", tmp.path()) };
+        let _home = TempHomeGuard::set(tmp.path());
         let mut runner = RecordingRunner {
             fail_args: Some(vec!["--user", "daemon-reload"]),
             ..RecordingRunner::default()
         };
         let result = install_with_runner(&sample_invocation(), &mut runner);
-        // SAFETY: serialized by `lock_runtime_env`.
-        unsafe {
-            match prior {
-                Some(value) => std::env::set_var("HOME", value),
-                None => std::env::remove_var("HOME"),
-            }
-        }
 
         assert!(result.is_err());
         assert_eq!(
@@ -825,21 +860,12 @@ mod tests {
     fn install_propagates_enable_failure() {
         let _lock = crate::runtime::test_env::lock_runtime_env();
         let tmp = tempfile::tempdir().expect("tempdir");
-        let prior = std::env::var_os("HOME");
-        // SAFETY: serialized by `lock_runtime_env`; restored below.
-        unsafe { std::env::set_var("HOME", tmp.path()) };
+        let _home = TempHomeGuard::set(tmp.path());
         let mut runner = RecordingRunner {
             fail_nth_args: Some((vec!["--user", "enable", SYSTEMD_UNIT], 1)),
             ..RecordingRunner::default()
         };
         let result = install_with_runner(&sample_invocation(), &mut runner);
-        // SAFETY: serialized by `lock_runtime_env`.
-        unsafe {
-            match prior {
-                Some(value) => std::env::set_var("HOME", value),
-                None => std::env::remove_var("HOME"),
-            }
-        }
 
         assert!(result.is_err());
         assert_eq!(
@@ -863,9 +889,7 @@ mod tests {
     fn uninstall_disables_before_removing_and_reloading() {
         let _lock = crate::runtime::test_env::lock_runtime_env();
         let tmp = tempfile::tempdir().expect("tempdir");
-        let prior = std::env::var_os("HOME");
-        // SAFETY: serialized by `lock_runtime_env`; restored below.
-        unsafe { std::env::set_var("HOME", tmp.path()) };
+        let _home = TempHomeGuard::set(tmp.path());
         let file = unit_path().expect("unit path");
         std::fs::create_dir_all(file.parent().expect("unit parent")).expect("create parent");
         std::fs::write(&file, "unit").expect("write unit");
@@ -874,13 +898,6 @@ mod tests {
             ..RecordingRunner::default()
         };
         let result = uninstall_with_runner(&mut runner);
-        // SAFETY: serialized by `lock_runtime_env`.
-        unsafe {
-            match prior {
-                Some(value) => std::env::set_var("HOME", value),
-                None => std::env::remove_var("HOME"),
-            }
-        }
 
         result.expect("uninstall succeeds");
         assert!(!file.exists());
@@ -906,9 +923,7 @@ mod tests {
         // the same rollback path as the other two.
         let _lock = crate::runtime::test_env::lock_runtime_env();
         let tmp = tempfile::tempdir().expect("tempdir");
-        let prior = std::env::var_os("HOME");
-        // SAFETY: serialized by `lock_runtime_env`; restored below.
-        unsafe { std::env::set_var("HOME", tmp.path()) };
+        let _home = TempHomeGuard::set(tmp.path());
         let file = unit_path().expect("unit path");
         std::fs::create_dir_all(file.parent().expect("unit parent")).expect("create parent");
         std::fs::write(&file, "unit").expect("write unit");
@@ -918,13 +933,6 @@ mod tests {
             ..RecordingRunner::default()
         };
         let result = uninstall_with_runner(&mut runner);
-        // SAFETY: serialized by `lock_runtime_env`.
-        unsafe {
-            match prior {
-                Some(value) => std::env::set_var("HOME", value),
-                None => std::env::remove_var("HOME"),
-            }
-        }
 
         let error = result.expect_err("a failed disable must propagate");
         assert!(file.exists(), "failed disable must not remove the unit");
@@ -946,9 +954,7 @@ mod tests {
     fn failed_reinstall_restores_previous_unit() {
         let _lock = crate::runtime::test_env::lock_runtime_env();
         let tmp = tempfile::tempdir().expect("tempdir");
-        let prior = std::env::var_os("HOME");
-        // SAFETY: serialized by `lock_runtime_env`; restored below.
-        unsafe { std::env::set_var("HOME", tmp.path()) };
+        let _home = TempHomeGuard::set(tmp.path());
         let file = unit_path().expect("unit path");
         std::fs::create_dir_all(file.parent().expect("unit parent")).expect("create parent");
         std::fs::write(&file, "previous unit").expect("write previous unit");
@@ -958,13 +964,6 @@ mod tests {
             ..RecordingRunner::default()
         };
         let result = install_with_runner(&sample_invocation(), &mut runner);
-        // SAFETY: serialized by `lock_runtime_env`.
-        unsafe {
-            match prior {
-                Some(value) => std::env::set_var("HOME", value),
-                None => std::env::remove_var("HOME"),
-            }
-        }
 
         assert!(result.is_err());
         assert_eq!(
@@ -994,9 +993,7 @@ mod tests {
     fn failed_reinstall_does_not_enable_previously_disabled_unit() {
         let _lock = crate::runtime::test_env::lock_runtime_env();
         let tmp = tempfile::tempdir().expect("tempdir");
-        let prior = std::env::var_os("HOME");
-        // SAFETY: serialized by `lock_runtime_env`; restored below.
-        unsafe { std::env::set_var("HOME", tmp.path()) };
+        let _home = TempHomeGuard::set(tmp.path());
         let file = unit_path().expect("unit path");
         std::fs::create_dir_all(file.parent().expect("unit parent")).expect("create parent");
         std::fs::write(&file, "previous unit").expect("write previous unit");
@@ -1006,13 +1003,6 @@ mod tests {
             ..RecordingRunner::default()
         };
         let result = install_with_runner(&sample_invocation(), &mut runner);
-        // SAFETY: serialized by `lock_runtime_env`.
-        unsafe {
-            match prior {
-                Some(value) => std::env::set_var("HOME", value),
-                None => std::env::remove_var("HOME"),
-            }
-        }
 
         assert!(result.is_err());
         assert_eq!(
@@ -1041,18 +1031,9 @@ mod tests {
     fn absent_uninstall_queries_manager_then_no_ops_when_not_found() {
         let _lock = crate::runtime::test_env::lock_runtime_env();
         let tmp = tempfile::tempdir().expect("tempdir");
-        let prior = std::env::var_os("HOME");
-        // SAFETY: serialized by `lock_runtime_env`; restored below.
-        unsafe { std::env::set_var("HOME", tmp.path()) };
+        let _home = TempHomeGuard::set(tmp.path());
         let mut runner = RecordingRunner::default();
         let result = uninstall_with_runner(&mut runner);
-        // SAFETY: serialized by `lock_runtime_env`.
-        unsafe {
-            match prior {
-                Some(value) => std::env::set_var("HOME", value),
-                None => std::env::remove_var("HOME"),
-            }
-        }
 
         result.expect("absent uninstall succeeds");
         assert_eq!(runner.labels, ["systemctl show unit state"]);
@@ -1062,21 +1043,12 @@ mod tests {
     fn absent_uninstall_disables_loaded_or_enabled_manager_state() {
         let _lock = crate::runtime::test_env::lock_runtime_env();
         let tmp = tempfile::tempdir().expect("tempdir");
-        let prior = std::env::var_os("HOME");
-        // SAFETY: serialized by `lock_runtime_env`; restored below.
-        unsafe { std::env::set_var("HOME", tmp.path()) };
+        let _home = TempHomeGuard::set(tmp.path());
         let mut runner = RecordingRunner {
             unit_state_output: Some("LoadState=loaded\nUnitFileState=enabled\n".to_string()),
             ..RecordingRunner::default()
         };
         let result = uninstall_with_runner(&mut runner);
-        // SAFETY: serialized by `lock_runtime_env`.
-        unsafe {
-            match prior {
-                Some(value) => std::env::set_var("HOME", value),
-                None => std::env::remove_var("HOME"),
-            }
-        }
 
         result.expect("orphan manager state uninstall succeeds");
         assert_eq!(
@@ -1099,9 +1071,7 @@ mod tests {
     fn enable_failure_reports_compensating_reload_failure_with_primary_error() {
         let _lock = crate::runtime::test_env::lock_runtime_env();
         let tmp = tempfile::tempdir().expect("tempdir");
-        let prior = std::env::var_os("HOME");
-        // SAFETY: serialized by `lock_runtime_env`; restored below.
-        unsafe { std::env::set_var("HOME", tmp.path()) };
+        let _home = TempHomeGuard::set(tmp.path());
         let mut runner = RecordingRunner {
             fail_args: Some(vec!["--user", "enable", SYSTEMD_UNIT]),
             fail_nth_args: Some((vec!["--user", "daemon-reload"], 2)),
@@ -1109,13 +1079,6 @@ mod tests {
         };
         let error = install_with_runner(&sample_invocation(), &mut runner)
             .expect_err("enable and compensating reload failure must surface");
-        // SAFETY: serialized by `lock_runtime_env`.
-        unsafe {
-            match prior {
-                Some(value) => std::env::set_var("HOME", value),
-                None => std::env::remove_var("HOME"),
-            }
-        }
 
         // Top-level `Display` (`to_string()`) now only shows the rollback
         // context, matching anyhow's chain convention; the primary failure
@@ -1141,9 +1104,7 @@ mod tests {
         // asserts the primary is preserved as the combined error's source.
         let _lock = crate::runtime::test_env::lock_runtime_env();
         let tmp = tempfile::tempdir().expect("tempdir");
-        let prior = std::env::var_os("HOME");
-        // SAFETY: serialized by `lock_runtime_env`; restored below.
-        unsafe { std::env::set_var("HOME", tmp.path()) };
+        let _home = TempHomeGuard::set(tmp.path());
         let mut runner = RecordingRunner {
             fail_args: Some(vec!["--user", "enable", SYSTEMD_UNIT]),
             fail_nth_args: Some((vec!["--user", "daemon-reload"], 2)),
@@ -1151,13 +1112,6 @@ mod tests {
         };
         let error = install_with_runner(&sample_invocation(), &mut runner)
             .expect_err("enable and compensating reload failure must surface");
-        // SAFETY: serialized by `lock_runtime_env`.
-        unsafe {
-            match prior {
-                Some(value) => std::env::set_var("HOME", value),
-                None => std::env::remove_var("HOME"),
-            }
-        }
 
         let source = error
             .source()
@@ -1173,9 +1127,7 @@ mod tests {
     fn uninstall_reload_failure_restores_unit_for_recovery() {
         let _lock = crate::runtime::test_env::lock_runtime_env();
         let tmp = tempfile::tempdir().expect("tempdir");
-        let prior = std::env::var_os("HOME");
-        // SAFETY: serialized by `lock_runtime_env`; restored below.
-        unsafe { std::env::set_var("HOME", tmp.path()) };
+        let _home = TempHomeGuard::set(tmp.path());
         let file = unit_path().expect("unit path");
         std::fs::create_dir_all(file.parent().expect("unit parent")).expect("create parent");
         std::fs::write(&file, "previous unit").expect("write unit");
@@ -1185,13 +1137,6 @@ mod tests {
             ..RecordingRunner::default()
         };
         let result = uninstall_with_runner(&mut runner);
-        // SAFETY: serialized by `lock_runtime_env`.
-        unsafe {
-            match prior {
-                Some(value) => std::env::set_var("HOME", value),
-                None => std::env::remove_var("HOME"),
-            }
-        }
 
         assert!(result.is_err());
         assert_eq!(
@@ -1227,9 +1172,7 @@ mod tests {
         // red-before-green regression check.
         let _lock = crate::runtime::test_env::lock_runtime_env();
         let tmp = tempfile::tempdir().expect("tempdir");
-        let prior = std::env::var_os("HOME");
-        // SAFETY: serialized by `lock_runtime_env`; restored below.
-        unsafe { std::env::set_var("HOME", tmp.path()) };
+        let _home = TempHomeGuard::set(tmp.path());
         let file = unit_path().expect("unit path");
         std::fs::create_dir_all(file.parent().expect("unit parent")).expect("create parent");
         std::fs::write(&file, "previous unit").expect("write unit");
@@ -1241,13 +1184,6 @@ mod tests {
             Err(std::io::Error::other("injected remove_file failure"))
         }
         let result = uninstall_with_runner_and_remover(&mut runner, failing_remove_file);
-        // SAFETY: serialized by `lock_runtime_env`.
-        unsafe {
-            match prior {
-                Some(value) => std::env::set_var("HOME", value),
-                None => std::env::remove_var("HOME"),
-            }
-        }
 
         let error = result.expect_err("an injected remove_file failure must propagate");
         // `Display` on `anyhow::Error` only prints the outermost context
@@ -1286,9 +1222,7 @@ mod tests {
     fn stop_propagates_service_manager_failure_when_unit_exists() {
         let _lock = crate::runtime::test_env::lock_runtime_env();
         let tmp = tempfile::tempdir().expect("tempdir");
-        let prior = std::env::var_os("HOME");
-        // SAFETY: serialized by `lock_runtime_env`; restored below.
-        unsafe { std::env::set_var("HOME", tmp.path()) };
+        let _home = TempHomeGuard::set(tmp.path());
         let file = unit_path().expect("unit path");
         std::fs::create_dir_all(file.parent().expect("unit parent")).expect("create parent");
         std::fs::write(file, "unit").expect("write unit");
@@ -1297,13 +1231,6 @@ mod tests {
             ..RecordingRunner::default()
         };
         let result = stop_with_runner(&mut runner);
-        // SAFETY: serialized by `lock_runtime_env`.
-        unsafe {
-            match prior {
-                Some(value) => std::env::set_var("HOME", value),
-                None => std::env::remove_var("HOME"),
-            }
-        }
 
         assert!(result.is_err());
         assert_eq!(runner.labels, ["systemctl stop"]);
@@ -1319,21 +1246,12 @@ mod tests {
         // `systemctl stop`.
         let _lock = crate::runtime::test_env::lock_runtime_env();
         let tmp = tempfile::tempdir().expect("tempdir");
-        let prior = std::env::var_os("HOME");
-        // SAFETY: serialized by `lock_runtime_env`; restored below.
-        unsafe { std::env::set_var("HOME", tmp.path()) };
+        let _home = TempHomeGuard::set(tmp.path());
         let mut runner = RecordingRunner {
             unit_state_output: Some("LoadState=loaded\nUnitFileState=enabled\n".to_string()),
             ..RecordingRunner::default()
         };
         let result = stop_with_runner(&mut runner);
-        // SAFETY: serialized by `lock_runtime_env`.
-        unsafe {
-            match prior {
-                Some(value) => std::env::set_var("HOME", value),
-                None => std::env::remove_var("HOME"),
-            }
-        }
 
         result.expect("stop of an orphaned loaded unit succeeds");
         assert_eq!(
@@ -1353,18 +1271,9 @@ mod tests {
         // file AND the manager both show nothing.
         let _lock = crate::runtime::test_env::lock_runtime_env();
         let tmp = tempfile::tempdir().expect("tempdir");
-        let prior = std::env::var_os("HOME");
-        // SAFETY: serialized by `lock_runtime_env`; restored below.
-        unsafe { std::env::set_var("HOME", tmp.path()) };
+        let _home = TempHomeGuard::set(tmp.path());
         let mut runner = RecordingRunner::default();
         let result = status_with_runner(&mut runner);
-        // SAFETY: serialized by `lock_runtime_env`.
-        unsafe {
-            match prior {
-                Some(value) => std::env::set_var("HOME", value),
-                None => std::env::remove_var("HOME"),
-            }
-        }
 
         result.expect("status succeeds when not installed");
         assert_eq!(
@@ -1426,9 +1335,7 @@ mod tests {
     fn status_propagates_capture_failure() {
         let _lock = crate::runtime::test_env::lock_runtime_env();
         let tmp = tempfile::tempdir().expect("tempdir");
-        let prior = std::env::var_os("HOME");
-        // SAFETY: serialized by `lock_runtime_env`; restored below.
-        unsafe { std::env::set_var("HOME", tmp.path()) };
+        let _home = TempHomeGuard::set(tmp.path());
         let file = unit_path().expect("unit path");
         std::fs::create_dir_all(file.parent().expect("unit parent")).expect("create parent");
         std::fs::write(file, "unit").expect("write unit");
@@ -1443,13 +1350,6 @@ mod tests {
             ..RecordingRunner::default()
         };
         let result = status_with_runner(&mut runner);
-        // SAFETY: serialized by `lock_runtime_env`.
-        unsafe {
-            match prior {
-                Some(value) => std::env::set_var("HOME", value),
-                None => std::env::remove_var("HOME"),
-            }
-        }
 
         assert!(result.is_err());
     }
@@ -1460,9 +1360,7 @@ mod tests {
     fn restart_running_service_stops_then_starts() {
         let _lock = crate::runtime::test_env::lock_runtime_env();
         let tmp = tempfile::tempdir().expect("tempdir");
-        let prior = std::env::var_os("HOME");
-        // SAFETY: serialized by `lock_runtime_env`; restored below.
-        unsafe { std::env::set_var("HOME", tmp.path()) };
+        let _home = TempHomeGuard::set(tmp.path());
         let file = unit_path().expect("unit path");
         std::fs::create_dir_all(file.parent().expect("unit parent")).expect("create parent");
         std::fs::write(&file, "unit").expect("write unit");
@@ -1471,13 +1369,6 @@ mod tests {
             ..RecordingRunner::default()
         };
         let result = restart_with_runner(&mut runner);
-        // SAFETY: serialized by `lock_runtime_env`.
-        unsafe {
-            match prior {
-                Some(value) => std::env::set_var("HOME", value),
-                None => std::env::remove_var("HOME"),
-            }
-        }
 
         result.expect("restart of a running service must succeed");
         assert_eq!(
@@ -1495,9 +1386,7 @@ mod tests {
     fn restart_stopped_service_just_starts() {
         let _lock = crate::runtime::test_env::lock_runtime_env();
         let tmp = tempfile::tempdir().expect("tempdir");
-        let prior = std::env::var_os("HOME");
-        // SAFETY: serialized by `lock_runtime_env`; restored below.
-        unsafe { std::env::set_var("HOME", tmp.path()) };
+        let _home = TempHomeGuard::set(tmp.path());
         let file = unit_path().expect("unit path");
         std::fs::create_dir_all(file.parent().expect("unit parent")).expect("create parent");
         std::fs::write(&file, "unit").expect("write unit");
@@ -1506,13 +1395,6 @@ mod tests {
             ..RecordingRunner::default()
         };
         let result = restart_with_runner(&mut runner);
-        // SAFETY: serialized by `lock_runtime_env`.
-        unsafe {
-            match prior {
-                Some(value) => std::env::set_var("HOME", value),
-                None => std::env::remove_var("HOME"),
-            }
-        }
 
         result.expect("restart of a stopped service must succeed without error");
         assert_eq!(
@@ -1529,18 +1411,9 @@ mod tests {
     fn restart_not_installed_errors_with_install_guidance() {
         let _lock = crate::runtime::test_env::lock_runtime_env();
         let tmp = tempfile::tempdir().expect("tempdir");
-        let prior = std::env::var_os("HOME");
-        // SAFETY: serialized by `lock_runtime_env`; restored below.
-        unsafe { std::env::set_var("HOME", tmp.path()) };
+        let _home = TempHomeGuard::set(tmp.path());
         let mut runner = RecordingRunner::default();
         let result = restart_with_runner(&mut runner);
-        // SAFETY: serialized by `lock_runtime_env`.
-        unsafe {
-            match prior {
-                Some(value) => std::env::set_var("HOME", value),
-                None => std::env::remove_var("HOME"),
-            }
-        }
 
         let error = result.expect_err("restart without an installed service must error");
         assert!(error.to_string().contains("service install"));
@@ -1551,9 +1424,7 @@ mod tests {
     fn restart_reports_stopped_when_start_fails_after_successful_stop() {
         let _lock = crate::runtime::test_env::lock_runtime_env();
         let tmp = tempfile::tempdir().expect("tempdir");
-        let prior = std::env::var_os("HOME");
-        // SAFETY: serialized by `lock_runtime_env`; restored below.
-        unsafe { std::env::set_var("HOME", tmp.path()) };
+        let _home = TempHomeGuard::set(tmp.path());
         let file = unit_path().expect("unit path");
         std::fs::create_dir_all(file.parent().expect("unit parent")).expect("create parent");
         std::fs::write(&file, "unit").expect("write unit");
@@ -1563,13 +1434,6 @@ mod tests {
             ..RecordingRunner::default()
         };
         let result = restart_with_runner(&mut runner);
-        // SAFETY: serialized by `lock_runtime_env`.
-        unsafe {
-            match prior {
-                Some(value) => std::env::set_var("HOME", value),
-                None => std::env::remove_var("HOME"),
-            }
-        }
 
         let error = result.expect_err("failed start after successful stop must error");
         assert!(
@@ -1605,9 +1469,7 @@ mod tests {
     fn status_accepts_active_and_inactive_states_from_exact_show_command() {
         let _lock = crate::runtime::test_env::lock_runtime_env();
         let tmp = tempfile::tempdir().expect("tempdir");
-        let prior = std::env::var_os("HOME");
-        // SAFETY: serialized by `lock_runtime_env`; restored below.
-        unsafe { std::env::set_var("HOME", tmp.path()) };
+        let _home = TempHomeGuard::set(tmp.path());
         let file = unit_path().expect("unit path");
         std::fs::create_dir_all(file.parent().expect("unit parent")).expect("create parent");
         std::fs::write(file, "unit").expect("write unit");
@@ -1636,13 +1498,6 @@ mod tests {
                     ]
                 ]
             );
-        }
-        // SAFETY: serialized by `lock_runtime_env`.
-        unsafe {
-            match prior {
-                Some(value) => std::env::set_var("HOME", value),
-                None => std::env::remove_var("HOME"),
-            }
         }
     }
 }
