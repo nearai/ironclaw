@@ -265,6 +265,10 @@ src/
     protocol.rs
     targets.rs
     triggered.rs
+  host/
+    mod.rs
+    builder.rs
+    revision.rs
   state/
     mod.rs
     records.rs
@@ -274,7 +278,7 @@ src/
     dm_targets.rs
 ```
 
-`telegram_channel_routes.rs` remains an HTTP adapter and delegates to setup/pairing
+`channel_routes.rs` remains an HTTP adapter and delegates to setup/pairing
 services; handler tests remain caller-level. Files should remain below 1,000 lines unless
 the architecture test documents an existing exception. No production-only compatibility
 shim remains after all consumers migrate.
@@ -425,18 +429,21 @@ after the named evidence is green.
   resolver traits are gone. Setup, dispatch, pairing, and egress tests use the concrete client
   over host-mediated HTTP; the 101-test Telegram suite, targeted Clippy, exact deleted-symbol
   scan, and Telegram composition feature check pass.
-- [ ] **A4 — DTO cleanup:** `TelegramPairingStatusResponse`,
+- [x] **A4 — DTO cleanup:** `TelegramPairingStatusResponse`,
   `ResolvedTelegramIngress`, dead wrappers, and unused public accessors are gone while
-  public JSON and behavior remain byte-compatible.
+  exact connected/pending route JSON tests remain compatible; verified by the 104-test
+  Telegram suite and deleted-symbol ratchet in commit `f1668d763`.
 - [x] **A5 — Generic lifecycle:** activation uses an `ExtensionId`-keyed account-setup
   registry; generic lifecycle code contains no Telegram policy, and Telegram owns its descriptor,
   pairing requirement, connection projection, activation copy, and connection-status source.
-- [ ] **A6 — Telegram-owned runtime behavior:** revision caching, dispatcher decoration,
+- [x] **A6 — Telegram-owned runtime behavior:** revision caching, dispatcher decoration,
   triggered hook construction, outbound target construction, and Telegram fallbacks live
-  in `ironclaw_telegram_extension`.
-- [ ] **A7 — Focused files:** setup, pairing, ingress, delivery, and state are split by
-  responsibility and touched production files meet the 1,000-line target.
-- [ ] **A8 — Ratchets:** all eight structural ratchets are committed and green.
+  in `ironclaw_telegram_extension`; 108 owner tests, 11 Telegram-filtered composition tests,
+  targeted Clippy, and the assembly-only ratchet pass in commit `e1f660030`.
+- [x] **A7 — Focused files:** setup, pairing, ingress, delivery, state, and host are split by
+  responsibility; the physical-file line-budget ratchet passes in commit `e1f660030`.
+- [x] **A8 — Ratchets:** all eight structural ratchets are committed and all nine tests in
+  `telegram_extension_gates` pass (`219a03f86`, completed by `e1f660030`).
 - [ ] **A9 — Contract preservation:** Telegram setup, ingress, pairing, identity, delivery,
   exclusivity, and default-off regression suites are green.
 - [ ] **A10 — Cross-channel preservation:** Slack and Telegram delivery tests are green

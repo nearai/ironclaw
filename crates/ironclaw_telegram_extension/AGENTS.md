@@ -2,43 +2,54 @@
 
 ## Start Here
 
-- No crate-local CLAUDE.md exists yet; the behavior contract is
-  `docs/reborn/contracts/telegram-v2.md` — read it before changing semantics.
-- Read `src/lib.rs` first, then the module you need:
-  - `telegram_setup.rs` — operator save pipeline (`getMe` → mint webhook secret → `setWebhook` → persist → activate, with rollback/compensation), redacted status, clear.
-  - `bot_api.rs` — the concrete host-egress Bot API client (envelope handling, sanitized error categories).
-  - `telegram_host_state.rs` — durable setup/pairing/binding/DM-target records on the tenant-shared filesystem plane (CAS-guarded).
-  - `telegram_pairing.rs` — WebGeneratedCode pairing: issue/rotate/consume/refuse/unpair, continuation dispatch, the lifecycle paired-status impl.
-  - `telegram_dispatch.rs` — the pairing-aware DM-only pre-router wrapping the adapter runner.
-  - `telegram_serve.rs` — manifest-projected webhook route fragment, dynamic per-setup-revision installation resolver, ingress error mapping.
-  - `telegram_actor_identity.rs` — provider `telegram`, key `tg-bot-<bot_id>:<tg_user>`, binding-epoch re-checks.
-  - `telegram_adapter.rs` — per-revision `TelegramV2Adapter` assembly + declared egress targets.
-  - `egress.rs` — policy-scoped egress with `{telegram_bot_token}` path-placeholder credential substitution.
-  - `telegram_channel_routes.rs` — admin setup + pairing HTTP route fragment (composition wraps it into its protected mount).
-  - `telegram_connectable_channel.rs` — Settings connectable-channels + per-caller connection facades.
-  - `telegram_outbound_targets.rs` — paired-DM delivery targets + `TelegramDeliveryProtocol`.
-  - `telegram_manifest.rs` — the bundled manifest constant (asset lives in `ironclaw_first_party_extensions/assets/telegram/`).
-- Composition's wiring layer is
-  `ironclaw_reborn_composition/src/telegram/telegram_host_beta.rs`; shared
-  vendor-neutral machinery is `ironclaw_channel_host`.
+- Read `docs/reborn/contracts/telegram-v2.md` before changing semantics.
+- Regenerate the source map with:
+
+```bash
+find crates/ironclaw_telegram_extension/src -maxdepth 2 -name '*.rs' -print | sort
+rg -n "pub (struct|enum|trait) Telegram|pub async fn build_telegram_host" crates/ironclaw_telegram_extension/src
+```
+
+- Stable responsibility anchors:
+  - `src/setup/` — operator save/clear, redacted status, compensation.
+  - `src/state/` — the single concrete filesystem-backed setup/pairing/binding/DM-target state.
+  - `src/pairing/` — issue/rotate/consume/refuse/unpair and continuation dispatch.
+  - `src/ingress/` — manifest-projected route, setup-revision resolver, DM pre-router.
+  - `src/delivery/` — Telegram protocol, target authority, revision-aware trigger hook.
+  - `src/host/` — facade-shaped Telegram builder and per-revision workflow construction.
+  - `src/channel_routes.rs` — thin admin/pairing HTTP adapter.
 
 ## What This Crate Owns
 
-- Everything Telegram-specific on the Reborn stack except `RebornRuntime`
-  wiring: the identifiers, services, routes, facades, and protocol details of
-  the single `telegram` extension.
+- Every Telegram-specific Reborn behavior for the single `telegram` extension: concrete
+  services/state/client, identity, routes/facades, revision workflow assembly, outbound
+  targets/protocol, and the Telegram trigger-hook decorator.
+- `build_telegram_host(TelegramHostInput) -> TelegramHostParts`, which consumes explicit
+  neutral ports and returns only mountable/registerable facades and hooks.
+- Telegram's declarative account-setup descriptor; generic lifecycle consumes it through
+  the `ExtensionId`-keyed registry.
 
-## Do Not Move In Here
+## Boundaries
 
-- `RebornRuntime`/mount assembly, delivery observer/driver construction, or
-  trigger-hook registration — that is composition's `telegram_host_beta`.
-- Vendor-neutral machinery (belongs in `ironclaw_channel_host`).
-- Other channels' code, retired-taxonomy identities (`telegram_bot` /
-  `telegram_personal` / `telegram_channel` companions are pinned to zero by
-  `ironclaw_architecture/tests/telegram_extension_gates.rs`).
+- `ironclaw_channel_host` owns neutral host contracts; `ironclaw_channel_delivery` owns
+  generic live/triggered delivery algorithms. Verify the dependency rule with
+  `cargo test -p ironclaw_architecture --test reborn_dependency_boundaries`.
+- Composition may construct the scoped filesystem and durable neutral stores, then mount
+  routes and register returned providers/hooks. It must not regain Telegram revision,
+  protocol, cache, fallback, or delivery behavior; verify with
+  `cargo test -p ironclaw_architecture --test telegram_extension_gates telegram_composition_is_assembly_only`.
+- Do not introduce same-crate store/client/resolver traits solely for test fakes. Exercise
+  concrete filesystem state, Bot API client, and setup-revision resolver through their
+  genuine lower seams.
+- Do not add `RebornRuntime`, global route-mount types, listener lifecycle, other channels,
+  or retired companion identities (`telegram_bot`, `telegram_personal`,
+  `telegram_channel`).
 
 ## Validation
 
-- Fast local check: `cargo test -p ironclaw_telegram_extension`
-- Composition wiring: `cargo test -p ironclaw_reborn_composition --features test-support,webui-v2-beta,slack-v2-host-beta,telegram-v2-host-beta,libsql --lib telegram`
-- Boundary check after dependency/API changes: `cargo test -p ironclaw_architecture`
+```bash
+cargo test -p ironclaw_telegram_extension
+cargo clippy -p ironclaw_telegram_extension --all-targets --all-features -- -D warnings
+cargo test -p ironclaw_reborn_composition --features test-support,webui-v2-beta,slack-v2-host-beta,telegram-v2-host-beta,libsql --lib telegram
+cargo test -p ironclaw_architecture --test telegram_extension_gates
+```

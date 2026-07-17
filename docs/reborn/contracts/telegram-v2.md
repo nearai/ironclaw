@@ -7,10 +7,11 @@ enablement — `[telegram].enabled = true` / `IRONCLAW_REBORN_TELEGRAM_ENABLED=t
 — before the routes are mounted). Supersedes the issue #3285 webhook-only
 tracer bullet this document previously described (see "What changed from the
 tracer-bullet contract" below).
-**Host crate:** `crates/ironclaw_telegram_extension/` (the Telegram host domain);
-composition keeps the thin wiring layer
-`crates/ironclaw_reborn_composition/src/telegram/telegram_host_beta.rs` and the
-shared vendor-neutral machinery lives in `crates/ironclaw_channel_host/`.
+**Host crate:** `crates/ironclaw_telegram_extension/` (the Telegram host domain and
+facade-shaped host builder); composition keeps the thin extraction/mount/registration
+adapter in `crates/ironclaw_reborn_composition/src/telegram/telegram_host_beta.rs`.
+Vendor-neutral host contracts live in `crates/ironclaw_channel_host/`; generic live and
+triggered delivery algorithms live in `crates/ironclaw_channel_delivery/`.
 **Adapter crate:** `ironclaw_telegram_v2_adapter` (reused unchanged).
 **Adapter runtime:** `ironclaw_wasm_product_adapters` (`NativeProductAdapterRunner`).
 **Parent contract:** [`product-adapters.md`](product-adapters.md).
@@ -52,7 +53,7 @@ required credentials are the two handles above; egress is
 ## Admin setup (`/api/webchat/v2/channels/telegram/setup`)
 
 Operator-managed, one bot per deployment
-(`telegram_setup.rs`, `telegram_channel_routes.rs`):
+(`setup/service.rs`, `setup/compensation.rs`, `channel_routes.rs`):
 
 - **Authorization:** cross-tenant caller → 404 (anti-enumeration);
   same-tenant non-operator → 403. The optional `webhook_url` field passes
@@ -94,7 +95,7 @@ Operator-managed, one bot per deployment
 
 ## Ingress (`POST /webhooks/extensions/telegram/updates`)
 
-`telegram_serve.rs` composes the public webhook without binding listeners
+`ingress/route.rs` and `ingress/resolver.rs` compose the public webhook without binding listeners
 (the host mounts the fragment through the WebUI public-route seam):
 
 - **Descriptor is manifest-projected.** The route id, path, method, and
@@ -137,7 +138,7 @@ Operator-managed, one bot per deployment
 ## Pairing (WebGeneratedCode)
 
 Direction is web→Telegram: IronClaw issues the code; the bot never does
-(`telegram_pairing.rs`):
+(`pairing/code.rs`, `pairing/service.rs`, `pairing/status.rs`):
 
 - **Issue** (`POST /api/webchat/v2/channels/telegram/pairing`, any
   authenticated same-tenant member, self-scoped): fails closed when no
@@ -177,14 +178,13 @@ Direction is web→Telegram: IronClaw issues the code; the bot never does
 In-chat `builtin.extension_activate` with an unpaired caller parks the run
 (`extension_host/extension_lifecycle.rs`):
 
-- `activation_credential_requirements` synthesizes a
-  `RuntimeCredentialAuthRequirement` with `provider = telegram`,
-  `setup = RuntimeCredentialAccountSetup::Pairing`
-  (`crates/ironclaw_host_api/src/capability.rs`), and
-  `requester_extension = telegram`. The run parks as
-  `TurnStatus::BlockedAuth`. If the deployment never mounted the Telegram
-  host (unfilled `TelegramPairedStatusSlot`), activation fails closed
-  instead of parking a run nothing can resume.
+- Telegram declares a provider-neutral account-setup descriptor with
+  `provider = telegram`, `setup = RuntimeCredentialAccountSetup::Pairing`, and
+  `requester_extension = telegram`. Generic lifecycle looks up that descriptor and its
+  connection-status source through the `ExtensionId`-keyed account-setup registry. A
+  disconnected caller receives the descriptor's `RuntimeCredentialAuthRequirement` and
+  the run parks as `TurnStatus::BlockedAuth`; an unmounted/unregistered required setup
+  fails closed instead of parking a run nothing can resume.
 - The auth-prompt projection maps `Pairing` to
   `AuthPromptChallengeKind::Pairing`, which renders the same pairing panel
   the Extensions card uses (dual-surface parity). Bot credentials are
@@ -202,7 +202,7 @@ In-chat `builtin.extension_activate` with an unpaired caller parks the run
 Egress targets only the declared `api.telegram.org` host; the bot token
 travels as an opaque credential handle substituted into the URL path by the
 mediated host egress (`{telegram_bot_token}` placeholder — token bytes never
-appear in adapter-visible state, URLs built in composition, or logs).
+appear in adapter-visible state, composition inputs, or logs).
 
 Final replies render as plain text. Replies over Telegram's 4096-UTF-16-unit
 message cap split into **ordered lossless `sendMessage` chunks** (never inside
@@ -258,8 +258,8 @@ stable `StatusMessage` error (HTTP status only; Telegram's free-text
 
 ## Durable host state
 
-All host state lives on the tenant-scoped filesystem plane
-(`telegram_host_state.rs`), restart-safe and CAS-guarded:
+All host state lives in the concrete `state/` owner on the tenant-scoped filesystem plane,
+restart-safe and CAS-guarded:
 `/tenant-shared/telegram-setup/installation.json`,
 `/tenant-shared/telegram-pairing/{codes,users}`,
 `/tenant-shared/telegram-binding/{identities,users}`,
@@ -303,8 +303,9 @@ Deltas now shipped:
 
 - **Host wiring exists.** Admin setup, manifest-projected public webhook
   mount, pairing, identity binding, the in-chat `BlockedAuth` pairing gate,
-  and the WebUI facades live in `crates/ironclaw_telegram_extension/`, wired
-  by `crates/ironclaw_reborn_composition/src/telegram/telegram_host_beta.rs`
+  revision workflow and trigger decorator, and the WebUI facades live in
+  `crates/ironclaw_telegram_extension/`, mounted/registered by
+  `crates/ironclaw_reborn_composition/src/telegram/telegram_host_beta.rs`
   behind `telegram-v2-host-beta`; the services below the workflow facade are
   real, not fakes.
 - **The webhook route is pinned** to
@@ -325,7 +326,7 @@ Deltas now shipped:
 
 | Surface | Test location | Run |
 |---|---|---|
-| Setup pipeline (fail-closed order, rollback, rotation, clear), pairing state machine (issue/rotate/consume/refusals/unpair/continuation), bot-api envelope handling, webhook route auth/rate/error mapping, gate requirement shape | `crates/ironclaw_telegram_extension/src/*` module tests, composition `telegram_host_beta.rs` + `extension_host/extension_lifecycle.rs` (`telegram_gate_tests`), `crates/ironclaw_reborn_composition/tests/webui_v2_serve.rs` | `cargo test -p ironclaw_telegram_extension` + `cargo test -p ironclaw_reborn_composition --features telegram-v2-host-beta telegram` |
+| Setup pipeline (fail-closed order, rollback, rotation, clear), pairing state machine (issue/rotate/consume/refusals/unpair/continuation), Bot API envelopes, webhook auth/rate/errors, revision replacement, trigger-cache behavior, gate requirement shape | `crates/ironclaw_telegram_extension/src/` focused module tests, composition `telegram_host_beta_tests.rs` + `extension_host/extension_lifecycle.rs`, `crates/ironclaw_reborn_composition/tests/webui_v2_serve.rs` | `cargo test -p ironclaw_telegram_extension` + `cargo test -p ironclaw_reborn_composition --features telegram-v2-host-beta telegram` |
 | Retired-taxonomy zero + no v1 pairing-route literals in the Reborn context | `crates/ironclaw_architecture/tests/telegram_extension_gates.rs` | `cargo test -p ironclaw_architecture --test telegram_extension_gates` (wired into `scripts/reborn-e2e-rust.sh` architecture group) |
 | v1↔v2 exclusivity arbitration + default-off posture | `tests/telegram_v2_default_off_integration.rs` (root crate) | `cargo test --test telegram_v2_default_off_integration` |
 | Adapter parse/render/idempotency/delivery mapping | `ironclaw_telegram_v2_adapter` per-module `mod tests` | `cargo test -p ironclaw_telegram_v2_adapter --lib` |

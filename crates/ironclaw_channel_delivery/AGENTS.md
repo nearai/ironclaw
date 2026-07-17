@@ -9,6 +9,7 @@
 - `routing.rs` records delivered gate routes and tracks posted messages.
 - `hooks.rs` owns post-submit hook fan-out.
 - `triggered.rs` owns triggered-run admission, polling, routing, and outcomes.
+- Re-derive this map with `find crates/ironclaw_channel_delivery/src -maxdepth 1 -name '*.rs' -print`; locate the public owners with `rg -n "pub struct FinalReplyDeliveryObserver|pub struct TriggeredRunDeliveryDriver|pub trait PostSubmitDeliveryHook" crates/ironclaw_channel_delivery/src`.
 
 ## What This Crate Owns
 
@@ -21,6 +22,8 @@
 
 - Channel-specific reference decoding, DM classification, rendering, and status
   requests enter through `ChannelDeliveryProtocol` and product-adapter ports.
+- Channel-owned revision caches and decorators may construct this crate's
+  observer/driver, but remain in their concrete channel crate.
 - Do not depend on composition, CLI/WebUI, or concrete Slack/Telegram crates.
 - Keep durable policy and state in `ironclaw_outbound`; keep prompt projection
   contracts in `ironclaw_product_workflow`.

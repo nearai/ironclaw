@@ -634,15 +634,15 @@ git commit -m "refactor(telegram): own revision and delivery runtime behavior"
 **Interfaces:**
 - Produces: documented ownership and evidence-linked A1-A12 checklist; no behavior change.
 
-- [ ] **Step 1: Update ownership guidance**
+- [x] **Step 1: Update ownership guidance**
 
 Document channel-host contracts versus delivery-engine behavior, concrete Telegram state, generic account-setup registry, Telegram builder ownership, and composition's mount/registration role. Keep the HTTP/persistence/security contract text unchanged.
 
-- [ ] **Step 2: Mark only materially complete acceptance rows**
+- [x] **Step 2: Mark only materially complete acceptance rows**
 
 For A1-A8, replace `[ ]` with `[x]` only after the corresponding focused tests and ratchets pass. Add the validating command/commit beside each checked row. Leave A9-A12 unchecked until Task 10.
 
-- [ ] **Step 3: Verify documentation names and old paths**
+- [x] **Step 3: Verify documentation names and old paths**
 
 Run:
 
@@ -652,7 +652,11 @@ rg -n "outbound/channel_delivery.rs|TelegramInstallationSetupStore|TelegramPairi
 
 Expected: only historical explanation in the approved design/plan and explicit deleted-symbol ratchet documentation remain.
 
-- [ ] **Step 4: Commit guidance/checklist updates**
+Observed: active crate guidance and the Telegram contract contain only current owner paths.
+Deleted names remain solely in the dated original/current implementation plans, the approved
+architecture design's deletion rationale, and the explicit architecture ratchet documentation.
+
+- [x] **Step 4: Commit guidance/checklist updates**
 
 ```bash
 git add crates/AGENTS.md crates/ironclaw_channel_host/AGENTS.md crates/ironclaw_channel_delivery/AGENTS.md crates/ironclaw_telegram_extension/AGENTS.md docs
@@ -730,13 +734,16 @@ git commit -m "docs(reborn): complete PR 6159 architecture evidence"
   Telegram composition feature check pass.
 - [x] **A3 — Concrete Bot API:** Task 6; 101 Telegram tests, mediated request/security tests,
   targeted Clippy, exact client/provider/resolver scan, and composition feature check pass.
-- [ ] **A4 — DTO cleanup:** Tasks 2, 6, and 7; exact JSON tests plus deleted-symbol/accessor audit.
+- [x] **A4 — DTO cleanup:** Tasks 2, 6, and 7; exact JSON tests, 104-test Telegram suite,
+  and deleted-symbol/accessor audit (`f1668d763`).
 - [x] **A5 — Generic lifecycle:** Task 4; six registry transition tests, 101 focused
   lifecycle tests, Telegram descriptor and idempotent mount regressions, the lifecycle source
   ratchet, and targeted product-workflow/Telegram/composition Clippy all pass.
-- [ ] **A6 — Telegram-owned runtime behavior:** Task 8; owner tests plus assembly-only ratchet.
-- [ ] **A7 — Focused files:** Tasks 5 and 7; 999-line physical-file ratchet.
-- [ ] **A8 — Ratchets:** Task 1, turned green by Tasks 3-8; architecture suite.
+- [x] **A6 — Telegram-owned runtime behavior:** Task 8; 108 owner tests, 11
+  Telegram-filtered composition tests, targeted Clippy, and assembly-only ratchet (`e1f660030`).
+- [x] **A7 — Focused files:** Tasks 5, 7, and 8; 999-line physical-file ratchet.
+- [x] **A8 — Ratchets:** Task 1, turned green by Tasks 3-8; all nine Telegram architecture
+  tests pass.
 - [ ] **A9 — Contract preservation:** Task 10 Telegram setup/ingress/pairing/identity/delivery/default-off suites.
 - [ ] **A10 — Cross-channel preservation:** Tasks 3 and 10 shared-engine Slack/Telegram suites.
 - [ ] **A11 — Quality gates:** Task 10 Clippy, architecture, Reborn E2E, and safety script.
