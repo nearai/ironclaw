@@ -261,6 +261,17 @@ class WorkflowTieringTests(unittest.TestCase):
         runs = active_run_text(mock_auth)
         self.assertIn("./scripts/build-wasm-extensions.sh", runs.splitlines())
         self.assertIn("scripts/live-canary/run.sh", runs.splitlines())
+        wasm_build = next(
+            step
+            for step in yaml_steps(mock_auth)
+            if step_run_body(step) == "./scripts/build-wasm-extensions.sh"
+        )
+        self.assertEqual(
+            scalar_value(
+                mapping_block(active_text(wasm_build), "env", 8), "RUSTFLAGS", 10
+            ),
+            "",
+        )
 
     def test_reborn_ci_owns_hermetic_workflow(self) -> None:
         workflow = job_block(self.reborn, "workflow-hermetic-e2e")
@@ -287,6 +298,17 @@ class WorkflowTieringTests(unittest.TestCase):
         runs = active_run_text(workflow)
         self.assertIn("./scripts/build-wasm-extensions.sh --channels", runs.splitlines())
         self.assertIn("scripts/live-canary/run.sh", runs.splitlines())
+        wasm_build = next(
+            step
+            for step in yaml_steps(workflow)
+            if step_run_body(step) == "./scripts/build-wasm-extensions.sh --channels"
+        )
+        self.assertEqual(
+            scalar_value(
+                mapping_block(active_text(wasm_build), "env", 8), "RUSTFLAGS", 10
+            ),
+            "",
+        )
 
     def test_reborn_changes_job_runs_ownership_test_for_every_event(self) -> None:
         changes = job_block(self.reborn, "changes")

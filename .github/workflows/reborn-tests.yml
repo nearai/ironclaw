@@ -829,6 +829,9 @@ jobs:
         run: cargo install cargo-component --locked || true
 
       - name: Build WASM extensions
+        env:
+          # The workflow-level host linker flags are invalid for WASI components.
+          RUSTFLAGS: ""
         run: ./scripts/build-wasm-extensions.sh
 
       - name: Install Python
@@ -904,6 +907,9 @@ jobs:
         run: cargo install cargo-component --locked || true
 
       - name: Build WASM channels
+        env:
+          # The workflow-level host linker flags are invalid for WASI components.
+          RUSTFLAGS: ""
         run: ./scripts/build-wasm-extensions.sh --channels
 
       - name: Install Python
