@@ -4,13 +4,11 @@ use ironclaw_reborn_config::RebornHome;
 
 /// Outcome of onboarding's OS-keychain master-key provisioning attempt.
 ///
-/// Every variant is a successful `execute()` (exit 0) — this is a status
-/// enum, not an error type. `Suppressed` is expected and normal on headless
-/// Linux/CI (`IRONCLAW_DISABLE_OS_KEYCHAIN`) or when the OS denies the
-/// keychain prompt: the resolver chain
-/// (`ironclaw_reborn_composition::factory::resolve_local_dev_secret_master_key_with_env`)
-/// still has the dotfile auto-generation fallback, so onboarding must not
-/// fail just because the keychain step didn't provision anything.
+/// - Status enum, not an error type: every variant is a successful `execute()`.
+/// - `Suppressed` is expected/normal (headless CI via `IRONCLAW_DISABLE_OS_KEYCHAIN`,
+///   or the OS denies the prompt) — the resolver
+///   (`ironclaw_reborn_composition::factory::resolve_local_dev_secret_master_key_with_env`)
+///   still falls back to dotfile auto-generation, so this must never fail onboarding.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum MasterKeyProvisionOutcome {
     /// A cached `.reborn-local-dev-secrets-master-key` dotfile already
@@ -20,10 +18,9 @@ pub(crate) enum MasterKeyProvisionOutcome {
     KeychainAlreadyPresent,
     /// A fresh key was generated and stored in the OS keychain.
     Provisioned,
-    /// The OS keychain is unavailable (suppressed under test/CI, or the OS
-    /// denied the write). `serve`/`onboard` still work: the resolver falls
-    /// through to the `SECRETS_MASTER_KEY` env var, then to auto-generating
-    /// and caching the dotfile on first boot.
+    /// Keychain unavailable (test/CI suppression or OS denial). Resolver
+    /// falls through to `SECRETS_MASTER_KEY` env var, then dotfile
+    /// auto-generation on first boot.
     Suppressed,
 }
 
@@ -38,13 +35,11 @@ impl MasterKeyProvisionOutcome {
     }
 }
 
-/// Provision a local-dev secrets master key in the OS keychain on a fresh
-/// desktop: if there is no cached dotfile AND the keychain has no key,
-/// generate one and store it. A second run (dotfile or keychain already
-/// populated) is a no-op. Never fails `execute()` — an unavailable/denied
-/// keychain is reported via [`MasterKeyProvisionOutcome::Suppressed`] and
-/// onboarding continues, matching the resolver's own env/dotfile fallback
-/// (`crates/ironclaw_reborn_composition/src/factory.rs`).
+/// Provisions a local-dev master key in the OS keychain if absent (no cached
+/// dotfile, no keychain key); no-op if either already exists. Never fails
+/// `execute()` — an unavailable/denied keychain reports
+/// [`MasterKeyProvisionOutcome::Suppressed`], matching the resolver's own
+/// env/dotfile fallback (`crates/ironclaw_reborn_composition/src/factory.rs`).
 ///
 /// Accepted risk (TOCTOU): the `dotfile_path.exists()` check below and the
 /// keychain's own internal `has_master_key()` check
@@ -81,8 +76,7 @@ pub(crate) fn provision_master_key(home: &RebornHome) -> anyhow::Result<MasterKe
     })
 }
 
-/// Without a storage backend feature there is no secret store to provision a
-/// master key for at all — the master-key resolver lives behind the same
+/// No storage backend, no secret store: the resolver lives behind the same
 /// `libsql`/`postgres` feature gate in `ironclaw_reborn_composition`.
 #[cfg(not(any(feature = "libsql", feature = "postgres")))]
 pub(crate) fn provision_master_key(

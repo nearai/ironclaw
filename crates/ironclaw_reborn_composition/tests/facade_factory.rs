@@ -1289,27 +1289,21 @@ async fn production_libsql_resolved_secret_master_key_rejects_invalid_env_key() 
     ));
 }
 
-/// With no cached `.reborn-local-dev-secrets-master-key` dotfile and no
-/// `SECRETS_MASTER_KEY` env var, `resolve_local_dev_secret_master_key`
-/// (`crates/ironclaw_reborn_composition/src/factory.rs`) now tries the OS
-/// keychain before generating a fresh key. Under
-/// `IRONCLAW_DISABLE_OS_KEYCHAIN` the keychain lookup is suppressed
-/// (`ironclaw_secrets::keychain::get_master_key` returns `NotFound`), so the
-/// resolver must fall through to its existing "generate + persist a dotfile"
-/// branch exactly as before the keychain step was added — and a second open
-/// over the same root must read the now-cached dotfile rather than
-/// re-generating.
+/// With no cached dotfile and no `SECRETS_MASTER_KEY` env var,
+/// `resolve_local_dev_secret_master_key` (`src/factory.rs`) tries the OS
+/// keychain before generating a fresh key.
 ///
-/// Lives here rather than as a `factory.rs` inline unit test because proving
-/// the fallthrough requires actually setting the real process env var
-/// `IRONCLAW_DISABLE_OS_KEYCHAIN` (`ironclaw_secrets::keychain` reads raw
-/// `std::env`, not this crate's env-override overlay), and
-/// `ironclaw_reborn_composition` is `#![forbid(unsafe_code)]` — `std::env::set_var`
-/// is `unsafe` under edition 2024 and `forbid` cannot be locally downgraded,
-/// even inside `#[cfg(test)]` code. This `tests/*.rs` integration binary is a
-/// separate crate the `forbid` attribute does not reach, and already holds
-/// the established `EnvVarGuard`/`SECRETS_MASTER_KEY_ENV_LOCK` convention for
-/// this exact class of env-mutating test.
+/// - Under `IRONCLAW_DISABLE_OS_KEYCHAIN` the keychain lookup returns
+///   `NotFound`, so the resolver must fall through to "generate + persist a
+///   dotfile"; a second open over the same root must read that cached
+///   dotfile rather than re-generating.
+/// - Lives here, not as a `factory.rs` inline unit test: proving the
+///   fallthrough needs the real process env var `IRONCLAW_DISABLE_OS_KEYCHAIN`
+///   set (`keychain` reads raw `std::env`), and `set_var` is `unsafe` under
+///   edition 2024 — `ironclaw_reborn_composition` is `#![forbid(unsafe_code)]`,
+///   which even `#[cfg(test)]` can't locally downgrade. This `tests/*.rs`
+///   binary is a separate crate the `forbid` doesn't reach, and already uses
+///   the `EnvVarGuard`/`SECRETS_MASTER_KEY_ENV_LOCK` convention for this.
 #[cfg(feature = "libsql")]
 #[tokio::test]
 async fn local_dev_secret_store_falls_through_suppressed_keychain_to_dotfile() {

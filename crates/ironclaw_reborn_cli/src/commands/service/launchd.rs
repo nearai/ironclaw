@@ -203,13 +203,10 @@ pub(super) fn install_with_runner(
     // target the same label/path by design (see the module doc). Either
     // way the write below atomically replaces it.
     let replaced_existing = file.exists();
-    // WorkingDirectory anchors the launched `serve` process's cwd at
-    // `<reborn_home>/workspace` — not launchd's default of `/`, and
-    // deliberately not the Reborn home itself either. See
-    // `super::service_working_directory`'s doc: the Reborn home is an
-    // ancestor of every default skill/extension root, so using it directly
-    // (this crate's first attempt at this fix) still trips composition's
-    // `paths_overlap` prefix check and crash-loops the same way `/` did.
+    // WorkingDirectory anchors cwd at `<reborn_home>/workspace`, not
+    // launchd's default `/` and not the Reborn home itself — the home is
+    // an ancestor of every default skill root, so it still trips
+    // composition's `paths_overlap` check (see `service_working_directory`).
     let reborn_home = context.boot_config().home().path();
     let working_directory = super::ensure_service_working_directory(reborn_home)?;
     let plist = plist_content(invocation, &working_directory, &stdout_log, &stderr_log);
@@ -776,19 +773,11 @@ mod tests {
         assert!(plist.contains("<string>/home/op/.ironclaw/reborn/logs/serve.stderr.log</string>"));
     }
 
-    /// Pins the crash-loop fix's mechanism: without an explicit
-    /// WorkingDirectory, launchd runs the job with cwd=`/`, `serve`'s
-    /// local-dev workspace root resolves to `/`, and composition refuses to
-    /// boot because `/` overlaps a default skill root. `plist_content`
-    /// itself is agnostic to *which* directory that is — it just writes
-    /// whatever caller-supplied path faithfully; see `install_with_runner`'s
-    /// use of `super::ensure_service_working_directory` and the
-    /// `<reborn_home>/workspace` regression test in `mod.rs`
-    /// (`install_then_uninstall_macos_writes_and_removes_plist`) for the
-    /// specific-path guarantee — the Reborn home itself is an ancestor of
-    /// every default skill root and so does *not* work here, even though it
-    /// looked like the obvious choice (this crate's first attempt at this
-    /// fix).
+    /// Pins the crash-loop fix: without WorkingDirectory, launchd runs with
+    /// cwd=`/`, which overlaps a default skill root and composition refuses
+    /// to boot. `plist_content` just writes the caller-supplied path
+    /// faithfully — see `install_with_runner` /
+    /// `ensure_service_working_directory` for the actual path choice.
     #[test]
     fn plist_content_includes_working_directory_line() {
         let plist = plist_content(

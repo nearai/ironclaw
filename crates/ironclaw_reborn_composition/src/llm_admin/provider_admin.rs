@@ -167,13 +167,13 @@ impl RebornProviderAdmin {
     /// Resolve `provider` (an id or alias) to its canonical registry id
     /// without writing anything.
     ///
-    /// Used by callers that must land a provider-keyed secret (e.g. an
-    /// onboarding API-key prompt) *before* committing the `config.toml`
-    /// selection via [`Self::set_provider`] — landing the key first and the
-    /// config second means a store failure never leaves `config.toml`
-    /// pointing at a provider whose key isn't durably stored. This resolves
-    /// the same canonical id `set_provider` would land in `[llm.default]`,
-    /// so the secret-store handle and the config selection always agree.
+    /// - For callers that must land a provider-keyed secret (e.g. an
+    ///   onboarding API-key prompt) *before* committing the `config.toml`
+    ///   selection via [`Self::set_provider`], so a store failure never
+    ///   leaves `config.toml` pointing at a provider with no durable key.
+    /// - Resolves the same canonical id `set_provider` would land in
+    ///   `[llm.default]`, so the secret-store handle and the config
+    ///   selection always agree.
     pub fn resolve_provider_id(&self, provider: &str) -> Result<String, RebornProviderAdminError> {
         let provider = provider.trim();
         if provider.is_empty() {
@@ -195,18 +195,16 @@ impl RebornProviderAdmin {
     }
 
     /// The MENU-LEVEL "requires an API key" value for `provider_id` — see
-    /// [`effective_api_key_required`]'s doc for what "menu-level" overrides
-    /// (currently: `session_token`-kind providers, i.e. `nearai`). Not
-    /// restricted to menu-eligible providers: `[llm.default]` may name a
-    /// provider excluded from the numbered menu (e.g. one set via `models
-    /// set-provider`), and onboard's idempotent-rerun check
-    /// (`already_configured_outcome` in `ironclaw_reborn_cli`) must answer
-    /// "does the CURRENTLY CONFIGURED provider need a key" for any provider
-    /// id, not just the ones offered on the menu.
+    /// [`effective_api_key_required`]'s doc for the menu-level override.
     ///
-    /// Returns `Ok(None)` when `provider_id` isn't in the registry at all —
-    /// the genuinely "can't tell" case, mirroring
-    /// [`Self::detect_env_llm`]'s read-only contract.
+    /// - Not restricted to menu-eligible providers: `[llm.default]` may name
+    ///   a provider excluded from the numbered menu (e.g. set via `models
+    ///   set-provider`), and onboard's idempotent-rerun check
+    ///   (`already_configured_outcome`) must answer "does the currently
+    ///   configured provider need a key" for any provider id.
+    /// - Returns `Ok(None)` when `provider_id` isn't in the registry at all
+    ///   — the genuinely "can't tell" case, mirroring
+    ///   [`Self::detect_env_llm`]'s read-only contract.
     pub fn effective_api_key_required(
         &self,
         provider_id: &str,
@@ -275,53 +273,31 @@ impl RebornProviderAdmin {
     }
 
     /// Providers offered on the interactive `onboard` numbered menu, in
-    /// `providers.json` order (`nearai` is entry 0 in the file, so it is
-    /// always menu item 1).
+    /// `providers.json` order (`nearai` is entry 0, so always menu item 1).
     ///
-    /// Filters [`ironclaw_llm::ProviderRegistry::selectable`] down to
-    /// providers whose [`ironclaw_llm::registry::SetupHint`] kind is
-    /// `ApiKey` or `SessionToken` — this excludes `ollama`, `bedrock`,
-    /// `gemini_oauth`, `openai_codex`, and `github_copilot` BY DESIGN (a
-    /// onboarding-scope decision: those providers stay reachable via
-    /// `ironclaw-reborn config set` / `models set-provider`, just not on the
-    /// numbered menu). Every kind except `github_copilot`'s is
-    /// distinguishable by `SetupHint::kind()` alone — `github_copilot`
-    /// declares `kind: "api_key"` in `providers.json` just like
-    /// `openai`/`anthropic`/etc, so it is excluded by id instead.
-    ///
-    /// `OpenAiCompatible` kind (`openai_compatible`, `cloudflare`) is also
-    /// excluded, distinctly from the onboarding-scope group above:
-    /// `openai_compatible` sets `base_url_required: true` in
-    /// `providers.json`, and the numbered menu never prompts for a base
-    /// URL — selecting it here would "succeed" at onboard time and then fail
-    /// `serve` boot with no base URL configured (`LLM_BASE_URL` unset).
-    /// `cloudflare` shares the same `open_ai_compatible` setup kind so it is
-    /// swept out by the same kind-level filter, even though it ships a fixed
-    /// default base URL and would otherwise be safe to onboard; it remains
-    /// configurable via `ironclaw-reborn config set` / `models
-    /// set-provider`, which do collect a base URL.
-    ///
-    /// Returns the serializable [`ProviderMenuEntry`] DTO rather than
-    /// `&ironclaw_llm::registry::ProviderDefinition` directly: callers in
-    /// `ironclaw_reborn_cli` must never see the `ironclaw_llm` setup-hint
-    /// taxonomy (the architecture boundary test
-    /// `ironclaw_architecture::reborn_dependency_boundaries` pins the CLI
-    /// crate's dependency graph to exclude `ironclaw_llm`).
-    ///
-    /// Also excludes [`EXAMPLE_OVERLAY_PROVIDER_ID`] — the tenant-pinned
-    /// OpenRouter example `ironclaw_reborn_cli::commands::config::init`
-    /// seeds into a fresh `providers.json` (`PROVIDERS_STUB`). That entry is
-    /// explicitly commented "example; rename or delete" and exists to show
-    /// an operator the overlay file's shape, not to be picked live off the
-    /// numbered menu — id equality is the least brittle signal available
-    /// here (composition has no other marker; the alternative, matching on
-    /// `description`'s "(example...)" text, breaks the moment an operator
-    /// edits or translates it).
-    ///
-    /// `api_key_required` is a MENU-LEVEL value, not always the raw
-    /// `providers.json` field — see [`effective_api_key_required`]'s doc for
-    /// why `session_token`-kind providers (`nearai`) are overridden to
-    /// `true` here.
+    /// - Filters [`ironclaw_llm::ProviderRegistry::selectable`] to
+    ///   `SetupHint` kind `ApiKey`/`SessionToken` only — excludes `ollama`,
+    ///   `bedrock`, `gemini_oauth`, `openai_codex` by kind, and
+    ///   `github_copilot` by id (it declares `kind: "api_key"` like a normal
+    ///   provider). Onboarding-scope decision: these stay reachable via
+    ///   `ironclaw-reborn config set` / `models set-provider`, just not on
+    ///   the numbered menu.
+    /// - Also excludes `OpenAiCompatible` kind (`openai_compatible`,
+    ///   `cloudflare`) for a correctness reason, not scope: it requires a
+    ///   base URL the menu never prompts for, so selecting it here would
+    ///   "succeed" at onboard time and fail `serve` boot with
+    ///   `LLM_BASE_URL` unset.
+    /// - Also excludes [`EXAMPLE_OVERLAY_PROVIDER_ID`] — the tenant-pinned
+    ///   OpenRouter example `config::init` seeds into a fresh
+    ///   `providers.json` (`PROVIDERS_STUB`), meant to show the overlay
+    ///   file's shape, not to be picked live. Matched by id (the only
+    ///   stable marker available).
+    /// - Returns the serializable [`ProviderMenuEntry`] DTO, not
+    ///   `&ProviderDefinition`: `ironclaw_reborn_cli` must never see the
+    ///   `ironclaw_llm` setup-hint taxonomy (pinned by
+    ///   `reborn_dependency_boundaries`).
+    /// - `api_key_required` is a MENU-LEVEL value — see
+    ///   [`effective_api_key_required`]'s doc for the `nearai` override.
     pub fn menu_entries(&self) -> Result<Vec<ProviderMenuEntry>, RebornProviderAdminError> {
         let registry = self.load_registry()?;
         Ok(registry
@@ -354,10 +330,9 @@ impl RebornProviderAdmin {
     /// variables — the same env resolution `resolve_reborn_runtime_llm`'s
     /// fallback path and `run`/`serve`'s stub-gateway warning both use
     /// (`ironclaw_llm::resolve_provider_config_from_env`), wrapped here so
-    /// `ironclaw_reborn_cli` (which may not depend on `ironclaw_llm`
-    /// directly — see the `reborn_dependency_boundaries` architecture test)
-    /// can offer onboard's env-detect-and-confirm/silent-seed step without
-    /// reaching into that crate itself.
+    /// `ironclaw_reborn_cli` (excluded from depending on `ironclaw_llm`
+    /// directly, per `reborn_dependency_boundaries`) can offer onboard's
+    /// env-detect-and-confirm/silent-seed step.
     ///
     /// Three outcomes, matching onboard's three branches:
     /// - `Ok(Some(detected))`: a complete provider configuration was found
@@ -388,28 +363,20 @@ impl RebornProviderAdmin {
     }
 
     /// Probe a candidate provider/key/model combination BEFORE it is
-    /// persisted — onboard's `provision_via_menu` calls this after the key
-    /// and model prompts and before either durable write (secret store,
-    /// then `[llm.default]`), so a rejected or unreachable key never lands
-    /// in config with nothing to show for it. `api_key` is the caller's
-    /// inline candidate (or `None` for a keyless provider); `model` is the
-    /// caller's chosen override, or `None` to probe the catalog default.
+    /// persisted — onboard's `provision_via_menu` calls this before either
+    /// durable write (secret store, then `[llm.default]`), so a rejected or
+    /// unreachable key never lands in config. `api_key` is the caller's
+    /// inline candidate (`None` for a keyless provider); `model` is the
+    /// caller's override, or `None` to probe the catalog default.
     ///
-    /// Reuses the exact transient-provider-build machinery the webui2
-    /// "test connection"/"list models" settings probes use
-    /// ([`crate::llm_admin::llm_config_service::probe_candidate_provider`])
-    /// — no new transport. That shared helper never falls back to a stored
-    /// key (the fallback `RebornLlmConfigService::probe_provider` has for
-    /// probing an *already-persisted* provider) because nothing is
-    /// persisted yet at the point onboard calls this.
+    /// Reuses the webui2 "test connection"/"list models" probe machinery
+    /// ([`crate::llm_admin::llm_config_service::probe_candidate_provider`]),
+    /// minus its stored-key fallback (nothing is persisted yet here).
     ///
-    /// Only errors when `provider_id` isn't in the registry at all — a
-    /// network/auth/adapter failure during the probe itself is reported
-    /// inside `Ok(ProviderProbeOutcome { ok: false, .. })`, not as an `Err`
-    /// (the probed provider's own `LlmProbeResult`/`LlmModelsResult` shape,
-    /// which this mirrors, has no separate error channel either — see that
-    /// module's doc for why every probe failure collapses to one outcome
-    /// shape rather than a fabricated auth-vs-transport classification).
+    /// Only errors when `provider_id` isn't in the registry — a
+    /// network/auth/adapter failure during the probe itself reports inside
+    /// `Ok(ProviderProbeOutcome { ok: false, .. })`, matching that shared
+    /// helper's no-separate-error-channel contract.
     pub async fn probe_candidate(
         &self,
         provider_id: &str,
@@ -536,12 +503,9 @@ pub struct ProviderProbeOutcome {
 /// Id of the tenant-pinned OpenRouter example overlay entry
 /// `ironclaw_reborn_cli::commands::config::init::PROVIDERS_STUB` seeds into
 /// a fresh `providers.json` — see [`RebornProviderAdmin::menu_entries`]'s
-/// doc for why this is filtered off the numbered menu. Kept as a named
-/// constant (rather than an inline literal at the filter call site) so the
-/// cross-crate relationship to `PROVIDERS_STUB`'s `"id"` field is
-/// discoverable from either side; the two are not type-linked (the stub is
-/// a raw JSON string literal in a crate this one doesn't depend on), so
-/// `provider_admin_tests::menu_entries_excludes_the_example_overlay_provider`
+/// doc for why this is filtered off the numbered menu. Named constant (not
+/// an inline literal) because the two crates aren't type-linked (the stub
+/// is a raw JSON string literal); `menu_entries_excludes_the_example_overlay_provider`
 /// pins them staying in sync.
 pub const EXAMPLE_OVERLAY_PROVIDER_ID: &str = "acme-openrouter";
 
@@ -893,10 +857,8 @@ mod tests {
             None,
         )
         .expect("valid reborn home");
-        // Leak the tempdir so the on-disk providers.json/config.toml stub
-        // outlive this function — `menu_entries` only reads the built-in
-        // registry (no config.toml required), so nothing is ever written
-        // here; the tempdir just needs to exist as a valid, empty root.
+        // Leak the tempdir so the on-disk stub outlives this function; only
+        // needs to exist as a valid, empty root (nothing is ever written).
         std::mem::forget(temp);
         RebornProviderAdmin::new(RebornBootConfig::new(
             home,
@@ -913,10 +875,8 @@ mod tests {
             first.id, "nearai",
             "nearai must be menu item 1: {entries:?}"
         );
-        // Menu-level override (see `effective_api_key_required`'s doc):
-        // reborn has no session-token auth wired, so nearai requires an
-        // API key here even though the raw `providers.json` entry marks it
-        // optional (shared with v1's wallet-login wizard, unmodified).
+        // Menu-level override: no session-token auth wired in reborn, so
+        // nearai requires a key here despite the raw catalog entry.
         assert!(
             first.api_key_required,
             "nearai must require an API key on the reborn onboard menu (no session-token auth \
@@ -924,12 +884,9 @@ mod tests {
         );
     }
 
-    /// RED (nearai onboarding scope addition): `RebornProviderAdmin::
-    /// effective_api_key_required` must agree with `menu_entries`'s
-    /// override for `nearai` (`true`, not the raw catalog `false`), pass
-    /// `openai`'s raw value through unchanged, and return `None` for an
-    /// unknown provider id — the "can't tell" contract onboard's
-    /// idempotent-rerun check relies on.
+    /// `effective_api_key_required` must agree with `menu_entries`'s
+    /// override for `nearai` (`true`, not raw catalog `false`), pass
+    /// `openai`'s raw value through, and return `None` for an unknown id.
     #[test]
     fn effective_api_key_required_overrides_session_token_providers() {
         let admin = test_admin();
@@ -974,14 +931,10 @@ mod tests {
         }
     }
 
-    /// `openai_compatible` requires a base URL (`base_url_required: true`
-    /// in `providers.json`) that the numbered menu never prompts for;
-    /// selecting it there would "succeed" at onboard time and then fail
+    /// `openai_compatible` requires a base URL the numbered menu never
+    /// prompts for; selecting it would "succeed" at onboard time and fail
     /// `serve` boot with `LLM_BASE_URL` unset. Pinned separately from the
-    /// onboarding-scope exclusions above because the reason is a
-    /// correctness bug, not a scope decision — a regression here silently
-    /// reintroduces a broken onboarding path rather than just widening menu
-    /// scope.
+    /// scope exclusions above — this is a correctness bug, not scope.
     #[test]
     fn menu_entries_excludes_openai_compatible_base_url_trap() {
         let admin = test_admin();
@@ -1008,15 +961,11 @@ mod tests {
         );
     }
 
-    /// RED (arrow-key menu item 1, example-overlay exclusion): the
-    /// tenant-pinned OpenRouter example overlay entry — the same shape
-    /// `ironclaw_reborn_cli::commands::config::init::PROVIDERS_STUB` writes
-    /// into a fresh `providers.json` (id `acme-openrouter`, kind `api_key`,
-    /// otherwise indistinguishable from a real menu-eligible provider) —
-    /// must never appear on the numbered menu, even though it passes every
-    /// other `menu_entries` filter (not `github_copilot`, setup kind is
-    /// `ApiKey`). Pins the id-equality filter against
-    /// [`EXAMPLE_OVERLAY_PROVIDER_ID`].
+    /// The tenant-pinned OpenRouter example overlay entry (same shape
+    /// `PROVIDERS_STUB` writes: id `acme-openrouter`, kind `api_key`,
+    /// otherwise indistinguishable from a real menu-eligible provider) must
+    /// never appear on the numbered menu. Pins the id-equality filter
+    /// against [`EXAMPLE_OVERLAY_PROVIDER_ID`].
     #[test]
     fn menu_entries_excludes_the_example_overlay_provider() {
         let temp = tempfile::tempdir().expect("tempdir");
@@ -1068,17 +1017,11 @@ mod tests {
         );
     }
 
-    /// `detect_env_llm` must return `Ok(None)` when no LLM environment
-    /// variables are set — the common case for a fresh interactive
-    /// `onboard` run on a developer's machine, which must fall through to
-    /// the full numbered menu rather than a confirm prompt. This test
-    /// cannot cover the `Ok(Some(_))`/`Err(_)` branches in-process: this
-    /// crate is `#![forbid(unsafe_code)]` and `std::env::set_var` is
-    /// `unsafe` (edition 2024), so those branches are covered at the CLI
-    /// smoke tier instead, where a real child process's environment can be
-    /// set via `Command::env` without touching this process's own env —
-    /// see `ironclaw_reborn_cli`'s smoke tests for the env-detected and
-    /// partial-env onboard scenarios.
+    /// `detect_env_llm` must return `Ok(None)` with no LLM env vars set —
+    /// the fresh-onboard case that must fall through to the full menu.
+    /// The `Ok(Some(_))`/`Err(_)` branches can't be covered in-process
+    /// (`forbid(unsafe_code)` blocks `set_var`); covered at the CLI smoke
+    /// tier instead via `Command::env` on a real child process.
     #[test]
     fn detect_env_llm_is_none_with_no_llm_env_vars_set() {
         let admin = test_admin();

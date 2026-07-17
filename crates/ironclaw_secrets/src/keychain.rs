@@ -361,17 +361,13 @@ mod platform {
 
 /// Whether OS-keychain access should be suppressed.
 ///
-/// Touching the real OS keychain during automated tests pops a macOS Keychain
-/// authorization dialog (and blocks on a locked Secret Service on Linux),
-/// which derails `cargo test`. We suppress it when compiled for tests
-/// (`cfg!(test)`, covering this crate's unit tests) or when
-/// `IRONCLAW_DISABLE_OS_KEYCHAIN` is set in the environment (covering
-/// integration/e2e tests, CI, and the compiled binary under test, which link
-/// the non-`cfg(test)` library). When suppressed, lookups behave as "no key
-/// present" and writes fail closed — so callers fall through to their next
-/// key source exactly as they would with an empty keychain, with no OS
-/// prompt. Production (no `cfg(test)`, env unset) is unaffected. Ported from
-/// v1's `src/secrets/keychain.rs`.
+/// - why: real keychain pops a macOS auth dialog / blocks on a locked Linux
+///   Secret Service, which derails `cargo test`
+/// - triggers: `cfg!(test)` (this crate's unit tests) OR
+///   `IRONCLAW_DISABLE_OS_KEYCHAIN` env (integration/e2e/CI, and the
+///   compiled binary under test, which links the non-`cfg(test)` lib)
+/// - effect: lookups report "no key present", writes fail closed — callers
+///   fall through to their next key source as if the keychain were empty
 fn os_keychain_suppressed() -> bool {
     cfg!(test) || std::env::var_os("IRONCLAW_DISABLE_OS_KEYCHAIN").is_some()
 }
@@ -379,7 +375,6 @@ fn os_keychain_suppressed() -> bool {
 const SUPPRESSED_MESSAGE: &str =
     "OS keychain access suppressed (cfg!(test) or IRONCLAW_DISABLE_OS_KEYCHAIN)";
 
-/// Retrieve the master key from the OS keychain (suppressed in tests/headless).
 pub async fn get_master_key() -> Result<Vec<u8>, SecretError> {
     if os_keychain_suppressed() {
         return Err(SecretError::NotFound("master key".to_string()));
@@ -387,7 +382,6 @@ pub async fn get_master_key() -> Result<Vec<u8>, SecretError> {
     platform::get_master_key().await
 }
 
-/// Whether a master key exists in the OS keychain (suppressed in tests/headless).
 pub async fn has_master_key() -> bool {
     if os_keychain_suppressed() {
         return false;
@@ -395,7 +389,6 @@ pub async fn has_master_key() -> bool {
     platform::has_master_key().await
 }
 
-/// Store the master key in the OS keychain (suppressed in tests/headless).
 pub async fn store_master_key(key: &[u8]) -> Result<(), SecretError> {
     if os_keychain_suppressed() {
         return Err(SecretError::KeychainError(SUPPRESSED_MESSAGE.to_string()));
@@ -403,7 +396,6 @@ pub async fn store_master_key(key: &[u8]) -> Result<(), SecretError> {
     platform::store_master_key(key).await
 }
 
-/// Delete the master key from the OS keychain (suppressed in tests/headless).
 pub async fn delete_master_key() -> Result<(), SecretError> {
     if os_keychain_suppressed() {
         return Err(SecretError::KeychainError(SUPPRESSED_MESSAGE.to_string()));
@@ -613,10 +605,9 @@ mod tests {
 
     static IRONCLAW_DISABLE_OS_KEYCHAIN_LOCK: Mutex<()> = Mutex::const_new(());
 
-    /// `cfg!(test)` alone already suppresses these calls in this crate's own
-    /// unit tests, so this pins the explicit-env-var path too — the one that
-    /// protects a compiled binary under test (no `cfg!(test)`) from popping a
-    /// real OS keychain prompt or touching the developer's real keychain.
+    // edge: pins the explicit-env-var suppression path (cfg!(test) already
+    // covers this crate's own unit tests) — protects a compiled binary under
+    // test from popping a real OS keychain prompt.
     #[tokio::test]
     async fn suppressed_keychain_lookup_and_write_never_touch_the_platform_module() {
         let _guard = IRONCLAW_DISABLE_OS_KEYCHAIN_LOCK.lock().await;

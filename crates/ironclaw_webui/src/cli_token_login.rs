@@ -1,40 +1,24 @@
-//! `GET /login?token=<cli-token>` — the CLI-printed bootstrap link
-//! into the browser session, plugging into the SAME
-//! bearer/ticket-exchange flow the OAuth callback uses (see
-//! `signed_session_login.rs`'s module docs for the rule this
-//! follows: `WebuiAuthenticator` / `SessionStore` wiring lives in
-//! this crate, not the command crate).
+//! `GET /login?token=<cli-token>` — CLI-printed bootstrap link into the
+//! browser session, sharing the OAuth callback's bearer/ticket-exchange
+//! contract (see `signed_session_login.rs` module docs for why this
+//! wiring lives in this crate, not the command crate).
 //!
-//! Shape, mirrored from `auth::routes::callback_handler`:
-//! 1. `GET /login?token=...` verifies the presented token against
-//!    the host's resolved bearer authenticator (constant-time via
-//!    [`crate::EnvBearerAuthenticator`], reused rather than
-//!    reimplemented), mints a session bearer through the supplied
-//!    [`SessionStore`] (typically [`crate::signed_session_store`]
-//!    built from the same operator secret + tenant as the CLI's
-//!    admin bearer minter), and redirects to
-//!    `<redirect_after>?login_ticket=<ticket>` — the exact query
-//!    convention the OAuth callback already produces.
-//! 2. `POST /auth/session/exchange` consumes that one-time ticket
-//!    and returns the real bearer as `{ "token": "..." }`, so the
-//!    SPA's existing `exchangeLoginTicket` (`api.ts:747-767`)
-//!    completes the hand-off with zero new frontend code.
+//! Flow (mirrors `auth::routes::callback_handler`):
+//! - `GET /login?token=...`: verify via [`crate::EnvBearerAuthenticator`],
+//!   mint a bearer via [`SessionStore`], redirect to
+//!   `<redirect_after>?login_ticket=<ticket>` (same convention as OAuth).
+//! - `POST /auth/session/exchange`: consumes the ticket, returns
+//!   `{ "token": "..." }` — byte-for-byte the same contract as
+//!   `auth::routes::session_exchange_handler`, so the SPA's
+//!   `exchangeLoginTicket` needs no new frontend code.
 //!
-//! This mount owns its own one-time ticket store rather than the
-//! OAuth login surface's (`auth::routes`'s `session_tickets` is
-//! private to that module, and CLI-token login must work even when
-//! no OAuth provider is configured, in which case
-//! `empty_webui_v2_auth_providers_mount` — the OAuth surface's
-//! provider-less fallback — never mounts `/auth/session/exchange`
-//! at all). The exchange handler here is byte-for-byte the same
-//! contract (`{ticket}` in, `{token}` out) as
-//! `auth::routes::session_exchange_handler`, so the SPA cannot tell
-//! the difference. **Integration note for whoever wires both
-//! surfaces into `serve.rs`:** both mounts register `POST
-//! /auth/session/exchange`; attach at most one of them per
-//! deployment (this mount when there is no SSO provider — the CLI
-//! onboarding case B4 targets — the OAuth mount's own exchange route
-//! otherwise) to avoid a duplicate-route panic at merge time.
+//! Owns its own one-time ticket store rather than `auth::routes`'s
+//! (private to that module) because CLI-token login must work even with
+//! no OAuth provider configured.
+//!
+//! Integration note: both this mount and the OAuth mount register `POST
+//! /auth/session/exchange` — attach at most one per deployment or routes
+//! collide at merge time.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -61,20 +45,16 @@ use serde::{Deserialize, Serialize};
 
 use crate::session::SessionStore;
 
-/// Default landing page after a successful login — matches the OAuth
-/// callback's `DEFAULT_REDIRECT_AFTER` so the SPA lands in the same
+/// Matches the OAuth callback's default so the SPA lands in the same
 /// place regardless of which flow authenticated it.
 const DEFAULT_REDIRECT_AFTER: &str = "/";
 
-/// Default session lifetime (30 days), matching the OAuth login
-/// surface's default.
+/// Matches the OAuth login surface's default (30 days).
 const DEFAULT_SESSION_LIFETIME: ChronoDuration = ChronoDuration::seconds(30 * 24 * 60 * 60);
 
-/// Login tickets live only long enough for the SPA to load and POST
-/// the ticket back — same TTL as the OAuth surface's session tickets.
+/// Same TTL as the OAuth surface's session tickets.
 const TICKET_TTL: Duration = Duration::from_secs(60);
-/// Hard cap on outstanding tickets, bounding memory if callers mint
-/// links but never redeem them.
+/// Bounds memory if callers mint links but never redeem them.
 const MAX_TICKETS: usize = 1024;
 
 const PATH_LOGIN: &str = "/login";
@@ -93,18 +73,15 @@ const EXCHANGE_BODY_LIMIT_BYTES: std::num::NonZeroU64 =
 pub struct CliTokenLoginConfig {
     /// Host-trusted installation tenant; never browser-influenced.
     pub tenant_id: TenantId,
-    /// Constant-time bearer verifier the presented `?token=` is
-    /// checked against, resolving the authenticated `UserId` on
-    /// success. Production callers pass the same
-    /// [`crate::EnvBearerAuthenticator`] the standalone deployment
-    /// already builds for its API bearer, so there is no second
-    /// secret to configure.
+    /// Constant-time verifier for the presented `?token=`, resolving the
+    /// authenticated `UserId`. Prod passes the same
+    /// [`crate::EnvBearerAuthenticator`] used for the API bearer — no
+    /// second secret to configure.
     pub authenticator: Arc<dyn WebuiAuthenticator>,
-    /// Store the minted session bearer is created through. Production
-    /// callers pass [`crate::signed_session_store`] built from the
-    /// same operator secret + tenant as the CLI's admin bearer
-    /// minter, so the resulting bearer validates anywhere that store
-    /// is reconstructed.
+    /// Store the minted session bearer is created through. Prod passes
+    /// [`crate::signed_session_store`] built from the same operator
+    /// secret + tenant as the CLI's admin bearer minter, so the bearer
+    /// validates anywhere that store is reconstructed.
     pub session_store: Arc<dyn SessionStore>,
     /// Session lifetime for the minted bearer. Defaults to 30 days.
     pub session_lifetime: ChronoDuration,
@@ -133,15 +110,12 @@ impl CliTokenLoginConfig {
         self
     }
 
-    /// Sanitized through the same `auth::pending::sanitize_redirect` rules
-    /// the OAuth login surface's own `redirect_after` query param goes
-    /// through (must be relative — no absolute or scheme-relative
-    /// `//host/...` target, no `#` fragment) — falling back to
-    /// [`DEFAULT_REDIRECT_AFTER`] when the supplied value fails that check.
-    /// No production caller sets this today (`serve` never calls this
-    /// setter), but it is a public builder method, so a future
-    /// browser/query-influenced caller can't smuggle an off-site redirect
-    /// through it.
+    /// Sanitized via `auth::pending::sanitize_redirect` (same rule as the
+    /// OAuth surface's `redirect_after`):
+    /// - must be relative — no absolute/scheme-relative `//host/...`, no `#`
+    /// - falls back to [`DEFAULT_REDIRECT_AFTER`] on failure
+    /// - no prod caller sets this today, but it's public, so a future
+    ///   browser/query-influenced caller can't smuggle an off-site redirect
     pub fn with_redirect_after(mut self, redirect_after: impl Into<String>) -> Self {
         self.redirect_after = crate::auth::pending::sanitize_redirect(Some(redirect_after.into()))
             .unwrap_or_else(|| DEFAULT_REDIRECT_AFTER.to_string());
@@ -262,21 +236,17 @@ async fn login_handler(
         return StatusCode::UNAUTHORIZED.into_response();
     };
 
-    // `authenticate` (e.g. `EnvBearerAuthenticator`) already performs
-    // a constant-time comparison — reused rather than reimplemented,
-    // per this route's own guardrail against a second bespoke compare.
+    // `authenticate` already does a constant-time compare (reused, not
+    // reimplemented).
     let Some(auth) = state.authenticator.authenticate(&token).await else {
         return StatusCode::UNAUTHORIZED.into_response();
     };
 
-    // USER-DECIDED LAW: authenticating with the webui token = operator/admin,
-    // whether via raw `Authorization: Bearer` or this `/login?token=` link.
-    // `auth` above is the outcome of verifying the presented token against the
-    // host's operator-capable authenticator (`EnvBearerAuthenticator` in
-    // production), so its `operator_webui_config` bit is exactly the
-    // provenance signal `SessionStore::create_session` wants — never
-    // hardcode `true` here, and never re-derive operator-ness later from the
-    // bearer at validation time.
+    // USER-DECIDED LAW: webui-token auth = operator/admin, same as raw
+    // `Authorization: Bearer`.
+    // - `auth.capabilities.operator_webui_config` is the provenance signal
+    //   `create_session` wants — never hardcode `true`, never re-derive
+    //   operator-ness later at validation time.
     let bearer = match state
         .session_store
         .create_session(
@@ -355,11 +325,10 @@ struct LoginTicket {
     created_at: Instant,
 }
 
-/// Bounded, TTL'd, single-use bearer exchange store — the same shape
-/// as `auth::pending::SessionTicketStore`, duplicated here rather than
-/// shared because that store is private to the OAuth login surface
-/// and (per the module doc above) this mount must work even when no
-/// OAuth provider — and therefore no OAuth ticket store — exists.
+/// Bounded, TTL'd, single-use bearer exchange store — same shape as
+/// `auth::pending::SessionTicketStore`, duplicated because that store is
+/// private to the OAuth login surface and this mount must work with no
+/// OAuth provider (and thus no OAuth ticket store) present.
 struct LoginTicketStore {
     inner: Mutex<HashMap<String, LoginTicket>>,
 }

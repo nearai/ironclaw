@@ -225,12 +225,9 @@ struct TokenPayload {
     user: String,
     iat: i64,
     exp: i64,
-    /// Operator-capability provenance stamp — see `SessionRecord::operator`'s
-    /// doc for the invariant. `#[serde(default)]` so a token minted before
-    /// this field existed decodes as non-operator (fail closed), and so the
-    /// HMAC signature (computed over these exact bytes) only breaks
-    /// compatibility for tokens that never carried the field to begin with —
-    /// it does not retroactively change what an already-issued token means.
+    /// Operator-capability stamp (see `SessionRecord::operator`). Defaults
+    /// to non-operator so pre-existing tokens fail closed rather than
+    /// retroactively escalating.
     #[serde(default)]
     op: bool,
 }

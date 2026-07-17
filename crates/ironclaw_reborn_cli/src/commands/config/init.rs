@@ -68,21 +68,16 @@ impl ConfigFileWrite {
 
 /// Canonical zero-friction LLM default: the provider named in the
 /// `config.toml` stub's commented-out `[llm.default]` example, and the
-/// numbered `onboard` menu's first (unnumbered-preferred) entry.
-///
-/// `config.toml` is the single source of truth for `[llm.default]`: it is
-/// written ONLY by an explicit act (`onboard`'s interactive/headless-detect
-/// seeding, `config set` / `models set-provider`, or the WebUI settings
-/// page) — never seeded implicitly by `config init` / `onboard`'s stub
-/// write. See `onboard::llm_credentials` for the seeding paths and
-/// `RebornLlmCatalogError::MissingProviderId` / `resolve_reborn_runtime_llm`
-/// for the env fallback a commented-out (or altogether absent)
-/// `[llm.default]` section falls through to.
-///
-/// `nearai` requires no upfront third-party account (session-token auth via
-/// a NEAR account, `api_key_required = false` in `providers.json`), which is
-/// why it remains the example/preferred provider for a fresh desktop install
-/// rather than a provider that hard-requires an API key before it will boot.
+/// numbered `onboard` menu's preferred entry.
+/// - `config.toml` is the single source of truth for `[llm.default]`:
+///   written ONLY by an explicit act (`onboard` seeding, `config set` /
+///   `models set-provider`, or WebUI settings) — never seeded implicitly by
+///   `config init`/`onboard`'s stub write. See `onboard::llm_credentials`
+///   for seeding paths and `resolve_reborn_runtime_llm` for the env fallback
+///   a commented-out `[llm.default]` falls through to.
+/// - `nearai` needs no upfront third-party account (session-token auth via a
+///   NEAR account, `api_key_required = false`), hence preferred for a fresh
+///   install over a provider that hard-requires a key before it boots.
 pub(crate) const DEFAULT_LLM_PROVIDER_ID: &str = "nearai";
 /// Mirrors `providers.json`'s `nearai` entry's `default_model`.
 pub(crate) const DEFAULT_LLM_MODEL: &str = "deepseek-ai/DeepSeek-V4-Flash";
@@ -307,13 +302,11 @@ mod tests {
     use super::*;
     use crate::context::RebornCliContext;
 
-    /// RED (de-seed the stub): the config stub written by `onboard`/`config
-    /// init` must carry NO `[llm.default]` selection at all —
-    /// `RebornConfigFile::default_llm_slot()` must return `None` (not
-    /// `Some` with empty fields — a bare header is still "present" and
-    /// fails closed with `MissingProviderId`, see this file's
-    /// `DEFAULT_LLM_PROVIDER_ID` doc) — so `resolve_reborn_runtime_llm`
-    /// reaches the environment fallback instead of a stub-seeded slot.
+    /// The config stub written by `onboard`/`config init` must carry NO
+    /// `[llm.default]` selection at all — `default_llm_slot()` must return
+    /// `None` (not `Some` with empty fields — a bare header still fails
+    /// closed with `MissingProviderId`, see `DEFAULT_LLM_PROVIDER_ID`'s doc)
+    /// — so `resolve_reborn_runtime_llm` reaches the env fallback.
     #[test]
     fn deseeded_stub_has_no_default_llm_slot_and_reaches_env_fallback() {
         let (_tmp, context) = RebornCliContext::test_context();
@@ -334,12 +327,9 @@ mod tests {
             "de-seeded stub must carry no `[llm.default]` slot at all: {config_text}"
         );
 
-        // No LLM env vars are set in this test process by default; a
-        // pre-existing `LLM_BACKEND`/provider env var in the ambient test
-        // environment would make this assertion environment-dependent, so
-        // this only pins the *shape* of the result (env fallback path is
-        // reached, not a stub-seeded slot short-circuiting it) rather than
-        // a specific `Some`/`None` outcome.
+        // A pre-existing LLM env var in the ambient test environment would make
+        // an exact outcome assertion environment-dependent, so this only pins
+        // the *shape*: env fallback reached, not a stub-seeded slot short-circuit.
         let resolved = ironclaw_reborn_composition::resolve_reborn_runtime_llm(
             context.boot_config(),
             Some(&config_file),

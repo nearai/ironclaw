@@ -307,9 +307,8 @@ impl WebuiAuthenticator for SessionAuthenticator {
             );
             return None;
         }
-        // Provenance-based, per `SessionRecord::operator`'s doc: never
-        // re-derive operator-ness from the bearer here, only stamp what was
-        // recorded at mint time.
+        // Never re-derive operator-ness from the bearer; only stamp what
+        // was recorded at mint time (see SessionRecord::operator doc).
         if record.operator {
             Some(WebuiAuthentication::operator(record.user_id))
         } else {
@@ -379,10 +378,8 @@ mod tests {
         assert!(!resolved.capabilities.operator_webui_config);
     }
 
-    // Provenance stamp: a session minted with `operator = true` (the
-    // "authenticated with the webui token" case, e.g. an operator-capable
-    // env-bearer check upstream of `create_session`) must authenticate as
-    // `WebuiAuthentication::operator`, not just `::user`.
+    // operator = true (webui-token-authenticated) must resolve to
+    // WebuiAuthentication::operator, not just ::user.
     #[tokio::test]
     async fn session_minted_as_operator_resolves_to_operator_capabilities() {
         let store = Arc::new(InMemorySessionStore::new());
@@ -428,11 +425,8 @@ mod tests {
         );
     }
 
-    // Serialization compat: a `SessionRecord` persisted before the
-    // `operator` field existed (or produced by a durable-backend
-    // implementation that hasn't added it to its wire schema yet) must
-    // deserialize with `operator = false` — fail closed to non-operator,
-    // never silently escalate an old record.
+    // Fail-closed: a SessionRecord persisted before `operator` existed must
+    // deserialize with operator = false, never silently escalate.
     #[test]
     fn pre_fix_session_record_json_without_operator_field_deserializes_non_operator() {
         let json = serde_json::json!({

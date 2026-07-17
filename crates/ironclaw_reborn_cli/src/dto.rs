@@ -14,49 +14,38 @@ pub(crate) struct StatusDto {
     pub providers_file: FilePresence,
     pub model_slots: Vec<String>,
     pub drivers: DriversSnapshot,
-    /// The CLI-token `/login?token=` bootstrap link (see
-    /// `webui_token::login_link`), present only when a valid
-    /// `webui-token` file exists under `reborn_home`. `None` on a build
-    /// without the `webui-v2-beta` feature, where there is no `serve` to
-    /// link into.
+    /// CLI-token `/login?token=` bootstrap link, present only when a valid
+    /// `webui-token` file exists under `reborn_home`. `None` without the
+    /// `webui-v2-beta` feature.
     ///
-    /// `#[serde(skip_serializing)]`: this carries a live bearer token in the
-    /// query string (`/login?token=<bearer>`). `status --json` output is
-    /// diagnostic data that gets pasted into issues, logs, and support
-    /// threads — it must never leak a credential that grants webui access.
-    /// The human-readable text renderer (`Renderable::render_text_to` below)
-    /// reads this field directly, not through serde, so the terminal
-    /// `login_link:` line printed for a human operator is unaffected.
+    /// `skip_serializing`: carries a live bearer token in the query string;
+    /// `status --json` is diagnostic data pasted into issues/logs and must
+    /// never leak it. The text renderer reads this field directly, not
+    /// through serde, so the terminal `login_link:` line is unaffected.
     #[serde(skip_serializing)]
     pub login_link: Option<String>,
     /// `Some` when `serve` will authenticate off an active env var rather
-    /// than the token file (see `webui_token::LoginLinkAnnouncement`) —
-    /// mutually exclusive with `login_link`. Carries no secret, unlike
-    /// `login_link`, so it is not `skip_serializing`.
+    /// than the token file — mutually exclusive with `login_link`. Carries
+    /// no secret, so not `skip_serializing`.
     pub login_note: Option<String>,
-    /// Whether the OS-managed service (`ironclaw-reborn service`) is
-    /// actually running, queried live (not inferred from config/state file
-    /// presence) — see `commands::status::build_status_dto`. `Unknown` on a
-    /// detection error or an unsupported platform; `status` must never
-    /// fail over this.
+    /// Whether the OS-managed service is actually running, queried live
+    /// (not inferred from file presence). `Unknown` on detection
+    /// error/unsupported platform; `status` must never fail over this.
     pub service: ServiceStateDto,
 }
 
-/// Live OS-service lifecycle state as reported by `status`. Mirrors
-/// `commands::service::ServiceState`, redefined here (rather than
-/// `#[serde]`-deriving directly on that type) because `commands::service`
-/// is gated behind the `webui-v2-beta` feature and this DTO must exist —
-/// with an `Unknown` fallback — on every build.
+/// Live OS-service lifecycle state. Mirrors `commands::service::ServiceState`,
+/// redefined here rather than deriving `Serialize` on that type directly
+/// because it's gated behind `webui-v2-beta` and this DTO must exist (with
+/// an `Unknown` fallback) on every build.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "kebab-case")]
 pub(crate) enum ServiceStateDto {
     Running,
     Stopped,
     NotInstalled,
-    /// Detection failed (unsupported platform, OS-service-manager query
-    /// error) or the `webui-v2-beta` feature — which owns service
-    /// management — is not compiled in. Distinct from `NotInstalled`: this
-    /// means "we don't know", not "we know it isn't installed".
+    /// Detection failed, or `webui-v2-beta` isn't compiled in. Distinct
+    /// from `NotInstalled`: "we don't know" vs. "we know it isn't installed".
     Unknown,
 }
 

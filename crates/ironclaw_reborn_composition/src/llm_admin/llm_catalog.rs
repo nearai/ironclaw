@@ -155,30 +155,17 @@ pub fn resolve_llm_selection_against_catalog(
     resolve_against_registry(selection, &registry)
 }
 
-/// Resolve a selection the same way [`resolve_llm_selection_against_catalog`]
-/// does, except a required-but-unset API key env var does not fail
-/// resolution: the selected provider is treated as keyless for this
-/// resolution only, producing a config with no API key set.
+/// Resolve a selection like [`resolve_llm_selection_against_catalog`], but
+/// tolerate a required key whose env var isn't set — treats the provider as
+/// keyless for this resolution only.
 ///
-/// This exists for the CLI runtime seam
-/// (`ironclaw_reborn_cli::runtime::build_runtime_input_with_options`), which
-/// calls it only after independently confirming a key is durably stored in
-/// the local secret store for this provider — the same store
-/// `apply_startup_stored_llm_key` reads from moments later at startup to
-/// overlay the stored key onto the config this function returns. This
-/// function itself stays store-agnostic (pure catalog/selection resolution)
-/// so the store lookup lives in exactly one place: the CLI call site.
-///
-/// Never masks a real misconfiguration: normal (non-keyless) resolution is
-/// tried first, and the keyless retry only kicks in on the exact
-/// `ApiKeyEnvUnset` outcome (a required key whose configured env var simply
-/// isn't set — the case this function exists to tolerate, because the
-/// caller has already confirmed a key is durably stored). Any other error —
-/// notably `ApiKeyEnvUnconfigured`, a catalog entry that requires a key but
-/// has no `api_key_env` to even name — propagates unconditionally instead
-/// of being silently retried keyless, which would otherwise turn a genuine
-/// catalog misconfiguration into a config with no API key set and no error
-/// at all.
+/// - Caller: CLI runtime seam (`build_runtime_input_with_options`), only
+///   after it has independently confirmed a key is durably stored locally.
+/// - Store-agnostic by design: the store lookup stays at the call site;
+///   `apply_startup_stored_llm_key` overlays the stored key at startup.
+/// - Retries keyless only on the exact `ApiKeyEnvUnset` outcome. Any other
+///   error (e.g. `ApiKeyEnvUnconfigured`) propagates unchanged — never masks
+///   a genuine catalog misconfiguration.
 pub fn resolve_llm_selection_allow_missing_key(
     selection: &LlmSlotSelection,
     user_providers_path: Option<&Path>,
@@ -189,10 +176,7 @@ pub fn resolve_llm_selection_allow_missing_key(
 }
 
 /// Registry-level counterpart of [`resolve_llm_selection_allow_missing_key`],
-/// factored out so it's directly unit-testable against a synthetic
-/// registry (mirrors `resolve_against_registry`'s relationship to
-/// [`resolve_llm_selection_against_catalog`]) without touching the
-/// filesystem.
+/// unit-testable against a synthetic registry without touching the filesystem.
 fn resolve_allow_missing_key_against_registry(
     selection: &LlmSlotSelection,
     registry: &ProviderRegistry,
@@ -211,10 +195,9 @@ fn resolve_allow_missing_key_against_registry(
     }
 }
 
-/// Clone `registry`, marking the catalog entry matching `provider_id`
-/// (by id or alias, case-insensitively — matching [`ProviderRegistry::find`]'s
-/// own lookup) as `api_key_required = false`. Every other entry, and every
-/// other field on the matched entry, is unchanged.
+/// Clones `registry`, marking the entry matching `provider_id` (by id or
+/// alias, case-insensitive, matching [`ProviderRegistry::find`]) as
+/// `api_key_required = false`. Nothing else changes.
 fn registry_with_provider_treated_as_keyless(
     registry: &ProviderRegistry,
     provider_id: &str,
@@ -633,11 +616,9 @@ mod tests {
         assert!(matches!(err, RebornLlmCatalogError::ApiKeyEnvUnset { .. }));
     }
 
-    /// Companion to `missing_required_api_key_env_fails_closed`: the same
-    /// unset-env-var setup must resolve successfully (with no API key on
-    /// the resulting config) once the CLI runtime seam's keyless override
-    /// is applied. This is the seam `build_runtime_input_with_options`
-    /// exercises after confirming a stored key exists.
+    /// Companion to `missing_required_api_key_env_fails_closed`: with the
+    /// keyless override applied, the same unset-env-var setup must resolve
+    /// (no API key on the resulting config).
     #[test]
     fn allow_missing_key_resolves_a_required_key_provider_without_the_env_var_set() {
         let env_name = "REBORN_TEST_UNSET_API_KEY_ALLOW_MISSING_DO_NOT_SET_7d2b";
@@ -660,14 +641,9 @@ mod tests {
         );
     }
 
-    /// Coderabbit fix: before this fix, `resolve_llm_selection_allow_missing_key`
-    /// unconditionally retried keyless — even for a provider whose catalog
-    /// entry is genuinely misconfigured (`api_key_required = true` but no
-    /// `api_key_env` to even name). That masked a real
-    /// `ApiKeyEnvUnconfigured` misconfiguration as a silent keyless
-    /// resolution. Only the exact `ApiKeyEnvUnset` outcome (a configured env
-    /// var that's simply unset) may retry keyless now; every other error,
-    /// including this one, must propagate unchanged.
+    /// A provider with `api_key_required = true` but no `api_key_env` must
+    /// surface `ApiKeyEnvUnconfigured`, not be silently retried keyless —
+    /// only the exact `ApiKeyEnvUnset` outcome may retry keyless.
     #[test]
     fn allow_missing_key_does_not_mask_a_missing_api_key_env_configuration() {
         let malformed = ProviderDefinition {

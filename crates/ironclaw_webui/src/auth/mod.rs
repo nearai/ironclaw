@@ -24,8 +24,7 @@ mod config;
 mod error;
 mod github;
 mod google;
-// `pub(crate)`: `cli_token_login` reuses `pending::sanitize_redirect` for
-// its own `redirect_after` setter (see that fn's doc).
+// pub(crate): cli_token_login reuses pending::sanitize_redirect (see its doc).
 pub(crate) mod pending;
 mod profile;
 mod provider;

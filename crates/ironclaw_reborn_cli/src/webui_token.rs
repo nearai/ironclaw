@@ -300,16 +300,13 @@ fn write_token_file(path: &Path, token: &str) -> anyhow::Result<()> {
 }
 
 /// Which of [`resolve_webui_token`]'s two sources produced the resolved
-/// bearer token. Distinguishing this matters beyond logging: `serve` only
-/// mounts the CLI-printed `/login?token=` route
-/// (`ironclaw_reborn_webui_ingress::build_cli_token_login`) when the token
-/// came from the file — a Railway-shaped deployment sources its token from
-/// an env var, and mounting a public route that accepts that same master
-/// bearer as a URL query string would let it leak into edge/proxy access
-/// logs. See `commands::serve::execute`'s `cli_login_mount` and
-/// `commands::onboard`/`commands::status`'s login-link printers, which both
-/// need to know the source to avoid advertising a link to a route that
-/// won't be mounted.
+/// bearer token. `serve` only mounts the CLI-printed `/login?token=` route
+/// when the token came from the file — an env-sourced token (e.g. a
+/// Railway-shaped deployment) must never appear in that route's query
+/// string, where it would leak into edge/proxy access logs. See
+/// `commands::serve::execute`'s `cli_login_mount` and the
+/// `onboard`/`status` login-link printers, which need the source to avoid
+/// advertising a link to an unmounted route.
 #[cfg(feature = "webui-v2-beta")]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum WebuiTokenSource {
@@ -408,24 +405,16 @@ pub(crate) fn resolve_webui_token(
     }
 }
 
-/// `true` when `serve` will source its webui bearer token from the operator's
-/// env var (`env_var_name`, default `IRONCLAW_REBORN_WEBUI_TOKEN`) rather
-/// than the onboarding-provisioned token file — i.e. the same precedence
-/// check [`resolve_webui_token`] makes for its first branch, exposed
-/// standalone so `onboard`'s finale and `status`'s login-link resolver can
-/// decide whether to print a login link at all: a file-token link is
-/// useless (and the route it points at isn't even mounted — see
-/// [`WebuiTokenSource`]'s doc) when the env var is what `serve` will
-/// actually honor.
+/// `true` when `serve` will source its webui bearer token from the env var
+/// rather than the token file — the same precedence check
+/// [`resolve_webui_token`] makes, exposed standalone so `onboard`/`status`
+/// can decide whether printing a file-token link is even useful.
 ///
-/// Returns `Ok(false)` only for a genuinely unset/empty var
-/// (`VarError::NotPresent`, or present-but-empty). A present-but-not-UTF-8
-/// value (`VarError::NotUnicode`) is `Err`, not `Ok(false)`: reusing
-/// `commands::serve::present_unicode_env_var`'s own unset-vs-not-unicode
-/// distinction means `onboard`/`status` can't disagree with `serve` about
-/// whether the env var is "active" — before this fix,
-/// `std::env::var(..).is_ok_and(..)` silently read a mangled-UTF-8 token
-/// as "inactive" here while `serve` itself fails closed on the same value.
+/// `Ok(false)` only for a genuinely unset/empty var. A present-but-not-UTF-8
+/// value is `Err`, not `Ok(false)` — reuses
+/// `commands::serve::present_unicode_env_var`'s unset-vs-not-unicode
+/// distinction so `onboard`/`status` can't disagree with `serve` about
+/// whether the var is "active".
 #[cfg(feature = "webui-v2-beta")]
 pub(crate) fn env_token_is_active(env_var_name: &str) -> anyhow::Result<bool> {
     Ok(
@@ -436,10 +425,9 @@ pub(crate) fn env_token_is_active(env_var_name: &str) -> anyhow::Result<bool> {
 
 /// Resolve which env var name gates the webui bearer token: the operator's
 /// `[webui].env_token_var` override when set, else
-/// `commands::serve::DEFAULT_ENV_TOKEN_VAR`. Shared by `onboard`'s finale and
-/// `status`'s login-link resolver, both of which need to check
-/// [`env_token_is_active`] against the *same* name `commands::serve::execute`
-/// itself resolves against, so the two can never drift onto different names.
+/// `commands::serve::DEFAULT_ENV_TOKEN_VAR`. Shared so `onboard`/`status`
+/// check [`env_token_is_active`] against the same name `serve` resolves
+/// against.
 #[cfg(feature = "webui-v2-beta")]
 pub(crate) fn resolve_env_token_var_name(
     config_file: Option<&ironclaw_reborn_config::RebornConfigFile>,
@@ -512,20 +500,12 @@ fn validate_token_entropy(
     ))
 }
 
-/// The CLI-printed bootstrap link into the browser session (see
-/// `ironclaw_reborn_webui_ingress::cli_token_login`'s module doc for the
-/// flow it plugs into) — `Some` only when a valid `webui-token` file is
-/// present (it always is right after `ensure_webui_token_file` runs, but
-/// this is also called from contexts, like `status`, where onboarding may
-/// not have run). Uses `serve`'s own default host:port constants rather
-/// than duplicating the literals — see their doc comment in
-/// `commands/serve.rs`.
-///
-/// Shared home for both callers that print a login link
-/// (`commands::onboard::OnboardCommand::finish_with_service_and_login_link`
-/// and `commands::status::resolve_login_link`) so the host:port/token
-/// construction lives in exactly one place rather than being re-derived
-/// per caller.
+/// The CLI-printed bootstrap link into the browser session — `Some` only
+/// when a valid `webui-token` file is present (may not be true in
+/// contexts like `status`, where onboarding may not have run). Uses
+/// `serve`'s own default host:port constants. Shared by every caller that
+/// prints a login link (`onboard`, `status`) so the construction lives in
+/// one place.
 #[cfg(feature = "webui-v2-beta")]
 pub(crate) fn login_link(home: &ironclaw_reborn_config::RebornHome) -> Option<String> {
     if !webui_token_file_is_valid(home.path()).unwrap_or(false) {
@@ -909,11 +889,8 @@ mod tests {
     #[test]
     fn env_token_is_active_propagates_not_unicode_instead_of_treating_it_as_inactive() {
         // Mirrors `commands::serve::present_unicode_env_var_propagates_not_unicode_instead_of_treating_it_as_unset`:
-        // before this fix, `std::env::var(..).is_ok_and(..)` collapsed a
-        // mangled-UTF-8 token env var to `Ok(false)` ("inactive"), so
-        // `onboard`/`status` would print a login link (or no note at all)
-        // while `serve` itself fails closed on the same value — a real
-        // disagreement between the two, not a degradation.
+        // a mangled-UTF-8 token env var must not collapse to "inactive"
+        // here while `serve` itself fails closed on the same value.
         use std::os::unix::ffi::OsStringExt as _;
 
         let _guard = crate::runtime::test_env::lock_runtime_env();

@@ -3506,27 +3506,18 @@ where
 /// local-dev [`CompositeRootFilesystem`] (project mounts, extension mounts,
 /// trigger/project repositories, …).
 ///
-/// This is the pre-composition entry point `ironclaw-reborn onboard` needs:
-/// onboard must write a provider API key into the encrypted store before a
-/// full build-input-driven build exists, and reconstructing the entire
-/// composite filesystem just to reach one mount would be both heavy and
-/// risky (any future composite-mount addition could silently diverge
-/// onboard's copy from `serve`'s). `/secrets`'s physical backing is just the
-/// single local-dev libSQL file (`open_local_dev_libsql_database`) — the
-/// same file `build_local_dev_root_filesystem` opens for the `/tenants`
-/// mount in production — so this opener reaches the same physical storage
-/// `serve` later opens, with no new coordination between the two: a key
-/// onboard writes here is immediately visible to `serve`.
-///
-/// Uses the same resolver chain as production (`explicit_master_key: None`
-/// -> env / cached dotfile / OS keychain / generate-and-cache, all inside
-/// [`build_local_dev_secret_store`]), so onboard and `serve` agree on the
-/// master key without either one special-casing the other.
-///
-/// Running `run_migrations()` here and again when `serve` later opens the
-/// full composite is safe — it's already relied on as idempotent elsewhere
-/// (`open_local_dev_secret_store_is_visible_across_reopens_of_the_same_root`,
-/// and the local-dev rebuild coverage in this module's own test suite).
+/// - Pre-composition entry point `ironclaw-reborn onboard` needs: it must
+///   write a provider API key before a full build-input-driven build exists,
+///   and reconstructing the whole composite just to reach one mount is
+///   heavy and risks silently diverging from `serve`'s copy.
+/// - `/secrets`'s physical backing is the same local-dev libSQL file
+///   `build_local_dev_root_filesystem` opens for `/tenants` in production —
+///   a key written here is immediately visible to `serve`, no extra
+///   coordination needed.
+/// - Uses the same resolver chain as production (env -> cached dotfile ->
+///   OS keychain -> generate-and-cache, via [`build_local_dev_secret_store`]).
+/// - `run_migrations()` here and again on `serve`'s later open is safe —
+///   already relied on as idempotent elsewhere in this module's tests.
 #[cfg(feature = "libsql")]
 pub async fn open_local_dev_secret_store(
     root: &Path,
@@ -3813,18 +3804,14 @@ pub enum LocalDevKeychainMasterKeyOutcome {
 }
 
 /// Facade over `ironclaw_secrets::keychain` for onboarding's OS-keychain
-/// master-key provisioning step, so callers outside this crate (namely
-/// `ironclaw_reborn_cli`) don't need their own dependency on
-/// `ironclaw_secrets` just to provision a keychain-backed key — see
-/// `crates/ironclaw_architecture/tests/reborn_dependency_boundaries.rs::reborn_cli_binary_crate_stays_separate_from_v1_root`,
-/// which pins `ironclaw_reborn_cli`'s allowed workspace dependency set.
+/// master-key provisioning step.
 ///
-/// If there is no key in the keychain yet, generates and stores one; a
-/// second call (keychain already populated) is a no-op returning
-/// `AlreadyPresent`. Never returns an error: an unavailable/denied keychain
-/// is reported via `Suppressed`, matching
-/// `resolve_local_dev_secret_master_key_with_env`'s own env/dotfile
-/// fallback.
+/// - Lets callers outside this crate (`ironclaw_reborn_cli`) avoid their own
+///   `ironclaw_secrets` dependency — pinned by
+///   `reborn_dependency_boundaries.rs::reborn_cli_binary_crate_stays_separate_from_v1_root`.
+/// - No key yet -> generate + store; already populated -> no-op `AlreadyPresent`.
+/// - Never returns an error: unavailable/denied keychain reports `Suppressed`,
+///   matching `resolve_local_dev_secret_master_key_with_env`'s env/dotfile fallback.
 #[cfg(any(feature = "libsql", feature = "postgres"))]
 pub async fn provision_local_dev_keychain_master_key() -> LocalDevKeychainMasterKeyOutcome {
     if ironclaw_secrets::keychain::has_master_key().await {
@@ -6516,14 +6503,10 @@ mod tests {
         let root = dir.path();
         let key_path = root.join(LOCAL_DEV_SECRETS_MASTER_KEY_PATH);
 
-        // Seed a valid cached key directly (not through the resolver): this
-        // test is about the empty-env/cached-file precedence, not the
-        // keychain step, so seeding must not exercise
-        // `ironclaw_secrets::keychain::get_master_key` — this crate is
-        // `#![forbid(unsafe_code)]` and cannot suppress the OS keychain via
-        // `IRONCLAW_DISABLE_OS_KEYCHAIN` in-process (see the fallthrough
-        // test in `tests/facade_factory.rs`), so an unsuppressed call here
-        // would hit the real OS keychain.
+        // Seed directly (not through the resolver): this test is about
+        // empty-env/cached-file precedence, not the keychain step, and this
+        // crate can't suppress the OS keychain in-process (`forbid(unsafe_code)`
+        // blocks `set_var`; see the fallthrough test in `tests/facade_factory.rs`).
         std::fs::write(
             &key_path,
             ironclaw_secrets::keychain::generate_master_key_hex(),
@@ -6680,18 +6663,11 @@ mod tests {
     // The keychain-fallthrough + idempotency test for
     // `resolve_local_dev_secret_master_key_with_env` lives in
     // `tests/facade_factory.rs`
-    // (`local_dev_secret_store_falls_through_suppressed_keychain_to_dotfile`),
-    // not here: this crate is `#![forbid(unsafe_code)]`
-    // (`crates/ironclaw_reborn_composition/src/lib.rs:1`), and proving the
-    // fallthrough requires actually setting the real process env var
-    // `IRONCLAW_DISABLE_OS_KEYCHAIN` so `ironclaw_secrets::keychain::get_master_key`
-    // (which reads raw `std::env`, not this crate's env-override overlay)
-    // observes it — `std::env::set_var` is `unsafe` under edition 2024, which
-    // `forbid(unsafe_code)` blocks even inside `#[cfg(test)]` code in this
-    // module. `tests/*.rs` integration binaries are separate crates the
-    // `forbid` attribute does not reach, and already hold the established
-    // `EnvVarGuard`/unsafe-env-mutation convention for this exact class of
-    // test (see `facade_factory.rs`'s `SECRETS_MASTER_KEY_ENV_LOCK`).
+    // (`local_dev_secret_store_falls_through_suppressed_keychain_to_dotfile`):
+    // proving it needs the real process env var `IRONCLAW_DISABLE_OS_KEYCHAIN`
+    // set, and `set_var` is `unsafe` — blocked here by this crate's
+    // `forbid(unsafe_code)` even in `#[cfg(test)]`. `tests/*.rs` binaries are
+    // separate crates the `forbid` doesn't reach.
 
     #[tokio::test]
     async fn local_dev_gsuite_installs_activates_and_dispatches_through_host_runtime() {

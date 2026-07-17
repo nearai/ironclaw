@@ -99,9 +99,8 @@ chrono = { version = "0.4", features = ["serde"] }
 hex = "0.4.3"
 clap = { version = "4", features = ["derive", "env"] }
 clap_complete = "4.5.0"
-# Masked (echo-suppressed) API-key prompt in `onboard`. Same crate/major
-# version v1's setup wizard already uses for identical secret-input masking
-# (`src/setup/prompts.rs::secret_input`) — reused here rather than adding a
+# Masked (echo-suppressed) API-key prompt in `onboard`. Same crate v1's setup
+# wizard uses for secret-input masking — reused here rather than adding a
 # second terminal-masking dependency.
 crossterm = "0.29"
 dotenvy = "0.15"
@@ -145,18 +144,17 @@ ironclaw_reborn_composition = { path = "../ironclaw_reborn_composition", version
 # reached solely from `#[cfg(test)]` code in `runtime::test_env`.
 ironclaw_common = { path = "../ironclaw_common", version = "0.4.2" }
 # Unconditional (not the feature-gated `dep:async-trait` optional dependency
-# above): `commands::onboard::mod`'s RED test for the write-first-then-config
-# ordering (item 2, onboarding review fixes) implements a fake
-# `ironclaw_secrets::SecretStore` whose `put` always fails, which needs
-# `#[async_trait::async_trait]` in every feature combination `cargo test`
-# runs, not just under `webui-v2-beta`.
+# above): `commands::onboard::mod`'s write-first-then-config-ordering test
+# implements a fake `ironclaw_secrets::SecretStore` whose `put` always fails,
+# needing `#[async_trait::async_trait]` in every feature combination `cargo
+# test` runs, not just under `webui-v2-beta`.
 async-trait = "0.1"
-# Same RED test's fake `SecretStore` impl takes `ResourceScope` /
-# `SecretHandle` / `Timestamp` in its trait method signatures.
+# Same fake `SecretStore` impl takes `ResourceScope` / `SecretHandle` /
+# `Timestamp` in its trait method signatures.
 ironclaw_host_api = { path = "../ironclaw_host_api", version = "0.1.0" }
-# Same RED test's fake `SecretStore` impl (`FailingSecretStore` in
-# `commands::onboard::mod`'s tests) implements `ironclaw_secrets::SecretStore`
-# directly; production onboarding code only ever touches secrets through
+# Same fake `SecretStore` impl (`FailingSecretStore` in `commands::onboard::mod`'s
+# tests) implements `ironclaw_secrets::SecretStore` directly; production
+# onboarding code only ever touches secrets through
 # `ironclaw_reborn_composition::LlmKeyStore`'s facade (`put_plaintext`), so
 # this stays a dev-only dependency — see
 # `crates/ironclaw_architecture/tests/reborn_dependency_boundaries.rs::reborn_cli_binary_crate_stays_separate_from_v1_root`.

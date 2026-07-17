@@ -1625,14 +1625,9 @@ fn serve_fails_closed_when_env_bearer_token_var_is_unset() {
 #[cfg(feature = "webui-v2-beta")]
 #[test]
 fn serve_boots_without_user_id_env_var() {
-    // Regression for the Railway/service-install crash-loop root cause: a
-    // launchd/systemd/Railway unit whose environment carries only
-    // HOME/PROFILE (see serve_invocation.rs) never sets
-    // IRONCLAW_REBORN_WEBUI_USER_ID. `serve` previously hard-failed before
-    // binding any listener; it must now fall back to the config file's
-    // `[identity].default_owner` (or the hard-coded "reborn-cli" default
-    // when `[identity]` is absent, as here, since no config.toml is
-    // seeded) instead of exiting.
+    // A unit env with only HOME/PROFILE and no IRONCLAW_REBORN_WEBUI_USER_ID
+    // must fall back to [identity].default_owner (or "reborn-cli" when
+    // absent) instead of hard-failing before binding a listener.
     let temp = tempfile::tempdir().expect("tempdir");
     let reborn_home = temp.path().join("reborn-home");
     let home = temp.path().join("home");
@@ -1645,10 +1640,8 @@ fn serve_boots_without_user_id_env_var() {
         .env("HOME", &home)
         .env("IRONCLAW_REBORN_HOME", &reborn_home)
         .env_remove("IRONCLAW_REBORN_PROFILE")
-        // >=32 bytes: must clear the token's own entropy floor (enforced by
-        // `webui_token::resolve_webui_token` as soon as the token is
-        // resolved, before the user-id var is read) so this test isolates
-        // the user-id-var-absent fallback it's meant to exercise.
+        // Token must be >=32 bytes so it clears its own entropy floor before
+        // the user-id fallback under test is reached.
         .env(
             "IRONCLAW_REBORN_WEBUI_TOKEN",
             "reborn-smoke-test-token-0123456789abcdef",
@@ -1664,21 +1657,12 @@ fn serve_boots_without_user_id_env_var() {
     let _ = child.wait();
 }
 
-/// Closes the test gap that let the launchd/systemd `WorkingDirectory` fix
-/// escape live to a user's machine: the unit-content tests only proved the
-/// directive was *present*, never that `serve` actually boots when launched
-/// from that cwd. Mirrors what the installed service now does — spawns the
-/// real binary with `.current_dir(<reborn_home>/workspace)`, exactly like
-/// `commands::service::{launchd,systemd}::install_with_runner` configure the
-/// unit/plist to do via `ensure_service_working_directory` — and asserts it
-/// reaches the ready banner.
-///
-/// Companion regression pin below
-/// (`serve_crash_loops_with_skill_root_overlap_when_cwd_is_reborn_home_itself`)
-/// proves this test actually discriminates: launching from the Reborn home
-/// itself (this crate's first, insufficient attempt at the fix) reproduces
-/// the exact "must not overlap default skill root" error this fix
-/// eliminates.
+/// Proves `serve` boots when launched with cwd=<reborn_home>/workspace, the
+/// cwd the installed launchd/systemd service now uses.
+/// - Regression: unit-content tests only checked `WorkingDirectory` was
+///   present, never that serve actually boots from it.
+/// - Companion negative test below shows the prior cwd (reborn_home itself)
+///   still fails, proving this test discriminates.
 #[cfg(feature = "webui-v2-beta")]
 #[test]
 fn serve_boots_from_the_workspace_subdir_the_installed_service_now_uses_as_cwd() {
@@ -1711,18 +1695,11 @@ fn serve_boots_from_the_workspace_subdir_the_installed_service_now_uses_as_cwd()
     let _ = child.wait();
 }
 
-/// Regression pin, companion to the test above: proves the fix is real by
-/// reproducing the bug it replaces. `WorkingDirectory` = the Reborn home
-/// itself (rather than `<reborn_home>/workspace`) was this crate's first
-/// attempt at the launchd/systemd crash-loop fix — it looked plausible
-/// (the plist correctly carried `WorkingDirectory=<reborn_home>`) but the
-/// Reborn home is an ancestor of every default local-dev skill/extension
-/// root (`<reborn_home>/local-dev/{skills,tenant-shared/skills,
-/// system/skills,system/extensions}` — see
-/// `ironclaw_reborn_composition::factory::validate_local_dev_workspace_skill_isolation`),
-/// so composition's prefix-based `paths_overlap` check still refused to
-/// boot. If a future change reverts the installer to cwd=reborn_home
-/// without noticing, this test fails loudly with the same error users saw.
+/// Companion regression pin: cwd=reborn_home itself (the crate's first,
+/// insufficient fix attempt) still fails, because reborn_home is an
+/// ancestor of the default local-dev skill/extension roots and trips
+/// composition's `paths_overlap` check. Guards against reverting the
+/// installer back to cwd=reborn_home.
 #[cfg(feature = "webui-v2-beta")]
 #[test]
 fn serve_crash_loops_with_skill_root_overlap_when_cwd_is_reborn_home_itself() {
@@ -1765,19 +1742,11 @@ fn serve_crash_loops_with_skill_root_overlap_when_cwd_is_reborn_home_itself() {
 #[cfg(feature = "webui-v2-beta")]
 #[test]
 fn a_real_env_var_beats_the_config_default_end_to_end() {
-    // Railway non-regression spine: the well-trodden Railway/service-install
-    // path (operator sets IRONCLAW_REBORN_WEBUI_USER_ID explicitly, no
-    // `[identity].default_owner` in config.toml) must keep booting after
-    // user-id resolution moved from a bare `env::var(...)?` into the shared
-    // `resolve_webui_user_id_raw` fallback helper. `[identity]` is
-    // deliberately left unset here: `resolve_webui_runtime_owner` rejects
-    // any *configured* `default_owner` that disagrees with the resolved
-    // WebUI user by design (see `webui_runtime_owner_rejects_divergent_config_owner`),
-    // so a config default that differs from the env value is a distinct,
-    // already-covered operator-misconfiguration case, not this one. Exact
-    // env-over-config-default precedence is pinned at the unit level by
-    // `webui_user_id_raw_prefers_a_set_nonempty_env_var`; this test proves
-    // the env-set path still reaches a bound listener end-to-end.
+    // Railway/service-install spine: operator sets IRONCLAW_REBORN_WEBUI_USER_ID
+    // explicitly with no [identity].default_owner configured; must still boot
+    // after user-id resolution moved into resolve_webui_user_id_raw.
+    // [identity] left unset deliberately — a configured default that diverges
+    // from env is a separate, already-covered misconfiguration case.
     let temp = tempfile::tempdir().expect("tempdir");
     let reborn_home = temp.path().join("reborn-home");
     let home = temp.path().join("home");
@@ -2375,16 +2344,10 @@ impl HttpResponse {
     }
 }
 
-/// RED (B4 step 1 / exchange-handler collision), narrowed by the
-/// file-vs-env token-source fix: with no SSO provider configured AND the
-/// resolved webui token sourced from the token FILE (not an env var —
-/// `serve` only mounts the CLI-login route for a file-sourced token; see
-/// `commands::serve::execute`'s `cli_login_mount` condition), `serve` must
-/// mount the CLI-printed `/login?token=` route
-/// (`ironclaw_reborn_webui_ingress::build_cli_token_login`) alongside its own
-/// `POST /auth/session/exchange`. A valid token redirects into the ticket
-/// hand-off; the ticket then resolves to a real session bearer through the
-/// exchange route. An invalid token gets a flat 401 with no ticket minted.
+/// With no SSO provider and a file-sourced webui token, `serve` must mount
+/// the CLI-printed `/login?token=` route plus `POST /auth/session/exchange`.
+/// A valid token redirects into the ticket hand-off, which then resolves to
+/// a real session bearer; an invalid token gets a flat 401.
 #[cfg(feature = "webui-v2-beta")]
 #[test]
 fn serve_mounts_cli_login_route_without_sso() {
@@ -2475,14 +2438,9 @@ fn serve_mounts_cli_login_route_without_sso() {
     );
 }
 
-/// Security fix: when the webui bearer token comes from the env var
-/// (`IRONCLAW_REBORN_WEBUI_TOKEN`, the Railway deployment shape — profile
-/// local-dev, no SSO, the env var set), `serve` must NOT mount the
-/// CLI-token `/login?token=` route. That route puts the bearer in a public
-/// route's URL query string, where an edge/proxy would capture it in access
-/// logs; a file-sourced token has no such env-carried master credential to
-/// protect. Port-contention flaky like its file-token sibling above — same
-/// spawn-and-poll isolation pattern.
+/// Security: an env-sourced webui bearer token must not get a mounted
+/// CLI-token `/login?token=` route — that route puts the bearer in a public
+/// URL query string, where an edge/proxy would capture it in access logs.
 #[cfg(feature = "webui-v2-beta")]
 #[test]
 fn serve_does_not_mount_cli_login_route_when_token_is_env_sourced() {
@@ -2524,12 +2482,10 @@ fn serve_does_not_mount_cli_login_route_when_token_is_env_sourced() {
     );
 }
 
-/// RED (B4 step 1 / exchange-handler collision): when an SSO provider IS
-/// configured, `serve` must NOT also mount the CLI-token-login route's own
-/// `/auth/session/exchange` — that would register the path twice. The SSO
-/// login surface's own exchange route stays the only one, proven here by the
-/// CLI-only `/login?token=` route being absent (404) while the SSO surface's
-/// `/auth/providers` stays up.
+/// With an SSO provider configured, `serve` must not also mount the
+/// CLI-token-login route's own `/auth/session/exchange` — that would
+/// register the path twice. Proven by the CLI-only `/login?token=` route
+/// being absent (404) while `/auth/providers` stays up.
 #[cfg(feature = "webui-v2-beta")]
 #[test]
 fn serve_with_sso_does_not_double_mount_session_exchange() {
@@ -2620,14 +2576,9 @@ fn strip_ansi(text: &str) -> String {
     out
 }
 
-/// Spawn-and-poll helper shared by the CLI-token-login tests above: block
-/// until `child`'s stderr carries the ready banner, matching the polling
-/// shape every other `serve` smoke test in this file hand-rolls inline.
-/// Returns everything captured on stderr up to and including the banner
-/// line, so callers that need to assert on pre-banner diagnostics (e.g. the
-/// resolved-LLM `debug!` trace emitted during boot, before
-/// `print_serve_banner` runs — see `runtime::build_runtime_input_with_options`)
-/// don't need their own stderr-draining thread.
+/// Blocks until `child`'s stderr carries the ready banner. Returns
+/// everything captured up to and including the banner line, so callers can
+/// also assert on pre-banner diagnostics without their own drain thread.
 #[cfg(feature = "webui-v2-beta")]
 fn wait_for_serve_banner(child: &mut std::process::Child) -> String {
     let stderr = child.stderr.take().expect("stderr should be piped");
@@ -3710,10 +3661,8 @@ fn onboard_bootstraps_reborn_home_without_touching_v1_state() {
 
 #[test]
 fn onboard_is_idempotent_for_the_webui_token_file() {
-    // The token doubles as `serve`'s session-signing key, so a re-run of
-    // `onboard` must never clobber a valid existing token — that would
-    // invalidate every signed session and any env var an operator copied
-    // from the first run.
+    // Token doubles as serve's session-signing key: re-running onboard must
+    // preserve it, or every signed session and copied env var breaks.
     let temp = tempfile::tempdir().expect("tempdir");
     let reborn_home = temp.path().join("reborn-home");
 
@@ -3749,33 +3698,17 @@ fn onboard_is_idempotent_for_the_webui_token_file() {
     );
 }
 
-/// RED (B4 step 5, capstone — rewritten for the de-seeded `[llm.default]`
-/// stub, thermo-approved design "config.toml is the single source of truth,
-/// written ONLY by explicit acts — no implicit seeding"): the full
-/// daemon-case journey through the real binary — `onboard` non-interactively
-/// (so it soft-skips LLM-credential prompts and OS-service install, matching
-/// a headless CI/first-boot environment with no terminal) with NO LLM
-/// environment variables set at all, then `serve` spawned with `env_clear()`
-/// and only `HOME`/`IRONCLAW_REBORN_HOME`/`IRONCLAW_DISABLE_OS_KEYCHAIN` — no
-/// `IRONCLAW_REBORN_WEBUI_TOKEN`/`_USER_ID` overrides.
-///
-/// Before this fix, `config.toml`'s stub always seeded a hardcoded `nearai`
-/// slot, so this test's old assertions pinned that stub-seeding bug: it
-/// asserted `provider_id = "nearai"` appeared in a fresh `config.toml` an
-/// operator never asked for. Now `onboard` writes NO `[llm.default]` slot
-/// when nothing was detected in the environment (see
-/// `commands::onboard::llm_credentials::provision_llm_credentials`'s
-/// doc) — non-LLM artifacts (webui-token, onboarding marker, login link)
-/// are still provisioned, and the printed output teaches how to configure
-/// an LLM afterward. `serve`'s runtime-LLM resolution is UNCHANGED (slot →
-/// env fallback → per-request fail-closed — see
-/// `runtime::build_runtime_input_with_options`): with neither a slot nor an
-/// env-resolvable provider, `resolve_reborn_runtime_llm` returns `Ok(None)`,
-/// which is NOT a boot-time hard failure — `serve` still binds its listener
-/// (matching `run`'s own `run_warns_when_falling_back_to_stub_gateway`
-/// degraded-boot behavior) but logs a `warn!` that runs will fail until an
-/// LLM is configured. This test pins BOTH halves: onboard's teaching output
-/// and de-seeded config, and serve's warn-but-still-bind runtime behavior.
+/// Full daemon-case journey: headless `onboard` (no LLM env set) followed by
+/// `serve` booted with no LLM overrides.
+/// - `onboard` must write NO `[llm.default]` slot when nothing is detected
+///   in env — config.toml is the single source of truth, seeded only by an
+///   explicit act. Non-LLM artifacts (webui-token, marker, login link) are
+///   still provisioned, and output teaches how to configure an LLM later.
+/// - `serve`'s runtime-LLM resolution is unchanged: no slot + no env means
+///   `resolve_reborn_runtime_llm` returns `Ok(None)`, which is not a
+///   boot-time hard failure — serve still binds but logs a `warn!`.
+/// - Pins both halves: onboard's teaching output/de-seeded config, and
+///   serve's warn-but-still-bind behavior.
 #[cfg(feature = "webui-v2-beta")]
 #[test]
 fn onboard_then_serve_boots_in_degraded_mode_with_an_empty_environment() {
@@ -3851,31 +3784,17 @@ fn onboard_then_serve_boots_in_degraded_mode_with_an_empty_environment() {
     let _ = child.wait();
 }
 
-/// Sibling of `onboard_then_serve_boots_in_degraded_mode_with_an_empty_environment`,
-/// closing the coverage gap that test's name implies: a headless onboard
-/// run WITH a complete `openai`-shape LLM environment (`OPENAI_API_KEY` AND
-/// `OPENAI_MODEL` set) must silently seed `[llm.default]` from it
-/// (`provision_headless_from_env`'s `ConfiguredFromEnv` branch, WRITING the
-/// slot to `config.toml`), and `serve` — booted later WITHOUT `OPENAI_MODEL`
-/// set — must resolve the PERSISTED model from that written slot, not a
-/// fresh env re-resolution (which would fall back to `openai`'s catalog
-/// default model, `gpt-5-mini`, once `OPENAI_MODEL` is gone). This is the
-/// bootable-daemon-case capstone that
-/// `onboard_then_serve_boots_in_degraded_mode_with_an_empty_environment`
-/// used to (incorrectly) exercise via a stub-baked `nearai` default.
-///
-/// Uses `openai` rather than `nearai`: `nearai`'s `api_key_required =
-/// false` means a fully env-resolvable `nearai` also satisfies the
-/// PRE-EXISTING idempotency short-circuit in `already_configured_outcome`
-/// (`RebornProviderAdmin::status`'s `active_llm_selection` already falls
-/// back to resolving straight from env when no slot is persisted) — that
-/// path reports `AlreadyConfigured` and returns before ever reaching the
-/// new env-detect-and-seed step, so nothing gets WRITTEN to `config.toml`
-/// (env alone stays sufficient every future boot too, so there is nothing
-/// to persist). `openai`'s idempotency check only ever looks at the
-/// persisted secret store, never at env, so a fresh store (this test's)
-/// lets the flow reach the new `ConfiguredFromEnv` branch and prove the
-/// WRITE actually happens.
+/// Sibling of `onboard_then_serve_boots_in_degraded_mode_with_an_empty_environment`:
+/// a headless onboard run WITH a complete `openai`-shape env (API key +
+/// model) must silently WRITE `[llm.default]` to config.toml, and a later
+/// `serve` booted without `OPENAI_MODEL` set must resolve the PERSISTED
+/// model, not a fresh env re-resolution (which would fall back to openai's
+/// catalog default).
+/// - Uses `openai`, not `nearai`: `nearai`'s `api_key_required = false`
+///   would hit the pre-existing idempotency short-circuit that resolves
+///   straight from env and never reaches the new write path. `openai`'s
+///   idempotency check only looks at the persisted secret store, so a
+///   fresh store here reaches the write and proves it happens.
 #[cfg(feature = "webui-v2-beta")]
 #[test]
 fn onboard_with_complete_llm_env_then_serve_boots_from_the_env_seeded_slot() {
@@ -3915,13 +3834,9 @@ fn onboard_with_complete_llm_env_then_serve_boots_from_the_env_seeded_slot() {
          env-detected model: {config_text}"
     );
 
-    // `serve`, booted WITHOUT `OPENAI_MODEL` set (only the key, which the
-    // slot's `api_key_env` still resolves from env — no key is ever
-    // stored, see `provision_llm_credentials`'s doc) must resolve the
-    // PERSISTED model from `config.toml`'s written slot, not silently fall
-    // back to `openai`'s catalog default. `IRONCLAW_REBORN_LOG` scopes the
-    // resolved-LLM `debug!` trace into view the same way
-    // `onboard_openai_key_then_serve_boots_with_env_var_unset` does.
+    // serve, booted without OPENAI_MODEL (only the key), must resolve the
+    // PERSISTED model from config.toml, not fall back to openai's catalog
+    // default. IRONCLAW_REBORN_LOG scopes the resolved-LLM debug! trace.
     let port = unused_local_port();
     let mut child = reborn_command()
         .args(["serve", "--host", "127.0.0.1", "--port"])
@@ -3952,27 +3867,14 @@ fn onboard_with_complete_llm_env_then_serve_boots_from_the_env_seeded_slot() {
     let _ = child.wait();
 }
 
-/// Full-chain capstone: `onboard`'s printed CLI-token login link must
-/// actually WORK once `serve` is up, and the session it mints must
-/// authorize a real request against the WebChat v2 API — not just bind a
-/// listener. Builds on
-/// `onboard_with_complete_llm_env_then_serve_boots_from_the_env_seeded_slot`'s
-/// setup — `NEARAI_MODEL` seeds the `[llm.default]` slot via onboard's
-/// headless env-detect step (`config.toml` is the single source of truth,
-/// written only by an explicit act — no implicit stub seeding), and
-/// `seed_stored_llm_key` additionally lands a key in the encrypted secret
-/// store to exercise the stored-key overlay path a real interactive
-/// onboarding run would also take (not required for `serve` to boot here:
-/// `nearai`'s `api_key_required` is `false`), then drives the HTTP
-/// mechanics `serve_mounts_cli_login_route_without_sso`
-/// already exercises (`GET /login?token=` → 302/303 with a `login_ticket` →
-/// `POST /auth/session/exchange` → bearer) starting from onboard's OWN
-/// provisioned token file instead of a hand-seeded one, and goes one step
-/// further: the exchanged bearer is used to authenticate a real
-/// `GET /api/webchat/v2/threads` call against the actually-composed
-/// `webui_v2_app` (real `RebornServicesApi`, not a stub), asserting a
-/// non-401/403 response — proving the login link's session is not just
-/// mintable but usable.
+/// Full-chain capstone: onboard's printed CLI-token login link must
+/// actually work once `serve` is up, and the minted session must authorize
+/// a real request against the composed WebChat v2 API — not just bind a
+/// listener.
+/// - Uses onboard's OWN provisioned token file (not a hand-seeded one) to
+///   drive the login → ticket → exchange flow, then goes one step further
+///   and uses the exchanged bearer to call the real `RebornServicesApi`,
+///   proving the session is mintable AND usable.
 #[cfg(feature = "webui-v2-beta")]
 #[test]
 fn onboard_login_link_then_bearer_authorizes_a_protected_request() {
@@ -4012,10 +3914,8 @@ fn onboard_login_link_then_bearer_authorizes_a_protected_request() {
         "onboard-provisioned webui-token must not be empty"
     );
 
-    // Additional stored-key seeding (not required for `serve` to boot here:
-    // the env-seeded `[llm.default]` slot is `nearai`, `api_key_required =
-    // false`) — exercises the stored-key overlay path a real interactive
-    // onboarding run would also take.
+    // Not required for serve to boot (nearai's api_key_required = false) but
+    // exercises the stored-key overlay path a real interactive run takes.
     seed_stored_llm_key(&reborn_home, "nearai", "nearai-smoke-test-session");
 
     let port = unused_local_port();
@@ -4030,10 +3930,8 @@ fn onboard_login_link_then_bearer_authorizes_a_protected_request() {
         .expect("ironclaw-reborn serve should start");
     wait_for_serve_banner(&mut child);
 
-    // 1. The onboard-provisioned token, presented at `/login?token=`,
-    //    must redirect into the ticket hand-off — this is the exact URL
-    //    `onboard` printed as `login_link:` above (minus the placeholder
-    //    port).
+    // 1. Onboard-provisioned token at /login?token= must redirect into the
+    //    ticket hand-off.
     let login = http_response(
         port,
         &format!(
@@ -4098,29 +3996,18 @@ fn onboard_login_link_then_bearer_authorizes_a_protected_request() {
         "exchanged bearer must not be empty"
     );
 
-    // 3. The exchanged bearer must authorize a REAL request against the
-    //    composed WebChat v2 API surface (production `RebornServicesApi`,
-    //    the same one `serve` wires for real traffic) — not merely be a
-    //    well-formed token. A regression that mints a bearer the auth
-    //    middleware then rejects (or that never reaches the real facade)
-    //    would slip past a test that stops at the exchange response.
+    // 3. The exchanged bearer must authorize a real request against the
+    //    production RebornServicesApi, not just be well-formed — catches a
+    //    bearer the auth middleware rejects.
     let api_request = format!(
         "GET /api/webchat/v2/threads HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer {}\r\nConnection: close\r\n\r\n",
         bearer.token
     );
     let api_response = http_response(port, &api_request, "authenticated protected-route probe");
 
-    // 4. USER-DECIDED LAW: authenticating with the webui token = operator/
-    //    admin, whether via raw `Authorization: Bearer` OR this
-    //    `/login?token=` link. So the exchanged bearer must ALSO authorize
-    //    an operator-gated route (`require_operator_webui_config` in
-    //    `crates/ironclaw_webui_v2/src/handlers.rs`), not just an ordinary
-    //    authenticated one — proving the login-link session actually
-    //    carries operator capabilities end to end, not merely a valid
-    //    identity. RED before the fix: `SessionAuthenticator::authenticate`
-    //    hardcoded `WebuiAuthentication::user(...)` for every session
-    //    bearer, so this 403'd even though the token that minted the
-    //    session verified against the operator-capable authenticator.
+    // 4. Authenticating with the webui token = operator/admin, whether via
+    //    raw Bearer or this login link — the bearer must also authorize an
+    //    operator-gated route, not just an ordinary authenticated one.
     let operator_request = format!(
         "GET /api/webchat/v2/operator/setup HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer {}\r\nConnection: close\r\n\r\n",
         bearer.token
@@ -4188,43 +4075,20 @@ fn seed_stored_llm_key(reborn_home: &Path, provider_id: &str, key: &str) {
     });
 }
 
-/// REGRESSION (review comments #4/#6): before the fix,
-/// `build_runtime_input_with_options` called `resolve_reborn_runtime_llm`
-/// directly, which fails closed on `ApiKeyEnvUnset` for an
-/// `api_key_required = true` provider (openai/anthropic) *before*
-/// `apply_startup_stored_llm_key` ever gets a chance to inject the key an
-/// operator stored through `onboard`/`models set-provider`. `onboard` itself
-/// never fails (it doesn't resolve the runtime LLM, just prompts and
-/// stores), so the bug only surfaced at the next `serve` boot — silently
-/// stranding an operator who had just "successfully" onboarded. `nearai`
-/// (`api_key_required = false`) never hit this path, which is why the
-/// existing daemon-case capstones
-/// (`onboard_then_serve_boots_in_degraded_mode_with_an_empty_environment` /
-/// `onboard_with_complete_llm_env_then_serve_boots_from_the_env_seeded_slot`)
-/// didn't catch it.
-///
-/// Crate smoke tier (spawns the real `ironclaw-reborn` binary), matching this
-/// file's other onboard/serve capstones' tier: the bug lives
-/// in `serve`'s pre-async-runtime boot sequence
-/// (`build_runtime_input_with_options`, called before `build_reborn_services`
-/// even starts), so only a real-process boot proves the ordering is fixed —
-/// an in-process integration-tier test would have to reconstruct that same
-/// boot sequence and couldn't observe the actual "does the process bind"
-/// outcome any more directly than spawning it does.
-///
-/// Also closes a coverage gap: the model an operator scripts through
-/// `models set-provider --model <model>` (the non-interactive equivalent of
-/// onboard's own model prompt — see the comment below) must be the model
-/// `serve` actually resolves for the runtime, not just A model. Asserted
-/// via the `debug!` trace `build_runtime_input_with_options` already emits
-/// at `runtime/mod.rs:676-680` (`"resolved LLM selection for Reborn
-/// runtime"`, fields `provider_id`/`model`) once scoped into view with
-/// `IRONCLAW_REBORN_LOG` (the crate's own env knob — see
-/// `runtime::init_tracing` — not `RUST_LOG`, and never `info!`/`warn!` for
-/// this per the REPL/TUI logging-level rule: `debug!` only). A deliberately
-/// non-default model name (`gpt-test-model`, distinct from `openai`'s
-/// catalog default) proves the resolved value flows all the way from the
-/// scripted answer, not a hardcoded fallback.
+/// A key stored via `onboard`/`models set-provider` for an
+/// `api_key_required = true` provider (openai/anthropic) must reach
+/// `serve`'s runtime resolution — `apply_startup_stored_llm_key` must run
+/// before `resolve_reborn_runtime_llm` fails closed on `ApiKeyEnvUnset`.
+/// `nearai` (`api_key_required = false`) never exercises this path, so the
+/// existing daemon-case capstones didn't catch it.
+/// - Crate smoke tier (real binary spawn): the bug lives in serve's
+///   pre-async-runtime boot sequence, so only a real-process boot proves
+///   the fix ordering.
+/// - Also proves the model scripted via `models set-provider --model` is
+///   the model `serve` actually resolves, not just A model — asserted via
+///   the resolved-LLM `debug!` trace, scoped into view with
+///   `IRONCLAW_REBORN_LOG` (never `info!`/`warn!` per the REPL/TUI logging
+///   rule). Uses a non-default model name to rule out a hardcoded fallback.
 #[cfg(feature = "webui-v2-beta")]
 #[test]
 fn onboard_openai_key_then_serve_boots_with_env_var_unset() {
@@ -4245,11 +4109,8 @@ fn onboard_openai_key_then_serve_boots_with_env_var_unset() {
         String::from_utf8_lossy(&onboard_output.stderr)
     );
 
-    // Point `[llm.default]` at `openai` (api_key_required = true) with a
-    // deliberately non-default model name, the same way an operator who ran
-    // `onboard`'s interactive credential prompt (which also asks for a
-    // model) would have ended up configured — `models set-provider` is the
-    // non-interactive equivalent this test drives instead of a terminal.
+    // models set-provider is the non-interactive equivalent of onboard's
+    // credential prompt; SCRIPTED_MODEL is deliberately non-default.
     const SCRIPTED_MODEL: &str = "gpt-test-model";
     let set_provider_output = reborn_command()
         .args([
@@ -4268,8 +4129,6 @@ fn onboard_openai_key_then_serve_boots_with_env_var_unset() {
         String::from_utf8_lossy(&set_provider_output.stderr)
     );
 
-    // Store the key the same way `onboard`'s interactive prompt would have
-    // — never in config.toml or the environment.
     seed_stored_llm_key(&reborn_home, "openai", "sk-smoke-test-stored-openai-key");
 
     let port = unused_local_port();
@@ -4279,15 +4138,8 @@ fn onboard_openai_key_then_serve_boots_with_env_var_unset() {
         .env("HOME", &home)
         .env("IRONCLAW_REBORN_HOME", &reborn_home)
         // No OPENAI_API_KEY: the stored key must be what makes this boot.
-        // Scoped to this crate (not a blanket `debug`) so the resolved-LLM
-        // trace is observable without flooding stderr with third-party
-        // crate noise `protect_reborn_log_filter` would otherwise still
-        // clamp anyway.
-        // Target is `ironclaw_reborn::runtime`: `tracing`'s default target
-        // is the compiled crate name, which for the `ironclaw-reborn`
-        // binary target (no separate lib crate) is the dash-to-underscore
-        // normalized BIN name — `ironclaw_reborn` — not the Cargo package
-        // name `ironclaw_reborn_cli` this test crate itself is compiled as.
+        // Target is `ironclaw_reborn` (the bin's normalized crate name, not
+        // the `ironclaw_reborn_cli` package this test itself compiles as).
         .env("IRONCLAW_REBORN_LOG", "info,ironclaw_reborn=debug")
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -4341,12 +4193,8 @@ fn serve_boots_with_env_api_key_set_and_empty_secret_store() {
         "onboard must succeed non-interactively; stderr: {}",
         String::from_utf8_lossy(&onboard_output.stderr)
     );
-    // Sanity: the de-seeded config stub carries no `[llm.default]` slot at
-    // all (config.toml is the single source of truth, written only by an
-    // explicit act) — this scenario boots purely off `NEARAI_API_KEY` at
-    // `serve` time via the env-fallback path (`resolve_reborn_runtime_llm`),
-    // matching Railway's env-var-driven deployment shape, and the secret
-    // store is never touched by this test.
+    // Sanity: config carries no [llm.default] slot; this boots purely off
+    // NEARAI_API_KEY via the env-fallback path, matching Railway's shape.
     let config_text =
         std::fs::read_to_string(reborn_home.join("config.toml")).expect("read seeded config.toml");
     assert!(
@@ -4406,11 +4254,9 @@ fn serve_fails_closed_when_neither_env_nor_store_has_the_key() {
     );
     // No `seed_stored_llm_key` call: the secret store stays empty.
 
-    // Not a blocking `.output()`: this test asserts an *expected* fail-closed
-    // exit, so a regression that makes `serve` bind a listener instead of
-    // exiting would otherwise hang this test (and CI) forever waiting on
-    // process exit. Spawn, poll `try_wait()` against a deadline, and kill on
-    // timeout instead.
+    // Spawn + poll try_wait() with a deadline instead of blocking .output():
+    // a regression that binds a listener instead of exiting must not hang
+    // this test (and CI) forever.
     let mut child = reborn_command()
         .args(["serve", "--host", "127.0.0.1", "--port", "0"])
         .env("HOME", &home)
@@ -4421,9 +4267,8 @@ fn serve_fails_closed_when_neither_env_nor_store_has_the_key() {
         .spawn()
         .expect("ironclaw-reborn serve should start");
 
-    // Drain stdout/stderr on background threads while polling for exit, so a
-    // full pipe buffer can never block the child from exiting (and thus
-    // block `try_wait()` from ever observing that exit).
+    // Drain stdout/stderr on background threads so a full pipe buffer can't
+    // block the child from exiting.
     let mut stdout_reader = child.stdout.take().expect("stdout should be piped");
     let stdout_thread = std::thread::spawn(move || {
         let mut buf = Vec::new();
@@ -4509,23 +4354,15 @@ fn onboard_prints_env_token_note_instead_of_login_link_when_env_token_is_set() {
     );
 }
 
-/// `status` companion to the onboard test above: reprinting the login link
-/// after onboarding must also respect the env-token precedence — *unless*
-/// `status` already knows the OS service isn't running, in which case that
-/// takes priority (see `commands::status::apply_service_suppression`):
-/// there is no point advertising any login credential, env-sourced or not,
-/// into a `serve` process that demonstrably isn't listening.
-///
-/// The service-state query is deliberately host-wide (`launchctl list` /
-/// `systemctl show`), not scoped to this test's temp `$HOME` — there is
-/// only one system service manager. So this test can't pin an exact
-/// `service:` value: on a clean CI runner it reads "not installed"; on a
-/// dev host that happens to have the real `ironclaw-reborn` service
-/// registered (including mid crash-loop — the bug this fix addresses) it
-/// may read "stopped" or even transiently "running". Assert the
-/// *invariant* instead — `login_link` is always absent, and `login_note`
-/// matches whichever branch the observed `service:` state took — rather
-/// than a specific state.
+/// `status` companion: reprinting the login link must also respect
+/// env-token precedence, unless `status` already knows the OS service isn't
+/// running, in which case that takes priority — no point advertising a
+/// login credential into a `serve` that isn't listening.
+/// - The service-state query is host-wide, not scoped to this test's temp
+///   $HOME, so the exact `service:` value can't be pinned (CI reads "not
+///   installed"; a dev host with the real service may read differently).
+///   Assert the invariant instead: `login_link` is always absent, and
+///   `login_note` matches whichever branch the observed state took.
 #[cfg(feature = "webui-v2-beta")]
 #[test]
 fn status_prints_env_token_note_instead_of_login_link_when_env_token_is_set() {
@@ -4804,18 +4641,13 @@ fn onboard_with_force_overwrites_existing_files_and_marker() {
     assert_eq!(marker["schema_version"], "ironclaw.reborn.onboarding/v1");
 }
 
-/// `onboard` provisions a local-dev secrets master key: with no cached
-/// `.reborn-local-dev-secrets-master-key` dotfile and no OS-keychain entry,
-/// it generates one and stores it in the keychain. This CI/test spawn (a
-/// real compiled binary, not `cargo test`'s `cfg!(test)`) sets
-/// `IRONCLAW_DISABLE_OS_KEYCHAIN=1`, which suppresses that OS keychain write
-/// (`ironclaw_secrets::keychain::store_master_key` fails closed under
-/// suppression — see `crates/ironclaw_secrets/src/keychain.rs`), so this
-/// pins the "headless Linux / denied prompt" fallback path specifically: the
-/// command must print the `SECRETS_MASTER_KEY`/dotfile fallback note and
-/// still exit 0, never fail onboarding just because the keychain step
-/// provisioned nothing. Verifying an actual successful keychain write needs
-/// a real OS keychain and is manual/E2E only (not unit-testable in CI).
+/// With no cached master-key dotfile and the OS keychain suppressed
+/// (`IRONCLAW_DISABLE_OS_KEYCHAIN=1`, this test's real-binary equivalent of
+/// a headless Linux / denied prompt), onboard must print the
+/// SECRETS_MASTER_KEY/dotfile fallback note and still exit 0 — never fail
+/// onboarding just because the keychain step provisioned nothing. A real
+/// successful keychain write needs an actual OS keychain and stays
+/// manual/E2E only.
 #[test]
 fn onboard_reports_suppressed_master_key_fallback_and_still_succeeds() {
     let temp = tempfile::tempdir().expect("tempdir");
@@ -4841,9 +4673,8 @@ fn onboard_reports_suppressed_master_key_fallback_and_still_succeeds() {
         stdout.contains("master_key_note:") && stdout.contains("SECRETS_MASTER_KEY"),
         "stdout must print the SECRETS_MASTER_KEY/dotfile fallback note: {stdout}"
     );
-    // The suppressed keychain path must not itself create the dotfile —
-    // that remains the resolver's own auto-gen-on-first-boot job (B1's
-    // `resolve_local_dev_secret_master_key_with_env`), not onboarding's.
+    // Dotfile creation stays the resolver's own auto-gen-on-first-boot job,
+    // not onboarding's.
     assert!(
         !reborn_home
             .join(".reborn-local-dev-secrets-master-key")

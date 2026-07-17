@@ -1,14 +1,12 @@
 //! Caller-level tests for the CLI-token `/login?token=` route (B4).
 //!
-//! Drives the unauthenticated `Router` returned by
-//! [`build_cli_token_login`] through `tower::ServiceExt::oneshot`,
-//! mirroring `google_oauth_routes.rs`'s pattern for the OAuth
-//! callback: a valid token mints a session and redirects the SPA
-//! with a one-time `login_ticket`, which `POST /auth/session/exchange`
-//! then redeems for the real bearer (the SPA's existing
-//! `exchangeLoginTicket` call, per `crates/ironclaw_webui/frontend/
-//! src/lib/api.ts:747-767` — no new frontend code). A wrong token
-//! 401s and mints no ticket; a redeemed ticket is single-use.
+//! Drives the unauthenticated `Router` from [`build_cli_token_login`] via
+//! `tower::ServiceExt::oneshot`, mirroring `google_oauth_routes.rs`'s
+//! OAuth-callback pattern:
+//! - valid token → mints a session, redirects with a one-time `login_ticket`
+//! - `POST /auth/session/exchange` redeems it for the real bearer (same
+//!   contract the SPA's `exchangeLoginTicket` already uses)
+//! - wrong token → 401, no ticket minted; a redeemed ticket is single-use
 
 use std::sync::Arc;
 
@@ -122,9 +120,8 @@ async fn valid_token_redirects_with_ticket_that_exchanges_for_an_authenticating_
     let payload: SessionExchangeResponse = serde_json::from_str(&body).expect("json");
     assert!(!payload.token.is_empty());
 
-    // The exchanged bearer must actually authenticate against the
-    // session store the route minted through — proving the redirect's
-    // ticket really carries a live session, not just an opaque value.
+    // Must authenticate against the store the route minted through — not
+    // just an opaque value.
     let record = session_store
         .lookup(&payload.token)
         .await
@@ -157,8 +154,7 @@ async fn wrong_token_is_rejected_and_mints_no_ticket() {
         "a rejected login must not redirect (no ticket minted)",
     );
 
-    // No ticket exists to exchange — a made-up value must also fail,
-    // proving the store was never populated by the failed attempt.
+    // Store was never populated by the failed attempt.
     let exchange = exchange_ticket(router, "made-up-ticket").await;
     assert_eq!(exchange.status(), StatusCode::UNAUTHORIZED);
 }
@@ -181,21 +177,16 @@ async fn missing_token_is_rejected() {
 
 // ─── post-exchange bearer authorizes a protected route ────────────────
 //
-// `build_router` above only proves the ticket exchange returns a
-// well-formed bearer — it never proves that bearer actually
-// authenticates anything. Compose the SAME `session_store` the login
-// mount mints through with the real production auth-verifying layer,
-// [`SessionAuthenticator`] (the one `serve.rs` wires into
-// `WebuiServeConfig` — see `session_round_trip.rs`'s `build_app` for the
-// analogous OAuth-side wiring), fronting a minimal protected route. This
-// is deliberately NOT the full `webui_v2_app` + `RebornServicesApi`
-// composition `session_round_trip.rs` uses — that facade stub is
-// scoped to proving the OAuth session round-trip through a real v2
-// handler, and duplicating its ~30-method trait impl here just to prove
-// "does this bearer authenticate" would be machinery this test doesn't
-// need. `SessionAuthenticator` IS the seam that decides that question in
-// production; a route behind it is enough to prove the login mount's
-// bearer is a real, working session and not just an opaque string.
+// `build_router` above only proves the exchange returns a well-formed
+// bearer, not that it authenticates anything. Front a minimal protected
+// route with the real prod auth layer, [`SessionAuthenticator`] (same as
+// `serve.rs`'s `WebuiServeConfig`), fed the SAME `session_store` the login
+// mount mints through.
+// - deliberately NOT the full `webui_v2_app` composition
+//   `session_round_trip.rs` uses — that facade is scoped to the OAuth
+//   round-trip; duplicating it here is unneeded machinery.
+// - `SessionAuthenticator` IS the seam that decides "does this bearer
+//   authenticate" in production, so a route behind it suffices.
 
 const PROTECTED_PATH: &str = "/protected/ping";
 
@@ -212,10 +203,8 @@ async fn require_session_bearer(
     let Some(token) = token else {
         return StatusCode::UNAUTHORIZED.into_response();
     };
-    // Reuses the real `WebuiAuthenticator::authenticate` contract — the
-    // same call `authenticate_request` makes in
-    // `ironclaw_reborn_composition::webui::webui_serve` — rather than
-    // reimplementing session validation.
+    // Reuses the real WebuiAuthenticator::authenticate contract (same call
+    // as webui_serve's authenticate_request) rather than reimplementing.
     if ironclaw_reborn_composition::WebuiAuthenticator::authenticate(&*authenticator, token)
         .await
         .is_none()
@@ -246,17 +235,10 @@ fn protected_request(bearer: Option<&str>) -> Request<Body> {
     builder.body(Body::empty()).expect("request")
 }
 
-// USER-DECIDED LAW: authenticating with the webui token = operator/admin,
-// whether via raw `Authorization: Bearer` OR this `/login?token=` link. A
-// session minted through this route (which verifies the presented token
-// against the same operator-capable `EnvBearerAuthenticator` a raw bearer
-// check uses) must authenticate with `operator_webui_config = true` so the
-// caller sees the same admin capabilities (settings/provider nav) that
-// `Authorization: Bearer <token>` gets. Before the fix, `create_session` had
-// no way to carry that provenance and `SessionAuthenticator` hardcoded
-// `WebuiAuthentication::user(...)` for every session bearer, so this
-// asserted `false` even though the login route verified the token against
-// the operator-capable authenticator.
+// USER-DECIDED LAW: webui-token auth = operator/admin, whether via raw
+// `Authorization: Bearer` or this `/login?token=` link. A session minted
+// through this route must authenticate with `operator_webui_config = true`
+// so the caller gets the same admin capabilities as a raw bearer check.
 #[tokio::test]
 async fn exchanged_bearer_from_cli_token_login_is_operator_capable() {
     let (router, session_store) = build_router();
@@ -302,10 +284,8 @@ async fn exchanged_bearer_authenticates_a_protected_route() {
     let protected_router = build_protected_router(session_store);
     let app = login_router.merge(protected_router.clone());
 
-    // RED first: an unauthenticated request against the protected route
-    // must 401 — proves the route actually enforces the auth-verifying
-    // layer before the rest of this test relies on a 200 meaning
-    // something.
+    // RED first: proves the route enforces auth before a later 200 means
+    // anything.
     let unauthenticated = protected_router
         .clone()
         .oneshot(protected_request(None))

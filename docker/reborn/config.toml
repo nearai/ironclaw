@@ -27,14 +27,11 @@ regex_activation_enabled = true
 env_token_var = "IRONCLAW_REBORN_WEBUI_TOKEN"
 env_user_id_var = "IRONCLAW_REBORN_WEBUI_USER_ID"
 
-# No [llm.default] slot is shipped: config.toml is the single source of
-# truth for `[llm.default]`, written only by an explicit act (never
-# implicitly seeded). Railway's env list is complete (NEARAI_API_KEY et al
-# are set in the service's environment), so the runtime resolves the LLM via
-# its env-fallback path (`resolve_reborn_runtime_llm`) with no slot needed.
-# See `entrypoint.sh`'s one-time volume migration for existing Railway
-# deployments whose PERSISTED volume config.toml still carries the old
-# baked-in `[llm.default]` stub from before this change.
+# No [llm.default] slot shipped (intentional):
+# - config.toml is sole source of truth for [llm.default], set only explicitly
+# - Railway env (NEARAI_API_KEY et al) is complete, so env-fallback
+#   (resolve_reborn_runtime_llm) resolves the LLM with no slot needed
+# - existing volumes with the old baked-in stub: see entrypoint.sh migration
 
 [slack]
 enabled = false

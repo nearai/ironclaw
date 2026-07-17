@@ -58,10 +58,9 @@ impl OnboardCommand {
         }
 
         let outcome = write_default_config_files(home, self.force, ExistingConfigPolicy::Preserve)?;
-        // Independent of `--force`: a valid existing token is never
-        // regenerated (see `ensure_webui_token_file`'s doc for why), so a
-        // repeated `onboard --force` cannot invalidate sessions or an
-        // operator-copied env var keyed to the current token value.
+        // Independent of `--force`: a valid existing token is never regenerated
+        // (see `ensure_webui_token_file`), so repeated `onboard --force` can't
+        // invalidate sessions or an operator-copied env var.
         let webui_token_action = crate::webui_token::ensure_webui_token_file(home.path())?;
         let master_key_outcome = provision_master_key(home)?;
         let mut prompts = StdinPromptSource;
@@ -74,21 +73,16 @@ impl OnboardCommand {
             self.force,
         ) {
             Ok(outcome) => outcome,
-            // A non-interactive session (headless CI, a piped/scripted
-            // invocation) is expected and normal — mirrors
-            // `MasterKeyProvisionOutcome::Suppressed` above: onboarding must
-            // not fail just because there is no terminal to prompt on.
-            // `ironclaw-reborn models set-provider` remains the
-            // non-interactive path to configure a provider afterward.
+            // Non-interactive session (headless CI, piped/scripted) is expected —
+            // mirrors `MasterKeyProvisionOutcome::Suppressed`; `models set-provider`
+            // remains the non-interactive path to configure a provider.
             Err(LlmCredentialPromptError::NonInteractive) => {
                 LlmCredentialProvisionOutcome::SkippedNonInteractive
             }
             Err(LlmCredentialPromptError::Other(error)) => return Err(error),
         };
-        // Computed after `llm_outcome` (not before, as in an earlier
-        // revision) so the marker's `steps_pending` reflects what actually
-        // happened this run rather than unconditionally listing
-        // `llm_credentials` as pending even when it was just configured.
+        // Computed after `llm_outcome` so `steps_pending` reflects what actually
+        // happened this run, not an unconditional `llm_credentials` pending.
         let llm_configured = matches!(
             llm_outcome,
             LlmCredentialProvisionOutcome::Configured { .. }
@@ -170,18 +164,15 @@ impl OnboardCommand {
         Ok(())
     }
 
-    /// Onboarding's last two steps, gated behind `webui-v2-beta` since both
-    /// depend on `serve`/`service` (only compiled under that feature):
-    /// install-and-start the OS service (skippable — see
-    /// [`Self::should_install_service`]), then print the CLI-token login
-    /// link `serve` will accept once it's running, using the same
-    /// `webui-token` value `ensure_webui_token_file` already provisioned
-    /// above.
+    /// Onboarding's last two steps, gated behind `webui-v2-beta` (both depend
+    /// on `serve`/`service`):
+    /// - install-and-start the OS service (skippable, see [`Self::should_install_service`])
+    /// - print the CLI-token login link, reusing the `webui-token` value
+    ///   `ensure_webui_token_file` already provisioned above
     ///
-    /// `interactive` is the same [`PromptSource::is_interactive`] reading the
-    /// LLM-credential prompt step already made — passed down rather than
-    /// re-derived, so `should_install_service` doesn't need its own
-    /// `IsTerminal` check (see that method's doc).
+    /// `interactive` is passed down from the same [`PromptSource::is_interactive`]
+    /// reading the LLM-credential prompt step made, so `should_install_service`
+    /// doesn't need its own `IsTerminal` check.
     #[cfg(feature = "webui-v2-beta")]
     fn finish_with_service_and_login_link(
         &self,
@@ -207,16 +198,10 @@ impl OnboardCommand {
             );
         }
 
-        // `.ok().flatten()`, not `?`: this step only needs config.toml to
-        // read `[webui].env_token_var` for the login-link-vs-note decision
-        // below, a purely informational courtesy. A config.toml that fails
-        // to parse (or predates this repo's schema — legacy/custom content
-        // is preserved as-is by `write_default_config_files` above) must
-        // not abort an otherwise-successful onboarding run; falling back to
-        // the default env var name is a fine degradation here, and `serve`
-        // itself is still the authority that fails closed on real config
-        // errors when it boots. Mirrors `status`'s own resolver, which
-        // swallows the same load failure for the same reason.
+        // `.ok().flatten()`, not `?`: only needed to read `[webui].env_token_var`
+        // for the login-link-vs-note decision below. `serve` remains the
+        // authority that fails closed on real config errors at boot; mirrors
+        // `status`'s own resolver swallowing the same load failure.
         // silent-ok: a config.toml that fails to parse (or predates this
         // repo's schema) must not abort an otherwise-successful onboarding
         // run; falling back to the default env var name is a fine
@@ -241,30 +226,24 @@ impl OnboardCommand {
         Ok(())
     }
 
-    /// `true` when onboarding should attempt to install/start the OS
-    /// service: the operator didn't pass `--no-service`, AND this is an
-    /// interactive session. A non-interactive session (headless CI, a
-    /// piped/scripted invocation) must never attempt a launchd/systemd
+    /// `true` when onboarding should install/start the OS service:
+    /// `--no-service` unset AND session is interactive. Non-interactive
+    /// (headless CI, piped/scripted) must never attempt a launchd/systemd
     /// install regardless of the flag — mirrors the LLM-credential prompt's
-    /// own non-interactive short-circuit above.
+    /// non-interactive short-circuit.
     ///
     /// `interactive` comes from the same [`PromptSource::is_interactive`]
-    /// reading used to gate the LLM-credential prompts
-    /// (`prompts::StdinPromptSource` is the sole `IsTerminal` check in this
-    /// command), rather than this method independently re-deriving "is this
-    /// session interactive" via its own `stdin().is_terminal()` call.
+    /// reading used to gate the LLM-credential prompts (`prompts::StdinPromptSource`
+    /// is the sole `IsTerminal` check in this command) rather than re-deriving it here.
     #[cfg(feature = "webui-v2-beta")]
     fn should_install_service(&self, interactive: bool) -> bool {
         !self.no_service && interactive
     }
 }
 
-/// Outcome of onboard's OS-service install/start finale. Every variant is a
-/// successful `execute()` (exit 0) except `Failed`, which is reported but
-/// does not fail onboarding overall — the operator can always install/start
-/// the service manually afterward (see the printed `service_note`), so a
-/// service-manager hiccup should not make an otherwise-successful onboarding
-/// run exit non-zero.
+/// Outcome of onboard's OS-service install/start finale. Even `Failed` is a
+/// successful `execute()` (exit 0) — reported via `service_note`, but a
+/// service-manager hiccup must not fail an otherwise-successful onboarding run.
 #[cfg(feature = "webui-v2-beta")]
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum ServiceStartOutcome {
@@ -308,10 +287,9 @@ fn print_dry_run(
         "would_write_or_preserve: {}",
         home.providers_file_path().display()
     );
-    // Propagates rather than defaulting to "would_write" on an I/O error:
-    // an unreadable-but-present token file must be reported as an error,
-    // not silently promised a (destructive) overwrite that wouldn't
-    // actually happen the same way on a real run.
+    // Propagates rather than defaulting to "would_write" on I/O error: an
+    // unreadable-but-present token file must error, not be silently promised
+    // an overwrite that wouldn't happen the same way on a real run.
     let webui_token_action = if crate::webui_token::webui_token_file_is_valid(home.path())? {
         "would_preserve"
     } else {
@@ -388,10 +366,8 @@ fn pending_steps(import_history: bool, llm_configured: bool) -> Vec<&'static str
 mod tests {
     use super::*;
 
-    /// RED (B4 step 6 truth-up): the marker's `steps_pending` must only list
-    /// `llm_credentials` when this run did NOT actually configure it —
-    /// before this fix `pending_steps` listed it unconditionally, even right
-    /// after a successful interactive `provision_llm_credentials` call.
+    /// The marker's `steps_pending` must only list `llm_credentials` when
+    /// this run did NOT actually configure it.
     #[test]
     fn pending_steps_omits_llm_credentials_once_configured() {
         assert_eq!(

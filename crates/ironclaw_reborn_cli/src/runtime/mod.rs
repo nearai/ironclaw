@@ -547,36 +547,20 @@ fn apply_credential_refresh_override(
 /// required-but-unset API key env var when a key is already durably stored
 /// for that provider in the local secret store.
 ///
-/// Without this, an operator who provisioned an `openai`/`anthropic` key
-/// through `onboard` (stored in the encrypted secret store, never written
-/// into `config.toml` or the environment) could `onboard` successfully but
-/// have `serve` refuse to boot: `resolve_reborn_runtime_llm` fails closed on
-/// the missing env var here, before `apply_startup_stored_llm_key` (which
-/// runs later, once the async runtime and `build_reborn_services` are up)
-/// ever gets a chance to inject the stored key. A provider with
-/// `api_key_required = false` (e.g. `nearai`) never hits this path —
-/// resolution succeeds outright, which is why this bug didn't show up for
-/// the zero-friction default provider.
-///
-/// Only the `ApiKeyEnvUnset` error variant is treated specially: every
-/// other resolution failure (unknown provider, malformed catalog fields,
-/// missing base URL, ...) surfaces unchanged, and so does `ApiKeyEnvUnset`
-/// itself when the store doesn't have a key either — this only ever turns a
-/// real fix (a stored key) into a successful boot, never masks a real
-/// misconfiguration.
-///
-/// Scoped to `RuntimeInputCaller::Serve` only: `run` keeps today's exact
-/// fail-fast behavior. Opening the local-dev secret store needs the local
-/// master key, which — absent a cached dotfile — falls through to the OS
-/// keychain; on an interactive dev machine that can mean a GUI prompt (or,
-/// with no GUI session at all, an indefinite block) before this even gets to
-/// check whether a key is stored. `onboard`'s own credential-prompt seam
-/// takes on that same cost deliberately, in an interactive step the operator
-/// is already present for. `serve` is the one other caller worth paying it
-/// for — it's the boot path this fix exists to unblock. `run` is a
-/// synchronous one-shot CLI invocation with no such boot-time contract, and
-/// widening this to it would make an ordinary "forgot to export the key"
-/// mistake hang instead of failing fast with today's clear error.
+/// - Without this, a key provisioned via `onboard` into the encrypted
+///   secret store (never written to config.toml/env) would boot `serve`
+///   into a fail-closed error, since `apply_startup_stored_llm_key` only
+///   runs later once the async runtime is up. Providers with
+///   `api_key_required = false` (e.g. `nearai`) never hit this path.
+/// - Only `ApiKeyEnvUnset` is treated specially; every other resolution
+///   failure surfaces unchanged, as does `ApiKeyEnvUnset` itself when no
+///   key is stored — this can only turn a real fix into a successful boot,
+///   never mask a misconfiguration.
+/// - Scoped to `RuntimeInputCaller::Serve` only: opening the secret store
+///   may fall through to the OS keychain (GUI prompt or indefinite block
+///   with no GUI session). `onboard` already pays that cost interactively;
+///   `serve` is the boot path this fix unblocks. `run` stays fail-fast so
+///   a forgotten env var doesn't hang instead of erroring clearly.
 #[cfg(all(feature = "libsql", feature = "root-llm-provider"))]
 fn resolve_reborn_runtime_llm_with_stored_key_fallback(
     config: &RebornBootConfig,
@@ -595,11 +579,8 @@ fn resolve_reborn_runtime_llm_with_stored_key_fallback(
     else {
         return Err(error.into());
     };
-    // `ApiKeyEnvUnset` can only come from the config-file-selection branch of
-    // `resolve_reborn_runtime_llm` (the env-fallback branch never returns
-    // this variant), so a selection must be present to retry against.
-    // Defensive: if it somehow isn't, surface the original error unchanged
-    // rather than reach for a selection that doesn't exist.
+    // `ApiKeyEnvUnset` only comes from the config-file-selection branch, so
+    // a selection should be present; defensive fallback to original error.
     let Some(selection) = config_file.and_then(|file| file.default_llm_slot()) else {
         return Err(error.into());
     };

@@ -54,14 +54,10 @@ fn unit_content(invocation: &ServeInvocation, working_directory: &Path) -> Resul
         .collect::<Result<Vec<_>>>()?
         .join(" ");
 
-    // WorkingDirectory anchors the launched `serve` process's cwd at
-    // `<reborn_home>/workspace` — not systemd's default (`/` for root user
-    // units, or the unit's own state directory), and deliberately not the
-    // Reborn home itself either. See `super::service_working_directory`'s
-    // doc: the Reborn home is an ancestor of every default skill/extension
-    // root, so using it directly (this crate's first attempt at this fix)
-    // still trips composition's `paths_overlap` prefix check and
-    // crash-loops the same way `/` did.
+    // WorkingDirectory anchors cwd at `<reborn_home>/workspace`, not
+    // systemd's default and not the Reborn home itself — the home is an
+    // ancestor of every default skill root, so it still trips
+    // composition's `paths_overlap` check (see `service_working_directory`).
     let working_directory = unit_quote(&working_directory.display().to_string(), false)?;
 
     Ok(format!(
@@ -774,17 +770,11 @@ mod tests {
         assert!(unit.contains("WantedBy=default.target"));
     }
 
-    /// Pins the crash-loop fix's mechanism: without an explicit
-    /// WorkingDirectory, systemd's default cwd for the unit doesn't match
-    /// wherever `serve` needs to run from, so `serve`'s local-dev workspace
-    /// root resolves somewhere that overlaps a default skill root and
-    /// composition refuses to boot. `unit_content` itself is agnostic to
-    /// *which* directory that is — it just writes whatever caller-supplied
-    /// path faithfully into the `[Service]` section before `ExecStart`; see
-    /// `install_with_runner`'s use of `super::ensure_service_working_directory`
-    /// and the `<reborn_home>/workspace` regression test in `mod.rs`
-    /// (`install_then_uninstall_linux_writes_and_removes_unit_file`) for the
-    /// specific-path guarantee.
+    /// Pins the crash-loop fix: without WorkingDirectory, systemd's default
+    /// cwd overlaps a default skill root and composition refuses to boot.
+    /// `unit_content` just writes the caller-supplied path faithfully — see
+    /// `install_with_runner` / `ensure_service_working_directory` for the
+    /// actual path choice.
     #[test]
     fn unit_content_includes_working_directory_line() {
         let unit = unit_content(&sample_invocation(), &sample_reborn_home()).expect("valid unit");

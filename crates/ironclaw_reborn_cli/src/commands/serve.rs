@@ -39,17 +39,10 @@ use crate::runtime::{
     resolve_google_oauth_config_from_env,
 };
 
-// `pub(crate)`: `onboard`'s finale prints the CLI-token login link using
-// the same default host:port `serve` binds to absent an explicit
-// override, so it imports these rather than duplicating the literals
-// (see `commands/onboard.rs`).
+// pub(crate): reused by onboard's finale login-link print (same default host:port).
 pub(crate) const DEFAULT_SERVE_HOST: &str = "127.0.0.1";
 pub(crate) const DEFAULT_SERVE_PORT: u16 = 3000;
-// `pub(crate)`: `onboard`'s finale and `status`'s login-link resolver both
-// need to know which env var name to check for `env_token_is_active`
-// (see `webui_token.rs`), so they reuse this default rather than
-// re-deriving it (the `[webui].env_token_var` override, when present, is
-// read from config.toml directly by each caller).
+// pub(crate): reused by onboard/status for `env_token_is_active` (webui_token.rs).
 pub(crate) const DEFAULT_ENV_TOKEN_VAR: &str = "IRONCLAW_REBORN_WEBUI_TOKEN";
 const DEFAULT_ENV_USER_ID_VAR: &str = "IRONCLAW_REBORN_WEBUI_USER_ID";
 /// Lifetime of the one-time API bearer minted when an admin creates a user. A
@@ -67,10 +60,8 @@ const ADMIN_API_TOKEN_LIFETIME_DAYS: i64 = 365;
 /// as unset"; `NotUnicode` is a real configuration error and must
 /// propagate with context naming the variable.
 ///
-/// `pub(crate)`: `webui_token::env_token_is_active` reuses this same
-/// unset-vs-not-unicode distinction rather than re-deriving it, so the two
-/// checks (this one gating which token source `serve` reads from, that one
-/// gating whether `onboard`/`status` print a login link) can never drift.
+/// pub(crate): shared with `webui_token::env_token_is_active` so both
+/// checks (token source vs. login-link gating) never drift.
 pub(crate) fn present_unicode_env_var(name: &str) -> anyhow::Result<Option<String>> {
     match env::var(name) {
         Ok(value) => Ok(Some(value)),
@@ -93,17 +84,10 @@ struct SignedSessionTokenMinter {
 #[async_trait::async_trait]
 impl ironclaw_reborn_composition::AdminApiTokenMinter for SignedSessionTokenMinter {
     async fn mint(&self, tenant: &TenantId, user_id: &UserId) -> Result<SecretString, String> {
-        // Non-operator: this mints a bearer FOR a newly admin-created user,
-        // identified by `user_id` — not a session for the acting operator's
-        // own identity. That user's authorization is governed by its own
-        // `AdminUserRole` (Owner/Admin/Member, a per-user product-workflow
-        // RBAC axis), which is a distinct system from the single-box
-        // `operator_webui_config` capability this session field gates (raw
-        // `Authorization: Bearer` / `/login?token=` only, per the
-        // USER-DECIDED LAW in `cli_token_login.rs`). Stamping `true` here
-        // would let every admin-created user — even a Member-role one —
-        // bypass `require_operator_webui_config`, which the crate docs'
-        // "SSO/multi-user sessions stay non-operator" rule forbids.
+        // `false`: this session is for the admin-created `user_id`, not the
+        // operator. Stamping `true` would let any admin-created user (even
+        // Member-role) bypass `require_operator_webui_config` — a distinct
+        // per-user RBAC axis from the single-box operator capability.
         self.session_store
             .create_session(
                 tenant.clone(),
@@ -263,9 +247,8 @@ impl ServeCommand {
         // mints tokens that validate under the login surface's own store.
         let admin_session_store =
             ironclaw_webui::signed_session_store(&session_signing_secret, &tenant_id);
-        // The CLI-token-login mount (built later, once `sso_enabled` is known)
-        // mints sessions the same way the admin minter does — same operator
-        // secret + tenant, so a clone of this store validates identically.
+        // Cloned for the CLI-token-login mount, built later once `sso_enabled`
+        // is known — same operator secret + tenant, so it validates identically.
         let cli_login_session_store = admin_session_store.clone();
         runtime_input =
             runtime_input.with_admin_api_token_minter(Arc::new(SignedSessionTokenMinter {
@@ -579,12 +562,10 @@ impl ServeCommand {
                 None
             };
 
-            // Cloned before the moves below: the CLI-token-login mount
-            // (built after `build_webui_auth_surface`, once its `public_mount`
-            // tells us whether an SSO exchange route is already claiming
-            // `/auth/session/exchange`) needs its own tenant id and bearer
-            // authenticator, but `tenant_id`/`env_authenticator` are moved
-            // into the auth-surface call immediately below.
+            // Cloned before the moves below: the CLI-token-login mount (built
+            // after `build_webui_auth_surface`) needs its own tenant id and
+            // bearer authenticator, but the originals are moved into the
+            // auth-surface call immediately below.
             let cli_login_tenant_id = tenant_id.clone();
             let cli_login_authenticator = Arc::clone(&env_authenticator);
 
@@ -615,33 +596,15 @@ impl ServeCommand {
             .await?;
 
             // CLI-token-login mount (`GET /login?token=`, printed by `onboard`
-            // at the end of setup) — built only when no SSO provider is
-            // configured AND the resolved webui token came from the token
-            // FILE, not the environment. `build_webui_auth_surface` above
-            // already mounted `POST /auth/session/exchange` in both its
-            // no-SSO branch (the inert `empty_webui_v2_auth_providers_mount`,
-            // which does NOT claim that path — see its own test coverage)
-            // and its SSO branch (`build_signed_session_login`, which DOES
-            // claim it). `build_cli_token_login` mounts its own
-            // `/auth/session/exchange` unconditionally, so attaching it
-            // whenever SSO is configured would register that path twice and
-            // panic at router-merge time (see `cli_token_login.rs`'s own
-            // module doc, which calls this out explicitly). There is no "no
-            // exchange handler" constructor knob on `CliTokenLoginConfig` to
-            // share the SSO surface's ticket store instead (its
-            // `session_tickets` map is private to `auth::routes`), so the
-            // simplest correct rule is: CLI-token login is available exactly
-            // when SSO is not, matching the deployment shape it targets (a
-            // single-operator desktop/CLI install, not an SSO-admitted
-            // multi-user host).
-            //
-            // The file-source condition is additional: when the token comes
-            // from an env var (e.g. a Railway-style deployment with
-            // `IRONCLAW_REBORN_WEBUI_TOKEN` set), mounting this route would
-            // put that same master bearer into a public route's query
-            // string, where it travels through edge/proxy access logs. A
-            // file-sourced token has no such deployment-shape reason to stay
-            // off this route, so it keeps the existing CLI-login UX.
+            // at setup end) — only when SSO is off AND the token came from
+            // the FILE, not env:
+            // - `build_cli_token_login` mounts its own `POST
+            //   /auth/session/exchange` unconditionally; mounting it while
+            //   SSO is on would double-register that path and panic at
+            //   router-merge time (no shared-ticket-store knob exists).
+            // - env-sourced tokens (e.g. Railway-style `IRONCLAW_REBORN_WEBUI_TOKEN`)
+            //   must not appear in this route's query string, which flows
+            //   through edge/proxy access logs.
             let cli_login_mount = if sso_enabled
                 || webui_token_source != crate::webui_token::WebuiTokenSource::File
             {
@@ -1045,15 +1008,12 @@ fn resolve_webui_default_agent(
         .unwrap_or_else(|| runtime_identity.agent_id.clone())
 }
 
-/// Resolve the raw WebUI user id: `env_user_id_var` when set to a non-empty
-/// value, else the config file's `[identity].default_owner` (via
-/// `crate::runtime::default_owner_id`, which falls back to `"reborn-cli"`).
+/// Resolution: `env_user_id_var` (non-empty) → config `[identity].default_owner`
+/// → `"reborn-cli"` (via `crate::runtime::default_owner_id`).
 ///
-/// A service-installed serve whose unit environment carries only
-/// HOME/PROFILE (no per-operator env var) must still boot bound to a stable
-/// identity rather than hard-failing — see `resolve_webui_runtime_owner`
-/// just below, which already accepts this same config default for the
-/// *runtime* owner and rejects a divergent explicit override.
+/// A service-installed serve with only HOME/PROFILE in its unit env (no
+/// per-operator var) must still boot bound to a stable identity rather than
+/// hard-failing — see `resolve_webui_runtime_owner` below, same fallback.
 fn resolve_webui_user_id_raw(
     env_user_id_var: &str,
     config_file: Option<&RebornConfigFile>,

@@ -2,16 +2,13 @@
 //! (provider menu, API key, model) come from, and the production
 //! terminal-backed implementation.
 //!
-//! Injected (`PromptSource`) so `provision_llm_credentials`
-//! (`super::llm_credentials::provision_llm_credentials`) is testable with a
-//! fixed answer sequence, and so [`StdinPromptSource`] is the *only* place
-//! that decides "is this session interactive" — matching the
+//! Injected (`PromptSource`) so `provision_llm_credentials` is testable with
+//! a fixed answer sequence, and so [`StdinPromptSource`] is the *only* place
+//! that decides "is this session interactive" — matches the
 //! injected-lookup convention `resolve_google_oauth_config` already
-//! established (`crate::runtime::resolve_google_oauth_config`, which takes
-//! a `lookup` closure rather than reading `std::env` inline) and the "only
-//! `main.rs` may exit; `execute()` returns typed errors" rule: this trait's
-//! methods return [`LlmCredentialPromptError::NonInteractive`] rather than
-//! calling `process::exit`.
+//! established, and the "only `main.rs` may exit" rule: this trait's methods
+//! return [`LlmCredentialPromptError::NonInteractive`] rather than calling
+//! `process::exit`.
 
 use std::io::{IsTerminal, Write as _};
 
@@ -237,16 +234,12 @@ fn resolve_menu_selection(
 }
 
 /// The bracketed note shown after a menu entry's description: nothing for a
-/// required-key provider (the description already implies a key prompt
-/// follows), `" (no API key needed)"` otherwise. Shared by both menu
-/// renderers ([`provider_menu_typed`] and [`render_menu`]) so the two can
-/// never drift on this text.
-///
-/// `nearai`'s `ProviderMenuEntry::api_key_required` is `true` here (a
-/// menu-level override — see `RebornProviderAdmin::menu_entries`'s doc),
-/// even though the raw catalog entry (`providers.json`) marks it optional:
-/// reborn has no session-token auth wired, so it is required-key like every
-/// other menu entry and gets no special note.
+/// required-key provider, `" (no API key needed)"` otherwise. Shared by both
+/// menu renderers ([`provider_menu_typed`] and [`render_menu`]) so the two
+/// can never drift on this text.
+/// - `nearai`'s `api_key_required` is `true` here (menu-level override) even
+///   though the raw catalog marks it optional — no session-token auth wired,
+///   so it's required-key like every other entry and gets no special note.
 #[cfg(all(feature = "libsql", feature = "root-llm-provider"))]
 fn menu_entry_key_note(entry: &ironclaw_reborn_composition::ProviderMenuEntry) -> &'static str {
     if entry.api_key_required {
@@ -256,16 +249,11 @@ fn menu_entry_key_note(entry: &ironclaw_reborn_composition::ProviderMenuEntry) -
     }
 }
 
-/// Plain numbered-list + line-read provider prompt — the ENTIRE original
-/// `provider_menu` body (byte-identical besides its `&mut self` → free-fn
-/// signature change), extracted so it can serve two roles unchanged: (1) the
-/// exact fallback `StdinPromptSource::provider_menu` uses whenever the
-/// interactive arrow-key menu can't run (not a TTY — though that's already
-/// caught earlier by the caller, raw mode failed to enable, or `TERM=dumb`),
-/// and (2) the hand-off target when an operator starts typing during arrow
-/// mode instead of using Up/Down (see [`ArrowMenuOutcome::FallBackTyped`]).
-/// `resolve_menu_selection` is untouched by this port — only the I/O
-/// wrapper moved.
+/// Plain numbered-list + line-read provider prompt, extracted so it can serve
+/// two roles: (1) the fallback `StdinPromptSource::provider_menu` uses
+/// whenever the interactive arrow-key menu can't run (raw mode failed, or
+/// `TERM=dumb`), and (2) the hand-off target when an operator starts typing
+/// during arrow mode instead of Up/Down (see [`ArrowMenuOutcome::FallBackTyped`]).
 #[cfg(all(feature = "libsql", feature = "root-llm-provider"))]
 fn provider_menu_typed(
     entries: &[ironclaw_reborn_composition::ProviderMenuEntry],
@@ -306,15 +294,11 @@ fn provider_menu_typed(
     )))
 }
 
-/// `true` when the current terminal looks capable of the interactive
-/// arrow-key menu: both stdin and stdout must be real terminals (not a
-/// pipe/redirect — the arrow menu writes cursor-movement escapes to
-/// stdout), and `TERM` must not be `dumb` (a terminal that explicitly
-/// disclaims escape-sequence support, e.g. some CI log collectors). This is
-/// a cheap pre-check only — [`run_arrow_menu`] can still fail if
-/// `enable_raw_mode()` itself errors (e.g. stdin/stdout got reassigned
-/// between this check and that call), which [`PromptSource::provider_menu`]
-/// treats identically to this check returning `false`: fall back to
+/// `true` when the terminal looks capable of the interactive arrow-key menu:
+/// stdin and stdout must both be real terminals (arrow menu writes cursor
+/// escapes to stdout), and `TERM` must not be `dumb`. Cheap pre-check only —
+/// [`run_arrow_menu`] can still fail if `enable_raw_mode()` errors later,
+/// which [`PromptSource::provider_menu`] treats the same: fall back to
 /// [`provider_menu_typed`].
 #[cfg(all(feature = "libsql", feature = "root-llm-provider"))]
 fn terminal_supports_arrow_menu() -> bool {
@@ -324,15 +308,12 @@ fn terminal_supports_arrow_menu() -> bool {
     !std::env::var("TERM").is_ok_and(|term| term == "dumb")
 }
 
-/// RAII guard for `crossterm::terminal::enable_raw_mode()`: disables raw
-/// mode in [`Drop`] so every exit path out of [`run_arrow_menu`] — a normal
-/// return, an early `?` on an I/O error mid-loop, or an unwinding panic —
-/// leaves the terminal back in cooked mode. [`read_masked_line`] instead
-/// pairs `enable_raw_mode`/`disable_raw_mode` manually because it has
-/// exactly one exit point right before returning; `run_arrow_menu` has
-/// several (Up/Down keep looping, but Enter/Esc/Ctrl-C/typed-fallback/read
-/// error all return from different places), so a guard is used instead of
-/// repeating that pairing at each one.
+/// RAII guard for `crossterm::terminal::enable_raw_mode()`: disables raw mode
+/// in [`Drop`] so every exit path out of [`run_arrow_menu`] (normal return,
+/// early `?`, or panic) leaves the terminal in cooked mode.
+/// - [`read_masked_line`] instead pairs enable/disable manually since it has
+///   one exit point; `run_arrow_menu` has several, so a guard avoids
+///   repeating the pairing at each one.
 #[cfg(all(feature = "libsql", feature = "root-llm-provider"))]
 struct RawModeGuard;
 
@@ -473,12 +454,11 @@ fn run_arrow_menu(
 }
 
 /// Render (or, when `redraw` is `true`, re-render in place) the numbered
-/// provider list with `highlighted` marked by a leading `>`. The header
-/// line is printed once on the very first draw and never redrawn; each
-/// `redraw` call moves the cursor back up exactly `entries.len()` lines
-/// (the entry lines only — the header stays put above them) and clears
-/// downward before reprinting, so the list appears to update in place
-/// rather than scrolling.
+/// provider list with `highlighted` marked by a leading `>`.
+/// - Header line prints once on the first draw, never redrawn; each `redraw`
+///   moves the cursor up exactly `entries.len()` lines (entries only, header
+///   stays put) and clears downward before reprinting — updates in place
+///   rather than scrolling.
 #[cfg(all(feature = "libsql", feature = "root-llm-provider"))]
 fn render_menu(
     stdout: &mut std::io::Stdout,
@@ -521,16 +501,11 @@ fn render_menu(
 
 /// Read one line with terminal echo suppressed, showing `*` per character.
 ///
-/// Ported from v1's `src/setup/prompts.rs` (`secret_input`/
-/// `read_secret_line`) — same crossterm raw-mode key-event loop, including
-/// its leading `drain_pending_events()` call, which discards any keystrokes
-/// buffered before raw mode was entered (e.g. a stray Enter left over from
-/// the previous plain-line `provider_menu()` prompt) so they can't be
-/// replayed into the masked read and silently corrupt the captured key —
-/// per this repo's "porting = copy, never depend" convention (v1 is read
-/// for shape, not imported; `ironclaw_secrets::keychain::os_keychain_suppressed`
-/// was ported into the Reborn stack the same way for the master-key work
-/// `super::master_key` already does).
+/// Ported from v1's `src/setup/prompts.rs` (`secret_input`/`read_secret_line`),
+/// per this repo's "porting = copy, never depend" convention. Its leading
+/// `drain_pending_events()` discards keystrokes buffered before raw mode was
+/// entered (e.g. a stray Enter from the preceding plain-line prompt) so they
+/// can't be replayed into the masked read.
 fn read_masked_line() -> std::io::Result<String> {
     use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
     use crossterm::{execute, style::Print, terminal};

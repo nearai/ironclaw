@@ -116,11 +116,8 @@ impl ServiceCommand {
 /// invocation via [`ServicePlatform::detect`]; every verb dispatches
 /// off the resolved variant instead of re-checking `cfg!(target_os)`.
 ///
-/// `pub(super)`: `commands::status` (a sibling module under `commands`)
-/// queries [`Self::current_state`] to report whether the installed
-/// service is actually running, rather than assuming a login link is
-/// live just because config/state files are present. See the module doc
-/// note in `commands/status.rs`.
+/// pub(super): `commands::status` queries [`Self::current_state`] to check
+/// whether the installed service is actually running, not just present.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum ServicePlatform {
     MacOs,
@@ -239,18 +236,12 @@ impl ServicePlatform {
 
     /// Production service-state query: real `launchctl`/`systemctl` via
     /// [`OsServiceCommandRunner`]. Used by `commands::status` so `status`
-    /// tells the truth about whether the installed service is actually
-    /// running, instead of only checking config/token files (the bug this
-    /// fixes: `status` reported a login link as if `serve` were live while
-    /// the launchd job was crash-looping).
+    /// reports the service as actually running, not just installed.
     pub(super) fn current_state(&self) -> Result<ServiceState> {
         self.current_state_with_runner(&mut OsServiceCommandRunner)
     }
 
-    /// Runner-injectable service-state query, mirroring
-    /// [`Self::install_with_runner`] — lets a test drive the same
-    /// installed/running detection each platform's `status_with_runner`
-    /// already performs, without touching the host's real service manager.
+    /// Runner-injectable variant of [`Self::current_state`] for tests.
     pub(super) fn current_state_with_runner(
         &self,
         runner: &mut dyn ServiceCommandRunner,
@@ -262,12 +253,8 @@ impl ServicePlatform {
     }
 }
 
-/// Install then start the OS service in one call — the composition
-/// `onboard`'s finale uses so a fresh install ends with `serve` actually
-/// running, not just registered. Delegates to the same per-platform
-/// `install`/`start` verbs `service install`/`service start` use; does not
-/// widen `ServicePlatform`'s visibility (see the module doc's dispatch
-/// note) — this free function is the one cross-module seam instead.
+/// Install then start the OS service in one call — used by `onboard`'s
+/// finale so a fresh install ends with `serve` actually running.
 pub(crate) fn install_and_start(context: &RebornCliContext) -> Result<()> {
     let platform = ServicePlatform::detect()?;
     platform.install(context)?;
@@ -292,22 +279,11 @@ fn home_dir() -> Result<PathBuf> {
 
 /// The `serve` process's launched cwd, shared by both platforms' installers.
 ///
-/// **Not** the Reborn home itself: `serve`'s local-dev workspace root
-/// defaults to `std::env::current_dir()` (see `runtime/mod.rs`'s
-/// `build_standalone_local_runtime_services_input` — shipped behavior, not
-/// changed here), while composition's default local-dev skill/extension
-/// roots live under `<reborn_home>/<profile-subdir>/{skills,tenant-shared/skills,
-/// system/skills,system/extensions}` (see `factory.rs`'s
-/// `validate_local_dev_workspace_skill_isolation` and
-/// `local_runtime_storage_root`). The Reborn home is an *ancestor* of every
-/// one of those skill roots, so launching with cwd = the Reborn home itself
-/// (this crate's first attempt at this fix) still trips
-/// `paths_overlap`: composition's own overlap check treats "one path is a
-/// prefix of the other" as an overlap, not just exact equality — a workspace
-/// root need not literally contain the same files as a skill root to fail
-/// this check, only to sit on its ancestor chain. `<reborn_home>/workspace`
-/// is a leaf directory that is neither an ancestor nor a descendant of any
-/// of those skill roots, so it never overlaps.
+/// - Not the Reborn home itself: composition's default skill/extension
+///   roots live under `<reborn_home>/...`, so the home is an *ancestor* of
+///   them and trips `paths_overlap` (prefix match, not just equality).
+/// - `<reborn_home>/workspace` is a leaf dir, neither ancestor nor
+///   descendant of any skill root, so it never overlaps.
 fn service_working_directory(reborn_home: &Path) -> PathBuf {
     reborn_home.join("workspace")
 }

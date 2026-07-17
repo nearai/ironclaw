@@ -967,22 +967,16 @@ fn normalized_endpoint(value: Option<&str>) -> Option<String> {
 /// Build a transient provider from a not-yet-persisted provider/key/model
 /// combination and list its models — used by
 /// [`crate::RebornProviderAdmin::probe_candidate`] (onboard's pre-write
-/// key/model verification step). Reuses the same `custom_definition` +
-/// `resolve_against_registry` + `build_static_provider_chain` machinery
-/// [`RebornLlmConfigService::probe_provider`] uses for the webui2 "test
-/// connection"/"list models" settings probes, minus that method's
-/// stored-key fallback: that fallback exists for probing an
-/// ALREADY-persisted provider when the caller supplies no inline key;
-/// onboard calls this BEFORE anything is persisted, so the only key that
-/// could ever apply is the caller's own inline candidate (or none, for a
-/// keyless provider) — there is nothing stored yet to fall back to.
+/// key/model verification step).
 ///
-/// Never returns `Err`: a resolve/build/list-models failure is reported as
-/// `ok: false` with a user-safe `message`, matching how `test_connection`/
-/// `list_models` already fold every probe failure into their `ok: false`
-/// result rather than a separate error channel — there is no
-/// auth-vs-transport signal in that shape for this function to preserve, so
-/// callers (onboard's `provision_via_menu`) must not invent one either.
+/// - Reuses [`RebornLlmConfigService::probe_provider`]'s `custom_definition`
+///   + `resolve_against_registry` + `build_static_provider_chain` machinery,
+///   minus its stored-key fallback: nothing is persisted yet, so only the
+///   caller's inline candidate key (or none) can ever apply.
+/// - Never returns `Err`: every failure folds into `ok: false` with a
+///   user-safe `message`, matching `test_connection`/`list_models` — callers
+///   (onboard's `provision_via_menu`) must not invent a separate error
+///   channel.
 pub(crate) async fn probe_candidate_provider(
     request: &LlmProbeRequest,
 ) -> crate::ProviderProbeOutcome {
@@ -1596,14 +1590,9 @@ mod tests {
         }
     }
 
-    /// `probe_candidate_provider` never returns `Err` — an unknown adapter
-    /// (the one input this function itself validates, rather than deferring
-    /// to `resolve_against_registry`/the network) is reported as
-    /// `ok: false` with a user-safe message, same as every other probe
-    /// failure shape. Onboard's `provision_via_menu` relies on this: it
-    /// treats every `ok: false` the same way (show the message, offer
-    /// "store anyway?"), so this function must never surface a distinct
-    /// error channel for callers to accidentally special-case.
+    /// An unknown adapter (validated locally, not via the network) must
+    /// report `ok: false` like every other probe failure — never `Err` —
+    /// since `provision_via_menu` treats all `ok: false` the same way.
     #[tokio::test]
     async fn probe_candidate_provider_reports_unknown_adapter_as_not_ok() {
         let mut request = probe_request("acme", "https://api.acme.test/v1", Some("sk-test"));

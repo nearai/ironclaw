@@ -32,12 +32,8 @@ fn build_status_dto(context: &RebornCliContext) -> anyhow::Result<StatusDto> {
 }
 
 /// Same as [`build_status_dto`] but with the live service-state query
-/// injectable, mirroring `commands::service`'s `*_with_runner` seam: the
-/// production entry point always resolves `service` from the real OS
-/// service manager, but the suppression logic below (and its tests) don't
-/// need — and must not depend on — the test host's actual launchd/systemd
-/// state, which a live `resolve_service_state()` call would otherwise pull
-/// in non-hermetically.
+/// injectable (mirrors `commands::service`'s `*_with_runner` seam), so
+/// tests don't depend on the test host's actual launchd/systemd state.
 fn build_status_dto_with_service_state(
     context: &RebornCliContext,
     service: ServiceStateDto,
@@ -85,23 +81,13 @@ fn build_status_dto_with_service_state(
     })
 }
 
-/// The message the returning-user login-link story yields to once we know
-/// (not guess) the service isn't running: the operator's actual bug was
-/// `status` printing `login_link` + "drivers initialized" while the
-/// launchd job was dead (crash-looping) — a link into a server that isn't
-/// listening.
 const SERVICE_NOT_RUNNING_LOGIN_NOTE: &str = "service is not running — start with \
      `ironclaw-reborn service restart`; link available once running";
 
-/// Overrides the file/env-derived `(login_link, login_note)` pair once the
-/// live service state is *known* (`Stopped`/`NotInstalled`) and says the
-/// service is not running: no login link can possibly be live, regardless
-/// of which credential source `serve` would use, so this takes priority
-/// over whatever `resolve_login_link_and_note` computed. `Running` and
-/// `Unknown` (detection failed, or unsupported/no `webui-v2-beta`) pass the
-/// original pair through unchanged — mirrors the mutually-exclusive
-/// `login_link`/`login_note` pattern `resolve_login_link_announcement`
-/// already uses.
+/// Overrides `(login_link, login_note)` when the live service state is
+/// *known* not-running (`Stopped`/`NotInstalled`) — no login link can be
+/// live then, regardless of credential source. `Running`/`Unknown`
+/// (detection failed or feature off) pass the original pair through.
 fn apply_service_suppression(
     service: ServiceStateDto,
     login_link: Option<String>,
@@ -140,24 +126,18 @@ fn resolve_service_state() -> ServiceStateDto {
 }
 
 /// `status` reprints the CLI-token login link `onboard` originally printed
-/// — the returning-user story: `sessionStorage` is per-browser-session, so
-/// a closed browser needs a fresh link, and `status` is the way to get one
-/// without rerunning `onboard`. Reuses the shared
-/// `webui_token::resolve_login_link_announcement` resolver (also used by
-/// `commands::onboard`) rather than re-deriving the host:port/token
-/// construction here — see this repo's shared-resolver convention for
-/// auth-adjacent links.
+/// (a closed browser loses its `sessionStorage` session, so this is how to
+/// get a fresh link without rerunning `onboard`). Reuses the shared
+/// `webui_token::resolve_login_link_announcement` resolver rather than
+/// re-deriving the host:port/token construction.
 ///
-/// Returns `(login_link, login_note)`, mutually exclusive: a file-sourced
-/// token yields `(Some(link), None)`; an active env var yields
-/// `(None, Some(note))` — printing the file-token link in that case would
-/// advertise a route `serve` doesn't mount for an env-sourced token (see
-/// `commands::serve::execute`'s `cli_login_mount` condition). Neither source
-/// available yet yields `(None, None)`.
-///
-/// Propagates a real error when the token env var is set but not valid
-/// UTF-8 — see `webui_token::env_token_is_active` — rather than silently
-/// treating it as inactive, which would let `status` disagree with `serve`
+/// - Returns `(login_link, login_note)`, mutually exclusive: file-sourced
+///   token → `(Some(link), None)`; active env var → `(None, Some(note))`
+///   (the file-token link's route isn't mounted for an env-sourced token,
+///   see `commands::serve::execute`'s `cli_login_mount`); neither → `(None, None)`.
+/// - Propagates an error when the token env var is set but not valid
+///   UTF-8 — see `webui_token::env_token_is_active` — rather than silently
+///   treating it as inactive, which would let `status` disagree with `serve`
 /// about which credential source is live.
 #[cfg(feature = "webui-v2-beta")]
 fn resolve_login_link_and_note(
@@ -300,17 +280,10 @@ mod tests {
         );
     }
 
-    /// RED (B4 step 6): `status` must reprint the same CLI-token login link
-    /// `onboard` printed — the returning-user story (see `resolve_login_link`'s
-    /// doc: `sessionStorage` is per-browser-session, so a closed browser needs
-    /// a fresh link without rerunning `onboard`).
-    ///
-    /// Drives `build_status_dto_with_service_state(.., Running)` rather
-    /// than `build_status_dto` directly: this test is about the
-    /// file-token -> login-link mechanism, not the service-suppression
-    /// override added later — pinning it to `Running` keeps it hermetic
-    /// (no dependency on whether the test host happens to have the
-    /// `ironclaw-reborn` OS service installed).
+    /// `status` must reprint the same CLI-token login link `onboard`
+    /// printed. Drives `build_status_dto_with_service_state(.., Running)`
+    /// rather than `build_status_dto` directly to stay hermetic (no
+    /// dependency on the test host's actual OS service install).
     #[cfg(feature = "webui-v2-beta")]
     #[test]
     fn status_dto_includes_login_link_once_a_valid_webui_token_file_exists() {
@@ -338,15 +311,10 @@ mod tests {
         );
     }
 
-    /// Security regression: `status --json` (`serde_json::to_string` over
-    /// `StatusDto`) must never leak the bearer token embedded in
-    /// `login_link`'s `/login?token=<bearer>` query string. The human
-    /// `status` text output legitimately prints it (see
-    /// `render_text_to` above); only the JSON/diagnostic path is redacted.
-    ///
-    /// Pinned to `ServiceStateDto::Running` for the same hermeticity
-    /// reason as the test above — a `Stopped`/`NotInstalled` state would
-    /// suppress `login_link` entirely, defeating this test's premise.
+    /// `status --json` must never leak the bearer token embedded in
+    /// `login_link`'s `/login?token=<bearer>` query string; the text output
+    /// legitimately prints it, only JSON is redacted. Pinned to `Running`
+    /// so `login_link` isn't suppressed, defeating the test's premise.
     #[cfg(feature = "webui-v2-beta")]
     #[test]
     fn status_dto_json_excludes_the_login_link_token() {
@@ -388,11 +356,8 @@ mod tests {
 
     // ── service state: `status` tells the truth (bug fix) ──────────
 
-    /// RED: pins the suppression gate itself, independent of how
-    /// `login_link`/`login_note` were computed upstream. A `Stopped` or
-    /// `NotInstalled` service state must always win — there is no login
-    /// link into a server that isn't listening — while `Running`/`Unknown`
-    /// must pass whatever was computed through unchanged.
+    /// `Stopped`/`NotInstalled` must always override login_link/login_note;
+    /// `Running`/`Unknown` must pass them through unchanged.
     #[test]
     fn apply_service_suppression_overrides_only_when_known_and_not_running() {
         let link = Some("http://127.0.0.1:3000/login?token=t".to_string());
@@ -426,8 +391,7 @@ mod tests {
         }
     }
 
-    /// RED (Item 2): `status --json` must serialize the live `service`
-    /// state as the documented kebab-case strings.
+    /// `status --json` must serialize `service` as documented kebab-case.
     #[test]
     fn status_dto_json_serializes_service_state_as_kebab_case() {
         let (_tmp, context) = RebornCliContext::test_context();
@@ -446,9 +410,8 @@ mod tests {
         }
     }
 
-    /// RED (Item 2): the text renderer must print a `service:` line for
-    /// every state, using the same running/stopped/not-installed
-    /// vocabulary as `service status`, plus `unknown` when detection
+    /// The text renderer must print a `service:` line for every state,
+    /// same vocabulary as `service status`, plus `unknown` when detection
     /// wasn't possible.
     #[test]
     fn status_text_renders_service_line_for_every_state() {
@@ -473,9 +436,8 @@ mod tests {
         }
     }
 
-    /// RED (Item 2): once the service state is known and not running, the
-    /// text output must show the restart guidance instead of any
-    /// (necessarily stale) login link.
+    /// Once the service state is known not-running, text output must show
+    /// restart guidance instead of a (necessarily stale) login link.
     #[cfg(feature = "webui-v2-beta")]
     #[test]
     fn status_text_suppresses_login_link_and_shows_restart_guidance_when_service_stopped() {
