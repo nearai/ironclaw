@@ -54,6 +54,7 @@ from scripts.reborn_webui_v2_live_qa.case_matrix import (  # noqa: E402
     qa_row_sort_key,
 )
 from scripts.reborn_webui_v2_live_qa.capability_evidence import (  # noqa: E402
+    OutboundTargetEvidence,
     TRIGGER_CREATE_CAPABILITY_ID,
     current_turn_outbound_final_reply_target_ids,
     current_turn_capability_previews as _current_turn_capability_previews,
@@ -3558,6 +3559,26 @@ _TERMINAL_CAPABILITY_EVENT_STATUSES = {
 }
 
 
+def _malformed_capability_evidence(
+    evidence: dict[str, object],
+    source: str,
+    malformed_count: int,
+) -> dict[str, object]:
+    evidence.pop("run_status", None)
+    evidence.pop("run_terminal", None)
+    evidence.update(
+        {
+            "read_error": (
+                "malformed authoritative current-turn capability "
+                f"{source} evidence"
+            ),
+            "read_error_kind": "malformed_evidence",
+            "malformed_count": malformed_count,
+        }
+    )
+    return evidence
+
+
 def _current_turn_capability_evidence(
     reborn_home: Path,
     submission_identity: dict[str, object],
@@ -3589,7 +3610,10 @@ def _current_turn_capability_evidence(
         return evidence
     try:
         database_uri = f"{db_path.resolve().as_uri()}?mode=ro"
-        with closing(sqlite3.connect(database_uri, uri=True)) as db:
+        with closing(
+            sqlite3.connect(database_uri, uri=True, timeout=0.0)
+        ) as db:
+            db.execute("BEGIN")
             event_rows = db.execute(
                 """
                 SELECT seq, payload
@@ -3629,9 +3653,11 @@ def _current_turn_capability_evidence(
             ).fetchall()
     except sqlite3.Error as exc:
         evidence["read_error"] = _exc_text(exc)
+        evidence["read_error_kind"] = "sqlite"
         return evidence
 
     run_status = str(submission_identity.get("run_status") or "")
+    malformed_run_records = 0
     for (raw_contents,) in run_record_rows:
         try:
             stored = json.loads(
@@ -3640,6 +3666,7 @@ def _current_turn_capability_evidence(
                 else str(raw_contents)
             )
         except (json.JSONDecodeError, UnicodeDecodeError):
+            malformed_run_records += 1
             continue
         record = stored.get("value") if isinstance(stored, dict) else None
         if record is None and isinstance(stored, dict):
@@ -3647,8 +3674,18 @@ def _current_turn_capability_evidence(
         if (
             isinstance(record, dict)
             and str(record.get("run_id") or "") == identity["run_id"]
+            and isinstance(record.get("status"), str)
+            and record.get("status")
         ):
             run_status = str(record.get("status") or run_status)
+        else:
+            malformed_run_records += 1
+    if malformed_run_records:
+        return _malformed_capability_evidence(
+            evidence,
+            "run-record",
+            malformed_run_records,
+        )
     if run_status:
         evidence["run_status"] = run_status
         evidence["run_terminal"] = run_status.lower() in {
@@ -3712,6 +3749,7 @@ def _current_turn_capability_evidence(
             )
 
     terminal_events: dict[str, tuple[str, str, int, str]] = {}
+    malformed_events = 0
     for raw_seq, raw_payload in event_rows:
         try:
             payload = json.loads(
@@ -3720,18 +3758,26 @@ def _current_turn_capability_evidence(
                 else str(raw_payload)
             )
         except (json.JSONDecodeError, UnicodeDecodeError):
+            malformed_events += 1
             continue
         if not isinstance(payload, dict):
+            malformed_events += 1
             continue
         capability_id = str(payload.get("capability_id") or "")
         event_status = _TERMINAL_CAPABILITY_EVENT_STATUSES.get(
             str(payload.get("kind") or "")
         )
         scope = payload.get("scope")
+        matches_current_run = (
+            capability_id in wanted
+            and event_status in allowed_statuses
+            and payload.get("parent_invocation_id") == identity["run_id"]
+        )
+        if matches_current_run and not isinstance(scope, dict):
+            malformed_events += 1
+            continue
         if (
-            capability_id not in wanted
-            or event_status not in allowed_statuses
-            or payload.get("parent_invocation_id") != identity["run_id"]
+            not matches_current_run
             or not isinstance(scope, dict)
             or scope.get("thread_id") != identity["thread_id"]
         ):
@@ -3744,10 +3790,19 @@ def _current_turn_capability_evidence(
                 int(raw_seq),
                 str(scope.get("tenant_id") or ""),
             )
+        else:
+            malformed_events += 1
+    if malformed_events:
+        return _malformed_capability_evidence(
+            evidence,
+            "runtime-event",
+            malformed_events,
+        )
 
     matched: dict[str, list[tuple[int, str, str, str]]] = {
         capability_id: [] for capability_id in capability_ids
     }
+    malformed_run_states = 0
     for (raw_contents,) in run_state_rows:
         try:
             payload = json.loads(
@@ -3756,8 +3811,10 @@ def _current_turn_capability_evidence(
                 else str(raw_contents)
             )
         except (json.JSONDecodeError, UnicodeDecodeError):
+            malformed_run_states += 1
             continue
         if not isinstance(payload, dict):
+            malformed_run_states += 1
             continue
         invocation_id = str(payload.get("invocation_id") or "")
         event = terminal_events.get(invocation_id)
@@ -3769,16 +3826,24 @@ def _current_turn_capability_evidence(
             0,
             "",
         )
+        if event is None:
+            continue
         if (
-            event is None
-            or payload.get("capability_id") != event_capability_id
+            payload.get("capability_id") != event_capability_id
             or status != event_status
             or not isinstance(scope, dict)
             or scope.get("thread_id") != identity["thread_id"]
         ):
+            malformed_run_states += 1
             continue
         matched[event_capability_id].append(
             (event_seq, invocation_id, status, event_tenant_id)
+        )
+    if malformed_run_states:
+        return _malformed_capability_evidence(
+            evidence,
+            "run-state",
+            malformed_run_states,
         )
 
     ordered_matches = sorted(
@@ -3830,7 +3895,7 @@ def _current_turn_capability_evidence(
 def _current_turn_outbound_final_reply_target_ids(
     reborn_home: Path,
     submission_identities: list[dict[str, object]],
-) -> list[str]:
+) -> OutboundTargetEvidence:
     return current_turn_outbound_final_reply_target_ids(
         reborn_home,
         submission_identities,
@@ -5085,14 +5150,12 @@ async def _slack_delivery_routine_case(
                 ctx.reborn_home,
                 identities,
             )
-            if not getattr(eligible_targets, "checked", True):
+            if not eligible_targets.checked:
                 raise CanaryEvidenceInconclusive(
                     "current-turn outbound target evidence could not be read: "
-                    f"{getattr(eligible_targets, 'error', None)}"
+                    f"{eligible_targets.error}"
                 )
-            eligible_target_ids = list(
-                getattr(eligible_targets, "target_ids", eligible_targets)
-            )
+            eligible_target_ids = list(eligible_targets.target_ids)
             base_details["outbound_target_evidence"] = {
                 "eligible_final_reply_target_count": len(eligible_target_ids),
                 "selected_target_sha256": hashlib.sha256(

@@ -18,6 +18,7 @@ import sqlite3
 import sys
 import tempfile
 import types
+import typing
 import unittest
 from contextlib import closing
 from pathlib import Path
@@ -1521,16 +1522,15 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
         self.assertEqual(list(targets.target_ids), ["slack-final"])
 
     def test_routed_routine_maps_outbound_preview_read_failure_to_inconclusive(self):
+        from scripts.reborn_webui_v2_live_qa.capability_evidence import (
+            OutboundTargetEvidence,
+        )
         from scripts.reborn_webui_v2_live_qa.routine_evidence import (
             DefaultTargetSnapshot,
             TriggerKey,
             TriggerRecordEvidence,
             TriggerSnapshot,
         )
-
-        class UnreadableTargets(list):
-            checked = False
-            error = "malformed outbound target capability preview"
 
         async def fake_creation(_ctx, **kwargs):
             return run_live_qa.ProbeResult(
@@ -1584,7 +1584,10 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
             patch.object(
                 run_live_qa,
                 "_current_turn_outbound_final_reply_target_ids",
-                return_value=UnreadableTargets(),
+                return_value=OutboundTargetEvidence(
+                    checked=False,
+                    error="malformed outbound target capability preview",
+                ),
             ),
         ):
             result = asyncio.run(
@@ -3564,11 +3567,306 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
         self.assertTrue(str(connection_target).startswith("file:"))
         self.assertIn("mode=ro", str(connection_target))
         self.assertTrue(connect.call_args.kwargs["uri"])
+        self.assertEqual(connect.call_args.kwargs["timeout"], 0.0)
         self.assertEqual(evidence["read_error"], "database is locked")
         self.assertEqual(
             evidence["statuses"],
             {"slack.get_conversation_history": []},
         )
+
+    def test_current_turn_capability_evidence_uses_one_sqlite_snapshot(self):
+        capability_id = run_live_qa.TRIGGER_CREATE_CAPABILITY_ID
+        identity = {
+            "accepted_message_ref": "message-current",
+            "thread_id": "thread-current",
+            "turn_id": "turn-current",
+            "run_id": "run-current",
+        }
+
+        def event(invocation_id: str) -> str:
+            return json.dumps(
+                {
+                    "kind": "capability_activity_succeeded",
+                    "scope": {
+                        "tenant_id": "tenant-current",
+                        "thread_id": "thread-current",
+                        "invocation_id": invocation_id,
+                    },
+                    "parent_invocation_id": "run-current",
+                    "capability_id": capability_id,
+                }
+            )
+
+        def run_state(invocation_id: str) -> str:
+            return json.dumps(
+                {
+                    "invocation_id": invocation_id,
+                    "capability_id": capability_id,
+                    "scope": {
+                        "tenant_id": "tenant-current",
+                        "thread_id": "thread-current",
+                    },
+                    "status": "completed",
+                }
+            )
+
+        def run_record(status: str) -> str:
+            return json.dumps(
+                {
+                    "value": {
+                        "run_id": "run-current",
+                        "status": status,
+                    }
+                }
+            )
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            reborn_home = Path(tmpdir)
+            db_path = reborn_home / "local-dev" / "reborn-local-dev.db"
+            db_path.parent.mkdir(parents=True)
+            with closing(sqlite3.connect(db_path)) as setup, setup:
+                setup.execute("PRAGMA journal_mode=WAL")
+                setup.execute(
+                    "CREATE TABLE root_filesystem_entries "
+                    "(path TEXT PRIMARY KEY, contents TEXT, is_dir INTEGER, "
+                    "content_type TEXT, kind TEXT)"
+                )
+                setup.execute(
+                    "CREATE TABLE root_filesystem_events "
+                    "(seq INTEGER PRIMARY KEY, path TEXT, payload TEXT)"
+                )
+                setup.execute(
+                    "INSERT INTO root_filesystem_events VALUES "
+                    "(1, '/events/runtime/tenant/current', ?)",
+                    (event("invocation-one"),),
+                )
+                setup.execute(
+                    "INSERT INTO root_filesystem_entries VALUES "
+                    "('/run-state/threads/thread-current/runs/invocation-one.json', "
+                    "?, 0, 'application/json', 'run_state_record')",
+                    (run_state("invocation-one"),),
+                )
+                setup.execute(
+                    "INSERT INTO root_filesystem_entries VALUES "
+                    "('/turns/rows/v1/runs/run-current.json', ?, 0, "
+                    "'application/json', 'turn_run')",
+                    (run_record("Running"),),
+                )
+
+            writer = sqlite3.connect(db_path)
+            try:
+                writer.execute("BEGIN IMMEDIATE")
+                writer.execute(
+                    "INSERT INTO root_filesystem_events VALUES "
+                    "(2, '/events/runtime/tenant/current', ?)",
+                    (event("invocation-two"),),
+                )
+                writer.execute(
+                    "INSERT INTO root_filesystem_entries VALUES "
+                    "('/run-state/threads/thread-current/runs/invocation-two.json', "
+                    "?, 0, 'application/json', 'run_state_record')",
+                    (run_state("invocation-two"),),
+                )
+                writer.execute(
+                    "UPDATE root_filesystem_entries SET contents = ? "
+                    "WHERE path = '/turns/rows/v1/runs/run-current.json'",
+                    (run_record("Completed"),),
+                )
+
+                real_connect = sqlite3.connect
+                interleaved = {"committed": False}
+
+                class InterleavingConnection:
+                    def __init__(self, connection):
+                        self.connection = connection
+
+                    def execute(self, sql, parameters=()):
+                        if (
+                            "LIKE '%/run-state/%'" in sql
+                            and not interleaved["committed"]
+                        ):
+                            writer.commit()
+                            interleaved["committed"] = True
+                        return self.connection.execute(sql, parameters)
+
+                    def close(self):
+                        self.connection.close()
+
+                def interleaving_connect(*args, **kwargs):
+                    return InterleavingConnection(real_connect(*args, **kwargs))
+
+                with patch.object(
+                    run_live_qa.sqlite3,
+                    "connect",
+                    side_effect=interleaving_connect,
+                ):
+                    during_commit = run_live_qa._current_turn_capability_evidence(
+                        reborn_home,
+                        identity,
+                        [capability_id],
+                        {"completed"},
+                    )
+
+                after_commit = run_live_qa._current_turn_capability_evidence(
+                    reborn_home,
+                    identity,
+                    [capability_id],
+                    {"completed"},
+                )
+            finally:
+                writer.close()
+
+        self.assertTrue(interleaved["committed"])
+        self.assertFalse(during_commit.get("run_terminal"))
+        self.assertEqual(
+            during_commit["statuses"][capability_id],
+            ["completed"],
+        )
+        self.assertTrue(after_commit["run_terminal"])
+        self.assertEqual(
+            after_commit["statuses"][capability_id],
+            ["completed", "completed"],
+        )
+
+    def test_current_turn_capability_evidence_rejects_malformed_authority_rows(self):
+        identity = {
+            "accepted_message_ref": "message-current",
+            "thread_id": "thread-current",
+            "turn_id": "turn-current",
+            "run_id": "run-current",
+        }
+        for source in ("run_record", "runtime_event", "run_state"):
+            with self.subTest(source=source), tempfile.TemporaryDirectory() as tmpdir:
+                reborn_home = Path(tmpdir)
+                db_path = reborn_home / "local-dev" / "reborn-local-dev.db"
+                db_path.parent.mkdir(parents=True)
+                with closing(sqlite3.connect(db_path)) as db, db:
+                    db.execute(
+                        "CREATE TABLE root_filesystem_entries "
+                        "(path TEXT, contents TEXT, is_dir INTEGER, "
+                        "content_type TEXT, kind TEXT)"
+                    )
+                    db.execute(
+                        "CREATE TABLE root_filesystem_events "
+                        "(seq INTEGER PRIMARY KEY, path TEXT, payload TEXT)"
+                    )
+                    if source == "run_record":
+                        db.execute(
+                            "INSERT INTO root_filesystem_entries VALUES "
+                            "('/turns/rows/v1/runs/run-current.json', "
+                            "'{not-json', 0, 'application/json', 'turn_run')"
+                        )
+                    elif source == "runtime_event":
+                        db.execute(
+                            "INSERT INTO root_filesystem_events VALUES "
+                            "(1, '/events/runtime/tenant/current', '{not-json')"
+                        )
+                    else:
+                        db.execute(
+                            "INSERT INTO root_filesystem_entries VALUES "
+                            "('/run-state/threads/thread-current/runs/"
+                            "invocation-current.json', '{not-json', 0, "
+                            "'application/json', 'run_state_record')"
+                        )
+
+                evidence = run_live_qa._current_turn_capability_evidence(
+                    reborn_home,
+                    identity,
+                    [run_live_qa.TRIGGER_CREATE_CAPABILITY_ID],
+                    {"completed"},
+                )
+
+            self.assertEqual(evidence.get("read_error_kind"), "malformed_evidence")
+            self.assertGreater(evidence.get("malformed_count", 0), 0)
+            self.assertIn("malformed", str(evidence.get("read_error")))
+
+    def test_routine_creation_maps_malformed_current_run_record_to_inconclusive(self):
+        async def fake_live_chat_case(_ctx, **kwargs):
+            return run_live_qa.ProbeResult(
+                provider="test",
+                mode=f"live:{kwargs['case_name']}",
+                success=True,
+                latency_ms=1,
+                details={
+                    "text_excerpt": "created",
+                    "assistant_reply_wait_reason": "final_reply_observed",
+                    "submission_identity": {
+                        "accepted_message_ref": "message-current",
+                        "thread_id": "thread-current",
+                        "turn_id": "turn-current",
+                        "run_id": "run-current",
+                    },
+                },
+            )
+
+        async def fast_real_wait(reborn_home, before, identities, **_kwargs):
+            return await run_live_qa.wait_for_current_turn_trigger_validation(
+                reborn_home,
+                before,
+                identities,
+                terminal_reader=run_live_qa._current_turn_capability_evidence,
+                preview_reader=run_live_qa._current_turn_capability_previews,
+                timeout=0.0,
+                poll_interval=0.0,
+            )
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            reborn_home = Path(tmpdir)
+            db_path = reborn_home / "local-dev" / "reborn-local-dev.db"
+            db_path.parent.mkdir(parents=True)
+            with closing(sqlite3.connect(db_path)) as db, db:
+                db.execute(
+                    "CREATE TABLE trigger_records "
+                    "(tenant_id TEXT, trigger_id TEXT, name TEXT, prompt TEXT, "
+                    "schedule_kind TEXT, schedule_expression TEXT, "
+                    "schedule_timezone TEXT, schedule_at TEXT, next_run_at TEXT, "
+                    "delivery_target TEXT)"
+                )
+                db.execute(
+                    "CREATE TABLE root_filesystem_entries "
+                    "(path TEXT, contents TEXT, is_dir INTEGER, "
+                    "content_type TEXT, kind TEXT)"
+                )
+                db.execute(
+                    "CREATE TABLE root_filesystem_events "
+                    "(seq INTEGER PRIMARY KEY, path TEXT, payload TEXT)"
+                )
+                db.execute(
+                    "INSERT INTO root_filesystem_entries VALUES "
+                    "('/turns/rows/v1/runs/run-current.json', '{not-json', "
+                    "0, 'application/json', 'turn_run')"
+                )
+            ctx = self._dummy_ctx()
+            ctx.reborn_home = reborn_home
+            with (
+                patch.object(
+                    run_live_qa,
+                    "_live_chat_case",
+                    side_effect=fake_live_chat_case,
+                ),
+                patch.object(
+                    run_live_qa,
+                    "_wait_for_current_turn_trigger_validation",
+                    side_effect=fast_real_wait,
+                ),
+            ):
+                result = asyncio.run(
+                    run_live_qa._routine_creation_case(
+                        ctx,
+                        case_name="qa_malformed_run_record",
+                        prompt="create it",
+                        marker="marker",
+                        routine_name="routine",
+                        required_text=["routine"],
+                    )
+                )
+
+        self.assertFalse(result.success)
+        self.assertEqual(result.details.get("failure_class"), "infrastructure")
+        self.assertEqual(result.details.get("failure_status"), "inconclusive")
+        self.assertTrue(result.details.get("inconclusive"))
+        self.assertFalse(result.details.get("blocking", True))
+        self.assertIn("malformed", result.details["error"])
 
     def test_current_turn_capability_evidence_reads_terminal_run_and_tenant_scope(self):
         capability_id = run_live_qa.TRIGGER_CREATE_CAPABILITY_ID
@@ -4098,6 +4396,41 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
         self.assertIn("<REDACTED_ANTHROPIC_KEY>", redacted)
         self.assertNotIn("sk-test1234567890abcdefghijklmnop", redacted)
         self.assertNotIn("sk-ant-test1234567890", redacted)
+
+    def test_browser_diagnostic_record_redacts_suffix_secret_keys_in_text(self):
+        secrets = (
+            "LEAK_PREFIXED_JSON",
+            "LEAK_ESCAPED_JSON",
+            "LEAK_ASSIGNMENT",
+            "LEAK_COLON",
+        )
+        diagnostic = (
+            'prefix payload={"slack_bot_token":"LEAK_PREFIXED_JSON"} '
+            'escaped={\\"webhook_secret\\":\\"LEAK_ESCAPED_JSON\\"} '
+            "SLACK_BOT_TOKEN=LEAK_ASSIGNMENT "
+            "webhook_secret: LEAK_COLON "
+            "monkey=harmless-monkey token_count=17"
+        )
+        with tempfile.TemporaryDirectory() as tmpdir:
+            diagnostics = run_live_qa._BrowserDiagnostics(Path(tmpdir), "case")
+            diagnostics.record("console", level="error", message=diagnostic)
+            persisted = diagnostics.event_path.read_text(encoding="utf-8")
+
+        for secret in secrets:
+            self.assertNotIn(secret, persisted)
+        self.assertIn("harmless-monkey", persisted)
+        self.assertIn("token_count=17", persisted)
+
+    def test_outbound_target_wrapper_exposes_typed_return_annotation(self):
+        from scripts.reborn_webui_v2_live_qa.capability_evidence import (
+            OutboundTargetEvidence,
+        )
+
+        hints = typing.get_type_hints(
+            run_live_qa._current_turn_outbound_final_reply_target_ids
+        )
+
+        self.assertIs(hints["return"], OutboundTargetEvidence)
 
     def test_slack_dm_route_discovery_prefers_configured_user(self):
         captured: dict[str, object] = {}

@@ -37,9 +37,16 @@ _SENSITIVE_KEY_SUFFIXES = {
     "secret",
     "token",
 }
-_SENSITIVE_KEY_PATTERN = (
+_SENSITIVE_KEY_BASE_PATTERN = (
     r"(?:api[_-]?key|authorization|client[_-]?secret|code|cookie|id[_-]?token|"
     r"oauth[_-]?token|password|refresh[_-]?token|secret|state|token|access[_-]?token)"
+)
+_SENSITIVE_KEY_SUFFIX_PATTERN = (
+    r"(?:[a-z0-9]+(?:[_-][a-z0-9]+)*[_-]"
+    r"(?:cookie|credentials?|key|password|secret|token))"
+)
+_SENSITIVE_KEY_PATTERN = (
+    rf"(?:{_SENSITIVE_KEY_BASE_PATTERN}|{_SENSITIVE_KEY_SUFFIX_PATTERN})"
 )
 _DOUBLE_QUOTED_SECRET = re.compile(
     rf'(?i)("{_SENSITIVE_KEY_PATTERN}"\s*:\s*")((?:\\.|[^"\\])*)(")'
@@ -52,6 +59,9 @@ _ESCAPED_DOUBLE_QUOTED_SECRET = re.compile(
 )
 _ASSIGNMENT_SECRET = re.compile(
     rf"(?i)(\b{_SENSITIVE_KEY_PATTERN}\s*=\s*)[^,\s)\]}}'\"]+"
+)
+_COLON_SECRET = re.compile(
+    rf"(?i)(\b{_SENSITIVE_KEY_PATTERN}\s*:\s*)[^,\s)\]}}'\"]+"
 )
 _QUERY_SECRET = re.compile(
     rf"(?i)([?&]{_SENSITIVE_KEY_PATTERN}=)[^&#\s]+"
@@ -125,6 +135,7 @@ def _sanitize_text(value: str, literal_secrets: Sequence[str]) -> str:
     text = _COOKIE_HEADER.sub(r"\1<REDACTED>", text)
     text = _QUERY_SECRET.sub(r"\1<REDACTED>", text)
     text = _ASSIGNMENT_SECRET.sub(r"\1<REDACTED>", text)
+    text = _COLON_SECRET.sub(r"\1<REDACTED>", text)
     text = _BEARER_OR_BASIC.sub("<REDACTED_AUTHORIZATION>", text)
     text = _SLACK_TOKEN.sub("<REDACTED_SLACK_TOKEN>", text)
     text = _GOOGLE_TOKEN.sub("<REDACTED_GOOGLE_TOKEN>", text)
