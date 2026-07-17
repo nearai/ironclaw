@@ -19,8 +19,8 @@ use ironclaw_extension_host::test_support::{
     tool_and_channel_manifest,
 };
 use ironclaw_extension_host::{
-    ExtensionBindings, ExtensionHost, ExtensionHostDeps, RehydratedInstallationRecordStore,
-    InstallationRecord, InstallationRecordStore, InstallationState, LifecycleError,
+    ExtensionBindings, ExtensionHost, ExtensionHostDeps, InstallationRecord,
+    InstallationRecordStore, InstallationState, LifecycleError, RehydratedInstallationRecordStore,
 };
 use ironclaw_host_api::ToolAdapter;
 use ironclaw_product_adapters::ChannelAdapter;

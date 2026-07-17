@@ -16,16 +16,16 @@ use hmac::{Hmac, KeyInit, Mac};
 use sha2::Sha256;
 
 use ironclaw_extension_host::ingress::{
-    ExtensionIngressRouter, ExtensionIngressRouterDeps,
-    InboundAdmission, InboundAdmissionAck, InboundSink, InboundSinkError, IngressPortError,
-    IngressRateLimitConfig, IngressRequest, IngressRouterConfig, IngressSecretsPort,
-    ReplyContextKey, ReplyContextStore, VerificationCandidate, canonical_ingress_path,
+    ExtensionIngressRouter, ExtensionIngressRouterDeps, InboundAdmission, InboundAdmissionAck,
+    InboundSink, InboundSinkError, IngressPortError, IngressRateLimitConfig, IngressRequest,
+    IngressRouterConfig, IngressSecretsPort, ReplyContextKey, ReplyContextStore,
+    VerificationCandidate, canonical_ingress_path,
 };
 use ironclaw_extension_host::test_support::resolve_manifest_toml;
 use ironclaw_extension_host::{
     ExtensionBindings, ExtensionEntrypoint, ExtensionHost, ExtensionHostDeps, ExtensionLoader,
-    RehydratedInstallationRecordStore, InstallationRecord, InstallationRecordStore,
-    InstallationState, LifecycleError, LoadContext, LoadedExtension, SnapshotConflict,
+    InstallationRecord, InstallationRecordStore, InstallationState, LifecycleError, LoadContext,
+    LoadedExtension, RehydratedInstallationRecordStore, SnapshotConflict,
 };
 use ironclaw_host_api::SecretHandle;
 use ironclaw_product_adapters::{

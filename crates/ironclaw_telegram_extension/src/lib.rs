@@ -24,7 +24,7 @@ pub use channel::{
 };
 pub use payload::{
     GroupTriggerPolicy, PayloadParseError, TELEGRAM_API_HOST, TELEGRAM_FILE_API_HOST,
-    TELEGRAM_USER_ACTOR_KIND, TelegramInboundEvent,
-    normalize_telegram_update, parse_telegram_update,
+    TELEGRAM_USER_ACTOR_KIND, TelegramInboundEvent, normalize_telegram_update,
+    parse_telegram_update,
 };
 pub use render::{TelegramRenderError, render_final_reply, render_progress_typing};

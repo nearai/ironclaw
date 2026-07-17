@@ -31,9 +31,9 @@ use std::time::Duration;
 use async_trait::async_trait;
 use ironclaw_extension_host::{
     BindError, DrainController, EgressFactory, ExtensionBindings, ExtensionEntrypoint,
-    ExtensionHost, ExtensionHostDeps, ExtensionLoader, HookError, RehydratedInstallationRecordStore,
-    InstallationRecord, InstallationState, LoadContext, LoadedExtension, NativeExtensionFactory,
-    SnapshotToolResolver,
+    ExtensionHost, ExtensionHostDeps, ExtensionLoader, HookError, InstallationRecord,
+    InstallationState, LoadContext, LoadedExtension, NativeExtensionFactory,
+    RehydratedInstallationRecordStore, SnapshotToolResolver,
 };
 use ironclaw_extensions::{
     ExtensionActivationState, ExtensionInstallationStore, ExtensionManifest, ExtensionPackage,

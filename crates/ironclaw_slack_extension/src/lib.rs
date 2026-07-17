@@ -25,9 +25,9 @@ pub const SLACK_V2_ADAPTER_ID: &str = "slack_v2";
 
 pub use channel::SlackChannelAdapter;
 pub use payload::{
-    SLACK_API_HOST, SLACK_USER_ACTOR_KIND, SlackInboundEvent,
-    SlackPayloadParseError, SlackUrlVerificationChallenge, classify_interaction_resolution,
-    normalize_slack_event, parse_slack_event, parse_slack_url_verification_challenge,
+    SLACK_API_HOST, SLACK_USER_ACTOR_KIND, SlackInboundEvent, SlackPayloadParseError,
+    SlackUrlVerificationChallenge, classify_interaction_resolution, normalize_slack_event,
+    parse_slack_event, parse_slack_url_verification_challenge,
 };
 pub use preference_targets::{
     SlackPreferenceTargetCodec, SlackReplyTargetError,

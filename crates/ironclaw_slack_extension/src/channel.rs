@@ -15,8 +15,8 @@ use ironclaw_host_api::{
     NetworkMethod, RestrictedEgress, RestrictedEgressError, RestrictedEgressRequest, SecretHandle,
 };
 use ironclaw_product_adapters::{
-    AdapterInstallationId, AttachmentRef, ChannelAdapter, ChannelError, DeliveryReport,
-    ExternalConversationRef, ImmediateResponse, InboundOutcome, NormalizedInboundMessage,
+    AdapterInstallationId, ChannelAdapter, ChannelError, DeliveryReport,
+    ExternalConversationRef, ImmediateResponse, InboundOutcome,
     OutboundEnvelope, OutboundPart, PartDeliveryOutcome, TargetCandidate, TargetQuery,
     VerifiedInbound,
 };
@@ -382,7 +382,7 @@ fn parse_error(error: SlackPayloadParseError) -> ChannelError {
 
 #[cfg(test)]
 mod tests {
-    use ironclaw_product_adapters::ProductTriggerReason;
+    use ironclaw_product_adapters::{AttachmentRef, ProductTriggerReason};
 
     use super::*;
 

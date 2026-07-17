@@ -17,8 +17,8 @@
 use ironclaw_product_adapters::{
     AdapterInstallationId, AttachmentRef, ExternalActorRef, ExternalConversationRef,
     ExternalEventId, InboundCommandPayload, NormalizedInboundMessage, ParsedProductInbound,
-    ProductAdapterError, ProductAttachmentDescriptor, ProductAttachmentKind,
-    ProductInboundPayload, ProductTriggerReason, ProtocolAuthEvidence, UserMessagePayload,
+    ProductAdapterError, ProductAttachmentDescriptor, ProductAttachmentKind, ProductInboundPayload,
+    ProductTriggerReason, ProtocolAuthEvidence, UserMessagePayload,
 };
 use serde::Deserialize;
 use thiserror::Error;
@@ -148,7 +148,6 @@ pub enum TelegramInboundEvent {
     Ignore,
     Message(Box<NormalizedInboundMessage>),
 }
-
 
 /// Parse one HOST-VERIFIED Telegram update into its normalized channel form.
 /// Pure protocol work — no I/O, no secrets; the host executed the

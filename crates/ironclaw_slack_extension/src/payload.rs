@@ -197,18 +197,20 @@ pub fn normalize_slack_event(
                     descriptor,
                 })
                 .collect();
-            Ok(SlackInboundEvent::Message(Box::new(NormalizedInboundMessage {
-                actor: parsed.external_actor_ref,
-                conversation: parsed.external_conversation_ref,
-                event_id: parsed.external_event_id,
-                text: message.text,
-                trigger,
-                attachments,
-                // Reply routing rides the conversation ref's thread anchors
-                // (pre-coordinator delivery path); adopted when the P5
-                // delivery coordinator consumes stored contexts.
-                reply_context: None,
-            })))
+            Ok(SlackInboundEvent::Message(Box::new(
+                NormalizedInboundMessage {
+                    actor: parsed.external_actor_ref,
+                    conversation: parsed.external_conversation_ref,
+                    event_id: parsed.external_event_id,
+                    text: message.text,
+                    trigger,
+                    attachments,
+                    // Reply routing rides the conversation ref's thread anchors
+                    // (pre-coordinator delivery path); adopted when the P5
+                    // delivery coordinator consumes stored contexts.
+                    reply_context: None,
+                },
+            )))
         }
         // try_parse_user_message downgrades bot/system/subtype messages to
         // NoOp — authenticated no-ops for the channel contract.

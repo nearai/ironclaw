@@ -574,8 +574,8 @@ async fn slack_test_extension_host() -> Arc<ironclaw_extension_host::ExtensionHo
     };
     use ironclaw_extension_host::{
         BindContext, BindError, ExtensionBindings, ExtensionEntrypoint, ExtensionHost,
-        ExtensionHostDeps, ExtensionLoader, RehydratedInstallationRecordStore, InstallationRecord,
-        InstallationState, LoadContext, LoadedExtension,
+        ExtensionHostDeps, ExtensionLoader, InstallationRecord, InstallationState, LoadContext,
+        LoadedExtension, RehydratedInstallationRecordStore,
     };
 
     struct SlackTestEntrypoint;

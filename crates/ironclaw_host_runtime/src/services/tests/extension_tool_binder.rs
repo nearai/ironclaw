@@ -6,8 +6,7 @@
 use std::collections::BTreeSet;
 
 use ironclaw_host_api::{
-    RequestedTrustClass, ToolCall, ToolCallResources, ToolError, ToolPorts,
-    TrustClass, VirtualPath,
+    RequestedTrustClass, ToolCall, ToolCallResources, ToolError, ToolPorts, TrustClass, VirtualPath,
 };
 
 use super::super::ExtensionToolBindError;

@@ -5,8 +5,7 @@
 //! `ironclaw_dispatcher` per-invocation-selection tests.
 
 use ironclaw_dispatcher::{
-    BoundCapabilityAdapter, CapabilityDispatchRequest, RuntimeDispatcher,
-    ToolResolver,
+    BoundCapabilityAdapter, CapabilityDispatchRequest, RuntimeDispatcher, ToolResolver,
 };
 use ironclaw_events::{InMemoryEventSink, RuntimeEventKind};
 use ironclaw_extensions::SharedExtensionRegistry;

@@ -21,10 +21,10 @@ mod router;
 mod verifier;
 
 pub use router::{
-    ExtensionIngressRouter, ExtensionIngressRouterDeps,
-    InboundAdmission, InboundAdmissionAck, InboundSink, InboundSinkError, IngressPortError,
-    IngressRateLimitConfig, IngressRequest, IngressResponse, IngressRouterConfig,
-    IngressSecretsPort, ReplyContextKey, ReplyContextStore, canonical_ingress_path,
+    ExtensionIngressRouter, ExtensionIngressRouterDeps, InboundAdmission, InboundAdmissionAck,
+    InboundSink, InboundSinkError, IngressPortError, IngressRateLimitConfig, IngressRequest,
+    IngressResponse, IngressRouterConfig, IngressSecretsPort, ReplyContextKey, ReplyContextStore,
+    canonical_ingress_path,
 };
 pub use verifier::{
     IngressHeaders, MAX_VERIFICATION_CANDIDATES, VerificationCandidate, VerificationFailure,
