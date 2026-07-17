@@ -114,6 +114,10 @@ def cargo_build() -> None:
     )
 
 
+def legacy_gateway_command() -> list[str]:
+    return [str(ROOT / "target" / "debug" / "ironclaw-v1"), "--no-onboard"]
+
+
 def env_str(name: str, default: str | None = None) -> str | None:
     value = os.environ.get(name, default)
     if value is None:
@@ -508,7 +512,7 @@ async def start_gateway_stack(
             extra_env=extra_gateway_env,
         )
         gateway_proc = subprocess.Popen(
-            [str(ROOT / "target" / "debug" / "ironclaw"), "--no-onboard"],
+            legacy_gateway_command(),
             cwd=ROOT,
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
