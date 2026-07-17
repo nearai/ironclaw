@@ -1168,8 +1168,62 @@ mod tests {
         assert_eq!(fixture.runner_calls.load(Ordering::SeqCst), 0);
     }
 
-    // Row (c): bare `/start` and unpaired ordinary text hint, throttled per
-    // chat within the window.
+    /// Invalid pairing guesses are uniformly answered but the failure reply
+    /// is rate-limited per chat, and the limiter never gates a valid consume
+    /// — a typo followed by the real code (the deep-link retry shape) still
+    /// pairs immediately. Automates the reply-throttle half of
+    /// qa-telegram:P13; guess feasibility itself is bounded by the code
+    /// space, TTL, and the per-installation ingress limiter.
+    #[tokio::test]
+    async fn invalid_code_replies_are_throttled_per_chat_without_gating_valid_consume() {
+        let fixture = fixture().await;
+        let ben = user("ben");
+
+        // Two invalid code-shaped guesses in the same chat: one reply only.
+        for _ in 0..2 {
+            fixture
+                .process(&private_text_update_body(42, 555, Some("AAAAAAAA")))
+                .await
+                .expect("acked");
+        }
+        // A different chat gets its own (single) failure reply.
+        fixture
+            .process(&private_text_update_body(43, 777, Some("AAAAAAAA")))
+            .await
+            .expect("acked");
+        assert_eq!(
+            fixture.bot_api.sends(),
+            vec![
+                (555, EXPIRED_OR_UNKNOWN_REPLY.to_string()),
+                (777, EXPIRED_OR_UNKNOWN_REPLY.to_string()),
+            ],
+            "the second same-chat invalid guess must be answered with silence"
+        );
+
+        // The throttle must not gate valid consumption: the real code sent
+        // from the throttled chat still pairs and still confirms.
+        let issue = fixture
+            .pairing
+            .issue_or_rotate(&ben)
+            .await
+            .expect("code issues");
+        fixture
+            .process(&private_text_update_body(
+                42,
+                555,
+                Some(&format!("/start {}", issue.code)),
+            ))
+            .await
+            .expect("acked");
+        let status = fixture.pairing.status_for(&ben).await.expect("status");
+        assert!(status.connected, "valid consume must bypass the throttle");
+        assert_eq!(
+            fixture.bot_api.sends().last(),
+            Some(&(555, PAIRED_REPLY.to_string())),
+            "the success confirmation is never throttled"
+        );
+    }
+
     #[tokio::test]
     async fn unpaired_hints_are_throttled_per_chat() {
         let fixture = fixture().await;

@@ -321,7 +321,7 @@ ironclaw_runner = { path = "crates/ironclaw_runner", version = "0.1.0", features
 # all 17 gated modules into every int-tier test binary — real, one-time
 # build-time cost for the lane, behaviorally inert for suites that never
 # reference Slack types.
-ironclaw_reborn_composition = { path = "crates/ironclaw_reborn_composition", version = "0.1.0", features = ["test-support", "libsql", "webui-v2-beta", "slack-v2-host-beta"] }
+ironclaw_reborn_composition = { path = "crates/ironclaw_reborn_composition", version = "0.1.0", features = ["test-support", "libsql", "webui-v2-beta", "slack-v2-host-beta", "telegram-v2-host-beta"] }
 # Direct dev-dep: composition deliberately does NOT re-export the bare
 # `webui_v2_router`/`WebUiV2State` (facade-only rule), and the router smoke
 # drives the bare router, not the `webui_v2_app` wrapper.
@@ -588,6 +588,10 @@ path = "tests/integration/triggered_submit.rs"
 [[test]]
 name = "reborn_integration_web_access"
 path = "tests/integration/web_access.rs"
+
+[[test]]
+name = "reborn_integration_telegram_journey"
+path = "tests/integration/telegram_journey.rs"
 
 [[test]]
 name = "reborn_integration_webui_v2_product_api"

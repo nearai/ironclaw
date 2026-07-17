@@ -1669,6 +1669,17 @@ impl RebornRuntime {
         self.turn_coordinator.clone()
     }
 
+    /// The runtime's turn coordinator — the same `Arc` production wiring hands
+    /// to the WebUI facade and the channel hosts
+    /// ([`RebornRuntime::webui_turn_coordinator`]) — so downstream integration
+    /// tests can poll `GetRunStateRequest` for runs submitted through the
+    /// composed surfaces (e.g. waiting on a `BlockedAuth` park and its resume).
+    /// For tests only — ships zero bytes in production builds.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn webui_turn_coordinator_for_test(&self) -> Arc<dyn TurnCoordinator> {
+        self.webui_turn_coordinator()
+    }
+
     #[cfg(any(feature = "slack-v2-host-beta", feature = "telegram-v2-host-beta"))]
     pub(crate) fn auth_challenge_provider(&self) -> Option<Arc<dyn crate::AuthChallengeProvider>> {
         self.services
