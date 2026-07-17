@@ -207,7 +207,7 @@ adapter's `DeliveryStatus` mapping is the honesty contract:
 | Telegram response | DeliveryStatus |
 |---|---|
 | 2xx | `Delivered` |
-| 5xx, 429 | `FailedRetryable` |
+| 5xx, 429 | `FailedRetryable` (the mediated egress first honors ONE declared `retry_after` ≤ 5s with an in-place resend; a longer flood wait or a second 429 surfaces immediately) |
 | 401, 403 (user blocked the bot / token revoked) | `FailedUnauthorized` |
 | other 4xx (e.g. 400), render errors | `FailedPermanent` |
 | non-final-reply payloads | `Deferred` |

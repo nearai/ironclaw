@@ -47,5 +47,5 @@ ironclaw_network = { path = "../ironclaw_network" }
 ironclaw_processes = { path = "../ironclaw_processes" }
 ironclaw_product_adapters = { path = "../ironclaw_product_adapters", features = ["test-support", "host-auth-mint"] }
 ironclaw_resources = { path = "../ironclaw_resources" }
-tokio = { version = "1", features = ["macros", "rt-multi-thread", "sync", "time"] }
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "sync", "test-util", "time"] }
 tower = { version = "0.5", features = ["util"] }

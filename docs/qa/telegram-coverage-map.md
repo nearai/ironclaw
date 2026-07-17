@@ -66,7 +66,7 @@ by exact test name — `cargo test <name>` locates each.
 | `qa-telegram:F3`<br>DRAFT — qa-telegram:F3 | **draft** | DRAFT parent — carried by F3:01/F3:02 |
 | `qa-telegram:F3:01:telegram-send-403`<br>A Telegram 403 marks the delivery failed and does not retry storm | **covered** | `cargo test --test reborn_integration_telegram_journey` telegram_duplicate_updates_and_send_failures_stay_honest (403 → exactly one Bot API attempt, no retry storm) + `cargo test -p ironclaw_telegram_v2_adapter` unauthorized mapping |
 | `qa-telegram:F3:02:telegram-send-recovery`<br>The next Telegram send succeeds after a prior blocked-recipient failure clears | **covered** | `cargo test --test reborn_integration_telegram_journey` telegram_duplicate_updates_and_send_failures_stay_honest (next turn's reply delivers after the failure clears) |
-| `qa-telegram:F4`<br>Telegram honors one retry_after delay and stops after the bounded retry | **gap-product** | NOT IMPLEMENTED: no retry_after/429-retry logic exists anywhere in the adapter or delivery path (grep-verified); a 429 maps to FailedRetryable status with no in-process retry. The design spec drafted 'one retry honoring retry_after'. Owner call — implement (fold-side?) or amend the row. No test written. |
+| `qa-telegram:F4`<br>Telegram honors one retry_after delay and stops after the bounded retry | **covered** | Implemented 2026-07-17 (was gap-product): `cargo test -p ironclaw_telegram_extension` telegram_egress::{send_retries_once_on_429_honoring_retry_after, send_returns_second_429_honestly_without_a_third_attempt, send_does_not_retry_when_retry_after_exceeds_the_cap, send_does_not_retry_a_429_without_retry_after} (cap 5s; paused-clock delay assertions). |
 | `qa-telegram:F6`<br>Telegram verifier swaps generations atomically below update deduplication | **covered** | `cargo test -p ironclaw_telegram_extension` telegram_serve::telegram_updates_bot_swap_rekeys_workflow_and_rejects_old_secret (+ shared idempotency ledger keyed by host scope, not revision — see telegram_host_beta.rs ledger comment) |
 | `qa-telegram:F7`<br>Telegram ignores callback, membership, inline, and channel-only updates | **covered** | `cargo test -p ironclaw_telegram_v2_adapter` payload noop tests + `cargo test -p ironclaw_telegram_extension` telegram_dispatch::non_actionable_updates_are_acked_silently |
 | `qa-telegram:F8`<br>A revoked Telegram bot token fails honestly until an administrator saves a valid replacement | **covered** | `cargo test -p ironclaw_telegram_v2_adapter` render_outbound_records_unauthorized_on_telegram_401 (honest failure while revoked) + `cargo test -p ironclaw_telegram_extension` telegram_setup::{rotation_bumps_revision_and_keeps_installation_identity, save_happy_path…} (recovery by re-save) |
@@ -222,10 +222,10 @@ by exact test name — `cargo test <name>` locates each.
 
 ## Tally
 
-- **covered**: 69
+- **covered**: 70
 - **divergence**: 2
 - **draft**: 19
-- **gap-product**: 2
+- **gap-product**: 1
 - **needs-test**: 2
 - **not-automated**: 59
 - **partial**: 7

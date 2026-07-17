@@ -114,6 +114,66 @@ impl TelegramProtocolHttpEgress {
     }
 }
 
+impl TelegramProtocolHttpEgress {
+    /// One mediated Bot API attempt: capability id, credential material, and
+    /// invocation scope are resolved fresh per attempt so telemetry sees each
+    /// wire call distinctly.
+    async fn dispatch_once(
+        &self,
+        request: &EgressRequest,
+        headers: &[(String, String)],
+    ) -> Result<EgressResponse, ProtocolHttpEgressError> {
+        let capability_id = CapabilityId::new(TELEGRAM_EGRESS_CAPABILITY_ID).map_err(|error| {
+            ProtocolHttpEgressError::PolicyDenied {
+                reason: RedactedString::new(format!(
+                    "invalid Telegram egress capability id: {error}"
+                )),
+            }
+        })?;
+        let credentials = self
+            .credential_material(request.credential_handle())
+            .await?;
+        let scope = self.request_scope();
+        let response = self
+            .host_egress
+            .execute(HostRuntimeHttpEgressRequest {
+                extension_id: telegram_extension_id()?,
+                trust: TrustClass::System,
+                request: RuntimeHttpEgressRequest {
+                    runtime: RuntimeKind::FirstParty,
+                    scope,
+                    capability_id,
+                    method: network_method(request.method().as_str())?,
+                    url: telegram_bot_api_url(request.host().as_str(), request.path().as_str()),
+                    headers: headers.to_vec(),
+                    body: request.body().to_vec(),
+                    network_policy: telegram_network_policy(request.host().as_str()),
+                    credential_injections: Vec::new(),
+                    response_body_limit: Some(TELEGRAM_EGRESS_RESPONSE_BODY_LIMIT_BYTES),
+                    save_body_to: None,
+                    timeout_ms: Some(TELEGRAM_EGRESS_TIMEOUT_MS),
+                },
+                credentials,
+            })
+            .await
+            .map_err(map_runtime_http_error)?;
+        Ok(EgressResponse::new(response.status, response.body))
+    }
+}
+
+/// A flood wait this long or shorter is honored with ONE in-place retry
+/// (qa-telegram:F4 / design spec §3); anything longer surfaces as an honest
+/// immediate failure for the delivery layer's own status handling — the
+/// egress must not park a bounded delivery task on a multi-minute sleep.
+const TELEGRAM_RETRY_AFTER_CAP_SECS: u64 = 5;
+
+/// Telegram's 429 envelope declares the wait in `parameters.retry_after`
+/// (seconds). `None` when absent or unparseable — nothing to honor.
+fn flood_wait_retry_after_secs(body: &[u8]) -> Option<u64> {
+    let envelope: serde_json::Value = serde_json::from_slice(body).ok()?;
+    envelope.get("parameters")?.get("retry_after")?.as_u64()
+}
+
 #[async_trait]
 impl ProtocolHttpEgress for TelegramProtocolHttpEgress {
     async fn send(
@@ -144,42 +204,18 @@ impl ProtocolHttpEgress for TelegramProtocolHttpEgress {
             .map(|header| (header.name().to_string(), header.value().to_string()))
             .collect::<Vec<_>>();
 
-        let capability_id = CapabilityId::new(TELEGRAM_EGRESS_CAPABILITY_ID).map_err(|error| {
-            ProtocolHttpEgressError::PolicyDenied {
-                reason: RedactedString::new(format!(
-                    "invalid Telegram egress capability id: {error}"
-                )),
-            }
-        })?;
-        let credentials = self
-            .credential_material(request.credential_handle())
-            .await?;
-        let scope = self.request_scope();
-        let response = self
-            .host_egress
-            .execute(HostRuntimeHttpEgressRequest {
-                extension_id: telegram_extension_id()?,
-                trust: TrustClass::System,
-                request: RuntimeHttpEgressRequest {
-                    runtime: RuntimeKind::FirstParty,
-                    scope,
-                    capability_id,
-                    method: network_method(request.method().as_str())?,
-                    url: telegram_bot_api_url(request.host().as_str(), request.path().as_str()),
-                    headers,
-                    body: request.body().to_vec(),
-                    network_policy: telegram_network_policy(request.host().as_str()),
-                    credential_injections: Vec::new(),
-                    response_body_limit: Some(TELEGRAM_EGRESS_RESPONSE_BODY_LIMIT_BYTES),
-                    save_body_to: None,
-                    timeout_ms: Some(TELEGRAM_EGRESS_TIMEOUT_MS),
-                },
-                credentials,
-            })
-            .await
-            .map_err(map_runtime_http_error)?;
-
-        Ok(EgressResponse::new(response.status, response.body))
+        let response = self.dispatch_once(&request, &headers).await?;
+        // qa-telegram:F4: honor ONE declared flood wait within the cap, then
+        // return whatever the resend produced — a second 429 is the delivery
+        // layer's problem (honest FailedRetryable), never a third attempt.
+        if response.status() == 429
+            && let Some(delay_secs) = flood_wait_retry_after_secs(response.body())
+                .filter(|secs| *secs <= TELEGRAM_RETRY_AFTER_CAP_SECS)
+        {
+            tokio::time::sleep(std::time::Duration::from_secs(delay_secs)).await;
+            return self.dispatch_once(&request, &headers).await;
+        }
+        Ok(response)
     }
 }
 
@@ -359,11 +395,21 @@ mod tests {
     struct RecordingNetworkHttpEgress {
         requests: Arc<Mutex<Vec<NetworkHttpRequest>>>,
         response: Result<NetworkHttpResponse, NetworkHttpError>,
+        queued: Mutex<std::collections::VecDeque<Result<NetworkHttpResponse, NetworkHttpError>>>,
     }
 
     impl RecordingNetworkHttpEgress {
+        /// FIFO responses for multi-attempt scenarios; falls back to the
+        /// default `ok()` response once drained.
+        fn with_queued(responses: Vec<Result<NetworkHttpResponse, NetworkHttpError>>) -> Self {
+            let fake = Self::ok();
+            *fake.queued.lock().expect("queued responses lock") = responses.into();
+            fake
+        }
+
         fn ok() -> Self {
             Self {
+                queued: Mutex::new(std::collections::VecDeque::new()),
                 requests: Arc::new(Mutex::new(Vec::new())),
                 response: Ok(NetworkHttpResponse {
                     status: 200,
@@ -393,6 +439,14 @@ mod tests {
                 .lock()
                 .expect("network HTTP requests lock")
                 .push(request);
+            if let Some(next) = self
+                .queued
+                .lock()
+                .expect("queued responses lock")
+                .pop_front()
+            {
+                return next;
+            }
             self.response.clone()
         }
     }
@@ -439,6 +493,135 @@ mod tests {
         )
         .with_body(br#"{"chat_id":42,"text":"hi"}"#.to_vec())
         .with_credential_handle(Some(handle))
+    }
+
+    fn flood_wait_response(retry_after: serde_json::Value) -> NetworkHttpResponse {
+        let body = serde_json::json!({
+            "ok": false,
+            "error_code": 429,
+            "description": "Too Many Requests: retry after 2",
+            "parameters": { "retry_after": retry_after }
+        })
+        .to_string()
+        .into_bytes();
+        NetworkHttpResponse {
+            status: 429,
+            headers: Vec::new(),
+            usage: NetworkUsage {
+                request_bytes: 0,
+                response_bytes: body.len() as u64,
+                resolved_ip: None,
+            },
+            body,
+        }
+    }
+
+    /// qa-telegram:F4 — one bounded retry honoring `retry_after`: the 429's
+    /// declared delay is slept once (virtual time), the request is resent
+    /// exactly once, and the second response is returned as-is.
+    #[tokio::test(start_paused = true)]
+    async fn send_retries_once_on_429_honoring_retry_after() {
+        let (egress, recorded) = telegram_egress_with_network(
+            RecordingNetworkHttpEgress::with_queued(vec![Ok(flood_wait_response(
+                serde_json::json!(2),
+            ))]),
+            "12345:secret-token",
+        );
+
+        let before = tokio::time::Instant::now();
+        let response = egress
+            .send(telegram_request(telegram_handle()))
+            .await
+            .expect("second attempt succeeds");
+        assert_eq!(response.status(), 200, "the retried attempt's response");
+        assert!(
+            before.elapsed() >= std::time::Duration::from_secs(2),
+            "the declared retry_after delay must be honored before the resend"
+        );
+        assert_eq!(
+            recorded.lock().expect("network requests lock").len(),
+            2,
+            "exactly one retry"
+        );
+    }
+
+    /// qa-telegram:F4 — the retry is bounded: a second 429 is returned
+    /// honestly with no third attempt.
+    #[tokio::test(start_paused = true)]
+    async fn send_returns_second_429_honestly_without_a_third_attempt() {
+        let (egress, recorded) = telegram_egress_with_network(
+            RecordingNetworkHttpEgress::with_queued(vec![
+                Ok(flood_wait_response(serde_json::json!(1))),
+                Ok(flood_wait_response(serde_json::json!(1))),
+            ]),
+            "12345:secret-token",
+        );
+
+        let response = egress
+            .send(telegram_request(telegram_handle()))
+            .await
+            .expect("the 429 is a response, not a transport error");
+        assert_eq!(
+            response.status(),
+            429,
+            "second flood-wait surfaces honestly"
+        );
+        assert_eq!(
+            recorded.lock().expect("network requests lock").len(),
+            2,
+            "no third attempt"
+        );
+    }
+
+    /// qa-telegram:F4 — a flood wait beyond the cap is not slept on: the 429
+    /// surfaces immediately after one attempt.
+    #[tokio::test(start_paused = true)]
+    async fn send_does_not_retry_when_retry_after_exceeds_the_cap() {
+        let (egress, recorded) = telegram_egress_with_network(
+            RecordingNetworkHttpEgress::with_queued(vec![Ok(flood_wait_response(
+                serde_json::json!(600),
+            ))]),
+            "12345:secret-token",
+        );
+
+        let before = tokio::time::Instant::now();
+        let response = egress
+            .send(telegram_request(telegram_handle()))
+            .await
+            .expect("the 429 is a response");
+        assert_eq!(response.status(), 429);
+        assert_eq!(
+            recorded.lock().expect("network requests lock").len(),
+            1,
+            "an over-cap flood wait is an honest immediate failure"
+        );
+        assert!(
+            before.elapsed() < std::time::Duration::from_secs(1),
+            "no sleep on the over-cap path"
+        );
+    }
+
+    /// qa-telegram:F4 — a 429 without a parseable retry_after has nothing to
+    /// honor: one attempt, returned as-is.
+    #[tokio::test(start_paused = true)]
+    async fn send_does_not_retry_a_429_without_retry_after() {
+        let (egress, recorded) = telegram_egress_with_network(
+            RecordingNetworkHttpEgress::with_queued(vec![Ok(flood_wait_response(
+                serde_json::Value::Null,
+            ))]),
+            "12345:secret-token",
+        );
+
+        let response = egress
+            .send(telegram_request(telegram_handle()))
+            .await
+            .expect("the 429 is a response");
+        assert_eq!(response.status(), 429);
+        assert_eq!(
+            recorded.lock().expect("network requests lock").len(),
+            1,
+            "no blind retry without a declared delay"
+        );
     }
 
     fn telegram_egress_with_network(
