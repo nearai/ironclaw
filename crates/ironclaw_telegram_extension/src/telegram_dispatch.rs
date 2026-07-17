@@ -53,7 +53,8 @@ const START_COMMAND: &str = "/start";
 // Anti-amplification guard, not a UX pacing choice: the hint is an
 // auto-reply to UNAUTHENTICATED senders, so an unthrottled version turns any
 // inbound flood into an equal outbound flood (Telegram bot quota + spam
-// flags). 30s bounds the loop (<= 2 hints/min/chat) while a real user never
+// flags). 30s bounds the loop (at most one hint per 30s window per chat —
+// i.e. ~2/minute on average) while a real user never
 // waits long enough to conclude the bot is dead — the prior 10-minute window
 // read as total silence in live testing (2026-07-17).
 const HINT_THROTTLE_WINDOW: Duration = Duration::from_secs(30);
