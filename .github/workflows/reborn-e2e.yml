@@ -269,11 +269,23 @@ jobs:
           set -euo pipefail
           product_ref="$(git rev-parse HEAD)"
           artifact_dir="artifacts/reborn-webui-v2-binary"
+          legacy_compat_dir="${RUNNER_TEMP}/ironclaw-reborn-live-canary-compat"
           mkdir -p "${artifact_dir}"
           tar -C target/debug -czf "${artifact_dir}/ironclaw.tar.gz" ironclaw
+          # PR live-canary runs are orchestrated by the trusted workflow on the
+          # default branch, which may still expect the pre-rename archive and
+          # member names. Keep this alias inside the ephemeral CI artifact only;
+          # release artifacts and the shipping CLI remain canonical `ironclaw`.
+          rm -rf "${legacy_compat_dir}"
+          mkdir -p "${legacy_compat_dir}"
+          cp target/debug/ironclaw "${legacy_compat_dir}/ironclaw-reborn"
+          tar -C "${legacy_compat_dir}" \
+            -czf "${artifact_dir}/ironclaw-reborn.tar.gz" \
+            ironclaw-reborn
           (
             cd "${artifact_dir}"
             sha256sum ironclaw.tar.gz > ironclaw.tar.gz.sha256
+            sha256sum ironclaw-reborn.tar.gz > ironclaw-reborn.tar.gz.sha256
           )
           jq -n \
             --arg product_ref "${product_ref}" \

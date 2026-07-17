@@ -7281,6 +7281,23 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
             "name: reborn-webui-v2-binary-${{ steps.live_canary_binary.outputs.product_ref }}",
             reborn_e2e,
         )
+        self.assertIn(
+            'tar -C target/debug -czf "${artifact_dir}/ironclaw.tar.gz" ironclaw',
+            reborn_e2e,
+        )
+        self.assertIn(
+            'cp target/debug/ironclaw "${legacy_compat_dir}/ironclaw-reborn"',
+            reborn_e2e,
+        )
+        self.assertIn(
+            '-czf "${artifact_dir}/ironclaw-reborn.tar.gz"',
+            reborn_e2e,
+        )
+        self.assertIn(
+            "sha256sum ironclaw-reborn.tar.gz > "
+            "ironclaw-reborn.tar.gz.sha256",
+            reborn_e2e,
+        )
 
         command_workflow_path = (
             Path(__file__).resolve().parents[2] / ".github/workflows/live-canary-command.yml"
