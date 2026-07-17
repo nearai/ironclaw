@@ -112,12 +112,6 @@ jobs:
             exit 1
           fi
 
-          IS_STAGING=false
-          if [[ "${EVENT_NAME}" == "schedule" || "${INPUT_TAG}" == "staging" ]]; then
-            IS_STAGING=true
-          fi
-          echo "is_staging=${IS_STAGING}" >> "$GITHUB_OUTPUT"
-
           SHA="sha-${SOURCE_SHA::7}"
           echo "sha_tag=${SHA}" >> "$GITHUB_OUTPUT"
 
@@ -162,7 +156,7 @@ jobs:
 
       - name: Check if current git commit is already built
         id: check
-        if: steps.tags.outputs.is_staging == 'true'
+        if: contains(steps.tags.outputs.tags, ':staging')
         env:
           SOURCE_SHA: ${{ steps.source_sha.outputs.sha }}
         run: |

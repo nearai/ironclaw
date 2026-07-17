@@ -6,24 +6,6 @@ use ironclaw_reborn_composition::SlackHostBetaRuntimeConfig;
 
 const SLACK_ENABLED_ENV: &str = "IRONCLAW_REBORN_SLACK_ENABLED";
 
-#[cfg(not(feature = "slack-v2-host-beta"))]
-#[derive(Debug)]
-struct SlackHostFeatureRequired;
-
-#[cfg(not(feature = "slack-v2-host-beta"))]
-impl std::fmt::Display for SlackHostFeatureRequired {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(
-            formatter,
-            "Slack enablement ([slack].enabled = true or {SLACK_ENABLED_ENV}=true) requires \
-             an ironclaw binary built with the `slack-v2-host-beta` Cargo feature"
-        )
-    }
-}
-
-#[cfg(not(feature = "slack-v2-host-beta"))]
-impl std::error::Error for SlackHostFeatureRequired {}
-
 #[cfg(feature = "slack-v2-host-beta")]
 pub(crate) fn resolve_slack_config_for_serve(
     section: Option<&ironclaw_reborn_config::SlackSection>,
@@ -116,7 +98,10 @@ pub(crate) fn resolve_slack_config_for_serve(
     // Fail loud instead of silently starting without Slack: an operator who
     // explicitly enabled Slack must learn the binary lacks the feature.
     if slack_enabled(section)? {
-        return Err(SlackHostFeatureRequired.into());
+        anyhow::bail!(
+            "Slack enablement ([slack].enabled = true or {SLACK_ENABLED_ENV}=true) requires \
+             an ironclaw binary built with the `slack-v2-host-beta` Cargo feature"
+        );
     }
     Ok(None)
 }
@@ -196,7 +181,10 @@ mod tests {
         )
         .expect_err("explicitly enabled Slack must fail loud without the feature");
 
-        assert!(err.downcast_ref::<SlackHostFeatureRequired>().is_some());
+        assert!(
+            err.to_string()
+                .contains("requires an ironclaw binary built with")
+        );
     }
 
     #[cfg(not(feature = "slack-v2-host-beta"))]

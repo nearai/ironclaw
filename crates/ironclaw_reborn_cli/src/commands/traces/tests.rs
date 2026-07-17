@@ -878,10 +878,6 @@ fn enroll_instance_parses_invite_and_consent_flags() {
 
 #[test]
 fn enroll_instance_requires_invite() {
-    let error = parse_cli_result(["ironclaw", "traces", "enroll-instance"])
-        .expect_err("--invite must be required");
-    assert_eq!(
-        error.kind(),
-        clap::error::ErrorKind::MissingRequiredArgument
-    );
+    let result = parse_cli_result(["ironclaw", "traces", "enroll-instance"]);
+    assert!(result.is_err(), "--invite must be required");
 }

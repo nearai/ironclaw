@@ -1318,13 +1318,10 @@ impl Tool for WasmToolWrapper {
         if !resolution.missing_required.is_empty() {
             return Err(ToolError::ExecutionFailed(format!(
                 "WASM tool '{}' requires credentials that are not configured for user '{}': {}. \
-                 Configure the tool with `ironclaw-v1 tool auth {}` or \
-                 `ironclaw-v1 tool setup {}`, then re-run it.",
+                 Configure the missing credentials with `ironclaw-v1 secrets set` and re-run the tool.",
                 self.name(),
                 credential_user_id,
-                resolution.missing_required.join(", "),
-                self.name(),
-                self.name()
+                resolution.missing_required.join(", ")
             )));
         }
         let host_credentials = resolution.resolved;

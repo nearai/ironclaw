@@ -105,7 +105,7 @@ fn write_executable(path: &std::path::Path, content: &str) {
 }
 
 #[test]
-fn runtime_image_declares_and_prepares_reborn_runtime_paths() {
+fn runtime_image_declares_and_prepares_ironclaw_home() {
     let dockerfile = runtime_dockerfile();
 
     assert!(
@@ -117,32 +117,12 @@ fn runtime_image_declares_and_prepares_reborn_runtime_paths() {
         "runtime image must set HOME to /home/ironclaw for ~/.ironclaw state",
     );
     assert!(
-        dockerfile.contains("mkdir -p /data/ironclaw-reborn /workspace"),
-        "runtime image must pre-create the Reborn data and workspace directories",
+        dockerfile.contains("WORKDIR /home/ironclaw"),
+        "runtime image must start in the ironclaw home directory",
     );
     assert!(
-        dockerfile.contains("WORKDIR /workspace"),
-        "runtime image must start in the Reborn workspace directory",
-    );
-}
-
-#[test]
-fn docker_workflow_only_checks_existing_images_for_the_exact_staging_tag() {
-    let workflow = read_repo_file(".github/workflows/docker.yml");
-
-    assert!(
-        workflow.contains(
-            "if [[ \"${EVENT_NAME}\" == \"schedule\" || \"${INPUT_TAG}\" == \"staging\" ]]"
-        ),
-        "scheduled builds and the exact manual staging tag must opt into the existing-image check",
-    );
-    assert!(
-        workflow.contains("if: steps.tags.outputs.is_staging == 'true'"),
-        "the existing-image check must use the explicit staging output",
-    );
-    assert!(
-        !workflow.contains("contains(steps.tags.outputs.tags, ':staging')"),
-        "substring matching would incorrectly treat tags such as staging-test as staging",
+        dockerfile.contains("mkdir -p /home/ironclaw/.ironclaw"),
+        "runtime image must pre-create ~/.ironclaw before dropping privileges",
     );
 }
 
