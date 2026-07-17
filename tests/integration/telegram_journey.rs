@@ -97,10 +97,16 @@ const INTERACTIVE_MODEL_PROFILE: &str = "interactive_model";
 #[derive(Debug, Default)]
 struct ScriptedTelegramNetwork {
     requests: Mutex<Vec<NetworkHttpRequest>>,
+    /// Every `/sendMessage` attempt with the HTTP status this fake answered —
+    /// the authoritative provider-outcome log (a captured request alone does
+    /// not prove delivery; see the F3 assertions).
+    send_outcomes: Mutex<Vec<(Value, u16)>>,
     sent_messages: Mutex<u32>,
-    /// When set, the next `/sendMessage` answers with this HTTP status and an
-    /// `ok:false` envelope (then clears) — the F3 blocked-recipient shape.
-    fail_next_send: Mutex<Option<u16>>,
+    /// When set, the first `/sendMessage` whose text contains the needle
+    /// answers with this HTTP status and an `ok:false` envelope (then
+    /// clears) — the F3 blocked-recipient shape, targeted so unrelated
+    /// status posts (e.g. the working message) keep succeeding.
+    fail_matching_send: Mutex<Option<(String, u16)>>,
 }
 
 impl ScriptedTelegramNetwork {
@@ -108,8 +114,9 @@ impl ScriptedTelegramNetwork {
         self.requests.lock().expect("network requests lock").clone()
     }
 
-    fn fail_next_send_message(&self, status: u16) {
-        *self.fail_next_send.lock().expect("fail toggle lock") = Some(status);
+    fn fail_send_containing(&self, needle: &str, status: u16) {
+        *self.fail_matching_send.lock().expect("fail toggle lock") =
+            Some((needle.to_string(), status));
     }
 
     fn request_bodies_for(&self, url_substr: &str) -> Vec<Value> {
@@ -118,6 +125,28 @@ impl ScriptedTelegramNetwork {
             .filter(|request| request.url.contains(url_substr))
             .map(|request| serde_json::from_slice(&request.body).unwrap_or(Value::Null))
             .collect()
+    }
+
+    /// `(body, answered_status)` for every `/sendMessage` attempt, in order.
+    fn send_outcomes(&self) -> Vec<(Value, u16)> {
+        self.send_outcomes
+            .lock()
+            .expect("send outcomes lock")
+            .clone()
+    }
+
+    /// Count of DELIVERED (2xx-answered) sendMessage bodies whose text
+    /// contains `needle`.
+    fn delivered_sends_containing(&self, needle: &str) -> usize {
+        self.send_outcomes()
+            .iter()
+            .filter(|(body, status)| {
+                (200..300).contains(status)
+                    && body["text"]
+                        .as_str()
+                        .is_some_and(|text| text.contains(needle))
+            })
+            .count()
     }
 }
 
@@ -154,7 +183,29 @@ impl NetworkHttpEgress for ScriptedTelegramNetwork {
         } else if url.ends_with("/setWebhook") || url.ends_with("/deleteWebhook") {
             json_response(200, json!({"ok": true, "result": true}))
         } else if url.ends_with("/sendMessage") {
-            if let Some(status) = self.fail_next_send.lock().expect("fail toggle lock").take() {
+            let request_body: Value =
+                serde_json::from_slice(&self.requests().last().expect("just pushed").body)
+                    .unwrap_or(Value::Null);
+            let matched_failure = {
+                let mut toggle = self.fail_matching_send.lock().expect("fail toggle lock");
+                match toggle.as_ref() {
+                    Some((needle, status))
+                        if request_body["text"]
+                            .as_str()
+                            .is_some_and(|text| text.contains(needle.as_str())) =>
+                    {
+                        let status = *status;
+                        *toggle = None;
+                        Some(status)
+                    }
+                    _ => None,
+                }
+            };
+            if let Some(status) = matched_failure {
+                self.send_outcomes
+                    .lock()
+                    .expect("send outcomes lock")
+                    .push((request_body, status));
                 return Ok(json_response(
                     status,
                     json!({"ok": false, "description": "scripted send failure"}),
@@ -162,6 +213,10 @@ impl NetworkHttpEgress for ScriptedTelegramNetwork {
             }
             let mut sent = self.sent_messages.lock().expect("sent counter lock");
             *sent += 1;
+            self.send_outcomes
+                .lock()
+                .expect("send outcomes lock")
+                .push((request_body, 200));
             json_response(200, json!({"ok": true, "result": {"message_id": *sent}}))
         } else {
             json_response(
@@ -1059,15 +1114,27 @@ async fn telegram_two_users_stay_isolated_across_pairing_reply_and_unpair() {
     assert!(!pairing_connected(&stack, &caller_a).await, "A unpaired");
     assert!(pairing_connected(&stack, &caller_b).await, "B still paired");
 
-    // R8: A's DM now fails closed with the static hint (no turn consumed).
-    let sends_before = stack.network.request_bodies_for("/sendMessage").len();
+    // R8: A's DM now fails closed with the static hint and starts NO turn —
+    // proven at the send seam: the only new delivered 555-send is the hint,
+    // and no scripted entry was consumed (a turn would have delivered
+    // "user B still works", the next FIFO entry, into A's chat).
+    let outcomes_before = stack.network.send_outcomes().len();
     let status = stack.webhook_dm(&secret, 6, "hello again from A").await;
     assert_eq!(status, StatusCode::OK);
     stack
         .wait_for_dm_send(|text| text.contains("Pair your account"))
         .await
         .expect("unpaired A gets the static pairing hint");
-    let _ = sends_before;
+    let new_outcomes: Vec<(Value, u16)> = stack.network.send_outcomes().split_off(outcomes_before);
+    assert!(
+        new_outcomes.iter().all(|(body, _)| {
+            body["chat_id"] == TG_CHAT_ID
+                && body["text"]
+                    .as_str()
+                    .is_some_and(|text| text.contains("Pair your account"))
+        }),
+        "a post-unpair DM must produce ONLY the static hint (no turn, no reply): {new_outcomes:?}"
+    );
 
     // B keeps working end to end.
     let status = stack
@@ -1107,7 +1174,11 @@ async fn telegram_duplicate_updates_and_send_failures_stay_honest() {
     pair_via_webhook(&stack, &secret, 1).await;
 
     // F1: the same update delivered twice (Telegram redelivery) produces
-    // exactly one turn and one reply.
+    // exactly one turn and one reply. Turn-count seam: the model script is a
+    // strict FIFO, so a second (deduplication-escaping) turn MUST consume and
+    // deliver the NEXT scripted entry — asserting zero later-entry sends is
+    // the authoritative "no second turn" proof, and the delivered count
+    // (2xx-answered, not merely captured) pins exactly one reply.
     let update = dm_update(2, "count me once");
     assert_eq!(
         stack.webhook_update(&secret, update.clone()).await,
@@ -1120,25 +1191,26 @@ async fn telegram_duplicate_updates_and_send_failures_stay_honest() {
         .expect("the update produces its reply");
     // Settle any straggling duplicate dispatch before counting.
     tokio::time::sleep(Duration::from_millis(150)).await;
-    let first_replies = stack
-        .network
-        .request_bodies_for("/sendMessage")
-        .iter()
-        .filter(|body| {
-            body["text"]
-                .as_str()
-                .is_some_and(|text| text.contains("first reply"))
-        })
-        .count();
     assert_eq!(
-        first_replies, 1,
-        "a redelivered update must not produce a second turn or reply"
+        stack.network.delivered_sends_containing("first reply"),
+        1,
+        "a redelivered update must not produce a second delivered reply"
     );
+    for later_entry in ["reply during outage", "reply after recovery"] {
+        assert_eq!(
+            stack.network.delivered_sends_containing(later_entry),
+            0,
+            "a second turn would have consumed the next scripted entry ({later_entry}); \
+             its absence proves exactly one turn ran"
+        );
+    }
 
     // F3:01 — the recipient blocks the bot: the reply send gets a 403.
     // Honest failure, no retry storm (the adapter maps 403 to
     // FailedUnauthorized — a terminal, non-retryable delivery status).
-    stack.network.fail_next_send_message(403);
+    stack
+        .network
+        .fail_send_containing("reply during outage", 403);
     assert_eq!(
         stack
             .webhook_dm(&secret, 3, "talk to me during the outage")
@@ -1146,30 +1218,51 @@ async fn telegram_duplicate_updates_and_send_failures_stay_honest() {
         StatusCode::OK
     );
     tokio::time::sleep(Duration::from_millis(300)).await;
-    let outage_attempts = stack
+    let outage_outcomes: Vec<u16> = stack
         .network
-        .requests()
+        .send_outcomes()
         .iter()
-        .filter(|request| {
-            request.url.ends_with("/sendMessage")
-                && String::from_utf8_lossy(&request.body).contains("reply during outage")
+        .filter(|(body, _)| {
+            body["text"]
+                .as_str()
+                .is_some_and(|text| text.contains("reply during outage"))
         })
-        .count();
+        .map(|(_, status)| *status)
+        .collect();
     assert_eq!(
-        outage_attempts, 1,
-        "a 403 delivery failure must not retry-storm the Bot API"
+        outage_outcomes,
+        vec![403],
+        "the outage turn's reply must be attempted exactly once, answered 403, \
+         and never retried"
+    );
+    assert_eq!(
+        stack
+            .network
+            .delivered_sends_containing("reply after recovery"),
+        0,
+        "the recovery entry must not have been consumed before the recovery turn"
     );
 
-    // F3:02 — the block clears; the next turn's reply delivers normally.
+    // F3:02 — the block clears; the next turn's reply DELIVERS (2xx-answered,
+    // not merely captured — the 403'd request above is also "captured").
     assert_eq!(
         stack.webhook_dm(&secret, 4, "are we back?").await,
         StatusCode::OK
     );
-    let recovered = stack
-        .wait_for_dm_send(|text| text.contains("reply after recovery"))
-        .await
-        .expect("delivery recovers after the blocked-recipient failure clears");
-    assert_eq!(recovered["chat_id"], TG_CHAT_ID);
+    let mut recovered_deliveries = 0;
+    for _ in 0..200 {
+        recovered_deliveries = stack
+            .network
+            .delivered_sends_containing("reply after recovery");
+        if recovered_deliveries > 0 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+    assert_eq!(
+        recovered_deliveries, 1,
+        "exactly one delivered recovery reply after the failure clears"
+    );
 
     stack.runtime.shutdown().await.expect("runtime shuts down");
 }

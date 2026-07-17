@@ -1271,6 +1271,14 @@ mod tests {
             StatusCode::OK,
             "verified-but-unparseable updates are acked so Telegram stops redelivering"
         );
+        let body = axum::body::to_bytes(response.into_body(), 1024)
+            .await
+            .expect("ack body");
+        assert_eq!(
+            body.as_ref(),
+            b"ok",
+            "the ack is the fixed acknowledgment — malformed input is never echoed"
+        );
         fixture.state.drain_immediate_ack_tasks().await;
         assert_eq!(
             fixture.submitted.load(Ordering::SeqCst),
