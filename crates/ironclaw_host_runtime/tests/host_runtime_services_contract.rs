@@ -533,7 +533,7 @@ async fn production_wiring_validation_classifies_in_memory_backed_lease_store_as
         Arc::new(LocalFilesystem::new()),
         Arc::new(InMemoryResourceGovernor::new()),
         Arc::new(GrantAuthorizer::new()),
-        ProcessServices::in_memory(),
+        ironclaw_processes::in_memory_backed_process_services(),
         CapabilitySurfaceVersion::new("surface-v1").unwrap(),
     )
     .with_capability_leases(Arc::new(in_memory_backed_capability_lease_store()));
@@ -2291,7 +2291,9 @@ async fn host_runtime_services_jsonl_approval_audit_projection_rejects_foreign_c
 async fn process_lifecycle_projects_through_durable_replay_without_output_leaks() {
     let event_log = Arc::new(InMemoryDurableEventLog::new());
     let processes_filesystem = ironclaw_processes::in_memory_backed_processes_filesystem();
-    let inner_process_store = Arc::new(FilesystemProcessStore::new(Arc::clone(&processes_filesystem)));
+    let inner_process_store = Arc::new(FilesystemProcessStore::new(Arc::clone(
+        &processes_filesystem,
+    )));
     let obligation_services = BuiltinObligationServices::new(
         Arc::new(InMemoryAuditSink::new()),
         Arc::new(InMemorySecretStore::new()),

@@ -2620,7 +2620,6 @@ fn in_memory_process_result_store() -> FilesystemProcessResultStore<InMemoryBack
     ))
 }
 
-
 fn stored_process_output_path(scope: &ResourceScope, process_id: ProcessId) -> VirtualPath {
     VirtualPath::new(format!(
         "{}/outputs/{process_id}/output.json",

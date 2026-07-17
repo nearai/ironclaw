@@ -65,15 +65,14 @@ where
 {
     let raw = String::deserialize(deserializer)?;
     match raw.as_str() {
-        "wasm" => Ok(RuntimeKind::Wasm),
-        "mcp" => Ok(RuntimeKind::Mcp),
-        "script" => Ok(RuntimeKind::Script),
+        // Only the `#[serde(skip_deserializing)]` host-assigned variants are
+        // hand-mapped; everything else delegates to the derived `Deserialize`,
+        // so a future non-privileged variant round-trips here without edits
+        // (hand-listing all names would silently reject it — the same durable
+        // round-trip failure this helper exists to prevent).
         "first_party" => Ok(RuntimeKind::FirstParty),
         "system" => Ok(RuntimeKind::System),
-        other => Err(serde::de::Error::unknown_variant(
-            other,
-            &["wasm", "mcp", "script", "first_party", "system"],
-        )),
+        other => RuntimeKind::deserialize(serde::de::value::StrDeserializer::new(other)),
     }
 }
 

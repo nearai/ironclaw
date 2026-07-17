@@ -29,8 +29,8 @@ use ironclaw_host_runtime::{
     VisibleCapabilityRequest,
 };
 use ironclaw_processes::{
-    FilesystemProcessResultStore, FilesystemProcessStore, ProcessCancellationRegistry, ProcessError,
-    ProcessRecord, ProcessResultStore, ProcessStart, ProcessStatus, ProcessStore,
+    FilesystemProcessResultStore, FilesystemProcessStore, ProcessCancellationRegistry,
+    ProcessError, ProcessRecord, ProcessResultStore, ProcessStart, ProcessStatus, ProcessStore,
 };
 use ironclaw_run_state::{
     ApprovalRecord, ApprovalRequestStore, InMemoryApprovalRequestStore, InMemoryRunStateStore,
@@ -887,7 +887,9 @@ async fn default_runtime_cancel_writes_killed_process_result_record() {
     let dispatcher = Arc::new(RecordingDispatcher::default());
     let authorizer: Arc<dyn TrustAwareCapabilityDispatchAuthorizer> = Arc::new(GrantAuthorizer);
     let processes_filesystem = ironclaw_processes::in_memory_backed_processes_filesystem();
-    let process_store = Arc::new(FilesystemProcessStore::new(Arc::clone(&processes_filesystem)));
+    let process_store = Arc::new(FilesystemProcessStore::new(Arc::clone(
+        &processes_filesystem,
+    )));
     let result_store = Arc::new(FilesystemProcessResultStore::new(processes_filesystem));
     let cancellation_registry = Arc::new(ProcessCancellationRegistry::new());
     let runtime = DefaultHostRuntime::new(

@@ -308,9 +308,10 @@ fn sample_scope(invocation_id: InvocationId, tenant: &str, user: &str) -> Resour
     }
 }
 
-fn in_mem_process_services()
--> ProcessServices<FilesystemProcessStore<InMemoryBackend>, FilesystemProcessResultStore<InMemoryBackend>>
-{
+fn in_mem_process_services() -> ProcessServices<
+    FilesystemProcessStore<InMemoryBackend>,
+    FilesystemProcessResultStore<InMemoryBackend>,
+> {
     ProcessServices::filesystem(scoped_processes_filesystem(
         Arc::new(InMemoryBackend::new()),
         "/engine/tenants/tenant1/users/user1/processes",

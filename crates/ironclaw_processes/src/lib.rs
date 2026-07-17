@@ -32,14 +32,14 @@ mod wrappers;
 pub use cancellation::{ProcessCancellationRegistry, ProcessCancellationToken};
 pub use filesystem_store::{FilesystemProcessResultStore, FilesystemProcessStore};
 pub use host::{ProcessHost, ProcessSubscription};
+pub use services::{
+    BackgroundErrorHandler, BackgroundFailure, BackgroundFailureStage, BackgroundProcessManager,
+    ProcessServices,
+};
 #[cfg(any(test, feature = "test-support"))]
 pub use test_support::{
     in_memory_backed_process_result_store, in_memory_backed_process_services,
     in_memory_backed_process_store, in_memory_backed_processes_filesystem,
-};
-pub use services::{
-    BackgroundErrorHandler, BackgroundFailure, BackgroundFailureStage, BackgroundProcessManager,
-    ProcessServices,
 };
 pub use types::{
     ProcessError, ProcessExecutionError, ProcessExecutionRequest, ProcessExecutionResult,

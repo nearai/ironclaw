@@ -60,8 +60,9 @@ pub fn in_memory_backed_process_result_store() -> FilesystemProcessResultStore<I
 /// deleted `ProcessServices::in_memory()`. Use this (not the two standalone
 /// helpers) when a test starts a process and reads back its result, since both
 /// stores must resolve against the same backend.
-pub fn in_memory_backed_process_services()
--> ProcessServices<FilesystemProcessStore<InMemoryBackend>, FilesystemProcessResultStore<InMemoryBackend>>
-{
+pub fn in_memory_backed_process_services() -> ProcessServices<
+    FilesystemProcessStore<InMemoryBackend>,
+    FilesystemProcessResultStore<InMemoryBackend>,
+> {
     ProcessServices::filesystem(in_memory_backed_processes_filesystem())
 }
