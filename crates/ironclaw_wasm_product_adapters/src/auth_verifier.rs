@@ -336,6 +336,24 @@ mod tests {
                 other => panic!("expected Failed for duplicates {values:?}, got {other:?}"),
             }
         }
+
+        // An undecodable (non-visible-ASCII) first occurrence must not demote
+        // the duplicate signal to `Missing`: the count check runs first.
+        let mut headers = HeaderMap::new();
+        let name =
+            http::header::HeaderName::from_bytes(b"X-Telegram-Bot-Api-Secret-Token").expect("name");
+        headers.append(
+            &name,
+            HeaderValue::from_bytes(&[0xFF, 0xFE]).expect("opaque value"),
+        );
+        headers.append(&name, HeaderValue::from_str("topsecret").expect("value"));
+        match verifier.verify(&headers, b"") {
+            VerificationOutcome::Failed { failure } => assert!(
+                matches!(failure, ProtocolAuthFailure::Malformed),
+                "undecodable-first duplicate stays Malformed, got {failure:?}"
+            ),
+            other => panic!("expected Failed for undecodable-first duplicate, got {other:?}"),
+        }
     }
 
     /// The duplicate rule must hold even when the FIRST occurrence is not
@@ -350,8 +368,8 @@ mod tests {
             expected_secret: "topsecret".into(),
             subject: "telegram_install_alpha".into(),
         };
-        let name = http::header::HeaderName::from_bytes(b"X-Telegram-Bot-Api-Secret-Token")
-            .expect("name");
+        let name =
+            http::header::HeaderName::from_bytes(b"X-Telegram-Bot-Api-Secret-Token").expect("name");
         let non_text = HeaderValue::from_bytes(&[0xFF, 0xFE]).expect("opaque header value");
 
         let mut duplicated = HeaderMap::new();
