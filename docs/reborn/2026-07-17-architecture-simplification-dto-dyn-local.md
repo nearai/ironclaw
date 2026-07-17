@@ -115,39 +115,86 @@ is silent: a recoverable `Ok(CapabilityOutcome::Failed)` and a run-terminating
 `Err(HostRuntimeError)` are structurally identical — a footgun the loop-capability
 contract docs record shipping three times.
 
-### 1.3 `dyn` seams with one production implementation
+### 1.3 `dyn` seams that exist for test doubles, not runtime variation
 
-Verified production implementation counts (test doubles excluded):
+Verified production vs. test-double implementation counts, and how each seam is
+stored:
 
-| Seam | Prod impls | Notes |
-| --- | --- | --- |
-| `LoopCapabilityPort` (loop ↔ host) | 1 | the real trust membrane — keep |
-| `HostRuntime` | 1 (`DefaultHostRuntime`) | rest are `Recording*`/`Queued*` test doubles |
-| `CapabilityDispatcher` | 1 (`RuntimeDispatcher`) | rest are `Recording*`/`Cancelling*` test doubles |
-| `RuntimeAdapter` | 4 lanes (WASM/script/MCP/first-party) | a closed set, not open polymorphism |
-| `LlmProvider` | many | genuine polymorphism — keep |
+| Seam | Prod impls | Test doubles | Stored as | Verdict |
+| --- | --- | --- | --- | --- |
+| `LoopCapabilityPort` (loop ↔ host) | 1 terminal (`HostRuntimeLoopCapabilityPort`) + decorators (hooks, surface filters, logging) | several | `Arc<dyn>` decorator chain | **keep** — the trust membrane; decoration is genuine composition |
+| `HostRuntime` | 1 (`DefaultHostRuntime`) | 6 (`Recording*`, `Queued*`, `dummy_runtime`) | `Arc<dyn HostRuntime>` | collapse |
+| `CapabilityDispatcher` | 1 (`RuntimeDispatcher<F, G>`) | 2 (`Recording*`, `Cancelling*`) | `Arc<dyn CapabilityDispatcher>` | collapse |
+| `RuntimeAdapter<F, G>` | 5 (`Script`, `Mcp`, `FirstParty`, `Wasm`, + a `ServiceResolved` wrapper) | — | trait object behind the dispatcher | closed set → enum |
+| `LlmProvider` | ~12 providers + decorators (`CircuitBreaker`, `Truncating`, `Swappable`, …); 32 impls total | — | `Arc<dyn>` | **keep** — genuine polymorphism |
 
-Four of these seams pay `dyn` cost for polymorphism that production never uses.
-Replaceability that never happens should be deleted; the second implementation
-is what should motivate re-introducing a trait.
+Note: `CapabilityHost` is **not** a trait — it is a concrete generic struct
+`CapabilityHost<'a, D>`, instantiated as `CapabilityHost<'a, dyn CapabilityDispatcher>`.
+So the `dyn` on that path is the dispatcher it holds, not the host.
 
-### 1.4 A parallel store tree per domain (the "local-specific structs")
+Three mechanisms produce the avoidable `dyn`:
 
-Each durable domain ships an in-memory implementation *and* a filesystem
-implementation *and* (where production-facing) libSQL + Postgres — each a full
-reimplementation of the domain logic, not a thin backend swap. Examples:
-`InMemoryTurnStateStore` + `FilesystemTurnStateStore` (`ironclaw_turns`),
-`InMemoryProcessStore` + `FilesystemProcessStore` (`ironclaw_processes`), and the
-same shape for approvals, authorization, and run-state. The `InMemory*` and
-local-dev wiring are the literal "structs specific to local," and they double
-(or quadruple) the surface every persistence change must touch in lock-step.
+1. **The trait exists to inject test doubles, not to vary production.**
+   `HostRuntime` has one production impl and six test doubles; `CapabilityDispatcher`
+   one and two. The trait + `Arc<dyn>` is paid on every production call so tests can
+   swap in a `Recording*`/`Queued*`/`Cancelling*` fake. That is a real need met in an
+   expensive way — the whole hot path takes vtable dispatch and every layer maintains
+   a trait mirroring the concrete API, all to serve a test seam that a generic
+   parameter or a single boundary fake would give more cheaply.
 
-Separately, `ironclaw_turns`/`ironclaw_runner` (the leased `TurnRun` work-unit)
-and `ironclaw_processes` (the OS-subprocess work-unit) are **two independent
-reimplementations** of the same six machinery layers — status enum, store trait,
-in-memory + filesystem stores, cancellation, eventing decorator, resource
-accounting — unified by no shared abstraction, and they even diverge on recovery
-(turns recover expired leases; processes have an unimplemented reconciler).
+2. **Speculative replaceability.** "Replaceable everything" was applied to internal
+   mediators, not only to the seams that actually vary. The single-prod-impl trait
+   objects on the hot path have never been replaced in production. The second
+   implementation is what should motivate re-introducing a trait.
+
+3. **Generic *and* `dyn` — double indirection.** `RuntimeDispatcher<F, G>` and
+   `RuntimeAdapter<F, G>` are generic over `RootFilesystem`/`ResourceGovernor` *and*
+   used as trait objects (`CapabilityHost<'a, dyn CapabilityDispatcher>` holds a
+   generic-turned-`dyn`). The path pays monomorphization complexity and vtable
+   dispatch at once — a tell that the design never settled on static or dynamic.
+
+Additionally, `RuntimeAdapter`'s impls are a **closed, enumerable set** — the four
+runtime lanes plus a resolver wrapper — modeled as an open trait. New lanes are rare
+and security-sensitive; new *tools* are data behind the existing lanes. An open trait
+buys extensibility exactly where it is not needed.
+
+### 1.4 A full store reimplementation per backend, per domain (the "local-specific structs")
+
+Backend variation is modeled as **type** variation, not parameterization: each
+backend is a separate struct that re-implements the whole domain trait by hand. The
+turn store alone is two full implementations of the same semantics:
+
+| Domain | In-memory impl | Durable impl | Reimplemented logic |
+| --- | --- | --- | --- |
+| turns | `InMemoryTurnStateStore` (`memory/mod.rs`, ~4,260 LOC) | `FilesystemTurnStateStore` (~1,710 LOC) | lease, active-lock, checkpoint, idempotency, events |
+| processes | `InMemoryProcessStore` + `InMemoryProcessResultStore` (~230 LOC) | `FilesystemProcessStore` + `FilesystemProcessResultStore` (~920 LOC) | process lifecycle + result store |
+| approvals | `InMemory{AutoApprove, PersistentApprovalPolicy, CapabilityPermissionOverride}Store` | matching `Filesystem*` (×3) | three separate approval stores |
+| authorization | `InMemoryCapabilityLeaseStore` | `FilesystemCapabilityLeaseStore` | lease store |
+| run_state | `InMemory{RunState, ApprovalRequest}Store` | matching `Filesystem*` (×2) | two run-state stores |
+
+Every `InMemory*Store` is a local/test-only parallel implementation of logic that
+also exists in the durable impl; a change to turn semantics (a new transition, a
+lock rule) must be written **twice, in lock-step**, and production-facing domains add
+libSQL + Postgres on top (2–4× per domain). The `InMemory*` structs are the literal
+"structs specific to local."
+
+Two mechanisms:
+
+1. **Storage mechanism and domain logic are not separated.** The turn store's
+   `filesystem_store/row_store/` layer (journal / delta / row materialization) is a
+   *partial* gesture at that split, but it is turns-specific and does not unify
+   in-memory vs filesystem vs the other domains. Without a shared backend seam, "what
+   the turn state *is*" and "how bytes are persisted" are welded together, so each
+   backend re-derives the former just to change the latter.
+
+2. **The split is multiplied by the two work-unit lifecycles.**
+   `ironclaw_turns`/`ironclaw_runner` (the leased `TurnRun`) and `ironclaw_processes`
+   (the OS-subprocess) are **independent reimplementations** of the same six machinery
+   layers — status enum, store trait, in-memory + filesystem stores, cancellation,
+   eventing decorator, resource accounting — unified by no shared abstraction, and they
+   diverge on recovery (turns recover expired leases; processes have an unimplemented
+   reconciler). So the per-backend duplication is itself duplicated across two parallel
+   lifecycles.
 
 ### 1.5 The last month agrees
 
@@ -266,9 +313,13 @@ goes to zero because nothing mirrors.
   until every `match` handles it. WASM extensions stay open — they are *data*
   behind the `Wasm` lane, not new lanes — so a closed lane set costs no real
   extensibility.
-- **Delete** the `HostRuntime`, `CapabilityDispatcher`, and `CapabilityHost`
-  traits; make them concrete types (or generic parameters resolved once at
-  composition). `CapabilityHost` becomes the `authorize` + `dispatch` pair.
+- **Delete** the `HostRuntime` and `CapabilityDispatcher` traits; make them
+  concrete (or a single generic parameter resolved once at composition), and get
+  the test seams they currently serve (§1.3, mechanism 1) from generics or one
+  boundary fake instead of a production `Arc<dyn>`. `CapabilityHost` is **already**
+  a concrete struct — collapsing `CapabilityDispatcher` to a concrete type removes
+  the `dyn` it holds today (`CapabilityHost<'a, dyn CapabilityDispatcher>`), and its
+  role folds into the `authorize` + `dispatch` pair.
 
 **Hot-path `dyn`: 6+ → ~2, plus one lane enum.**
 
