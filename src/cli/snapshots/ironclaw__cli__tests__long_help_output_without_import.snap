@@ -5,20 +5,20 @@ expression: help
 IronClaw is a secure AI assistant.
 
 Getting started:
-  ironclaw onboard              # Interactive setup wizard (recommended for first run)
-  ironclaw onboard --quick      # Quick setup: just pick a provider and model
-  ironclaw models set-provider openai  # Switch to a specific provider
-  ironclaw doctor               # Check your configuration
+  ironclaw-v1 onboard              # Interactive setup wizard (recommended for first run)
+  ironclaw-v1 onboard --quick      # Quick setup: just pick a provider and model
+  ironclaw-v1 models set-provider openai  # Switch to a specific provider
+  ironclaw-v1 doctor               # Check your configuration
 
 Common commands:
-  ironclaw run                  # Start the agent
-  ironclaw config list          # View all settings
-  ironclaw models status        # Show current provider and model
-  ironclaw models list          # List available providers
+  ironclaw-v1 run                  # Start the agent
+  ironclaw-v1 config list          # View all settings
+  ironclaw-v1 models status        # Show current provider and model
+  ironclaw-v1 models list          # List available providers
 
-Use 'ironclaw <subcommand> --help' for details on any command.
+Use 'ironclaw-v1 <subcommand> --help' for details on any command.
 
-Usage: ironclaw [OPTIONS] [COMMAND]
+Usage: ironclaw-v1 [OPTIONS] [COMMAND]
 
 Commands:
   run         Run the AI agent

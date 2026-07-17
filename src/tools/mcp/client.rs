@@ -632,7 +632,7 @@ impl McpClient {
                         )
                     } else {
                         format!(
-                            "MCP server '{}' requires authentication. Run: ironclaw mcp auth {}",
+                            "MCP server '{}' requires authentication. Run: ironclaw-v1 mcp auth {}",
                             self.server_name, self.server_name
                         )
                     };

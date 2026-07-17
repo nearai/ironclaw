@@ -6,9 +6,9 @@ description: REST API for external integrations
 
 The HTTP Webhook channel provides a REST API for integrating external services with IronClaw.
 
-<Note>
-If you haven't set up your agent yet, follow our [Quickstart guide](../quickstart)
-</Note>
+<Warning>
+This page covers the retained v1 runtime. Build it from source and invoke it as `ironclaw-v1`; the canonical `ironclaw` command runs Reborn.
+</Warning>
 
 ---
 
@@ -180,7 +180,7 @@ print(response.json()["job_id"])
   </Accordion>
 
   <Accordion title="Messages not processed" icon="message-circle">
-    - Check logs: `RUST_LOG=ironclaw=debug ironclaw run`
+    - Check logs: `RUST_LOG=ironclaw=debug ironclaw-v1 run`
     - Verify JSON format
     - Check `user_id` is valid
   </Accordion>

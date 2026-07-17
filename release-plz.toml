@@ -3,12 +3,22 @@
 # release-plz only creates git tags and publishes to crates.io.
 git_release_enable = false
 
-# ── Main binary ─────────────────────────────────────────────
-# Not published to crates.io. Still create git tags so cargo-dist builds
-# binaries and creates GitHub Releases.
+# ── Shipping Reborn binary ──────────────────────────────────
+# Not published to crates.io. Manage its version from unified git tags; the
+# root v1 package remains in the workspace but is not a release target.
+[[package]]
+name = "ironclaw_reborn_cli"
+publish = false
+git_only = true
+git_tag_name = "v{{ version }}"
+changelog_path = "CHANGELOG.md"
+semver_check = false
+
+# ── Retained v1 package ─────────────────────────────────────
 [[package]]
 name = "ironclaw"
 publish = false
+release = false
 
 # ── Internal crates (not useful standalone) ─────────────────
 [[package]]

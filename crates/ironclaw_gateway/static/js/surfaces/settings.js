@@ -588,14 +588,14 @@ function loadChannelsStatus() {
       I18n.t('channels.cli'),
       I18n.t('channels.cliDesc'),
       enabledChannels.indexOf('cli') !== -1,
-      I18n.t('channels.runWith', { cmd: 'ironclaw run --cli' })
+      I18n.t('channels.runWith', { cmd: 'ironclaw-v1 run --cli' })
     ));
 
     builtinList.appendChild(renderBuiltinChannelCard(
       I18n.t('channels.repl'),
       I18n.t('channels.replDesc'),
       enabledChannels.indexOf('repl') !== -1,
-      I18n.t('channels.runWith', { cmd: 'ironclaw run --repl' })
+      I18n.t('channels.runWith', { cmd: 'ironclaw-v1 run --repl' })
     ));
 
     builtinSection.appendChild(builtinList);
@@ -842,4 +842,3 @@ function loadTraceCommonsCredits() {
 }
 
 // --- Toasts ---
-

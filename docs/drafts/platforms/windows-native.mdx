@@ -59,7 +59,7 @@ winget install Microsoft.VisualStudio.2022.BuildTools
 # Build
 git clone https://github.com/nearai/ironclaw.git
 cd ironclaw
-cargo build --release
+cargo build --release -p ironclaw_reborn_cli --bin ironclaw
 
 # Install
 copy target\release\ironclaw.exe C:\Program Files\IronClaw\ironclaw.exe

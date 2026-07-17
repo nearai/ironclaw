@@ -5,7 +5,7 @@
 //! # Authentication
 //!
 //! Store your Brave Search API key:
-//! `ironclaw secret set brave_api_key <key>`
+//! `ironclaw-v1 secret set brave_api_key <key>`
 //!
 //! Get a key at: https://brave.com/search/api/
 
@@ -130,7 +130,7 @@ fn execute_inner(params: &str) -> Result<String, String> {
     if !near::agent::host::secret_exists("brave_api_key") {
         return Err(
             "Brave API key not found in secret store. Set it with: \
-             ironclaw secret set brave_api_key <key>. \
+             ironclaw-v1 secret set brave_api_key <key>. \
              Get a key at: https://brave.com/search/api/"
                 .into(),
         );

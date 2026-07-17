@@ -3,6 +3,12 @@ title: "Google OAuth 设置"
 description: "IronClaw 中所有 Google 扩展的一次性 OAuth 配置"
 ---
 
+<Warning>
+本 OAuth 指南配套 retained v1 的 Google 扩展页面；其中 CLI 命令使用
+`ironclaw-v1`。Canonical Reborn 的扩展生命周期请参阅
+[CLI 参考](/reborn-binary#extension)。
+</Warning>
+
 所有 Google 扩展共用同一套 OAuth 2.0 配置。完成一次后，您可以复用同一个 Google Cloud 项目和凭证。
 
 ---

@@ -1150,7 +1150,7 @@ fn send_pairing_reply(ctx: &PairingReplyCtx, code: &str) -> Result<(), String> {
 
     let mut payload = serde_json::json!({
         "content": format!(
-            "Enter this code in IronClaw to pair your discord account: `{}`. CLI fallback: `ironclaw pairing approve discord {}`",
+            "Enter this code in IronClaw to pair your discord account: `{}`. CLI fallback: `ironclaw-v1 pairing approve discord {}`",
             code, code
         )
     });

@@ -1994,7 +1994,7 @@ impl ExtensionManager {
                     ))
                 }
                 ExtensionKind::AcpAgent => Err(ExtensionError::InstallFailed(
-                    "ACP agents are configured via 'ironclaw acp add', not the extension manager"
+                    "ACP agents are configured via 'ironclaw-v1 acp add', not the extension manager"
                         .to_string(),
                 )),
             }
@@ -2070,7 +2070,7 @@ impl ExtensionManager {
                 kind: ExtensionKind::AcpAgent,
                 tools_loaded: Vec::new(),
                 message: format!(
-                    "ACP agent '{}' is managed via 'ironclaw acp' commands",
+                    "ACP agent '{}' is managed via 'ironclaw-v1 acp' commands",
                     name
                 ),
             }),
@@ -2915,9 +2915,9 @@ impl ExtensionManager {
                 Ok(format!("Removed channel relay '{}'", name))
             }
             ExtensionKind::AcpAgent => {
-                // ACP agents are managed via `ironclaw acp remove`
+                // ACP agents are managed via `ironclaw-v1 acp remove`
                 Ok(format!(
-                    "ACP agent '{}' should be removed via 'ironclaw acp remove {}'",
+                    "ACP agent '{}' should be removed via 'ironclaw-v1 acp remove {}'",
                     name, name
                 ))
             }
@@ -3556,7 +3556,7 @@ impl ExtensionManager {
                 })
             }
             ExtensionKind::AcpAgent => Err(ExtensionError::InstallFailed(
-                "ACP agents are configured via 'ironclaw acp add', not the registry".to_string(),
+                "ACP agents are configured via 'ironclaw-v1 acp add', not the registry".to_string(),
             )),
         }
     }
@@ -4140,7 +4140,7 @@ impl ExtensionManager {
                 ExtensionError::InstallFailed(format!(
                     "'{}' requires building from source. Build artifact not found. \
                          Run `cargo component build --release` in {} first, \
-                         or use `ironclaw registry install {}`.",
+                         or use `ironclaw-v1 registry install {}`.",
                     name,
                     resolved_dir.display(),
                     name,

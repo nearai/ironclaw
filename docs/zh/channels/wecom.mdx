@@ -5,9 +5,9 @@ description: "通过企业微信与智能体交互"
 
 通过企业微信智能机器人将 IronClaw 接入企业微信。企业微信频道使用企业微信智能机器人的 WebSocket 长连接，因此不需要公网 webhook URL 或隧道。
 
-<Note>
-如果您还没有设置智能体，请先查看我们的[快速开始指南](../quickstart)
-</Note>
+<Warning>
+本页描述保留的 v1 运行时。请从源码构建并使用 `ironclaw-v1`；规范的 `ironclaw` 命令运行 Reborn。
+</Warning>
 
 <Warning>
 企业微信频道面向智能机器人 WebSocket 长连接流程。自建应用 callback URL 和 Agent API 主动 REST 发送暂不支持。
@@ -38,10 +38,10 @@ description: "通过企业微信与智能体交互"
 企业微信以 WASM 频道形式分发。您可以在 Web Gateway 的 Extensions 页面安装，也可以在终端运行：
 
 ```bash
-ironclaw registry install wecom
+ironclaw-v1 registry install wecom
 ```
 
-`ironclaw onboard --channels-only` 向导也可以安装该频道，并提示您输入机器人凭据。
+`ironclaw-v1 onboard --channels-only` 向导也可以安装该频道，并提示您输入机器人凭据。
 
 </Step>
 
@@ -58,7 +58,7 @@ ironclaw registry install wecom
 如果智能体尚未运行，请先启动：
 
 ```bash
-ironclaw
+ironclaw-v1
 ```
 
 频道启用后，IronClaw 会在启动时打开企业微信 WebSocket 连接。
@@ -72,7 +72,7 @@ ironclaw
 在终端批准该请求：
 
 ```bash
-ironclaw pairing approve wecom <PAIRING_CODE>
+ironclaw-v1 pairing approve wecom <PAIRING_CODE>
 ```
 
 批准后，再发送一条消息确认智能体能在企业微信中回复。
@@ -138,7 +138,7 @@ ironclaw pairing approve wecom <PAIRING_CODE>
 
 `dm_policy` 选项控制私聊访问：
 
-- `pairing` **（默认）**：未知用户会在私聊中收到配对码，并需要通过 `ironclaw pairing approve wecom <PAIRING_CODE>` 批准
+- `pairing` **（默认）**：未知用户会在私聊中收到配对码，并需要通过 `ironclaw-v1 pairing approve wecom <PAIRING_CODE>` 批准
 - `open`：私聊无需配对即可开始
 - `allowlist`：只有 `allow_from` 中列出的用户可以对话
 
@@ -156,7 +156,7 @@ ironclaw pairing approve wecom <PAIRING_CODE>
 
 <AccordionGroup>
   <Accordion title="没有看到企业微信频道">
-    运行 `ironclaw registry install wecom` 安装频道，然后重启 IronClaw 并刷新 Web Gateway。
+    运行 `ironclaw-v1 registry install wecom` 安装频道，然后重启 IronClaw 并刷新 Web Gateway。
   </Accordion>
 
   <Accordion title="机器人没有连接">
@@ -168,7 +168,7 @@ ironclaw pairing approve wecom <PAIRING_CODE>
   </Accordion>
 
   <Accordion title="机器人回复了配对码">
-    当 `dm_policy` 为 `pairing` 时这是预期行为。运行 `ironclaw pairing approve wecom <PAIRING_CODE>`，然后再发送一条消息。
+    当 `dm_policy` 为 `pairing` 时这是预期行为。运行 `ironclaw-v1 pairing approve wecom <PAIRING_CODE>`，然后再发送一条消息。
   </Accordion>
 
   <Accordion title="群聊用户无法完成配对">

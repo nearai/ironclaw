@@ -3,6 +3,12 @@ title: "GitHub"
 description: "Let your agent access GitHub"
 ---
 
+<Warning>
+This integration guide targets the retained v1 runtime. Use `ironclaw-v1` for
+the `registry` and `tool` commands below. Canonical Reborn uses
+`ironclaw extension`; see the [CLI reference](/reborn-binary#extension).
+</Warning>
+
 The GitHub extension allows your agent to interact with GitHub repositories, issues, pull requests, and more, making it ideal for automating code-related tasks, managing projects, or gathering information from GitHub.
 
 ---
@@ -17,7 +23,7 @@ The GitHub extension allows your agent to interact with GitHub repositories, iss
 To install the GitHub extension, run:
 
 ```bash
-ironclaw registry install github
+ironclaw-v1 registry install github
 ```
 
 </Step>
@@ -37,7 +43,7 @@ export GITHUB_OAUTH_CLIENT_SECRET=...
 Now authenticate:
 
 ```bash
-ironclaw tool auth github
+ironclaw-v1 tool auth github
 ```
 
 IronClaw will open the browser OAuth flow and store the resulting `github_token`.
@@ -49,7 +55,7 @@ IronClaw will open the browser OAuth flow and store the resulting `github_token`
 If you do not want to run a GitHub OAuth app, you can still use a Personal Access Token:
 
 ```bash
-ironclaw secret set github_token YOUR_TOKEN
+ironclaw-v1 secret set github_token YOUR_TOKEN
 ```
 
 <Warning>
@@ -124,7 +130,7 @@ On the agent's GitHub account, go to [Settings -> Developer settings -> Personal
 Now that you have either OAuth app credentials or a PAT, authenticate the GitHub extension:
 
 ```bash
-ironclaw tool auth github
+ironclaw-v1 tool auth github
 ```
 
 If `GITHUB_OAUTH_CLIENT_ID` and `GITHUB_OAUTH_CLIENT_SECRET` are set, IronClaw

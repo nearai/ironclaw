@@ -5484,7 +5484,7 @@ impl RebornServices {
     ///
     /// Scope of the guarantee: this lock lives in the current `RebornServices`
     /// instance, so it serializes every admin mutation within one process. The
-    /// standalone `ironclaw-reborn serve` binary is single-process, so last-
+    /// standalone `ironclaw serve` binary is single-process, so last-
     /// admin protection is airtight there. It does NOT span multiple runtime
     /// instances sharing one identity filesystem (a not-yet-supported multi-
     /// replica deployment): two processes each hold their own lock and could

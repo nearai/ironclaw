@@ -4,6 +4,12 @@ sidebarTitle: MCP Servers
 description: Connect Model Context Protocol servers to extend IronClaw
 ---
 
+<Warning>
+This integration guide targets the retained v1 runtime. Use `ironclaw-v1` for
+the MCP commands below. Canonical Reborn uses `ironclaw extension`; see the
+[CLI reference](/reborn-binary#extension).
+</Warning>
+
 IronClaw can connect to any [Model Context Protocol (MCP)](https://modelcontextprotocol.io/) server and expose its tools to the agent. MCP is an open standard for tool servers, with a growing ecosystem of pre-built servers covering databases, APIs, cloud services, and more.
 
 <Info>
@@ -18,7 +24,7 @@ IronClaw connects to MCP servers over **HTTP transport** using JSON-RPC 2.0. The
 To add a MCP server you can either directly request your agent to use it, or configure it via CLI:
 
 ```bash
-ironclaw mcp add <server_name> <server_url>
+ironclaw-v1 mcp add <server_name> <server_url>
 ```
 
 ---
@@ -27,7 +33,7 @@ ironclaw mcp add <server_name> <server_url>
 If your MCP server requires authentication, use the following command:
 
 ```bash
-ironclaw mcp auth <server_name>
+ironclaw-v1 mcp auth <server_name>
 ```
 
 ---
@@ -38,7 +44,7 @@ Once connected, MCP tools appear in the agent's tool list alongside built-in too
 
 ```bash
 # Via CLI
-ironclaw mcp list
+ironclaw-v1 mcp list
 ```
 
 ---
@@ -48,7 +54,7 @@ ironclaw mcp list
 Remove a server with:
 
 ```bash
-ironclaw mcp remove <server_name>
+ironclaw-v1 mcp remove <server_name>
 ```
 
 ---
@@ -68,4 +74,3 @@ ironclaw mcp remove <server_name>
 <Note>
 For integrations that handle sensitive credentials or untrusted external data, prefer WASM tools. The network proxy and credential injection model give you stronger isolation guarantees than an MCP server running as a separate process.
 </Note>
-

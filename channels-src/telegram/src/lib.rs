@@ -1844,7 +1844,7 @@ fn send_pairing_reply(chat_id: i64, code: &str) -> Result<(), String> {
             "Pair this Telegram account with IronClaw using one of:\n\
              • Web: Settings → Channels → Telegram → paste `{code}`\n\
              • Any signed-in IronClaw chat (TUI / web): type `approve telegram {code}`\n\
-             • Terminal: `ironclaw pairing approve telegram {code}`",
+             • Terminal: `ironclaw-v1 pairing approve telegram {code}`",
         ),
         None,
         Some("Markdown"),

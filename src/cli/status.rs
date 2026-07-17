@@ -106,7 +106,7 @@ pub async fn run_status_command() -> anyhow::Result<()> {
     let session_value = if session_path.exists() {
         format!("found ({})", session_path.display())
     } else {
-        "not found (run `ironclaw onboard`)".to_string()
+        "not found (run `ironclaw-v1 onboard`)".to_string()
     };
     println!("{}", fmt::kv_line("Session", &session_value, 12));
 

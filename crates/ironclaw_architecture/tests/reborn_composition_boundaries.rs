@@ -200,7 +200,7 @@ fn reborn_binary_main_is_thin_bootstrap() {
 
     assert!(
         reborn_main.contains("cli::run()"),
-        "ironclaw-reborn main.rs should delegate to the clap command root"
+        "ironclaw main.rs should delegate to the clap command root"
     );
     for forbidden in [
         "build_reborn_runtime",
@@ -212,7 +212,7 @@ fn reborn_binary_main_is_thin_bootstrap() {
     ] {
         assert!(
             !reborn_main.contains(forbidden),
-            "ironclaw-reborn main.rs must stay a thin bootstrap over Reborn-owned command \
+            "ironclaw main.rs must stay a thin bootstrap over Reborn-owned command \
              modules and factories; found `{forbidden}`"
         );
     }

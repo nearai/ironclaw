@@ -197,7 +197,7 @@ async def test_telegram_pairing_reply_names_every_surface(
         f"pairing reply must mention chat-surface command 'approve telegram': "
         f"{pairing_text}"
     )
-    assert "ironclaw pairing approve telegram" in pairing_text, (
+    assert "ironclaw-v1 pairing approve telegram" in pairing_text, (
         f"pairing reply must mention CLI fallback: {pairing_text}"
     )
 

@@ -46,6 +46,10 @@ class ValidateRebornBinaryArtifactTests(unittest.TestCase):
             encoding="utf-8",
         )
 
+    def test_uses_canonical_archive_names(self) -> None:
+        self.assertEqual(VALIDATOR.ARCHIVE_NAME, "ironclaw.tar.gz")
+        self.assertEqual(VALIDATOR.CHECKSUM_NAME, "ironclaw.tar.gz.sha256")
+
     def test_accepts_matching_artifact(self) -> None:
         VALIDATOR.validate_artifact(
             self.artifact_dir,

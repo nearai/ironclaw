@@ -224,7 +224,7 @@ impl SecretsConfig {
 }
 
 /// Extract a valid 32-byte hex `SECRETS_MASTER_KEY` value from an
-/// ironclaw `.env` file. Returns `None` if the file is missing, the
+/// ironclaw-v1 `.env` file. Returns `None` if the file is missing, the
 /// key isn't present, or the value isn't exactly 64 hex characters.
 /// Used for TOCTOU detection in [`SecretsConfig::auto_generate_and_persist`].
 fn read_secrets_master_key(env_path: &Path) -> Option<String> {

@@ -519,7 +519,7 @@ impl SetupWizard {
 
         #[allow(unreachable_code)]
         Err(SetupError::Database(
-            "No database configured. Run full setup first (ironclaw onboard).".to_string(),
+            "No database configured. Run full setup first (ironclaw-v1 onboard).".to_string(),
         ))
     }
 
@@ -528,7 +528,7 @@ impl SetupWizard {
     async fn reconnect_postgres(&mut self) -> Result<(), SetupError> {
         let url = std::env::var("DATABASE_URL").map_err(|_| {
             SetupError::Database(
-                "DATABASE_URL not set. Run full setup first (ironclaw onboard).".to_string(),
+                "DATABASE_URL not set. Run full setup first (ironclaw-v1 onboard).".to_string(),
             )
         })?;
 
@@ -884,7 +884,7 @@ impl SetupWizard {
                  Ubuntu:  apt install postgresql-{0}-pgvector\n  \
                  Docker:  use the pgvector/pgvector:pg{0} image\n  \
                  Source:  https://github.com/pgvector/pgvector#installation\n\n\
-                 Then restart PostgreSQL and re-run: ironclaw onboard",
+                 Then restart PostgreSQL and re-run: ironclaw-v1 onboard",
                 major_version
             )));
         }
@@ -2767,7 +2767,7 @@ impl SetupWizard {
             Some(c) => c,
             None => {
                 print_info("Extension registry not found. Skipping tool installation.");
-                print_info("Install tools manually with: ironclaw tool install <path>");
+                print_info("Install tools manually with: ironclaw-v1 tool install <path>");
                 return Ok(());
             }
         };
@@ -2785,7 +2785,7 @@ impl SetupWizard {
 
         print_info("Available tools from the extension registry:");
         print_info("Select which tools to install. You can install more later with:");
-        print_info("  ironclaw registry install <name>");
+        print_info("  ironclaw-v1 registry install <name>");
         println!();
 
         // Check which tools are already installed
@@ -2856,7 +2856,7 @@ impl SetupWizard {
                     {
                         let provider = auth.provider.as_deref().unwrap_or(&tool.name);
                         // Only mention unique providers (Google tools share auth)
-                        let hint = format!("  {} - ironclaw tool auth {}", provider, tool.name);
+                        let hint = format!("  {} - ironclaw-v1 tool auth {}", provider, tool.name);
                         if !auth_needed
                             .iter()
                             .any(|h| h.starts_with(&format!("  {} -", provider)))
@@ -3509,9 +3509,9 @@ impl SetupWizard {
         println!("  {}", sep);
         println!();
 
-        // Title line: checkmark + "ironclaw is ready"
+        // Title line: checkmark + "ironclaw-v1 is ready"
         println!(
-            "  {}\u{2713}{} {}ironclaw is ready{}",
+            "  {}\u{2713}{} {}ironclaw-v1 is ready{}",
             fmt::success(),
             fmt::reset(),
             fmt::bold_accent(),
@@ -3598,7 +3598,7 @@ impl SetupWizard {
             fmt::reset(),
         );
         println!(
-            "  {}Full setup:{}       {}ironclaw onboard{}",
+            "  {}Full setup:{}       {}ironclaw-v1 onboard{}",
             fmt::dim(),
             fmt::reset(),
             fmt::bold_accent(),
@@ -3608,7 +3608,7 @@ impl SetupWizard {
 
         if self.config.quick {
             print_info(
-                "Tip: Run `ironclaw onboard` to configure channels, extensions, embeddings, and more.",
+                "Tip: Run `ironclaw-v1 onboard` to configure channels, extensions, embeddings, and more.",
             );
             println!();
         }

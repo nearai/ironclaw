@@ -102,7 +102,7 @@ impl Tool for RestartTool {
         // We use std::process::exit(0) to trigger a Docker container restart:
         //
         // - The ironclaw-worker Docker container runs an entrypoint loop that monitors
-        //   the exit code of the `ironclaw run` process:
+        //   the exit code of the `ironclaw-v1 run` process:
         //   * Exit code 0 = clean restart: reset failure counter, wait IRONCLAW_RESTART_DELAY
         //     (default 5s), then restart the process
         //   * Exit code ≠ 0 = failure: increment counter, exit after IRONCLAW_MAX_FAILURES

@@ -1,6 +1,6 @@
 """Private tool installs E2E (#5459 P1): import, install/activate, per-user
 membership visibility, and real tool dispatch — driven through the real
-``ironclaw-reborn serve`` binary.
+``ironclaw serve`` binary.
 
 Pure httpx/API surface, like ``test_admin_api.py`` and
 ``test_reborn_webui_v2_extensions_api.py``: the acceptance criteria here are

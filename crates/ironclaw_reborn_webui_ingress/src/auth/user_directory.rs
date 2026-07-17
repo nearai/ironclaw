@@ -3,7 +3,7 @@
 //!
 //! The composition layer in this crate intentionally does not own a
 //! user database — the same crate is used by the standalone
-//! `ironclaw-reborn` CLI (single operator, no user table) and by
+//! `ironclaw` CLI (single operator, no user table) and by
 //! production deployments (DB-backed user table). Host code supplies
 //! whichever [`UserDirectory`] impl matches its deployment shape.
 //!

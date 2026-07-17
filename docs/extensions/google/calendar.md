@@ -3,6 +3,12 @@ title: "Calendar"
 description: "Let your agent manage your Google Calendar"
 ---
 
+<Warning>
+This integration guide targets the retained v1 runtime. Use `ironclaw-v1` for
+the `registry` and `tool` commands below. Canonical Reborn uses
+`ironclaw extension`; see the [CLI reference](/reborn-binary#extension).
+</Warning>
+
 The Google Calendar extension allows your agent to interact with your Google Calendar — creating events, checking your schedule, updating appointments, and more. It's ideal for automating scheduling tasks, setting reminders, or managing meetings directly from your agent.
 
 ---
@@ -22,7 +28,7 @@ In your Google Cloud project, navigate to **APIs & Services → Library**, searc
 <Step title="Install the Extension">
 
 ```bash
-ironclaw registry install google-calendar
+ironclaw-v1 registry install google-calendar
 ```
 
 </Step>
@@ -30,7 +36,7 @@ ironclaw registry install google-calendar
 <Step title="Authorize Access">
 
 ```bash
-ironclaw tool auth google-calendar
+ironclaw-v1 tool auth google-calendar
 ```
 
 IronClaw will provide a URL for you to authenticate - remember to follow the [auth setup](./oauth-setup) to enable your agent to capture the callback. If possible, it will open a browser window. Once approved, the token is stored securely and refreshed automatically.

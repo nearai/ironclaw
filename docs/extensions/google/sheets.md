@@ -3,6 +3,12 @@ title: "Sheets"
 description: "Let your agent read and write Google Spreadsheets"
 ---
 
+<Warning>
+This integration guide targets the retained v1 runtime. Use `ironclaw-v1` for
+the `registry` and `tool` commands below. Canonical Reborn uses
+`ironclaw extension`; see the [CLI reference](/reborn-binary#extension).
+</Warning>
+
 The Google Sheets extension allows your agent to interact with Google Sheets — creating spreadsheets, reading and writing cell ranges, appending rows, formatting cells, and managing sheets. It uses standard A1 notation for ranges and is ideal for data entry automation, report generation, and spreadsheet-driven workflows.
 
 ---
@@ -22,7 +28,7 @@ In your Google Cloud project, navigate to **APIs & Services → Library**, searc
 <Step title="Install the Extension">
 
 ```bash
-ironclaw registry install google-sheets
+ironclaw-v1 registry install google-sheets
 ```
 
 </Step>
@@ -30,7 +36,7 @@ ironclaw registry install google-sheets
 <Step title="Authorize Access">
 
 ```bash
-ironclaw tool auth google-sheets
+ironclaw-v1 tool auth google-sheets
 ```
 
 IronClaw will provide a URL for you to authenticate - remember to follow the [auth setup](./oauth-setup) to enable your agent to capture the callback. If possible, it will open a browser window. Once approved, the token is stored securely and refreshed automatically.

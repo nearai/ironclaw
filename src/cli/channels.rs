@@ -211,7 +211,7 @@ async fn cmd_list(
         println!("Use --verbose for details.");
         println!();
         println!("Note: enable/disable not yet available. Channel configuration is");
-        println!("managed via environment variables. See 'ironclaw onboard --channels-only'.");
+        println!("managed via environment variables. See 'ironclaw-v1 onboard --channels-only'.");
     }
 
     Ok(())

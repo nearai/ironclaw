@@ -3,6 +3,12 @@ title: "Docs"
 description: "Let your agent create and edit Google Documents"
 ---
 
+<Warning>
+This integration guide targets the retained v1 runtime. Use `ironclaw-v1` for
+the `registry` and `tool` commands below. Canonical Reborn uses
+`ironclaw extension`; see the [CLI reference](/reborn-binary#extension).
+</Warning>
+
 The Google Docs extension allows your agent to interact with Google Docs — creating documents, reading content, inserting and formatting text, managing tables and lists, and running batch updates. It's ideal for drafting reports, editing existing documents, or automating document workflows directly from your agent.
 
 ---
@@ -22,7 +28,7 @@ In your Google Cloud project, navigate to **APIs & Services → Library**, searc
 <Step title="Install the Extension">
 
 ```bash
-ironclaw registry install google-docs
+ironclaw-v1 registry install google-docs
 ```
 
 </Step>
@@ -30,7 +36,7 @@ ironclaw registry install google-docs
 <Step title="Authorize Access">
 
 ```bash
-ironclaw tool auth google-docs
+ironclaw-v1 tool auth google-docs
 ```
 
 IronClaw will provide a URL for you to authenticate - remember to follow the [auth setup](./oauth-setup) to enable your agent to capture the callback. If possible, it will open a browser window. Once approved, the token is stored securely and refreshed automatically.

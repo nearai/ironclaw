@@ -4,6 +4,12 @@ description: "让智能体搜索网页"
 icon: globe
 ---
 
+<Warning>
+本集成指南适用于 retained v1。以下 `registry` 和 `tool` 命令请使用
+`ironclaw-v1`。Canonical Reborn 使用 `ironclaw extension`，详见
+[CLI 参考](/reborn-binary#extension)。
+</Warning>
+
 网页搜索工具允许智能体使用 [Brave Search API]() 搜索网页获取最新信息，非常适合回答时事问题、查找特定数据或收集一般信息。
 
 ---
@@ -30,7 +36,7 @@ icon: globe
 在终端中运行以下命令安装网页搜索扩展：
 
 ```bash
-ironclaw registry install web-search
+ironclaw-v1 registry install web-search
 ```
 
 </Step>
@@ -40,7 +46,7 @@ ironclaw registry install web-search
 安装扩展后，需要在 IronClaw 中配置您的 Brave Search API 密钥。运行：
 
 ```bash
-ironclaw tool auth web-search
+ironclaw-v1 tool auth web-search
 ```
 
 然后按照提示输入您的 API 密钥。

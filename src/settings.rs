@@ -1304,7 +1304,7 @@ impl Settings {
              # A DB value equal to the built-in default is treated as unset.\n\
              # Exceptions: bootstrap and security-sensitive fields are env-only.\n\
              # Uncomment and edit values to override defaults.\n\
-             # Run `ironclaw config init` to regenerate this file.\n\
+             # Run `ironclaw-v1 config init` to regenerate this file.\n\
              #\n\
              # Documentation: https://github.com/nearai/ironclaw\n\
              \n\
@@ -2442,7 +2442,7 @@ mod tests {
     // to verify that re-running the wizard (or a subset of steps) doesn't
     // accidentally reset settings from prior runs.
 
-    /// Simulates `ironclaw onboard --provider-only` re-running on a fully
+    /// Simulates `ironclaw-v1 onboard --provider-only` re-running on a fully
     /// configured installation. Only provider + model should change; all
     /// other settings (channels, embeddings, heartbeat) must survive.
     #[test]
@@ -2511,7 +2511,7 @@ mod tests {
         );
     }
 
-    /// Simulates `ironclaw onboard --channels-only` re-running on a fully
+    /// Simulates `ironclaw-v1 onboard --channels-only` re-running on a fully
     /// configured installation. Only channel settings should change;
     /// provider, model, embeddings, heartbeat must survive.
     #[test]

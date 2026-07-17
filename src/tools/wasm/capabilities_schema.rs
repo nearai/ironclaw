@@ -85,7 +85,7 @@ pub struct CapabilitiesFile {
     pub websocket: Option<serde_json::Value>,
 
     /// Authentication setup instructions.
-    /// Used by `ironclaw config` to guide users through auth setup.
+    /// Used by `ironclaw-v1 config` to guide users through auth setup.
     #[serde(default)]
     pub auth: Option<AuthCapabilitySchema>,
 

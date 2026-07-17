@@ -3,7 +3,7 @@
 //! Shows a compact ANSI-styled status panel with three tiers:
 //! - **Tier 1 (always):** Name + version, model + backend.
 //! - **Tier 2 (conditional):** Gateway URL, tunnel URL, non-default channels.
-//! - **Tier 3 (removed):** Database, tool count, features → use `ironclaw status`.
+//! - **Tier 3 (removed):** Database, tool count, features → use `ironclaw-v1 status`.
 
 use crate::cli::fmt;
 
@@ -43,7 +43,7 @@ const KW: usize = 10;
 ///
 /// **Tier 1 (always):** Name + version, model + backend.
 /// **Tier 2 (conditional):** Gateway URL, tunnel URL, non-default channels.
-/// **Tier 3 (removed):** Database, tool count, features — use `ironclaw status`.
+/// **Tier 3 (removed):** Database, tool count, features — use `ironclaw-v1 status`.
 pub fn print_boot_screen(info: &BootInfo) {
     let border = format!("  {}", fmt::separator(58));
 
@@ -242,9 +242,9 @@ pub fn print_boot_screen(info: &BootInfo) {
         println!("  {}ready in {}{}", fmt::dim(), elapsed_str, fmt::reset());
     }
 
-    // Hint to run `ironclaw status` for full details
+    // Hint to run `ironclaw-v1 status` for full details
     println!(
-        "  {}Run `ironclaw status` for full system details.{}",
+        "  {}Run `ironclaw-v1 status` for full system details.{}",
         fmt::hint(),
         fmt::reset()
     );

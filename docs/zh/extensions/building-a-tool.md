@@ -3,6 +3,12 @@ title: 从零构建一个工具
 description: 使用 Rust 构建一个天气 WASM 工具
 ---
 
+<Warning>
+本页记录 retained v1 的 WASM tool 流程。以下 `tool` 命令请使用
+`ironclaw-v1`。Canonical Reborn 的实现指南请参阅
+[Reborn tool extension](/extensions/building-a-tool)。
+</Warning>
+
 本教程带你从零实现一个 weather-tool：通过 Open-Meteo（免费、无需 API Key）获取实时天气、5 天预报与空气质量，并让 IronClaw 代理可直接调用。
 
 目标效果：
@@ -208,8 +214,8 @@ cargo build --release --target wasm32-wasip2
 ## 8. 安装并测试
 
 ```bash
-ironclaw tool install ./target/wasm32-wasip2/release/weather_tool.wasm
-ironclaw tool list
+ironclaw-v1 tool install ./target/wasm32-wasip2/release/weather_tool.wasm
+ironclaw-v1 tool list
 ```
 
 然后在聊天中测试：

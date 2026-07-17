@@ -3,6 +3,12 @@ title: "Google Calendar"
 description: "让您的智能体管理 Google Calendar"
 ---
 
+<Warning>
+本集成指南适用于 retained v1。以下 `registry` 和 `tool` 命令请使用
+`ironclaw-v1`。Canonical Reborn 使用 `ironclaw extension`，详见
+[CLI 参考](/reborn-binary#extension)。
+</Warning>
+
 Google Calendar 扩展允许您的智能体与 Google Calendar 交互，包括创建事件、查看日程、更新预约等。它非常适合自动化排程、设置提醒，或者直接通过智能体管理会议。
 
 ---
@@ -90,7 +96,7 @@ export GOOGLE_OAUTH_CLIENT_SECRET=<your-client-secret>
 运行以下命令安装扩展：
 
 ```bash
-ironclaw registry install google-calendar
+ironclaw-v1 registry install google-calendar
 ```
 
 </Step>
@@ -100,7 +106,7 @@ ironclaw registry install google-calendar
 向 IronClaw 提供您的 OAuth 凭证：
 
 ```bash
-ironclaw tool auth google-calendar
+ironclaw-v1 tool auth google-calendar
 ```
 
 按照提示粘贴 `credentials.json` 文件内容，或者提供该文件的路径。IronClaw 会为您打开一个浏览器窗口来授权访问日历。授权完成后，token 会被安全存储。

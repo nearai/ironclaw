@@ -238,7 +238,7 @@ impl CreateJobTool {
 
             if !exists {
                 return Err(ToolError::ExecutionFailed(format!(
-                    "secret '{}' not found. Store it first via 'ironclaw tool auth' or the web UI.",
+                    "secret '{}' not found. Store it first via 'ironclaw-v1 tool auth' or the web UI.",
                     secret_name
                 )));
             }
@@ -906,7 +906,7 @@ impl Tool for CreateJobTool {
             props.insert("credentials".into(), serde_json::json!({
                 "type": "object",
                 "description": "Map of secret names to env var names. Each secret must exist in the \
-                                secrets store (via 'ironclaw tool auth' or web UI). Example: \
+                                secrets store (via 'ironclaw-v1 tool auth' or web UI). Example: \
                                 {\"github_token\": \"GITHUB_TOKEN\", \"npm_token\": \"NPM_TOKEN\"}",
                 "additionalProperties": { "type": "string" }
             }));
@@ -938,7 +938,7 @@ impl Tool for CreateJobTool {
                     "agent_name".into(),
                     serde_json::json!({
                         "type": "string",
-                        "description": "Name of the ACP agent to use (from 'ironclaw acp list'). \
+                        "description": "Name of the ACP agent to use (from 'ironclaw-v1 acp list'). \
                                         Required when mode is 'acp'."
                     }),
                 );

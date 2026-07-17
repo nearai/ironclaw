@@ -41,7 +41,9 @@ permissions:
 on:
   push:
     tags:
-      - 'ironclaw-v[0-9]+.[0-9]+.[0-9]+*'
+      # An unqualified tag selects the only dist-enabled package. Package-
+      # qualified `ironclaw/...` tags resolve to the retained v1 Cargo package.
+      - 'v[0-9]+.[0-9]+.[0-9]+*'
 
 jobs:
   # Run 'dist plan' (or host) to determine what tasks we need to do
@@ -128,6 +130,12 @@ jobs:
         with:
           persist-credentials: false
           submodules: recursive
+      - name: Install Node.js for the embedded WebUI
+        uses: actions/setup-node@60edb5dd545a775178f52524783378180af0d1f8 # v4
+        with:
+          node-version: "22"
+      - name: Enable pnpm for the embedded WebUI
+        run: corepack enable pnpm
       - name: Install Rust non-interactively if not already installed
         if: ${{ matrix.container }}
         run: |

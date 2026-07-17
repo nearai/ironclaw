@@ -2135,7 +2135,7 @@ mod tests {
     }
 
     /// Regression test for nearai/ironclaw#2391: exercise the full CLI
-    /// `ironclaw tool auth google-calendar` code path end-to-end. Loads the
+    /// `ironclaw-v1 tool auth google-calendar` code path end-to-end. Loads the
     /// actual shipped capabilities JSON, parses it via
     /// `CapabilitiesFile::from_json`, then calls `build_oauth_url` with the
     /// exact `extra_params` the CLI would pass — the same call site as

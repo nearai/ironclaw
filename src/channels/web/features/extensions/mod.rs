@@ -280,7 +280,7 @@ pub(crate) async fn extensions_install_handler(
                 crate::extensions::ExtensionSource::WasmBuildable { .. } => {
                     format!(
                         "'{name_str}' requires building from source. \
-                         Run `ironclaw registry install {name_str}` from the CLI."
+                         Run `ironclaw-v1 registry install {name_str}` from the CLI."
                     )
                 }
                 _ => format!(

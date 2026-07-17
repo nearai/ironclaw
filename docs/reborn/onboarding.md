@@ -1,21 +1,22 @@
 # Reborn Onboarding
 
-This document describes the standalone `ironclaw-reborn onboard` surface.
+This document describes the canonical `ironclaw onboard` surface.
 It is Reborn-owned and must not call into v1 `src/setup`, v1 database
 configuration, v1 channels, or v1 import state.
 
 ## Current Slice
 
-`ironclaw-reborn onboard` is a first-run bootstrap command for the standalone
-Reborn binary. It currently:
+`ironclaw onboard` is a first-run bootstrap command for the Reborn runtime. It
+currently:
 
 1. resolves `IRONCLAW_REBORN_HOME` or the default `~/.ironclaw/reborn`;
 2. creates the Reborn home directory;
 3. creates missing `config.toml` and `providers.json` using the same atomic
-   writer as `ironclaw-reborn config init`;
+   writer as `ironclaw config init`;
 4. preserves existing operator-edited config files unless `--force` is passed;
-5. writes `.onboard-completed.json` in Reborn home; and
-6. prints explicit remaining setup work.
+5. provisions or preserves a mode-protected `webui-token` bearer-token file;
+6. writes `.onboard-completed.json` in Reborn home; and
+7. prints explicit remaining setup work.
 
 The completion marker schema is:
 
@@ -27,7 +28,8 @@ The completion marker schema is:
   "home_source": "IRONCLAW_REBORN_HOME or default",
   "config_file": "/absolute/path/config.toml",
   "providers_file": "/absolute/path/providers.json",
-  "steps_completed": ["reborn_home", "config_files", "completion_marker"],
+  "webui_token_file": "/absolute/path/webui-token",
+  "steps_completed": ["reborn_home", "config_files", "webui_token", "completion_marker"],
   "steps_pending": ["llm_credentials", "model_selection", "channel_setup"],
   "v1_state": "not-used"
 }
@@ -56,7 +58,7 @@ Legacy IronClaw startup also uses the same env pair to bootstrap the persisted
 ## Non-Goals In This Slice
 
 - No v1 `src/setup/wizard.rs` reuse.
-- No automatic first-run invocation before `ironclaw-reborn run`.
+- No automatic first-run invocation before `ironclaw run`.
 - No interactive provider credential prompts.
 - No keychain or encrypted secret setup for LLM keys.
 - No model picker.

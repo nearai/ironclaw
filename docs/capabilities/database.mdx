@@ -3,10 +3,17 @@ title: Database Backends
 description: PostgreSQL vs libSQL — choosing your database
 ---
 
+<Warning>
+This page documents retained v1 database settings. Use `ironclaw-v1` for the
+commands below. Canonical Reborn local-dev storage is isolated under
+`~/.ironclaw/reborn`; hosted and production storage is documented in the
+[CLI reference](/reborn-binary#run).
+</Warning>
+
 IronClaw supports two database backends: **PostgreSQL** and **libSQL** (embedded SQLite). **PostgreSQL is the default** — if you don't set `DATABASE_BACKEND`, IronClaw will use PostgreSQL and require a `DATABASE_URL`. Choose libSQL for zero-config personal use.
 
 <Warning>
-If you start IronClaw without configuring a database, you'll see: `DATABASE_URL is required`. Run `ironclaw onboard` or set the environment variables manually.
+If you start IronClaw without configuring a database, you'll see: `DATABASE_URL is required`. Run `ironclaw-v1 onboard` or set the environment variables manually.
 </Warning>
 
 ## Quick Comparison
@@ -88,7 +95,7 @@ export DATABASE_POOL_SIZE=30  # default; increase for high-throughput workloads
 ```
 
 <Warning>
-`DATABASE_URL` is **required** when using PostgreSQL. If not set, IronClaw will fail to start with the error: `DATABASE_URL is required — Run 'ironclaw onboard' or set DATABASE_URL environment variable`.
+`DATABASE_URL` is **required** when using PostgreSQL. If not set, IronClaw will fail to start with the error: `DATABASE_URL is required — Run 'ironclaw-v1 onboard' or set DATABASE_URL environment variable`.
 </Warning>
 
 Or in the wizard:

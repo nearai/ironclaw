@@ -9,7 +9,7 @@ import json
 from pathlib import Path
 
 
-ARCHIVE_NAME = "ironclaw-reborn.tar.gz"
+ARCHIVE_NAME = "ironclaw.tar.gz"
 CHECKSUM_NAME = f"{ARCHIVE_NAME}.sha256"
 MANIFEST_NAME = "manifest.json"
 

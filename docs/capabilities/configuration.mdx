@@ -4,6 +4,12 @@ sidebarTitle: Configuration
 description: Common operator configuration reference for IronClaw
 ---
 
+<Warning>
+This page documents the retained v1 runtime and its database-backed settings.
+Use `ironclaw-v1` for the commands below. For the canonical `ironclaw` Reborn
+configuration surface, see the [CLI reference](/reborn-binary#config).
+</Warning>
+
 IronClaw is configured through bootstrap environment variables, database-backed settings, and a small set of advanced or provider-specific environment variables. This page documents the primary options used during setup and normal operation.
 
 <Info>
@@ -36,7 +42,7 @@ IronClaw uses a two-layer configuration system:
     - Skills configuration
     - Heartbeat settings
 
-    Some security-sensitive and advanced options remain environment-only. Manage database-backed values through the wizard or `ironclaw config` command.
+    Some security-sensitive and advanced options remain environment-only. Manage database-backed values through the wizard or `ironclaw-v1 config` command.
   </Accordion>
 </AccordionGroup>
 
@@ -553,16 +559,16 @@ HEARTBEAT_INTERVAL_SECS=1800
 
 ```bash
 # View current config
-ironclaw config list
+ironclaw-v1 config list
 
 # Get specific value
-ironclaw config get llm.backend
+ironclaw-v1 config get llm.backend
 
 # Set value
-ironclaw config set llm.backend nearai
+ironclaw-v1 config set llm.backend nearai
 
 # Delete value (reset to default)
-ironclaw config delete llm.backend
+ironclaw-v1 config delete llm.backend
 ```
 
 ## Next Steps

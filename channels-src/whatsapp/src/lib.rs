@@ -908,7 +908,7 @@ fn send_pairing_reply(
         "text": {
             "preview_url": false,
             "body": format!(
-                "Enter this code in IronClaw to pair your whatsapp account: {}. CLI fallback: ironclaw pairing approve whatsapp {}",
+                "Enter this code in IronClaw to pair your whatsapp account: {}. CLI fallback: ironclaw-v1 pairing approve whatsapp {}",
                 code, code
             )
         }

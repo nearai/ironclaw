@@ -1,4 +1,4 @@
-//! `ironclaw-reborn service` — install/manage the standalone Reborn
+//! `ironclaw service` — install/manage the standalone Reborn
 //! binary as an OS-native service.
 //!
 //! - **macOS**: launchd user agent at
@@ -21,7 +21,7 @@
 //!
 //! [`SERVICE_LABEL`] and [`SYSTEMD_UNIT`] name the **one** OS service
 //! identity for the standalone Reborn binary. Two surfaces install and
-//! manage it today: this CLI (`ironclaw-reborn service install`), and the
+//! manage it today: this CLI (`ironclaw service install`), and the
 //! WebUI operator facade (`RebornLocalServiceLifecycle` in
 //! `ironclaw_reborn_composition::observability::operator_service_lifecycle`,
 //! behind `POST /api/webchat/v2/operator/service`). Both target the same
@@ -251,7 +251,7 @@ fn home_dir() -> Result<PathBuf> {
 /// Non-fatal readiness warnings for `service install`: warn, don't
 /// fail, when onboarding hasn't run yet — the service can still be
 /// installed, but `serve` starts without config, providers, or a valid
-/// WebUI token until `ironclaw-reborn onboard` runs. Checks the
+/// WebUI token until `ironclaw onboard` runs. Checks the
 /// onboarding marker, `config.toml`, and the WebUI token file's entropy
 /// floor.
 ///
@@ -267,7 +267,7 @@ fn preflight_warnings(context: &RebornCliContext) -> Result<Vec<String>> {
     let marker = crate::commands::onboard::onboarding_marker_path(home);
     if !marker.exists() {
         warnings.push(format!(
-            "onboarding marker not found at {} — run `ironclaw-reborn onboard` first so \
+            "onboarding marker not found at {} — run `ironclaw onboard` first so \
              `serve` has config, providers, and the WebUI token available",
             marker.display()
         ));
@@ -283,7 +283,7 @@ fn preflight_warnings(context: &RebornCliContext) -> Result<Vec<String>> {
 
     if !crate::webui_token::webui_token_file_is_valid(home.path())? {
         warnings.push(format!(
-            "WebUI token not found or too short at {} — run `ironclaw-reborn onboard` first so \
+            "WebUI token not found or too short at {} — run `ironclaw onboard` first so \
              `serve` has a valid WebUI bearer token",
             crate::webui_token::webui_token_file_path(home.path()).display()
         ));
@@ -313,7 +313,7 @@ fn restart_generic(
     start: fn(&mut dyn ServiceCommandRunner) -> Result<()>,
 ) -> Result<()> {
     if !installed {
-        bail!("Service not installed. Run `ironclaw-reborn service install` first.");
+        bail!("Service not installed. Run `ironclaw service install` first.");
     }
     if was_running {
         stop(runner)?;
@@ -377,7 +377,7 @@ fn status_label(installed: bool, running: bool) -> &'static str {
 fn replaced_existing_service_file_note(replaced_existing: bool) -> Option<&'static str> {
     replaced_existing.then_some(
         "  Replaced an existing service definition at this path; if the service is currently \
-         running, it keeps the OLD definition until `ironclaw-reborn service restart`.",
+         running, it keeps the OLD definition until `ironclaw service restart`.",
     )
 }
 
@@ -651,11 +651,11 @@ mod tests {
         }
 
         for (args, verb_name) in [
-            (["ironclaw-reborn", "start"], "start"),
-            (["ironclaw-reborn", "stop"], "stop"),
-            (["ironclaw-reborn", "restart"], "restart"),
-            (["ironclaw-reborn", "status"], "status"),
-            (["ironclaw-reborn", "uninstall"], "uninstall"),
+            (["ironclaw", "start"], "start"),
+            (["ironclaw", "stop"], "stop"),
+            (["ironclaw", "restart"], "restart"),
+            (["ironclaw", "status"], "status"),
+            (["ironclaw", "uninstall"], "uninstall"),
         ] {
             let parsed = VerbParser::try_parse_from(args)
                 .unwrap_or_else(|e| panic!("{verb_name} must parse via clap: {e}"));

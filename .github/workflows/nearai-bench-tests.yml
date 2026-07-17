@@ -50,6 +50,9 @@ jobs:
           parse_model() {
             printf '%s' "$1" | sed -nE 's@^/benchmark[[:space:]]+[A-Za-z0-9_-]+[[:space:]]+--model[[:space:]]+([A-Za-z0-9_./:-]+)[[:space:]]*$@\1@p'
           }
+          parse_framework() {
+            printf '%s' "$1" | tr '\n\t' '  ' | tr -s ' ' | sed -nE 's@.*--framework[[:space:]]+([A-Za-z0-9_-]+).*@\1@p'
+          }
 
           # Whole-word guard from the workflow-level `if:` clause.
           # GitHub Actions: startsWith(body, '/benchmark ') || body == '/benchmark'
@@ -71,6 +74,18 @@ jobs:
               printf '        body:  %q\n' "$body"
               printf '        want:  suite=%q model=%q\n' "$want_suite" "$want_model"
               printf '        got:   suite=%q model=%q\n' "$got_suite" "$got_model"
+              fail=1
+            fi
+          }
+
+          assert_framework() {
+            local label="$1" body="$2" want="$3" got="reject" framework
+            framework=$(parse_framework "$body")
+            if [ -z "$framework" ] || [ "$framework" = "ironclaw" ]; then got="allow"; fi
+            if [ "$got" = "$want" ]; then
+              printf '  PASS  %s\n' "$label"
+            else
+              printf '  FAIL  %s (want %s, got %s)\n' "$label" "$want" "$got"
               fail=1
             fi
           }
@@ -124,6 +139,11 @@ jobs:
             'looks good to me' '' ''
           assert_parse 'starts with /benchmark but in a quote' \
             '> /benchmark ironclaw-smoke' '' ''
+
+          assert_framework 'canonical framework is allowed' \
+            '/benchmark ironclaw-smoke --framework ironclaw' 'allow'
+          assert_framework 'retired framework is rejected' \
+            '/benchmark ironclaw-smoke --framework ironclaw-reborn' 'reject'
 
           # ─── Guard fixtures ──────────────────────────────────────────
           echo

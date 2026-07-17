@@ -106,14 +106,14 @@ function buildBuiltInChannels(status, t) {
       name: t("channels.cli"),
       description: t("channels.cliDesc"),
       enabled: enabledChannels.includes("cli"),
-      detail: "ironclaw run --cli",
+      detail: "ironclaw run",
     },
     {
       id: "repl",
       name: t("channels.repl"),
       description: t("channels.replDesc"),
       enabled: enabledChannels.includes("repl"),
-      detail: "ironclaw run --repl",
+      detail: "ironclaw repl",
     },
   ];
 }

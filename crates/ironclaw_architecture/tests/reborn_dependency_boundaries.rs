@@ -499,7 +499,7 @@ fn untrusted_ingress_paths_cannot_submit_host_trusted_inbound() {
 }
 
 #[test]
-fn reborn_cli_binary_crate_stays_separate_from_v1_root() {
+fn reborn_cli_owns_the_only_canonical_binary() {
     let metadata = cargo_metadata();
     let packages = metadata["packages"]
         .as_array()
@@ -528,8 +528,50 @@ fn reborn_cli_binary_crate_stays_separate_from_v1_root() {
         "Reborn CLI crate package name should be ironclaw_reborn_cli"
     );
     assert!(
-        manifest.contains("[[bin]]") && manifest.contains("name = \"ironclaw-reborn\""),
-        "Reborn CLI crate must declare the ironclaw-reborn binary explicitly"
+        manifest.contains("[[bin]]") && manifest.contains("name = \"ironclaw\""),
+        "Reborn CLI crate must declare the ironclaw binary explicitly"
+    );
+
+    let mut canonical_bin_owners = Vec::new();
+    let mut legacy_bin_owners = Vec::new();
+    let mut retired_bin_owners = Vec::new();
+    for package in packages {
+        let package_name = package["name"]
+            .as_str()
+            .expect("cargo package must have a name");
+        let targets = package["targets"]
+            .as_array()
+            .expect("cargo package must include targets");
+        for target in targets {
+            let is_binary = target["kind"]
+                .as_array()
+                .expect("cargo target kind must be an array")
+                .iter()
+                .any(|kind| kind.as_str() == Some("bin"));
+            if !is_binary {
+                continue;
+            }
+            match target["name"].as_str() {
+                Some("ironclaw") => canonical_bin_owners.push(package_name),
+                Some("ironclaw-v1") => legacy_bin_owners.push(package_name),
+                Some("ironclaw-reborn") => retired_bin_owners.push(package_name),
+                _ => {}
+            }
+        }
+    }
+    assert_eq!(
+        canonical_bin_owners,
+        vec!["ironclaw_reborn_cli"],
+        "exactly one workspace package must own the canonical ironclaw binary"
+    );
+    assert_eq!(
+        legacy_bin_owners,
+        vec!["ironclaw"],
+        "the retained root package must be isolated behind the ironclaw-v1 target"
+    );
+    assert!(
+        retired_bin_owners.is_empty(),
+        "the retired ironclaw-reborn compatibility binary must not be reintroduced: {retired_bin_owners:?}"
     );
 
     let command_module_paths = [
@@ -1756,7 +1798,7 @@ fn slack_import_segment(suffix: &str) -> &str {
 }
 
 /// Lock the boot-config TOML + provider-catalog layering for the
-/// standalone `ironclaw-reborn` binary.
+/// canonical `ironclaw` binary.
 ///
 /// Three properties:
 ///

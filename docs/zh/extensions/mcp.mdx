@@ -4,6 +4,12 @@ sidebarTitle: MCP 服务器
 description: 连接 Model Context Protocol 服务器扩展 IronClaw
 ---
 
+<Warning>
+本集成指南适用于 retained v1。以下 MCP 命令请使用 `ironclaw-v1`。
+Canonical Reborn 使用 `ironclaw extension`，详见
+[CLI 参考](/reborn-binary#extension)。
+</Warning>
+
 IronClaw 可连接任意 [Model Context Protocol (MCP)](https://modelcontextprotocol.io/) 服务器，并把其工具暴露给代理。MCP 是开放标准，生态中已有大量数据库、API、云服务连接器。
 
 <Info>
@@ -17,7 +23,7 @@ IronClaw 可连接任意 [Model Context Protocol (MCP)](https://modelcontextprot
 可直接要求代理使用 MCP，或通过 CLI 添加：
 
 ```bash
-ironclaw mcp add <server_name> <server_url>
+ironclaw-v1 mcp add <server_name> <server_url>
 ```
 
 ---
@@ -27,7 +33,7 @@ ironclaw mcp add <server_name> <server_url>
 如果服务器需要认证：
 
 ```bash
-ironclaw mcp auth <server_name>
+ironclaw-v1 mcp auth <server_name>
 ```
 
 ---
@@ -35,7 +41,7 @@ ironclaw mcp auth <server_name>
 ## 查看已连接服务器
 
 ```bash
-ironclaw mcp list
+ironclaw-v1 mcp list
 ```
 
 连接成功后，MCP 工具会出现在代理工具列表中。
@@ -45,7 +51,7 @@ ironclaw mcp list
 ## 移除服务器
 
 ```bash
-ironclaw mcp remove <server_name>
+ironclaw-v1 mcp remove <server_name>
 ```
 
 ---

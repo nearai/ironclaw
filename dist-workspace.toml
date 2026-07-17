@@ -1,0 +1,48 @@
+[workspace]
+members = ["cargo:."]
+
+# Config for 'dist'
+[dist]
+# The preferred dist version to use in CI (Cargo.toml SemVer syntax)
+cargo-dist-version = "0.31.0"
+# Ignore out-of-date generated CI and the intentionally branded MSI template.
+# cargo-wix derives its default Product name from the internal Cargo package;
+# the checked-in template instead exposes the canonical `ironclaw` product.
+allow-dirty = ["ci", "msi"]
+# CI backends to support
+ci = "github"
+# The installers to generate for each app
+installers = ["shell", "powershell", "npm", "msi"]
+# Publish jobs to run in CI
+publish-jobs = []
+# Target platforms to build apps for (Rust target-triple syntax)
+targets = [
+    "aarch64-apple-darwin",
+    "aarch64-unknown-linux-gnu",
+    "aarch64-unknown-linux-musl",
+    "x86_64-apple-darwin",
+    "x86_64-unknown-linux-gnu",
+    "x86_64-unknown-linux-musl",
+    "x86_64-pc-windows-msvc",
+]
+# The archive format to use for windows builds (defaults .zip)
+windows-archive = ".tar.gz"
+# The archive format to use for non-windows builds (defaults .tar.xz)
+unix-archive = ".tar.gz"
+# Which actions to run on pull requests
+pr-run-mode = "skip"
+# Path that installers should place binaries in
+install-path = "CARGO_HOME"
+# Whether to install an updater program
+install-updater = true
+# Cache intermediate build artifacts to speed up the release pipelines
+cache-builds = true
+
+[dist.github-custom-runners]
+aarch64-unknown-linux-gnu = "ubuntu-24.04-arm"
+aarch64-unknown-linux-musl = "ubuntu-24.04-arm"
+x86_64-unknown-linux-gnu = "ubuntu-22.04"
+x86_64-unknown-linux-musl = "ubuntu-22.04"
+x86_64-pc-windows-msvc = "windows-2022"
+x86_64-apple-darwin = "macos-15-intel"
+aarch64-apple-darwin = "macos-14"

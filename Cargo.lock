@@ -4824,7 +4824,7 @@ dependencies = [
 
 [[package]]
 name = "ironclaw_reborn_cli"
-version = "0.1.0"
+version = "0.30.0"
 dependencies = [
  "anyhow",
  "async-trait",

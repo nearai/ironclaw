@@ -1,8 +1,8 @@
 """Legacy core Playwright scenarios ported to Reborn WebUI v2.
 
 This file is the first migration slice for the legacy ``test_connection.py`` and
-basic ``test_chat.py`` intent. It targets the real ``ironclaw-reborn serve``
-surface rather than the legacy ``ironclaw`` gateway, so assertions use Reborn's
+basic ``test_chat.py`` intent. It targets the real ``ironclaw serve``
+surface rather than the legacy ``ironclaw-v1`` gateway, so assertions use Reborn's
 sidebar routes, token login view, and ``data-testid`` selectors.
 """
 

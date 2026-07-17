@@ -15,15 +15,8 @@ _ironclaw() {
 
     local context curcontext="$curcontext" state line
     _arguments "${_arguments_options[@]}" : \
-'-m+[Single message mode - send one message and exit]:MESSAGE:_default' \
-'--message=[Single message mode - send one message and exit]:MESSAGE:_default' \
-'-c+[Configuration file path (optional, uses env vars by default)]:CONFIG:_files' \
-'--config=[Configuration file path (optional, uses env vars by default)]:CONFIG:_files' \
-'--cli-only[Run in interactive CLI mode only (disable other channels)]' \
-'--no-db[Skip database connection (for testing)]' \
-'--no-onboard[Skip first-run onboarding check]' \
-'-h[Print help (see more with '\''--help'\'')]' \
-'--help[Print help (see more with '\''--help'\'')]' \
+'-h[Print help]' \
+'--help[Print help]' \
 '-V[Print version]' \
 '--version[Print version]' \
 ":: :_ironclaw_commands" \
@@ -35,46 +28,69 @@ _ironclaw() {
         (( CURRENT += 1 ))
         curcontext="${curcontext%:*:*}:ironclaw-command-$line[1]:"
         case $line[1] in
-            (run)
+            (channels)
 _arguments "${_arguments_options[@]}" : \
-'-m+[Single message mode - send one message and exit]:MESSAGE:_default' \
-'--message=[Single message mode - send one message and exit]:MESSAGE:_default' \
-'-c+[Configuration file path (optional, uses env vars by default)]:CONFIG:_files' \
-'--config=[Configuration file path (optional, uses env vars by default)]:CONFIG:_files' \
-'--cli-only[Run in interactive CLI mode only (disable other channels)]' \
-'--no-db[Skip database connection (for testing)]' \
-'--no-onboard[Skip first-run onboarding check]' \
-'-h[Print help (see more with '\''--help'\'')]' \
-'--help[Print help (see more with '\''--help'\'')]' \
+'-h[Print help]' \
+'--help[Print help]' \
+":: :_ironclaw__subcmd__channels_commands" \
+"*::: :->channels" \
+&& ret=0
+
+    case $state in
+    (channels)
+        words=($line[1] "${words[@]}")
+        (( CURRENT += 1 ))
+        curcontext="${curcontext%:*:*}:ironclaw-channels-command-$line[1]:"
+        case $line[1] in
+            (list)
+_arguments "${_arguments_options[@]}" : \
+'-v[Show extra status details]' \
+'--verbose[Show extra status details]' \
+'--json[Output channels as JSON]' \
+'-h[Print help]' \
+'--help[Print help]' \
 && ret=0
 ;;
-(onboard)
+(help)
 _arguments "${_arguments_options[@]}" : \
-'-m+[Single message mode - send one message and exit]:MESSAGE:_default' \
-'--message=[Single message mode - send one message and exit]:MESSAGE:_default' \
-'-c+[Configuration file path (optional, uses env vars by default)]:CONFIG:_files' \
-'--config=[Configuration file path (optional, uses env vars by default)]:CONFIG:_files' \
-'--skip-auth[Skip authentication (use existing session)]' \
-'--channels-only[Reconfigure channels only]' \
-'--cli-only[Run in interactive CLI mode only (disable other channels)]' \
-'--no-db[Skip database connection (for testing)]' \
-'--no-onboard[Skip first-run onboarding check]' \
-'-h[Print help (see more with '\''--help'\'')]' \
-'--help[Print help (see more with '\''--help'\'')]' \
+":: :_ironclaw__subcmd__channels__subcmd__help_commands" \
+"*::: :->help" \
+&& ret=0
+
+    case $state in
+    (help)
+        words=($line[1] "${words[@]}")
+        (( CURRENT += 1 ))
+        curcontext="${curcontext%:*:*}:ironclaw-channels-help-command-$line[1]:"
+        case $line[1] in
+            (list)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(help)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+        esac
+    ;;
+esac
+;;
+        esac
+    ;;
+esac
+;;
+(completion)
+_arguments "${_arguments_options[@]}" : \
+'--shell=[The shell to generate completions for]:SHELL:(bash elvish fish powershell zsh)' \
+'-h[Print help]' \
+'--help[Print help]' \
 && ret=0
 ;;
 (config)
 _arguments "${_arguments_options[@]}" : \
-'-m+[Single message mode - send one message and exit]:MESSAGE:_default' \
-'--message=[Single message mode - send one message and exit]:MESSAGE:_default' \
-'-c+[Configuration file path (optional, uses env vars by default)]:CONFIG:_files' \
-'--config=[Configuration file path (optional, uses env vars by default)]:CONFIG:_files' \
-'--cli-only[Run in interactive CLI mode only (disable other channels)]' \
-'--no-db[Skip database connection (for testing)]' \
-'--no-onboard[Skip first-run onboarding check]' \
-'-h[Print help (see more with '\''--help'\'')]' \
-'--help[Print help (see more with '\''--help'\'')]' \
-":: :_ironclaw__config_commands" \
+'-h[Print help]' \
+'--help[Print help]' \
+":: :_ironclaw__subcmd__config_commands" \
 "*::: :->config" \
 && ret=0
 
@@ -84,96 +100,37 @@ _arguments "${_arguments_options[@]}" : \
         (( CURRENT += 1 ))
         curcontext="${curcontext%:*:*}:ironclaw-config-command-$line[1]:"
         case $line[1] in
-            (init)
+            (path)
 _arguments "${_arguments_options[@]}" : \
-'-o+[Output path (default\: ~/.ironclaw/config.toml)]:OUTPUT:_files' \
-'--output=[Output path (default\: ~/.ironclaw/config.toml)]:OUTPUT:_files' \
-'-m+[Single message mode - send one message and exit]:MESSAGE:_default' \
-'--message=[Single message mode - send one message and exit]:MESSAGE:_default' \
-'-c+[Configuration file path (optional, uses env vars by default)]:CONFIG:_files' \
-'--config=[Configuration file path (optional, uses env vars by default)]:CONFIG:_files' \
-'--force[Overwrite existing file]' \
-'--cli-only[Run in interactive CLI mode only (disable other channels)]' \
-'--no-db[Skip database connection (for testing)]' \
-'--no-onboard[Skip first-run onboarding check]' \
+'-h[Print help]' \
+'--help[Print help]' \
+&& ret=0
+;;
+(init)
+_arguments "${_arguments_options[@]}" : \
+'--force[Overwrite existing files]' \
 '-h[Print help]' \
 '--help[Print help]' \
 && ret=0
 ;;
 (list)
 _arguments "${_arguments_options[@]}" : \
-'-f+[Show only settings matching this prefix (e.g., "agent", "heartbeat")]:FILTER:_default' \
-'--filter=[Show only settings matching this prefix (e.g., "agent", "heartbeat")]:FILTER:_default' \
-'-m+[Single message mode - send one message and exit]:MESSAGE:_default' \
-'--message=[Single message mode - send one message and exit]:MESSAGE:_default' \
-'-c+[Configuration file path (optional, uses env vars by default)]:CONFIG:_files' \
-'--config=[Configuration file path (optional, uses env vars by default)]:CONFIG:_files' \
-'--cli-only[Run in interactive CLI mode only (disable other channels)]' \
-'--no-db[Skip database connection (for testing)]' \
-'--no-onboard[Skip first-run onboarding check]' \
+'--json[Output as JSON]' \
 '-h[Print help]' \
 '--help[Print help]' \
 && ret=0
 ;;
 (get)
 _arguments "${_arguments_options[@]}" : \
-'-m+[Single message mode - send one message and exit]:MESSAGE:_default' \
-'--message=[Single message mode - send one message and exit]:MESSAGE:_default' \
-'-c+[Configuration file path (optional, uses env vars by default)]:CONFIG:_files' \
-'--config=[Configuration file path (optional, uses env vars by default)]:CONFIG:_files' \
-'--cli-only[Run in interactive CLI mode only (disable other channels)]' \
-'--no-db[Skip database connection (for testing)]' \
-'--no-onboard[Skip first-run onboarding check]' \
+'--json[Output as JSON]' \
 '-h[Print help]' \
 '--help[Print help]' \
-':path -- Setting path (e.g., "agent.max_parallel_jobs"):_default' \
-&& ret=0
-;;
-(set)
-_arguments "${_arguments_options[@]}" : \
-'-m+[Single message mode - send one message and exit]:MESSAGE:_default' \
-'--message=[Single message mode - send one message and exit]:MESSAGE:_default' \
-'-c+[Configuration file path (optional, uses env vars by default)]:CONFIG:_files' \
-'--config=[Configuration file path (optional, uses env vars by default)]:CONFIG:_files' \
-'--cli-only[Run in interactive CLI mode only (disable other channels)]' \
-'--no-db[Skip database connection (for testing)]' \
-'--no-onboard[Skip first-run onboarding check]' \
-'-h[Print help]' \
-'--help[Print help]' \
-':path -- Setting path (e.g., "agent.max_parallel_jobs"):_default' \
-':value -- Value to set:_default' \
-&& ret=0
-;;
-(reset)
-_arguments "${_arguments_options[@]}" : \
-'-m+[Single message mode - send one message and exit]:MESSAGE:_default' \
-'--message=[Single message mode - send one message and exit]:MESSAGE:_default' \
-'-c+[Configuration file path (optional, uses env vars by default)]:CONFIG:_files' \
-'--config=[Configuration file path (optional, uses env vars by default)]:CONFIG:_files' \
-'--cli-only[Run in interactive CLI mode only (disable other channels)]' \
-'--no-db[Skip database connection (for testing)]' \
-'--no-onboard[Skip first-run onboarding check]' \
-'-h[Print help]' \
-'--help[Print help]' \
-':path -- Setting path (e.g., "agent.max_parallel_jobs"):_default' \
-&& ret=0
-;;
-(path)
-_arguments "${_arguments_options[@]}" : \
-'-m+[Single message mode - send one message and exit]:MESSAGE:_default' \
-'--message=[Single message mode - send one message and exit]:MESSAGE:_default' \
-'-c+[Configuration file path (optional, uses env vars by default)]:CONFIG:_files' \
-'--config=[Configuration file path (optional, uses env vars by default)]:CONFIG:_files' \
-'--cli-only[Run in interactive CLI mode only (disable other channels)]' \
-'--no-db[Skip database connection (for testing)]' \
-'--no-onboard[Skip first-run onboarding check]' \
-'-h[Print help]' \
-'--help[Print help]' \
+':key -- Dot-separated config key (e.g. boot.profile, llm.default.model):_default' \
 && ret=0
 ;;
 (help)
 _arguments "${_arguments_options[@]}" : \
-":: :_ironclaw__config__help_commands" \
+":: :_ironclaw__subcmd__config__subcmd__help_commands" \
 "*::: :->help" \
 && ret=0
 
@@ -183,7 +140,11 @@ _arguments "${_arguments_options[@]}" : \
         (( CURRENT += 1 ))
         curcontext="${curcontext%:*:*}:ironclaw-config-help-command-$line[1]:"
         case $line[1] in
-            (init)
+            (path)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(init)
 _arguments "${_arguments_options[@]}" : \
 && ret=0
 ;;
@@ -195,15 +156,247 @@ _arguments "${_arguments_options[@]}" : \
 _arguments "${_arguments_options[@]}" : \
 && ret=0
 ;;
+(help)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+        esac
+    ;;
+esac
+;;
+        esac
+    ;;
+esac
+;;
+(doctor)
+_arguments "${_arguments_options[@]}" : \
+'--json[Output as JSON]' \
+'-h[Print help]' \
+'--help[Print help]' \
+&& ret=0
+;;
+(extension)
+_arguments "${_arguments_options[@]}" : \
+'--confirm-host-access[Confirm trusted-laptop host filesystem access for local-dev-yolo]' \
+'-h[Print help]' \
+'--help[Print help]' \
+":: :_ironclaw__subcmd__extension_commands" \
+"*::: :->extension" \
+&& ret=0
+
+    case $state in
+    (extension)
+        words=($line[1] "${words[@]}")
+        (( CURRENT += 1 ))
+        curcontext="${curcontext%:*:*}:ironclaw-extension-command-$line[1]:"
+        case $line[1] in
+            (search)
+_arguments "${_arguments_options[@]}" : \
+'--json[Output the lifecycle response as JSON]' \
+'--confirm-host-access[Confirm trusted-laptop host filesystem access for local-dev-yolo]' \
+'-h[Print help]' \
+'--help[Print help]' \
+'::query -- Query extension id, name, or description. Omit to list all local packages:_default' \
+&& ret=0
+;;
+(install)
+_arguments "${_arguments_options[@]}" : \
+'--json[Output the lifecycle response as JSON]' \
+'--confirm-host-access[Confirm trusted-laptop host filesystem access for local-dev-yolo]' \
+'-h[Print help]' \
+'--help[Print help]' \
+':id -- Extension id from `ironclaw extension search`:_default' \
+&& ret=0
+;;
+(activate)
+_arguments "${_arguments_options[@]}" : \
+'--json[Output the lifecycle response as JSON]' \
+'--confirm-host-access[Confirm trusted-laptop host filesystem access for local-dev-yolo]' \
+'-h[Print help]' \
+'--help[Print help]' \
+':id -- Extension id from `ironclaw extension search`:_default' \
+&& ret=0
+;;
+(remove)
+_arguments "${_arguments_options[@]}" : \
+'--json[Output the lifecycle response as JSON]' \
+'--confirm-host-access[Confirm trusted-laptop host filesystem access for local-dev-yolo]' \
+'-h[Print help]' \
+'--help[Print help]' \
+':id -- Extension id from `ironclaw extension search`:_default' \
+&& ret=0
+;;
+(help)
+_arguments "${_arguments_options[@]}" : \
+":: :_ironclaw__subcmd__extension__subcmd__help_commands" \
+"*::: :->help" \
+&& ret=0
+
+    case $state in
+    (help)
+        words=($line[1] "${words[@]}")
+        (( CURRENT += 1 ))
+        curcontext="${curcontext%:*:*}:ironclaw-extension-help-command-$line[1]:"
+        case $line[1] in
+            (search)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(install)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(activate)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(remove)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(help)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+        esac
+    ;;
+esac
+;;
+        esac
+    ;;
+esac
+;;
+(hooks)
+_arguments "${_arguments_options[@]}" : \
+'-h[Print help]' \
+'--help[Print help]' \
+":: :_ironclaw__subcmd__hooks_commands" \
+"*::: :->hooks" \
+&& ret=0
+
+    case $state in
+    (hooks)
+        words=($line[1] "${words[@]}")
+        (( CURRENT += 1 ))
+        curcontext="${curcontext%:*:*}:ironclaw-hooks-command-$line[1]:"
+        case $line[1] in
+            (list)
+_arguments "${_arguments_options[@]}" : \
+'-v[Show extra status details]' \
+'--verbose[Show extra status details]' \
+'--json[Output hooks as JSON]' \
+'-h[Print help]' \
+'--help[Print help]' \
+&& ret=0
+;;
+(help)
+_arguments "${_arguments_options[@]}" : \
+":: :_ironclaw__subcmd__hooks__subcmd__help_commands" \
+"*::: :->help" \
+&& ret=0
+
+    case $state in
+    (help)
+        words=($line[1] "${words[@]}")
+        (( CURRENT += 1 ))
+        curcontext="${curcontext%:*:*}:ironclaw-hooks-help-command-$line[1]:"
+        case $line[1] in
+            (list)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(help)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+        esac
+    ;;
+esac
+;;
+        esac
+    ;;
+esac
+;;
+(logs)
+_arguments "${_arguments_options[@]}" : \
+'-v[Show extra status details]' \
+'--verbose[Show extra status details]' \
+'--json[Output log status as JSON]' \
+'-h[Print help]' \
+'--help[Print help]' \
+&& ret=0
+;;
+(models)
+_arguments "${_arguments_options[@]}" : \
+'-h[Print help]' \
+'--help[Print help]' \
+":: :_ironclaw__subcmd__models_commands" \
+"*::: :->models" \
+&& ret=0
+
+    case $state in
+    (models)
+        words=($line[1] "${words[@]}")
+        (( CURRENT += 1 ))
+        curcontext="${curcontext%:*:*}:ironclaw-models-command-$line[1]:"
+        case $line[1] in
+            (list)
+_arguments "${_arguments_options[@]}" : \
+'-v[Show provider protocol and credential metadata]' \
+'--verbose[Show provider protocol and credential metadata]' \
+'--json[Output providers as JSON]' \
+'-h[Print help]' \
+'--help[Print help]' \
+'::provider -- Show only a specific provider by id or alias:_default' \
+&& ret=0
+;;
+(status)
+_arguments "${_arguments_options[@]}" : \
+'--json[Output model status as JSON]' \
+'-h[Print help]' \
+'--help[Print help]' \
+&& ret=0
+;;
+(set)
+_arguments "${_arguments_options[@]}" : \
+'-h[Print help]' \
+'--help[Print help]' \
+':model -- Model name (for example, gpt-5-mini or claude-sonnet-4-6-20250514):_default' \
+&& ret=0
+;;
+(set-provider)
+_arguments "${_arguments_options[@]}" : \
+'--model=[Also set the model. Defaults to the provider'\''s catalog default]:MODEL:_default' \
+'-h[Print help]' \
+'--help[Print help]' \
+':provider -- Provider id or alias (for example, openai, anthropic, ollama):_default' \
+&& ret=0
+;;
+(help)
+_arguments "${_arguments_options[@]}" : \
+":: :_ironclaw__subcmd__models__subcmd__help_commands" \
+"*::: :->help" \
+&& ret=0
+
+    case $state in
+    (help)
+        words=($line[1] "${words[@]}")
+        (( CURRENT += 1 ))
+        curcontext="${curcontext%:*:*}:ironclaw-models-help-command-$line[1]:"
+        case $line[1] in
+            (list)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(status)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
 (set)
 _arguments "${_arguments_options[@]}" : \
 && ret=0
 ;;
-(reset)
-_arguments "${_arguments_options[@]}" : \
-&& ret=0
-;;
-(path)
+(set-provider)
 _arguments "${_arguments_options[@]}" : \
 && ret=0
 ;;
@@ -219,251 +412,39 @@ esac
     ;;
 esac
 ;;
-(tool)
+(onboard)
 _arguments "${_arguments_options[@]}" : \
-'-m+[Single message mode - send one message and exit]:MESSAGE:_default' \
-'--message=[Single message mode - send one message and exit]:MESSAGE:_default' \
-'-c+[Configuration file path (optional, uses env vars by default)]:CONFIG:_files' \
-'--config=[Configuration file path (optional, uses env vars by default)]:CONFIG:_files' \
-'--cli-only[Run in interactive CLI mode only (disable other channels)]' \
-'--no-db[Skip database connection (for testing)]' \
-'--no-onboard[Skip first-run onboarding check]' \
+'--force[Overwrite generated config.toml, providers.json, and the completion marker]' \
+'--dry-run[Show what would be initialized without writing files]' \
+'--import-history[Reserve the history-import step in the onboarding summary]' \
 '-h[Print help (see more with '\''--help'\'')]' \
 '--help[Print help (see more with '\''--help'\'')]' \
-":: :_ironclaw__tool_commands" \
-"*::: :->tool" \
+&& ret=0
+;;
+(profile)
+_arguments "${_arguments_options[@]}" : \
+'-h[Print help]' \
+'--help[Print help]' \
+":: :_ironclaw__subcmd__profile_commands" \
+"*::: :->profile" \
 && ret=0
 
     case $state in
-    (tool)
+    (profile)
         words=($line[1] "${words[@]}")
         (( CURRENT += 1 ))
-        curcontext="${curcontext%:*:*}:ironclaw-tool-command-$line[1]:"
-        case $line[1] in
-            (install)
-_arguments "${_arguments_options[@]}" : \
-'-n+[Tool name (defaults to directory/file name)]:NAME:_default' \
-'--name=[Tool name (defaults to directory/file name)]:NAME:_default' \
-'--capabilities=[Path to capabilities JSON file (auto-detected if not specified)]:CAPABILITIES:_files' \
-'-t+[Target directory for installation (default\: ~/.ironclaw/tools/)]:TARGET:_files' \
-'--target=[Target directory for installation (default\: ~/.ironclaw/tools/)]:TARGET:_files' \
-'-m+[Single message mode - send one message and exit]:MESSAGE:_default' \
-'--message=[Single message mode - send one message and exit]:MESSAGE:_default' \
-'-c+[Configuration file path (optional, uses env vars by default)]:CONFIG:_files' \
-'--config=[Configuration file path (optional, uses env vars by default)]:CONFIG:_files' \
-'--release[Build in release mode (default\: true)]' \
-'--skip-build[Skip compilation (use existing .wasm file)]' \
-'-f[Force overwrite if tool already exists]' \
-'--force[Force overwrite if tool already exists]' \
-'--cli-only[Run in interactive CLI mode only (disable other channels)]' \
-'--no-db[Skip database connection (for testing)]' \
-'--no-onboard[Skip first-run onboarding check]' \
-'-h[Print help]' \
-'--help[Print help]' \
-':path -- Path to tool source directory (with Cargo.toml) or .wasm file:_files' \
-&& ret=0
-;;
-(list)
-_arguments "${_arguments_options[@]}" : \
-'-d+[Directory to list tools from (default\: ~/.ironclaw/tools/)]:DIR:_files' \
-'--dir=[Directory to list tools from (default\: ~/.ironclaw/tools/)]:DIR:_files' \
-'-m+[Single message mode - send one message and exit]:MESSAGE:_default' \
-'--message=[Single message mode - send one message and exit]:MESSAGE:_default' \
-'-c+[Configuration file path (optional, uses env vars by default)]:CONFIG:_files' \
-'--config=[Configuration file path (optional, uses env vars by default)]:CONFIG:_files' \
-'-v[Show detailed information]' \
-'--verbose[Show detailed information]' \
-'--cli-only[Run in interactive CLI mode only (disable other channels)]' \
-'--no-db[Skip database connection (for testing)]' \
-'--no-onboard[Skip first-run onboarding check]' \
-'-h[Print help]' \
-'--help[Print help]' \
-&& ret=0
-;;
-(remove)
-_arguments "${_arguments_options[@]}" : \
-'-d+[Directory to remove tool from (default\: ~/.ironclaw/tools/)]:DIR:_files' \
-'--dir=[Directory to remove tool from (default\: ~/.ironclaw/tools/)]:DIR:_files' \
-'-m+[Single message mode - send one message and exit]:MESSAGE:_default' \
-'--message=[Single message mode - send one message and exit]:MESSAGE:_default' \
-'-c+[Configuration file path (optional, uses env vars by default)]:CONFIG:_files' \
-'--config=[Configuration file path (optional, uses env vars by default)]:CONFIG:_files' \
-'--cli-only[Run in interactive CLI mode only (disable other channels)]' \
-'--no-db[Skip database connection (for testing)]' \
-'--no-onboard[Skip first-run onboarding check]' \
-'-h[Print help]' \
-'--help[Print help]' \
-':name -- Name of the tool to remove:_default' \
-&& ret=0
-;;
-(info)
-_arguments "${_arguments_options[@]}" : \
-'-d+[Directory to look for tool (default\: ~/.ironclaw/tools/)]:DIR:_files' \
-'--dir=[Directory to look for tool (default\: ~/.ironclaw/tools/)]:DIR:_files' \
-'-m+[Single message mode - send one message and exit]:MESSAGE:_default' \
-'--message=[Single message mode - send one message and exit]:MESSAGE:_default' \
-'-c+[Configuration file path (optional, uses env vars by default)]:CONFIG:_files' \
-'--config=[Configuration file path (optional, uses env vars by default)]:CONFIG:_files' \
-'--cli-only[Run in interactive CLI mode only (disable other channels)]' \
-'--no-db[Skip database connection (for testing)]' \
-'--no-onboard[Skip first-run onboarding check]' \
-'-h[Print help]' \
-'--help[Print help]' \
-':name_or_path -- Name of the tool or path to .wasm file:_default' \
-&& ret=0
-;;
-(auth)
-_arguments "${_arguments_options[@]}" : \
-'-d+[Directory to look for tool (default\: ~/.ironclaw/tools/)]:DIR:_files' \
-'--dir=[Directory to look for tool (default\: ~/.ironclaw/tools/)]:DIR:_files' \
-'-u+[User ID for storing the secret (default\: "default")]:USER:_default' \
-'--user=[User ID for storing the secret (default\: "default")]:USER:_default' \
-'-m+[Single message mode - send one message and exit]:MESSAGE:_default' \
-'--message=[Single message mode - send one message and exit]:MESSAGE:_default' \
-'-c+[Configuration file path (optional, uses env vars by default)]:CONFIG:_files' \
-'--config=[Configuration file path (optional, uses env vars by default)]:CONFIG:_files' \
-'--cli-only[Run in interactive CLI mode only (disable other channels)]' \
-'--no-db[Skip database connection (for testing)]' \
-'--no-onboard[Skip first-run onboarding check]' \
-'-h[Print help]' \
-'--help[Print help]' \
-':name -- Name of the tool:_default' \
-&& ret=0
-;;
-(help)
-_arguments "${_arguments_options[@]}" : \
-":: :_ironclaw__tool__help_commands" \
-"*::: :->help" \
-&& ret=0
-
-    case $state in
-    (help)
-        words=($line[1] "${words[@]}")
-        (( CURRENT += 1 ))
-        curcontext="${curcontext%:*:*}:ironclaw-tool-help-command-$line[1]:"
-        case $line[1] in
-            (install)
-_arguments "${_arguments_options[@]}" : \
-&& ret=0
-;;
-(list)
-_arguments "${_arguments_options[@]}" : \
-&& ret=0
-;;
-(remove)
-_arguments "${_arguments_options[@]}" : \
-&& ret=0
-;;
-(info)
-_arguments "${_arguments_options[@]}" : \
-&& ret=0
-;;
-(auth)
-_arguments "${_arguments_options[@]}" : \
-&& ret=0
-;;
-(help)
-_arguments "${_arguments_options[@]}" : \
-&& ret=0
-;;
-        esac
-    ;;
-esac
-;;
-        esac
-    ;;
-esac
-;;
-(registry)
-_arguments "${_arguments_options[@]}" : \
-'-m+[Single message mode - send one message and exit]:MESSAGE:_default' \
-'--message=[Single message mode - send one message and exit]:MESSAGE:_default' \
-'-c+[Configuration file path (optional, uses env vars by default)]:CONFIG:_files' \
-'--config=[Configuration file path (optional, uses env vars by default)]:CONFIG:_files' \
-'--cli-only[Run in interactive CLI mode only (disable other channels)]' \
-'--no-db[Skip database connection (for testing)]' \
-'--no-onboard[Skip first-run onboarding check]' \
-'-h[Print help (see more with '\''--help'\'')]' \
-'--help[Print help (see more with '\''--help'\'')]' \
-":: :_ironclaw__registry_commands" \
-"*::: :->registry" \
-&& ret=0
-
-    case $state in
-    (registry)
-        words=($line[1] "${words[@]}")
-        (( CURRENT += 1 ))
-        curcontext="${curcontext%:*:*}:ironclaw-registry-command-$line[1]:"
+        curcontext="${curcontext%:*:*}:ironclaw-profile-command-$line[1]:"
         case $line[1] in
             (list)
 _arguments "${_arguments_options[@]}" : \
-'-k+[Filter by kind\: "tool" or "channel"]:KIND:_default' \
-'--kind=[Filter by kind\: "tool" or "channel"]:KIND:_default' \
-'-t+[Filter by tag (e.g. "default", "google", "messaging")]:TAG:_default' \
-'--tag=[Filter by tag (e.g. "default", "google", "messaging")]:TAG:_default' \
-'-m+[Single message mode - send one message and exit]:MESSAGE:_default' \
-'--message=[Single message mode - send one message and exit]:MESSAGE:_default' \
-'-c+[Configuration file path (optional, uses env vars by default)]:CONFIG:_files' \
-'--config=[Configuration file path (optional, uses env vars by default)]:CONFIG:_files' \
-'-v[Show detailed information]' \
-'--verbose[Show detailed information]' \
-'--cli-only[Run in interactive CLI mode only (disable other channels)]' \
-'--no-db[Skip database connection (for testing)]' \
-'--no-onboard[Skip first-run onboarding check]' \
-'-h[Print help]' \
-'--help[Print help]' \
-&& ret=0
-;;
-(info)
-_arguments "${_arguments_options[@]}" : \
-'-m+[Single message mode - send one message and exit]:MESSAGE:_default' \
-'--message=[Single message mode - send one message and exit]:MESSAGE:_default' \
-'-c+[Configuration file path (optional, uses env vars by default)]:CONFIG:_files' \
-'--config=[Configuration file path (optional, uses env vars by default)]:CONFIG:_files' \
-'--cli-only[Run in interactive CLI mode only (disable other channels)]' \
-'--no-db[Skip database connection (for testing)]' \
-'--no-onboard[Skip first-run onboarding check]' \
-'-h[Print help]' \
-'--help[Print help]' \
-':name -- Extension or bundle name (e.g. "slack", "google", "tools/gmail"):_default' \
-&& ret=0
-;;
-(install)
-_arguments "${_arguments_options[@]}" : \
-'-m+[Single message mode - send one message and exit]:MESSAGE:_default' \
-'--message=[Single message mode - send one message and exit]:MESSAGE:_default' \
-'-c+[Configuration file path (optional, uses env vars by default)]:CONFIG:_files' \
-'--config=[Configuration file path (optional, uses env vars by default)]:CONFIG:_files' \
-'-f[Force overwrite if already installed]' \
-'--force[Force overwrite if already installed]' \
-'--build[Build from source instead of downloading pre-built artifact]' \
-'--cli-only[Run in interactive CLI mode only (disable other channels)]' \
-'--no-db[Skip database connection (for testing)]' \
-'--no-onboard[Skip first-run onboarding check]' \
-'-h[Print help]' \
-'--help[Print help]' \
-':name -- Extension or bundle name (e.g. "slack", "google", "default"):_default' \
-&& ret=0
-;;
-(install-defaults)
-_arguments "${_arguments_options[@]}" : \
-'-m+[Single message mode - send one message and exit]:MESSAGE:_default' \
-'--message=[Single message mode - send one message and exit]:MESSAGE:_default' \
-'-c+[Configuration file path (optional, uses env vars by default)]:CONFIG:_files' \
-'--config=[Configuration file path (optional, uses env vars by default)]:CONFIG:_files' \
-'-f[Force overwrite if already installed]' \
-'--force[Force overwrite if already installed]' \
-'--build[Build from source instead of downloading pre-built artifact]' \
-'--cli-only[Run in interactive CLI mode only (disable other channels)]' \
-'--no-db[Skip database connection (for testing)]' \
-'--no-onboard[Skip first-run onboarding check]' \
+'--json[Output profiles as JSON]' \
 '-h[Print help]' \
 '--help[Print help]' \
 && ret=0
 ;;
 (help)
 _arguments "${_arguments_options[@]}" : \
-":: :_ironclaw__registry__help_commands" \
+":: :_ironclaw__subcmd__profile__subcmd__help_commands" \
 "*::: :->help" \
 && ret=0
 
@@ -471,24 +452,12 @@ _arguments "${_arguments_options[@]}" : \
     (help)
         words=($line[1] "${words[@]}")
         (( CURRENT += 1 ))
-        curcontext="${curcontext%:*:*}:ironclaw-registry-help-command-$line[1]:"
+        curcontext="${curcontext%:*:*}:ironclaw-profile-help-command-$line[1]:"
         case $line[1] in
             (list)
 _arguments "${_arguments_options[@]}" : \
 && ret=0
 ;;
-(info)
-_arguments "${_arguments_options[@]}" : \
-&& ret=0
-;;
-(install)
-_arguments "${_arguments_options[@]}" : \
-&& ret=0
-;;
-(install-defaults)
-_arguments "${_arguments_options[@]}" : \
-&& ret=0
-;;
 (help)
 _arguments "${_arguments_options[@]}" : \
 && ret=0
@@ -501,408 +470,37 @@ esac
     ;;
 esac
 ;;
-(mcp)
+(repl)
 _arguments "${_arguments_options[@]}" : \
-'-m+[Single message mode - send one message and exit]:MESSAGE:_default' \
-'--message=[Single message mode - send one message and exit]:MESSAGE:_default' \
-'-c+[Configuration file path (optional, uses env vars by default)]:CONFIG:_files' \
-'--config=[Configuration file path (optional, uses env vars by default)]:CONFIG:_files' \
-'--cli-only[Run in interactive CLI mode only (disable other channels)]' \
-'--no-db[Skip database connection (for testing)]' \
-'--no-onboard[Skip first-run onboarding check]' \
-'-h[Print help (see more with '\''--help'\'')]' \
-'--help[Print help (see more with '\''--help'\'')]' \
-":: :_ironclaw__mcp_commands" \
-"*::: :->mcp" \
-&& ret=0
-
-    case $state in
-    (mcp)
-        words=($line[1] "${words[@]}")
-        (( CURRENT += 1 ))
-        curcontext="${curcontext%:*:*}:ironclaw-mcp-command-$line[1]:"
-        case $line[1] in
-            (add)
-_arguments "${_arguments_options[@]}" : \
-'--client-id=[OAuth client ID (if authentication is required)]:CLIENT_ID:_default' \
-'--auth-url=[OAuth authorization URL (optional, can be discovered)]:AUTH_URL:_default' \
-'--token-url=[OAuth token URL (optional, can be discovered)]:TOKEN_URL:_default' \
-'--scopes=[Scopes to request (comma-separated)]:SCOPES:_default' \
-'--description=[Server description]:DESCRIPTION:_default' \
-'-m+[Single message mode - send one message and exit]:MESSAGE:_default' \
-'--message=[Single message mode - send one message and exit]:MESSAGE:_default' \
-'-c+[Configuration file path (optional, uses env vars by default)]:CONFIG:_files' \
-'--config=[Configuration file path (optional, uses env vars by default)]:CONFIG:_files' \
-'--cli-only[Run in interactive CLI mode only (disable other channels)]' \
-'--no-db[Skip database connection (for testing)]' \
-'--no-onboard[Skip first-run onboarding check]' \
-'-h[Print help]' \
-'--help[Print help]' \
-':name -- Server name (e.g., "notion", "github"):_default' \
-':url -- Server URL (e.g., "https\://mcp.notion.com"):_default' \
-&& ret=0
-;;
-(remove)
-_arguments "${_arguments_options[@]}" : \
-'-m+[Single message mode - send one message and exit]:MESSAGE:_default' \
-'--message=[Single message mode - send one message and exit]:MESSAGE:_default' \
-'-c+[Configuration file path (optional, uses env vars by default)]:CONFIG:_files' \
-'--config=[Configuration file path (optional, uses env vars by default)]:CONFIG:_files' \
-'--cli-only[Run in interactive CLI mode only (disable other channels)]' \
-'--no-db[Skip database connection (for testing)]' \
-'--no-onboard[Skip first-run onboarding check]' \
-'-h[Print help]' \
-'--help[Print help]' \
-':name -- Server name to remove:_default' \
-&& ret=0
-;;
-(list)
-_arguments "${_arguments_options[@]}" : \
-'-m+[Single message mode - send one message and exit]:MESSAGE:_default' \
-'--message=[Single message mode - send one message and exit]:MESSAGE:_default' \
-'-c+[Configuration file path (optional, uses env vars by default)]:CONFIG:_files' \
-'--config=[Configuration file path (optional, uses env vars by default)]:CONFIG:_files' \
-'-v[Show detailed information]' \
-'--verbose[Show detailed information]' \
-'--cli-only[Run in interactive CLI mode only (disable other channels)]' \
-'--no-db[Skip database connection (for testing)]' \
-'--no-onboard[Skip first-run onboarding check]' \
+'--confirm-host-access[Confirm trusted-laptop host filesystem access for local-dev-yolo]' \
 '-h[Print help]' \
 '--help[Print help]' \
 && ret=0
 ;;
-(auth)
+(run)
 _arguments "${_arguments_options[@]}" : \
-'-u+[User ID for storing the token (default\: "default")]:USER:_default' \
-'--user=[User ID for storing the token (default\: "default")]:USER:_default' \
-'-m+[Single message mode - send one message and exit]:MESSAGE:_default' \
-'--message=[Single message mode - send one message and exit]:MESSAGE:_default' \
-'-c+[Configuration file path (optional, uses env vars by default)]:CONFIG:_files' \
-'--config=[Configuration file path (optional, uses env vars by default)]:CONFIG:_files' \
-'--cli-only[Run in interactive CLI mode only (disable other channels)]' \
-'--no-db[Skip database connection (for testing)]' \
-'--no-onboard[Skip first-run onboarding check]' \
-'-h[Print help]' \
-'--help[Print help]' \
-':name -- Server name to authenticate:_default' \
-&& ret=0
-;;
-(test)
-_arguments "${_arguments_options[@]}" : \
-'-u+[User ID for authentication (default\: "default")]:USER:_default' \
-'--user=[User ID for authentication (default\: "default")]:USER:_default' \
-'-m+[Single message mode - send one message and exit]:MESSAGE:_default' \
-'--message=[Single message mode - send one message and exit]:MESSAGE:_default' \
-'-c+[Configuration file path (optional, uses env vars by default)]:CONFIG:_files' \
-'--config=[Configuration file path (optional, uses env vars by default)]:CONFIG:_files' \
-'--cli-only[Run in interactive CLI mode only (disable other channels)]' \
-'--no-db[Skip database connection (for testing)]' \
-'--no-onboard[Skip first-run onboarding check]' \
-'-h[Print help]' \
-'--help[Print help]' \
-':name -- Server name to test:_default' \
-&& ret=0
-;;
-(toggle)
-_arguments "${_arguments_options[@]}" : \
-'-m+[Single message mode - send one message and exit]:MESSAGE:_default' \
-'--message=[Single message mode - send one message and exit]:MESSAGE:_default' \
-'-c+[Configuration file path (optional, uses env vars by default)]:CONFIG:_files' \
-'--config=[Configuration file path (optional, uses env vars by default)]:CONFIG:_files' \
-'(--disable)--enable[Enable the server]' \
-'(--enable)--disable[Disable the server]' \
-'--cli-only[Run in interactive CLI mode only (disable other channels)]' \
-'--no-db[Skip database connection (for testing)]' \
-'--no-onboard[Skip first-run onboarding check]' \
-'-h[Print help]' \
-'--help[Print help]' \
-':name -- Server name:_default' \
-&& ret=0
-;;
-(help)
-_arguments "${_arguments_options[@]}" : \
-":: :_ironclaw__mcp__help_commands" \
-"*::: :->help" \
-&& ret=0
-
-    case $state in
-    (help)
-        words=($line[1] "${words[@]}")
-        (( CURRENT += 1 ))
-        curcontext="${curcontext%:*:*}:ironclaw-mcp-help-command-$line[1]:"
-        case $line[1] in
-            (add)
-_arguments "${_arguments_options[@]}" : \
-&& ret=0
-;;
-(remove)
-_arguments "${_arguments_options[@]}" : \
-&& ret=0
-;;
-(list)
-_arguments "${_arguments_options[@]}" : \
-&& ret=0
-;;
-(auth)
-_arguments "${_arguments_options[@]}" : \
-&& ret=0
-;;
-(test)
-_arguments "${_arguments_options[@]}" : \
-&& ret=0
-;;
-(toggle)
-_arguments "${_arguments_options[@]}" : \
-&& ret=0
-;;
-(help)
-_arguments "${_arguments_options[@]}" : \
-&& ret=0
-;;
-        esac
-    ;;
-esac
-;;
-        esac
-    ;;
-esac
-;;
-(memory)
-_arguments "${_arguments_options[@]}" : \
-'-m+[Single message mode - send one message and exit]:MESSAGE:_default' \
-'--message=[Single message mode - send one message and exit]:MESSAGE:_default' \
-'-c+[Configuration file path (optional, uses env vars by default)]:CONFIG:_files' \
-'--config=[Configuration file path (optional, uses env vars by default)]:CONFIG:_files' \
-'--cli-only[Run in interactive CLI mode only (disable other channels)]' \
-'--no-db[Skip database connection (for testing)]' \
-'--no-onboard[Skip first-run onboarding check]' \
-'-h[Print help (see more with '\''--help'\'')]' \
-'--help[Print help (see more with '\''--help'\'')]' \
-":: :_ironclaw__memory_commands" \
-"*::: :->memory" \
-&& ret=0
-
-    case $state in
-    (memory)
-        words=($line[1] "${words[@]}")
-        (( CURRENT += 1 ))
-        curcontext="${curcontext%:*:*}:ironclaw-memory-command-$line[1]:"
-        case $line[1] in
-            (search)
-_arguments "${_arguments_options[@]}" : \
-'-l+[Maximum number of results]:LIMIT:_default' \
-'--limit=[Maximum number of results]:LIMIT:_default' \
-'-m+[Single message mode - send one message and exit]:MESSAGE:_default' \
-'--message=[Single message mode - send one message and exit]:MESSAGE:_default' \
-'-c+[Configuration file path (optional, uses env vars by default)]:CONFIG:_files' \
-'--config=[Configuration file path (optional, uses env vars by default)]:CONFIG:_files' \
-'--cli-only[Run in interactive CLI mode only (disable other channels)]' \
-'--no-db[Skip database connection (for testing)]' \
-'--no-onboard[Skip first-run onboarding check]' \
-'-h[Print help]' \
-'--help[Print help]' \
-':query -- Search query:_default' \
-&& ret=0
-;;
-(read)
-_arguments "${_arguments_options[@]}" : \
-'-m+[Single message mode - send one message and exit]:MESSAGE:_default' \
-'--message=[Single message mode - send one message and exit]:MESSAGE:_default' \
-'-c+[Configuration file path (optional, uses env vars by default)]:CONFIG:_files' \
-'--config=[Configuration file path (optional, uses env vars by default)]:CONFIG:_files' \
-'--cli-only[Run in interactive CLI mode only (disable other channels)]' \
-'--no-db[Skip database connection (for testing)]' \
-'--no-onboard[Skip first-run onboarding check]' \
-'-h[Print help]' \
-'--help[Print help]' \
-':path -- File path (e.g., "MEMORY.md", "daily/2024-01-15.md"):_default' \
-&& ret=0
-;;
-(write)
-_arguments "${_arguments_options[@]}" : \
-'-m+[Single message mode - send one message and exit]:MESSAGE:_default' \
-'--message=[Single message mode - send one message and exit]:MESSAGE:_default' \
-'-c+[Configuration file path (optional, uses env vars by default)]:CONFIG:_files' \
-'--config=[Configuration file path (optional, uses env vars by default)]:CONFIG:_files' \
-'-a[Append instead of overwrite]' \
-'--append[Append instead of overwrite]' \
-'--cli-only[Run in interactive CLI mode only (disable other channels)]' \
-'--no-db[Skip database connection (for testing)]' \
-'--no-onboard[Skip first-run onboarding check]' \
-'-h[Print help]' \
-'--help[Print help]' \
-':path -- File path (e.g., "notes/idea.md"):_default' \
-'::content -- Content to write (omit to read from stdin):_default' \
-&& ret=0
-;;
-(tree)
-_arguments "${_arguments_options[@]}" : \
-'-d+[Maximum depth to traverse]:DEPTH:_default' \
-'--depth=[Maximum depth to traverse]:DEPTH:_default' \
-'-m+[Single message mode - send one message and exit]:MESSAGE:_default' \
-'--message=[Single message mode - send one message and exit]:MESSAGE:_default' \
-'-c+[Configuration file path (optional, uses env vars by default)]:CONFIG:_files' \
-'--config=[Configuration file path (optional, uses env vars by default)]:CONFIG:_files' \
-'--cli-only[Run in interactive CLI mode only (disable other channels)]' \
-'--no-db[Skip database connection (for testing)]' \
-'--no-onboard[Skip first-run onboarding check]' \
-'-h[Print help]' \
-'--help[Print help]' \
-'::path -- Root path to start from:_default' \
-&& ret=0
-;;
-(status)
-_arguments "${_arguments_options[@]}" : \
-'-m+[Single message mode - send one message and exit]:MESSAGE:_default' \
-'--message=[Single message mode - send one message and exit]:MESSAGE:_default' \
-'-c+[Configuration file path (optional, uses env vars by default)]:CONFIG:_files' \
-'--config=[Configuration file path (optional, uses env vars by default)]:CONFIG:_files' \
-'--cli-only[Run in interactive CLI mode only (disable other channels)]' \
-'--no-db[Skip database connection (for testing)]' \
-'--no-onboard[Skip first-run onboarding check]' \
+'-m+[Send a single message, print the assistant reply, and exit. Without this flag, the CLI reads lines from stdin in a loop]:MESSAGE:_default' \
+'--message=[Send a single message, print the assistant reply, and exit. Without this flag, the CLI reads lines from stdin in a loop]:MESSAGE:_default' \
+'--dry-run[Print the substrate readiness snapshot and exit without starting the agent. Preserves the legacy \`run\` diagnostic shape so existing smoke tests keep passing]' \
+'--confirm-host-access[Confirm trusted-laptop host filesystem access for local-dev-yolo]' \
 '-h[Print help]' \
 '--help[Print help]' \
 && ret=0
 ;;
-(help)
+(serve)
 _arguments "${_arguments_options[@]}" : \
-":: :_ironclaw__memory__help_commands" \
-"*::: :->help" \
-&& ret=0
-
-    case $state in
-    (help)
-        words=($line[1] "${words[@]}")
-        (( CURRENT += 1 ))
-        curcontext="${curcontext%:*:*}:ironclaw-memory-help-command-$line[1]:"
-        case $line[1] in
-            (search)
-_arguments "${_arguments_options[@]}" : \
-&& ret=0
-;;
-(read)
-_arguments "${_arguments_options[@]}" : \
-&& ret=0
-;;
-(write)
-_arguments "${_arguments_options[@]}" : \
-&& ret=0
-;;
-(tree)
-_arguments "${_arguments_options[@]}" : \
-&& ret=0
-;;
-(status)
-_arguments "${_arguments_options[@]}" : \
-&& ret=0
-;;
-(help)
-_arguments "${_arguments_options[@]}" : \
-&& ret=0
-;;
-        esac
-    ;;
-esac
-;;
-        esac
-    ;;
-esac
-;;
-(pairing)
-_arguments "${_arguments_options[@]}" : \
-'-m+[Single message mode - send one message and exit]:MESSAGE:_default' \
-'--message=[Single message mode - send one message and exit]:MESSAGE:_default' \
-'-c+[Configuration file path (optional, uses env vars by default)]:CONFIG:_files' \
-'--config=[Configuration file path (optional, uses env vars by default)]:CONFIG:_files' \
-'--cli-only[Run in interactive CLI mode only (disable other channels)]' \
-'--no-db[Skip database connection (for testing)]' \
-'--no-onboard[Skip first-run onboarding check]' \
-'-h[Print help (see more with '\''--help'\'')]' \
-'--help[Print help (see more with '\''--help'\'')]' \
-":: :_ironclaw__pairing_commands" \
-"*::: :->pairing" \
-&& ret=0
-
-    case $state in
-    (pairing)
-        words=($line[1] "${words[@]}")
-        (( CURRENT += 1 ))
-        curcontext="${curcontext%:*:*}:ironclaw-pairing-command-$line[1]:"
-        case $line[1] in
-            (list)
-_arguments "${_arguments_options[@]}" : \
-'-m+[Single message mode - send one message and exit]:MESSAGE:_default' \
-'--message=[Single message mode - send one message and exit]:MESSAGE:_default' \
-'-c+[Configuration file path (optional, uses env vars by default)]:CONFIG:_files' \
-'--config=[Configuration file path (optional, uses env vars by default)]:CONFIG:_files' \
-'--json[Output as JSON]' \
-'--cli-only[Run in interactive CLI mode only (disable other channels)]' \
-'--no-db[Skip database connection (for testing)]' \
-'--no-onboard[Skip first-run onboarding check]' \
+'--host=[Host interface for the Reborn WebChat v2 HTTP listener. Overrides \`\[webui\].listen_host\` from the boot config file. Default (when neither is set) is \`127.0.0.1\`]:HOST:_default' \
+'--port=[Port for the Reborn WebChat v2 HTTP listener. \`0\` lets the kernel pick a free port (useful for tests). Overrides \`\[webui\].listen_port\` from the boot config file. Default (when neither is set) is 3000]:PORT:_default' \
+'--confirm-host-access[Confirm trusted-laptop host filesystem access for local-dev-yolo]' \
 '-h[Print help]' \
 '--help[Print help]' \
-':channel -- Channel name (e.g., telegram, slack):_default' \
 && ret=0
-;;
-(approve)
-_arguments "${_arguments_options[@]}" : \
-'-m+[Single message mode - send one message and exit]:MESSAGE:_default' \
-'--message=[Single message mode - send one message and exit]:MESSAGE:_default' \
-'-c+[Configuration file path (optional, uses env vars by default)]:CONFIG:_files' \
-'--config=[Configuration file path (optional, uses env vars by default)]:CONFIG:_files' \
-'--cli-only[Run in interactive CLI mode only (disable other channels)]' \
-'--no-db[Skip database connection (for testing)]' \
-'--no-onboard[Skip first-run onboarding check]' \
-'-h[Print help]' \
-'--help[Print help]' \
-':channel -- Channel name (e.g., telegram, slack):_default' \
-':code -- Pairing code (e.g., ABC12345):_default' \
-&& ret=0
-;;
-(help)
-_arguments "${_arguments_options[@]}" : \
-":: :_ironclaw__pairing__help_commands" \
-"*::: :->help" \
-&& ret=0
-
-    case $state in
-    (help)
-        words=($line[1] "${words[@]}")
-        (( CURRENT += 1 ))
-        curcontext="${curcontext%:*:*}:ironclaw-pairing-help-command-$line[1]:"
-        case $line[1] in
-            (list)
-_arguments "${_arguments_options[@]}" : \
-&& ret=0
-;;
-(approve)
-_arguments "${_arguments_options[@]}" : \
-&& ret=0
-;;
-(help)
-_arguments "${_arguments_options[@]}" : \
-&& ret=0
-;;
-        esac
-    ;;
-esac
-;;
-        esac
-    ;;
-esac
 ;;
 (service)
 _arguments "${_arguments_options[@]}" : \
-'-m+[Single message mode - send one message and exit]:MESSAGE:_default' \
-'--message=[Single message mode - send one message and exit]:MESSAGE:_default' \
-'-c+[Configuration file path (optional, uses env vars by default)]:CONFIG:_files' \
-'--config=[Configuration file path (optional, uses env vars by default)]:CONFIG:_files' \
-'--cli-only[Run in interactive CLI mode only (disable other channels)]' \
-'--no-db[Skip database connection (for testing)]' \
-'--no-onboard[Skip first-run onboarding check]' \
-'-h[Print help (see more with '\''--help'\'')]' \
-'--help[Print help (see more with '\''--help'\'')]' \
-":: :_ironclaw__service_commands" \
+'-h[Print help]' \
+'--help[Print help]' \
+":: :_ironclaw__subcmd__service_commands" \
 "*::: :->service" \
 && ret=0
 
@@ -914,72 +512,43 @@ _arguments "${_arguments_options[@]}" : \
         case $line[1] in
             (install)
 _arguments "${_arguments_options[@]}" : \
-'-m+[Single message mode - send one message and exit]:MESSAGE:_default' \
-'--message=[Single message mode - send one message and exit]:MESSAGE:_default' \
-'-c+[Configuration file path (optional, uses env vars by default)]:CONFIG:_files' \
-'--config=[Configuration file path (optional, uses env vars by default)]:CONFIG:_files' \
-'--cli-only[Run in interactive CLI mode only (disable other channels)]' \
-'--no-db[Skip database connection (for testing)]' \
-'--no-onboard[Skip first-run onboarding check]' \
-'-h[Print help]' \
-'--help[Print help]' \
+'-h[Print help (see more with '\''--help'\'')]' \
+'--help[Print help (see more with '\''--help'\'')]' \
 && ret=0
 ;;
 (start)
 _arguments "${_arguments_options[@]}" : \
-'-m+[Single message mode - send one message and exit]:MESSAGE:_default' \
-'--message=[Single message mode - send one message and exit]:MESSAGE:_default' \
-'-c+[Configuration file path (optional, uses env vars by default)]:CONFIG:_files' \
-'--config=[Configuration file path (optional, uses env vars by default)]:CONFIG:_files' \
-'--cli-only[Run in interactive CLI mode only (disable other channels)]' \
-'--no-db[Skip database connection (for testing)]' \
-'--no-onboard[Skip first-run onboarding check]' \
 '-h[Print help]' \
 '--help[Print help]' \
 && ret=0
 ;;
 (stop)
 _arguments "${_arguments_options[@]}" : \
-'-m+[Single message mode - send one message and exit]:MESSAGE:_default' \
-'--message=[Single message mode - send one message and exit]:MESSAGE:_default' \
-'-c+[Configuration file path (optional, uses env vars by default)]:CONFIG:_files' \
-'--config=[Configuration file path (optional, uses env vars by default)]:CONFIG:_files' \
-'--cli-only[Run in interactive CLI mode only (disable other channels)]' \
-'--no-db[Skip database connection (for testing)]' \
-'--no-onboard[Skip first-run onboarding check]' \
+'-h[Print help]' \
+'--help[Print help]' \
+&& ret=0
+;;
+(restart)
+_arguments "${_arguments_options[@]}" : \
 '-h[Print help]' \
 '--help[Print help]' \
 && ret=0
 ;;
 (status)
 _arguments "${_arguments_options[@]}" : \
-'-m+[Single message mode - send one message and exit]:MESSAGE:_default' \
-'--message=[Single message mode - send one message and exit]:MESSAGE:_default' \
-'-c+[Configuration file path (optional, uses env vars by default)]:CONFIG:_files' \
-'--config=[Configuration file path (optional, uses env vars by default)]:CONFIG:_files' \
-'--cli-only[Run in interactive CLI mode only (disable other channels)]' \
-'--no-db[Skip database connection (for testing)]' \
-'--no-onboard[Skip first-run onboarding check]' \
 '-h[Print help]' \
 '--help[Print help]' \
 && ret=0
 ;;
 (uninstall)
 _arguments "${_arguments_options[@]}" : \
-'-m+[Single message mode - send one message and exit]:MESSAGE:_default' \
-'--message=[Single message mode - send one message and exit]:MESSAGE:_default' \
-'-c+[Configuration file path (optional, uses env vars by default)]:CONFIG:_files' \
-'--config=[Configuration file path (optional, uses env vars by default)]:CONFIG:_files' \
-'--cli-only[Run in interactive CLI mode only (disable other channels)]' \
-'--no-db[Skip database connection (for testing)]' \
-'--no-onboard[Skip first-run onboarding check]' \
 '-h[Print help]' \
 '--help[Print help]' \
 && ret=0
 ;;
 (help)
 _arguments "${_arguments_options[@]}" : \
-":: :_ironclaw__service__help_commands" \
+":: :_ironclaw__subcmd__service__subcmd__help_commands" \
 "*::: :->help" \
 && ret=0
 
@@ -1001,6 +570,10 @@ _arguments "${_arguments_options[@]}" : \
 _arguments "${_arguments_options[@]}" : \
 && ret=0
 ;;
+(restart)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
 (status)
 _arguments "${_arguments_options[@]}" : \
 && ret=0
@@ -1021,82 +594,390 @@ esac
     ;;
 esac
 ;;
-(doctor)
+(skills)
 _arguments "${_arguments_options[@]}" : \
-'-m+[Single message mode - send one message and exit]:MESSAGE:_default' \
-'--message=[Single message mode - send one message and exit]:MESSAGE:_default' \
-'-c+[Configuration file path (optional, uses env vars by default)]:CONFIG:_files' \
-'--config=[Configuration file path (optional, uses env vars by default)]:CONFIG:_files' \
-'--cli-only[Run in interactive CLI mode only (disable other channels)]' \
-'--no-db[Skip database connection (for testing)]' \
-'--no-onboard[Skip first-run onboarding check]' \
-'-h[Print help (see more with '\''--help'\'')]' \
-'--help[Print help (see more with '\''--help'\'')]' \
-&& ret=0
-;;
-(status)
-_arguments "${_arguments_options[@]}" : \
-'-m+[Single message mode - send one message and exit]:MESSAGE:_default' \
-'--message=[Single message mode - send one message and exit]:MESSAGE:_default' \
-'-c+[Configuration file path (optional, uses env vars by default)]:CONFIG:_files' \
-'--config=[Configuration file path (optional, uses env vars by default)]:CONFIG:_files' \
-'--cli-only[Run in interactive CLI mode only (disable other channels)]' \
-'--no-db[Skip database connection (for testing)]' \
-'--no-onboard[Skip first-run onboarding check]' \
-'-h[Print help (see more with '\''--help'\'')]' \
-'--help[Print help (see more with '\''--help'\'')]' \
-&& ret=0
-;;
-(completion)
-_arguments "${_arguments_options[@]}" : \
-'--shell=[The shell to generate completions for]:SHELL:(bash elvish fish powershell zsh)' \
-'-m+[Single message mode - send one message and exit]:MESSAGE:_default' \
-'--message=[Single message mode - send one message and exit]:MESSAGE:_default' \
-'-c+[Configuration file path (optional, uses env vars by default)]:CONFIG:_files' \
-'--config=[Configuration file path (optional, uses env vars by default)]:CONFIG:_files' \
-'--cli-only[Run in interactive CLI mode only (disable other channels)]' \
-'--no-db[Skip database connection (for testing)]' \
-'--no-onboard[Skip first-run onboarding check]' \
-'-h[Print help (see more with '\''--help'\'')]' \
-'--help[Print help (see more with '\''--help'\'')]' \
-&& ret=0
-;;
-(worker)
-_arguments "${_arguments_options[@]}" : \
-'--job-id=[Job ID to execute]:JOB_ID:_default' \
-'--orchestrator-url=[URL of the orchestrator'\''s internal API]:ORCHESTRATOR_URL:_default' \
-'--max-iterations=[Maximum iterations before stopping]:MAX_ITERATIONS:_default' \
-'-m+[Single message mode - send one message and exit]:MESSAGE:_default' \
-'--message=[Single message mode - send one message and exit]:MESSAGE:_default' \
-'-c+[Configuration file path (optional, uses env vars by default)]:CONFIG:_files' \
-'--config=[Configuration file path (optional, uses env vars by default)]:CONFIG:_files' \
-'--cli-only[Run in interactive CLI mode only (disable other channels)]' \
-'--no-db[Skip database connection (for testing)]' \
-'--no-onboard[Skip first-run onboarding check]' \
 '-h[Print help]' \
 '--help[Print help]' \
+":: :_ironclaw__subcmd__skills_commands" \
+"*::: :->skills" \
 && ret=0
-;;
-(claude-bridge)
+
+    case $state in
+    (skills)
+        words=($line[1] "${words[@]}")
+        (( CURRENT += 1 ))
+        curcontext="${curcontext%:*:*}:ironclaw-skills-command-$line[1]:"
+        case $line[1] in
+            (list)
 _arguments "${_arguments_options[@]}" : \
-'--job-id=[Job ID to execute]:JOB_ID:_default' \
-'--orchestrator-url=[URL of the orchestrator'\''s internal API]:ORCHESTRATOR_URL:_default' \
-'--max-turns=[Maximum agentic turns for Claude Code]:MAX_TURNS:_default' \
-'--model=[Claude model to use (e.g. "sonnet", "opus")]:MODEL:_default' \
-'-m+[Single message mode - send one message and exit]:MESSAGE:_default' \
-'--message=[Single message mode - send one message and exit]:MESSAGE:_default' \
-'-c+[Configuration file path (optional, uses env vars by default)]:CONFIG:_files' \
-'--config=[Configuration file path (optional, uses env vars by default)]:CONFIG:_files' \
-'--cli-only[Run in interactive CLI mode only (disable other channels)]' \
-'--no-db[Skip database connection (for testing)]' \
-'--no-onboard[Skip first-run onboarding check]' \
+'-v[Show extra status details]' \
+'--verbose[Show extra status details]' \
+'--json[Output skills as JSON]' \
 '-h[Print help]' \
 '--help[Print help]' \
 && ret=0
 ;;
 (help)
 _arguments "${_arguments_options[@]}" : \
-":: :_ironclaw__help_commands" \
+":: :_ironclaw__subcmd__skills__subcmd__help_commands" \
+"*::: :->help" \
+&& ret=0
+
+    case $state in
+    (help)
+        words=($line[1] "${words[@]}")
+        (( CURRENT += 1 ))
+        curcontext="${curcontext%:*:*}:ironclaw-skills-help-command-$line[1]:"
+        case $line[1] in
+            (list)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(help)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+        esac
+    ;;
+esac
+;;
+        esac
+    ;;
+esac
+;;
+(status)
+_arguments "${_arguments_options[@]}" : \
+'--json[Output as JSON]' \
+'-h[Print help]' \
+'--help[Print help]' \
+&& ret=0
+;;
+(traces)
+_arguments "${_arguments_options[@]}" : \
+'-h[Print help]' \
+'--help[Print help]' \
+":: :_ironclaw__subcmd__traces_commands" \
+"*::: :->traces" \
+&& ret=0
+
+    case $state in
+    (traces)
+        words=($line[1] "${words[@]}")
+        (( CURRENT += 1 ))
+        curcontext="${curcontext%:*:*}:ironclaw-traces-command-$line[1]:"
+        case $line[1] in
+            (opt-in)
+_arguments "${_arguments_options[@]}" : \
+'--endpoint=[Explicit private ingestion endpoint URL]:ENDPOINT:_default' \
+'--user-scope=[Runtime/web user scope to configure; defaults to this instance'\''s owner_id]:USER_SCOPE:_default' \
+'--bearer-token-env=[Environment variable containing the bearer token for the endpoint]:BEARER_TOKEN_ENV:_default' \
+'--upload-token-issuer-url=[HTTPS issuer URL that returns short-lived EdDSA upload claims]:UPLOAD_TOKEN_ISSUER_URL:_default' \
+'*--upload-token-issuer-allowed-hosts=[Exact allowed issuer hostnames for upload claim refresh]:UPLOAD_TOKEN_ISSUER_ALLOWED_HOSTS:_default' \
+'--upload-token-audience=[Audience to request from the upload claim issuer]:UPLOAD_TOKEN_AUDIENCE:_default' \
+'--upload-token-tenant-id=[Tenant ID to request from the upload claim issuer]:UPLOAD_TOKEN_TENANT_ID:_default' \
+'--upload-token-workload-token-env=[Environment variable containing workload credentials for the issuer]:UPLOAD_TOKEN_WORKLOAD_TOKEN_ENV:_default' \
+'--upload-token-invite-code=[Operator-issued pilot invite code. When set, included in upload-claim refresh requests so the issuer'\''s allowlist gate can match it. Required only when the configured issuer runs with TRACE_COMMONS_ALLOWLIST_SOURCE — omit otherwise]:UPLOAD_TOKEN_INVITE_CODE:_default' \
+'--upload-token-issuer-timeout-ms=[Upload claim issuer timeout in milliseconds]:UPLOAD_TOKEN_ISSUER_TIMEOUT_MS:_default' \
+'--scope=[Consent scope to include in autonomous envelopes]:SCOPE:(debugging-evaluation benchmark-only ranking-training model-training)' \
+'*--selected-tools=[Only auto-submit traces that use these tool names]:SELECTED_TOOLS:_default' \
+'--min-submission-score=[Minimum local score required for autonomous submission]:MIN_SUBMISSION_SCORE:_default' \
+'--include-message-text[Include locally redacted user/assistant message text]' \
+'--include-tool-payloads[Include locally redacted tool arguments, tool results, and HTTP bodies]' \
+'--allow-pii-review-bypass[Submit medium-risk traces without holding them for manual review]' \
+'-h[Print help]' \
+'--help[Print help]' \
+&& ret=0
+;;
+(opt-out)
+_arguments "${_arguments_options[@]}" : \
+'--user-scope=[Runtime/web user scope to disable (scoped-only opt-out); defaults to this instance'\''s owner_id AND disables the global policy]:USER_SCOPE:_default' \
+'-h[Print help]' \
+'--help[Print help]' \
+&& ret=0
+;;
+(enroll-instance)
+_arguments "${_arguments_options[@]}" : \
+'--invite=[Operator invite link (\`https\://<host>#<code>\`, or \`<code>@<host>\`)]:INVITE:_default' \
+'--include-message-text[Include locally redacted user/assistant message text in envelopes (applies instance-wide to every inheriting user)]' \
+'--include-tool-payloads[Include locally redacted tool arguments, tool results, and HTTP bodies in envelopes (applies instance-wide)]' \
+'--json[Output the enrollment outcome as JSON]' \
+'-h[Print help]' \
+'--help[Print help]' \
+&& ret=0
+;;
+(status)
+_arguments "${_arguments_options[@]}" : \
+'--user-scope=[Show the runtime/web policy for this user scope instead of the global CLI policy]:USER_SCOPE:_default' \
+'--json[Output as JSON]' \
+'-h[Print help]' \
+'--help[Print help]' \
+&& ret=0
+;;
+(preview)
+_arguments "${_arguments_options[@]}" : \
+'--recorded-trace=[Recorded trace JSON file produced by IRONCLAW_RECORD_TRACE]:PATH:_files' \
+'--scope=[Consent scope to include in the envelope]:SCOPE:(debugging-evaluation benchmark-only ranking-training model-training)' \
+'--channel=[Source channel for this trace]:CHANNEL:(web cli telegram slack routine other)' \
+'--engine-version=[Optional engine version metadata]:ENGINE_VERSION:_default' \
+'--contributor-id=[Optional pseudonymous contributor ID]:CONTRIBUTOR_ID:_default' \
+'--credit-account-ref=[Optional separate credit account reference]:CREDIT_ACCOUNT_REF:_default' \
+'-o+[Write envelope JSON to a file instead of stdout]:PATH:_files' \
+'--output=[Write envelope JSON to a file instead of stdout]:PATH:_files' \
+'--include-message-text[Include locally redacted user/assistant message text]' \
+'--include-tool-payloads[Include locally redacted tool arguments, tool results, and HTTP bodies]' \
+'--enqueue[Add the redacted envelope to the autonomous submission queue]' \
+'-h[Print help]' \
+'--help[Print help]' \
+&& ret=0
+;;
+(enqueue)
+_arguments "${_arguments_options[@]}" : \
+'--envelope=[Redacted contribution envelope JSON file]:PATH:_files' \
+'-h[Print help]' \
+'--help[Print help]' \
+&& ret=0
+;;
+(flush-queue)
+_arguments "${_arguments_options[@]}" : \
+'--limit=[Maximum queued envelopes to submit]:LIMIT:_default' \
+'-h[Print help]' \
+'--help[Print help]' \
+&& ret=0
+;;
+(queue-status)
+_arguments "${_arguments_options[@]}" : \
+'--scope=[Local tenant/user trace scope to inspect]:SCOPE:_default' \
+'--json[Output as JSON]' \
+'-h[Print help]' \
+'--help[Print help]' \
+&& ret=0
+;;
+(credit)
+_arguments "${_arguments_options[@]}" : \
+'--notice-scope=[Local tenant/user trace scope to check for a due periodic notice]:NOTICE_SCOPE:_default' \
+'(--ack)--snooze-hours=[Snooze the current credit notice for this many hours]:SNOOZE_HOURS:_default' \
+'--json[Output as JSON]' \
+'--notice[Print and mark a due periodic credit notice instead of the full credit report]' \
+'(--snooze-hours)--ack[Acknowledge the current credit notice until credit changes again]' \
+'-h[Print help]' \
+'--help[Print help]' \
+&& ret=0
+;;
+(submit)
+_arguments "${_arguments_options[@]}" : \
+'--envelope=[Redacted contribution envelope JSON file]:PATH:_files' \
+'--endpoint=[Explicit private ingestion endpoint URL]:ENDPOINT:_default' \
+'--bearer-token-env=[Environment variable containing the bearer token for the endpoint]:BEARER_TOKEN_ENV:_default' \
+'-h[Print help]' \
+'--help[Print help]' \
+&& ret=0
+;;
+(list-submissions)
+_arguments "${_arguments_options[@]}" : \
+'--json[Output as JSON]' \
+'--summary[Include aggregate submission and credit totals]' \
+'-h[Print help]' \
+'--help[Print help]' \
+&& ret=0
+;;
+(revoke)
+_arguments "${_arguments_options[@]}" : \
+'--endpoint=[Optional private revocation endpoint URL]:ENDPOINT:_default' \
+'--bearer-token-env=[Environment variable containing the bearer token for the endpoint]:BEARER_TOKEN_ENV:_default' \
+'-h[Print help]' \
+'--help[Print help]' \
+':submission_id -- Submission ID to revoke:_default' \
+&& ret=0
+;;
+(ingest-health)
+_arguments "${_arguments_options[@]}" : \
+'--endpoint=[Trace Commons ingestion base URL, /health URL, or /v1/traces URL]:ENDPOINT:_default' \
+'--json[Output as JSON]' \
+'-h[Print help]' \
+'--help[Print help]' \
+&& ret=0
+;;
+(profile)
+_arguments "${_arguments_options[@]}" : \
+'-h[Print help]' \
+'--help[Print help]' \
+":: :_ironclaw__subcmd__traces__subcmd__profile_commands" \
+"*::: :->profile" \
+&& ret=0
+
+    case $state in
+    (profile)
+        words=($line[1] "${words[@]}")
+        (( CURRENT += 1 ))
+        curcontext="${curcontext%:*:*}:ironclaw-traces-profile-command-$line[1]:"
+        case $line[1] in
+            (token)
+_arguments "${_arguments_options[@]}" : \
+'--user-scope=[Runtime/web user scope; defaults to this instance'\''s owner_id]:USER_SCOPE:_default' \
+'--json[Output as JSON]' \
+'-h[Print help]' \
+'--help[Print help]' \
+&& ret=0
+;;
+(set)
+_arguments "${_arguments_options[@]}" : \
+'--handle=[Pseudonymous display handle (3-32 chars\: ASCII letters, digits, '\''-'\'', '\''_'\'')]:HANDLE:_default' \
+'--bio=[Optional short bio (max 280 bytes)]:BIO:_default' \
+'--user-scope=[Runtime/web user scope; defaults to this instance'\''s owner_id]:USER_SCOPE:_default' \
+'-h[Print help]' \
+'--help[Print help]' \
+&& ret=0
+;;
+(withdraw)
+_arguments "${_arguments_options[@]}" : \
+'--user-scope=[Runtime/web user scope; defaults to this instance'\''s owner_id]:USER_SCOPE:_default' \
+'-h[Print help]' \
+'--help[Print help]' \
+&& ret=0
+;;
+(help)
+_arguments "${_arguments_options[@]}" : \
+":: :_ironclaw__subcmd__traces__subcmd__profile__subcmd__help_commands" \
+"*::: :->help" \
+&& ret=0
+
+    case $state in
+    (help)
+        words=($line[1] "${words[@]}")
+        (( CURRENT += 1 ))
+        curcontext="${curcontext%:*:*}:ironclaw-traces-profile-help-command-$line[1]:"
+        case $line[1] in
+            (token)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(set)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(withdraw)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(help)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+        esac
+    ;;
+esac
+;;
+        esac
+    ;;
+esac
+;;
+(help)
+_arguments "${_arguments_options[@]}" : \
+":: :_ironclaw__subcmd__traces__subcmd__help_commands" \
+"*::: :->help" \
+&& ret=0
+
+    case $state in
+    (help)
+        words=($line[1] "${words[@]}")
+        (( CURRENT += 1 ))
+        curcontext="${curcontext%:*:*}:ironclaw-traces-help-command-$line[1]:"
+        case $line[1] in
+            (opt-in)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(opt-out)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(enroll-instance)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(status)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(preview)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(enqueue)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(flush-queue)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(queue-status)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(credit)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(submit)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(list-submissions)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(revoke)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(ingest-health)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(profile)
+_arguments "${_arguments_options[@]}" : \
+":: :_ironclaw__subcmd__traces__subcmd__help__subcmd__profile_commands" \
+"*::: :->profile" \
+&& ret=0
+
+    case $state in
+    (profile)
+        words=($line[1] "${words[@]}")
+        (( CURRENT += 1 ))
+        curcontext="${curcontext%:*:*}:ironclaw-traces-help-profile-command-$line[1]:"
+        case $line[1] in
+            (token)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(set)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(withdraw)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+        esac
+    ;;
+esac
+;;
+(help)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+        esac
+    ;;
+esac
+;;
+        esac
+    ;;
+esac
+;;
+(help)
+_arguments "${_arguments_options[@]}" : \
+":: :_ironclaw__subcmd__help_commands" \
 "*::: :->help" \
 && ret=0
 
@@ -1106,17 +987,33 @@ _arguments "${_arguments_options[@]}" : \
         (( CURRENT += 1 ))
         curcontext="${curcontext%:*:*}:ironclaw-help-command-$line[1]:"
         case $line[1] in
-            (run)
+            (channels)
+_arguments "${_arguments_options[@]}" : \
+":: :_ironclaw__subcmd__help__subcmd__channels_commands" \
+"*::: :->channels" \
+&& ret=0
+
+    case $state in
+    (channels)
+        words=($line[1] "${words[@]}")
+        (( CURRENT += 1 ))
+        curcontext="${curcontext%:*:*}:ironclaw-help-channels-command-$line[1]:"
+        case $line[1] in
+            (list)
 _arguments "${_arguments_options[@]}" : \
 && ret=0
 ;;
-(onboard)
+        esac
+    ;;
+esac
+;;
+(completion)
 _arguments "${_arguments_options[@]}" : \
 && ret=0
 ;;
 (config)
 _arguments "${_arguments_options[@]}" : \
-":: :_ironclaw__help__config_commands" \
+":: :_ironclaw__subcmd__help__subcmd__config_commands" \
 "*::: :->config" \
 && ret=0
 
@@ -1126,7 +1023,11 @@ _arguments "${_arguments_options[@]}" : \
         (( CURRENT += 1 ))
         curcontext="${curcontext%:*:*}:ironclaw-help-config-command-$line[1]:"
         case $line[1] in
-            (init)
+            (path)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(init)
 _arguments "${_arguments_options[@]}" : \
 && ret=0
 ;;
@@ -1138,75 +1039,27 @@ _arguments "${_arguments_options[@]}" : \
 _arguments "${_arguments_options[@]}" : \
 && ret=0
 ;;
-(set)
-_arguments "${_arguments_options[@]}" : \
-&& ret=0
-;;
-(reset)
-_arguments "${_arguments_options[@]}" : \
-&& ret=0
-;;
-(path)
-_arguments "${_arguments_options[@]}" : \
-&& ret=0
-;;
         esac
     ;;
 esac
 ;;
-(tool)
+(doctor)
 _arguments "${_arguments_options[@]}" : \
-":: :_ironclaw__help__tool_commands" \
-"*::: :->tool" \
+&& ret=0
+;;
+(extension)
+_arguments "${_arguments_options[@]}" : \
+":: :_ironclaw__subcmd__help__subcmd__extension_commands" \
+"*::: :->extension" \
 && ret=0
 
     case $state in
-    (tool)
+    (extension)
         words=($line[1] "${words[@]}")
         (( CURRENT += 1 ))
-        curcontext="${curcontext%:*:*}:ironclaw-help-tool-command-$line[1]:"
+        curcontext="${curcontext%:*:*}:ironclaw-help-extension-command-$line[1]:"
         case $line[1] in
-            (install)
-_arguments "${_arguments_options[@]}" : \
-&& ret=0
-;;
-(list)
-_arguments "${_arguments_options[@]}" : \
-&& ret=0
-;;
-(remove)
-_arguments "${_arguments_options[@]}" : \
-&& ret=0
-;;
-(info)
-_arguments "${_arguments_options[@]}" : \
-&& ret=0
-;;
-(auth)
-_arguments "${_arguments_options[@]}" : \
-&& ret=0
-;;
-        esac
-    ;;
-esac
-;;
-(registry)
-_arguments "${_arguments_options[@]}" : \
-":: :_ironclaw__help__registry_commands" \
-"*::: :->registry" \
-&& ret=0
-
-    case $state in
-    (registry)
-        words=($line[1] "${words[@]}")
-        (( CURRENT += 1 ))
-        curcontext="${curcontext%:*:*}:ironclaw-help-registry-command-$line[1]:"
-        case $line[1] in
-            (list)
-_arguments "${_arguments_options[@]}" : \
-&& ret=0
-;;
-(info)
+            (search)
 _arguments "${_arguments_options[@]}" : \
 && ret=0
 ;;
@@ -1214,27 +1067,7 @@ _arguments "${_arguments_options[@]}" : \
 _arguments "${_arguments_options[@]}" : \
 && ret=0
 ;;
-(install-defaults)
-_arguments "${_arguments_options[@]}" : \
-&& ret=0
-;;
-        esac
-    ;;
-esac
-;;
-(mcp)
-_arguments "${_arguments_options[@]}" : \
-":: :_ironclaw__help__mcp_commands" \
-"*::: :->mcp" \
-&& ret=0
-
-    case $state in
-    (mcp)
-        words=($line[1] "${words[@]}")
-        (( CURRENT += 1 ))
-        curcontext="${curcontext%:*:*}:ironclaw-help-mcp-command-$line[1]:"
-        case $line[1] in
-            (add)
+(activate)
 _arguments "${_arguments_options[@]}" : \
 && ret=0
 ;;
@@ -1242,19 +1075,23 @@ _arguments "${_arguments_options[@]}" : \
 _arguments "${_arguments_options[@]}" : \
 && ret=0
 ;;
-(list)
-_arguments "${_arguments_options[@]}" : \
-&& ret=0
+        esac
+    ;;
+esac
 ;;
-(auth)
+(hooks)
 _arguments "${_arguments_options[@]}" : \
+":: :_ironclaw__subcmd__help__subcmd__hooks_commands" \
+"*::: :->hooks" \
 && ret=0
-;;
-(test)
-_arguments "${_arguments_options[@]}" : \
-&& ret=0
-;;
-(toggle)
+
+    case $state in
+    (hooks)
+        words=($line[1] "${words[@]}")
+        (( CURRENT += 1 ))
+        curcontext="${curcontext%:*:*}:ironclaw-help-hooks-command-$line[1]:"
+        case $line[1] in
+            (list)
 _arguments "${_arguments_options[@]}" : \
 && ret=0
 ;;
@@ -1262,31 +1099,23 @@ _arguments "${_arguments_options[@]}" : \
     ;;
 esac
 ;;
-(memory)
+(logs)
 _arguments "${_arguments_options[@]}" : \
-":: :_ironclaw__help__memory_commands" \
-"*::: :->memory" \
+&& ret=0
+;;
+(models)
+_arguments "${_arguments_options[@]}" : \
+":: :_ironclaw__subcmd__help__subcmd__models_commands" \
+"*::: :->models" \
 && ret=0
 
     case $state in
-    (memory)
+    (models)
         words=($line[1] "${words[@]}")
         (( CURRENT += 1 ))
-        curcontext="${curcontext%:*:*}:ironclaw-help-memory-command-$line[1]:"
+        curcontext="${curcontext%:*:*}:ironclaw-help-models-command-$line[1]:"
         case $line[1] in
-            (search)
-_arguments "${_arguments_options[@]}" : \
-&& ret=0
-;;
-(read)
-_arguments "${_arguments_options[@]}" : \
-&& ret=0
-;;
-(write)
-_arguments "${_arguments_options[@]}" : \
-&& ret=0
-;;
-(tree)
+            (list)
 _arguments "${_arguments_options[@]}" : \
 && ret=0
 ;;
@@ -1294,37 +1123,57 @@ _arguments "${_arguments_options[@]}" : \
 _arguments "${_arguments_options[@]}" : \
 && ret=0
 ;;
+(set)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(set-provider)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
         esac
     ;;
 esac
 ;;
-(pairing)
+(onboard)
 _arguments "${_arguments_options[@]}" : \
-":: :_ironclaw__help__pairing_commands" \
-"*::: :->pairing" \
+&& ret=0
+;;
+(profile)
+_arguments "${_arguments_options[@]}" : \
+":: :_ironclaw__subcmd__help__subcmd__profile_commands" \
+"*::: :->profile" \
 && ret=0
 
     case $state in
-    (pairing)
+    (profile)
         words=($line[1] "${words[@]}")
         (( CURRENT += 1 ))
-        curcontext="${curcontext%:*:*}:ironclaw-help-pairing-command-$line[1]:"
+        curcontext="${curcontext%:*:*}:ironclaw-help-profile-command-$line[1]:"
         case $line[1] in
             (list)
 _arguments "${_arguments_options[@]}" : \
 && ret=0
 ;;
-(approve)
-_arguments "${_arguments_options[@]}" : \
-&& ret=0
-;;
         esac
     ;;
 esac
 ;;
+(repl)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(run)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(serve)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
 (service)
 _arguments "${_arguments_options[@]}" : \
-":: :_ironclaw__help__service_commands" \
+":: :_ironclaw__subcmd__help__subcmd__service_commands" \
 "*::: :->service" \
 && ret=0
 
@@ -1346,6 +1195,10 @@ _arguments "${_arguments_options[@]}" : \
 _arguments "${_arguments_options[@]}" : \
 && ret=0
 ;;
+(restart)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
 (status)
 _arguments "${_arguments_options[@]}" : \
 && ret=0
@@ -1358,7 +1211,51 @@ _arguments "${_arguments_options[@]}" : \
     ;;
 esac
 ;;
-(doctor)
+(skills)
+_arguments "${_arguments_options[@]}" : \
+":: :_ironclaw__subcmd__help__subcmd__skills_commands" \
+"*::: :->skills" \
+&& ret=0
+
+    case $state in
+    (skills)
+        words=($line[1] "${words[@]}")
+        (( CURRENT += 1 ))
+        curcontext="${curcontext%:*:*}:ironclaw-help-skills-command-$line[1]:"
+        case $line[1] in
+            (list)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+        esac
+    ;;
+esac
+;;
+(status)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(traces)
+_arguments "${_arguments_options[@]}" : \
+":: :_ironclaw__subcmd__help__subcmd__traces_commands" \
+"*::: :->traces" \
+&& ret=0
+
+    case $state in
+    (traces)
+        words=($line[1] "${words[@]}")
+        (( CURRENT += 1 ))
+        curcontext="${curcontext%:*:*}:ironclaw-help-traces-command-$line[1]:"
+        case $line[1] in
+            (opt-in)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(opt-out)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(enroll-instance)
 _arguments "${_arguments_options[@]}" : \
 && ret=0
 ;;
@@ -1366,17 +1263,73 @@ _arguments "${_arguments_options[@]}" : \
 _arguments "${_arguments_options[@]}" : \
 && ret=0
 ;;
-(completion)
+(preview)
 _arguments "${_arguments_options[@]}" : \
 && ret=0
 ;;
-(worker)
+(enqueue)
 _arguments "${_arguments_options[@]}" : \
 && ret=0
 ;;
-(claude-bridge)
+(flush-queue)
 _arguments "${_arguments_options[@]}" : \
 && ret=0
+;;
+(queue-status)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(credit)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(submit)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(list-submissions)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(revoke)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(ingest-health)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(profile)
+_arguments "${_arguments_options[@]}" : \
+":: :_ironclaw__subcmd__help__subcmd__traces__subcmd__profile_commands" \
+"*::: :->profile" \
+&& ret=0
+
+    case $state in
+    (profile)
+        words=($line[1] "${words[@]}")
+        (( CURRENT += 1 ))
+        curcontext="${curcontext%:*:*}:ironclaw-help-traces-profile-command-$line[1]:"
+        case $line[1] in
+            (token)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(set)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(withdraw)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+        esac
+    ;;
+esac
+;;
+        esac
+    ;;
+esac
 ;;
 (help)
 _arguments "${_arguments_options[@]}" : \
@@ -1394,888 +1347,1096 @@ esac
 (( $+functions[_ironclaw_commands] )) ||
 _ironclaw_commands() {
     local commands; commands=(
-'run:Run the AI agent' \
-'onboard:Run interactive setup wizard' \
-'config:Manage app configs' \
-'tool:Manage WASM tools' \
-'registry:Browse/install extensions' \
-'mcp:Manage MCP servers' \
-'memory:Manage workspace memory' \
-'pairing:Manage DM pairing' \
-'service:Manage OS service' \
-'doctor:Run diagnostics' \
-'status:Show system status' \
-'completion:Generate completions' \
-'worker:Run as a sandboxed worker inside a Docker container (internal use). This is invoked automatically by the orchestrator, not by users directly' \
-'claude-bridge:Run as a Claude Code bridge inside a Docker container (internal use). Spawns the \`claude\` CLI and streams output back to the orchestrator' \
+'channels:Inspect configured Reborn channels' \
+'completion:Generate shell completion scripts' \
+'config:Inspect Reborn configuration paths without creating state' \
+'doctor:Check Reborn binary configuration without creating state' \
+'extension:Manage local Reborn extension lifecycle' \
+'hooks:Inspect configured Reborn hooks' \
+'logs:Inspect Reborn logs' \
+'models:Inspect Reborn model slots and route status' \
+'onboard:Initialize the standalone Reborn home and first-run setup marker' \
+'profile:Inspect supported Reborn boot profiles' \
+'repl:Start the composed Reborn CLI REPL' \
+'run:Initialize the minimal Reborn runtime shell and exit' \
+'serve:Start the Reborn WebUI service. Available only when the binary is built with the \`webui-v2-beta\` Cargo feature; off by default because the beta HTTP/auth gateway requires explicit opt-in before being linked into a production binary' \
+'service:Install/start/stop/status/uninstall the standalone Reborn binary as an OS-native service (launchd on macOS, systemd on Linux). Available only when built with the \`webui-v2-beta\` Cargo feature, since the installed unit runs \`serve\`' \
+'skills:Inspect configured Reborn skills' \
+'status:Show Reborn runtime status snapshot' \
+'traces:Manage trace contributions to TraceCommons' \
 'help:Print this message or the help of the given subcommand(s)' \
     )
     _describe -t commands 'ironclaw commands' commands "$@"
 }
-(( $+functions[_ironclaw__claude-bridge_commands] )) ||
-_ironclaw__claude-bridge_commands() {
-    local commands; commands=()
-    _describe -t commands 'ironclaw claude-bridge commands' commands "$@"
+(( $+functions[_ironclaw__subcmd__channels_commands] )) ||
+_ironclaw__subcmd__channels_commands() {
+    local commands; commands=(
+'list:List configured Reborn channels' \
+'help:Print this message or the help of the given subcommand(s)' \
+    )
+    _describe -t commands 'ironclaw channels commands' commands "$@"
 }
-(( $+functions[_ironclaw__completion_commands] )) ||
-_ironclaw__completion_commands() {
+(( $+functions[_ironclaw__subcmd__channels__subcmd__help_commands] )) ||
+_ironclaw__subcmd__channels__subcmd__help_commands() {
+    local commands; commands=(
+'list:List configured Reborn channels' \
+'help:Print this message or the help of the given subcommand(s)' \
+    )
+    _describe -t commands 'ironclaw channels help commands' commands "$@"
+}
+(( $+functions[_ironclaw__subcmd__channels__subcmd__help__subcmd__help_commands] )) ||
+_ironclaw__subcmd__channels__subcmd__help__subcmd__help_commands() {
+    local commands; commands=()
+    _describe -t commands 'ironclaw channels help help commands' commands "$@"
+}
+(( $+functions[_ironclaw__subcmd__channels__subcmd__help__subcmd__list_commands] )) ||
+_ironclaw__subcmd__channels__subcmd__help__subcmd__list_commands() {
+    local commands; commands=()
+    _describe -t commands 'ironclaw channels help list commands' commands "$@"
+}
+(( $+functions[_ironclaw__subcmd__channels__subcmd__list_commands] )) ||
+_ironclaw__subcmd__channels__subcmd__list_commands() {
+    local commands; commands=()
+    _describe -t commands 'ironclaw channels list commands' commands "$@"
+}
+(( $+functions[_ironclaw__subcmd__completion_commands] )) ||
+_ironclaw__subcmd__completion_commands() {
     local commands; commands=()
     _describe -t commands 'ironclaw completion commands' commands "$@"
 }
-(( $+functions[_ironclaw__config_commands] )) ||
-_ironclaw__config_commands() {
+(( $+functions[_ironclaw__subcmd__config_commands] )) ||
+_ironclaw__subcmd__config_commands() {
     local commands; commands=(
-'init:Generate a default config.toml file' \
-'list:List all settings and their current values' \
-'get:Get a specific setting value' \
-'set:Set a setting value' \
-'reset:Reset a setting to its default value' \
-'path:Show the settings storage info' \
+'path:Show resolved Reborn configuration paths without creating state' \
+'init:Write a commented stub \`config.toml\` and \`providers.json\` into the Reborn home directory. Refuses to clobber unless --force' \
+'list:List all configuration keys and their values' \
+'get:Get a single configuration value by dot-separated key' \
 'help:Print this message or the help of the given subcommand(s)' \
     )
     _describe -t commands 'ironclaw config commands' commands "$@"
 }
-(( $+functions[_ironclaw__config__get_commands] )) ||
-_ironclaw__config__get_commands() {
+(( $+functions[_ironclaw__subcmd__config__subcmd__get_commands] )) ||
+_ironclaw__subcmd__config__subcmd__get_commands() {
     local commands; commands=()
     _describe -t commands 'ironclaw config get commands' commands "$@"
 }
-(( $+functions[_ironclaw__config__help_commands] )) ||
-_ironclaw__config__help_commands() {
+(( $+functions[_ironclaw__subcmd__config__subcmd__help_commands] )) ||
+_ironclaw__subcmd__config__subcmd__help_commands() {
     local commands; commands=(
-'init:Generate a default config.toml file' \
-'list:List all settings and their current values' \
-'get:Get a specific setting value' \
-'set:Set a setting value' \
-'reset:Reset a setting to its default value' \
-'path:Show the settings storage info' \
+'path:Show resolved Reborn configuration paths without creating state' \
+'init:Write a commented stub \`config.toml\` and \`providers.json\` into the Reborn home directory. Refuses to clobber unless --force' \
+'list:List all configuration keys and their values' \
+'get:Get a single configuration value by dot-separated key' \
 'help:Print this message or the help of the given subcommand(s)' \
     )
     _describe -t commands 'ironclaw config help commands' commands "$@"
 }
-(( $+functions[_ironclaw__config__help__get_commands] )) ||
-_ironclaw__config__help__get_commands() {
+(( $+functions[_ironclaw__subcmd__config__subcmd__help__subcmd__get_commands] )) ||
+_ironclaw__subcmd__config__subcmd__help__subcmd__get_commands() {
     local commands; commands=()
     _describe -t commands 'ironclaw config help get commands' commands "$@"
 }
-(( $+functions[_ironclaw__config__help__help_commands] )) ||
-_ironclaw__config__help__help_commands() {
+(( $+functions[_ironclaw__subcmd__config__subcmd__help__subcmd__help_commands] )) ||
+_ironclaw__subcmd__config__subcmd__help__subcmd__help_commands() {
     local commands; commands=()
     _describe -t commands 'ironclaw config help help commands' commands "$@"
 }
-(( $+functions[_ironclaw__config__help__init_commands] )) ||
-_ironclaw__config__help__init_commands() {
+(( $+functions[_ironclaw__subcmd__config__subcmd__help__subcmd__init_commands] )) ||
+_ironclaw__subcmd__config__subcmd__help__subcmd__init_commands() {
     local commands; commands=()
     _describe -t commands 'ironclaw config help init commands' commands "$@"
 }
-(( $+functions[_ironclaw__config__help__list_commands] )) ||
-_ironclaw__config__help__list_commands() {
+(( $+functions[_ironclaw__subcmd__config__subcmd__help__subcmd__list_commands] )) ||
+_ironclaw__subcmd__config__subcmd__help__subcmd__list_commands() {
     local commands; commands=()
     _describe -t commands 'ironclaw config help list commands' commands "$@"
 }
-(( $+functions[_ironclaw__config__help__path_commands] )) ||
-_ironclaw__config__help__path_commands() {
+(( $+functions[_ironclaw__subcmd__config__subcmd__help__subcmd__path_commands] )) ||
+_ironclaw__subcmd__config__subcmd__help__subcmd__path_commands() {
     local commands; commands=()
     _describe -t commands 'ironclaw config help path commands' commands "$@"
 }
-(( $+functions[_ironclaw__config__help__reset_commands] )) ||
-_ironclaw__config__help__reset_commands() {
-    local commands; commands=()
-    _describe -t commands 'ironclaw config help reset commands' commands "$@"
-}
-(( $+functions[_ironclaw__config__help__set_commands] )) ||
-_ironclaw__config__help__set_commands() {
-    local commands; commands=()
-    _describe -t commands 'ironclaw config help set commands' commands "$@"
-}
-(( $+functions[_ironclaw__config__init_commands] )) ||
-_ironclaw__config__init_commands() {
+(( $+functions[_ironclaw__subcmd__config__subcmd__init_commands] )) ||
+_ironclaw__subcmd__config__subcmd__init_commands() {
     local commands; commands=()
     _describe -t commands 'ironclaw config init commands' commands "$@"
 }
-(( $+functions[_ironclaw__config__list_commands] )) ||
-_ironclaw__config__list_commands() {
+(( $+functions[_ironclaw__subcmd__config__subcmd__list_commands] )) ||
+_ironclaw__subcmd__config__subcmd__list_commands() {
     local commands; commands=()
     _describe -t commands 'ironclaw config list commands' commands "$@"
 }
-(( $+functions[_ironclaw__config__path_commands] )) ||
-_ironclaw__config__path_commands() {
+(( $+functions[_ironclaw__subcmd__config__subcmd__path_commands] )) ||
+_ironclaw__subcmd__config__subcmd__path_commands() {
     local commands; commands=()
     _describe -t commands 'ironclaw config path commands' commands "$@"
 }
-(( $+functions[_ironclaw__config__reset_commands] )) ||
-_ironclaw__config__reset_commands() {
-    local commands; commands=()
-    _describe -t commands 'ironclaw config reset commands' commands "$@"
-}
-(( $+functions[_ironclaw__config__set_commands] )) ||
-_ironclaw__config__set_commands() {
-    local commands; commands=()
-    _describe -t commands 'ironclaw config set commands' commands "$@"
-}
-(( $+functions[_ironclaw__doctor_commands] )) ||
-_ironclaw__doctor_commands() {
+(( $+functions[_ironclaw__subcmd__doctor_commands] )) ||
+_ironclaw__subcmd__doctor_commands() {
     local commands; commands=()
     _describe -t commands 'ironclaw doctor commands' commands "$@"
 }
-(( $+functions[_ironclaw__help_commands] )) ||
-_ironclaw__help_commands() {
+(( $+functions[_ironclaw__subcmd__extension_commands] )) ||
+_ironclaw__subcmd__extension_commands() {
     local commands; commands=(
-'run:Run the AI agent' \
-'onboard:Run interactive setup wizard' \
-'config:Manage app configs' \
-'tool:Manage WASM tools' \
-'registry:Browse/install extensions' \
-'mcp:Manage MCP servers' \
-'memory:Manage workspace memory' \
-'pairing:Manage DM pairing' \
-'service:Manage OS service' \
-'doctor:Run diagnostics' \
-'status:Show system status' \
-'completion:Generate completions' \
-'worker:Run as a sandboxed worker inside a Docker container (internal use). This is invoked automatically by the orchestrator, not by users directly' \
-'claude-bridge:Run as a Claude Code bridge inside a Docker container (internal use). Spawns the \`claude\` CLI and streams output back to the orchestrator' \
+'search:Search local Reborn extension packages' \
+'install:Install a local Reborn extension package' \
+'activate:Activate an installed local Reborn extension package' \
+'remove:Remove an installed local Reborn extension package' \
+'help:Print this message or the help of the given subcommand(s)' \
+    )
+    _describe -t commands 'ironclaw extension commands' commands "$@"
+}
+(( $+functions[_ironclaw__subcmd__extension__subcmd__activate_commands] )) ||
+_ironclaw__subcmd__extension__subcmd__activate_commands() {
+    local commands; commands=()
+    _describe -t commands 'ironclaw extension activate commands' commands "$@"
+}
+(( $+functions[_ironclaw__subcmd__extension__subcmd__help_commands] )) ||
+_ironclaw__subcmd__extension__subcmd__help_commands() {
+    local commands; commands=(
+'search:Search local Reborn extension packages' \
+'install:Install a local Reborn extension package' \
+'activate:Activate an installed local Reborn extension package' \
+'remove:Remove an installed local Reborn extension package' \
+'help:Print this message or the help of the given subcommand(s)' \
+    )
+    _describe -t commands 'ironclaw extension help commands' commands "$@"
+}
+(( $+functions[_ironclaw__subcmd__extension__subcmd__help__subcmd__activate_commands] )) ||
+_ironclaw__subcmd__extension__subcmd__help__subcmd__activate_commands() {
+    local commands; commands=()
+    _describe -t commands 'ironclaw extension help activate commands' commands "$@"
+}
+(( $+functions[_ironclaw__subcmd__extension__subcmd__help__subcmd__help_commands] )) ||
+_ironclaw__subcmd__extension__subcmd__help__subcmd__help_commands() {
+    local commands; commands=()
+    _describe -t commands 'ironclaw extension help help commands' commands "$@"
+}
+(( $+functions[_ironclaw__subcmd__extension__subcmd__help__subcmd__install_commands] )) ||
+_ironclaw__subcmd__extension__subcmd__help__subcmd__install_commands() {
+    local commands; commands=()
+    _describe -t commands 'ironclaw extension help install commands' commands "$@"
+}
+(( $+functions[_ironclaw__subcmd__extension__subcmd__help__subcmd__remove_commands] )) ||
+_ironclaw__subcmd__extension__subcmd__help__subcmd__remove_commands() {
+    local commands; commands=()
+    _describe -t commands 'ironclaw extension help remove commands' commands "$@"
+}
+(( $+functions[_ironclaw__subcmd__extension__subcmd__help__subcmd__search_commands] )) ||
+_ironclaw__subcmd__extension__subcmd__help__subcmd__search_commands() {
+    local commands; commands=()
+    _describe -t commands 'ironclaw extension help search commands' commands "$@"
+}
+(( $+functions[_ironclaw__subcmd__extension__subcmd__install_commands] )) ||
+_ironclaw__subcmd__extension__subcmd__install_commands() {
+    local commands; commands=()
+    _describe -t commands 'ironclaw extension install commands' commands "$@"
+}
+(( $+functions[_ironclaw__subcmd__extension__subcmd__remove_commands] )) ||
+_ironclaw__subcmd__extension__subcmd__remove_commands() {
+    local commands; commands=()
+    _describe -t commands 'ironclaw extension remove commands' commands "$@"
+}
+(( $+functions[_ironclaw__subcmd__extension__subcmd__search_commands] )) ||
+_ironclaw__subcmd__extension__subcmd__search_commands() {
+    local commands; commands=()
+    _describe -t commands 'ironclaw extension search commands' commands "$@"
+}
+(( $+functions[_ironclaw__subcmd__help_commands] )) ||
+_ironclaw__subcmd__help_commands() {
+    local commands; commands=(
+'channels:Inspect configured Reborn channels' \
+'completion:Generate shell completion scripts' \
+'config:Inspect Reborn configuration paths without creating state' \
+'doctor:Check Reborn binary configuration without creating state' \
+'extension:Manage local Reborn extension lifecycle' \
+'hooks:Inspect configured Reborn hooks' \
+'logs:Inspect Reborn logs' \
+'models:Inspect Reborn model slots and route status' \
+'onboard:Initialize the standalone Reborn home and first-run setup marker' \
+'profile:Inspect supported Reborn boot profiles' \
+'repl:Start the composed Reborn CLI REPL' \
+'run:Initialize the minimal Reborn runtime shell and exit' \
+'serve:Start the Reborn WebUI service. Available only when the binary is built with the \`webui-v2-beta\` Cargo feature; off by default because the beta HTTP/auth gateway requires explicit opt-in before being linked into a production binary' \
+'service:Install/start/stop/status/uninstall the standalone Reborn binary as an OS-native service (launchd on macOS, systemd on Linux). Available only when built with the \`webui-v2-beta\` Cargo feature, since the installed unit runs \`serve\`' \
+'skills:Inspect configured Reborn skills' \
+'status:Show Reborn runtime status snapshot' \
+'traces:Manage trace contributions to TraceCommons' \
 'help:Print this message or the help of the given subcommand(s)' \
     )
     _describe -t commands 'ironclaw help commands' commands "$@"
 }
-(( $+functions[_ironclaw__help__claude-bridge_commands] )) ||
-_ironclaw__help__claude-bridge_commands() {
-    local commands; commands=()
-    _describe -t commands 'ironclaw help claude-bridge commands' commands "$@"
+(( $+functions[_ironclaw__subcmd__help__subcmd__channels_commands] )) ||
+_ironclaw__subcmd__help__subcmd__channels_commands() {
+    local commands; commands=(
+'list:List configured Reborn channels' \
+    )
+    _describe -t commands 'ironclaw help channels commands' commands "$@"
 }
-(( $+functions[_ironclaw__help__completion_commands] )) ||
-_ironclaw__help__completion_commands() {
+(( $+functions[_ironclaw__subcmd__help__subcmd__channels__subcmd__list_commands] )) ||
+_ironclaw__subcmd__help__subcmd__channels__subcmd__list_commands() {
+    local commands; commands=()
+    _describe -t commands 'ironclaw help channels list commands' commands "$@"
+}
+(( $+functions[_ironclaw__subcmd__help__subcmd__completion_commands] )) ||
+_ironclaw__subcmd__help__subcmd__completion_commands() {
     local commands; commands=()
     _describe -t commands 'ironclaw help completion commands' commands "$@"
 }
-(( $+functions[_ironclaw__help__config_commands] )) ||
-_ironclaw__help__config_commands() {
+(( $+functions[_ironclaw__subcmd__help__subcmd__config_commands] )) ||
+_ironclaw__subcmd__help__subcmd__config_commands() {
     local commands; commands=(
-'init:Generate a default config.toml file' \
-'list:List all settings and their current values' \
-'get:Get a specific setting value' \
-'set:Set a setting value' \
-'reset:Reset a setting to its default value' \
-'path:Show the settings storage info' \
+'path:Show resolved Reborn configuration paths without creating state' \
+'init:Write a commented stub \`config.toml\` and \`providers.json\` into the Reborn home directory. Refuses to clobber unless --force' \
+'list:List all configuration keys and their values' \
+'get:Get a single configuration value by dot-separated key' \
     )
     _describe -t commands 'ironclaw help config commands' commands "$@"
 }
-(( $+functions[_ironclaw__help__config__get_commands] )) ||
-_ironclaw__help__config__get_commands() {
+(( $+functions[_ironclaw__subcmd__help__subcmd__config__subcmd__get_commands] )) ||
+_ironclaw__subcmd__help__subcmd__config__subcmd__get_commands() {
     local commands; commands=()
     _describe -t commands 'ironclaw help config get commands' commands "$@"
 }
-(( $+functions[_ironclaw__help__config__init_commands] )) ||
-_ironclaw__help__config__init_commands() {
+(( $+functions[_ironclaw__subcmd__help__subcmd__config__subcmd__init_commands] )) ||
+_ironclaw__subcmd__help__subcmd__config__subcmd__init_commands() {
     local commands; commands=()
     _describe -t commands 'ironclaw help config init commands' commands "$@"
 }
-(( $+functions[_ironclaw__help__config__list_commands] )) ||
-_ironclaw__help__config__list_commands() {
+(( $+functions[_ironclaw__subcmd__help__subcmd__config__subcmd__list_commands] )) ||
+_ironclaw__subcmd__help__subcmd__config__subcmd__list_commands() {
     local commands; commands=()
     _describe -t commands 'ironclaw help config list commands' commands "$@"
 }
-(( $+functions[_ironclaw__help__config__path_commands] )) ||
-_ironclaw__help__config__path_commands() {
+(( $+functions[_ironclaw__subcmd__help__subcmd__config__subcmd__path_commands] )) ||
+_ironclaw__subcmd__help__subcmd__config__subcmd__path_commands() {
     local commands; commands=()
     _describe -t commands 'ironclaw help config path commands' commands "$@"
 }
-(( $+functions[_ironclaw__help__config__reset_commands] )) ||
-_ironclaw__help__config__reset_commands() {
-    local commands; commands=()
-    _describe -t commands 'ironclaw help config reset commands' commands "$@"
-}
-(( $+functions[_ironclaw__help__config__set_commands] )) ||
-_ironclaw__help__config__set_commands() {
-    local commands; commands=()
-    _describe -t commands 'ironclaw help config set commands' commands "$@"
-}
-(( $+functions[_ironclaw__help__doctor_commands] )) ||
-_ironclaw__help__doctor_commands() {
+(( $+functions[_ironclaw__subcmd__help__subcmd__doctor_commands] )) ||
+_ironclaw__subcmd__help__subcmd__doctor_commands() {
     local commands; commands=()
     _describe -t commands 'ironclaw help doctor commands' commands "$@"
 }
-(( $+functions[_ironclaw__help__help_commands] )) ||
-_ironclaw__help__help_commands() {
+(( $+functions[_ironclaw__subcmd__help__subcmd__extension_commands] )) ||
+_ironclaw__subcmd__help__subcmd__extension_commands() {
+    local commands; commands=(
+'search:Search local Reborn extension packages' \
+'install:Install a local Reborn extension package' \
+'activate:Activate an installed local Reborn extension package' \
+'remove:Remove an installed local Reborn extension package' \
+    )
+    _describe -t commands 'ironclaw help extension commands' commands "$@"
+}
+(( $+functions[_ironclaw__subcmd__help__subcmd__extension__subcmd__activate_commands] )) ||
+_ironclaw__subcmd__help__subcmd__extension__subcmd__activate_commands() {
+    local commands; commands=()
+    _describe -t commands 'ironclaw help extension activate commands' commands "$@"
+}
+(( $+functions[_ironclaw__subcmd__help__subcmd__extension__subcmd__install_commands] )) ||
+_ironclaw__subcmd__help__subcmd__extension__subcmd__install_commands() {
+    local commands; commands=()
+    _describe -t commands 'ironclaw help extension install commands' commands "$@"
+}
+(( $+functions[_ironclaw__subcmd__help__subcmd__extension__subcmd__remove_commands] )) ||
+_ironclaw__subcmd__help__subcmd__extension__subcmd__remove_commands() {
+    local commands; commands=()
+    _describe -t commands 'ironclaw help extension remove commands' commands "$@"
+}
+(( $+functions[_ironclaw__subcmd__help__subcmd__extension__subcmd__search_commands] )) ||
+_ironclaw__subcmd__help__subcmd__extension__subcmd__search_commands() {
+    local commands; commands=()
+    _describe -t commands 'ironclaw help extension search commands' commands "$@"
+}
+(( $+functions[_ironclaw__subcmd__help__subcmd__help_commands] )) ||
+_ironclaw__subcmd__help__subcmd__help_commands() {
     local commands; commands=()
     _describe -t commands 'ironclaw help help commands' commands "$@"
 }
-(( $+functions[_ironclaw__help__mcp_commands] )) ||
-_ironclaw__help__mcp_commands() {
+(( $+functions[_ironclaw__subcmd__help__subcmd__hooks_commands] )) ||
+_ironclaw__subcmd__help__subcmd__hooks_commands() {
     local commands; commands=(
-'add:Add an MCP server' \
-'remove:Remove an MCP server' \
-'list:List configured MCP servers' \
-'auth:Authenticate with an MCP server (OAuth flow)' \
-'test:Test connection to an MCP server' \
-'toggle:Enable or disable an MCP server' \
+'list:List configured Reborn hooks' \
     )
-    _describe -t commands 'ironclaw help mcp commands' commands "$@"
+    _describe -t commands 'ironclaw help hooks commands' commands "$@"
 }
-(( $+functions[_ironclaw__help__mcp__add_commands] )) ||
-_ironclaw__help__mcp__add_commands() {
+(( $+functions[_ironclaw__subcmd__help__subcmd__hooks__subcmd__list_commands] )) ||
+_ironclaw__subcmd__help__subcmd__hooks__subcmd__list_commands() {
     local commands; commands=()
-    _describe -t commands 'ironclaw help mcp add commands' commands "$@"
+    _describe -t commands 'ironclaw help hooks list commands' commands "$@"
 }
-(( $+functions[_ironclaw__help__mcp__auth_commands] )) ||
-_ironclaw__help__mcp__auth_commands() {
+(( $+functions[_ironclaw__subcmd__help__subcmd__logs_commands] )) ||
+_ironclaw__subcmd__help__subcmd__logs_commands() {
     local commands; commands=()
-    _describe -t commands 'ironclaw help mcp auth commands' commands "$@"
+    _describe -t commands 'ironclaw help logs commands' commands "$@"
 }
-(( $+functions[_ironclaw__help__mcp__list_commands] )) ||
-_ironclaw__help__mcp__list_commands() {
-    local commands; commands=()
-    _describe -t commands 'ironclaw help mcp list commands' commands "$@"
-}
-(( $+functions[_ironclaw__help__mcp__remove_commands] )) ||
-_ironclaw__help__mcp__remove_commands() {
-    local commands; commands=()
-    _describe -t commands 'ironclaw help mcp remove commands' commands "$@"
-}
-(( $+functions[_ironclaw__help__mcp__test_commands] )) ||
-_ironclaw__help__mcp__test_commands() {
-    local commands; commands=()
-    _describe -t commands 'ironclaw help mcp test commands' commands "$@"
-}
-(( $+functions[_ironclaw__help__mcp__toggle_commands] )) ||
-_ironclaw__help__mcp__toggle_commands() {
-    local commands; commands=()
-    _describe -t commands 'ironclaw help mcp toggle commands' commands "$@"
-}
-(( $+functions[_ironclaw__help__memory_commands] )) ||
-_ironclaw__help__memory_commands() {
+(( $+functions[_ironclaw__subcmd__help__subcmd__models_commands] )) ||
+_ironclaw__subcmd__help__subcmd__models_commands() {
     local commands; commands=(
-'search:Search workspace memory (hybrid full-text + semantic)' \
-'read:Read a file from the workspace' \
-'write:Write content to a workspace file' \
-'tree:Show workspace directory tree' \
-'status:Show workspace status (document count, index health)' \
+'list:List Reborn LLM providers, or show one provider' \
+'status:Show Reborn model route status' \
+'set:Set the default Reborn model for the active provider' \
+'set-provider:Set the default Reborn LLM provider' \
     )
-    _describe -t commands 'ironclaw help memory commands' commands "$@"
+    _describe -t commands 'ironclaw help models commands' commands "$@"
 }
-(( $+functions[_ironclaw__help__memory__read_commands] )) ||
-_ironclaw__help__memory__read_commands() {
+(( $+functions[_ironclaw__subcmd__help__subcmd__models__subcmd__list_commands] )) ||
+_ironclaw__subcmd__help__subcmd__models__subcmd__list_commands() {
     local commands; commands=()
-    _describe -t commands 'ironclaw help memory read commands' commands "$@"
+    _describe -t commands 'ironclaw help models list commands' commands "$@"
 }
-(( $+functions[_ironclaw__help__memory__search_commands] )) ||
-_ironclaw__help__memory__search_commands() {
+(( $+functions[_ironclaw__subcmd__help__subcmd__models__subcmd__set_commands] )) ||
+_ironclaw__subcmd__help__subcmd__models__subcmd__set_commands() {
     local commands; commands=()
-    _describe -t commands 'ironclaw help memory search commands' commands "$@"
+    _describe -t commands 'ironclaw help models set commands' commands "$@"
 }
-(( $+functions[_ironclaw__help__memory__status_commands] )) ||
-_ironclaw__help__memory__status_commands() {
+(( $+functions[_ironclaw__subcmd__help__subcmd__models__subcmd__set-provider_commands] )) ||
+_ironclaw__subcmd__help__subcmd__models__subcmd__set-provider_commands() {
     local commands; commands=()
-    _describe -t commands 'ironclaw help memory status commands' commands "$@"
+    _describe -t commands 'ironclaw help models set-provider commands' commands "$@"
 }
-(( $+functions[_ironclaw__help__memory__tree_commands] )) ||
-_ironclaw__help__memory__tree_commands() {
+(( $+functions[_ironclaw__subcmd__help__subcmd__models__subcmd__status_commands] )) ||
+_ironclaw__subcmd__help__subcmd__models__subcmd__status_commands() {
     local commands; commands=()
-    _describe -t commands 'ironclaw help memory tree commands' commands "$@"
+    _describe -t commands 'ironclaw help models status commands' commands "$@"
 }
-(( $+functions[_ironclaw__help__memory__write_commands] )) ||
-_ironclaw__help__memory__write_commands() {
-    local commands; commands=()
-    _describe -t commands 'ironclaw help memory write commands' commands "$@"
-}
-(( $+functions[_ironclaw__help__onboard_commands] )) ||
-_ironclaw__help__onboard_commands() {
+(( $+functions[_ironclaw__subcmd__help__subcmd__onboard_commands] )) ||
+_ironclaw__subcmd__help__subcmd__onboard_commands() {
     local commands; commands=()
     _describe -t commands 'ironclaw help onboard commands' commands "$@"
 }
-(( $+functions[_ironclaw__help__pairing_commands] )) ||
-_ironclaw__help__pairing_commands() {
+(( $+functions[_ironclaw__subcmd__help__subcmd__profile_commands] )) ||
+_ironclaw__subcmd__help__subcmd__profile_commands() {
     local commands; commands=(
-'list:List pending pairing requests' \
-'approve:Approve a pairing request by code' \
+'list:List supported Reborn boot profiles' \
     )
-    _describe -t commands 'ironclaw help pairing commands' commands "$@"
+    _describe -t commands 'ironclaw help profile commands' commands "$@"
 }
-(( $+functions[_ironclaw__help__pairing__approve_commands] )) ||
-_ironclaw__help__pairing__approve_commands() {
+(( $+functions[_ironclaw__subcmd__help__subcmd__profile__subcmd__list_commands] )) ||
+_ironclaw__subcmd__help__subcmd__profile__subcmd__list_commands() {
     local commands; commands=()
-    _describe -t commands 'ironclaw help pairing approve commands' commands "$@"
+    _describe -t commands 'ironclaw help profile list commands' commands "$@"
 }
-(( $+functions[_ironclaw__help__pairing__list_commands] )) ||
-_ironclaw__help__pairing__list_commands() {
+(( $+functions[_ironclaw__subcmd__help__subcmd__repl_commands] )) ||
+_ironclaw__subcmd__help__subcmd__repl_commands() {
     local commands; commands=()
-    _describe -t commands 'ironclaw help pairing list commands' commands "$@"
+    _describe -t commands 'ironclaw help repl commands' commands "$@"
 }
-(( $+functions[_ironclaw__help__registry_commands] )) ||
-_ironclaw__help__registry_commands() {
-    local commands; commands=(
-'list:List available extensions in the registry' \
-'info:Show detailed information about an extension or bundle' \
-'install:Install an extension or bundle from the registry' \
-'install-defaults:Install the default bundle of recommended extensions' \
-    )
-    _describe -t commands 'ironclaw help registry commands' commands "$@"
-}
-(( $+functions[_ironclaw__help__registry__info_commands] )) ||
-_ironclaw__help__registry__info_commands() {
-    local commands; commands=()
-    _describe -t commands 'ironclaw help registry info commands' commands "$@"
-}
-(( $+functions[_ironclaw__help__registry__install_commands] )) ||
-_ironclaw__help__registry__install_commands() {
-    local commands; commands=()
-    _describe -t commands 'ironclaw help registry install commands' commands "$@"
-}
-(( $+functions[_ironclaw__help__registry__install-defaults_commands] )) ||
-_ironclaw__help__registry__install-defaults_commands() {
-    local commands; commands=()
-    _describe -t commands 'ironclaw help registry install-defaults commands' commands "$@"
-}
-(( $+functions[_ironclaw__help__registry__list_commands] )) ||
-_ironclaw__help__registry__list_commands() {
-    local commands; commands=()
-    _describe -t commands 'ironclaw help registry list commands' commands "$@"
-}
-(( $+functions[_ironclaw__help__run_commands] )) ||
-_ironclaw__help__run_commands() {
+(( $+functions[_ironclaw__subcmd__help__subcmd__run_commands] )) ||
+_ironclaw__subcmd__help__subcmd__run_commands() {
     local commands; commands=()
     _describe -t commands 'ironclaw help run commands' commands "$@"
 }
-(( $+functions[_ironclaw__help__service_commands] )) ||
-_ironclaw__help__service_commands() {
+(( $+functions[_ironclaw__subcmd__help__subcmd__serve_commands] )) ||
+_ironclaw__subcmd__help__subcmd__serve_commands() {
+    local commands; commands=()
+    _describe -t commands 'ironclaw help serve commands' commands "$@"
+}
+(( $+functions[_ironclaw__subcmd__help__subcmd__service_commands] )) ||
+_ironclaw__subcmd__help__subcmd__service_commands() {
     local commands; commands=(
 'install:Install the OS service (launchd on macOS, systemd on Linux)' \
 'start:Start the installed service' \
 'stop:Stop the running service' \
+'restart:Restart the service\: stop then start if running, or just start if stopped. Errors if the service is not installed' \
 'status:Show service status' \
 'uninstall:Uninstall the OS service and remove the unit file' \
     )
     _describe -t commands 'ironclaw help service commands' commands "$@"
 }
-(( $+functions[_ironclaw__help__service__install_commands] )) ||
-_ironclaw__help__service__install_commands() {
+(( $+functions[_ironclaw__subcmd__help__subcmd__service__subcmd__install_commands] )) ||
+_ironclaw__subcmd__help__subcmd__service__subcmd__install_commands() {
     local commands; commands=()
     _describe -t commands 'ironclaw help service install commands' commands "$@"
 }
-(( $+functions[_ironclaw__help__service__start_commands] )) ||
-_ironclaw__help__service__start_commands() {
+(( $+functions[_ironclaw__subcmd__help__subcmd__service__subcmd__restart_commands] )) ||
+_ironclaw__subcmd__help__subcmd__service__subcmd__restart_commands() {
+    local commands; commands=()
+    _describe -t commands 'ironclaw help service restart commands' commands "$@"
+}
+(( $+functions[_ironclaw__subcmd__help__subcmd__service__subcmd__start_commands] )) ||
+_ironclaw__subcmd__help__subcmd__service__subcmd__start_commands() {
     local commands; commands=()
     _describe -t commands 'ironclaw help service start commands' commands "$@"
 }
-(( $+functions[_ironclaw__help__service__status_commands] )) ||
-_ironclaw__help__service__status_commands() {
+(( $+functions[_ironclaw__subcmd__help__subcmd__service__subcmd__status_commands] )) ||
+_ironclaw__subcmd__help__subcmd__service__subcmd__status_commands() {
     local commands; commands=()
     _describe -t commands 'ironclaw help service status commands' commands "$@"
 }
-(( $+functions[_ironclaw__help__service__stop_commands] )) ||
-_ironclaw__help__service__stop_commands() {
+(( $+functions[_ironclaw__subcmd__help__subcmd__service__subcmd__stop_commands] )) ||
+_ironclaw__subcmd__help__subcmd__service__subcmd__stop_commands() {
     local commands; commands=()
     _describe -t commands 'ironclaw help service stop commands' commands "$@"
 }
-(( $+functions[_ironclaw__help__service__uninstall_commands] )) ||
-_ironclaw__help__service__uninstall_commands() {
+(( $+functions[_ironclaw__subcmd__help__subcmd__service__subcmd__uninstall_commands] )) ||
+_ironclaw__subcmd__help__subcmd__service__subcmd__uninstall_commands() {
     local commands; commands=()
     _describe -t commands 'ironclaw help service uninstall commands' commands "$@"
 }
-(( $+functions[_ironclaw__help__status_commands] )) ||
-_ironclaw__help__status_commands() {
+(( $+functions[_ironclaw__subcmd__help__subcmd__skills_commands] )) ||
+_ironclaw__subcmd__help__subcmd__skills_commands() {
+    local commands; commands=(
+'list:List configured Reborn skills' \
+    )
+    _describe -t commands 'ironclaw help skills commands' commands "$@"
+}
+(( $+functions[_ironclaw__subcmd__help__subcmd__skills__subcmd__list_commands] )) ||
+_ironclaw__subcmd__help__subcmd__skills__subcmd__list_commands() {
+    local commands; commands=()
+    _describe -t commands 'ironclaw help skills list commands' commands "$@"
+}
+(( $+functions[_ironclaw__subcmd__help__subcmd__status_commands] )) ||
+_ironclaw__subcmd__help__subcmd__status_commands() {
     local commands; commands=()
     _describe -t commands 'ironclaw help status commands' commands "$@"
 }
-(( $+functions[_ironclaw__help__tool_commands] )) ||
-_ironclaw__help__tool_commands() {
+(( $+functions[_ironclaw__subcmd__help__subcmd__traces_commands] )) ||
+_ironclaw__subcmd__help__subcmd__traces_commands() {
     local commands; commands=(
-'install:Install a WASM tool from source directory or .wasm file' \
-'list:List installed tools' \
-'remove:Remove an installed tool' \
-'info:Show information about a tool' \
-'auth:Configure authentication for a tool' \
+'opt-in:Enable autonomous trace contribution after local redaction' \
+'opt-out:Disable autonomous trace contribution. With --user-scope\: opt out ONLY that user (instance-level enrollment untouched). Without\: disable the global/instance policy AND the owner scope (full off switch)' \
+'enroll-instance:Enroll this ENTIRE INSTANCE in Trace Commons with an operator invite link (admin operation — requires shell access to the instance host). Every user without a personal enrollment inherits it, attributed via a salted per-user pseudonym. Exclude a single user with \`traces opt-out --user-scope <tenant-id>/<user-id>\` (bare \`traces opt-out\` disables the entire instance enrollment)' \
+'status:Show local standing trace contribution policy' \
+'preview:Preview a redacted contribution envelope from a recorded trace file' \
+'enqueue:Add an already-previewed envelope to the autonomous submission queue' \
+'flush-queue:Submit eligible queued envelopes using the standing opt-in policy' \
+'queue-status:Show local autonomous trace queue diagnostics' \
+'credit:Show local credit totals and recent credit explanations' \
+'submit:Submit an already-previewed redacted contribution envelope' \
+'list-submissions:List local trace contribution submission records' \
+'revoke:Revoke a trace contribution locally and, optionally, at an ingestion API' \
+'ingest-health:Check a Trace Commons ingestion service /health endpoint' \
+'profile:Manage the optional public community profile (second opt-in)' \
     )
-    _describe -t commands 'ironclaw help tool commands' commands "$@"
+    _describe -t commands 'ironclaw help traces commands' commands "$@"
 }
-(( $+functions[_ironclaw__help__tool__auth_commands] )) ||
-_ironclaw__help__tool__auth_commands() {
+(( $+functions[_ironclaw__subcmd__help__subcmd__traces__subcmd__credit_commands] )) ||
+_ironclaw__subcmd__help__subcmd__traces__subcmd__credit_commands() {
     local commands; commands=()
-    _describe -t commands 'ironclaw help tool auth commands' commands "$@"
+    _describe -t commands 'ironclaw help traces credit commands' commands "$@"
 }
-(( $+functions[_ironclaw__help__tool__info_commands] )) ||
-_ironclaw__help__tool__info_commands() {
+(( $+functions[_ironclaw__subcmd__help__subcmd__traces__subcmd__enqueue_commands] )) ||
+_ironclaw__subcmd__help__subcmd__traces__subcmd__enqueue_commands() {
     local commands; commands=()
-    _describe -t commands 'ironclaw help tool info commands' commands "$@"
+    _describe -t commands 'ironclaw help traces enqueue commands' commands "$@"
 }
-(( $+functions[_ironclaw__help__tool__install_commands] )) ||
-_ironclaw__help__tool__install_commands() {
+(( $+functions[_ironclaw__subcmd__help__subcmd__traces__subcmd__enroll-instance_commands] )) ||
+_ironclaw__subcmd__help__subcmd__traces__subcmd__enroll-instance_commands() {
     local commands; commands=()
-    _describe -t commands 'ironclaw help tool install commands' commands "$@"
+    _describe -t commands 'ironclaw help traces enroll-instance commands' commands "$@"
 }
-(( $+functions[_ironclaw__help__tool__list_commands] )) ||
-_ironclaw__help__tool__list_commands() {
+(( $+functions[_ironclaw__subcmd__help__subcmd__traces__subcmd__flush-queue_commands] )) ||
+_ironclaw__subcmd__help__subcmd__traces__subcmd__flush-queue_commands() {
     local commands; commands=()
-    _describe -t commands 'ironclaw help tool list commands' commands "$@"
+    _describe -t commands 'ironclaw help traces flush-queue commands' commands "$@"
 }
-(( $+functions[_ironclaw__help__tool__remove_commands] )) ||
-_ironclaw__help__tool__remove_commands() {
+(( $+functions[_ironclaw__subcmd__help__subcmd__traces__subcmd__ingest-health_commands] )) ||
+_ironclaw__subcmd__help__subcmd__traces__subcmd__ingest-health_commands() {
     local commands; commands=()
-    _describe -t commands 'ironclaw help tool remove commands' commands "$@"
+    _describe -t commands 'ironclaw help traces ingest-health commands' commands "$@"
 }
-(( $+functions[_ironclaw__help__worker_commands] )) ||
-_ironclaw__help__worker_commands() {
+(( $+functions[_ironclaw__subcmd__help__subcmd__traces__subcmd__list-submissions_commands] )) ||
+_ironclaw__subcmd__help__subcmd__traces__subcmd__list-submissions_commands() {
     local commands; commands=()
-    _describe -t commands 'ironclaw help worker commands' commands "$@"
+    _describe -t commands 'ironclaw help traces list-submissions commands' commands "$@"
 }
-(( $+functions[_ironclaw__mcp_commands] )) ||
-_ironclaw__mcp_commands() {
+(( $+functions[_ironclaw__subcmd__help__subcmd__traces__subcmd__opt-in_commands] )) ||
+_ironclaw__subcmd__help__subcmd__traces__subcmd__opt-in_commands() {
+    local commands; commands=()
+    _describe -t commands 'ironclaw help traces opt-in commands' commands "$@"
+}
+(( $+functions[_ironclaw__subcmd__help__subcmd__traces__subcmd__opt-out_commands] )) ||
+_ironclaw__subcmd__help__subcmd__traces__subcmd__opt-out_commands() {
+    local commands; commands=()
+    _describe -t commands 'ironclaw help traces opt-out commands' commands "$@"
+}
+(( $+functions[_ironclaw__subcmd__help__subcmd__traces__subcmd__preview_commands] )) ||
+_ironclaw__subcmd__help__subcmd__traces__subcmd__preview_commands() {
+    local commands; commands=()
+    _describe -t commands 'ironclaw help traces preview commands' commands "$@"
+}
+(( $+functions[_ironclaw__subcmd__help__subcmd__traces__subcmd__profile_commands] )) ||
+_ironclaw__subcmd__help__subcmd__traces__subcmd__profile_commands() {
     local commands; commands=(
-'add:Add an MCP server' \
-'remove:Remove an MCP server' \
-'list:List configured MCP servers' \
-'auth:Authenticate with an MCP server (OAuth flow)' \
-'test:Test connection to an MCP server' \
-'toggle:Enable or disable an MCP server' \
+'token:Mint a short-lived profile token for the Trace Commons web profile page' \
+'set:Create or update the public community profile' \
+'withdraw:Withdraw the public community profile' \
+    )
+    _describe -t commands 'ironclaw help traces profile commands' commands "$@"
+}
+(( $+functions[_ironclaw__subcmd__help__subcmd__traces__subcmd__profile__subcmd__set_commands] )) ||
+_ironclaw__subcmd__help__subcmd__traces__subcmd__profile__subcmd__set_commands() {
+    local commands; commands=()
+    _describe -t commands 'ironclaw help traces profile set commands' commands "$@"
+}
+(( $+functions[_ironclaw__subcmd__help__subcmd__traces__subcmd__profile__subcmd__token_commands] )) ||
+_ironclaw__subcmd__help__subcmd__traces__subcmd__profile__subcmd__token_commands() {
+    local commands; commands=()
+    _describe -t commands 'ironclaw help traces profile token commands' commands "$@"
+}
+(( $+functions[_ironclaw__subcmd__help__subcmd__traces__subcmd__profile__subcmd__withdraw_commands] )) ||
+_ironclaw__subcmd__help__subcmd__traces__subcmd__profile__subcmd__withdraw_commands() {
+    local commands; commands=()
+    _describe -t commands 'ironclaw help traces profile withdraw commands' commands "$@"
+}
+(( $+functions[_ironclaw__subcmd__help__subcmd__traces__subcmd__queue-status_commands] )) ||
+_ironclaw__subcmd__help__subcmd__traces__subcmd__queue-status_commands() {
+    local commands; commands=()
+    _describe -t commands 'ironclaw help traces queue-status commands' commands "$@"
+}
+(( $+functions[_ironclaw__subcmd__help__subcmd__traces__subcmd__revoke_commands] )) ||
+_ironclaw__subcmd__help__subcmd__traces__subcmd__revoke_commands() {
+    local commands; commands=()
+    _describe -t commands 'ironclaw help traces revoke commands' commands "$@"
+}
+(( $+functions[_ironclaw__subcmd__help__subcmd__traces__subcmd__status_commands] )) ||
+_ironclaw__subcmd__help__subcmd__traces__subcmd__status_commands() {
+    local commands; commands=()
+    _describe -t commands 'ironclaw help traces status commands' commands "$@"
+}
+(( $+functions[_ironclaw__subcmd__help__subcmd__traces__subcmd__submit_commands] )) ||
+_ironclaw__subcmd__help__subcmd__traces__subcmd__submit_commands() {
+    local commands; commands=()
+    _describe -t commands 'ironclaw help traces submit commands' commands "$@"
+}
+(( $+functions[_ironclaw__subcmd__hooks_commands] )) ||
+_ironclaw__subcmd__hooks_commands() {
+    local commands; commands=(
+'list:List configured Reborn hooks' \
 'help:Print this message or the help of the given subcommand(s)' \
     )
-    _describe -t commands 'ironclaw mcp commands' commands "$@"
+    _describe -t commands 'ironclaw hooks commands' commands "$@"
 }
-(( $+functions[_ironclaw__mcp__add_commands] )) ||
-_ironclaw__mcp__add_commands() {
-    local commands; commands=()
-    _describe -t commands 'ironclaw mcp add commands' commands "$@"
-}
-(( $+functions[_ironclaw__mcp__auth_commands] )) ||
-_ironclaw__mcp__auth_commands() {
-    local commands; commands=()
-    _describe -t commands 'ironclaw mcp auth commands' commands "$@"
-}
-(( $+functions[_ironclaw__mcp__help_commands] )) ||
-_ironclaw__mcp__help_commands() {
+(( $+functions[_ironclaw__subcmd__hooks__subcmd__help_commands] )) ||
+_ironclaw__subcmd__hooks__subcmd__help_commands() {
     local commands; commands=(
-'add:Add an MCP server' \
-'remove:Remove an MCP server' \
-'list:List configured MCP servers' \
-'auth:Authenticate with an MCP server (OAuth flow)' \
-'test:Test connection to an MCP server' \
-'toggle:Enable or disable an MCP server' \
+'list:List configured Reborn hooks' \
 'help:Print this message or the help of the given subcommand(s)' \
     )
-    _describe -t commands 'ironclaw mcp help commands' commands "$@"
+    _describe -t commands 'ironclaw hooks help commands' commands "$@"
 }
-(( $+functions[_ironclaw__mcp__help__add_commands] )) ||
-_ironclaw__mcp__help__add_commands() {
+(( $+functions[_ironclaw__subcmd__hooks__subcmd__help__subcmd__help_commands] )) ||
+_ironclaw__subcmd__hooks__subcmd__help__subcmd__help_commands() {
     local commands; commands=()
-    _describe -t commands 'ironclaw mcp help add commands' commands "$@"
+    _describe -t commands 'ironclaw hooks help help commands' commands "$@"
 }
-(( $+functions[_ironclaw__mcp__help__auth_commands] )) ||
-_ironclaw__mcp__help__auth_commands() {
+(( $+functions[_ironclaw__subcmd__hooks__subcmd__help__subcmd__list_commands] )) ||
+_ironclaw__subcmd__hooks__subcmd__help__subcmd__list_commands() {
     local commands; commands=()
-    _describe -t commands 'ironclaw mcp help auth commands' commands "$@"
+    _describe -t commands 'ironclaw hooks help list commands' commands "$@"
 }
-(( $+functions[_ironclaw__mcp__help__help_commands] )) ||
-_ironclaw__mcp__help__help_commands() {
+(( $+functions[_ironclaw__subcmd__hooks__subcmd__list_commands] )) ||
+_ironclaw__subcmd__hooks__subcmd__list_commands() {
     local commands; commands=()
-    _describe -t commands 'ironclaw mcp help help commands' commands "$@"
+    _describe -t commands 'ironclaw hooks list commands' commands "$@"
 }
-(( $+functions[_ironclaw__mcp__help__list_commands] )) ||
-_ironclaw__mcp__help__list_commands() {
+(( $+functions[_ironclaw__subcmd__logs_commands] )) ||
+_ironclaw__subcmd__logs_commands() {
     local commands; commands=()
-    _describe -t commands 'ironclaw mcp help list commands' commands "$@"
+    _describe -t commands 'ironclaw logs commands' commands "$@"
 }
-(( $+functions[_ironclaw__mcp__help__remove_commands] )) ||
-_ironclaw__mcp__help__remove_commands() {
-    local commands; commands=()
-    _describe -t commands 'ironclaw mcp help remove commands' commands "$@"
-}
-(( $+functions[_ironclaw__mcp__help__test_commands] )) ||
-_ironclaw__mcp__help__test_commands() {
-    local commands; commands=()
-    _describe -t commands 'ironclaw mcp help test commands' commands "$@"
-}
-(( $+functions[_ironclaw__mcp__help__toggle_commands] )) ||
-_ironclaw__mcp__help__toggle_commands() {
-    local commands; commands=()
-    _describe -t commands 'ironclaw mcp help toggle commands' commands "$@"
-}
-(( $+functions[_ironclaw__mcp__list_commands] )) ||
-_ironclaw__mcp__list_commands() {
-    local commands; commands=()
-    _describe -t commands 'ironclaw mcp list commands' commands "$@"
-}
-(( $+functions[_ironclaw__mcp__remove_commands] )) ||
-_ironclaw__mcp__remove_commands() {
-    local commands; commands=()
-    _describe -t commands 'ironclaw mcp remove commands' commands "$@"
-}
-(( $+functions[_ironclaw__mcp__test_commands] )) ||
-_ironclaw__mcp__test_commands() {
-    local commands; commands=()
-    _describe -t commands 'ironclaw mcp test commands' commands "$@"
-}
-(( $+functions[_ironclaw__mcp__toggle_commands] )) ||
-_ironclaw__mcp__toggle_commands() {
-    local commands; commands=()
-    _describe -t commands 'ironclaw mcp toggle commands' commands "$@"
-}
-(( $+functions[_ironclaw__memory_commands] )) ||
-_ironclaw__memory_commands() {
+(( $+functions[_ironclaw__subcmd__models_commands] )) ||
+_ironclaw__subcmd__models_commands() {
     local commands; commands=(
-'search:Search workspace memory (hybrid full-text + semantic)' \
-'read:Read a file from the workspace' \
-'write:Write content to a workspace file' \
-'tree:Show workspace directory tree' \
-'status:Show workspace status (document count, index health)' \
+'list:List Reborn LLM providers, or show one provider' \
+'status:Show Reborn model route status' \
+'set:Set the default Reborn model for the active provider' \
+'set-provider:Set the default Reborn LLM provider' \
 'help:Print this message or the help of the given subcommand(s)' \
     )
-    _describe -t commands 'ironclaw memory commands' commands "$@"
+    _describe -t commands 'ironclaw models commands' commands "$@"
 }
-(( $+functions[_ironclaw__memory__help_commands] )) ||
-_ironclaw__memory__help_commands() {
+(( $+functions[_ironclaw__subcmd__models__subcmd__help_commands] )) ||
+_ironclaw__subcmd__models__subcmd__help_commands() {
     local commands; commands=(
-'search:Search workspace memory (hybrid full-text + semantic)' \
-'read:Read a file from the workspace' \
-'write:Write content to a workspace file' \
-'tree:Show workspace directory tree' \
-'status:Show workspace status (document count, index health)' \
+'list:List Reborn LLM providers, or show one provider' \
+'status:Show Reborn model route status' \
+'set:Set the default Reborn model for the active provider' \
+'set-provider:Set the default Reborn LLM provider' \
 'help:Print this message or the help of the given subcommand(s)' \
     )
-    _describe -t commands 'ironclaw memory help commands' commands "$@"
+    _describe -t commands 'ironclaw models help commands' commands "$@"
 }
-(( $+functions[_ironclaw__memory__help__help_commands] )) ||
-_ironclaw__memory__help__help_commands() {
+(( $+functions[_ironclaw__subcmd__models__subcmd__help__subcmd__help_commands] )) ||
+_ironclaw__subcmd__models__subcmd__help__subcmd__help_commands() {
     local commands; commands=()
-    _describe -t commands 'ironclaw memory help help commands' commands "$@"
+    _describe -t commands 'ironclaw models help help commands' commands "$@"
 }
-(( $+functions[_ironclaw__memory__help__read_commands] )) ||
-_ironclaw__memory__help__read_commands() {
+(( $+functions[_ironclaw__subcmd__models__subcmd__help__subcmd__list_commands] )) ||
+_ironclaw__subcmd__models__subcmd__help__subcmd__list_commands() {
     local commands; commands=()
-    _describe -t commands 'ironclaw memory help read commands' commands "$@"
+    _describe -t commands 'ironclaw models help list commands' commands "$@"
 }
-(( $+functions[_ironclaw__memory__help__search_commands] )) ||
-_ironclaw__memory__help__search_commands() {
+(( $+functions[_ironclaw__subcmd__models__subcmd__help__subcmd__set_commands] )) ||
+_ironclaw__subcmd__models__subcmd__help__subcmd__set_commands() {
     local commands; commands=()
-    _describe -t commands 'ironclaw memory help search commands' commands "$@"
+    _describe -t commands 'ironclaw models help set commands' commands "$@"
 }
-(( $+functions[_ironclaw__memory__help__status_commands] )) ||
-_ironclaw__memory__help__status_commands() {
+(( $+functions[_ironclaw__subcmd__models__subcmd__help__subcmd__set-provider_commands] )) ||
+_ironclaw__subcmd__models__subcmd__help__subcmd__set-provider_commands() {
     local commands; commands=()
-    _describe -t commands 'ironclaw memory help status commands' commands "$@"
+    _describe -t commands 'ironclaw models help set-provider commands' commands "$@"
 }
-(( $+functions[_ironclaw__memory__help__tree_commands] )) ||
-_ironclaw__memory__help__tree_commands() {
+(( $+functions[_ironclaw__subcmd__models__subcmd__help__subcmd__status_commands] )) ||
+_ironclaw__subcmd__models__subcmd__help__subcmd__status_commands() {
     local commands; commands=()
-    _describe -t commands 'ironclaw memory help tree commands' commands "$@"
+    _describe -t commands 'ironclaw models help status commands' commands "$@"
 }
-(( $+functions[_ironclaw__memory__help__write_commands] )) ||
-_ironclaw__memory__help__write_commands() {
+(( $+functions[_ironclaw__subcmd__models__subcmd__list_commands] )) ||
+_ironclaw__subcmd__models__subcmd__list_commands() {
     local commands; commands=()
-    _describe -t commands 'ironclaw memory help write commands' commands "$@"
+    _describe -t commands 'ironclaw models list commands' commands "$@"
 }
-(( $+functions[_ironclaw__memory__read_commands] )) ||
-_ironclaw__memory__read_commands() {
+(( $+functions[_ironclaw__subcmd__models__subcmd__set_commands] )) ||
+_ironclaw__subcmd__models__subcmd__set_commands() {
     local commands; commands=()
-    _describe -t commands 'ironclaw memory read commands' commands "$@"
+    _describe -t commands 'ironclaw models set commands' commands "$@"
 }
-(( $+functions[_ironclaw__memory__search_commands] )) ||
-_ironclaw__memory__search_commands() {
+(( $+functions[_ironclaw__subcmd__models__subcmd__set-provider_commands] )) ||
+_ironclaw__subcmd__models__subcmd__set-provider_commands() {
     local commands; commands=()
-    _describe -t commands 'ironclaw memory search commands' commands "$@"
+    _describe -t commands 'ironclaw models set-provider commands' commands "$@"
 }
-(( $+functions[_ironclaw__memory__status_commands] )) ||
-_ironclaw__memory__status_commands() {
+(( $+functions[_ironclaw__subcmd__models__subcmd__status_commands] )) ||
+_ironclaw__subcmd__models__subcmd__status_commands() {
     local commands; commands=()
-    _describe -t commands 'ironclaw memory status commands' commands "$@"
+    _describe -t commands 'ironclaw models status commands' commands "$@"
 }
-(( $+functions[_ironclaw__memory__tree_commands] )) ||
-_ironclaw__memory__tree_commands() {
-    local commands; commands=()
-    _describe -t commands 'ironclaw memory tree commands' commands "$@"
-}
-(( $+functions[_ironclaw__memory__write_commands] )) ||
-_ironclaw__memory__write_commands() {
-    local commands; commands=()
-    _describe -t commands 'ironclaw memory write commands' commands "$@"
-}
-(( $+functions[_ironclaw__onboard_commands] )) ||
-_ironclaw__onboard_commands() {
+(( $+functions[_ironclaw__subcmd__onboard_commands] )) ||
+_ironclaw__subcmd__onboard_commands() {
     local commands; commands=()
     _describe -t commands 'ironclaw onboard commands' commands "$@"
 }
-(( $+functions[_ironclaw__pairing_commands] )) ||
-_ironclaw__pairing_commands() {
+(( $+functions[_ironclaw__subcmd__profile_commands] )) ||
+_ironclaw__subcmd__profile_commands() {
     local commands; commands=(
-'list:List pending pairing requests' \
-'approve:Approve a pairing request by code' \
+'list:List supported Reborn boot profiles' \
 'help:Print this message or the help of the given subcommand(s)' \
     )
-    _describe -t commands 'ironclaw pairing commands' commands "$@"
+    _describe -t commands 'ironclaw profile commands' commands "$@"
 }
-(( $+functions[_ironclaw__pairing__approve_commands] )) ||
-_ironclaw__pairing__approve_commands() {
-    local commands; commands=()
-    _describe -t commands 'ironclaw pairing approve commands' commands "$@"
-}
-(( $+functions[_ironclaw__pairing__help_commands] )) ||
-_ironclaw__pairing__help_commands() {
+(( $+functions[_ironclaw__subcmd__profile__subcmd__help_commands] )) ||
+_ironclaw__subcmd__profile__subcmd__help_commands() {
     local commands; commands=(
-'list:List pending pairing requests' \
-'approve:Approve a pairing request by code' \
+'list:List supported Reborn boot profiles' \
 'help:Print this message or the help of the given subcommand(s)' \
     )
-    _describe -t commands 'ironclaw pairing help commands' commands "$@"
+    _describe -t commands 'ironclaw profile help commands' commands "$@"
 }
-(( $+functions[_ironclaw__pairing__help__approve_commands] )) ||
-_ironclaw__pairing__help__approve_commands() {
+(( $+functions[_ironclaw__subcmd__profile__subcmd__help__subcmd__help_commands] )) ||
+_ironclaw__subcmd__profile__subcmd__help__subcmd__help_commands() {
     local commands; commands=()
-    _describe -t commands 'ironclaw pairing help approve commands' commands "$@"
+    _describe -t commands 'ironclaw profile help help commands' commands "$@"
 }
-(( $+functions[_ironclaw__pairing__help__help_commands] )) ||
-_ironclaw__pairing__help__help_commands() {
+(( $+functions[_ironclaw__subcmd__profile__subcmd__help__subcmd__list_commands] )) ||
+_ironclaw__subcmd__profile__subcmd__help__subcmd__list_commands() {
     local commands; commands=()
-    _describe -t commands 'ironclaw pairing help help commands' commands "$@"
+    _describe -t commands 'ironclaw profile help list commands' commands "$@"
 }
-(( $+functions[_ironclaw__pairing__help__list_commands] )) ||
-_ironclaw__pairing__help__list_commands() {
+(( $+functions[_ironclaw__subcmd__profile__subcmd__list_commands] )) ||
+_ironclaw__subcmd__profile__subcmd__list_commands() {
     local commands; commands=()
-    _describe -t commands 'ironclaw pairing help list commands' commands "$@"
+    _describe -t commands 'ironclaw profile list commands' commands "$@"
 }
-(( $+functions[_ironclaw__pairing__list_commands] )) ||
-_ironclaw__pairing__list_commands() {
+(( $+functions[_ironclaw__subcmd__repl_commands] )) ||
+_ironclaw__subcmd__repl_commands() {
     local commands; commands=()
-    _describe -t commands 'ironclaw pairing list commands' commands "$@"
+    _describe -t commands 'ironclaw repl commands' commands "$@"
 }
-(( $+functions[_ironclaw__registry_commands] )) ||
-_ironclaw__registry_commands() {
-    local commands; commands=(
-'list:List available extensions in the registry' \
-'info:Show detailed information about an extension or bundle' \
-'install:Install an extension or bundle from the registry' \
-'install-defaults:Install the default bundle of recommended extensions' \
-'help:Print this message or the help of the given subcommand(s)' \
-    )
-    _describe -t commands 'ironclaw registry commands' commands "$@"
-}
-(( $+functions[_ironclaw__registry__help_commands] )) ||
-_ironclaw__registry__help_commands() {
-    local commands; commands=(
-'list:List available extensions in the registry' \
-'info:Show detailed information about an extension or bundle' \
-'install:Install an extension or bundle from the registry' \
-'install-defaults:Install the default bundle of recommended extensions' \
-'help:Print this message or the help of the given subcommand(s)' \
-    )
-    _describe -t commands 'ironclaw registry help commands' commands "$@"
-}
-(( $+functions[_ironclaw__registry__help__help_commands] )) ||
-_ironclaw__registry__help__help_commands() {
-    local commands; commands=()
-    _describe -t commands 'ironclaw registry help help commands' commands "$@"
-}
-(( $+functions[_ironclaw__registry__help__info_commands] )) ||
-_ironclaw__registry__help__info_commands() {
-    local commands; commands=()
-    _describe -t commands 'ironclaw registry help info commands' commands "$@"
-}
-(( $+functions[_ironclaw__registry__help__install_commands] )) ||
-_ironclaw__registry__help__install_commands() {
-    local commands; commands=()
-    _describe -t commands 'ironclaw registry help install commands' commands "$@"
-}
-(( $+functions[_ironclaw__registry__help__install-defaults_commands] )) ||
-_ironclaw__registry__help__install-defaults_commands() {
-    local commands; commands=()
-    _describe -t commands 'ironclaw registry help install-defaults commands' commands "$@"
-}
-(( $+functions[_ironclaw__registry__help__list_commands] )) ||
-_ironclaw__registry__help__list_commands() {
-    local commands; commands=()
-    _describe -t commands 'ironclaw registry help list commands' commands "$@"
-}
-(( $+functions[_ironclaw__registry__info_commands] )) ||
-_ironclaw__registry__info_commands() {
-    local commands; commands=()
-    _describe -t commands 'ironclaw registry info commands' commands "$@"
-}
-(( $+functions[_ironclaw__registry__install_commands] )) ||
-_ironclaw__registry__install_commands() {
-    local commands; commands=()
-    _describe -t commands 'ironclaw registry install commands' commands "$@"
-}
-(( $+functions[_ironclaw__registry__install-defaults_commands] )) ||
-_ironclaw__registry__install-defaults_commands() {
-    local commands; commands=()
-    _describe -t commands 'ironclaw registry install-defaults commands' commands "$@"
-}
-(( $+functions[_ironclaw__registry__list_commands] )) ||
-_ironclaw__registry__list_commands() {
-    local commands; commands=()
-    _describe -t commands 'ironclaw registry list commands' commands "$@"
-}
-(( $+functions[_ironclaw__run_commands] )) ||
-_ironclaw__run_commands() {
+(( $+functions[_ironclaw__subcmd__run_commands] )) ||
+_ironclaw__subcmd__run_commands() {
     local commands; commands=()
     _describe -t commands 'ironclaw run commands' commands "$@"
 }
-(( $+functions[_ironclaw__service_commands] )) ||
-_ironclaw__service_commands() {
+(( $+functions[_ironclaw__subcmd__serve_commands] )) ||
+_ironclaw__subcmd__serve_commands() {
+    local commands; commands=()
+    _describe -t commands 'ironclaw serve commands' commands "$@"
+}
+(( $+functions[_ironclaw__subcmd__service_commands] )) ||
+_ironclaw__subcmd__service_commands() {
     local commands; commands=(
 'install:Install the OS service (launchd on macOS, systemd on Linux)' \
 'start:Start the installed service' \
 'stop:Stop the running service' \
+'restart:Restart the service\: stop then start if running, or just start if stopped. Errors if the service is not installed' \
 'status:Show service status' \
 'uninstall:Uninstall the OS service and remove the unit file' \
 'help:Print this message or the help of the given subcommand(s)' \
     )
     _describe -t commands 'ironclaw service commands' commands "$@"
 }
-(( $+functions[_ironclaw__service__help_commands] )) ||
-_ironclaw__service__help_commands() {
+(( $+functions[_ironclaw__subcmd__service__subcmd__help_commands] )) ||
+_ironclaw__subcmd__service__subcmd__help_commands() {
     local commands; commands=(
 'install:Install the OS service (launchd on macOS, systemd on Linux)' \
 'start:Start the installed service' \
 'stop:Stop the running service' \
+'restart:Restart the service\: stop then start if running, or just start if stopped. Errors if the service is not installed' \
 'status:Show service status' \
 'uninstall:Uninstall the OS service and remove the unit file' \
 'help:Print this message or the help of the given subcommand(s)' \
     )
     _describe -t commands 'ironclaw service help commands' commands "$@"
 }
-(( $+functions[_ironclaw__service__help__help_commands] )) ||
-_ironclaw__service__help__help_commands() {
+(( $+functions[_ironclaw__subcmd__service__subcmd__help__subcmd__help_commands] )) ||
+_ironclaw__subcmd__service__subcmd__help__subcmd__help_commands() {
     local commands; commands=()
     _describe -t commands 'ironclaw service help help commands' commands "$@"
 }
-(( $+functions[_ironclaw__service__help__install_commands] )) ||
-_ironclaw__service__help__install_commands() {
+(( $+functions[_ironclaw__subcmd__service__subcmd__help__subcmd__install_commands] )) ||
+_ironclaw__subcmd__service__subcmd__help__subcmd__install_commands() {
     local commands; commands=()
     _describe -t commands 'ironclaw service help install commands' commands "$@"
 }
-(( $+functions[_ironclaw__service__help__start_commands] )) ||
-_ironclaw__service__help__start_commands() {
+(( $+functions[_ironclaw__subcmd__service__subcmd__help__subcmd__restart_commands] )) ||
+_ironclaw__subcmd__service__subcmd__help__subcmd__restart_commands() {
+    local commands; commands=()
+    _describe -t commands 'ironclaw service help restart commands' commands "$@"
+}
+(( $+functions[_ironclaw__subcmd__service__subcmd__help__subcmd__start_commands] )) ||
+_ironclaw__subcmd__service__subcmd__help__subcmd__start_commands() {
     local commands; commands=()
     _describe -t commands 'ironclaw service help start commands' commands "$@"
 }
-(( $+functions[_ironclaw__service__help__status_commands] )) ||
-_ironclaw__service__help__status_commands() {
+(( $+functions[_ironclaw__subcmd__service__subcmd__help__subcmd__status_commands] )) ||
+_ironclaw__subcmd__service__subcmd__help__subcmd__status_commands() {
     local commands; commands=()
     _describe -t commands 'ironclaw service help status commands' commands "$@"
 }
-(( $+functions[_ironclaw__service__help__stop_commands] )) ||
-_ironclaw__service__help__stop_commands() {
+(( $+functions[_ironclaw__subcmd__service__subcmd__help__subcmd__stop_commands] )) ||
+_ironclaw__subcmd__service__subcmd__help__subcmd__stop_commands() {
     local commands; commands=()
     _describe -t commands 'ironclaw service help stop commands' commands "$@"
 }
-(( $+functions[_ironclaw__service__help__uninstall_commands] )) ||
-_ironclaw__service__help__uninstall_commands() {
+(( $+functions[_ironclaw__subcmd__service__subcmd__help__subcmd__uninstall_commands] )) ||
+_ironclaw__subcmd__service__subcmd__help__subcmd__uninstall_commands() {
     local commands; commands=()
     _describe -t commands 'ironclaw service help uninstall commands' commands "$@"
 }
-(( $+functions[_ironclaw__service__install_commands] )) ||
-_ironclaw__service__install_commands() {
+(( $+functions[_ironclaw__subcmd__service__subcmd__install_commands] )) ||
+_ironclaw__subcmd__service__subcmd__install_commands() {
     local commands; commands=()
     _describe -t commands 'ironclaw service install commands' commands "$@"
 }
-(( $+functions[_ironclaw__service__start_commands] )) ||
-_ironclaw__service__start_commands() {
+(( $+functions[_ironclaw__subcmd__service__subcmd__restart_commands] )) ||
+_ironclaw__subcmd__service__subcmd__restart_commands() {
+    local commands; commands=()
+    _describe -t commands 'ironclaw service restart commands' commands "$@"
+}
+(( $+functions[_ironclaw__subcmd__service__subcmd__start_commands] )) ||
+_ironclaw__subcmd__service__subcmd__start_commands() {
     local commands; commands=()
     _describe -t commands 'ironclaw service start commands' commands "$@"
 }
-(( $+functions[_ironclaw__service__status_commands] )) ||
-_ironclaw__service__status_commands() {
+(( $+functions[_ironclaw__subcmd__service__subcmd__status_commands] )) ||
+_ironclaw__subcmd__service__subcmd__status_commands() {
     local commands; commands=()
     _describe -t commands 'ironclaw service status commands' commands "$@"
 }
-(( $+functions[_ironclaw__service__stop_commands] )) ||
-_ironclaw__service__stop_commands() {
+(( $+functions[_ironclaw__subcmd__service__subcmd__stop_commands] )) ||
+_ironclaw__subcmd__service__subcmd__stop_commands() {
     local commands; commands=()
     _describe -t commands 'ironclaw service stop commands' commands "$@"
 }
-(( $+functions[_ironclaw__service__uninstall_commands] )) ||
-_ironclaw__service__uninstall_commands() {
+(( $+functions[_ironclaw__subcmd__service__subcmd__uninstall_commands] )) ||
+_ironclaw__subcmd__service__subcmd__uninstall_commands() {
     local commands; commands=()
     _describe -t commands 'ironclaw service uninstall commands' commands "$@"
 }
-(( $+functions[_ironclaw__status_commands] )) ||
-_ironclaw__status_commands() {
+(( $+functions[_ironclaw__subcmd__skills_commands] )) ||
+_ironclaw__subcmd__skills_commands() {
+    local commands; commands=(
+'list:List configured Reborn skills' \
+'help:Print this message or the help of the given subcommand(s)' \
+    )
+    _describe -t commands 'ironclaw skills commands' commands "$@"
+}
+(( $+functions[_ironclaw__subcmd__skills__subcmd__help_commands] )) ||
+_ironclaw__subcmd__skills__subcmd__help_commands() {
+    local commands; commands=(
+'list:List configured Reborn skills' \
+'help:Print this message or the help of the given subcommand(s)' \
+    )
+    _describe -t commands 'ironclaw skills help commands' commands "$@"
+}
+(( $+functions[_ironclaw__subcmd__skills__subcmd__help__subcmd__help_commands] )) ||
+_ironclaw__subcmd__skills__subcmd__help__subcmd__help_commands() {
+    local commands; commands=()
+    _describe -t commands 'ironclaw skills help help commands' commands "$@"
+}
+(( $+functions[_ironclaw__subcmd__skills__subcmd__help__subcmd__list_commands] )) ||
+_ironclaw__subcmd__skills__subcmd__help__subcmd__list_commands() {
+    local commands; commands=()
+    _describe -t commands 'ironclaw skills help list commands' commands "$@"
+}
+(( $+functions[_ironclaw__subcmd__skills__subcmd__list_commands] )) ||
+_ironclaw__subcmd__skills__subcmd__list_commands() {
+    local commands; commands=()
+    _describe -t commands 'ironclaw skills list commands' commands "$@"
+}
+(( $+functions[_ironclaw__subcmd__status_commands] )) ||
+_ironclaw__subcmd__status_commands() {
     local commands; commands=()
     _describe -t commands 'ironclaw status commands' commands "$@"
 }
-(( $+functions[_ironclaw__tool_commands] )) ||
-_ironclaw__tool_commands() {
+(( $+functions[_ironclaw__subcmd__traces_commands] )) ||
+_ironclaw__subcmd__traces_commands() {
     local commands; commands=(
-'install:Install a WASM tool from source directory or .wasm file' \
-'list:List installed tools' \
-'remove:Remove an installed tool' \
-'info:Show information about a tool' \
-'auth:Configure authentication for a tool' \
+'opt-in:Enable autonomous trace contribution after local redaction' \
+'opt-out:Disable autonomous trace contribution. With --user-scope\: opt out ONLY that user (instance-level enrollment untouched). Without\: disable the global/instance policy AND the owner scope (full off switch)' \
+'enroll-instance:Enroll this ENTIRE INSTANCE in Trace Commons with an operator invite link (admin operation — requires shell access to the instance host). Every user without a personal enrollment inherits it, attributed via a salted per-user pseudonym. Exclude a single user with \`traces opt-out --user-scope <tenant-id>/<user-id>\` (bare \`traces opt-out\` disables the entire instance enrollment)' \
+'status:Show local standing trace contribution policy' \
+'preview:Preview a redacted contribution envelope from a recorded trace file' \
+'enqueue:Add an already-previewed envelope to the autonomous submission queue' \
+'flush-queue:Submit eligible queued envelopes using the standing opt-in policy' \
+'queue-status:Show local autonomous trace queue diagnostics' \
+'credit:Show local credit totals and recent credit explanations' \
+'submit:Submit an already-previewed redacted contribution envelope' \
+'list-submissions:List local trace contribution submission records' \
+'revoke:Revoke a trace contribution locally and, optionally, at an ingestion API' \
+'ingest-health:Check a Trace Commons ingestion service /health endpoint' \
+'profile:Manage the optional public community profile (second opt-in)' \
 'help:Print this message or the help of the given subcommand(s)' \
     )
-    _describe -t commands 'ironclaw tool commands' commands "$@"
+    _describe -t commands 'ironclaw traces commands' commands "$@"
 }
-(( $+functions[_ironclaw__tool__auth_commands] )) ||
-_ironclaw__tool__auth_commands() {
+(( $+functions[_ironclaw__subcmd__traces__subcmd__credit_commands] )) ||
+_ironclaw__subcmd__traces__subcmd__credit_commands() {
     local commands; commands=()
-    _describe -t commands 'ironclaw tool auth commands' commands "$@"
+    _describe -t commands 'ironclaw traces credit commands' commands "$@"
 }
-(( $+functions[_ironclaw__tool__help_commands] )) ||
-_ironclaw__tool__help_commands() {
+(( $+functions[_ironclaw__subcmd__traces__subcmd__enqueue_commands] )) ||
+_ironclaw__subcmd__traces__subcmd__enqueue_commands() {
+    local commands; commands=()
+    _describe -t commands 'ironclaw traces enqueue commands' commands "$@"
+}
+(( $+functions[_ironclaw__subcmd__traces__subcmd__enroll-instance_commands] )) ||
+_ironclaw__subcmd__traces__subcmd__enroll-instance_commands() {
+    local commands; commands=()
+    _describe -t commands 'ironclaw traces enroll-instance commands' commands "$@"
+}
+(( $+functions[_ironclaw__subcmd__traces__subcmd__flush-queue_commands] )) ||
+_ironclaw__subcmd__traces__subcmd__flush-queue_commands() {
+    local commands; commands=()
+    _describe -t commands 'ironclaw traces flush-queue commands' commands "$@"
+}
+(( $+functions[_ironclaw__subcmd__traces__subcmd__help_commands] )) ||
+_ironclaw__subcmd__traces__subcmd__help_commands() {
     local commands; commands=(
-'install:Install a WASM tool from source directory or .wasm file' \
-'list:List installed tools' \
-'remove:Remove an installed tool' \
-'info:Show information about a tool' \
-'auth:Configure authentication for a tool' \
+'opt-in:Enable autonomous trace contribution after local redaction' \
+'opt-out:Disable autonomous trace contribution. With --user-scope\: opt out ONLY that user (instance-level enrollment untouched). Without\: disable the global/instance policy AND the owner scope (full off switch)' \
+'enroll-instance:Enroll this ENTIRE INSTANCE in Trace Commons with an operator invite link (admin operation — requires shell access to the instance host). Every user without a personal enrollment inherits it, attributed via a salted per-user pseudonym. Exclude a single user with \`traces opt-out --user-scope <tenant-id>/<user-id>\` (bare \`traces opt-out\` disables the entire instance enrollment)' \
+'status:Show local standing trace contribution policy' \
+'preview:Preview a redacted contribution envelope from a recorded trace file' \
+'enqueue:Add an already-previewed envelope to the autonomous submission queue' \
+'flush-queue:Submit eligible queued envelopes using the standing opt-in policy' \
+'queue-status:Show local autonomous trace queue diagnostics' \
+'credit:Show local credit totals and recent credit explanations' \
+'submit:Submit an already-previewed redacted contribution envelope' \
+'list-submissions:List local trace contribution submission records' \
+'revoke:Revoke a trace contribution locally and, optionally, at an ingestion API' \
+'ingest-health:Check a Trace Commons ingestion service /health endpoint' \
+'profile:Manage the optional public community profile (second opt-in)' \
 'help:Print this message or the help of the given subcommand(s)' \
     )
-    _describe -t commands 'ironclaw tool help commands' commands "$@"
+    _describe -t commands 'ironclaw traces help commands' commands "$@"
 }
-(( $+functions[_ironclaw__tool__help__auth_commands] )) ||
-_ironclaw__tool__help__auth_commands() {
+(( $+functions[_ironclaw__subcmd__traces__subcmd__help__subcmd__credit_commands] )) ||
+_ironclaw__subcmd__traces__subcmd__help__subcmd__credit_commands() {
     local commands; commands=()
-    _describe -t commands 'ironclaw tool help auth commands' commands "$@"
+    _describe -t commands 'ironclaw traces help credit commands' commands "$@"
 }
-(( $+functions[_ironclaw__tool__help__help_commands] )) ||
-_ironclaw__tool__help__help_commands() {
+(( $+functions[_ironclaw__subcmd__traces__subcmd__help__subcmd__enqueue_commands] )) ||
+_ironclaw__subcmd__traces__subcmd__help__subcmd__enqueue_commands() {
     local commands; commands=()
-    _describe -t commands 'ironclaw tool help help commands' commands "$@"
+    _describe -t commands 'ironclaw traces help enqueue commands' commands "$@"
 }
-(( $+functions[_ironclaw__tool__help__info_commands] )) ||
-_ironclaw__tool__help__info_commands() {
+(( $+functions[_ironclaw__subcmd__traces__subcmd__help__subcmd__enroll-instance_commands] )) ||
+_ironclaw__subcmd__traces__subcmd__help__subcmd__enroll-instance_commands() {
     local commands; commands=()
-    _describe -t commands 'ironclaw tool help info commands' commands "$@"
+    _describe -t commands 'ironclaw traces help enroll-instance commands' commands "$@"
 }
-(( $+functions[_ironclaw__tool__help__install_commands] )) ||
-_ironclaw__tool__help__install_commands() {
+(( $+functions[_ironclaw__subcmd__traces__subcmd__help__subcmd__flush-queue_commands] )) ||
+_ironclaw__subcmd__traces__subcmd__help__subcmd__flush-queue_commands() {
     local commands; commands=()
-    _describe -t commands 'ironclaw tool help install commands' commands "$@"
+    _describe -t commands 'ironclaw traces help flush-queue commands' commands "$@"
 }
-(( $+functions[_ironclaw__tool__help__list_commands] )) ||
-_ironclaw__tool__help__list_commands() {
+(( $+functions[_ironclaw__subcmd__traces__subcmd__help__subcmd__help_commands] )) ||
+_ironclaw__subcmd__traces__subcmd__help__subcmd__help_commands() {
     local commands; commands=()
-    _describe -t commands 'ironclaw tool help list commands' commands "$@"
+    _describe -t commands 'ironclaw traces help help commands' commands "$@"
 }
-(( $+functions[_ironclaw__tool__help__remove_commands] )) ||
-_ironclaw__tool__help__remove_commands() {
+(( $+functions[_ironclaw__subcmd__traces__subcmd__help__subcmd__ingest-health_commands] )) ||
+_ironclaw__subcmd__traces__subcmd__help__subcmd__ingest-health_commands() {
     local commands; commands=()
-    _describe -t commands 'ironclaw tool help remove commands' commands "$@"
+    _describe -t commands 'ironclaw traces help ingest-health commands' commands "$@"
 }
-(( $+functions[_ironclaw__tool__info_commands] )) ||
-_ironclaw__tool__info_commands() {
+(( $+functions[_ironclaw__subcmd__traces__subcmd__help__subcmd__list-submissions_commands] )) ||
+_ironclaw__subcmd__traces__subcmd__help__subcmd__list-submissions_commands() {
     local commands; commands=()
-    _describe -t commands 'ironclaw tool info commands' commands "$@"
+    _describe -t commands 'ironclaw traces help list-submissions commands' commands "$@"
 }
-(( $+functions[_ironclaw__tool__install_commands] )) ||
-_ironclaw__tool__install_commands() {
+(( $+functions[_ironclaw__subcmd__traces__subcmd__help__subcmd__opt-in_commands] )) ||
+_ironclaw__subcmd__traces__subcmd__help__subcmd__opt-in_commands() {
     local commands; commands=()
-    _describe -t commands 'ironclaw tool install commands' commands "$@"
+    _describe -t commands 'ironclaw traces help opt-in commands' commands "$@"
 }
-(( $+functions[_ironclaw__tool__list_commands] )) ||
-_ironclaw__tool__list_commands() {
+(( $+functions[_ironclaw__subcmd__traces__subcmd__help__subcmd__opt-out_commands] )) ||
+_ironclaw__subcmd__traces__subcmd__help__subcmd__opt-out_commands() {
     local commands; commands=()
-    _describe -t commands 'ironclaw tool list commands' commands "$@"
+    _describe -t commands 'ironclaw traces help opt-out commands' commands "$@"
 }
-(( $+functions[_ironclaw__tool__remove_commands] )) ||
-_ironclaw__tool__remove_commands() {
+(( $+functions[_ironclaw__subcmd__traces__subcmd__help__subcmd__preview_commands] )) ||
+_ironclaw__subcmd__traces__subcmd__help__subcmd__preview_commands() {
     local commands; commands=()
-    _describe -t commands 'ironclaw tool remove commands' commands "$@"
+    _describe -t commands 'ironclaw traces help preview commands' commands "$@"
 }
-(( $+functions[_ironclaw__worker_commands] )) ||
-_ironclaw__worker_commands() {
+(( $+functions[_ironclaw__subcmd__traces__subcmd__help__subcmd__profile_commands] )) ||
+_ironclaw__subcmd__traces__subcmd__help__subcmd__profile_commands() {
+    local commands; commands=(
+'token:Mint a short-lived profile token for the Trace Commons web profile page' \
+'set:Create or update the public community profile' \
+'withdraw:Withdraw the public community profile' \
+    )
+    _describe -t commands 'ironclaw traces help profile commands' commands "$@"
+}
+(( $+functions[_ironclaw__subcmd__traces__subcmd__help__subcmd__profile__subcmd__set_commands] )) ||
+_ironclaw__subcmd__traces__subcmd__help__subcmd__profile__subcmd__set_commands() {
     local commands; commands=()
-    _describe -t commands 'ironclaw worker commands' commands "$@"
+    _describe -t commands 'ironclaw traces help profile set commands' commands "$@"
+}
+(( $+functions[_ironclaw__subcmd__traces__subcmd__help__subcmd__profile__subcmd__token_commands] )) ||
+_ironclaw__subcmd__traces__subcmd__help__subcmd__profile__subcmd__token_commands() {
+    local commands; commands=()
+    _describe -t commands 'ironclaw traces help profile token commands' commands "$@"
+}
+(( $+functions[_ironclaw__subcmd__traces__subcmd__help__subcmd__profile__subcmd__withdraw_commands] )) ||
+_ironclaw__subcmd__traces__subcmd__help__subcmd__profile__subcmd__withdraw_commands() {
+    local commands; commands=()
+    _describe -t commands 'ironclaw traces help profile withdraw commands' commands "$@"
+}
+(( $+functions[_ironclaw__subcmd__traces__subcmd__help__subcmd__queue-status_commands] )) ||
+_ironclaw__subcmd__traces__subcmd__help__subcmd__queue-status_commands() {
+    local commands; commands=()
+    _describe -t commands 'ironclaw traces help queue-status commands' commands "$@"
+}
+(( $+functions[_ironclaw__subcmd__traces__subcmd__help__subcmd__revoke_commands] )) ||
+_ironclaw__subcmd__traces__subcmd__help__subcmd__revoke_commands() {
+    local commands; commands=()
+    _describe -t commands 'ironclaw traces help revoke commands' commands "$@"
+}
+(( $+functions[_ironclaw__subcmd__traces__subcmd__help__subcmd__status_commands] )) ||
+_ironclaw__subcmd__traces__subcmd__help__subcmd__status_commands() {
+    local commands; commands=()
+    _describe -t commands 'ironclaw traces help status commands' commands "$@"
+}
+(( $+functions[_ironclaw__subcmd__traces__subcmd__help__subcmd__submit_commands] )) ||
+_ironclaw__subcmd__traces__subcmd__help__subcmd__submit_commands() {
+    local commands; commands=()
+    _describe -t commands 'ironclaw traces help submit commands' commands "$@"
+}
+(( $+functions[_ironclaw__subcmd__traces__subcmd__ingest-health_commands] )) ||
+_ironclaw__subcmd__traces__subcmd__ingest-health_commands() {
+    local commands; commands=()
+    _describe -t commands 'ironclaw traces ingest-health commands' commands "$@"
+}
+(( $+functions[_ironclaw__subcmd__traces__subcmd__list-submissions_commands] )) ||
+_ironclaw__subcmd__traces__subcmd__list-submissions_commands() {
+    local commands; commands=()
+    _describe -t commands 'ironclaw traces list-submissions commands' commands "$@"
+}
+(( $+functions[_ironclaw__subcmd__traces__subcmd__opt-in_commands] )) ||
+_ironclaw__subcmd__traces__subcmd__opt-in_commands() {
+    local commands; commands=()
+    _describe -t commands 'ironclaw traces opt-in commands' commands "$@"
+}
+(( $+functions[_ironclaw__subcmd__traces__subcmd__opt-out_commands] )) ||
+_ironclaw__subcmd__traces__subcmd__opt-out_commands() {
+    local commands; commands=()
+    _describe -t commands 'ironclaw traces opt-out commands' commands "$@"
+}
+(( $+functions[_ironclaw__subcmd__traces__subcmd__preview_commands] )) ||
+_ironclaw__subcmd__traces__subcmd__preview_commands() {
+    local commands; commands=()
+    _describe -t commands 'ironclaw traces preview commands' commands "$@"
+}
+(( $+functions[_ironclaw__subcmd__traces__subcmd__profile_commands] )) ||
+_ironclaw__subcmd__traces__subcmd__profile_commands() {
+    local commands; commands=(
+'token:Mint a short-lived profile token for the Trace Commons web profile page' \
+'set:Create or update the public community profile' \
+'withdraw:Withdraw the public community profile' \
+'help:Print this message or the help of the given subcommand(s)' \
+    )
+    _describe -t commands 'ironclaw traces profile commands' commands "$@"
+}
+(( $+functions[_ironclaw__subcmd__traces__subcmd__profile__subcmd__help_commands] )) ||
+_ironclaw__subcmd__traces__subcmd__profile__subcmd__help_commands() {
+    local commands; commands=(
+'token:Mint a short-lived profile token for the Trace Commons web profile page' \
+'set:Create or update the public community profile' \
+'withdraw:Withdraw the public community profile' \
+'help:Print this message or the help of the given subcommand(s)' \
+    )
+    _describe -t commands 'ironclaw traces profile help commands' commands "$@"
+}
+(( $+functions[_ironclaw__subcmd__traces__subcmd__profile__subcmd__help__subcmd__help_commands] )) ||
+_ironclaw__subcmd__traces__subcmd__profile__subcmd__help__subcmd__help_commands() {
+    local commands; commands=()
+    _describe -t commands 'ironclaw traces profile help help commands' commands "$@"
+}
+(( $+functions[_ironclaw__subcmd__traces__subcmd__profile__subcmd__help__subcmd__set_commands] )) ||
+_ironclaw__subcmd__traces__subcmd__profile__subcmd__help__subcmd__set_commands() {
+    local commands; commands=()
+    _describe -t commands 'ironclaw traces profile help set commands' commands "$@"
+}
+(( $+functions[_ironclaw__subcmd__traces__subcmd__profile__subcmd__help__subcmd__token_commands] )) ||
+_ironclaw__subcmd__traces__subcmd__profile__subcmd__help__subcmd__token_commands() {
+    local commands; commands=()
+    _describe -t commands 'ironclaw traces profile help token commands' commands "$@"
+}
+(( $+functions[_ironclaw__subcmd__traces__subcmd__profile__subcmd__help__subcmd__withdraw_commands] )) ||
+_ironclaw__subcmd__traces__subcmd__profile__subcmd__help__subcmd__withdraw_commands() {
+    local commands; commands=()
+    _describe -t commands 'ironclaw traces profile help withdraw commands' commands "$@"
+}
+(( $+functions[_ironclaw__subcmd__traces__subcmd__profile__subcmd__set_commands] )) ||
+_ironclaw__subcmd__traces__subcmd__profile__subcmd__set_commands() {
+    local commands; commands=()
+    _describe -t commands 'ironclaw traces profile set commands' commands "$@"
+}
+(( $+functions[_ironclaw__subcmd__traces__subcmd__profile__subcmd__token_commands] )) ||
+_ironclaw__subcmd__traces__subcmd__profile__subcmd__token_commands() {
+    local commands; commands=()
+    _describe -t commands 'ironclaw traces profile token commands' commands "$@"
+}
+(( $+functions[_ironclaw__subcmd__traces__subcmd__profile__subcmd__withdraw_commands] )) ||
+_ironclaw__subcmd__traces__subcmd__profile__subcmd__withdraw_commands() {
+    local commands; commands=()
+    _describe -t commands 'ironclaw traces profile withdraw commands' commands "$@"
+}
+(( $+functions[_ironclaw__subcmd__traces__subcmd__queue-status_commands] )) ||
+_ironclaw__subcmd__traces__subcmd__queue-status_commands() {
+    local commands; commands=()
+    _describe -t commands 'ironclaw traces queue-status commands' commands "$@"
+}
+(( $+functions[_ironclaw__subcmd__traces__subcmd__revoke_commands] )) ||
+_ironclaw__subcmd__traces__subcmd__revoke_commands() {
+    local commands; commands=()
+    _describe -t commands 'ironclaw traces revoke commands' commands "$@"
+}
+(( $+functions[_ironclaw__subcmd__traces__subcmd__status_commands] )) ||
+_ironclaw__subcmd__traces__subcmd__status_commands() {
+    local commands; commands=()
+    _describe -t commands 'ironclaw traces status commands' commands "$@"
+}
+(( $+functions[_ironclaw__subcmd__traces__subcmd__submit_commands] )) ||
+_ironclaw__subcmd__traces__subcmd__submit_commands() {
+    local commands; commands=()
+    _describe -t commands 'ironclaw traces submit commands' commands "$@"
 }
 
 if [ "$funcstack[1]" = "_ironclaw" ]; then

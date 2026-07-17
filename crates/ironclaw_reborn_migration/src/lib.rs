@@ -8,7 +8,7 @@
 //! today is recorded in a [`MigrationReport`] rather than silently dropped.
 //!
 //! The crate is a library (this module) plus a thin binary (`src/main.rs`) so
-//! the conversion engine can later be reused inside `ironclaw-reborn` startup.
+//! the conversion engine can later be reused inside canonical `ironclaw` startup.
 
 pub mod error;
 pub mod options;

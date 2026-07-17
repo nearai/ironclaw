@@ -72,9 +72,7 @@ impl OnboardCommand {
         println!();
         println!("remaining:");
         println!("- configure LLM credentials through env vars referenced by config.toml");
-        println!(
-            "- run `ironclaw-reborn models set-provider <provider> --model <model>` as needed"
-        );
+        println!("- run `ironclaw models set-provider <provider> --model <model>` as needed");
         if self.import_history {
             println!("- history import requested but not wired yet");
         } else {

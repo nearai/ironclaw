@@ -396,7 +396,7 @@ async fn maybe_transcode_wechat_silk_attachment(attachment: &mut Attachment) -> 
     }
     let decoder_path = resolve_silk_decoder_command().ok_or_else(|| {
         format!(
-            "{SILK_DECODER_BIN_NAME} not found (set {SILK_DECODER_ENV_VAR}, install on PATH, or place beside the ironclaw binary)"
+            "{SILK_DECODER_BIN_NAME} not found (set {SILK_DECODER_ENV_VAR}, install on PATH, or place beside the ironclaw-v1 binary)"
         )
     })?;
 

@@ -282,8 +282,8 @@ impl AppBuilder {
         tracing::warn!(
             reason = reason,
             "Persistent secrets store unavailable; installing ephemeral in-memory fallback. \
-             Credentials saved via `ironclaw tool auth` will not persist across restarts. \
-             Run `ironclaw doctor` for diagnostics (see #1537 for hosted-TEE specifics)."
+             Credentials saved via `ironclaw-v1 tool auth` will not persist across restarts. \
+             Run `ironclaw-v1 doctor` for diagnostics (see #1537 for hosted-TEE specifics)."
         );
         self.secrets_store = Some(store);
         Ok(())
@@ -883,7 +883,7 @@ impl AppBuilder {
                                             } else {
                                                 tracing::warn!(
                                                     "MCP server '{}' requires authentication. \
-                                                     Run: ironclaw mcp auth {}",
+                                                     Run: ironclaw-v1 mcp auth {}",
                                                     server_name,
                                                     server_name
                                                 );

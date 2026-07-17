@@ -1,4 +1,4 @@
-# Setup / Onboarding Specification
+# Legacy v1 Setup / Onboarding Specification
 
 This document is the authoritative specification for IronClaw's onboarding
 wizard. Any code change to `src/setup/` **must** keep this document in sync.
@@ -10,13 +10,13 @@ file first, then adjust the code to match.
 ## Entry Points
 
 ```
-ironclaw onboard [--skip-auth] [--channels-only] [--provider-only] [--quick]
+ironclaw-v1 onboard [--skip-auth] [--channels-only] [--provider-only] [--quick]
 ```
 
 Explicit invocation. Loads `.env` files, runs the wizard, exits.
 
 ```
-ironclaw          (first run, no database configured)
+ironclaw-v1          (first run, no database configured)
 ```
 
 Auto-detection via `check_onboard_needed()` in `main.rs`. Skips onboarding
@@ -33,7 +33,7 @@ The `--no-onboard` CLI flag suppresses auto-detection.
 ### Reborn Standalone Onboarding
 
 ```
-ironclaw-reborn onboard [--force] [--dry-run] [--import-history]
+ironclaw onboard [--force] [--dry-run] [--import-history]
 ```
 
 This command is owned by the standalone Reborn binary, not by `src/setup`.
@@ -41,7 +41,7 @@ It initializes `IRONCLAW_REBORN_HOME` / `~/.ironclaw/reborn`, creates or
 preserves Reborn `config.toml` and `providers.json`, and writes the Reborn
 `.onboard-completed.json` marker without reading or mutating v1 database,
 channel, settings, or setup state. The detailed Reborn-specific contract lives
-in `docs/reborn/onboarding.md`; changes to `ironclaw-reborn onboard` should keep
+in `docs/reborn/onboarding.md`; changes to `ironclaw onboard` should keep
 that document and this boundary note in sync.
 
 ---
@@ -79,7 +79,7 @@ auto_setup_security()    → keychain or env var (zero prompts)
 Step 1/2: Inference Provider  ← interactive unless provider env is detected
 Step 2/2: Model Selection     ← interactive unless defaulted by detected provider
        ↓
-   save_and_summarize()      → includes tip to run `ironclaw onboard`
+   save_and_summarize()      → includes tip to run `ironclaw-v1 onboard`
 ```
 
 **Local usage profile:** If `IRONCLAW_PROFILE` is already set, quick mode
@@ -107,7 +107,7 @@ except unavoidable macOS keychain dialogs.
 `upsert_bootstrap_vars()` instead of `save_bootstrap_env()`, preserving
 user-added variables like `HTTP_HOST` across re-onboarding.
 
-The full 9-step wizard remains available via `ironclaw onboard`.
+The full 9-step v1 wizard remains available via `ironclaw-v1 onboard`.
 
 ---
 
@@ -223,7 +223,7 @@ This is OS-level behavior we cannot prevent. To minimize pain:
   Later calls to `init_secrets_context()` check this field first, avoiding
   redundant keychain probes.
 
-- **Never probe the keychain in read-only commands** (e.g., `ironclaw status`).
+- **Never probe the keychain in read-only commands** (e.g., `ironclaw-v1 status`).
   The status command reports "env not set (keychain may be configured)"
   rather than triggering system dialogs.
 
@@ -607,7 +607,7 @@ pub struct Settings {
     // Step 7: Heartbeat
     pub heartbeat: HeartbeatSettings,        // enabled, interval, notify
 
-    // Advanced (not in wizard, set via `ironclaw config set`)
+    // Advanced (not in wizard, set via `ironclaw-v1 config set`)
     pub agent: AgentSettings,
     pub wasm: WasmSettings,
     pub sandbox: SandboxSettings,
@@ -778,4 +778,4 @@ When changing the onboarding flow:
    cargo clippy --all --benches --tests --examples --all-features -- -D warnings
    cargo test --lib -- setup bootstrap
    ```
-7. Test a fresh onboarding: `rm -rf ~/.ironclaw && cargo run`
+7. Test a fresh onboarding: `rm -rf ~/.ironclaw && cargo run --bin ironclaw-v1`

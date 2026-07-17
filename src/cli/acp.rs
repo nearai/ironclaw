@@ -124,7 +124,7 @@ async fn list_agents() -> anyhow::Result<()> {
         println!("No ACP agents configured.");
         println!();
         println!("Add one with:");
-        println!("  ironclaw acp add goose --command goose --arg \"--stdio\"");
+        println!("  ironclaw-v1 acp add goose --command goose --arg \"--stdio\"");
         return Ok(());
     }
 
@@ -170,7 +170,7 @@ async fn test_agent(name: &str) -> anyhow::Result<()> {
     use crate::worker::acp_bridge;
     use crate::worker::api::JobEventPayload;
 
-    /// Event sink that prints agent output to stdout during `ironclaw acp test`.
+    /// Event sink that prints agent output to stdout during `ironclaw-v1 acp test`.
     struct PrintEventSink;
 
     impl acp_bridge::AcpEventSink for PrintEventSink {

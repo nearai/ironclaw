@@ -280,7 +280,7 @@ async fn add_server(args: McpAddArgs) -> anyhow::Result<()> {
 
     if requires_auth && !has_custom_auth_header {
         println!();
-        println!("  Run 'ironclaw mcp auth {}' to authenticate.", name);
+        println!("  Run 'ironclaw-v1 mcp auth {}' to authenticate.", name);
     }
 
     println!();
@@ -314,7 +314,7 @@ async fn list_servers(verbose: bool) -> anyhow::Result<()> {
         println!("  No MCP servers configured.");
         println!();
         println!("  Add a server with:");
-        println!("    ironclaw mcp add <name> <url> [--client-id <id>]");
+        println!("    ironclaw-v1 mcp add <name> <url> [--client-id <id>]");
         println!();
         return Ok(());
     }
@@ -422,7 +422,7 @@ async fn auth_server(name: String, user_id: String) -> anyhow::Result<()> {
     if server.has_custom_auth_header() {
         println!();
         println!(
-            "  Server '{}' is configured with an Authorization header, so 'ironclaw mcp auth' is not used for this configuration.",
+            "  Server '{}' is configured with an Authorization header, so 'ironclaw-v1 mcp auth' is not used for this configuration.",
             name
         );
         println!("  Update or remove that header if you want to switch auth methods.");
@@ -475,9 +475,9 @@ async fn auth_server(name: String, user_id: String) -> anyhow::Result<()> {
             println!("  The server may require a different authentication method,");
             println!("  or you may need to configure OAuth manually:");
             println!();
-            println!("    ironclaw mcp remove {}", name);
+            println!("    ironclaw-v1 mcp remove {}", name);
             println!(
-                "    ironclaw mcp add {} {} --client-id YOUR_CLIENT_ID",
+                "    ironclaw-v1 mcp add {} {} --client-id YOUR_CLIENT_ID",
                 name, server.url
             );
             println!();
@@ -531,7 +531,7 @@ async fn test_server(name: String, user_id: String) -> anyhow::Result<()> {
         // OAuth configured but no tokens - need to authenticate
         println!();
         println!(
-            "  ✗ Not authenticated. Run 'ironclaw mcp auth {}' first.",
+            "  ✗ Not authenticated. Run 'ironclaw-v1 mcp auth {}' first.",
             name
         );
         println!();
@@ -587,7 +587,7 @@ async fn test_server(name: String, user_id: String) -> anyhow::Result<()> {
                     println!(
                         "  ✗ Authentication failed (token may be expired). Try re-authenticating:"
                     );
-                    println!("    ironclaw mcp auth {}", name);
+                    println!("    ironclaw-v1 mcp auth {}", name);
                 } else if server.has_custom_auth_header() {
                     println!("  ✗ Authentication failed.");
                     println!();
@@ -598,7 +598,7 @@ async fn test_server(name: String, user_id: String) -> anyhow::Result<()> {
                     // No tokens - server requires auth
                     println!("  ✗ Server requires authentication.");
                     println!();
-                    println!("  Run 'ironclaw mcp auth {}' to authenticate.", name);
+                    println!("  Run 'ironclaw-v1 mcp auth {}' to authenticate.", name);
                 }
             } else {
                 println!("  ✗ Connection failed: {}", e);

@@ -6,7 +6,7 @@
 //! # Authentication
 //!
 //! Store your GitHub Personal Access Token:
-//! `ironclaw secret set github_token <token>`
+//! `ironclaw-v1 secret set github_token <token>`
 //!
 //! Token needs these permissions:
 //! - repo (for private repos)
@@ -784,7 +784,7 @@ fn get_github_token() -> Result<String, String> {
         return Ok("present".to_string());
     }
 
-    Err("GitHub token not found in secret store. Set it with: ironclaw secret set github_token <token>. \
+    Err("GitHub token not found in secret store. Set it with: ironclaw-v1 secret set github_token <token>. \
          Token needs 'repo', 'workflow', and 'read:org' scopes.".into())
 }
 

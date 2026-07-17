@@ -314,7 +314,7 @@ pub(crate) async fn open_trigger_access_store_for_profile(
 }
 
 fn print_runtime_banner(config: &RebornBootConfig) {
-    eprintln!("ironclaw-reborn: runtime started");
+    eprintln!("ironclaw: runtime started");
     eprintln!("  profile     : {}", config.profile());
     eprintln!("  reborn_home : {}", config.home().path().display());
     eprintln!();
@@ -626,7 +626,7 @@ pub(crate) fn build_services_input_with_options(
     options: RuntimeInputOptions,
 ) -> anyhow::Result<RuntimeServicesInput> {
     // Read the operator's boot TOML if present. Missing file is OK
-    // (operator may not have run `ironclaw-reborn config init` yet);
+    // (operator may not have run `ironclaw config init` yet);
     // sparse fields are OK (each absent field falls back to the
     // CLI-shaped default baked into composition).
     let config_file = read_config_file(config)?;

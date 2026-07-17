@@ -253,7 +253,7 @@ fn show_path(has_db: bool) -> anyhow::Result<()> {
     let toml_status = if toml_path.exists() {
         "found"
     } else {
-        "not found (run `ironclaw config init` to create)"
+        "not found (run `ironclaw-v1 config init` to create)"
     };
     println!(
         "TOML config:        {} ({})",

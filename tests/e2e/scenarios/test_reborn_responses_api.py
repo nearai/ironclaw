@@ -95,7 +95,7 @@ base_url = "{mock_llm_server}/v1"
 async def reborn_responses_server(
     ironclaw_reborn_openai_compat_binary, mock_llm_server, tmp_path_factory
 ):
-    """Start `ironclaw-reborn serve` with `/v1/responses` mounted."""
+    """Start `ironclaw serve` with `/v1/responses` mounted."""
     home_dir = tmp_path_factory.mktemp("ironclaw-reborn-responses-home")
     reborn_home = home_dir / "reborn-home"
     reborn_home.mkdir(parents=True, exist_ok=True)

@@ -8,7 +8,7 @@
 //! fully-composed axum [`Router`] (auth + rate limit + CORS + body
 //! limit + security headers + v2 route surface). Tests drive it
 //! through `tower::ServiceExt::oneshot`; the standalone
-//! `ironclaw-reborn serve` subcommand (on a follow-up PR) consumes the
+//! `ironclaw serve` subcommand (on a follow-up PR) consumes the
 //! same `Router` and owns the listener lifecycle on the host side.
 //!
 //! ### Why no serve-and-bind helper here
@@ -553,7 +553,7 @@ pub enum WebuiServeError {
 ///
 /// The returned [`Router`] is the seam between this composition crate
 /// and host-owned ingress code: tests drive it via
-/// `tower::ServiceExt::oneshot`, and the standalone `ironclaw-reborn
+/// `tower::ServiceExt::oneshot`, and the standalone `ironclaw
 /// serve` subcommand on a follow-up PR will hand it to axum's serve
 /// loop from a host-owned listener. This crate intentionally never
 /// binds a socket or drives the serve loop itself — that boundary is

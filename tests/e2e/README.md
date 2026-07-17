@@ -66,7 +66,7 @@ Then Playwright drives a headless Chromium browser against the gateway, making D
 The GitHub Actions Code Coverage workflow uses
 `tests/e2e/reborn_coverage_tests.txt` instead of running every scenario in this
 directory. That manifest is intentionally limited to tests that boot
-`ironclaw-reborn serve` and cover the Reborn WebChat v2 or OpenAI-compatible
+`ironclaw serve` and cover the Reborn WebChat v2 or OpenAI-compatible
 API surface. Legacy gateway tests and `ENGINE_V2=true` compatibility tests stay
 in the E2E suite, but they are not part of the Reborn coverage gate. Manifest
 entries may be pytest node IDs when only part of a broader scenario file belongs
@@ -149,7 +149,7 @@ lifecycle tests deterministic, see [`E2E_DEBT.md`](./E2E_DEBT.md).
 
 For tabs that depend on external data (extensions, jobs, memory, routines), use
 Playwright's `page.route()` to intercept the browser's HTTP requests to the
-ironclaw gateway and return deterministic fixture JSON. This avoids needing
+legacy ironclaw-v1 gateway and return deterministic fixture JSON. This avoids needing
 real installed binaries, live external services, or complex database setup.
 
 ### Basic pattern

@@ -147,17 +147,18 @@ sudo ufw enable
 
 ## 安装 IronClaw
 
-Droplet 创建并加固完成后，就可以开始安装 IronClaw 了。您可以按照[快速开始指南](/quickstart)中的安装步骤来完成部署。
+Droplet 创建并加固完成后，就可以开始安装 IronClaw 了。您可以按照[快速开始指南](/zh/quickstart)中的安装步骤来完成部署。
 
 ```
 # 安装 IronClaw
 curl --proto '=https' --tlsv1.2 -LsSf https://github.com/nearai/ironclaw/releases/latest/download/ironclaw-installer.sh | sh
 ```
 
-安装后，直接启动 IronClaw 并按照提示完成配置：
+初始化 canonical Reborn runtime，然后启动交互式 REPL：
 
 ```
-ironclaw
+ironclaw onboard
+ironclaw repl
 ```
 
 <Tip>
@@ -168,8 +169,4 @@ ironclaw
 
 ## 下一步
 
-接下来可以阅读[快速开始指南](/quickstart)，创建您的第一个智能体，把它连接到 Telegram，并开始探索 IronClaw 的能力。
-
-如果您希望通过消息应用与智能体对话，请查看[频道](/channels/overview)文档，了解如何完成接入。
-
-如果您需要让智能体执行依赖多个工具的复杂任务，请查看[扩展](/extensions/overview)文档。
+接下来阅读[快速开始指南](/zh/quickstart)，配置 provider 并发送第一条消息。Profile、生产存储、扩展和 WebUI serve 模式请参阅 [canonical CLI 参考](/reborn-binary)。

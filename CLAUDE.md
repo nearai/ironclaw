@@ -27,7 +27,7 @@ This repo can be indexed into a **codebase knowledge graph** (the `codebase-memo
 
 ## Where to Build — Reborn-First
 
-**New feature work targets the Reborn stack in `crates/`, not the v1 `src/` monolith.** A Reborn feature crosses `product_workflow → composition → webui_v2 → runtime/serve → frontend`; the binary entry point is `crates/ironclaw_reborn_cli` (binary name `ironclaw-reborn`), **not** `src/main.rs`. Start from the `reborn-feature` skill — it maps those layers so you wire a feature in one pass instead of layer-by-layer.
+**New feature work targets the Reborn stack in `crates/`, not the v1 `src/` monolith.** A Reborn feature crosses `product_workflow → composition → webui_v2 → runtime/serve → frontend`; the binary entry point is `crates/ironclaw_reborn_cli` (binary name `ironclaw`), **not** `src/main.rs`. Start from the `reborn-feature` skill — it maps those layers so you wire a feature in one pass instead of layer-by-layer.
 
 `src/` is the **v1 monolith**, being retired under the roadmap's "Clean up old architecture." Maintain existing v1 behavior there when a bug requires it, but **do not build new features into `src/`** — they belong Reborn-side. The detailed `src/` layout in "Project Structure" below documents v1 for maintenance, not as the default place to add code.
 
@@ -35,10 +35,10 @@ This repo can be indexed into a **codebase knowledge graph** (the `codebase-memo
 
 ```bash
 cargo fmt                                                    # format
-cargo clippy --all --benches --tests --examples --all-features  # lint (zero warnings)
-cargo test                                                   # unit tests
-cargo test --features integration                            # + PostgreSQL tests
-RUST_LOG=ironclaw=debug cargo run                            # run with logging
+cargo clippy -p ironclaw_reborn_cli --all-targets --all-features -- -D warnings
+cargo test -p ironclaw_reborn_cli                            # canonical CLI tests
+cargo test --workspace                                       # full workspace tests
+RUST_LOG=ironclaw=debug cargo run -p ironclaw_reborn_cli --bin ironclaw -- repl
 ```
 
 E2E tests: see `tests/e2e/CLAUDE.md`.
@@ -358,9 +358,8 @@ Persistent memory with hybrid search (FTS + vector via RRF). Four tools: `memory
 ## Debugging
 
 ```bash
-RUST_LOG=ironclaw=trace cargo run           # verbose
-RUST_LOG=ironclaw::agent=debug cargo run    # agent module only
-RUST_LOG=ironclaw=debug,tower_http=debug cargo run  # + HTTP request logging
+RUST_LOG=ironclaw=trace cargo run -p ironclaw_reborn_cli --bin ironclaw -- repl
+RUST_LOG=ironclaw=debug,tower_http=debug cargo run -p ironclaw_reborn_cli --bin ironclaw -- repl
 ```
 
 ## Current Limitations

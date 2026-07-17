@@ -96,7 +96,7 @@ into `config.toml`. The generated Reborn config only enables Slack:
 enabled = true
 ```
 
-Bot installation setup is applied headlessly after `ironclaw-reborn serve`
+Bot installation setup is applied headlessly after `ironclaw serve`
 boots by calling `PUT /api/webchat/v2/channels/slack/setup` with the WebUI
 operator bearer token. Required repository variables:
 

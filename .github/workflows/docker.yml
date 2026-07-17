@@ -57,16 +57,46 @@ jobs:
           echo "sha=${SOURCE_SHA}" >> "$GITHUB_OUTPUT"
           echo "Source commit: ${SOURCE_SHA}"
 
-      - name: Extract version from Cargo.toml
+      - name: Extract image versions
         id: version
         run: |
-          VERSION=$(grep '^version' Cargo.toml | head -1 | sed 's/.*"\(.*\)"/\1/')
+          VERSION_MANIFEST="crates/ironclaw_reborn_cli/Cargo.toml"
+          VERSION="$(
+            python3 - "${VERSION_MANIFEST}" <<'PY'
+          import sys
+          import tomllib
+
+          with open(sys.argv[1], "rb") as manifest:
+              version = tomllib.load(manifest).get("package", {}).get("version")
+          if not isinstance(version, str):
+              raise SystemExit(f"missing [package].version in {sys.argv[1]}")
+          print(version)
+          PY
+          )"
           if [[ ! "${VERSION}" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]]; then
             echo "::error::Extracted version '${VERSION}' must match MAJOR.MINOR.PATCH[-prerelease] (Docker tags forbid '+')"
             exit 1
           fi
           echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
-          echo "Detected version: ${VERSION}"
+          LEGACY_VERSION="$(
+            python3 - "Cargo.toml" <<'PY'
+          import sys
+          import tomllib
+
+          with open(sys.argv[1], "rb") as manifest:
+              version = tomllib.load(manifest).get("package", {}).get("version")
+          if not isinstance(version, str):
+              raise SystemExit(f"missing [package].version in {sys.argv[1]}")
+          print(version)
+          PY
+          )"
+          if [[ ! "${LEGACY_VERSION}" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]]; then
+            echo "::error::Extracted legacy version '${LEGACY_VERSION}' must match MAJOR.MINOR.PATCH[-prerelease] (Docker tags forbid '+')"
+            exit 1
+          fi
+          echo "legacy_version=${LEGACY_VERSION}" >> "$GITHUB_OUTPUT"
+          echo "Detected Reborn CLI version: ${VERSION}"
+          echo "Detected retained v1 worker binary version: ${LEGACY_VERSION}"
 
       - name: Determine tags
         id: tags
@@ -90,6 +120,8 @@ jobs:
             TAGS="${IMAGE_NAME}:${VERSION}"
             TAGS="${TAGS},${IMAGE_NAME}:latest"
             TAGS="${TAGS},${IMAGE_NAME}:${SHA}"
+            # Worker tags follow the release train so a frozen v1 package
+            # version never causes a mutable semver tag to be overwritten.
             WORKER_TAGS="${WORKER_IMAGE_NAME}:${VERSION}"
             WORKER_TAGS="${WORKER_TAGS},${WORKER_IMAGE_NAME}:latest"
             WORKER_TAGS="${WORKER_TAGS},${WORKER_IMAGE_NAME}:${SHA}"
@@ -113,12 +145,8 @@ jobs:
           echo "tags=${TAGS}" >> "$GITHUB_OUTPUT"
           echo "worker_tags=${WORKER_TAGS}" >> "$GITHUB_OUTPUT"
 
-          # Staging builds get pre-bundled WASM extensions
-          if [[ "${EVENT_NAME}" == "schedule" || "${INPUT_TAG}" == "staging" ]]; then
-            echo "target=runtime-staging" >> "$GITHUB_OUTPUT"
-          else
-            echo "target=runtime" >> "$GITHUB_OUTPUT"
-          fi
+          # Staging and release tags use the same canonical Reborn runtime.
+          echo "target=runtime" >> "$GITHUB_OUTPUT"
 
       - name: Log in to Docker Hub
         uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
@@ -128,7 +156,7 @@ jobs:
 
       - name: Check if current git commit is already built
         id: check
-        if: steps.tags.outputs.target == 'runtime-staging'
+        if: contains(steps.tags.outputs.tags, ':staging')
         env:
           SOURCE_SHA: ${{ steps.source_sha.outputs.sha }}
         run: |
@@ -158,7 +186,7 @@ jobs:
         if: steps.check.outputs.skip != 'true'
         uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
 
-      - name: Build and push (ironclaw)
+      - name: Build and push (ironclaw Reborn)
         if: steps.check.outputs.skip != 'true'
         uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
         with:
@@ -168,6 +196,7 @@ jobs:
           target: ${{ steps.tags.outputs.target }}
           labels: |
             ironclaw.git.sha=${{ steps.source_sha.outputs.sha }}
+            ironclaw.runtime=reborn
           platforms: linux/amd64
           cache-from: type=gha
           cache-to: type=gha,mode=max
@@ -182,6 +211,8 @@ jobs:
           tags: ${{ steps.tags.outputs.worker_tags }}
           labels: |
             ironclaw.git.sha=${{ steps.source_sha.outputs.sha }}
+            ironclaw.runtime=legacy-v1-worker
+            ironclaw.legacy.binary.version=${{ steps.version.outputs.legacy_version }}
           platforms: linux/amd64
           cache-from: type=gha,scope=worker
           cache-to: type=gha,mode=max,scope=worker
@@ -229,12 +260,12 @@ jobs:
           {
             echo "## Docker Images"
             echo ""
-            echo "**ironclaw:**"
+            echo "**ironclaw (Reborn runtime):**"
             echo '```'
             echo "${TAGS}" | tr ',' '\n'
             echo '```'
             echo ""
-            echo "**ironclaw-worker:**"
+            echo "**ironclaw-worker (legacy-v1 auxiliary runtime):**"
             echo '```'
             echo "${WORKER_TAGS}" | tr ',' '\n'
             echo '```'

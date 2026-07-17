@@ -7,9 +7,9 @@ icon: globe
 
 HTTP Webhook 频道提供 REST API，用于将外部服务与 IronClaw 集成。
 
-<Note>
-如果您还没有设置智能体，请先查看我们的[快速开始指南](../quickstart)
-</Note>
+<Warning>
+本页描述保留的 v1 运行时。请从源码构建并使用 `ironclaw-v1`；规范的 `ironclaw` 命令运行 Reborn。
+</Warning>
 
 ---
 
@@ -181,7 +181,7 @@ print(response.json()["job_id"])
   </Accordion>
 
   <Accordion title="消息未处理" icon="message-circle">
-    - 检查日志：`RUST_LOG=ironclaw=debug ironclaw run`
+    - 检查日志：`RUST_LOG=ironclaw=debug ironclaw-v1 run`
     - 验证 JSON 格式
     - 检查 `user_id` 有效
   </Accordion>

@@ -164,7 +164,7 @@ impl LogLevelHandle {
         Ok(())
     }
 
-    /// Returns the current ironclaw log level (e.g. "info", "debug").
+    /// Returns the current `ironclaw` tracing-target level (e.g. "info", "debug").
     pub fn current_level(&self) -> String {
         self.current_level
             .lock()
@@ -188,7 +188,7 @@ pub fn init_tracing(
     let raw_filter =
         std::env::var("RUST_LOG").unwrap_or_else(|_| "ironclaw=info,tower_http=warn".to_string());
 
-    // Split into the ironclaw directive and "everything else" (base_filter).
+    // Split into the `ironclaw` tracing directive and "everything else" (base_filter).
     let mut ironclaw_level = String::from("info");
     let mut base_parts: Vec<&str> = Vec::new();
 

@@ -814,7 +814,7 @@ jobs:
           cargo build
           -p ironclaw_reborn_cli
           --features webui-v2-beta,slack-v2-host-beta
-          --bin ironclaw-reborn
+          --bin ironclaw
 
       - name: Package fallback Reborn WebUI v2 binary
         id: fallback
@@ -825,10 +825,10 @@ jobs:
           set -euo pipefail
           rm -rf artifacts/prepared-reborn-webui-v2-binary
           mkdir -p artifacts/prepared-reborn-webui-v2-binary
-          tar -C target/debug -czf artifacts/prepared-reborn-webui-v2-binary/ironclaw-reborn.tar.gz ironclaw-reborn
+          tar -C target/debug -czf artifacts/prepared-reborn-webui-v2-binary/ironclaw.tar.gz ironclaw
           (
             cd artifacts/prepared-reborn-webui-v2-binary
-            sha256sum ironclaw-reborn.tar.gz > ironclaw-reborn.tar.gz.sha256
+            sha256sum ironclaw.tar.gz > ironclaw.tar.gz.sha256
           )
           jq -n \
             --arg product_ref "${TARGET_REF}" \
@@ -1110,8 +1110,8 @@ jobs:
             "${TARGET_REF}" \
             "webui-v2-beta,slack-v2-host-beta"
           mkdir -p target/debug
-          tar -C target/debug -xzf .live-qa-binary/ironclaw-reborn.tar.gz
-          chmod 755 target/debug/ironclaw-reborn
+          tar -C target/debug -xzf .live-qa-binary/ironclaw.tar.gz
+          chmod 755 target/debug/ironclaw
       - name: Materialize Reborn WebUI v2 live QA sensitive secrets to files
         if: steps.filter_reborn_webui_v2_google_cases.outputs.skip_shard != '1'
         shell: bash

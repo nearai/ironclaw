@@ -3,6 +3,12 @@ title: "Slides"
 description: "Let your agent create and edit Google Presentations"
 ---
 
+<Warning>
+This integration guide targets the retained v1 runtime. Use `ironclaw-v1` for
+the `registry` and `tool` commands below. Canonical Reborn uses
+`ironclaw extension`; see the [CLI reference](/reborn-binary#extension).
+</Warning>
+
 The Google Slides extension allows your agent to interact with Google Slides — creating presentations, managing slides, inserting and formatting text, adding shapes and images, and running batch updates. It's ideal for automating slide deck generation, updating presentation content, or building reports directly from your agent.
 
 ---
@@ -22,7 +28,7 @@ In your Google Cloud project, navigate to **APIs & Services → Library**, searc
 <Step title="Install the Extension">
 
 ```bash
-ironclaw registry install google-slides
+ironclaw-v1 registry install google-slides
 ```
 
 </Step>
@@ -30,7 +36,7 @@ ironclaw registry install google-slides
 <Step title="Authorize Access">
 
 ```bash
-ironclaw tool auth google-slides
+ironclaw-v1 tool auth google-slides
 ```
 
 IronClaw will provide a URL for you to authenticate - remember to follow the [auth setup](./oauth-setup) to enable your agent to capture the callback. If possible, it will open a browser window. Once approved, the token is stored securely and refreshed automatically.

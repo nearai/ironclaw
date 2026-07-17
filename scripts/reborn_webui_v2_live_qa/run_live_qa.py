@@ -1,6 +1,6 @@
 """Live QA runner for Reborn WebUI v2.
 
-This lane intentionally starts the standalone ``ironclaw-reborn serve`` binary
+This lane intentionally starts the canonical ``ironclaw serve`` binary
 and drives the React WebUI v2 surface with Playwright. It does not use the
 legacy gateway stack and does not mock the LLM provider.
 """
@@ -368,7 +368,7 @@ def _cargo_target_dir() -> Path:
 
 
 def _reborn_binary() -> Path:
-    return _cargo_target_dir() / "debug" / "ironclaw-reborn"
+    return _cargo_target_dir() / "debug" / "ironclaw"
 
 
 def build_reborn_binary() -> Path:
@@ -388,14 +388,14 @@ def build_reborn_binary() -> Path:
             "--features",
             features,
             "--bin",
-            "ironclaw-reborn",
+            "ironclaw",
         ],
         cwd=ROOT,
         env=build_env,
     )
     binary = _reborn_binary()
     if not binary.exists():
-        raise LiveQaError(f"ironclaw-reborn binary was not produced at {binary}")
+        raise LiveQaError(f"ironclaw binary was not produced at {binary}")
     return binary
 
 
@@ -812,13 +812,13 @@ async def start_reborn_server(
         process_extra_env["IRONCLAW_REBORN_SLACK_PERSONAL_OAUTH_REDIRECT_URI"] = (
             f"{base_url}/api/reborn/product-auth/oauth/slack_personal/callback"
         )
-    stdout_path = output_dir / "ironclaw-reborn-serve.stdout.log"
-    stderr_path = output_dir / "ironclaw-reborn-serve.stderr.log"
+    stdout_path = output_dir / "ironclaw-serve.stdout.log"
+    stderr_path = output_dir / "ironclaw-serve.stderr.log"
     workspace_dir = output_dir / "workspace"
     workspace_dir.mkdir(parents=True, exist_ok=True)
     out = stdout_path.open("a", encoding="utf-8")
     err = stderr_path.open("a", encoding="utf-8")
-    separator = f"\n--- ironclaw-reborn serve start {time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())} ---\n"
+    separator = f"\n--- ironclaw serve start {time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())} ---\n"
     out.write(separator)
     err.write(separator)
     out.flush()
@@ -847,7 +847,7 @@ async def start_reborn_server(
         if stderr_path.exists():
             tail = "\n".join(stderr_path.read_text(encoding="utf-8", errors="replace").splitlines()[-80:])
         raise LiveQaError(
-            f"ironclaw-reborn serve did not become healthy at {base_url}: {exc}\n{tail}"
+            f"ironclaw serve did not become healthy at {base_url}: {exc}\n{tail}"
         ) from exc
     return proc, base_url
 
@@ -7935,7 +7935,7 @@ async def run_cases(args: argparse.Namespace) -> int:
     binary = _reborn_binary() if args.skip_build else build_reborn_binary()
     if not binary.exists():
         raise LiveQaError(
-            f"ironclaw-reborn binary missing at {binary}; rerun without --skip-build"
+            f"ironclaw binary missing at {binary}; rerun without --skip-build"
         )
     results: list[ProbeResult] = []
     trace_exports: list[dict[str, object]] = []

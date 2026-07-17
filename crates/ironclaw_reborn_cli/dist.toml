@@ -1,0 +1,13 @@
+[package]
+name = "ironclaw"
+binaries = ["ironclaw"]
+
+[dist]
+dist = true
+features = [
+  "webui-v2-beta",
+  "slack-v2-host-beta",
+  "libsql",
+  "postgres",
+  "inmemory-turn-state",
+]

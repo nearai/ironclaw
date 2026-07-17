@@ -1,7 +1,7 @@
 //! Public auth facade for `ironclaw_llm`.
 //!
-//! External callers (the setup wizard, the `ironclaw login` subcommand, and
-//! the LLM config loader) interact with provider authentication through this
+//! External callers (setup wizards, product login surfaces, and the LLM config
+//! loader) interact with provider authentication through this
 //! module only. The per-provider implementations (`github_copilot_auth`,
 //! `gemini_oauth`, `openai_codex_session`, `codex_auth`) are crate-private —
 //! callers must not import them directly.
@@ -109,7 +109,7 @@ impl OpenAiCodexLoginOptions {
     /// shape produced by the binary's `LlmConfig::resolve` pipeline,
     /// which already layered TOML / env / DB precedence.
     ///
-    /// Use this from `ironclaw login --openai-codex` so config-file
+    /// Use this from a product login surface so config-file
     /// overrides for endpoints / client id / session path keep working,
     /// not just env vars. Each field becomes `Some(_)` so it wins over
     /// the built-in default in [`Self::into_codex_config`].
