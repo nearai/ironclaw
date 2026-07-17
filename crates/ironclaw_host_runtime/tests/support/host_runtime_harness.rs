@@ -31,7 +31,7 @@ use ironclaw_filesystem::InMemoryBackend;
 use ironclaw_filesystem::LibSqlRootFilesystem;
 #[cfg(feature = "libsql")]
 use ironclaw_filesystem::ScopedFilesystem;
-use ironclaw_filesystem::{LocalFilesystem, RootFilesystem};
+use ironclaw_filesystem::{DiskFilesystem, RootFilesystem};
 use ironclaw_host_api::*;
 use ironclaw_host_runtime::{
     BuiltinObligationHandler, BuiltinObligationServices, CapabilitySurfaceVersion,
@@ -217,7 +217,7 @@ pub(crate) fn assert_completed_outcome(
 }
 
 pub(crate) type InMemoryHostRuntimeServices = HostRuntimeServices<
-    LocalFilesystem,
+    DiskFilesystem,
     InMemoryResourceGovernor,
     FilesystemProcessStore<InMemoryBackend>,
     FilesystemProcessResultStore<InMemoryBackend>,
@@ -404,7 +404,7 @@ pub(crate) fn approval_resume_fixture_with_manifest(
     let events = InMemoryEventSink::new();
     let services = HostRuntimeServices::new(
         Arc::new(registry_with_manifest(manifest)),
-        Arc::new(LocalFilesystem::new()),
+        Arc::new(DiskFilesystem::new()),
         Arc::new(InMemoryResourceGovernor::new()),
         Arc::new(ApprovalThenGrantAuthorizer),
         ironclaw_processes::in_memory_backed_process_services(),
@@ -437,7 +437,7 @@ pub(crate) fn resume_runtime_with_empty_registry(
 ) -> DefaultHostRuntime {
     HostRuntimeServices::new(
         Arc::new(ExtensionRegistry::new()),
-        Arc::new(LocalFilesystem::new()),
+        Arc::new(DiskFilesystem::new()),
         Arc::new(InMemoryResourceGovernor::new()),
         Arc::new(ApprovalThenGrantAuthorizer),
         ironclaw_processes::in_memory_backed_process_services(),
@@ -463,7 +463,7 @@ pub(crate) fn resume_runtime_with_policy(
 ) -> DefaultHostRuntime {
     HostRuntimeServices::new(
         Arc::new(registry_with_manifest(SCRIPT_NETWORK_MANIFEST)),
-        Arc::new(LocalFilesystem::new()),
+        Arc::new(DiskFilesystem::new()),
         Arc::new(InMemoryResourceGovernor::new()),
         Arc::new(ApprovalThenGrantAuthorizer),
         ironclaw_processes::in_memory_backed_process_services(),
@@ -1906,7 +1906,7 @@ pub(crate) fn assert_local_only_runtime_policy_rejected(
 ) {
     let services = HostRuntimeServices::new(
         Arc::new(registry_with_manifest(SCRIPT_MANIFEST)),
-        Arc::new(LocalFilesystem::new()),
+        Arc::new(DiskFilesystem::new()),
         Arc::new(InMemoryResourceGovernor::new()),
         Arc::new(GrantAuthorizer::new()),
         ironclaw_processes::in_memory_backed_process_services(),
@@ -2152,7 +2152,7 @@ pub(crate) async fn filesystem_with_wasm_component(
     extension_id: &str,
     module_path: &str,
     wasm_bytes: &[u8],
-) -> LocalFilesystem {
+) -> DiskFilesystem {
     let fs = mounted_empty_extension_root();
     let path =
         VirtualPath::new(format!("/system/extensions/{extension_id}/{module_path}")).unwrap();
@@ -2160,9 +2160,9 @@ pub(crate) async fn filesystem_with_wasm_component(
     fs
 }
 
-pub(crate) fn mounted_empty_extension_root() -> LocalFilesystem {
+pub(crate) fn mounted_empty_extension_root() -> DiskFilesystem {
     let storage = tempfile::tempdir().unwrap().keep();
-    let mut fs = LocalFilesystem::new();
+    let mut fs = DiskFilesystem::new();
     fs.mount_local(
         VirtualPath::new("/system/extensions").unwrap(),
         HostPath::from_path_buf(storage),

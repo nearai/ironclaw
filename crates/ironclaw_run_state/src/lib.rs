@@ -238,7 +238,7 @@ pub trait RunStateApprovalStore: RunStateStore + ApprovalRequestStore {
 }
 
 /// `RecordKind` tag written on every run-state entry so byte-only backends
-/// (e.g. `LocalFilesystem`) are rejected with `Unsupported{WriteFile}` on
+/// (e.g. `DiskFilesystem`) are rejected with `Unsupported{WriteFile}` on
 /// first put, which `cas_update` maps to `CasUnsupported` (fail-closed).
 const RUN_STATE_RECORD_KIND: &str = "run_state_record";
 

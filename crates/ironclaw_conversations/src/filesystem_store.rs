@@ -353,7 +353,7 @@ fn index_key_tenant_ids() -> IndexKey {
 ///
 /// Mirrors the secrets / processes / run-state stores: record-shaped
 /// entries and non-`Any` CAS are stripped/downgraded when the backend
-/// reports `Unsupported` so byte-only mounts (LocalFilesystem) keep
+/// reports `Unsupported` so byte-only mounts (DiskFilesystem) keep
 /// working. The single-instance `mutation_lock` on
 /// [`InMemoryConversationServices`] is the caller-side ordering guarantee
 /// that CAS would otherwise provide on byte-only backends.

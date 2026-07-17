@@ -6,7 +6,7 @@ use std::{
 
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
-use ironclaw_filesystem::{FilesystemError, LocalFilesystem, RootFilesystem, ScopedFilesystem};
+use ironclaw_filesystem::{DiskFilesystem, FilesystemError, RootFilesystem, ScopedFilesystem};
 use ironclaw_host_api::{
     AgentId, HostApiError, MountAlias, MountGrant, MountPermissions, MountView, ProjectId,
     ResourceScope, ScopedPath, TenantId, ThreadId, UserId, VirtualPath,
@@ -37,8 +37,8 @@ pub enum RebornProductWorkflowHarnessError {
 
 pub struct RebornProductWorkflowHarness {
     pub scope: ResourceScope,
-    filesystem: Arc<ScopedFilesystem<LocalFilesystem>>,
-    backend: Arc<LocalFilesystem>,
+    filesystem: Arc<ScopedFilesystem<DiskFilesystem>>,
+    backend: Arc<DiskFilesystem>,
     root: Arc<tempfile::TempDir>,
     idempotency_lock: Arc<Mutex<()>>,
 }
@@ -54,7 +54,7 @@ impl RebornProductWorkflowHarness {
 
     pub fn filesystem_shared_backend(
         scope: ResourceScope,
-        backend: Arc<LocalFilesystem>,
+        backend: Arc<DiskFilesystem>,
         root: Arc<tempfile::TempDir>,
     ) -> Result<Self, RebornProductWorkflowHarnessError> {
         let idempotency_lock = idempotency_lock_for_workflow_root(&root, &scope);
@@ -63,7 +63,7 @@ impl RebornProductWorkflowHarness {
 
     fn filesystem_shared_backend_with_lock(
         scope: ResourceScope,
-        backend: Arc<LocalFilesystem>,
+        backend: Arc<DiskFilesystem>,
         root: Arc<tempfile::TempDir>,
         idempotency_lock: Arc<Mutex<()>>,
     ) -> Result<Self, RebornProductWorkflowHarnessError> {
@@ -101,7 +101,7 @@ impl RebornProductWorkflowHarness {
     pub fn binding_service(
         &self,
     ) -> Result<
-        FilesystemConversationBindingService<LocalFilesystem>,
+        FilesystemConversationBindingService<DiskFilesystem>,
         RebornProductWorkflowHarnessError,
     > {
         let agent_id = self
@@ -117,7 +117,7 @@ impl RebornProductWorkflowHarness {
         ))
     }
 
-    pub fn idempotency_ledger(&self) -> FilesystemIdempotencyLedger<LocalFilesystem> {
+    pub fn idempotency_ledger(&self) -> FilesystemIdempotencyLedger<DiskFilesystem> {
         FilesystemIdempotencyLedger::new_with_lock(
             Arc::clone(&self.filesystem),
             self.scope.clone(),
@@ -129,7 +129,7 @@ impl RebornProductWorkflowHarness {
     pub fn idempotency_ledger_with_ttl(
         &self,
         lease_ttl: Duration,
-    ) -> FilesystemIdempotencyLedger<LocalFilesystem> {
+    ) -> FilesystemIdempotencyLedger<DiskFilesystem> {
         FilesystemIdempotencyLedger::new_with_lock(
             Arc::clone(&self.filesystem),
             self.scope.clone(),

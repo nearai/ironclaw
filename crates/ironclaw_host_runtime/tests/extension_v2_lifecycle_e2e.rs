@@ -12,7 +12,7 @@ use ironclaw_extensions::{
     CapabilityVisibility, ExtensionError, ExtensionLifecycleService, ExtensionManifest,
     ExtensionPackage, ExtensionRegistry, ExtensionRuntime, ManifestSource, ManifestV2Error,
 };
-use ironclaw_filesystem::LocalFilesystem;
+use ironclaw_filesystem::DiskFilesystem;
 use ironclaw_host_api::{
     CapabilityId, EffectKind, ExtensionId, HostPath, MountView, NetworkScheme,
     NetworkTargetPattern, PermissionMode, ReservationStatus, ResourceEstimate,
@@ -470,10 +470,10 @@ struct RecordedAdapterRequest {
 }
 
 #[async_trait]
-impl RuntimeAdapter<LocalFilesystem, InMemoryResourceGovernor> for RecordingAdapter {
+impl RuntimeAdapter<DiskFilesystem, InMemoryResourceGovernor> for RecordingAdapter {
     async fn dispatch_json(
         &self,
-        request: RuntimeAdapterRequest<'_, LocalFilesystem, InMemoryResourceGovernor>,
+        request: RuntimeAdapterRequest<'_, DiskFilesystem, InMemoryResourceGovernor>,
     ) -> Result<RuntimeAdapterResult, DispatchError> {
         self.requests.lock().unwrap().push(RecordedAdapterRequest {
             provider: request.package.id.clone(),
@@ -540,7 +540,7 @@ fn dispatch_error_for_runtime(
     }
 }
 
-fn mounted_extension_fs(id: &str, manifest: &str) -> (tempfile::TempDir, LocalFilesystem) {
+fn mounted_extension_fs(id: &str, manifest: &str) -> (tempfile::TempDir, DiskFilesystem) {
     let storage = tempdir().unwrap();
     let extension_root = storage.path().join(id);
     std::fs::create_dir_all(extension_root.join("schemas/script")).unwrap();
@@ -562,7 +562,7 @@ fn mounted_extension_fs(id: &str, manifest: &str) -> (tempfile::TempDir, LocalFi
     )
     .unwrap();
 
-    let mut fs = LocalFilesystem::new();
+    let mut fs = DiskFilesystem::new();
     fs.mount_local(
         VirtualPath::new("/system/extensions").unwrap(),
         HostPath::from_path_buf(storage.path().to_path_buf()),
@@ -571,7 +571,7 @@ fn mounted_extension_fs(id: &str, manifest: &str) -> (tempfile::TempDir, LocalFi
     (storage, fs)
 }
 
-fn mounted_github_package_fs() -> (tempfile::TempDir, LocalFilesystem) {
+fn mounted_github_package_fs() -> (tempfile::TempDir, DiskFilesystem) {
     let storage = tempdir().unwrap();
     let source_root = github_first_party_asset_root();
     let package_root = storage.path().join("github");
@@ -586,7 +586,7 @@ fn mounted_github_package_fs() -> (tempfile::TempDir, LocalFilesystem) {
         &package_root.join("prompts/github"),
     );
 
-    let mut fs = LocalFilesystem::new();
+    let mut fs = DiskFilesystem::new();
     fs.mount_local(
         VirtualPath::new("/system/extensions").unwrap(),
         HostPath::from_path_buf(storage.path().to_path_buf()),

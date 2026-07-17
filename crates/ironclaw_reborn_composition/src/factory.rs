@@ -46,7 +46,7 @@ use ironclaw_filesystem::{
     BackendCapabilities, BackendId, BackendKind, CompositeRootFilesystem, ContentKind, IndexPolicy,
     MountDescriptor, RootFilesystem, StorageClass,
 };
-use ironclaw_filesystem::{LocalFilesystem, ScopedFilesystem};
+use ironclaw_filesystem::{DiskFilesystem, ScopedFilesystem};
 #[cfg(feature = "test-support")]
 use ironclaw_first_party_extensions::{
     EXA_MCP_HOST, NETWORK_EGRESS_LIMIT, WEB_ACCESS_EXTENSION_ID, WEB_GET_CONTENT_CAPABILITY_ID,
@@ -3168,8 +3168,8 @@ fn local_dev_project_filesystem(
     root: &Path,
     workspace_root: &Path,
     host_home_root: Option<&LocalDevHostHomeRoot>,
-) -> Result<LocalFilesystem, RebornBuildError> {
-    let mut filesystem = LocalFilesystem::new();
+) -> Result<DiskFilesystem, RebornBuildError> {
+    let mut filesystem = DiskFilesystem::new();
     filesystem.mount_local(
         VirtualPath::new("/projects")?,
         HostPath::from_path_buf(root.to_path_buf()),
@@ -3457,13 +3457,13 @@ where
 
 fn mount_local_dev_project_roots(
     root: &mut CompositeRootFilesystem,
-    local: Arc<LocalFilesystem>,
+    local: Arc<DiskFilesystem>,
 ) -> Result<(), RebornBuildError> {
     root.mount(
         local_dev_mount_descriptor(
             "/projects",
             "local-dev-project-files",
-            BackendKind::LocalFilesystem,
+            BackendKind::DiskFilesystem,
             StorageClass::FileContent,
             ContentKind::ProjectFile,
             IndexPolicy::NotIndexed,
@@ -3475,7 +3475,7 @@ fn mount_local_dev_project_roots(
         local_dev_mount_descriptor(
             "/system/extensions",
             "local-dev-system-extensions",
-            BackendKind::LocalFilesystem,
+            BackendKind::DiskFilesystem,
             StorageClass::FileContent,
             ContentKind::ExtensionPackage,
             IndexPolicy::NotIndexed,
@@ -6265,7 +6265,7 @@ mod tests {
     fn attach_hosted_mcp_runtime_skips_services_without_http_egress() {
         let services = HostRuntimeServices::new(
             Arc::new(ExtensionRegistry::new()),
-            Arc::new(LocalFilesystem::new()),
+            Arc::new(DiskFilesystem::new()),
             Arc::new(InMemoryResourceGovernor::new()),
             Arc::new(GrantAuthorizer::new()),
             ProcessServices::in_memory(),
@@ -7462,7 +7462,7 @@ mod tests {
     fn attach_hosted_mcp_runtime_skips_services_without_runtime_http_egress() {
         let services = HostRuntimeServices::new(
             Arc::new(ExtensionRegistry::new()),
-            Arc::new(LocalFilesystem::new()),
+            Arc::new(DiskFilesystem::new()),
             Arc::new(InMemoryResourceGovernor::new()),
             Arc::new(GrantAuthorizer::new()),
             ProcessServices::in_memory(),

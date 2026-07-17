@@ -31,7 +31,7 @@
 //! Definition of done for this axis (§4.4/§10): the allowlist reaches the empty
 //! set — no `LocalDev*` type remains; local-dev is one `DeploymentConfig`
 //! constant. (Scoped to `LocalDev*` specifically: the broader §4.4 `Local*` /
-//! `Hosted*` name audit — Bucket 2 renames like `LocalFilesystem`→`DiskFilesystem`
+//! `Hosted*` name audit — Bucket 2 renames like `DiskFilesystem`→`DiskFilesystem`
 //! and Bucket 3 false positives like `Locale`, `HostedMcp*`, `NodeTraceSubmission*`
 //! — is a separate concern, so this ratchet stays high-signal with a clean
 //! empty-set goal.)

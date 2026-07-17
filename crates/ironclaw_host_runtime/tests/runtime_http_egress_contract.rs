@@ -1,8 +1,9 @@
+// arch-exempt: large_file, mechanical LocalFilesystem->DiskFilesystem Bucket-2 rename (arch-simplification §4.4), no logic change, plan #6168
 use ironclaw_capabilities::{
     CapabilityObligationHandler, CapabilityObligationPhase, CapabilityObligationRequest,
 };
 use ironclaw_events::InMemoryAuditSink;
-use ironclaw_filesystem::{InMemoryBackend, LocalFilesystem, RootFilesystem, ScopedFilesystem};
+use ironclaw_filesystem::{DiskFilesystem, InMemoryBackend, RootFilesystem, ScopedFilesystem};
 use ironclaw_host_api::{
     AgentId, CapabilityHostHttpRequest, CapabilityId, CapabilitySet, CredentialStageError,
     ExecutionContext, ExtensionId, InvocationId, MountAlias, MountGrant, MountPermissions,
@@ -3641,7 +3642,7 @@ async fn host_http_egress_fails_closed_when_real_scoped_filesystem_write_fails()
         },
     });
     let temp = tempdir().unwrap();
-    let mut root = LocalFilesystem::new();
+    let mut root = DiskFilesystem::new();
     root.mount_local(
         VirtualPath::new("/projects/workspace").unwrap(),
         ironclaw_host_api::HostPath::from_path_buf(temp.path().to_path_buf()),
