@@ -357,8 +357,8 @@ goes to zero because nothing mirrors.
 
 ### 4.2 Less `dyn` — a trait earns a trait object only if it has ≥2 production impls or is the trust boundary
 
-- **Keep** `LoopCapabilityPort` (the one trust membrane) and `LlmProvider`
-  (genuine polymorphism).
+- **Keep** `LoopCapabilityPort` (the loop's trust membrane — one of several trust
+  boundaries, §2) and `LlmProvider` (genuine polymorphism).
 - **Replace** `RuntimeAdapter`'s `dyn` with a closed `enum RuntimeLane`
   (`Wasm | Script | Mcp | FirstParty`). Adding a lane becomes a compile error
   until every `match` handles it. WASM extensions stay open — they are *data*
