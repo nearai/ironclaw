@@ -10,7 +10,7 @@ use super::prompts::{LlmCredentialPromptError, PromptSource};
 
 /// Outcome of onboard's LLM provider/API-key prompt step. Every variant is a
 /// successful `execute()` (exit 0) — mirrors [`super::master_key::MasterKeyProvisionOutcome`]'s
-/// shape: `SkippedNonInteractive` is expected and normal, not a failure.
+/// shape: the `Skipped*` variants are expected and normal, not a failure.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum LlmCredentialProvisionOutcome {
     Configured {
@@ -26,7 +26,32 @@ pub(crate) enum LlmCredentialProvisionOutcome {
         provider_id: String,
         model: String,
     },
+    /// A complete LLM configuration was detected in the environment
+    /// (`RebornProviderAdmin::detect_env_llm`) and the `[llm.default]` slot
+    /// was seeded from it — via `set_provider`, storing no API key (the
+    /// value keeps resolving from its env var at runtime; see
+    /// [`provision_llm_credentials`]'s doc). Reached either through an
+    /// interactive "use it?" confirmation, or silently on a headless run.
+    ///
+    /// Idempotency note: once seeded, this slot is authoritative like any
+    /// other — a later drift between the seeded values and the live
+    /// environment is accepted (not re-detected or re-synced) on subsequent
+    /// runs; `--force` re-seeds from the environment again.
+    ConfiguredFromEnv {
+        provider_id: String,
+        model: String,
+    },
+    /// Headless (non-interactive) session; no LLM environment variables are
+    /// set at all. Nothing was seeded.
     SkippedNonInteractive,
+    /// Headless (non-interactive) session; some LLM environment
+    /// configuration was present but incomplete or invalid (e.g. a
+    /// provider's model env var set without its required API key env var).
+    /// Nothing was seeded — a partial/broken environment must never be
+    /// silently adopted.
+    SkippedNonInteractivePartialEnv {
+        reason: String,
+    },
 }
 
 impl LlmCredentialProvisionOutcome {
@@ -41,7 +66,15 @@ impl LlmCredentialProvisionOutcome {
                      --force to reconfigure"
                 )
             }
+            Self::ConfiguredFromEnv { provider_id, model } => {
+                format!("configured provider `{provider_id}` (model `{model}`) from environment")
+            }
             Self::SkippedNonInteractive => "skipped (non-interactive session)".to_string(),
+            Self::SkippedNonInteractivePartialEnv { reason } => {
+                format!(
+                    "skipped (non-interactive session; partial environment LLM config: {reason})"
+                )
+            }
         }
     }
 }
@@ -104,32 +137,62 @@ impl LlmKeyStoreOpener for LocalDevLlmKeyStoreOpener {
     }
 }
 
-/// Prompt for an LLM provider (via the numbered menu — see
-/// [`super::prompts::PromptSource::provider_menu`]), its API key when the
-/// selected provider requires one, and a model override, then persist what's
-/// needed. Both prompts (`api_key`, `model`) run first — they're pure reads
-/// of user input with nothing durable behind them — so every fallible step
-/// remaining once a write starts is a write itself, never a prompt: any API
-/// key value goes into the encrypted secret store via the canonical
-/// `LlmKeyStore` handle (`llm_provider_<id>_api_key`) FIRST — the same handle
-/// the webui2 settings surface writes and `apply_startup_stored_llm_key`
-/// reads at boot — and only once that succeeds does the provider selection
-/// land in `[llm.default]` in `config.toml` SECOND (existing
-/// `RebornProviderAdmin::set_provider` config machinery, the same one
-/// `ironclaw-reborn models set-provider` uses). This ordering means
-/// `config.toml` can never point at a provider whose key failed to persist
-/// durably: a `LlmKeyStore::put` failure returns an error before
-/// `set_provider` is ever called, leaving `config.toml` exactly as it was —
-/// and, symmetrically, a prompt failure (e.g. Ctrl-D on the model prompt)
-/// can never leave an orphan key in the secret store, because no prompt runs
-/// after the store write starts. A provider whose menu entry has
+/// Provision onboard's `[llm.default]` slot.
+///
+/// Before the numbered menu, this checks whether a complete LLM
+/// configuration is already detectable from the environment
+/// (`RebornProviderAdmin::detect_env_llm`, the same
+/// `ironclaw_llm::resolve_provider_config_from_env` resolution
+/// `resolve_reborn_runtime_llm`'s own fallback path and the `run`/`serve`
+/// stub-gateway warning use):
+///
+/// - **Interactive**, detected: asks "Found `<provider>` configured in
+///   environment — use it?" ([`PromptSource::confirm`]). A yes answer seeds
+///   `[llm.default]` from the detected provider/model via `set_provider` —
+///   storing NO key in the encrypted secret store; the env var stays the key
+///   source at runtime (`set_provider` leaves `api_key_env` at the catalog
+///   default, and `ironclaw_llm`'s resolution reads that env var by name at
+///   startup — see `resolve_provider_definition` in `ironclaw_llm`). A no
+///   answer falls through to the full numbered menu below.
+/// - **Interactive**, partial/invalid env (`Err`): prints one line noting
+///   the environment config is being ignored, then falls through to the
+///   full menu.
+/// - **Interactive**, nothing detected (`Ok(None)`): falls through to the
+///   full menu unchanged.
+/// - **Headless**, detected: seeds `[llm.default]` silently (no prompt was
+///   possible) and reports it in onboard's printed output.
+/// - **Headless**, partial/invalid or nothing detected: seeds nothing;
+///   returns a `Skipped*` outcome whose `display_line` teaches the operator
+///   what to do next.
+///
+/// The full numbered menu (via [`super::prompts::PromptSource::provider_menu`])
+/// then prompts for a provider, its API key when required, and a model
+/// override, then persists what's needed. Both prompts (`api_key`, `model`)
+/// run first — they're pure reads of user input with nothing durable behind
+/// them — so every fallible step remaining once a write starts is a write
+/// itself, never a prompt: any API key value goes into the encrypted secret
+/// store via the canonical `LlmKeyStore` handle (`llm_provider_<id>_api_key`)
+/// FIRST — the same handle the webui2 settings surface writes and
+/// `apply_startup_stored_llm_key` reads at boot — and only once that
+/// succeeds does the provider selection land in `[llm.default]` in
+/// `config.toml` SECOND (existing `RebornProviderAdmin::set_provider` config
+/// machinery, the same one `ironclaw-reborn models set-provider` uses). This
+/// ordering means `config.toml` can never point at a provider whose key
+/// failed to persist durably: a `LlmKeyStore::put` failure returns an error
+/// before `set_provider` is ever called, leaving `config.toml` exactly as it
+/// was — and, symmetrically, a prompt failure (e.g. Ctrl-D on the model
+/// prompt) can never leave an orphan key in the secret store, because no
+/// prompt runs after the store write starts. A provider whose menu entry has
 /// `api_key_required: false` (e.g. `nearai`) skips the key prompt and
 /// secret-store write entirely — there is nothing to persist there.
 ///
-/// Skips prompting entirely (an idempotent no-op) on a rerun where
+/// Skips ALL of the above entirely (an idempotent no-op) on a rerun where
 /// `[llm.default]` is already user-configured AND (the provider doesn't
 /// require a key OR the store already has a key for it), unless `force` is
-/// set — see [`already_configured_outcome`].
+/// set — see [`already_configured_outcome`]. This idempotency check now
+/// covers env-seeded slots too: once seeded, drift between the slot and a
+/// since-changed environment is accepted, not re-detected — `--force`
+/// re-seeds from the environment again.
 #[cfg(all(feature = "libsql", feature = "root-llm-provider"))]
 pub(crate) fn provision_llm_credentials(
     home: &RebornHome,
@@ -138,16 +201,86 @@ pub(crate) fn provision_llm_credentials(
     store_opener: &dyn LlmKeyStoreOpener,
     force: bool,
 ) -> Result<LlmCredentialProvisionOutcome, LlmCredentialPromptError> {
-    if !prompts.is_interactive() {
-        return Err(LlmCredentialPromptError::NonInteractive);
-    }
-
     let admin = ironclaw_reborn_composition::RebornProviderAdmin::new(boot.clone());
 
     if !force && let Some(outcome) = already_configured_outcome(&admin, home, store_opener)? {
         return Ok(outcome);
     }
 
+    if !prompts.is_interactive() {
+        return provision_headless_from_env(&admin);
+    }
+
+    match admin.detect_env_llm() {
+        Ok(Some(detected)) => {
+            let question = format!(
+                "Found `{}` configured in environment — use it?",
+                detected.provider_id
+            );
+            if prompts.confirm(&question)? {
+                let write_outcome = admin
+                    .set_provider(&detected.provider_id, Some(detected.model.as_str()))
+                    .map_err(|error| LlmCredentialPromptError::Other(error.into()))?;
+                return Ok(LlmCredentialProvisionOutcome::ConfiguredFromEnv {
+                    provider_id: write_outcome.provider_id,
+                    model: write_outcome.model,
+                });
+            }
+            // Declined: fall through to the full numbered menu below.
+        }
+        Ok(None) => {
+            // Nothing detected: fall through to the full numbered menu
+            // unchanged — this is the common fresh-install case.
+        }
+        Err(error) => {
+            println!("ignoring partial environment LLM config: {error}");
+            // Fall through to the full numbered menu below.
+        }
+    }
+
+    provision_via_menu(home, &admin, prompts, store_opener)
+}
+
+/// Headless (non-interactive) counterpart of the env-detect step in
+/// [`provision_llm_credentials`]'s doc: no prompt is possible, so a detected
+/// configuration is seeded silently, and anything else (partial env or
+/// nothing detected) seeds nothing and returns a `Skipped*` outcome whose
+/// `display_line` teaches the operator what to do next.
+#[cfg(all(feature = "libsql", feature = "root-llm-provider"))]
+fn provision_headless_from_env(
+    admin: &ironclaw_reborn_composition::RebornProviderAdmin,
+) -> Result<LlmCredentialProvisionOutcome, LlmCredentialPromptError> {
+    match admin.detect_env_llm() {
+        Ok(Some(detected)) => {
+            let write_outcome = admin
+                .set_provider(&detected.provider_id, Some(detected.model.as_str()))
+                .map_err(|error| LlmCredentialPromptError::Other(error.into()))?;
+            Ok(LlmCredentialProvisionOutcome::ConfiguredFromEnv {
+                provider_id: write_outcome.provider_id,
+                model: write_outcome.model,
+            })
+        }
+        Ok(None) => Ok(LlmCredentialProvisionOutcome::SkippedNonInteractive),
+        Err(error) => Ok(
+            LlmCredentialProvisionOutcome::SkippedNonInteractivePartialEnv {
+                reason: error.to_string(),
+            },
+        ),
+    }
+}
+
+/// Drive the full numbered provider menu — the pre-env-detect behavior of
+/// [`provision_llm_credentials`], factored out so both the "declined
+/// confirm" and "nothing detected" branches share exactly one
+/// implementation. See that function's doc for the store-then-config write
+/// ordering this preserves.
+#[cfg(all(feature = "libsql", feature = "root-llm-provider"))]
+fn provision_via_menu(
+    home: &RebornHome,
+    admin: &ironclaw_reborn_composition::RebornProviderAdmin,
+    prompts: &mut dyn PromptSource,
+    store_opener: &dyn LlmKeyStoreOpener,
+) -> Result<LlmCredentialProvisionOutcome, LlmCredentialPromptError> {
     let entries = admin
         .menu_entries()
         .map_err(|error| LlmCredentialPromptError::Other(error.into()))?;
@@ -171,8 +304,9 @@ pub(crate) fn provision_llm_credentials(
     // Both prompts run BEFORE any write: they're pure reads of user input,
     // so gathering them first means the only fallible steps left are the
     // two durable writes below (store, then config) — no prompt can fail
-    // partway through with a secret already committed. See this function's
-    // doc for the store-then-config write ordering.
+    // partway through with a secret already committed. See
+    // `provision_llm_credentials`'s doc for the store-then-config write
+    // ordering.
     let key = if entry.api_key_required {
         let key = prompts.api_key(&canonical_provider_id)?;
         // Defense in depth: `StdinPromptSource::api_key` already re-prompts
@@ -243,15 +377,37 @@ pub(crate) fn provision_llm_credentials(
 /// still succeed even if the pre-flight check couldn't read the store). A
 /// registry lookup failure, in contrast, is propagated — see
 /// [`provider_api_key_required`]'s doc.
+///
+/// A `config.toml` LOAD failure (unparseable TOML — e.g. a pre-existing,
+/// operator-authored `config.toml` this idempotency check runs BEFORE the
+/// interactivity gate now runs against too, per the env-detect step's
+/// headless idempotency requirement) is likewise treated as "can't tell":
+/// this check's whole job is figuring out whether to SKIP work, so a config
+/// it cannot read must never turn into a hard failure here — `set_provider`/
+/// `write_default_config_files` are the real authorities on whether a
+/// malformed `config.toml` is fatal, and `onboard`'s `ExistingConfigPolicy::
+/// Preserve` deliberately leaves an operator-authored (even malformed)
+/// `config.toml` untouched rather than validating it.
 #[cfg(all(feature = "libsql", feature = "root-llm-provider"))]
 fn already_configured_outcome(
     admin: &ironclaw_reborn_composition::RebornProviderAdmin,
     home: &RebornHome,
     store_opener: &dyn LlmKeyStoreOpener,
 ) -> Result<Option<LlmCredentialProvisionOutcome>, LlmCredentialPromptError> {
-    let status = admin
-        .status()
-        .map_err(|error| LlmCredentialPromptError::Other(error.into()))?;
+    let status = match admin.status() {
+        Ok(status) => status,
+        Err(ironclaw_reborn_composition::RebornProviderAdminError::LoadConfig {
+            source, ..
+        }) => {
+            tracing::debug!(
+                error = %source,
+                "config.toml failed to parse while checking already-configured LLM; falling \
+                 through rather than failing the whole run"
+            );
+            return Ok(None);
+        }
+        Err(error) => return Err(LlmCredentialPromptError::Other(error.into())),
+    };
     let Some(selection) = status.default else {
         return Ok(None);
     };
@@ -390,6 +546,14 @@ mod tests {
         ) -> Result<Option<String>, LlmCredentialPromptError> {
             Ok(self.model.map(str::to_string))
         }
+
+        fn confirm(&mut self, _question: &str) -> Result<bool, LlmCredentialPromptError> {
+            panic!(
+                "confirm() must not be called: these tests run with a clean process \
+                 environment (no LLM env vars set), so detect_env_llm() must return Ok(None) \
+                 and fall straight through to the numbered menu"
+            )
+        }
     }
 
     struct NonInteractivePromptSource;
@@ -416,6 +580,13 @@ mod tests {
             _default_model: &str,
         ) -> Result<Option<String>, LlmCredentialPromptError> {
             unreachable!("model must not be prompted once provider_menu() has already failed")
+        }
+
+        fn confirm(&mut self, _question: &str) -> Result<bool, LlmCredentialPromptError> {
+            unreachable!(
+                "confirm() must not be called once is_interactive() is false: the headless \
+                 env-detect path never prompts"
+            )
         }
     }
 
@@ -446,6 +617,10 @@ mod tests {
             _default_model: &str,
         ) -> Result<Option<String>, LlmCredentialPromptError> {
             panic!("model() must not be called on an idempotent, already-configured rerun")
+        }
+
+        fn confirm(&mut self, _question: &str) -> Result<bool, LlmCredentialPromptError> {
+            panic!("confirm() must not be called on an idempotent, already-configured rerun")
         }
     }
 
@@ -593,6 +768,14 @@ mod tests {
         ) -> Result<Option<String>, LlmCredentialPromptError> {
             Ok(self.model.map(str::to_string))
         }
+
+        fn confirm(&mut self, _question: &str) -> Result<bool, LlmCredentialPromptError> {
+            panic!(
+                "confirm() must not be called: these tests run with a clean process \
+                 environment (no LLM env vars set), so detect_env_llm() must return Ok(None) \
+                 and fall straight through to the numbered menu"
+            )
+        }
     }
 
     /// RED (B2 step 1, adapted for the menu): a fake interactive
@@ -609,6 +792,7 @@ mod tests {
     /// skipped, not merely tolerated.
     #[test]
     fn provision_llm_credentials_writes_config_and_secret_store_through_fake_prompts() {
+        let _env_guard = crate::runtime::test_env::lock_runtime_env();
         let (_tmp, context) = RebornCliContext::test_context();
         let home = context.boot_config().home();
         std::fs::create_dir_all(home.path()).expect("create reborn home");
@@ -688,6 +872,7 @@ mod tests {
     /// re-prompted even though there was nothing left to configure.
     #[test]
     fn provision_llm_credentials_is_idempotent_for_a_no_key_provider() {
+        let _env_guard = crate::runtime::test_env::lock_runtime_env();
         let (_tmp, context) = RebornCliContext::test_context();
         let home = context.boot_config().home();
         std::fs::create_dir_all(home.path()).expect("create reborn home");
@@ -751,32 +936,40 @@ mod tests {
         );
     }
 
-    /// RED (B2 step 2): a non-interactive fake source must surface as a
-    /// typed [`LlmCredentialPromptError::NonInteractive`] — never a panic or
-    /// process exit — and must not write anything: `provider_menu()`/
-    /// `api_key()` are `unreachable!()` (proving the interactivity check
-    /// short-circuits before either prompt runs) and `config.toml` must not
-    /// exist afterward (proving no store/config touch happens before both
-    /// prompts have succeeded).
+    /// A non-interactive session with no LLM environment variables set must
+    /// now succeed with `Ok(SkippedNonInteractive)` (not the old
+    /// `Err(NonInteractive)` — headless `onboard` no longer treats "nothing
+    /// to prompt for, nothing detected in env" as a failure; see
+    /// `provision_llm_credentials`'s doc for the env-detect-then-headless
+    /// branch) and must not write anything: `provider_menu()`/`api_key()`/
+    /// `model()`/`confirm()` are all `unreachable!()` on
+    /// `NonInteractivePromptSource` (proving the interactivity check
+    /// short-circuits before any prompt runs) and `config.toml` must not
+    /// exist afterward (proving no store/config touch happens without a
+    /// detected environment).
     #[test]
-    fn provision_llm_credentials_propagates_non_interactive_error_without_touching_anything() {
+    fn provision_llm_credentials_is_a_noop_when_non_interactive_with_no_env_detected() {
+        let _env_guard = crate::runtime::test_env::lock_runtime_env();
         let (_tmp, context) = RebornCliContext::test_context();
         let home = context.boot_config().home();
         std::fs::create_dir_all(home.path()).expect("create reborn home");
 
         let mut prompts = NonInteractivePromptSource;
-        let error = provision_llm_credentials(
+        let outcome = provision_llm_credentials(
             home,
             context.boot_config(),
             &mut prompts,
             &LocalDevLlmKeyStoreOpener,
             false,
         )
-        .expect_err("a non-interactive source must return a typed error");
-        assert!(matches!(error, LlmCredentialPromptError::NonInteractive));
+        .expect("a non-interactive source with nothing detected in env must succeed as a no-op");
+        assert_eq!(
+            outcome,
+            LlmCredentialProvisionOutcome::SkippedNonInteractive
+        );
         assert!(
             !home.config_file_path().exists(),
-            "a non-interactive prompt failure must not write config.toml"
+            "a non-interactive no-op must not write config.toml"
         );
     }
 
@@ -789,6 +982,7 @@ mod tests {
     /// opens the store at all, so it couldn't exercise this ordering.
     #[test]
     fn provision_llm_credentials_leaves_config_untouched_when_the_store_put_fails() {
+        let _env_guard = crate::runtime::test_env::lock_runtime_env();
         let (_tmp, context) = RebornCliContext::test_context();
         let home = context.boot_config().home();
         std::fs::create_dir_all(home.path()).expect("create reborn home");
@@ -822,6 +1016,7 @@ mod tests {
     /// every `PromptSource`, not just the terminal-backed one.
     #[test]
     fn provision_llm_credentials_rejects_a_blank_api_key_without_touching_anything() {
+        let _env_guard = crate::runtime::test_env::lock_runtime_env();
         let (_tmp, context) = RebornCliContext::test_context();
         let home = context.boot_config().home();
         std::fs::create_dir_all(home.path()).expect("create reborn home");
@@ -857,6 +1052,7 @@ mod tests {
     #[test]
     fn provision_llm_credentials_rejects_a_menu_excluded_provider_id() {
         for excluded_provider in ["bedrock", "openai_compatible"] {
+            let _env_guard = crate::runtime::test_env::lock_runtime_env();
             let (_tmp, context) = RebornCliContext::test_context();
             let home = context.boot_config().home();
             std::fs::create_dir_all(home.path()).expect("create reborn home");
@@ -888,6 +1084,7 @@ mod tests {
     /// `[llm.default].model`, not a blank string.
     #[test]
     fn provision_llm_credentials_empty_model_answer_uses_catalog_default() {
+        let _env_guard = crate::runtime::test_env::lock_runtime_env();
         let (_tmp, context) = RebornCliContext::test_context();
         let home = context.boot_config().home();
         std::fs::create_dir_all(home.path()).expect("create reborn home");
@@ -913,6 +1110,344 @@ mod tests {
                 model: "gpt-5-mini".to_string(),
             },
             "an empty model answer must resolve to openai's catalog default model"
+        );
+    }
+
+    /// `PromptSource` that answers a fixed `confirm()` result and, if the
+    /// flow falls through to the menu instead, selects `provider`/`model`
+    /// like [`FakePromptSource`] — used to drive both branches of the
+    /// interactive env-detect step from one fake.
+    struct ConfirmingPromptSource {
+        confirm_answer: bool,
+        provider: &'static str,
+        model: Option<&'static str>,
+    }
+
+    impl PromptSource for ConfirmingPromptSource {
+        fn is_interactive(&self) -> bool {
+            true
+        }
+
+        fn provider_menu(
+            &mut self,
+            entries: &[ironclaw_reborn_composition::ProviderMenuEntry],
+        ) -> Result<String, LlmCredentialPromptError> {
+            entries
+                .iter()
+                .find(|entry| entry.id == self.provider)
+                .map(|entry| entry.id.clone())
+                .ok_or_else(|| {
+                    LlmCredentialPromptError::Other(anyhow::anyhow!(
+                        "fake-selected provider `{}` is not on the menu",
+                        self.provider
+                    ))
+                })
+        }
+
+        fn api_key(&mut self, _provider: &str) -> Result<String, LlmCredentialPromptError> {
+            panic!(
+                "api_key() must not be called: this test's env-detected provider (openai via \
+                 OPENAI_API_KEY) never reaches the key prompt on the confirm-yes branch, and \
+                 the confirm-no branch in this test selects nearai (no key required)"
+            )
+        }
+
+        fn model(
+            &mut self,
+            _provider_id: &str,
+            _default_model: &str,
+        ) -> Result<Option<String>, LlmCredentialPromptError> {
+            Ok(self.model.map(str::to_string))
+        }
+
+        fn confirm(&mut self, question: &str) -> Result<bool, LlmCredentialPromptError> {
+            assert!(
+                question.contains("openai"),
+                "confirm question must name the detected provider: {question}"
+            );
+            Ok(self.confirm_answer)
+        }
+    }
+
+    /// `PromptSource` whose `confirm()`/`provider_menu()` both panic if
+    /// called — used to prove the headless env-detect path never prompts.
+    struct HeadlessPromptSource;
+
+    impl PromptSource for HeadlessPromptSource {
+        fn is_interactive(&self) -> bool {
+            false
+        }
+
+        fn provider_menu(
+            &mut self,
+            _entries: &[ironclaw_reborn_composition::ProviderMenuEntry],
+        ) -> Result<String, LlmCredentialPromptError> {
+            unreachable!("provider_menu() must not be called once is_interactive() is false")
+        }
+
+        fn api_key(&mut self, _provider: &str) -> Result<String, LlmCredentialPromptError> {
+            unreachable!("api_key() must not be called once is_interactive() is false")
+        }
+
+        fn model(
+            &mut self,
+            _provider_id: &str,
+            _default_model: &str,
+        ) -> Result<Option<String>, LlmCredentialPromptError> {
+            unreachable!("model() must not be called once is_interactive() is false")
+        }
+
+        fn confirm(&mut self, _question: &str) -> Result<bool, LlmCredentialPromptError> {
+            unreachable!("confirm() must not be called once is_interactive() is false")
+        }
+    }
+
+    /// RED (env-detect step 2a, interactive + detected + confirm yes): with
+    /// a complete `openai` configuration in the environment (`OPENAI_API_KEY`
+    /// set), an interactive session must ask to confirm using it, and a
+    /// "yes" answer must seed `[llm.default]` from the DETECTED provider/
+    /// model — via `set_provider`, WITHOUT ever opening the secret store or
+    /// calling `api_key()`. The key stays resolvable from `OPENAI_API_KEY`
+    /// at runtime (see `provision_llm_credentials`'s doc for why `set_provider`
+    /// leaving `api_key_env` at its catalog default is sufficient — the env
+    /// var name, not a stored value, is what `ironclaw_llm` resolution reads
+    /// at startup).
+    #[test]
+    fn provision_llm_credentials_seeds_from_env_on_interactive_confirm_yes() {
+        let _env_guard = crate::runtime::test_env::lock_runtime_env();
+        // SAFETY: serialized by the shared crate process-env lock; cleaned up
+        // before the guard drops.
+        unsafe {
+            std::env::set_var("OPENAI_API_KEY", "sk-env-detected-value");
+        }
+        let (_tmp, context) = RebornCliContext::test_context();
+        let home = context.boot_config().home();
+        std::fs::create_dir_all(home.path()).expect("create reborn home");
+
+        let mut prompts = ConfirmingPromptSource {
+            confirm_answer: true,
+            provider: "openai",
+            model: None,
+        };
+        let outcome = provision_llm_credentials(
+            home,
+            context.boot_config(),
+            &mut prompts,
+            &LocalDevLlmKeyStoreOpener,
+            false,
+        );
+        unsafe {
+            std::env::remove_var("OPENAI_API_KEY");
+        }
+        let outcome = outcome.expect("provision must succeed on confirm-yes");
+        assert_eq!(
+            outcome,
+            LlmCredentialProvisionOutcome::ConfiguredFromEnv {
+                provider_id: "openai".to_string(),
+                model: "gpt-5-mini".to_string(),
+            }
+        );
+
+        let config_text =
+            std::fs::read_to_string(home.config_file_path()).expect("read config.toml");
+        assert!(
+            config_text.contains("provider_id = \"openai\""),
+            "config.toml: {config_text}"
+        );
+
+        let home_path = home.path().to_path_buf();
+        let has_key = crate::runtime::block_on_cli(async move {
+            let store = ironclaw_reborn_composition::open_local_dev_secret_store(&home_path)
+                .await
+                .map_err(anyhow::Error::from)?;
+            ironclaw_reborn_composition::LlmKeyStore::new(store)
+                .exists("openai")
+                .await
+                .map_err(anyhow::Error::from)
+        })
+        .expect("read back through a fresh open of the same root");
+        assert!(
+            !has_key,
+            "an env-detected+confirmed seed must never write the secret store — the API key \
+             stays resolvable from its env var at runtime"
+        );
+    }
+
+    /// RED (env-detect step 2b, interactive + detected + confirm no): a
+    /// "no" answer to the confirm prompt must fall through to the full
+    /// numbered menu, proving the decline path is not a dead end.
+    #[test]
+    fn provision_llm_credentials_falls_through_to_menu_on_interactive_confirm_no() {
+        let _env_guard = crate::runtime::test_env::lock_runtime_env();
+        // SAFETY: serialized by the shared crate process-env lock; cleaned up
+        // before the guard drops.
+        unsafe {
+            std::env::set_var("OPENAI_API_KEY", "sk-env-detected-value");
+        }
+        let (_tmp, context) = RebornCliContext::test_context();
+        let home = context.boot_config().home();
+        std::fs::create_dir_all(home.path()).expect("create reborn home");
+
+        let mut prompts = ConfirmingPromptSource {
+            confirm_answer: false,
+            provider: "nearai",
+            model: None,
+        };
+        let outcome = provision_llm_credentials(
+            home,
+            context.boot_config(),
+            &mut prompts,
+            &LocalDevLlmKeyStoreOpener,
+            false,
+        );
+        unsafe {
+            std::env::remove_var("OPENAI_API_KEY");
+        }
+        let outcome = outcome.expect("provision must succeed after declining the env prompt");
+        assert_eq!(
+            outcome,
+            LlmCredentialProvisionOutcome::Configured {
+                provider_id: "nearai".to_string(),
+                model: "deepseek-ai/DeepSeek-V4-Flash".to_string(),
+            },
+            "declining the env-detected provider must fall through to the full menu, landing \
+             the menu's own selection instead of the env-detected one"
+        );
+    }
+
+    /// RED (env-detect step 3, headless + detected): a non-interactive
+    /// session with a complete `openai` configuration in the environment
+    /// must seed `[llm.default]` from it SILENTLY (no prompt is possible),
+    /// without ever touching the secret store.
+    #[test]
+    fn provision_llm_credentials_seeds_from_env_when_headless() {
+        let _env_guard = crate::runtime::test_env::lock_runtime_env();
+        // SAFETY: serialized by the shared crate process-env lock; cleaned up
+        // before the guard drops.
+        unsafe {
+            std::env::set_var("OPENAI_API_KEY", "sk-env-detected-value");
+        }
+        let (_tmp, context) = RebornCliContext::test_context();
+        let home = context.boot_config().home();
+        std::fs::create_dir_all(home.path()).expect("create reborn home");
+
+        let mut prompts = HeadlessPromptSource;
+        let outcome = provision_llm_credentials(
+            home,
+            context.boot_config(),
+            &mut prompts,
+            &LocalDevLlmKeyStoreOpener,
+            false,
+        );
+        unsafe {
+            std::env::remove_var("OPENAI_API_KEY");
+        }
+        let outcome = outcome.expect("headless provision with a detected env config must succeed");
+        assert_eq!(
+            outcome,
+            LlmCredentialProvisionOutcome::ConfiguredFromEnv {
+                provider_id: "openai".to_string(),
+                model: "gpt-5-mini".to_string(),
+            }
+        );
+        let config_text =
+            std::fs::read_to_string(home.config_file_path()).expect("read config.toml");
+        assert!(
+            config_text.contains("provider_id = \"openai\""),
+            "config.toml: {config_text}"
+        );
+    }
+
+    /// RED (env-detect step 4, headless + partial env): a non-interactive
+    /// session with an INCOMPLETE environment configuration (`OPENAI_MODEL`
+    /// set without the required `OPENAI_API_KEY`) must seed nothing and
+    /// report a `SkippedNonInteractivePartialEnv` outcome naming the reason
+    /// — never silently adopt a broken environment, and never fall back to
+    /// a hardcoded default provider.
+    #[test]
+    fn provision_llm_credentials_seeds_nothing_when_headless_env_is_partial() {
+        let _env_guard = crate::runtime::test_env::lock_runtime_env();
+        // SAFETY: serialized by the shared crate process-env lock; cleaned up
+        // before the guard drops.
+        unsafe {
+            std::env::set_var("OPENAI_MODEL", "gpt-test-model");
+        }
+        let (_tmp, context) = RebornCliContext::test_context();
+        let home = context.boot_config().home();
+        std::fs::create_dir_all(home.path()).expect("create reborn home");
+
+        let mut prompts = HeadlessPromptSource;
+        let outcome = provision_llm_credentials(
+            home,
+            context.boot_config(),
+            &mut prompts,
+            &LocalDevLlmKeyStoreOpener,
+            false,
+        );
+        unsafe {
+            std::env::remove_var("OPENAI_MODEL");
+        }
+        let outcome = outcome.expect("a partial env must not fail onboard overall");
+        match outcome {
+            LlmCredentialProvisionOutcome::SkippedNonInteractivePartialEnv { reason } => {
+                assert!(
+                    reason.to_lowercase().contains("openai") || !reason.is_empty(),
+                    "reason should describe the incomplete provider: {reason}"
+                );
+            }
+            other => panic!("expected SkippedNonInteractivePartialEnv, got {other:?}"),
+        }
+        assert!(
+            !home.config_file_path().exists(),
+            "a partial env must leave config.toml untouched"
+        );
+    }
+
+    /// RED (first-run regression): a fresh reborn home, an interactive
+    /// session, and a clean environment (no LLM env vars set) must still
+    /// invoke the full numbered `provider_menu()` — pinning the exact
+    /// regression the env-detect-and-confirm step risked reintroducing: an
+    /// earlier revision of this env-detect step, developed against this PR,
+    /// treated `Ok(None)` (nothing detected) as equivalent to "nothing to
+    /// do" and skipped straight to `SkippedNonInteractive`-shaped behavior
+    /// even though the session WAS interactive, silently dropping the
+    /// first-run menu a fresh desktop install depends on. `FakePromptSource`
+    /// panics on `confirm()`, so this test would also fail loudly if
+    /// `confirm()` were spuriously invoked with nothing detected.
+    #[test]
+    fn fresh_home_interactive_with_clean_env_still_invokes_the_provider_menu() {
+        let _env_guard = crate::runtime::test_env::lock_runtime_env();
+        let (_tmp, context) = RebornCliContext::test_context();
+        let home = context.boot_config().home();
+        std::fs::create_dir_all(home.path()).expect("create reborn home");
+        seed_cached_master_key(home);
+        assert!(
+            !home.config_file_path().exists(),
+            "must start from a genuinely fresh home with no pre-existing config.toml"
+        );
+
+        let mut prompts = FakePromptSource {
+            provider: "nearai",
+            key: "unused",
+            model: None,
+        };
+        let outcome = provision_llm_credentials(
+            home,
+            context.boot_config(),
+            &mut prompts,
+            &LocalDevLlmKeyStoreOpener,
+            false,
+        )
+        .expect("provision must succeed by falling through to the menu");
+        assert_eq!(
+            outcome,
+            LlmCredentialProvisionOutcome::Configured {
+                provider_id: "nearai".to_string(),
+                model: "deepseek-ai/DeepSeek-V4-Flash".to_string(),
+            },
+            "the numbered menu's own selection must land in config.toml, proving \
+             provider_menu() was actually invoked (FakePromptSource's provider_menu is the only \
+             path that can produce this outcome)"
         );
     }
 }

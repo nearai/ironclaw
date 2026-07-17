@@ -91,6 +91,7 @@ impl OnboardCommand {
             llm_outcome,
             LlmCredentialProvisionOutcome::Configured { .. }
                 | LlmCredentialProvisionOutcome::AlreadyConfigured { .. }
+                | LlmCredentialProvisionOutcome::ConfiguredFromEnv { .. }
         );
         let marker_action = write_onboarding_marker(
             home,
@@ -136,6 +137,12 @@ impl OnboardCommand {
         {
             println!("- LLM provider `{provider_id}` credentials stored");
         }
+        if let LlmCredentialProvisionOutcome::ConfiguredFromEnv { provider_id, .. } = &llm_outcome {
+            println!(
+                "- LLM provider `{provider_id}` configured from environment (key stays in its \
+                 env var; nothing new stored)"
+            );
+        }
         println!();
         println!("remaining:");
         if llm_configured {
@@ -143,8 +150,10 @@ impl OnboardCommand {
         } else {
             println!(
                 "- configure LLM credentials: rerun `ironclaw-reborn onboard` from an \
-                 interactive terminal, or run \
-                 `ironclaw-reborn models set-provider <provider> --model <model>` directly"
+                 interactive terminal, run \
+                 `ironclaw-reborn models set-provider <provider> --model <model>` directly, or \
+                 export a provider's LLM environment variables (e.g. `LLM_BACKEND` or \
+                 `OPENAI_API_KEY`; see `.env.example`) before the next `onboard`/`serve`"
             );
         }
         if self.import_history {

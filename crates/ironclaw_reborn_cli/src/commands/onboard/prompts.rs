@@ -47,6 +47,11 @@ pub(crate) trait PromptSource {
     /// Prompt for `provider`'s API key with input masked (not echoed).
     fn api_key(&mut self, provider: &str) -> Result<String, LlmCredentialPromptError>;
 
+    /// Ask a yes/no `question`, defaulting to yes on a blank answer (`[Y/n]`
+    /// framing). Used by onboard's env-detect-and-confirm step: "Found
+    /// `<provider>` configured in environment — use it?"
+    fn confirm(&mut self, question: &str) -> Result<bool, LlmCredentialPromptError>;
+
     /// Prompt for a model override for `provider_id`. `default_model` is
     /// shown as the bracketed default; an empty/whitespace-only answer
     /// means "use the catalog default" (`Ok(None)`), any other answer is
@@ -197,6 +202,24 @@ impl PromptSource for StdinPromptSource {
         } else {
             Some(trimmed.to_string())
         })
+    }
+
+    fn confirm(&mut self, question: &str) -> Result<bool, LlmCredentialPromptError> {
+        if !std::io::stdin().is_terminal() {
+            return Err(LlmCredentialPromptError::NonInteractive);
+        }
+        print!("{question} [Y/n]: ");
+        std::io::stdout()
+            .flush()
+            .map_err(|error| LlmCredentialPromptError::Other(error.into()))?;
+        let mut input = String::new();
+        std::io::stdin()
+            .read_line(&mut input)
+            .map_err(|error| LlmCredentialPromptError::Other(error.into()))?;
+        let trimmed = input.trim();
+        Ok(trimmed.is_empty()
+            || trimmed.eq_ignore_ascii_case("y")
+            || trimmed.eq_ignore_ascii_case("yes"))
     }
 }
 
