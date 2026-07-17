@@ -39,8 +39,11 @@ async fn telegram_duplicate_updates_and_send_failures_stay_honest() {
         .wait_for_dm_send(|text| text.contains("first reply"))
         .await
         .expect("the update produces its reply");
-    // Settle any straggling duplicate dispatch before counting.
-    tokio::time::sleep(Duration::from_millis(150)).await;
+    // No sleep: a straggling duplicate dispatch cannot escape this scenario —
+    // the script is a FIFO, so a second turn would consume "reply during
+    // outage" and the outage leg below would then fail its exact-outcome
+    // assertion. That downstream fence, plus the entry-absence asserts here,
+    // prove exactly-once deterministically.
     assert_eq!(
         stack.network.delivered_sends_containing("first reply"),
         1,
@@ -67,7 +70,21 @@ async fn telegram_duplicate_updates_and_send_failures_stay_honest() {
             .await,
         StatusCode::OK
     );
-    tokio::time::sleep(Duration::from_millis(300)).await;
+    // Deterministic positive seam: wait for the outage reply's provider
+    // outcome to be recorded (the 403 answer), then assert its exactness.
+    // "Never retried" is fenced by the recovery leg below: a retry would
+    // consume/emit an extra outcome and break its exact assertions.
+    for _ in 0..200 {
+        if !stack.network.send_outcomes().iter().any(|(body, _)| {
+            body["text"]
+                .as_str()
+                .is_some_and(|text| text.contains("reply during outage"))
+        }) {
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        } else {
+            break;
+        }
+    }
     let outage_outcomes: Vec<u16> = stack
         .network
         .send_outcomes()

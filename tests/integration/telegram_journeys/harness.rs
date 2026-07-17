@@ -79,7 +79,10 @@ impl ScriptedTelegramNetwork {
         self.requests()
             .iter()
             .filter(|request| request.url.contains(url_substr))
-            .map(|request| serde_json::from_slice(&request.body).unwrap_or(Value::Null))
+            .map(|request| {
+                serde_json::from_slice(&request.body)
+                    .expect("captured Bot API request body is valid JSON")
+            })
             .collect()
     }
 
@@ -131,7 +134,8 @@ impl NetworkHttpEgress for ScriptedTelegramNetwork {
         // log: `requests().last()` after the push races concurrent egress
         // calls and could pair this URL with another call's body,
         // misdirecting the failure toggle.
-        let request_body: Value = serde_json::from_slice(&request.body).unwrap_or(Value::Null);
+        let request_body: Value =
+            serde_json::from_slice(&request.body).expect("captured sendMessage body is valid JSON");
         self.requests
             .lock()
             .expect("network requests lock")
@@ -283,7 +287,17 @@ pub(crate) async fn call_route(
     let value = if bytes.is_empty() {
         Value::Null
     } else {
-        serde_json::from_slice(&bytes).unwrap_or(Value::Null)
+        if bytes.is_empty() {
+            // 204s and other empty-body responses are legitimate.
+            Value::Null
+        } else {
+            // This helper serves JSON API routes AND opaque webhook acks; a
+            // non-JSON body is preserved as a string so any JSON-field
+            // assertion against it fails loudly SHOWING the body, rather
+            // than silently collapsing to Null.
+            serde_json::from_slice(&bytes)
+                .unwrap_or_else(|_| Value::String(String::from_utf8_lossy(&bytes).into_owned()))
+        }
     };
     (status, value)
 }

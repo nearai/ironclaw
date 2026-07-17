@@ -93,11 +93,23 @@ async fn telegram_dm_slack_install_gates_with_action_needed_notice_not_silence()
         }
         tokio::time::sleep(Duration::from_millis(25)).await;
     }
-    let all_sends = stack.network.request_bodies_for("/sendMessage");
+    let follow_up_sends: Vec<String> = stack.network.request_bodies_for("/sendMessage")
+        [before_follow_up..]
+        .iter()
+        .filter_map(|body| body["text"].as_str().map(str::to_string))
+        .collect();
+    // Two healthy shapes: the deny arm cancelled the parked run, so the
+    // follow-up either starts a fresh turn (consuming the next scripted
+    // entry) or — if the cancel is still settling — draws a busy hint.
     assert!(
-        all_sends.len() > before_follow_up,
-        "a follow-up DM to a gated conversation must still get host feedback \
-         (busy hint or reply), got no new sends: {all_sends:?}"
+        follow_up_sends.iter().any(|text| {
+            text.contains("still working on a previous message")
+                || text.contains("waiting on authentication")
+                || text.contains("slack is connected")
+                || text.contains("still here")
+        }),
+        "the follow-up DM must draw recognizable host feedback (busy hint or \
+         a fresh scripted reply) attributable to it, got: {follow_up_sends:?}"
     );
 
     stack.runtime.shutdown().await.expect("runtime shuts down");
