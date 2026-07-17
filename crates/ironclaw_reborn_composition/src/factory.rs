@@ -3502,6 +3502,43 @@ where
     Ok((store, crypto))
 }
 
+/// Open the `/secrets` store alone, without building the rest of the
+/// local-dev [`CompositeRootFilesystem`] (project mounts, extension mounts,
+/// trigger/project repositories, …).
+///
+/// This is the pre-composition entry point `ironclaw-reborn onboard` needs:
+/// onboard must write a provider API key into the encrypted store before a
+/// full build-input-driven build exists, and reconstructing the entire
+/// composite filesystem just to reach one mount would be both heavy and
+/// risky (any future composite-mount addition could silently diverge
+/// onboard's copy from `serve`'s). `/secrets`'s physical backing is just the
+/// single local-dev libSQL file (`open_local_dev_libsql_database`) — the
+/// same file `build_local_dev_root_filesystem` opens for the `/tenants`
+/// mount in production — so this opener reaches the same physical storage
+/// `serve` later opens, with no new coordination between the two: a key
+/// onboard writes here is immediately visible to `serve`.
+///
+/// Uses the same resolver chain as production (`explicit_master_key: None`
+/// -> env / cached dotfile / OS keychain / generate-and-cache, all inside
+/// [`build_local_dev_secret_store`]), so onboard and `serve` agree on the
+/// master key without either one special-casing the other.
+///
+/// Running `run_migrations()` here and again when `serve` later opens the
+/// full composite is safe — it's already relied on as idempotent elsewhere
+/// (`open_local_dev_secret_store_is_visible_across_reopens_of_the_same_root`,
+/// and the local-dev rebuild coverage in this module's own test suite).
+#[cfg(feature = "libsql")]
+pub async fn open_local_dev_secret_store(
+    root: &Path,
+) -> Result<Arc<dyn SecretStore>, RebornBuildError> {
+    let db = open_local_dev_libsql_database(root).await?;
+    let filesystem = Arc::new(LibSqlRootFilesystem::new(db));
+    filesystem.run_migrations().await?;
+    let scoped = crate::wrap_scoped(filesystem);
+    let (store, _crypto) = build_local_dev_secret_store(root, scoped, None).await?;
+    Ok(store as Arc<dyn SecretStore>)
+}
+
 /// Where a resolved local-dev master key came from, used to name the source in
 /// fail-loud error messages.
 #[cfg(any(feature = "libsql", feature = "postgres"))]
@@ -6505,6 +6542,79 @@ mod tests {
         resolve_local_dev_secret_master_key(root)
             .await
             .expect("valid cached key must be accepted");
+    }
+
+    /// `open_local_dev_secret_store` is the narrow pre-composition opener
+    /// onboard needs: no full [`CompositeRootFilesystem`], just the physical
+    /// libSQL file backing `/secrets`. A cached master-key dotfile is seeded
+    /// up front so the resolver never touches the OS keychain or env (see the
+    /// `forbid(unsafe_code)` note above — this crate's inline tests cannot
+    /// mutate process env, and a cached dotfile is the non-env-mutating way
+    /// to make the resolver deterministic here).
+    #[cfg(all(feature = "libsql", feature = "root-llm-provider"))]
+    #[tokio::test]
+    async fn open_local_dev_secret_store_opens_a_working_store_over_the_bare_root() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = dir.path();
+        let valid = ironclaw_secrets::keychain::generate_master_key_hex();
+        std::fs::write(root.join(LOCAL_DEV_SECRETS_MASTER_KEY_PATH), &valid)
+            .expect("seed cached master key");
+
+        let store = open_local_dev_secret_store(root)
+            .await
+            .expect("opener must succeed over a bare root");
+
+        let keys = crate::LlmKeyStore::new(store);
+        keys.put(
+            "nearai",
+            ironclaw_secrets::SecretMaterial::from("sk-test-value"),
+        )
+        .await
+        .expect("put through the opened store");
+        let read = keys
+            .read("nearai")
+            .await
+            .expect("read through the opened store")
+            .expect("value must be present");
+        assert_eq!(secrecy::ExposeSecret::expose_secret(&read), "sk-test-value");
+    }
+
+    /// The opener is idempotent: reopening over the same root (same physical
+    /// db file, same cached master key) must decrypt a value written by a
+    /// prior open — this is the "onboard writes, serve reads" contract B2
+    /// exists to satisfy.
+    #[cfg(all(feature = "libsql", feature = "root-llm-provider"))]
+    #[tokio::test]
+    async fn open_local_dev_secret_store_is_visible_across_reopens_of_the_same_root() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = dir.path();
+        let valid = ironclaw_secrets::keychain::generate_master_key_hex();
+        std::fs::write(root.join(LOCAL_DEV_SECRETS_MASTER_KEY_PATH), &valid)
+            .expect("seed cached master key");
+
+        let first = open_local_dev_secret_store(root)
+            .await
+            .expect("first open must succeed");
+        crate::LlmKeyStore::new(first)
+            .put(
+                "nearai",
+                ironclaw_secrets::SecretMaterial::from("sk-reopen-value"),
+            )
+            .await
+            .expect("put through the first open");
+
+        let second = open_local_dev_secret_store(root)
+            .await
+            .expect("second open (simulating `serve`) must succeed");
+        let read = crate::LlmKeyStore::new(second)
+            .read("nearai")
+            .await
+            .expect("read through the second open")
+            .expect("value written by the first open must be visible");
+        assert_eq!(
+            secrecy::ExposeSecret::expose_secret(&read),
+            "sk-reopen-value"
+        );
     }
 
     // The keychain-fallthrough + idempotency test for
