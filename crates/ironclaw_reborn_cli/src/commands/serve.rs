@@ -66,7 +66,12 @@ const ADMIN_API_TOKEN_LIFETIME_DAYS: i64 = 365;
 /// credential instead of failing loudly. Only `NotPresent` means "treat
 /// as unset"; `NotUnicode` is a real configuration error and must
 /// propagate with context naming the variable.
-fn present_unicode_env_var(name: &str) -> anyhow::Result<Option<String>> {
+///
+/// `pub(crate)`: `webui_token::env_token_is_active` reuses this same
+/// unset-vs-not-unicode distinction rather than re-deriving it, so the two
+/// checks (this one gating which token source `serve` reads from, that one
+/// gating whether `onboard`/`status` print a login link) can never drift.
+pub(crate) fn present_unicode_env_var(name: &str) -> anyhow::Result<Option<String>> {
     match env::var(name) {
         Ok(value) => Ok(Some(value)),
         Err(env::VarError::NotPresent) => Ok(None),

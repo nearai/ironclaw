@@ -323,11 +323,25 @@ pub(crate) enum WebuiTokenSource {
 
 /// [`resolve_webui_token`]'s result: the bearer value plus which source
 /// produced it (see [`WebuiTokenSource`]).
+///
+/// `Debug` is hand-written (not derived) to redact `value`: it doubles as
+/// the WebChat v2 bearer credential *and* the session-signing HMAC key (see
+/// the module doc), so a derived `Debug` would print the live secret
+/// verbatim into any log line or panic message that formats this struct.
 #[cfg(feature = "webui-v2-beta")]
-#[derive(Debug)]
 pub(crate) struct ResolvedWebuiToken {
     pub(crate) value: String,
     pub(crate) source: WebuiTokenSource,
+}
+
+#[cfg(feature = "webui-v2-beta")]
+impl std::fmt::Debug for ResolvedWebuiToken {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ResolvedWebuiToken")
+            .field("value", &"<redacted>")
+            .field("source", &self.source)
+            .finish()
+    }
 }
 
 /// Resolve the WebChat v2 bearer token with precedence:
@@ -403,9 +417,21 @@ pub(crate) fn resolve_webui_token(
 /// useless (and the route it points at isn't even mounted — see
 /// [`WebuiTokenSource`]'s doc) when the env var is what `serve` will
 /// actually honor.
+///
+/// Returns `Ok(false)` only for a genuinely unset/empty var
+/// (`VarError::NotPresent`, or present-but-empty). A present-but-not-UTF-8
+/// value (`VarError::NotUnicode`) is `Err`, not `Ok(false)`: reusing
+/// `commands::serve::present_unicode_env_var`'s own unset-vs-not-unicode
+/// distinction means `onboard`/`status` can't disagree with `serve` about
+/// whether the env var is "active" — before this fix,
+/// `std::env::var(..).is_ok_and(..)` silently read a mangled-UTF-8 token
+/// as "inactive" here while `serve` itself fails closed on the same value.
 #[cfg(feature = "webui-v2-beta")]
-pub(crate) fn env_token_is_active(env_var_name: &str) -> bool {
-    std::env::var(env_var_name).is_ok_and(|value| !value.is_empty())
+pub(crate) fn env_token_is_active(env_var_name: &str) -> anyhow::Result<bool> {
+    Ok(
+        crate::commands::serve::present_unicode_env_var(env_var_name)?
+            .is_some_and(|value| !value.is_empty()),
+    )
 }
 
 /// Resolve which env var name gates the webui bearer token: the operator's
@@ -446,21 +472,25 @@ pub(crate) enum LoginLinkAnnouncement {
 /// [`LoginLinkAnnouncement`]. Checks the env var first (matching
 /// `resolve_webui_token`'s own precedence): an active env var always wins,
 /// regardless of whether a valid token file also happens to exist.
+///
+/// Propagates a real error when the env var is set but not valid UTF-8 —
+/// see [`env_token_is_active`] — rather than silently treating it as
+/// inactive.
 #[cfg(feature = "webui-v2-beta")]
 pub(crate) fn resolve_login_link_announcement(
     home: &ironclaw_reborn_config::RebornHome,
     config_file: Option<&ironclaw_reborn_config::RebornConfigFile>,
-) -> LoginLinkAnnouncement {
+) -> anyhow::Result<LoginLinkAnnouncement> {
     let env_var_name = resolve_env_token_var_name(config_file);
-    if env_token_is_active(env_var_name) {
-        return LoginLinkAnnouncement::EnvTokenActive {
+    if env_token_is_active(env_var_name)? {
+        return Ok(LoginLinkAnnouncement::EnvTokenActive {
             env_var_name: env_var_name.to_string(),
-        };
+        });
     }
-    match login_link(home) {
+    Ok(match login_link(home) {
         Some(link) => LoginLinkAnnouncement::Link(link),
         None => LoginLinkAnnouncement::Unavailable,
-    }
+    })
 }
 
 #[cfg(feature = "webui-v2-beta")]
@@ -597,6 +627,28 @@ mod tests {
             .expect("file fallback should resolve");
         assert_eq!(resolved.value, VALID_TOKEN, "file value must be trimmed");
         assert_eq!(resolved.source, WebuiTokenSource::File);
+    }
+
+    #[cfg(feature = "webui-v2-beta")]
+    #[test]
+    fn resolved_webui_token_debug_redacts_the_value() {
+        let resolved = ResolvedWebuiToken {
+            value: VALID_TOKEN.to_string(),
+            source: WebuiTokenSource::Env,
+        };
+        let debug_output = format!("{resolved:?}");
+        assert!(
+            !debug_output.contains(VALID_TOKEN),
+            "Debug output must not contain the bearer token verbatim: {debug_output}"
+        );
+        assert!(
+            debug_output.contains("<redacted>"),
+            "Debug output should mark the value as redacted: {debug_output}"
+        );
+        assert!(
+            debug_output.contains("Env"),
+            "Debug output should still show the (non-secret) source: {debug_output}"
+        );
     }
 
     #[cfg(feature = "webui-v2-beta")]
@@ -822,7 +874,10 @@ mod tests {
         let active = env_token_is_active(VAR);
         // SAFETY: serialized by `lock_runtime_env`.
         unsafe { std::env::remove_var(VAR) };
-        assert!(active, "a non-empty env var must count as active");
+        assert!(
+            active.expect("a present unicode var is not an error"),
+            "a non-empty env var must count as active"
+        );
     }
 
     #[cfg(feature = "webui-v2-beta")]
@@ -832,7 +887,10 @@ mod tests {
         const VAR: &str = "IRONCLAW_REBORN_CLI_TEST_TOKEN_SOURCE_INACTIVE_VAR";
         // SAFETY: serialized by `lock_runtime_env`.
         unsafe { std::env::remove_var(VAR) };
-        assert!(!env_token_is_active(VAR), "an unset env var is not active");
+        assert!(
+            !env_token_is_active(VAR).expect("unset is not an error"),
+            "an unset env var is not active"
+        );
 
         // SAFETY: serialized by `lock_runtime_env`; restored below.
         unsafe { std::env::set_var(VAR, "") };
@@ -840,9 +898,37 @@ mod tests {
         // SAFETY: serialized by `lock_runtime_env`.
         unsafe { std::env::remove_var(VAR) };
         assert!(
-            !active_when_empty,
+            !active_when_empty.expect("a present empty unicode var is not an error"),
             "an empty-string env var must not count as active, matching \
              `resolve_webui_token`'s own non-empty check"
+        );
+    }
+
+    #[cfg(feature = "webui-v2-beta")]
+    #[cfg(unix)]
+    #[test]
+    fn env_token_is_active_propagates_not_unicode_instead_of_treating_it_as_inactive() {
+        // Mirrors `commands::serve::present_unicode_env_var_propagates_not_unicode_instead_of_treating_it_as_unset`:
+        // before this fix, `std::env::var(..).is_ok_and(..)` collapsed a
+        // mangled-UTF-8 token env var to `Ok(false)` ("inactive"), so
+        // `onboard`/`status` would print a login link (or no note at all)
+        // while `serve` itself fails closed on the same value — a real
+        // disagreement between the two, not a degradation.
+        use std::os::unix::ffi::OsStringExt as _;
+
+        let _guard = crate::runtime::test_env::lock_runtime_env();
+        const VAR: &str = "IRONCLAW_REBORN_CLI_TEST_TOKEN_SOURCE_NON_UNICODE_VAR";
+        let invalid_utf8 = std::ffi::OsString::from_vec(vec![0xFF, 0xFE, 0xFD]);
+        // SAFETY: serialized by `lock_runtime_env`; restored below.
+        unsafe { std::env::set_var(VAR, &invalid_utf8) };
+        let result = env_token_is_active(VAR);
+        // SAFETY: serialized by `lock_runtime_env`.
+        unsafe { std::env::remove_var(VAR) };
+
+        let error = result.expect_err("non-UTF-8 env value must be a real error, not `Ok(false)`");
+        assert!(
+            error.to_string().contains(VAR),
+            "error should name the var: {error}"
         );
     }
 }

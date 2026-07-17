@@ -41,7 +41,8 @@ fn build_status_dto(context: &RebornCliContext) -> anyhow::Result<StatusDto> {
         .into_iter()
         .map(|s| s.to_string())
         .collect();
-    let (login_link, login_note) = resolve_login_link_and_note(home, &config_path_for_webui_lookup);
+    let (login_link, login_note) =
+        resolve_login_link_and_note(home, &config_path_for_webui_lookup)?;
 
     Ok(StatusDto {
         version: env!("CARGO_PKG_VERSION").to_string(),
@@ -83,33 +84,40 @@ fn build_status_dto(context: &RebornCliContext) -> anyhow::Result<StatusDto> {
 /// advertise a route `serve` doesn't mount for an env-sourced token (see
 /// `commands::serve::execute`'s `cli_login_mount` condition). Neither source
 /// available yet yields `(None, None)`.
+///
+/// Propagates a real error when the token env var is set but not valid
+/// UTF-8 — see `webui_token::env_token_is_active` — rather than silently
+/// treating it as inactive, which would let `status` disagree with `serve`
+/// about which credential source is live.
 #[cfg(feature = "webui-v2-beta")]
 fn resolve_login_link_and_note(
     home: &ironclaw_reborn_config::RebornHome,
     config_path: &std::path::Path,
-) -> (Option<String>, Option<String>) {
+) -> anyhow::Result<(Option<String>, Option<String>)> {
     let config_file = ironclaw_reborn_config::RebornConfigFile::load(config_path)
         .ok()
         .flatten();
-    match crate::webui_token::resolve_login_link_announcement(home, config_file.as_ref()) {
-        crate::webui_token::LoginLinkAnnouncement::Link(link) => (Some(link), None),
-        crate::webui_token::LoginLinkAnnouncement::EnvTokenActive { env_var_name } => (
-            None,
-            Some(format!(
-                "{env_var_name} is set; serve authenticates with that env token directly (no \
-                 login link — the CLI-token login route only mounts for a file-sourced token)"
-            )),
-        ),
-        crate::webui_token::LoginLinkAnnouncement::Unavailable => (None, None),
-    }
+    Ok(
+        match crate::webui_token::resolve_login_link_announcement(home, config_file.as_ref())? {
+            crate::webui_token::LoginLinkAnnouncement::Link(link) => (Some(link), None),
+            crate::webui_token::LoginLinkAnnouncement::EnvTokenActive { env_var_name } => (
+                None,
+                Some(format!(
+                    "{env_var_name} is set; serve authenticates with that env token directly (no \
+                     login link — the CLI-token login route only mounts for a file-sourced token)"
+                )),
+            ),
+            crate::webui_token::LoginLinkAnnouncement::Unavailable => (None, None),
+        },
+    )
 }
 
 #[cfg(not(feature = "webui-v2-beta"))]
 fn resolve_login_link_and_note(
     _home: &ironclaw_reborn_config::RebornHome,
     _config_path: &std::path::Path,
-) -> (Option<String>, Option<String>) {
-    (None, None)
+) -> anyhow::Result<(Option<String>, Option<String>)> {
+    Ok((None, None))
 }
 
 pub(super) fn convert_component_status(status: &RebornRuntimeComponentStatus) -> ComponentStatus {
