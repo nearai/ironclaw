@@ -543,7 +543,210 @@ Two cleanups make it a *kernel*:
 
 ---
 
-## 5. Before → after
+## 5. Target structure: the minimal kernel and clean interfaces
+
+This is the destination the moves converge on: a small, frozen **kernel** of
+authority and recovery; **substrates** that are mechanism behind narrow ports;
+**userland loops** and **products** as replaceable code that reach the kernel through
+exactly two interfaces; and **deployment** as a config value.
+
+### 5.1 Components
+
+| Layer | Component | Owns | Interface | Changes when… |
+| --- | --- | --- | --- | --- |
+| Product | CLI / WebUI / Slack / Telegram | UX, transport, rendering | *consumes* `ProductSurface` | a surface's UX changes |
+| **Kernel** | Turn coordinator + runner | durable turns, leases, active-lock, recovery | exposes `ProductSurface`, `AgentLoopHost` | the recovery model changes |
+| **Kernel** | Capability mediation | `authorize` + `dispatch` over `Invocation`/`Authority`/`Outcome` | `AgentLoopHost::invoke` | the authority model changes |
+| **Kernel** | Vocabulary (`host_api`) | neutral authority types, frozen by test (§4.5) | — (types) | the security model changes |
+| Loop | Agent loop driver(s) | agent behavior, prompt/model/tool strategy | implements `AgentLoopDriver` | agent behavior changes |
+| Substrate | Filesystem | scoped/contained storage | `RootFilesystem` | a backend is added |
+| Substrate | Process sandbox | the **only** way to run an OS process, scope-derived mount | `ProcessSandbox` | (never for features) |
+| Substrate | Secret broker | one-shot leased secrets | `SecretBroker` | (never for features) |
+| Substrate | Network policy | egress mediation | `NetworkPolicy` | (never for features) |
+| Substrate | Events / memory / threads / run-state | durable records, projections | typed stores | a domain record changes |
+| Lane | Wasm / Script / Mcp / FirstParty | executes extension/tool code (untrusted) | `RuntimeLane` (closed enum) | a lane is added (rare) |
+| Deployment | `DeploymentConfig` | selects backends + policy per target | *is* a value → `build_runtime` | a deployment target changes |
+
+The kernel is the only layer that owns authority; substrates are mechanism it
+mediates; products and loops are replaceable userland reaching the kernel through
+exactly two interfaces (`ProductSurface`, `AgentLoopHost`).
+
+### 5.2 The clean product-surface interface — one, generic, feature-agnostic
+
+Every product talks to the system through **one** narrow interface. Adding a feature
+never adds a method here (that was the change-amplification cost — a feature touching
+5–8 crates because each product method was per-feature). A feature is a new capability
++ descriptor; the product interface is unchanged.
+
+```rust
+/// The ONLY surface a product uses. A generic conduit, not a per-feature API.
+trait ProductSurface {
+    fn open_conversation(&self, actor: Actor, source: SourceBinding) -> ConversationId;
+    fn submit_turn(&self, conv: ConversationId, msg: InboundMessage,
+                   idem: IdempotencyKey) -> Result<TurnRunId, SubmitError>;   // all inbound → one door
+    fn events(&self, conv: ConversationId, from: EventCursor) -> EventStream;  // redacted projections, resumable
+    fn reply(&self, run: TurnRunId) -> Result<AssistantReply, ReplyError>;
+    fn resolve_gate(&self, gate: GateRef, decision: GateDecision) -> Result<(), GateError>; // approval/auth
+    fn cancel(&self, run: TurnRunId, idem: IdempotencyKey) -> Result<(), CancelError>;
+}
+```
+
+Six methods, all feature-agnostic. A new settings page, a new tool, a new model
+selector — none add a method; they add a capability the loop can invoke and
+(optionally) one event variant on the projection stream.
+
+### 5.3 The kernel capability interface — authorize + dispatch
+
+```rust
+// host_api vocabulary — the frozen kernel types (§4.5)
+struct Invocation { capability: CapabilityId, input: Json, scope: Scope, estimate: Estimate }
+struct Authority  { trust: TrustClass, approval: Option<ApprovalLease>, reservation: Reservation, mounts: ScopedMounts }
+enum   Blocked    { Approval(GateRef), Auth(GateRef), Resource(GateRef) }
+struct Outcome    { refs: OutcomeRefs, summary: SafeSummary }
+
+fn authorize(inv: &Invocation, scope: &Scope) -> Result<Authority, Blocked>;   // one authority pass
+fn dispatch (inv: &Invocation, auth: &Authority, lane: &RuntimeLane) -> Outcome; // already authorized
+```
+
+### 5.4 The loop interface — the one trust membrane
+
+```rust
+trait AgentLoopDriver {                      // userland: agent behavior, replaceable
+    fn run(&self, ctx: RunContext, host: &dyn AgentLoopHost) -> LoopExit;   // returns refs only
+}
+
+/// The ONLY thing a loop may call. Below it, authorize+dispatch mediate every effect.
+trait AgentLoopHost {
+    fn prompt(&self) -> PromptContext;
+    fn model(&self, req: ModelRequest) -> ModelResult;
+    fn invoke(&self, inv: Invocation) -> Result<Outcome, Blocked>;   // → authorize → dispatch
+    fn transcript(&self) -> &dyn TranscriptPort;
+    fn checkpoint(&self, state: LoopState) -> CheckpointRef;
+    fn input(&self) -> &dyn InputPort;
+    fn cancelled(&self) -> bool;
+}
+```
+
+### 5.5 Substrate interfaces — mechanism behind narrow ports
+
+```rust
+trait RootFilesystem { /* get / put / list / cas */ }
+// backends: InMemoryBackend | DiskFilesystem | LibSqlRootFilesystem | PostgresRootFilesystem
+
+/// The ONLY way to run an OS process. The mount is derived from scope, never a host path.
+trait ProcessSandbox {
+    fn spawn(&self, cmd: Command, mount: SandboxMount) -> Result<ProcessHandle, SpawnDenied>;
+}
+struct SandboxMount(/* private */);
+impl SandboxMount {
+    fn for_scope(scope: &TurnScope, fs: &dyn RootFilesystem) -> Self; // no `from_host_path` constructor
+}
+
+trait SecretBroker  { fn lease(&self, sel: SecretSelector, scope: &Scope) -> OneShotSecret; }
+trait NetworkPolicy { fn resolve(&self, target: UrlTarget, scope: &Scope) -> Result<Egress, Denied>; }
+```
+
+### 5.6 The deployment interface — modes are data
+
+```rust
+struct DeploymentConfig {
+    filesystem: Backend,        // InMemory | Disk | LibSql | Postgres
+    process:    ProcessPolicy,  // Sandboxed { .. } | HostUnsandboxed(LocalOnlyToken)
+    network:    NetworkPolicy,
+    approval:   ApprovalPolicy,
+    // …one value per policy axis
+}
+fn build_runtime(cfg: DeploymentConfig) -> Runtime;   // one function; LocalDev/Hosted/Enterprise are constants
+```
+
+### 5.7 The structure at a glance
+
+```mermaid
+flowchart TD
+    P["Products: CLI · WebUI · Slack · Telegram"]
+    TC["Kernel: Turn coordinator + runner (leases, recovery)"]
+    CAP["Kernel: authorize() + dispatch()"]
+    L["Userland loop: AgentLoopDriver"]
+    FS["RootFilesystem"]
+    PS["ProcessSandbox (only OS-process path)"]
+    SB["SecretBroker"]
+    NP["NetworkPolicy"]
+    EV["Events / Memory / Threads / RunState"]
+    RL["Runtime lanes: Wasm · Script · Mcp · FirstParty"]
+    CFG["DeploymentConfig (data)"]
+
+    P -->|ProductSurface| TC
+    TC -->|AgentLoopHost| L
+    L -->|invoke Invocation| CAP
+    CAP --> RL
+    RL --> FS
+    RL --> PS
+    RL --> SB
+    RL --> NP
+    CAP --> EV
+    CFG -. selects backend/policy .-> PS
+    CFG -. selects .-> FS
+```
+
+Products enter through **one** interface (`ProductSurface`); loops reach effects
+through **one** membrane (`AgentLoopHost`) that funnels to `authorize`+`dispatch`;
+substrates are mechanism the kernel mediates; and `DeploymentConfig` (data) is the
+only thing that varies per deployment. The kernel box is the slow-moving part — it
+changes when the security/recovery model changes, never when a product or feature is
+added.
+
+---
+
+## 6. Case study: the shell cross-tenant escape (issue #6170)
+
+The clearest evidence that this structure matters: a live cross-tenant file-disclosure
+bug that the target structure makes impossible by construction.
+
+**The incident.** On a multi-user instance, the agent's `shell` ran `ls -all`
+unbounded to the user's workspace — reading the host filesystem, shared across users.
+
+**Why it happened, in the current structure.**
+
+- `builtin.shell` spawns a **real OS subprocess**, and the virtual `ScopedFilesystem`
+  does not bound a subprocess — the planner explicitly does not check filesystem
+  containment for process capabilities. Shell's only real containment is *which
+  process backend it is routed to*.
+- Two process ports exist; the unsandboxed `LocalHostProcessPort` is the **default**
+  (`process_sandbox_executor: None`). Safety is opt-in.
+- The runtime-policy resolver is sound (it guarantees `HostedMultiTenant` →
+  `TenantSandbox`, never `LocalHost`), but the composition-profile → deployment-mode
+  mapping declares **`HostedSingleTenant` → `LocalSingleUser`** →
+  `ProcessBackendKind::LocalHost` → the unsandboxed host port
+  (`crates/ironclaw_reborn_composition/src/local_runtime_profile.rs`).
+- So containment depended on the operator picking the right profile *string*, over a
+  fail-open default, with no structural tie to the fact that the instance serves
+  multiple users. The disease of this whole document — *policy as runtime discipline*
+  — with a live exploit attached.
+
+**How the target structure prevents it** (mapping to §5):
+
+- **`ProcessSandbox` is the only way to run an OS process** (§5.5), and `SandboxMount`
+  has only `for_scope` — no `from_host_path`. "Run shell against the host root" is
+  *unrepresentable*.
+- **`DeploymentConfig.process`** (§5.6): `HostUnsandboxed` requires a `LocalOnlyToken`
+  a served boot cannot mint, so the host port is **unconstructible** once more than one
+  user is authenticated.
+- **Mode is derived from a fact, not a profile string** (§4.4 principle): a multi-user
+  boot cannot resolve `LocalSingleUser`; it fails closed at startup.
+- **Fail-closed default:** no verified sandbox ⇒ shell is hidden and rejected
+  (`SecureDefault → process None`), never host shell.
+- **Mechanical guarantee** (§9): a two-user integration test drives user B's shell and
+  asserts it cannot read user A's files — a caller-level cross-tenant escape test, the
+  thing whose absence let this ship.
+
+The lesson generalizes: the escape existed because isolation was runtime discipline
+over a fail-open default. In the target structure it is a structural impossibility —
+one sandbox chokepoint, an unconstructible unsafe path, mode-from-fact, fail-closed —
+plus a test that *proves* containment. That is the entire thesis in one incident.
+
+---
+
+## 7. Before → after
 
 | | Now | After |
 | --- | --- | --- |
@@ -558,7 +761,7 @@ Two cleanups make it a *kernel*:
 
 ---
 
-## 6. Invariants that must NOT change (and why this keeps them)
+## 8. Invariants that must NOT change (and why this keeps them)
 
 The simplification touches only trusted internals, so every security invariant
 survives — several are strengthened:
@@ -582,7 +785,7 @@ across the host-kernel chain. Same goal, orthogonal axes — no conflict.
 
 ---
 
-## 7. Migration: incremental, not a rewrite
+## 9. Migration: incremental, not a rewrite
 
 Land in verifiable slices with `ironclaw_architecture` boundary tests green at
 every step. The moves have very different risk, so sequence by risk, not by section
@@ -629,7 +832,7 @@ lanes, then the `RuntimeLane` enum, then the mediator-trait collapse (§4.2).
 
 ---
 
-## 8. Open questions
+## 10. Open questions
 
 1. Should `TurnRun` and `ironclaw_processes` converge on a shared leased-work-unit
    abstraction, or stay deliberately separate with a documented rationale?
@@ -659,4 +862,5 @@ lanes, then the `RuntimeLane` enum, then the mediator-trait collapse (§4.2).
 - `crates/ironclaw_filesystem/src/in_memory.rs` — `InMemoryBackend: RootFilesystem`: the existing seam that makes every `InMemory*Store` deletable (§4.3).
 - `crates/ironclaw_reborn_composition/src/local_dev_capability_policy.rs` — `LocalDevConstraintSource` and the ~66-identifier `LocalDev*` shadow runtime to collapse to config (§4.4).
 - `crates/ironclaw_architecture/tests/reborn_dependency_boundaries.rs` — boundary tests that must stay green; home for the "no `Local*` type names" and "freeze `host_api`" checks.
+- Issue #6170 (shell cross-tenant escape — the §6 case study); `crates/ironclaw_reborn_composition/src/local_runtime_profile.rs` (the `HostedSingleTenant → LocalSingleUser` mapping), `crates/ironclaw_host_runtime/src/planner.rs` (process/filesystem fail-closed rules).
 - Issues: #6168 (composition god-crate), #6144 (unenforced budget), #6137 / #6138 (gate-resume / capability-path).
