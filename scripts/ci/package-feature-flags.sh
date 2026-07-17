@@ -82,6 +82,12 @@ case "${package}" in
   ironclaw_webui_v2)
     printf '%s\n' "--features webui-v2-beta"
     ;;
+  ironclaw_channel_host)
+    # `webhook-serve` compiles + runs the installation rate limiter and
+    # webhook error-mapping helpers the channel hosts consume; the base build
+    # alone would skip those tests.
+    printf '%s\n' "--features webhook-serve"
+    ;;
   ironclaw_reborn_openai_compat)
     # `openai-compat-beta` activates the route/workflow/streaming contract
     # suites; `libsql` also exercises the durable ref-store contract folded in
@@ -95,6 +101,7 @@ case "${package}" in
   ironclaw_reborn_identity | \
   ironclaw_reborn_traces | \
   ironclaw_slack_v2_adapter | \
+  ironclaw_telegram_extension | \
   ironclaw_telegram_v2_adapter | \
   ironclaw_wasm_product_adapters)
     # Already on the allowlist with no feature flags; keep them flag-free now
