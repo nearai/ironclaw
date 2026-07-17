@@ -16,12 +16,15 @@ security invariant:
    tree per domain, plus deployment-mode struct families that risk local-only
    shortcuts leaking into production.
 
-The thesis: these are three symptoms of **one** decision — *treating every crate
-boundary as if it were a trust boundary.* Reborn has exactly **one** trust
-boundary (the untrusted agent loop ↔ the host). Everything below it is trusted
-host code that was nonetheless split into ~6 crates, each with its own DTO,
-its own `dyn` trait, and its own backend struct family. Collapse the trusted
-internals onto a shared vocabulary and concrete wiring; keep the single membrane.
+The thesis: these are three symptoms of **one** decision — *treating internal crate
+seams as if they were trust boundaries.* Reborn has a few real trust boundaries —
+the untrusted agent loop, untrusted runtime-lane execution (WASM/script/MCP,
+containers, external services), and untrusted runtime-supplied data (egress
+responses, worker output) — all mediated by host filesystem/network/secrets/sandbox
+surfaces, and **all preserved here** (§2). Between them sits a *trusted* mediation
+chain that was nonetheless split into ~6 crates, each with its own DTO, its own
+`dyn` trait, and its own backend struct family. Collapse those trusted internals
+onto a shared vocabulary and concrete wiring; keep every trust boundary intact.
 
 ---
 
@@ -214,13 +217,33 @@ Two mechanisms:
 
 ---
 
-## 2. Root cause: one trust boundary, six crate boundaries pretending to be one
+## 2. Root cause: crate seams mistaken for trust boundaries
 
-The security model has exactly one hard seam: the untrusted loop must not be able
-to name secrets, the dispatcher, or the network. That is the loop ↔ host line.
-Everything below it is trusted host code.
+Reborn has a few real **trust boundaries** — places where untrusted code or data meets
+trusted host authority — and many **crate seams** that are only internal factoring. The
+two must not be confused: trust boundaries are the security model and must be preserved;
+crate seams are where the DTO/`dyn` tax accumulates, and are what this document collapses.
 
-The implementation split that trusted region into ~6 crates and gave each:
+**The trust boundaries — preserve all of them:**
+
+- **The agent loop.** Untrusted agent behavior; it may only *ask* for effects through host
+  ports, and must not name secrets, the dispatcher, or the network.
+- **Runtime-lane execution.** WASM, script/process, MCP, and any container or external
+  service running extension/tool code is untrusted. It receives *mediated*
+  filesystem/network/secrets/sandbox handles — never ambient authority — and cannot bypass
+  the host services.
+- **Runtime-supplied data.** Everything coming *back* — egress responses, worker output,
+  MCP/external results — is untrusted input: the host validates it, binds it to the
+  authorized invocation, enforces limits, and redacts it before it re-enters trusted flow
+  or reaches the model. Worker metadata cannot grant authority or declare itself safe.
+
+These are the standing invariants in `.claude/rules/safety-and-sandbox.md` ("mediation is
+the boundary"); nothing below relaxes them.
+
+**The crate seams — collapse them.** Between the loop boundary and the lane boundary sits
+the *trusted* mediation chain (`loop_host → host_runtime → capabilities → dispatcher`).
+That region is entirely trusted host code, yet the implementation split it into ~6 crates
+and gave each:
 
 - its **own request DTO**, because the boundary rule (`ironclaw_architecture`
   forbids importing "upward") means a layer that wants to reference a type must
@@ -608,7 +631,7 @@ fn authorize(inv: &Invocation, scope: &Scope) -> Result<Authority, Blocked>;   /
 fn dispatch (inv: &Invocation, auth: &Authority, lane: &RuntimeLane) -> Outcome; // already authorized
 ```
 
-### 5.4 The loop interface — the one trust membrane
+### 5.4 The loop interface — the loop's trust membrane (one of several)
 
 ```rust
 trait AgentLoopDriver {                      // userland: agent behavior, replaceable
@@ -626,6 +649,11 @@ trait AgentLoopHost {
     fn cancelled(&self) -> bool;
 }
 ```
+
+This is the loop's boundary; it is not the only one (§2). Below it, `dispatch` hands work
+to an **untrusted** `RuntimeLane` (§5.5) with mediated handles, and the `Outcome` it
+returns is **untrusted data** the host validates, bounds, and redacts before it reaches the
+loop or the model. The substrate ports below are where those other two boundaries live.
 
 ### 5.5 Substrate interfaces — mechanism behind narrow ports
 
@@ -806,18 +834,23 @@ plus a test that *proves* containment. That is the entire thesis in one incident
 The simplification touches only trusted internals, so every security invariant
 survives — several are strengthened:
 
-1. **The loop cannot name privileged types.** Preserved: the one
-   `LoopCapabilityPort` seam stays, and `Invocation` / `Outcome` remain ref-only.
-2. **Authorize-before-dispatch, fail-closed.** *Strengthened*: it becomes one
-   function, not four interleaved layers where an ordering bug can hide.
-3. **`LoopExit` is refs-only and evidence-verified.** Untouched.
-4. **Durable single-writer lease + terminal-on-expiry recovery.** Untouched;
-   `TurnStore<B>` keeps the same records, it just stops reimplementing them per
-   backend.
-5. **Golden Boundaries (README).** `host_api` stays vocabulary-only (the new
-   canonical types belong there by definition); substrates still do not depend
-   upward; PostgreSQL/libSQL parity is *easier* to preserve because parity lives
-   in one `RowBackend` impl pair, not per-domain.
+1. **The loop cannot name privileged types.** Preserved: the one `LoopCapabilityPort`
+   seam stays, and `Invocation` / `Outcome` remain ref-only.
+2. **Runtime lanes stay untrusted and mediated.** WASM/script/MCP/container execution
+   receives only mediated filesystem/network/secrets/sandbox handles, never ambient
+   authority. The closed `RuntimeLane` enum (§4.2) removes a `dyn`, not the boundary.
+3. **Runtime-supplied data stays untrusted.** Lane/egress/worker output is validated,
+   bound to the authorized invocation, bounded, and redacted before it re-enters trusted
+   flow or the model; worker metadata cannot grant authority.
+4. **Authorize-before-dispatch, fail-closed.** *Strengthened*: one function, not four
+   interleaved layers where an ordering bug can hide.
+5. **`LoopExit` is refs-only and evidence-verified.** Untouched.
+6. **Durable single-writer lease + terminal-on-expiry recovery.** Untouched; the store
+   keeps the same records, it just stops reimplementing them per backend.
+7. **Golden Boundaries (README).** `host_api` stays vocabulary-only (the new canonical
+   types belong there by definition); substrates still do not depend upward;
+   PostgreSQL/libSQL parity is *easier* to preserve because it lives in one
+   `RootFilesystem` backend, not a per-domain store reimplementation.
 
 Relationship to **#6168**: that issue sheds *product* code (host-side Slack) *out*
 of the composition god-crate. This proposal sheds *mirror DTOs / traits* *in*
@@ -915,7 +948,111 @@ tenant"); the process-isolation row above is its mechanical backing.
 
 ---
 
-## 11. Open questions
+## 11. Testing: state-machine invariants and idempotency, from any state
+
+The kernel's value is that it holds authority and recovery correctly *from any state* —
+so that is a testing obligation, not a hope. The turn/run lifecycle, the
+authorize→dispatch path, leases, and gate/resume are state machines, and the guarantees
+below must survive arbitrary operation orderings, crashes, and races. This section
+specifies the behavioral suite the refactor must carry, complementing the static ratchets
+(§10). It is design, not implementation: it says *what must be proven and how to reach the
+states where the bugs live*.
+
+### 11.1 The state machines to pin
+
+(Flows described in `crates/Architecture.md`; the tests make them enforceable.)
+
+- **Turn/run lifecycle:** `Queued → Running → {BlockedApproval | BlockedAuth | WaitingProcess} → Queued(resume) → … → {Completed | Failed | Cancelled}`, plus lease-expiry and crash/recover edges.
+- **Capability invocation:** `candidate → authorize → {Authority | Blocked} → dispatch(lane) → Outcome`, with resume / auth-resume re-entry.
+- **Lease:** `unclaimed → claimed(runner, token) → heartbeat* → {released | expired}`; expiry terminal.
+- **Gate/resume:** `blocked(gate_ref, checkpoint) → resolved → requeue(same run/checkpoint)`.
+
+### 11.2 Invariants that must hold from any reachable state
+
+Each is asserted after *every* step of a generated sequence, not only on a happy path:
+
+1. **One active run per canonical thread** before any model/tool side effect; a second submit on a busy thread is rejected, never runs.
+2. **The active-thread lock releases exactly once** on any terminal transition — across every path that can finish a run (trusted completion, lease expiry, relinquish, runner failure, cancel completion). No double-release, no orphaned lock.
+3. **Lease expiry is terminal:** Running → `Failed{lease_expired}`, CancelRequested → `Cancelled`; never an automatic retry of side-effecting work.
+4. **A `LoopExit` is trusted only with host-owned evidence**; a syntactically valid but unverified exit maps to a sanitized terminal failure — from every exit variant.
+5. **No capability effect runs without a completed `authorize()`**; deny/blocked fails closed from any surface, including direct invocation of a hidden or denied capability.
+6. **Lease state has a single truth** — durable and in-memory representations never disagree (post-refactor: one representation, true by construction).
+7. **Cross-tenant isolation holds from any deployment state**: user B's shell/filesystem cannot read user A's data (§6).
+
+### 11.3 Idempotency contract
+
+Every mutating operation is idempotent by construction, proven *from any state*:
+
+- **Replay returns the recorded sanitized outcome and re-runs no side effect** — for `submit`, `resume`, `retry`, `cancel`, capability `invoke`, and subagent release.
+- **Replay is safe after the operation already resolved**: submit-after-terminal, resume-after-resumed, cancel-after-cancelled (returns `already_terminal`), double-claim (one winner), double-release (once).
+- **Transient states are deliberately non-replayable** and tested as such: same-thread-busy is a lock state, not an idempotent outcome — its record is kept for audit, never replayed.
+- **Recorded errors replay as sanitized categories**, never raw causes.
+
+### 11.4 How to reach "any state"
+
+Happy-path tests never visit the states where these bugs live. The suite reaches them three ways:
+
+- **Model-based stateful property tests (primary instrument).** A small reference model of
+  the state machine drives a random stream of operations —
+  `submit, claim, heartbeat, block, resolve, resume, cancel, expire-lease, crash-and-recover,
+  race-claim` — against the real store; the §11.2 invariants are checked after every step,
+  and the store's observable state must match the model.
+- **Exhaustive (state × operation) enumeration.** The turn state machine is small enough to
+  enumerate every (state, op) pair and assert the result is either a defined safe transition
+  or an explicit rejection — no operation silently mutates from a state it does not handle.
+- **Fault injection.** Crash between the two-phase claim writes, drop a heartbeat, expire a
+  lease mid-dispatch, deliver a resume for a stale checkpoint — each must land on a safe
+  terminal or resumable state.
+
+### 11.5 Cross-backend parity — one suite, every backend
+
+The §11.2–§11.3 property suite runs against every storage backend. Today that means
+in-memory + libSQL + Postgres proven behaviorally interchangeable (the
+`ironclaw_hooks_parity` pattern). After §4.3 (one store over `RootFilesystem`), parity
+collapses to running the *one* store logic over `InMemoryBackend` / disk / libSQL /
+Postgres — the same suite, no per-backend reimplementation to keep in sync.
+
+### 11.6 Fail-closed and adversarial
+
+Security invariants are proven by trying to break them:
+
+- **Fabricated `LoopExit`:** forged reply/result/checkpoint/gate refs, mismatched kinds,
+  unknown non-exhaustive gate kinds → all fail closed.
+- **Forged evidence:** a checkpoint bound to a different gate reused as auth evidence → rejected.
+- **Cross-tenant escape (§6):** the two-user shell test — user B cannot read user A's files;
+  no served profile resolves to a host process backend.
+- **Untrusted lane & data (§2):** a WASM/script/MCP lane cannot reach ambient
+  filesystem/network/secrets — only mediated handles; and lane/egress/worker output is
+  validated, bounded, and redacted, and cannot grant authority or forge trust. Tested with
+  hostile worker metadata, oversized/forged responses, and a lane attempting a direct host
+  effect.
+- **Missing substrate:** no sandbox ⇒ shell hidden/rejected; secret/network deny ⇒ capability
+  rejected — never a silent downgrade.
+
+### 11.7 Interface conformance harnesses
+
+Each kernel interface (§5) ships a conformance suite every implementation must pass, so a new
+adapter/loop/backend inherits correctness instead of re-deriving it:
+
+- **`ProductSurface`** — submit/observe/reply/gate/cancel semantics + idempotency, run against
+  every product adapter (§5.8).
+- **`AgentLoopHost`** — the trust membrane: a loop reaches effects only through it; direct
+  dispatcher/secret/network access is a compile error (boundary test).
+- **`authorize` / `dispatch`** — authority-before-effect, redaction, fail-closed.
+- **store traits / `RootFilesystem`** — the §11.5 parity suite.
+
+### 11.8 Tiering
+
+Per `.claude/rules/testing.md` (integration-first): production-wired behavior is proven
+through the harness, asserting at a seam — never `wait_for_status(Completed)` alone. The
+state-machine property and (state × op) tests are crate-tier where they can reach the
+transition directly; the cross-tenant, gate/resume, and adapter-conformance tests are
+integration-tier through the caller. Every bug fixed during the migration lands with the
+regression test that pins it (the commit-msg hook already requires one).
+
+---
+
+## 12. Open questions
 
 1. Should `TurnRun` and `ironclaw_processes` converge on a shared leased-work-unit
    abstraction, or stay deliberately separate with a documented rationale?
