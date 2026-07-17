@@ -516,10 +516,10 @@ async def test_reborn_v2_automation_rename_persists_from_ui(
         assert renamed["automation_id"] == automation_id
 
 
-async def test_reborn_v2_automation_action_error_is_safe_dismissible_and_cleared_on_retry(
+async def test_reborn_v2_automation_action_error_toast_is_safe_dismissible_and_cleared_on_retry(
     reborn_v2_server, reborn_v2_browser
 ):
-    """Automation mutations keep raw errors private and clear stale failures."""
+    """Automation mutation toasts stay visible, private, and clear on retry."""
     automation_id = "11111111-2222-3333-4444-555555555555"
     automation_name = "Safe action error regression"
     raw_error = "postgres failed: secret_internal_automation_table"
@@ -585,7 +585,9 @@ async def test_reborn_v2_automation_action_error_is_safe_dismissible_and_cleared
 
     await page.route("**/api/webchat/v2/automations**", handle_automations)
     row_selector = SEL_V2["automation_row_for"].format(id=automation_id)
-    error_banner = page.locator(SEL_V2["automation_action_error"])
+    error_toast = page.locator(SEL_V2["toast"]).filter(
+        has_text="Unable to update the automation. Please try again."
+    )
 
     async def submit_rename(name: str) -> None:
         row = page.locator(row_selector)
@@ -599,33 +601,32 @@ async def test_reborn_v2_automation_action_error_is_safe_dismissible_and_cleared
         await page.locator(SEL_V2["automation_rename_save"]).click()
 
     try:
-        await page.goto(f"{reborn_v2_server}/v2/automations?token={REBORN_V2_AUTH_TOKEN}")
+        await page.goto(f"{reborn_v2_server}/automations?token={REBORN_V2_AUTH_TOKEN}")
 
         await submit_rename("First failed rename")
-        await expect(error_banner).to_be_visible(timeout=10000)
-        await expect(error_banner).to_have_text(
+        await expect(error_toast).to_be_visible(timeout=10000)
+        await expect(error_toast).to_have_text(
             "Unable to update the automation. Please try again."
         )
-        await expect(error_banner).not_to_contain_text(raw_error)
+        await expect(error_toast).not_to_contain_text(raw_error)
         assert not any(raw_error in message for message in console_messages)
-
-        await error_banner.get_by_role("button", name="Dismiss").click()
-        await expect(error_banner).to_have_count(0)
+        await error_toast.get_by_role("button", name="Dismiss").click()
+        await expect(error_toast).to_have_count(0, timeout=3000)
 
         pause_button = page.get_by_role(
             "button", name=f"Pause: {automation_name}", exact=True
         )
         await pause_button.click()
-        await expect(error_banner).to_be_visible(timeout=10000)
+        await expect(error_toast).to_be_visible(timeout=10000)
         assert not any(raw_error in message for message in console_messages)
 
         await pause_button.click()
         await asyncio.wait_for(retry_started.wait(), timeout=10)
-        await expect(error_banner).to_have_count(0)
+        await expect(error_toast).to_have_count(0)
 
         release_retry.set()
         await asyncio.wait_for(retry_completed.wait(), timeout=10)
-        await expect(error_banner).to_have_count(0)
+        await expect(error_toast).to_have_count(0)
         assert not any(raw_error in message for message in console_messages)
         assert mutation_requests == [
             (

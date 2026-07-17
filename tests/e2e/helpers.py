@@ -375,7 +375,7 @@ SEL_V2 = {
     "automation_rename_button": "[data-testid='automation-rename-button']",
     "automation_rename_input": "[data-testid='automation-rename-input']",
     "automation_rename_save": "[data-testid='automation-rename-save']",
-    "automation_action_error": "[data-testid='automation-action-error']",
+    "toast": "[data-testid='toast']",
     "automation_run_open": "[data-testid='automation-run-open']",
     "automation_run_logs": "[data-testid='automation-run-logs']",
     "skills_card": "#skills-list .ext-card",
