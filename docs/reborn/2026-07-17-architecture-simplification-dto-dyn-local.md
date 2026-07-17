@@ -17,6 +17,14 @@ annotations and `.claude/rules/architecture.md` cite them; additions get
   `Process` (§4.2/§5.9), served-predicate for `LocalOnlyToken` (§6), evidence
   reframed (§1.5), `type-placement.md` reconciliation (§4.2), batch modeled
   (§11.1), Slice 0 + URT ordering (§9).
+- **r4** 2026-07-17 — PR #6208 review fixes: served predicate tightened (any
+  non-loopback listener/tunnel counts, epoch-synchronized transition, §6);
+  `SpawnedChildRun` correctly non-suspending (§5.3); `ProductSurface`
+  actor-bound at mint (§5.2); product-gesture consent is policy-evaluated
+  evidence, not blanket approval skip (§5.2.1); `resolve`/`authorize`/`abort`
+  Result-wrapped (§3/§5.3); facade count corrected to the 88-method trait
+  block; `CapabilityOutcome` is ten variants; type-count restated as
+  mirrors-not-names (§3/§7); Slice 0 scoped around merged #6200 (§9).
 
 This note proposes a **fundamental** simplification of the Reborn host/runtime
 internals. The goal is to remove three recurring costs without weakening any
@@ -249,9 +257,13 @@ which §3's single-invocation types alone do not do); #6144 is an unenforced
 budget (fixed only because §3 names `authorize()` as the enforcement site for
 `estimate`). The honest causal claim is narrower and still sufficient: the bugs
 live on semantic seams — gates, leases, identity, resume — and the refactor
-gives each of those **one place to be wrong instead of four**, plus a channel
-vocabulary in which misclassification is visible. Fewer hiding places, not
-fewer bug classes.
+gives each decision **a single implementation instead of four interleaved
+copies**: one `authorize()` for pre-flight policy, one gate vocabulary, one
+batch fold. The *seams* themselves remain plural — resolve, authorize,
+dispatch-time auth discovery, abort, batch resume (§5.3.1–§5.3.2) — what
+becomes singular is the implementation of each, plus typed channels in which
+misclassification is visible. Fewer duplicated decision sites, not fewer bug
+classes.
 
 ---
 
@@ -338,17 +350,17 @@ struct LoopRequest { activity_id: ActivityId, capability: CapabilityId, input_re
 struct Invocation  { activity_id: ActivityId, capability: CapabilityId, input: Json, scope: Scope, actor: ActorId, origin: InvocationOrigin, estimate: Estimate }
 struct Authorized  { /* Invocation + lane + trust/approval/reservation/mounts — SEALED: private, built only by authorize() */ }
 enum   Blocked     { Approval(GateRef), Auth(GateRef), Resource(GateRef) }  // re-entrant gates
-enum   Suspension  { Process(ProcessRef), ChildRun(RunRef), DependentRun(GateRef), ExternalTool(GateRef) }  // parked; work continues or control returns to the client
+enum   Suspension  { Process(ProcessRef), DependentRun(GateRef), ExternalTool(GateRef) }  // parked; work continues or control returns to the client
 enum   HostFailure { Transient(ErrRef), Permanent(ErrRef), Uncertain(ErrRef) } // infra/storage/obligation-cleanup; Uncertain = crash between dispatch start and outcome record
 struct Outcome     { /* sanitized refs + typed verdict + summary; tool success OR recoverable tool failure */ }
 enum   Resolution  { Done(Outcome), Denied(DenyRef), Blocked(Blocked), Suspended(Suspension) }  // the composed invoke's answer; AuthorizeResult::Denied maps into it
 
 // ── the host kernel (trusted, below the loop seam) ──
-fn resolve  (req: LoopRequest, scope: &Scope) -> Invocation;              // membrane: deref input, bind actor+scope+origin
-fn authorize(inv: Invocation) -> AuthorizeResult;                         // ALL pre-flightable policy, one place; consumes inv
+fn resolve  (req: LoopRequest, scope: &Scope) -> Result<Invocation, HostFailure>; // membrane: deref input (a ref can be stale/consumed), bind actor+scope+origin
+fn authorize(inv: Invocation) -> Result<AuthorizeResult, HostFailure>;    // ALL pre-flightable policy, one place; reservation/obligation writes can themselves fail
 enum AuthorizeResult { Authorized(Authorized), Denied(DenyRef), Blocked(Blocked) }
 fn dispatch (auth: Authorized, cancel: &CancelSignal) -> Result<Resolution, HostFailure>; // CONSUMES auth (single-use); lane sealed inside; may surface a dispatch-time Auth gate (§5.3.1)
-fn abort    (auth: Authorized);                                           // the not-dispatched path: unwind reservation/obligations explicitly — never in Drop
+fn abort    (auth: Authorized) -> Result<(), HostFailure>;                // not-dispatched path: unwind reservation/obligations explicitly — never in Drop; a failed abort is swept by lease-expiry recovery (§5.3.2)
 ```
 
 - The loop expresses a `LoopRequest` (input by **ref**, resume tokens, pre-trust); the host
@@ -378,10 +390,10 @@ fn abort    (auth: Authorized);                                           // the
   the loop branches on (never summary-string inspection); `Denied` = terminal policy
   denial (model-visible, not re-entrant — the channel today's
   `CapabilityOutcome::Denied` occupies); `Blocked` = re-entrant approval/auth/resource
-  gates; `Suspension` = parked work (spawned process, child run, external tool — the
+  gates; `Suspension` = parked work (spawned process, dependent run, external tool — the
   turn parks, §11.1's `WaitingProcess`); `HostFailure` = infra/storage failure
   (`Transient` retryable, `Permanent`, `Uncertain`). Each failure class in its own
-  channel; the full mapping from today's nine-variant `CapabilityOutcome` is the §5.3
+  channel; the full mapping from today's ten-variant `CapabilityOutcome` is the §5.3
   acceptance table.
 - **`origin` is sealed at the membrane, like `actor` and `scope`.** The loop is not the
   only caller of this pipeline: products invoke capabilities directly (settings mutations,
@@ -401,15 +413,19 @@ fn abort    (auth: Authorized);                                           // the
   at the call site." Here the field cannot ride along unenforced, because the only
   constructor of `Authorized` is the function that reserves against it.
 
-**Type count on a capability call, honestly stated: ~14 request/result shapes →
-~9–10.** Four core payload shapes (`LoopRequest`, `Invocation`, `Authorized`,
-`Outcome`), the resolution vocabulary (`Resolution`, `Blocked`, `Suspension`,
-`Denied`, `HostFailure`), and the per-lane execution types — which **must survive**,
-because the lane boundary is a trust boundary (§2) and each lane's request is its
-mediated contract. The reduction is therefore ~30–40%, matching §1.1's own field-diff
-finding (~2 pure duplications + dead fields out of ~5 request shapes), not the ~70% a
-"14 → 4" reading would suggest. The larger win is qualitative: every surviving type is
-a *distinct state or channel*, not a mirror — nothing left to copy a field through.
+**Type count on a capability call, honestly stated: roughly flat in names, zero
+in mirrors.** Like-for-like (the old ~14 = ~8 request shapes *including* ~3
+per-lane requests + ~6 result shapes): the new path is 3 host-side request
+states (`LoopRequest`, `Invocation`, `Authorized`) + the same ~3 per-lane
+requests (they **must survive** — the lane boundary is a trust boundary, §2) +
+5 channel types (`Resolution`, `Outcome`, `Blocked`, `Suspension`,
+`HostFailure`) ≈ **~12 vs. ~14**. The raw count barely moves because the result
+side deliberately *gains* vocabulary: one overloaded ten-variant enum becomes
+five channels with distinct semantics. The claim this doc actually makes is not
+"fewer type names" — it is **zero mirrors**: the request path drops from 5
+near-identical shapes to 3 distinct states (§1.1's measured duplication), the
+dead fields vanish, and no two surviving types differ by ±a field, so nothing
+is ever again copied layer-to-layer. Count mirrors, not names.
 
 ### 3.1 The three real states, named
 
@@ -744,9 +760,11 @@ Every product talks to the system through **one** narrow interface. An earlier
 draft of this section claimed six conversation methods could carry the whole
 product; that fails by inspection — the proto-`ProductSurface` this replaces
 (`RebornServicesApi`, `ironclaw_product_workflow/src/reborn_services.rs`) has
-**~251 async methods** (verified 2026-07-17), and most are not conversation
-operations: settings mutations, extension install/configure, thread/project
-listing, LLM admin. A conversation API cannot absorb them, and per-feature
+**88 trait methods** (87 async + 1 sync, measured from the `trait
+RebornServicesApi` block, 2026-07-17 — the file's ~251 `async fn`s include
+impls and tests; counts cited here are always trait-block counts), and most
+are not conversation operations: settings mutations, extension
+install/configure, thread/project listing, LLM admin. A conversation API cannot absorb them, and per-feature
 methods must not return (that was the change-amplification cost — a feature
 touching 5–8 crates because each product method was per-feature). The
 resolution is the repo's own standing rule (`.claude/rules/tools.md`):
@@ -758,9 +776,16 @@ for reads.**
 
 ```rust
 /// The ONLY surface a product uses. Turn lifecycle + two conduits; frozen.
+///
+/// ACTOR-BOUND AT MINT: ingress constructs one `ProductSurface` per
+/// authenticated session, sealed to that actor — the facade itself is the
+/// capability. Every method operates under the bound actor; conversation/
+/// run/gate IDs are designators only, NEVER bearer authority. Streaming,
+/// cancellation, and gate resolution authorize against the bound actor,
+/// not against knowledge of an ID.
 trait ProductSurface {
     // ── Turn lifecycle — the kernel's state machine (§11.1); irreducible ──
-    fn open_conversation(&self, actor: Actor, source: SourceBinding) -> ConversationId;
+    fn open_conversation(&self, source: SourceBinding) -> ConversationId;
     fn submit_turn(&self, conv: ConversationId, msg: InboundMessage,
                    idem: IdempotencyKey) -> Result<TurnRunId, SubmitError>;   // all inbound → one door
     fn events(&self, conv: ConversationId, from: EventCursor) -> EventStream;  // redacted projections, resumable
@@ -769,13 +794,14 @@ trait ProductSurface {
     fn cancel(&self, run: TurnRunId, idem: IdempotencyKey) -> Result<(), CancelError>;
 
     // ── Commands: the product-side twin of AgentLoopHost::invoke (§5.4).
-    //    Same resolve → authorize → dispatch pipeline (§3), different origin. ──
-    fn invoke(&self, actor: AuthenticatedActor, capability: CapabilityId,
-              input: Json, idem: IdempotencyKey) -> Result<Resolution, HostFailure>;
+    //    Same resolve → authorize → dispatch pipeline (§3); origin AND actor
+    //    come from the facade's binding, never from the caller. ──
+    fn invoke(&self, capability: CapabilityId, input: Json,
+              idem: IdempotencyKey) -> Result<Resolution, HostFailure>;
 
     // ── Reads: view descriptors over projections; scope-checked, no dispatch. ──
-    fn query(&self, actor: AuthenticatedActor, view: ViewRef,
-             params: Json, cursor: Option<Cursor>) -> Result<ViewPage, QueryError>;
+    fn query(&self, view: ViewRef, params: Json,
+             cursor: Option<Cursor>) -> Result<ViewPage, QueryError>;
 }
 ```
 
@@ -816,15 +842,22 @@ Three consequences, all landing in the single `authorize()` fold:
    exposes an admin capability to the model. Deny-by-default plus an
    `ironclaw_architecture` test — *a descriptor with no explicit origin
    declaration fails* — is the non-negotiable mitigation, not a nicety.
-2. **Approval semantics differ by origin — deliberately.** Approval gates
-   exist to obtain user consent for *model-initiated* actions. A
-   `Product`-origin invocation carries its consent in the act — the user
-   clicked. So `authorize()` auto-satisfies approval gates for `Product`
-   origin, while **auth gates** (credential needed → `Blocked::Auth` →
-   `resolve_gate`) and **resource gates** apply uniformly to every origin.
-   Extension OAuth onboarding from a settings page and from a mid-turn tool
-   call become literally one code path — the shared-resolver requirement the
-   extension/auth invariants (CLAUDE.md) have demanded all along.
+2. **Approval semantics differ by origin — as policy, not as a bypass.** A
+   `Product`-origin invocation carries the user's gesture as **consent
+   evidence bound to this exact (capability, input) pair** — entering through
+   the product membrane proves *who* acted, and the submitted call pins *what*
+   they acted on. Whether that evidence satisfies an approval gate is an
+   `authorize()` **policy decision**, never a blanket skip: the default policy
+   accepts it for gates whose purpose is user consent to a model-initiated
+   action (the common case — asking the user to approve their own click is
+   ceremony), but an `AskAlways` capability, an org-mandated approval, or any
+   policy demanding an explicit review step still blocks and resolves through
+   the same `resolve_gate` flow. **Auth gates** (credential needed →
+   `Blocked::Auth` → `resolve_gate`) and **resource gates** apply uniformly to
+   every origin. Extension OAuth onboarding from a settings page and from a
+   mid-turn tool call become literally one code path — the shared-resolver
+   requirement the extension/auth invariants (CLAUDE.md) have demanded all
+   along.
 3. **Automation stops being special.** Routines/heartbeat invoke with
    `Automation` origin under the same descriptor policy — deleting the
    parallel dispatch path that `composition/src/automation/` (§5.8) wires
@@ -854,7 +887,7 @@ at the view boundary; no dispatch pipeline, no idempotency record.
 
 ### 5.2.4 The honest cost: type safety moves from the compiler to descriptors
 
-~251 typed methods become descriptors + `Json` input — the compile-time
+88 typed methods become descriptors + `Json` input — the compile-time
 contract becomes a runtime schema check. Per `.claude/rules/types.md` this is
 acceptable exactly when the `Json` is treated as a boundary format:
 
@@ -901,15 +934,16 @@ struct Invocation { activity_id: ActivityId, capability: CapabilityId, input: Js
 enum   InvocationOrigin { LoopRun(TurnRunId), Product(ProductKind), Automation(RoutineId) }  // sealed per entry point (§5.2.1)
 struct Authorized { /* the Invocation bound to lane + trust/approval/reservation/mounts + validity deadline — SEALED: private, built only by authorize() */ }
 enum   Blocked    { Approval(GateRef), Auth(GateRef), Resource(GateRef) }        // re-entrant gates
-enum   Suspension { Process(ProcessRef), ChildRun(RunRef), DependentRun(GateRef), ExternalTool(GateRef) } // parked work
+enum   Suspension { Process(ProcessRef), DependentRun(GateRef), ExternalTool(GateRef) } // parked work — matches is_suspension() (host.rs): SpawnedChildRun does NOT park
 enum   HostFailure { Transient(ErrRef), Permanent(ErrRef), Uncertain(ErrRef) }   // Uncertain: crash after dispatch start, before resolution record (§3, §11.3)
 struct Outcome    { refs: OutcomeRefs, verdict: ToolVerdict, summary: SafeSummary } // success OR recoverable failure — typed, never summary-sniffed
 enum   Resolution { Done(Outcome), Denied(DenyRef), Blocked(Blocked), Suspended(Suspension) }
 
 enum AuthorizeResult { Authorized(Authorized), Denied(DenyRef), Blocked(Blocked) }
-fn authorize(inv: Invocation) -> AuthorizeResult;   // consumes inv; binds actor/scope/origin/activity_id; resolves the lane; reserves estimate
+fn resolve  (req: LoopRequest, scope: &Scope) -> Result<Invocation, HostFailure>; // input-ref deref can fail (stale/consumed ref)
+fn authorize(inv: Invocation) -> Result<AuthorizeResult, HostFailure>; // consumes inv; binds actor/scope/origin/activity_id; resolves the lane; reserves estimate — reservation I/O can fail
 fn dispatch (auth: Authorized, cancel: &CancelSignal) -> Result<Resolution, HostFailure>; // CONSUMES auth; lane sealed inside
-fn abort    (auth: Authorized);                     // not-dispatched path: unwind reservation/obligations; explicit, never Drop
+fn abort    (auth: Authorized) -> Result<(), HostFailure>; // not-dispatched path: unwind reservation/obligations; explicit, never Drop; failure swept by lease-expiry recovery (§5.3.2)
 ```
 
 **Acceptance table — every variant of today's `CapabilityOutcome`
@@ -928,7 +962,7 @@ and the new vocabulary must carry all of it:
 | `AuthRequired { .. }` | `Resolution::Blocked(Blocked::Auth)` | authorize-time **or dispatch-time** (§5.3.1) |
 | `ResourceBlocked { .. }` | `Resolution::Blocked(Blocked::Resource)` | authorize-time only |
 | `SpawnedProcess(handle)` | `Resolution::Suspended(Suspension::Process)` | turn parks → §11.1 `WaitingProcess` |
-| `SpawnedChildRun { .. }` | `Resolution::Suspended(Suspension::ChildRun)` | carries result ref + byte len as `OutcomeRefs` do |
+| `SpawnedChildRun { .. }` | `Resolution::Done(Outcome)`, verdict = child spawned | **non-suspending** — `is_suspension()` excludes it; the executor appends the result and continues; result ref + byte len ride in `OutcomeRefs` |
 | `AwaitDependentRun { .. }` | `Resolution::Suspended(Suspension::DependentRun)` | |
 | `ExternalToolPending { .. }` | `Resolution::Suspended(Suspension::ExternalTool)` | host never dispatches; control returns to the API client |
 
@@ -964,10 +998,12 @@ the witness it returns has a lifecycle, not just a type:
   re-dispatching a held witness.
 - **Explicit unwind:** the not-dispatched path (cancel between authorize and
   dispatch, runner handoff, shutdown) calls `abort(auth)`, which releases the
-  reservation and aborts prepared obligations. Unwind is never implicit in
-  `Drop` — destructors do no async I/O. A leaked witness (crash) is recovered
-  by the same lease-expiry sweep that recovers runs: reservations carry the
-  `activity_id` and expire with it.
+  reservation and aborts prepared obligations — and returns
+  `Result<(), HostFailure>`, because unwind is itself I/O that can fail. A
+  failed abort does not strand authority: the reservation carries the
+  `activity_id` and the lease-expiry sweep reclaims it, same as a leaked
+  witness after a crash. Unwind is never implicit in `Drop` — destructors do
+  no async I/O.
 - **Bounded validity:** `Authorized` carries a deadline derived from the
   shortest-lived fact it froze (approval lease, credential lease). `dispatch`
   after the deadline fails closed with `HostFailure::Permanent` — a held
@@ -1001,10 +1037,13 @@ to an **untrusted** `RuntimeLane` (§5.5) with mediated handles, and the `Outcom
 returns is **untrusted data** the host validates, bounds, and redacts before it reaches the
 loop or the model. The substrate ports below are where those other two boundaries live.
 
-`AgentLoopHost::invoke` has a product-side twin — `ProductSurface::invoke` (§5.2) — and
-both funnel into the same `authorize` + `dispatch` (§5.3), distinguished only by the
-sealed `InvocationOrigin` each membrane binds (§5.2.1). There is one capability pipeline,
-entered from two membranes.
+`AgentLoopHost::invoke` has a product-side twin — `ProductSurface::invoke` (§5.2). Each
+membrane keeps its own ingress contract: a `LoopRequest` with ref-based input and resume
+state here; a session-bound actor, raw JSON, and an idempotency key on the product side.
+**Past the membrane the pipeline is identical** — both resolve into the same
+`Invocation` and funnel into the same `authorize` + `dispatch` (§5.3) — and the sealed
+`InvocationOrigin` (§5.2.1) is the only fact the kernel consults about where a call came
+from. One capability pipeline, entered from two membranes with two front doors.
 
 ### 5.5 Substrate interfaces — mechanism behind narrow ports
 
@@ -1231,15 +1270,35 @@ This product family ships tunnels (`src/tunnel/`: cloudflared, ngrok, tailscale,
 custom) and multi-device pairing: a boot that is genuinely local-single-user at
 startup can *become* served afterwards. So `LocalOnlyToken` is not a boot-time
 artifact; it is a capability checked at **every** `ProcessSandbox::spawn` against
-two live facts: (a) exactly one authenticated `UserId` exists, and (b) no public
-ingress is active (no tunnel, no non-loopback listener with SSO enabled). The
-transition is part of the contract: the moment fact (a) or (b) flips —
-a second user authenticates, a tunnel comes up — subsequent host-unsandboxed
-spawns fail closed, **and in-flight host processes are killed**, not drained:
-their containment premise is gone, and a drained process is a live cross-tenant
-window. The §11.2 matrix test drives exactly this transition (spawn under
-single-user, flip the fact, assert kill + fail-closed), not only the static
-two-user case.
+two live facts: (a) exactly one authenticated `UserId` exists, and (b) **no
+non-loopback listener and no tunnel is active — unconditionally.** SSO plays no
+part in (b): a non-loopback listener *without* authentication is a wider
+exposure, not a narrower one, so any reachable-from-off-host surface counts as
+served, authenticated or not.
+
+**The transition is a synchronized protocol, not a pair of independent checks.**
+A per-spawn check alone races the transition: a spawn could pass the predicate,
+miss the transition's sweep, and start *after* the deployment became served.
+So the check and the transition share one admission gate (an epoch/lock over
+the host-process registry):
+
+1. `spawn` executes {validate predicate, register the process in the
+   host-process registry} **atomically under the current epoch** — a process
+   is never running-but-unregistered.
+2. A serving transition (second user authenticating, tunnel/listener coming
+   up) executes, in order: **block new admissions** (advance the epoch — every
+   subsequent spawn fails closed) → **kill every registered host process tree
+   and confirm exit** → only then **publish the new user/ingress fact**. The
+   second user's session, or the tunnel, does not exist until containment is
+   re-established.
+3. The race has two outcomes and no third: a spawn admitted under the old
+   epoch is in the registry and dies in step 2's sweep; a spawn arriving after
+   the epoch advance fails closed. Killed, not drained — a drained host
+   process is a live cross-tenant window.
+
+The §11.2 matrix test drives exactly this transition with barriers (spawn held
+at the admission gate while the transition fires, both interleavings asserted),
+not only the static two-user case.
 - **Fail-closed default:** no verified sandbox ⇒ shell is hidden and rejected
   (`SecureDefault → process None`), never host shell.
 - **Mechanical guarantee** (§9): a two-user integration test drives user B's shell and
@@ -1263,7 +1322,7 @@ containment. That is the entire thesis in one incident.
 
 | | Now | After |
 | --- | --- | --- |
-| Types per capability call | ~14 | ~9–10: 4 payload shapes (`LoopRequest` / `Invocation` / `Authorized` / `Outcome`) + resolution vocabulary + per-lane types (trust boundary, must survive) — every one a distinct state, none a mirror (§3) |
+| Types per capability call | ~14 (5 near-identical request mirrors + one overloaded 10-variant outcome enum) | ~12 like-for-like, **zero mirrors**: request states 5 → 3; outcome enum → 5 typed channels; per-lane types survive (trust boundary) — count mirrors, not names (§3) |
 | Hot-path `dyn` seams | 6+ | 2 + 1 lane enum |
 | Policy decision sites | 4 crates | 1 `authorize()` |
 | Store impls per domain | 2–4 hand-written | 1 (`FsStore<F>`); in-memory is a backend, not a store |
@@ -1271,7 +1330,7 @@ containment. That is the entire thesis in one incident.
 | `LocalDev*` identifiers | ~66 across 42 files | 0 (one `DeploymentConfig` value) |
 | Deployment modes | struct family (`Local*`/`Hosted*`) | `DeploymentConfig` constants (data) |
 | `host_api` boundary | ~124 types incl. mode/policy | neutral authority vocab, frozen by test |
-| Product facade | ~251-method `RebornServicesApi` | turn lifecycle + `invoke`/`query` (8 methods); mutations are origin-declared descriptors (§5.2) |
+| Product facade | 88-method `RebornServicesApi` trait | turn lifecycle + `invoke`/`query` (8 methods); mutations are origin-declared descriptors (§5.2) |
 
 ---
 
@@ -1317,7 +1376,14 @@ oracle the `InMemory*` deletion removes, §4.3) and the instrument that reaches 
 states where the §11.2 invariants live. The repo has no stateful
 property-testing infrastructure today; standing it up — reference model for the
 turn/lease machine, operation generator, invariant checker — is its own scoped
-slice and lands **before** the first store deletion.
+slice and lands **before** any further store deletion.
+
+One exception is already on the books: **#6200 (merged 2026-07-17) deleted the
+`InMemoryProcess*Store`s ahead of this ordering**, styling itself Slice A3.
+Treat it as a landed exception, not a precedent: Slice 0's reference model must
+retroactively cover the process-store semantics #6200 consolidated (its
+replacement oracle is owed, not waived), and no further Slice A domain — the
+turn store above all — lands before Slice 0 does.
 
 Two moves are then low-risk and independently valuable — start there:
 
@@ -1408,7 +1474,7 @@ type duplication in `scripts/check-type-duplicates.py`, cross-tenant behavior in
 | `Local*` types (§4.4) | no `Local` / `LocalDev` / `Hosted` / `Enterprise` in public type names | `ironclaw_architecture` | freeze the ~66-identifier allowlist; fail on any new one | allowlist empty |
 | `host_api` freeze (§4.5) | checked-in allowlist of public type names; `runtime_policy` mode enums absent from `host_api` | `ironclaw_architecture` | freeze the allowlist (set membership); a new type needs a justified allowlist entry | mode enums moved to the edge; only neutral authority vocab remains |
 | Products in composition (§5.8) | no `slack` / `webui` / `telegram` / `openai` / HTTP-route / transport identifier in `ironclaw_reborn_composition` | `ironclaw_architecture` | freeze the current product footprint; fail on new product/transport code landing in composition | composition is assembler-only; products are adapters + a `DeploymentConfig` list |
-| Product facade (§5.2) | `RebornServicesApi` method-set allowlist; every capability descriptor declares allowed origins | `ironclaw_architecture` | freeze the current ~251-method set (set membership); fail on any new method; fail on any descriptor without an explicit origin declaration | facade = turn lifecycle + `invoke`/`query`; all mutations are origin-declared descriptors |
+| Product facade (§5.2) | `RebornServicesApi` method-set allowlist; every capability descriptor declares allowed origins | `ironclaw_architecture` | freeze the current 88-method set, **generated from the trait block itself** (set membership, not a file-wide grep); fail on any new method; fail on any descriptor without an explicit origin declaration | facade = turn lifecycle + `invoke`/`query`; all mutations are origin-declared descriptors |
 
 Each axis's "hard ban" column is also its **definition of done**: the migration slice for
 that axis is complete when its ratchet flips from a frozen allowlist to an empty one (or the
@@ -1710,7 +1776,7 @@ knobs to calibrate against measured latency, not open architectural questions.
 - `docs/reborn/2026-05-11-trust-boundary-stack-note.md` — trust-boundary baseline invariants.
 - `docs/reborn/2026-04-25-storage-catalog-and-placement.md` — storage placement.
 - `crates/ironclaw_host_api/` — the neutral vocabulary crate (target home for `Invocation`/`Authorized`/`Outcome`); ~124 public types across 21 files (§4.5).
-- `crates/ironclaw_product_workflow/src/reborn_services.rs` — `RebornServicesApi`: the ~251-method proto-`ProductSurface` that §5.2's `invoke`/`query` conduits replace (methods → origin-declared capability descriptors + view descriptors).
+- `crates/ironclaw_product_workflow/src/reborn_services.rs` — `RebornServicesApi`: the 88-method proto-`ProductSurface` trait that §5.2's `invoke`/`query` conduits replace (methods → origin-declared capability descriptors + view descriptors).
 - `crates/ironclaw_host_api/src/runtime_policy.rs` — `DeploymentMode` / `RuntimeProfile`: the deployment-mode enums that leaked into the kernel vocabulary (§4.4–§4.5).
 - `crates/ironclaw_runtime_policy/` — `EffectiveRuntimePolicy`: the resolved policy *data* the kernel should consume instead of a mode enum.
 - `crates/ironclaw_filesystem/src/in_memory.rs` — `InMemoryBackend: RootFilesystem`: the existing seam that makes every `InMemory*Store` deletable (§4.3).
