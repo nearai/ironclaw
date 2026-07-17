@@ -767,8 +767,10 @@ carries **~108K LOC of product/transport code** — the core of #6168:
 Plus cross-cutting product concerns currently inside composition that belong to the
 adapters (their deliver / auth side) or the kernel, not the assembler:
 
-- `composition/src/product_auth/` (**~32.7K**) — product-facing auth/onboarding → the auth
-  substrate + per-adapter auth, behind the kernel `resolve_gate` seam.
+- `composition/src/product_auth/` (**~32.7K**) — product-facing auth/onboarding → **recipe
+  data + one host `AuthEngine`**, not per-adapter code (§5.9): vendors differ in parameters,
+  not flow, so this collapses to per-vendor OAuth/api-key recipes behind the kernel
+  `resolve_gate` seam.
 - `composition/src/outbound/` (~1.8K) — delivery → the adapter's deliver path over the
   outbound port.
 - `composition/src/automation/` (~6.1K), `llm_admin/` (~8.5K) — these are *product
@@ -783,6 +785,36 @@ The invariant, enforceable by an `ironclaw_architecture` test: **no
 the `DeploymentConfig` adapter list — never by editing composition. That collapses the
 channel-generation multiplicity into one uniform shape (§4.4) and shrinks the god-crate to
 the assembler it should be (#6168).
+
+### 5.9 Relationship to the in-progress Unified Extension Runtime
+
+A parallel design — the **Unified Extension Runtime** (URT; an in-progress note, BenKurrek)
+— works this same thesis on the extension/product axis in depth. This proposal **aligns
+with and defers to it** there; the convergence is strong and was reached independently,
+which is corroborating:
+
+| This doc | Unified Extension Runtime | Relationship |
+| --- | --- | --- |
+| §5.8 no product code in composition | "no generic crate contains a concrete product name / protocol / route" + Deletion & Addition acceptance tests | same invariant; the URT's tests are the concrete enforcement (adopt in §10) |
+| §4.4 config-not-code; §4.4.1 behavior-as-shared-mechanism | auth = recipe *data* + one host `AuthEngine` ("vendors differ in parameters, never flow behavior") | the URT proves it on the auth axis: `product_auth`'s ~32.7K LOC → recipes + one engine, zero per-vendor code |
+| §4.2 closed `RuntimeLane` enum; "runtime kind is a loading detail" | `first_party` / `wasm` / `mcp` loaders; "runtime is a loading detail, never taxonomy" | the same closed-set decision, independently |
+| §4.4.1 / §13.3 promote synthetic ops to first-party capabilities on the normal lane | "built-in capabilities run the identical pipeline"; "past activation there is no MCP in the dispatch path" | same principle: one dispatch pipeline, no per-source special-casing |
+| §2 trust boundaries (untrusted lanes/data, mediated) | adapters never see secret bytes; no third-party code in an auth flow; the adapter has no store access and cannot mark a message delivered; nothing a server returns widens authority | the URT's adapter seams are a concrete instance of §2's boundaries |
+| §5.2 `ProductSurface`; §11.7 conformance suites | ingress router / delivery coordinator / dispatcher, one host pipeline per flow; one conformance suite per capability | the URT's host pipelines sit above `ProductSurface`; external channels feed it via the ingress router, the host WebUI consumes it directly |
+
+**Complementary scope.** The URT is the deep design of the *extension / adapter / auth* axis
+(this doc's §5.8 + §4.4); this doc is the broader kernel refactor (capability DTO/`dyn`
+collapse §3–§4.2, store consolidation §4.3, `Local*` §4.4, turn machinery / performance /
+testing §11–§12). They compose: the URT's "dispatcher pipeline, implemented once" **is** this
+doc's `authorize` + `dispatch` (§3), and its adapter `invoke` / `deliver` are the untrusted
+`RuntimeLane` execution (§5.5). One boundary nuance the URT sharpens: the host WebUI *consumes*
+`ProductSurface` directly and is **not** a `ChannelAdapter` (it renders run state, it is not a
+vendor-API delivery target); external channels (Slack/Telegram) are `ChannelAdapter`
+extensions whose `inbound` feeds `ProductSurface` through the ingress router.
+
+Two refinements this doc adopts from the URT: **(a)** auth is recipe data + one engine, not
+per-adapter code (§5.8, above); **(b)** the URT's Deletion / Addition / retired-taxonomy tests
+are the concrete enforcement for the products-in-composition ratchet (§10).
 
 ---
 
@@ -962,6 +994,12 @@ Two rules from the guidance layer apply, because a guardrail is itself code
 - **No `Local*`-style hard ban can land today** — 66 identifiers exist; it must start as a
   frozen allowlist and shrink. The same holds for `InMemory*Store` and the composition
   product footprint. Asserting a hard ban before the debt is paid just breaks the build.
+
+For the products-in-composition axis (§5.8), the in-progress Unified Extension Runtime
+(§5.9) supplies a stronger check than a grep ban: a **Deletion test** (remove a product
+package; every generic crate still compiles and its tests pass), an **Addition test** (add a
+channel extension; no generic source file changes), and `reborn_retired_taxonomy.rs` pinning
+retired product vocabulary at zero. Adopt those as this axis's ratchet.
 
 The standing safety invariant (§6) is already codified in
 `.claude/rules/safety-and-sandbox.md` ("Process and shell execution: real OS isolation, per
@@ -1217,3 +1255,4 @@ knobs to calibrate against measured latency, not open architectural questions.
 - `crates/ironclaw_architecture/tests/reborn_dependency_boundaries.rs` — boundary tests that must stay green; home for the "no `Local*` type names" and "freeze `host_api`" checks.
 - Issue #6170 (shell cross-tenant escape — the §6 case study); `crates/ironclaw_reborn_composition/src/local_runtime_profile.rs` (the `HostedSingleTenant → LocalSingleUser` mapping), `crates/ironclaw_host_runtime/src/planner.rs` (process/filesystem fail-closed rules).
 - Issues: #6168 (composition god-crate), #6144 (unenforced budget), #6137 / #6138 (gate-resume / capability-path).
+- Unified Extension Runtime design note (in progress, BenKurrek) — the detailed extension / adapter / auth design this proposal aligns with (§5.9): https://gist.github.com/BenKurrek/1d0c9189a3b25f5933cb00d4ac188efe
