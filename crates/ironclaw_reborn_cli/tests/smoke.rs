@@ -690,6 +690,71 @@ fn service_help_lists_all_verbs() {
     }
 }
 
+/// Onboard's OS-service finale (`OnboardCommand::finish_with_service_and_login_link`)
+/// only calls `commands::service::install_and_start` when
+/// `should_install_service` sees an interactive session — and every child
+/// this suite spawns via `Command::output()`/`.spawn()` sees piped, non-tty
+/// stdin, so `onboard` can never be driven into that install-attempt branch
+/// through a real subprocess here (`onboard_then_serve_boots_in_degraded_mode_with_an_empty_environment`
+/// below pins the non-interactive `service: skipped (non-interactive
+/// session)` line onboard prints instead). There is no clean "break $HOME"
+/// hook that forces onboard itself into the install branch in this
+/// environment, so the next best equivalent — same file convention as
+/// `onboard_dry_run_propagates_a_webui_token_io_error_without_mutating_home`,
+/// which plants a wrong-type filesystem entry at a write target to force a
+/// real I/O error — is to drive `service install` directly. That is the
+/// exact call `install_and_start` makes on the interactive path
+/// (`ServicePlatform::install` writes the same plist/unit file), so this
+/// still pins that a blocked service-definition path surfaces as a clean
+/// non-zero exit with a readable error, not a panic or a hang.
+#[cfg(all(
+    feature = "webui-v2-beta",
+    any(target_os = "macos", target_os = "linux")
+))]
+#[test]
+fn service_install_reports_error_when_service_definition_path_is_blocked() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let home = temp.path().join("home");
+    std::fs::create_dir_all(&home).expect("mkdir home");
+
+    // Plant a plain file where the service-definition directory needs to
+    // be created (`~/Library/LaunchAgents/...` on macOS,
+    // `~/.config/systemd/user/...` on Linux), so the install's
+    // `create_dir_all(parent)` hits a real "not a directory" I/O error
+    // instead of writing the plist/unit successfully.
+    #[cfg(target_os = "macos")]
+    let blocked_parent = home.join("Library");
+    #[cfg(target_os = "linux")]
+    let blocked_parent = home.join(".config");
+    std::fs::write(&blocked_parent, b"not a directory").expect("plant blocking file");
+
+    let output = Command::new(reborn_bin())
+        .args(["service", "install"])
+        .env_clear()
+        .env("HOME", &home)
+        .env("IRONCLAW_REBORN_HOME", temp.path().join("reborn-home"))
+        .output()
+        .expect("ironclaw-reborn service install should run");
+
+    assert!(
+        !output.status.success(),
+        "a blocked service-definition path must fail `service install`, not silently succeed: \
+         stdout={} stderr={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        !stderr.contains("panicked"),
+        "install failure must be a handled `anyhow` error surfaced on stderr, not a panic: \
+         stderr={stderr}"
+    );
+    assert!(
+        !stderr.trim().is_empty(),
+        "install failure must surface a readable error, not swallow it: stderr={stderr}"
+    );
+}
+
 #[test]
 fn extension_search_does_not_seed_reborn_config() {
     let temp = tempfile::tempdir().expect("tempdir");
@@ -1632,6 +1697,9 @@ fn serve_boots_without_user_id_env_var() {
     let reborn_home = temp.path().join("reborn-home");
     let home = temp.path().join("home");
     std::fs::create_dir_all(&home).expect("home dir");
+    let _serve_port_guard = SERVE_PORT_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
     let port = unused_local_port();
 
     let mut child = reborn_command()
@@ -1672,6 +1740,9 @@ fn serve_boots_from_the_workspace_subdir_the_installed_service_now_uses_as_cwd()
     let working_directory = reborn_home.join("workspace");
     std::fs::create_dir_all(&home).expect("home dir");
     std::fs::create_dir_all(&working_directory).expect("working directory");
+    let _serve_port_guard = SERVE_PORT_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
     let port = unused_local_port();
 
     let mut child = reborn_command()
@@ -1708,6 +1779,9 @@ fn serve_crash_loops_with_skill_root_overlap_when_cwd_is_reborn_home_itself() {
     let home = temp.path().join("home");
     std::fs::create_dir_all(&home).expect("home dir");
     std::fs::create_dir_all(&reborn_home).expect("reborn home");
+    let _serve_port_guard = SERVE_PORT_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
     let port = unused_local_port();
 
     let output = reborn_command()
@@ -1751,6 +1825,9 @@ fn a_real_env_var_beats_the_config_default_end_to_end() {
     let reborn_home = temp.path().join("reborn-home");
     let home = temp.path().join("home");
     std::fs::create_dir_all(&home).expect("home dir");
+    let _serve_port_guard = SERVE_PORT_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
     let port = unused_local_port();
 
     let mut child = reborn_command()
@@ -1780,6 +1857,9 @@ fn serve_with_env_auth_seeds_reborn_config_before_binding() {
     let reborn_home = temp.path().join("reborn-home");
     let home = temp.path().join("home");
     std::fs::create_dir_all(&home).expect("home dir");
+    let _serve_port_guard = SERVE_PORT_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
     let port = unused_local_port();
 
     let mut child = reborn_command()
@@ -1919,6 +1999,9 @@ fn serve_resolves_bearer_token_from_reborn_home_webui_token_file() {
         "reborn-smoke-test-token-0123456789abcdef",
     )
     .expect("seed webui-token file");
+    let _serve_port_guard = SERVE_PORT_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
     let port = unused_local_port();
 
     let mut child = reborn_command()
@@ -1980,6 +2063,9 @@ fn serve_env_slack_enabled_mounts_slack_events_route() {
     let reborn_home = temp.path().join("reborn-home");
     let home = temp.path().join("home");
     std::fs::create_dir_all(&home).expect("home dir");
+    let _serve_port_guard = SERVE_PORT_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
     let port = unused_local_port();
 
     let mut child = reborn_command()
@@ -2066,6 +2152,23 @@ fn config_text_has_live_provider_id(config_text: &str) -> bool {
         trimmed.starts_with("provider_id =") || trimmed.starts_with("provider_id=")
     })
 }
+
+/// Guards the bind-close-then-spawn window every `unused_local_port()`
+/// caller below goes through: the helper binds a listener to port 0 to get
+/// an OS-assigned free port, reads it back, and closes it — then hands
+/// that port number to a spawned `serve` child to bind itself. Between the
+/// helper's close and the child's own bind, `cargo test`'s parallel test
+/// threads can race for the same freed port (one test's helper grabs the
+/// port another test's child is about to bind), causing real cross-talk —
+/// proven in CI logs, one test observing another test's HTTP response.
+/// Every test that spawns a `serve`-mode child on a port from
+/// `unused_local_port()` takes this lock before allocating its port and
+/// holds it for the rest of the test (dropped at function end), so no two
+/// of these tests' allocate-then-spawn windows can overlap. This is a
+/// small serialization fix, not a port-reservation framework — do not
+/// extend it into a pool or retry-with-backoff mechanism.
+#[cfg(feature = "webui-v2-beta")]
+static SERVE_PORT_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 #[cfg(feature = "webui-v2-beta")]
 fn unused_local_port() -> u16 {
@@ -2355,6 +2458,9 @@ fn serve_mounts_cli_login_route_without_sso() {
     let reborn_home = temp.path().join("reborn-home");
     let home = temp.path().join("home");
     std::fs::create_dir_all(&home).expect("home dir");
+    let _serve_port_guard = SERVE_PORT_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
     let port = unused_local_port();
     let webui_token = "reborn-smoke-test-token-0123456789abcdef";
     // File-sourced token, not `IRONCLAW_REBORN_WEBUI_TOKEN` — this is the
@@ -2458,6 +2564,9 @@ fn serve_does_not_mount_cli_login_route_when_token_is_env_sourced() {
     let reborn_home = temp.path().join("reborn-home");
     let home = temp.path().join("home");
     std::fs::create_dir_all(&home).expect("home dir");
+    let _serve_port_guard = SERVE_PORT_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
     let port = unused_local_port();
 
     let mut child = reborn_command()
@@ -2519,6 +2628,9 @@ fn serve_with_sso_does_not_double_mount_session_exchange() {
     let reborn_home = temp.path().join("reborn-home");
     let home = temp.path().join("home");
     std::fs::create_dir_all(&home).expect("home dir");
+    let _serve_port_guard = SERVE_PORT_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
     let port = unused_local_port();
 
     let mut child = reborn_command()
@@ -3792,6 +3904,9 @@ fn onboard_then_serve_boots_in_degraded_mode_with_an_empty_environment() {
          provider: {config_text}"
     );
 
+    let _serve_port_guard = SERVE_PORT_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
     let port = unused_local_port();
     let mut child = reborn_command()
         .args(["serve", "--host", "127.0.0.1", "--port"])
@@ -3867,6 +3982,9 @@ fn onboard_with_complete_llm_env_then_serve_boots_from_the_env_seeded_slot() {
     // serve, booted without OPENAI_MODEL (only the key), must resolve the
     // PERSISTED model from config.toml, not fall back to openai's catalog
     // default. IRONCLAW_REBORN_LOG scopes the resolved-LLM debug! trace.
+    let _serve_port_guard = SERVE_PORT_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
     let port = unused_local_port();
     let mut child = reborn_command()
         .args(["serve", "--host", "127.0.0.1", "--port"])
@@ -3948,6 +4066,9 @@ fn onboard_login_link_then_bearer_authorizes_a_protected_request() {
     // exercises the stored-key overlay path a real interactive run takes.
     seed_stored_llm_key(&reborn_home, "nearai", "nearai-smoke-test-session");
 
+    let _serve_port_guard = SERVE_PORT_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
     let port = unused_local_port();
     let mut child = reborn_command()
         .args(["serve", "--host", "127.0.0.1", "--port"])
@@ -4070,6 +4191,12 @@ fn onboard_login_link_then_bearer_authorizes_a_protected_request() {
         operator_response.status_line,
         operator_response.body
     );
+    assert!(
+        operator_response.status_line.contains(" 200 "),
+        "GET /api/webchat/v2/operator/setup with a valid operator bearer should succeed, got: {}; body: {}",
+        operator_response.status_line,
+        operator_response.body
+    );
 }
 
 /// Seed the local-dev encrypted secret store with an LLM API key for
@@ -4161,6 +4288,9 @@ fn onboard_openai_key_then_serve_boots_with_env_var_unset() {
 
     seed_stored_llm_key(&reborn_home, "openai", "sk-smoke-test-stored-openai-key");
 
+    let _serve_port_guard = SERVE_PORT_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
     let port = unused_local_port();
     let mut child = reborn_command()
         .args(["serve", "--host", "127.0.0.1", "--port"])
@@ -4245,6 +4375,9 @@ fn onboard_nearai_then_serve_boots_with_cloud_base_url() {
         String::from_utf8_lossy(&set_provider_output.stderr)
     );
 
+    let _serve_port_guard = SERVE_PORT_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
     let port = unused_local_port();
     let mut child = reborn_command()
         .args(["serve", "--host", "127.0.0.1", "--port"])
@@ -4285,6 +4418,99 @@ fn onboard_nearai_then_serve_boots_with_cloud_base_url() {
     );
 }
 
+/// Companion to `onboard_nearai_then_serve_boots_with_cloud_base_url`: that
+/// test only pins the fully-keyless coded default, since `onboard`/`models
+/// set-provider` never stores a NearAI key non-interactively — a regression
+/// in `apply_startup_stored_llm_key` or its ordering relative to config
+/// resolution would still pass it. This test seeds an encrypted NearAI
+/// credential AFTER provider selection (mirroring
+/// `onboard_openai_key_then_serve_boots_with_env_var_unset`'s
+/// `seed_stored_llm_key` pattern for the required-key providers), with both
+/// NearAI env overrides removed, and asserts through the same resolved-LLM
+/// boot-trace seam that the late-attached stored credential still resolves
+/// to the cloud endpoint — not just the coded default in isolation.
+#[cfg(feature = "webui-v2-beta")]
+#[test]
+fn onboard_nearai_stored_key_then_serve_boots_with_cloud_base_url() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let reborn_home = temp.path().join("reborn-home");
+    let home = temp.path().join("home");
+    std::fs::create_dir_all(&home).expect("home dir");
+
+    let onboard_output = reborn_command()
+        .arg("onboard")
+        .env("HOME", &home)
+        .env("IRONCLAW_REBORN_HOME", &reborn_home)
+        .output()
+        .expect("ironclaw-reborn onboard should run");
+    assert!(
+        onboard_output.status.success(),
+        "onboard must succeed non-interactively; stderr: {}",
+        String::from_utf8_lossy(&onboard_output.stderr)
+    );
+
+    let set_provider_output = reborn_command()
+        .args(["models", "set-provider", "nearai"])
+        .env("IRONCLAW_REBORN_HOME", &reborn_home)
+        .output()
+        .expect("ironclaw-reborn models set-provider should run");
+    assert!(
+        set_provider_output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&set_provider_output.stderr)
+    );
+
+    seed_stored_llm_key(
+        &reborn_home,
+        "nearai",
+        "session-smoke-test-stored-nearai-key",
+    );
+
+    let _serve_port_guard = SERVE_PORT_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let port = unused_local_port();
+    let mut child = reborn_command()
+        .args(["serve", "--host", "127.0.0.1", "--port"])
+        .arg(port.to_string())
+        .env("HOME", &home)
+        .env("IRONCLAW_REBORN_HOME", &reborn_home)
+        // No NEARAI_API_KEY, no NEARAI_BASE_URL: only the stored credential
+        // (applied post-resolution, via apply_startup_stored_llm_key) is
+        // present — proving the late-attached path also lands on cloud.
+        .env_remove("NEARAI_API_KEY")
+        .env_remove("NEARAI_BASE_URL")
+        .env("IRONCLAW_REBORN_LOG", "info,ironclaw_reborn=debug")
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("ironclaw-reborn serve should start");
+    let pre_banner_stderr = strip_ansi(&wait_for_serve_banner(&mut child));
+
+    let _ = child.kill();
+    let _ = child.wait();
+
+    assert!(
+        pre_banner_stderr.contains("resolved LLM selection for Reborn runtime"),
+        "serve must emit the resolved-LLM debug trace before binding; stderr: {pre_banner_stderr}"
+    );
+    assert!(
+        pre_banner_stderr.contains("provider_id=nearai"),
+        "resolved-LLM trace must name the nearai provider; stderr: {pre_banner_stderr}"
+    );
+    assert!(
+        pre_banner_stderr.contains("base_url=https://cloud-api.near.ai"),
+        "a NearAI key stored after provider selection and applied via \
+         apply_startup_stored_llm_key must still resolve to the cloud endpoint; \
+         stderr: {pre_banner_stderr}"
+    );
+    assert!(
+        !pre_banner_stderr.contains("base_url=https://private.near.ai"),
+        "resolved-LLM trace must never carry the retired keyless-private default, even on the \
+         late-stored-key path; stderr: {pre_banner_stderr}"
+    );
+}
+
 /// RAILWAY PIN 1: the production Railway deployment boots with an
 /// `api_key_required = false` provider (`nearai`) and its API key env var
 /// (`NEARAI_API_KEY`) set — never a stored key, never an unset-key error.
@@ -4321,6 +4547,9 @@ fn serve_boots_with_env_api_key_set_and_empty_secret_store() {
         "config: {config_text}"
     );
 
+    let _serve_port_guard = SERVE_PORT_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
     let port = unused_local_port();
     let mut child = reborn_command()
         .args(["serve", "--host", "127.0.0.1", "--port"])
@@ -4524,9 +4753,13 @@ fn status_prints_env_token_note_instead_of_login_link_when_env_token_is_set() {
         .unwrap_or_else(|| panic!("status text must include a `service:` line: {stdout}"));
     let service_state = service_line.trim_start_matches("service:").trim();
     match service_state {
-        "running" => assert!(
+        // `apply_service_suppression` passes `Running`/`Unknown` through
+        // unchanged by design — `Unknown` is what CI runners actually hit
+        // (no user dbus session to query), so this arm is load-bearing for
+        // CI, not just local-dev symmetry.
+        "running" | "unknown" => assert!(
             stdout.contains("login_note:") && stdout.contains("IRONCLAW_REBORN_WEBUI_TOKEN is set"),
-            "service is genuinely running, so the env-token note must still win: {stdout}"
+            "service is running or unknown, so the env-token note must still win: {stdout}"
         ),
         "stopped" | "not installed" => assert!(
             stdout.contains("login_note:") && stdout.contains("service is not running"),
@@ -4672,6 +4905,19 @@ fn onboard_import_history_records_pending_step() {
     );
 }
 
+/// `config.toml`'s content here ("custom config\n") is deliberately not
+/// valid TOML — it used to prove Preserve-policy writes are byte-for-byte,
+/// unvalidated. That's still true (the Preserve write runs before LLM-
+/// credential provisioning ever inspects the file), but
+/// `already_configured_outcome` now fails loud on an unparseable
+/// `config.toml` rather than silently treating it as "not yet configured"
+/// (see that function's doc): a corrupt config is a real problem onboard
+/// must surface, not quietly succeed over. So the overall command now fails
+/// — this test pins that (a) it fails with a parse-error message, and (b)
+/// the artifacts written/preserved BEFORE that failure (config.toml's exact
+/// bytes, the marker, providers.json) are still correct on disk, since
+/// `write_default_config_files` and the marker/master-key steps all run
+/// ahead of the LLM-credential step that fails.
 #[test]
 fn onboard_preserves_existing_config_without_force() {
     let temp = tempfile::tempdir().expect("tempdir");
@@ -4691,23 +4937,30 @@ fn onboard_preserves_existing_config_without_force() {
         .expect("ironclaw-reborn onboard should run");
 
     assert!(
-        output.status.success(),
-        "stderr: {}",
-        String::from_utf8_lossy(&output.stderr)
+        !output.status.success(),
+        "onboard must fail when a pre-existing config.toml can't be parsed, not silently \
+         succeed over a broken config; stdout: {}",
+        String::from_utf8_lossy(&output.stdout)
     );
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    assert_stdout_file_action(&stdout, "config.toml", "preserved");
-    assert_stdout_file_action(&stdout, "providers.json", "wrote");
-    assert_stdout_labeled_action(&stdout, "onboarding_marker:", "preserved");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("could not parse config file"),
+        "stderr must explain the config.toml parse failure: {stderr}"
+    );
+
     let config_text =
         std::fs::read_to_string(reborn_home.join("config.toml")).expect("read config");
-    assert_eq!(config_text, "custom config\n");
+    assert_eq!(
+        config_text, "custom config\n",
+        "the Preserve write runs before the LLM-credential step, so the malformed file on disk \
+         must stay untouched even though the overall command later fails"
+    );
     let marker_text =
         std::fs::read_to_string(reborn_home.join(".onboard-completed.json")).expect("read marker");
     assert_eq!(marker_text, "custom marker\n");
     assert!(
         reborn_home.join("providers.json").exists(),
-        "missing providers file"
+        "missing providers file — write_default_config_files runs before the failing step"
     );
     assert!(
         reborn_home.join(".onboard-completed.json").exists(),

@@ -479,32 +479,23 @@ fn probe_and_confirm_key(
 ///   slot with no stored/env key does NOT count either — see
 ///   `provision_llm_credentials_nearai_slot_without_a_stored_key_is_not_already_configured`.
 /// - Store-open failure → "can't tell", falls through to prompting (not a
-///   hard error). Registry lookup failure is propagated instead — see
-///   [`provider_api_key_required`]'s doc.
-/// - `config.toml` LOAD failure (unparseable TOML) → also "can't tell": this
-///   check's job is deciding whether to SKIP work, so an unreadable config
-///   must never hard-fail here. `set_provider`/`write_default_config_files`
-///   are the real authorities on whether a malformed config is fatal.
+///   hard error) — deliberate, unlike the two failures below.
+/// - Registry lookup failure and `config.toml` LOAD failure (unparseable
+///   TOML) both propagate instead of being swallowed to "can't tell": a
+///   corrupt/unreadable config is a real failure onboard must surface, not
+///   silently reinterpret as "never configured" (which would re-run the
+///   prompt, or re-write credentials on `--force`, every time against a
+///   config the operator needs to fix by hand). Matches
+///   [`provider_api_key_required`]'s registry-lookup-failure precedent.
 #[cfg(all(feature = "libsql", feature = "root-llm-provider"))]
 fn already_configured_outcome(
     admin: &ironclaw_reborn_composition::RebornProviderAdmin,
     home: &RebornHome,
     store_opener: &dyn LlmKeyStoreOpener,
 ) -> Result<Option<LlmCredentialProvisionOutcome>, LlmCredentialPromptError> {
-    let status = match admin.status() {
-        Ok(status) => status,
-        Err(ironclaw_reborn_composition::RebornProviderAdminError::LoadConfig {
-            source, ..
-        }) => {
-            tracing::debug!(
-                error = %source,
-                "config.toml failed to parse while checking already-configured LLM; falling \
-                 through rather than failing the whole run"
-            );
-            return Ok(None);
-        }
-        Err(error) => return Err(LlmCredentialPromptError::Other(error.into())),
-    };
+    let status = admin
+        .status()
+        .map_err(|error| LlmCredentialPromptError::Other(error.into()))?;
     let Some(selection) = status.default else {
         return Ok(None);
     };
@@ -764,17 +755,33 @@ mod tests {
     /// `probe_and_confirm_key` without a live LLM endpoint. Panics if
     /// called more times than scripted (proving the loop asks exactly as
     /// many times as expected, no more).
+    /// Args a single [`ScriptedProbe::probe`] call was made with — recorded
+    /// so a test can assert the selected provider/key/model actually reached
+    /// the probe, not just that a probe happened.
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    struct RecordedProbeCall {
+        provider_id: String,
+        api_key: Option<String>,
+        model: Option<String>,
+    }
+
     struct ScriptedProbe {
         outcomes: std::cell::RefCell<
             std::collections::VecDeque<ironclaw_reborn_composition::ProviderProbeOutcome>,
         >,
+        calls: std::cell::RefCell<Vec<RecordedProbeCall>>,
     }
 
     impl ScriptedProbe {
         fn new(outcomes: Vec<ironclaw_reborn_composition::ProviderProbeOutcome>) -> Self {
             Self {
                 outcomes: std::cell::RefCell::new(outcomes.into()),
+                calls: std::cell::RefCell::new(Vec::new()),
             }
+        }
+
+        fn calls(&self) -> Vec<RecordedProbeCall> {
+            self.calls.borrow().clone()
         }
     }
 
@@ -782,10 +789,15 @@ mod tests {
         fn probe(
             &self,
             _admin: &ironclaw_reborn_composition::RebornProviderAdmin,
-            _provider_id: &str,
-            _api_key: Option<&str>,
-            _model: Option<&str>,
+            provider_id: &str,
+            api_key: Option<&str>,
+            model: Option<&str>,
         ) -> anyhow::Result<ironclaw_reborn_composition::ProviderProbeOutcome> {
+            self.calls.borrow_mut().push(RecordedProbeCall {
+                provider_id: provider_id.to_string(),
+                api_key: api_key.map(str::to_string),
+                model: model.map(str::to_string),
+            });
             self.outcomes
                 .borrow_mut()
                 .pop_front()
@@ -1155,6 +1167,31 @@ mod tests {
             "a nearai slot with no stored key must never be treated as AlreadyConfigured — \
              `Configured` here proves the full prompt flow ran instead of skipping it"
         );
+    }
+
+    /// A malformed `config.toml` (unparseable TOML) must surface as a real
+    /// error from `already_configured_outcome`'s `admin.status()` call, not
+    /// be swallowed to "can't tell" and silently fall through to prompting —
+    /// `PanickingPromptSource` proves no prompt is ever reached.
+    #[test]
+    fn provision_llm_credentials_fails_loudly_on_a_malformed_config_toml() {
+        let _env_guard = crate::runtime::test_env::lock_runtime_env();
+        let (_tmp, context) = RebornCliContext::test_context();
+        let home = context.boot_config().home();
+        std::fs::create_dir_all(home.path()).expect("create reborn home");
+        std::fs::write(home.config_file_path(), "not valid toml [[[").expect("write bad config");
+
+        let mut prompts = PanickingPromptSource;
+        let error = provision_llm_credentials(
+            home,
+            context.boot_config(),
+            &mut prompts,
+            &LocalDevLlmKeyStoreOpener,
+            &PanickingProbe,
+            false,
+        )
+        .expect_err("a malformed config.toml must surface as an error, not a silent fall-through");
+        assert!(matches!(error, LlmCredentialPromptError::Other(_)));
     }
 
     /// A non-interactive session with no LLM environment variables set must
@@ -1733,6 +1770,23 @@ mod tests {
             "sk-good",
             "the SECOND (reprompted) key must be the one stored, not the first rejected one"
         );
+        assert_eq!(
+            probe.calls(),
+            vec![
+                RecordedProbeCall {
+                    provider_id: "openai".to_string(),
+                    api_key: Some("sk-bad".to_string()),
+                    model: Some("gpt-5-mini".to_string()),
+                },
+                RecordedProbeCall {
+                    provider_id: "openai".to_string(),
+                    api_key: Some("sk-good".to_string()),
+                    model: Some("gpt-5-mini".to_string()),
+                },
+            ],
+            "each probe call must carry the SELECTED provider/model and the candidate key \
+             actually being tried, not stale values"
+        );
     }
 
     /// Three consecutive probe failures, each declined via "store anyway? no",
@@ -1770,6 +1824,19 @@ mod tests {
         assert!(
             !home.config_file_path().exists(),
             "an exhausted probe-reprompt loop must leave config.toml untouched"
+        );
+        assert_eq!(
+            probe
+                .calls()
+                .into_iter()
+                .map(|call| call.api_key)
+                .collect::<Vec<_>>(),
+            vec![
+                Some("sk-1".to_string()),
+                Some("sk-2".to_string()),
+                Some("sk-3".to_string())
+            ],
+            "each of the three attempts must probe its own freshly-entered key"
         );
     }
 
@@ -1827,6 +1894,15 @@ mod tests {
             secrecy::ExposeSecret::expose_secret(&stored.expect("a value must have been stored")),
             "sk-offline"
         );
+        assert_eq!(
+            probe.calls(),
+            vec![RecordedProbeCall {
+                provider_id: "openai".to_string(),
+                api_key: Some("sk-offline".to_string()),
+                model: Some("gpt-5-mini".to_string()),
+            }],
+            "the single probe attempt must carry the entered key and selected model"
+        );
     }
 
     /// A successful probe whose model list doesn't contain the chosen model
@@ -1861,6 +1937,16 @@ mod tests {
                 provider_id: "openai".to_string(),
                 model: "not-a-real-model".to_string(),
             }
+        );
+        assert_eq!(
+            probe.calls(),
+            vec![RecordedProbeCall {
+                provider_id: "openai".to_string(),
+                api_key: Some("sk-test-value".to_string()),
+                model: Some("not-a-real-model".to_string()),
+            }],
+            "the probe must be called with the operator's chosen (unlisted) model, not the \
+             catalog default"
         );
     }
 }

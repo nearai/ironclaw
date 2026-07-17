@@ -106,6 +106,7 @@ impl PromptSource for StdinPromptSource {
         if !std::io::stdin().is_terminal() {
             return Err(LlmCredentialPromptError::NonInteractive);
         }
+        let mut typed_seed: Option<char> = None;
         if terminal_supports_arrow_menu() {
             match run_arrow_menu(entries) {
                 Ok(ArrowMenuOutcome::Selected(provider_id)) => return Ok(provider_id),
@@ -114,11 +115,13 @@ impl PromptSource for StdinPromptSource {
                         "onboarding cancelled at provider selection"
                     )));
                 }
-                Ok(ArrowMenuOutcome::FallBackTyped) => {
+                Ok(ArrowMenuOutcome::FallBackTyped(seed)) => {
                     // Simplest robust hand-off (see this module's doc): drop
                     // straight to the plain numbered-list + line-read prompt
-                    // below rather than threading the already-typed
-                    // character through a second input mode.
+                    // below, seeded with the keystroke that triggered the
+                    // hand-off so it isn't silently dropped (e.g. typing
+                    // "openai" must not land "penai").
+                    typed_seed = seed;
                 }
                 Err(error) => {
                     tracing::debug!(
@@ -129,7 +132,7 @@ impl PromptSource for StdinPromptSource {
                 }
             }
         }
-        provider_menu_typed(entries)
+        provider_menu_typed(entries, typed_seed)
     }
 
     fn api_key(&mut self, provider: &str) -> Result<String, LlmCredentialPromptError> {
@@ -254,9 +257,17 @@ fn menu_entry_key_note(entry: &ironclaw_reborn_composition::ProviderMenuEntry) -
 /// whenever the interactive arrow-key menu can't run (raw mode failed, or
 /// `TERM=dumb`), and (2) the hand-off target when an operator starts typing
 /// during arrow mode instead of Up/Down (see [`ArrowMenuOutcome::FallBackTyped`]).
+/// `seed`, when present, is the keystroke that triggered a hand-off from the
+/// arrow-key menu (see [`ArrowMenuOutcome::FallBackTyped`]) — raw mode
+/// already consumed that character as a `crossterm` event, so it never
+/// reaches `read_line`'s buffer on its own; [`seed_typed_input`] prepends it
+/// back onto the first attempt's line so the operator's keystroke isn't
+/// dropped (e.g. typing "openai" must not land "penai"). Only the first
+/// attempt is seeded — later re-prompts (on invalid input) read a plain line.
 #[cfg(all(feature = "libsql", feature = "root-llm-provider"))]
 fn provider_menu_typed(
     entries: &[ironclaw_reborn_composition::ProviderMenuEntry],
+    seed: Option<char>,
 ) -> Result<String, LlmCredentialPromptError> {
     println!("Select an LLM provider:");
     for (index, entry) in entries.iter().enumerate() {
@@ -269,15 +280,21 @@ fn provider_menu_typed(
         );
     }
     const MAX_ATTEMPTS: u8 = 3;
+    let mut seed = seed;
     for attempt in 1..=MAX_ATTEMPTS {
         print!("Provider [1-{}]: ", entries.len());
+        let this_seed = seed.take();
+        if let Some(c) = this_seed {
+            print!("{c}");
+        }
         std::io::stdout()
             .flush()
             .map_err(|error| LlmCredentialPromptError::Other(error.into()))?;
-        let mut input = String::new();
+        let mut rest = String::new();
         std::io::stdin()
-            .read_line(&mut input)
+            .read_line(&mut rest)
             .map_err(|error| LlmCredentialPromptError::Other(error.into()))?;
+        let input = seed_typed_input(this_seed, &rest);
         let trimmed = input.trim();
         if let Some(provider_id) = resolve_menu_selection(entries, trimmed) {
             return Ok(provider_id);
@@ -294,6 +311,23 @@ fn provider_menu_typed(
     )))
 }
 
+/// Prepend `seed` (the triggering keystroke, if any) onto `rest` (the line
+/// `read_line` captured after it) — pure so the "does the seed survive"
+/// behavior is unit-testable without a real terminal. See
+/// [`provider_menu_typed`]'s doc for why the seed exists.
+#[cfg(all(feature = "libsql", feature = "root-llm-provider"))]
+fn seed_typed_input(seed: Option<char>, rest: &str) -> String {
+    match seed {
+        Some(c) => {
+            let mut input = String::with_capacity(rest.len() + c.len_utf8());
+            input.push(c);
+            input.push_str(rest);
+            input
+        }
+        None => rest.to_string(),
+    }
+}
+
 /// `true` when the terminal looks capable of the interactive arrow-key menu:
 /// stdin and stdout must both be real terminals (arrow menu writes cursor
 /// escapes to stdout), and `TERM` must not be `dumb`. Cheap pre-check only —
@@ -305,7 +339,7 @@ fn terminal_supports_arrow_menu() -> bool {
     if !std::io::stdin().is_terminal() || !std::io::stdout().is_terminal() {
         return false;
     }
-    !std::env::var("TERM").is_ok_and(|term| term == "dumb")
+    !std::env::var("TERM").is_ok_and(|term| term.eq_ignore_ascii_case("dumb"))
 }
 
 /// RAII guard for `crossterm::terminal::enable_raw_mode()`: disables raw mode
@@ -344,8 +378,10 @@ enum MenuKey {
     /// Esc, or Ctrl-C.
     Cancel,
     /// Any other key press (digit, letter, punctuation, …) — the signal to
-    /// hand off to the typed-line fallback.
-    Other,
+    /// hand off to the typed-line fallback. Carries the pressed character
+    /// when the key was a `Char`, so it can be seeded back into the typed
+    /// prompt instead of silently dropped.
+    Other(Option<char>),
 }
 
 /// One outcome of applying a single [`MenuKey`] to the currently highlighted
@@ -363,7 +399,8 @@ enum MenuStep {
     /// Enter: the highlighted index was chosen.
     Select(usize),
     Cancel,
-    FallBackTyped,
+    /// Carries the triggering keystroke, if any — see [`MenuKey::Other`].
+    FallBackTyped(Option<char>),
 }
 
 /// Pure key-event → selection-state reducer for the interactive provider
@@ -378,7 +415,7 @@ fn apply_menu_key(highlighted: usize, len: usize, key: MenuKey) -> MenuStep {
         MenuKey::Down => MenuStep::Move((highlighted + 1) % len),
         MenuKey::Enter => MenuStep::Select(highlighted),
         MenuKey::Cancel => MenuStep::Cancel,
-        MenuKey::Other => MenuStep::FallBackTyped,
+        MenuKey::Other(seed) => MenuStep::FallBackTyped(seed),
     }
 }
 
@@ -387,7 +424,8 @@ fn apply_menu_key(highlighted: usize, len: usize, key: MenuKey) -> MenuStep {
 enum ArrowMenuOutcome {
     Selected(String),
     Cancelled,
-    FallBackTyped,
+    /// Carries the triggering keystroke, if any — see [`MenuKey::Other`].
+    FallBackTyped(Option<char>),
 }
 
 /// Drive the interactive Up/Down/Enter provider menu in raw mode. Returns
@@ -426,7 +464,8 @@ fn run_arrow_menu(
             KeyCode::Enter => MenuKey::Enter,
             KeyCode::Esc => MenuKey::Cancel,
             KeyCode::Char('c') if modifiers.contains(KeyModifiers::CONTROL) => MenuKey::Cancel,
-            _ => MenuKey::Other,
+            KeyCode::Char(c) => MenuKey::Other(Some(c)),
+            _ => MenuKey::Other(None),
         };
         match apply_menu_key(highlighted, entries.len(), key) {
             MenuStep::Move(next) => {
@@ -441,13 +480,13 @@ fn run_arrow_menu(
                 execute!(stdout, cursor::MoveToNextLine(1))?;
                 return Ok(ArrowMenuOutcome::Cancelled);
             }
-            MenuStep::FallBackTyped => {
+            MenuStep::FallBackTyped(seed) => {
                 execute!(
                     stdout,
                     cursor::MoveToNextLine(1),
                     Print("switching to typed entry\r\n")
                 )?;
-                return Ok(ArrowMenuOutcome::FallBackTyped);
+                return Ok(ArrowMenuOutcome::FallBackTyped(seed));
             }
         }
     }
@@ -687,15 +726,38 @@ mod tests {
     }
 
     /// Any other key press hands off to the typed-line fallback rather than
-    /// being silently ignored or erroring — see
-    /// `ArrowMenuOutcome::FallBackTyped`'s doc for why dropping straight to
-    /// `provider_menu_typed` (rather than threading the pressed character
-    /// through) is the chosen "simplest robust" behavior.
+    /// being silently ignored or erroring, carrying the pressed character
+    /// through so [`provider_menu_typed`] can seed it back in rather than
+    /// dropping it (see [`seed_typed_input`]).
     #[test]
-    fn apply_menu_key_other_falls_back_to_typed_entry() {
+    fn apply_menu_key_other_falls_back_to_typed_entry_carrying_the_keystroke() {
         assert_eq!(
-            apply_menu_key(1, 3, MenuKey::Other),
-            MenuStep::FallBackTyped
+            apply_menu_key(1, 3, MenuKey::Other(Some('o'))),
+            MenuStep::FallBackTyped(Some('o'))
         );
+        assert_eq!(
+            apply_menu_key(1, 3, MenuKey::Other(None)),
+            MenuStep::FallBackTyped(None)
+        );
+    }
+
+    /// Pins the actual bug this seeding exists for: an operator typing
+    /// "openai" while the arrow menu is active must resolve to the full
+    /// provider id, not "penai" (the triggering keystroke dropped).
+    #[test]
+    fn seed_typed_input_prepends_the_triggering_keystroke_so_typed_ids_resolve_in_full() {
+        let combined = seed_typed_input(Some('o'), "penai\n");
+        assert_eq!(combined.trim(), "openai");
+        assert_eq!(
+            resolve_menu_selection(&entries(), combined.trim()),
+            Some("openai".to_string())
+        );
+    }
+
+    /// No seed (the plain non-arrow-menu fallback path) must pass the read
+    /// line through unchanged.
+    #[test]
+    fn seed_typed_input_with_no_seed_passes_the_line_through_unchanged() {
+        assert_eq!(seed_typed_input(None, "openai\n"), "openai\n");
     }
 }

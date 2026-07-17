@@ -358,7 +358,7 @@ impl RebornProviderAdmin {
                 })
             })
             .map_err(|source| RebornProviderAdminError::EnvDetection {
-                reason: source.to_string(),
+                source: Box::new(source),
             })
     }
 
@@ -614,8 +614,11 @@ pub enum RebornProviderAdminError {
     },
     /// [`RebornProviderAdmin::detect_env_llm`]'s "partial env" outcome: some
     /// LLM environment configuration was present but incomplete or invalid.
-    #[error("environment LLM configuration is incomplete: {reason}")]
-    EnvDetection { reason: String },
+    #[error("environment LLM configuration is incomplete: {source}")]
+    EnvDetection {
+        #[source]
+        source: Box<ironclaw_llm::LlmError>,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -1003,28 +1006,23 @@ mod tests {
         .expect("valid reborn home");
         std::fs::create_dir_all(home.path()).expect("create reborn home dir");
 
-        let overlay_definition = ironclaw_llm::registry::ProviderDefinition {
-            id: EXAMPLE_OVERLAY_PROVIDER_ID.to_string(),
-            aliases: Vec::new(),
-            protocol: ProviderProtocol::OpenAiCompletions,
-            default_base_url: Some("https://openrouter.ai/api/v1".to_string()),
-            base_url_env: None,
-            base_url_required: false,
-            api_key_env: Some("ACME_OPENROUTER_KEY".to_string()),
-            api_key_required: true,
-            model_env: "ACME_OPENROUTER_MODEL".to_string(),
-            default_model: "anthropic/claude-3.5-sonnet".to_string(),
-            description: "Tenant-pinned OpenRouter route (example; rename or delete)".to_string(),
-            extra_headers_env: None,
-            setup: Some(ironclaw_llm::registry::SetupHint::ApiKey {
-                secret_name: "llm_acme_openrouter_api_key".to_string(),
-                key_url: Some("https://openrouter.ai/keys".to_string()),
-                display_name: "OpenRouter (Acme)".to_string(),
-                can_list_models: true,
-                models_filter: None,
-            }),
-            unsupported_params: Vec::new(),
-        };
+        // Built from the REAL `ironclaw_reborn_cli::commands::config::init::
+        // PROVIDERS_STUB` JSON (not a hand-typed duplicate) so this test
+        // catches drift between that stub's id and
+        // `EXAMPLE_OVERLAY_PROVIDER_ID` instead of two disjoint fixtures
+        // agreeing by coincidence.
+        let stub_definitions: Vec<ironclaw_llm::registry::ProviderDefinition> =
+            serde_json::from_str(providers_stub_json()).expect("PROVIDERS_STUB must parse as JSON");
+        assert_eq!(
+            stub_definitions.len(),
+            1,
+            "this test assumes PROVIDERS_STUB seeds exactly one overlay entry: {stub_definitions:?}"
+        );
+        let overlay_definition = stub_definitions.into_iter().next().expect("checked above");
+        assert_eq!(
+            overlay_definition.id, EXAMPLE_OVERLAY_PROVIDER_ID,
+            "PROVIDERS_STUB's overlay id has drifted from EXAMPLE_OVERLAY_PROVIDER_ID"
+        );
         crate::ProviderRepo::new(home.providers_file_path())
             .upsert(overlay_definition)
             .expect("write example overlay");
@@ -1041,6 +1039,28 @@ mod tests {
             "the tenant-pinned OpenRouter example overlay must never appear on the onboard \
              menu: {entries:?}"
         );
+    }
+
+    /// Extract the raw JSON text of `PROVIDERS_STUB` from
+    /// `ironclaw_reborn_cli::commands::config::init`'s source, via
+    /// `include_str!` — composition can't depend on `ironclaw_reborn_cli`
+    /// (only the reverse), so this reads the file text directly rather than
+    /// duplicating the JSON literal, keeping the fixture used above tied to
+    /// the actual stub `config init`/`onboard` write.
+    fn providers_stub_json() -> &'static str {
+        const INIT_RS: &str =
+            include_str!("../../../ironclaw_reborn_cli/src/commands/config/init.rs");
+        const START_MARKER: &str = "const PROVIDERS_STUB: &str = r#\"";
+        let start = INIT_RS.find(START_MARKER).unwrap_or_else(|| {
+            panic!(
+                "PROVIDERS_STUB definition not found in ironclaw_reborn_cli's init.rs — this \
+                 test's extraction marker has drifted from the real source"
+            )
+        }) + START_MARKER.len();
+        let end = INIT_RS[start..]
+            .find("\"#;")
+            .expect("PROVIDERS_STUB closing delimiter `\"#;` not found");
+        &INIT_RS[start..start + end]
     }
 
     /// `detect_env_llm` must return `Ok(None)` with no LLM env vars set —

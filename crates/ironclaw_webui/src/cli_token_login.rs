@@ -111,17 +111,11 @@ impl CliTokenLoginConfig {
         self
     }
 
-    /// Sanitized via `auth::pending::sanitize_redirect` (same rule as the
-    /// OAuth surface's `redirect_after`):
-    /// - must be relative — no absolute/scheme-relative `//host/...`, no `#`
-    /// - falls back to [`DEFAULT_REDIRECT_AFTER`] on failure
-    /// - no prod caller sets this today, but it's public, so a future
-    ///   browser/query-influenced caller can't smuggle an off-site redirect
-    pub fn with_redirect_after(mut self, redirect_after: impl Into<String>) -> Self {
-        self.redirect_after = crate::auth::pending::sanitize_redirect(Some(redirect_after.into()))
-            .unwrap_or_else(|| DEFAULT_REDIRECT_AFTER.to_string());
-        self
-    }
+    // `redirect_after` is fixed to `DEFAULT_REDIRECT_AFTER` until a real
+    // caller needs it — a `with_redirect_after` setter was removed as
+    // speculative surface (zero production callers) in a security-sensitive
+    // module; re-add it (with `auth::pending::sanitize_redirect`) if one
+    // shows up.
 }
 
 struct RouterState {
@@ -417,40 +411,6 @@ mod tests {
         }
         assert!(store.take(&ticket).is_none());
         assert!(!store.inner.lock().contains_key(&ticket));
-    }
-
-    fn test_config() -> CliTokenLoginConfig {
-        let tenant = TenantId::new("tenant-a").expect("tenant");
-        let session_store = crate::signed_session_store(
-            &SecretString::from("test-signing-key-0123456789abcdef0123456789".to_string()),
-            &tenant,
-        );
-        let authenticator = Arc::new(
-            crate::EnvBearerAuthenticator::new(
-                SecretString::from("test-bearer-0123456789abcdef0123456789".to_string()),
-                ironclaw_host_api::UserId::new("operator").expect("user"),
-            )
-            .expect("env bearer authenticator"),
-        );
-        CliTokenLoginConfig::new(tenant, authenticator, session_store)
-    }
-
-    #[test]
-    fn with_redirect_after_rejects_an_absolute_url_and_falls_back_to_the_default() {
-        let config = test_config().with_redirect_after("https://evil.example");
-        assert_eq!(config.redirect_after, DEFAULT_REDIRECT_AFTER);
-    }
-
-    #[test]
-    fn with_redirect_after_rejects_a_scheme_relative_url_and_falls_back_to_the_default() {
-        let config = test_config().with_redirect_after("//evil.example");
-        assert_eq!(config.redirect_after, DEFAULT_REDIRECT_AFTER);
-    }
-
-    #[test]
-    fn with_redirect_after_preserves_a_safe_relative_path() {
-        let config = test_config().with_redirect_after("/v2/foo");
-        assert_eq!(config.redirect_after, "/v2/foo");
     }
 
     #[test]

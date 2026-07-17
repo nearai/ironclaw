@@ -275,6 +275,77 @@ async fn exchanged_bearer_from_cli_token_login_is_operator_capable() {
     );
 }
 
+// Non-operator mirror of `exchanged_bearer_from_cli_token_login_is_operator_capable`:
+// `EnvBearerAuthenticator::authenticate` always returns an operator
+// `WebuiAuthentication`, so it alone can't prove `login_handler` actually
+// carries the token's own `operator_webui_config` bit through to
+// `create_session` rather than hardcoding `true`. This authenticator
+// returns a non-operator identity so a session minted through it must NOT
+// come out operator-capable.
+struct NonOperatorAuthenticator {
+    token: &'static str,
+    user_id: UserId,
+}
+
+#[async_trait::async_trait]
+impl ironclaw_webui::WebuiAuthenticator for NonOperatorAuthenticator {
+    async fn authenticate(&self, candidate: &str) -> Option<ironclaw_webui::WebuiAuthentication> {
+        (candidate == self.token)
+            .then(|| ironclaw_webui::WebuiAuthentication::user(self.user_id.clone()))
+    }
+
+    fn mounts_operator_webui_config_routes(&self) -> bool {
+        false
+    }
+}
+
+#[tokio::test]
+async fn exchanged_bearer_from_a_non_operator_authenticator_is_not_operator_capable() {
+    let session_store = signed_session_store(
+        &SecretString::from("operator-secret".to_string()),
+        &tenant(),
+    );
+    let authenticator = Arc::new(NonOperatorAuthenticator {
+        token: CLI_TOKEN,
+        user_id: UserId::new("member").expect("user"),
+    });
+    let config = CliTokenLoginConfig::new(tenant(), authenticator, session_store.clone())
+        .with_session_lifetime(ChronoDuration::hours(1));
+    let router = build_cli_token_login(config).router;
+    let session_authenticator = SessionAuthenticator::new(session_store);
+
+    let login = router
+        .clone()
+        .oneshot(login_request(CLI_TOKEN))
+        .await
+        .expect("oneshot");
+    assert_eq!(login.status(), StatusCode::SEE_OTHER);
+    let location = login
+        .headers()
+        .get(header::LOCATION)
+        .expect("Location header")
+        .to_str()
+        .expect("utf-8")
+        .to_string();
+    let ticket = ticket_from_location(&location);
+
+    let exchange = exchange_ticket(router, &ticket).await;
+    assert_eq!(exchange.status(), StatusCode::OK);
+    let body = body_string(exchange.into_body()).await;
+    let payload: SessionExchangeResponse = serde_json::from_str(&body).expect("json");
+
+    let auth =
+        ironclaw_webui::WebuiAuthenticator::authenticate(&session_authenticator, &payload.token)
+            .await
+            .expect("exchanged bearer must authenticate");
+    assert!(
+        !auth.capabilities.operator_webui_config,
+        "a session minted from a non-operator-capable authenticator must never come out \
+         operator-capable — login_handler must carry the token's own \
+         `operator_webui_config` bit through, not hardcode `true`",
+    );
+}
+
 #[tokio::test]
 async fn exchanged_bearer_authenticates_a_protected_route() {
     let (login_router, session_store) = build_router();

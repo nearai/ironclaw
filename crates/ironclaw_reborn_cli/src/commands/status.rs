@@ -391,16 +391,18 @@ mod tests {
         }
     }
 
-    /// `status --json` must serialize `service` as documented kebab-case.
+    /// `status --json` must serialize `service` as snake_case, matching this
+    /// file's other status/doctor enums (`CheckCategory`, `CheckOutcome`,
+    /// `ComponentStatus`) rather than the odd kebab-case one out.
     #[test]
-    fn status_dto_json_serializes_service_state_as_kebab_case() {
+    fn status_dto_json_serializes_service_state_as_snake_case() {
         let (_tmp, context) = RebornCliContext::test_context();
         for (state, expected) in [
             (ServiceStateDto::Running, "\"service\":\"running\""),
             (ServiceStateDto::Stopped, "\"service\":\"stopped\""),
             (
                 ServiceStateDto::NotInstalled,
-                "\"service\":\"not-installed\"",
+                "\"service\":\"not_installed\"",
             ),
             (ServiceStateDto::Unknown, "\"service\":\"unknown\""),
         ] {
@@ -416,22 +418,24 @@ mod tests {
     #[test]
     fn status_text_renders_service_line_for_every_state() {
         let (_tmp, context) = RebornCliContext::test_context();
-        for (state, expected_line) in [
-            (ServiceStateDto::Running, "service:             running"),
-            (ServiceStateDto::Stopped, "service:             stopped"),
-            (
-                ServiceStateDto::NotInstalled,
-                "service:             not installed",
-            ),
-            (ServiceStateDto::Unknown, "service:             unknown"),
+        for (state, expected_value) in [
+            (ServiceStateDto::Running, "running"),
+            (ServiceStateDto::Stopped, "stopped"),
+            (ServiceStateDto::NotInstalled, "not installed"),
+            (ServiceStateDto::Unknown, "unknown"),
         ] {
             let dto = build_status_dto_with_service_state(&context, state).expect("must build");
             let mut buf = Vec::new();
             dto.render_text_to(&mut buf).expect("render must succeed");
             let text = String::from_utf8(buf).expect("render output must be UTF-8");
+            // contains()-based rather than an exact-column-spacing match: the
+            // `kv` column width is a formatting detail this test shouldn't
+            // pin, only that the `service:` line carries the right value.
             assert!(
-                text.lines().any(|line| line == expected_line),
-                "expected a `{expected_line}` line, got:\n{text}"
+                text.lines()
+                    .any(|line| line.trim_start().starts_with("service:")
+                        && line.contains(expected_value)),
+                "expected a `service:` line containing `{expected_value}`, got:\n{text}"
             );
         }
     }

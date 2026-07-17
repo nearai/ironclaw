@@ -78,11 +78,11 @@ impl ConfigFileWrite {
 /// - `nearai` needs no upfront third-party account (session-token auth via a
 ///   NEAR account, `api_key_required = false`), hence preferred for a fresh
 ///   install over a provider that hard-requires a key before it boots.
-pub(crate) const DEFAULT_LLM_PROVIDER_ID: &str = "nearai";
+const DEFAULT_LLM_PROVIDER_ID: &str = "nearai";
 /// Mirrors `providers.json`'s `nearai` entry's `default_model`.
-pub(crate) const DEFAULT_LLM_MODEL: &str = "deepseek-ai/DeepSeek-V4-Flash";
+const DEFAULT_LLM_MODEL: &str = "deepseek-ai/DeepSeek-V4-Flash";
 /// Mirrors `providers.json`'s `nearai` entry's `api_key_env`.
-pub(crate) const DEFAULT_LLM_API_KEY_ENV: &str = "NEARAI_API_KEY";
+const DEFAULT_LLM_API_KEY_ENV: &str = "NEARAI_API_KEY";
 
 pub(crate) fn write_default_config_files(
     home: &RebornHome,
@@ -301,6 +301,41 @@ const PROVIDERS_STUB: &str = r#"[
 mod tests {
     use super::*;
     use crate::context::RebornCliContext;
+
+    /// `DEFAULT_LLM_*` are hand-maintained mirrors of `providers.json`'s
+    /// `nearai` entry (see each const's doc) rather than derived from it —
+    /// `ironclaw_reborn_cli` is excluded from depending on `ironclaw_llm`
+    /// directly (per `reborn_dependency_boundaries`), so there's no shared
+    /// type to read the catalog through here. Parses the real
+    /// `providers.json` as raw JSON instead, so a future catalog edit that
+    /// forgets to update these consts fails this test rather than silently
+    /// drifting.
+    #[test]
+    fn default_llm_consts_match_the_real_providers_json_nearai_entry() {
+        const PROVIDERS_JSON: &str = include_str!("../../../../../providers.json");
+        let providers: serde_json::Value =
+            serde_json::from_str(PROVIDERS_JSON).expect("providers.json must parse as JSON");
+        let nearai = providers
+            .as_array()
+            .expect("providers.json is a JSON array")
+            .iter()
+            .find(|entry| {
+                entry.get("id").and_then(|id| id.as_str()) == Some(DEFAULT_LLM_PROVIDER_ID)
+            })
+            .unwrap_or_else(|| panic!("providers.json has no `{DEFAULT_LLM_PROVIDER_ID}` entry"));
+        assert_eq!(
+            nearai.get("default_model").and_then(|v| v.as_str()),
+            Some(DEFAULT_LLM_MODEL),
+            "DEFAULT_LLM_MODEL has drifted from providers.json's `{DEFAULT_LLM_PROVIDER_ID}` \
+             entry's default_model"
+        );
+        assert_eq!(
+            nearai.get("api_key_env").and_then(|v| v.as_str()),
+            Some(DEFAULT_LLM_API_KEY_ENV),
+            "DEFAULT_LLM_API_KEY_ENV has drifted from providers.json's `{DEFAULT_LLM_PROVIDER_ID}` \
+             entry's api_key_env"
+        );
+    }
 
     /// The config stub written by `onboard`/`config init` must carry NO
     /// `[llm.default]` selection at all — `default_llm_slot()` must return

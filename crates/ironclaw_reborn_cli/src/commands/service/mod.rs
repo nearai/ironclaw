@@ -288,17 +288,21 @@ fn service_working_directory(reborn_home: &Path) -> PathBuf {
     reborn_home.join("workspace")
 }
 
-/// Creates [`service_working_directory`] (0755, `create_dir_all` — a no-op
+/// Creates [`service_working_directory`] (0700, `create_dir_all` — a no-op
 /// if it already exists) and returns its path. Called by both platforms'
 /// `install_with_runner` before writing the unit/plist, so the directory
 /// exists by the time `serve` is ever launched with it as cwd.
+///
+/// 0700, not 0755: this is a single-user local service directory, not a
+/// shared or world-readable path, so other local accounts must not be able
+/// to list or read it.
 fn ensure_service_working_directory(reborn_home: &Path) -> Result<PathBuf> {
     let dir = service_working_directory(reborn_home);
     std::fs::create_dir_all(&dir).with_context(|| format!("create {}", dir.display()))?;
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o755))
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700))
             .with_context(|| format!("set permissions on {}", dir.display()))?;
     }
     Ok(dir)
@@ -907,7 +911,7 @@ mod tests {
                 .permissions()
                 .mode()
                 & 0o777;
-            assert_eq!(mode, 0o755, "working directory must be 0755, got {mode:o}");
+            assert_eq!(mode, 0o700, "working directory must be 0700, got {mode:o}");
         }
         assert!(
             !fresh_replaced,
@@ -979,7 +983,7 @@ mod tests {
                 .permissions()
                 .mode()
                 & 0o777;
-            assert_eq!(mode, 0o755, "working directory must be 0755, got {mode:o}");
+            assert_eq!(mode, 0o700, "working directory must be 0700, got {mode:o}");
         }
 
         // Idempotent reinstall.

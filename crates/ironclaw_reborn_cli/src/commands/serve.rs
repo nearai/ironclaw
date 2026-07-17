@@ -189,7 +189,7 @@ impl ServeCommand {
         )?;
         let webui_token_source = resolved_token.source;
         let token_value = resolved_token.value;
-        let user_id_raw = resolve_webui_user_id_raw(env_user_id_var, config_file.as_ref());
+        let user_id_raw = resolve_webui_user_id_raw(env_user_id_var, config_file.as_ref())?;
         let user_id = UserId::new(&user_id_raw)
             .map_err(|err| anyhow!("{env_user_id_var} value `{user_id_raw}` is invalid: {err}"))?;
 
@@ -1014,14 +1014,18 @@ fn resolve_webui_default_agent(
 /// A service-installed serve with only HOME/PROFILE in its unit env (no
 /// per-operator var) must still boot bound to a stable identity rather than
 /// hard-failing — see `resolve_webui_runtime_owner` below, same fallback.
+///
+/// Uses `present_unicode_env_var` so a non-UTF-8 value for `env_user_id_var`
+/// propagates as a startup error instead of being silently treated as
+/// unset (the same `NotPresent`-vs-`NotUnicode` distinction documented on
+/// `present_unicode_env_var`).
 fn resolve_webui_user_id_raw(
     env_user_id_var: &str,
     config_file: Option<&RebornConfigFile>,
-) -> String {
-    env::var(env_user_id_var)
-        .ok()
+) -> anyhow::Result<String> {
+    Ok(present_unicode_env_var(env_user_id_var)?
         .filter(|value| !value.is_empty())
-        .unwrap_or_else(|| crate::runtime::default_owner_id(config_file).to_string())
+        .unwrap_or_else(|| crate::runtime::default_owner_id(config_file).to_string()))
 }
 
 /// Resolve the owner the Reborn runtime must run under for the WebChat v2
@@ -1331,7 +1335,8 @@ mod tests {
         };
 
         assert_eq!(
-            resolve_webui_user_id_raw(WEBUI_USER_ID_TEST_ENV, Some(&config_file)),
+            resolve_webui_user_id_raw(WEBUI_USER_ID_TEST_ENV, Some(&config_file))
+                .expect("valid unicode env value is not an error"),
             "env-user"
         );
 
@@ -1351,7 +1356,8 @@ mod tests {
         };
 
         assert_eq!(
-            resolve_webui_user_id_raw(WEBUI_USER_ID_TEST_ENV, Some(&config_file)),
+            resolve_webui_user_id_raw(WEBUI_USER_ID_TEST_ENV, Some(&config_file))
+                .expect("absent env value is not an error"),
             "config-user"
         );
     }
@@ -1369,7 +1375,8 @@ mod tests {
         };
 
         assert_eq!(
-            resolve_webui_user_id_raw(WEBUI_USER_ID_TEST_ENV, Some(&config_file)),
+            resolve_webui_user_id_raw(WEBUI_USER_ID_TEST_ENV, Some(&config_file))
+                .expect("empty env value is not an error"),
             "config-user"
         );
 
@@ -1384,8 +1391,43 @@ mod tests {
         unsafe { std::env::remove_var(WEBUI_USER_ID_TEST_ENV) };
 
         assert_eq!(
-            resolve_webui_user_id_raw(WEBUI_USER_ID_TEST_ENV, None),
+            resolve_webui_user_id_raw(WEBUI_USER_ID_TEST_ENV, None)
+                .expect("no config or env is not an error"),
             "reborn-cli"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn webui_user_id_raw_propagates_not_unicode_instead_of_treating_it_as_unset() {
+        // Mirrors `present_unicode_env_var_propagates_not_unicode_instead_of_treating_it_as_unset`:
+        // before this fix, `resolve_webui_user_id_raw` read the env var with
+        // `env::var(..).ok()`, which collapsed `VarError::NotUnicode` (a real
+        // misconfiguration — the user-id env var got mangled into invalid
+        // UTF-8) into `None`, silently falling through to the config/default
+        // owner instead of failing loudly at startup.
+        use std::os::unix::ffi::OsStringExt as _;
+
+        let _guard = crate::runtime::test_env::lock_runtime_env();
+        let invalid_utf8 = std::ffi::OsString::from_vec(vec![0xFF, 0xFE, 0xFD]);
+        // SAFETY: serialized by `lock_runtime_env`; restored below.
+        unsafe { std::env::set_var(WEBUI_USER_ID_TEST_ENV, &invalid_utf8) };
+
+        let result = resolve_webui_user_id_raw(WEBUI_USER_ID_TEST_ENV, None);
+
+        // SAFETY: serialized by `lock_runtime_env`.
+        unsafe { std::env::remove_var(WEBUI_USER_ID_TEST_ENV) };
+
+        let error =
+            result.expect_err("non-UTF-8 env value must be a real error, not a silent fallback");
+        let message = error.to_string();
+        assert!(
+            message.contains(WEBUI_USER_ID_TEST_ENV),
+            "error must name the variable: {message}"
+        );
+        assert!(
+            message.contains("not valid UTF-8"),
+            "error must explain why: {message}"
         );
     }
 

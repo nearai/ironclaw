@@ -39,7 +39,7 @@ pub(crate) struct StatusDto {
 /// because it's gated behind `webui-v2-beta` and this DTO must exist (with
 /// an `Unknown` fallback) on every build.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "kebab-case")]
+#[serde(rename_all = "snake_case")]
 pub(crate) enum ServiceStateDto {
     Running,
     Stopped,
