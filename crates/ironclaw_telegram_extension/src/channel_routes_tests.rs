@@ -68,9 +68,9 @@ fn safety_layer() -> Arc<SafetyLayer> {
 
 fn operator_caller() -> WebUiAuthenticatedCaller {
     WebUiAuthenticatedCaller::new(
-        TenantId::new("tenant-a").expect("tenant"),
-        UserId::new("operator").expect("operator"),
-        Some(AgentId::new("agent-a").expect("agent")),
+        TenantId::new("tenant-a").expect("tenant"), // safety: test-only fixture
+        UserId::new("operator").expect("operator"), // safety: test-only fixture
+        Some(AgentId::new("agent-a").expect("agent")), // safety: test-only fixture
         None,
     )
     .with_operator_webui_config(true)
@@ -78,18 +78,18 @@ fn operator_caller() -> WebUiAuthenticatedCaller {
 
 fn member_caller(user: &str) -> WebUiAuthenticatedCaller {
     WebUiAuthenticatedCaller::new(
-        TenantId::new("tenant-a").expect("tenant"),
-        UserId::new(user).expect("member"),
-        Some(AgentId::new("agent-a").expect("agent")),
+        TenantId::new("tenant-a").expect("tenant"), // safety: test-only fixture
+        UserId::new(user).expect("member"), // safety: test-only fixture
+        Some(AgentId::new("agent-a").expect("agent")), // safety: test-only fixture
         None,
     )
 }
 
 fn cross_tenant_caller() -> WebUiAuthenticatedCaller {
     WebUiAuthenticatedCaller::new(
-        TenantId::new("tenant-b").expect("tenant"),
-        UserId::new("operator").expect("operator"),
-        Some(AgentId::new("agent-a").expect("agent")),
+        TenantId::new("tenant-b").expect("tenant"), // safety: test-only fixture
+        UserId::new("operator").expect("operator"), // safety: test-only fixture
+        Some(AgentId::new("agent-a").expect("agent")), // safety: test-only fixture
         None,
     )
     .with_operator_webui_config(true)
@@ -109,7 +109,7 @@ fn routed_app(
 ) -> axum::Router {
     let config = TelegramChannelRouteConfig::new(setup, pairing, safety_layer());
     let (router, _descriptors) =
-        telegram_channel_route_parts(config).expect("static route descriptors validate");
+        telegram_channel_route_parts(config).expect("static route descriptors validate"); // safety: test-only fixture
     router.layer(axum::Extension(caller))
 }
 
@@ -129,15 +129,15 @@ async fn send(
     };
     let response = app
         .clone()
-        .oneshot(builder.body(body).expect("request builds"))
+        .oneshot(builder.body(body).expect("request builds")) // safety: test-only fixture
         .await
-        .expect("router responds");
+        .expect("router responds"); // safety: test-only fixture
     let status = response.status();
     let bytes = response
         .into_body()
         .collect()
         .await
-        .expect("body reads")
+        .expect("body reads") // safety: test-only fixture
         .to_bytes();
     (status, String::from_utf8_lossy(&bytes).to_string())
 }

@@ -36,7 +36,7 @@ pub(crate) mod test_fixtures {
             &self,
             event: AuthContinuationEvent,
         ) -> Result<(), AuthProductError> {
-            self.events.lock().expect("lock").push(event);
+            self.events.lock().expect("lock").push(event); // safety: test-only fixture
             Ok(())
         }
     }
@@ -51,9 +51,9 @@ pub(crate) mod test_fixtures {
 
     impl FakeIdentityLookup {
         pub(crate) fn bind(&self, provider: &str, provider_user_id: &str, user: &str) {
-            self.bindings.lock().expect("lock").insert(
+            self.bindings.lock().expect("lock").insert( // safety: test-only fixture
                 (provider.to_string(), provider_user_id.to_string()),
-                UserId::new(user).expect("valid user id"),
+                UserId::new(user).expect("valid user id"), // safety: test-only fixture
             );
         }
 
@@ -77,7 +77,7 @@ pub(crate) mod test_fixtures {
             Ok(self
                 .bindings
                 .lock()
-                .expect("lock")
+                .expect("lock") // safety: test-only fixture
                 .get(&(provider.to_string(), provider_user_id.to_string()))
                 .cloned())
         }
@@ -90,7 +90,7 @@ pub(crate) mod test_fixtures {
             Ok(self
                 .bindings
                 .lock()
-                .expect("lock")
+                .expect("lock") // safety: test-only fixture
                 .iter()
                 .any(|((bound_provider, _), bound)| bound_provider == provider && bound == user_id))
         }
@@ -130,11 +130,11 @@ pub(crate) mod test_fixtures {
     }
 
     fn tenant_id() -> TenantId {
-        TenantId::new("tenant-a").expect("valid tenant")
+        TenantId::new("tenant-a").expect("valid tenant") // safety: test-only fixture
     }
 
     fn agent_id() -> AgentId {
-        AgentId::new("agent-a").expect("valid agent")
+        AgentId::new("agent-a").expect("valid agent") // safety: test-only fixture
     }
 
     pub(crate) fn unconfigured_setup_service(
@@ -151,7 +151,7 @@ pub(crate) mod test_fixtures {
             tenant_id(),
             agent_id(),
             None,
-            UserId::new("operator").expect("valid user"),
+            UserId::new("operator").expect("valid user"), // safety: test-only fixture
             state,
             Arc::new(InMemorySecretStore::new()),
             bot_api.client(),
@@ -171,7 +171,7 @@ pub(crate) mod test_fixtures {
                 webhook_url_override: None,
             })
             .await
-            .expect("test setup saves");
+            .expect("test setup saves"); // safety: test-only fixture
         setup
     }
 
@@ -192,7 +192,7 @@ pub(crate) mod test_fixtures {
 
     pub(crate) fn fixture_installation_id() -> AdapterInstallationId {
         AdapterInstallationId::new(format!("tg-bot-{FIXTURE_BOT_ID}"))
-            .expect("valid installation id")
+            .expect("valid installation id") // safety: test-only fixture
     }
 
     /// A private-chat update body; `text: None` models a media-only message.
@@ -214,7 +214,7 @@ pub(crate) mod test_fixtures {
             "update_id": 7,
             "message": message,
         }))
-        .expect("test body serializes")
+        .expect("test body serializes") // safety: test-only fixture
     }
 }
 

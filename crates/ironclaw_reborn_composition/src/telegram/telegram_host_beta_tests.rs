@@ -53,10 +53,10 @@ async fn telegram_runtime() -> (crate::RebornRuntime, tempfile::TempDir) {
 async fn telegram_runtime_with(
     customize: impl FnOnce(RebornRuntimeInput) -> RebornRuntimeInput,
 ) -> (crate::RebornRuntime, tempfile::TempDir) {
-    let root = tempfile::tempdir().expect("tempdir");
+    let root = tempfile::tempdir().expect("tempdir"); // safety: test-only fixture
     let input = RebornRuntimeInput::from_services(
         RebornBuildInput::local_dev("telegram-host-owner", root.path().join("local-dev"))
-            .with_runtime_policy(local_dev_runtime_policy().expect("local policy")),
+            .with_runtime_policy(local_dev_runtime_policy().expect("local policy")), // safety: test-only fixture
     )
     .with_identity(RebornRuntimeIdentity {
         tenant_id: TENANT.to_string(),
@@ -67,16 +67,16 @@ async fn telegram_runtime_with(
     .with_model_gateway_override(Arc::new(StaticGateway));
     let runtime = build_reborn_runtime(customize(input))
         .await
-        .expect("runtime builds");
+        .expect("runtime builds"); // safety: test-only fixture
     (runtime, root)
 }
 
 fn host_config() -> TelegramHostRuntimeConfig {
     TelegramHostRuntimeConfig::new(
-        TenantId::new(TENANT).expect("tenant"),
-        AgentId::new(AGENT).expect("agent"),
+        TenantId::new(TENANT).expect("tenant"), // safety: test-only fixture
+        AgentId::new(AGENT).expect("agent"), // safety: test-only fixture
         None,
-        UserId::new(OPERATOR).expect("operator"),
+        UserId::new(OPERATOR).expect("operator"), // safety: test-only fixture
         Some("https://ironclaw.example".to_string()),
     )
 }
