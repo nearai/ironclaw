@@ -1260,9 +1260,7 @@ mod session_store_failure {
     use async_trait::async_trait;
     use chrono::Duration as ChronoDuration;
     use ironclaw_host_api::{TenantId, UserId};
-    use ironclaw_webui::{
-        SessionRecord, SessionStore, SessionStoreError, UserDirectory,
-    };
+    use ironclaw_webui::{SessionRecord, SessionStore, SessionStoreError, UserDirectory};
     use secrecy::SecretString;
 
     struct AlwaysFailCreate;
@@ -1361,9 +1359,7 @@ mod logout_revoke_failure {
     use async_trait::async_trait;
     use chrono::Duration as ChronoDuration;
     use ironclaw_host_api::{TenantId, UserId};
-    use ironclaw_webui::{
-        SessionRecord, SessionStore, SessionStoreError, UserDirectory,
-    };
+    use ironclaw_webui::{SessionRecord, SessionStore, SessionStoreError, UserDirectory};
     use secrecy::SecretString;
 
     struct RevokeAlwaysFails;

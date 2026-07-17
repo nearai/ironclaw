@@ -13,9 +13,7 @@ use std::net::SocketAddr;
 use std::time::Duration;
 
 use axum::{Router, extract::ConnectInfo, routing::get};
-use ironclaw_webui::{
-    RebornWebuiServeOptions, deferred_webui_v2_startup_router, serve_webui_v2,
-};
+use ironclaw_webui::{RebornWebuiServeOptions, deferred_webui_v2_startup_router, serve_webui_v2};
 use tokio::sync::oneshot;
 
 async fn build_test_router() -> Router {

@@ -292,10 +292,7 @@ pub enum EnvBearerConfigError {
 
 #[async_trait]
 impl WebuiAuthenticator for EnvBearerAuthenticator {
-    async fn authenticate(
-        &self,
-        candidate: &str,
-    ) -> Option<WebuiAuthentication> {
+    async fn authenticate(&self, candidate: &str) -> Option<WebuiAuthentication> {
         // Constant-time comparison so an attacker cannot use response
         // timing to learn the prefix of the configured token. Both
         // operands are coerced to `&[u8]` of the same length to make
@@ -305,9 +302,7 @@ impl WebuiAuthenticator for EnvBearerAuthenticator {
         let expected = self.token.expose_secret().as_bytes();
         let candidate = candidate.as_bytes();
         if expected.ct_eq(candidate).into() {
-            Some(WebuiAuthentication::operator(
-                self.user_id.clone(),
-            ))
+            Some(WebuiAuthentication::operator(self.user_id.clone()))
         } else {
             None
         }

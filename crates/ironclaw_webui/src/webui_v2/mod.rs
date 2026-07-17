@@ -39,7 +39,6 @@
 //! [`WebUiAuthenticatedCaller`]: ironclaw_product_workflow::WebUiAuthenticatedCaller
 //! [`IngressRouteDescriptor`]: ironclaw_host_api::ingress::IngressRouteDescriptor
 
-
 mod descriptors;
 mod error;
 mod handlers;

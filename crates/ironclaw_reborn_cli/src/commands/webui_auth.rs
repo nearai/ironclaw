@@ -159,9 +159,7 @@ mod tests {
 
     use async_trait::async_trait;
     use ironclaw_webui::WebuiAuthentication;
-    use ironclaw_webui::{
-        OAuthError, OAuthProvider, OAuthProviderName, OAuthUserProfile,
-    };
+    use ironclaw_webui::{OAuthError, OAuthProvider, OAuthProviderName, OAuthUserProfile};
 
     /// Bearer verifier that accepts nothing — stands in for the env-bearer
     /// authenticator without pulling in its construction requirements.

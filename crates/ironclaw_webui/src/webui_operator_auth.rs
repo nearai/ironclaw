@@ -66,9 +66,9 @@ fn method_matches_route(route_method: &Method, request_method: &Method) -> bool 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::webui_v2::is_webui_v2_operator_webui_config_route_id;
     use axum::body::Body;
     use axum::http::Method;
-    use crate::webui_v2::is_webui_v2_operator_webui_config_route_id;
 
     fn request(method: Method, path: &str) -> Request {
         Request::builder()

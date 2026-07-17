@@ -239,10 +239,8 @@ impl ServeCommand {
         // the SSO login surface. The store is stateless and deterministic in its
         // signing key, so this sibling instance (built before the login surface)
         // mints tokens that validate under the login surface's own store.
-        let admin_session_store = ironclaw_webui::signed_session_store(
-            &session_signing_secret,
-            &tenant_id,
-        );
+        let admin_session_store =
+            ironclaw_webui::signed_session_store(&session_signing_secret, &tenant_id);
         runtime_input =
             runtime_input.with_admin_api_token_minter(Arc::new(SignedSessionTokenMinter {
                 session_store: admin_session_store,
