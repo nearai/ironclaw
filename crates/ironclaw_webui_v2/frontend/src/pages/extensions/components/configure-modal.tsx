@@ -18,10 +18,15 @@ import { isChannelExtensionKind } from "../lib/extensions-schema";
 import { redeemPairingCode } from "../lib/pairing-api";
 import { activateExtension } from "../lib/extensions-api";
 import { notifyChannelConnected } from "../../../lib/channel-connection-events";
+import { TelegramPairingPanel } from "../../../components/telegram-pairing-panel";
 
 // Model B: the visible Slack extension is the user-tools package (id `slack`),
 // not the bot channel (which is hidden operator infrastructure).
 const SLACK_TOOLS_EXTENSION_ID = "slack";
+// Telegram pairs via WebGeneratedCode: IronClaw mints the code (deep link +
+// QR + typed fallback), so Configure hosts the pairing panel — never the
+// proof-code paste box and never the "no configuration required" fallback.
+const TELEGRAM_EXTENSION_ID = "telegram";
 
 export function ConfigureModal({ extension, onActivate, onClose, onSaved }) {
   const t = useT();
@@ -154,6 +159,23 @@ export function ConfigureModal({ extension, onActivate, onClose, onSaved }) {
     setupReadyForActivation({ extension, secrets, fields });
   const oauthBusy = oauthMutation.isPending || oauthMutation.isAuthorizing;
   const setupUrl = httpsUrl(onboarding?.setup_url);
+  const isTelegramChannelExtension =
+    isChannelExtensionKind(extension?.kind) &&
+    channelId.toLowerCase() === TELEGRAM_EXTENSION_ID;
+
+  if (isTelegramChannelExtension) {
+    // The panel is self-contained (mints/rotates codes, polls status,
+    // broadcasts channel-connected on pairing), so the modal only hosts it —
+    // dual-surface parity with the Channels tab (design spec §4.2/§5).
+    return (
+      <ModalShell
+        onClose={onClose}
+        title={t("extensions.configureName").replace("{name}", extensionName)}
+      >
+        <TelegramPairingPanel compact />
+      </ModalShell>
+    );
+  }
 
   if (isPairingChannel) {
     return (
