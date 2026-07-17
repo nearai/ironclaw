@@ -9,7 +9,7 @@ paths:
   - "crates/ironclaw_wasm/**"
   - "crates/ironclaw_mcp/**"
   - "crates/ironclaw_product_adapters/**"
-  - "crates/ironclaw_reborn_webui_ingress/**"
+  - "crates/ironclaw_webui/**"
   - "crates/ironclaw_prompt_envelope/**"
 ---
 # Reborn safety and sandbox rules

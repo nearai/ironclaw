@@ -54,7 +54,7 @@ def _write_workbook(path: Path, feature_rows: list[list[str]]) -> None:
 
 
 def _write_repo(root: Path) -> None:
-    app_dir = root / "crates/ironclaw_webui_v2/frontend/src/app"
+    app_dir = root / "crates/ironclaw_webui/frontend/src/app"
     app_dir.mkdir(parents=True)
     (app_dir / "app.tsx").write_text(
         """
@@ -64,7 +64,7 @@ def _write_repo(root: Path) -> None:
         """,
         encoding="utf-8",
     )
-    webui_dir = root / "crates/ironclaw_webui_v2/src"
+    webui_dir = root / "crates/ironclaw_webui/src"
     webui_dir.mkdir(parents=True)
     (webui_dir / "descriptors.rs").write_text(
         'pub const WEBUI_V2_PATTERN_LIST_THREADS: &str = "/api/webchat/v2/threads";\n'

@@ -1465,13 +1465,13 @@ impl RebornRuntime {
     }
 
     /// Public NEAR AI login callback mount for the host ingress to merge via
-    /// [`crate::webui::webui_serve::WebuiServeConfig::with_public_route_mount`]. Built
+    /// `ironclaw_webui::WebuiServeConfig::with_public_route_mount`. Built
     /// from the runtime's private session/reload/boot so those stay internal.
     /// `None` when no LLM seam or boot config was wired.
     #[cfg(all(feature = "root-llm-provider", feature = "webui-v2-beta"))]
     pub fn nearai_login_callback_mount(
         &self,
-    ) -> Option<crate::webui::webui_serve::PublicRouteMount> {
+    ) -> Option<crate::webui::route_mounts::PublicRouteMount> {
         let boot = self.boot.clone()?;
         let session = self.webui_llm_session()?;
         let reload = self.webui_llm_reload_trigger()?;
@@ -9958,7 +9958,7 @@ output_schema_ref = "schemas/write.output.json"
     async fn webui_route_rejects_list_automations_without_agent_binding() {
         use axum::body::Body;
         use axum::http::{Request, StatusCode};
-        use ironclaw_webui_v2::{
+        use ironclaw_webui::webui_v2::{
             DEFAULT_SSE_MAX_CONCURRENT_PER_CALLER, WebUiV2State, webui_v2_router,
         };
         use tower::ServiceExt;
@@ -10120,7 +10120,7 @@ output_schema_ref = "schemas/write.output.json"
     async fn webui_operator_diagnostics_route_exposes_composed_readiness_evidence() {
         use axum::body::{Body, to_bytes};
         use axum::http::{Request, StatusCode};
-        use ironclaw_webui_v2::{
+        use ironclaw_webui::webui_v2::{
             DEFAULT_SSE_MAX_CONCURRENT_PER_CALLER, WebUiV2Capabilities, WebUiV2State,
             webui_v2_router,
         };

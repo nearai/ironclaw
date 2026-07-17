@@ -58,8 +58,10 @@ migration-support = []
 # from its `serve` subcommand. Substrate-only callers (v1 `AppBuilder`,
 # diagnostic harnesses) stay off the feature and carry no WebUI code.
 webui-v2-beta = [
-    "dep:ironclaw_webui_v2",
-    "ironclaw_webui_v2/webui-v2-beta",
+    # The WebChat v2 route surface + serve loop merged up into `ironclaw_webui`
+    # (as its `webui_v2` module + `webui_serve`); this crate no longer depends on
+    # that route crate. Composition keeps this feature to gate the WebUI facade,
+    # identity, admin, and route-mount vocabulary it still owns.
     "dep:ironclaw_reborn_identity",
     "ironclaw_runner/webui-user-store",
     "libsql",
@@ -162,9 +164,8 @@ ironclaw_product_context = { path = "../ironclaw_product_context", version = "0.
 nix = { version = "0.30", default-features = false, features = ["process"] }
 # Unpacking uploaded WASM-tool bundles for the WebUI "Install Tool" import flow.
 zip = { version = "8", default-features = false, features = ["deflate"] }
-# WebUI v2 JSON route surface and root-mounted static SPA — feature-gated;
-# only used by `webui_serve`.
-ironclaw_webui_v2 = { path = "../ironclaw_webui_v2", optional = true }
+# WebUI v2 route surface + static SPA bundle merged up into
+# `ironclaw_webui`; no longer a composition dependency.
 ironclaw_wasm_product_adapters = { path = "../ironclaw_wasm_product_adapters", optional = true }
 libsql = { version = "0.9", optional = true, default-features = false, features = ["core", "replication", "remote", "tls"] }
 libc = "0.2"
@@ -202,7 +203,13 @@ http = "1"
 http-body-util = "0.1"
 # Admin-user-management e2e test drives the composed app with a real session
 # authenticator so a minted API token can be validated (login-with-token).
-ironclaw_reborn_webui_ingress = { path = "../ironclaw_reborn_webui_ingress" }
+# `slack-v2-host-beta` is enabled because composition's own WebUI integration
+# tests (`tests/webui_v2_product_auth*.rs`) exercise
+# `#[cfg(feature = "slack-v2-host-beta")]` blocks that call the
+# `WebuiServeConfig::with_slack_*` setters — which moved into this ingress crate
+# and are gated on the ingress slack feature. Cargo features cannot reach a
+# dev-dependency, so the dev-dep must request the feature directly.
+ironclaw_webui = { path = "../ironclaw_webui", features = ["slack-v2-host-beta"] }
 secrecy = { version = "0.10", features = ["serde"] }
 ironclaw_common = { path = "../ironclaw_common" }
 ironclaw_host_api = { path = "../ironclaw_host_api" }

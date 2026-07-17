@@ -58,7 +58,7 @@ root-llm-provider = [
 # dev-only feature required.
 webui-v2-beta = [
     "ironclaw_reborn_composition/webui-v2-beta",
-    "dep:ironclaw_reborn_webui_ingress",
+    "dep:ironclaw_webui",
     "dep:async-trait",
 ]
 # Compile in the Slack Events API host-beta mount for `ironclaw-reborn serve`.
@@ -68,10 +68,12 @@ webui-v2-beta = [
 slack-v2-host-beta = [
     "webui-v2-beta",
     "ironclaw_reborn_composition/slack-v2-host-beta",
+    "ironclaw_webui/slack-v2-host-beta",
 ]
 openai-compat-beta = [
     "webui-v2-beta",
     "ironclaw_reborn_composition/openai-compat-beta",
+    "ironclaw_webui/openai-compat-beta",
 ]
 # Enable production PostgreSQL storage composition for `ironclaw-reborn`.
 postgres = [
@@ -101,7 +103,7 @@ dotenvy = "0.15"
 ironclaw_reborn_composition = { path = "../ironclaw_reborn_composition", version = "0.1.0" }
 ironclaw_reborn_config = { path = "../ironclaw_reborn_config", version = "0.1.0" }
 ironclaw_reborn_traces = { path = "../ironclaw_reborn_traces", version = "0.1.0" }
-ironclaw_reborn_webui_ingress = { path = "../ironclaw_reborn_webui_ingress", version = "0.1.0", optional = true }
+ironclaw_webui = { path = "../ironclaw_webui", version = "0.1.0", optional = true }
 rand = "0.10"
 reqwest = { version = "0.12", default-features = false, features = ["json", "multipart", "rustls-tls-native-roots", "stream"] }
 secrecy = "0.10"
