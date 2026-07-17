@@ -147,9 +147,10 @@ pub use llm_admin::openai_compat_serve::build_openai_compat_route_mount;
 pub use ironclaw_product_adapters::mark_bearer_token_verified_for_tenant;
 #[cfg(feature = "root-llm-provider")]
 pub use llm_admin::provider_admin::{
-    DetectedEnvLlm, ProviderMenuEntry, RebornModelRoutesState, RebornProviderAdmin,
-    RebornProviderAdminError, RebornProviderInfo, RebornProviderList, RebornProviderMetadata,
-    RebornProviderSelection, RebornProviderStatus, RebornProviderWriteOutcome, RebornV1State,
+    DetectedEnvLlm, EXAMPLE_OVERLAY_PROVIDER_ID, ProviderMenuEntry, ProviderProbeOutcome,
+    RebornModelRoutesState, RebornProviderAdmin, RebornProviderAdminError, RebornProviderInfo,
+    RebornProviderList, RebornProviderMetadata, RebornProviderSelection, RebornProviderStatus,
+    RebornProviderWriteOutcome, RebornV1State,
 };
 #[cfg(feature = "root-llm-provider")]
 pub use llm_admin::provider_admin_product_command::RebornProviderAdminProductCommandService;

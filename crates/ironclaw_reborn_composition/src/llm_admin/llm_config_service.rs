@@ -964,6 +964,109 @@ fn normalized_endpoint(value: Option<&str>) -> Option<String> {
         .map(|value| value.trim_end_matches('/').to_string())
 }
 
+/// Build a transient provider from a not-yet-persisted provider/key/model
+/// combination and list its models — used by
+/// [`crate::RebornProviderAdmin::probe_candidate`] (onboard's pre-write
+/// key/model verification step). Reuses the same `custom_definition` +
+/// `resolve_against_registry` + `build_static_provider_chain` machinery
+/// [`RebornLlmConfigService::probe_provider`] uses for the webui2 "test
+/// connection"/"list models" settings probes, minus that method's
+/// stored-key fallback: that fallback exists for probing an
+/// ALREADY-persisted provider when the caller supplies no inline key;
+/// onboard calls this BEFORE anything is persisted, so the only key that
+/// could ever apply is the caller's own inline candidate (or none, for a
+/// keyless provider) — there is nothing stored yet to fall back to.
+///
+/// Never returns `Err`: a resolve/build/list-models failure is reported as
+/// `ok: false` with a user-safe `message`, matching how `test_connection`/
+/// `list_models` already fold every probe failure into their `ok: false`
+/// result rather than a separate error channel — there is no
+/// auth-vs-transport signal in that shape for this function to preserve, so
+/// callers (onboard's `provision_via_menu`) must not invent one either.
+pub(crate) async fn probe_candidate_provider(
+    request: &LlmProbeRequest,
+) -> crate::ProviderProbeOutcome {
+    let endpoint = probe_endpoint_label(request);
+    let Some(protocol) = parse_adapter(&request.adapter) else {
+        return crate::ProviderProbeOutcome {
+            ok: false,
+            models: Vec::new(),
+            message: format!("unknown adapter `{}`", request.adapter),
+        };
+    };
+    let base_url = request
+        .base_url
+        .clone()
+        .filter(|url| !url.trim().is_empty());
+    let model = request
+        .model
+        .clone()
+        .filter(|model| !model.trim().is_empty())
+        .unwrap_or_default();
+    let definition = custom_definition(&request.provider_id, protocol, base_url.clone(), model);
+    let registry = ProviderRegistry::new(vec![definition]);
+    let selection = LlmSlotSelection {
+        provider_id: Some(request.provider_id.clone()),
+        model: request
+            .model
+            .clone()
+            .filter(|model| !model.trim().is_empty()),
+        api_key_env: None,
+        base_url,
+    };
+    let mut config = match resolve_against_registry(&selection, &registry) {
+        Ok(config) => config,
+        Err(error) => {
+            return crate::ProviderProbeOutcome {
+                ok: false,
+                models: Vec::new(),
+                message: error.to_string(),
+            };
+        }
+    };
+    if let Some(key) = request.api_key.clone() {
+        apply_stored_api_key(&mut config, key);
+    }
+
+    let session = ironclaw_llm::create_session_manager(config.session.clone()).await;
+    let provider = match ironclaw_llm::build_static_provider_chain(&config, session).await {
+        Ok(provider) => provider,
+        Err(error) => {
+            tracing::debug!(
+                provider_id = %request.provider_id,
+                adapter = %request.adapter,
+                %error,
+                "onboard candidate probe: provider build failed"
+            );
+            return crate::ProviderProbeOutcome {
+                ok: false,
+                models: Vec::new(),
+                message: format!("could not reach {endpoint} with these settings"),
+            };
+        }
+    };
+    match provider.list_models().await {
+        Ok(models) => crate::ProviderProbeOutcome {
+            ok: true,
+            models,
+            message: String::new(),
+        },
+        Err(error) => {
+            tracing::debug!(
+                provider_id = %request.provider_id,
+                adapter = %request.adapter,
+                %error,
+                "onboard candidate probe: list_models failed"
+            );
+            crate::ProviderProbeOutcome {
+                ok: false,
+                models: Vec::new(),
+                message: format!("could not reach {endpoint} with these settings"),
+            }
+        }
+    }
+}
+
 /// Human-readable endpoint for probe-result messages so a connectivity failure
 /// names the address that was actually tried (e.g. `http://localhost:11434`)
 /// rather than a generic "the provider". Prefers the caller's override URL,
@@ -1491,6 +1594,30 @@ mod tests {
             model: Some("acme-1".to_string()),
             api_key: api_key.map(SecretString::from),
         }
+    }
+
+    /// `probe_candidate_provider` never returns `Err` — an unknown adapter
+    /// (the one input this function itself validates, rather than deferring
+    /// to `resolve_against_registry`/the network) is reported as
+    /// `ok: false` with a user-safe message, same as every other probe
+    /// failure shape. Onboard's `provision_via_menu` relies on this: it
+    /// treats every `ok: false` the same way (show the message, offer
+    /// "store anyway?"), so this function must never surface a distinct
+    /// error channel for callers to accidentally special-case.
+    #[tokio::test]
+    async fn probe_candidate_provider_reports_unknown_adapter_as_not_ok() {
+        let mut request = probe_request("acme", "https://api.acme.test/v1", Some("sk-test"));
+        request.adapter = "not-a-real-adapter".to_string();
+
+        let outcome = probe_candidate_provider(&request).await;
+
+        assert!(!outcome.ok);
+        assert!(outcome.models.is_empty());
+        assert!(
+            outcome.message.contains("not-a-real-adapter"),
+            "message should name the invalid adapter: {}",
+            outcome.message
+        );
     }
 
     #[cfg(feature = "webui-v2-beta")]

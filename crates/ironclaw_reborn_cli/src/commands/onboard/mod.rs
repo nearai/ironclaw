@@ -12,7 +12,8 @@ mod master_key;
 mod prompts;
 
 use llm_credentials::{
-    LlmCredentialProvisionOutcome, LocalDevLlmKeyStoreOpener, provision_llm_credentials,
+    LiveLlmProbe, LlmCredentialProvisionOutcome, LocalDevLlmKeyStoreOpener,
+    provision_llm_credentials,
 };
 use master_key::{MasterKeyProvisionOutcome, provision_master_key};
 use prompts::{LlmCredentialPromptError, PromptSource, StdinPromptSource};
@@ -69,6 +70,7 @@ impl OnboardCommand {
             context.boot_config(),
             &mut prompts,
             &LocalDevLlmKeyStoreOpener,
+            &LiveLlmProbe,
             self.force,
         ) {
             Ok(outcome) => outcome,
