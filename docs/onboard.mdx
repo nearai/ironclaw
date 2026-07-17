@@ -1,73 +1,105 @@
 ---
 title: "Onboard"
-description: "Initialize the canonical Reborn runtime"
+description: "Configure your agent's main settings"
 icon: cog
 ---
 
-`ironclaw onboard` initializes the canonical Reborn runtime. It is a
-non-interactive bootstrap command, not the retained v1 all-in-one setup wizard.
+The `onboard` command allows you to configure multiple settings of your agent at once, including your inference provider, LLM, tunnels, and channels. It provides a guided experience to help you set up your agent in minutes.
 
 <Note>
-If you have not installed IronClaw yet, start with the [Quickstart guide](/quickstart).
+If you haven't set up your agent yet, follow our [Quickstart guide](/quickstart)
 </Note>
 
-## What the command does
+<Danger>
+If you are new to IronClaw, we recommend you to configure [channels](/channels/telegram), tools, and other settings one at a time instead of 
+all at once through the `onboard` command.
+</Danger>
+
+---
+
+## Onboarding Wizard
+
+If you are new to IronClaw, we recommend you to configure channels, tools, and other settings one at a time instead of all at once through the onboard command.
+
+<Steps>
+
+<Step title="Start the Onboarding Wizard">
+
+To start the onboarding wizard, run the following command in your terminal:
 
 ```bash
 ironclaw onboard
 ```
 
-The command:
+</Step>
 
-1. resolves `IRONCLAW_REBORN_HOME`, or defaults to `~/.ironclaw/reborn`;
-2. creates the Reborn home directory;
-3. creates missing `config.toml` and `providers.json` files;
-4. preserves existing operator-edited files unless `--force` is passed;
-5. provisions or preserves a mode-protected `webui-token` bearer-token file;
-6. writes `.onboard-completed.json` with completed and pending setup steps.
+<Step title="Select the Database">
 
-It does not read or modify retained v1 state, configure a v1 database, or run
-the v1 channel, tunnel, extension, sandbox, and heartbeat wizard.
+IronClaw supports two database backends: **PostgreSQL** (default, recommended for production) and **libSQL** (embedded SQLite, zero-config). The wizard will guide you through setup — see the [Database Backends](/capabilities/database) page for details.
 
-## Finish provider setup
+</Step>
 
-Choose a provider and model, then inspect the effective route:
+<Step title="Secrets Management">
 
-```bash
-ironclaw models list
-ironclaw models set-provider openai --model gpt-5-mini
-ironclaw models status
-```
+Choose were to store your master secrets key, which is used to encrypt all your credentials.
 
-Set the API-key environment variable reported by `models list --verbose` before
-starting the runtime. LLM/API credentials remain in environment variables and
-are not written into `config.toml`; the generated WebUI bearer token is stored
-in the mode-protected `webui-token` file.
+The recommended option is to use the system's keyring, but if you are running in an environment without a keyring (like a server or a container), prefer to store the master key in an environment variable
 
-## Inspect generated configuration
+</Step>
 
-```bash
-ironclaw config path
-ironclaw config list
-ironclaw config get boot.profile
-```
+<Step title="Inference Provider and LLM">
 
-Use `ironclaw config init --force` only when you intentionally want to replace
-the generated configuration stubs.
+Built-in providers include Anthropic, OpenAI, Google Gemini, MiniMax, Mistral, and Ollama (local).
 
-## Start the runtime
+We recommend using [NEAR AI](https://cloud.near.ai/) as your inference provider for maximum privacy and security, and the `Qwen3-30B` model to start for its cost-effectiveness.
 
-```bash
-ironclaw repl
-ironclaw run --message "Hello"
-```
+</Step>
 
-For profiles, production storage, WebUI serve mode, and all command options,
-see the [canonical CLI reference](/reborn-binary). The detailed onboarding
-contract and current non-goals are documented in
-[Reborn onboarding](/reborn/onboarding).
+<Step title="Enable Semantics">
 
-<Warning>
-The retained v1 wizard is available only as `ironclaw-v1 onboard`. It operates
-on v1 state and is not part of the canonical Reborn onboarding flow.
-</Warning>
+Embeddings enable semantic search in your workspace memory, we recommend enabling it.
+
+</Step>
+
+<Step title="Configure Tunnel & Channels">
+
+Tunnels are used to securely expose your agent's API to the internet, which is required for channels to work. We recommend using [ngrok](https://dashboard.ngrok.com/) for its ease of use and reliability.
+
+After configuring your tunnel, you can select which channels you want to enable for your agent, so it can listen and respond to messages from, for example, Telegram, Slack, or Discord. 
+
+You can always add more channels later.
+
+</Step>
+
+<Step title="Tools / Extensions">
+
+You can configure which tools and extensions you want to enable for your agent. They are used by the agent to perform actions, like searching the web, reading and sending emails, using github, and more.
+
+You can always add more tools and extensions later.
+
+</Step>
+
+<Step title="Docker Sandboxing">
+
+IronClaw can execute code, run builds, and use tools inside Docker
+containers. This keeps your system safe -- commands from the LLM run
+in an isolated sandbox with no access to your credentials, limited
+filesystem access, and network traffic restricted to an allowlist.
+
+<Info>
+
+If you are running IronClaw in an environment without Docker (like a server or a container), you can disable sandboxing
+</Info>
+
+</Step>
+
+<Step title="Background Tasks">
+
+Heartbeat runs periodic background tasks (e.g., checking your calendar,
+monitoring for notifications, running scheduled workflows).
+
+We recommend enabling it to unlock the full potential of your agent, but you can always disable it later if you prefer.
+
+</Step>
+
+</Steps>

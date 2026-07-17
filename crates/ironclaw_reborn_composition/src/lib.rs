@@ -10,7 +10,7 @@
 //! - [`build_reborn_runtime`] — full runtime assembly: substrate + loop
 //!   driver registry + LLM model gateway (under `root-llm-provider`) +
 //!   turn-runner worker, spawned as one unit. This is the single entry
-//!   point used by the canonical `ironclaw` binary and any
+//!   point used by the standalone `ironclaw-reborn` binary and any
 //!   future Reborn ingress.
 //!
 //! Downstream callers should not name internal Reborn types directly:
@@ -342,7 +342,7 @@ impl runtime_input::TriggerFireAccessChecker for LocalTriggerAccessFireChecker {
 /// boundary that maps every external identity — WebUI OAuth logins and
 /// external channel/product actors — to a stable `UserId` before runtime
 /// state is touched. Only the resolver trait, request, surface, and error
-/// types are re-exported so host wiring (`ironclaw serve`, the CLI
+/// types are re-exported so host wiring (`ironclaw-reborn serve`, the CLI
 /// `UserDirectory` adapter) depends on the facade vocabulary, never on
 /// `ironclaw_reborn_identity` directly. The concrete filesystem-backed store
 /// stays private to this composition layer (composition CLAUDE.md: "keep

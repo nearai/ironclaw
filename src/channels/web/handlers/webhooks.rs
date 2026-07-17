@@ -34,7 +34,7 @@ fn validate_webhook_secret(
             return Err((
                 StatusCode::FORBIDDEN,
                 "Webhook secret not configured for this routine. \
-                 Set a secret with: ironclaw-v1 routine update <id> --webhook-secret <secret>"
+                 Set a secret with: ironclaw routine update <id> --webhook-secret <secret>"
                     .to_string(),
             ));
         }

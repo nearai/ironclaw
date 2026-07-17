@@ -15,7 +15,7 @@ pub mod redaction;
 pub use conversation_message::ConversationMessage;
 
 /// Recorded-trace deserialization surface for callers that load JSON traces
-/// off disk (e.g. `ironclaw traces preview`). Re-exports from
+/// off disk (e.g. `ironclaw-reborn traces preview`). Re-exports from
 /// `ironclaw_llm::recording` so reborn-cli does not need a direct
 /// `ironclaw_llm` dependency, preserving the architectural boundary.
 pub mod recording {

@@ -5,9 +5,9 @@ description: "Expose your local agent to the internet"
 
 A tunnel exposes your local IronClaw agent to the internet. You need it for webhook-based channels and for instant message delivery where polling is not desired.
 
-<Warning>
-This page covers the retained v1 runtime. Build it from source and invoke it as `ironclaw-v1`; the canonical `ironclaw` command runs Reborn.
-</Warning>
+<Note>
+If you haven't set up your agent yet, follow our [Quickstart guide](./quickstart)
+</Note>
 
 ---
 
@@ -16,12 +16,12 @@ This page covers the retained v1 runtime. Build it from source and invoke it as 
 Configure a tunnel through the onboarding command:
 
 ```bash
-ironclaw-v1 onboard --channels-only
+ironclaw onboard --channels-only
 ```
 
 ### ngrok
 
-`ngrok` is a managed tunnel service with a minimal setup, ideal if you are just starting with `ironclaw-v1`. To use it, you will need to get an auth token from the [ngrok dashboard](https://dashboard.ngrok.com/get-started/your-authtoken)
+`ngrok` is a managed tunnel service with a minimal setup, ideal if you are just starting with `ironclaw`. To use it, you will need to get an auth token from the [ngrok dashboard](https://dashboard.ngrok.com/get-started/your-authtoken)
 
 ### Cloudflare
 

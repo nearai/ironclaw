@@ -3,12 +3,6 @@ title: "Gmail"
 description: "Let your agent read, send, and manage your Gmail messages"
 ---
 
-<Warning>
-This integration guide targets the retained v1 runtime. Use `ironclaw-v1` for
-the `registry` and `tool` commands below. Canonical Reborn uses
-`ironclaw extension`; see the [CLI reference](/reborn-binary#extension).
-</Warning>
-
 The Gmail extension allows your agent to interact with your Gmail inbox — listing and searching messages, reading full email content, sending new emails, creating drafts, replying to threads, and trashing messages. It's ideal for automating email workflows, monitoring important threads, or sending notifications directly from your agent.
 
 ---
@@ -28,7 +22,7 @@ In your Google Cloud project, navigate to **APIs & Services → Library**, searc
 <Step title="Install the Extension">
 
 ```bash
-ironclaw-v1 registry install gmail
+ironclaw registry install gmail
 ```
 
 </Step>
@@ -36,7 +30,7 @@ ironclaw-v1 registry install gmail
 <Step title="Authorize Access">
 
 ```bash
-ironclaw-v1 tool auth gmail
+ironclaw tool auth gmail
 ```
 
 IronClaw will provide a URL for you to authenticate - remember to follow the [auth setup](./oauth-setup) to enable your agent to capture the callback. If possible, it will open a browser window. Once approved, the token is stored securely and refreshed automatically.

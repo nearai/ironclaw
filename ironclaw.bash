@@ -16,533 +16,386 @@ _ironclaw() {
             ",$1")
                 cmd="ironclaw"
                 ;;
-            ironclaw,channels)
-                cmd="ironclaw__subcmd__channels"
+            ironclaw,claude-bridge)
+                cmd="ironclaw__claude__bridge"
                 ;;
             ironclaw,completion)
-                cmd="ironclaw__subcmd__completion"
+                cmd="ironclaw__completion"
                 ;;
             ironclaw,config)
-                cmd="ironclaw__subcmd__config"
+                cmd="ironclaw__config"
                 ;;
             ironclaw,doctor)
-                cmd="ironclaw__subcmd__doctor"
-                ;;
-            ironclaw,extension)
-                cmd="ironclaw__subcmd__extension"
+                cmd="ironclaw__doctor"
                 ;;
             ironclaw,help)
-                cmd="ironclaw__subcmd__help"
+                cmd="ironclaw__help"
                 ;;
-            ironclaw,hooks)
-                cmd="ironclaw__subcmd__hooks"
+            ironclaw,mcp)
+                cmd="ironclaw__mcp"
                 ;;
-            ironclaw,logs)
-                cmd="ironclaw__subcmd__logs"
-                ;;
-            ironclaw,models)
-                cmd="ironclaw__subcmd__models"
+            ironclaw,memory)
+                cmd="ironclaw__memory"
                 ;;
             ironclaw,onboard)
-                cmd="ironclaw__subcmd__onboard"
+                cmd="ironclaw__onboard"
                 ;;
-            ironclaw,profile)
-                cmd="ironclaw__subcmd__profile"
-                ;;
-            ironclaw,repl)
-                cmd="ironclaw__subcmd__repl"
+            ironclaw,pairing)
+                cmd="ironclaw__pairing"
                 ;;
             ironclaw,run)
-                cmd="ironclaw__subcmd__run"
-                ;;
-            ironclaw,serve)
-                cmd="ironclaw__subcmd__serve"
+                cmd="ironclaw__run"
                 ;;
             ironclaw,service)
-                cmd="ironclaw__subcmd__service"
-                ;;
-            ironclaw,skills)
-                cmd="ironclaw__subcmd__skills"
+                cmd="ironclaw__service"
                 ;;
             ironclaw,status)
-                cmd="ironclaw__subcmd__status"
+                cmd="ironclaw__status"
                 ;;
-            ironclaw,traces)
-                cmd="ironclaw__subcmd__traces"
+            ironclaw,tool)
+                cmd="ironclaw__tool"
                 ;;
-            ironclaw__subcmd__channels,help)
-                cmd="ironclaw__subcmd__channels__subcmd__help"
+            ironclaw,worker)
+                cmd="ironclaw__worker"
                 ;;
-            ironclaw__subcmd__channels,list)
-                cmd="ironclaw__subcmd__channels__subcmd__list"
+            ironclaw__config,get)
+                cmd="ironclaw__config__get"
                 ;;
-            ironclaw__subcmd__channels__subcmd__help,help)
-                cmd="ironclaw__subcmd__channels__subcmd__help__subcmd__help"
+            ironclaw__config,help)
+                cmd="ironclaw__config__help"
                 ;;
-            ironclaw__subcmd__channels__subcmd__help,list)
-                cmd="ironclaw__subcmd__channels__subcmd__help__subcmd__list"
+            ironclaw__config,init)
+                cmd="ironclaw__config__init"
                 ;;
-            ironclaw__subcmd__config,get)
-                cmd="ironclaw__subcmd__config__subcmd__get"
+            ironclaw__config,list)
+                cmd="ironclaw__config__list"
                 ;;
-            ironclaw__subcmd__config,help)
-                cmd="ironclaw__subcmd__config__subcmd__help"
+            ironclaw__config,path)
+                cmd="ironclaw__config__path"
                 ;;
-            ironclaw__subcmd__config,init)
-                cmd="ironclaw__subcmd__config__subcmd__init"
+            ironclaw__config,reset)
+                cmd="ironclaw__config__reset"
                 ;;
-            ironclaw__subcmd__config,list)
-                cmd="ironclaw__subcmd__config__subcmd__list"
+            ironclaw__config,set)
+                cmd="ironclaw__config__set"
                 ;;
-            ironclaw__subcmd__config,path)
-                cmd="ironclaw__subcmd__config__subcmd__path"
+            ironclaw__config__help,get)
+                cmd="ironclaw__config__help__get"
                 ;;
-            ironclaw__subcmd__config__subcmd__help,get)
-                cmd="ironclaw__subcmd__config__subcmd__help__subcmd__get"
+            ironclaw__config__help,help)
+                cmd="ironclaw__config__help__help"
                 ;;
-            ironclaw__subcmd__config__subcmd__help,help)
-                cmd="ironclaw__subcmd__config__subcmd__help__subcmd__help"
+            ironclaw__config__help,init)
+                cmd="ironclaw__config__help__init"
                 ;;
-            ironclaw__subcmd__config__subcmd__help,init)
-                cmd="ironclaw__subcmd__config__subcmd__help__subcmd__init"
+            ironclaw__config__help,list)
+                cmd="ironclaw__config__help__list"
                 ;;
-            ironclaw__subcmd__config__subcmd__help,list)
-                cmd="ironclaw__subcmd__config__subcmd__help__subcmd__list"
+            ironclaw__config__help,path)
+                cmd="ironclaw__config__help__path"
                 ;;
-            ironclaw__subcmd__config__subcmd__help,path)
-                cmd="ironclaw__subcmd__config__subcmd__help__subcmd__path"
+            ironclaw__config__help,reset)
+                cmd="ironclaw__config__help__reset"
                 ;;
-            ironclaw__subcmd__extension,activate)
-                cmd="ironclaw__subcmd__extension__subcmd__activate"
+            ironclaw__config__help,set)
+                cmd="ironclaw__config__help__set"
                 ;;
-            ironclaw__subcmd__extension,help)
-                cmd="ironclaw__subcmd__extension__subcmd__help"
+            ironclaw__help,claude-bridge)
+                cmd="ironclaw__help__claude__bridge"
                 ;;
-            ironclaw__subcmd__extension,install)
-                cmd="ironclaw__subcmd__extension__subcmd__install"
+            ironclaw__help,completion)
+                cmd="ironclaw__help__completion"
                 ;;
-            ironclaw__subcmd__extension,remove)
-                cmd="ironclaw__subcmd__extension__subcmd__remove"
+            ironclaw__help,config)
+                cmd="ironclaw__help__config"
                 ;;
-            ironclaw__subcmd__extension,search)
-                cmd="ironclaw__subcmd__extension__subcmd__search"
+            ironclaw__help,doctor)
+                cmd="ironclaw__help__doctor"
                 ;;
-            ironclaw__subcmd__extension__subcmd__help,activate)
-                cmd="ironclaw__subcmd__extension__subcmd__help__subcmd__activate"
+            ironclaw__help,help)
+                cmd="ironclaw__help__help"
                 ;;
-            ironclaw__subcmd__extension__subcmd__help,help)
-                cmd="ironclaw__subcmd__extension__subcmd__help__subcmd__help"
+            ironclaw__help,mcp)
+                cmd="ironclaw__help__mcp"
                 ;;
-            ironclaw__subcmd__extension__subcmd__help,install)
-                cmd="ironclaw__subcmd__extension__subcmd__help__subcmd__install"
+            ironclaw__help,memory)
+                cmd="ironclaw__help__memory"
                 ;;
-            ironclaw__subcmd__extension__subcmd__help,remove)
-                cmd="ironclaw__subcmd__extension__subcmd__help__subcmd__remove"
+            ironclaw__help,onboard)
+                cmd="ironclaw__help__onboard"
                 ;;
-            ironclaw__subcmd__extension__subcmd__help,search)
-                cmd="ironclaw__subcmd__extension__subcmd__help__subcmd__search"
+            ironclaw__help,pairing)
+                cmd="ironclaw__help__pairing"
                 ;;
-            ironclaw__subcmd__help,channels)
-                cmd="ironclaw__subcmd__help__subcmd__channels"
+            ironclaw__help,run)
+                cmd="ironclaw__help__run"
                 ;;
-            ironclaw__subcmd__help,completion)
-                cmd="ironclaw__subcmd__help__subcmd__completion"
+            ironclaw__help,service)
+                cmd="ironclaw__help__service"
                 ;;
-            ironclaw__subcmd__help,config)
-                cmd="ironclaw__subcmd__help__subcmd__config"
+            ironclaw__help,status)
+                cmd="ironclaw__help__status"
                 ;;
-            ironclaw__subcmd__help,doctor)
-                cmd="ironclaw__subcmd__help__subcmd__doctor"
+            ironclaw__help,tool)
+                cmd="ironclaw__help__tool"
                 ;;
-            ironclaw__subcmd__help,extension)
-                cmd="ironclaw__subcmd__help__subcmd__extension"
+            ironclaw__help,worker)
+                cmd="ironclaw__help__worker"
                 ;;
-            ironclaw__subcmd__help,help)
-                cmd="ironclaw__subcmd__help__subcmd__help"
+            ironclaw__help__config,get)
+                cmd="ironclaw__help__config__get"
                 ;;
-            ironclaw__subcmd__help,hooks)
-                cmd="ironclaw__subcmd__help__subcmd__hooks"
+            ironclaw__help__config,init)
+                cmd="ironclaw__help__config__init"
                 ;;
-            ironclaw__subcmd__help,logs)
-                cmd="ironclaw__subcmd__help__subcmd__logs"
+            ironclaw__help__config,list)
+                cmd="ironclaw__help__config__list"
                 ;;
-            ironclaw__subcmd__help,models)
-                cmd="ironclaw__subcmd__help__subcmd__models"
+            ironclaw__help__config,path)
+                cmd="ironclaw__help__config__path"
                 ;;
-            ironclaw__subcmd__help,onboard)
-                cmd="ironclaw__subcmd__help__subcmd__onboard"
+            ironclaw__help__config,reset)
+                cmd="ironclaw__help__config__reset"
                 ;;
-            ironclaw__subcmd__help,profile)
-                cmd="ironclaw__subcmd__help__subcmd__profile"
+            ironclaw__help__config,set)
+                cmd="ironclaw__help__config__set"
                 ;;
-            ironclaw__subcmd__help,repl)
-                cmd="ironclaw__subcmd__help__subcmd__repl"
+            ironclaw__help__mcp,add)
+                cmd="ironclaw__help__mcp__add"
                 ;;
-            ironclaw__subcmd__help,run)
-                cmd="ironclaw__subcmd__help__subcmd__run"
+            ironclaw__help__mcp,auth)
+                cmd="ironclaw__help__mcp__auth"
                 ;;
-            ironclaw__subcmd__help,serve)
-                cmd="ironclaw__subcmd__help__subcmd__serve"
+            ironclaw__help__mcp,list)
+                cmd="ironclaw__help__mcp__list"
                 ;;
-            ironclaw__subcmd__help,service)
-                cmd="ironclaw__subcmd__help__subcmd__service"
+            ironclaw__help__mcp,remove)
+                cmd="ironclaw__help__mcp__remove"
                 ;;
-            ironclaw__subcmd__help,skills)
-                cmd="ironclaw__subcmd__help__subcmd__skills"
+            ironclaw__help__mcp,test)
+                cmd="ironclaw__help__mcp__test"
                 ;;
-            ironclaw__subcmd__help,status)
-                cmd="ironclaw__subcmd__help__subcmd__status"
+            ironclaw__help__mcp,toggle)
+                cmd="ironclaw__help__mcp__toggle"
                 ;;
-            ironclaw__subcmd__help,traces)
-                cmd="ironclaw__subcmd__help__subcmd__traces"
+            ironclaw__help__memory,read)
+                cmd="ironclaw__help__memory__read"
                 ;;
-            ironclaw__subcmd__help__subcmd__channels,list)
-                cmd="ironclaw__subcmd__help__subcmd__channels__subcmd__list"
+            ironclaw__help__memory,search)
+                cmd="ironclaw__help__memory__search"
                 ;;
-            ironclaw__subcmd__help__subcmd__config,get)
-                cmd="ironclaw__subcmd__help__subcmd__config__subcmd__get"
+            ironclaw__help__memory,status)
+                cmd="ironclaw__help__memory__status"
                 ;;
-            ironclaw__subcmd__help__subcmd__config,init)
-                cmd="ironclaw__subcmd__help__subcmd__config__subcmd__init"
+            ironclaw__help__memory,tree)
+                cmd="ironclaw__help__memory__tree"
                 ;;
-            ironclaw__subcmd__help__subcmd__config,list)
-                cmd="ironclaw__subcmd__help__subcmd__config__subcmd__list"
+            ironclaw__help__memory,write)
+                cmd="ironclaw__help__memory__write"
                 ;;
-            ironclaw__subcmd__help__subcmd__config,path)
-                cmd="ironclaw__subcmd__help__subcmd__config__subcmd__path"
+            ironclaw__help__pairing,approve)
+                cmd="ironclaw__help__pairing__approve"
                 ;;
-            ironclaw__subcmd__help__subcmd__extension,activate)
-                cmd="ironclaw__subcmd__help__subcmd__extension__subcmd__activate"
+            ironclaw__help__pairing,list)
+                cmd="ironclaw__help__pairing__list"
                 ;;
-            ironclaw__subcmd__help__subcmd__extension,install)
-                cmd="ironclaw__subcmd__help__subcmd__extension__subcmd__install"
+            ironclaw__help__service,install)
+                cmd="ironclaw__help__service__install"
                 ;;
-            ironclaw__subcmd__help__subcmd__extension,remove)
-                cmd="ironclaw__subcmd__help__subcmd__extension__subcmd__remove"
+            ironclaw__help__service,start)
+                cmd="ironclaw__help__service__start"
                 ;;
-            ironclaw__subcmd__help__subcmd__extension,search)
-                cmd="ironclaw__subcmd__help__subcmd__extension__subcmd__search"
+            ironclaw__help__service,status)
+                cmd="ironclaw__help__service__status"
                 ;;
-            ironclaw__subcmd__help__subcmd__hooks,list)
-                cmd="ironclaw__subcmd__help__subcmd__hooks__subcmd__list"
+            ironclaw__help__service,stop)
+                cmd="ironclaw__help__service__stop"
                 ;;
-            ironclaw__subcmd__help__subcmd__models,list)
-                cmd="ironclaw__subcmd__help__subcmd__models__subcmd__list"
+            ironclaw__help__service,uninstall)
+                cmd="ironclaw__help__service__uninstall"
                 ;;
-            ironclaw__subcmd__help__subcmd__models,set)
-                cmd="ironclaw__subcmd__help__subcmd__models__subcmd__set"
+            ironclaw__help__tool,auth)
+                cmd="ironclaw__help__tool__auth"
                 ;;
-            ironclaw__subcmd__help__subcmd__models,set-provider)
-                cmd="ironclaw__subcmd__help__subcmd__models__subcmd__set__subcmd__provider"
+            ironclaw__help__tool,info)
+                cmd="ironclaw__help__tool__info"
                 ;;
-            ironclaw__subcmd__help__subcmd__models,status)
-                cmd="ironclaw__subcmd__help__subcmd__models__subcmd__status"
+            ironclaw__help__tool,install)
+                cmd="ironclaw__help__tool__install"
                 ;;
-            ironclaw__subcmd__help__subcmd__profile,list)
-                cmd="ironclaw__subcmd__help__subcmd__profile__subcmd__list"
+            ironclaw__help__tool,list)
+                cmd="ironclaw__help__tool__list"
                 ;;
-            ironclaw__subcmd__help__subcmd__service,install)
-                cmd="ironclaw__subcmd__help__subcmd__service__subcmd__install"
+            ironclaw__help__tool,remove)
+                cmd="ironclaw__help__tool__remove"
                 ;;
-            ironclaw__subcmd__help__subcmd__service,restart)
-                cmd="ironclaw__subcmd__help__subcmd__service__subcmd__restart"
+            ironclaw__mcp,add)
+                cmd="ironclaw__mcp__add"
                 ;;
-            ironclaw__subcmd__help__subcmd__service,start)
-                cmd="ironclaw__subcmd__help__subcmd__service__subcmd__start"
+            ironclaw__mcp,auth)
+                cmd="ironclaw__mcp__auth"
                 ;;
-            ironclaw__subcmd__help__subcmd__service,status)
-                cmd="ironclaw__subcmd__help__subcmd__service__subcmd__status"
+            ironclaw__mcp,help)
+                cmd="ironclaw__mcp__help"
                 ;;
-            ironclaw__subcmd__help__subcmd__service,stop)
-                cmd="ironclaw__subcmd__help__subcmd__service__subcmd__stop"
+            ironclaw__mcp,list)
+                cmd="ironclaw__mcp__list"
                 ;;
-            ironclaw__subcmd__help__subcmd__service,uninstall)
-                cmd="ironclaw__subcmd__help__subcmd__service__subcmd__uninstall"
+            ironclaw__mcp,remove)
+                cmd="ironclaw__mcp__remove"
                 ;;
-            ironclaw__subcmd__help__subcmd__skills,list)
-                cmd="ironclaw__subcmd__help__subcmd__skills__subcmd__list"
+            ironclaw__mcp,test)
+                cmd="ironclaw__mcp__test"
                 ;;
-            ironclaw__subcmd__help__subcmd__traces,credit)
-                cmd="ironclaw__subcmd__help__subcmd__traces__subcmd__credit"
+            ironclaw__mcp,toggle)
+                cmd="ironclaw__mcp__toggle"
                 ;;
-            ironclaw__subcmd__help__subcmd__traces,enqueue)
-                cmd="ironclaw__subcmd__help__subcmd__traces__subcmd__enqueue"
+            ironclaw__mcp__help,add)
+                cmd="ironclaw__mcp__help__add"
                 ;;
-            ironclaw__subcmd__help__subcmd__traces,enroll-instance)
-                cmd="ironclaw__subcmd__help__subcmd__traces__subcmd__enroll__subcmd__instance"
+            ironclaw__mcp__help,auth)
+                cmd="ironclaw__mcp__help__auth"
                 ;;
-            ironclaw__subcmd__help__subcmd__traces,flush-queue)
-                cmd="ironclaw__subcmd__help__subcmd__traces__subcmd__flush__subcmd__queue"
+            ironclaw__mcp__help,help)
+                cmd="ironclaw__mcp__help__help"
                 ;;
-            ironclaw__subcmd__help__subcmd__traces,ingest-health)
-                cmd="ironclaw__subcmd__help__subcmd__traces__subcmd__ingest__subcmd__health"
+            ironclaw__mcp__help,list)
+                cmd="ironclaw__mcp__help__list"
                 ;;
-            ironclaw__subcmd__help__subcmd__traces,list-submissions)
-                cmd="ironclaw__subcmd__help__subcmd__traces__subcmd__list__subcmd__submissions"
+            ironclaw__mcp__help,remove)
+                cmd="ironclaw__mcp__help__remove"
                 ;;
-            ironclaw__subcmd__help__subcmd__traces,opt-in)
-                cmd="ironclaw__subcmd__help__subcmd__traces__subcmd__opt__subcmd__in"
+            ironclaw__mcp__help,test)
+                cmd="ironclaw__mcp__help__test"
                 ;;
-            ironclaw__subcmd__help__subcmd__traces,opt-out)
-                cmd="ironclaw__subcmd__help__subcmd__traces__subcmd__opt__subcmd__out"
+            ironclaw__mcp__help,toggle)
+                cmd="ironclaw__mcp__help__toggle"
                 ;;
-            ironclaw__subcmd__help__subcmd__traces,preview)
-                cmd="ironclaw__subcmd__help__subcmd__traces__subcmd__preview"
+            ironclaw__memory,help)
+                cmd="ironclaw__memory__help"
                 ;;
-            ironclaw__subcmd__help__subcmd__traces,profile)
-                cmd="ironclaw__subcmd__help__subcmd__traces__subcmd__profile"
+            ironclaw__memory,read)
+                cmd="ironclaw__memory__read"
                 ;;
-            ironclaw__subcmd__help__subcmd__traces,queue-status)
-                cmd="ironclaw__subcmd__help__subcmd__traces__subcmd__queue__subcmd__status"
+            ironclaw__memory,search)
+                cmd="ironclaw__memory__search"
                 ;;
-            ironclaw__subcmd__help__subcmd__traces,revoke)
-                cmd="ironclaw__subcmd__help__subcmd__traces__subcmd__revoke"
+            ironclaw__memory,status)
+                cmd="ironclaw__memory__status"
                 ;;
-            ironclaw__subcmd__help__subcmd__traces,status)
-                cmd="ironclaw__subcmd__help__subcmd__traces__subcmd__status"
+            ironclaw__memory,tree)
+                cmd="ironclaw__memory__tree"
                 ;;
-            ironclaw__subcmd__help__subcmd__traces,submit)
-                cmd="ironclaw__subcmd__help__subcmd__traces__subcmd__submit"
+            ironclaw__memory,write)
+                cmd="ironclaw__memory__write"
                 ;;
-            ironclaw__subcmd__help__subcmd__traces__subcmd__profile,set)
-                cmd="ironclaw__subcmd__help__subcmd__traces__subcmd__profile__subcmd__set"
+            ironclaw__memory__help,help)
+                cmd="ironclaw__memory__help__help"
                 ;;
-            ironclaw__subcmd__help__subcmd__traces__subcmd__profile,token)
-                cmd="ironclaw__subcmd__help__subcmd__traces__subcmd__profile__subcmd__token"
+            ironclaw__memory__help,read)
+                cmd="ironclaw__memory__help__read"
                 ;;
-            ironclaw__subcmd__help__subcmd__traces__subcmd__profile,withdraw)
-                cmd="ironclaw__subcmd__help__subcmd__traces__subcmd__profile__subcmd__withdraw"
+            ironclaw__memory__help,search)
+                cmd="ironclaw__memory__help__search"
                 ;;
-            ironclaw__subcmd__hooks,help)
-                cmd="ironclaw__subcmd__hooks__subcmd__help"
+            ironclaw__memory__help,status)
+                cmd="ironclaw__memory__help__status"
                 ;;
-            ironclaw__subcmd__hooks,list)
-                cmd="ironclaw__subcmd__hooks__subcmd__list"
+            ironclaw__memory__help,tree)
+                cmd="ironclaw__memory__help__tree"
                 ;;
-            ironclaw__subcmd__hooks__subcmd__help,help)
-                cmd="ironclaw__subcmd__hooks__subcmd__help__subcmd__help"
+            ironclaw__memory__help,write)
+                cmd="ironclaw__memory__help__write"
                 ;;
-            ironclaw__subcmd__hooks__subcmd__help,list)
-                cmd="ironclaw__subcmd__hooks__subcmd__help__subcmd__list"
+            ironclaw__pairing,approve)
+                cmd="ironclaw__pairing__approve"
                 ;;
-            ironclaw__subcmd__models,help)
-                cmd="ironclaw__subcmd__models__subcmd__help"
+            ironclaw__pairing,help)
+                cmd="ironclaw__pairing__help"
                 ;;
-            ironclaw__subcmd__models,list)
-                cmd="ironclaw__subcmd__models__subcmd__list"
+            ironclaw__pairing,list)
+                cmd="ironclaw__pairing__list"
                 ;;
-            ironclaw__subcmd__models,set)
-                cmd="ironclaw__subcmd__models__subcmd__set"
+            ironclaw__pairing__help,approve)
+                cmd="ironclaw__pairing__help__approve"
                 ;;
-            ironclaw__subcmd__models,set-provider)
-                cmd="ironclaw__subcmd__models__subcmd__set__subcmd__provider"
+            ironclaw__pairing__help,help)
+                cmd="ironclaw__pairing__help__help"
                 ;;
-            ironclaw__subcmd__models,status)
-                cmd="ironclaw__subcmd__models__subcmd__status"
+            ironclaw__pairing__help,list)
+                cmd="ironclaw__pairing__help__list"
                 ;;
-            ironclaw__subcmd__models__subcmd__help,help)
-                cmd="ironclaw__subcmd__models__subcmd__help__subcmd__help"
+            ironclaw__service,help)
+                cmd="ironclaw__service__help"
                 ;;
-            ironclaw__subcmd__models__subcmd__help,list)
-                cmd="ironclaw__subcmd__models__subcmd__help__subcmd__list"
+            ironclaw__service,install)
+                cmd="ironclaw__service__install"
                 ;;
-            ironclaw__subcmd__models__subcmd__help,set)
-                cmd="ironclaw__subcmd__models__subcmd__help__subcmd__set"
+            ironclaw__service,start)
+                cmd="ironclaw__service__start"
                 ;;
-            ironclaw__subcmd__models__subcmd__help,set-provider)
-                cmd="ironclaw__subcmd__models__subcmd__help__subcmd__set__subcmd__provider"
+            ironclaw__service,status)
+                cmd="ironclaw__service__status"
                 ;;
-            ironclaw__subcmd__models__subcmd__help,status)
-                cmd="ironclaw__subcmd__models__subcmd__help__subcmd__status"
+            ironclaw__service,stop)
+                cmd="ironclaw__service__stop"
                 ;;
-            ironclaw__subcmd__profile,help)
-                cmd="ironclaw__subcmd__profile__subcmd__help"
+            ironclaw__service,uninstall)
+                cmd="ironclaw__service__uninstall"
                 ;;
-            ironclaw__subcmd__profile,list)
-                cmd="ironclaw__subcmd__profile__subcmd__list"
+            ironclaw__service__help,help)
+                cmd="ironclaw__service__help__help"
                 ;;
-            ironclaw__subcmd__profile__subcmd__help,help)
-                cmd="ironclaw__subcmd__profile__subcmd__help__subcmd__help"
+            ironclaw__service__help,install)
+                cmd="ironclaw__service__help__install"
                 ;;
-            ironclaw__subcmd__profile__subcmd__help,list)
-                cmd="ironclaw__subcmd__profile__subcmd__help__subcmd__list"
+            ironclaw__service__help,start)
+                cmd="ironclaw__service__help__start"
                 ;;
-            ironclaw__subcmd__service,help)
-                cmd="ironclaw__subcmd__service__subcmd__help"
+            ironclaw__service__help,status)
+                cmd="ironclaw__service__help__status"
                 ;;
-            ironclaw__subcmd__service,install)
-                cmd="ironclaw__subcmd__service__subcmd__install"
+            ironclaw__service__help,stop)
+                cmd="ironclaw__service__help__stop"
                 ;;
-            ironclaw__subcmd__service,restart)
-                cmd="ironclaw__subcmd__service__subcmd__restart"
+            ironclaw__service__help,uninstall)
+                cmd="ironclaw__service__help__uninstall"
                 ;;
-            ironclaw__subcmd__service,start)
-                cmd="ironclaw__subcmd__service__subcmd__start"
+            ironclaw__tool,auth)
+                cmd="ironclaw__tool__auth"
                 ;;
-            ironclaw__subcmd__service,status)
-                cmd="ironclaw__subcmd__service__subcmd__status"
+            ironclaw__tool,help)
+                cmd="ironclaw__tool__help"
                 ;;
-            ironclaw__subcmd__service,stop)
-                cmd="ironclaw__subcmd__service__subcmd__stop"
+            ironclaw__tool,info)
+                cmd="ironclaw__tool__info"
                 ;;
-            ironclaw__subcmd__service,uninstall)
-                cmd="ironclaw__subcmd__service__subcmd__uninstall"
+            ironclaw__tool,install)
+                cmd="ironclaw__tool__install"
                 ;;
-            ironclaw__subcmd__service__subcmd__help,help)
-                cmd="ironclaw__subcmd__service__subcmd__help__subcmd__help"
+            ironclaw__tool,list)
+                cmd="ironclaw__tool__list"
                 ;;
-            ironclaw__subcmd__service__subcmd__help,install)
-                cmd="ironclaw__subcmd__service__subcmd__help__subcmd__install"
+            ironclaw__tool,remove)
+                cmd="ironclaw__tool__remove"
                 ;;
-            ironclaw__subcmd__service__subcmd__help,restart)
-                cmd="ironclaw__subcmd__service__subcmd__help__subcmd__restart"
+            ironclaw__tool__help,auth)
+                cmd="ironclaw__tool__help__auth"
                 ;;
-            ironclaw__subcmd__service__subcmd__help,start)
-                cmd="ironclaw__subcmd__service__subcmd__help__subcmd__start"
+            ironclaw__tool__help,help)
+                cmd="ironclaw__tool__help__help"
                 ;;
-            ironclaw__subcmd__service__subcmd__help,status)
-                cmd="ironclaw__subcmd__service__subcmd__help__subcmd__status"
+            ironclaw__tool__help,info)
+                cmd="ironclaw__tool__help__info"
                 ;;
-            ironclaw__subcmd__service__subcmd__help,stop)
-                cmd="ironclaw__subcmd__service__subcmd__help__subcmd__stop"
+            ironclaw__tool__help,install)
+                cmd="ironclaw__tool__help__install"
                 ;;
-            ironclaw__subcmd__service__subcmd__help,uninstall)
-                cmd="ironclaw__subcmd__service__subcmd__help__subcmd__uninstall"
+            ironclaw__tool__help,list)
+                cmd="ironclaw__tool__help__list"
                 ;;
-            ironclaw__subcmd__skills,help)
-                cmd="ironclaw__subcmd__skills__subcmd__help"
-                ;;
-            ironclaw__subcmd__skills,list)
-                cmd="ironclaw__subcmd__skills__subcmd__list"
-                ;;
-            ironclaw__subcmd__skills__subcmd__help,help)
-                cmd="ironclaw__subcmd__skills__subcmd__help__subcmd__help"
-                ;;
-            ironclaw__subcmd__skills__subcmd__help,list)
-                cmd="ironclaw__subcmd__skills__subcmd__help__subcmd__list"
-                ;;
-            ironclaw__subcmd__traces,credit)
-                cmd="ironclaw__subcmd__traces__subcmd__credit"
-                ;;
-            ironclaw__subcmd__traces,enqueue)
-                cmd="ironclaw__subcmd__traces__subcmd__enqueue"
-                ;;
-            ironclaw__subcmd__traces,enroll-instance)
-                cmd="ironclaw__subcmd__traces__subcmd__enroll__subcmd__instance"
-                ;;
-            ironclaw__subcmd__traces,flush-queue)
-                cmd="ironclaw__subcmd__traces__subcmd__flush__subcmd__queue"
-                ;;
-            ironclaw__subcmd__traces,help)
-                cmd="ironclaw__subcmd__traces__subcmd__help"
-                ;;
-            ironclaw__subcmd__traces,ingest-health)
-                cmd="ironclaw__subcmd__traces__subcmd__ingest__subcmd__health"
-                ;;
-            ironclaw__subcmd__traces,list-submissions)
-                cmd="ironclaw__subcmd__traces__subcmd__list__subcmd__submissions"
-                ;;
-            ironclaw__subcmd__traces,opt-in)
-                cmd="ironclaw__subcmd__traces__subcmd__opt__subcmd__in"
-                ;;
-            ironclaw__subcmd__traces,opt-out)
-                cmd="ironclaw__subcmd__traces__subcmd__opt__subcmd__out"
-                ;;
-            ironclaw__subcmd__traces,preview)
-                cmd="ironclaw__subcmd__traces__subcmd__preview"
-                ;;
-            ironclaw__subcmd__traces,profile)
-                cmd="ironclaw__subcmd__traces__subcmd__profile"
-                ;;
-            ironclaw__subcmd__traces,queue-status)
-                cmd="ironclaw__subcmd__traces__subcmd__queue__subcmd__status"
-                ;;
-            ironclaw__subcmd__traces,revoke)
-                cmd="ironclaw__subcmd__traces__subcmd__revoke"
-                ;;
-            ironclaw__subcmd__traces,status)
-                cmd="ironclaw__subcmd__traces__subcmd__status"
-                ;;
-            ironclaw__subcmd__traces,submit)
-                cmd="ironclaw__subcmd__traces__subcmd__submit"
-                ;;
-            ironclaw__subcmd__traces__subcmd__help,credit)
-                cmd="ironclaw__subcmd__traces__subcmd__help__subcmd__credit"
-                ;;
-            ironclaw__subcmd__traces__subcmd__help,enqueue)
-                cmd="ironclaw__subcmd__traces__subcmd__help__subcmd__enqueue"
-                ;;
-            ironclaw__subcmd__traces__subcmd__help,enroll-instance)
-                cmd="ironclaw__subcmd__traces__subcmd__help__subcmd__enroll__subcmd__instance"
-                ;;
-            ironclaw__subcmd__traces__subcmd__help,flush-queue)
-                cmd="ironclaw__subcmd__traces__subcmd__help__subcmd__flush__subcmd__queue"
-                ;;
-            ironclaw__subcmd__traces__subcmd__help,help)
-                cmd="ironclaw__subcmd__traces__subcmd__help__subcmd__help"
-                ;;
-            ironclaw__subcmd__traces__subcmd__help,ingest-health)
-                cmd="ironclaw__subcmd__traces__subcmd__help__subcmd__ingest__subcmd__health"
-                ;;
-            ironclaw__subcmd__traces__subcmd__help,list-submissions)
-                cmd="ironclaw__subcmd__traces__subcmd__help__subcmd__list__subcmd__submissions"
-                ;;
-            ironclaw__subcmd__traces__subcmd__help,opt-in)
-                cmd="ironclaw__subcmd__traces__subcmd__help__subcmd__opt__subcmd__in"
-                ;;
-            ironclaw__subcmd__traces__subcmd__help,opt-out)
-                cmd="ironclaw__subcmd__traces__subcmd__help__subcmd__opt__subcmd__out"
-                ;;
-            ironclaw__subcmd__traces__subcmd__help,preview)
-                cmd="ironclaw__subcmd__traces__subcmd__help__subcmd__preview"
-                ;;
-            ironclaw__subcmd__traces__subcmd__help,profile)
-                cmd="ironclaw__subcmd__traces__subcmd__help__subcmd__profile"
-                ;;
-            ironclaw__subcmd__traces__subcmd__help,queue-status)
-                cmd="ironclaw__subcmd__traces__subcmd__help__subcmd__queue__subcmd__status"
-                ;;
-            ironclaw__subcmd__traces__subcmd__help,revoke)
-                cmd="ironclaw__subcmd__traces__subcmd__help__subcmd__revoke"
-                ;;
-            ironclaw__subcmd__traces__subcmd__help,status)
-                cmd="ironclaw__subcmd__traces__subcmd__help__subcmd__status"
-                ;;
-            ironclaw__subcmd__traces__subcmd__help,submit)
-                cmd="ironclaw__subcmd__traces__subcmd__help__subcmd__submit"
-                ;;
-            ironclaw__subcmd__traces__subcmd__help__subcmd__profile,set)
-                cmd="ironclaw__subcmd__traces__subcmd__help__subcmd__profile__subcmd__set"
-                ;;
-            ironclaw__subcmd__traces__subcmd__help__subcmd__profile,token)
-                cmd="ironclaw__subcmd__traces__subcmd__help__subcmd__profile__subcmd__token"
-                ;;
-            ironclaw__subcmd__traces__subcmd__help__subcmd__profile,withdraw)
-                cmd="ironclaw__subcmd__traces__subcmd__help__subcmd__profile__subcmd__withdraw"
-                ;;
-            ironclaw__subcmd__traces__subcmd__profile,help)
-                cmd="ironclaw__subcmd__traces__subcmd__profile__subcmd__help"
-                ;;
-            ironclaw__subcmd__traces__subcmd__profile,set)
-                cmd="ironclaw__subcmd__traces__subcmd__profile__subcmd__set"
-                ;;
-            ironclaw__subcmd__traces__subcmd__profile,token)
-                cmd="ironclaw__subcmd__traces__subcmd__profile__subcmd__token"
-                ;;
-            ironclaw__subcmd__traces__subcmd__profile,withdraw)
-                cmd="ironclaw__subcmd__traces__subcmd__profile__subcmd__withdraw"
-                ;;
-            ironclaw__subcmd__traces__subcmd__profile__subcmd__help,help)
-                cmd="ironclaw__subcmd__traces__subcmd__profile__subcmd__help__subcmd__help"
-                ;;
-            ironclaw__subcmd__traces__subcmd__profile__subcmd__help,set)
-                cmd="ironclaw__subcmd__traces__subcmd__profile__subcmd__help__subcmd__set"
-                ;;
-            ironclaw__subcmd__traces__subcmd__profile__subcmd__help,token)
-                cmd="ironclaw__subcmd__traces__subcmd__profile__subcmd__help__subcmd__token"
-                ;;
-            ironclaw__subcmd__traces__subcmd__profile__subcmd__help,withdraw)
-                cmd="ironclaw__subcmd__traces__subcmd__profile__subcmd__help__subcmd__withdraw"
+            ironclaw__tool__help,remove)
+                cmd="ironclaw__tool__help__remove"
                 ;;
             *)
                 ;;
@@ -551,1459 +404,25 @@ _ironclaw() {
 
     case "${cmd}" in
         ironclaw)
-            opts="-h -V --help --version channels completion config doctor extension hooks logs models onboard profile repl run serve service skills status traces help"
+            opts="-m -c -h -V --cli-only --no-db --message --config --no-onboard --help --version run onboard config tool mcp memory pairing service doctor status completion worker claude-bridge help"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 1 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
             fi
             case "${prev}" in
-                *)
-                    COMPREPLY=()
-                    ;;
-            esac
-            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
-            return 0
-            ;;
-        ironclaw__subcmd__channels)
-            opts="-h --help list help"
-            if [[ ${cur} == -* || ${COMP_CWORD} -eq 2 ]] ; then
-                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
-                return 0
-            fi
-            case "${prev}" in
-                *)
-                    COMPREPLY=()
-                    ;;
-            esac
-            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
-            return 0
-            ;;
-        ironclaw__subcmd__channels__subcmd__help)
-            opts="list help"
-            if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
-                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
-                return 0
-            fi
-            case "${prev}" in
-                *)
-                    COMPREPLY=()
-                    ;;
-            esac
-            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
-            return 0
-            ;;
-        ironclaw__subcmd__channels__subcmd__help__subcmd__help)
-            opts=""
-            if [[ ${cur} == -* || ${COMP_CWORD} -eq 4 ]] ; then
-                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
-                return 0
-            fi
-            case "${prev}" in
-                *)
-                    COMPREPLY=()
-                    ;;
-            esac
-            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
-            return 0
-            ;;
-        ironclaw__subcmd__channels__subcmd__help__subcmd__list)
-            opts=""
-            if [[ ${cur} == -* || ${COMP_CWORD} -eq 4 ]] ; then
-                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
-                return 0
-            fi
-            case "${prev}" in
-                *)
-                    COMPREPLY=()
-                    ;;
-            esac
-            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
-            return 0
-            ;;
-        ironclaw__subcmd__channels__subcmd__list)
-            opts="-v -h --verbose --json --help"
-            if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
-                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
-                return 0
-            fi
-            case "${prev}" in
-                *)
-                    COMPREPLY=()
-                    ;;
-            esac
-            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
-            return 0
-            ;;
-        ironclaw__subcmd__completion)
-            opts="-h --shell --help"
-            if [[ ${cur} == -* || ${COMP_CWORD} -eq 2 ]] ; then
-                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
-                return 0
-            fi
-            case "${prev}" in
-                --shell)
-                    COMPREPLY=($(compgen -W "bash elvish fish powershell zsh" -- "${cur}"))
+                --message)
+                    COMPREPLY=($(compgen -f "${cur}"))
                     return 0
                     ;;
-                *)
-                    COMPREPLY=()
-                    ;;
-            esac
-            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
-            return 0
-            ;;
-        ironclaw__subcmd__config)
-            opts="-h --help path init list get help"
-            if [[ ${cur} == -* || ${COMP_CWORD} -eq 2 ]] ; then
-                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
-                return 0
-            fi
-            case "${prev}" in
-                *)
-                    COMPREPLY=()
-                    ;;
-            esac
-            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
-            return 0
-            ;;
-        ironclaw__subcmd__config__subcmd__get)
-            opts="-h --json --help <KEY>"
-            if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
-                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
-                return 0
-            fi
-            case "${prev}" in
-                *)
-                    COMPREPLY=()
-                    ;;
-            esac
-            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
-            return 0
-            ;;
-        ironclaw__subcmd__config__subcmd__help)
-            opts="path init list get help"
-            if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
-                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
-                return 0
-            fi
-            case "${prev}" in
-                *)
-                    COMPREPLY=()
-                    ;;
-            esac
-            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
-            return 0
-            ;;
-        ironclaw__subcmd__config__subcmd__help__subcmd__get)
-            opts=""
-            if [[ ${cur} == -* || ${COMP_CWORD} -eq 4 ]] ; then
-                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
-                return 0
-            fi
-            case "${prev}" in
-                *)
-                    COMPREPLY=()
-                    ;;
-            esac
-            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
-            return 0
-            ;;
-        ironclaw__subcmd__config__subcmd__help__subcmd__help)
-            opts=""
-            if [[ ${cur} == -* || ${COMP_CWORD} -eq 4 ]] ; then
-                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
-                return 0
-            fi
-            case "${prev}" in
-                *)
-                    COMPREPLY=()
-                    ;;
-            esac
-            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
-            return 0
-            ;;
-        ironclaw__subcmd__config__subcmd__help__subcmd__init)
-            opts=""
-            if [[ ${cur} == -* || ${COMP_CWORD} -eq 4 ]] ; then
-                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
-                return 0
-            fi
-            case "${prev}" in
-                *)
-                    COMPREPLY=()
-                    ;;
-            esac
-            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
-            return 0
-            ;;
-        ironclaw__subcmd__config__subcmd__help__subcmd__list)
-            opts=""
-            if [[ ${cur} == -* || ${COMP_CWORD} -eq 4 ]] ; then
-                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
-                return 0
-            fi
-            case "${prev}" in
-                *)
-                    COMPREPLY=()
-                    ;;
-            esac
-            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
-            return 0
-            ;;
-        ironclaw__subcmd__config__subcmd__help__subcmd__path)
-            opts=""
-            if [[ ${cur} == -* || ${COMP_CWORD} -eq 4 ]] ; then
-                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
-                return 0
-            fi
-            case "${prev}" in
-                *)
-                    COMPREPLY=()
-                    ;;
-            esac
-            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
-            return 0
-            ;;
-        ironclaw__subcmd__config__subcmd__init)
-            opts="-h --force --help"
-            if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
-                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
-                return 0
-            fi
-            case "${prev}" in
-                *)
-                    COMPREPLY=()
-                    ;;
-            esac
-            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
-            return 0
-            ;;
-        ironclaw__subcmd__config__subcmd__list)
-            opts="-h --json --help"
-            if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
-                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
-                return 0
-            fi
-            case "${prev}" in
-                *)
-                    COMPREPLY=()
-                    ;;
-            esac
-            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
-            return 0
-            ;;
-        ironclaw__subcmd__config__subcmd__path)
-            opts="-h --help"
-            if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
-                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
-                return 0
-            fi
-            case "${prev}" in
-                *)
-                    COMPREPLY=()
-                    ;;
-            esac
-            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
-            return 0
-            ;;
-        ironclaw__subcmd__doctor)
-            opts="-h --json --help"
-            if [[ ${cur} == -* || ${COMP_CWORD} -eq 2 ]] ; then
-                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
-                return 0
-            fi
-            case "${prev}" in
-                *)
-                    COMPREPLY=()
-                    ;;
-            esac
-            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
-            return 0
-            ;;
-        ironclaw__subcmd__extension)
-            opts="-h --confirm-host-access --help search install activate remove help"
-            if [[ ${cur} == -* || ${COMP_CWORD} -eq 2 ]] ; then
-                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
-                return 0
-            fi
-            case "${prev}" in
-                *)
-                    COMPREPLY=()
-                    ;;
-            esac
-            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
-            return 0
-            ;;
-        ironclaw__subcmd__extension__subcmd__activate)
-            opts="-h --json --confirm-host-access --help <ID>"
-            if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
-                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
-                return 0
-            fi
-            case "${prev}" in
-                *)
-                    COMPREPLY=()
-                    ;;
-            esac
-            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
-            return 0
-            ;;
-        ironclaw__subcmd__extension__subcmd__help)
-            opts="search install activate remove help"
-            if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
-                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
-                return 0
-            fi
-            case "${prev}" in
-                *)
-                    COMPREPLY=()
-                    ;;
-            esac
-            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
-            return 0
-            ;;
-        ironclaw__subcmd__extension__subcmd__help__subcmd__activate)
-            opts=""
-            if [[ ${cur} == -* || ${COMP_CWORD} -eq 4 ]] ; then
-                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
-                return 0
-            fi
-            case "${prev}" in
-                *)
-                    COMPREPLY=()
-                    ;;
-            esac
-            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
-            return 0
-            ;;
-        ironclaw__subcmd__extension__subcmd__help__subcmd__help)
-            opts=""
-            if [[ ${cur} == -* || ${COMP_CWORD} -eq 4 ]] ; then
-                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
-                return 0
-            fi
-            case "${prev}" in
-                *)
-                    COMPREPLY=()
-                    ;;
-            esac
-            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
-            return 0
-            ;;
-        ironclaw__subcmd__extension__subcmd__help__subcmd__install)
-            opts=""
-            if [[ ${cur} == -* || ${COMP_CWORD} -eq 4 ]] ; then
-                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
-                return 0
-            fi
-            case "${prev}" in
-                *)
-                    COMPREPLY=()
-                    ;;
-            esac
-            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
-            return 0
-            ;;
-        ironclaw__subcmd__extension__subcmd__help__subcmd__remove)
-            opts=""
-            if [[ ${cur} == -* || ${COMP_CWORD} -eq 4 ]] ; then
-                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
-                return 0
-            fi
-            case "${prev}" in
-                *)
-                    COMPREPLY=()
-                    ;;
-            esac
-            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
-            return 0
-            ;;
-        ironclaw__subcmd__extension__subcmd__help__subcmd__search)
-            opts=""
-            if [[ ${cur} == -* || ${COMP_CWORD} -eq 4 ]] ; then
-                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
-                return 0
-            fi
-            case "${prev}" in
-                *)
-                    COMPREPLY=()
-                    ;;
-            esac
-            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
-            return 0
-            ;;
-        ironclaw__subcmd__extension__subcmd__install)
-            opts="-h --json --confirm-host-access --help <ID>"
-            if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
-                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
-                return 0
-            fi
-            case "${prev}" in
-                *)
-                    COMPREPLY=()
-                    ;;
-            esac
-            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
-            return 0
-            ;;
-        ironclaw__subcmd__extension__subcmd__remove)
-            opts="-h --json --confirm-host-access --help <ID>"
-            if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
-                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
-                return 0
-            fi
-            case "${prev}" in
-                *)
-                    COMPREPLY=()
-                    ;;
-            esac
-            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
-            return 0
-            ;;
-        ironclaw__subcmd__extension__subcmd__search)
-            opts="-h --json --confirm-host-access --help [QUERY]"
-            if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
-                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
-                return 0
-            fi
-            case "${prev}" in
-                *)
-                    COMPREPLY=()
-                    ;;
-            esac
-            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
-            return 0
-            ;;
-        ironclaw__subcmd__help)
-            opts="channels completion config doctor extension hooks logs models onboard profile repl run serve service skills status traces help"
-            if [[ ${cur} == -* || ${COMP_CWORD} -eq 2 ]] ; then
-                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
-                return 0
-            fi
-            case "${prev}" in
-                *)
-                    COMPREPLY=()
-                    ;;
-            esac
-            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
-            return 0
-            ;;
-        ironclaw__subcmd__help__subcmd__channels)
-            opts="list"
-            if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
-                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
-                return 0
-            fi
-            case "${prev}" in
-                *)
-                    COMPREPLY=()
-                    ;;
-            esac
-            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
-            return 0
-            ;;
-        ironclaw__subcmd__help__subcmd__channels__subcmd__list)
-            opts=""
-            if [[ ${cur} == -* || ${COMP_CWORD} -eq 4 ]] ; then
-                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
-                return 0
-            fi
-            case "${prev}" in
-                *)
-                    COMPREPLY=()
-                    ;;
-            esac
-            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
-            return 0
-            ;;
-        ironclaw__subcmd__help__subcmd__completion)
-            opts=""
-            if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
-                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
-                return 0
-            fi
-            case "${prev}" in
-                *)
-                    COMPREPLY=()
-                    ;;
-            esac
-            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
-            return 0
-            ;;
-        ironclaw__subcmd__help__subcmd__config)
-            opts="path init list get"
-            if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
-                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
-                return 0
-            fi
-            case "${prev}" in
-                *)
-                    COMPREPLY=()
-                    ;;
-            esac
-            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
-            return 0
-            ;;
-        ironclaw__subcmd__help__subcmd__config__subcmd__get)
-            opts=""
-            if [[ ${cur} == -* || ${COMP_CWORD} -eq 4 ]] ; then
-                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
-                return 0
-            fi
-            case "${prev}" in
-                *)
-                    COMPREPLY=()
-                    ;;
-            esac
-            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
-            return 0
-            ;;
-        ironclaw__subcmd__help__subcmd__config__subcmd__init)
-            opts=""
-            if [[ ${cur} == -* || ${COMP_CWORD} -eq 4 ]] ; then
-                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
-                return 0
-            fi
-            case "${prev}" in
-                *)
-                    COMPREPLY=()
-                    ;;
-            esac
-            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
-            return 0
-            ;;
-        ironclaw__subcmd__help__subcmd__config__subcmd__list)
-            opts=""
-            if [[ ${cur} == -* || ${COMP_CWORD} -eq 4 ]] ; then
-                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
-                return 0
-            fi
-            case "${prev}" in
-                *)
-                    COMPREPLY=()
-                    ;;
-            esac
-            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
-            return 0
-            ;;
-        ironclaw__subcmd__help__subcmd__config__subcmd__path)
-            opts=""
-            if [[ ${cur} == -* || ${COMP_CWORD} -eq 4 ]] ; then
-                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
-                return 0
-            fi
-            case "${prev}" in
-                *)
-                    COMPREPLY=()
-                    ;;
-            esac
-            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
-            return 0
-            ;;
-        ironclaw__subcmd__help__subcmd__doctor)
-            opts=""
-            if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
-                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
-                return 0
-            fi
-            case "${prev}" in
-                *)
-                    COMPREPLY=()
-                    ;;
-            esac
-            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
-            return 0
-            ;;
-        ironclaw__subcmd__help__subcmd__extension)
-            opts="search install activate remove"
-            if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
-                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
-                return 0
-            fi
-            case "${prev}" in
-                *)
-                    COMPREPLY=()
-                    ;;
-            esac
-            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
-            return 0
-            ;;
-        ironclaw__subcmd__help__subcmd__extension__subcmd__activate)
-            opts=""
-            if [[ ${cur} == -* || ${COMP_CWORD} -eq 4 ]] ; then
-                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
-                return 0
-            fi
-            case "${prev}" in
-                *)
-                    COMPREPLY=()
-                    ;;
-            esac
-            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
-            return 0
-            ;;
-        ironclaw__subcmd__help__subcmd__extension__subcmd__install)
-            opts=""
-            if [[ ${cur} == -* || ${COMP_CWORD} -eq 4 ]] ; then
-                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
-                return 0
-            fi
-            case "${prev}" in
-                *)
-                    COMPREPLY=()
-                    ;;
-            esac
-            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
-            return 0
-            ;;
-        ironclaw__subcmd__help__subcmd__extension__subcmd__remove)
-            opts=""
-            if [[ ${cur} == -* || ${COMP_CWORD} -eq 4 ]] ; then
-                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
-                return 0
-            fi
-            case "${prev}" in
-                *)
-                    COMPREPLY=()
-                    ;;
-            esac
-            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
-            return 0
-            ;;
-        ironclaw__subcmd__help__subcmd__extension__subcmd__search)
-            opts=""
-            if [[ ${cur} == -* || ${COMP_CWORD} -eq 4 ]] ; then
-                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
-                return 0
-            fi
-            case "${prev}" in
-                *)
-                    COMPREPLY=()
-                    ;;
-            esac
-            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
-            return 0
-            ;;
-        ironclaw__subcmd__help__subcmd__help)
-            opts=""
-            if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
-                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
-                return 0
-            fi
-            case "${prev}" in
-                *)
-                    COMPREPLY=()
-                    ;;
-            esac
-            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
-            return 0
-            ;;
-        ironclaw__subcmd__help__subcmd__hooks)
-            opts="list"
-            if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
-                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
-                return 0
-            fi
-            case "${prev}" in
-                *)
-                    COMPREPLY=()
-                    ;;
-            esac
-            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
-            return 0
-            ;;
-        ironclaw__subcmd__help__subcmd__hooks__subcmd__list)
-            opts=""
-            if [[ ${cur} == -* || ${COMP_CWORD} -eq 4 ]] ; then
-                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
-                return 0
-            fi
-            case "${prev}" in
-                *)
-                    COMPREPLY=()
-                    ;;
-            esac
-            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
-            return 0
-            ;;
-        ironclaw__subcmd__help__subcmd__logs)
-            opts=""
-            if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
-                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
-                return 0
-            fi
-            case "${prev}" in
-                *)
-                    COMPREPLY=()
-                    ;;
-            esac
-            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
-            return 0
-            ;;
-        ironclaw__subcmd__help__subcmd__models)
-            opts="list status set set-provider"
-            if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
-                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
-                return 0
-            fi
-            case "${prev}" in
-                *)
-                    COMPREPLY=()
-                    ;;
-            esac
-            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
-            return 0
-            ;;
-        ironclaw__subcmd__help__subcmd__models__subcmd__list)
-            opts=""
-            if [[ ${cur} == -* || ${COMP_CWORD} -eq 4 ]] ; then
-                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
-                return 0
-            fi
-            case "${prev}" in
-                *)
-                    COMPREPLY=()
-                    ;;
-            esac
-            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
-            return 0
-            ;;
-        ironclaw__subcmd__help__subcmd__models__subcmd__set)
-            opts=""
-            if [[ ${cur} == -* || ${COMP_CWORD} -eq 4 ]] ; then
-                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
-                return 0
-            fi
-            case "${prev}" in
-                *)
-                    COMPREPLY=()
-                    ;;
-            esac
-            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
-            return 0
-            ;;
-        ironclaw__subcmd__help__subcmd__models__subcmd__set__subcmd__provider)
-            opts=""
-            if [[ ${cur} == -* || ${COMP_CWORD} -eq 4 ]] ; then
-                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
-                return 0
-            fi
-            case "${prev}" in
-                *)
-                    COMPREPLY=()
-                    ;;
-            esac
-            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
-            return 0
-            ;;
-        ironclaw__subcmd__help__subcmd__models__subcmd__status)
-            opts=""
-            if [[ ${cur} == -* || ${COMP_CWORD} -eq 4 ]] ; then
-                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
-                return 0
-            fi
-            case "${prev}" in
-                *)
-                    COMPREPLY=()
-                    ;;
-            esac
-            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
-            return 0
-            ;;
-        ironclaw__subcmd__help__subcmd__onboard)
-            opts=""
-            if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
-                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
-                return 0
-            fi
-            case "${prev}" in
-                *)
-                    COMPREPLY=()
-                    ;;
-            esac
-            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
-            return 0
-            ;;
-        ironclaw__subcmd__help__subcmd__profile)
-            opts="list"
-            if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
-                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
-                return 0
-            fi
-            case "${prev}" in
-                *)
-                    COMPREPLY=()
-                    ;;
-            esac
-            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
-            return 0
-            ;;
-        ironclaw__subcmd__help__subcmd__profile__subcmd__list)
-            opts=""
-            if [[ ${cur} == -* || ${COMP_CWORD} -eq 4 ]] ; then
-                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
-                return 0
-            fi
-            case "${prev}" in
-                *)
-                    COMPREPLY=()
-                    ;;
-            esac
-            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
-            return 0
-            ;;
-        ironclaw__subcmd__help__subcmd__repl)
-            opts=""
-            if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
-                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
-                return 0
-            fi
-            case "${prev}" in
-                *)
-                    COMPREPLY=()
-                    ;;
-            esac
-            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
-            return 0
-            ;;
-        ironclaw__subcmd__help__subcmd__run)
-            opts=""
-            if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
-                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
-                return 0
-            fi
-            case "${prev}" in
-                *)
-                    COMPREPLY=()
-                    ;;
-            esac
-            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
-            return 0
-            ;;
-        ironclaw__subcmd__help__subcmd__serve)
-            opts=""
-            if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
-                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
-                return 0
-            fi
-            case "${prev}" in
-                *)
-                    COMPREPLY=()
-                    ;;
-            esac
-            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
-            return 0
-            ;;
-        ironclaw__subcmd__help__subcmd__service)
-            opts="install start stop restart status uninstall"
-            if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
-                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
-                return 0
-            fi
-            case "${prev}" in
-                *)
-                    COMPREPLY=()
-                    ;;
-            esac
-            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
-            return 0
-            ;;
-        ironclaw__subcmd__help__subcmd__service__subcmd__install)
-            opts=""
-            if [[ ${cur} == -* || ${COMP_CWORD} -eq 4 ]] ; then
-                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
-                return 0
-            fi
-            case "${prev}" in
-                *)
-                    COMPREPLY=()
-                    ;;
-            esac
-            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
-            return 0
-            ;;
-        ironclaw__subcmd__help__subcmd__service__subcmd__restart)
-            opts=""
-            if [[ ${cur} == -* || ${COMP_CWORD} -eq 4 ]] ; then
-                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
-                return 0
-            fi
-            case "${prev}" in
-                *)
-                    COMPREPLY=()
-                    ;;
-            esac
-            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
-            return 0
-            ;;
-        ironclaw__subcmd__help__subcmd__service__subcmd__start)
-            opts=""
-            if [[ ${cur} == -* || ${COMP_CWORD} -eq 4 ]] ; then
-                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
-                return 0
-            fi
-            case "${prev}" in
-                *)
-                    COMPREPLY=()
-                    ;;
-            esac
-            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
-            return 0
-            ;;
-        ironclaw__subcmd__help__subcmd__service__subcmd__status)
-            opts=""
-            if [[ ${cur} == -* || ${COMP_CWORD} -eq 4 ]] ; then
-                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
-                return 0
-            fi
-            case "${prev}" in
-                *)
-                    COMPREPLY=()
-                    ;;
-            esac
-            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
-            return 0
-            ;;
-        ironclaw__subcmd__help__subcmd__service__subcmd__stop)
-            opts=""
-            if [[ ${cur} == -* || ${COMP_CWORD} -eq 4 ]] ; then
-                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
-                return 0
-            fi
-            case "${prev}" in
-                *)
-                    COMPREPLY=()
-                    ;;
-            esac
-            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
-            return 0
-            ;;
-        ironclaw__subcmd__help__subcmd__service__subcmd__uninstall)
-            opts=""
-            if [[ ${cur} == -* || ${COMP_CWORD} -eq 4 ]] ; then
-                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
-                return 0
-            fi
-            case "${prev}" in
-                *)
-                    COMPREPLY=()
-                    ;;
-            esac
-            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
-            return 0
-            ;;
-        ironclaw__subcmd__help__subcmd__skills)
-            opts="list"
-            if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
-                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
-                return 0
-            fi
-            case "${prev}" in
-                *)
-                    COMPREPLY=()
-                    ;;
-            esac
-            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
-            return 0
-            ;;
-        ironclaw__subcmd__help__subcmd__skills__subcmd__list)
-            opts=""
-            if [[ ${cur} == -* || ${COMP_CWORD} -eq 4 ]] ; then
-                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
-                return 0
-            fi
-            case "${prev}" in
-                *)
-                    COMPREPLY=()
-                    ;;
-            esac
-            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
-            return 0
-            ;;
-        ironclaw__subcmd__help__subcmd__status)
-            opts=""
-            if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
-                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
-                return 0
-            fi
-            case "${prev}" in
-                *)
-                    COMPREPLY=()
-                    ;;
-            esac
-            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
-            return 0
-            ;;
-        ironclaw__subcmd__help__subcmd__traces)
-            opts="opt-in opt-out enroll-instance status preview enqueue flush-queue queue-status credit submit list-submissions revoke ingest-health profile"
-            if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
-                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
-                return 0
-            fi
-            case "${prev}" in
-                *)
-                    COMPREPLY=()
-                    ;;
-            esac
-            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
-            return 0
-            ;;
-        ironclaw__subcmd__help__subcmd__traces__subcmd__credit)
-            opts=""
-            if [[ ${cur} == -* || ${COMP_CWORD} -eq 4 ]] ; then
-                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
-                return 0
-            fi
-            case "${prev}" in
-                *)
-                    COMPREPLY=()
-                    ;;
-            esac
-            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
-            return 0
-            ;;
-        ironclaw__subcmd__help__subcmd__traces__subcmd__enqueue)
-            opts=""
-            if [[ ${cur} == -* || ${COMP_CWORD} -eq 4 ]] ; then
-                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
-                return 0
-            fi
-            case "${prev}" in
-                *)
-                    COMPREPLY=()
-                    ;;
-            esac
-            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
-            return 0
-            ;;
-        ironclaw__subcmd__help__subcmd__traces__subcmd__enroll__subcmd__instance)
-            opts=""
-            if [[ ${cur} == -* || ${COMP_CWORD} -eq 4 ]] ; then
-                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
-                return 0
-            fi
-            case "${prev}" in
-                *)
-                    COMPREPLY=()
-                    ;;
-            esac
-            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
-            return 0
-            ;;
-        ironclaw__subcmd__help__subcmd__traces__subcmd__flush__subcmd__queue)
-            opts=""
-            if [[ ${cur} == -* || ${COMP_CWORD} -eq 4 ]] ; then
-                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
-                return 0
-            fi
-            case "${prev}" in
-                *)
-                    COMPREPLY=()
-                    ;;
-            esac
-            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
-            return 0
-            ;;
-        ironclaw__subcmd__help__subcmd__traces__subcmd__ingest__subcmd__health)
-            opts=""
-            if [[ ${cur} == -* || ${COMP_CWORD} -eq 4 ]] ; then
-                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
-                return 0
-            fi
-            case "${prev}" in
-                *)
-                    COMPREPLY=()
-                    ;;
-            esac
-            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
-            return 0
-            ;;
-        ironclaw__subcmd__help__subcmd__traces__subcmd__list__subcmd__submissions)
-            opts=""
-            if [[ ${cur} == -* || ${COMP_CWORD} -eq 4 ]] ; then
-                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
-                return 0
-            fi
-            case "${prev}" in
-                *)
-                    COMPREPLY=()
-                    ;;
-            esac
-            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
-            return 0
-            ;;
-        ironclaw__subcmd__help__subcmd__traces__subcmd__opt__subcmd__in)
-            opts=""
-            if [[ ${cur} == -* || ${COMP_CWORD} -eq 4 ]] ; then
-                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
-                return 0
-            fi
-            case "${prev}" in
-                *)
-                    COMPREPLY=()
-                    ;;
-            esac
-            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
-            return 0
-            ;;
-        ironclaw__subcmd__help__subcmd__traces__subcmd__opt__subcmd__out)
-            opts=""
-            if [[ ${cur} == -* || ${COMP_CWORD} -eq 4 ]] ; then
-                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
-                return 0
-            fi
-            case "${prev}" in
-                *)
-                    COMPREPLY=()
-                    ;;
-            esac
-            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
-            return 0
-            ;;
-        ironclaw__subcmd__help__subcmd__traces__subcmd__preview)
-            opts=""
-            if [[ ${cur} == -* || ${COMP_CWORD} -eq 4 ]] ; then
-                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
-                return 0
-            fi
-            case "${prev}" in
-                *)
-                    COMPREPLY=()
-                    ;;
-            esac
-            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
-            return 0
-            ;;
-        ironclaw__subcmd__help__subcmd__traces__subcmd__profile)
-            opts="token set withdraw"
-            if [[ ${cur} == -* || ${COMP_CWORD} -eq 4 ]] ; then
-                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
-                return 0
-            fi
-            case "${prev}" in
-                *)
-                    COMPREPLY=()
-                    ;;
-            esac
-            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
-            return 0
-            ;;
-        ironclaw__subcmd__help__subcmd__traces__subcmd__profile__subcmd__set)
-            opts=""
-            if [[ ${cur} == -* || ${COMP_CWORD} -eq 5 ]] ; then
-                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
-                return 0
-            fi
-            case "${prev}" in
-                *)
-                    COMPREPLY=()
-                    ;;
-            esac
-            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
-            return 0
-            ;;
-        ironclaw__subcmd__help__subcmd__traces__subcmd__profile__subcmd__token)
-            opts=""
-            if [[ ${cur} == -* || ${COMP_CWORD} -eq 5 ]] ; then
-                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
-                return 0
-            fi
-            case "${prev}" in
-                *)
-                    COMPREPLY=()
-                    ;;
-            esac
-            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
-            return 0
-            ;;
-        ironclaw__subcmd__help__subcmd__traces__subcmd__profile__subcmd__withdraw)
-            opts=""
-            if [[ ${cur} == -* || ${COMP_CWORD} -eq 5 ]] ; then
-                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
-                return 0
-            fi
-            case "${prev}" in
-                *)
-                    COMPREPLY=()
-                    ;;
-            esac
-            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
-            return 0
-            ;;
-        ironclaw__subcmd__help__subcmd__traces__subcmd__queue__subcmd__status)
-            opts=""
-            if [[ ${cur} == -* || ${COMP_CWORD} -eq 4 ]] ; then
-                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
-                return 0
-            fi
-            case "${prev}" in
-                *)
-                    COMPREPLY=()
-                    ;;
-            esac
-            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
-            return 0
-            ;;
-        ironclaw__subcmd__help__subcmd__traces__subcmd__revoke)
-            opts=""
-            if [[ ${cur} == -* || ${COMP_CWORD} -eq 4 ]] ; then
-                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
-                return 0
-            fi
-            case "${prev}" in
-                *)
-                    COMPREPLY=()
-                    ;;
-            esac
-            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
-            return 0
-            ;;
-        ironclaw__subcmd__help__subcmd__traces__subcmd__status)
-            opts=""
-            if [[ ${cur} == -* || ${COMP_CWORD} -eq 4 ]] ; then
-                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
-                return 0
-            fi
-            case "${prev}" in
-                *)
-                    COMPREPLY=()
-                    ;;
-            esac
-            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
-            return 0
-            ;;
-        ironclaw__subcmd__help__subcmd__traces__subcmd__submit)
-            opts=""
-            if [[ ${cur} == -* || ${COMP_CWORD} -eq 4 ]] ; then
-                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
-                return 0
-            fi
-            case "${prev}" in
-                *)
-                    COMPREPLY=()
-                    ;;
-            esac
-            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
-            return 0
-            ;;
-        ironclaw__subcmd__hooks)
-            opts="-h --help list help"
-            if [[ ${cur} == -* || ${COMP_CWORD} -eq 2 ]] ; then
-                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
-                return 0
-            fi
-            case "${prev}" in
-                *)
-                    COMPREPLY=()
-                    ;;
-            esac
-            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
-            return 0
-            ;;
-        ironclaw__subcmd__hooks__subcmd__help)
-            opts="list help"
-            if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
-                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
-                return 0
-            fi
-            case "${prev}" in
-                *)
-                    COMPREPLY=()
-                    ;;
-            esac
-            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
-            return 0
-            ;;
-        ironclaw__subcmd__hooks__subcmd__help__subcmd__help)
-            opts=""
-            if [[ ${cur} == -* || ${COMP_CWORD} -eq 4 ]] ; then
-                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
-                return 0
-            fi
-            case "${prev}" in
-                *)
-                    COMPREPLY=()
-                    ;;
-            esac
-            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
-            return 0
-            ;;
-        ironclaw__subcmd__hooks__subcmd__help__subcmd__list)
-            opts=""
-            if [[ ${cur} == -* || ${COMP_CWORD} -eq 4 ]] ; then
-                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
-                return 0
-            fi
-            case "${prev}" in
-                *)
-                    COMPREPLY=()
-                    ;;
-            esac
-            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
-            return 0
-            ;;
-        ironclaw__subcmd__hooks__subcmd__list)
-            opts="-v -h --verbose --json --help"
-            if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
-                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
-                return 0
-            fi
-            case "${prev}" in
-                *)
-                    COMPREPLY=()
-                    ;;
-            esac
-            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
-            return 0
-            ;;
-        ironclaw__subcmd__logs)
-            opts="-v -h --verbose --json --help"
-            if [[ ${cur} == -* || ${COMP_CWORD} -eq 2 ]] ; then
-                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
-                return 0
-            fi
-            case "${prev}" in
-                *)
-                    COMPREPLY=()
-                    ;;
-            esac
-            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
-            return 0
-            ;;
-        ironclaw__subcmd__models)
-            opts="-h --help list status set set-provider help"
-            if [[ ${cur} == -* || ${COMP_CWORD} -eq 2 ]] ; then
-                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
-                return 0
-            fi
-            case "${prev}" in
-                *)
-                    COMPREPLY=()
-                    ;;
-            esac
-            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
-            return 0
-            ;;
-        ironclaw__subcmd__models__subcmd__help)
-            opts="list status set set-provider help"
-            if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
-                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
-                return 0
-            fi
-            case "${prev}" in
-                *)
-                    COMPREPLY=()
-                    ;;
-            esac
-            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
-            return 0
-            ;;
-        ironclaw__subcmd__models__subcmd__help__subcmd__help)
-            opts=""
-            if [[ ${cur} == -* || ${COMP_CWORD} -eq 4 ]] ; then
-                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
-                return 0
-            fi
-            case "${prev}" in
-                *)
-                    COMPREPLY=()
-                    ;;
-            esac
-            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
-            return 0
-            ;;
-        ironclaw__subcmd__models__subcmd__help__subcmd__list)
-            opts=""
-            if [[ ${cur} == -* || ${COMP_CWORD} -eq 4 ]] ; then
-                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
-                return 0
-            fi
-            case "${prev}" in
-                *)
-                    COMPREPLY=()
-                    ;;
-            esac
-            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
-            return 0
-            ;;
-        ironclaw__subcmd__models__subcmd__help__subcmd__set)
-            opts=""
-            if [[ ${cur} == -* || ${COMP_CWORD} -eq 4 ]] ; then
-                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
-                return 0
-            fi
-            case "${prev}" in
-                *)
-                    COMPREPLY=()
-                    ;;
-            esac
-            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
-            return 0
-            ;;
-        ironclaw__subcmd__models__subcmd__help__subcmd__set__subcmd__provider)
-            opts=""
-            if [[ ${cur} == -* || ${COMP_CWORD} -eq 4 ]] ; then
-                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
-                return 0
-            fi
-            case "${prev}" in
-                *)
-                    COMPREPLY=()
-                    ;;
-            esac
-            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
-            return 0
-            ;;
-        ironclaw__subcmd__models__subcmd__help__subcmd__status)
-            opts=""
-            if [[ ${cur} == -* || ${COMP_CWORD} -eq 4 ]] ; then
-                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
-                return 0
-            fi
-            case "${prev}" in
-                *)
-                    COMPREPLY=()
-                    ;;
-            esac
-            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
-            return 0
-            ;;
-        ironclaw__subcmd__models__subcmd__list)
-            opts="-v -h --verbose --json --help [PROVIDER]"
-            if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
-                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
-                return 0
-            fi
-            case "${prev}" in
-                *)
-                    COMPREPLY=()
-                    ;;
-            esac
-            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
-            return 0
-            ;;
-        ironclaw__subcmd__models__subcmd__set)
-            opts="-h --help <MODEL>"
-            if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
-                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
-                return 0
-            fi
-            case "${prev}" in
-                *)
-                    COMPREPLY=()
-                    ;;
-            esac
-            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
-            return 0
-            ;;
-        ironclaw__subcmd__models__subcmd__set__subcmd__provider)
-            opts="-h --model --help <PROVIDER>"
-            if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
-                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
-                return 0
-            fi
-            case "${prev}" in
-                --model)
+                -m)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --config)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                -c)
                     COMPREPLY=($(compgen -f "${cur}"))
                     return 0
                     ;;
@@ -2014,27 +433,45 @@ _ironclaw() {
             COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
             return 0
             ;;
-        ironclaw__subcmd__models__subcmd__status)
-            opts="-h --json --help"
-            if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
-                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
-                return 0
-            fi
-            case "${prev}" in
-                *)
-                    COMPREPLY=()
-                    ;;
-            esac
-            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
-            return 0
-            ;;
-        ironclaw__subcmd__onboard)
-            opts="-h --force --dry-run --import-history --help"
+        ironclaw__claude__bridge)
+            opts="-m -c -h --job-id --orchestrator-url --max-turns --model --cli-only --no-db --message --config --no-onboard --help"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 2 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
             fi
             case "${prev}" in
+                --job-id)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --orchestrator-url)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --max-turns)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --model)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --message)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                -m)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --config)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                -c)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
                 *)
                     COMPREPLY=()
                     ;;
@@ -2042,13 +479,33 @@ _ironclaw() {
             COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
             return 0
             ;;
-        ironclaw__subcmd__profile)
-            opts="-h --help list help"
+        ironclaw__completion)
+            opts="-m -c -h --shell --cli-only --no-db --message --config --no-onboard --help"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 2 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
             fi
             case "${prev}" in
+                --shell)
+                    COMPREPLY=($(compgen -W "bash zsh fish powershell elvish" -- "${cur}"))
+                    return 0
+                    ;;
+                --message)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                -m)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --config)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                -c)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
                 *)
                     COMPREPLY=()
                     ;;
@@ -2056,78 +513,8 @@ _ironclaw() {
             COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
             return 0
             ;;
-        ironclaw__subcmd__profile__subcmd__help)
-            opts="list help"
-            if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
-                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
-                return 0
-            fi
-            case "${prev}" in
-                *)
-                    COMPREPLY=()
-                    ;;
-            esac
-            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
-            return 0
-            ;;
-        ironclaw__subcmd__profile__subcmd__help__subcmd__help)
-            opts=""
-            if [[ ${cur} == -* || ${COMP_CWORD} -eq 4 ]] ; then
-                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
-                return 0
-            fi
-            case "${prev}" in
-                *)
-                    COMPREPLY=()
-                    ;;
-            esac
-            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
-            return 0
-            ;;
-        ironclaw__subcmd__profile__subcmd__help__subcmd__list)
-            opts=""
-            if [[ ${cur} == -* || ${COMP_CWORD} -eq 4 ]] ; then
-                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
-                return 0
-            fi
-            case "${prev}" in
-                *)
-                    COMPREPLY=()
-                    ;;
-            esac
-            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
-            return 0
-            ;;
-        ironclaw__subcmd__profile__subcmd__list)
-            opts="-h --json --help"
-            if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
-                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
-                return 0
-            fi
-            case "${prev}" in
-                *)
-                    COMPREPLY=()
-                    ;;
-            esac
-            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
-            return 0
-            ;;
-        ironclaw__subcmd__repl)
-            opts="-h --confirm-host-access --help"
-            if [[ ${cur} == -* || ${COMP_CWORD} -eq 2 ]] ; then
-                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
-                return 0
-            fi
-            case "${prev}" in
-                *)
-                    COMPREPLY=()
-                    ;;
-            esac
-            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
-            return 0
-            ;;
-        ironclaw__subcmd__run)
-            opts="-m -h --message --dry-run --confirm-host-access --help"
+        ironclaw__config)
+            opts="-m -c -h --cli-only --no-db --message --config --no-onboard --help init list get set reset path help"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 2 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
@@ -2141,6 +528,14 @@ _ironclaw() {
                     COMPREPLY=($(compgen -f "${cur}"))
                     return 0
                     ;;
+                --config)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                -c)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
                 *)
                     COMPREPLY=()
                     ;;
@@ -2148,18 +543,334 @@ _ironclaw() {
             COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
             return 0
             ;;
-        ironclaw__subcmd__serve)
-            opts="-h --host --port --confirm-host-access --help"
+        ironclaw__config__get)
+            opts="-m -c -h --cli-only --no-db --message --config --no-onboard --help <PATH>"
+            if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
+                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+                return 0
+            fi
+            case "${prev}" in
+                --message)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                -m)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --config)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                -c)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                *)
+                    COMPREPLY=()
+                    ;;
+            esac
+            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+            return 0
+            ;;
+        ironclaw__config__help)
+            opts="init list get set reset path help"
+            if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
+                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+                return 0
+            fi
+            case "${prev}" in
+                *)
+                    COMPREPLY=()
+                    ;;
+            esac
+            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+            return 0
+            ;;
+        ironclaw__config__help__get)
+            opts=""
+            if [[ ${cur} == -* || ${COMP_CWORD} -eq 4 ]] ; then
+                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+                return 0
+            fi
+            case "${prev}" in
+                *)
+                    COMPREPLY=()
+                    ;;
+            esac
+            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+            return 0
+            ;;
+        ironclaw__config__help__help)
+            opts=""
+            if [[ ${cur} == -* || ${COMP_CWORD} -eq 4 ]] ; then
+                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+                return 0
+            fi
+            case "${prev}" in
+                *)
+                    COMPREPLY=()
+                    ;;
+            esac
+            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+            return 0
+            ;;
+        ironclaw__config__help__init)
+            opts=""
+            if [[ ${cur} == -* || ${COMP_CWORD} -eq 4 ]] ; then
+                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+                return 0
+            fi
+            case "${prev}" in
+                *)
+                    COMPREPLY=()
+                    ;;
+            esac
+            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+            return 0
+            ;;
+        ironclaw__config__help__list)
+            opts=""
+            if [[ ${cur} == -* || ${COMP_CWORD} -eq 4 ]] ; then
+                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+                return 0
+            fi
+            case "${prev}" in
+                *)
+                    COMPREPLY=()
+                    ;;
+            esac
+            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+            return 0
+            ;;
+        ironclaw__config__help__path)
+            opts=""
+            if [[ ${cur} == -* || ${COMP_CWORD} -eq 4 ]] ; then
+                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+                return 0
+            fi
+            case "${prev}" in
+                *)
+                    COMPREPLY=()
+                    ;;
+            esac
+            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+            return 0
+            ;;
+        ironclaw__config__help__reset)
+            opts=""
+            if [[ ${cur} == -* || ${COMP_CWORD} -eq 4 ]] ; then
+                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+                return 0
+            fi
+            case "${prev}" in
+                *)
+                    COMPREPLY=()
+                    ;;
+            esac
+            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+            return 0
+            ;;
+        ironclaw__config__help__set)
+            opts=""
+            if [[ ${cur} == -* || ${COMP_CWORD} -eq 4 ]] ; then
+                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+                return 0
+            fi
+            case "${prev}" in
+                *)
+                    COMPREPLY=()
+                    ;;
+            esac
+            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+            return 0
+            ;;
+        ironclaw__config__init)
+            opts="-o -m -c -h --output --force --cli-only --no-db --message --config --no-onboard --help"
+            if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
+                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+                return 0
+            fi
+            case "${prev}" in
+                --output)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                -o)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --message)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                -m)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --config)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                -c)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                *)
+                    COMPREPLY=()
+                    ;;
+            esac
+            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+            return 0
+            ;;
+        ironclaw__config__list)
+            opts="-f -m -c -h --filter --cli-only --no-db --message --config --no-onboard --help"
+            if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
+                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+                return 0
+            fi
+            case "${prev}" in
+                --filter)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                -f)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --message)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                -m)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --config)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                -c)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                *)
+                    COMPREPLY=()
+                    ;;
+            esac
+            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+            return 0
+            ;;
+        ironclaw__config__path)
+            opts="-m -c -h --cli-only --no-db --message --config --no-onboard --help"
+            if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
+                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+                return 0
+            fi
+            case "${prev}" in
+                --message)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                -m)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --config)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                -c)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                *)
+                    COMPREPLY=()
+                    ;;
+            esac
+            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+            return 0
+            ;;
+        ironclaw__config__reset)
+            opts="-m -c -h --cli-only --no-db --message --config --no-onboard --help <PATH>"
+            if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
+                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+                return 0
+            fi
+            case "${prev}" in
+                --message)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                -m)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --config)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                -c)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                *)
+                    COMPREPLY=()
+                    ;;
+            esac
+            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+            return 0
+            ;;
+        ironclaw__config__set)
+            opts="-m -c -h --cli-only --no-db --message --config --no-onboard --help <PATH> <VALUE>"
+            if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
+                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+                return 0
+            fi
+            case "${prev}" in
+                --message)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                -m)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --config)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                -c)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                *)
+                    COMPREPLY=()
+                    ;;
+            esac
+            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+            return 0
+            ;;
+        ironclaw__doctor)
+            opts="-m -c -h --cli-only --no-db --message --config --no-onboard --help"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 2 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
             fi
             case "${prev}" in
-                --host)
+                --message)
                     COMPREPLY=($(compgen -f "${cur}"))
                     return 0
                     ;;
-                --port)
+                -m)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --config)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                -c)
                     COMPREPLY=($(compgen -f "${cur}"))
                     return 0
                     ;;
@@ -2170,8 +881,8 @@ _ironclaw() {
             COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
             return 0
             ;;
-        ironclaw__subcmd__service)
-            opts="-h --help install start stop restart status uninstall help"
+        ironclaw__help)
+            opts="run onboard config tool mcp memory pairing service doctor status completion worker claude-bridge help"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 2 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
@@ -2184,8 +895,8 @@ _ironclaw() {
             COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
             return 0
             ;;
-        ironclaw__subcmd__service__subcmd__help)
-            opts="install start stop restart status uninstall help"
+        ironclaw__help__claude__bridge)
+            opts=""
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
@@ -2198,7 +909,35 @@ _ironclaw() {
             COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
             return 0
             ;;
-        ironclaw__subcmd__service__subcmd__help__subcmd__help)
+        ironclaw__help__completion)
+            opts=""
+            if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
+                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+                return 0
+            fi
+            case "${prev}" in
+                *)
+                    COMPREPLY=()
+                    ;;
+            esac
+            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+            return 0
+            ;;
+        ironclaw__help__config)
+            opts="init list get set reset path"
+            if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
+                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+                return 0
+            fi
+            case "${prev}" in
+                *)
+                    COMPREPLY=()
+                    ;;
+            esac
+            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+            return 0
+            ;;
+        ironclaw__help__config__get)
             opts=""
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 4 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
@@ -2212,7 +951,7 @@ _ironclaw() {
             COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
             return 0
             ;;
-        ironclaw__subcmd__service__subcmd__help__subcmd__install)
+        ironclaw__help__config__init)
             opts=""
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 4 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
@@ -2226,7 +965,7 @@ _ironclaw() {
             COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
             return 0
             ;;
-        ironclaw__subcmd__service__subcmd__help__subcmd__restart)
+        ironclaw__help__config__list)
             opts=""
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 4 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
@@ -2240,7 +979,7 @@ _ironclaw() {
             COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
             return 0
             ;;
-        ironclaw__subcmd__service__subcmd__help__subcmd__start)
+        ironclaw__help__config__path)
             opts=""
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 4 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
@@ -2254,7 +993,7 @@ _ironclaw() {
             COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
             return 0
             ;;
-        ironclaw__subcmd__service__subcmd__help__subcmd__status)
+        ironclaw__help__config__reset)
             opts=""
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 4 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
@@ -2268,7 +1007,7 @@ _ironclaw() {
             COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
             return 0
             ;;
-        ironclaw__subcmd__service__subcmd__help__subcmd__stop)
+        ironclaw__help__config__set)
             opts=""
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 4 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
@@ -2282,7 +1021,49 @@ _ironclaw() {
             COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
             return 0
             ;;
-        ironclaw__subcmd__service__subcmd__help__subcmd__uninstall)
+        ironclaw__help__doctor)
+            opts=""
+            if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
+                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+                return 0
+            fi
+            case "${prev}" in
+                *)
+                    COMPREPLY=()
+                    ;;
+            esac
+            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+            return 0
+            ;;
+        ironclaw__help__help)
+            opts=""
+            if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
+                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+                return 0
+            fi
+            case "${prev}" in
+                *)
+                    COMPREPLY=()
+                    ;;
+            esac
+            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+            return 0
+            ;;
+        ironclaw__help__mcp)
+            opts="add remove list auth test toggle"
+            if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
+                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+                return 0
+            fi
+            case "${prev}" in
+                *)
+                    COMPREPLY=()
+                    ;;
+            esac
+            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+            return 0
+            ;;
+        ironclaw__help__mcp__add)
             opts=""
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 4 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
@@ -2296,8 +1077,78 @@ _ironclaw() {
             COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
             return 0
             ;;
-        ironclaw__subcmd__service__subcmd__install)
-            opts="-h --help"
+        ironclaw__help__mcp__auth)
+            opts=""
+            if [[ ${cur} == -* || ${COMP_CWORD} -eq 4 ]] ; then
+                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+                return 0
+            fi
+            case "${prev}" in
+                *)
+                    COMPREPLY=()
+                    ;;
+            esac
+            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+            return 0
+            ;;
+        ironclaw__help__mcp__list)
+            opts=""
+            if [[ ${cur} == -* || ${COMP_CWORD} -eq 4 ]] ; then
+                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+                return 0
+            fi
+            case "${prev}" in
+                *)
+                    COMPREPLY=()
+                    ;;
+            esac
+            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+            return 0
+            ;;
+        ironclaw__help__mcp__remove)
+            opts=""
+            if [[ ${cur} == -* || ${COMP_CWORD} -eq 4 ]] ; then
+                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+                return 0
+            fi
+            case "${prev}" in
+                *)
+                    COMPREPLY=()
+                    ;;
+            esac
+            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+            return 0
+            ;;
+        ironclaw__help__mcp__test)
+            opts=""
+            if [[ ${cur} == -* || ${COMP_CWORD} -eq 4 ]] ; then
+                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+                return 0
+            fi
+            case "${prev}" in
+                *)
+                    COMPREPLY=()
+                    ;;
+            esac
+            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+            return 0
+            ;;
+        ironclaw__help__mcp__toggle)
+            opts=""
+            if [[ ${cur} == -* || ${COMP_CWORD} -eq 4 ]] ; then
+                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+                return 0
+            fi
+            case "${prev}" in
+                *)
+                    COMPREPLY=()
+                    ;;
+            esac
+            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+            return 0
+            ;;
+        ironclaw__help__memory)
+            opts="search read write tree status"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
@@ -2310,8 +1161,78 @@ _ironclaw() {
             COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
             return 0
             ;;
-        ironclaw__subcmd__service__subcmd__restart)
-            opts="-h --help"
+        ironclaw__help__memory__read)
+            opts=""
+            if [[ ${cur} == -* || ${COMP_CWORD} -eq 4 ]] ; then
+                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+                return 0
+            fi
+            case "${prev}" in
+                *)
+                    COMPREPLY=()
+                    ;;
+            esac
+            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+            return 0
+            ;;
+        ironclaw__help__memory__search)
+            opts=""
+            if [[ ${cur} == -* || ${COMP_CWORD} -eq 4 ]] ; then
+                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+                return 0
+            fi
+            case "${prev}" in
+                *)
+                    COMPREPLY=()
+                    ;;
+            esac
+            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+            return 0
+            ;;
+        ironclaw__help__memory__status)
+            opts=""
+            if [[ ${cur} == -* || ${COMP_CWORD} -eq 4 ]] ; then
+                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+                return 0
+            fi
+            case "${prev}" in
+                *)
+                    COMPREPLY=()
+                    ;;
+            esac
+            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+            return 0
+            ;;
+        ironclaw__help__memory__tree)
+            opts=""
+            if [[ ${cur} == -* || ${COMP_CWORD} -eq 4 ]] ; then
+                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+                return 0
+            fi
+            case "${prev}" in
+                *)
+                    COMPREPLY=()
+                    ;;
+            esac
+            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+            return 0
+            ;;
+        ironclaw__help__memory__write)
+            opts=""
+            if [[ ${cur} == -* || ${COMP_CWORD} -eq 4 ]] ; then
+                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+                return 0
+            fi
+            case "${prev}" in
+                *)
+                    COMPREPLY=()
+                    ;;
+            esac
+            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+            return 0
+            ;;
+        ironclaw__help__onboard)
+            opts=""
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
@@ -2324,8 +1245,8 @@ _ironclaw() {
             COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
             return 0
             ;;
-        ironclaw__subcmd__service__subcmd__start)
-            opts="-h --help"
+        ironclaw__help__pairing)
+            opts="list approve"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
@@ -2338,8 +1259,36 @@ _ironclaw() {
             COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
             return 0
             ;;
-        ironclaw__subcmd__service__subcmd__status)
-            opts="-h --help"
+        ironclaw__help__pairing__approve)
+            opts=""
+            if [[ ${cur} == -* || ${COMP_CWORD} -eq 4 ]] ; then
+                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+                return 0
+            fi
+            case "${prev}" in
+                *)
+                    COMPREPLY=()
+                    ;;
+            esac
+            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+            return 0
+            ;;
+        ironclaw__help__pairing__list)
+            opts=""
+            if [[ ${cur} == -* || ${COMP_CWORD} -eq 4 ]] ; then
+                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+                return 0
+            fi
+            case "${prev}" in
+                *)
+                    COMPREPLY=()
+                    ;;
+            esac
+            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+            return 0
+            ;;
+        ironclaw__help__run)
+            opts=""
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
@@ -2352,8 +1301,8 @@ _ironclaw() {
             COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
             return 0
             ;;
-        ironclaw__subcmd__service__subcmd__stop)
-            opts="-h --help"
+        ironclaw__help__service)
+            opts="install start stop status uninstall"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
@@ -2366,8 +1315,78 @@ _ironclaw() {
             COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
             return 0
             ;;
-        ironclaw__subcmd__service__subcmd__uninstall)
-            opts="-h --help"
+        ironclaw__help__service__install)
+            opts=""
+            if [[ ${cur} == -* || ${COMP_CWORD} -eq 4 ]] ; then
+                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+                return 0
+            fi
+            case "${prev}" in
+                *)
+                    COMPREPLY=()
+                    ;;
+            esac
+            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+            return 0
+            ;;
+        ironclaw__help__service__start)
+            opts=""
+            if [[ ${cur} == -* || ${COMP_CWORD} -eq 4 ]] ; then
+                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+                return 0
+            fi
+            case "${prev}" in
+                *)
+                    COMPREPLY=()
+                    ;;
+            esac
+            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+            return 0
+            ;;
+        ironclaw__help__service__status)
+            opts=""
+            if [[ ${cur} == -* || ${COMP_CWORD} -eq 4 ]] ; then
+                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+                return 0
+            fi
+            case "${prev}" in
+                *)
+                    COMPREPLY=()
+                    ;;
+            esac
+            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+            return 0
+            ;;
+        ironclaw__help__service__stop)
+            opts=""
+            if [[ ${cur} == -* || ${COMP_CWORD} -eq 4 ]] ; then
+                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+                return 0
+            fi
+            case "${prev}" in
+                *)
+                    COMPREPLY=()
+                    ;;
+            esac
+            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+            return 0
+            ;;
+        ironclaw__help__service__uninstall)
+            opts=""
+            if [[ ${cur} == -* || ${COMP_CWORD} -eq 4 ]] ; then
+                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+                return 0
+            fi
+            case "${prev}" in
+                *)
+                    COMPREPLY=()
+                    ;;
+            esac
+            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+            return 0
+            ;;
+        ironclaw__help__status)
+            opts=""
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
@@ -2380,13 +1399,127 @@ _ironclaw() {
             COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
             return 0
             ;;
-        ironclaw__subcmd__skills)
-            opts="-h --help list help"
+        ironclaw__help__tool)
+            opts="install list remove info auth"
+            if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
+                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+                return 0
+            fi
+            case "${prev}" in
+                *)
+                    COMPREPLY=()
+                    ;;
+            esac
+            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+            return 0
+            ;;
+        ironclaw__help__tool__auth)
+            opts=""
+            if [[ ${cur} == -* || ${COMP_CWORD} -eq 4 ]] ; then
+                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+                return 0
+            fi
+            case "${prev}" in
+                *)
+                    COMPREPLY=()
+                    ;;
+            esac
+            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+            return 0
+            ;;
+        ironclaw__help__tool__info)
+            opts=""
+            if [[ ${cur} == -* || ${COMP_CWORD} -eq 4 ]] ; then
+                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+                return 0
+            fi
+            case "${prev}" in
+                *)
+                    COMPREPLY=()
+                    ;;
+            esac
+            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+            return 0
+            ;;
+        ironclaw__help__tool__install)
+            opts=""
+            if [[ ${cur} == -* || ${COMP_CWORD} -eq 4 ]] ; then
+                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+                return 0
+            fi
+            case "${prev}" in
+                *)
+                    COMPREPLY=()
+                    ;;
+            esac
+            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+            return 0
+            ;;
+        ironclaw__help__tool__list)
+            opts=""
+            if [[ ${cur} == -* || ${COMP_CWORD} -eq 4 ]] ; then
+                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+                return 0
+            fi
+            case "${prev}" in
+                *)
+                    COMPREPLY=()
+                    ;;
+            esac
+            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+            return 0
+            ;;
+        ironclaw__help__tool__remove)
+            opts=""
+            if [[ ${cur} == -* || ${COMP_CWORD} -eq 4 ]] ; then
+                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+                return 0
+            fi
+            case "${prev}" in
+                *)
+                    COMPREPLY=()
+                    ;;
+            esac
+            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+            return 0
+            ;;
+        ironclaw__help__worker)
+            opts=""
+            if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
+                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+                return 0
+            fi
+            case "${prev}" in
+                *)
+                    COMPREPLY=()
+                    ;;
+            esac
+            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+            return 0
+            ;;
+        ironclaw__mcp)
+            opts="-m -c -h --cli-only --no-db --message --config --no-onboard --help add remove list auth test toggle help"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 2 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
             fi
             case "${prev}" in
+                --message)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                -m)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --config)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                -c)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
                 *)
                     COMPREPLY=()
                     ;;
@@ -2394,8 +1527,96 @@ _ironclaw() {
             COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
             return 0
             ;;
-        ironclaw__subcmd__skills__subcmd__help)
-            opts="list help"
+        ironclaw__mcp__add)
+            opts="-m -c -h --client-id --auth-url --token-url --scopes --description --cli-only --no-db --message --config --no-onboard --help <NAME> <URL>"
+            if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
+                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+                return 0
+            fi
+            case "${prev}" in
+                --client-id)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --auth-url)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --token-url)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --scopes)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --description)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --message)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                -m)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --config)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                -c)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                *)
+                    COMPREPLY=()
+                    ;;
+            esac
+            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+            return 0
+            ;;
+        ironclaw__mcp__auth)
+            opts="-u -m -c -h --user --cli-only --no-db --message --config --no-onboard --help <NAME>"
+            if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
+                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+                return 0
+            fi
+            case "${prev}" in
+                --user)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                -u)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --message)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                -m)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --config)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                -c)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                *)
+                    COMPREPLY=()
+                    ;;
+            esac
+            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+            return 0
+            ;;
+        ironclaw__mcp__help)
+            opts="add remove list auth test toggle help"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
@@ -2408,7 +1629,7 @@ _ironclaw() {
             COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
             return 0
             ;;
-        ironclaw__subcmd__skills__subcmd__help__subcmd__help)
+        ironclaw__mcp__help__add)
             opts=""
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 4 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
@@ -2422,7 +1643,7 @@ _ironclaw() {
             COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
             return 0
             ;;
-        ironclaw__subcmd__skills__subcmd__help__subcmd__list)
+        ironclaw__mcp__help__auth)
             opts=""
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 4 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
@@ -2436,9 +1657,9 @@ _ironclaw() {
             COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
             return 0
             ;;
-        ironclaw__subcmd__skills__subcmd__list)
-            opts="-v -h --verbose --json --help"
-            if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
+        ironclaw__mcp__help__help)
+            opts=""
+            if [[ ${cur} == -* || ${COMP_CWORD} -eq 4 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
             fi
@@ -2450,13 +1671,213 @@ _ironclaw() {
             COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
             return 0
             ;;
-        ironclaw__subcmd__status)
-            opts="-h --json --help"
+        ironclaw__mcp__help__list)
+            opts=""
+            if [[ ${cur} == -* || ${COMP_CWORD} -eq 4 ]] ; then
+                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+                return 0
+            fi
+            case "${prev}" in
+                *)
+                    COMPREPLY=()
+                    ;;
+            esac
+            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+            return 0
+            ;;
+        ironclaw__mcp__help__remove)
+            opts=""
+            if [[ ${cur} == -* || ${COMP_CWORD} -eq 4 ]] ; then
+                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+                return 0
+            fi
+            case "${prev}" in
+                *)
+                    COMPREPLY=()
+                    ;;
+            esac
+            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+            return 0
+            ;;
+        ironclaw__mcp__help__test)
+            opts=""
+            if [[ ${cur} == -* || ${COMP_CWORD} -eq 4 ]] ; then
+                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+                return 0
+            fi
+            case "${prev}" in
+                *)
+                    COMPREPLY=()
+                    ;;
+            esac
+            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+            return 0
+            ;;
+        ironclaw__mcp__help__toggle)
+            opts=""
+            if [[ ${cur} == -* || ${COMP_CWORD} -eq 4 ]] ; then
+                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+                return 0
+            fi
+            case "${prev}" in
+                *)
+                    COMPREPLY=()
+                    ;;
+            esac
+            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+            return 0
+            ;;
+        ironclaw__mcp__list)
+            opts="-v -m -c -h --verbose --cli-only --no-db --message --config --no-onboard --help"
+            if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
+                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+                return 0
+            fi
+            case "${prev}" in
+                --message)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                -m)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --config)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                -c)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                *)
+                    COMPREPLY=()
+                    ;;
+            esac
+            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+            return 0
+            ;;
+        ironclaw__mcp__remove)
+            opts="-m -c -h --cli-only --no-db --message --config --no-onboard --help <NAME>"
+            if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
+                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+                return 0
+            fi
+            case "${prev}" in
+                --message)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                -m)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --config)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                -c)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                *)
+                    COMPREPLY=()
+                    ;;
+            esac
+            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+            return 0
+            ;;
+        ironclaw__mcp__test)
+            opts="-u -m -c -h --user --cli-only --no-db --message --config --no-onboard --help <NAME>"
+            if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
+                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+                return 0
+            fi
+            case "${prev}" in
+                --user)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                -u)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --message)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                -m)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --config)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                -c)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                *)
+                    COMPREPLY=()
+                    ;;
+            esac
+            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+            return 0
+            ;;
+        ironclaw__mcp__toggle)
+            opts="-m -c -h --enable --disable --cli-only --no-db --message --config --no-onboard --help <NAME>"
+            if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
+                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+                return 0
+            fi
+            case "${prev}" in
+                --message)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                -m)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --config)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                -c)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                *)
+                    COMPREPLY=()
+                    ;;
+            esac
+            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+            return 0
+            ;;
+        ironclaw__memory)
+            opts="-m -c -h --cli-only --no-db --message --config --no-onboard --help search read write tree status help"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 2 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
             fi
             case "${prev}" in
+                --message)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                -m)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --config)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                -c)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
                 *)
                     COMPREPLY=()
                     ;;
@@ -2464,35 +1885,13 @@ _ironclaw() {
             COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
             return 0
             ;;
-        ironclaw__subcmd__traces)
-            opts="-h --help opt-in opt-out enroll-instance status preview enqueue flush-queue queue-status credit submit list-submissions revoke ingest-health profile help"
-            if [[ ${cur} == -* || ${COMP_CWORD} -eq 2 ]] ; then
-                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
-                return 0
-            fi
-            case "${prev}" in
-                *)
-                    COMPREPLY=()
-                    ;;
-            esac
-            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
-            return 0
-            ;;
-        ironclaw__subcmd__traces__subcmd__credit)
-            opts="-h --json --notice --notice-scope --ack --snooze-hours --help"
+        ironclaw__memory__help)
+            opts="search read write tree status help"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
             fi
             case "${prev}" in
-                --notice-scope)
-                    COMPREPLY=($(compgen -f "${cur}"))
-                    return 0
-                    ;;
-                --snooze-hours)
-                    COMPREPLY=($(compgen -f "${cur}"))
-                    return 0
-                    ;;
                 *)
                     COMPREPLY=()
                     ;;
@@ -2500,14 +1899,110 @@ _ironclaw() {
             COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
             return 0
             ;;
-        ironclaw__subcmd__traces__subcmd__enqueue)
-            opts="-h --envelope --help"
+        ironclaw__memory__help__help)
+            opts=""
+            if [[ ${cur} == -* || ${COMP_CWORD} -eq 4 ]] ; then
+                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+                return 0
+            fi
+            case "${prev}" in
+                *)
+                    COMPREPLY=()
+                    ;;
+            esac
+            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+            return 0
+            ;;
+        ironclaw__memory__help__read)
+            opts=""
+            if [[ ${cur} == -* || ${COMP_CWORD} -eq 4 ]] ; then
+                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+                return 0
+            fi
+            case "${prev}" in
+                *)
+                    COMPREPLY=()
+                    ;;
+            esac
+            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+            return 0
+            ;;
+        ironclaw__memory__help__search)
+            opts=""
+            if [[ ${cur} == -* || ${COMP_CWORD} -eq 4 ]] ; then
+                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+                return 0
+            fi
+            case "${prev}" in
+                *)
+                    COMPREPLY=()
+                    ;;
+            esac
+            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+            return 0
+            ;;
+        ironclaw__memory__help__status)
+            opts=""
+            if [[ ${cur} == -* || ${COMP_CWORD} -eq 4 ]] ; then
+                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+                return 0
+            fi
+            case "${prev}" in
+                *)
+                    COMPREPLY=()
+                    ;;
+            esac
+            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+            return 0
+            ;;
+        ironclaw__memory__help__tree)
+            opts=""
+            if [[ ${cur} == -* || ${COMP_CWORD} -eq 4 ]] ; then
+                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+                return 0
+            fi
+            case "${prev}" in
+                *)
+                    COMPREPLY=()
+                    ;;
+            esac
+            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+            return 0
+            ;;
+        ironclaw__memory__help__write)
+            opts=""
+            if [[ ${cur} == -* || ${COMP_CWORD} -eq 4 ]] ; then
+                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+                return 0
+            fi
+            case "${prev}" in
+                *)
+                    COMPREPLY=()
+                    ;;
+            esac
+            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+            return 0
+            ;;
+        ironclaw__memory__read)
+            opts="-m -c -h --cli-only --no-db --message --config --no-onboard --help <PATH>"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
             fi
             case "${prev}" in
-                --envelope)
+                --message)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                -m)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --config)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                -c)
                     COMPREPLY=($(compgen -f "${cur}"))
                     return 0
                     ;;
@@ -2518,26 +2013,8 @@ _ironclaw() {
             COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
             return 0
             ;;
-        ironclaw__subcmd__traces__subcmd__enroll__subcmd__instance)
-            opts="-h --invite --include-message-text --include-tool-payloads --json --help"
-            if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
-                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
-                return 0
-            fi
-            case "${prev}" in
-                --invite)
-                    COMPREPLY=($(compgen -f "${cur}"))
-                    return 0
-                    ;;
-                *)
-                    COMPREPLY=()
-                    ;;
-            esac
-            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
-            return 0
-            ;;
-        ironclaw__subcmd__traces__subcmd__flush__subcmd__queue)
-            opts="-h --limit --help"
+        ironclaw__memory__search)
+            opts="-l -m -c -h --limit --cli-only --no-db --message --config --no-onboard --help <QUERY>"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
@@ -2547,6 +2024,26 @@ _ironclaw() {
                     COMPREPLY=($(compgen -f "${cur}"))
                     return 0
                     ;;
+                -l)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --message)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                -m)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --config)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                -c)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
                 *)
                     COMPREPLY=()
                     ;;
@@ -2554,8 +2051,196 @@ _ironclaw() {
             COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
             return 0
             ;;
-        ironclaw__subcmd__traces__subcmd__help)
-            opts="opt-in opt-out enroll-instance status preview enqueue flush-queue queue-status credit submit list-submissions revoke ingest-health profile help"
+        ironclaw__memory__status)
+            opts="-m -c -h --cli-only --no-db --message --config --no-onboard --help"
+            if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
+                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+                return 0
+            fi
+            case "${prev}" in
+                --message)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                -m)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --config)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                -c)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                *)
+                    COMPREPLY=()
+                    ;;
+            esac
+            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+            return 0
+            ;;
+        ironclaw__memory__tree)
+            opts="-d -m -c -h --depth --cli-only --no-db --message --config --no-onboard --help [PATH]"
+            if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
+                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+                return 0
+            fi
+            case "${prev}" in
+                --depth)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                -d)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --message)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                -m)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --config)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                -c)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                *)
+                    COMPREPLY=()
+                    ;;
+            esac
+            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+            return 0
+            ;;
+        ironclaw__memory__write)
+            opts="-a -m -c -h --append --cli-only --no-db --message --config --no-onboard --help <PATH> [CONTENT]"
+            if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
+                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+                return 0
+            fi
+            case "${prev}" in
+                --message)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                -m)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --config)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                -c)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                *)
+                    COMPREPLY=()
+                    ;;
+            esac
+            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+            return 0
+            ;;
+        ironclaw__onboard)
+            opts="-m -c -h --skip-auth --channels-only --cli-only --no-db --message --config --no-onboard --help"
+            if [[ ${cur} == -* || ${COMP_CWORD} -eq 2 ]] ; then
+                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+                return 0
+            fi
+            case "${prev}" in
+                --message)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                -m)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --config)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                -c)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                *)
+                    COMPREPLY=()
+                    ;;
+            esac
+            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+            return 0
+            ;;
+        ironclaw__pairing)
+            opts="-m -c -h --cli-only --no-db --message --config --no-onboard --help list approve help"
+            if [[ ${cur} == -* || ${COMP_CWORD} -eq 2 ]] ; then
+                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+                return 0
+            fi
+            case "${prev}" in
+                --message)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                -m)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --config)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                -c)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                *)
+                    COMPREPLY=()
+                    ;;
+            esac
+            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+            return 0
+            ;;
+        ironclaw__pairing__approve)
+            opts="-m -c -h --cli-only --no-db --message --config --no-onboard --help <CHANNEL> <CODE>"
+            if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
+                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+                return 0
+            fi
+            case "${prev}" in
+                --message)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                -m)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --config)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                -c)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                *)
+                    COMPREPLY=()
+                    ;;
+            esac
+            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+            return 0
+            ;;
+        ironclaw__pairing__help)
+            opts="list approve help"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
@@ -2568,7 +2253,7 @@ _ironclaw() {
             COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
             return 0
             ;;
-        ironclaw__subcmd__traces__subcmd__help__subcmd__credit)
+        ironclaw__pairing__help__approve)
             opts=""
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 4 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
@@ -2582,7 +2267,7 @@ _ironclaw() {
             COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
             return 0
             ;;
-        ironclaw__subcmd__traces__subcmd__help__subcmd__enqueue)
+        ironclaw__pairing__help__help)
             opts=""
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 4 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
@@ -2596,7 +2281,7 @@ _ironclaw() {
             COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
             return 0
             ;;
-        ironclaw__subcmd__traces__subcmd__help__subcmd__enroll__subcmd__instance)
+        ironclaw__pairing__help__list)
             opts=""
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 4 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
@@ -2610,224 +2295,26 @@ _ironclaw() {
             COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
             return 0
             ;;
-        ironclaw__subcmd__traces__subcmd__help__subcmd__flush__subcmd__queue)
-            opts=""
-            if [[ ${cur} == -* || ${COMP_CWORD} -eq 4 ]] ; then
-                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
-                return 0
-            fi
-            case "${prev}" in
-                *)
-                    COMPREPLY=()
-                    ;;
-            esac
-            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
-            return 0
-            ;;
-        ironclaw__subcmd__traces__subcmd__help__subcmd__help)
-            opts=""
-            if [[ ${cur} == -* || ${COMP_CWORD} -eq 4 ]] ; then
-                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
-                return 0
-            fi
-            case "${prev}" in
-                *)
-                    COMPREPLY=()
-                    ;;
-            esac
-            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
-            return 0
-            ;;
-        ironclaw__subcmd__traces__subcmd__help__subcmd__ingest__subcmd__health)
-            opts=""
-            if [[ ${cur} == -* || ${COMP_CWORD} -eq 4 ]] ; then
-                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
-                return 0
-            fi
-            case "${prev}" in
-                *)
-                    COMPREPLY=()
-                    ;;
-            esac
-            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
-            return 0
-            ;;
-        ironclaw__subcmd__traces__subcmd__help__subcmd__list__subcmd__submissions)
-            opts=""
-            if [[ ${cur} == -* || ${COMP_CWORD} -eq 4 ]] ; then
-                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
-                return 0
-            fi
-            case "${prev}" in
-                *)
-                    COMPREPLY=()
-                    ;;
-            esac
-            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
-            return 0
-            ;;
-        ironclaw__subcmd__traces__subcmd__help__subcmd__opt__subcmd__in)
-            opts=""
-            if [[ ${cur} == -* || ${COMP_CWORD} -eq 4 ]] ; then
-                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
-                return 0
-            fi
-            case "${prev}" in
-                *)
-                    COMPREPLY=()
-                    ;;
-            esac
-            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
-            return 0
-            ;;
-        ironclaw__subcmd__traces__subcmd__help__subcmd__opt__subcmd__out)
-            opts=""
-            if [[ ${cur} == -* || ${COMP_CWORD} -eq 4 ]] ; then
-                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
-                return 0
-            fi
-            case "${prev}" in
-                *)
-                    COMPREPLY=()
-                    ;;
-            esac
-            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
-            return 0
-            ;;
-        ironclaw__subcmd__traces__subcmd__help__subcmd__preview)
-            opts=""
-            if [[ ${cur} == -* || ${COMP_CWORD} -eq 4 ]] ; then
-                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
-                return 0
-            fi
-            case "${prev}" in
-                *)
-                    COMPREPLY=()
-                    ;;
-            esac
-            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
-            return 0
-            ;;
-        ironclaw__subcmd__traces__subcmd__help__subcmd__profile)
-            opts="token set withdraw"
-            if [[ ${cur} == -* || ${COMP_CWORD} -eq 4 ]] ; then
-                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
-                return 0
-            fi
-            case "${prev}" in
-                *)
-                    COMPREPLY=()
-                    ;;
-            esac
-            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
-            return 0
-            ;;
-        ironclaw__subcmd__traces__subcmd__help__subcmd__profile__subcmd__set)
-            opts=""
-            if [[ ${cur} == -* || ${COMP_CWORD} -eq 5 ]] ; then
-                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
-                return 0
-            fi
-            case "${prev}" in
-                *)
-                    COMPREPLY=()
-                    ;;
-            esac
-            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
-            return 0
-            ;;
-        ironclaw__subcmd__traces__subcmd__help__subcmd__profile__subcmd__token)
-            opts=""
-            if [[ ${cur} == -* || ${COMP_CWORD} -eq 5 ]] ; then
-                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
-                return 0
-            fi
-            case "${prev}" in
-                *)
-                    COMPREPLY=()
-                    ;;
-            esac
-            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
-            return 0
-            ;;
-        ironclaw__subcmd__traces__subcmd__help__subcmd__profile__subcmd__withdraw)
-            opts=""
-            if [[ ${cur} == -* || ${COMP_CWORD} -eq 5 ]] ; then
-                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
-                return 0
-            fi
-            case "${prev}" in
-                *)
-                    COMPREPLY=()
-                    ;;
-            esac
-            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
-            return 0
-            ;;
-        ironclaw__subcmd__traces__subcmd__help__subcmd__queue__subcmd__status)
-            opts=""
-            if [[ ${cur} == -* || ${COMP_CWORD} -eq 4 ]] ; then
-                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
-                return 0
-            fi
-            case "${prev}" in
-                *)
-                    COMPREPLY=()
-                    ;;
-            esac
-            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
-            return 0
-            ;;
-        ironclaw__subcmd__traces__subcmd__help__subcmd__revoke)
-            opts=""
-            if [[ ${cur} == -* || ${COMP_CWORD} -eq 4 ]] ; then
-                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
-                return 0
-            fi
-            case "${prev}" in
-                *)
-                    COMPREPLY=()
-                    ;;
-            esac
-            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
-            return 0
-            ;;
-        ironclaw__subcmd__traces__subcmd__help__subcmd__status)
-            opts=""
-            if [[ ${cur} == -* || ${COMP_CWORD} -eq 4 ]] ; then
-                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
-                return 0
-            fi
-            case "${prev}" in
-                *)
-                    COMPREPLY=()
-                    ;;
-            esac
-            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
-            return 0
-            ;;
-        ironclaw__subcmd__traces__subcmd__help__subcmd__submit)
-            opts=""
-            if [[ ${cur} == -* || ${COMP_CWORD} -eq 4 ]] ; then
-                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
-                return 0
-            fi
-            case "${prev}" in
-                *)
-                    COMPREPLY=()
-                    ;;
-            esac
-            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
-            return 0
-            ;;
-        ironclaw__subcmd__traces__subcmd__ingest__subcmd__health)
-            opts="-h --endpoint --json --help"
+        ironclaw__pairing__list)
+            opts="-m -c -h --json --cli-only --no-db --message --config --no-onboard --help <CHANNEL>"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
             fi
             case "${prev}" in
-                --endpoint)
+                --message)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                -m)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --config)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                -c)
                     COMPREPLY=($(compgen -f "${cur}"))
                     return 0
                     ;;
@@ -2838,8 +2325,68 @@ _ironclaw() {
             COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
             return 0
             ;;
-        ironclaw__subcmd__traces__subcmd__list__subcmd__submissions)
-            opts="-h --json --summary --help"
+        ironclaw__run)
+            opts="-m -c -h --cli-only --no-db --message --config --no-onboard --help"
+            if [[ ${cur} == -* || ${COMP_CWORD} -eq 2 ]] ; then
+                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+                return 0
+            fi
+            case "${prev}" in
+                --message)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                -m)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --config)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                -c)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                *)
+                    COMPREPLY=()
+                    ;;
+            esac
+            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+            return 0
+            ;;
+        ironclaw__service)
+            opts="-m -c -h --cli-only --no-db --message --config --no-onboard --help install start stop status uninstall help"
+            if [[ ${cur} == -* || ${COMP_CWORD} -eq 2 ]] ; then
+                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+                return 0
+            fi
+            case "${prev}" in
+                --message)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                -m)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --config)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                -c)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                *)
+                    COMPREPLY=()
+                    ;;
+            esac
+            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+            return 0
+            ;;
+        ironclaw__service__help)
+            opts="install start stop status uninstall help"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
@@ -2852,152 +2399,8 @@ _ironclaw() {
             COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
             return 0
             ;;
-        ironclaw__subcmd__traces__subcmd__opt__subcmd__in)
-            opts="-h --endpoint --user-scope --bearer-token-env --upload-token-issuer-url --upload-token-issuer-allowed-hosts --upload-token-audience --upload-token-tenant-id --upload-token-workload-token-env --upload-token-invite-code --upload-token-issuer-timeout-ms --include-message-text --include-tool-payloads --scope --selected-tools --allow-pii-review-bypass --min-submission-score --help"
-            if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
-                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
-                return 0
-            fi
-            case "${prev}" in
-                --endpoint)
-                    COMPREPLY=($(compgen -f "${cur}"))
-                    return 0
-                    ;;
-                --user-scope)
-                    COMPREPLY=($(compgen -f "${cur}"))
-                    return 0
-                    ;;
-                --bearer-token-env)
-                    COMPREPLY=($(compgen -f "${cur}"))
-                    return 0
-                    ;;
-                --upload-token-issuer-url)
-                    COMPREPLY=($(compgen -f "${cur}"))
-                    return 0
-                    ;;
-                --upload-token-issuer-allowed-hosts)
-                    COMPREPLY=($(compgen -f "${cur}"))
-                    return 0
-                    ;;
-                --upload-token-audience)
-                    COMPREPLY=($(compgen -f "${cur}"))
-                    return 0
-                    ;;
-                --upload-token-tenant-id)
-                    COMPREPLY=($(compgen -f "${cur}"))
-                    return 0
-                    ;;
-                --upload-token-workload-token-env)
-                    COMPREPLY=($(compgen -f "${cur}"))
-                    return 0
-                    ;;
-                --upload-token-invite-code)
-                    COMPREPLY=($(compgen -f "${cur}"))
-                    return 0
-                    ;;
-                --upload-token-issuer-timeout-ms)
-                    COMPREPLY=($(compgen -f "${cur}"))
-                    return 0
-                    ;;
-                --scope)
-                    COMPREPLY=($(compgen -W "debugging-evaluation benchmark-only ranking-training model-training" -- "${cur}"))
-                    return 0
-                    ;;
-                --selected-tools)
-                    COMPREPLY=($(compgen -f "${cur}"))
-                    return 0
-                    ;;
-                --min-submission-score)
-                    COMPREPLY=($(compgen -f "${cur}"))
-                    return 0
-                    ;;
-                *)
-                    COMPREPLY=()
-                    ;;
-            esac
-            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
-            return 0
-            ;;
-        ironclaw__subcmd__traces__subcmd__opt__subcmd__out)
-            opts="-h --user-scope --help"
-            if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
-                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
-                return 0
-            fi
-            case "${prev}" in
-                --user-scope)
-                    COMPREPLY=($(compgen -f "${cur}"))
-                    return 0
-                    ;;
-                *)
-                    COMPREPLY=()
-                    ;;
-            esac
-            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
-            return 0
-            ;;
-        ironclaw__subcmd__traces__subcmd__preview)
-            opts="-o -h --recorded-trace --include-message-text --include-tool-payloads --scope --channel --engine-version --contributor-id --credit-account-ref --output --enqueue --help"
-            if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
-                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
-                return 0
-            fi
-            case "${prev}" in
-                --recorded-trace)
-                    COMPREPLY=($(compgen -f "${cur}"))
-                    return 0
-                    ;;
-                --scope)
-                    COMPREPLY=($(compgen -W "debugging-evaluation benchmark-only ranking-training model-training" -- "${cur}"))
-                    return 0
-                    ;;
-                --channel)
-                    COMPREPLY=($(compgen -W "web cli telegram slack routine other" -- "${cur}"))
-                    return 0
-                    ;;
-                --engine-version)
-                    COMPREPLY=($(compgen -f "${cur}"))
-                    return 0
-                    ;;
-                --contributor-id)
-                    COMPREPLY=($(compgen -f "${cur}"))
-                    return 0
-                    ;;
-                --credit-account-ref)
-                    COMPREPLY=($(compgen -f "${cur}"))
-                    return 0
-                    ;;
-                --output)
-                    COMPREPLY=($(compgen -f "${cur}"))
-                    return 0
-                    ;;
-                -o)
-                    COMPREPLY=($(compgen -f "${cur}"))
-                    return 0
-                    ;;
-                *)
-                    COMPREPLY=()
-                    ;;
-            esac
-            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
-            return 0
-            ;;
-        ironclaw__subcmd__traces__subcmd__profile)
-            opts="-h --help token set withdraw help"
-            if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
-                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
-                return 0
-            fi
-            case "${prev}" in
-                *)
-                    COMPREPLY=()
-                    ;;
-            esac
-            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
-            return 0
-            ;;
-        ironclaw__subcmd__traces__subcmd__profile__subcmd__help)
-            opts="token set withdraw help"
+        ironclaw__service__help__help)
+            opts=""
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 4 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
@@ -3010,81 +2413,13 @@ _ironclaw() {
             COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
             return 0
             ;;
-        ironclaw__subcmd__traces__subcmd__profile__subcmd__help__subcmd__help)
+        ironclaw__service__help__install)
             opts=""
-            if [[ ${cur} == -* || ${COMP_CWORD} -eq 5 ]] ; then
-                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
-                return 0
-            fi
-            case "${prev}" in
-                *)
-                    COMPREPLY=()
-                    ;;
-            esac
-            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
-            return 0
-            ;;
-        ironclaw__subcmd__traces__subcmd__profile__subcmd__help__subcmd__set)
-            opts=""
-            if [[ ${cur} == -* || ${COMP_CWORD} -eq 5 ]] ; then
-                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
-                return 0
-            fi
-            case "${prev}" in
-                *)
-                    COMPREPLY=()
-                    ;;
-            esac
-            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
-            return 0
-            ;;
-        ironclaw__subcmd__traces__subcmd__profile__subcmd__help__subcmd__token)
-            opts=""
-            if [[ ${cur} == -* || ${COMP_CWORD} -eq 5 ]] ; then
-                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
-                return 0
-            fi
-            case "${prev}" in
-                *)
-                    COMPREPLY=()
-                    ;;
-            esac
-            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
-            return 0
-            ;;
-        ironclaw__subcmd__traces__subcmd__profile__subcmd__help__subcmd__withdraw)
-            opts=""
-            if [[ ${cur} == -* || ${COMP_CWORD} -eq 5 ]] ; then
-                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
-                return 0
-            fi
-            case "${prev}" in
-                *)
-                    COMPREPLY=()
-                    ;;
-            esac
-            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
-            return 0
-            ;;
-        ironclaw__subcmd__traces__subcmd__profile__subcmd__set)
-            opts="-h --handle --bio --user-scope --help"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 4 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
             fi
             case "${prev}" in
-                --handle)
-                    COMPREPLY=($(compgen -f "${cur}"))
-                    return 0
-                    ;;
-                --bio)
-                    COMPREPLY=($(compgen -f "${cur}"))
-                    return 0
-                    ;;
-                --user-scope)
-                    COMPREPLY=($(compgen -f "${cur}"))
-                    return 0
-                    ;;
                 *)
                     COMPREPLY=()
                     ;;
@@ -3092,17 +2427,13 @@ _ironclaw() {
             COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
             return 0
             ;;
-        ironclaw__subcmd__traces__subcmd__profile__subcmd__token)
-            opts="-h --user-scope --json --help"
+        ironclaw__service__help__start)
+            opts=""
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 4 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
             fi
             case "${prev}" in
-                --user-scope)
-                    COMPREPLY=($(compgen -f "${cur}"))
-                    return 0
-                    ;;
                 *)
                     COMPREPLY=()
                     ;;
@@ -3110,14 +2441,68 @@ _ironclaw() {
             COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
             return 0
             ;;
-        ironclaw__subcmd__traces__subcmd__profile__subcmd__withdraw)
-            opts="-h --user-scope --help"
+        ironclaw__service__help__status)
+            opts=""
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 4 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
             fi
             case "${prev}" in
-                --user-scope)
+                *)
+                    COMPREPLY=()
+                    ;;
+            esac
+            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+            return 0
+            ;;
+        ironclaw__service__help__stop)
+            opts=""
+            if [[ ${cur} == -* || ${COMP_CWORD} -eq 4 ]] ; then
+                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+                return 0
+            fi
+            case "${prev}" in
+                *)
+                    COMPREPLY=()
+                    ;;
+            esac
+            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+            return 0
+            ;;
+        ironclaw__service__help__uninstall)
+            opts=""
+            if [[ ${cur} == -* || ${COMP_CWORD} -eq 4 ]] ; then
+                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+                return 0
+            fi
+            case "${prev}" in
+                *)
+                    COMPREPLY=()
+                    ;;
+            esac
+            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+            return 0
+            ;;
+        ironclaw__service__install)
+            opts="-m -c -h --cli-only --no-db --message --config --no-onboard --help"
+            if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
+                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+                return 0
+            fi
+            case "${prev}" in
+                --message)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                -m)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --config)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                -c)
                     COMPREPLY=($(compgen -f "${cur}"))
                     return 0
                     ;;
@@ -3128,14 +2513,26 @@ _ironclaw() {
             COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
             return 0
             ;;
-        ironclaw__subcmd__traces__subcmd__queue__subcmd__status)
-            opts="-h --json --scope --help"
+        ironclaw__service__start)
+            opts="-m -c -h --cli-only --no-db --message --config --no-onboard --help"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
             fi
             case "${prev}" in
-                --scope)
+                --message)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                -m)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --config)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                -c)
                     COMPREPLY=($(compgen -f "${cur}"))
                     return 0
                     ;;
@@ -3146,18 +2543,26 @@ _ironclaw() {
             COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
             return 0
             ;;
-        ironclaw__subcmd__traces__subcmd__revoke)
-            opts="-h --endpoint --bearer-token-env --help <SUBMISSION_ID>"
+        ironclaw__service__status)
+            opts="-m -c -h --cli-only --no-db --message --config --no-onboard --help"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
             fi
             case "${prev}" in
-                --endpoint)
+                --message)
                     COMPREPLY=($(compgen -f "${cur}"))
                     return 0
                     ;;
-                --bearer-token-env)
+                -m)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --config)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                -c)
                     COMPREPLY=($(compgen -f "${cur}"))
                     return 0
                     ;;
@@ -3168,14 +2573,26 @@ _ironclaw() {
             COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
             return 0
             ;;
-        ironclaw__subcmd__traces__subcmd__status)
-            opts="-h --json --user-scope --help"
+        ironclaw__service__stop)
+            opts="-m -c -h --cli-only --no-db --message --config --no-onboard --help"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
             fi
             case "${prev}" in
-                --user-scope)
+                --message)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                -m)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --config)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                -c)
                     COMPREPLY=($(compgen -f "${cur}"))
                     return 0
                     ;;
@@ -3186,22 +2603,436 @@ _ironclaw() {
             COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
             return 0
             ;;
-        ironclaw__subcmd__traces__subcmd__submit)
-            opts="-h --envelope --endpoint --bearer-token-env --help"
+        ironclaw__service__uninstall)
+            opts="-m -c -h --cli-only --no-db --message --config --no-onboard --help"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
             fi
             case "${prev}" in
-                --envelope)
+                --message)
                     COMPREPLY=($(compgen -f "${cur}"))
                     return 0
                     ;;
-                --endpoint)
+                -m)
                     COMPREPLY=($(compgen -f "${cur}"))
                     return 0
                     ;;
-                --bearer-token-env)
+                --config)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                -c)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                *)
+                    COMPREPLY=()
+                    ;;
+            esac
+            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+            return 0
+            ;;
+        ironclaw__status)
+            opts="-m -c -h --cli-only --no-db --message --config --no-onboard --help"
+            if [[ ${cur} == -* || ${COMP_CWORD} -eq 2 ]] ; then
+                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+                return 0
+            fi
+            case "${prev}" in
+                --message)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                -m)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --config)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                -c)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                *)
+                    COMPREPLY=()
+                    ;;
+            esac
+            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+            return 0
+            ;;
+        ironclaw__tool)
+            opts="-m -c -h --cli-only --no-db --message --config --no-onboard --help install list remove info auth help"
+            if [[ ${cur} == -* || ${COMP_CWORD} -eq 2 ]] ; then
+                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+                return 0
+            fi
+            case "${prev}" in
+                --message)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                -m)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --config)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                -c)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                *)
+                    COMPREPLY=()
+                    ;;
+            esac
+            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+            return 0
+            ;;
+        ironclaw__tool__auth)
+            opts="-d -u -m -c -h --dir --user --cli-only --no-db --message --config --no-onboard --help <NAME>"
+            if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
+                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+                return 0
+            fi
+            case "${prev}" in
+                --dir)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                -d)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --user)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                -u)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --message)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                -m)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --config)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                -c)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                *)
+                    COMPREPLY=()
+                    ;;
+            esac
+            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+            return 0
+            ;;
+        ironclaw__tool__help)
+            opts="install list remove info auth help"
+            if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
+                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+                return 0
+            fi
+            case "${prev}" in
+                *)
+                    COMPREPLY=()
+                    ;;
+            esac
+            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+            return 0
+            ;;
+        ironclaw__tool__help__auth)
+            opts=""
+            if [[ ${cur} == -* || ${COMP_CWORD} -eq 4 ]] ; then
+                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+                return 0
+            fi
+            case "${prev}" in
+                *)
+                    COMPREPLY=()
+                    ;;
+            esac
+            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+            return 0
+            ;;
+        ironclaw__tool__help__help)
+            opts=""
+            if [[ ${cur} == -* || ${COMP_CWORD} -eq 4 ]] ; then
+                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+                return 0
+            fi
+            case "${prev}" in
+                *)
+                    COMPREPLY=()
+                    ;;
+            esac
+            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+            return 0
+            ;;
+        ironclaw__tool__help__info)
+            opts=""
+            if [[ ${cur} == -* || ${COMP_CWORD} -eq 4 ]] ; then
+                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+                return 0
+            fi
+            case "${prev}" in
+                *)
+                    COMPREPLY=()
+                    ;;
+            esac
+            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+            return 0
+            ;;
+        ironclaw__tool__help__install)
+            opts=""
+            if [[ ${cur} == -* || ${COMP_CWORD} -eq 4 ]] ; then
+                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+                return 0
+            fi
+            case "${prev}" in
+                *)
+                    COMPREPLY=()
+                    ;;
+            esac
+            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+            return 0
+            ;;
+        ironclaw__tool__help__list)
+            opts=""
+            if [[ ${cur} == -* || ${COMP_CWORD} -eq 4 ]] ; then
+                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+                return 0
+            fi
+            case "${prev}" in
+                *)
+                    COMPREPLY=()
+                    ;;
+            esac
+            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+            return 0
+            ;;
+        ironclaw__tool__help__remove)
+            opts=""
+            if [[ ${cur} == -* || ${COMP_CWORD} -eq 4 ]] ; then
+                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+                return 0
+            fi
+            case "${prev}" in
+                *)
+                    COMPREPLY=()
+                    ;;
+            esac
+            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+            return 0
+            ;;
+        ironclaw__tool__info)
+            opts="-d -m -c -h --dir --cli-only --no-db --message --config --no-onboard --help <NAME_OR_PATH>"
+            if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
+                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+                return 0
+            fi
+            case "${prev}" in
+                --dir)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                -d)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --message)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                -m)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --config)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                -c)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                *)
+                    COMPREPLY=()
+                    ;;
+            esac
+            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+            return 0
+            ;;
+        ironclaw__tool__install)
+            opts="-n -t -f -m -c -h --name --capabilities --target --release --skip-build --force --cli-only --no-db --message --config --no-onboard --help <PATH>"
+            if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
+                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+                return 0
+            fi
+            case "${prev}" in
+                --name)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                -n)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --capabilities)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --target)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                -t)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --message)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                -m)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --config)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                -c)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                *)
+                    COMPREPLY=()
+                    ;;
+            esac
+            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+            return 0
+            ;;
+        ironclaw__tool__list)
+            opts="-d -v -m -c -h --dir --verbose --cli-only --no-db --message --config --no-onboard --help"
+            if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
+                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+                return 0
+            fi
+            case "${prev}" in
+                --dir)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                -d)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --message)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                -m)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --config)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                -c)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                *)
+                    COMPREPLY=()
+                    ;;
+            esac
+            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+            return 0
+            ;;
+        ironclaw__tool__remove)
+            opts="-d -m -c -h --dir --cli-only --no-db --message --config --no-onboard --help <NAME>"
+            if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
+                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+                return 0
+            fi
+            case "${prev}" in
+                --dir)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                -d)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --message)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                -m)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --config)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                -c)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                *)
+                    COMPREPLY=()
+                    ;;
+            esac
+            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+            return 0
+            ;;
+        ironclaw__worker)
+            opts="-m -c -h --job-id --orchestrator-url --max-iterations --cli-only --no-db --message --config --no-onboard --help"
+            if [[ ${cur} == -* || ${COMP_CWORD} -eq 2 ]] ; then
+                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+                return 0
+            fi
+            case "${prev}" in
+                --job-id)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --orchestrator-url)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --max-iterations)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --message)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                -m)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --config)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                -c)
                     COMPREPLY=($(compgen -f "${cur}"))
                     return 0
                     ;;

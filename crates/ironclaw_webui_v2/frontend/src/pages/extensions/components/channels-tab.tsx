@@ -155,13 +155,13 @@ export function ChannelsTab({
           name={t("channels.cli")}
           description={t("channels.cliDesc")}
           enabled={enabledChannels.includes("cli")}
-          detail="ironclaw run"
+          detail="ironclaw run --cli"
         />
         <BuiltinRow
           name={t("channels.repl")}
           description={t("channels.replDesc")}
           enabled={enabledChannels.includes("repl")}
-          detail="ironclaw repl"
+          detail="ironclaw run --repl"
         />
         {showBuiltinSlackConnectActions &&
         (

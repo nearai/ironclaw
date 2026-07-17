@@ -6,7 +6,7 @@
 (`crates/ironclaw_engine` + `src/bridge/`, gated behind `ENGINE_V2`, default
 off) provided has a home in the **Reborn** architecture
 (`crates/ironclaw_runner*` + the neutral contract crates, shipped as the
-standalone canonical `ironclaw` binary). This document is the justification for
+standalone `ironclaw-reborn` binary). This document is the justification for
 deleting engine v2 from the codebase.
 
 ## Source of Evidence

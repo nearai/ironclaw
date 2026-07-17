@@ -360,12 +360,10 @@ jobs:
         with:
           ref: ${{ inputs.ref || github.sha }}
           persist-credentials: false
-      - name: Build default Reborn Docker image
-        run: docker build --target runtime -t ironclaw-reborn-default-test:ci .
-      - name: Build explicit Reborn Docker image
+      - name: Build Docker image
+        run: docker build --target runtime -t ironclaw-test:ci .
+      - name: Build Reborn Docker image
         run: docker build -f Dockerfile.reborn -t ironclaw-reborn-test:ci .
-      - name: Build retained v1 worker Docker image
-        run: docker build -f Dockerfile.worker -t ironclaw-worker-test:ci .
 
   version-check:
     name: Version Bump Check

@@ -18,7 +18,7 @@ WASM tools are the preferred way to add new capabilities. They run in a sandboxe
 2. Implement the WIT interface (`wit/tool.wit`)
 3. Create `<name>.capabilities.json` declaring required permissions
 4. Build with `cargo build --target wasm32-wasip2 --release`
-5. Install with `ironclaw-v1 tool install path/to/tool.wasm`
+5. Install with `ironclaw tool install path/to/tool.wasm`
 
 See `tools-src/` for examples.
 
@@ -99,7 +99,7 @@ For services without OAuth or when OAuth isn't configured:
 
 #### Auth Flow Priority
 
-When running `ironclaw-v1 tool auth <tool>`:
+When running `ironclaw tool auth <tool>`:
 
 1. Check `env_var` - if set in environment, use it directly
 2. Check `oauth` - if configured, open browser for OAuth flow
@@ -109,7 +109,7 @@ The agent reads auth config from the tool's capabilities file and provides the a
 
 ### WASM Tools vs MCP Servers: When to Use Which
 
-Both are first-class in the extension system (`ironclaw-v1 tool install` handles both), but they have different strengths.
+Both are first-class in the extension system (`ironclaw tool install` handles both), but they have different strengths.
 
 **WASM Tools (IronClaw native)**
 

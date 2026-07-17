@@ -48,7 +48,7 @@ pub enum RebornConfigSeedOutcome {
 
 /// Atomically seed a sparse first-run `config.toml` if the file is missing.
 ///
-/// The first-run seed is intentionally smaller than `ironclaw config
+/// The first-run seed is intentionally smaller than `ironclaw-reborn config
 /// init`: it records only the API version and safe default boot profile without
 /// installing an active LLM slot or pinning compiled runtime defaults. That
 /// preserves the existing "missing config" behavior for env-driven provider
@@ -108,7 +108,7 @@ fn first_run_config_toml() -> String {
         r#"# IronClaw Reborn first-run configuration.
 #
 # This sparse file is created automatically the first time an
-# `ironclaw` command starts the runtime. It records the stable,
+# `ironclaw-reborn` command starts the runtime. It records the stable,
 # safe default boot choice only; other omitted fields continue to use
 # compiled defaults unless you set them here. One-off env/CLI choices
 # are not persisted into this file.
@@ -117,7 +117,7 @@ fn first_run_config_toml() -> String {
 #   compiled defaults < this file < env vars < CLI flags.
 #
 # For a fully commented operator template, run:
-#   ironclaw config init --force
+#   ironclaw-reborn config init --force
 #
 # Secrets stay out of this file. Store token values in environment variables
 # or a secret store, and reference them here only by env-var NAME.

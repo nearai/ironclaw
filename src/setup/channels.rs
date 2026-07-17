@@ -1556,6 +1556,6 @@ mod tests {
         let hint = http_webhook_secret_hint();
         assert!(hint.contains("encrypted secrets database"));
         assert!(hint.contains("loaded automatically on startup"));
-        assert!(!hint.contains("secret get"));
+        assert!(!hint.contains("ironclaw secret get"));
     }
 }

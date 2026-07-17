@@ -39,25 +39,27 @@
 
 ## IronClaw Reborn Quick Start
 
-IronClaw Reborn is the shipping runtime. The internal
-`ironclaw_reborn_cli` package builds the canonical `ironclaw` executable while
-Reborn configuration and state remain isolated under the existing Reborn state
-root. Existing `IRONCLAW_REBORN_*` environment variables and state paths are
-unchanged by the executable rename.
+IronClaw Reborn is the standalone runtime on the `reborn-integration` branch.
+It uses the separate `ironclaw-reborn` binary from the
+`ironclaw_reborn_cli` package and a separate Reborn state root. It does not use
+the legacy `ironclaw` state directory as its config root.
+
+For the older `ironclaw` binary, see [Installation](#installation) and
+[Legacy IronClaw Usage](#legacy-ironclaw-usage).
 
 ### Build or run the binary
 
 From the repo root:
 
 ```bash
-cargo run -q -p ironclaw_reborn_cli --bin ironclaw -- --help
+cargo run -q -p ironclaw_reborn_cli --bin ironclaw-reborn -- --help
 ```
 
 Or build it first:
 
 ```bash
-cargo build -p ironclaw_reborn_cli --bin ironclaw
-./target/debug/ironclaw --help
+cargo build -p ironclaw_reborn_cli --bin ironclaw-reborn
+./target/debug/ironclaw-reborn --help
 ```
 
 The default Reborn home is `$HOME/.ironclaw/reborn`. Override it with an
@@ -65,7 +67,7 @@ absolute path when you want isolated state:
 
 ```bash
 export IRONCLAW_REBORN_HOME="$PWD/.reborn-home"
-cargo run -q -p ironclaw_reborn_cli --bin ironclaw -- config path
+cargo run -q -p ironclaw_reborn_cli --bin ironclaw-reborn -- config path
 ```
 
 `config path` and `doctor` are safe diagnostics; they report the resolved home,
@@ -78,28 +80,28 @@ The CLI-native way to configure Reborn's default model route is:
 
 ```bash
 export IRONCLAW_REBORN_HOME="$PWD/.reborn-home"
-cargo run -q -p ironclaw_reborn_cli --bin ironclaw -- models set-provider openai --model gpt-5-mini
+cargo run -q -p ironclaw_reborn_cli --bin ironclaw-reborn -- models set-provider openai --model gpt-5-mini
 ```
 
 That writes `$IRONCLAW_REBORN_HOME/config.toml` with `[llm.default]` and the
 provider's credential env-var name. Check it with:
 
 ```bash
-cargo run -q -p ironclaw_reborn_cli --bin ironclaw -- models status
-cargo run -q -p ironclaw_reborn_cli --bin ironclaw -- models list openai
+cargo run -q -p ironclaw_reborn_cli --bin ironclaw-reborn -- models status
+cargo run -q -p ironclaw_reborn_cli --bin ironclaw-reborn -- models list openai
 ```
 
 For OpenAI, set the secret value in the environment before starting:
 
 ```bash
 export OPENAI_API_KEY="sk-..."
-cargo run -q -p ironclaw_reborn_cli --bin ironclaw -- run --message "hello"
+cargo run -q -p ironclaw_reborn_cli --bin ironclaw-reborn -- run --message "hello"
 ```
 
 Omit `--message` or use `repl` for an interactive stdin session:
 
 ```bash
-cargo run -q -p ironclaw_reborn_cli --bin ironclaw -- repl
+cargo run -q -p ironclaw_reborn_cli --bin ironclaw-reborn -- repl
 ```
 
 ### `config.toml` shape
@@ -107,7 +109,7 @@ cargo run -q -p ironclaw_reborn_cli --bin ironclaw -- repl
 `config init` creates editable starter files:
 
 ```bash
-cargo run -q -p ironclaw_reborn_cli --bin ironclaw -- config init
+cargo run -q -p ironclaw_reborn_cli --bin ironclaw-reborn -- config init
 ```
 
 It writes:
@@ -180,7 +182,7 @@ continues to work:
 export IRONCLAW_REBORN_HOME="$PWD/.reborn-env-only"
 export LLM_BACKEND=openai
 export OPENAI_API_KEY="sk-..."
-cargo run -q -p ironclaw_reborn_cli --bin ironclaw -- run --message "hello"
+cargo run -q -p ironclaw_reborn_cli --bin ironclaw-reborn -- run --message "hello"
 ```
 
 Common provider env vars:
@@ -222,7 +224,7 @@ explicitly:
 
 ```bash
 export IRONCLAW_REBORN_PROFILE=local-dev-yolo
-cargo run -q -p ironclaw_reborn_cli --bin ironclaw -- repl --confirm-host-access
+cargo run -q -p ironclaw_reborn_cli --bin ironclaw-reborn -- repl --confirm-host-access
 ```
 
 ### WebUI service
@@ -233,8 +235,8 @@ and embed the SPA bundle. Build or run the binary with that feature to enable th
 command:
 
 ```bash
-cargo run -q -p ironclaw_reborn_cli --features webui-v2-beta --bin ironclaw -- serve --help
-cargo build -p ironclaw_reborn_cli --features webui-v2-beta --bin ironclaw
+cargo run -q -p ironclaw_reborn_cli --features webui-v2-beta --bin ironclaw-reborn -- serve --help
+cargo build -p ironclaw_reborn_cli --features webui-v2-beta --bin ironclaw-reborn
 ```
 
 The WebUI listener defaults to `127.0.0.1:3000`. The service requires an
@@ -247,7 +249,7 @@ export OPENAI_API_KEY="sk-..." # or the required env var for your configured pro
 export IRONCLAW_REBORN_WEBUI_TOKEN="$(openssl rand -hex 32)"
 export IRONCLAW_REBORN_WEBUI_USER_ID="reborn-cli"
 
-cargo run -q -p ironclaw_reborn_cli --features webui-v2-beta --bin ironclaw -- serve
+cargo run -q -p ironclaw_reborn_cli --features webui-v2-beta --bin ironclaw-reborn -- serve
 ```
 
 Equivalent `config.toml` listener configuration:
@@ -320,7 +322,7 @@ export IRONCLAW_REBORN_WEBUI_ALLOWED_EMAIL_DOMAINS="example.com,team.example.com
 export IRONCLAW_REBORN_WEBUI_GOOGLE_CLIENT_ID="..."
 export IRONCLAW_REBORN_WEBUI_GOOGLE_CLIENT_SECRET="..."
 
-cargo run -q -p ironclaw_reborn_cli --features webui-v2-beta --bin ironclaw -- serve --host 0.0.0.0 --port 3000
+cargo run -q -p ironclaw_reborn_cli --features webui-v2-beta --bin ironclaw-reborn -- serve --host 0.0.0.0 --port 3000
 ```
 
 `IRONCLAW_REBORN_WEBUI_ALLOWED_EMAIL_DOMAINS` is the actual admission
@@ -346,7 +348,7 @@ export IRONCLAW_REBORN_WEBUI_TOKEN="$(openssl rand -hex 32)"
 export IRONCLAW_REBORN_WEBUI_USER_ID="reborn-cli"
 export IRONCLAW_REBORN_SLACK_ENABLED="true"
 
-cargo run -q -p ironclaw_reborn_cli --features slack-v2-host-beta --bin ironclaw -- serve
+cargo run -q -p ironclaw_reborn_cli --features slack-v2-host-beta --bin ironclaw-reborn -- serve
 ```
 
 Enable Slack by setting `IRONCLAW_REBORN_SLACK_ENABLED=true`, or by adding a
@@ -420,10 +422,10 @@ IronClaw is the AI assistant you can actually trust with your personal and profe
 
 ### Prerequisites
 
-- Rust 1.96+ for source builds
+- Rust 1.96+
+- PostgreSQL 15+ with [pgvector](https://github.com/pgvector/pgvector) extension
 - Node.js 22+ with Corepack/pnpm for source builds that enable the `webui-v2-beta` feature
-- Credentials for your chosen LLM provider
-- PostgreSQL 15+ is optional for hosted/production profiles; local-dev does not require it
+- NEAR AI account (authentication handled via setup wizard)
 - `libclang` and a working C toolchain if you build the WeChat voice/SILK path from source
 
 ## Download or Build
@@ -473,12 +475,14 @@ Install it with `cargo`, just make sure you have [Rust](https://rustup.rs) insta
 git clone https://github.com/nearai/ironclaw.git
 cd ironclaw
 
-# Build the canonical executable
-cargo build --release -p ironclaw_reborn_cli --bin ironclaw
+# Build
+cargo build --release
 
-# Run canonical CLI tests
-cargo test -p ironclaw_reborn_cli
+# Run tests
+cargo test
 ```
+
+For **full release** (after modifying channel sources), run `./scripts/build-all.sh` to rebuild channels first.
 
 > **Optional:** WeChat voice notes (`audio/silk`) require the standalone
 > `ironclaw-silk-decoder` helper to be transcribable. It's excluded from the
@@ -490,18 +494,28 @@ cargo test -p ironclaw_reborn_cli
 
 </details>
 
+### Database Setup
+
+```bash
+# Create database
+createdb ironclaw
+
+# Enable pgvector
+psql ironclaw -c "CREATE EXTENSION IF NOT EXISTS vector;"
+```
+
 ## Configuration
 
-Initialize the canonical Reborn home:
+Run the setup wizard to configure IronClaw:
 
 ```bash
 ironclaw onboard
 ```
 
-The Reborn onboarding command initializes the isolated Reborn home, creates or
-preserves `config.toml` and `providers.json`, and writes its completion marker.
-It does not read or mutate the retained v1 database, channel, or setup state.
-Use `IRONCLAW_REBORN_HOME` to select a non-default state root.
+The wizard handles database connection, NEAR AI authentication (via browser OAuth),
+and secrets encryption (using your system keychain). Settings are persisted in the
+connected database; bootstrap variables (e.g. `DATABASE_URL`, `LLM_BACKEND`) are
+written to `~/.ironclaw/.env` so they are available before the database connects.
 
 ### Alternative LLM Providers
 
@@ -511,14 +525,7 @@ Built-in providers include **Anthropic**, **OpenAI**, **GitHub Copilot**, **Goog
 (300+ models), **Together AI**, **Fireworks AI**, and self-hosted servers (**vLLM**,
 **LiteLLM**) are also supported.
 
-Select a provider with `ironclaw models set-provider`, edit Reborn
-`config.toml`, or set environment variables directly:
-
-```bash
-ironclaw models set-provider openai --model gpt-5-mini
-```
-
-Environment-only configuration remains available:
+Select your provider in the wizard, or set environment variables directly:
 
 ```env
 # Example: MiniMax (built-in, 204K context)
@@ -532,7 +539,7 @@ LLM_API_KEY=sk-or-...
 LLM_MODEL=anthropic/claude-sonnet-4
 ```
 
-See the [canonical CLI model guide](docs/reborn-binary.md#models) for provider discovery and selection.
+See [docs/capabilities/llm-providers.md](docs/capabilities/llm-providers.md) for a full provider guide.
 
 ## Security
 
@@ -565,7 +572,7 @@ External content passes through multiple security layers:
 
 ### Data Protection
 
-- Runtime state stays local by default; hosted/production profiles can opt into PostgreSQL
+- All data stored locally in your PostgreSQL database
 - Secrets encrypted with AES-256-GCM
 - No telemetry, analytics, or data sharing
 - Full audit log of all tool executions
@@ -628,14 +635,14 @@ External content passes through multiple security layers:
 ## IronClaw Usage
 
 ```bash
-# First-time Reborn setup
+# First-time setup (configures database, auth, etc.)
 ironclaw onboard
 
 # Start interactive REPL
-cargo run -q -p ironclaw_reborn_cli --bin ironclaw -- repl
+cargo run
 
 # REPL with debug logging
-RUST_LOG=ironclaw=debug cargo run -q -p ironclaw_reborn_cli --bin ironclaw -- repl
+RUST_LOG=ironclaw=debug cargo run
 ```
 
 ## Development
@@ -649,10 +656,10 @@ cargo clippy --all --benches --tests --examples --all-features
 
 # Run tests
 createdb ironclaw_test
-cargo test -p ironclaw_reborn_cli
+cargo test
 
 # Run specific test
-cargo test -p ironclaw_reborn_cli test_name
+cargo test test_name
 ```
 
 - **Channels**: See [docs/channels/overview.mdx](docs/channels/overview.mdx) for setup of Telegram, Discord, and other channels.

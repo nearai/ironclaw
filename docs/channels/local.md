@@ -8,15 +8,15 @@ By default, IronClaw provides two local interfaces for chatting with your agent:
 - **Terminal UI (TUI):** chat directly in your terminal
 - **Web Gateway:** chat in your browser over a local HTTP server
 
-<Warning>
-This page covers the retained v1 runtime. Build it from source and invoke it as `ironclaw-v1`; the canonical `ironclaw` command runs Reborn.
-</Warning>
+<Note>
+If you haven't set up your agent yet, follow our [Quickstart guide](../quickstart)
+</Note>
 
 ---
 
 ## Terminal UI
 
-Simply run `ironclaw-v1` and the TUI will launch in your terminal. Use the keyboard shortcuts below to navigate and chat with your agent.
+Simply run `ironclaw` and the TUI will launch in your terminal. Use the keyboard shortcuts below to navigate and chat with your agent.
 | Key | Action |
 |-----|--------|
 | `Enter` | Send message |
@@ -106,7 +106,7 @@ When using `0.0.0.0`, use a strong auth token and place the service behind HTTPS
   </Accordion>
 
   <Accordion title="Web UI connection refused">
-    - Verify `ironclaw-v1 run` is active
+    - Verify `ironclaw run` is active
     - Check `GATEWAY_PORT` value
     - Confirm host and firewall settings
   </Accordion>

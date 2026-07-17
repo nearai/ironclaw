@@ -556,7 +556,7 @@ fn handle_message_event(event_data: &serde_json::Value) {
                                 sender_id,
                                 "open_id",
                                 &format!(
-                                    "Enter this code in IronClaw to pair your feishu account: `{}`. CLI fallback: `ironclaw-v1 pairing approve feishu {}`",
+                                    "Enter this code in IronClaw to pair your feishu account: `{}`. CLI fallback: `ironclaw pairing approve feishu {}`",
                                     result.code, result.code
                                 ),
                             );

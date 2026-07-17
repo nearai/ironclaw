@@ -18,7 +18,7 @@ WASM channel for Discord integration - handle slash commands and button interact
 5. Store in IronClaw secrets:
 
    ```bash
-   ironclaw-v1 secret set discord_bot_token YOUR_BOT_TOKEN
+   ironclaw secret set discord_bot_token YOUR_BOT_TOKEN
    ```
 
    **Note:** The `discord_bot_token` secret is used for Discord REST API calls.

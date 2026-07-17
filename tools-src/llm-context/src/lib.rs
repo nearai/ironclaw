@@ -6,7 +6,7 @@
 //! # Authentication
 //!
 //! Uses the same Brave Search API key as the Web Search tool:
-//! `ironclaw-v1 secret set brave_api_key <key>`
+//! `ironclaw secret set brave_api_key <key>`
 //!
 //! Get a key at: https://brave.com/search/api/
 
@@ -246,7 +246,7 @@ fn execute_inner(params: &str) -> Result<String, String> {
 fn preflight_check() -> Result<(), String> {
     if !near::agent::host::secret_exists("brave_api_key") {
         return Err("Brave API key not found in secret store. Set it with: \
-             ironclaw-v1 secret set brave_api_key <key>. \
+             ironclaw secret set brave_api_key <key>. \
              Get a key at: https://brave.com/search/api/"
             .into());
     }

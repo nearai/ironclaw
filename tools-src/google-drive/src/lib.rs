@@ -86,7 +86,7 @@ impl exports::near::agent::tool::Guest for GoogleDriveTool {
 fn execute_inner(params: &str) -> Result<String, String> {
     if !crate::near::agent::host::secret_exists("google_oauth_token") {
         return Err(
-            "Google OAuth token not configured. Run `ironclaw-v1 tool auth google-drive` to set up \
+            "Google OAuth token not configured. Run `ironclaw tool auth google-drive` to set up \
              OAuth, or set the GOOGLE_OAUTH_TOKEN environment variable."
                 .to_string(),
         );

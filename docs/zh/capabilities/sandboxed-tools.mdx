@@ -4,11 +4,6 @@ sidebarTitle: 沙箱工具
 description: 通过 WebAssembly（wasmtime）在沙箱中执行工具
 ---
 
-<Warning>
-本页记录 retained v1 的 WASM tool CLI。以下命令请使用 `ironclaw-v1`。
-Canonical Reborn 的扩展生命周期命令请参阅 [CLI 参考](/reborn-binary#extension)。
-</Warning>
-
 WASM 工具运行在 [wasmtime](https://wasmtime.dev/) 沙箱中。除 IronClaw 暴露的宿主函数外，网络、文件系统、凭据等能力都必须在 `capabilities.json` 中显式声明。
 
 对于需要强隔离的自定义集成，这是 IronClaw 推荐方案。
@@ -144,9 +139,9 @@ export WASM_MEMORY_LIMIT=16777216
 安装示例：
 
 ```bash
-ironclaw-v1 tool install ./my-tool.wasm
-ironclaw-v1 tool install https://example.com/tools/my-tool.wasm
-ironclaw-v1 tool list
+ironclaw tool install ./my-tool.wasm
+ironclaw tool install https://example.com/tools/my-tool.wasm
+ironclaw tool list
 ```
 
 ---

@@ -60,7 +60,7 @@ cp slack.capabilities.json ~/.ironclaw/tools/
 Use the agent CLI or API to store the tool:
 
 ```bash
-ironclaw-v1 tool install \
+ironclaw tool install \
   --name slack \
   --wasm target/wasm32-wasip2/release/slack_tool.wasm \
   --capabilities slack.capabilities.json
@@ -71,7 +71,7 @@ ironclaw-v1 tool install \
 Store your Slack bot token as a secret:
 
 ```bash
-ironclaw-v1 secret set slack_bot_token "xoxb-your-token-here"
+ironclaw secret set slack_bot_token "xoxb-your-token-here"
 ```
 
 Or via SQL:
@@ -214,7 +214,7 @@ world sandboxed-tool {
 
 Ensure you've stored the secret:
 ```bash
-ironclaw-v1 secret set slack_bot_token "xoxb-..."
+ironclaw secret set slack_bot_token "xoxb-..."
 ```
 
 ### "Endpoint not in allowlist"

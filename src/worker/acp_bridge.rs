@@ -13,7 +13,7 @@
 //! ┌──────────────────────────────────────────────┐
 //! │ Docker Container                              │
 //! │                                               │
-//! │  ironclaw-v1 acp-bridge --job-id <uuid>          │
+//! │  ironclaw acp-bridge --job-id <uuid>          │
 //! │    └─ spawns ACP agent subprocess             │
 //! │    └─ ACP handshake (initialize + session)    │
 //! │    └─ sends job description via prompt()      │

@@ -1,7 +1,7 @@
 use std::{fs, path::Path, process::Command};
 
 fn reborn_bin() -> &'static str {
-    env!("CARGO_BIN_EXE_ironclaw")
+    env!("CARGO_BIN_EXE_ironclaw-reborn")
 }
 
 #[test]
@@ -59,7 +59,7 @@ fn extension_install_json_uses_reborn_home_without_v1_state() {
         .env("IRONCLAW_REBORN_HOME", &reborn_home)
         .env("IRONCLAW_BASE_DIR", &v1_base_dir)
         .output()
-        .expect("ironclaw extension install --json should run");
+        .expect("ironclaw-reborn extension install --json should run");
 
     assert!(
         output.status.success(),
@@ -102,7 +102,7 @@ fn extension_search_human_output_escapes_control_characters() {
         .env_clear()
         .env("IRONCLAW_REBORN_HOME", &reborn_home)
         .output()
-        .expect("ironclaw extension search should run");
+        .expect("ironclaw-reborn extension search should run");
 
     assert!(
         output.status.success(),
@@ -149,7 +149,7 @@ fn run_extension_json(reborn_home: &Path, args: &[&str]) -> serde_json::Value {
         .env_clear()
         .env("IRONCLAW_REBORN_HOME", reborn_home)
         .output()
-        .expect("ironclaw extension command should run");
+        .expect("ironclaw-reborn extension command should run");
 
     assert!(
         output.status.success(),

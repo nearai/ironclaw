@@ -46,10 +46,7 @@ This guide will get you from zero to a running IronClaw instance in under 10 min
   </Tab>
 
   <Tab title="Local">
-    Best for personal use on your own machine. The default `local-dev` profile
-    keeps Reborn state under `~/.ironclaw/reborn` and does not require the
-    retained v1 database setup. For hosted and production storage, see the
-    [canonical CLI reference](/reborn-binary#run).
+    Best for personal use on your own machine. Uses libSQL (embedded SQLite) by default — no separate database server required. For production or multi-user setups, see [Database Backends](/capabilities/database).
 
     ```bash
     # Install IronClaw
@@ -60,37 +57,57 @@ This guide will get you from zero to a running IronClaw instance in under 10 min
 
 </Step>
 
-<Step title="Initialize the Agent">
+<Step title="Start the Agent">
 
-Initialize the canonical Reborn runtime. This creates its isolated config,
-provider, and WebUI token files under `~/.ironclaw/reborn` without touching
-retained v1 state:
+Start your agent for the first time:
 
 ```bash
-ironclaw onboard
-ironclaw config path
+ironclaw
 ```
 
-Configure a provider and model, then verify the effective routes:
+<Accordion title="⚠️ Error: Another IronClaw instance is already running">
 
-```bash
-ironclaw models set-provider openai --model gpt-5-mini
-ironclaw models status
+If you get the error `Error: Another IronClaw instance is already running (PID 38). If this is incorrect, remove the stale PID file: /home/agent/.ironclaw/ironclaw.pid`, simply run the following command to remove the stale PID file and try starting the agent again:
+
+```
+# Remove the stale PID file
+rm /home/agent/.ironclaw/ironclaw.pid
+
+# Then start the agent again
+ironclaw
 ```
 
-Set the API-key environment variable requested by the selected provider before
-starting a run.
+</Accordion>
+
+Since this is the first time you are starting your agent, it will ask you to configure your inference provider, and the LLM you want to use.
+
+![setup](/images/quickstart/setup-wizard.png)
+
+<Note>
+We recommend using [NEAR AI](https://cloud.near.ai/) as your inference provider for maximum privacy and security, and the `Qwen3-30B` model for its cost-effectiveness
+</Note>
+
+<Accordion title="⚠️ Error: Failed to start webhook server">
+
+If you encounter the error `Error: Channel webhook_server failed to start: Failed to bind to 0.0.0.0:8080: Address already in use (os error 98)`, simply try setting a different HTTP port:
+
+```
+# Change the default HTTP port to 8081
+export HTTP_PORT=8081
+
+# Then start the agent again
+ironclaw
+```
+
+</Accordion>
 
 </Step>
 
 <Step title="Talk with your Agent">
 
-Start an interactive REPL, or send one message and exit:
+Once your agent is up and running, you can start interacting with it through the terminal, simply type your message and the agent will respond
 
-```bash
-ironclaw repl
-ironclaw run --message "Hello"
-```
+![hello-ai](/images/quickstart/hello-ai.png)
 
 
 </Step>
@@ -112,16 +129,14 @@ ironclaw-update
 
 ## Next Steps
 
-Continue with the [Reborn onboarding contract](./reborn/onboarding) or the
-[canonical CLI reference](./reborn-binary). The retained v1 channel and tool
-guides are explicitly labeled and use the separate `ironclaw-v1` command.
+Now that you have your agent up and running, it is time to configure a new [channel](./channels/telegram) to interact with your agent from your preferred messaging platform, and add some [tools](/extensions/web-search) to give your agent more capabilities.
 
 <CardGroup cols={2}>
-  <Card title="Onboarding" icon="rocket" href="/reborn/onboarding">
-    Configure the Reborn runtime and provider routes.
+  <Card title="Channels" icon="plug" href="/channels/telegram">
+    Connect your agent to your favorite messaging platform.
   </Card>
 
-  <Card title="CLI reference" icon="terminal" href="/reborn-binary">
-    Explore canonical commands, profiles, extensions, and serve mode.
+  <Card title="Tools" icon="wrench" href="/extensions/web-search">
+    Give your agent access to external APIs and services.
   </Card>
 </CardGroup>

@@ -31,7 +31,7 @@ Preferred: configure GitHub OAuth app credentials for browser auth:
 4. Run:
 
    ```bash
-   ironclaw-v1 tool auth github
+   ironclaw tool auth github
    ```
 
 IronClaw will open the browser OAuth flow and store the resulting `github_token`.
@@ -43,7 +43,7 @@ Fallback: use a Personal Access Token if you do not want to run an OAuth app:
 3. Store the token:
 
    ```
-   ironclaw-v1 secret set github_token YOUR_TOKEN
+   ironclaw secret set github_token YOUR_TOKEN
    ```
 
 ## Usage Examples
@@ -399,7 +399,7 @@ Invalid event: 'INVALID'. Must be one of: APPROVE, REQUEST_CHANGES, COMMENT
 ### Missing Token
 
 ```text
-GitHub token not found in secret store. Set it with: ironclaw-v1 secret set github_token <token>...
+GitHub token not found in secret store. Set it with: ironclaw secret set github_token <token>...
 ```
 
 ## Troubleshooting
@@ -413,7 +413,7 @@ GitHub token not found in secret store. Set it with: ironclaw-v1 secret set gith
 ### "GitHub API error 401: Bad credentials"
 
 - The token might be invalid or expired.
-- Update the token: `ironclaw-v1 secret set github_token NEW_TOKEN`.
+- Update the token: `ironclaw secret set github_token NEW_TOKEN`.
 
 ### Rate Limiting
 

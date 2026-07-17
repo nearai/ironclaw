@@ -4,12 +4,6 @@ sidebarTitle: Sandboxed Tools
 description: Sandboxed tool execution via WebAssembly (wasmtime)
 ---
 
-<Warning>
-This page documents the retained v1 WASM tool CLI. Use `ironclaw-v1` for the
-commands below. For canonical Reborn extension lifecycle commands, see the
-[CLI reference](/reborn-binary#extension).
-</Warning>
-
 WASM tools run inside a WebAssembly sandbox powered by [wasmtime](https://wasmtime.dev/). They have access to IronClaw's host functions (logging, time, workspace), but all other capabilities — network, filesystem, credentials — must be explicitly declared in a `capabilities.json` file.
 
 This is IronClaw's recommended approach for custom integrations that need stronger isolation than a built-in Rust tool provides.
@@ -164,13 +158,13 @@ Each tool directory must contain:
 
 ```bash
 # Install from a local file
-ironclaw-v1 tool install ./my-tool.wasm
+ironclaw tool install ./my-tool.wasm
 
 # Install from a URL
-ironclaw-v1 tool install https://example.com/tools/my-tool.wasm
+ironclaw tool install https://example.com/tools/my-tool.wasm
 
 # List installed tools
-ironclaw-v1 tool list
+ironclaw tool list
 ```
 
 Or via the `extension_install` tool in chat:

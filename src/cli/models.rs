@@ -228,7 +228,7 @@ fn print_model_list(models: &Option<Vec<String>>, active_model: Option<&String>)
         None => {
             println!(
                 "\n  Could not fetch model list (missing credentials or provider unavailable).\
-                 \n  Tip: Run `ironclaw-v1 doctor` to check your configuration."
+                 \n  Tip: Run `ironclaw doctor` to check your configuration."
             );
         }
     }
@@ -371,8 +371,8 @@ fn cmd_set_provider(
                 .collect();
             anyhow::anyhow!(
                 "Unknown provider '{}'.\n\nAvailable providers: {}\n\n\
-                 Tip: Run `ironclaw-v1 models list` to see all providers with descriptions,\n\
-                 or `ironclaw-v1 onboard --step provider` for interactive setup.",
+                 Tip: Run `ironclaw models list` to see all providers with descriptions,\n\
+                 or `ironclaw onboard --step provider` for interactive setup.",
                 provider,
                 known.join(", ")
             )
@@ -434,7 +434,7 @@ fn cmd_set_provider(
         if !has_key {
             println!();
             println!(
-                "Note: {} requires an API key. Set {} or run `ironclaw-v1 onboard --step provider` to configure.",
+                "Note: {} requires an API key. Set {} or run `ironclaw onboard --step provider` to configure.",
                 canonical_id, env_var
             );
         }
@@ -578,8 +578,8 @@ async fn cmd_list_providers(
         println!();
         println!("* = active provider. Use --verbose for details.");
         println!();
-        println!("To switch provider: ironclaw-v1 models set-provider <name>");
-        println!("For guided setup:   ironclaw-v1 onboard --step provider");
+        println!("To switch provider: ironclaw models set-provider <name>");
+        println!("For guided setup:   ironclaw onboard --step provider");
     }
 
     Ok(())
@@ -649,7 +649,7 @@ async fn cmd_show_provider(
             .collect();
         anyhow::anyhow!(
             "Unknown provider '{}'.\n\nAvailable providers: {}\n\n\
-             Tip: Run `ironclaw-v1 models list` to see all providers with descriptions.",
+             Tip: Run `ironclaw models list` to see all providers with descriptions.",
             id,
             known.join(", ")
         )

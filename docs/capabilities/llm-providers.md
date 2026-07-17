@@ -3,12 +3,6 @@ title: Inference Providers
 description: IronClaw readily supports multiple LLM providers
 ---
 
-<Warning>
-This page is the retained v1 provider reference. Use `ironclaw-v1` for its
-onboarding command. For canonical Reborn provider discovery and selection, use
-`ironclaw models list --verbose` and see the [CLI reference](/reborn-binary#models).
-</Warning>
-
 IronClaw supports multiple LLM providers out of the box, including NEAR AI , Anthropic, OpenAI, Google Gemini, GitHub Copilot, Ollama, AWS Bedrock, and any OpenAI-compatible endpoint.
 
 Providers can be configured via environment variables or the onboarding wizard. IronClaw's modular architecture allows seamless integration with new providers by implementing the `LLMProvider` trait.
@@ -17,7 +11,7 @@ Providers can be configured via environment variables or the onboarding wizard. 
 To config a new provider, simply run the onboarding wizard:
 
 ```bash
-ironclaw-v1 onboard --provider-only
+ironclaw onboard --provider-only
 ```
 
 ---
@@ -138,7 +132,7 @@ GITHUB_COPILOT_MODEL=gpt-4o
 # GITHUB_COPILOT_EXTRA_HEADERS=Copilot-Integration-Id:vscode-chat
 ```
 
-`ironclaw-v1 onboard` can acquire this token for you using GitHub device login. If you
+`ironclaw onboard` can acquire this token for you using GitHub device login. If you
 already signed into Copilot through VS Code or a JetBrains IDE, you can also reuse
 the `oauth_token` stored in `~/.config/github-copilot/apps.json`. If you prefer,
 `LLM_BACKEND=github-copilot` also works as an alias.

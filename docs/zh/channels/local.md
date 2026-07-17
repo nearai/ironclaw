@@ -9,15 +9,15 @@ icon: keyboard
 - **终端界面 (TUI)：** 直接在终端中对话
 - **Web 网关：** 通过本地 HTTP 服务器在浏览器中对话
 
-<Warning>
-本页描述保留的 v1 运行时。请从源码构建并使用 `ironclaw-v1`；规范的 `ironclaw` 命令运行 Reborn。
-</Warning>
+<Note>
+如果您还没有设置智能体，请先查看我们的[快速开始指南](../quickstart)
+</Note>
 
 ---
 
 ## 终端界面
 
-只需运行 `ironclaw-v1`，TUI 将在终端中启动。使用以下快捷键进行导航和对话。
+只需运行 `ironclaw`，TUI 将在终端中启动。使用以下快捷键进行导航和对话。
 | 按键 | 操作 |
 |-----|--------|
 | `Enter` | 发送消息 |
@@ -107,7 +107,7 @@ export GATEWAY_HOST=0.0.0.0
   </Accordion>
 
   <Accordion title="Web UI 连接被拒绝">
-    - 确认 `ironclaw-v1 run` 正在运行
+    - 确认 `ironclaw run` 正在运行
     - 检查 `GATEWAY_PORT` 值
     - 确认主机和防火墙设置
   </Accordion>

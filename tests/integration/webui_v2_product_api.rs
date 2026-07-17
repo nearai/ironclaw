@@ -600,7 +600,7 @@ async fn production_runtime_canonicalizes_legacy_multi_row_extension_installs() 
 /// `restore_extension_lifecycle_state` for every other installation. Before
 /// the fix, `catalog.resolve(&package_ref)?` on that one row propagated all
 /// the way through `build_reborn_runtime`, so a SINGLE orphan row made every
-/// subsequent `ironclaw serve` startup fail. This mirrors
+/// subsequent `ironclaw-reborn serve` startup fail. This mirrors
 /// `production_runtime_canonicalizes_legacy_multi_row_extension_installs`'s
 /// restart-with-hand-edited-state-file shape, but for a catalog-absent row
 /// instead of a legacy multi-row membership shape.

@@ -14,7 +14,7 @@ the axum serve loop with the `Router` it gets handed.
   from owning server lifecycle, and this crate is host-owned ingress
   code, not product/API.
 - Provide concrete `WebuiAuthenticator` implementations the standalone
-  `ironclaw` binary can wire (env-bearer first; DB / OIDC are
+  `ironclaw-reborn` binary can wire (env-bearer first; DB / OIDC are
   follow-ups). Each accepted token must return both the `UserId` and
   the request-scoped WebUI capabilities for that exact token. Token
   comparison must be constant-time (`subtle::ConstantTimeEq`).

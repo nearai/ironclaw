@@ -415,21 +415,21 @@ def ironclaw_binary():
 
 @pytest.fixture(scope="session")
 def ironclaw_reborn_binary():
-    """Ensure the `ironclaw` binary is built with the WebChat v2 surface.
+    """Ensure the `ironclaw-reborn` binary is built with the WebChat v2 surface.
 
-    The Reborn WebUI v2 SPA and `serve` subcommand are gated behind the
+    Distinct from `ironclaw_binary` (the legacy `ironclaw` web channel): the
+    Reborn WebUI v2 SPA and `serve` subcommand are gated behind the
     `webui-v2-beta` Cargo feature, which transitively enables `libsql`. Returns
     the binary path. Used by the Reborn WebUI v2 smoke scenario.
     """
     target_dir = _cargo_target_dir()
-    binary = target_dir / "debug" / "ironclaw"
+    binary = target_dir / "debug" / "ironclaw-reborn"
     if _binary_needs_rebuild(binary):
-        print("Building ironclaw (webui-v2-beta; this may take a while)...")
+        print("Building ironclaw-reborn (webui-v2-beta; this may take a while)...")
         subprocess.run(
             [
                 "cargo", "build",
                 "-p", "ironclaw_reborn_cli",
-                "--bin", "ironclaw",
                 "--features", "webui-v2-beta",
             ],
             cwd=ROOT,
@@ -445,14 +445,14 @@ def ironclaw_reborn_binary():
 
 @pytest.fixture(scope="session")
 def ironclaw_reborn_openai_compat_binary():
-    """Ensure `ironclaw` is built with the OpenAI-compatible routes.
+    """Ensure `ironclaw-reborn` is built with the OpenAI-compatible routes.
 
     `openai-compat-beta` is a strict superset of `webui-v2-beta`, but it is not
     enabled by the generic Reborn WebUI fixture. Keep this separate so the
     OpenAI-compatible E2E explicitly proves the route-bearing binary.
     """
     target_dir = _cargo_target_dir()
-    binary = target_dir / "debug" / "ironclaw"
+    binary = target_dir / "debug" / "ironclaw-reborn"
     stamp = target_dir / "debug" / ".ironclaw-reborn-openai-compat-beta.stamp"
     input_mtime = max(
         _latest_mtime(ROOT / "Cargo.toml"),
@@ -468,12 +468,11 @@ def ironclaw_reborn_openai_compat_binary():
         or not stamp.exists()
         or stamp.stat().st_mtime < input_mtime
     ):
-        print("Building ironclaw (openai-compat-beta; this may take a while)...")
+        print("Building ironclaw-reborn (openai-compat-beta; this may take a while)...")
         subprocess.run(
             [
                 "cargo", "build",
                 "-p", "ironclaw_reborn_cli",
-                "--bin", "ironclaw",
                 "--features", "openai-compat-beta",
             ],
             cwd=ROOT,
@@ -753,7 +752,7 @@ async def ironclaw_server(
     wasm_tools_dir,
     server_ports,
 ):
-    """Start the legacy ironclaw-v1 gateway. Yields the base URL."""
+    """Start the ironclaw gateway. Yields the base URL."""
     home_dir = _HOME_TMPDIR.name
     gateway_port = server_ports["gateway"]
     http_port = server_ports["http"]

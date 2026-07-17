@@ -2,7 +2,7 @@ use clap::{CommandFactory, Parser};
 use clap_complete::{Shell, generate};
 use std::io::{self, Write};
 
-/// Generate shell completion scripts for the retained v1 CLI.
+/// Generate shell completion scripts for ironclaw
 #[derive(Parser, Debug)]
 pub struct Completion {
     /// The shell to generate completions for
@@ -17,7 +17,7 @@ impl Completion {
 
         if self.shell == Shell::Zsh {
             // Generate to buffer so we can patch the compdef call.
-            // clap_complete emits a bare `compdef` for the v1 command which
+            // clap_complete emits bare `compdef _ironclaw ironclaw` which
             // errors if sourced before compinit. Guard it so the script
             // works in all sourcing contexts.
             let mut buf = Vec::new();

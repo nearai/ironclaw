@@ -601,18 +601,6 @@ async fn migrates_v1_and_engine_v2_state_without_loss() {
         expected_total,
         "total lossy count must equal the sum of every asserted domain bucket"
     );
-    assert!(
-        report
-            .lossy
-            .iter()
-            .filter(|loss| loss.domain == Domain::Setting)
-            .all(|loss| {
-                loss.detail.contains("`ironclaw` config")
-                    && !loss.detail.contains("ironclaw-reborn")
-            }),
-        "setting remediation must point at the canonical CLI: {:#?}",
-        report.lossy
-    );
     // Semantic spot-checks on the gap set (field names, not just counts).
     let routine_trigger_gaps = report
         .lossy

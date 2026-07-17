@@ -4,7 +4,7 @@
 //! - **macOS**: launchd plist at `~/Library/LaunchAgents/com.ironclaw.daemon.plist`
 //! - **Linux**: systemd user unit at `~/.config/systemd/user/ironclaw.service`
 //!
-//! The installed service runs `ironclaw-v1 run` (the default agent mode) and is
+//! The installed service runs `ironclaw run` (the default agent mode) and is
 //! configured to restart automatically on failure.
 
 use std::path::PathBuf;
@@ -73,7 +73,7 @@ fn install_macos() -> Result<()> {
 
     std::fs::write(&file, plist)?;
     println!("Installed launchd service: {}", file.display());
-    println!("  Start with: ironclaw-v1 service start");
+    println!("  Start with: ironclaw service start");
     Ok(())
 }
 
@@ -143,7 +143,7 @@ fn install_linux() -> Result<()> {
     run_checked(Command::new("systemctl").args(["--user", "daemon-reload"])).ok();
     run_checked(Command::new("systemctl").args(["--user", "enable", SYSTEMD_UNIT])).ok();
     println!("Installed systemd user service: {}", file.display());
-    println!("  Start with: ironclaw-v1 service start");
+    println!("  Start with: ironclaw service start");
     Ok(())
 }
 
@@ -153,7 +153,7 @@ fn start() -> Result<()> {
     if cfg!(target_os = "macos") {
         let plist = macos_plist_path()?;
         if !plist.exists() {
-            bail!("Service not installed. Run `ironclaw-v1 service install` first.");
+            bail!("Service not installed. Run `ironclaw service install` first.");
         }
         run_checked(Command::new("launchctl").arg("load").arg("-w").arg(&plist))?;
         run_checked(Command::new("launchctl").arg("start").arg(SERVICE_LABEL))?;

@@ -103,7 +103,7 @@ async fn run_import_openclaw(
             }
             Err(_) => {
                 return Err(anyhow::anyhow!(
-                    "No secrets master key found. Set SECRETS_MASTER_KEY env var or run 'ironclaw-v1 onboard' first."
+                    "No secrets master key found. Set SECRETS_MASTER_KEY env var or run 'ironclaw onboard' first."
                 ));
             }
         }

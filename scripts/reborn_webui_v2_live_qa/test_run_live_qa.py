@@ -3462,7 +3462,7 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
             ):
                 proc, base_url = asyncio.run(
                     run_live_qa.start_reborn_server(
-                        root / "ironclaw",
+                        root / "ironclaw-reborn",
                         root / "reborn-home",
                         root / "out",
                         {
@@ -3535,7 +3535,7 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
             ):
                 proc, base_url = asyncio.run(
                     run_live_qa.start_reborn_server(
-                        root / "ironclaw",
+                        root / "ironclaw-reborn",
                         reborn_home,
                         root / "out",
                         {
@@ -8008,7 +8008,7 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
             with tempfile.TemporaryDirectory() as tmpdir:
                 root = Path(tmpdir)
                 output_dir = root / "out"
-                binary = root / "ironclaw"
+                binary = root / "ironclaw-reborn"
                 binary.touch()
                 prepared_home = root / "prepared-home"
                 prepared_home.mkdir()
@@ -8109,7 +8109,7 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
             output_dir = root / "out"
-            binary = root / "ironclaw"
+            binary = root / "ironclaw-reborn"
             binary.touch()
             args = argparse.Namespace(
                 all_cases=False,
@@ -8238,7 +8238,7 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
             output_dir = root / "out"
-            binary = root / "ironclaw"
+            binary = root / "ironclaw-reborn"
             binary.touch()
             args = argparse.Namespace(
                 all_cases=False,
@@ -8350,7 +8350,7 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
             output_dir = root / "out"
-            binary = root / "ironclaw"
+            binary = root / "ironclaw-reborn"
             binary.touch()
             args = argparse.Namespace(
                 all_cases=False,
@@ -8418,7 +8418,7 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
             output_dir = root / "out"
-            binary = root / "ironclaw"
+            binary = root / "ironclaw-reborn"
             binary.touch()
             args = argparse.Namespace(
                 all_cases=False,
@@ -8480,7 +8480,7 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
             output_dir = root / "out"
-            binary = root / "ironclaw"
+            binary = root / "ironclaw-reborn"
             binary.touch()
             prepared_home = root / "prepared-home"
             prepared_home.mkdir()
@@ -8568,7 +8568,7 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
             output_dir = root / "out"
-            binary = root / "ironclaw"
+            binary = root / "ironclaw-reborn"
             binary.touch()
             prepared_home = root / "prepared-home"
             prepared_home.mkdir()

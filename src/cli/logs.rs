@@ -14,7 +14,7 @@ use clap::Args;
 #[derive(Args, Debug, Clone)]
 #[command(
     about = "View and manage gateway logs",
-    long_about = "Tail gateway logs, stream live output, or adjust log level.\nExamples:\n  ironclaw-v1 logs                          # Show last 200 lines\n  ironclaw-v1 logs --follow                 # Stream live logs via SSE\n  ironclaw-v1 logs --limit 50 --json        # Last 50 lines as JSON\n  ironclaw-v1 logs --level                  # Show current log level\n  ironclaw-v1 logs --level debug            # Set log level to debug\n  ironclaw-v1 logs --grep ERROR             # Filter lines matching 'ERROR'\n  ironclaw-v1 logs -g 'timeout|refused' --context 3  # Regex with context"
+    long_about = "Tail gateway logs, stream live output, or adjust log level.\nExamples:\n  ironclaw logs                          # Show last 200 lines\n  ironclaw logs --follow                 # Stream live logs via SSE\n  ironclaw logs --limit 50 --json        # Last 50 lines as JSON\n  ironclaw logs --level                  # Show current log level\n  ironclaw logs --level debug            # Set log level to debug\n  ironclaw logs --grep ERROR             # Filter lines matching 'ERROR'\n  ironclaw logs -g 'timeout|refused' --context 3  # Regex with context"
 )]
 pub struct LogsCommand {
     /// Stream live logs from the running gateway via SSE.
@@ -107,7 +107,7 @@ fn cmd_show(cmd: &LogsCommand) -> anyhow::Result<()> {
         anyhow::bail!(
             "No gateway log file found at {}.\n\
              The log file is created when the gateway runs in background mode \
-             (e.g. `ironclaw-v1 gateway start`).",
+             (e.g. `ironclaw gateway start`).",
             log_path.display()
         );
     }
@@ -259,7 +259,7 @@ async fn cmd_follow(cmd: &LogsCommand, params: &GatewayParams) -> anyhow::Result
         .map_err(|e| {
             anyhow::anyhow!(
                 "Failed to connect to gateway at {url}: {e}\n\
-                 Is the gateway running? Try `ironclaw-v1 gateway status`."
+                 Is the gateway running? Try `ironclaw gateway status`."
             )
         })?;
 
@@ -326,7 +326,7 @@ async fn cmd_get_level(cmd: &LogsCommand, params: &GatewayParams) -> anyhow::Res
         .map_err(|e| {
             anyhow::anyhow!(
                 "Failed to connect to gateway at {url}: {e}\n\
-                 Is the gateway running? Try `ironclaw-v1 gateway status`."
+                 Is the gateway running? Try `ironclaw gateway status`."
             )
         })?;
 
@@ -392,7 +392,7 @@ async fn cmd_set_level(
         .map_err(|e| {
             anyhow::anyhow!(
                 "Failed to connect to gateway at {url}: {e}\n\
-                 Is the gateway running? Try `ironclaw-v1 gateway status`."
+                 Is the gateway running? Try `ironclaw gateway status`."
             )
         })?;
 
@@ -474,7 +474,7 @@ async fn resolve_gateway_params(
 /// propagated — the user asked for a specific file and deserves a clear
 /// failure when it is missing, unreadable, or malformed.  When no path
 /// was given we fall back to env-only resolution and silently return
-/// `None` on failure so that `ironclaw-v1 logs` works without any config.
+/// `None` on failure so that `ironclaw logs` works without any config.
 async fn load_gateway_config(
     config_path: Option<&Path>,
 ) -> anyhow::Result<Option<crate::config::GatewayConfig>> {

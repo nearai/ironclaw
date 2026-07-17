@@ -38,7 +38,7 @@ use ironclaw_skills::registry::SkillRegistry;
 
 /// Names of built-in tools that cannot be shadowed by dynamic registrations
 /// and should not be rebuilt by the self-repair system. Protected tools are
-/// authored as part of the ironclaw-v1 binary — errors on them are caller-side
+/// authored as part of the ironclaw binary — errors on them are caller-side
 /// issues (bad LLM parameters), not tool defects.
 ///
 /// Keep this list in sync with all `fn name() -> &str` implementations in
@@ -114,7 +114,7 @@ const PROTECTED_TOOL_NAMES: &[&str] = &[
 
 /// Check if a tool name is a protected built-in that should not be rebuilt
 /// by the self-repair system. Protected tools are authored as part of the
-/// ironclaw-v1 binary; errors in these tools are caller-side issues (bad
+/// ironclaw binary; errors in these tools are caller-side issues (bad
 /// parameters from the LLM), not tool defects.
 pub fn is_protected_tool_name(name: &str) -> bool {
     PROTECTED_TOOL_NAMES.contains(&name)

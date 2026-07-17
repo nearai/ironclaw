@@ -9,7 +9,7 @@
 //! FOLLOW-UP: the production mount resolver lives (private) in
 //! `ironclaw_reborn_composition`. Until a shared `pub` accessor exists, this
 //! module reproduces that layout; it MUST be reconciled with composition when
-//! the migration step is wired into canonical `ironclaw` startup so the runtime
+//! the migration step is wired into `ironclaw-reborn` startup so the runtime
 //! reads back exactly what was migrated. The acceptance test verifies
 //! round-trip through these same services, which pins conversion correctness
 //! independently of that reconciliation.

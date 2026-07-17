@@ -570,7 +570,7 @@ fn onboard_success_value(outcome: &OnboardOutcome, consents: &OnboardConsents) -
         "next_steps": "Traces are redacted locally and queued; submission requires meeting \
     the score threshold. Optional second opt-in: to appear on the public community \
     leaderboard, choose a pseudonymous handle and ask the agent to set your public \
-    Trace Commons profile, or run 'ironclaw traces profile set --handle \
+    Trace Commons profile, or run 'ironclaw-reborn traces profile set --handle \
     <pseudonymous-handle>'. Browser/manual profile setup can still use \
     'traces profile token'. \
     Opt out anytime with 'ironclaw traces opt-out'."

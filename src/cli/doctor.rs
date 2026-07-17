@@ -1,4 +1,4 @@
-//! `ironclaw-v1 doctor` - active health diagnostics.
+//! `ironclaw doctor` - active health diagnostics.
 //!
 //! Probes external dependencies and validates configuration to surface
 //! problems before they bite during normal operation. Each check reports
@@ -297,7 +297,7 @@ async fn check_nearai_session(settings: &Settings) -> CheckResult {
             return CheckResult::Pass("API key configured".into());
         }
         return CheckResult::Fail(format!(
-            "session file not found at {}. Run `ironclaw-v1 onboard`",
+            "session file not found at {}. Run `ironclaw onboard`",
             session_path.display()
         ));
     }
@@ -472,7 +472,7 @@ fn check_embeddings(settings: &Settings) -> CheckResult {
         ))
     } else {
         let hint = match config.provider.as_str() {
-            "nearai" => "run `ironclaw-v1 onboard` to create a session",
+            "nearai" => "run `ironclaw onboard` to create a session",
             "bedrock" => "set AWS_PROFILE or AWS_ACCESS_KEY_ID + AWS_SECRET_ACCESS_KEY",
             _ => "set OPENAI_API_KEY",
         };
@@ -646,12 +646,12 @@ async fn check_skills() -> CheckResult {
 /// dispatch `AppBuilder::init_secrets` uses at startup. It deliberately
 /// avoids `SecretsConfig::resolve()` because that path auto-generates and
 /// persists a key to `~/.ironclaw/.env` when none exists, which would make
-/// `ironclaw-v1 doctor` mutate user state on a fresh machine.
+/// `ironclaw doctor` mutate user state on a fresh machine.
 async fn check_secrets(settings: &Settings) -> CheckResult {
     // 1. Master-key resolution — READ-ONLY. `SecretsConfig::resolve()`
     //    auto-generates and persists a key to `~/.ironclaw/.env` when
     //    none exists, which is the correct behavior for startup but
-    //    would make `ironclaw-v1 doctor` mutate user state every time it
+    //    would make `ironclaw doctor` mutate user state every time it
     //    ran on a fresh machine. Instead, probe only for an *existing*
     //    key — env var or OS keychain — so the missing-key case reports
     //    as Skip("not configured") without creating one.
@@ -659,7 +659,7 @@ async fn check_secrets(settings: &Settings) -> CheckResult {
     let resolved_key = crate::secrets::resolve_master_key().await;
 
     let Some(master_key_hex) = resolved_key else {
-        return CheckResult::Skip("secrets not configured (run `ironclaw-v1 onboard`)".into());
+        return CheckResult::Skip("secrets not configured (run `ironclaw onboard`)".into());
     };
 
     // Determine which source won. Mirrors `SecretsConfig::resolve`'s
@@ -682,7 +682,7 @@ async fn check_secrets(settings: &Settings) -> CheckResult {
     let settings_note = match (settings.secrets_master_key_source, source) {
         (s, r) if s == r => String::new(),
         (crate::settings::KeySource::None, _) => {
-            " (settings say `None`; run `ironclaw-v1 onboard` to persist)".to_string()
+            " (settings say `None`; run `ironclaw onboard` to persist)".to_string()
         }
         (s, r) => format!(" (settings say `{s:?}`, runtime resolved `{r:?}`)"),
     };
@@ -729,7 +729,7 @@ async fn check_secrets(settings: &Settings) -> CheckResult {
             return CheckResult::Fail(format!(
                 "master key present ({source_label}){settings_note} but database unreachable: \
                  {e}. Runtime will fall back to an ephemeral in-memory secrets store (see #1537); \
-                 credentials saved via `ironclaw-v1 tool auth` will not persist across restarts"
+                 credentials saved via `ironclaw tool auth` will not persist across restarts"
             ));
         }
     };
@@ -741,7 +741,7 @@ async fn check_secrets(settings: &Settings) -> CheckResult {
         None => CheckResult::Fail(format!(
             "master key present ({source_label}){settings_note} but no backing store handle \
              available for backend '{}'. This is the #1537 hosted-TEE symptom: runtime will \
-             fall back to an ephemeral in-memory store, and credentials saved via `ironclaw-v1 tool \
+             fall back to an ephemeral in-memory store, and credentials saved via `ironclaw tool \
              auth` will not persist across restarts",
             config.database.backend
         )),
@@ -758,9 +758,7 @@ fn check_service_installed() -> CheckResult {
             Some(path) if path.exists() => {
                 CheckResult::Pass(format!("launchd plist installed ({})", path.display()))
             }
-            Some(_) => {
-                CheckResult::Skip("not installed (run `ironclaw-v1 service install`)".into())
-            }
+            Some(_) => CheckResult::Skip("not installed (run `ironclaw service install`)".into()),
             None => CheckResult::Skip("cannot determine home directory".into()),
         }
     } else if cfg!(target_os = "linux") {
@@ -769,9 +767,7 @@ fn check_service_installed() -> CheckResult {
             Some(path) if path.exists() => {
                 CheckResult::Pass(format!("systemd unit installed ({})", path.display()))
             }
-            Some(_) => {
-                CheckResult::Skip("not installed (run `ironclaw-v1 service install`)".into())
-            }
+            Some(_) => CheckResult::Skip("not installed (run `ironclaw service install`)".into()),
             None => CheckResult::Skip("cannot determine home directory".into()),
         }
     } else {

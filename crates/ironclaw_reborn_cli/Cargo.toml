@@ -1,9 +1,9 @@
 [package]
 name = "ironclaw_reborn_cli"
-version = "0.30.0"
+version = "0.1.0"
 edition = "2024"
 rust-version.workspace = true
-description = "IronClaw agent runtime"
+description = "Standalone IronClaw Reborn binary"
 authors = ["NEAR AI <support@near.ai>"]
 license = "MIT OR Apache-2.0"
 homepage = "https://github.com/nearai/ironclaw"
@@ -13,15 +13,14 @@ publish = false
 [package.metadata.ironclaw]
 layer = "app"
 
-[package.metadata.wix]
-upgrade-guid = "D0156E61-BA37-451E-8AB9-1A2ECCCFA48F"
-path-guid = "F90B6EA6-87F7-499B-BB19-CF55DE1EB339"
-license = false
-eula = false
+# Keep disabled until #3483 resolves cargo-dist tag/versioning + Windows WiX
+# packaging for the standalone Reborn binary.
+[package.metadata.dist]
+dist = false
 
 [features]
 # libsql is the default storage backend: a file-backed local database needs
-# no external server, so a default `ironclaw` build is runnable as-is.
+# no external server, so a default `ironclaw-reborn` build is runnable as-is.
 # `postgres` remains opt-in for deployments that point `[storage]` at a server.
 default = ["root-llm-provider", "libsql"]
 # Everything a full-fat local/desktop build ships: the WebChat v2 HTTP
@@ -47,7 +46,7 @@ root-llm-provider = [
     "ironclaw_reborn_composition/root-llm-provider",
 ]
 # Compile in the WebChat v2 beta HTTP gateway subcommand
-# (`ironclaw serve`). Off by default so a default binary build
+# (`ironclaw-reborn serve`). Off by default so a default binary build
 # does not link the auth/HTTP middleware stack at all — production
 # binaries that genuinely expose v2 over HTTP must opt in. Pulls in
 # `webui-v2-beta` on the composition crate plus the ingress crate
@@ -62,7 +61,7 @@ webui-v2-beta = [
     "dep:ironclaw_reborn_webui_ingress",
     "dep:async-trait",
 ]
-# Compile in the Slack Events API host-beta mount for `ironclaw serve`.
+# Compile in the Slack Events API host-beta mount for `ironclaw-reborn serve`.
 # Still requires effective Slack enablement at runtime before the route is
 # mounted: either `[slack].enabled = true` or
 # `IRONCLAW_REBORN_SLACK_ENABLED=true`.
@@ -74,7 +73,7 @@ openai-compat-beta = [
     "webui-v2-beta",
     "ironclaw_reborn_composition/openai-compat-beta",
 ]
-# Enable production PostgreSQL storage composition for `ironclaw`.
+# Enable production PostgreSQL storage composition for `ironclaw-reborn`.
 postgres = [
     "ironclaw_reborn_composition/postgres",
 ]
@@ -139,5 +138,5 @@ ironclaw_reborn_composition = { path = "../ironclaw_reborn_composition", version
 ironclaw_common = { path = "../ironclaw_common", version = "0.4.2" }
 
 [[bin]]
-name = "ironclaw"
+name = "ironclaw-reborn"
 path = "src/main.rs"

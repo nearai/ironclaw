@@ -5,9 +5,9 @@ description: "Interact with your agent through WeChat"
 
 Connect IronClaw to WeChat through a WeChat iLink bot account. The channel uses QR-code login and long polling, so it does not require a public webhook URL or tunnel.
 
-<Warning>
-This page covers the retained v1 runtime. Build it from source and invoke it as `ironclaw-v1`; the canonical `ironclaw` command runs Reborn.
-</Warning>
+<Note>
+If you haven't set up your agent yet, follow our [Quickstart guide](../quickstart)
+</Note>
 
 <Warning>
 The WeChat channel supports a single connected account and direct-message conversations. Group chats and multi-account management are not available yet.
@@ -24,10 +24,10 @@ The WeChat channel supports a single connected account and direct-message conver
 WeChat is distributed as a WASM channel. You can install it from the Web Gateway's Extensions view, or from the terminal:
 
 ```bash
-ironclaw-v1 registry install wechat
+ironclaw registry install wechat
 ```
 
-The `ironclaw-v1 onboard --channels-only` wizard can also install the channel, but the QR login flow is designed for the Web Gateway.
+The `ironclaw onboard --channels-only` wizard can also install the channel, but the QR login flow is designed for the Web Gateway.
 
 </Step>
 
@@ -36,7 +36,7 @@ The `ironclaw-v1 onboard --channels-only` wizard can also install the channel, b
 Start the agent if it is not already running:
 
 ```bash
-ironclaw-v1
+ironclaw
 ```
 
 Open the Web Gateway, then go to **Settings** -> **Extensions**.
@@ -123,7 +123,7 @@ If the login expires or WeChat reports that the token is no longer valid, open t
 
 <AccordionGroup>
   <Accordion title="I don't see the WeChat channel">
-    Install it with `ironclaw-v1 registry install wechat`, then restart IronClaw and refresh the Web Gateway.
+    Install it with `ironclaw registry install wechat`, then restart IronClaw and refresh the Web Gateway.
   </Accordion>
 
   <Accordion title="The QR page did not open">

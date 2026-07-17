@@ -3,7 +3,7 @@
 //!
 //! Thin CLI wrapper over [`ironclaw_reborn_migration::run_migration`]. The
 //! conversion engine lives in the library so it can later be reused inside
-//! canonical `ironclaw` startup (documented follow-up).
+//! `ironclaw-reborn` startup (documented follow-up).
 
 use std::path::PathBuf;
 use std::process::ExitCode;

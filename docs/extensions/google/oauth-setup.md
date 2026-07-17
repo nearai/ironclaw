@@ -3,12 +3,6 @@ title: "OAuth Setup"
 description: "One-time setup for any Google extension in IronClaw"
 ---
 
-<Warning>
-This OAuth guide accompanies the retained v1 Google extension pages. Their CLI
-commands use `ironclaw-v1`; canonical Reborn extension lifecycle is documented
-in the [CLI reference](/reborn-binary#extension).
-</Warning>
-
 All Google extensions share the same OAuth 2.0 setup. Complete these steps once — you can reuse the same Google Cloud project and credentials for every Google extension you install.
 
 ---

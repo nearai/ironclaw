@@ -5,7 +5,7 @@
 //! A standalone migration cannot safely fold arbitrary v1 keys into that typed
 //! schema (and the config file lives at the Reborn home, not in the state
 //! store), so every v1 setting is enumerated and recorded as a loss naming the
-//! key, so an operator can re-apply the ones that matter via `ironclaw`
+//! key, so an operator can re-apply the ones that matter via `ironclaw-reborn`
 //! config. Nothing is silently dropped.
 
 use crate::error::MigrationError;
@@ -38,7 +38,7 @@ pub(crate) async fn run(
                 LossReason::NoTargetConcept,
                 "Reborn config is a typed config.toml / providers.json / LlmKeyStore; \
                  there is no generic key/value settings store to migrate into. \
-                 Re-apply via `ironclaw` config if needed."
+                 Re-apply via `ironclaw-reborn` config if needed."
                     .to_string(),
             );
         }

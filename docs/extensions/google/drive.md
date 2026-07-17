@@ -3,12 +3,6 @@ title: "Drive"
 description: "Let your agent manage files and folders in Google Drive"
 ---
 
-<Warning>
-This integration guide targets the retained v1 runtime. Use `ironclaw-v1` for
-the `registry` and `tool` commands below. Canonical Reborn uses
-`ironclaw extension`; see the [CLI reference](/reborn-binary#extension).
-</Warning>
-
 The Google Drive extension allows your agent to interact with your Google Drive — listing, searching, uploading, downloading, sharing, and organizing files and folders. It supports both personal Drive and shared drives, making it ideal for file management workflows, automated uploads, and permission management.
 
 ---
@@ -28,7 +22,7 @@ In your Google Cloud project, navigate to **APIs & Services → Library**, searc
 <Step title="Install the Extension">
 
 ```bash
-ironclaw-v1 registry install google-drive
+ironclaw registry install google-drive
 ```
 
 </Step>
@@ -36,7 +30,7 @@ ironclaw-v1 registry install google-drive
 <Step title="Authorize Access">
 
 ```bash
-ironclaw-v1 tool auth google-drive
+ironclaw tool auth google-drive
 ```
 
 IronClaw will provide a URL for you to authenticate - remember to follow the [auth setup](./oauth-setup) to enable your agent to capture the callback. If possible, it will open a browser window. Once approved, the token is stored securely and refreshed automatically.

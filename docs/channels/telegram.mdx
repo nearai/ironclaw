@@ -5,9 +5,9 @@ description: "Interact with your agent through Telegram"
 
 You can create a Telegram bot and connect your IronClaw agent to it. Once configured, you can talk to your agent in direct messages or add it to a group chat so it can participate there.
 
-<Warning>
-This page covers the retained v1 runtime. Build it from source and invoke it as `ironclaw-v1`; the canonical `ironclaw` command runs Reborn.
-</Warning>
+<Note>
+If you haven't set up your agent yet, follow our [Quickstart guide](../quickstart)
+</Note>
 
 ---
 
@@ -37,7 +37,7 @@ In order to create a new Telegram bot, you need to talk to [BotFather](https://t
     Invoke the IronClaw CLI onboard wizard using the `--channels-only` flag to configure only the channels without going through the entire onboarding process again:
 
     ```
-    ironclaw-v1 onboard --channels-only
+    ironclaw onboard --channels-only
     ```
 
     <Steps>
@@ -57,16 +57,16 @@ In order to create a new Telegram bot, you need to talk to [BotFather](https://t
 </Step>
 
 <Step title="Test your Telegram channel">
-    Now that you have configured your Telegram channel, it is time to test it out. Start the `ironclaw-v1` agent if it is not already running:
+    Now that you have configured your Telegram channel, it is time to test it out. Start the `ironclaw` agent if it is not already running:
 
     ```
-    ironclaw-v1
+    ironclaw
     ```
 
     Send a message to your bot in Telegram. It will respond with a command that you will need to execute in the terminal to complete the channel setup:
 
     ```
-    ironclaw-v1 pairing approve telegram <PAIRING_CODE>
+    ironclaw pairing approve telegram <PAIRING_CODE>
     ```
 </Step>
 
@@ -333,6 +333,6 @@ The webhook secret is only relevant when `polling_enabled` is `false`. If you ar
   </Accordion>
 
   <Accordion title="Owner binding timeout during setup">
-    The wizard waits 120 seconds for the first message. If it times out, send `/start` to your bot in Telegram and re-run `ironclaw-v1 onboard --channels-only`.
+    The wizard waits 120 seconds for the first message. If it times out, send `/start` to your bot in Telegram and re-run `ironclaw onboard --channels-only`.
   </Accordion>
 </AccordionGroup>

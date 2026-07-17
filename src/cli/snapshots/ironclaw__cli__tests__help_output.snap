@@ -4,7 +4,7 @@ expression: help
 ---
 Secure personal AI assistant that protects your data and expands its capabilities
 
-Usage: ironclaw-v1 [OPTIONS] [COMMAND]
+Usage: ironclaw [OPTIONS] [COMMAND]
 
 Commands:
   run         Run the AI agent

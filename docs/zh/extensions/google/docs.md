@@ -3,12 +3,6 @@ title: "Google Docs"
 description: "让您的智能体创建并编辑 Google 文档"
 ---
 
-<Warning>
-本集成指南适用于 retained v1。以下 `registry` 和 `tool` 命令请使用
-`ironclaw-v1`。Canonical Reborn 使用 `ironclaw extension`，详见
-[CLI 参考](/reborn-binary#extension)。
-</Warning>
-
 Google Docs 扩展允许智能体操作 Google 文档，包括创建文档、读取内容、插入与格式化文本、管理表格与列表、执行批量更新。适合报告起草、内容编辑与文档流程自动化。
 
 ---
@@ -28,7 +22,7 @@ Google Docs 扩展允许智能体操作 Google 文档，包括创建文档、读
 <Step title="安装扩展">
 
 ```bash
-ironclaw-v1 registry install google-docs
+ironclaw registry install google-docs
 ```
 
 </Step>
@@ -36,7 +30,7 @@ ironclaw-v1 registry install google-docs
 <Step title="授权访问">
 
 ```bash
-ironclaw-v1 tool auth google-docs
+ironclaw tool auth google-docs
 ```
 
 IronClaw 会提供认证链接。请确保已按 [auth setup](./oauth-setup) 完成回调配置。若环境支持，会自动打开浏览器。授权成功后，令牌会被安全保存并自动刷新。

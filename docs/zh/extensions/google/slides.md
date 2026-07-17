@@ -3,12 +3,6 @@ title: "Google Slides"
 description: "让您的智能体创建并编辑 Google 演示文稿"
 ---
 
-<Warning>
-本集成指南适用于 retained v1。以下 `registry` 和 `tool` 命令请使用
-`ironclaw-v1`。Canonical Reborn 使用 `ironclaw extension`，详见
-[CLI 参考](/reborn-binary#extension)。
-</Warning>
-
 Google Slides 扩展允许智能体操作演示文稿，包括创建演示、管理幻灯片、插入和格式化文本、添加形状与图片，以及执行批量更新。适合自动生成汇报材料和持续更新内容。
 
 ---
@@ -28,7 +22,7 @@ Google Slides 扩展允许智能体操作演示文稿，包括创建演示、管
 <Step title="安装扩展">
 
 ```bash
-ironclaw-v1 registry install google-slides
+ironclaw registry install google-slides
 ```
 
 </Step>
@@ -36,7 +30,7 @@ ironclaw-v1 registry install google-slides
 <Step title="授权访问">
 
 ```bash
-ironclaw-v1 tool auth google-slides
+ironclaw tool auth google-slides
 ```
 
 IronClaw 会提供认证链接。请确保已按 [auth setup](./oauth-setup) 完成回调配置。若环境支持，会自动打开浏览器。授权成功后，令牌会被安全保存并自动刷新。

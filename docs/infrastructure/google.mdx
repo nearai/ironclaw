@@ -175,11 +175,10 @@ With the server hardened, install IronClaw and start it up:
 curl --proto '=https' --tlsv1.2 -LsSf https://github.com/nearai/ironclaw/releases/latest/download/ironclaw-installer.sh | sh
 ```
 
-Initialize the canonical Reborn runtime, then start its interactive REPL:
+Then start IronClaw and follow the prompts to complete the setup:
 
 ```bash
-ironclaw onboard
-ironclaw repl
+ironclaw
 ```
 
 <Tip>
@@ -190,6 +189,8 @@ We recommend using a session manager like `tmux` or `screen` so you can easily d
 
 ## Next Steps
 
-Follow the [Quickstart Guide](/quickstart) to configure a provider and send your
-first message. See the [canonical CLI reference](/reborn-binary) for profiles,
-production storage, extensions, and WebUI serve mode.
+Follow our [Quickstart Guide](/quickstart) to create your first agent, connect it to Telegram, and start exploring IronClaw's capabilities.
+
+Want to talk with your agent using a messaging app? Check out the [**Channels**](/channels/overview) documentation to learn how to connect.
+
+Need your agent to perform complex tasks that require multiple tools? Check out the [**Extensions**](/extensions/overview) documentation.

@@ -183,7 +183,7 @@ impl SandboxReaper {
                     tracing::warn!(
                         container_id = %&container_id[..12.min(container_id.len())],
                         label_key = %&self.config.container_label,
-                        "Reaper: ironclaw-v1 container missing valid job_id label"
+                        "Reaper: ironclaw container missing valid job_id label"
                     );
                     continue;
                 }

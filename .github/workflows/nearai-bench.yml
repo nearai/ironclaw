@@ -1,6 +1,6 @@
 # Slash-command dispatcher for nearai-bench on PR comments. A maintainer
 # (write/maintain/admin permission) comments `/benchmark <suite>`
-# (optionally `--model <id>` and/or `--framework ironclaw`)
+# (optionally `--model <id>` and/or `--framework <ironclaw|ironclaw-reborn>`)
 # on a PR; this workflow validates auth,
 # parses the command, resolves the PR head SHA, reacts with 🚀, then
 # delegates to nearai/benchmarks's reusable workflow which builds the
@@ -11,7 +11,7 @@
 # https://github.com/nearai/benchmarks/blob/main/docs/ci/README.md
 #
 # Requires `OPENROUTER_API_KEY` as an org-level (or repo-level) secret, plus
-# `NEARAI_API_KEY` for IronClaw runs that route the agent to NEAR AI cloud.
+# `NEARAI_API_KEY` for ironclaw-reborn runs (agent routes to NEAR AI cloud).
 # Only those secrets are forwarded — `secrets: inherit` is intentionally
 # NOT used (supply-chain hardening).
 
@@ -108,13 +108,13 @@ jobs:
           BENCH_PIN: main
         run: |
           set -euo pipefail
-          # Grammar: /benchmark <suite> [--model <model-id>] [--framework ironclaw]
+          # Grammar: /benchmark <suite> [--model <model-id>] [--framework <ironclaw|ironclaw-reborn>]
           #   <suite>     first token after the command, [A-Za-z0-9_-]+
           #   --model     [A-Za-z0-9_./:-]+ (allows openrouter-style "vendor/model")
-          #   --framework ironclaw (default and only supported runtime)
+          #   --framework ironclaw (default) | ironclaw-reborn
           # The two flags may appear in either order. Newlines/tabs are
           # normalised to single spaces so a multi-line comment still parses.
-          USAGE=$'Usage: `/benchmark <suite> [--model <model-id>] [--framework ironclaw]`\n\nExample: `/benchmark ironclaw-smoke --framework ironclaw`'
+          USAGE=$'Usage: `/benchmark <suite> [--model <model-id>] [--framework ironclaw|ironclaw-reborn]`\n\nExample: `/benchmark ironclaw-smoke --framework ironclaw-reborn`'
           body_norm=$(printf '%s' "$BODY" | tr '\n\t' '  ' | tr -s ' ')
           suite=$(printf '%s' "$body_norm" | sed -nE 's@^/benchmark[[:space:]]+([A-Za-z0-9_-]+).*@\1@p')
           model=$(printf '%s' "$body_norm" | sed -nE 's@.*--model[[:space:]]+([A-Za-z0-9_./:-]+).*@\1@p')
@@ -135,8 +135,8 @@ jobs:
           fi
           # Validate the framework against the allowlist. Empty = unset =
           # reusable workflow's default (ironclaw).
-          if [ -n "$framework" ] && [ "$framework" != "ironclaw" ]; then
-            gh pr comment "$PR" --repo "$REPO" --body "Unknown framework \`${framework}\`. Use \`ironclaw\` (the default and only supported runtime)."$'\n\n'"$USAGE"
+          if [ -n "$framework" ] && [ "$framework" != "ironclaw" ] && [ "$framework" != "ironclaw-reborn" ]; then
+            gh pr comment "$PR" --repo "$REPO" --body "Unknown framework \`${framework}\`. Use \`ironclaw\` (default) or \`ironclaw-reborn\`."$'\n\n'"$USAGE"
             exit 0
           fi
           # Pre-dispatch suite check: refuse unknown suite names before
@@ -245,7 +245,7 @@ jobs:
     # to every secret available here.
     secrets:
       OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
-      # IronClaw runs may route the agent to NEAR AI cloud; the reusable
-      # workflow reads this for LLM_BACKEND=nearai and otherwise uses its
-      # configured provider.
+      # ironclaw-reborn runs route the agent to NEAR AI cloud; the reusable
+      # workflow reads this for LLM_BACKEND=nearai. Optional there, so legacy
+      # ironclaw runs (OpenRouter) are unaffected if it's unset.
       NEARAI_API_KEY: ${{ secrets.NEARAI_API_KEY }}

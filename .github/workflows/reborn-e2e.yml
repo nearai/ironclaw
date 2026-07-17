@@ -220,12 +220,12 @@ jobs:
           key: reborn-e2e-webui-v2-smoke
           save-if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
 
-      - name: Build ironclaw with WebChat v2 surface
+      - name: Build ironclaw-reborn with WebChat v2 surface
         run: >-
           cargo build
           -p ironclaw_reborn_cli
           --features openai-compat-beta,slack-v2-host-beta
-          --bin ironclaw
+          --bin ironclaw-reborn
 
       - name: Mark OpenAI-compatible binary feature set
         run: touch target/debug/.ironclaw-reborn-openai-compat-beta.stamp
@@ -270,10 +270,10 @@ jobs:
           product_ref="$(git rev-parse HEAD)"
           artifact_dir="artifacts/reborn-webui-v2-binary"
           mkdir -p "${artifact_dir}"
-          tar -C target/debug -czf "${artifact_dir}/ironclaw.tar.gz" ironclaw
+          tar -C target/debug -czf "${artifact_dir}/ironclaw-reborn.tar.gz" ironclaw-reborn
           (
             cd "${artifact_dir}"
-            sha256sum ironclaw.tar.gz > ironclaw.tar.gz.sha256
+            sha256sum ironclaw-reborn.tar.gz > ironclaw-reborn.tar.gz.sha256
           )
           jq -n \
             --arg product_ref "${product_ref}" \

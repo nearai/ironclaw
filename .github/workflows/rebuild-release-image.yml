@@ -30,62 +30,24 @@ jobs:
           ref: ${{ inputs.source_ref }}
           persist-credentials: false
 
-      - name: Extract source release version
+      - name: Extract version from Cargo.toml
         id: version
-        env:
-          SOURCE_REF: ${{ inputs.source_ref }}
         run: |
-          case "${SOURCE_REF}" in
-            v*)
-              # Bare tags are used both by historical v0.1-v0.21 releases
-              # and by the Reborn cutover from v0.30 onward. The checked-out
-              # source determines which manifest produced the release.
-              if [[ -f crates/ironclaw_reborn_cli/Cargo.toml ]]; then
-                VERSION_MANIFEST="crates/ironclaw_reborn_cli/Cargo.toml"
-              else
-                VERSION_MANIFEST="Cargo.toml"
-              fi
-              TAG_PREFIX="v"
-              ;;
-            ironclaw-v*)
-              # Historical releases before the Reborn cutover used the root
-              # package and `ironclaw-v*` tags.
-              VERSION_MANIFEST="Cargo.toml"
-              TAG_PREFIX="ironclaw-v"
-              ;;
-            *)
-              echo "::error::source_ref '${SOURCE_REF}' must be a v* or historical ironclaw-v* release tag"
-              exit 1
-              ;;
-          esac
-          VERSION="$(
-            python3 - "${VERSION_MANIFEST}" <<'PY'
-          import sys
-          import tomllib
-
-          with open(sys.argv[1], "rb") as manifest:
-              version = tomllib.load(manifest).get("package", {}).get("version")
-          if not isinstance(version, str):
-              raise SystemExit(f"missing [package].version in {sys.argv[1]}")
-          print(version)
-          PY
-          )"
+          VERSION=$(grep '^version' Cargo.toml | head -1 | sed 's/.*"\(.*\)"/\1/')
           if [[ ! "${VERSION}" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]]; then
             echo "::error::Extracted version '${VERSION}' must match MAJOR.MINOR.PATCH[-prerelease] (Docker tags forbid '+')"
             exit 1
           fi
           echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
-          echo "tag_prefix=${TAG_PREFIX}" >> "$GITHUB_OUTPUT"
-          echo "Detected version ${VERSION} from ${VERSION_MANIFEST}"
+          echo "Detected version: ${VERSION}"
 
       - name: Verify requested tag matches source version
         env:
           EXPECTED_TAG: ${{ inputs.tag }}
           SOURCE_REF: ${{ inputs.source_ref }}
           SOURCE_VERSION: ${{ steps.version.outputs.version }}
-          TAG_PREFIX: ${{ steps.version.outputs.tag_prefix }}
         run: |
-          EXPECTED_REF="${TAG_PREFIX}${EXPECTED_TAG}"
+          EXPECTED_REF="ironclaw-v${EXPECTED_TAG}"
           if [[ "${SOURCE_REF}" != "${EXPECTED_REF}" ]]; then
             echo "::error::Expected source_ref '${EXPECTED_REF}' for tag '${EXPECTED_TAG}', got '${SOURCE_REF}'"
             exit 1

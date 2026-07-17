@@ -144,7 +144,7 @@ fn cmd_list(
     let bundle_names = catalog.bundle_names();
     if !bundle_names.is_empty() {
         println!("\nBundles available: {}", bundle_names.join(", "));
-        println!("Use `ironclaw-v1 registry info <bundle>` for details.");
+        println!("Use `ironclaw registry info <bundle>` for details.");
     }
 
     Ok(())
@@ -304,7 +304,7 @@ async fn cmd_install(
             && auth.method.as_deref() != Some("none")
         {
             println!(
-                "\nNext step: authenticate with `ironclaw-v1 tool auth {}`",
+                "\nNext step: authenticate with `ironclaw tool auth {}`",
                 manifest.name
             );
             if let Some(url) = &auth.setup_url {

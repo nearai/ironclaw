@@ -10,7 +10,7 @@
 //! blueprint: an operator who *would* paste a raw API key into
 //! `~/.ironclaw/reborn/config.toml` instead of pointing at
 //! `OPENAI_API_KEY` should be told no, loudly, on the very first
-//! `ironclaw run`. That way the muscle-memory carries straight
+//! `ironclaw-reborn run`. That way the muscle-memory carries straight
 //! into blueprint authoring later.
 //!
 //! The detection is pattern-based on the known high-signal shapes that

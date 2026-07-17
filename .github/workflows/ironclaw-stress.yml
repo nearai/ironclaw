@@ -222,7 +222,7 @@ jobs:
           cargo build --release \
             --package ironclaw_reborn_cli \
             --features webui-v2-beta,postgres,inmemory-turn-state \
-            --bin ironclaw
+            --bin ironclaw-reborn
           cargo build --release --package ironclaw_stress
 
       - name: Run hosted-single-tenant Postgres API capacity workload
@@ -259,7 +259,7 @@ jobs:
           EOF
 
           IRONCLAW_REBORN_HOME="$RUNNER_TEMP/ironclaw-reborn-home" \
-            target/release/ironclaw serve \
+            target/release/ironclaw-reborn serve \
               --host 127.0.0.1 \
               --port 18080 \
               > target/ironclaw-stress/postgres-api-server.log \
@@ -272,7 +272,7 @@ jobs:
               break
             fi
             if ! kill -0 "$server_pid" 2>/dev/null; then
-              echo "ironclaw exited before becoming healthy" >&2
+              echo "ironclaw-reborn exited before becoming healthy" >&2
               cat target/ironclaw-stress/postgres-api-server.log >&2 || true
               exit 1
             fi
@@ -286,7 +286,7 @@ jobs:
               break
             fi
             if ! kill -0 "$server_pid" 2>/dev/null; then
-              echo "ironclaw exited before WebUI API readiness" >&2
+              echo "ironclaw-reborn exited before WebUI API readiness" >&2
               cat target/ironclaw-stress/postgres-api-server.log >&2 || true
               exit 1
             fi

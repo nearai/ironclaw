@@ -54,7 +54,7 @@ migration-support = []
 # Compose the Reborn WebChat v2 HTTP gateway in this crate. Off by
 # default; turning this on pulls in the v2 route crate plus the axum /
 # tower-http middleware stack used by the `webui_serve` module. The
-# canonical `ironclaw` binary opts in to call `serve_webui_v2`
+# standalone `ironclaw-reborn` binary opts in to call `serve_webui_v2`
 # from its `serve` subcommand. Substrate-only callers (v1 `AppBuilder`,
 # diagnostic harnesses) stay off the feature and carry no WebUI code.
 webui-v2-beta = [

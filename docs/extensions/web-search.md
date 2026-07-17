@@ -3,12 +3,6 @@ title: "Web Search"
 description: "Let your agent search the web"
 ---
 
-<Warning>
-This integration guide targets the retained v1 runtime. Use `ironclaw-v1` for
-the `registry` and `tool` commands below. Canonical Reborn uses
-`ironclaw extension`; see the [CLI reference](/reborn-binary#extension).
-</Warning>
-
 The Web Search tool allows your agent to use the [Brave Search API]() search the web for up-to-date information, making it ideal for answering questions about current events, finding specific data, or gathering general information.
 
 ---
@@ -35,7 +29,7 @@ As of the time of writing, Brave Search API offers 5$ of free credits per month 
 To install the Web Search extension, run the following command in your terminal:
 
 ```bash
-ironclaw-v1 registry install web-search
+ironclaw registry install web-search
 ```
 
 </Step>
@@ -45,7 +39,7 @@ ironclaw-v1 registry install web-search
 After installing the extension, you need to configure your Brave Search API key in IronClaw. You can do this by running:
 
 ```bash
-ironclaw-v1 tool auth web-search
+ironclaw tool auth web-search
 ```
 
 Then follow the prompts to enter your API key.

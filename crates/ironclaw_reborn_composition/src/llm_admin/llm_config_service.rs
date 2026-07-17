@@ -1993,7 +1993,7 @@ mod tests {
 
     /// Reproduction for issue #4673: saving the NEAR AI (builtin) provider
     /// returns `service_unavailable` even though Test connection succeeds. This
-    /// wires the secret store EXACTLY as production `ironclaw serve` does
+    /// wires the secret store EXACTLY as production `ironclaw-reborn serve` does
     /// — the dynamic `invocation_mount_view` scoped filesystem behind a real
     /// `FilesystemSecretStore` — instead of the in-memory store the other tests
     /// use, so a system-scope write/read regression in that path is caught.

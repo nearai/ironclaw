@@ -304,7 +304,7 @@ async fn list_tools(dir: Option<PathBuf>, verbose: bool) -> anyhow::Result<()> {
 
     if !tools_dir.exists() {
         println!("No tools directory found at {}", tools_dir.display());
-        println!("Install a tool with: ironclaw-v1 tool install <path>");
+        println!("Install a tool with: ironclaw tool install <path>");
         return Ok(());
     }
 
@@ -1193,7 +1193,7 @@ async fn setup_tool(name: String, dir: Option<PathBuf>, user_id: String) -> anyh
         anyhow::anyhow!(
             "Tool '{}' has no setup configuration.\n\
              The tool may not require setup, or setup is not defined.\n\
-             Try 'ironclaw-v1 tool auth {}' for OAuth-based authentication.",
+             Try 'ironclaw tool auth {}' for OAuth-based authentication.",
             name,
             name
         )

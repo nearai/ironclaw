@@ -1,6 +1,6 @@
 # Print an optspec for argparse to handle cmd's options that are independent of any subcommand.
 function __fish_ironclaw_global_optspecs
-	string join \n h/help V/version
+	string join \n cli-only no-db m/message= c/config= no-onboard h/help V/version
 end
 
 function __fish_ironclaw_needs_command
@@ -24,328 +24,432 @@ function __fish_ironclaw_using_subcommand
 	contains -- $cmd[1] $argv
 end
 
+complete -c ironclaw -n "__fish_ironclaw_needs_command" -s m -l message -d 'Single message mode - send one message and exit' -r
+complete -c ironclaw -n "__fish_ironclaw_needs_command" -s c -l config -d 'Configuration file path (optional, uses env vars by default)' -r -F
+complete -c ironclaw -n "__fish_ironclaw_needs_command" -l cli-only -d 'Run in interactive CLI mode only (disable other channels)'
+complete -c ironclaw -n "__fish_ironclaw_needs_command" -l no-db -d 'Skip database connection (for testing)'
+complete -c ironclaw -n "__fish_ironclaw_needs_command" -l no-onboard -d 'Skip first-run onboarding check'
 complete -c ironclaw -n "__fish_ironclaw_needs_command" -s h -l help -d 'Print help'
 complete -c ironclaw -n "__fish_ironclaw_needs_command" -s V -l version -d 'Print version'
-complete -c ironclaw -n "__fish_ironclaw_needs_command" -f -a "channels" -d 'Inspect configured Reborn channels'
+complete -c ironclaw -n "__fish_ironclaw_needs_command" -f -a "run" -d 'Run the agent (default if no subcommand given)'
+complete -c ironclaw -n "__fish_ironclaw_needs_command" -f -a "onboard" -d 'Interactive onboarding wizard'
+complete -c ironclaw -n "__fish_ironclaw_needs_command" -f -a "config" -d 'Manage configuration settings'
+complete -c ironclaw -n "__fish_ironclaw_needs_command" -f -a "tool" -d 'Manage WASM tools'
+complete -c ironclaw -n "__fish_ironclaw_needs_command" -f -a "mcp" -d 'Manage MCP servers (hosted tool providers)'
+complete -c ironclaw -n "__fish_ironclaw_needs_command" -f -a "memory" -d 'Query and manage workspace memory'
+complete -c ironclaw -n "__fish_ironclaw_needs_command" -f -a "pairing" -d 'DM pairing (approve inbound requests from unknown senders)'
+complete -c ironclaw -n "__fish_ironclaw_needs_command" -f -a "service" -d 'Manage OS service (launchd / systemd)'
+complete -c ironclaw -n "__fish_ironclaw_needs_command" -f -a "doctor" -d 'Probe external dependencies and validate configuration'
+complete -c ironclaw -n "__fish_ironclaw_needs_command" -f -a "status" -d 'Show system health and diagnostics'
 complete -c ironclaw -n "__fish_ironclaw_needs_command" -f -a "completion" -d 'Generate shell completion scripts'
-complete -c ironclaw -n "__fish_ironclaw_needs_command" -f -a "config" -d 'Inspect Reborn configuration paths without creating state'
-complete -c ironclaw -n "__fish_ironclaw_needs_command" -f -a "doctor" -d 'Check Reborn binary configuration without creating state'
-complete -c ironclaw -n "__fish_ironclaw_needs_command" -f -a "extension" -d 'Manage local Reborn extension lifecycle'
-complete -c ironclaw -n "__fish_ironclaw_needs_command" -f -a "hooks" -d 'Inspect configured Reborn hooks'
-complete -c ironclaw -n "__fish_ironclaw_needs_command" -f -a "logs" -d 'Inspect Reborn logs'
-complete -c ironclaw -n "__fish_ironclaw_needs_command" -f -a "models" -d 'Inspect Reborn model slots and route status'
-complete -c ironclaw -n "__fish_ironclaw_needs_command" -f -a "onboard" -d 'Initialize the standalone Reborn home and first-run setup marker'
-complete -c ironclaw -n "__fish_ironclaw_needs_command" -f -a "profile" -d 'Inspect supported Reborn boot profiles'
-complete -c ironclaw -n "__fish_ironclaw_needs_command" -f -a "repl" -d 'Start the composed Reborn CLI REPL'
-complete -c ironclaw -n "__fish_ironclaw_needs_command" -f -a "run" -d 'Initialize the minimal Reborn runtime shell and exit'
-complete -c ironclaw -n "__fish_ironclaw_needs_command" -f -a "serve" -d 'Start the Reborn WebUI service. Available only when the binary is built with the `webui-v2-beta` Cargo feature; off by default because the beta HTTP/auth gateway requires explicit opt-in before being linked into a production binary'
-complete -c ironclaw -n "__fish_ironclaw_needs_command" -f -a "service" -d 'Install/start/stop/status/uninstall the standalone Reborn binary as an OS-native service (launchd on macOS, systemd on Linux). Available only when built with the `webui-v2-beta` Cargo feature, since the installed unit runs `serve`'
-complete -c ironclaw -n "__fish_ironclaw_needs_command" -f -a "skills" -d 'Inspect configured Reborn skills'
-complete -c ironclaw -n "__fish_ironclaw_needs_command" -f -a "status" -d 'Show Reborn runtime status snapshot'
-complete -c ironclaw -n "__fish_ironclaw_needs_command" -f -a "traces" -d 'Manage trace contributions to TraceCommons'
+complete -c ironclaw -n "__fish_ironclaw_needs_command" -f -a "worker" -d 'Run as a sandboxed worker inside a Docker container (internal use). This is invoked automatically by the orchestrator, not by users directly'
+complete -c ironclaw -n "__fish_ironclaw_needs_command" -f -a "claude-bridge" -d 'Run as a Claude Code bridge inside a Docker container (internal use). Spawns the `claude` CLI and streams output back to the orchestrator'
 complete -c ironclaw -n "__fish_ironclaw_needs_command" -f -a "help" -d 'Print this message or the help of the given subcommand(s)'
-complete -c ironclaw -n "__fish_ironclaw_using_subcommand channels; and not __fish_seen_subcommand_from list help" -s h -l help -d 'Print help'
-complete -c ironclaw -n "__fish_ironclaw_using_subcommand channels; and not __fish_seen_subcommand_from list help" -f -a "list" -d 'List configured Reborn channels'
-complete -c ironclaw -n "__fish_ironclaw_using_subcommand channels; and not __fish_seen_subcommand_from list help" -f -a "help" -d 'Print this message or the help of the given subcommand(s)'
-complete -c ironclaw -n "__fish_ironclaw_using_subcommand channels; and __fish_seen_subcommand_from list" -s v -l verbose -d 'Show extra status details'
-complete -c ironclaw -n "__fish_ironclaw_using_subcommand channels; and __fish_seen_subcommand_from list" -l json -d 'Output channels as JSON'
-complete -c ironclaw -n "__fish_ironclaw_using_subcommand channels; and __fish_seen_subcommand_from list" -s h -l help -d 'Print help'
-complete -c ironclaw -n "__fish_ironclaw_using_subcommand channels; and __fish_seen_subcommand_from help" -f -a "list" -d 'List configured Reborn channels'
-complete -c ironclaw -n "__fish_ironclaw_using_subcommand channels; and __fish_seen_subcommand_from help" -f -a "help" -d 'Print this message or the help of the given subcommand(s)'
-complete -c ironclaw -n "__fish_ironclaw_using_subcommand completion" -l shell -d 'The shell to generate completions for' -r -f -a "bash\t''
-elvish\t''
-fish\t''
-powershell\t''
-zsh\t''"
-complete -c ironclaw -n "__fish_ironclaw_using_subcommand completion" -s h -l help -d 'Print help'
-complete -c ironclaw -n "__fish_ironclaw_using_subcommand config; and not __fish_seen_subcommand_from path init list get help" -s h -l help -d 'Print help'
-complete -c ironclaw -n "__fish_ironclaw_using_subcommand config; and not __fish_seen_subcommand_from path init list get help" -f -a "path" -d 'Show resolved Reborn configuration paths without creating state'
-complete -c ironclaw -n "__fish_ironclaw_using_subcommand config; and not __fish_seen_subcommand_from path init list get help" -f -a "init" -d 'Write a commented stub `config.toml` and `providers.json` into the Reborn home directory. Refuses to clobber unless --force'
-complete -c ironclaw -n "__fish_ironclaw_using_subcommand config; and not __fish_seen_subcommand_from path init list get help" -f -a "list" -d 'List all configuration keys and their values'
-complete -c ironclaw -n "__fish_ironclaw_using_subcommand config; and not __fish_seen_subcommand_from path init list get help" -f -a "get" -d 'Get a single configuration value by dot-separated key'
-complete -c ironclaw -n "__fish_ironclaw_using_subcommand config; and not __fish_seen_subcommand_from path init list get help" -f -a "help" -d 'Print this message or the help of the given subcommand(s)'
-complete -c ironclaw -n "__fish_ironclaw_using_subcommand config; and __fish_seen_subcommand_from path" -s h -l help -d 'Print help'
-complete -c ironclaw -n "__fish_ironclaw_using_subcommand config; and __fish_seen_subcommand_from init" -l force -d 'Overwrite existing files'
-complete -c ironclaw -n "__fish_ironclaw_using_subcommand config; and __fish_seen_subcommand_from init" -s h -l help -d 'Print help'
-complete -c ironclaw -n "__fish_ironclaw_using_subcommand config; and __fish_seen_subcommand_from list" -l json -d 'Output as JSON'
-complete -c ironclaw -n "__fish_ironclaw_using_subcommand config; and __fish_seen_subcommand_from list" -s h -l help -d 'Print help'
-complete -c ironclaw -n "__fish_ironclaw_using_subcommand config; and __fish_seen_subcommand_from get" -l json -d 'Output as JSON'
-complete -c ironclaw -n "__fish_ironclaw_using_subcommand config; and __fish_seen_subcommand_from get" -s h -l help -d 'Print help'
-complete -c ironclaw -n "__fish_ironclaw_using_subcommand config; and __fish_seen_subcommand_from help" -f -a "path" -d 'Show resolved Reborn configuration paths without creating state'
-complete -c ironclaw -n "__fish_ironclaw_using_subcommand config; and __fish_seen_subcommand_from help" -f -a "init" -d 'Write a commented stub `config.toml` and `providers.json` into the Reborn home directory. Refuses to clobber unless --force'
-complete -c ironclaw -n "__fish_ironclaw_using_subcommand config; and __fish_seen_subcommand_from help" -f -a "list" -d 'List all configuration keys and their values'
-complete -c ironclaw -n "__fish_ironclaw_using_subcommand config; and __fish_seen_subcommand_from help" -f -a "get" -d 'Get a single configuration value by dot-separated key'
-complete -c ironclaw -n "__fish_ironclaw_using_subcommand config; and __fish_seen_subcommand_from help" -f -a "help" -d 'Print this message or the help of the given subcommand(s)'
-complete -c ironclaw -n "__fish_ironclaw_using_subcommand doctor" -l json -d 'Output as JSON'
-complete -c ironclaw -n "__fish_ironclaw_using_subcommand doctor" -s h -l help -d 'Print help'
-complete -c ironclaw -n "__fish_ironclaw_using_subcommand extension; and not __fish_seen_subcommand_from search install activate remove help" -l confirm-host-access -d 'Confirm trusted-laptop host filesystem access for local-dev-yolo'
-complete -c ironclaw -n "__fish_ironclaw_using_subcommand extension; and not __fish_seen_subcommand_from search install activate remove help" -s h -l help -d 'Print help'
-complete -c ironclaw -n "__fish_ironclaw_using_subcommand extension; and not __fish_seen_subcommand_from search install activate remove help" -f -a "search" -d 'Search local Reborn extension packages'
-complete -c ironclaw -n "__fish_ironclaw_using_subcommand extension; and not __fish_seen_subcommand_from search install activate remove help" -f -a "install" -d 'Install a local Reborn extension package'
-complete -c ironclaw -n "__fish_ironclaw_using_subcommand extension; and not __fish_seen_subcommand_from search install activate remove help" -f -a "activate" -d 'Activate an installed local Reborn extension package'
-complete -c ironclaw -n "__fish_ironclaw_using_subcommand extension; and not __fish_seen_subcommand_from search install activate remove help" -f -a "remove" -d 'Remove an installed local Reborn extension package'
-complete -c ironclaw -n "__fish_ironclaw_using_subcommand extension; and not __fish_seen_subcommand_from search install activate remove help" -f -a "help" -d 'Print this message or the help of the given subcommand(s)'
-complete -c ironclaw -n "__fish_ironclaw_using_subcommand extension; and __fish_seen_subcommand_from search" -l json -d 'Output the lifecycle response as JSON'
-complete -c ironclaw -n "__fish_ironclaw_using_subcommand extension; and __fish_seen_subcommand_from search" -l confirm-host-access -d 'Confirm trusted-laptop host filesystem access for local-dev-yolo'
-complete -c ironclaw -n "__fish_ironclaw_using_subcommand extension; and __fish_seen_subcommand_from search" -s h -l help -d 'Print help'
-complete -c ironclaw -n "__fish_ironclaw_using_subcommand extension; and __fish_seen_subcommand_from install" -l json -d 'Output the lifecycle response as JSON'
-complete -c ironclaw -n "__fish_ironclaw_using_subcommand extension; and __fish_seen_subcommand_from install" -l confirm-host-access -d 'Confirm trusted-laptop host filesystem access for local-dev-yolo'
-complete -c ironclaw -n "__fish_ironclaw_using_subcommand extension; and __fish_seen_subcommand_from install" -s h -l help -d 'Print help'
-complete -c ironclaw -n "__fish_ironclaw_using_subcommand extension; and __fish_seen_subcommand_from activate" -l json -d 'Output the lifecycle response as JSON'
-complete -c ironclaw -n "__fish_ironclaw_using_subcommand extension; and __fish_seen_subcommand_from activate" -l confirm-host-access -d 'Confirm trusted-laptop host filesystem access for local-dev-yolo'
-complete -c ironclaw -n "__fish_ironclaw_using_subcommand extension; and __fish_seen_subcommand_from activate" -s h -l help -d 'Print help'
-complete -c ironclaw -n "__fish_ironclaw_using_subcommand extension; and __fish_seen_subcommand_from remove" -l json -d 'Output the lifecycle response as JSON'
-complete -c ironclaw -n "__fish_ironclaw_using_subcommand extension; and __fish_seen_subcommand_from remove" -l confirm-host-access -d 'Confirm trusted-laptop host filesystem access for local-dev-yolo'
-complete -c ironclaw -n "__fish_ironclaw_using_subcommand extension; and __fish_seen_subcommand_from remove" -s h -l help -d 'Print help'
-complete -c ironclaw -n "__fish_ironclaw_using_subcommand extension; and __fish_seen_subcommand_from help" -f -a "search" -d 'Search local Reborn extension packages'
-complete -c ironclaw -n "__fish_ironclaw_using_subcommand extension; and __fish_seen_subcommand_from help" -f -a "install" -d 'Install a local Reborn extension package'
-complete -c ironclaw -n "__fish_ironclaw_using_subcommand extension; and __fish_seen_subcommand_from help" -f -a "activate" -d 'Activate an installed local Reborn extension package'
-complete -c ironclaw -n "__fish_ironclaw_using_subcommand extension; and __fish_seen_subcommand_from help" -f -a "remove" -d 'Remove an installed local Reborn extension package'
-complete -c ironclaw -n "__fish_ironclaw_using_subcommand extension; and __fish_seen_subcommand_from help" -f -a "help" -d 'Print this message or the help of the given subcommand(s)'
-complete -c ironclaw -n "__fish_ironclaw_using_subcommand hooks; and not __fish_seen_subcommand_from list help" -s h -l help -d 'Print help'
-complete -c ironclaw -n "__fish_ironclaw_using_subcommand hooks; and not __fish_seen_subcommand_from list help" -f -a "list" -d 'List configured Reborn hooks'
-complete -c ironclaw -n "__fish_ironclaw_using_subcommand hooks; and not __fish_seen_subcommand_from list help" -f -a "help" -d 'Print this message or the help of the given subcommand(s)'
-complete -c ironclaw -n "__fish_ironclaw_using_subcommand hooks; and __fish_seen_subcommand_from list" -s v -l verbose -d 'Show extra status details'
-complete -c ironclaw -n "__fish_ironclaw_using_subcommand hooks; and __fish_seen_subcommand_from list" -l json -d 'Output hooks as JSON'
-complete -c ironclaw -n "__fish_ironclaw_using_subcommand hooks; and __fish_seen_subcommand_from list" -s h -l help -d 'Print help'
-complete -c ironclaw -n "__fish_ironclaw_using_subcommand hooks; and __fish_seen_subcommand_from help" -f -a "list" -d 'List configured Reborn hooks'
-complete -c ironclaw -n "__fish_ironclaw_using_subcommand hooks; and __fish_seen_subcommand_from help" -f -a "help" -d 'Print this message or the help of the given subcommand(s)'
-complete -c ironclaw -n "__fish_ironclaw_using_subcommand logs" -s v -l verbose -d 'Show extra status details'
-complete -c ironclaw -n "__fish_ironclaw_using_subcommand logs" -l json -d 'Output log status as JSON'
-complete -c ironclaw -n "__fish_ironclaw_using_subcommand logs" -s h -l help -d 'Print help'
-complete -c ironclaw -n "__fish_ironclaw_using_subcommand models; and not __fish_seen_subcommand_from list status set set-provider help" -s h -l help -d 'Print help'
-complete -c ironclaw -n "__fish_ironclaw_using_subcommand models; and not __fish_seen_subcommand_from list status set set-provider help" -f -a "list" -d 'List Reborn LLM providers, or show one provider'
-complete -c ironclaw -n "__fish_ironclaw_using_subcommand models; and not __fish_seen_subcommand_from list status set set-provider help" -f -a "status" -d 'Show Reborn model route status'
-complete -c ironclaw -n "__fish_ironclaw_using_subcommand models; and not __fish_seen_subcommand_from list status set set-provider help" -f -a "set" -d 'Set the default Reborn model for the active provider'
-complete -c ironclaw -n "__fish_ironclaw_using_subcommand models; and not __fish_seen_subcommand_from list status set set-provider help" -f -a "set-provider" -d 'Set the default Reborn LLM provider'
-complete -c ironclaw -n "__fish_ironclaw_using_subcommand models; and not __fish_seen_subcommand_from list status set set-provider help" -f -a "help" -d 'Print this message or the help of the given subcommand(s)'
-complete -c ironclaw -n "__fish_ironclaw_using_subcommand models; and __fish_seen_subcommand_from list" -s v -l verbose -d 'Show provider protocol and credential metadata'
-complete -c ironclaw -n "__fish_ironclaw_using_subcommand models; and __fish_seen_subcommand_from list" -l json -d 'Output providers as JSON'
-complete -c ironclaw -n "__fish_ironclaw_using_subcommand models; and __fish_seen_subcommand_from list" -s h -l help -d 'Print help'
-complete -c ironclaw -n "__fish_ironclaw_using_subcommand models; and __fish_seen_subcommand_from status" -l json -d 'Output model status as JSON'
-complete -c ironclaw -n "__fish_ironclaw_using_subcommand models; and __fish_seen_subcommand_from status" -s h -l help -d 'Print help'
-complete -c ironclaw -n "__fish_ironclaw_using_subcommand models; and __fish_seen_subcommand_from set" -s h -l help -d 'Print help'
-complete -c ironclaw -n "__fish_ironclaw_using_subcommand models; and __fish_seen_subcommand_from set-provider" -l model -d 'Also set the model. Defaults to the provider\'s catalog default' -r
-complete -c ironclaw -n "__fish_ironclaw_using_subcommand models; and __fish_seen_subcommand_from set-provider" -s h -l help -d 'Print help'
-complete -c ironclaw -n "__fish_ironclaw_using_subcommand models; and __fish_seen_subcommand_from help" -f -a "list" -d 'List Reborn LLM providers, or show one provider'
-complete -c ironclaw -n "__fish_ironclaw_using_subcommand models; and __fish_seen_subcommand_from help" -f -a "status" -d 'Show Reborn model route status'
-complete -c ironclaw -n "__fish_ironclaw_using_subcommand models; and __fish_seen_subcommand_from help" -f -a "set" -d 'Set the default Reborn model for the active provider'
-complete -c ironclaw -n "__fish_ironclaw_using_subcommand models; and __fish_seen_subcommand_from help" -f -a "set-provider" -d 'Set the default Reborn LLM provider'
-complete -c ironclaw -n "__fish_ironclaw_using_subcommand models; and __fish_seen_subcommand_from help" -f -a "help" -d 'Print this message or the help of the given subcommand(s)'
-complete -c ironclaw -n "__fish_ironclaw_using_subcommand onboard" -l force -d 'Overwrite generated config.toml, providers.json, and the completion marker'
-complete -c ironclaw -n "__fish_ironclaw_using_subcommand onboard" -l dry-run -d 'Show what would be initialized without writing files'
-complete -c ironclaw -n "__fish_ironclaw_using_subcommand onboard" -l import-history -d 'Reserve the history-import step in the onboarding summary'
-complete -c ironclaw -n "__fish_ironclaw_using_subcommand onboard" -s h -l help -d 'Print help (see more with \'--help\')'
-complete -c ironclaw -n "__fish_ironclaw_using_subcommand profile; and not __fish_seen_subcommand_from list help" -s h -l help -d 'Print help'
-complete -c ironclaw -n "__fish_ironclaw_using_subcommand profile; and not __fish_seen_subcommand_from list help" -f -a "list" -d 'List supported Reborn boot profiles'
-complete -c ironclaw -n "__fish_ironclaw_using_subcommand profile; and not __fish_seen_subcommand_from list help" -f -a "help" -d 'Print this message or the help of the given subcommand(s)'
-complete -c ironclaw -n "__fish_ironclaw_using_subcommand profile; and __fish_seen_subcommand_from list" -l json -d 'Output profiles as JSON'
-complete -c ironclaw -n "__fish_ironclaw_using_subcommand profile; and __fish_seen_subcommand_from list" -s h -l help -d 'Print help'
-complete -c ironclaw -n "__fish_ironclaw_using_subcommand profile; and __fish_seen_subcommand_from help" -f -a "list" -d 'List supported Reborn boot profiles'
-complete -c ironclaw -n "__fish_ironclaw_using_subcommand profile; and __fish_seen_subcommand_from help" -f -a "help" -d 'Print this message or the help of the given subcommand(s)'
-complete -c ironclaw -n "__fish_ironclaw_using_subcommand repl" -l confirm-host-access -d 'Confirm trusted-laptop host filesystem access for local-dev-yolo'
-complete -c ironclaw -n "__fish_ironclaw_using_subcommand repl" -s h -l help -d 'Print help'
-complete -c ironclaw -n "__fish_ironclaw_using_subcommand run" -s m -l message -d 'Send a single message, print the assistant reply, and exit. Without this flag, the CLI reads lines from stdin in a loop' -r
-complete -c ironclaw -n "__fish_ironclaw_using_subcommand run" -l dry-run -d 'Print the substrate readiness snapshot and exit without starting the agent. Preserves the legacy `run` diagnostic shape so existing smoke tests keep passing'
-complete -c ironclaw -n "__fish_ironclaw_using_subcommand run" -l confirm-host-access -d 'Confirm trusted-laptop host filesystem access for local-dev-yolo'
+complete -c ironclaw -n "__fish_ironclaw_using_subcommand run" -s m -l message -d 'Single message mode - send one message and exit' -r
+complete -c ironclaw -n "__fish_ironclaw_using_subcommand run" -s c -l config -d 'Configuration file path (optional, uses env vars by default)' -r -F
+complete -c ironclaw -n "__fish_ironclaw_using_subcommand run" -l cli-only -d 'Run in interactive CLI mode only (disable other channels)'
+complete -c ironclaw -n "__fish_ironclaw_using_subcommand run" -l no-db -d 'Skip database connection (for testing)'
+complete -c ironclaw -n "__fish_ironclaw_using_subcommand run" -l no-onboard -d 'Skip first-run onboarding check'
 complete -c ironclaw -n "__fish_ironclaw_using_subcommand run" -s h -l help -d 'Print help'
-complete -c ironclaw -n "__fish_ironclaw_using_subcommand serve" -l host -d 'Host interface for the Reborn WebChat v2 HTTP listener. Overrides `[webui].listen_host` from the boot config file. Default (when neither is set) is `127.0.0.1`' -r
-complete -c ironclaw -n "__fish_ironclaw_using_subcommand serve" -l port -d 'Port for the Reborn WebChat v2 HTTP listener. `0` lets the kernel pick a free port (useful for tests). Overrides `[webui].listen_port` from the boot config file. Default (when neither is set) is 3000' -r
-complete -c ironclaw -n "__fish_ironclaw_using_subcommand serve" -l confirm-host-access -d 'Confirm trusted-laptop host filesystem access for local-dev-yolo'
-complete -c ironclaw -n "__fish_ironclaw_using_subcommand serve" -s h -l help -d 'Print help'
-complete -c ironclaw -n "__fish_ironclaw_using_subcommand service; and not __fish_seen_subcommand_from install start stop restart status uninstall help" -s h -l help -d 'Print help'
-complete -c ironclaw -n "__fish_ironclaw_using_subcommand service; and not __fish_seen_subcommand_from install start stop restart status uninstall help" -f -a "install" -d 'Install the OS service (launchd on macOS, systemd on Linux)'
-complete -c ironclaw -n "__fish_ironclaw_using_subcommand service; and not __fish_seen_subcommand_from install start stop restart status uninstall help" -f -a "start" -d 'Start the installed service'
-complete -c ironclaw -n "__fish_ironclaw_using_subcommand service; and not __fish_seen_subcommand_from install start stop restart status uninstall help" -f -a "stop" -d 'Stop the running service'
-complete -c ironclaw -n "__fish_ironclaw_using_subcommand service; and not __fish_seen_subcommand_from install start stop restart status uninstall help" -f -a "restart" -d 'Restart the service: stop then start if running, or just start if stopped. Errors if the service is not installed'
-complete -c ironclaw -n "__fish_ironclaw_using_subcommand service; and not __fish_seen_subcommand_from install start stop restart status uninstall help" -f -a "status" -d 'Show service status'
-complete -c ironclaw -n "__fish_ironclaw_using_subcommand service; and not __fish_seen_subcommand_from install start stop restart status uninstall help" -f -a "uninstall" -d 'Uninstall the OS service and remove the unit file'
-complete -c ironclaw -n "__fish_ironclaw_using_subcommand service; and not __fish_seen_subcommand_from install start stop restart status uninstall help" -f -a "help" -d 'Print this message or the help of the given subcommand(s)'
-complete -c ironclaw -n "__fish_ironclaw_using_subcommand service; and __fish_seen_subcommand_from install" -s h -l help -d 'Print help (see more with \'--help\')'
+complete -c ironclaw -n "__fish_ironclaw_using_subcommand onboard" -s m -l message -d 'Single message mode - send one message and exit' -r
+complete -c ironclaw -n "__fish_ironclaw_using_subcommand onboard" -s c -l config -d 'Configuration file path (optional, uses env vars by default)' -r -F
+complete -c ironclaw -n "__fish_ironclaw_using_subcommand onboard" -l skip-auth -d 'Skip authentication (use existing session)'
+complete -c ironclaw -n "__fish_ironclaw_using_subcommand onboard" -l channels-only -d 'Reconfigure channels only'
+complete -c ironclaw -n "__fish_ironclaw_using_subcommand onboard" -l cli-only -d 'Run in interactive CLI mode only (disable other channels)'
+complete -c ironclaw -n "__fish_ironclaw_using_subcommand onboard" -l no-db -d 'Skip database connection (for testing)'
+complete -c ironclaw -n "__fish_ironclaw_using_subcommand onboard" -l no-onboard -d 'Skip first-run onboarding check'
+complete -c ironclaw -n "__fish_ironclaw_using_subcommand onboard" -s h -l help -d 'Print help'
+complete -c ironclaw -n "__fish_ironclaw_using_subcommand config; and not __fish_seen_subcommand_from init list get set reset path help" -s m -l message -d 'Single message mode - send one message and exit' -r
+complete -c ironclaw -n "__fish_ironclaw_using_subcommand config; and not __fish_seen_subcommand_from init list get set reset path help" -s c -l config -d 'Configuration file path (optional, uses env vars by default)' -r -F
+complete -c ironclaw -n "__fish_ironclaw_using_subcommand config; and not __fish_seen_subcommand_from init list get set reset path help" -l cli-only -d 'Run in interactive CLI mode only (disable other channels)'
+complete -c ironclaw -n "__fish_ironclaw_using_subcommand config; and not __fish_seen_subcommand_from init list get set reset path help" -l no-db -d 'Skip database connection (for testing)'
+complete -c ironclaw -n "__fish_ironclaw_using_subcommand config; and not __fish_seen_subcommand_from init list get set reset path help" -l no-onboard -d 'Skip first-run onboarding check'
+complete -c ironclaw -n "__fish_ironclaw_using_subcommand config; and not __fish_seen_subcommand_from init list get set reset path help" -s h -l help -d 'Print help'
+complete -c ironclaw -n "__fish_ironclaw_using_subcommand config; and not __fish_seen_subcommand_from init list get set reset path help" -f -a "init" -d 'Generate a default config.toml file'
+complete -c ironclaw -n "__fish_ironclaw_using_subcommand config; and not __fish_seen_subcommand_from init list get set reset path help" -f -a "list" -d 'List all settings and their current values'
+complete -c ironclaw -n "__fish_ironclaw_using_subcommand config; and not __fish_seen_subcommand_from init list get set reset path help" -f -a "get" -d 'Get a specific setting value'
+complete -c ironclaw -n "__fish_ironclaw_using_subcommand config; and not __fish_seen_subcommand_from init list get set reset path help" -f -a "set" -d 'Set a setting value'
+complete -c ironclaw -n "__fish_ironclaw_using_subcommand config; and not __fish_seen_subcommand_from init list get set reset path help" -f -a "reset" -d 'Reset a setting to its default value'
+complete -c ironclaw -n "__fish_ironclaw_using_subcommand config; and not __fish_seen_subcommand_from init list get set reset path help" -f -a "path" -d 'Show the settings storage info'
+complete -c ironclaw -n "__fish_ironclaw_using_subcommand config; and not __fish_seen_subcommand_from init list get set reset path help" -f -a "help" -d 'Print this message or the help of the given subcommand(s)'
+complete -c ironclaw -n "__fish_ironclaw_using_subcommand config; and __fish_seen_subcommand_from init" -s o -l output -d 'Output path (default: ~/.ironclaw/config.toml)' -r -F
+complete -c ironclaw -n "__fish_ironclaw_using_subcommand config; and __fish_seen_subcommand_from init" -s m -l message -d 'Single message mode - send one message and exit' -r
+complete -c ironclaw -n "__fish_ironclaw_using_subcommand config; and __fish_seen_subcommand_from init" -s c -l config -d 'Configuration file path (optional, uses env vars by default)' -r -F
+complete -c ironclaw -n "__fish_ironclaw_using_subcommand config; and __fish_seen_subcommand_from init" -l force -d 'Overwrite existing file'
+complete -c ironclaw -n "__fish_ironclaw_using_subcommand config; and __fish_seen_subcommand_from init" -l cli-only -d 'Run in interactive CLI mode only (disable other channels)'
+complete -c ironclaw -n "__fish_ironclaw_using_subcommand config; and __fish_seen_subcommand_from init" -l no-db -d 'Skip database connection (for testing)'
+complete -c ironclaw -n "__fish_ironclaw_using_subcommand config; and __fish_seen_subcommand_from init" -l no-onboard -d 'Skip first-run onboarding check'
+complete -c ironclaw -n "__fish_ironclaw_using_subcommand config; and __fish_seen_subcommand_from init" -s h -l help -d 'Print help'
+complete -c ironclaw -n "__fish_ironclaw_using_subcommand config; and __fish_seen_subcommand_from list" -s f -l filter -d 'Show only settings matching this prefix (e.g., "agent", "heartbeat")' -r
+complete -c ironclaw -n "__fish_ironclaw_using_subcommand config; and __fish_seen_subcommand_from list" -s m -l message -d 'Single message mode - send one message and exit' -r
+complete -c ironclaw -n "__fish_ironclaw_using_subcommand config; and __fish_seen_subcommand_from list" -s c -l config -d 'Configuration file path (optional, uses env vars by default)' -r -F
+complete -c ironclaw -n "__fish_ironclaw_using_subcommand config; and __fish_seen_subcommand_from list" -l cli-only -d 'Run in interactive CLI mode only (disable other channels)'
+complete -c ironclaw -n "__fish_ironclaw_using_subcommand config; and __fish_seen_subcommand_from list" -l no-db -d 'Skip database connection (for testing)'
+complete -c ironclaw -n "__fish_ironclaw_using_subcommand config; and __fish_seen_subcommand_from list" -l no-onboard -d 'Skip first-run onboarding check'
+complete -c ironclaw -n "__fish_ironclaw_using_subcommand config; and __fish_seen_subcommand_from list" -s h -l help -d 'Print help'
+complete -c ironclaw -n "__fish_ironclaw_using_subcommand config; and __fish_seen_subcommand_from get" -s m -l message -d 'Single message mode - send one message and exit' -r
+complete -c ironclaw -n "__fish_ironclaw_using_subcommand config; and __fish_seen_subcommand_from get" -s c -l config -d 'Configuration file path (optional, uses env vars by default)' -r -F
+complete -c ironclaw -n "__fish_ironclaw_using_subcommand config; and __fish_seen_subcommand_from get" -l cli-only -d 'Run in interactive CLI mode only (disable other channels)'
+complete -c ironclaw -n "__fish_ironclaw_using_subcommand config; and __fish_seen_subcommand_from get" -l no-db -d 'Skip database connection (for testing)'
+complete -c ironclaw -n "__fish_ironclaw_using_subcommand config; and __fish_seen_subcommand_from get" -l no-onboard -d 'Skip first-run onboarding check'
+complete -c ironclaw -n "__fish_ironclaw_using_subcommand config; and __fish_seen_subcommand_from get" -s h -l help -d 'Print help'
+complete -c ironclaw -n "__fish_ironclaw_using_subcommand config; and __fish_seen_subcommand_from set" -s m -l message -d 'Single message mode - send one message and exit' -r
+complete -c ironclaw -n "__fish_ironclaw_using_subcommand config; and __fish_seen_subcommand_from set" -s c -l config -d 'Configuration file path (optional, uses env vars by default)' -r -F
+complete -c ironclaw -n "__fish_ironclaw_using_subcommand config; and __fish_seen_subcommand_from set" -l cli-only -d 'Run in interactive CLI mode only (disable other channels)'
+complete -c ironclaw -n "__fish_ironclaw_using_subcommand config; and __fish_seen_subcommand_from set" -l no-db -d 'Skip database connection (for testing)'
+complete -c ironclaw -n "__fish_ironclaw_using_subcommand config; and __fish_seen_subcommand_from set" -l no-onboard -d 'Skip first-run onboarding check'
+complete -c ironclaw -n "__fish_ironclaw_using_subcommand config; and __fish_seen_subcommand_from set" -s h -l help -d 'Print help'
+complete -c ironclaw -n "__fish_ironclaw_using_subcommand config; and __fish_seen_subcommand_from reset" -s m -l message -d 'Single message mode - send one message and exit' -r
+complete -c ironclaw -n "__fish_ironclaw_using_subcommand config; and __fish_seen_subcommand_from reset" -s c -l config -d 'Configuration file path (optional, uses env vars by default)' -r -F
+complete -c ironclaw -n "__fish_ironclaw_using_subcommand config; and __fish_seen_subcommand_from reset" -l cli-only -d 'Run in interactive CLI mode only (disable other channels)'
+complete -c ironclaw -n "__fish_ironclaw_using_subcommand config; and __fish_seen_subcommand_from reset" -l no-db -d 'Skip database connection (for testing)'
+complete -c ironclaw -n "__fish_ironclaw_using_subcommand config; and __fish_seen_subcommand_from reset" -l no-onboard -d 'Skip first-run onboarding check'
+complete -c ironclaw -n "__fish_ironclaw_using_subcommand config; and __fish_seen_subcommand_from reset" -s h -l help -d 'Print help'
+complete -c ironclaw -n "__fish_ironclaw_using_subcommand config; and __fish_seen_subcommand_from path" -s m -l message -d 'Single message mode - send one message and exit' -r
+complete -c ironclaw -n "__fish_ironclaw_using_subcommand config; and __fish_seen_subcommand_from path" -s c -l config -d 'Configuration file path (optional, uses env vars by default)' -r -F
+complete -c ironclaw -n "__fish_ironclaw_using_subcommand config; and __fish_seen_subcommand_from path" -l cli-only -d 'Run in interactive CLI mode only (disable other channels)'
+complete -c ironclaw -n "__fish_ironclaw_using_subcommand config; and __fish_seen_subcommand_from path" -l no-db -d 'Skip database connection (for testing)'
+complete -c ironclaw -n "__fish_ironclaw_using_subcommand config; and __fish_seen_subcommand_from path" -l no-onboard -d 'Skip first-run onboarding check'
+complete -c ironclaw -n "__fish_ironclaw_using_subcommand config; and __fish_seen_subcommand_from path" -s h -l help -d 'Print help'
+complete -c ironclaw -n "__fish_ironclaw_using_subcommand config; and __fish_seen_subcommand_from help" -f -a "init" -d 'Generate a default config.toml file'
+complete -c ironclaw -n "__fish_ironclaw_using_subcommand config; and __fish_seen_subcommand_from help" -f -a "list" -d 'List all settings and their current values'
+complete -c ironclaw -n "__fish_ironclaw_using_subcommand config; and __fish_seen_subcommand_from help" -f -a "get" -d 'Get a specific setting value'
+complete -c ironclaw -n "__fish_ironclaw_using_subcommand config; and __fish_seen_subcommand_from help" -f -a "set" -d 'Set a setting value'
+complete -c ironclaw -n "__fish_ironclaw_using_subcommand config; and __fish_seen_subcommand_from help" -f -a "reset" -d 'Reset a setting to its default value'
+complete -c ironclaw -n "__fish_ironclaw_using_subcommand config; and __fish_seen_subcommand_from help" -f -a "path" -d 'Show the settings storage info'
+complete -c ironclaw -n "__fish_ironclaw_using_subcommand config; and __fish_seen_subcommand_from help" -f -a "help" -d 'Print this message or the help of the given subcommand(s)'
+complete -c ironclaw -n "__fish_ironclaw_using_subcommand tool; and not __fish_seen_subcommand_from install list remove info auth help" -s m -l message -d 'Single message mode - send one message and exit' -r
+complete -c ironclaw -n "__fish_ironclaw_using_subcommand tool; and not __fish_seen_subcommand_from install list remove info auth help" -s c -l config -d 'Configuration file path (optional, uses env vars by default)' -r -F
+complete -c ironclaw -n "__fish_ironclaw_using_subcommand tool; and not __fish_seen_subcommand_from install list remove info auth help" -l cli-only -d 'Run in interactive CLI mode only (disable other channels)'
+complete -c ironclaw -n "__fish_ironclaw_using_subcommand tool; and not __fish_seen_subcommand_from install list remove info auth help" -l no-db -d 'Skip database connection (for testing)'
+complete -c ironclaw -n "__fish_ironclaw_using_subcommand tool; and not __fish_seen_subcommand_from install list remove info auth help" -l no-onboard -d 'Skip first-run onboarding check'
+complete -c ironclaw -n "__fish_ironclaw_using_subcommand tool; and not __fish_seen_subcommand_from install list remove info auth help" -s h -l help -d 'Print help'
+complete -c ironclaw -n "__fish_ironclaw_using_subcommand tool; and not __fish_seen_subcommand_from install list remove info auth help" -f -a "install" -d 'Install a WASM tool from source directory or .wasm file'
+complete -c ironclaw -n "__fish_ironclaw_using_subcommand tool; and not __fish_seen_subcommand_from install list remove info auth help" -f -a "list" -d 'List installed tools'
+complete -c ironclaw -n "__fish_ironclaw_using_subcommand tool; and not __fish_seen_subcommand_from install list remove info auth help" -f -a "remove" -d 'Remove an installed tool'
+complete -c ironclaw -n "__fish_ironclaw_using_subcommand tool; and not __fish_seen_subcommand_from install list remove info auth help" -f -a "info" -d 'Show information about a tool'
+complete -c ironclaw -n "__fish_ironclaw_using_subcommand tool; and not __fish_seen_subcommand_from install list remove info auth help" -f -a "auth" -d 'Configure authentication for a tool'
+complete -c ironclaw -n "__fish_ironclaw_using_subcommand tool; and not __fish_seen_subcommand_from install list remove info auth help" -f -a "help" -d 'Print this message or the help of the given subcommand(s)'
+complete -c ironclaw -n "__fish_ironclaw_using_subcommand tool; and __fish_seen_subcommand_from install" -s n -l name -d 'Tool name (defaults to directory/file name)' -r
+complete -c ironclaw -n "__fish_ironclaw_using_subcommand tool; and __fish_seen_subcommand_from install" -l capabilities -d 'Path to capabilities JSON file (auto-detected if not specified)' -r -F
+complete -c ironclaw -n "__fish_ironclaw_using_subcommand tool; and __fish_seen_subcommand_from install" -s t -l target -d 'Target directory for installation (default: ~/.ironclaw/tools/)' -r -F
+complete -c ironclaw -n "__fish_ironclaw_using_subcommand tool; and __fish_seen_subcommand_from install" -s m -l message -d 'Single message mode - send one message and exit' -r
+complete -c ironclaw -n "__fish_ironclaw_using_subcommand tool; and __fish_seen_subcommand_from install" -s c -l config -d 'Configuration file path (optional, uses env vars by default)' -r -F
+complete -c ironclaw -n "__fish_ironclaw_using_subcommand tool; and __fish_seen_subcommand_from install" -l release -d 'Build in release mode (default: true)'
+complete -c ironclaw -n "__fish_ironclaw_using_subcommand tool; and __fish_seen_subcommand_from install" -l skip-build -d 'Skip compilation (use existing .wasm file)'
+complete -c ironclaw -n "__fish_ironclaw_using_subcommand tool; and __fish_seen_subcommand_from install" -s f -l force -d 'Force overwrite if tool already exists'
+complete -c ironclaw -n "__fish_ironclaw_using_subcommand tool; and __fish_seen_subcommand_from install" -l cli-only -d 'Run in interactive CLI mode only (disable other channels)'
+complete -c ironclaw -n "__fish_ironclaw_using_subcommand tool; and __fish_seen_subcommand_from install" -l no-db -d 'Skip database connection (for testing)'
+complete -c ironclaw -n "__fish_ironclaw_using_subcommand tool; and __fish_seen_subcommand_from install" -l no-onboard -d 'Skip first-run onboarding check'
+complete -c ironclaw -n "__fish_ironclaw_using_subcommand tool; and __fish_seen_subcommand_from install" -s h -l help -d 'Print help'
+complete -c ironclaw -n "__fish_ironclaw_using_subcommand tool; and __fish_seen_subcommand_from list" -s d -l dir -d 'Directory to list tools from (default: ~/.ironclaw/tools/)' -r -F
+complete -c ironclaw -n "__fish_ironclaw_using_subcommand tool; and __fish_seen_subcommand_from list" -s m -l message -d 'Single message mode - send one message and exit' -r
+complete -c ironclaw -n "__fish_ironclaw_using_subcommand tool; and __fish_seen_subcommand_from list" -s c -l config -d 'Configuration file path (optional, uses env vars by default)' -r -F
+complete -c ironclaw -n "__fish_ironclaw_using_subcommand tool; and __fish_seen_subcommand_from list" -s v -l verbose -d 'Show detailed information'
+complete -c ironclaw -n "__fish_ironclaw_using_subcommand tool; and __fish_seen_subcommand_from list" -l cli-only -d 'Run in interactive CLI mode only (disable other channels)'
+complete -c ironclaw -n "__fish_ironclaw_using_subcommand tool; and __fish_seen_subcommand_from list" -l no-db -d 'Skip database connection (for testing)'
+complete -c ironclaw -n "__fish_ironclaw_using_subcommand tool; and __fish_seen_subcommand_from list" -l no-onboard -d 'Skip first-run onboarding check'
+complete -c ironclaw -n "__fish_ironclaw_using_subcommand tool; and __fish_seen_subcommand_from list" -s h -l help -d 'Print help'
+complete -c ironclaw -n "__fish_ironclaw_using_subcommand tool; and __fish_seen_subcommand_from remove" -s d -l dir -d 'Directory to remove tool from (default: ~/.ironclaw/tools/)' -r -F
+complete -c ironclaw -n "__fish_ironclaw_using_subcommand tool; and __fish_seen_subcommand_from remove" -s m -l message -d 'Single message mode - send one message and exit' -r
+complete -c ironclaw -n "__fish_ironclaw_using_subcommand tool; and __fish_seen_subcommand_from remove" -s c -l config -d 'Configuration file path (optional, uses env vars by default)' -r -F
+complete -c ironclaw -n "__fish_ironclaw_using_subcommand tool; and __fish_seen_subcommand_from remove" -l cli-only -d 'Run in interactive CLI mode only (disable other channels)'
+complete -c ironclaw -n "__fish_ironclaw_using_subcommand tool; and __fish_seen_subcommand_from remove" -l no-db -d 'Skip database connection (for testing)'
+complete -c ironclaw -n "__fish_ironclaw_using_subcommand tool; and __fish_seen_subcommand_from remove" -l no-onboard -d 'Skip first-run onboarding check'
+complete -c ironclaw -n "__fish_ironclaw_using_subcommand tool; and __fish_seen_subcommand_from remove" -s h -l help -d 'Print help'
+complete -c ironclaw -n "__fish_ironclaw_using_subcommand tool; and __fish_seen_subcommand_from info" -s d -l dir -d 'Directory to look for tool (default: ~/.ironclaw/tools/)' -r -F
+complete -c ironclaw -n "__fish_ironclaw_using_subcommand tool; and __fish_seen_subcommand_from info" -s m -l message -d 'Single message mode - send one message and exit' -r
+complete -c ironclaw -n "__fish_ironclaw_using_subcommand tool; and __fish_seen_subcommand_from info" -s c -l config -d 'Configuration file path (optional, uses env vars by default)' -r -F
+complete -c ironclaw -n "__fish_ironclaw_using_subcommand tool; and __fish_seen_subcommand_from info" -l cli-only -d 'Run in interactive CLI mode only (disable other channels)'
+complete -c ironclaw -n "__fish_ironclaw_using_subcommand tool; and __fish_seen_subcommand_from info" -l no-db -d 'Skip database connection (for testing)'
+complete -c ironclaw -n "__fish_ironclaw_using_subcommand tool; and __fish_seen_subcommand_from info" -l no-onboard -d 'Skip first-run onboarding check'
+complete -c ironclaw -n "__fish_ironclaw_using_subcommand tool; and __fish_seen_subcommand_from info" -s h -l help -d 'Print help'
+complete -c ironclaw -n "__fish_ironclaw_using_subcommand tool; and __fish_seen_subcommand_from auth" -s d -l dir -d 'Directory to look for tool (default: ~/.ironclaw/tools/)' -r -F
+complete -c ironclaw -n "__fish_ironclaw_using_subcommand tool; and __fish_seen_subcommand_from auth" -s u -l user -d 'User ID for storing the secret (default: "default")' -r
+complete -c ironclaw -n "__fish_ironclaw_using_subcommand tool; and __fish_seen_subcommand_from auth" -s m -l message -d 'Single message mode - send one message and exit' -r
+complete -c ironclaw -n "__fish_ironclaw_using_subcommand tool; and __fish_seen_subcommand_from auth" -s c -l config -d 'Configuration file path (optional, uses env vars by default)' -r -F
+complete -c ironclaw -n "__fish_ironclaw_using_subcommand tool; and __fish_seen_subcommand_from auth" -l cli-only -d 'Run in interactive CLI mode only (disable other channels)'
+complete -c ironclaw -n "__fish_ironclaw_using_subcommand tool; and __fish_seen_subcommand_from auth" -l no-db -d 'Skip database connection (for testing)'
+complete -c ironclaw -n "__fish_ironclaw_using_subcommand tool; and __fish_seen_subcommand_from auth" -l no-onboard -d 'Skip first-run onboarding check'
+complete -c ironclaw -n "__fish_ironclaw_using_subcommand tool; and __fish_seen_subcommand_from auth" -s h -l help -d 'Print help'
+complete -c ironclaw -n "__fish_ironclaw_using_subcommand tool; and __fish_seen_subcommand_from help" -f -a "install" -d 'Install a WASM tool from source directory or .wasm file'
+complete -c ironclaw -n "__fish_ironclaw_using_subcommand tool; and __fish_seen_subcommand_from help" -f -a "list" -d 'List installed tools'
+complete -c ironclaw -n "__fish_ironclaw_using_subcommand tool; and __fish_seen_subcommand_from help" -f -a "remove" -d 'Remove an installed tool'
+complete -c ironclaw -n "__fish_ironclaw_using_subcommand tool; and __fish_seen_subcommand_from help" -f -a "info" -d 'Show information about a tool'
+complete -c ironclaw -n "__fish_ironclaw_using_subcommand tool; and __fish_seen_subcommand_from help" -f -a "auth" -d 'Configure authentication for a tool'
+complete -c ironclaw -n "__fish_ironclaw_using_subcommand tool; and __fish_seen_subcommand_from help" -f -a "help" -d 'Print this message or the help of the given subcommand(s)'
+complete -c ironclaw -n "__fish_ironclaw_using_subcommand mcp; and not __fish_seen_subcommand_from add remove list auth test toggle help" -s m -l message -d 'Single message mode - send one message and exit' -r
+complete -c ironclaw -n "__fish_ironclaw_using_subcommand mcp; and not __fish_seen_subcommand_from add remove list auth test toggle help" -s c -l config -d 'Configuration file path (optional, uses env vars by default)' -r -F
+complete -c ironclaw -n "__fish_ironclaw_using_subcommand mcp; and not __fish_seen_subcommand_from add remove list auth test toggle help" -l cli-only -d 'Run in interactive CLI mode only (disable other channels)'
+complete -c ironclaw -n "__fish_ironclaw_using_subcommand mcp; and not __fish_seen_subcommand_from add remove list auth test toggle help" -l no-db -d 'Skip database connection (for testing)'
+complete -c ironclaw -n "__fish_ironclaw_using_subcommand mcp; and not __fish_seen_subcommand_from add remove list auth test toggle help" -l no-onboard -d 'Skip first-run onboarding check'
+complete -c ironclaw -n "__fish_ironclaw_using_subcommand mcp; and not __fish_seen_subcommand_from add remove list auth test toggle help" -s h -l help -d 'Print help'
+complete -c ironclaw -n "__fish_ironclaw_using_subcommand mcp; and not __fish_seen_subcommand_from add remove list auth test toggle help" -f -a "add" -d 'Add an MCP server'
+complete -c ironclaw -n "__fish_ironclaw_using_subcommand mcp; and not __fish_seen_subcommand_from add remove list auth test toggle help" -f -a "remove" -d 'Remove an MCP server'
+complete -c ironclaw -n "__fish_ironclaw_using_subcommand mcp; and not __fish_seen_subcommand_from add remove list auth test toggle help" -f -a "list" -d 'List configured MCP servers'
+complete -c ironclaw -n "__fish_ironclaw_using_subcommand mcp; and not __fish_seen_subcommand_from add remove list auth test toggle help" -f -a "auth" -d 'Authenticate with an MCP server (OAuth flow)'
+complete -c ironclaw -n "__fish_ironclaw_using_subcommand mcp; and not __fish_seen_subcommand_from add remove list auth test toggle help" -f -a "test" -d 'Test connection to an MCP server'
+complete -c ironclaw -n "__fish_ironclaw_using_subcommand mcp; and not __fish_seen_subcommand_from add remove list auth test toggle help" -f -a "toggle" -d 'Enable or disable an MCP server'
+complete -c ironclaw -n "__fish_ironclaw_using_subcommand mcp; and not __fish_seen_subcommand_from add remove list auth test toggle help" -f -a "help" -d 'Print this message or the help of the given subcommand(s)'
+complete -c ironclaw -n "__fish_ironclaw_using_subcommand mcp; and __fish_seen_subcommand_from add" -l client-id -d 'OAuth client ID (if authentication is required)' -r
+complete -c ironclaw -n "__fish_ironclaw_using_subcommand mcp; and __fish_seen_subcommand_from add" -l auth-url -d 'OAuth authorization URL (optional, can be discovered)' -r
+complete -c ironclaw -n "__fish_ironclaw_using_subcommand mcp; and __fish_seen_subcommand_from add" -l token-url -d 'OAuth token URL (optional, can be discovered)' -r
+complete -c ironclaw -n "__fish_ironclaw_using_subcommand mcp; and __fish_seen_subcommand_from add" -l scopes -d 'Scopes to request (comma-separated)' -r
+complete -c ironclaw -n "__fish_ironclaw_using_subcommand mcp; and __fish_seen_subcommand_from add" -l description -d 'Server description' -r
+complete -c ironclaw -n "__fish_ironclaw_using_subcommand mcp; and __fish_seen_subcommand_from add" -s m -l message -d 'Single message mode - send one message and exit' -r
+complete -c ironclaw -n "__fish_ironclaw_using_subcommand mcp; and __fish_seen_subcommand_from add" -s c -l config -d 'Configuration file path (optional, uses env vars by default)' -r -F
+complete -c ironclaw -n "__fish_ironclaw_using_subcommand mcp; and __fish_seen_subcommand_from add" -l cli-only -d 'Run in interactive CLI mode only (disable other channels)'
+complete -c ironclaw -n "__fish_ironclaw_using_subcommand mcp; and __fish_seen_subcommand_from add" -l no-db -d 'Skip database connection (for testing)'
+complete -c ironclaw -n "__fish_ironclaw_using_subcommand mcp; and __fish_seen_subcommand_from add" -l no-onboard -d 'Skip first-run onboarding check'
+complete -c ironclaw -n "__fish_ironclaw_using_subcommand mcp; and __fish_seen_subcommand_from add" -s h -l help -d 'Print help'
+complete -c ironclaw -n "__fish_ironclaw_using_subcommand mcp; and __fish_seen_subcommand_from remove" -s m -l message -d 'Single message mode - send one message and exit' -r
+complete -c ironclaw -n "__fish_ironclaw_using_subcommand mcp; and __fish_seen_subcommand_from remove" -s c -l config -d 'Configuration file path (optional, uses env vars by default)' -r -F
+complete -c ironclaw -n "__fish_ironclaw_using_subcommand mcp; and __fish_seen_subcommand_from remove" -l cli-only -d 'Run in interactive CLI mode only (disable other channels)'
+complete -c ironclaw -n "__fish_ironclaw_using_subcommand mcp; and __fish_seen_subcommand_from remove" -l no-db -d 'Skip database connection (for testing)'
+complete -c ironclaw -n "__fish_ironclaw_using_subcommand mcp; and __fish_seen_subcommand_from remove" -l no-onboard -d 'Skip first-run onboarding check'
+complete -c ironclaw -n "__fish_ironclaw_using_subcommand mcp; and __fish_seen_subcommand_from remove" -s h -l help -d 'Print help'
+complete -c ironclaw -n "__fish_ironclaw_using_subcommand mcp; and __fish_seen_subcommand_from list" -s m -l message -d 'Single message mode - send one message and exit' -r
+complete -c ironclaw -n "__fish_ironclaw_using_subcommand mcp; and __fish_seen_subcommand_from list" -s c -l config -d 'Configuration file path (optional, uses env vars by default)' -r -F
+complete -c ironclaw -n "__fish_ironclaw_using_subcommand mcp; and __fish_seen_subcommand_from list" -s v -l verbose -d 'Show detailed information'
+complete -c ironclaw -n "__fish_ironclaw_using_subcommand mcp; and __fish_seen_subcommand_from list" -l cli-only -d 'Run in interactive CLI mode only (disable other channels)'
+complete -c ironclaw -n "__fish_ironclaw_using_subcommand mcp; and __fish_seen_subcommand_from list" -l no-db -d 'Skip database connection (for testing)'
+complete -c ironclaw -n "__fish_ironclaw_using_subcommand mcp; and __fish_seen_subcommand_from list" -l no-onboard -d 'Skip first-run onboarding check'
+complete -c ironclaw -n "__fish_ironclaw_using_subcommand mcp; and __fish_seen_subcommand_from list" -s h -l help -d 'Print help'
+complete -c ironclaw -n "__fish_ironclaw_using_subcommand mcp; and __fish_seen_subcommand_from auth" -s u -l user -d 'User ID for storing the token (default: "default")' -r
+complete -c ironclaw -n "__fish_ironclaw_using_subcommand mcp; and __fish_seen_subcommand_from auth" -s m -l message -d 'Single message mode - send one message and exit' -r
+complete -c ironclaw -n "__fish_ironclaw_using_subcommand mcp; and __fish_seen_subcommand_from auth" -s c -l config -d 'Configuration file path (optional, uses env vars by default)' -r -F
+complete -c ironclaw -n "__fish_ironclaw_using_subcommand mcp; and __fish_seen_subcommand_from auth" -l cli-only -d 'Run in interactive CLI mode only (disable other channels)'
+complete -c ironclaw -n "__fish_ironclaw_using_subcommand mcp; and __fish_seen_subcommand_from auth" -l no-db -d 'Skip database connection (for testing)'
+complete -c ironclaw -n "__fish_ironclaw_using_subcommand mcp; and __fish_seen_subcommand_from auth" -l no-onboard -d 'Skip first-run onboarding check'
+complete -c ironclaw -n "__fish_ironclaw_using_subcommand mcp; and __fish_seen_subcommand_from auth" -s h -l help -d 'Print help'
+complete -c ironclaw -n "__fish_ironclaw_using_subcommand mcp; and __fish_seen_subcommand_from test" -s u -l user -d 'User ID for authentication (default: "default")' -r
+complete -c ironclaw -n "__fish_ironclaw_using_subcommand mcp; and __fish_seen_subcommand_from test" -s m -l message -d 'Single message mode - send one message and exit' -r
+complete -c ironclaw -n "__fish_ironclaw_using_subcommand mcp; and __fish_seen_subcommand_from test" -s c -l config -d 'Configuration file path (optional, uses env vars by default)' -r -F
+complete -c ironclaw -n "__fish_ironclaw_using_subcommand mcp; and __fish_seen_subcommand_from test" -l cli-only -d 'Run in interactive CLI mode only (disable other channels)'
+complete -c ironclaw -n "__fish_ironclaw_using_subcommand mcp; and __fish_seen_subcommand_from test" -l no-db -d 'Skip database connection (for testing)'
+complete -c ironclaw -n "__fish_ironclaw_using_subcommand mcp; and __fish_seen_subcommand_from test" -l no-onboard -d 'Skip first-run onboarding check'
+complete -c ironclaw -n "__fish_ironclaw_using_subcommand mcp; and __fish_seen_subcommand_from test" -s h -l help -d 'Print help'
+complete -c ironclaw -n "__fish_ironclaw_using_subcommand mcp; and __fish_seen_subcommand_from toggle" -s m -l message -d 'Single message mode - send one message and exit' -r
+complete -c ironclaw -n "__fish_ironclaw_using_subcommand mcp; and __fish_seen_subcommand_from toggle" -s c -l config -d 'Configuration file path (optional, uses env vars by default)' -r -F
+complete -c ironclaw -n "__fish_ironclaw_using_subcommand mcp; and __fish_seen_subcommand_from toggle" -l enable -d 'Enable the server'
+complete -c ironclaw -n "__fish_ironclaw_using_subcommand mcp; and __fish_seen_subcommand_from toggle" -l disable -d 'Disable the server'
+complete -c ironclaw -n "__fish_ironclaw_using_subcommand mcp; and __fish_seen_subcommand_from toggle" -l cli-only -d 'Run in interactive CLI mode only (disable other channels)'
+complete -c ironclaw -n "__fish_ironclaw_using_subcommand mcp; and __fish_seen_subcommand_from toggle" -l no-db -d 'Skip database connection (for testing)'
+complete -c ironclaw -n "__fish_ironclaw_using_subcommand mcp; and __fish_seen_subcommand_from toggle" -l no-onboard -d 'Skip first-run onboarding check'
+complete -c ironclaw -n "__fish_ironclaw_using_subcommand mcp; and __fish_seen_subcommand_from toggle" -s h -l help -d 'Print help'
+complete -c ironclaw -n "__fish_ironclaw_using_subcommand mcp; and __fish_seen_subcommand_from help" -f -a "add" -d 'Add an MCP server'
+complete -c ironclaw -n "__fish_ironclaw_using_subcommand mcp; and __fish_seen_subcommand_from help" -f -a "remove" -d 'Remove an MCP server'
+complete -c ironclaw -n "__fish_ironclaw_using_subcommand mcp; and __fish_seen_subcommand_from help" -f -a "list" -d 'List configured MCP servers'
+complete -c ironclaw -n "__fish_ironclaw_using_subcommand mcp; and __fish_seen_subcommand_from help" -f -a "auth" -d 'Authenticate with an MCP server (OAuth flow)'
+complete -c ironclaw -n "__fish_ironclaw_using_subcommand mcp; and __fish_seen_subcommand_from help" -f -a "test" -d 'Test connection to an MCP server'
+complete -c ironclaw -n "__fish_ironclaw_using_subcommand mcp; and __fish_seen_subcommand_from help" -f -a "toggle" -d 'Enable or disable an MCP server'
+complete -c ironclaw -n "__fish_ironclaw_using_subcommand mcp; and __fish_seen_subcommand_from help" -f -a "help" -d 'Print this message or the help of the given subcommand(s)'
+complete -c ironclaw -n "__fish_ironclaw_using_subcommand memory; and not __fish_seen_subcommand_from search read write tree status help" -s m -l message -d 'Single message mode - send one message and exit' -r
+complete -c ironclaw -n "__fish_ironclaw_using_subcommand memory; and not __fish_seen_subcommand_from search read write tree status help" -s c -l config -d 'Configuration file path (optional, uses env vars by default)' -r -F
+complete -c ironclaw -n "__fish_ironclaw_using_subcommand memory; and not __fish_seen_subcommand_from search read write tree status help" -l cli-only -d 'Run in interactive CLI mode only (disable other channels)'
+complete -c ironclaw -n "__fish_ironclaw_using_subcommand memory; and not __fish_seen_subcommand_from search read write tree status help" -l no-db -d 'Skip database connection (for testing)'
+complete -c ironclaw -n "__fish_ironclaw_using_subcommand memory; and not __fish_seen_subcommand_from search read write tree status help" -l no-onboard -d 'Skip first-run onboarding check'
+complete -c ironclaw -n "__fish_ironclaw_using_subcommand memory; and not __fish_seen_subcommand_from search read write tree status help" -s h -l help -d 'Print help'
+complete -c ironclaw -n "__fish_ironclaw_using_subcommand memory; and not __fish_seen_subcommand_from search read write tree status help" -f -a "search" -d 'Search workspace memory (hybrid full-text + semantic)'
+complete -c ironclaw -n "__fish_ironclaw_using_subcommand memory; and not __fish_seen_subcommand_from search read write tree status help" -f -a "read" -d 'Read a file from the workspace'
+complete -c ironclaw -n "__fish_ironclaw_using_subcommand memory; and not __fish_seen_subcommand_from search read write tree status help" -f -a "write" -d 'Write content to a workspace file'
+complete -c ironclaw -n "__fish_ironclaw_using_subcommand memory; and not __fish_seen_subcommand_from search read write tree status help" -f -a "tree" -d 'Show workspace directory tree'
+complete -c ironclaw -n "__fish_ironclaw_using_subcommand memory; and not __fish_seen_subcommand_from search read write tree status help" -f -a "status" -d 'Show workspace status (document count, index health)'
+complete -c ironclaw -n "__fish_ironclaw_using_subcommand memory; and not __fish_seen_subcommand_from search read write tree status help" -f -a "help" -d 'Print this message or the help of the given subcommand(s)'
+complete -c ironclaw -n "__fish_ironclaw_using_subcommand memory; and __fish_seen_subcommand_from search" -s l -l limit -d 'Maximum number of results' -r
+complete -c ironclaw -n "__fish_ironclaw_using_subcommand memory; and __fish_seen_subcommand_from search" -s m -l message -d 'Single message mode - send one message and exit' -r
+complete -c ironclaw -n "__fish_ironclaw_using_subcommand memory; and __fish_seen_subcommand_from search" -s c -l config -d 'Configuration file path (optional, uses env vars by default)' -r -F
+complete -c ironclaw -n "__fish_ironclaw_using_subcommand memory; and __fish_seen_subcommand_from search" -l cli-only -d 'Run in interactive CLI mode only (disable other channels)'
+complete -c ironclaw -n "__fish_ironclaw_using_subcommand memory; and __fish_seen_subcommand_from search" -l no-db -d 'Skip database connection (for testing)'
+complete -c ironclaw -n "__fish_ironclaw_using_subcommand memory; and __fish_seen_subcommand_from search" -l no-onboard -d 'Skip first-run onboarding check'
+complete -c ironclaw -n "__fish_ironclaw_using_subcommand memory; and __fish_seen_subcommand_from search" -s h -l help -d 'Print help'
+complete -c ironclaw -n "__fish_ironclaw_using_subcommand memory; and __fish_seen_subcommand_from read" -s m -l message -d 'Single message mode - send one message and exit' -r
+complete -c ironclaw -n "__fish_ironclaw_using_subcommand memory; and __fish_seen_subcommand_from read" -s c -l config -d 'Configuration file path (optional, uses env vars by default)' -r -F
+complete -c ironclaw -n "__fish_ironclaw_using_subcommand memory; and __fish_seen_subcommand_from read" -l cli-only -d 'Run in interactive CLI mode only (disable other channels)'
+complete -c ironclaw -n "__fish_ironclaw_using_subcommand memory; and __fish_seen_subcommand_from read" -l no-db -d 'Skip database connection (for testing)'
+complete -c ironclaw -n "__fish_ironclaw_using_subcommand memory; and __fish_seen_subcommand_from read" -l no-onboard -d 'Skip first-run onboarding check'
+complete -c ironclaw -n "__fish_ironclaw_using_subcommand memory; and __fish_seen_subcommand_from read" -s h -l help -d 'Print help'
+complete -c ironclaw -n "__fish_ironclaw_using_subcommand memory; and __fish_seen_subcommand_from write" -s m -l message -d 'Single message mode - send one message and exit' -r
+complete -c ironclaw -n "__fish_ironclaw_using_subcommand memory; and __fish_seen_subcommand_from write" -s c -l config -d 'Configuration file path (optional, uses env vars by default)' -r -F
+complete -c ironclaw -n "__fish_ironclaw_using_subcommand memory; and __fish_seen_subcommand_from write" -s a -l append -d 'Append instead of overwrite'
+complete -c ironclaw -n "__fish_ironclaw_using_subcommand memory; and __fish_seen_subcommand_from write" -l cli-only -d 'Run in interactive CLI mode only (disable other channels)'
+complete -c ironclaw -n "__fish_ironclaw_using_subcommand memory; and __fish_seen_subcommand_from write" -l no-db -d 'Skip database connection (for testing)'
+complete -c ironclaw -n "__fish_ironclaw_using_subcommand memory; and __fish_seen_subcommand_from write" -l no-onboard -d 'Skip first-run onboarding check'
+complete -c ironclaw -n "__fish_ironclaw_using_subcommand memory; and __fish_seen_subcommand_from write" -s h -l help -d 'Print help'
+complete -c ironclaw -n "__fish_ironclaw_using_subcommand memory; and __fish_seen_subcommand_from tree" -s d -l depth -d 'Maximum depth to traverse' -r
+complete -c ironclaw -n "__fish_ironclaw_using_subcommand memory; and __fish_seen_subcommand_from tree" -s m -l message -d 'Single message mode - send one message and exit' -r
+complete -c ironclaw -n "__fish_ironclaw_using_subcommand memory; and __fish_seen_subcommand_from tree" -s c -l config -d 'Configuration file path (optional, uses env vars by default)' -r -F
+complete -c ironclaw -n "__fish_ironclaw_using_subcommand memory; and __fish_seen_subcommand_from tree" -l cli-only -d 'Run in interactive CLI mode only (disable other channels)'
+complete -c ironclaw -n "__fish_ironclaw_using_subcommand memory; and __fish_seen_subcommand_from tree" -l no-db -d 'Skip database connection (for testing)'
+complete -c ironclaw -n "__fish_ironclaw_using_subcommand memory; and __fish_seen_subcommand_from tree" -l no-onboard -d 'Skip first-run onboarding check'
+complete -c ironclaw -n "__fish_ironclaw_using_subcommand memory; and __fish_seen_subcommand_from tree" -s h -l help -d 'Print help'
+complete -c ironclaw -n "__fish_ironclaw_using_subcommand memory; and __fish_seen_subcommand_from status" -s m -l message -d 'Single message mode - send one message and exit' -r
+complete -c ironclaw -n "__fish_ironclaw_using_subcommand memory; and __fish_seen_subcommand_from status" -s c -l config -d 'Configuration file path (optional, uses env vars by default)' -r -F
+complete -c ironclaw -n "__fish_ironclaw_using_subcommand memory; and __fish_seen_subcommand_from status" -l cli-only -d 'Run in interactive CLI mode only (disable other channels)'
+complete -c ironclaw -n "__fish_ironclaw_using_subcommand memory; and __fish_seen_subcommand_from status" -l no-db -d 'Skip database connection (for testing)'
+complete -c ironclaw -n "__fish_ironclaw_using_subcommand memory; and __fish_seen_subcommand_from status" -l no-onboard -d 'Skip first-run onboarding check'
+complete -c ironclaw -n "__fish_ironclaw_using_subcommand memory; and __fish_seen_subcommand_from status" -s h -l help -d 'Print help'
+complete -c ironclaw -n "__fish_ironclaw_using_subcommand memory; and __fish_seen_subcommand_from help" -f -a "search" -d 'Search workspace memory (hybrid full-text + semantic)'
+complete -c ironclaw -n "__fish_ironclaw_using_subcommand memory; and __fish_seen_subcommand_from help" -f -a "read" -d 'Read a file from the workspace'
+complete -c ironclaw -n "__fish_ironclaw_using_subcommand memory; and __fish_seen_subcommand_from help" -f -a "write" -d 'Write content to a workspace file'
+complete -c ironclaw -n "__fish_ironclaw_using_subcommand memory; and __fish_seen_subcommand_from help" -f -a "tree" -d 'Show workspace directory tree'
+complete -c ironclaw -n "__fish_ironclaw_using_subcommand memory; and __fish_seen_subcommand_from help" -f -a "status" -d 'Show workspace status (document count, index health)'
+complete -c ironclaw -n "__fish_ironclaw_using_subcommand memory; and __fish_seen_subcommand_from help" -f -a "help" -d 'Print this message or the help of the given subcommand(s)'
+complete -c ironclaw -n "__fish_ironclaw_using_subcommand pairing; and not __fish_seen_subcommand_from list approve help" -s m -l message -d 'Single message mode - send one message and exit' -r
+complete -c ironclaw -n "__fish_ironclaw_using_subcommand pairing; and not __fish_seen_subcommand_from list approve help" -s c -l config -d 'Configuration file path (optional, uses env vars by default)' -r -F
+complete -c ironclaw -n "__fish_ironclaw_using_subcommand pairing; and not __fish_seen_subcommand_from list approve help" -l cli-only -d 'Run in interactive CLI mode only (disable other channels)'
+complete -c ironclaw -n "__fish_ironclaw_using_subcommand pairing; and not __fish_seen_subcommand_from list approve help" -l no-db -d 'Skip database connection (for testing)'
+complete -c ironclaw -n "__fish_ironclaw_using_subcommand pairing; and not __fish_seen_subcommand_from list approve help" -l no-onboard -d 'Skip first-run onboarding check'
+complete -c ironclaw -n "__fish_ironclaw_using_subcommand pairing; and not __fish_seen_subcommand_from list approve help" -s h -l help -d 'Print help'
+complete -c ironclaw -n "__fish_ironclaw_using_subcommand pairing; and not __fish_seen_subcommand_from list approve help" -f -a "list" -d 'List pending pairing requests'
+complete -c ironclaw -n "__fish_ironclaw_using_subcommand pairing; and not __fish_seen_subcommand_from list approve help" -f -a "approve" -d 'Approve a pairing request by code'
+complete -c ironclaw -n "__fish_ironclaw_using_subcommand pairing; and not __fish_seen_subcommand_from list approve help" -f -a "help" -d 'Print this message or the help of the given subcommand(s)'
+complete -c ironclaw -n "__fish_ironclaw_using_subcommand pairing; and __fish_seen_subcommand_from list" -s m -l message -d 'Single message mode - send one message and exit' -r
+complete -c ironclaw -n "__fish_ironclaw_using_subcommand pairing; and __fish_seen_subcommand_from list" -s c -l config -d 'Configuration file path (optional, uses env vars by default)' -r -F
+complete -c ironclaw -n "__fish_ironclaw_using_subcommand pairing; and __fish_seen_subcommand_from list" -l json -d 'Output as JSON'
+complete -c ironclaw -n "__fish_ironclaw_using_subcommand pairing; and __fish_seen_subcommand_from list" -l cli-only -d 'Run in interactive CLI mode only (disable other channels)'
+complete -c ironclaw -n "__fish_ironclaw_using_subcommand pairing; and __fish_seen_subcommand_from list" -l no-db -d 'Skip database connection (for testing)'
+complete -c ironclaw -n "__fish_ironclaw_using_subcommand pairing; and __fish_seen_subcommand_from list" -l no-onboard -d 'Skip first-run onboarding check'
+complete -c ironclaw -n "__fish_ironclaw_using_subcommand pairing; and __fish_seen_subcommand_from list" -s h -l help -d 'Print help'
+complete -c ironclaw -n "__fish_ironclaw_using_subcommand pairing; and __fish_seen_subcommand_from approve" -s m -l message -d 'Single message mode - send one message and exit' -r
+complete -c ironclaw -n "__fish_ironclaw_using_subcommand pairing; and __fish_seen_subcommand_from approve" -s c -l config -d 'Configuration file path (optional, uses env vars by default)' -r -F
+complete -c ironclaw -n "__fish_ironclaw_using_subcommand pairing; and __fish_seen_subcommand_from approve" -l cli-only -d 'Run in interactive CLI mode only (disable other channels)'
+complete -c ironclaw -n "__fish_ironclaw_using_subcommand pairing; and __fish_seen_subcommand_from approve" -l no-db -d 'Skip database connection (for testing)'
+complete -c ironclaw -n "__fish_ironclaw_using_subcommand pairing; and __fish_seen_subcommand_from approve" -l no-onboard -d 'Skip first-run onboarding check'
+complete -c ironclaw -n "__fish_ironclaw_using_subcommand pairing; and __fish_seen_subcommand_from approve" -s h -l help -d 'Print help'
+complete -c ironclaw -n "__fish_ironclaw_using_subcommand pairing; and __fish_seen_subcommand_from help" -f -a "list" -d 'List pending pairing requests'
+complete -c ironclaw -n "__fish_ironclaw_using_subcommand pairing; and __fish_seen_subcommand_from help" -f -a "approve" -d 'Approve a pairing request by code'
+complete -c ironclaw -n "__fish_ironclaw_using_subcommand pairing; and __fish_seen_subcommand_from help" -f -a "help" -d 'Print this message or the help of the given subcommand(s)'
+complete -c ironclaw -n "__fish_ironclaw_using_subcommand service; and not __fish_seen_subcommand_from install start stop status uninstall help" -s m -l message -d 'Single message mode - send one message and exit' -r
+complete -c ironclaw -n "__fish_ironclaw_using_subcommand service; and not __fish_seen_subcommand_from install start stop status uninstall help" -s c -l config -d 'Configuration file path (optional, uses env vars by default)' -r -F
+complete -c ironclaw -n "__fish_ironclaw_using_subcommand service; and not __fish_seen_subcommand_from install start stop status uninstall help" -l cli-only -d 'Run in interactive CLI mode only (disable other channels)'
+complete -c ironclaw -n "__fish_ironclaw_using_subcommand service; and not __fish_seen_subcommand_from install start stop status uninstall help" -l no-db -d 'Skip database connection (for testing)'
+complete -c ironclaw -n "__fish_ironclaw_using_subcommand service; and not __fish_seen_subcommand_from install start stop status uninstall help" -l no-onboard -d 'Skip first-run onboarding check'
+complete -c ironclaw -n "__fish_ironclaw_using_subcommand service; and not __fish_seen_subcommand_from install start stop status uninstall help" -s h -l help -d 'Print help'
+complete -c ironclaw -n "__fish_ironclaw_using_subcommand service; and not __fish_seen_subcommand_from install start stop status uninstall help" -f -a "install" -d 'Install the OS service (launchd on macOS, systemd on Linux)'
+complete -c ironclaw -n "__fish_ironclaw_using_subcommand service; and not __fish_seen_subcommand_from install start stop status uninstall help" -f -a "start" -d 'Start the installed service'
+complete -c ironclaw -n "__fish_ironclaw_using_subcommand service; and not __fish_seen_subcommand_from install start stop status uninstall help" -f -a "stop" -d 'Stop the running service'
+complete -c ironclaw -n "__fish_ironclaw_using_subcommand service; and not __fish_seen_subcommand_from install start stop status uninstall help" -f -a "status" -d 'Show service status'
+complete -c ironclaw -n "__fish_ironclaw_using_subcommand service; and not __fish_seen_subcommand_from install start stop status uninstall help" -f -a "uninstall" -d 'Uninstall the OS service and remove the unit file'
+complete -c ironclaw -n "__fish_ironclaw_using_subcommand service; and not __fish_seen_subcommand_from install start stop status uninstall help" -f -a "help" -d 'Print this message or the help of the given subcommand(s)'
+complete -c ironclaw -n "__fish_ironclaw_using_subcommand service; and __fish_seen_subcommand_from install" -s m -l message -d 'Single message mode - send one message and exit' -r
+complete -c ironclaw -n "__fish_ironclaw_using_subcommand service; and __fish_seen_subcommand_from install" -s c -l config -d 'Configuration file path (optional, uses env vars by default)' -r -F
+complete -c ironclaw -n "__fish_ironclaw_using_subcommand service; and __fish_seen_subcommand_from install" -l cli-only -d 'Run in interactive CLI mode only (disable other channels)'
+complete -c ironclaw -n "__fish_ironclaw_using_subcommand service; and __fish_seen_subcommand_from install" -l no-db -d 'Skip database connection (for testing)'
+complete -c ironclaw -n "__fish_ironclaw_using_subcommand service; and __fish_seen_subcommand_from install" -l no-onboard -d 'Skip first-run onboarding check'
+complete -c ironclaw -n "__fish_ironclaw_using_subcommand service; and __fish_seen_subcommand_from install" -s h -l help -d 'Print help'
+complete -c ironclaw -n "__fish_ironclaw_using_subcommand service; and __fish_seen_subcommand_from start" -s m -l message -d 'Single message mode - send one message and exit' -r
+complete -c ironclaw -n "__fish_ironclaw_using_subcommand service; and __fish_seen_subcommand_from start" -s c -l config -d 'Configuration file path (optional, uses env vars by default)' -r -F
+complete -c ironclaw -n "__fish_ironclaw_using_subcommand service; and __fish_seen_subcommand_from start" -l cli-only -d 'Run in interactive CLI mode only (disable other channels)'
+complete -c ironclaw -n "__fish_ironclaw_using_subcommand service; and __fish_seen_subcommand_from start" -l no-db -d 'Skip database connection (for testing)'
+complete -c ironclaw -n "__fish_ironclaw_using_subcommand service; and __fish_seen_subcommand_from start" -l no-onboard -d 'Skip first-run onboarding check'
 complete -c ironclaw -n "__fish_ironclaw_using_subcommand service; and __fish_seen_subcommand_from start" -s h -l help -d 'Print help'
+complete -c ironclaw -n "__fish_ironclaw_using_subcommand service; and __fish_seen_subcommand_from stop" -s m -l message -d 'Single message mode - send one message and exit' -r
+complete -c ironclaw -n "__fish_ironclaw_using_subcommand service; and __fish_seen_subcommand_from stop" -s c -l config -d 'Configuration file path (optional, uses env vars by default)' -r -F
+complete -c ironclaw -n "__fish_ironclaw_using_subcommand service; and __fish_seen_subcommand_from stop" -l cli-only -d 'Run in interactive CLI mode only (disable other channels)'
+complete -c ironclaw -n "__fish_ironclaw_using_subcommand service; and __fish_seen_subcommand_from stop" -l no-db -d 'Skip database connection (for testing)'
+complete -c ironclaw -n "__fish_ironclaw_using_subcommand service; and __fish_seen_subcommand_from stop" -l no-onboard -d 'Skip first-run onboarding check'
 complete -c ironclaw -n "__fish_ironclaw_using_subcommand service; and __fish_seen_subcommand_from stop" -s h -l help -d 'Print help'
-complete -c ironclaw -n "__fish_ironclaw_using_subcommand service; and __fish_seen_subcommand_from restart" -s h -l help -d 'Print help'
+complete -c ironclaw -n "__fish_ironclaw_using_subcommand service; and __fish_seen_subcommand_from status" -s m -l message -d 'Single message mode - send one message and exit' -r
+complete -c ironclaw -n "__fish_ironclaw_using_subcommand service; and __fish_seen_subcommand_from status" -s c -l config -d 'Configuration file path (optional, uses env vars by default)' -r -F
+complete -c ironclaw -n "__fish_ironclaw_using_subcommand service; and __fish_seen_subcommand_from status" -l cli-only -d 'Run in interactive CLI mode only (disable other channels)'
+complete -c ironclaw -n "__fish_ironclaw_using_subcommand service; and __fish_seen_subcommand_from status" -l no-db -d 'Skip database connection (for testing)'
+complete -c ironclaw -n "__fish_ironclaw_using_subcommand service; and __fish_seen_subcommand_from status" -l no-onboard -d 'Skip first-run onboarding check'
 complete -c ironclaw -n "__fish_ironclaw_using_subcommand service; and __fish_seen_subcommand_from status" -s h -l help -d 'Print help'
+complete -c ironclaw -n "__fish_ironclaw_using_subcommand service; and __fish_seen_subcommand_from uninstall" -s m -l message -d 'Single message mode - send one message and exit' -r
+complete -c ironclaw -n "__fish_ironclaw_using_subcommand service; and __fish_seen_subcommand_from uninstall" -s c -l config -d 'Configuration file path (optional, uses env vars by default)' -r -F
+complete -c ironclaw -n "__fish_ironclaw_using_subcommand service; and __fish_seen_subcommand_from uninstall" -l cli-only -d 'Run in interactive CLI mode only (disable other channels)'
+complete -c ironclaw -n "__fish_ironclaw_using_subcommand service; and __fish_seen_subcommand_from uninstall" -l no-db -d 'Skip database connection (for testing)'
+complete -c ironclaw -n "__fish_ironclaw_using_subcommand service; and __fish_seen_subcommand_from uninstall" -l no-onboard -d 'Skip first-run onboarding check'
 complete -c ironclaw -n "__fish_ironclaw_using_subcommand service; and __fish_seen_subcommand_from uninstall" -s h -l help -d 'Print help'
 complete -c ironclaw -n "__fish_ironclaw_using_subcommand service; and __fish_seen_subcommand_from help" -f -a "install" -d 'Install the OS service (launchd on macOS, systemd on Linux)'
 complete -c ironclaw -n "__fish_ironclaw_using_subcommand service; and __fish_seen_subcommand_from help" -f -a "start" -d 'Start the installed service'
 complete -c ironclaw -n "__fish_ironclaw_using_subcommand service; and __fish_seen_subcommand_from help" -f -a "stop" -d 'Stop the running service'
-complete -c ironclaw -n "__fish_ironclaw_using_subcommand service; and __fish_seen_subcommand_from help" -f -a "restart" -d 'Restart the service: stop then start if running, or just start if stopped. Errors if the service is not installed'
 complete -c ironclaw -n "__fish_ironclaw_using_subcommand service; and __fish_seen_subcommand_from help" -f -a "status" -d 'Show service status'
 complete -c ironclaw -n "__fish_ironclaw_using_subcommand service; and __fish_seen_subcommand_from help" -f -a "uninstall" -d 'Uninstall the OS service and remove the unit file'
 complete -c ironclaw -n "__fish_ironclaw_using_subcommand service; and __fish_seen_subcommand_from help" -f -a "help" -d 'Print this message or the help of the given subcommand(s)'
-complete -c ironclaw -n "__fish_ironclaw_using_subcommand skills; and not __fish_seen_subcommand_from list help" -s h -l help -d 'Print help'
-complete -c ironclaw -n "__fish_ironclaw_using_subcommand skills; and not __fish_seen_subcommand_from list help" -f -a "list" -d 'List configured Reborn skills'
-complete -c ironclaw -n "__fish_ironclaw_using_subcommand skills; and not __fish_seen_subcommand_from list help" -f -a "help" -d 'Print this message or the help of the given subcommand(s)'
-complete -c ironclaw -n "__fish_ironclaw_using_subcommand skills; and __fish_seen_subcommand_from list" -s v -l verbose -d 'Show extra status details'
-complete -c ironclaw -n "__fish_ironclaw_using_subcommand skills; and __fish_seen_subcommand_from list" -l json -d 'Output skills as JSON'
-complete -c ironclaw -n "__fish_ironclaw_using_subcommand skills; and __fish_seen_subcommand_from list" -s h -l help -d 'Print help'
-complete -c ironclaw -n "__fish_ironclaw_using_subcommand skills; and __fish_seen_subcommand_from help" -f -a "list" -d 'List configured Reborn skills'
-complete -c ironclaw -n "__fish_ironclaw_using_subcommand skills; and __fish_seen_subcommand_from help" -f -a "help" -d 'Print this message or the help of the given subcommand(s)'
-complete -c ironclaw -n "__fish_ironclaw_using_subcommand status" -l json -d 'Output as JSON'
+complete -c ironclaw -n "__fish_ironclaw_using_subcommand doctor" -s m -l message -d 'Single message mode - send one message and exit' -r
+complete -c ironclaw -n "__fish_ironclaw_using_subcommand doctor" -s c -l config -d 'Configuration file path (optional, uses env vars by default)' -r -F
+complete -c ironclaw -n "__fish_ironclaw_using_subcommand doctor" -l cli-only -d 'Run in interactive CLI mode only (disable other channels)'
+complete -c ironclaw -n "__fish_ironclaw_using_subcommand doctor" -l no-db -d 'Skip database connection (for testing)'
+complete -c ironclaw -n "__fish_ironclaw_using_subcommand doctor" -l no-onboard -d 'Skip first-run onboarding check'
+complete -c ironclaw -n "__fish_ironclaw_using_subcommand doctor" -s h -l help -d 'Print help'
+complete -c ironclaw -n "__fish_ironclaw_using_subcommand status" -s m -l message -d 'Single message mode - send one message and exit' -r
+complete -c ironclaw -n "__fish_ironclaw_using_subcommand status" -s c -l config -d 'Configuration file path (optional, uses env vars by default)' -r -F
+complete -c ironclaw -n "__fish_ironclaw_using_subcommand status" -l cli-only -d 'Run in interactive CLI mode only (disable other channels)'
+complete -c ironclaw -n "__fish_ironclaw_using_subcommand status" -l no-db -d 'Skip database connection (for testing)'
+complete -c ironclaw -n "__fish_ironclaw_using_subcommand status" -l no-onboard -d 'Skip first-run onboarding check'
 complete -c ironclaw -n "__fish_ironclaw_using_subcommand status" -s h -l help -d 'Print help'
-complete -c ironclaw -n "__fish_ironclaw_using_subcommand traces; and not __fish_seen_subcommand_from opt-in opt-out enroll-instance status preview enqueue flush-queue queue-status credit submit list-submissions revoke ingest-health profile help" -s h -l help -d 'Print help'
-complete -c ironclaw -n "__fish_ironclaw_using_subcommand traces; and not __fish_seen_subcommand_from opt-in opt-out enroll-instance status preview enqueue flush-queue queue-status credit submit list-submissions revoke ingest-health profile help" -f -a "opt-in" -d 'Enable autonomous trace contribution after local redaction'
-complete -c ironclaw -n "__fish_ironclaw_using_subcommand traces; and not __fish_seen_subcommand_from opt-in opt-out enroll-instance status preview enqueue flush-queue queue-status credit submit list-submissions revoke ingest-health profile help" -f -a "opt-out" -d 'Disable autonomous trace contribution. With --user-scope: opt out ONLY that user (instance-level enrollment untouched). Without: disable the global/instance policy AND the owner scope (full off switch)'
-complete -c ironclaw -n "__fish_ironclaw_using_subcommand traces; and not __fish_seen_subcommand_from opt-in opt-out enroll-instance status preview enqueue flush-queue queue-status credit submit list-submissions revoke ingest-health profile help" -f -a "enroll-instance" -d 'Enroll this ENTIRE INSTANCE in Trace Commons with an operator invite link (admin operation — requires shell access to the instance host). Every user without a personal enrollment inherits it, attributed via a salted per-user pseudonym. Exclude a single user with `traces opt-out --user-scope <tenant-id>/<user-id>` (bare `traces opt-out` disables the entire instance enrollment)'
-complete -c ironclaw -n "__fish_ironclaw_using_subcommand traces; and not __fish_seen_subcommand_from opt-in opt-out enroll-instance status preview enqueue flush-queue queue-status credit submit list-submissions revoke ingest-health profile help" -f -a "status" -d 'Show local standing trace contribution policy'
-complete -c ironclaw -n "__fish_ironclaw_using_subcommand traces; and not __fish_seen_subcommand_from opt-in opt-out enroll-instance status preview enqueue flush-queue queue-status credit submit list-submissions revoke ingest-health profile help" -f -a "preview" -d 'Preview a redacted contribution envelope from a recorded trace file'
-complete -c ironclaw -n "__fish_ironclaw_using_subcommand traces; and not __fish_seen_subcommand_from opt-in opt-out enroll-instance status preview enqueue flush-queue queue-status credit submit list-submissions revoke ingest-health profile help" -f -a "enqueue" -d 'Add an already-previewed envelope to the autonomous submission queue'
-complete -c ironclaw -n "__fish_ironclaw_using_subcommand traces; and not __fish_seen_subcommand_from opt-in opt-out enroll-instance status preview enqueue flush-queue queue-status credit submit list-submissions revoke ingest-health profile help" -f -a "flush-queue" -d 'Submit eligible queued envelopes using the standing opt-in policy'
-complete -c ironclaw -n "__fish_ironclaw_using_subcommand traces; and not __fish_seen_subcommand_from opt-in opt-out enroll-instance status preview enqueue flush-queue queue-status credit submit list-submissions revoke ingest-health profile help" -f -a "queue-status" -d 'Show local autonomous trace queue diagnostics'
-complete -c ironclaw -n "__fish_ironclaw_using_subcommand traces; and not __fish_seen_subcommand_from opt-in opt-out enroll-instance status preview enqueue flush-queue queue-status credit submit list-submissions revoke ingest-health profile help" -f -a "credit" -d 'Show local credit totals and recent credit explanations'
-complete -c ironclaw -n "__fish_ironclaw_using_subcommand traces; and not __fish_seen_subcommand_from opt-in opt-out enroll-instance status preview enqueue flush-queue queue-status credit submit list-submissions revoke ingest-health profile help" -f -a "submit" -d 'Submit an already-previewed redacted contribution envelope'
-complete -c ironclaw -n "__fish_ironclaw_using_subcommand traces; and not __fish_seen_subcommand_from opt-in opt-out enroll-instance status preview enqueue flush-queue queue-status credit submit list-submissions revoke ingest-health profile help" -f -a "list-submissions" -d 'List local trace contribution submission records'
-complete -c ironclaw -n "__fish_ironclaw_using_subcommand traces; and not __fish_seen_subcommand_from opt-in opt-out enroll-instance status preview enqueue flush-queue queue-status credit submit list-submissions revoke ingest-health profile help" -f -a "revoke" -d 'Revoke a trace contribution locally and, optionally, at an ingestion API'
-complete -c ironclaw -n "__fish_ironclaw_using_subcommand traces; and not __fish_seen_subcommand_from opt-in opt-out enroll-instance status preview enqueue flush-queue queue-status credit submit list-submissions revoke ingest-health profile help" -f -a "ingest-health" -d 'Check a Trace Commons ingestion service /health endpoint'
-complete -c ironclaw -n "__fish_ironclaw_using_subcommand traces; and not __fish_seen_subcommand_from opt-in opt-out enroll-instance status preview enqueue flush-queue queue-status credit submit list-submissions revoke ingest-health profile help" -f -a "profile" -d 'Manage the optional public community profile (second opt-in)'
-complete -c ironclaw -n "__fish_ironclaw_using_subcommand traces; and not __fish_seen_subcommand_from opt-in opt-out enroll-instance status preview enqueue flush-queue queue-status credit submit list-submissions revoke ingest-health profile help" -f -a "help" -d 'Print this message or the help of the given subcommand(s)'
-complete -c ironclaw -n "__fish_ironclaw_using_subcommand traces; and __fish_seen_subcommand_from opt-in" -l endpoint -d 'Explicit private ingestion endpoint URL' -r
-complete -c ironclaw -n "__fish_ironclaw_using_subcommand traces; and __fish_seen_subcommand_from opt-in" -l user-scope -d 'Runtime/web user scope to configure; defaults to this instance\'s owner_id' -r
-complete -c ironclaw -n "__fish_ironclaw_using_subcommand traces; and __fish_seen_subcommand_from opt-in" -l bearer-token-env -d 'Environment variable containing the bearer token for the endpoint' -r
-complete -c ironclaw -n "__fish_ironclaw_using_subcommand traces; and __fish_seen_subcommand_from opt-in" -l upload-token-issuer-url -d 'HTTPS issuer URL that returns short-lived EdDSA upload claims' -r
-complete -c ironclaw -n "__fish_ironclaw_using_subcommand traces; and __fish_seen_subcommand_from opt-in" -l upload-token-issuer-allowed-hosts -d 'Exact allowed issuer hostnames for upload claim refresh' -r
-complete -c ironclaw -n "__fish_ironclaw_using_subcommand traces; and __fish_seen_subcommand_from opt-in" -l upload-token-audience -d 'Audience to request from the upload claim issuer' -r
-complete -c ironclaw -n "__fish_ironclaw_using_subcommand traces; and __fish_seen_subcommand_from opt-in" -l upload-token-tenant-id -d 'Tenant ID to request from the upload claim issuer' -r
-complete -c ironclaw -n "__fish_ironclaw_using_subcommand traces; and __fish_seen_subcommand_from opt-in" -l upload-token-workload-token-env -d 'Environment variable containing workload credentials for the issuer' -r
-complete -c ironclaw -n "__fish_ironclaw_using_subcommand traces; and __fish_seen_subcommand_from opt-in" -l upload-token-invite-code -d 'Operator-issued pilot invite code. When set, included in upload-claim refresh requests so the issuer\'s allowlist gate can match it. Required only when the configured issuer runs with TRACE_COMMONS_ALLOWLIST_SOURCE — omit otherwise' -r
-complete -c ironclaw -n "__fish_ironclaw_using_subcommand traces; and __fish_seen_subcommand_from opt-in" -l upload-token-issuer-timeout-ms -d 'Upload claim issuer timeout in milliseconds' -r
-complete -c ironclaw -n "__fish_ironclaw_using_subcommand traces; and __fish_seen_subcommand_from opt-in" -l scope -d 'Consent scope to include in autonomous envelopes' -r -f -a "debugging-evaluation\t''
-benchmark-only\t''
-ranking-training\t''
-model-training\t''"
-complete -c ironclaw -n "__fish_ironclaw_using_subcommand traces; and __fish_seen_subcommand_from opt-in" -l selected-tools -d 'Only auto-submit traces that use these tool names' -r
-complete -c ironclaw -n "__fish_ironclaw_using_subcommand traces; and __fish_seen_subcommand_from opt-in" -l min-submission-score -d 'Minimum local score required for autonomous submission' -r
-complete -c ironclaw -n "__fish_ironclaw_using_subcommand traces; and __fish_seen_subcommand_from opt-in" -l include-message-text -d 'Include locally redacted user/assistant message text'
-complete -c ironclaw -n "__fish_ironclaw_using_subcommand traces; and __fish_seen_subcommand_from opt-in" -l include-tool-payloads -d 'Include locally redacted tool arguments, tool results, and HTTP bodies'
-complete -c ironclaw -n "__fish_ironclaw_using_subcommand traces; and __fish_seen_subcommand_from opt-in" -l allow-pii-review-bypass -d 'Submit medium-risk traces without holding them for manual review'
-complete -c ironclaw -n "__fish_ironclaw_using_subcommand traces; and __fish_seen_subcommand_from opt-in" -s h -l help -d 'Print help'
-complete -c ironclaw -n "__fish_ironclaw_using_subcommand traces; and __fish_seen_subcommand_from opt-out" -l user-scope -d 'Runtime/web user scope to disable (scoped-only opt-out); defaults to this instance\'s owner_id AND disables the global policy' -r
-complete -c ironclaw -n "__fish_ironclaw_using_subcommand traces; and __fish_seen_subcommand_from opt-out" -s h -l help -d 'Print help'
-complete -c ironclaw -n "__fish_ironclaw_using_subcommand traces; and __fish_seen_subcommand_from enroll-instance" -l invite -d 'Operator invite link (`https://<host>#<code>`, or `<code>@<host>`)' -r
-complete -c ironclaw -n "__fish_ironclaw_using_subcommand traces; and __fish_seen_subcommand_from enroll-instance" -l include-message-text -d 'Include locally redacted user/assistant message text in envelopes (applies instance-wide to every inheriting user)'
-complete -c ironclaw -n "__fish_ironclaw_using_subcommand traces; and __fish_seen_subcommand_from enroll-instance" -l include-tool-payloads -d 'Include locally redacted tool arguments, tool results, and HTTP bodies in envelopes (applies instance-wide)'
-complete -c ironclaw -n "__fish_ironclaw_using_subcommand traces; and __fish_seen_subcommand_from enroll-instance" -l json -d 'Output the enrollment outcome as JSON'
-complete -c ironclaw -n "__fish_ironclaw_using_subcommand traces; and __fish_seen_subcommand_from enroll-instance" -s h -l help -d 'Print help'
-complete -c ironclaw -n "__fish_ironclaw_using_subcommand traces; and __fish_seen_subcommand_from status" -l user-scope -d 'Show the runtime/web policy for this user scope instead of the global CLI policy' -r
-complete -c ironclaw -n "__fish_ironclaw_using_subcommand traces; and __fish_seen_subcommand_from status" -l json -d 'Output as JSON'
-complete -c ironclaw -n "__fish_ironclaw_using_subcommand traces; and __fish_seen_subcommand_from status" -s h -l help -d 'Print help'
-complete -c ironclaw -n "__fish_ironclaw_using_subcommand traces; and __fish_seen_subcommand_from preview" -l recorded-trace -d 'Recorded trace JSON file produced by IRONCLAW_RECORD_TRACE' -r -F
-complete -c ironclaw -n "__fish_ironclaw_using_subcommand traces; and __fish_seen_subcommand_from preview" -l scope -d 'Consent scope to include in the envelope' -r -f -a "debugging-evaluation\t''
-benchmark-only\t''
-ranking-training\t''
-model-training\t''"
-complete -c ironclaw -n "__fish_ironclaw_using_subcommand traces; and __fish_seen_subcommand_from preview" -l channel -d 'Source channel for this trace' -r -f -a "web\t''
-cli\t''
-telegram\t''
-slack\t''
-routine\t''
-other\t''"
-complete -c ironclaw -n "__fish_ironclaw_using_subcommand traces; and __fish_seen_subcommand_from preview" -l engine-version -d 'Optional engine version metadata' -r
-complete -c ironclaw -n "__fish_ironclaw_using_subcommand traces; and __fish_seen_subcommand_from preview" -l contributor-id -d 'Optional pseudonymous contributor ID' -r
-complete -c ironclaw -n "__fish_ironclaw_using_subcommand traces; and __fish_seen_subcommand_from preview" -l credit-account-ref -d 'Optional separate credit account reference' -r
-complete -c ironclaw -n "__fish_ironclaw_using_subcommand traces; and __fish_seen_subcommand_from preview" -s o -l output -d 'Write envelope JSON to a file instead of stdout' -r -F
-complete -c ironclaw -n "__fish_ironclaw_using_subcommand traces; and __fish_seen_subcommand_from preview" -l include-message-text -d 'Include locally redacted user/assistant message text'
-complete -c ironclaw -n "__fish_ironclaw_using_subcommand traces; and __fish_seen_subcommand_from preview" -l include-tool-payloads -d 'Include locally redacted tool arguments, tool results, and HTTP bodies'
-complete -c ironclaw -n "__fish_ironclaw_using_subcommand traces; and __fish_seen_subcommand_from preview" -l enqueue -d 'Add the redacted envelope to the autonomous submission queue'
-complete -c ironclaw -n "__fish_ironclaw_using_subcommand traces; and __fish_seen_subcommand_from preview" -s h -l help -d 'Print help'
-complete -c ironclaw -n "__fish_ironclaw_using_subcommand traces; and __fish_seen_subcommand_from enqueue" -l envelope -d 'Redacted contribution envelope JSON file' -r -F
-complete -c ironclaw -n "__fish_ironclaw_using_subcommand traces; and __fish_seen_subcommand_from enqueue" -s h -l help -d 'Print help'
-complete -c ironclaw -n "__fish_ironclaw_using_subcommand traces; and __fish_seen_subcommand_from flush-queue" -l limit -d 'Maximum queued envelopes to submit' -r
-complete -c ironclaw -n "__fish_ironclaw_using_subcommand traces; and __fish_seen_subcommand_from flush-queue" -s h -l help -d 'Print help'
-complete -c ironclaw -n "__fish_ironclaw_using_subcommand traces; and __fish_seen_subcommand_from queue-status" -l scope -d 'Local tenant/user trace scope to inspect' -r
-complete -c ironclaw -n "__fish_ironclaw_using_subcommand traces; and __fish_seen_subcommand_from queue-status" -l json -d 'Output as JSON'
-complete -c ironclaw -n "__fish_ironclaw_using_subcommand traces; and __fish_seen_subcommand_from queue-status" -s h -l help -d 'Print help'
-complete -c ironclaw -n "__fish_ironclaw_using_subcommand traces; and __fish_seen_subcommand_from credit" -l notice-scope -d 'Local tenant/user trace scope to check for a due periodic notice' -r
-complete -c ironclaw -n "__fish_ironclaw_using_subcommand traces; and __fish_seen_subcommand_from credit" -l snooze-hours -d 'Snooze the current credit notice for this many hours' -r
-complete -c ironclaw -n "__fish_ironclaw_using_subcommand traces; and __fish_seen_subcommand_from credit" -l json -d 'Output as JSON'
-complete -c ironclaw -n "__fish_ironclaw_using_subcommand traces; and __fish_seen_subcommand_from credit" -l notice -d 'Print and mark a due periodic credit notice instead of the full credit report'
-complete -c ironclaw -n "__fish_ironclaw_using_subcommand traces; and __fish_seen_subcommand_from credit" -l ack -d 'Acknowledge the current credit notice until credit changes again'
-complete -c ironclaw -n "__fish_ironclaw_using_subcommand traces; and __fish_seen_subcommand_from credit" -s h -l help -d 'Print help'
-complete -c ironclaw -n "__fish_ironclaw_using_subcommand traces; and __fish_seen_subcommand_from submit" -l envelope -d 'Redacted contribution envelope JSON file' -r -F
-complete -c ironclaw -n "__fish_ironclaw_using_subcommand traces; and __fish_seen_subcommand_from submit" -l endpoint -d 'Explicit private ingestion endpoint URL' -r
-complete -c ironclaw -n "__fish_ironclaw_using_subcommand traces; and __fish_seen_subcommand_from submit" -l bearer-token-env -d 'Environment variable containing the bearer token for the endpoint' -r
-complete -c ironclaw -n "__fish_ironclaw_using_subcommand traces; and __fish_seen_subcommand_from submit" -s h -l help -d 'Print help'
-complete -c ironclaw -n "__fish_ironclaw_using_subcommand traces; and __fish_seen_subcommand_from list-submissions" -l json -d 'Output as JSON'
-complete -c ironclaw -n "__fish_ironclaw_using_subcommand traces; and __fish_seen_subcommand_from list-submissions" -l summary -d 'Include aggregate submission and credit totals'
-complete -c ironclaw -n "__fish_ironclaw_using_subcommand traces; and __fish_seen_subcommand_from list-submissions" -s h -l help -d 'Print help'
-complete -c ironclaw -n "__fish_ironclaw_using_subcommand traces; and __fish_seen_subcommand_from revoke" -l endpoint -d 'Optional private revocation endpoint URL' -r
-complete -c ironclaw -n "__fish_ironclaw_using_subcommand traces; and __fish_seen_subcommand_from revoke" -l bearer-token-env -d 'Environment variable containing the bearer token for the endpoint' -r
-complete -c ironclaw -n "__fish_ironclaw_using_subcommand traces; and __fish_seen_subcommand_from revoke" -s h -l help -d 'Print help'
-complete -c ironclaw -n "__fish_ironclaw_using_subcommand traces; and __fish_seen_subcommand_from ingest-health" -l endpoint -d 'Trace Commons ingestion base URL, /health URL, or /v1/traces URL' -r
-complete -c ironclaw -n "__fish_ironclaw_using_subcommand traces; and __fish_seen_subcommand_from ingest-health" -l json -d 'Output as JSON'
-complete -c ironclaw -n "__fish_ironclaw_using_subcommand traces; and __fish_seen_subcommand_from ingest-health" -s h -l help -d 'Print help'
-complete -c ironclaw -n "__fish_ironclaw_using_subcommand traces; and __fish_seen_subcommand_from profile" -s h -l help -d 'Print help'
-complete -c ironclaw -n "__fish_ironclaw_using_subcommand traces; and __fish_seen_subcommand_from profile" -f -a "token" -d 'Mint a short-lived profile token for the Trace Commons web profile page'
-complete -c ironclaw -n "__fish_ironclaw_using_subcommand traces; and __fish_seen_subcommand_from profile" -f -a "set" -d 'Create or update the public community profile'
-complete -c ironclaw -n "__fish_ironclaw_using_subcommand traces; and __fish_seen_subcommand_from profile" -f -a "withdraw" -d 'Withdraw the public community profile'
-complete -c ironclaw -n "__fish_ironclaw_using_subcommand traces; and __fish_seen_subcommand_from profile" -f -a "help" -d 'Print this message or the help of the given subcommand(s)'
-complete -c ironclaw -n "__fish_ironclaw_using_subcommand traces; and __fish_seen_subcommand_from help" -f -a "opt-in" -d 'Enable autonomous trace contribution after local redaction'
-complete -c ironclaw -n "__fish_ironclaw_using_subcommand traces; and __fish_seen_subcommand_from help" -f -a "opt-out" -d 'Disable autonomous trace contribution. With --user-scope: opt out ONLY that user (instance-level enrollment untouched). Without: disable the global/instance policy AND the owner scope (full off switch)'
-complete -c ironclaw -n "__fish_ironclaw_using_subcommand traces; and __fish_seen_subcommand_from help" -f -a "enroll-instance" -d 'Enroll this ENTIRE INSTANCE in Trace Commons with an operator invite link (admin operation — requires shell access to the instance host). Every user without a personal enrollment inherits it, attributed via a salted per-user pseudonym. Exclude a single user with `traces opt-out --user-scope <tenant-id>/<user-id>` (bare `traces opt-out` disables the entire instance enrollment)'
-complete -c ironclaw -n "__fish_ironclaw_using_subcommand traces; and __fish_seen_subcommand_from help" -f -a "status" -d 'Show local standing trace contribution policy'
-complete -c ironclaw -n "__fish_ironclaw_using_subcommand traces; and __fish_seen_subcommand_from help" -f -a "preview" -d 'Preview a redacted contribution envelope from a recorded trace file'
-complete -c ironclaw -n "__fish_ironclaw_using_subcommand traces; and __fish_seen_subcommand_from help" -f -a "enqueue" -d 'Add an already-previewed envelope to the autonomous submission queue'
-complete -c ironclaw -n "__fish_ironclaw_using_subcommand traces; and __fish_seen_subcommand_from help" -f -a "flush-queue" -d 'Submit eligible queued envelopes using the standing opt-in policy'
-complete -c ironclaw -n "__fish_ironclaw_using_subcommand traces; and __fish_seen_subcommand_from help" -f -a "queue-status" -d 'Show local autonomous trace queue diagnostics'
-complete -c ironclaw -n "__fish_ironclaw_using_subcommand traces; and __fish_seen_subcommand_from help" -f -a "credit" -d 'Show local credit totals and recent credit explanations'
-complete -c ironclaw -n "__fish_ironclaw_using_subcommand traces; and __fish_seen_subcommand_from help" -f -a "submit" -d 'Submit an already-previewed redacted contribution envelope'
-complete -c ironclaw -n "__fish_ironclaw_using_subcommand traces; and __fish_seen_subcommand_from help" -f -a "list-submissions" -d 'List local trace contribution submission records'
-complete -c ironclaw -n "__fish_ironclaw_using_subcommand traces; and __fish_seen_subcommand_from help" -f -a "revoke" -d 'Revoke a trace contribution locally and, optionally, at an ingestion API'
-complete -c ironclaw -n "__fish_ironclaw_using_subcommand traces; and __fish_seen_subcommand_from help" -f -a "ingest-health" -d 'Check a Trace Commons ingestion service /health endpoint'
-complete -c ironclaw -n "__fish_ironclaw_using_subcommand traces; and __fish_seen_subcommand_from help" -f -a "profile" -d 'Manage the optional public community profile (second opt-in)'
-complete -c ironclaw -n "__fish_ironclaw_using_subcommand traces; and __fish_seen_subcommand_from help" -f -a "help" -d 'Print this message or the help of the given subcommand(s)'
-complete -c ironclaw -n "__fish_ironclaw_using_subcommand help; and not __fish_seen_subcommand_from channels completion config doctor extension hooks logs models onboard profile repl run serve service skills status traces help" -f -a "channels" -d 'Inspect configured Reborn channels'
-complete -c ironclaw -n "__fish_ironclaw_using_subcommand help; and not __fish_seen_subcommand_from channels completion config doctor extension hooks logs models onboard profile repl run serve service skills status traces help" -f -a "completion" -d 'Generate shell completion scripts'
-complete -c ironclaw -n "__fish_ironclaw_using_subcommand help; and not __fish_seen_subcommand_from channels completion config doctor extension hooks logs models onboard profile repl run serve service skills status traces help" -f -a "config" -d 'Inspect Reborn configuration paths without creating state'
-complete -c ironclaw -n "__fish_ironclaw_using_subcommand help; and not __fish_seen_subcommand_from channels completion config doctor extension hooks logs models onboard profile repl run serve service skills status traces help" -f -a "doctor" -d 'Check Reborn binary configuration without creating state'
-complete -c ironclaw -n "__fish_ironclaw_using_subcommand help; and not __fish_seen_subcommand_from channels completion config doctor extension hooks logs models onboard profile repl run serve service skills status traces help" -f -a "extension" -d 'Manage local Reborn extension lifecycle'
-complete -c ironclaw -n "__fish_ironclaw_using_subcommand help; and not __fish_seen_subcommand_from channels completion config doctor extension hooks logs models onboard profile repl run serve service skills status traces help" -f -a "hooks" -d 'Inspect configured Reborn hooks'
-complete -c ironclaw -n "__fish_ironclaw_using_subcommand help; and not __fish_seen_subcommand_from channels completion config doctor extension hooks logs models onboard profile repl run serve service skills status traces help" -f -a "logs" -d 'Inspect Reborn logs'
-complete -c ironclaw -n "__fish_ironclaw_using_subcommand help; and not __fish_seen_subcommand_from channels completion config doctor extension hooks logs models onboard profile repl run serve service skills status traces help" -f -a "models" -d 'Inspect Reborn model slots and route status'
-complete -c ironclaw -n "__fish_ironclaw_using_subcommand help; and not __fish_seen_subcommand_from channels completion config doctor extension hooks logs models onboard profile repl run serve service skills status traces help" -f -a "onboard" -d 'Initialize the standalone Reborn home and first-run setup marker'
-complete -c ironclaw -n "__fish_ironclaw_using_subcommand help; and not __fish_seen_subcommand_from channels completion config doctor extension hooks logs models onboard profile repl run serve service skills status traces help" -f -a "profile" -d 'Inspect supported Reborn boot profiles'
-complete -c ironclaw -n "__fish_ironclaw_using_subcommand help; and not __fish_seen_subcommand_from channels completion config doctor extension hooks logs models onboard profile repl run serve service skills status traces help" -f -a "repl" -d 'Start the composed Reborn CLI REPL'
-complete -c ironclaw -n "__fish_ironclaw_using_subcommand help; and not __fish_seen_subcommand_from channels completion config doctor extension hooks logs models onboard profile repl run serve service skills status traces help" -f -a "run" -d 'Initialize the minimal Reborn runtime shell and exit'
-complete -c ironclaw -n "__fish_ironclaw_using_subcommand help; and not __fish_seen_subcommand_from channels completion config doctor extension hooks logs models onboard profile repl run serve service skills status traces help" -f -a "serve" -d 'Start the Reborn WebUI service. Available only when the binary is built with the `webui-v2-beta` Cargo feature; off by default because the beta HTTP/auth gateway requires explicit opt-in before being linked into a production binary'
-complete -c ironclaw -n "__fish_ironclaw_using_subcommand help; and not __fish_seen_subcommand_from channels completion config doctor extension hooks logs models onboard profile repl run serve service skills status traces help" -f -a "service" -d 'Install/start/stop/status/uninstall the standalone Reborn binary as an OS-native service (launchd on macOS, systemd on Linux). Available only when built with the `webui-v2-beta` Cargo feature, since the installed unit runs `serve`'
-complete -c ironclaw -n "__fish_ironclaw_using_subcommand help; and not __fish_seen_subcommand_from channels completion config doctor extension hooks logs models onboard profile repl run serve service skills status traces help" -f -a "skills" -d 'Inspect configured Reborn skills'
-complete -c ironclaw -n "__fish_ironclaw_using_subcommand help; and not __fish_seen_subcommand_from channels completion config doctor extension hooks logs models onboard profile repl run serve service skills status traces help" -f -a "status" -d 'Show Reborn runtime status snapshot'
-complete -c ironclaw -n "__fish_ironclaw_using_subcommand help; and not __fish_seen_subcommand_from channels completion config doctor extension hooks logs models onboard profile repl run serve service skills status traces help" -f -a "traces" -d 'Manage trace contributions to TraceCommons'
-complete -c ironclaw -n "__fish_ironclaw_using_subcommand help; and not __fish_seen_subcommand_from channels completion config doctor extension hooks logs models onboard profile repl run serve service skills status traces help" -f -a "help" -d 'Print this message or the help of the given subcommand(s)'
-complete -c ironclaw -n "__fish_ironclaw_using_subcommand help; and __fish_seen_subcommand_from channels" -f -a "list" -d 'List configured Reborn channels'
-complete -c ironclaw -n "__fish_ironclaw_using_subcommand help; and __fish_seen_subcommand_from config" -f -a "path" -d 'Show resolved Reborn configuration paths without creating state'
-complete -c ironclaw -n "__fish_ironclaw_using_subcommand help; and __fish_seen_subcommand_from config" -f -a "init" -d 'Write a commented stub `config.toml` and `providers.json` into the Reborn home directory. Refuses to clobber unless --force'
-complete -c ironclaw -n "__fish_ironclaw_using_subcommand help; and __fish_seen_subcommand_from config" -f -a "list" -d 'List all configuration keys and their values'
-complete -c ironclaw -n "__fish_ironclaw_using_subcommand help; and __fish_seen_subcommand_from config" -f -a "get" -d 'Get a single configuration value by dot-separated key'
-complete -c ironclaw -n "__fish_ironclaw_using_subcommand help; and __fish_seen_subcommand_from extension" -f -a "search" -d 'Search local Reborn extension packages'
-complete -c ironclaw -n "__fish_ironclaw_using_subcommand help; and __fish_seen_subcommand_from extension" -f -a "install" -d 'Install a local Reborn extension package'
-complete -c ironclaw -n "__fish_ironclaw_using_subcommand help; and __fish_seen_subcommand_from extension" -f -a "activate" -d 'Activate an installed local Reborn extension package'
-complete -c ironclaw -n "__fish_ironclaw_using_subcommand help; and __fish_seen_subcommand_from extension" -f -a "remove" -d 'Remove an installed local Reborn extension package'
-complete -c ironclaw -n "__fish_ironclaw_using_subcommand help; and __fish_seen_subcommand_from hooks" -f -a "list" -d 'List configured Reborn hooks'
-complete -c ironclaw -n "__fish_ironclaw_using_subcommand help; and __fish_seen_subcommand_from models" -f -a "list" -d 'List Reborn LLM providers, or show one provider'
-complete -c ironclaw -n "__fish_ironclaw_using_subcommand help; and __fish_seen_subcommand_from models" -f -a "status" -d 'Show Reborn model route status'
-complete -c ironclaw -n "__fish_ironclaw_using_subcommand help; and __fish_seen_subcommand_from models" -f -a "set" -d 'Set the default Reborn model for the active provider'
-complete -c ironclaw -n "__fish_ironclaw_using_subcommand help; and __fish_seen_subcommand_from models" -f -a "set-provider" -d 'Set the default Reborn LLM provider'
-complete -c ironclaw -n "__fish_ironclaw_using_subcommand help; and __fish_seen_subcommand_from profile" -f -a "list" -d 'List supported Reborn boot profiles'
+complete -c ironclaw -n "__fish_ironclaw_using_subcommand completion" -l shell -d 'The shell to generate completions for' -r -f -a "bash\t''
+zsh\t''
+fish\t''
+powershell\t''
+elvish\t''"
+complete -c ironclaw -n "__fish_ironclaw_using_subcommand completion" -s m -l message -d 'Single message mode - send one message and exit' -r
+complete -c ironclaw -n "__fish_ironclaw_using_subcommand completion" -s c -l config -d 'Configuration file path (optional, uses env vars by default)' -r -F
+complete -c ironclaw -n "__fish_ironclaw_using_subcommand completion" -l cli-only -d 'Run in interactive CLI mode only (disable other channels)'
+complete -c ironclaw -n "__fish_ironclaw_using_subcommand completion" -l no-db -d 'Skip database connection (for testing)'
+complete -c ironclaw -n "__fish_ironclaw_using_subcommand completion" -l no-onboard -d 'Skip first-run onboarding check'
+complete -c ironclaw -n "__fish_ironclaw_using_subcommand completion" -s h -l help -d 'Print help'
+complete -c ironclaw -n "__fish_ironclaw_using_subcommand worker" -l job-id -d 'Job ID to execute' -r
+complete -c ironclaw -n "__fish_ironclaw_using_subcommand worker" -l orchestrator-url -d 'URL of the orchestrator\'s internal API' -r
+complete -c ironclaw -n "__fish_ironclaw_using_subcommand worker" -l max-iterations -d 'Maximum iterations before stopping' -r
+complete -c ironclaw -n "__fish_ironclaw_using_subcommand worker" -s m -l message -d 'Single message mode - send one message and exit' -r
+complete -c ironclaw -n "__fish_ironclaw_using_subcommand worker" -s c -l config -d 'Configuration file path (optional, uses env vars by default)' -r -F
+complete -c ironclaw -n "__fish_ironclaw_using_subcommand worker" -l cli-only -d 'Run in interactive CLI mode only (disable other channels)'
+complete -c ironclaw -n "__fish_ironclaw_using_subcommand worker" -l no-db -d 'Skip database connection (for testing)'
+complete -c ironclaw -n "__fish_ironclaw_using_subcommand worker" -l no-onboard -d 'Skip first-run onboarding check'
+complete -c ironclaw -n "__fish_ironclaw_using_subcommand worker" -s h -l help -d 'Print help'
+complete -c ironclaw -n "__fish_ironclaw_using_subcommand claude-bridge" -l job-id -d 'Job ID to execute' -r
+complete -c ironclaw -n "__fish_ironclaw_using_subcommand claude-bridge" -l orchestrator-url -d 'URL of the orchestrator\'s internal API' -r
+complete -c ironclaw -n "__fish_ironclaw_using_subcommand claude-bridge" -l max-turns -d 'Maximum agentic turns for Claude Code' -r
+complete -c ironclaw -n "__fish_ironclaw_using_subcommand claude-bridge" -l model -d 'Claude model to use (e.g. "sonnet", "opus")' -r
+complete -c ironclaw -n "__fish_ironclaw_using_subcommand claude-bridge" -s m -l message -d 'Single message mode - send one message and exit' -r
+complete -c ironclaw -n "__fish_ironclaw_using_subcommand claude-bridge" -s c -l config -d 'Configuration file path (optional, uses env vars by default)' -r -F
+complete -c ironclaw -n "__fish_ironclaw_using_subcommand claude-bridge" -l cli-only -d 'Run in interactive CLI mode only (disable other channels)'
+complete -c ironclaw -n "__fish_ironclaw_using_subcommand claude-bridge" -l no-db -d 'Skip database connection (for testing)'
+complete -c ironclaw -n "__fish_ironclaw_using_subcommand claude-bridge" -l no-onboard -d 'Skip first-run onboarding check'
+complete -c ironclaw -n "__fish_ironclaw_using_subcommand claude-bridge" -s h -l help -d 'Print help'
+complete -c ironclaw -n "__fish_ironclaw_using_subcommand help; and not __fish_seen_subcommand_from run onboard config tool mcp memory pairing service doctor status completion worker claude-bridge help" -f -a "run" -d 'Run the agent (default if no subcommand given)'
+complete -c ironclaw -n "__fish_ironclaw_using_subcommand help; and not __fish_seen_subcommand_from run onboard config tool mcp memory pairing service doctor status completion worker claude-bridge help" -f -a "onboard" -d 'Interactive onboarding wizard'
+complete -c ironclaw -n "__fish_ironclaw_using_subcommand help; and not __fish_seen_subcommand_from run onboard config tool mcp memory pairing service doctor status completion worker claude-bridge help" -f -a "config" -d 'Manage configuration settings'
+complete -c ironclaw -n "__fish_ironclaw_using_subcommand help; and not __fish_seen_subcommand_from run onboard config tool mcp memory pairing service doctor status completion worker claude-bridge help" -f -a "tool" -d 'Manage WASM tools'
+complete -c ironclaw -n "__fish_ironclaw_using_subcommand help; and not __fish_seen_subcommand_from run onboard config tool mcp memory pairing service doctor status completion worker claude-bridge help" -f -a "mcp" -d 'Manage MCP servers (hosted tool providers)'
+complete -c ironclaw -n "__fish_ironclaw_using_subcommand help; and not __fish_seen_subcommand_from run onboard config tool mcp memory pairing service doctor status completion worker claude-bridge help" -f -a "memory" -d 'Query and manage workspace memory'
+complete -c ironclaw -n "__fish_ironclaw_using_subcommand help; and not __fish_seen_subcommand_from run onboard config tool mcp memory pairing service doctor status completion worker claude-bridge help" -f -a "pairing" -d 'DM pairing (approve inbound requests from unknown senders)'
+complete -c ironclaw -n "__fish_ironclaw_using_subcommand help; and not __fish_seen_subcommand_from run onboard config tool mcp memory pairing service doctor status completion worker claude-bridge help" -f -a "service" -d 'Manage OS service (launchd / systemd)'
+complete -c ironclaw -n "__fish_ironclaw_using_subcommand help; and not __fish_seen_subcommand_from run onboard config tool mcp memory pairing service doctor status completion worker claude-bridge help" -f -a "doctor" -d 'Probe external dependencies and validate configuration'
+complete -c ironclaw -n "__fish_ironclaw_using_subcommand help; and not __fish_seen_subcommand_from run onboard config tool mcp memory pairing service doctor status completion worker claude-bridge help" -f -a "status" -d 'Show system health and diagnostics'
+complete -c ironclaw -n "__fish_ironclaw_using_subcommand help; and not __fish_seen_subcommand_from run onboard config tool mcp memory pairing service doctor status completion worker claude-bridge help" -f -a "completion" -d 'Generate shell completion scripts'
+complete -c ironclaw -n "__fish_ironclaw_using_subcommand help; and not __fish_seen_subcommand_from run onboard config tool mcp memory pairing service doctor status completion worker claude-bridge help" -f -a "worker" -d 'Run as a sandboxed worker inside a Docker container (internal use). This is invoked automatically by the orchestrator, not by users directly'
+complete -c ironclaw -n "__fish_ironclaw_using_subcommand help; and not __fish_seen_subcommand_from run onboard config tool mcp memory pairing service doctor status completion worker claude-bridge help" -f -a "claude-bridge" -d 'Run as a Claude Code bridge inside a Docker container (internal use). Spawns the `claude` CLI and streams output back to the orchestrator'
+complete -c ironclaw -n "__fish_ironclaw_using_subcommand help; and not __fish_seen_subcommand_from run onboard config tool mcp memory pairing service doctor status completion worker claude-bridge help" -f -a "help" -d 'Print this message or the help of the given subcommand(s)'
+complete -c ironclaw -n "__fish_ironclaw_using_subcommand help; and __fish_seen_subcommand_from config" -f -a "init" -d 'Generate a default config.toml file'
+complete -c ironclaw -n "__fish_ironclaw_using_subcommand help; and __fish_seen_subcommand_from config" -f -a "list" -d 'List all settings and their current values'
+complete -c ironclaw -n "__fish_ironclaw_using_subcommand help; and __fish_seen_subcommand_from config" -f -a "get" -d 'Get a specific setting value'
+complete -c ironclaw -n "__fish_ironclaw_using_subcommand help; and __fish_seen_subcommand_from config" -f -a "set" -d 'Set a setting value'
+complete -c ironclaw -n "__fish_ironclaw_using_subcommand help; and __fish_seen_subcommand_from config" -f -a "reset" -d 'Reset a setting to its default value'
+complete -c ironclaw -n "__fish_ironclaw_using_subcommand help; and __fish_seen_subcommand_from config" -f -a "path" -d 'Show the settings storage info'
+complete -c ironclaw -n "__fish_ironclaw_using_subcommand help; and __fish_seen_subcommand_from tool" -f -a "install" -d 'Install a WASM tool from source directory or .wasm file'
+complete -c ironclaw -n "__fish_ironclaw_using_subcommand help; and __fish_seen_subcommand_from tool" -f -a "list" -d 'List installed tools'
+complete -c ironclaw -n "__fish_ironclaw_using_subcommand help; and __fish_seen_subcommand_from tool" -f -a "remove" -d 'Remove an installed tool'
+complete -c ironclaw -n "__fish_ironclaw_using_subcommand help; and __fish_seen_subcommand_from tool" -f -a "info" -d 'Show information about a tool'
+complete -c ironclaw -n "__fish_ironclaw_using_subcommand help; and __fish_seen_subcommand_from tool" -f -a "auth" -d 'Configure authentication for a tool'
+complete -c ironclaw -n "__fish_ironclaw_using_subcommand help; and __fish_seen_subcommand_from mcp" -f -a "add" -d 'Add an MCP server'
+complete -c ironclaw -n "__fish_ironclaw_using_subcommand help; and __fish_seen_subcommand_from mcp" -f -a "remove" -d 'Remove an MCP server'
+complete -c ironclaw -n "__fish_ironclaw_using_subcommand help; and __fish_seen_subcommand_from mcp" -f -a "list" -d 'List configured MCP servers'
+complete -c ironclaw -n "__fish_ironclaw_using_subcommand help; and __fish_seen_subcommand_from mcp" -f -a "auth" -d 'Authenticate with an MCP server (OAuth flow)'
+complete -c ironclaw -n "__fish_ironclaw_using_subcommand help; and __fish_seen_subcommand_from mcp" -f -a "test" -d 'Test connection to an MCP server'
+complete -c ironclaw -n "__fish_ironclaw_using_subcommand help; and __fish_seen_subcommand_from mcp" -f -a "toggle" -d 'Enable or disable an MCP server'
+complete -c ironclaw -n "__fish_ironclaw_using_subcommand help; and __fish_seen_subcommand_from memory" -f -a "search" -d 'Search workspace memory (hybrid full-text + semantic)'
+complete -c ironclaw -n "__fish_ironclaw_using_subcommand help; and __fish_seen_subcommand_from memory" -f -a "read" -d 'Read a file from the workspace'
+complete -c ironclaw -n "__fish_ironclaw_using_subcommand help; and __fish_seen_subcommand_from memory" -f -a "write" -d 'Write content to a workspace file'
+complete -c ironclaw -n "__fish_ironclaw_using_subcommand help; and __fish_seen_subcommand_from memory" -f -a "tree" -d 'Show workspace directory tree'
+complete -c ironclaw -n "__fish_ironclaw_using_subcommand help; and __fish_seen_subcommand_from memory" -f -a "status" -d 'Show workspace status (document count, index health)'
+complete -c ironclaw -n "__fish_ironclaw_using_subcommand help; and __fish_seen_subcommand_from pairing" -f -a "list" -d 'List pending pairing requests'
+complete -c ironclaw -n "__fish_ironclaw_using_subcommand help; and __fish_seen_subcommand_from pairing" -f -a "approve" -d 'Approve a pairing request by code'
 complete -c ironclaw -n "__fish_ironclaw_using_subcommand help; and __fish_seen_subcommand_from service" -f -a "install" -d 'Install the OS service (launchd on macOS, systemd on Linux)'
 complete -c ironclaw -n "__fish_ironclaw_using_subcommand help; and __fish_seen_subcommand_from service" -f -a "start" -d 'Start the installed service'
 complete -c ironclaw -n "__fish_ironclaw_using_subcommand help; and __fish_seen_subcommand_from service" -f -a "stop" -d 'Stop the running service'
-complete -c ironclaw -n "__fish_ironclaw_using_subcommand help; and __fish_seen_subcommand_from service" -f -a "restart" -d 'Restart the service: stop then start if running, or just start if stopped. Errors if the service is not installed'
 complete -c ironclaw -n "__fish_ironclaw_using_subcommand help; and __fish_seen_subcommand_from service" -f -a "status" -d 'Show service status'
 complete -c ironclaw -n "__fish_ironclaw_using_subcommand help; and __fish_seen_subcommand_from service" -f -a "uninstall" -d 'Uninstall the OS service and remove the unit file'
-complete -c ironclaw -n "__fish_ironclaw_using_subcommand help; and __fish_seen_subcommand_from skills" -f -a "list" -d 'List configured Reborn skills'
-complete -c ironclaw -n "__fish_ironclaw_using_subcommand help; and __fish_seen_subcommand_from traces" -f -a "opt-in" -d 'Enable autonomous trace contribution after local redaction'
-complete -c ironclaw -n "__fish_ironclaw_using_subcommand help; and __fish_seen_subcommand_from traces" -f -a "opt-out" -d 'Disable autonomous trace contribution. With --user-scope: opt out ONLY that user (instance-level enrollment untouched). Without: disable the global/instance policy AND the owner scope (full off switch)'
-complete -c ironclaw -n "__fish_ironclaw_using_subcommand help; and __fish_seen_subcommand_from traces" -f -a "enroll-instance" -d 'Enroll this ENTIRE INSTANCE in Trace Commons with an operator invite link (admin operation — requires shell access to the instance host). Every user without a personal enrollment inherits it, attributed via a salted per-user pseudonym. Exclude a single user with `traces opt-out --user-scope <tenant-id>/<user-id>` (bare `traces opt-out` disables the entire instance enrollment)'
-complete -c ironclaw -n "__fish_ironclaw_using_subcommand help; and __fish_seen_subcommand_from traces" -f -a "status" -d 'Show local standing trace contribution policy'
-complete -c ironclaw -n "__fish_ironclaw_using_subcommand help; and __fish_seen_subcommand_from traces" -f -a "preview" -d 'Preview a redacted contribution envelope from a recorded trace file'
-complete -c ironclaw -n "__fish_ironclaw_using_subcommand help; and __fish_seen_subcommand_from traces" -f -a "enqueue" -d 'Add an already-previewed envelope to the autonomous submission queue'
-complete -c ironclaw -n "__fish_ironclaw_using_subcommand help; and __fish_seen_subcommand_from traces" -f -a "flush-queue" -d 'Submit eligible queued envelopes using the standing opt-in policy'
-complete -c ironclaw -n "__fish_ironclaw_using_subcommand help; and __fish_seen_subcommand_from traces" -f -a "queue-status" -d 'Show local autonomous trace queue diagnostics'
-complete -c ironclaw -n "__fish_ironclaw_using_subcommand help; and __fish_seen_subcommand_from traces" -f -a "credit" -d 'Show local credit totals and recent credit explanations'
-complete -c ironclaw -n "__fish_ironclaw_using_subcommand help; and __fish_seen_subcommand_from traces" -f -a "submit" -d 'Submit an already-previewed redacted contribution envelope'
-complete -c ironclaw -n "__fish_ironclaw_using_subcommand help; and __fish_seen_subcommand_from traces" -f -a "list-submissions" -d 'List local trace contribution submission records'
-complete -c ironclaw -n "__fish_ironclaw_using_subcommand help; and __fish_seen_subcommand_from traces" -f -a "revoke" -d 'Revoke a trace contribution locally and, optionally, at an ingestion API'
-complete -c ironclaw -n "__fish_ironclaw_using_subcommand help; and __fish_seen_subcommand_from traces" -f -a "ingest-health" -d 'Check a Trace Commons ingestion service /health endpoint'
-complete -c ironclaw -n "__fish_ironclaw_using_subcommand help; and __fish_seen_subcommand_from traces" -f -a "profile" -d 'Manage the optional public community profile (second opt-in)'

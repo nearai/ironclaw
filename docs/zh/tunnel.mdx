@@ -6,9 +6,9 @@ icon: cloud
 
 隧道将您本地的 IronClaw 智能体暴露到互联网。当您需要基于 webhook 的频道或希望实现即时消息传递而非轮询时，就需要它。
 
-<Warning>
-本页描述保留的 v1 运行时。请从源码构建并使用 `ironclaw-v1`；规范的 `ironclaw` 命令运行 Reborn。
-</Warning>
+<Note>
+如果您还没有设置智能体，请先查看我们的[快速开始指南](./quickstart)
+</Note>
 
 ---
 
@@ -17,12 +17,12 @@ icon: cloud
 通过引导命令配置隧道：
 
 ```bash
-ironclaw-v1 onboard --channels-only
+ironclaw onboard --channels-only
 ```
 
 ### ngrok
 
-`ngrok` 是一个托管隧道服务，设置简单，非常适合刚开始使用 `ironclaw-v1` 的用户。使用前需要从 [ngrok 控制台](https://dashboard.ngrok.com/get-started/your-authtoken) 获取认证令牌。
+`ngrok` 是一个托管隧道服务，设置简单，非常适合刚开始使用 `ironclaw` 的用户。使用前需要从 [ngrok 控制台](https://dashboard.ngrok.com/get-started/your-authtoken) 获取认证令牌。
 
 ### Cloudflare
 
