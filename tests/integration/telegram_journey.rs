@@ -171,6 +171,11 @@ impl NetworkHttpEgress for ScriptedTelegramNetwork {
         request: NetworkHttpRequest,
     ) -> Result<NetworkHttpResponse, NetworkHttpError> {
         let url = request.url.clone();
+        // Parse THIS call's body before publishing the request to the shared
+        // log: `requests().last()` after the push races concurrent egress
+        // calls and could pair this URL with another call's body,
+        // misdirecting the failure toggle.
+        let request_body: Value = serde_json::from_slice(&request.body).unwrap_or(Value::Null);
         self.requests
             .lock()
             .expect("network requests lock")
@@ -183,9 +188,6 @@ impl NetworkHttpEgress for ScriptedTelegramNetwork {
         } else if url.ends_with("/setWebhook") || url.ends_with("/deleteWebhook") {
             json_response(200, json!({"ok": true, "result": true}))
         } else if url.ends_with("/sendMessage") {
-            let request_body: Value =
-                serde_json::from_slice(&self.requests().last().expect("just pushed").body)
-                    .unwrap_or(Value::Null);
             let matched_failure = {
                 let mut toggle = self.fail_matching_send.lock().expect("fail toggle lock");
                 match toggle.as_ref() {
