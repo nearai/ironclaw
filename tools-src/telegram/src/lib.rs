@@ -24,8 +24,7 @@
 //! # Prerequisites
 //!
 //! 1. Get Telegram API credentials from https://my.telegram.org/apps
-//! 2. Store them: `ironclaw-v1 secret set telegram_api_id <id>`
-//!    `ironclaw-v1 secret set telegram_api_hash <hash>`
+//! 2. Store them with `ironclaw-v1 tool setup telegram`
 //! 3. Use the `login` action with your phone number
 //!
 //! # Authentication Flow

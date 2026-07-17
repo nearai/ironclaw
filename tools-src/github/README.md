@@ -40,10 +40,11 @@ Fallback: use a Personal Access Token if you do not want to run an OAuth app:
 
 1. Create a GitHub Personal Access Token at <https://github.com/settings/tokens>
 2. Recommended scopes: `repo`, `workflow`, `read:org`
-3. Store the token:
+3. Export the token and run the tool auth flow:
 
-   ```
-   ironclaw-v1 secret set github_token YOUR_TOKEN
+   ```bash
+   export GITHUB_TOKEN="YOUR_TOKEN"
+   ironclaw-v1 tool auth github
    ```
 
 ## Usage Examples
@@ -399,7 +400,7 @@ Invalid event: 'INVALID'. Must be one of: APPROVE, REQUEST_CHANGES, COMMENT
 ### Missing Token
 
 ```text
-GitHub token not found in secret store. Set it with: ironclaw-v1 secret set github_token <token>...
+GitHub token not found in secret store. Run `ironclaw-v1 tool auth github`...
 ```
 
 ## Troubleshooting
@@ -413,7 +414,7 @@ GitHub token not found in secret store. Set it with: ironclaw-v1 secret set gith
 ### "GitHub API error 401: Bad credentials"
 
 - The token might be invalid or expired.
-- Update the token: `ironclaw-v1 secret set github_token NEW_TOKEN`.
+- Re-run `ironclaw-v1 tool auth github` and replace the existing credentials.
 
 ### Rate Limiting
 

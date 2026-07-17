@@ -71,7 +71,8 @@ ironclaw-v1 tool install \
 Store your Slack bot token as a secret:
 
 ```bash
-ironclaw-v1 secret set slack_bot_token "xoxb-your-token-here"
+export SLACK_BOT_TOKEN="xoxb-your-token-here"
+ironclaw-v1 tool auth slack
 ```
 
 Or via SQL:
@@ -214,7 +215,8 @@ world sandboxed-tool {
 
 Ensure you've stored the secret:
 ```bash
-ironclaw-v1 secret set slack_bot_token "xoxb-..."
+export SLACK_BOT_TOKEN="xoxb-..."
+ironclaw-v1 tool auth slack
 ```
 
 ### "Endpoint not in allowlist"

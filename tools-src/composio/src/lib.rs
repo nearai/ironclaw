@@ -7,7 +7,7 @@
 //! # Authentication
 //!
 //! Store your Composio API key:
-//! `ironclaw-v1 secret set composio_api_key <key>`
+//! `ironclaw-v1 tool auth composio`
 //!
 //! Get a key at: https://app.composio.dev/
 
@@ -75,8 +75,8 @@ fn execute_inner(params_str: &str, context: Option<&str>) -> Result<String, Stri
     // avoids wasting a rate-limited API call when clearly misconfigured.
     if !near::agent::host::secret_exists("composio_api_key") {
         return Err(
-            "Composio API key not configured. Set it with: \
-             ironclaw-v1 secret set composio_api_key <key>. \
+            "Composio API key not configured. \
+             Run `ironclaw-v1 tool auth composio`. \
              Get a key at: https://app.composio.dev/"
                 .into(),
         );
@@ -159,8 +159,8 @@ fn api_post(path: &str, body: &serde_json::Value) -> Result<serde_json::Value, S
     // Surface helpful message on auth failure
     if resp.status == 401 || resp.status == 403 {
         return Err(
-            "Composio API authentication failed. Ensure your API key is set: \
-             ironclaw-v1 secret set composio_api_key <key>. \
+            "Composio API authentication failed. \
+             Run `ironclaw-v1 tool auth composio`. \
              Get a key at: https://app.composio.dev/"
                 .into(),
         );
@@ -190,8 +190,8 @@ fn get_with_retry(
         // Surface helpful message on auth failure
         if resp.status == 401 || resp.status == 403 {
             return Err(
-                "Composio API authentication failed. Ensure your API key is set: \
-                 ironclaw-v1 secret set composio_api_key <key>. \
+                "Composio API authentication failed. \
+                 Run `ironclaw-v1 tool auth composio`. \
                  Get a key at: https://app.composio.dev/"
                     .into(),
             );
