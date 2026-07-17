@@ -339,7 +339,7 @@ ironclaw_webui = { path = "crates/ironclaw_webui", version = "0.1.0" }
 ironclaw_slack_v2_adapter = { path = "crates/ironclaw_slack_v2_adapter", version = "0.1.0" }
 ironclaw_reborn_config = { path = "crates/ironclaw_reborn_config", version = "0.1.0" }
 ironclaw_reborn_openai_compat = { path = "crates/ironclaw_reborn_openai_compat", version = "0.1.0", features = ["openai-compat-beta"] }
-ironclaw_run_state = { path = "crates/ironclaw_run_state", version = "0.1.0" }
+ironclaw_run_state = { path = "crates/ironclaw_run_state", version = "0.1.0", features = ["test-support"] }
 ironclaw_threads = { path = "crates/ironclaw_threads", version = "0.1.0" }
 # `InMemoryDurableEventLog` for the W5-WEBUI-API-1 SSE scenario's test-local
 # `ProjectionStream` wiring (`build_webui_event_stream_for_test`).

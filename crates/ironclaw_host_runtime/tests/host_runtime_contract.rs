@@ -33,8 +33,8 @@ use ironclaw_processes::{
     ProcessError, ProcessRecord, ProcessResultStore, ProcessStart, ProcessStatus, ProcessStore,
 };
 use ironclaw_run_state::{
-    ApprovalRecord, ApprovalRequestStore, InMemoryApprovalRequestStore, InMemoryRunStateStore,
-    RunRecord, RunStart, RunStateApprovalStore, RunStateError, RunStateStore,
+    ApprovalRecord, ApprovalRequestStore, RunRecord, RunStart, RunStateApprovalStore,
+    RunStateError, RunStateStore,
 };
 use ironclaw_trust::{
     AdminConfig, AdminEntry, AuthorityCeiling, EffectiveTrustClass, HostTrustAssignment,
@@ -74,8 +74,8 @@ async fn default_runtime_returns_completed_outcome_for_authorized_dispatch() {
     let registry = Arc::new(registry_with_echo_capability());
     let dispatcher = Arc::new(RecordingDispatcher::default());
     let authorizer: Arc<dyn TrustAwareCapabilityDispatchAuthorizer> = Arc::new(GrantAuthorizer);
-    let run_state = Arc::new(InMemoryRunStateStore::new());
-    let approval_requests = Arc::new(InMemoryApprovalRequestStore::new());
+    let run_state = Arc::new(ironclaw_run_state::in_memory_backed_run_state_store());
+    let approval_requests = Arc::new(ironclaw_run_state::in_memory_backed_approval_request_store());
 
     let runtime = DefaultHostRuntime::new(
         registry.clone(),
@@ -115,8 +115,8 @@ async fn default_runtime_surfaces_approval_required_with_persisted_request_id() 
     let registry = Arc::new(registry_with_echo_capability());
     let dispatcher = Arc::new(RecordingDispatcher::default());
     let authorizer: Arc<dyn TrustAwareCapabilityDispatchAuthorizer> = Arc::new(ApprovalAuthorizer);
-    let run_state = Arc::new(InMemoryRunStateStore::new());
-    let approval_requests = Arc::new(InMemoryApprovalRequestStore::new());
+    let run_state = Arc::new(ironclaw_run_state::in_memory_backed_run_state_store());
+    let approval_requests = Arc::new(ironclaw_run_state::in_memory_backed_approval_request_store());
     let leases: Arc<dyn ironclaw_authorization::CapabilityLeaseStore> =
         Arc::new(in_memory_backed_capability_lease_store());
 
@@ -226,11 +226,11 @@ async fn default_runtime_propagates_unavailable_when_run_state_lookup_fails_duri
     let registry = Arc::new(registry_with_echo_capability());
     let dispatcher = Arc::new(RecordingDispatcher::default());
     let authorizer: Arc<dyn TrustAwareCapabilityDispatchAuthorizer> = Arc::new(ApprovalAuthorizer);
-    let inner_run_state = Arc::new(InMemoryRunStateStore::new());
+    let inner_run_state = Arc::new(ironclaw_run_state::in_memory_backed_run_state_store());
     let run_state: Arc<dyn RunStateStore> = Arc::new(FailingGetRunStateStore {
         inner: inner_run_state.clone(),
     });
-    let approval_requests = Arc::new(InMemoryApprovalRequestStore::new());
+    let approval_requests = Arc::new(ironclaw_run_state::in_memory_backed_approval_request_store());
     let leases: Arc<dyn ironclaw_authorization::CapabilityLeaseStore> =
         Arc::new(in_memory_backed_capability_lease_store());
 
@@ -273,7 +273,7 @@ async fn default_runtime_returns_failed_for_unknown_capability() {
     let registry = Arc::new(ExtensionRegistry::new());
     let dispatcher = Arc::new(RecordingDispatcher::default());
     let authorizer: Arc<dyn TrustAwareCapabilityDispatchAuthorizer> = Arc::new(GrantAuthorizer);
-    let run_state = Arc::new(InMemoryRunStateStore::new());
+    let run_state = Arc::new(ironclaw_run_state::in_memory_backed_run_state_store());
     let runtime = DefaultHostRuntime::new(
         registry,
         dispatcher.clone(),
@@ -444,7 +444,7 @@ async fn default_runtime_status_propagates_unavailable_on_run_state_error() {
     let registry = Arc::new(ExtensionRegistry::new());
     let dispatcher = Arc::new(RecordingDispatcher::default());
     let authorizer: Arc<dyn TrustAwareCapabilityDispatchAuthorizer> = Arc::new(GrantAuthorizer);
-    let inner = Arc::new(InMemoryRunStateStore::new());
+    let inner = Arc::new(ironclaw_run_state::in_memory_backed_run_state_store());
     let run_state: Arc<dyn RunStateStore> = Arc::new(FailingRecordsRunStateStore { inner });
     let runtime = DefaultHostRuntime::new(
         registry,
@@ -522,7 +522,7 @@ async fn default_runtime_status_filters_to_running_records_only() {
     let registry = Arc::new(registry_with_echo_capability());
     let dispatcher = Arc::new(RecordingDispatcher::default());
     let authorizer: Arc<dyn TrustAwareCapabilityDispatchAuthorizer> = Arc::new(GrantAuthorizer);
-    let run_state = Arc::new(InMemoryRunStateStore::new());
+    let run_state = Arc::new(ironclaw_run_state::in_memory_backed_run_state_store());
 
     let runtime = DefaultHostRuntime::new(
         registry,
@@ -689,7 +689,7 @@ async fn default_runtime_status_reports_running_invocations_only() {
     let registry = Arc::new(registry_with_echo_capability());
     let dispatcher = Arc::new(RecordingDispatcher::default());
     let authorizer: Arc<dyn TrustAwareCapabilityDispatchAuthorizer> = Arc::new(GrantAuthorizer);
-    let run_state = Arc::new(InMemoryRunStateStore::new());
+    let run_state = Arc::new(ironclaw_run_state::in_memory_backed_run_state_store());
 
     let runtime = DefaultHostRuntime::new(
         registry,
@@ -733,7 +733,7 @@ async fn default_runtime_cancel_reports_running_invocations_as_unsupported() {
     let registry = Arc::new(registry_with_echo_capability());
     let dispatcher = Arc::new(RecordingDispatcher::default());
     let authorizer: Arc<dyn TrustAwareCapabilityDispatchAuthorizer> = Arc::new(GrantAuthorizer);
-    let run_state = Arc::new(InMemoryRunStateStore::new());
+    let run_state = Arc::new(ironclaw_run_state::in_memory_backed_run_state_store());
     let runtime = DefaultHostRuntime::new(
         registry,
         dispatcher,
@@ -937,7 +937,7 @@ async fn default_runtime_status_does_not_duplicate_process_backed_invocations() 
     let registry = Arc::new(registry_with_echo_capability());
     let dispatcher = Arc::new(RecordingDispatcher::default());
     let authorizer: Arc<dyn TrustAwareCapabilityDispatchAuthorizer> = Arc::new(GrantAuthorizer);
-    let run_state = Arc::new(InMemoryRunStateStore::new());
+    let run_state = Arc::new(ironclaw_run_state::in_memory_backed_run_state_store());
     let process_store = Arc::new(ironclaw_processes::in_memory_backed_process_store());
     let runtime = DefaultHostRuntime::new(
         registry,
@@ -1068,10 +1068,10 @@ fn process_start(context: &ExecutionContext, process_id: ProcessId) -> ProcessSt
     }
 }
 
-/// Wraps an [`InMemoryRunStateStore`] but fails every `records_for_scope`
+/// Wraps an [`ironclaw_run_state::FilesystemRunStateStore<ironclaw_filesystem::InMemoryBackend>`] but fails every `records_for_scope`
 /// call so we can exercise the runtime-status error-propagation path.
 struct FailingRecordsRunStateStore {
-    inner: Arc<InMemoryRunStateStore>,
+    inner: Arc<ironclaw_run_state::FilesystemRunStateStore<ironclaw_filesystem::InMemoryBackend>>,
 }
 
 #[async_trait]
@@ -1196,12 +1196,12 @@ impl ProcessStore for FailingRecordsProcessStore {
     }
 }
 
-/// Wraps an [`InMemoryRunStateStore`] but fails every `get` call so we can
+/// Wraps an [`ironclaw_run_state::FilesystemRunStateStore<ironclaw_filesystem::InMemoryBackend>`] but fails every `get` call so we can
 /// exercise the approval-lookup error-propagation path. Writes pass through
 /// to the inner store so the capability host can complete its own
 /// `start`/`block_approval` writes before we reach the broken read.
 struct FailingGetRunStateStore {
-    inner: Arc<InMemoryRunStateStore>,
+    inner: Arc<ironclaw_run_state::FilesystemRunStateStore<ironclaw_filesystem::InMemoryBackend>>,
 }
 
 #[async_trait]
@@ -1268,8 +1268,9 @@ impl RunStateStore for FailingGetRunStateStore {
 }
 
 struct RecordingCombinedRunStateApprovalStore {
-    runs: InMemoryRunStateStore,
-    approvals: InMemoryApprovalRequestStore,
+    runs: ironclaw_run_state::FilesystemRunStateStore<ironclaw_filesystem::InMemoryBackend>,
+    approvals:
+        ironclaw_run_state::FilesystemApprovalRequestStore<ironclaw_filesystem::InMemoryBackend>,
     combined_calls: AtomicUsize,
     separate_save_calls: AtomicUsize,
 }
@@ -1277,8 +1278,8 @@ struct RecordingCombinedRunStateApprovalStore {
 impl RecordingCombinedRunStateApprovalStore {
     fn new() -> Self {
         Self {
-            runs: InMemoryRunStateStore::new(),
-            approvals: InMemoryApprovalRequestStore::new(),
+            runs: ironclaw_run_state::in_memory_backed_run_state_store(),
+            approvals: ironclaw_run_state::in_memory_backed_approval_request_store(),
             combined_calls: AtomicUsize::new(0),
             separate_save_calls: AtomicUsize::new(0),
         }

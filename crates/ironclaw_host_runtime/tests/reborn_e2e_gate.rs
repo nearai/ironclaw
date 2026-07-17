@@ -32,9 +32,7 @@ use ironclaw_network::{
 };
 use ironclaw_processes::{FilesystemProcessResultStore, FilesystemProcessStore};
 use ironclaw_resources::{InMemoryResourceGovernor, ResourceAccount, ResourceTally};
-use ironclaw_run_state::{
-    InMemoryApprovalRequestStore, InMemoryRunStateStore, RunStateStore, RunStatus,
-};
+use ironclaw_run_state::{RunStateStore, RunStatus};
 use ironclaw_scripts::{
     ScriptBackend, ScriptBackendOutput, ScriptBackendRequest, ScriptRuntime, ScriptRuntimeConfig,
 };
@@ -48,7 +46,7 @@ use serde_json::json;
 #[tokio::test]
 async fn reborn_e2e_gate_invokes_script_through_host_runtime_with_status_events_and_resources() {
     let governor = Arc::new(InMemoryResourceGovernor::new());
-    let run_state = Arc::new(InMemoryRunStateStore::new());
+    let run_state = Arc::new(ironclaw_run_state::in_memory_backed_run_state_store());
     let event_log = Arc::new(InMemoryDurableEventLog::new());
     let filesystem = Arc::new(InMemoryBackend::new());
     seed_script_manifest_assets(filesystem.as_ref()).await;
@@ -266,7 +264,7 @@ async fn reborn_e2e_gate_blocks_for_approval_resumes_once_and_rejects_replay() {
 
 #[tokio::test]
 async fn reborn_e2e_gate_fails_unsupported_obligations_before_runtime_events_or_success() {
-    let run_state = Arc::new(InMemoryRunStateStore::new());
+    let run_state = Arc::new(ironclaw_run_state::in_memory_backed_run_state_store());
     let events = InMemoryEventSink::new();
     let governor = Arc::new(InMemoryResourceGovernor::new());
     let services = HostRuntimeServices::new(
@@ -318,7 +316,7 @@ async fn reborn_e2e_gate_fails_unsupported_obligations_before_runtime_events_or_
 
 #[tokio::test]
 async fn reborn_e2e_gate_redacts_runtime_output_before_public_result() {
-    let run_state = Arc::new(InMemoryRunStateStore::new());
+    let run_state = Arc::new(ironclaw_run_state::in_memory_backed_run_state_store());
     let events = InMemoryEventSink::new();
     let services = HostRuntimeServices::new(
         Arc::new(registry_with_manifest(SCRIPT_MANIFEST)),
@@ -382,7 +380,7 @@ async fn reborn_e2e_gate_redacts_runtime_output_before_public_result() {
 
 #[tokio::test]
 async fn reborn_e2e_gate_sanitizes_runtime_backend_failure_before_public_surfaces() {
-    let run_state = Arc::new(InMemoryRunStateStore::new());
+    let run_state = Arc::new(ironclaw_run_state::in_memory_backed_run_state_store());
     let events = InMemoryEventSink::new();
     let services = HostRuntimeServices::new(
         Arc::new(registry_with_manifest(SCRIPT_MANIFEST)),
@@ -461,7 +459,7 @@ async fn reborn_e2e_gate_sanitizes_runtime_backend_failure_before_public_surface
 
 #[tokio::test]
 async fn reborn_e2e_gate_blocks_oversized_runtime_output_before_publication() {
-    let run_state = Arc::new(InMemoryRunStateStore::new());
+    let run_state = Arc::new(ironclaw_run_state::in_memory_backed_run_state_store());
     let events = InMemoryEventSink::new();
     let services = HostRuntimeServices::new(
         Arc::new(registry_with_manifest(SCRIPT_MANIFEST)),
@@ -640,14 +638,15 @@ type InMemoryServices = HostRuntimeServices<
 
 struct ApprovalFixture {
     services: InMemoryServices,
-    run_state: Arc<InMemoryRunStateStore>,
+    run_state:
+        Arc<ironclaw_run_state::FilesystemRunStateStore<ironclaw_filesystem::InMemoryBackend>>,
     capability_leases: Arc<FilesystemCapabilityLeaseStore<InMemoryBackend>>,
     events: InMemoryEventSink,
 }
 
 fn approval_resume_fixture() -> ApprovalFixture {
-    let run_state = Arc::new(InMemoryRunStateStore::new());
-    let approval_requests = Arc::new(InMemoryApprovalRequestStore::new());
+    let run_state = Arc::new(ironclaw_run_state::in_memory_backed_run_state_store());
+    let approval_requests = Arc::new(ironclaw_run_state::in_memory_backed_approval_request_store());
     let capability_leases = Arc::new(in_memory_backed_capability_lease_store());
     let events = InMemoryEventSink::new();
     let services = HostRuntimeServices::new(

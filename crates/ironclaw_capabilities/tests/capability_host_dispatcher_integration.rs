@@ -24,7 +24,7 @@ async fn capability_host_invokes_through_runtime_dispatcher_and_completes_run() 
         json!({"via":"runtime-dispatcher"}),
     ));
     let (registry, dispatcher, governor, events) = runtime_dispatcher_stack(Arc::clone(&adapter));
-    let run_state = InMemoryRunStateStore::new();
+    let run_state = ironclaw_run_state::in_memory_backed_run_state_store();
     let authorizer = GrantAuthorizer::new();
     let host =
         CapabilityHost::new(registry.as_ref(), &dispatcher, &authorizer).with_run_state(&run_state);
@@ -88,8 +88,8 @@ async fn capability_host_invokes_through_runtime_dispatcher_and_completes_run() 
 async fn capability_host_blocks_then_resumes_approved_dispatch_through_runtime_dispatcher() {
     let adapter = Arc::new(RecordingRuntimeAdapter::new(json!({"approved":true})));
     let (registry, dispatcher, _governor, events) = runtime_dispatcher_stack(Arc::clone(&adapter));
-    let run_state = InMemoryRunStateStore::new();
-    let approval_requests = InMemoryApprovalRequestStore::new();
+    let run_state = ironclaw_run_state::in_memory_backed_run_state_store();
+    let approval_requests = ironclaw_run_state::in_memory_backed_approval_request_store();
     let leases = in_memory_backed_capability_lease_store();
     let block_host = CapabilityHost::new(registry.as_ref(), &dispatcher, &ApprovalAuthorizer)
         .with_run_state(&run_state)
@@ -193,8 +193,8 @@ async fn capability_host_blocks_then_resumes_approved_dispatch_through_runtime_d
 async fn capability_host_rejects_resume_from_wrong_user_scope_without_dispatch_or_lease_claim() {
     let adapter = Arc::new(RecordingRuntimeAdapter::new(json!({"must_not":"dispatch"})));
     let (registry, dispatcher, _governor, _events) = runtime_dispatcher_stack(Arc::clone(&adapter));
-    let run_state = InMemoryRunStateStore::new();
-    let approval_requests = InMemoryApprovalRequestStore::new();
+    let run_state = ironclaw_run_state::in_memory_backed_run_state_store();
+    let approval_requests = ironclaw_run_state::in_memory_backed_approval_request_store();
     let leases = in_memory_backed_capability_lease_store();
     let block_host = CapabilityHost::new(registry.as_ref(), &dispatcher, &ApprovalAuthorizer)
         .with_run_state(&run_state)
@@ -279,8 +279,8 @@ async fn capability_host_rejects_resume_from_wrong_user_scope_without_dispatch_o
 async fn capability_host_rejects_expired_approval_lease_before_dispatch() {
     let adapter = Arc::new(RecordingRuntimeAdapter::new(json!({"must_not":"dispatch"})));
     let (registry, dispatcher, _governor, _events) = runtime_dispatcher_stack(Arc::clone(&adapter));
-    let run_state = InMemoryRunStateStore::new();
-    let approval_requests = InMemoryApprovalRequestStore::new();
+    let run_state = ironclaw_run_state::in_memory_backed_run_state_store();
+    let approval_requests = ironclaw_run_state::in_memory_backed_approval_request_store();
     let leases = in_memory_backed_capability_lease_store();
     let block_host = CapabilityHost::new(registry.as_ref(), &dispatcher, &ApprovalAuthorizer)
         .with_run_state(&run_state)
@@ -446,7 +446,9 @@ fn runtime_dispatcher_stack(
 }
 
 async fn approve_dispatch(
-    approval_requests: &InMemoryApprovalRequestStore,
+    approval_requests: &ironclaw_run_state::FilesystemApprovalRequestStore<
+        ironclaw_filesystem::InMemoryBackend,
+    >,
     leases: &FilesystemCapabilityLeaseStore<InMemoryBackend>,
     scope: &ResourceScope,
     approval_id: ApprovalRequestId,

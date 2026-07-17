@@ -1475,7 +1475,9 @@ impl HostRuntimeCapabilityHarness {
             .approval_parts
             .as_ref()
             .map(|parts| Arc::clone(&parts.approval_requests))
-            .unwrap_or_else(|| Arc::new(ironclaw_run_state::InMemoryApprovalRequestStore::new()));
+            .unwrap_or_else(|| {
+                Arc::new(ironclaw_run_state::in_memory_backed_approval_request_store())
+            });
         let approval_requests: Arc<dyn ironclaw_run_state::ApprovalRequestStore> =
             Arc::new(super::doubles::RecordingApprovalRequestStore {
                 inner: inner_approval_requests,

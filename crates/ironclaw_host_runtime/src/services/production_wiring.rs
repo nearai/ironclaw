@@ -6,13 +6,13 @@ use ironclaw_approvals::FilesystemPersistentApprovalPolicyStore;
 use ironclaw_authorization::FilesystemCapabilityLeaseStore;
 use ironclaw_filesystem::InMemoryBackend;
 use ironclaw_processes::{FilesystemProcessResultStore, FilesystemProcessStore};
+use ironclaw_run_state::{FilesystemApprovalRequestStore, FilesystemRunStateStore};
 
 use super::{
-    DurableAuditSink, DurableEventSink, EmptyWasmRuntimeCredentials, InMemoryApprovalRequestStore,
-    InMemoryAuditSink, InMemoryCredentialBroker, InMemoryDurableAuditLog, InMemoryDurableEventLog,
-    InMemoryEventSink, InMemoryResourceGovernor, InMemoryRunStateStore, InMemorySecretStore,
-    InMemoryTurnStateStore, LocalFilesystem, LocalHostProcessPort, NoopTurnRunWakeNotifier,
-    RebornEventStoreError, RuntimeKind,
+    DurableAuditSink, DurableEventSink, EmptyWasmRuntimeCredentials, InMemoryAuditSink,
+    InMemoryCredentialBroker, InMemoryDurableAuditLog, InMemoryDurableEventLog, InMemoryEventSink,
+    InMemoryResourceGovernor, InMemorySecretStore, InMemoryTurnStateStore, LocalFilesystem,
+    LocalHostProcessPort, NoopTurnRunWakeNotifier, RebornEventStoreError, RuntimeKind,
 };
 
 #[derive(Debug, Error)]
@@ -299,8 +299,13 @@ fn classify_component_type<T: ?Sized + 'static>() -> ProductionImplementationRea
             // still local-only; libSQL/Postgres monomorphizations are distinct.
             || type_id == TypeId::of::<FilesystemProcessStore<InMemoryBackend>>()
             || type_id == TypeId::of::<FilesystemProcessResultStore<InMemoryBackend>>()
-            || type_id == TypeId::of::<InMemoryRunStateStore>()
-            || type_id == TypeId::of::<InMemoryApprovalRequestStore>()
+            // The run-state and approval-request stores no longer have bespoke
+            // in-memory implementations; "in-memory" is the `InMemoryBackend`
+            // behind the one production `Filesystem*Store<F>` (arch-simplification
+            // §4.3). A store backed by `InMemoryBackend` is still local-only;
+            // libSQL/Postgres monomorphizations are distinct.
+            || type_id == TypeId::of::<FilesystemRunStateStore<InMemoryBackend>>()
+            || type_id == TypeId::of::<FilesystemApprovalRequestStore<InMemoryBackend>>()
             // The persistent-approval and capability-lease stores no longer have
             // bespoke in-memory implementations; "in-memory" is now the
             // `InMemoryBackend` behind the one production `Filesystem*Store<F>`

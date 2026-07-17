@@ -104,10 +104,10 @@ use ironclaw_resources::{
     BroadcastBudgetEventSink, BudgetGateStore, FilesystemBudgetGateStore,
     FilesystemResourceGovernor, ResourceGovernor,
 };
-#[cfg(any(feature = "libsql", feature = "postgres"))]
+// Used by both the durable (`<LocalDevRootFilesystem>`) and no-durable
+// (`<InMemoryBackend>`) run-state/approval aliases + builders, so the import is
+// unconditional (arch-simplification §4.3).
 use ironclaw_run_state::{FilesystemApprovalRequestStore, FilesystemRunStateStore};
-#[cfg(not(any(feature = "libsql", feature = "postgres")))]
-use ironclaw_run_state::{InMemoryApprovalRequestStore, InMemoryRunStateStore};
 #[cfg(any(feature = "libsql", feature = "postgres"))]
 use ironclaw_secrets::FilesystemCredentialBroker;
 #[cfg(any(feature = "libsql", feature = "postgres"))]
@@ -276,16 +276,21 @@ type LocalDevResourceGovernor = FilesystemResourceGovernor<LocalDevRootFilesyste
 #[cfg(not(any(feature = "libsql", feature = "postgres")))]
 type LocalDevResourceGovernor = InMemoryResourceGovernor;
 
+// One run-state / approval-request store, backend-injected — the production
+// `Filesystem*Store<F>` every deployment uses, never a bespoke `InMemory*Store`
+// (arch-simplification §4.3). The no-durable-features build backs them with
+// `InMemoryBackend` directly, so the concrete type is `<InMemoryBackend>`, which
+// the host-runtime production-wiring guard classifies `LocalOnly`.
 #[cfg(any(feature = "libsql", feature = "postgres"))]
 type LocalDevRunStateStore = FilesystemRunStateStore<LocalDevRootFilesystem>;
 #[cfg(not(any(feature = "libsql", feature = "postgres")))]
-type LocalDevRunStateStore = InMemoryRunStateStore;
+type LocalDevRunStateStore = FilesystemRunStateStore<InMemoryBackend>;
 
 #[cfg(any(feature = "libsql", feature = "postgres"))]
 pub(crate) type LocalDevApprovalRequestStore =
     FilesystemApprovalRequestStore<LocalDevRootFilesystem>;
 #[cfg(not(any(feature = "libsql", feature = "postgres")))]
-pub(crate) type LocalDevApprovalRequestStore = InMemoryApprovalRequestStore;
+pub(crate) type LocalDevApprovalRequestStore = FilesystemApprovalRequestStore<InMemoryBackend>;
 
 #[cfg(any(feature = "libsql", feature = "postgres"))]
 pub(crate) type LocalDevCapabilityLeaseStore =
@@ -305,9 +310,9 @@ pub(crate) type LocalDevCapabilityLeaseStore = FilesystemCapabilityLeaseStore<In
 // the no-durable-features build backs them with `InMemoryBackend` directly, so
 // the concrete type is `<InMemoryBackend>` — which the host-runtime
 // production-wiring guard classifies `LocalOnly` (the same way the volatile
-// `InMemoryRunStateStore` is flagged). Durable
-// builds use the libSQL/Postgres-backed composite root filesystem, whose type is
-// distinct and correctly classifies as a production candidate.
+// `<InMemoryBackend>`-backed run-state/approval/lease stores are flagged).
+// Durable builds use the libSQL/Postgres-backed composite root filesystem, whose
+// type is distinct and correctly classifies as a production candidate.
 #[cfg(any(feature = "libsql", feature = "postgres"))]
 pub(crate) type LocalDevPersistentApprovalPolicyStore =
     FilesystemPersistentApprovalPolicyStore<LocalDevRootFilesystem>;
@@ -2618,8 +2623,16 @@ async fn build_local_dev_store_graph(
     let approvals_filesystem = crate::wrap_scoped(Arc::new(InMemoryBackend::new()));
     let event_log = local_dev_event_log(Arc::clone(&filesystem))?;
     let audit_log = local_dev_audit_log(Arc::clone(&filesystem))?;
-    let run_state = Arc::new(InMemoryRunStateStore::new());
-    let approval_requests = Arc::new(InMemoryApprovalRequestStore::new());
+    // Run-state and approval-request records live under sibling aliases on the
+    // same volatile in-memory backend (§4.3), so both share `approvals_filesystem`
+    // (the full-alias in-memory scoped filesystem) — a blocked run and its approval
+    // record resolve against one consistent view.
+    let run_state = Arc::new(FilesystemRunStateStore::new(Arc::clone(
+        &approvals_filesystem,
+    )));
+    let approval_requests = Arc::new(FilesystemApprovalRequestStore::new(Arc::clone(
+        &approvals_filesystem,
+    )));
     let capability_leases = Arc::new(FilesystemCapabilityLeaseStore::new(crate::wrap_scoped(
         Arc::new(InMemoryBackend::new()),
     )));

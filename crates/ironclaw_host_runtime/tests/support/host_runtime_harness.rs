@@ -55,8 +55,8 @@ use ironclaw_resources::{
     InMemoryResourceGovernor, ResourceAccount, ResourceError, ResourceGovernor, ResourceLimits,
 };
 use ironclaw_run_state::{
-    ApprovalRecord, ApprovalRequestStore, InMemoryApprovalRequestStore, InMemoryRunStateStore,
-    RunRecord, RunStart, RunStateApprovalStore, RunStateError, RunStateStore, RunStatus,
+    ApprovalRecord, ApprovalRequestStore, RunRecord, RunStart, RunStateApprovalStore,
+    RunStateError, RunStateStore, RunStatus,
 };
 use ironclaw_scripts::{
     ScriptBackend, ScriptBackendOutput, ScriptBackendRequest, ScriptExecutionRequest,
@@ -224,8 +224,10 @@ pub(crate) type InMemoryHostRuntimeServices = HostRuntimeServices<
 >;
 
 pub(crate) struct InMemoryRecordingCombinedRunStateApprovalStore {
-    pub(crate) runs: InMemoryRunStateStore,
-    pub(crate) approvals: InMemoryApprovalRequestStore,
+    pub(crate) runs:
+        ironclaw_run_state::FilesystemRunStateStore<ironclaw_filesystem::InMemoryBackend>,
+    pub(crate) approvals:
+        ironclaw_run_state::FilesystemApprovalRequestStore<ironclaw_filesystem::InMemoryBackend>,
     pub(crate) combined_calls: AtomicUsize,
     pub(crate) separate_save_calls: AtomicUsize,
 }
@@ -233,8 +235,8 @@ pub(crate) struct InMemoryRecordingCombinedRunStateApprovalStore {
 impl InMemoryRecordingCombinedRunStateApprovalStore {
     pub(crate) fn new() -> Self {
         Self {
-            runs: InMemoryRunStateStore::new(),
-            approvals: InMemoryApprovalRequestStore::new(),
+            runs: ironclaw_run_state::in_memory_backed_run_state_store(),
+            approvals: ironclaw_run_state::in_memory_backed_approval_request_store(),
             combined_calls: AtomicUsize::new(0),
             separate_save_calls: AtomicUsize::new(0),
         }
@@ -379,8 +381,11 @@ impl RunStateApprovalStore for InMemoryRecordingCombinedRunStateApprovalStore {
 
 pub(crate) struct ApprovalResumeFixture {
     pub(crate) services: InMemoryHostRuntimeServices,
-    pub(crate) run_state: Arc<InMemoryRunStateStore>,
-    pub(crate) approval_requests: Arc<InMemoryApprovalRequestStore>,
+    pub(crate) run_state:
+        Arc<ironclaw_run_state::FilesystemRunStateStore<ironclaw_filesystem::InMemoryBackend>>,
+    pub(crate) approval_requests: Arc<
+        ironclaw_run_state::FilesystemApprovalRequestStore<ironclaw_filesystem::InMemoryBackend>,
+    >,
     pub(crate) capability_leases: Arc<FilesystemCapabilityLeaseStore<InMemoryBackend>>,
     pub(crate) events: InMemoryEventSink,
 }
@@ -393,8 +398,8 @@ pub(crate) fn approval_resume_fixture_with_manifest(
     manifest: &str,
     trust_effects: Vec<EffectKind>,
 ) -> ApprovalResumeFixture {
-    let run_state = Arc::new(InMemoryRunStateStore::new());
-    let approval_requests = Arc::new(InMemoryApprovalRequestStore::new());
+    let run_state = Arc::new(ironclaw_run_state::in_memory_backed_run_state_store());
+    let approval_requests = Arc::new(ironclaw_run_state::in_memory_backed_approval_request_store());
     let capability_leases = Arc::new(in_memory_backed_capability_lease_store());
     let events = InMemoryEventSink::new();
     let services = HostRuntimeServices::new(

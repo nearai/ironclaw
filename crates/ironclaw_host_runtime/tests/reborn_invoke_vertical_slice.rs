@@ -24,7 +24,7 @@ use ironclaw_host_runtime::{
 use ironclaw_resources::{
     InMemoryResourceGovernor, ResourceAccount, ResourceGovernor, ResourceTally,
 };
-use ironclaw_run_state::{InMemoryRunStateStore, RunStateStore, RunStatus};
+use ironclaw_run_state::{RunStateStore, RunStatus};
 use ironclaw_trust::{
     AdminConfig, AdminEntry, AuthorityCeiling, EffectiveTrustClass, HostTrustAssignment,
     HostTrustPolicy, TrustDecision, TrustProvenance,
@@ -45,7 +45,7 @@ async fn default_host_runtime_invokes_through_runtime_dispatcher_with_resources_
     let (registry, dispatcher, governor, events) = runtime_dispatcher_stack(Arc::clone(&adapter));
     let dispatcher: Arc<dyn CapabilityDispatcher> = Arc::new(dispatcher);
     let authorizer = Arc::new(CountingGrantAuthorizer::default());
-    let run_state = Arc::new(InMemoryRunStateStore::new());
+    let run_state = Arc::new(ironclaw_run_state::in_memory_backed_run_state_store());
     let runtime = DefaultHostRuntime::new(
         Arc::clone(&registry),
         dispatcher,
@@ -114,7 +114,7 @@ async fn default_host_runtime_fails_unsupported_obligations_before_runtime_dispa
     let adapter = Arc::new(RecordingRuntimeAdapter::new(json!({"must_not":"dispatch"})));
     let (registry, dispatcher, governor, events) = runtime_dispatcher_stack(Arc::clone(&adapter));
     let dispatcher: Arc<dyn CapabilityDispatcher> = Arc::new(dispatcher);
-    let run_state = Arc::new(InMemoryRunStateStore::new());
+    let run_state = Arc::new(ironclaw_run_state::in_memory_backed_run_state_store());
     let runtime = DefaultHostRuntime::new(
         Arc::clone(&registry),
         dispatcher,

@@ -31,7 +31,6 @@ use ironclaw_host_runtime::{
 };
 use ironclaw_processes::ProcessServices;
 use ironclaw_resources::InMemoryResourceGovernor;
-use ironclaw_run_state::{InMemoryApprovalRequestStore, InMemoryRunStateStore};
 use ironclaw_secrets::{InMemorySecretStore, SecretMaterial, SecretStore};
 use ironclaw_trust::{
     AdminConfig, AdminEntry, AuthorityCeiling, EffectiveTrustClass, HostTrustAssignment,
@@ -185,8 +184,11 @@ fn trust_decision_with_dispatch_authority() -> TrustDecision {
 /// the flow proceeds to the approval gate.
 #[tokio::test]
 async fn product_auth_account_credential_does_not_trip_preflight() {
-    let run_state = Arc::new(InMemoryRunStateStore::new());
-    let approval_requests = Arc::new(InMemoryApprovalRequestStore::new());
+    let fs = ironclaw_run_state::in_memory_backed_run_state_filesystem();
+    let run_state = Arc::new(ironclaw_run_state::FilesystemRunStateStore::new(
+        std::sync::Arc::clone(&fs),
+    ));
+    let approval_requests = Arc::new(ironclaw_run_state::FilesystemApprovalRequestStore::new(fs));
     let capability_leases = Arc::new(in_memory_backed_capability_lease_store());
     let secret_store = Arc::new(InMemorySecretStore::new());
     // Deliberately do NOT seed any secret under "google_oauth_token".
@@ -243,8 +245,11 @@ async fn product_auth_account_credential_does_not_trip_preflight() {
 /// for SecretHandle credentials.
 #[tokio::test]
 async fn secret_handle_credential_absent_still_trips_preflight() {
-    let run_state = Arc::new(InMemoryRunStateStore::new());
-    let approval_requests = Arc::new(InMemoryApprovalRequestStore::new());
+    let fs = ironclaw_run_state::in_memory_backed_run_state_filesystem();
+    let run_state = Arc::new(ironclaw_run_state::FilesystemRunStateStore::new(
+        std::sync::Arc::clone(&fs),
+    ));
+    let approval_requests = Arc::new(ironclaw_run_state::FilesystemApprovalRequestStore::new(fs));
     let capability_leases = Arc::new(in_memory_backed_capability_lease_store());
     let secret_store = Arc::new(InMemorySecretStore::new());
     // No secret seeded — the SecretHandle pre-flight must fire.
@@ -303,8 +308,11 @@ async fn secret_handle_credential_absent_still_trips_preflight() {
 /// `credential_preflight_check`, not just the `secret_owner_scope` helper.
 #[tokio::test]
 async fn tenant_shared_secret_satisfies_credential_preflight() {
-    let run_state = Arc::new(InMemoryRunStateStore::new());
-    let approval_requests = Arc::new(InMemoryApprovalRequestStore::new());
+    let fs = ironclaw_run_state::in_memory_backed_run_state_filesystem();
+    let run_state = Arc::new(ironclaw_run_state::FilesystemRunStateStore::new(
+        std::sync::Arc::clone(&fs),
+    ));
+    let approval_requests = Arc::new(ironclaw_run_state::FilesystemApprovalRequestStore::new(fs));
     let capability_leases = Arc::new(in_memory_backed_capability_lease_store());
     let secret_store = Arc::new(InMemorySecretStore::new());
 

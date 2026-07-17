@@ -11,10 +11,7 @@
 //! local-disk) is made at the filesystem layer — the consumer-store level no
 //! longer carries per-backend impls.
 
-use std::{
-    collections::HashMap,
-    sync::{Arc, Mutex, MutexGuard},
-};
+use std::sync::Arc;
 
 use async_trait::async_trait;
 use ironclaw_filesystem::{
@@ -22,11 +19,19 @@ use ironclaw_filesystem::{
     ScopedFilesystem, cas_update,
 };
 use ironclaw_host_api::{
-    AgentId, ApprovalRequest, ApprovalRequestId, CapabilityId, HostApiError, InvocationId,
-    MissionId, ProjectId, ResourceScope, ScopedPath, TenantId, ThreadId, UserId,
+    ApprovalRequest, ApprovalRequestId, CapabilityId, HostApiError, InvocationId, ResourceScope,
+    ScopedPath, UserId,
 };
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
+
+#[cfg(any(test, feature = "test-support"))]
+mod test_support;
+#[cfg(any(test, feature = "test-support"))]
+pub use test_support::{
+    in_memory_backed_approval_request_store, in_memory_backed_run_state_filesystem,
+    in_memory_backed_run_state_store,
+};
 
 /// Current lifecycle state for one invocation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -78,56 +83,6 @@ pub struct ApprovalRecord {
     pub scope: ResourceScope,
     pub request: ApprovalRequest,
     pub status: ApprovalStatus,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-struct RunStateKey {
-    tenant_id: TenantId,
-    user_id: UserId,
-    agent_id: Option<AgentId>,
-    project_id: Option<ProjectId>,
-    mission_id: Option<MissionId>,
-    thread_id: Option<ThreadId>,
-    invocation_id: InvocationId,
-}
-
-impl RunStateKey {
-    fn new(scope: &ResourceScope, invocation_id: InvocationId) -> Self {
-        Self {
-            tenant_id: scope.tenant_id.clone(),
-            user_id: scope.user_id.clone(),
-            agent_id: scope.agent_id.clone(),
-            project_id: scope.project_id.clone(),
-            mission_id: scope.mission_id.clone(),
-            thread_id: scope.thread_id.clone(),
-            invocation_id,
-        }
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-struct ApprovalKey {
-    tenant_id: TenantId,
-    user_id: UserId,
-    agent_id: Option<AgentId>,
-    project_id: Option<ProjectId>,
-    mission_id: Option<MissionId>,
-    thread_id: Option<ThreadId>,
-    request_id: ApprovalRequestId,
-}
-
-impl ApprovalKey {
-    fn new(scope: &ResourceScope, request_id: ApprovalRequestId) -> Self {
-        Self {
-            tenant_id: scope.tenant_id.clone(),
-            user_id: scope.user_id.clone(),
-            agent_id: scope.agent_id.clone(),
-            project_id: scope.project_id.clone(),
-            mission_id: scope.mission_id.clone(),
-            thread_id: scope.thread_id.clone(),
-            request_id,
-        }
-    }
 }
 
 /// Run-state and approval persistence errors.
@@ -280,268 +235,6 @@ pub trait RunStateApprovalStore: RunStateStore + ApprovalRequestStore {
         invocation_id: InvocationId,
         approval: ApprovalRequest,
     ) -> Result<RunRecord, RunStateError>;
-}
-
-/// In-memory run-state store for tests and early host wiring.
-#[derive(Debug, Default)]
-pub struct InMemoryRunStateStore {
-    records: Mutex<HashMap<RunStateKey, RunRecord>>,
-}
-
-impl InMemoryRunStateStore {
-    pub fn new() -> Self {
-        Self::default()
-    }
-
-    fn update(
-        &self,
-        scope: &ResourceScope,
-        invocation_id: InvocationId,
-        update: impl FnOnce(&mut RunRecord),
-    ) -> Result<RunRecord, RunStateError> {
-        let key = RunStateKey::new(scope, invocation_id);
-        let mut records = self.records_guard();
-        let record = records
-            .get_mut(&key)
-            .ok_or(RunStateError::UnknownInvocation { invocation_id })?;
-        update(record);
-        Ok(record.clone())
-    }
-
-    fn records_guard(&self) -> MutexGuard<'_, HashMap<RunStateKey, RunRecord>> {
-        self.records
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-    }
-}
-
-#[async_trait]
-impl RunStateStore for InMemoryRunStateStore {
-    async fn start(&self, start: RunStart) -> Result<RunRecord, RunStateError> {
-        let record = RunRecord {
-            invocation_id: start.invocation_id,
-            capability_id: start.capability_id,
-            scope: start.scope,
-            authenticated_actor_user_id: start.authenticated_actor_user_id,
-            status: RunStatus::Running,
-            approval_request_id: None,
-            error_kind: None,
-        };
-        let key = RunStateKey::new(&record.scope, record.invocation_id);
-        let mut records = self.records_guard();
-        if records.contains_key(&key) {
-            return Err(RunStateError::InvocationAlreadyExists {
-                invocation_id: record.invocation_id,
-            });
-        }
-        records.insert(key, record.clone());
-        Ok(record)
-    }
-
-    async fn block_approval(
-        &self,
-        scope: &ResourceScope,
-        invocation_id: InvocationId,
-        approval: ApprovalRequest,
-    ) -> Result<RunRecord, RunStateError> {
-        self.update(scope, invocation_id, |record| {
-            record.status = RunStatus::BlockedApproval;
-            record.approval_request_id = Some(approval.id);
-            record.error_kind = None;
-        })
-    }
-
-    async fn block_auth(
-        &self,
-        scope: &ResourceScope,
-        invocation_id: InvocationId,
-        error_kind: String,
-    ) -> Result<RunRecord, RunStateError> {
-        self.update(scope, invocation_id, |record| {
-            record.status = RunStatus::BlockedAuth;
-            record.approval_request_id = None;
-            record.error_kind = Some(error_kind);
-        })
-    }
-
-    async fn complete(
-        &self,
-        scope: &ResourceScope,
-        invocation_id: InvocationId,
-    ) -> Result<RunRecord, RunStateError> {
-        self.update(scope, invocation_id, |record| {
-            record.status = RunStatus::Completed;
-            record.approval_request_id = None;
-            record.error_kind = None;
-        })
-    }
-
-    async fn fail(
-        &self,
-        scope: &ResourceScope,
-        invocation_id: InvocationId,
-        error_kind: String,
-    ) -> Result<RunRecord, RunStateError> {
-        self.update(scope, invocation_id, |record| {
-            record.status = RunStatus::Failed;
-            record.approval_request_id = None;
-            record.error_kind = Some(error_kind);
-        })
-    }
-
-    async fn get(
-        &self,
-        scope: &ResourceScope,
-        invocation_id: InvocationId,
-    ) -> Result<Option<RunRecord>, RunStateError> {
-        Ok(self
-            .records_guard()
-            .get(&RunStateKey::new(scope, invocation_id))
-            .cloned())
-    }
-
-    async fn records_for_scope(
-        &self,
-        scope: &ResourceScope,
-    ) -> Result<Vec<RunRecord>, RunStateError> {
-        let mut records = self
-            .records_guard()
-            .values()
-            .filter(|record| same_scope_owner(&record.scope, scope))
-            .cloned()
-            .collect::<Vec<_>>();
-        records.sort_by_key(|record| record.invocation_id.as_uuid());
-        Ok(records)
-    }
-}
-
-/// In-memory approval request store for tests and early host wiring.
-#[derive(Debug, Default)]
-pub struct InMemoryApprovalRequestStore {
-    records: Mutex<HashMap<ApprovalKey, ApprovalRecord>>,
-}
-
-impl InMemoryApprovalRequestStore {
-    pub fn new() -> Self {
-        Self::default()
-    }
-
-    fn update_status(
-        &self,
-        scope: &ResourceScope,
-        request_id: ApprovalRequestId,
-        status: ApprovalStatus,
-    ) -> Result<ApprovalRecord, RunStateError> {
-        let mut records = self.records_guard();
-        let record = records
-            .get_mut(&ApprovalKey::new(scope, request_id))
-            .ok_or(RunStateError::UnknownApprovalRequest { request_id })?;
-        if record.status != ApprovalStatus::Pending {
-            return Err(RunStateError::ApprovalNotPending {
-                request_id,
-                status: record.status,
-            });
-        }
-        record.status = status;
-        Ok(record.clone())
-    }
-
-    fn records_guard(&self) -> MutexGuard<'_, HashMap<ApprovalKey, ApprovalRecord>> {
-        self.records
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-    }
-}
-
-#[async_trait]
-impl ApprovalRequestStore for InMemoryApprovalRequestStore {
-    async fn save_pending(
-        &self,
-        scope: ResourceScope,
-        request: ApprovalRequest,
-    ) -> Result<ApprovalRecord, RunStateError> {
-        let record = ApprovalRecord {
-            scope,
-            request,
-            status: ApprovalStatus::Pending,
-        };
-        let key = ApprovalKey::new(&record.scope, record.request.id);
-        let mut records = self.records_guard();
-        if records.contains_key(&key) {
-            return Err(RunStateError::ApprovalRequestAlreadyExists {
-                request_id: record.request.id,
-            });
-        }
-        records.insert(key, record.clone());
-        Ok(record)
-    }
-
-    async fn get(
-        &self,
-        scope: &ResourceScope,
-        request_id: ApprovalRequestId,
-    ) -> Result<Option<ApprovalRecord>, RunStateError> {
-        Ok(self
-            .records_guard()
-            .get(&ApprovalKey::new(scope, request_id))
-            .cloned()
-            .filter(|record| record.status != ApprovalStatus::Discarded))
-    }
-
-    async fn approve(
-        &self,
-        scope: &ResourceScope,
-        request_id: ApprovalRequestId,
-    ) -> Result<ApprovalRecord, RunStateError> {
-        self.update_status(scope, request_id, ApprovalStatus::Approved)
-    }
-
-    async fn deny(
-        &self,
-        scope: &ResourceScope,
-        request_id: ApprovalRequestId,
-    ) -> Result<ApprovalRecord, RunStateError> {
-        self.update_status(scope, request_id, ApprovalStatus::Denied)
-    }
-
-    async fn discard_pending(
-        &self,
-        scope: &ResourceScope,
-        request_id: ApprovalRequestId,
-    ) -> Result<ApprovalRecord, RunStateError> {
-        let mut records = self.records_guard();
-        let key = ApprovalKey::new(scope, request_id);
-        let record = records
-            .get_mut(&key)
-            .ok_or(RunStateError::UnknownApprovalRequest { request_id })?;
-        if record.status != ApprovalStatus::Pending {
-            return Err(RunStateError::ApprovalNotPending {
-                request_id,
-                status: record.status,
-            });
-        }
-        // Tombstone in place (#5467), mirroring FilesystemApprovalRequestStore:
-        // blocks id reuse via save_pending. Return pre-mutation clone (Pending).
-        let original = record.clone();
-        record.status = ApprovalStatus::Discarded;
-        Ok(original)
-    }
-
-    async fn records_for_scope(
-        &self,
-        scope: &ResourceScope,
-    ) -> Result<Vec<ApprovalRecord>, RunStateError> {
-        let mut records = self
-            .records_guard()
-            .values()
-            .filter(|record| {
-                same_scope_owner(&record.scope, scope) && record.status != ApprovalStatus::Discarded
-            })
-            .cloned()
-            .collect::<Vec<_>>();
-        records.sort_by_key(|record| record.request.id.as_uuid());
-        Ok(records)
-    }
 }
 
 /// `RecordKind` tag written on every run-state entry so byte-only backends

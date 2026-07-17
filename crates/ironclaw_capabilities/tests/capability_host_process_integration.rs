@@ -18,7 +18,7 @@ use support::*;
 async fn capability_host_spawn_runs_background_process_through_process_host() {
     let registry = registry_with_echo_capability();
     let dispatcher = RecordingDispatcher::default();
-    let run_state = InMemoryRunStateStore::new();
+    let run_state = ironclaw_run_state::in_memory_backed_run_state_store();
     let process_services = ProcessServices::in_memory();
     let executor = Arc::new(RecordingSuccessExecutor::default());
     let process_manager = process_services.background_manager(Arc::clone(&executor));
@@ -154,7 +154,7 @@ async fn capability_spawn_process_host_hides_cross_scope_status_and_output() {
 async fn capability_host_spawn_fails_closed_on_unsupported_obligations_before_process_start() {
     let registry = registry_with_echo_capability();
     let dispatcher = RecordingDispatcher::default();
-    let run_state = InMemoryRunStateStore::new();
+    let run_state = ironclaw_run_state::in_memory_backed_run_state_store();
     let process_services = ProcessServices::in_memory();
     let executor = Arc::new(RecordingSuccessExecutor::default());
     let process_manager = process_services.background_manager(Arc::clone(&executor));

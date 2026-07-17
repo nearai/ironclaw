@@ -25,7 +25,7 @@ use ironclaw_network::{
     NetworkHttpEgress, NetworkHttpError, NetworkHttpRequest, NetworkHttpResponse, NetworkUsage,
 };
 use ironclaw_resources::{InMemoryResourceGovernor, ResourceAccount, ResourceTally};
-use ironclaw_run_state::{InMemoryRunStateStore, RunStateStore, RunStatus};
+use ironclaw_run_state::{RunStateStore, RunStatus};
 use ironclaw_secrets::{InMemorySecretStore, SecretMaterial, SecretStore};
 use ironclaw_trust::{
     AdminConfig, AdminEntry, AuthorityCeiling, EffectiveTrustClass, HostTrustAssignment,
@@ -43,7 +43,7 @@ async fn host_runtime_invokes_first_party_handler_through_capability_host() {
     let first_party =
         FirstPartyCapabilityRegistry::new().with_handler(capability_id(), Arc::clone(&handler));
     let events = InMemoryEventSink::new();
-    let run_state = Arc::new(InMemoryRunStateStore::new());
+    let run_state = Arc::new(ironclaw_run_state::in_memory_backed_run_state_store());
     let governor = Arc::new(InMemoryResourceGovernor::new());
     let runtime = HostRuntimeServices::new(
         Arc::new(first_party_registry()),
@@ -454,7 +454,7 @@ async fn first_party_handler_panic_fails_closed_and_releases_reservation() {
     let first_party =
         FirstPartyCapabilityRegistry::new().with_handler(capability_id(), Arc::clone(&handler));
     let events = InMemoryEventSink::new();
-    let run_state = Arc::new(InMemoryRunStateStore::new());
+    let run_state = Arc::new(ironclaw_run_state::in_memory_backed_run_state_store());
     let governor = Arc::new(InMemoryResourceGovernor::new());
     let runtime = HostRuntimeServices::new(
         Arc::new(first_party_registry()),
