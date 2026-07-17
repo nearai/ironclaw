@@ -48,8 +48,7 @@ pub use service::{
 };
 pub use store::OutboundStateStore;
 pub use triggered_run_delivery::{
-    InMemoryTriggeredRunDeliveryStore, TriggeredRunDeliveryOutcomeKind, TriggeredRunDeliveryRecord,
-    TriggeredRunDeliveryStore,
+    TriggeredRunDeliveryOutcomeKind, TriggeredRunDeliveryRecord, TriggeredRunDeliveryStore,
 };
 pub use types::{
     AdvanceSubscriptionCursorRequest, DeliveryFailureKind, LoadSubscriptionCursorRequest,
