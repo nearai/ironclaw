@@ -1248,13 +1248,35 @@ async fn telegram_unpair_then_repair_starts_fresh_thread_not_the_old_blocked_one
         "disconnect response: {body}"
     );
 
+    // Ben's fifth regression (2026-07-17): in the disconnected-but-installed
+    // state ("setup needed"), a DM produced NOTHING — not even the static
+    // pairing hint the unpaired contract promises. Reproduce his exact
+    // sequence: paired turns happened above, a fresh code is pending (the
+    // setup panel minted one), and the disconnected user DMs plain text.
+    let (status, body) = call_route(
+        stack.mounts.protected_routes().router,
+        Method::POST,
+        "/api/webchat/v2/channels/telegram/pairing",
+        Some(stack.caller.clone()),
+        &[],
+        Some(json!({})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "fresh code mints: {body}");
+    let status = stack.webhook_dm(&secret, 3, "anyone there?").await;
+    assert_eq!(status, StatusCode::OK);
+    stack
+        .wait_for_dm_send(|text| text.contains("Pair your account"))
+        .await
+        .expect("a disconnected (installed, unpaired) DM must get the static pairing hint, not silence");
+
     // Re-pair with a fresh code.
-    pair_via_webhook(&stack, &secret, 3).await;
+    pair_via_webhook(&stack, &secret, 4).await;
 
     // The re-paired user's first message must start a fresh conversation —
     // a real reply, never the resurrected run's auth-busy hint.
     let sends_before = stack.network.request_bodies_for("/sendMessage").len();
-    let status = stack.webhook_dm(&secret, 4, "hello again!").await;
+    let status = stack.webhook_dm(&secret, 5, "hello again!").await;
     assert_eq!(status, StatusCode::OK);
     let reply = stack
         .wait_for_dm_send(|text| text.contains("fresh conversation reply"))
