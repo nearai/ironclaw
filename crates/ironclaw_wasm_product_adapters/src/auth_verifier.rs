@@ -224,14 +224,20 @@ impl WebhookAuthVerifier for SharedSecretHeaderAuth {
                 failure: ProtocolAuthFailure::Malformed,
             };
         }
-        let Some(received) = headers
-            .get(self.header_name.as_str())
-            .and_then(|v| v.to_str().ok())
-        else {
+        let mut values = headers.get_all(self.header_name.as_str()).iter();
+        let Some(received) = values.next().and_then(|v| v.to_str().ok()) else {
             return VerificationOutcome::Failed {
                 failure: ProtocolAuthFailure::Missing,
             };
         };
+        // Duplicate occurrences are an ambiguity vector (proxies disagree on
+        // which one "counts"), so they are malformed outright — never
+        // first-or-last-wins, even if one copy carries the correct secret.
+        if values.next().is_some() {
+            return VerificationOutcome::Failed {
+                failure: ProtocolAuthFailure::Malformed,
+            };
+        }
         if !bool::from(received.as_bytes().ct_eq(self.expected_secret.as_bytes())) {
             return VerificationOutcome::Failed {
                 failure: ProtocolAuthFailure::SharedSecretMismatch,
@@ -285,6 +291,42 @@ mod tests {
                 assert_eq!(subject, "telegram_install_alpha");
             }
             other => panic!("expected Verified, got {other:?}"),
+        }
+    }
+
+    /// Duplicate verification headers are an ambiguity vector (different
+    /// proxies pick different occurrences), so the verifier rejects them
+    /// outright — no first-or-last-wins, even when one occurrence carries the
+    /// correct secret. Automates manual-QA row qa-telegram:S3.
+    #[test]
+    fn shared_secret_header_rejects_duplicate_headers_even_with_a_correct_value() {
+        let verifier = SharedSecretHeaderAuth {
+            header_name: "X-Telegram-Bot-Api-Secret-Token".into(),
+            expected_secret: "topsecret".into(),
+            subject: "telegram_install_alpha".into(),
+        };
+        for values in [
+            ["topsecret", "forged"],
+            ["forged", "topsecret"],
+            ["topsecret", "topsecret"],
+        ] {
+            let mut headers = HeaderMap::new();
+            for value in values {
+                headers.append(
+                    http::header::HeaderName::from_bytes(b"X-Telegram-Bot-Api-Secret-Token")
+                        .expect("name"),
+                    HeaderValue::from_str(value).expect("value"),
+                );
+            }
+            match verifier.verify(&headers, b"") {
+                VerificationOutcome::Failed { failure } => {
+                    assert!(
+                        matches!(failure, ProtocolAuthFailure::Malformed),
+                        "duplicates are malformed requests, got {failure:?}"
+                    );
+                }
+                other => panic!("expected Failed for duplicates {values:?}, got {other:?}"),
+            }
         }
     }
 
