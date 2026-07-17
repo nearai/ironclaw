@@ -30,7 +30,7 @@ use ironclaw_outbound::{
     ValidatedReplyTargetBinding,
 };
 use ironclaw_product_adapters::{
-    ApprovalPromptContextView, EgressRequest, EgressResponse, ExternalActorRef,
+    ApprovalPromptContextView, AuthPromptView, EgressRequest, EgressResponse, ExternalActorRef,
     ExternalConversationRef, ExternalEventId, FinalReplyView, GatePromptView, OutboundDeliverySink,
     ProductAdapter, ProductAdapterError, ProductInboundAck, ProductInboundEnvelope,
     ProductInboundPayload, ProductOutboundPayload, ProductRejection, ProductRejectionKind,
@@ -39,8 +39,8 @@ use ironclaw_product_adapters::{
 use ironclaw_product_workflow::{
     ConversationBindingService, ProductOutboundDeliveryRequest, ProductOutboundTargetResolver,
     ProductWorkflowError, ResolveBindingRequest, ResolvedBinding,
-    VerifiedProductOutboundTargetMetadata, is_approval_gate_ref,
-    prepare_and_render_product_outbound,
+    VerifiedProductOutboundTargetMetadata, approval_prompt_context_view, enrich_auth_prompt_view,
+    is_approval_gate_ref, prepare_and_render_product_outbound,
 };
 use ironclaw_run_state::ApprovalRequestStore;
 use ironclaw_threads::{FinalizedAssistantMessageByRunRequest, SessionThreadService, ThreadScope};
@@ -53,9 +53,6 @@ use ironclaw_wasm_product_adapters::ImmediateAckWorkflowObserver;
 use std::collections::{HashSet, VecDeque};
 use tokio::sync::Semaphore;
 
-use crate::product_auth::api::auth_prompt::{
-    BlockedAuthPromptRequest, auth_prompt_view_for_blocked_auth,
-};
 use crate::{AuthChallengeProvider, BlockedAuthFlowCanceller};
 
 // The per-channel protocol seam this machinery is generic over lives in
@@ -462,7 +459,7 @@ impl FinalReplyDeliveryObserver {
                 // Look up WHAT is being approved from the ApprovalRequestStore by
                 // gate ref — the same source the WebUI gate projection uses — so
                 // the prompt names the capability/reason instead of a generic step.
-                let approval_context = crate::projection::approval_prompt_context_view(
+                let approval_context = approval_prompt_context_view(
                     self.services.approval_requests.as_deref(),
                     gate_ref,
                     &binding.actor_user_id,
@@ -487,16 +484,25 @@ impl FinalReplyDeliveryObserver {
                     );
                     return Ok(None);
                 };
-                let view = auth_prompt_view_for_blocked_auth(BlockedAuthPromptRequest {
-                    fallback_owner_user_id: &binding.actor_user_id,
+                let view = enrich_auth_prompt_view(
+                    AuthPromptView {
+                        turn_run_id: run_id,
+                        auth_request_ref: gate_ref.as_str().to_string(),
+                        invocation_id: None,
+                        headline: "Authentication required".to_string(),
+                        body: "Authenticate to continue this run.".to_string(),
+                        challenge_kind: None,
+                        provider: None,
+                        account_label: None,
+                        authorization_url: None,
+                        expires_at: None,
+                        connection: None,
+                    },
+                    &binding.actor_user_id,
                     scope,
-                    run_id,
-                    gate_ref: gate_ref.as_str(),
-                    invocation_id: None,
-                    body: "Authenticate to continue this run.".to_string(),
-                    credential_requirements: &state.credential_requirements,
-                    auth_challenges: self.services.auth_challenges.as_deref(),
-                })
+                    &state.credential_requirements,
+                    self.services.auth_challenges.as_deref(),
+                )
                 .await?;
                 // Only link-based OAuth is allowed over Slack: the user
                 // authenticates on the provider's site via `authorization_url` and
@@ -1120,7 +1126,7 @@ async fn cancel_auth_blocked_run(
     gate_ref: Option<&str>,
 ) -> Result<(), FinalReplyDeliveryError> {
     // Resolve the flow-cancel target BEFORE `cancel_run` consumes `actor`. Owner
-    // resolution mirrors `auth_prompt_view_for_blocked_auth`: an explicit turn owner
+    // Resolution mirrors `enrich_auth_prompt_view`: an explicit turn owner
     // (shared/team subject) wins, else the acting user. When `gate_ref` is absent
     // there is no flow to resolve, so the flow cancel is skipped entirely (not
     // encoded as an empty ref).
@@ -1667,7 +1673,7 @@ async fn busy_hint_from_run_state(
                 // run is in this thread's scope (that is why the thread is busy),
                 // so the approval request resolves under the derived scope.
                 Some(gate_ref) => {
-                    let what = crate::projection::approval_prompt_context_view(
+                    let what = approval_prompt_context_view(
                         approval_requests,
                         gate_ref,
                         &binding.actor_user_id,
@@ -2609,7 +2615,7 @@ async fn triggered_notification_for_state(
             // instruction appended once by the adapter. The approval request is
             // stored under this triggered run's scope, so the context resolves
             // here.
-            let context = crate::projection::approval_prompt_context_view(
+            let context = approval_prompt_context_view(
                 services.approval_requests.as_deref(),
                 gate_ref,
                 &actor.user_id,
@@ -2633,16 +2639,25 @@ async fn triggered_notification_for_state(
                 );
                 return Ok(None);
             };
-            let mut view = auth_prompt_view_for_blocked_auth(BlockedAuthPromptRequest {
-                fallback_owner_user_id: &actor.user_id,
+            let mut view = enrich_auth_prompt_view(
+                AuthPromptView {
+                    turn_run_id: run_id,
+                    auth_request_ref: gate_ref.as_str().to_string(),
+                    invocation_id: None,
+                    headline: "Authentication required".to_string(),
+                    body: "Authentication required to continue this automation.".to_string(),
+                    challenge_kind: None,
+                    provider: None,
+                    account_label: None,
+                    authorization_url: None,
+                    expires_at: None,
+                    connection: None,
+                },
+                &actor.user_id,
                 scope,
-                run_id,
-                gate_ref: gate_ref.as_str(),
-                invocation_id: None,
-                body: "Authentication required to continue this automation.".to_string(),
-                credential_requirements: &state.credential_requirements,
-                auth_challenges: services.auth_challenges.as_deref(),
-            })
+                &state.credential_requirements,
+                services.auth_challenges.as_deref(),
+            )
             .await?;
             view.body.push_str(&triggered_gate_footer(trigger_label));
             // Only link-based OAuth is allowed over Slack. The `require_direct_message_target`
@@ -7533,21 +7548,18 @@ mod tests {
             _gate_ref: &str,
             _credential_requirements: &[ironclaw_host_api::RuntimeCredentialAuthRequirement],
         ) -> Result<
-            Option<crate::product_auth::api::auth_prompt::AuthChallengeView>,
+            Option<ironclaw_product_workflow::AuthChallengeView>,
             ironclaw_auth::AuthProductError,
         > {
-            Ok(Some(
-                crate::product_auth::api::auth_prompt::AuthChallengeView {
-                    kind: ironclaw_product_adapters::AuthPromptChallengeKind::OAuthUrl,
-                    provider: ironclaw_auth::AuthProviderId::new("test-provider")
-                        .expect("provider"),
-                    account_label: None,
-                    authorization_url: Some(
-                        ironclaw_auth::OAuthAuthorizationUrl::new(self.url.clone()).expect("url"),
-                    ),
-                    expires_at: None,
-                },
-            ))
+            Ok(Some(ironclaw_product_workflow::AuthChallengeView {
+                kind: ironclaw_product_adapters::AuthPromptChallengeKind::OAuthUrl,
+                provider: ironclaw_auth::AuthProviderId::new("test-provider").expect("provider"),
+                account_label: None,
+                authorization_url: Some(
+                    ironclaw_auth::OAuthAuthorizationUrl::new(self.url.clone()).expect("url"),
+                ),
+                expires_at: None,
+            }))
         }
     }
 

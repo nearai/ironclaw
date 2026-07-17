@@ -175,21 +175,21 @@ pub async fn approval_prompt_lookup(
 ) -> ApprovalPromptLookup;
 ```
 
-- [ ] **Step 1: Add product-workflow tests for auth and approval projection**
+- [x] **Step 1: Add product-workflow tests for auth and approval projection**
 
 Move the existing requirement-fallback and approval-context cases to module tests beside the new owners. Add a direct assertion that `enrich_auth_prompt_view` enriches an existing `AuthPromptView` and does not require a request DTO.
 
-- [ ] **Step 2: Run the new focused tests and verify unresolved imports**
+- [x] **Step 2: Run the new focused tests and verify unresolved imports**
 
 Run: `cargo test -p ironclaw_product_workflow auth_prompt approval_prompt`
 
 Expected: compilation fails because the new modules/exports do not exist.
 
-- [ ] **Step 3: Move the implementations and remove the crossing DTO**
+- [x] **Step 3: Move the implementations and remove the crossing DTO**
 
 Move the existing bodies without changing error mapping. Delete `BlockedAuthPromptRequest`; callers construct their existing base `AuthPromptView` and call `enrich_auth_prompt_view`. Move the complete approval lookup/action/scope/detail rendering helper family so WebUI projection and channel delivery read the same implementation.
 
-- [ ] **Step 4: Rewire composition and run owner/caller tests**
+- [x] **Step 4: Rewire composition and run owner/caller tests**
 
 Run:
 
@@ -200,7 +200,7 @@ cargo test -p ironclaw_reborn_composition --features test-support,webui-v2-beta,
 
 Expected: all selected tests pass with composition implementing and re-exporting the product-workflow ports.
 
-- [ ] **Step 5: Commit the contract move**
+- [x] **Step 5: Commit the contract move**
 
 ```bash
 git add crates/ironclaw_product_workflow crates/ironclaw_reborn_composition

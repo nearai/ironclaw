@@ -63,7 +63,6 @@ use runtime_replay::{
 };
 // Only the channel-host delivery path (feature-gated) consumes this re-export.
 #[cfg(any(feature = "slack-v2-host-beta", feature = "telegram-v2-host-beta"))]
-pub(crate) use turn_events::approval_prompt_context_view;
 use turn_events::{
     FailureExplanationProvider, ModelFailureExplanationProvider, TurnEventBridge, TurnEventDrain,
     TurnEventPayload, turn_status_wire,

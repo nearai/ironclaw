@@ -50,7 +50,7 @@ mod profile_approval_authorization;
 mod projection;
 mod slack;
 mod telegram;
-pub use product_auth::api::auth_prompt::{
+pub use ironclaw_product_workflow::{
     AuthChallengeProvider, AuthChallengeView, BlockedAuthFlowCanceller,
 };
 #[cfg(any(feature = "slack-v2-host-beta", feature = "telegram-v2-host-beta"))]
