@@ -34,6 +34,30 @@ pub(crate) struct StatusDto {
     /// mutually exclusive with `login_link`. Carries no secret, unlike
     /// `login_link`, so it is not `skip_serializing`.
     pub login_note: Option<String>,
+    /// Whether the OS-managed service (`ironclaw-reborn service`) is
+    /// actually running, queried live (not inferred from config/state file
+    /// presence) — see `commands::status::build_status_dto`. `Unknown` on a
+    /// detection error or an unsupported platform; `status` must never
+    /// fail over this.
+    pub service: ServiceStateDto,
+}
+
+/// Live OS-service lifecycle state as reported by `status`. Mirrors
+/// `commands::service::ServiceState`, redefined here (rather than
+/// `#[serde]`-deriving directly on that type) because `commands::service`
+/// is gated behind the `webui-v2-beta` feature and this DTO must exist —
+/// with an `Unknown` fallback — on every build.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub(crate) enum ServiceStateDto {
+    Running,
+    Stopped,
+    NotInstalled,
+    /// Detection failed (unsupported platform, OS-service-manager query
+    /// error) or the `webui-v2-beta` feature — which owns service
+    /// management — is not compiled in. Distinct from `NotInstalled`: this
+    /// means "we don't know", not "we know it isn't installed".
+    Unknown,
 }
 
 #[derive(Debug, Clone, Serialize)]

@@ -3,7 +3,8 @@ use std::path::PathBuf;
 use super::Renderable;
 use crate::dto::{
     CheckCategory, CheckOutcome, ComponentStatus, ConfigEntry, ConfigGetDto, ConfigListDto,
-    ConfigValue, DoctorCheck, DoctorDto, DoctorSummary, DriversSnapshot, FilePresence, StatusDto,
+    ConfigValue, DoctorCheck, DoctorDto, DoctorSummary, DriversSnapshot, FilePresence,
+    ServiceStateDto, StatusDto,
 };
 
 fn render_to_string(dto: &impl Renderable) -> String {
@@ -37,6 +38,7 @@ fn sample_status() -> StatusDto {
         },
         login_link: Some("http://127.0.0.1:3000/login?token=sample-token".to_string()),
         login_note: None,
+        service: ServiceStateDto::Running,
     }
 }
 
@@ -111,6 +113,7 @@ fn status_json_round_trips() {
         parsed["drivers"]["subagent_planned"]["reason"],
         "missing loop family"
     );
+    assert_eq!(parsed["service"], "running");
     // Security: `login_link` embeds a live webui bearer token in its query
     // string and must never reach JSON/diagnostic output, even though
     // `sample_status()` sets it and the text renderer legitimately prints it
@@ -142,6 +145,8 @@ fn status_render_text_contains_all_fields() {
     assert!(text.contains("(absent)"));
     assert!(text.contains("model_slots:"));
     assert!(text.contains("default, mission"));
+    assert!(text.contains("service:"));
+    assert!(text.contains("running"));
     assert!(text.contains("drivers:"));
     assert!(text.contains("text_only: initialized"));
     assert!(text.contains("planned: initialized"));

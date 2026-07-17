@@ -4138,7 +4138,22 @@ fn onboard_prints_env_token_note_instead_of_login_link_when_env_token_is_set() {
 }
 
 /// `status` companion to the onboard test above: reprinting the login link
-/// after onboarding must also respect the env-token precedence.
+/// after onboarding must also respect the env-token precedence — *unless*
+/// `status` already knows the OS service isn't running, in which case that
+/// takes priority (see `commands::status::apply_service_suppression`):
+/// there is no point advertising any login credential, env-sourced or not,
+/// into a `serve` process that demonstrably isn't listening.
+///
+/// The service-state query is deliberately host-wide (`launchctl list` /
+/// `systemctl show`), not scoped to this test's temp `$HOME` — there is
+/// only one system service manager. So this test can't pin an exact
+/// `service:` value: on a clean CI runner it reads "not installed"; on a
+/// dev host that happens to have the real `ironclaw-reborn` service
+/// registered (including mid crash-loop — the bug this fix addresses) it
+/// may read "stopped" or even transiently "running". Assert the
+/// *invariant* instead — `login_link` is always absent, and `login_note`
+/// matches whichever branch the observed `service:` state took — rather
+/// than a specific state.
 #[cfg(feature = "webui-v2-beta")]
 #[test]
 fn status_prints_env_token_note_instead_of_login_link_when_env_token_is_set() {
@@ -4175,10 +4190,24 @@ fn status_prints_env_token_note_instead_of_login_link_when_env_token_is_set() {
         String::from_utf8_lossy(&status_output.stderr)
     );
     let stdout = String::from_utf8_lossy(&status_output.stdout);
-    assert!(
-        stdout.contains("login_note:") && stdout.contains("IRONCLAW_REBORN_WEBUI_TOKEN is set"),
-        "stdout must note the active env var instead of a login link: {stdout}"
-    );
+    let service_line = stdout
+        .lines()
+        .find(|line| line.starts_with("service:"))
+        .unwrap_or_else(|| panic!("status text must include a `service:` line: {stdout}"));
+    let service_state = service_line.trim_start_matches("service:").trim();
+    match service_state {
+        "running" => assert!(
+            stdout.contains("login_note:") && stdout.contains("IRONCLAW_REBORN_WEBUI_TOKEN is set"),
+            "service is genuinely running, so the env-token note must still win: {stdout}"
+        ),
+        "stopped" | "not installed" => assert!(
+            stdout.contains("login_note:") && stdout.contains("service is not running"),
+            "a known not-running service must take priority over the env-token note — \
+             there is no login credential (env-sourced or not) worth advertising into \
+             a `serve` process that isn't listening: {stdout}"
+        ),
+        other => panic!("unexpected service: state {other:?}: {stdout}"),
+    }
     assert!(
         !stdout.contains("login_link:"),
         "stdout must not print a login link that points at an unmounted route \

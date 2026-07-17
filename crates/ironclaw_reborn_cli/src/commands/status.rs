@@ -4,7 +4,7 @@ use ironclaw_reborn_composition::{
 };
 
 use crate::context::RebornCliContext;
-use crate::dto::{ComponentStatus, DriversSnapshot, FilePresence, StatusDto};
+use crate::dto::{ComponentStatus, DriversSnapshot, FilePresence, ServiceStateDto, StatusDto};
 use crate::render::{self, OutputMode, Renderable, terminal_safe_text};
 use std::io::Write;
 
@@ -28,6 +28,20 @@ impl StatusCommand {
 }
 
 fn build_status_dto(context: &RebornCliContext) -> anyhow::Result<StatusDto> {
+    build_status_dto_with_service_state(context, resolve_service_state())
+}
+
+/// Same as [`build_status_dto`] but with the live service-state query
+/// injectable, mirroring `commands::service`'s `*_with_runner` seam: the
+/// production entry point always resolves `service` from the real OS
+/// service manager, but the suppression logic below (and its tests) don't
+/// need — and must not depend on — the test host's actual launchd/systemd
+/// state, which a live `resolve_service_state()` call would otherwise pull
+/// in non-hermetically.
+fn build_status_dto_with_service_state(
+    context: &RebornCliContext,
+    service: ServiceStateDto,
+) -> anyhow::Result<StatusDto> {
     let home = context.boot_config().home();
     let profile = context.boot_config().profile();
     let config_path = home.config_file_path();
@@ -43,6 +57,7 @@ fn build_status_dto(context: &RebornCliContext) -> anyhow::Result<StatusDto> {
         .collect();
     let (login_link, login_note) =
         resolve_login_link_and_note(home, &config_path_for_webui_lookup)?;
+    let (login_link, login_note) = apply_service_suppression(service, login_link, login_note);
 
     Ok(StatusDto {
         version: env!("CARGO_PKG_VERSION").to_string(),
@@ -66,7 +81,62 @@ fn build_status_dto(context: &RebornCliContext) -> anyhow::Result<StatusDto> {
         },
         login_link,
         login_note,
+        service,
     })
+}
+
+/// The message the returning-user login-link story yields to once we know
+/// (not guess) the service isn't running: the operator's actual bug was
+/// `status` printing `login_link` + "drivers initialized" while the
+/// launchd job was dead (crash-looping) — a link into a server that isn't
+/// listening.
+const SERVICE_NOT_RUNNING_LOGIN_NOTE: &str = "service is not running — start with \
+     `ironclaw-reborn service restart`; link available once running";
+
+/// Overrides the file/env-derived `(login_link, login_note)` pair once the
+/// live service state is *known* (`Stopped`/`NotInstalled`) and says the
+/// service is not running: no login link can possibly be live, regardless
+/// of which credential source `serve` would use, so this takes priority
+/// over whatever `resolve_login_link_and_note` computed. `Running` and
+/// `Unknown` (detection failed, or unsupported/no `webui-v2-beta`) pass the
+/// original pair through unchanged — mirrors the mutually-exclusive
+/// `login_link`/`login_note` pattern `resolve_login_link_announcement`
+/// already uses.
+fn apply_service_suppression(
+    service: ServiceStateDto,
+    login_link: Option<String>,
+    login_note: Option<String>,
+) -> (Option<String>, Option<String>) {
+    match service {
+        ServiceStateDto::Stopped | ServiceStateDto::NotInstalled => {
+            (None, Some(SERVICE_NOT_RUNNING_LOGIN_NOTE.to_string()))
+        }
+        ServiceStateDto::Running | ServiceStateDto::Unknown => (login_link, login_note),
+    }
+}
+
+/// Live OS-service state for the `service` DTO field — see
+/// `StatusDto::service`'s doc. Detection failure (unsupported platform, a
+/// broken `launchctl`/`systemctl` query) folds to `Unknown` rather than
+/// failing `status`: this is diagnostic best-effort, not a hard
+/// requirement.
+#[cfg(feature = "webui-v2-beta")]
+fn resolve_service_state() -> ServiceStateDto {
+    let state = crate::commands::service::ServicePlatform::detect()
+        .and_then(|platform| platform.current_state());
+    match state {
+        Ok(crate::commands::service::ServiceState::Running) => ServiceStateDto::Running,
+        Ok(crate::commands::service::ServiceState::Stopped) => ServiceStateDto::Stopped,
+        Ok(crate::commands::service::ServiceState::NotInstalled) => ServiceStateDto::NotInstalled,
+        Err(_) => ServiceStateDto::Unknown,
+    }
+}
+
+/// `commands::service` (and the OS-service concept it manages) is gated
+/// behind `webui-v2-beta` — a build without it has no service to query.
+#[cfg(not(feature = "webui-v2-beta"))]
+fn resolve_service_state() -> ServiceStateDto {
+    ServiceStateDto::Unknown
 }
 
 /// `status` reprints the CLI-token login link `onboard` originally printed
@@ -164,6 +234,7 @@ impl Renderable for StatusDto {
             ),
         )?;
         kv(w, "model_slots", &self.model_slots.join(", "))?;
+        kv(w, "service", service_state_text(self.service))?;
         if let Some(login_link) = &self.login_link {
             kv(w, "login_link", login_link)?;
         }
@@ -181,6 +252,19 @@ impl Renderable for StatusDto {
             &self.drivers.planned_default_profile,
         )?;
         Ok(())
+    }
+}
+
+/// Human-readable text for the `service:` status line — matches
+/// `commands::service::status_label`'s vocabulary
+/// (running/stopped/not installed) plus `unknown` for a build/host where
+/// live detection isn't possible.
+fn service_state_text(state: ServiceStateDto) -> &'static str {
+    match state {
+        ServiceStateDto::Running => "running",
+        ServiceStateDto::Stopped => "stopped",
+        ServiceStateDto::NotInstalled => "not installed",
+        ServiceStateDto::Unknown => "unknown",
     }
 }
 
@@ -220,6 +304,13 @@ mod tests {
     /// `onboard` printed — the returning-user story (see `resolve_login_link`'s
     /// doc: `sessionStorage` is per-browser-session, so a closed browser needs
     /// a fresh link without rerunning `onboard`).
+    ///
+    /// Drives `build_status_dto_with_service_state(.., Running)` rather
+    /// than `build_status_dto` directly: this test is about the
+    /// file-token -> login-link mechanism, not the service-suppression
+    /// override added later — pinning it to `Running` keeps it hermetic
+    /// (no dependency on whether the test host happens to have the
+    /// `ironclaw-reborn` OS service installed).
     #[cfg(feature = "webui-v2-beta")]
     #[test]
     fn status_dto_includes_login_link_once_a_valid_webui_token_file_exists() {
@@ -232,7 +323,8 @@ mod tests {
         )
         .expect("seed webui-token file");
 
-        let dto = build_status_dto(&context).expect("must build");
+        let dto = build_status_dto_with_service_state(&context, ServiceStateDto::Running)
+            .expect("must build");
         let login_link = dto
             .login_link
             .expect("a valid webui-token file must produce a login link");
@@ -251,6 +343,10 @@ mod tests {
     /// `login_link`'s `/login?token=<bearer>` query string. The human
     /// `status` text output legitimately prints it (see
     /// `render_text_to` above); only the JSON/diagnostic path is redacted.
+    ///
+    /// Pinned to `ServiceStateDto::Running` for the same hermeticity
+    /// reason as the test above — a `Stopped`/`NotInstalled` state would
+    /// suppress `login_link` entirely, defeating this test's premise.
     #[cfg(feature = "webui-v2-beta")]
     #[test]
     fn status_dto_json_excludes_the_login_link_token() {
@@ -260,7 +356,8 @@ mod tests {
         let token = "reborn-status-json-test-token-0123456789abcdef";
         std::fs::write(home.path().join("webui-token"), token).expect("seed webui-token file");
 
-        let dto = build_status_dto(&context).expect("must build");
+        let dto = build_status_dto_with_service_state(&context, ServiceStateDto::Running)
+            .expect("must build");
         assert!(
             dto.login_link.is_some(),
             "sanity: the DTO must actually carry a login_link to make this test meaningful"
@@ -287,5 +384,125 @@ mod tests {
             }
             ComponentStatus::Initialized => panic!("expected Failed variant"),
         }
+    }
+
+    // ── service state: `status` tells the truth (bug fix) ──────────
+
+    /// RED: pins the suppression gate itself, independent of how
+    /// `login_link`/`login_note` were computed upstream. A `Stopped` or
+    /// `NotInstalled` service state must always win — there is no login
+    /// link into a server that isn't listening — while `Running`/`Unknown`
+    /// must pass whatever was computed through unchanged.
+    #[test]
+    fn apply_service_suppression_overrides_only_when_known_and_not_running() {
+        let link = Some("http://127.0.0.1:3000/login?token=t".to_string());
+        let note = Some("env token active".to_string());
+
+        for state in [ServiceStateDto::Stopped, ServiceStateDto::NotInstalled] {
+            let (suppressed_link, suppressed_note) =
+                apply_service_suppression(state, link.clone(), note.clone());
+            assert_eq!(
+                suppressed_link, None,
+                "a known not-running service must suppress login_link ({state:?})"
+            );
+            assert_eq!(
+                suppressed_note.as_deref(),
+                Some(SERVICE_NOT_RUNNING_LOGIN_NOTE),
+                "a known not-running service must carry the restart guidance ({state:?})"
+            );
+        }
+
+        for state in [ServiceStateDto::Running, ServiceStateDto::Unknown] {
+            let (passthrough_link, passthrough_note) =
+                apply_service_suppression(state, link.clone(), note.clone());
+            assert_eq!(
+                passthrough_link, link,
+                "Running/Unknown must not touch login_link ({state:?})"
+            );
+            assert_eq!(
+                passthrough_note, note,
+                "Running/Unknown must not touch login_note ({state:?})"
+            );
+        }
+    }
+
+    /// RED (Item 2): `status --json` must serialize the live `service`
+    /// state as the documented kebab-case strings.
+    #[test]
+    fn status_dto_json_serializes_service_state_as_kebab_case() {
+        let (_tmp, context) = RebornCliContext::test_context();
+        for (state, expected) in [
+            (ServiceStateDto::Running, "\"service\":\"running\""),
+            (ServiceStateDto::Stopped, "\"service\":\"stopped\""),
+            (
+                ServiceStateDto::NotInstalled,
+                "\"service\":\"not-installed\"",
+            ),
+            (ServiceStateDto::Unknown, "\"service\":\"unknown\""),
+        ] {
+            let dto = build_status_dto_with_service_state(&context, state).expect("must build");
+            let json = serde_json::to_string(&dto).expect("StatusDto must serialize");
+            assert!(json.contains(expected), "json: {json}");
+        }
+    }
+
+    /// RED (Item 2): the text renderer must print a `service:` line for
+    /// every state, using the same running/stopped/not-installed
+    /// vocabulary as `service status`, plus `unknown` when detection
+    /// wasn't possible.
+    #[test]
+    fn status_text_renders_service_line_for_every_state() {
+        let (_tmp, context) = RebornCliContext::test_context();
+        for (state, expected_line) in [
+            (ServiceStateDto::Running, "service:             running"),
+            (ServiceStateDto::Stopped, "service:             stopped"),
+            (
+                ServiceStateDto::NotInstalled,
+                "service:             not installed",
+            ),
+            (ServiceStateDto::Unknown, "service:             unknown"),
+        ] {
+            let dto = build_status_dto_with_service_state(&context, state).expect("must build");
+            let mut buf = Vec::new();
+            dto.render_text_to(&mut buf).expect("render must succeed");
+            let text = String::from_utf8(buf).expect("render output must be UTF-8");
+            assert!(
+                text.lines().any(|line| line == expected_line),
+                "expected a `{expected_line}` line, got:\n{text}"
+            );
+        }
+    }
+
+    /// RED (Item 2): once the service state is known and not running, the
+    /// text output must show the restart guidance instead of any
+    /// (necessarily stale) login link.
+    #[cfg(feature = "webui-v2-beta")]
+    #[test]
+    fn status_text_suppresses_login_link_and_shows_restart_guidance_when_service_stopped() {
+        let (_tmp, context) = RebornCliContext::test_context();
+        let home = context.boot_config().home();
+        std::fs::create_dir_all(home.path()).expect("create reborn home");
+        std::fs::write(
+            home.path().join("webui-token"),
+            "reborn-status-suppression-test-0123456789abcdef",
+        )
+        .expect("seed webui-token file");
+
+        let dto = build_status_dto_with_service_state(&context, ServiceStateDto::Stopped)
+            .expect("must build");
+        assert!(
+            dto.login_link.is_none(),
+            "a stopped service must suppress the login link even though a valid token file exists"
+        );
+        assert_eq!(
+            dto.login_note.as_deref(),
+            Some(SERVICE_NOT_RUNNING_LOGIN_NOTE)
+        );
+
+        let mut buf = Vec::new();
+        dto.render_text_to(&mut buf).expect("render must succeed");
+        let text = String::from_utf8(buf).expect("render output must be UTF-8");
+        assert!(!text.contains("login_link:"));
+        assert!(text.contains(SERVICE_NOT_RUNNING_LOGIN_NOTE));
     }
 }

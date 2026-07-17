@@ -115,14 +115,20 @@ impl ServiceCommand {
 /// The two supported service-management targets. Detected once per
 /// invocation via [`ServicePlatform::detect`]; every verb dispatches
 /// off the resolved variant instead of re-checking `cfg!(target_os)`.
+///
+/// `pub(super)`: `commands::status` (a sibling module under `commands`)
+/// queries [`Self::current_state`] to report whether the installed
+/// service is actually running, rather than assuming a login link is
+/// live just because config/state files are present. See the module doc
+/// note in `commands/status.rs`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum ServicePlatform {
+pub(super) enum ServicePlatform {
     MacOs,
     Linux,
 }
 
 impl ServicePlatform {
-    fn detect() -> Result<Self> {
+    pub(super) fn detect() -> Result<Self> {
         if cfg!(target_os = "macos") {
             Ok(Self::MacOs)
         } else if cfg!(target_os = "linux") {
@@ -161,7 +167,9 @@ impl ServicePlatform {
             Self::MacOs => {
                 launchd::install_with_runner(context, &invocation, runner).map(|_replaced| ())?
             }
-            Self::Linux => systemd::install_with_runner(&invocation, runner).map(|_replaced| ())?,
+            Self::Linux => {
+                systemd::install_with_runner(context, &invocation, runner).map(|_replaced| ())?
+            }
         }
         Ok(warnings)
     }
@@ -226,6 +234,30 @@ impl ServicePlatform {
         match self {
             Self::MacOs => launchd::uninstall_with_runner(runner),
             Self::Linux => systemd::uninstall_with_runner(runner),
+        }
+    }
+
+    /// Production service-state query: real `launchctl`/`systemctl` via
+    /// [`OsServiceCommandRunner`]. Used by `commands::status` so `status`
+    /// tells the truth about whether the installed service is actually
+    /// running, instead of only checking config/token files (the bug this
+    /// fixes: `status` reported a login link as if `serve` were live while
+    /// the launchd job was crash-looping).
+    pub(super) fn current_state(&self) -> Result<ServiceState> {
+        self.current_state_with_runner(&mut OsServiceCommandRunner)
+    }
+
+    /// Runner-injectable service-state query, mirroring
+    /// [`Self::install_with_runner`] — lets a test drive the same
+    /// installed/running detection each platform's `status_with_runner`
+    /// already performs, without touching the host's real service manager.
+    pub(super) fn current_state_with_runner(
+        &self,
+        runner: &mut dyn ServiceCommandRunner,
+    ) -> Result<ServiceState> {
+        match self {
+            Self::MacOs => launchd::current_state_with_runner(runner),
+            Self::Linux => systemd::current_state_with_runner(runner),
         }
     }
 }
@@ -352,15 +384,37 @@ fn restart_generic(
 
 // ── Status vocabulary ───────────────────────────────────────────
 
+/// Normalized service lifecycle state, shared by both platforms and by
+/// `commands::status` (see [`ServicePlatform::current_state`]) so the
+/// running/stopped/not-installed vocabulary can't drift between the
+/// `service status` text output and the `status` command's `service`
+/// field.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum ServiceState {
+    NotInstalled,
+    Stopped,
+    Running,
+}
+
+impl ServiceState {
+    fn from_installed_running(installed: bool, running: bool) -> Self {
+        if !installed {
+            Self::NotInstalled
+        } else if running {
+            Self::Running
+        } else {
+            Self::Stopped
+        }
+    }
+}
+
 /// Normalized `service status` line, shared by both platforms so the
 /// running/stopped/not-installed vocabulary can't drift between them.
 fn status_label(installed: bool, running: bool) -> &'static str {
-    if !installed {
-        "not installed"
-    } else if running {
-        "running"
-    } else {
-        "stopped"
+    match ServiceState::from_installed_running(installed, running) {
+        ServiceState::NotInstalled => "not installed",
+        ServiceState::Stopped => "stopped",
+        ServiceState::Running => "running",
     }
 }
 
@@ -475,7 +529,11 @@ fn run_capture_checked(label: &str, command: &mut Command) -> Result<String> {
 /// Production uses [`OsServiceCommandRunner`]. Tests provide a recorder so
 /// failure propagation and command ordering are verified without reaching the
 /// host's real launchd/systemd instance.
-trait ServiceCommandRunner {
+///
+/// `pub(super)`: `commands::status`'s tests implement this trait with their
+/// own mock runner to drive [`ServicePlatform::current_state_with_runner`]
+/// hermetically for all three [`ServiceState`] outcomes.
+pub(super) trait ServiceCommandRunner {
     fn run_checked(&mut self, label: &str, command: &mut Command) -> Result<()>;
     fn run_capture_checked(&mut self, label: &str, command: &mut Command) -> Result<String>;
 }
@@ -797,10 +855,14 @@ mod tests {
         let _lock = crate::runtime::test_env::lock_runtime_env();
         let tmp = tempfile::tempdir().expect("tempdir");
         let _home = TempHomeGuard::set(tmp.path());
+        let context = RebornCliContext::from_boot_config(
+            ironclaw_reborn_config::RebornBootConfig::resolve_from_env()
+                .expect("boot config must resolve under temp HOME"),
+        );
         let invocation = serve_invocation().expect("serve invocation");
         let mut runner = SuccessfulServiceCommandRunner::default();
-        let fresh_replaced =
-            systemd::install_with_runner(&invocation, &mut runner).expect("install must succeed");
+        let fresh_replaced = systemd::install_with_runner(&context, &invocation, &mut runner)
+            .expect("install must succeed");
         let unit_path = tmp
             .path()
             .join(".config/systemd/user/ironclaw-reborn.service");
@@ -808,6 +870,10 @@ mod tests {
         let contents = std::fs::read_to_string(&unit_path).expect("read unit file");
         assert!(contents.contains("ExecStart="));
         assert!(contents.contains("IRONCLAW_REBORN_HOME="));
+        assert!(
+            contents.contains("WorkingDirectory="),
+            "unit file must anchor cwd at the Reborn home (crash-loop fix)"
+        );
         assert!(
             !fresh_replaced,
             "a fresh install must not report a replaced unit"
@@ -819,8 +885,8 @@ mod tests {
         // facade (`RebornLocalServiceLifecycle`), must now report that it
         // replaced an existing unit (this reinstall stands in for the
         // facade's unit being atomically replaced by the CLI's).
-        let reinstall_replaced =
-            systemd::install_with_runner(&invocation, &mut runner).expect("reinstall must succeed");
+        let reinstall_replaced = systemd::install_with_runner(&context, &invocation, &mut runner)
+            .expect("reinstall must succeed");
         assert!(unit_path.exists());
         assert!(
             reinstall_replaced,
@@ -855,6 +921,10 @@ mod tests {
         let contents = std::fs::read_to_string(&plist_path).expect("read plist file");
         assert!(contents.contains(SERVICE_LABEL));
         assert!(contents.contains("<key>IRONCLAW_REBORN_HOME</key>"));
+        assert!(
+            contents.contains("<key>WorkingDirectory</key>"),
+            "plist must anchor cwd at the Reborn home (crash-loop fix)"
+        );
 
         // Idempotent reinstall.
         ServicePlatform::MacOs
