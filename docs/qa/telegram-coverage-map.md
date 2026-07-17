@@ -232,16 +232,25 @@ by exact test name — `cargo test <name>` locates each.
 
 ## Owner adjudications requested
 
-1. **qa-telegram:C3 (4096 chunking)** — unimplemented on main AND in the
-   #6116 descendant; long replies fail honestly (Telegram 400 →
-   FailedPermanent) instead of chunking. Implement (fold-side?) or amend the row.
-2. **qa-telegram:F4 (retry_after)** — no 429-retry exists; a 429 records
-   FailedRetryable with no in-process retry. Implement or amend the row.
-3. **qa-telegram:S5 (malformed JSON)** — shipped: verified-but-unparseable
+1. **qa-telegram:S5 (malformed JSON)** — shipped: verified-but-unparseable
    bodies are acked 200 (anti-redelivery) with no turn/reply/body-echo; the
    row drafts a 4xx. The shipped shape is pinned by test; flip either the row
    or the classification.
-4. **qa-telegram:C6 (paired `/start`)** — shipped sends the throttled pairing
-   hint regardless of pairedness; the row drafts a silent no-op for paired
-   senders. One-line fix if desired (pairedness-aware hint), else amend the row.
+
+(Resolved 2026-07-17: C3 chunking, F4 429-retry, and C6 pairedness-aware
+`/start` were implemented with red-first tests — their rows above are
+**covered**.)
+
+## Live-session findings (2026-07-17, not drafted as catalog rows)
+
+Found by live QA on the local stack; catalog amendment candidates. Each
+describes shared channel-host machinery assuming a Slack-side capability the
+Telegram side lacks — the sweep dimension the original 16-scenario suite
+missed (it pinned what Telegram does, not what the shared layer advertises).
+
+| Finding | Status | Evidence / fix |
+|---|---|---|
+| A `BlockedAuth` run with a link-shaped challenge DMs the authorization URL (was: adapter recorded the AuthPrompt `Deferred` → thinking-message deleted, then silence) | **fixed + covered** | `cargo test -p ironclaw_telegram_v2_adapter` adapter::{render_outbound_auth_prompt_sends_link_message_and_records_delivered, render_outbound_gate_prompt_sends_webapp_redirect_and_records_delivered} + `cargo test --test reborn_integration_telegram_journey` telegram_dm_gated_install_posts_oauth_authorization_link_not_silence (proven red pre-fix) |
+| Busy-on-auth hint advertises ``auth deny <gate_ref>`` in-chat, but Telegram inbound has no interaction-resolution parsing — the reply bounces off the busy thread with the same hint (phantom affordance loop) | **gap-product (open)** | Fix designed: lift Slack's `parse_interaction_resolution` grammar into the shared channel-host crate so both adapters parse identically, + journey pin (park → DM `auth deny` → run cancelled, thread freed, confirmation posted) |
+| Telegram unpair/removal does not clean the conversation→thread binding: after re-pair the chat re-attaches to the old (even deleted) thread and its parked runs | **gap-product (open)** | Slack removal cleans conversation actor bindings; telegram `unpair` cleans codes/identity-bindings/DM-targets only (`telegram_pairing.rs::unpair`). Needs cleanup parity + a reinstall-walk pin (extends `qa-telegram:R1:05`) |
 
