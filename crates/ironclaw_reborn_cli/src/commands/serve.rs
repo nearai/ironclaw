@@ -177,13 +177,7 @@ impl ServeCommand {
             present_unicode_env_var(env_token_var)?.as_deref(),
             boot_config.home().path(),
         )?;
-        let user_id_raw = env::var(env_user_id_var).map_err(|_| {
-            anyhow!(
-                "{env_user_id_var} must be set to the UserId an env-bearer-authenticated caller maps to. \
-                 Override the variable name via `[webui].env_user_id_var` in {}.",
-                boot_config.home().config_file_path().display(),
-            )
-        })?;
+        let user_id_raw = resolve_webui_user_id_raw(env_user_id_var, config_file.as_ref());
         let user_id = UserId::new(&user_id_raw)
             .map_err(|err| anyhow!("{env_user_id_var} value `{user_id_raw}` is invalid: {err}"))?;
 
@@ -965,6 +959,25 @@ fn resolve_webui_default_agent(
         .unwrap_or_else(|| runtime_identity.agent_id.clone())
 }
 
+/// Resolve the raw WebUI user id: `env_user_id_var` when set to a non-empty
+/// value, else the config file's `[identity].default_owner` (via
+/// `crate::runtime::default_owner_id`, which falls back to `"reborn-cli"`).
+///
+/// A service-installed serve whose unit environment carries only
+/// HOME/PROFILE (no per-operator env var) must still boot bound to a stable
+/// identity rather than hard-failing — see `resolve_webui_runtime_owner`
+/// just below, which already accepts this same config default for the
+/// *runtime* owner and rejects a divergent explicit override.
+fn resolve_webui_user_id_raw(
+    env_user_id_var: &str,
+    config_file: Option<&RebornConfigFile>,
+) -> String {
+    env::var(env_user_id_var)
+        .ok()
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| crate::runtime::default_owner_id(config_file).to_string())
+}
+
 /// Resolve the owner the Reborn runtime must run under for the WebChat v2
 /// serve path.
 ///
@@ -1254,6 +1267,79 @@ mod tests {
         assert_eq!(
             resolve_webui_default_agent(Some(&identity), &runtime_identity),
             "configured-agent"
+        );
+    }
+
+    const WEBUI_USER_ID_TEST_ENV: &str = "IRONCLAW_REBORN_SERVE_TEST_USER_ID_RAW";
+
+    #[test]
+    fn webui_user_id_raw_prefers_a_set_nonempty_env_var() {
+        let _guard = crate::runtime::test_env::lock_runtime_env();
+        // SAFETY: serialized by the shared crate process-env lock; cleaned up
+        // before the guard drops.
+        unsafe { std::env::set_var(WEBUI_USER_ID_TEST_ENV, "env-user") };
+
+        let config_file = RebornConfigFile {
+            identity: Some(IdentitySection::default().set_default_owner("config-user")),
+            ..Default::default()
+        };
+
+        assert_eq!(
+            resolve_webui_user_id_raw(WEBUI_USER_ID_TEST_ENV, Some(&config_file)),
+            "env-user"
+        );
+
+        // SAFETY: see above.
+        unsafe { std::env::remove_var(WEBUI_USER_ID_TEST_ENV) };
+    }
+
+    #[test]
+    fn webui_user_id_raw_falls_back_to_config_default_owner_when_env_absent() {
+        let _guard = crate::runtime::test_env::lock_runtime_env();
+        // SAFETY: serialized by the shared crate process-env lock.
+        unsafe { std::env::remove_var(WEBUI_USER_ID_TEST_ENV) };
+
+        let config_file = RebornConfigFile {
+            identity: Some(IdentitySection::default().set_default_owner("config-user")),
+            ..Default::default()
+        };
+
+        assert_eq!(
+            resolve_webui_user_id_raw(WEBUI_USER_ID_TEST_ENV, Some(&config_file)),
+            "config-user"
+        );
+    }
+
+    #[test]
+    fn webui_user_id_raw_treats_empty_env_var_as_absent() {
+        let _guard = crate::runtime::test_env::lock_runtime_env();
+        // SAFETY: serialized by the shared crate process-env lock; cleaned up
+        // before the guard drops.
+        unsafe { std::env::set_var(WEBUI_USER_ID_TEST_ENV, "") };
+
+        let config_file = RebornConfigFile {
+            identity: Some(IdentitySection::default().set_default_owner("config-user")),
+            ..Default::default()
+        };
+
+        assert_eq!(
+            resolve_webui_user_id_raw(WEBUI_USER_ID_TEST_ENV, Some(&config_file)),
+            "config-user"
+        );
+
+        // SAFETY: see above.
+        unsafe { std::env::remove_var(WEBUI_USER_ID_TEST_ENV) };
+    }
+
+    #[test]
+    fn webui_user_id_raw_defaults_to_reborn_cli_when_no_config_or_env() {
+        let _guard = crate::runtime::test_env::lock_runtime_env();
+        // SAFETY: serialized by the shared crate process-env lock.
+        unsafe { std::env::remove_var(WEBUI_USER_ID_TEST_ENV) };
+
+        assert_eq!(
+            resolve_webui_user_id_raw(WEBUI_USER_ID_TEST_ENV, None),
+            "reborn-cli"
         );
     }
 

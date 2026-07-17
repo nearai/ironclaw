@@ -1510,37 +1510,165 @@ fn serve_fails_closed_when_env_bearer_token_var_is_unset() {
 
 #[cfg(feature = "webui-v2-beta")]
 #[test]
-fn serve_fails_closed_when_env_user_id_var_is_unset() {
+fn serve_boots_without_user_id_env_var() {
+    // Regression for the Railway/service-install crash-loop root cause: a
+    // launchd/systemd/Railway unit whose environment carries only
+    // HOME/PROFILE (see serve_invocation.rs) never sets
+    // IRONCLAW_REBORN_WEBUI_USER_ID. `serve` previously hard-failed before
+    // binding any listener; it must now fall back to the config file's
+    // `[identity].default_owner` (or the hard-coded "reborn-cli" default
+    // when `[identity]` is absent, as here, since no config.toml is
+    // seeded) instead of exiting.
     let temp = tempfile::tempdir().expect("tempdir");
-    let output = Command::new(reborn_bin())
-        .arg("serve")
-        .arg("--host")
-        .arg("127.0.0.1")
-        .arg("--port")
-        .arg("0")
-        .env("IRONCLAW_REBORN_HOME", temp.path().join("reborn-home"))
+    let reborn_home = temp.path().join("reborn-home");
+    let home = temp.path().join("home");
+    std::fs::create_dir_all(&home).expect("home dir");
+    let port = unused_local_port();
+
+    let mut child = Command::new(reborn_bin())
+        .args(["serve", "--host", "127.0.0.1", "--port"])
+        .arg(port.to_string())
+        .env_clear()
+        .env("HOME", &home)
+        .env("IRONCLAW_REBORN_HOME", &reborn_home)
         .env_remove("IRONCLAW_REBORN_PROFILE")
         // >=32 bytes: must clear the token's own entropy floor (enforced by
         // `webui_token::resolve_webui_token` as soon as the token is
         // resolved, before the user-id var is read) so this test isolates
-        // the user-id-var-missing failure it's meant to exercise.
+        // the user-id-var-absent fallback it's meant to exercise.
         .env(
             "IRONCLAW_REBORN_WEBUI_TOKEN",
             "reborn-smoke-test-token-0123456789abcdef",
         )
         .env_remove("IRONCLAW_REBORN_WEBUI_USER_ID")
-        .output()
-        .expect("ironclaw-reborn serve should run");
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("ironclaw-reborn serve should start");
+    let stderr = child.stderr.take().expect("stderr should be piped");
+    let (stderr_tx, stderr_rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        for line in std::io::BufReader::new(stderr).lines() {
+            if stderr_tx.send(line).is_err() {
+                break;
+            }
+        }
+    });
 
-    assert!(
-        !output.status.success(),
-        "serve must fail closed when the user-id env var is unset"
-    );
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(
-        stderr.contains("IRONCLAW_REBORN_WEBUI_USER_ID must be set"),
-        "stderr should name the missing user-id env var: {stderr}"
-    );
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
+    let mut stderr_text = String::new();
+    loop {
+        if let Some(status) = child.try_wait().expect("serve child status") {
+            panic!(
+                "serve must not exit before binding when the user-id env var \
+                 is absent (must fall back to the config default); status \
+                 {status}; stderr: {stderr_text}"
+            );
+        }
+        if std::time::Instant::now() >= deadline {
+            let _ = child.kill();
+            let _ = child.wait();
+            panic!("serve did not reach listener banner; stderr: {stderr_text}");
+        }
+        match stderr_rx.recv_timeout(std::time::Duration::from_millis(100)) {
+            Ok(Ok(line)) => {
+                stderr_text.push_str(&line);
+                stderr_text.push('\n');
+                if stderr_text.contains("ironclaw-reborn: WebChat v2 listener") {
+                    break;
+                }
+            }
+            Ok(Err(error)) => panic!("failed to read serve stderr: {error}"),
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                panic!("serve stderr closed before banner; stderr: {stderr_text}");
+            }
+        }
+    }
+
+    let _ = child.kill();
+    let _ = child.wait();
+}
+
+#[cfg(feature = "webui-v2-beta")]
+#[test]
+fn a_real_env_var_beats_the_config_default_end_to_end() {
+    // Railway non-regression spine: the well-trodden Railway/service-install
+    // path (operator sets IRONCLAW_REBORN_WEBUI_USER_ID explicitly, no
+    // `[identity].default_owner` in config.toml) must keep booting after
+    // user-id resolution moved from a bare `env::var(...)?` into the shared
+    // `resolve_webui_user_id_raw` fallback helper. `[identity]` is
+    // deliberately left unset here: `resolve_webui_runtime_owner` rejects
+    // any *configured* `default_owner` that disagrees with the resolved
+    // WebUI user by design (see `webui_runtime_owner_rejects_divergent_config_owner`),
+    // so a config default that differs from the env value is a distinct,
+    // already-covered operator-misconfiguration case, not this one. Exact
+    // env-over-config-default precedence is pinned at the unit level by
+    // `webui_user_id_raw_prefers_a_set_nonempty_env_var`; this test proves
+    // the env-set path still reaches a bound listener end-to-end.
+    let temp = tempfile::tempdir().expect("tempdir");
+    let reborn_home = temp.path().join("reborn-home");
+    let home = temp.path().join("home");
+    std::fs::create_dir_all(&home).expect("home dir");
+    let port = unused_local_port();
+
+    let mut child = Command::new(reborn_bin())
+        .args(["serve", "--host", "127.0.0.1", "--port"])
+        .arg(port.to_string())
+        .env_clear()
+        .env("HOME", &home)
+        .env("IRONCLAW_REBORN_HOME", &reborn_home)
+        .env(
+            "IRONCLAW_REBORN_WEBUI_TOKEN",
+            "reborn-smoke-test-token-0123456789abcdef",
+        )
+        .env("IRONCLAW_REBORN_WEBUI_USER_ID", "env-user")
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("ironclaw-reborn serve should start");
+    let stderr = child.stderr.take().expect("stderr should be piped");
+    let (stderr_tx, stderr_rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        for line in std::io::BufReader::new(stderr).lines() {
+            if stderr_tx.send(line).is_err() {
+                break;
+            }
+        }
+    });
+
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
+    let mut stderr_text = String::new();
+    loop {
+        if let Some(status) = child.try_wait().expect("serve child status") {
+            panic!(
+                "env-user is a valid, set env var; serve must bind using it; \
+                 status {status}; stderr: {stderr_text}"
+            );
+        }
+        if std::time::Instant::now() >= deadline {
+            let _ = child.kill();
+            let _ = child.wait();
+            panic!("serve did not reach listener banner; stderr: {stderr_text}");
+        }
+        match stderr_rx.recv_timeout(std::time::Duration::from_millis(100)) {
+            Ok(Ok(line)) => {
+                stderr_text.push_str(&line);
+                stderr_text.push('\n');
+                if stderr_text.contains("ironclaw-reborn: WebChat v2 listener") {
+                    break;
+                }
+            }
+            Ok(Err(error)) => panic!("failed to read serve stderr: {error}"),
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                panic!("serve stderr closed before banner; stderr: {stderr_text}");
+            }
+        }
+    }
+
+    let _ = child.kill();
+    let _ = child.wait();
 }
 
 #[cfg(feature = "webui-v2-beta")]
