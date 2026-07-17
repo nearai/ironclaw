@@ -556,6 +556,59 @@ async fn production_wiring_validation_classifies_in_memory_backed_lease_store_as
 }
 
 #[tokio::test]
+async fn production_wiring_validation_classifies_in_memory_backed_run_state_and_approval_stores_as_local_only()
+ {
+    // Regression guard for arch-simplification §4.3 (deleting
+    // `InMemoryRunStateStore` / `InMemoryApprovalRequestStore`): the classifier
+    // keyed the now-deleted stores as explicit `LocalOnly` types, and unknown
+    // component types default to `ProductionCandidate`. Their replacements — the
+    // production `Filesystem*Store<InMemoryBackend>` pair the no-durable build
+    // and every test seam wire — must classify the same way, or volatile
+    // in-memory run-state/approval stores could silently satisfy production
+    // readiness. Drive the real `HostRuntimeServices` caller so classification
+    // is exercised through the monomorphized `with_run_state::<T>` /
+    // `with_approval_requests::<T>` type capture, not just the classifier
+    // helper (the combined-store path hard-codes `LocalOnly` and bypasses it).
+    let services = HostRuntimeServices::new(
+        Arc::new(registry_with_manifest(SCRIPT_MANIFEST)),
+        Arc::new(LocalFilesystem::new()),
+        Arc::new(InMemoryResourceGovernor::new()),
+        Arc::new(GrantAuthorizer::new()),
+        ironclaw_processes::in_memory_backed_process_services(),
+        CapabilitySurfaceVersion::new("surface-v1").unwrap(),
+    )
+    .with_run_state(Arc::new(
+        ironclaw_run_state::in_memory_backed_run_state_store(),
+    ))
+    .with_approval_requests(Arc::new(
+        ironclaw_run_state::in_memory_backed_approval_request_store(),
+    ));
+
+    let report = services
+        .validate_production_wiring(&ProductionWiringConfig::new([]))
+        .expect_err(
+            "in-memory-backed run-state/approval stores must not pass production validation",
+        );
+
+    for component in [
+        ProductionWiringComponent::RunState,
+        ProductionWiringComponent::ApprovalRequests,
+    ] {
+        assert!(
+            report.contains(
+                component,
+                ProductionWiringIssueKind::LocalOnlyImplementation
+            ),
+            "Filesystem store<InMemoryBackend> for {component:?} must classify local-only: {report:?}"
+        );
+        assert!(
+            !report.contains(component, ProductionWiringIssueKind::Missing),
+            "a wired store must satisfy {component:?} presence: {report:?}"
+        );
+    }
+}
+
+#[tokio::test]
 async fn production_wiring_validation_rejects_unsupported_runtime_requirements() {
     let services = HostRuntimeServices::new(
         Arc::new(registry_with_manifest(SCRIPT_MANIFEST)),
