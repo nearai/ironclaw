@@ -629,6 +629,7 @@ registerPack("ja", {
   "workspace.emptyDir": "このフォルダーは空です。",
   "workspace.noMatches": "フィルターに一致する項目がありません。",
   "workspace.download": "ダウンロード",
+  "workspace.downloadFailed": "このファイルをダウンロードできませんでした。もう一度お試しください。",
   "workspace.binaryPreviewUnavailable": "このファイル形式のプレビューはありません。内容を表示するにはダウンロードしてください。",
   "workspace.fileMeta": "{mime} · {size}",
   "workspace.subtitle": "永続メモリ",

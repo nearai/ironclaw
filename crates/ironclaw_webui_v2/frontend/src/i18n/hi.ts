@@ -629,6 +629,7 @@ registerPack("hi", {
   "workspace.emptyDir": "यह फ़ोल्डर खाली है।",
   "workspace.noMatches": "फ़िल्टर से कुछ मेल नहीं खाता।",
   "workspace.download": "डाउनलोड",
+  "workspace.downloadFailed": "यह फ़ाइल डाउनलोड नहीं की जा सकी। कृपया फिर से कोशिश करें।",
   "workspace.binaryPreviewUnavailable": "इस फ़ाइल प्रकार के लिए कोई पूर्वावलोकन नहीं है। सामग्री देखने के लिए इसे डाउनलोड करें।",
   "workspace.fileMeta": "{mime} · {size}",
   "workspace.subtitle": "स्थायी स्मृति",

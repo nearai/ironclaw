@@ -629,6 +629,7 @@ registerPack("ko", {
   "workspace.emptyDir": "이 폴더는 비어 있습니다.",
   "workspace.noMatches": "필터와 일치하는 항목이 없습니다.",
   "workspace.download": "다운로드",
+  "workspace.downloadFailed": "이 파일을 다운로드할 수 없습니다. 다시 시도해 주세요.",
   "workspace.binaryPreviewUnavailable": "이 파일 형식은 미리 볼 수 없습니다. 내용을 보려면 다운로드하세요.",
   "workspace.fileMeta": "{mime} · {size}",
   "workspace.subtitle": "영구 메모리",
