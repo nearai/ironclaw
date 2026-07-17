@@ -1529,6 +1529,7 @@ fn serve_boots_without_user_id_env_var() {
         .args(["serve", "--host", "127.0.0.1", "--port"])
         .arg(port.to_string())
         .env_clear()
+        .env("IRONCLAW_DISABLE_OS_KEYCHAIN", "1")
         .env("HOME", &home)
         .env("IRONCLAW_REBORN_HOME", &reborn_home)
         .env_remove("IRONCLAW_REBORN_PROFILE")
@@ -1616,6 +1617,7 @@ fn a_real_env_var_beats_the_config_default_end_to_end() {
         .args(["serve", "--host", "127.0.0.1", "--port"])
         .arg(port.to_string())
         .env_clear()
+        .env("IRONCLAW_DISABLE_OS_KEYCHAIN", "1")
         .env("HOME", &home)
         .env("IRONCLAW_REBORN_HOME", &reborn_home)
         .env(
