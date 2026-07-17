@@ -4,9 +4,7 @@ use ironclaw_host_api::UserId;
 use ironclaw_product_workflow::{AutomationName, AutomationProductFacade, RebornAutomationState};
 use ironclaw_triggers::{InMemoryTriggerRepository, TriggerId, TriggerRepository, TriggerState};
 
-use crate::automation::facade::RebornAutomationProductFacade;
-
-use super::{caller, make_record, now};
+use super::{caller, facade_over, make_record, now};
 
 fn automation_name(value: &str) -> AutomationName {
     AutomationName::new(value).expect("valid automation name")
@@ -27,7 +25,7 @@ async fn pause_and_resume_update_scoped_trigger_state() {
     .await
     .expect("upsert trigger");
 
-    let facade = RebornAutomationProductFacade::new(repo.clone());
+    let facade = facade_over(repo.clone());
 
     let paused = facade
         .pause_automation(c.clone(), trigger_id.to_string())
@@ -82,7 +80,7 @@ async fn pause_automation_returns_not_updated_for_wrong_scope() {
     .await
     .expect("upsert trigger");
 
-    let facade = RebornAutomationProductFacade::new(repo);
+    let facade = facade_over(repo);
     let response = facade
         .pause_automation(c, trigger_id.to_string())
         .await
@@ -107,7 +105,7 @@ async fn rename_automation_updates_scoped_trigger_name() {
     .await
     .expect("upsert trigger");
 
-    let facade = RebornAutomationProductFacade::new(repo.clone());
+    let facade = facade_over(repo.clone());
     let response = facade
         .rename_automation(
             c.clone(),
@@ -149,7 +147,7 @@ async fn rename_automation_returns_not_updated_for_wrong_scope() {
     .await
     .expect("upsert trigger");
 
-    let facade = RebornAutomationProductFacade::new(repo.clone());
+    let facade = facade_over(repo.clone());
     let response = facade
         .rename_automation(c, trigger_id.to_string(), automation_name("Wrong scope"))
         .await
@@ -182,7 +180,7 @@ async fn delete_automation_removes_scoped_trigger() {
     .await
     .expect("upsert trigger");
 
-    let facade = RebornAutomationProductFacade::new(repo.clone());
+    let facade = facade_over(repo.clone());
     let response = facade
         .delete_automation(c.clone(), trigger_id.to_string())
         .await
@@ -222,7 +220,7 @@ async fn delete_automation_returns_not_updated_for_wrong_scope() {
     .await
     .expect("upsert trigger");
 
-    let facade = RebornAutomationProductFacade::new(repo.clone());
+    let facade = facade_over(repo.clone());
     let response = facade
         .delete_automation(c, trigger_id.to_string())
         .await
@@ -261,7 +259,7 @@ async fn resume_automation_does_not_reopen_completed_trigger() {
     .await
     .expect("upsert completed trigger");
 
-    let facade = RebornAutomationProductFacade::new(repo);
+    let facade = facade_over(repo);
     let response = facade
         .resume_automation(c, trigger_id.to_string())
         .await
@@ -273,7 +271,7 @@ async fn resume_automation_does_not_reopen_completed_trigger() {
 
 #[tokio::test]
 async fn pause_automation_rejects_invalid_automation_id_as_bad_request() {
-    let facade = RebornAutomationProductFacade::new(Arc::new(InMemoryTriggerRepository::default()));
+    let facade = facade_over(Arc::new(InMemoryTriggerRepository::default()));
 
     let error = facade
         .pause_automation(caller(), "not a trigger id".to_string())
@@ -285,7 +283,7 @@ async fn pause_automation_rejects_invalid_automation_id_as_bad_request() {
 
 #[tokio::test]
 async fn rename_automation_rejects_invalid_automation_id_as_bad_request() {
-    let facade = RebornAutomationProductFacade::new(Arc::new(InMemoryTriggerRepository::default()));
+    let facade = facade_over(Arc::new(InMemoryTriggerRepository::default()));
 
     let error = facade
         .rename_automation(
@@ -301,7 +299,7 @@ async fn rename_automation_rejects_invalid_automation_id_as_bad_request() {
 
 #[tokio::test]
 async fn delete_automation_rejects_invalid_automation_id_as_bad_request() {
-    let facade = RebornAutomationProductFacade::new(Arc::new(InMemoryTriggerRepository::default()));
+    let facade = facade_over(Arc::new(InMemoryTriggerRepository::default()));
 
     let error = facade
         .delete_automation(caller(), "not a trigger id".to_string())

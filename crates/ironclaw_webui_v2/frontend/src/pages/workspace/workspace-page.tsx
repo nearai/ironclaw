@@ -31,7 +31,10 @@ export function WorkspacePage() {
           <div className="flex flex-wrap items-start justify-between gap-3">
             <div className="min-w-0">
               <div className="flex items-center gap-2">
-                <h1 className="text-lg font-semibold text-white">{t("workspace.title")}</h1>
+                <h1
+                  data-testid="workspace-heading"
+                  className="text-lg font-semibold text-white"
+                >{t("workspace.title")}</h1>
                 <StatusPill tone="muted" label={t("workspace.readOnly")} />
               </div>
               <p className="mt-0.5 text-sm text-iron-400">{t("workspace.subtitle")}</p>

@@ -2,8 +2,8 @@
 //!
 //! Populated at compile time by `build.rs` from the crate-owned WebUI bundle
 //! and committed public assets. Each file becomes one
-//! `Asset` row keyed by its URL path (relative to the `/v2` mount
-//! prefix). `index.html` is handled separately — see
+//! `Asset` row keyed by its URL path (relative to the gateway root).
+//! `index.html` is handled separately — see
 //! [`INDEX_HTML_TEMPLATE`].
 
 pub(crate) struct Asset {
@@ -439,7 +439,9 @@ mod tests {
         assert!(detail_panel.contains("automation.state === \"scheduled\""));
         assert!(detail_panel.contains("primary_status_label"));
         assert!(detail_panel.contains("primary_status_tone"));
-        assert!(detail_panel.contains("window.confirm"));
+        assert!(detail_panel.contains("import { ConfirmDialog }"));
+        assert!(detail_panel.contains("<ConfirmDialog"));
+        assert!(!detail_panel.contains("window.confirm"));
 
         let app_bundle = bundled_javascript();
         let app_bundle_contains_encoded_automation_route = |suffix: &str| {

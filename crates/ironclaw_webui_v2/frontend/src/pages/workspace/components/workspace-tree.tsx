@@ -1,7 +1,7 @@
 import { useQuery } from "@tanstack/react-query";
 import { useT } from "../../../lib/i18n";
 import { listWorkspace } from "../lib/workspace-api";
-import { sortEntries } from "../lib/workspace-presenters";
+import { areaDisplayName, sortEntries } from "../lib/workspace-presenters";
 
 function isUiHiddenWorkspacePath(path = "") {
   return String(path)
@@ -30,6 +30,7 @@ function visibleEntries(entries, filter, expandedPaths) {
 function TreeNode({ entry, depth, selectedPath, expandedPaths, filter, onToggleDirectory, onSelectFile }) {
   const t = useT();
   const isExpanded = expandedPaths.has(entry.path);
+  const displayName = depth === 0 ? areaDisplayName(entry.path, t) : entry.name;
   const childQuery = useQuery({
     queryKey: ["workspace-list", entry.path],
     queryFn: () => listWorkspace(entry.path),
@@ -57,7 +58,7 @@ function TreeNode({ entry, depth, selectedPath, expandedPaths, filter, onToggleD
           aria-expanded={isExpanded}
         >
           <span className={["w-3 text-[10px]", isExpanded ? "rotate-90" : ""].join(" ")}>{">"}</span>
-          <span className="min-w-0 truncate font-semibold">{entry.name}</span>
+          <span className="min-w-0 truncate font-semibold">{displayName}</span>
         </button>
         {isExpanded && (
           <div className="space-y-1">
@@ -93,7 +94,7 @@ function TreeNode({ entry, depth, selectedPath, expandedPaths, filter, onToggleD
       ].join(" ")}
       style={{ paddingLeft: `${24 + depth * 16}px` }}
     >
-      <span className="min-w-0 truncate">{entry.name}</span>
+      <span className="min-w-0 truncate">{displayName}</span>
     </button>
   );
 }
@@ -113,7 +114,8 @@ export function WorkspaceTree({
   }
 
   const rootEntries = sortEntries(
-    entries.filter((entry) => !isUiHiddenWorkspacePath(entry.path))
+    entries.filter((entry) => !isUiHiddenWorkspacePath(entry.path)),
+    (entry) => areaDisplayName(entry.path, t),
   );
   if (!rootEntries.length) {
     return (<div className="px-4 py-8 text-sm text-iron-300">{t("workspace.noFiles")}</div>);

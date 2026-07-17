@@ -17,4 +17,7 @@
 mod assets;
 mod router;
 
-pub use router::{mount_at_prefix, serve_root, serve_wildcard, static_router};
+pub use router::{
+    StaticRouterConfig, StaticRouterConfigError, serve_root, serve_wildcard, static_router,
+    static_router_with_config,
+};

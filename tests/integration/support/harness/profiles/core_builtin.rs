@@ -254,7 +254,7 @@ fn core_builtin_tools_from_runtime(
     ];
     let (io, result_writer_io) = super::super::default_capability_io_pair();
     Ok(HostRuntimeCapabilityHarness {
-        runtime,
+        runtime: Mutex::new(runtime),
         approval_parts: None,
         auto_approve_settings: None,
         pending_approval_scopes: Arc::new(Mutex::new(HashMap::new())),
@@ -306,5 +306,6 @@ fn core_builtin_tools_from_runtime(
         persistent_approval_policies: None,
         trigger_repository: None,
         reborn_services: None,
+        trigger_active_run_lookup_requested: false,
     })
 }

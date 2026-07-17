@@ -69,6 +69,7 @@ export function Modal({
     <div
       className="fixed inset-0 z-50 flex items-end justify-center p-4 sm:items-center"
       aria-modal="true"
+      aria-label={typeof title === "string" ? title : undefined}
       role="dialog"
     >
       {/* Dim layer */}

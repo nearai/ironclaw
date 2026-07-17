@@ -74,6 +74,8 @@ zip = { version = "8", default-features = false, features = ["deflate"] }
 [dev-dependencies]
 axum = { version = "0.8", features = ["json"] }
 hex = "0.4"
+# Enables the in-memory-backed approval store constructors for tests only.
+ironclaw_approvals = { path = "../ironclaw_approvals", features = ["test-support"] }
 ironclaw_event_projections = { path = "../ironclaw_event_projections" }
 sha2 = "0.11"
 tempfile = "3"

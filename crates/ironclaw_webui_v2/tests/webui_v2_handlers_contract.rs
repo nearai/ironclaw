@@ -1599,6 +1599,7 @@ fn automation_info(automation_id: &str, name: &str, cron: &str) -> RebornAutomat
         }],
         is_active: true,
         created_at: None,
+        active_hold: None,
     }
 }
 

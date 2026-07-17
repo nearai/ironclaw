@@ -19,7 +19,13 @@ import { useSettings } from "./hooks/useSettings";
 export function SettingsPage() {
   const t = useT();
   const { tab: requestedTab } = useParams();
-  const { gatewayStatus, gatewayStatusQuery, isAdmin = false } = useOutletContext();
+  const {
+    gatewayStatus,
+    gatewayStatusQuery,
+    isAdmin = false,
+    theme,
+    setTheme,
+  } = useOutletContext();
   const defaultTab = isAdmin ? "inference" : "language";
   const tab = requestedTab || defaultTab;
   const {
@@ -50,7 +56,11 @@ export function SettingsPage() {
       isLoading={isLoading}
       searchQuery={searchQuery}
     />),
-    appearance: (<AppearanceTab searchQuery={searchQuery} />),
+    appearance: (<AppearanceTab
+      searchQuery={searchQuery}
+      theme={theme}
+      onThemeChange={setTheme}
+    />),
     agent: (<AgentTab
       settings={settings}
       onSave={save}

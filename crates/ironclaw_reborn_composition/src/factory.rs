@@ -9,15 +9,9 @@ use std::{
 #[cfg(any(feature = "libsql", feature = "postgres"))]
 use crate::product_auth::durable::{FilesystemAuthProductServices, UnavailableAuthProviderClient};
 use crate::support::fs::RebornProjectService;
-#[cfg(any(feature = "libsql", feature = "postgres"))]
 use ironclaw_approvals::{
     FilesystemAutoApproveSettingStore, FilesystemPersistentApprovalPolicyStore,
     FilesystemToolPermissionOverrideStore,
-};
-#[cfg(not(any(feature = "libsql", feature = "postgres")))]
-use ironclaw_approvals::{
-    InMemoryAutoApproveSettingStore, InMemoryPersistentApprovalPolicyStore,
-    InMemoryToolPermissionOverrideStore,
 };
 #[cfg(any(feature = "libsql", feature = "postgres"))]
 use ironclaw_auth::AuthProviderClient;
@@ -126,7 +120,8 @@ use ironclaw_threads::InMemorySessionThreadService;
 use ironclaw_threads::SessionThreadService;
 use ironclaw_triggers::{
     TRIGGER_TRUSTED_ADAPTER_INSTALLATION_ID, TRIGGER_TRUSTED_ADAPTER_KIND,
-    TRIGGER_TRUSTED_EXTERNAL_ACTOR_NAMESPACE, TriggerError, TriggerRecord, TriggerRepository,
+    TRIGGER_TRUSTED_EXTERNAL_ACTOR_NAMESPACE, TriggerActiveRunLookup, TriggerError, TriggerRecord,
+    TriggerRepository,
 };
 use ironclaw_trust::{AdminConfig, AdminEntry, HostTrustAssignment, HostTrustPolicy};
 #[cfg(feature = "test-support")]
@@ -298,23 +293,35 @@ pub(crate) type LocalDevCapabilityLeaseStore =
 #[cfg(not(any(feature = "libsql", feature = "postgres")))]
 pub(crate) type LocalDevCapabilityLeaseStore = InMemoryCapabilityLeaseStore;
 
+// One store per approval domain, backend-injected — the production
+// `Filesystem*Store<F>` every deployment uses, never a bespoke `InMemory*Store`
+// (arch-simplification §4.3). The store's backend type encodes its durability:
+// the no-durable-features build backs them with `InMemoryBackend` directly, so
+// the concrete type is `<InMemoryBackend>` — which the host-runtime
+// production-wiring guard classifies `LocalOnly` (the same way the volatile
+// `InMemoryRunStateStore`/`InMemoryCapabilityLeaseStore` are flagged). Durable
+// builds use the libSQL/Postgres-backed composite root filesystem, whose type is
+// distinct and correctly classifies as a production candidate.
 #[cfg(any(feature = "libsql", feature = "postgres"))]
 pub(crate) type LocalDevPersistentApprovalPolicyStore =
     FilesystemPersistentApprovalPolicyStore<LocalDevRootFilesystem>;
 #[cfg(not(any(feature = "libsql", feature = "postgres")))]
-pub(crate) type LocalDevPersistentApprovalPolicyStore = InMemoryPersistentApprovalPolicyStore;
+pub(crate) type LocalDevPersistentApprovalPolicyStore =
+    FilesystemPersistentApprovalPolicyStore<InMemoryBackend>;
 
 #[cfg(any(feature = "libsql", feature = "postgres"))]
 pub(crate) type LocalDevToolPermissionOverrideStore =
     FilesystemToolPermissionOverrideStore<LocalDevRootFilesystem>;
 #[cfg(not(any(feature = "libsql", feature = "postgres")))]
-pub(crate) type LocalDevToolPermissionOverrideStore = InMemoryToolPermissionOverrideStore;
+pub(crate) type LocalDevToolPermissionOverrideStore =
+    FilesystemToolPermissionOverrideStore<InMemoryBackend>;
 
 #[cfg(any(feature = "libsql", feature = "postgres"))]
 pub(crate) type LocalDevAutoApproveSettingStore =
     FilesystemAutoApproveSettingStore<LocalDevRootFilesystem>;
 #[cfg(not(any(feature = "libsql", feature = "postgres")))]
-pub(crate) type LocalDevAutoApproveSettingStore = InMemoryAutoApproveSettingStore;
+pub(crate) type LocalDevAutoApproveSettingStore =
+    FilesystemAutoApproveSettingStore<InMemoryBackend>;
 
 #[cfg(any(feature = "libsql", feature = "postgres"))]
 type LocalDevProcessServices = ProcessServices<
@@ -1163,6 +1170,21 @@ impl RebornProductionRuntimeServices {
             Self::Postgres(graph) => Arc::clone(&graph.trigger_repository),
         }
     }
+
+    /// Turn-state snapshot source from the active production store graph.
+    /// Pairs with [`Self::trigger_repository`] so the automations facade
+    /// derives active-hold projections from the same runtime's run state
+    /// (#5886).
+    pub(crate) fn turn_run_snapshot_source(
+        &self,
+    ) -> Arc<dyn crate::turn_run_snapshot::TurnRunSnapshotSource> {
+        match self {
+            #[cfg(feature = "libsql")]
+            Self::LibSql(graph) => Arc::clone(&graph.turn_state) as _,
+            #[cfg(feature = "postgres")]
+            Self::Postgres(graph) => Arc::clone(&graph.turn_state) as _,
+        }
+    }
 }
 
 #[cfg(any(feature = "libsql", feature = "postgres"))]
@@ -1968,9 +1990,19 @@ async fn build_local_runtime(input: RebornBuildInput) -> Result<RebornServices, 
         });
     }
     let trigger_create_hook = local_dev_trigger_create_hook(&store_graph.local_runtime);
+    // Built from the same turn-state store the WebUI automations panel reads
+    // (`crate::webui::facade`), so both `trigger_list` and the panel agree on
+    // which fires are blocked (#5886).
+    let trigger_active_run_lookup: Arc<dyn TriggerActiveRunLookup> = Arc::new(
+        crate::automation::trigger_poller::SnapshotActiveRunLookup::new(Arc::clone(
+            &store_graph.local_runtime.turn_state,
+        )
+            as Arc<dyn crate::turn_run_snapshot::TurnRunSnapshotSource>),
+    );
     let mut first_party_registry = builtin_first_party_registry_with_trigger_create_hook(
         Arc::clone(&store_graph.trigger_repository),
         trigger_create_hook,
+        trigger_active_run_lookup,
     )?;
     register_bundled_gsuite_first_party_handlers(
         &mut first_party_registry,
@@ -2565,12 +2597,21 @@ async fn build_local_dev_store_graph(
         project_repository,
         turn_state_store_limits,
     } = input;
+    // Approval stores run the production `Filesystem*Store<F>` over a dedicated
+    // `InMemoryBackend` (volatile) — no bespoke `InMemory*Store`
+    // (arch-simplification §4.3). Backing them with `InMemoryBackend` *directly*
+    // (rather than the composite root filesystem) keeps the store's concrete type
+    // `<InMemoryBackend>`, so the host-runtime production-wiring guard classifies it
+    // `LocalOnly` — matching the volatile run-state/lease stores in this build.
+    let approvals_filesystem = crate::wrap_scoped(Arc::new(InMemoryBackend::new()));
     let event_log = local_dev_event_log(Arc::clone(&filesystem))?;
     let audit_log = local_dev_audit_log(Arc::clone(&filesystem))?;
     let run_state = Arc::new(InMemoryRunStateStore::new());
     let approval_requests = Arc::new(InMemoryApprovalRequestStore::new());
     let capability_leases = Arc::new(InMemoryCapabilityLeaseStore::new());
-    let persistent_approval_policies = Arc::new(InMemoryPersistentApprovalPolicyStore::new());
+    let persistent_approval_policies = Arc::new(FilesystemPersistentApprovalPolicyStore::new(
+        Arc::clone(&approvals_filesystem),
+    ));
     let turn_state = Arc::new(InMemoryTurnStateStore::with_limits(turn_state_store_limits));
     let checkpoint_state_store: Arc<dyn CheckpointStateStore> =
         Arc::new(InMemoryCheckpointStateStore::default());
@@ -2596,8 +2637,12 @@ async fn build_local_dev_store_graph(
             reason: format!("local-dev capability policy is invalid: {error}"),
         }
     })?);
-    let tool_permission_overrides = Arc::new(LocalDevToolPermissionOverrideStore::new());
-    let auto_approve_settings = Arc::new(LocalDevAutoApproveSettingStore::new());
+    let tool_permission_overrides = Arc::new(LocalDevToolPermissionOverrideStore::new(Arc::clone(
+        &approvals_filesystem,
+    )));
+    let auto_approve_settings = Arc::new(LocalDevAutoApproveSettingStore::new(Arc::clone(
+        &approvals_filesystem,
+    )));
     let memory_mounts =
         memory_mount_view(MountPermissions::read_write_list_delete()).map_err(|error| {
             RebornBuildError::InvalidConfig {
@@ -3116,6 +3161,41 @@ fn local_dev_project_filesystem(
         )?;
     }
     Ok(filesystem)
+}
+
+/// Test-only (C-SLACK-LIFECYCLE restart seam, issue #6105 T5): reopen the
+/// composed Slack host-state filesystem at an existing local-dev
+/// `storage_root` — a FRESH root filesystem (fresh durable-backend handles,
+/// independent of the live runtime's `Arc`s) wrapped with the SAME
+/// `slack_host_state_mount_view` production wraps it with. Mirrors the
+/// production construction in [`build_reborn_services`]
+/// (`local_dev_slack_host_state_filesystem` over the local-dev root), so a
+/// restart-survival test proves durable Slack host state (identity bindings,
+/// DM targets) is reconstructible the way a real process restart
+/// reconstructs it. Tests only; zero bytes in production builds.
+///
+/// `libsql`-only (not `any(libsql, postgres)`): the body reopens via
+/// `LocalDevStorageBackendInput::LocalDefault`, whose non-libsql arm mounts a
+/// fresh `InMemoryBackend` — under a postgres-composed runtime that would be
+/// a brand-new empty store, not the live Postgres-backed host state, so a
+/// postgres gate here would compile a probe that can only report absence.
+#[cfg(all(
+    feature = "test-support",
+    feature = "slack-v2-host-beta",
+    feature = "libsql"
+))]
+pub(crate) async fn open_local_dev_slack_host_state_filesystem_for_test(
+    storage_root: &Path,
+) -> Result<Arc<ScopedFilesystem<LocalDevRootFilesystem>>, RebornBuildError> {
+    let workspace_root = storage_root.join("workspace");
+    let bundle = build_local_dev_root_filesystem(
+        storage_root,
+        &workspace_root,
+        None,
+        LocalDevStorageBackendInput::LocalDefault,
+    )
+    .await?;
+    Ok(local_dev_slack_host_state_filesystem(bundle.filesystem))
 }
 
 /// Test-only (E-DURABLE seam): open a FRESH, independent
@@ -3942,22 +4022,29 @@ fn production_builtin_extension_registry(
 fn builtin_first_party_registry_with_trigger_create_hook(
     trigger_repository: Arc<dyn TriggerRepository>,
     trigger_create_hook: Arc<dyn TriggerCreateHook>,
+    active_run_lookup: Arc<dyn TriggerActiveRunLookup>,
 ) -> Result<FirstPartyCapabilityRegistry, RebornBuildError> {
-    builtin_first_party_handlers_with_trigger_create_hook(trigger_repository, trigger_create_hook)
-        .map_err(|error| RebornBuildError::InvalidConfig {
-            reason: format!("built-in first-party handlers are invalid: {error}"),
-        })
+    builtin_first_party_handlers_with_trigger_create_hook(
+        trigger_repository,
+        trigger_create_hook,
+        active_run_lookup,
+    )
+    .map_err(|error| RebornBuildError::InvalidConfig {
+        reason: format!("built-in first-party handlers are invalid: {error}"),
+    })
 }
 
 #[cfg(any(feature = "libsql", feature = "postgres"))]
 fn production_first_party_registry_with_trigger_create_hook(
     trigger_repository: Arc<dyn TriggerRepository>,
     trigger_create_hook: Arc<dyn TriggerCreateHook>,
+    active_run_lookup: Arc<dyn TriggerActiveRunLookup>,
     process_backend: ProcessBackendKind,
 ) -> Result<FirstPartyCapabilityRegistry, RebornBuildError> {
     builtin_first_party_handlers_with_trigger_create_hook_for_process_backend(
         trigger_repository,
         trigger_create_hook,
+        active_run_lookup,
         process_backend,
     )
     .map_err(|error| RebornBuildError::InvalidConfig {
@@ -4978,9 +5065,17 @@ where
         audit_log,
     });
     let production_runtime = production_runtime_services(production_runtime_graph);
+    // Same store-backed lookup the WebUI automations panel builds via
+    // `RebornProductionRuntimeServices::turn_run_snapshot_source` (#5886).
+    let trigger_active_run_lookup: Arc<dyn TriggerActiveRunLookup> = Arc::new(
+        crate::automation::trigger_poller::SnapshotActiveRunLookup::new(
+            production_runtime.turn_run_snapshot_source(),
+        ),
+    );
     let mut first_party_registry = production_first_party_registry_with_trigger_create_hook(
         trigger_repository,
         trigger_create_hook,
+        trigger_active_run_lookup,
         process_backend,
     )?;
     let product_auth_filesystem = Arc::clone(&stores.scoped_filesystem);

@@ -13,10 +13,7 @@
 //! override store: it lives as a persistent approval grant so there is a single
 //! source of truth for auto-run authority.
 
-use std::{
-    collections::HashMap,
-    sync::{Arc, RwLock},
-};
+use std::sync::Arc;
 
 use async_trait::async_trait;
 use chrono::Utc;
@@ -207,86 +204,6 @@ pub trait CapabilityPermissionOverrideStore: Send + Sync {
         &self,
         key: &CapabilityPermissionOverrideKey,
     ) -> Result<(), CapabilityPermissionStoreError>;
-}
-
-#[derive(Debug, Default)]
-pub struct InMemoryCapabilityPermissionOverrideStore {
-    overrides: RwLock<HashMap<CapabilityPermissionOverrideKey, CapabilityPermissionOverrideRecord>>,
-}
-
-impl InMemoryCapabilityPermissionOverrideStore {
-    pub fn new() -> Self {
-        Self::default()
-    }
-}
-
-#[async_trait]
-impl CapabilityPermissionOverrideStore for InMemoryCapabilityPermissionOverrideStore {
-    async fn set(
-        &self,
-        input: CapabilityPermissionOverrideInput,
-    ) -> Result<CapabilityPermissionOverrideRecord, CapabilityPermissionStoreError> {
-        let key = CapabilityPermissionOverrideKey::new(&input.scope, input.capability_id);
-        let mut overrides = self
-            .overrides
-            .write()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        let now = Utc::now();
-        let created_at = overrides
-            .get(&key)
-            .map_or(now, |existing| existing.created_at);
-        let record = CapabilityPermissionOverrideRecord {
-            key: key.clone(),
-            state: input.state,
-            updated_by: input.updated_by,
-            created_at,
-            updated_at: now,
-        };
-        overrides.insert(key, record.clone());
-        Ok(record)
-    }
-
-    async fn get(
-        &self,
-        key: &CapabilityPermissionOverrideKey,
-    ) -> Result<Option<CapabilityPermissionOverrideRecord>, CapabilityPermissionStoreError> {
-        Ok(self
-            .overrides
-            .read()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .get(key)
-            .cloned())
-    }
-
-    fn supports_scope_listing(&self) -> bool {
-        true
-    }
-
-    async fn list_for_scope(
-        &self,
-        scope: &ResourceScope,
-    ) -> Result<Vec<CapabilityPermissionOverrideRecord>, CapabilityPermissionStoreError> {
-        let target_scope = PersistentApprovalScope::from_resource_scope(scope);
-        Ok(self
-            .overrides
-            .read()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .values()
-            .filter(|record| record.key.scope == target_scope)
-            .cloned()
-            .collect())
-    }
-
-    async fn clear(
-        &self,
-        key: &CapabilityPermissionOverrideKey,
-    ) -> Result<(), CapabilityPermissionStoreError> {
-        self.overrides
-            .write()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .remove(key);
-        Ok(())
-    }
 }
 
 pub struct FilesystemCapabilityPermissionOverrideStore<F>
@@ -651,6 +568,17 @@ mod tests {
         Arc::new(ScopedFilesystem::with_fixed_view(backend, mounts))
     }
 
+    // The single production store, exercised over the in-memory filesystem
+    // backend — the seam that replaced the deleted
+    // `InMemoryCapabilityPermissionOverrideStore`.
+    fn memory_store() -> FilesystemCapabilityPermissionOverrideStore<InMemoryBackend> {
+        FilesystemCapabilityPermissionOverrideStore::new(scoped_fs(
+            Arc::new(InMemoryBackend::new()),
+            "tenant-a",
+            "alice",
+        ))
+    }
+
     struct VersionMismatchOnceBackend {
         inner: Arc<InMemoryBackend>,
         injected: AtomicBool,
@@ -882,8 +810,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn in_memory_set_get_clear_roundtrip() {
-        let store = InMemoryCapabilityPermissionOverrideStore::new();
+    async fn set_get_clear_roundtrip() {
+        let store = memory_store();
         let scope = scope(None, Some("thread-a"));
         let key = key_for(&scope);
 
@@ -1215,7 +1143,7 @@ mod tests {
 
     #[tokio::test]
     async fn override_scope_isolates_users() {
-        let store = InMemoryCapabilityPermissionOverrideStore::new();
+        let store = memory_store();
         let alice = scope(None, Some("thread-a"));
         let bob = ResourceScope {
             user_id: UserId::new("bob").unwrap(),
@@ -1234,7 +1162,7 @@ mod tests {
     #[tokio::test]
     async fn override_scope_is_thread_agnostic() {
         // Mirrors persistent-approval scoping: thread id is not part of the key.
-        let store = InMemoryCapabilityPermissionOverrideStore::new();
+        let store = memory_store();
         let thread_a = scope(None, Some("thread-a"));
         let thread_b = scope(None, Some("thread-b"));
 
