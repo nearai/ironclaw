@@ -87,29 +87,115 @@ fn plist_path() -> Result<PathBuf> {
 
 // ── Status matching ─────────────────────────────────────────────
 
-fn service_running(launchctl_list_output: &str) -> bool {
-    launchctl_list_output.lines().any(|line| {
-        let mut fields = line.split_whitespace();
-        fields.next().is_some()
-            && fields.next().is_some()
-            && fields.next() == Some(SERVICE_LABEL)
-            && fields.next().is_none()
+/// The three states `launchctl list` can report for a given label, read
+/// from its three whitespace-separated columns (PID, last-exit-status,
+/// label). Mirrors `launchd_status_from_line` in
+/// `ironclaw_reborn_composition::observability::operator_service_lifecycle`
+/// (copied shape, not imported — that module is a different crate and
+/// this one intentionally does not depend on it for a few lines of
+/// parsing).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LaunchdStatus {
+    Running,
+    Stopped,
+    Failed,
+}
+
+/// Parse one `launchctl list` line into `(status, label)`. The PID
+/// column is `-` when the job is loaded but not currently running (the
+/// bug this fixes: the old `service_running` treated any 3-field line —
+/// including a `-` PID — as running). A numeric PID means running; a
+/// non-numeric PID with a nonzero last-exit-status means the job died
+/// and hasn't been respawned yet (`Failed`); anything else is `Stopped`.
+fn launchd_status_from_line(line: &str) -> Option<(LaunchdStatus, &str)> {
+    let mut columns = line.split_whitespace();
+    let pid = columns.next()?;
+    let exit_status = columns.next()?;
+    let label = columns.next()?;
+    let status = if pid.parse::<i32>().is_ok() {
+        LaunchdStatus::Running
+    } else if exit_status.parse::<i32>().is_ok_and(|status| status != 0) {
+        LaunchdStatus::Failed
+    } else {
+        LaunchdStatus::Stopped
+    };
+    Some((status, label))
+}
+
+/// The status of our label's line in `launchctl list`, if it appears at
+/// all (i.e. the job is currently loaded, running or not).
+fn find_label_status(launchctl_list_output: &str) -> Option<LaunchdStatus> {
+    launchctl_list_output.lines().find_map(|line| {
+        launchd_status_from_line(line)
+            .and_then(|(status, label)| (label == SERVICE_LABEL).then_some(status))
     })
+}
+
+fn service_running(launchctl_list_output: &str) -> bool {
+    find_label_status(launchctl_list_output) == Some(LaunchdStatus::Running)
+}
+
+/// Whether the label is registered with launchd at all, regardless of
+/// whether it currently has a live PID. Used where a loaded-but-stopped
+/// job still needs to be torn down / reloaded (uninstall, reinstall) —
+/// unlike `service_running`, which only asks "does it have a PID right
+/// now" (used for the user-facing running/stopped status line).
+fn service_loaded(launchctl_list_output: &str) -> bool {
+    find_label_status(launchctl_list_output).is_some()
+}
+
+/// Whether `service status` should report the service as installed:
+/// either the plist file exists, or launchd still has the label loaded
+/// (an orphan left behind after the plist was removed out-of-band).
+fn resolve_installed(file_exists: bool, loaded: bool) -> bool {
+    file_exists || loaded
 }
 
 // ── Verb bodies ─────────────────────────────────────────────────
 
 pub(super) fn install(context: &RebornCliContext, invocation: &ServeInvocation) -> Result<()> {
+    install_with_runner(context, invocation, &mut OsServiceCommandRunner)
+}
+
+fn install_with_runner(
+    context: &RebornCliContext,
+    invocation: &ServeInvocation,
+    runner: &mut dyn ServiceCommandRunner,
+) -> Result<()> {
     let file = plist_path()?;
     if let Some(parent) = file.parent() {
         std::fs::create_dir_all(parent).with_context(|| format!("create {}", parent.display()))?;
     }
     let logs_dir = context.boot_config().home().path().join("logs");
     std::fs::create_dir_all(&logs_dir).with_context(|| format!("create {}", logs_dir.display()))?;
+    // Unrotated: launchd appends to these paths forever across restarts.
+    // This module wires no rotation (e.g. `newsyslog`) — operators must
+    // add it externally if long-running installs need it.
     let stdout_log = logs_dir.join("serve.stdout.log");
     let stderr_log = logs_dir.join("serve.stderr.log");
+    let list =
+        runner.run_capture_checked("launchctl list", Command::new("launchctl").arg("list"))?;
+    let was_loaded = service_loaded(&list);
     let plist = plist_content(invocation, &stdout_log, &stderr_log);
     super::write_atomic(&file, plist.as_bytes())?;
+    if was_loaded {
+        // A loaded job keeps running off its in-memory definition until
+        // reloaded; overwriting the plist file alone does not make it
+        // pick up the new ProgramArguments/EnvironmentVariables. Force a
+        // reload with the same legacy verbs `start`/`stop` already use.
+        runner.run_checked(
+            "launchctl unload",
+            Command::new("launchctl").arg("unload").arg("-w").arg(&file),
+        )?;
+        runner.run_checked(
+            "launchctl load",
+            Command::new("launchctl").arg("load").arg("-w").arg(&file),
+        )?;
+        runner.run_checked(
+            "launchctl start",
+            Command::new("launchctl").arg("start").arg(SERVICE_LABEL),
+        )?;
+    }
     println!("Installed launchd service: {}", file.display());
     println!("  Start with: ironclaw-reborn service start");
     Ok(())
@@ -198,14 +284,14 @@ pub(super) fn status() -> Result<()> {
 
 fn status_with_runner(runner: &mut dyn ServiceCommandRunner) -> Result<()> {
     let plist = plist_path()?;
-    let installed = plist.exists();
-    let running = if installed {
-        let out =
-            runner.run_capture_checked("launchctl list", Command::new("launchctl").arg("list"))?;
-        service_running(&out)
-    } else {
-        false
-    };
+    let file_exists = plist.exists();
+    // Query launchctl unconditionally — a plist that was removed
+    // out-of-band while the job is still loaded is an orphan we must
+    // still report as installed, not silently claim "not installed".
+    let list =
+        runner.run_capture_checked("launchctl list", Command::new("launchctl").arg("list"))?;
+    let running = service_running(&list);
+    let installed = resolve_installed(file_exists, service_loaded(&list));
     println!("Service: {}", super::status_label(installed, running));
     println!("Unit: {}", plist.display());
     Ok(())
@@ -219,7 +305,7 @@ pub(super) fn uninstall_with_runner(runner: &mut dyn ServiceCommandRunner) -> Re
     let file = plist_path()?;
     let list =
         runner.run_capture_checked("launchctl list", Command::new("launchctl").arg("list"))?;
-    if service_running(&list) {
+    if service_loaded(&list) {
         // `stop` alone is insufficient for a KeepAlive agent: launchd
         // immediately restarts it. Target the registered label so a loaded
         // job left behind by an older broken uninstall can still be removed
@@ -315,6 +401,66 @@ mod tests {
                 "/home/op/.ironclaw/reborn".to_string(),
             )],
         }
+    }
+
+    #[test]
+    fn install_reloads_when_label_is_already_loaded() {
+        let _lock = crate::runtime::test_env::lock_runtime_env();
+        let home_tmp = tempfile::tempdir().expect("tempdir");
+        let prior = std::env::var_os("HOME");
+        // SAFETY: serialized by `lock_runtime_env`; restored below.
+        unsafe { std::env::set_var("HOME", home_tmp.path()) };
+        let (_ctx_tmp, context) = RebornCliContext::test_context();
+        let mut runner = RecordingRunner {
+            launchctl_list: format!("123\t0\t{SERVICE_LABEL}\n"),
+            ..RecordingRunner::default()
+        };
+        let result = install_with_runner(&context, &sample_invocation(), &mut runner);
+        // SAFETY: serialized by `lock_runtime_env`.
+        unsafe {
+            match prior {
+                Some(value) => std::env::set_var("HOME", value),
+                None => std::env::remove_var("HOME"),
+            }
+        }
+
+        result.expect("install must succeed");
+        assert_eq!(
+            runner.labels,
+            [
+                "launchctl list",
+                "launchctl unload",
+                "launchctl load",
+                "launchctl start",
+            ],
+            "an already-loaded job must be reloaded so it picks up the new plist"
+        );
+    }
+
+    #[test]
+    fn install_skips_reload_when_label_is_not_loaded() {
+        let _lock = crate::runtime::test_env::lock_runtime_env();
+        let home_tmp = tempfile::tempdir().expect("tempdir");
+        let prior = std::env::var_os("HOME");
+        // SAFETY: serialized by `lock_runtime_env`; restored below.
+        unsafe { std::env::set_var("HOME", home_tmp.path()) };
+        let (_ctx_tmp, context) = RebornCliContext::test_context();
+        let mut runner = RecordingRunner::default();
+        let result = install_with_runner(&context, &sample_invocation(), &mut runner);
+        // SAFETY: serialized by `lock_runtime_env`.
+        unsafe {
+            match prior {
+                Some(value) => std::env::set_var("HOME", value),
+                None => std::env::remove_var("HOME"),
+            }
+        }
+
+        result.expect("install must succeed");
+        assert_eq!(
+            runner.labels,
+            ["launchctl list"],
+            "a fresh (not-loaded) install must not issue a reload sequence"
+        );
     }
 
     #[test]
@@ -641,7 +787,13 @@ mod tests {
     }
 
     #[test]
-    fn status_reports_not_installed_and_skips_launchctl_query_when_plist_absent() {
+    fn status_queries_launchctl_unconditionally_and_reports_not_installed_when_absent_everywhere() {
+        // Was: "skips launchctl query when plist absent". That skip was
+        // itself the orphan-hiding bug (finding 5) — a plist removed
+        // out-of-band while still loaded in launchd would silently read
+        // as "not installed". The query must always run so an orphan can
+        // be detected; only report "not installed" when the file AND the
+        // manager both show nothing.
         let _lock = crate::runtime::test_env::lock_runtime_env();
         let tmp = tempfile::tempdir().expect("tempdir");
         let prior = std::env::var_os("HOME");
@@ -658,9 +810,35 @@ mod tests {
         }
 
         result.expect("status succeeds when not installed");
+        assert_eq!(
+            runner.labels,
+            ["launchctl list"],
+            "must query launchctl even when the plist is absent, to detect orphans"
+        );
+    }
+
+    #[test]
+    fn resolve_installed_true_when_file_absent_but_manager_still_shows_it_loaded() {
+        assert!(!resolve_installed(false, false));
+        assert!(resolve_installed(false, true), "orphaned unit still loaded");
+        assert!(resolve_installed(true, false));
+        assert!(resolve_installed(true, true));
+    }
+
+    #[test]
+    fn service_running_false_when_loaded_but_stopped_with_dash_pid() {
+        // The finding-1 bug: `launchctl list` reports `-` in the PID
+        // column for a job that is loaded but not currently running. The
+        // old `service_running` only checked that 3 fields were present,
+        // so it misread this as running.
+        let output = format!("-\t0\t{SERVICE_LABEL}\n");
         assert!(
-            runner.labels.is_empty(),
-            "must not query launchctl when the plist is absent"
+            !service_running(&output),
+            "dash PID must not read as running"
+        );
+        assert!(
+            service_loaded(&output),
+            "the label is still registered with launchd even though stopped"
         );
     }
 

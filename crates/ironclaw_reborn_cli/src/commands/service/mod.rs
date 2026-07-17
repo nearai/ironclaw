@@ -46,6 +46,12 @@ pub(crate) struct ServiceCommand {
 #[derive(Debug, Subcommand)]
 enum ServiceVerb {
     /// Install the OS service (launchd on macOS, systemd on Linux).
+    ///
+    /// On macOS, stdout/stderr are captured to
+    /// `<reborn_home>/logs/serve.std{out,err}.log`. These files are
+    /// never rotated by this tool — set up external rotation (e.g.
+    /// `newsyslog`) if a long-running install needs it. On Linux, output
+    /// goes to the systemd user journal, which the OS already rotates.
     Install,
     /// Start the installed service.
     Start,
@@ -163,8 +169,10 @@ fn home_dir() -> Result<PathBuf> {
 
 /// Non-fatal readiness warnings for `service install`: warn, don't
 /// fail, when onboarding hasn't run yet — the service can still be
-/// installed, but `serve` starts without config/providers/token until
-/// `ironclaw-reborn onboard` runs.
+/// installed, but `serve` starts without config, providers, or a valid
+/// WebUI token until `ironclaw-reborn onboard` runs. Checks the
+/// onboarding marker, `config.toml`, and the WebUI token file's entropy
+/// floor.
 fn preflight_warnings(context: &RebornCliContext) -> Vec<String> {
     let home = context.boot_config().home();
     let mut warnings = Vec::new();
@@ -183,6 +191,14 @@ fn preflight_warnings(context: &RebornCliContext) -> Vec<String> {
         warnings.push(format!(
             "config.toml not found at {} — `serve` will run with compiled-in defaults only",
             config.display()
+        ));
+    }
+
+    if !crate::webui_token::webui_token_file_is_valid(home.path()) {
+        warnings.push(format!(
+            "WebUI token not found or too short at {} — run `ironclaw-reborn onboard` first so \
+             `serve` has a valid WebUI bearer token",
+            crate::webui_token::webui_token_file_path(home.path()).display()
         ));
     }
 
@@ -270,6 +286,15 @@ fn write_atomic(path: &Path, contents: &[u8]) -> Result<()> {
         let temp = parent.join(format!(".{file_name}.tmp-{}-{suffix}", std::process::id()));
         let mut options = std::fs::OpenOptions::new();
         options.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            // Service definition files can carry operator env values
+            // (`ServeInvocation::env`); keep them unreadable to other
+            // local users from the moment they're created, same as
+            // `operator_service_lifecycle::write_service_file`.
+            options.mode(0o600);
+        }
         let mut file = match options.open(&temp) {
             Ok(file) => file,
             Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
@@ -380,24 +405,45 @@ mod tests {
     }
 
     #[test]
-    fn preflight_warnings_empty_when_marker_and_config_present() {
+    fn preflight_warnings_empty_when_marker_config_and_token_present() {
         let (_tmp, context) = RebornCliContext::test_context();
         let home = context.boot_config().home();
         std::fs::create_dir_all(home.path()).expect("create home");
         std::fs::write(crate::commands::onboard::onboarding_marker_path(home), "{}")
             .expect("write marker");
         std::fs::write(home.config_file_path(), "").expect("write config");
+        std::fs::write(
+            crate::webui_token::webui_token_file_path(home.path()),
+            "0".repeat(crate::webui_token::WEBUI_TOKEN_MIN_BYTES),
+        )
+        .expect("write webui token");
 
         assert!(preflight_warnings(&context).is_empty());
     }
 
     #[test]
-    fn preflight_warnings_flags_missing_marker_and_config() {
+    fn preflight_warnings_flags_missing_marker_config_and_webui_token() {
         let (_tmp, context) = RebornCliContext::test_context();
         let warnings = preflight_warnings(&context);
-        assert_eq!(warnings.len(), 2);
+        assert_eq!(warnings.len(), 3);
         assert!(warnings[0].contains("onboarding marker not found"));
         assert!(warnings[1].contains("config.toml not found"));
+        assert!(warnings[2].contains("WebUI token not found or too short"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn write_atomic_creates_file_with_0600_permissions() {
+        use std::os::unix::fs::PermissionsExt;
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let path = tmp.path().join("service-file");
+        write_atomic(&path, b"contents").expect("write succeeds");
+        let mode = std::fs::metadata(&path)
+            .expect("stat service file")
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(mode, 0o600, "service file must be 0600, got {mode:o}");
     }
 
     #[test]

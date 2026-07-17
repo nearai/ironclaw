@@ -35,6 +35,7 @@ full = [
     "postgres",
     "inmemory-turn-state",
     "openai-compat-beta",
+    "root-llm-provider",
 ]
 # Wire a real LLM provider into the assembled runtime. Mirrors the same
 # `root-llm-provider` feature on `ironclaw_reborn_composition` /

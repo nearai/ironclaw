@@ -86,6 +86,14 @@ struct SystemdUnitState {
     enabled: bool,
 }
 
+/// Query `LoadState`/`UnitFileState` and parse them as `Key=Value` lines
+/// (no `--value`, so the output is self-describing and order-independent
+/// — `--value` alone would print bare values in property-declaration
+/// order, which is undocumented and not guaranteed to be stable across
+/// systemd versions). A required key missing from the output is an
+/// error, not a silently-assumed default: a malformed/truncated response
+/// must not read as `enabled=false`, which would make an install-failure
+/// rollback skip re-enabling a unit that actually was enabled.
 fn query_unit_state(runner: &mut dyn ServiceCommandRunner) -> Result<SystemdUnitState> {
     let output = runner.run_capture_checked(
         "systemctl show unit state",
@@ -94,13 +102,24 @@ fn query_unit_state(runner: &mut dyn ServiceCommandRunner) -> Result<SystemdUnit
             "show",
             "--property=LoadState",
             "--property=UnitFileState",
-            "--value",
             SYSTEMD_UNIT,
         ]),
     )?;
-    let mut lines = output.split('\n');
-    let load_state = lines.next().unwrap_or_default().trim();
-    let unit_file_state = lines.next().unwrap_or_default().trim();
+    let mut load_state = None;
+    let mut unit_file_state = None;
+    for line in output.lines() {
+        let Some((key, value)) = line.split_once('=') else {
+            continue;
+        };
+        match key {
+            "LoadState" => load_state = Some(value.trim()),
+            "UnitFileState" => unit_file_state = Some(value.trim()),
+            _ => {}
+        }
+    }
+    let load_state = load_state.context("systemctl show output missing LoadState=... line")?;
+    let unit_file_state =
+        unit_file_state.context("systemctl show output missing UnitFileState=... line")?;
     Ok(SystemdUnitState {
         loaded: !matches!(load_state, "" | "not-found"),
         enabled: matches!(
@@ -295,28 +314,44 @@ fn systemd_status_detail(raw_state: &str) -> Option<String> {
     }
 }
 
+/// Whether `service status` should report the service as installed:
+/// either the unit file exists, or systemd still shows it loaded or
+/// enabled (an orphan left behind after the unit file was removed
+/// out-of-band).
+fn resolve_installed(file_exists: bool, unit_state: SystemdUnitState) -> bool {
+    file_exists || unit_state.loaded || unit_state.enabled
+}
+
 fn status_with_runner(runner: &mut dyn ServiceCommandRunner) -> Result<()> {
     let file = unit_path()?;
-    let installed = file.exists();
-    let mut detail = None;
-    let running = if installed {
-        // `is-active` uses non-zero exits for ordinary inactive states.
-        // `show` returns those states in stdout and reserves failure for a
-        // broken query.
-        let state = runner.run_capture_checked(
-            "systemctl show ActiveState",
-            Command::new("systemctl").args([
-                "--user",
-                "show",
-                "--property=ActiveState",
-                "--value",
-                SYSTEMD_UNIT,
-            ]),
-        )?;
-        detail = systemd_status_detail(&state);
-        state.trim() == "active"
+    let file_exists = file.exists();
+    // Query the manager unconditionally — a unit file removed out-of-band
+    // while systemd still has it loaded/enabled is an orphan we must
+    // still report as installed, not silently claim "not installed".
+    let unit_state = query_unit_state(runner)?;
+    // `is-active` uses non-zero exits for ordinary inactive states.
+    // `show` returns those states in stdout and reserves failure for a
+    // broken query.
+    let active_state = runner.run_capture_checked(
+        "systemctl show ActiveState",
+        Command::new("systemctl").args([
+            "--user",
+            "show",
+            "--property=ActiveState",
+            "--value",
+            SYSTEMD_UNIT,
+        ]),
+    )?;
+    let running = active_state.trim() == "active";
+    let installed = resolve_installed(file_exists, unit_state);
+    // Detail line stays keyed off file presence: for a genuine orphan
+    // (no unit file) the `Service: running/stopped` line already covers
+    // it, and there's no installed-config context to attach the raw
+    // ActiveState to.
+    let detail = if file_exists {
+        systemd_status_detail(&active_state)
     } else {
-        false
+        None
     };
     println!("Service: {}", super::status_label(installed, running));
     if let Some(detail) = detail {
@@ -328,6 +363,38 @@ fn status_with_runner(runner: &mut dyn ServiceCommandRunner) -> Result<()> {
 
 pub(super) fn uninstall() -> Result<()> {
     uninstall_with_runner(&mut OsServiceCommandRunner)
+}
+
+/// Shared uninstall rollback: restore the previous unit file (or remove
+/// it if there was none), reload the manager, and — if the unit was
+/// previously enabled — re-enable it. Used by both the `remove_file`
+/// failure path and the `daemon-reload` failure path, which must leave
+/// the host in the same recovered state regardless of which step failed.
+fn rollback_uninstall(
+    file: &Path,
+    previous: Option<&[u8]>,
+    manager_state: SystemdUnitState,
+    runner: &mut dyn ServiceCommandRunner,
+) -> Vec<String> {
+    let mut rollback_errors = Vec::new();
+    if let Err(rollback) = restore_previous_unit(file, previous) {
+        rollback_errors.push(format!("restore unit: {rollback:#}"));
+    }
+    if let Err(rollback) = runner.run_checked(
+        "systemctl rollback daemon-reload",
+        Command::new("systemctl").args(["--user", "daemon-reload"]),
+    ) {
+        rollback_errors.push(format!("reload restored unit: {rollback:#}"));
+    }
+    if manager_state.enabled
+        && let Err(rollback) = runner.run_checked(
+            "systemctl rollback enable previous unit",
+            Command::new("systemctl").args(["--user", "enable", SYSTEMD_UNIT]),
+        )
+    {
+        rollback_errors.push(format!("re-enable previous unit: {rollback:#}"));
+    }
+    rollback_errors
 }
 
 pub(super) fn uninstall_with_runner(runner: &mut dyn ServiceCommandRunner) -> Result<()> {
@@ -348,31 +415,18 @@ pub(super) fn uninstall_with_runner(runner: &mut dyn ServiceCommandRunner) -> Re
             Command::new("systemctl").args(["--user", "disable", "--now", SYSTEMD_UNIT]),
         )?;
     }
-    if previous.is_some() {
-        std::fs::remove_file(&file).with_context(|| format!("remove {}", file.display()))?;
+    if previous.is_some()
+        && let Err(error) =
+            std::fs::remove_file(&file).with_context(|| format!("remove {}", file.display()))
+    {
+        let rollback_errors = rollback_uninstall(&file, previous.as_deref(), manager_state, runner);
+        return Err(combined_failure(error, rollback_errors));
     }
     if let Err(error) = runner.run_checked(
         "systemctl daemon-reload",
         Command::new("systemctl").args(["--user", "daemon-reload"]),
     ) {
-        let mut rollback_errors = Vec::new();
-        if let Err(rollback) = restore_previous_unit(&file, previous.as_deref()) {
-            rollback_errors.push(format!("restore unit: {rollback:#}"));
-        }
-        if let Err(rollback) = runner.run_checked(
-            "systemctl rollback daemon-reload",
-            Command::new("systemctl").args(["--user", "daemon-reload"]),
-        ) {
-            rollback_errors.push(format!("reload restored unit: {rollback:#}"));
-        }
-        if manager_state.enabled
-            && let Err(rollback) = runner.run_checked(
-                "systemctl rollback enable previous unit",
-                Command::new("systemctl").args(["--user", "enable", SYSTEMD_UNIT]),
-            )
-        {
-            rollback_errors.push(format!("re-enable previous unit: {rollback:#}"));
-        }
+        let rollback_errors = rollback_uninstall(&file, previous.as_deref(), manager_state, runner);
         return Err(combined_failure(error, rollback_errors));
     }
     println!("Service uninstalled ({})", file.display());
@@ -448,18 +502,17 @@ mod tests {
             }
             let args = self.args.last().cloned().unwrap_or_default();
             match args.as_slice() {
-                [user, show, load, unit_file, value, unit]
+                [user, show, load, unit_file, unit]
                     if user == "--user"
                         && show == "show"
                         && load == "--property=LoadState"
                         && unit_file == "--property=UnitFileState"
-                        && value == "--value"
                         && unit == SYSTEMD_UNIT =>
                 {
                     Ok(self
                         .unit_state_output
                         .clone()
-                        .unwrap_or_else(|| "not-found\n\n".to_string()))
+                        .unwrap_or_else(|| "LoadState=not-found\nUnitFileState=\n".to_string()))
                 }
                 [user, show, property, value, unit]
                     if user == "--user"
@@ -672,7 +725,7 @@ mod tests {
         std::fs::create_dir_all(file.parent().expect("unit parent")).expect("create parent");
         std::fs::write(&file, "unit").expect("write unit");
         let mut runner = RecordingRunner {
-            unit_state_output: Some("loaded\nenabled\n".to_string()),
+            unit_state_output: Some("LoadState=loaded\nUnitFileState=enabled\n".to_string()),
             ..RecordingRunner::default()
         };
         let result = uninstall_with_runner(&mut runner);
@@ -709,7 +762,7 @@ mod tests {
         std::fs::write(&file, "unit").expect("write unit");
         let mut runner = RecordingRunner {
             fail_args: Some(vec!["--user", "disable", "--now", SYSTEMD_UNIT]),
-            unit_state_output: Some("loaded\nenabled\n".to_string()),
+            unit_state_output: Some("LoadState=loaded\nUnitFileState=enabled\n".to_string()),
             ..RecordingRunner::default()
         };
         let result = uninstall_with_runner(&mut runner);
@@ -740,7 +793,7 @@ mod tests {
         std::fs::create_dir_all(file.parent().expect("unit parent")).expect("create parent");
         std::fs::write(&file, "previous unit").expect("write previous unit");
         let mut runner = RecordingRunner {
-            unit_state_output: Some("loaded\nenabled\n".to_string()),
+            unit_state_output: Some("LoadState=loaded\nUnitFileState=enabled\n".to_string()),
             fail_nth_args: Some((vec!["--user", "enable", SYSTEMD_UNIT], 1)),
             ..RecordingRunner::default()
         };
@@ -766,7 +819,6 @@ mod tests {
                     "show",
                     "--property=LoadState",
                     "--property=UnitFileState",
-                    "--value",
                     SYSTEMD_UNIT,
                 ],
                 vec!["--user", "daemon-reload"],
@@ -789,7 +841,7 @@ mod tests {
         std::fs::create_dir_all(file.parent().expect("unit parent")).expect("create parent");
         std::fs::write(&file, "previous unit").expect("write previous unit");
         let mut runner = RecordingRunner {
-            unit_state_output: Some("loaded\ndisabled\n".to_string()),
+            unit_state_output: Some("LoadState=loaded\nUnitFileState=disabled\n".to_string()),
             fail_nth_args: Some((vec!["--user", "enable", SYSTEMD_UNIT], 1)),
             ..RecordingRunner::default()
         };
@@ -815,7 +867,6 @@ mod tests {
                     "show",
                     "--property=LoadState",
                     "--property=UnitFileState",
-                    "--value",
                     SYSTEMD_UNIT,
                 ],
                 vec!["--user", "daemon-reload"],
@@ -855,7 +906,7 @@ mod tests {
         // SAFETY: serialized by `lock_runtime_env`; restored below.
         unsafe { std::env::set_var("HOME", tmp.path()) };
         let mut runner = RecordingRunner {
-            unit_state_output: Some("loaded\nenabled\n".to_string()),
+            unit_state_output: Some("LoadState=loaded\nUnitFileState=enabled\n".to_string()),
             ..RecordingRunner::default()
         };
         let result = uninstall_with_runner(&mut runner);
@@ -876,7 +927,6 @@ mod tests {
                     "show",
                     "--property=LoadState",
                     "--property=UnitFileState",
-                    "--value",
                     SYSTEMD_UNIT,
                 ],
                 vec!["--user", "disable", "--now", SYSTEMD_UNIT],
@@ -924,7 +974,7 @@ mod tests {
         std::fs::create_dir_all(file.parent().expect("unit parent")).expect("create parent");
         std::fs::write(&file, "previous unit").expect("write unit");
         let mut runner = RecordingRunner {
-            unit_state_output: Some("loaded\nenabled\n".to_string()),
+            unit_state_output: Some("LoadState=loaded\nUnitFileState=enabled\n".to_string()),
             fail_nth_args: Some((vec!["--user", "daemon-reload"], 1)),
             ..RecordingRunner::default()
         };
@@ -951,6 +1001,66 @@ mod tests {
             runner
                 .labels
                 .contains(&"systemctl rollback enable previous unit".to_string())
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn uninstall_remove_file_failure_rolls_back_like_reload_failure() {
+        // Before this fix, a `remove_file` error after a successful
+        // `disable` propagated with a bare `?` and no rollback: the unit
+        // stayed disabled with no unit file, and (if it had been
+        // enabled) never got re-enabled. This pins that the failure now
+        // goes through the same rollback path as a daemon-reload
+        // failure.
+        use std::os::unix::fs::PermissionsExt;
+        let _lock = crate::runtime::test_env::lock_runtime_env();
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let prior = std::env::var_os("HOME");
+        // SAFETY: serialized by `lock_runtime_env`; restored below.
+        unsafe { std::env::set_var("HOME", tmp.path()) };
+        let file = unit_path().expect("unit path");
+        let parent = file.parent().expect("unit parent").to_path_buf();
+        std::fs::create_dir_all(&parent).expect("create parent");
+        std::fs::write(&file, "previous unit").expect("write unit");
+        // Strip write+execute on the parent dir so `remove_file` fails
+        // with a permission error while the file itself remains readable.
+        std::fs::set_permissions(&parent, std::fs::Permissions::from_mode(0o555))
+            .expect("lock parent dir");
+        let mut runner = RecordingRunner {
+            unit_state_output: Some("LoadState=loaded\nUnitFileState=enabled\n".to_string()),
+            ..RecordingRunner::default()
+        };
+        let result = uninstall_with_runner(&mut runner);
+        std::fs::set_permissions(&parent, std::fs::Permissions::from_mode(0o755))
+            .expect("restore parent dir perms for cleanup");
+        // SAFETY: serialized by `lock_runtime_env`.
+        unsafe {
+            match prior {
+                Some(value) => std::env::set_var("HOME", value),
+                None => std::env::remove_var("HOME"),
+            }
+        }
+
+        if result.is_ok() {
+            // Running as root (some CI containers) bypasses directory
+            // permission checks entirely, so `remove_file` can succeed
+            // even with the parent locked down. Nothing to assert then.
+            return;
+        }
+        assert!(
+            runner
+                .labels
+                .contains(&"systemctl rollback daemon-reload".to_string()),
+            "remove_file failure must roll back like a reload failure: {:?}",
+            runner.labels
+        );
+        assert!(
+            runner
+                .labels
+                .contains(&"systemctl rollback enable previous unit".to_string()),
+            "a previously-enabled unit must be re-enabled during rollback: {:?}",
+            runner.labels
         );
     }
 
@@ -982,7 +1092,13 @@ mod tests {
     }
 
     #[test]
-    fn status_reports_not_installed_and_skips_systemctl_query_when_unit_absent() {
+    fn status_queries_systemctl_unconditionally_and_reports_not_installed_when_absent_everywhere() {
+        // Was: "skips systemctl query when unit absent". That skip was
+        // itself the orphan-hiding bug (finding 5) — a unit file removed
+        // out-of-band while systemd still had it loaded/enabled would
+        // silently read as "not installed". The query must always run so
+        // an orphan can be detected; only report "not installed" when the
+        // file AND the manager both show nothing.
         let _lock = crate::runtime::test_env::lock_runtime_env();
         let tmp = tempfile::tempdir().expect("tempdir");
         let prior = std::env::var_os("HOME");
@@ -999,10 +1115,59 @@ mod tests {
         }
 
         result.expect("status succeeds when not installed");
-        assert!(
-            runner.labels.is_empty(),
-            "must not query systemctl when the unit file is absent"
+        assert_eq!(
+            runner.labels,
+            ["systemctl show unit state", "systemctl show ActiveState"],
+            "must query systemd even when the unit file is absent, to detect orphans"
         );
+    }
+
+    #[test]
+    fn resolve_installed_true_when_file_absent_but_manager_still_shows_it_loaded_or_enabled() {
+        let none = SystemdUnitState {
+            loaded: false,
+            enabled: false,
+        };
+        let loaded_only = SystemdUnitState {
+            loaded: true,
+            enabled: false,
+        };
+        let enabled_only = SystemdUnitState {
+            loaded: false,
+            enabled: true,
+        };
+        assert!(!resolve_installed(false, none));
+        assert!(
+            resolve_installed(false, loaded_only),
+            "orphaned unit still loaded"
+        );
+        assert!(
+            resolve_installed(false, enabled_only),
+            "orphaned unit still enabled"
+        );
+        assert!(resolve_installed(true, none));
+    }
+
+    #[test]
+    fn query_unit_state_parses_key_value_lines_regardless_of_order() {
+        let mut runner = RecordingRunner {
+            unit_state_output: Some("UnitFileState=enabled\nLoadState=loaded\n".to_string()),
+            ..RecordingRunner::default()
+        };
+        let state = query_unit_state(&mut runner).expect("out-of-order lines must parse");
+        assert!(state.loaded);
+        assert!(state.enabled);
+    }
+
+    #[test]
+    fn query_unit_state_errors_when_a_required_key_is_missing() {
+        let mut runner = RecordingRunner {
+            unit_state_output: Some("LoadState=loaded\n".to_string()),
+            ..RecordingRunner::default()
+        };
+        let error = query_unit_state(&mut runner)
+            .expect_err("a missing UnitFileState line must error, not silently default");
+        assert!(error.to_string().contains("UnitFileState"));
     }
 
     #[test]
@@ -1202,13 +1367,22 @@ mod tests {
             status_with_runner(&mut runner).expect("status succeeds");
             assert_eq!(
                 runner.args,
-                [vec![
-                    "--user",
-                    "show",
-                    "--property=ActiveState",
-                    "--value",
-                    SYSTEMD_UNIT,
-                ]]
+                [
+                    vec![
+                        "--user",
+                        "show",
+                        "--property=LoadState",
+                        "--property=UnitFileState",
+                        SYSTEMD_UNIT,
+                    ],
+                    vec![
+                        "--user",
+                        "show",
+                        "--property=ActiveState",
+                        "--value",
+                        SYSTEMD_UNIT,
+                    ]
+                ]
             );
         }
         // SAFETY: serialized by `lock_runtime_env`.
