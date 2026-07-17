@@ -3159,6 +3159,50 @@ fn onboard_dry_run_reports_existing_marker_as_preserved() {
 }
 
 #[test]
+fn onboard_dry_run_propagates_a_webui_token_io_error_without_mutating_home() {
+    // `print_dry_run` propagates `webui_token_file_is_valid`'s error with
+    // `?` instead of defaulting to "would_write" on an I/O failure (see
+    // that fn's doc comment). Pin the end-to-end behavior: a directory
+    // planted at the token path is a real I/O error, the process exits
+    // non-zero, and the dry run's read-only contract still holds — no
+    // marker or config file gets written to the (already-existing)
+    // Reborn home.
+    let temp = tempfile::tempdir().expect("tempdir");
+    let reborn_home = temp.path().join("reborn-home");
+    std::fs::create_dir_all(&reborn_home).expect("mkdir reborn_home");
+    std::fs::create_dir_all(reborn_home.join("webui-token"))
+        .expect("seed a directory at token path");
+
+    let output = Command::new(reborn_bin())
+        .args(["onboard", "--dry-run"])
+        .env_clear()
+        .env("IRONCLAW_REBORN_HOME", &reborn_home)
+        .output()
+        .expect("ironclaw-reborn onboard --dry-run should run");
+
+    assert!(
+        !output.status.success(),
+        "a directory at the token path must fail dry-run, not silently proceed: stdout={} stderr={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        !reborn_home.join(".onboard-completed.json").exists(),
+        "a failed dry-run must not write the onboarding marker"
+    );
+    assert!(
+        !reborn_home.join("config.toml").exists(),
+        "a failed dry-run must not write config.toml"
+    );
+    assert!(
+        std::fs::metadata(reborn_home.join("webui-token"))
+            .expect("token path still present")
+            .is_dir(),
+        "a failed dry-run must not touch the pre-existing token path"
+    );
+}
+
+#[test]
 fn onboard_import_history_records_pending_step() {
     let temp = tempfile::tempdir().expect("tempdir");
     let reborn_home = temp.path().join("reborn-home");

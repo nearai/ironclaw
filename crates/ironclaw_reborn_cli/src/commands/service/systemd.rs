@@ -8,7 +8,7 @@ use anyhow::{Context, Result, bail};
 
 use crate::serve_invocation::ServeInvocation;
 
-use super::{OsServiceCommandRunner, SYSTEMD_UNIT, ServiceCommandRunner, home_dir};
+use super::{SYSTEMD_UNIT, ServiceCommandRunner, home_dir};
 
 // ── Quoting ─────────────────────────────────────────────────────
 
@@ -238,11 +238,7 @@ pub(super) fn install_with_runner(
     Ok(replaced_existing)
 }
 
-pub(super) fn start() -> Result<()> {
-    start_with_runner(&mut OsServiceCommandRunner)
-}
-
-fn start_with_runner(runner: &mut dyn ServiceCommandRunner) -> Result<()> {
+pub(super) fn start_with_runner(runner: &mut dyn ServiceCommandRunner) -> Result<()> {
     if !unit_path()?.exists() {
         bail!("Service not installed. Run `ironclaw-reborn service install` first.");
     }
@@ -258,11 +254,7 @@ fn start_with_runner(runner: &mut dyn ServiceCommandRunner) -> Result<()> {
     Ok(())
 }
 
-pub(super) fn stop() -> Result<()> {
-    stop_with_runner(&mut OsServiceCommandRunner)
-}
-
-fn stop_with_runner(runner: &mut dyn ServiceCommandRunner) -> Result<()> {
+pub(super) fn stop_with_runner(runner: &mut dyn ServiceCommandRunner) -> Result<()> {
     if !unit_path()?.exists() {
         println!("Service stopped");
         return Ok(());
@@ -275,13 +267,9 @@ fn stop_with_runner(runner: &mut dyn ServiceCommandRunner) -> Result<()> {
     Ok(())
 }
 
-pub(super) fn restart() -> Result<()> {
-    restart_with_runner(&mut OsServiceCommandRunner)
-}
-
 /// Detects install/running state, then delegates the stop/start decision
 /// tree to [`super::restart_generic`], which both platforms share.
-fn restart_with_runner(runner: &mut dyn ServiceCommandRunner) -> Result<()> {
+pub(super) fn restart_with_runner(runner: &mut dyn ServiceCommandRunner) -> Result<()> {
     let installed = unit_path()?.exists();
     let was_running = if installed {
         let active_state = runner.run_capture_checked(
@@ -305,10 +293,6 @@ fn restart_with_runner(runner: &mut dyn ServiceCommandRunner) -> Result<()> {
         stop_with_runner,
         start_with_runner,
     )
-}
-
-pub(super) fn status() -> Result<()> {
-    status_with_runner(&mut OsServiceCommandRunner)
 }
 
 /// Secondary detail line for a non-`active` raw `ActiveState`, e.g. a
@@ -337,7 +321,7 @@ fn resolve_installed(file_exists: bool, unit_state: SystemdUnitState) -> bool {
     file_exists || unit_state.loaded || unit_state.enabled
 }
 
-fn status_with_runner(runner: &mut dyn ServiceCommandRunner) -> Result<()> {
+pub(super) fn status_with_runner(runner: &mut dyn ServiceCommandRunner) -> Result<()> {
     let file = unit_path()?;
     let file_exists = file.exists();
     // Query the manager unconditionally — a unit file removed out-of-band
@@ -374,10 +358,6 @@ fn status_with_runner(runner: &mut dyn ServiceCommandRunner) -> Result<()> {
     }
     println!("Unit: {}", file.display());
     Ok(())
-}
-
-pub(super) fn uninstall() -> Result<()> {
-    uninstall_with_runner(&mut OsServiceCommandRunner)
 }
 
 /// Shared uninstall rollback: restore the previous unit file (or remove
@@ -446,11 +426,14 @@ fn uninstall_with_runner_and_remover(
         println!("Service uninstalled ({})", file.display());
         return Ok(());
     }
-    if manager_state.loaded || manager_state.enabled {
-        runner.run_checked(
+    if (manager_state.loaded || manager_state.enabled)
+        && let Err(error) = runner.run_checked(
             "systemctl disable",
             Command::new("systemctl").args(["--user", "disable", "--now", SYSTEMD_UNIT]),
-        )?;
+        )
+    {
+        let rollback_errors = rollback_uninstall(&file, previous.as_deref(), manager_state, runner);
+        return Err(combined_failure(error, rollback_errors));
     }
     if previous.is_some()
         && let Err(error) = remove_file(&file).with_context(|| format!("remove {}", file.display()))
@@ -787,7 +770,14 @@ mod tests {
     }
 
     #[test]
-    fn uninstall_disable_failure_preserves_unit_file() {
+    fn uninstall_disable_failure_rolls_back_like_reload_failure() {
+        // Before this fix, a `disable --now` error propagated with a bare
+        // `?` and no rollback, unlike every sibling failure branch in this
+        // function (remove_file, daemon-reload), which routes through
+        // `rollback_uninstall` + `combined_failure`. A disable failure can
+        // leave the unit partially disabled with no compensating
+        // daemon-reload/re-enable, so this pins that it now goes through
+        // the same rollback path as the other two.
         let _lock = crate::runtime::test_env::lock_runtime_env();
         let tmp = tempfile::tempdir().expect("tempdir");
         let prior = std::env::var_os("HOME");
@@ -810,11 +800,19 @@ mod tests {
             }
         }
 
-        assert!(result.is_err());
+        let error = result.expect_err("a failed disable must propagate");
         assert!(file.exists(), "failed disable must not remove the unit");
+        let rendered = format!("{error:#}");
+        assert!(rendered.contains("systemctl disable"), "{rendered}");
         assert_eq!(
             runner.labels,
-            ["systemctl show unit state", "systemctl disable"]
+            [
+                "systemctl show unit state",
+                "systemctl disable",
+                "systemctl rollback daemon-reload",
+                "systemctl rollback enable previous unit",
+            ],
+            "a disable failure must run the same rollback sequence as a reload failure"
         );
     }
 

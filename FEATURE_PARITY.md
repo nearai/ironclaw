@@ -551,7 +551,7 @@ Trace Commons issuer/TenantCtx note: the server-side `zmanian/tracedao-server` s
 | Config recovery on clobber | ✅ | ❌ | Restore last-known-good config on critical clobber signatures (missing metadata, missing `gateway.mode`, sharp size drops); foreground/service notices include rejected paths |
 | Modular `$include` files | ✅ | ❌ | Single-file top-level includes for isolated mutations; `plugins install`/`update` updates `plugins.json5` instead of flattening |
 | `config set --merge`/`--replace` | ✅ | ❌ | Additive vs intentional clobber for provider model maps |
-| Wrapper-based service install | ✅ | ❌ | `--wrapper`/`OPENCLAW_WRAPPER` validated executable LaunchAgent/systemd wrappers |
+| Wrapper-based service install | ✅ | ✅ (Reborn) | `--wrapper`/`OPENCLAW_WRAPPER` validated executable LaunchAgent/systemd wrappers; Reborn's `ironclaw-reborn service install` covers launchd (macOS)/systemd (Linux) with a webui-token-file fallback and atomic install + rollback on failure |
 
 ### Owner: _Unassigned_
 

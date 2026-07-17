@@ -167,37 +167,65 @@ impl ServicePlatform {
     }
 
     fn start(&self) -> Result<()> {
+        self.start_with_runner(&mut OsServiceCommandRunner)
+    }
+
+    /// Runner-injectable `start`, mirroring [`Self::install_with_runner`]:
+    /// lets a test drive the same dispatch `start()`/`ServiceCommand::execute`
+    /// use, with a fake [`ServiceCommandRunner`] instead of the host's real
+    /// `launchctl`/`systemctl`.
+    fn start_with_runner(&self, runner: &mut dyn ServiceCommandRunner) -> Result<()> {
         match self {
-            Self::MacOs => launchd::start(),
-            Self::Linux => systemd::start(),
+            Self::MacOs => launchd::start_with_runner(runner),
+            Self::Linux => systemd::start_with_runner(runner),
         }
     }
 
     fn stop(&self) -> Result<()> {
+        self.stop_with_runner(&mut OsServiceCommandRunner)
+    }
+
+    /// Runner-injectable `stop` — see [`Self::start_with_runner`].
+    fn stop_with_runner(&self, runner: &mut dyn ServiceCommandRunner) -> Result<()> {
         match self {
-            Self::MacOs => launchd::stop(),
-            Self::Linux => systemd::stop(),
+            Self::MacOs => launchd::stop_with_runner(runner),
+            Self::Linux => systemd::stop_with_runner(runner),
         }
     }
 
     fn restart(&self) -> Result<()> {
+        self.restart_with_runner(&mut OsServiceCommandRunner)
+    }
+
+    /// Runner-injectable `restart` — see [`Self::start_with_runner`].
+    fn restart_with_runner(&self, runner: &mut dyn ServiceCommandRunner) -> Result<()> {
         match self {
-            Self::MacOs => launchd::restart(),
-            Self::Linux => systemd::restart(),
+            Self::MacOs => launchd::restart_with_runner(runner),
+            Self::Linux => systemd::restart_with_runner(runner),
         }
     }
 
     fn status(&self) -> Result<()> {
+        self.status_with_runner(&mut OsServiceCommandRunner)
+    }
+
+    /// Runner-injectable `status` — see [`Self::start_with_runner`].
+    fn status_with_runner(&self, runner: &mut dyn ServiceCommandRunner) -> Result<()> {
         match self {
-            Self::MacOs => launchd::status(),
-            Self::Linux => systemd::status(),
+            Self::MacOs => launchd::status_with_runner(runner),
+            Self::Linux => systemd::status_with_runner(runner),
         }
     }
 
     fn uninstall(&self) -> Result<()> {
+        self.uninstall_with_runner(&mut OsServiceCommandRunner)
+    }
+
+    /// Runner-injectable `uninstall` — see [`Self::start_with_runner`].
+    fn uninstall_with_runner(&self, runner: &mut dyn ServiceCommandRunner) -> Result<()> {
         match self {
-            Self::MacOs => launchd::uninstall(),
-            Self::Linux => systemd::uninstall(),
+            Self::MacOs => launchd::uninstall_with_runner(runner),
+            Self::Linux => systemd::uninstall_with_runner(runner),
         }
     }
 }
@@ -457,14 +485,23 @@ mod tests {
     use super::*;
 
     #[derive(Default)]
-    struct SuccessfulServiceCommandRunner;
+    struct SuccessfulServiceCommandRunner {
+        /// Labels of every command run through this stub, in call order.
+        /// Used by [`service_verbs_dispatch_through_the_injectable_runner_path`]
+        /// to prove a verb actually reached the injected runner rather than
+        /// bailing out before calling it (e.g. an "not installed" short
+        /// circuit).
+        labels: Vec<String>,
+    }
 
     impl ServiceCommandRunner for SuccessfulServiceCommandRunner {
-        fn run_checked(&mut self, _label: &str, _command: &mut Command) -> Result<()> {
+        fn run_checked(&mut self, label: &str, _command: &mut Command) -> Result<()> {
+            self.labels.push(label.to_string());
             Ok(())
         }
 
         fn run_capture_checked(&mut self, label: &str, _command: &mut Command) -> Result<String> {
+            self.labels.push(label.to_string());
             match label {
                 "launchctl list" => Ok(String::new()),
                 "id -u" => Ok("501\n".to_string()),
@@ -562,7 +599,7 @@ mod tests {
         // WebUI token deliberately absent.
 
         let platform = ServicePlatform::detect().expect("detect must resolve on macOS/Linux");
-        let mut runner = SuccessfulServiceCommandRunner;
+        let mut runner = SuccessfulServiceCommandRunner::default();
         let warnings = platform
             .install_with_runner(&context, &mut runner)
             .expect("install must succeed even with the token warning outstanding");
@@ -576,6 +613,69 @@ mod tests {
             warnings[0].contains("WebUI token not found or too short"),
             "warnings: {warnings:?}"
         );
+    }
+
+    #[test]
+    fn service_verbs_dispatch_through_the_injectable_runner_path() {
+        // Before this fix, only `install` had a runner-injectable split
+        // (`install_with_runner`, exercised above) — `start`/`stop`/
+        // `restart`/`status`/`uninstall` existed only as `pub(super) fn
+        // verb()`, hardcoding `OsServiceCommandRunner` with no way to drive
+        // `ServiceCommand`'s dispatch wiring itself without touching the
+        // real service manager. This parses each verb via clap (the same
+        // way `ServiceCommand` does) and drives it through
+        // `ServicePlatform`'s new `*_with_runner` methods with a stub
+        // runner, proving the dispatch wiring end to end. It deliberately
+        // does NOT re-assert each verb's own behavior (installed/running
+        // detection, rollback, etc.) — that's already covered by the
+        // dedicated per-platform tests in systemd.rs and launchd.rs.
+        let _lock = crate::runtime::test_env::lock_runtime_env();
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let _home = TempHomeGuard::set(tmp.path());
+        let context = RebornCliContext::from_boot_config(
+            ironclaw_reborn_config::RebornBootConfig::resolve_from_env()
+                .expect("boot config must resolve under temp HOME"),
+        );
+        let platform = ServicePlatform::detect().expect("detect must resolve on macOS/Linux");
+        let mut runner = SuccessfulServiceCommandRunner::default();
+        platform.install_with_runner(&context, &mut runner).expect(
+            "install must succeed so start/stop/restart/status/uninstall have a unit to act on",
+        );
+
+        use clap::Parser;
+
+        #[derive(clap::Parser)]
+        struct VerbParser {
+            #[command(subcommand)]
+            verb: ServiceVerb,
+        }
+
+        for (args, verb_name) in [
+            (["ironclaw-reborn", "start"], "start"),
+            (["ironclaw-reborn", "stop"], "stop"),
+            (["ironclaw-reborn", "restart"], "restart"),
+            (["ironclaw-reborn", "status"], "status"),
+            (["ironclaw-reborn", "uninstall"], "uninstall"),
+        ] {
+            let parsed = VerbParser::try_parse_from(args)
+                .unwrap_or_else(|e| panic!("{verb_name} must parse via clap: {e}"));
+            let before = runner.labels.len();
+            let result = match parsed.verb {
+                ServiceVerb::Install => unreachable!("install is not under test here"),
+                ServiceVerb::Start => platform.start_with_runner(&mut runner),
+                ServiceVerb::Stop => platform.stop_with_runner(&mut runner),
+                ServiceVerb::Restart => platform.restart_with_runner(&mut runner),
+                ServiceVerb::Status => platform.status_with_runner(&mut runner),
+                ServiceVerb::Uninstall => platform.uninstall_with_runner(&mut runner),
+            };
+            result.unwrap_or_else(|e| {
+                panic!("{verb_name} through the injected runner must succeed: {e:#}")
+            });
+            assert!(
+                runner.labels.len() > before,
+                "{verb_name} must reach the injected runner, not bail out before calling it"
+            );
+        }
     }
 
     #[cfg(unix)]
@@ -673,7 +773,7 @@ mod tests {
         let tmp = tempfile::tempdir().expect("tempdir");
         let _home = TempHomeGuard::set(tmp.path());
         let invocation = serve_invocation().expect("serve invocation");
-        let mut runner = SuccessfulServiceCommandRunner;
+        let mut runner = SuccessfulServiceCommandRunner::default();
         let fresh_replaced =
             systemd::install_with_runner(&invocation, &mut runner).expect("install must succeed");
         let unit_path = tmp
@@ -737,7 +837,7 @@ mod tests {
             .expect("reinstall must succeed");
         assert!(plist_path.exists());
 
-        let mut runner = SuccessfulServiceCommandRunner;
+        let mut runner = SuccessfulServiceCommandRunner::default();
         launchd::uninstall_with_runner(&mut runner).expect("uninstall must succeed");
         assert!(!plist_path.exists(), "plist file must be removed");
     }

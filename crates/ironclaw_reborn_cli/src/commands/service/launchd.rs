@@ -9,7 +9,7 @@ use anyhow::{Context, Result, bail};
 use crate::context::RebornCliContext;
 use crate::serve_invocation::ServeInvocation;
 
-use super::{OsServiceCommandRunner, SERVICE_LABEL, ServiceCommandRunner, home_dir};
+use super::{SERVICE_LABEL, ServiceCommandRunner, home_dir};
 
 // ── Escaping ────────────────────────────────────────────────────
 
@@ -223,11 +223,7 @@ pub(super) fn install_with_runner(
     Ok(replaced_existing)
 }
 
-pub(super) fn start() -> Result<()> {
-    start_with_runner(&mut OsServiceCommandRunner)
-}
-
-fn start_with_runner(runner: &mut dyn ServiceCommandRunner) -> Result<()> {
+pub(super) fn start_with_runner(runner: &mut dyn ServiceCommandRunner) -> Result<()> {
     let plist = plist_path()?;
     if !plist.exists() {
         bail!("Service not installed. Run `ironclaw-reborn service install` first.");
@@ -244,11 +240,7 @@ fn start_with_runner(runner: &mut dyn ServiceCommandRunner) -> Result<()> {
     Ok(())
 }
 
-pub(super) fn stop() -> Result<()> {
-    stop_with_runner(&mut OsServiceCommandRunner)
-}
-
-fn stop_with_runner(runner: &mut dyn ServiceCommandRunner) -> Result<()> {
+pub(super) fn stop_with_runner(runner: &mut dyn ServiceCommandRunner) -> Result<()> {
     let plist = plist_path()?;
     if !plist.exists() {
         println!("Service stopped");
@@ -275,13 +267,9 @@ fn stop_with_runner(runner: &mut dyn ServiceCommandRunner) -> Result<()> {
     Ok(())
 }
 
-pub(super) fn restart() -> Result<()> {
-    restart_with_runner(&mut OsServiceCommandRunner)
-}
-
 /// Detects install/running state, then delegates the stop/start decision
 /// tree to [`super::restart_generic`], which both platforms share.
-fn restart_with_runner(runner: &mut dyn ServiceCommandRunner) -> Result<()> {
+pub(super) fn restart_with_runner(runner: &mut dyn ServiceCommandRunner) -> Result<()> {
     let plist = plist_path()?;
     let installed = plist.exists();
     let was_running = if installed {
@@ -300,11 +288,7 @@ fn restart_with_runner(runner: &mut dyn ServiceCommandRunner) -> Result<()> {
     )
 }
 
-pub(super) fn status() -> Result<()> {
-    status_with_runner(&mut OsServiceCommandRunner)
-}
-
-fn status_with_runner(runner: &mut dyn ServiceCommandRunner) -> Result<()> {
+pub(super) fn status_with_runner(runner: &mut dyn ServiceCommandRunner) -> Result<()> {
     let plist = plist_path()?;
     let file_exists = plist.exists();
     // Query launchctl unconditionally — a plist that was removed
@@ -317,10 +301,6 @@ fn status_with_runner(runner: &mut dyn ServiceCommandRunner) -> Result<()> {
     println!("Service: {}", super::status_label(installed, running));
     println!("Unit: {}", plist.display());
     Ok(())
-}
-
-pub(super) fn uninstall() -> Result<()> {
-    uninstall_with_runner(&mut OsServiceCommandRunner)
 }
 
 pub(super) fn uninstall_with_runner(runner: &mut dyn ServiceCommandRunner) -> Result<()> {
