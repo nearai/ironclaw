@@ -485,12 +485,42 @@ fn help_mentions_reborn_commands() {
     assert!(stdout.contains("profile"), "stdout: {stdout}");
     assert!(stdout.contains("repl"), "stdout: {stdout}");
     assert!(stdout.contains("run"), "stdout: {stdout}");
-    // `serve` is gated behind the `webui-v2-beta` Cargo feature so a
-    // default binary build does not link the beta HTTP/auth gateway.
-    // The dedicated `serve_*` tests below also `#[cfg]` themselves.
+    // `serve` and `service` are gated behind the `webui-v2-beta` Cargo
+    // feature so a default binary build does not link the beta HTTP/auth
+    // gateway or the OS-service installer that runs it. The dedicated
+    // `serve_*`/`service_*` tests below also `#[cfg]` themselves.
     #[cfg(feature = "webui-v2-beta")]
     assert!(stdout.contains("serve"), "stdout: {stdout}");
+    #[cfg(feature = "webui-v2-beta")]
+    assert!(stdout.contains("service"), "stdout: {stdout}");
     assert!(stdout.contains("skills"), "stdout: {stdout}");
+    // No standalone `tui` subcommand exists (Reborn's interactive surface
+    // is `repl`); pin this so a `full`-feature build never grows one
+    // without an explicit, reviewed decision.
+    assert!(
+        !stdout.to_lowercase().contains("tui"),
+        "unexpected tui subcommand: {stdout}"
+    );
+}
+
+#[cfg(feature = "webui-v2-beta")]
+#[test]
+fn service_help_lists_all_verbs() {
+    let output = Command::new(reborn_bin())
+        .arg("service")
+        .arg("--help")
+        .output()
+        .expect("ironclaw-reborn service --help should run");
+
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    for verb in ["install", "start", "stop", "status", "restart", "uninstall"] {
+        assert!(stdout.contains(verb), "missing `{verb}` verb: {stdout}");
+    }
 }
 
 #[test]
