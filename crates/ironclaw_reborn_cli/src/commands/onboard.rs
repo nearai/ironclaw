@@ -27,6 +27,14 @@ pub(crate) struct OnboardCommand {
     /// step explicit without touching v1 setup/import state.
     #[arg(long = "import-history")]
     import_history: bool,
+
+    /// Skip installing/starting the OS service (launchd/systemd) at the end
+    /// of onboarding. Always effectively on in a non-interactive session
+    /// (headless CI, a piped/scripted invocation) regardless of this flag —
+    /// see `execute()`'s service step.
+    #[cfg(feature = "webui-v2-beta")]
+    #[arg(long = "no-service")]
+    no_service: bool,
 }
 
 impl OnboardCommand {
@@ -45,8 +53,6 @@ impl OnboardCommand {
         // repeated `onboard --force` cannot invalidate sessions or an
         // operator-copied env var keyed to the current token value.
         let webui_token_action = crate::webui_token::ensure_webui_token_file(home.path())?;
-        let marker_action =
-            write_onboarding_marker(home, &marker_path, self.force, self.import_history)?;
         let master_key_outcome = provision_master_key(home)?;
         let llm_outcome =
             match provision_llm_credentials(home, context.boot_config(), &mut StdinPromptSource) {
@@ -62,6 +68,21 @@ impl OnboardCommand {
                 }
                 Err(LlmCredentialPromptError::Other(error)) => return Err(error),
             };
+        // Computed after `llm_outcome` (not before, as in an earlier
+        // revision) so the marker's `steps_pending` reflects what actually
+        // happened this run rather than unconditionally listing
+        // `llm_credentials` as pending even when it was just configured.
+        let llm_configured = matches!(
+            llm_outcome,
+            LlmCredentialProvisionOutcome::Configured { .. }
+        );
+        let marker_action = write_onboarding_marker(
+            home,
+            &marker_path,
+            self.force,
+            self.import_history,
+            llm_configured,
+        )?;
 
         println!("IronClaw Reborn onboarding");
         println!("reborn_home: {}", home.path().display());
@@ -99,15 +120,13 @@ impl OnboardCommand {
         }
         println!();
         println!("remaining:");
-        if matches!(
-            llm_outcome,
-            LlmCredentialProvisionOutcome::Configured { .. }
-        ) {
+        if llm_configured {
             println!("- none for LLM credentials (configured above)");
         } else {
-            println!("- configure LLM credentials through env vars referenced by config.toml");
             println!(
-                "- run `ironclaw-reborn models set-provider <provider> --model <model>` as needed"
+                "- configure LLM credentials: rerun `ironclaw-reborn onboard` from an \
+                 interactive terminal, or run \
+                 `ironclaw-reborn models set-provider <provider> --model <model>` directly"
             );
         }
         if self.import_history {
@@ -115,8 +134,110 @@ impl OnboardCommand {
         } else {
             println!("- history import not requested");
         }
+
+        #[cfg(feature = "webui-v2-beta")]
+        self.finish_with_service_and_login_link(&context, home)?;
+
         Ok(())
     }
+
+    /// Onboarding's last two steps, gated behind `webui-v2-beta` since both
+    /// depend on `serve`/`service` (only compiled under that feature):
+    /// install-and-start the OS service (skippable — see
+    /// [`Self::should_install_service`]), then print the CLI-token login
+    /// link `serve` will accept once it's running, using the same
+    /// `webui-token` value `ensure_webui_token_file` already provisioned
+    /// above.
+    #[cfg(feature = "webui-v2-beta")]
+    fn finish_with_service_and_login_link(
+        &self,
+        context: &RebornCliContext,
+        home: &RebornHome,
+    ) -> anyhow::Result<()> {
+        let service_outcome = if self.should_install_service() {
+            match crate::commands::service::install_and_start(context) {
+                Ok(()) => ServiceStartOutcome::InstalledAndStarted,
+                Err(error) => ServiceStartOutcome::Failed(error.to_string()),
+            }
+        } else if self.no_service {
+            ServiceStartOutcome::SkippedFlag
+        } else {
+            ServiceStartOutcome::SkippedNonInteractive
+        };
+        println!("service: {}", service_outcome.display_line());
+        if let ServiceStartOutcome::Failed(reason) = &service_outcome {
+            println!(
+                "service_note: install/start failed ({reason}); run `ironclaw-reborn service \
+                 install` and `ironclaw-reborn service start` manually"
+            );
+        }
+
+        if let Some(login_link) = login_link(home) {
+            println!("login_link: {login_link}");
+        }
+        println!("hint: add Gmail or Slack any time: ironclaw-reborn config set --help");
+        Ok(())
+    }
+
+    /// `true` when onboarding should attempt to install/start the OS
+    /// service: the operator didn't pass `--no-service`, AND this is an
+    /// interactive session. A non-interactive session (headless CI, a
+    /// piped/scripted invocation) must never attempt a launchd/systemd
+    /// install regardless of the flag — mirrors the LLM-credential prompt's
+    /// own non-interactive short-circuit above.
+    #[cfg(feature = "webui-v2-beta")]
+    fn should_install_service(&self) -> bool {
+        !self.no_service && std::io::stdin().is_terminal()
+    }
+}
+
+/// Outcome of onboard's OS-service install/start finale. Every variant is a
+/// successful `execute()` (exit 0) except `Failed`, which is reported but
+/// does not fail onboarding overall — the operator can always install/start
+/// the service manually afterward (see the printed `service_note`), so a
+/// service-manager hiccup should not make an otherwise-successful onboarding
+/// run exit non-zero.
+#[cfg(feature = "webui-v2-beta")]
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum ServiceStartOutcome {
+    InstalledAndStarted,
+    SkippedFlag,
+    SkippedNonInteractive,
+    Failed(String),
+}
+
+#[cfg(feature = "webui-v2-beta")]
+impl ServiceStartOutcome {
+    fn display_line(&self) -> String {
+        match self {
+            Self::InstalledAndStarted => "installed and started".to_string(),
+            Self::SkippedFlag => "skipped (--no-service)".to_string(),
+            Self::SkippedNonInteractive => "skipped (non-interactive session)".to_string(),
+            Self::Failed(reason) => format!("failed: {reason}"),
+        }
+    }
+}
+
+/// The CLI-printed bootstrap link into the browser session (see
+/// `ironclaw_reborn_webui_ingress::cli_token_login`'s module doc for the
+/// flow it plugs into) — `Some` only when a valid `webui-token` file is
+/// present (it always is right after `ensure_webui_token_file` runs above,
+/// but this is also called from contexts, like `status`, where onboarding
+/// may not have run). Uses `serve`'s own default host:port constants rather
+/// than duplicating the literals — see their doc comment in `commands/serve.rs`.
+#[cfg(feature = "webui-v2-beta")]
+pub(crate) fn login_link(home: &RebornHome) -> Option<String> {
+    if !crate::webui_token::webui_token_file_is_valid(home.path()) {
+        return None;
+    }
+    let token =
+        std::fs::read_to_string(crate::webui_token::webui_token_file_path(home.path())).ok()?;
+    Some(format!(
+        "http://{}:{}/login?token={}",
+        crate::commands::serve::DEFAULT_SERVE_HOST,
+        crate::commands::serve::DEFAULT_SERVE_PORT,
+        token.trim()
+    ))
 }
 
 pub(crate) fn onboarding_marker_path(home: &RebornHome) -> PathBuf {
@@ -457,6 +578,7 @@ fn write_onboarding_marker(
     marker_path: &Path,
     force: bool,
     import_history: bool,
+    llm_configured: bool,
 ) -> anyhow::Result<FileWriteAction> {
     if marker_path.exists() && !force {
         return Ok(FileWriteAction::Preserved);
@@ -475,7 +597,7 @@ fn write_onboarding_marker(
             "webui_token",
             "completion_marker"
         ],
-        "steps_pending": pending_steps(import_history),
+        "steps_pending": pending_steps(import_history, llm_configured),
         "v1_state": "not-used"
     }))?;
     write_atomic(
@@ -486,8 +608,17 @@ fn write_onboarding_marker(
     )
 }
 
-fn pending_steps(import_history: bool) -> Vec<&'static str> {
-    let mut steps = vec!["llm_credentials", "model_selection", "channel_setup"];
+/// `llm_credentials` is only reported pending when this run did NOT
+/// configure it — an interactive `provision_llm_credentials` success means
+/// there is nothing left to do for that step, so the marker must not
+/// unconditionally claim it is still outstanding.
+fn pending_steps(import_history: bool, llm_configured: bool) -> Vec<&'static str> {
+    let mut steps = Vec::new();
+    if !llm_configured {
+        steps.push("llm_credentials");
+    }
+    steps.push("model_selection");
+    steps.push("channel_setup");
     if import_history {
         steps.push("history_import");
     }
@@ -497,6 +628,29 @@ fn pending_steps(import_history: bool) -> Vec<&'static str> {
 #[cfg(all(test, feature = "libsql", feature = "root-llm-provider"))]
 mod tests {
     use super::*;
+
+    /// RED (B4 step 6 truth-up): the marker's `steps_pending` must only list
+    /// `llm_credentials` when this run did NOT actually configure it —
+    /// before this fix `pending_steps` listed it unconditionally, even right
+    /// after a successful interactive `provision_llm_credentials` call.
+    #[test]
+    fn pending_steps_omits_llm_credentials_once_configured() {
+        assert_eq!(
+            pending_steps(false, true),
+            vec!["model_selection", "channel_setup"],
+            "llm_credentials must not be reported pending once this run configured it"
+        );
+        assert_eq!(
+            pending_steps(false, false),
+            vec!["llm_credentials", "model_selection", "channel_setup"],
+            "llm_credentials must still be reported pending when this run did not configure it"
+        );
+        assert_eq!(
+            pending_steps(true, true),
+            vec!["model_selection", "channel_setup", "history_import"],
+            "import_history must still append history_import regardless of llm_configured"
+        );
+    }
 
     struct FakePromptSource {
         provider: &'static str,

@@ -39,8 +39,12 @@ use crate::runtime::{
     resolve_google_oauth_config_from_env,
 };
 
-const DEFAULT_SERVE_HOST: &str = "127.0.0.1";
-const DEFAULT_SERVE_PORT: u16 = 3000;
+// `pub(crate)`: `onboard`'s finale prints the CLI-token login link using
+// the same default host:port `serve` binds to absent an explicit
+// override, so it imports these rather than duplicating the literals
+// (see `commands/onboard.rs`).
+pub(crate) const DEFAULT_SERVE_HOST: &str = "127.0.0.1";
+pub(crate) const DEFAULT_SERVE_PORT: u16 = 3000;
 const DEFAULT_ENV_TOKEN_VAR: &str = "IRONCLAW_REBORN_WEBUI_TOKEN";
 const DEFAULT_ENV_USER_ID_VAR: &str = "IRONCLAW_REBORN_WEBUI_USER_ID";
 /// Lifetime of the one-time API bearer minted when an admin creates a user. A
@@ -235,6 +239,10 @@ impl ServeCommand {
         // mints tokens that validate under the login surface's own store.
         let admin_session_store =
             ironclaw_webui::signed_session_store(&session_signing_secret, &tenant_id);
+        // The CLI-token-login mount (built later, once `sso_enabled` is known)
+        // mints sessions the same way the admin minter does — same operator
+        // secret + tenant, so a clone of this store validates identically.
+        let cli_login_session_store = admin_session_store.clone();
         runtime_input =
             runtime_input.with_admin_api_token_minter(Arc::new(SignedSessionTokenMinter {
                 session_store: admin_session_store,
@@ -547,6 +555,15 @@ impl ServeCommand {
                 None
             };
 
+            // Cloned before the moves below: the CLI-token-login mount
+            // (built after `build_webui_auth_surface`, once its `public_mount`
+            // tells us whether an SSO exchange route is already claiming
+            // `/auth/session/exchange`) needs its own tenant id and bearer
+            // authenticator, but `tenant_id`/`env_authenticator` are moved
+            // into the auth-surface call immediately below.
+            let cli_login_tenant_id = tenant_id.clone();
+            let cli_login_authenticator = Arc::clone(&env_authenticator);
+
             // Assemble the WebChat v2 auth surface (authenticator + optional
             // public login mount). The auth/identity module owns the
             // signed-session wiring; `serve` supplies host config, the
@@ -572,6 +589,36 @@ impl ServeCommand {
                 }),
             )
             .await?;
+
+            // CLI-token-login mount (`GET /login?token=`, printed by `onboard`
+            // at the end of setup) — built only when no SSO provider is
+            // configured. `build_webui_auth_surface` above already mounted
+            // `POST /auth/session/exchange` in both its no-SSO branch (the
+            // inert `empty_webui_v2_auth_providers_mount`, which does NOT
+            // claim that path — see its own test coverage) and its SSO
+            // branch (`build_signed_session_login`, which DOES claim it).
+            // `build_cli_token_login` mounts its own `/auth/session/exchange`
+            // unconditionally, so attaching it whenever SSO is configured
+            // would register that path twice and panic at router-merge time
+            // (see `cli_token_login.rs`'s own module doc, which calls this
+            // out explicitly). There is no "no exchange handler" constructor
+            // knob on `CliTokenLoginConfig` to share the SSO surface's ticket
+            // store instead (its `session_tickets` map is private to
+            // `auth::routes`), so the simplest correct rule is: CLI-token
+            // login is available exactly when SSO is not, matching the
+            // deployment shape it targets (a single-operator desktop/CLI
+            // install, not an SSO-admitted multi-user host).
+            let cli_login_mount = if sso_enabled {
+                None
+            } else {
+                Some(ironclaw_webui::build_cli_token_login(
+                    ironclaw_webui::CliTokenLoginConfig::new(
+                        cli_login_tenant_id,
+                        cli_login_authenticator,
+                        cli_login_session_store,
+                    ),
+                ))
+            };
 
             print_serve_banner(
                 listen_addr,
@@ -638,6 +685,9 @@ impl ServeCommand {
             }
             if let Some(mount) = public_mount {
                 serve_config = serve_config.with_public_route_mount(mount);
+            }
+            if let Some(cli_login_mount) = cli_login_mount {
+                serve_config = serve_config.with_public_route_mount(cli_login_mount);
             }
             let webui_app = webui_v2_app_with_lifecycle(bundle, serve_config)
                 .context("failed to compose v2 Router")?;

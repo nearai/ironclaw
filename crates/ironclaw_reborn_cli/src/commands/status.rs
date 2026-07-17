@@ -59,7 +59,25 @@ fn build_status_dto(context: &RebornCliContext) -> anyhow::Result<StatusDto> {
             subagent_planned: convert_component_status(&snapshot.subagent_planned_driver),
             planned_default_profile: convert_component_status(&snapshot.planned_default_profile),
         },
+        login_link: resolve_login_link(home),
     })
+}
+
+/// `status` reprints the CLI-token login link `onboard` originally printed
+/// — the returning-user story: `sessionStorage` is per-browser-session, so
+/// a closed browser needs a fresh link, and `status` is the way to get one
+/// without rerunning `onboard`. Reuses `onboard`'s own resolver
+/// (`commands::onboard::login_link`) rather than re-deriving the
+/// host:port/token construction here — see this repo's shared-resolver
+/// convention for auth-adjacent links.
+#[cfg(feature = "webui-v2-beta")]
+fn resolve_login_link(home: &ironclaw_reborn_config::RebornHome) -> Option<String> {
+    crate::commands::onboard::login_link(home)
+}
+
+#[cfg(not(feature = "webui-v2-beta"))]
+fn resolve_login_link(_home: &ironclaw_reborn_config::RebornHome) -> Option<String> {
+    None
 }
 
 pub(super) fn convert_component_status(status: &RebornRuntimeComponentStatus) -> ComponentStatus {
@@ -106,6 +124,9 @@ impl Renderable for StatusDto {
             ),
         )?;
         kv(w, "model_slots", &self.model_slots.join(", "))?;
+        if let Some(login_link) = &self.login_link {
+            kv(w, "login_link", login_link)?;
+        }
         writeln!(w)?;
         writeln!(w, "drivers:")?;
         driver_line(w, "  text_only", &self.drivers.text_only)?;
@@ -145,6 +166,41 @@ mod tests {
         let dto = build_status_dto(&context).expect("must build");
         assert_eq!(dto.version, env!("CARGO_PKG_VERSION"));
         assert!(!dto.model_slots.is_empty());
+        assert!(
+            dto.login_link.is_none(),
+            "no webui-token file exists yet, so there is nothing to link into: {:?}",
+            dto.login_link
+        );
+    }
+
+    /// RED (B4 step 6): `status` must reprint the same CLI-token login link
+    /// `onboard` printed — the returning-user story (see `resolve_login_link`'s
+    /// doc: `sessionStorage` is per-browser-session, so a closed browser needs
+    /// a fresh link without rerunning `onboard`).
+    #[cfg(feature = "webui-v2-beta")]
+    #[test]
+    fn status_dto_includes_login_link_once_a_valid_webui_token_file_exists() {
+        let (_tmp, context) = RebornCliContext::test_context();
+        let home = context.boot_config().home();
+        std::fs::create_dir_all(home.path()).expect("create reborn home");
+        std::fs::write(
+            home.path().join("webui-token"),
+            "reborn-status-test-token-0123456789abcdef",
+        )
+        .expect("seed webui-token file");
+
+        let dto = build_status_dto(&context).expect("must build");
+        let login_link = dto
+            .login_link
+            .expect("a valid webui-token file must produce a login link");
+        assert!(
+            login_link.contains("/login?token=reborn-status-test-token-0123456789abcdef"),
+            "login_link must carry the token file's contents: {login_link}"
+        );
+        assert!(
+            login_link.starts_with("http://127.0.0.1:3000/"),
+            "login_link must use serve's default host:port: {login_link}"
+        );
     }
 
     #[test]

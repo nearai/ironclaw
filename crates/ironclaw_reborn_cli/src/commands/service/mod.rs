@@ -230,6 +230,18 @@ impl ServicePlatform {
     }
 }
 
+/// Install then start the OS service in one call — the composition
+/// `onboard`'s finale uses so a fresh install ends with `serve` actually
+/// running, not just registered. Delegates to the same per-platform
+/// `install`/`start` verbs `service install`/`service start` use; does not
+/// widen `ServicePlatform`'s visibility (see the module doc's dispatch
+/// note) — this free function is the one cross-module seam instead.
+pub(crate) fn install_and_start(context: &RebornCliContext) -> Result<()> {
+    let platform = ServicePlatform::detect()?;
+    platform.install(context)?;
+    platform.start()
+}
+
 // ── Path helpers ────────────────────────────────────────────────
 
 /// The OS user's real home directory (`$HOME`), used only for the

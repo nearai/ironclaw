@@ -35,6 +35,7 @@ fn sample_status() -> StatusDto {
             },
             planned_default_profile: ComponentStatus::Initialized,
         },
+        login_link: Some("http://127.0.0.1:3000/login?token=sample-token".to_string()),
     }
 }
 
@@ -133,6 +134,19 @@ fn status_render_text_contains_all_fields() {
     assert!(text.contains("planned: initialized"));
     assert!(text.contains("subagent_planned: unavailable (missing loop family)"));
     assert!(text.contains("planned_default_profile: initialized"));
+    assert!(text.contains("login_link:"));
+    assert!(text.contains("http://127.0.0.1:3000/login?token=sample-token"));
+}
+
+#[test]
+fn status_render_text_omits_login_link_line_when_absent() {
+    let mut status = sample_status();
+    status.login_link = None;
+    let text = render_to_string(&status);
+    assert!(
+        !text.contains("login_link:"),
+        "no login_link line should be printed when the DTO carries None: {text}"
+    );
 }
 
 #[test]
