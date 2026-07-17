@@ -34,11 +34,12 @@
 //! every scope by a `resolve_for_scope` adapter (`scope_gateway.rs`'s
 //! pattern for runtimes whose thread scopes are minted at bind time).
 //!
-//! Manual-QA catalog rows this scenario covers (coverage map:
+//! Manual-QA catalog rows this bin covers (coverage map:
 //! `docs/qa/telegram-coverage-map.md`): qa-telegram admin-setup happy path,
 //! unpaired-activation pairing gate, `/start <CODE>` consume + blocked-run
-//! resume, paired-DM turn + outbound render, and webhook secret
-//! verification on the live route.
+//! resume, paired-DM turn + outbound render, webhook secret verification on
+//! the live route, and the in-DM extension-install gate feedback regression
+//! (see `telegram_dm_slack_install_gates_with_action_needed_notice_not_silence`).
 
 #[allow(dead_code)]
 #[path = "support/mod.rs"]
@@ -303,31 +304,65 @@ async fn wait_for_run_status(
     Err(format!("run never reached {expected:?}"))
 }
 
-#[tokio::test]
-async fn telegram_whole_journey_setup_pair_resume_and_dm_reply() {
+/// The composed production stack every scenario in this bin drives: runtime,
+/// telegram host mounts, WebUI bundle over the telegram facades, and the
+/// scripted network. `_root` keeps the storage tempdir alive.
+struct JourneyStack {
+    _root: tempfile::TempDir,
+    network: Arc<ScriptedTelegramNetwork>,
+    runtime: ironclaw_reborn_composition::RebornRuntime,
+    mounts: ironclaw_reborn_composition::TelegramHostMounts,
+    webui: ironclaw_reborn_composition::RebornWebuiBundle,
+    caller: WebUiAuthenticatedCaller,
+}
+
+impl JourneyStack {
+    /// Deliver a verified private-chat webhook update and drain the
+    /// immediate-ack dispatch tasks so its turn/consume settles.
+    async fn webhook_dm(&self, secret: &str, update_id: i64, text: &str) -> StatusCode {
+        let (status, _body) = call_route(
+            self.mounts.events.router.clone(),
+            Method::POST,
+            "/webhooks/extensions/telegram/updates",
+            None,
+            &[(SECRET_HEADER, secret)],
+            Some(dm_update(update_id, text)),
+        )
+        .await;
+        if let Some(drain) = self.mounts.events.drain.as_ref() {
+            drain.drain().await;
+        }
+        status
+    }
+
+    /// Poll the scripted network for a `sendMessage` into the DM chat whose
+    /// text matches `predicate`.
+    async fn wait_for_dm_send(&self, predicate: impl Fn(&str) -> bool) -> Result<Value, String> {
+        for _ in 0..200 {
+            let sends = self.network.request_bodies_for("/sendMessage");
+            if let Some(body) = sends.iter().find(|body| {
+                body["chat_id"] == TG_CHAT_ID && body["text"].as_str().is_some_and(&predicate)
+            }) {
+                return Ok(body.clone());
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+        Err(format!(
+            "no matching DM sendMessage; captured: {:?}",
+            self.network.request_bodies_for("/sendMessage")
+        ))
+    }
+}
+
+/// Build the production stack with the given model script (FIFO across every
+/// turn the scenario drives).
+async fn build_journey_stack(
+    replies: impl IntoIterator<Item = RebornScriptedReply>,
+) -> JourneyStack {
     let root = tempdir().expect("runtime storage tempdir");
     let storage_root = root.path().join("local-dev");
     let network = Arc::new(ScriptedTelegramNetwork::default());
-
-    // Turn A (WebChat): install + activate telegram; activation parks on the
-    // pairing gate and, once resumed, the model reacts to the completed
-    // activation with the final text. Turn B (Telegram DM): plain reply.
-    let gateway = scripted_chain_gateway(
-        root.path(),
-        [
-            RebornScriptedReply::tool_call(
-                "builtin.extension_install",
-                json!({"extension_id": "telegram"}),
-            ),
-            RebornScriptedReply::tool_call(
-                "builtin.extension_activate",
-                json!({"extension_id": "telegram"}),
-            ),
-            RebornScriptedReply::text("telegram is ready"),
-            RebornScriptedReply::text("hello from your ironclaw bot"),
-        ],
-    )
-    .await;
+    let gateway = scripted_chain_gateway(root.path(), replies).await;
 
     let input = RebornBuildInput::local_dev(USER, storage_root.clone())
         .with_local_runtime_identity(
@@ -363,7 +398,95 @@ async fn telegram_whole_journey_setup_pair_resume_and_dm_reply() {
     .expect("telegram host mounts build");
     let webui = build_webui_services_with_telegram_host_mounts(&runtime, None, Some(&mounts))
         .expect("webui bundle builds over the telegram facades");
-    let caller = journey_caller();
+    JourneyStack {
+        _root: root,
+        network,
+        runtime,
+        mounts,
+        webui,
+        caller: journey_caller(),
+    }
+}
+
+/// Admin-save the bot token through the real protected route and return the
+/// webhook secret captured from the `setWebhook` body (exactly where Telegram
+/// would hold it).
+async fn admin_save(stack: &JourneyStack) -> String {
+    let (status, body) = call_route(
+        stack.mounts.protected_routes().router,
+        Method::PUT,
+        "/api/webchat/v2/channels/telegram/setup",
+        Some(stack.caller.clone()),
+        &[],
+        Some(json!({"bot_token": BOT_TOKEN})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "admin save response: {body}");
+    let set_webhook_bodies = stack.network.request_bodies_for("/setWebhook");
+    set_webhook_bodies
+        .last()
+        .and_then(|body| body["secret_token"].as_str())
+        .expect("setWebhook carries the minted secret")
+        .to_string()
+}
+
+/// Mint a pairing code via the real pairing route and consume it over the
+/// verified webhook; asserts the pairing facade flips to connected.
+async fn pair_via_webhook(stack: &JourneyStack, secret: &str, update_id: i64) {
+    let (status, body) = call_route(
+        stack.mounts.protected_routes().router,
+        Method::POST,
+        "/api/webchat/v2/channels/telegram/pairing",
+        Some(stack.caller.clone()),
+        &[],
+        Some(json!({})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "pairing issue: {body}");
+    let code = body["code"].as_str().expect("pairing code").to_string();
+    let status = stack
+        .webhook_dm(secret, update_id, &format!("/start {code}"))
+        .await;
+    assert_eq!(status, StatusCode::OK, "verified /start consume acks 200");
+    let (status, body) = call_route(
+        stack.mounts.protected_routes().router,
+        Method::GET,
+        "/api/webchat/v2/channels/telegram/pairing",
+        Some(stack.caller.clone()),
+        &[],
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["connected"], true, "consume must bind: {body}");
+}
+
+#[tokio::test]
+async fn telegram_whole_journey_setup_pair_resume_and_dm_reply() {
+    // Turn A (WebChat): install + activate telegram; activation parks on the
+    // pairing gate and, once resumed, the model reacts to the completed
+    // activation with the final text. Turn B (Telegram DM): plain reply.
+    let stack = build_journey_stack([
+        RebornScriptedReply::tool_call(
+            "builtin.extension_install",
+            json!({"extension_id": "telegram"}),
+        ),
+        RebornScriptedReply::tool_call(
+            "builtin.extension_activate",
+            json!({"extension_id": "telegram"}),
+        ),
+        RebornScriptedReply::text("telegram is ready"),
+        RebornScriptedReply::text("hello from your ironclaw bot"),
+    ])
+    .await;
+    let JourneyStack {
+        _root,
+        network,
+        runtime,
+        mounts,
+        webui,
+        caller,
+    } = stack;
     let protected = mounts.protected_routes();
 
     // ── Seam 1: admin save → getMe + setWebhook at the network boundary ────
@@ -643,4 +766,104 @@ async fn telegram_whole_journey_setup_pair_resume_and_dm_reply() {
 
     drop(webui);
     runtime.shutdown().await.expect("runtime shuts down");
+}
+
+/// Ben's regression (2026-07-16): a paired user DMed the bot "can you
+/// install slack" and the conversation HUNG — the run parked on slack's
+/// OAuth setup gate, and with `TelegramDeliveryProtocol::post_status_message`
+/// unwired in v1 every host-authored notice (working message, blocked-run
+/// action-needed prompt, busy hints) silently failed, so the DM saw nothing
+/// and follow-up messages produced nothing. This pins the fixed contract:
+///
+/// 1. a paired DM asking for a slack install runs the REAL
+///    `builtin.extension_install` + `builtin.extension_activate` capabilities;
+///    slack's activation gates on its personal-OAuth credential requirement;
+/// 2. the DM RECEIVES host-authored feedback about the gate (via the wired
+///    `sendMessage` status path — never silence);
+/// 3. the channel is not wedged: a follow-up DM still gets host feedback.
+///
+/// Covers (docs/qa/telegram-coverage-map.md): the cross-extension in-DM
+/// install/gate rows of qa-telegram Conversations + the deferred-busy
+/// feedback rows of Telegram Failure and Recovery.
+#[tokio::test]
+async fn telegram_dm_slack_install_gates_with_action_needed_notice_not_silence() {
+    // FIFO: the DM turn calls install then activate; activate parks on the
+    // slack OAuth gate, so the post-resume entry and the follow-up-turn entry
+    // may stay unconsumed depending on how the gate resolves — both are
+    // scripted so neither outcome can starve the trace.
+    let stack = build_journey_stack([
+        RebornScriptedReply::tool_call(
+            "builtin.extension_install",
+            json!({"extension_id": "slack"}),
+        ),
+        RebornScriptedReply::tool_call(
+            "builtin.extension_activate",
+            json!({"extension_id": "slack"}),
+        ),
+        RebornScriptedReply::text("slack is connected"),
+        RebornScriptedReply::text("still here"),
+    ])
+    .await;
+
+    let secret = admin_save(&stack).await;
+    pair_via_webhook(&stack, &secret, 1).await;
+    let sends_after_pairing = stack.network.request_bodies_for("/sendMessage").len();
+
+    // The regression trigger: a paired DM asking for a slack install.
+    let status = stack
+        .webhook_dm(&secret, 2, "can you install slack for me?")
+        .await;
+    assert_eq!(status, StatusCode::OK, "paired DM webhook acks 200");
+
+    // The working message posts first ("Ironclaw is thinking...") — the
+    // observer's placeholder, riding the wired status path. Its silent
+    // failure was half of the "hung" experience.
+    stack
+        .wait_for_dm_send(|text| text.contains("Ironclaw is thinking"))
+        .await
+        .expect("the DM turn must post the working message, not silence");
+
+    // Slack's activation parks on its personal-OAuth credential requirement.
+    // Local-dev has no slack OAuth client config, so the challenge is
+    // credential-entry shaped and the observer takes the deny arm: it cancels
+    // the blocked run and posts the host-authored "set this up in the web
+    // app" notice — via the SAME wired status path that used to fail
+    // silently. (A deployment with slack OAuth configured takes the
+    // link-prompt arm instead and renders the authorization URL through the
+    // adapter; either way the DM is never silent.)
+    let notice = stack
+        .wait_for_dm_send(|text| text.contains("credential-based connections can only be set up"))
+        .await
+        .expect("the gated slack install must produce the action-needed DM notice, not silence");
+    assert_eq!(notice["chat_id"], TG_CHAT_ID);
+    assert!(
+        notice["text"]
+            .as_str()
+            .is_some_and(|text| text.contains("ask me again here")),
+        "the notice tells the user how to recover: {notice}"
+    );
+
+    // Not wedged: a follow-up DM still produces host feedback (a busy hint
+    // for the parked run, or a fresh reply if the gate auto-resolved).
+    let before_follow_up = stack.network.request_bodies_for("/sendMessage").len();
+    assert!(
+        before_follow_up > sends_after_pairing,
+        "the gate notice itself must be a new send"
+    );
+    let status = stack.webhook_dm(&secret, 3, "are you still there?").await;
+    assert_eq!(status, StatusCode::OK, "follow-up DM webhook acks 200");
+    for _ in 0..200 {
+        if stack.network.request_bodies_for("/sendMessage").len() > before_follow_up {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+    let all_sends = stack.network.request_bodies_for("/sendMessage");
+    assert!(
+        all_sends.len() > before_follow_up,
+        "a follow-up DM to a gated conversation must still get host feedback \
+         (busy hint or reply), got no new sends: {all_sends:?}"
+    );
+
+    stack.runtime.shutdown().await.expect("runtime shuts down");
 }
