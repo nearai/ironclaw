@@ -225,21 +225,21 @@ git commit -m "refactor(reborn): move prompt projection contracts below composit
 - Consumes: product-workflow prompt helpers, `ChannelDeliveryProtocol`, outbound stores/policy, product adapter/egress, thread/turn services, and trigger events.
 - Produces the existing public behavior under `ironclaw_channel_delivery::{FinalReplyDeliveryObserver, FinalReplyDeliveryServices, FinalReplyDeliverySettings, PostSubmitDeliveryHook, NoopPostSubmitDeliveryHook, CompositePostSubmitDeliveryHook, TriggeredRunDeliveryDriver}`.
 
-- [ ] **Step 1: Create the crate manifest and a failing public API compile test**
+- [x] **Step 1: Create the crate manifest and a failing public API compile test**
 
-The manifest has layer `products`, no default features, and only these production dependencies: `async-trait`, `chrono`, `ironclaw_channel_host`, `ironclaw_outbound`, `ironclaw_product_adapters`, `ironclaw_product_workflow`, `ironclaw_run_state`, `ironclaw_threads`, `ironclaw_triggers`, `ironclaw_turns`, `ironclaw_wasm_product_adapters`, and `tokio`.
+The manifest has layer `products`, no default features, and only neutral production dependencies: `async-trait`, `chrono`, `ironclaw_channel_host`, `ironclaw_conversations`, `ironclaw_host_api`, `ironclaw_outbound`, `ironclaw_product_adapters`, `ironclaw_product_workflow`, `ironclaw_run_state`, `ironclaw_threads`, `ironclaw_triggers`, `ironclaw_turns`, `ironclaw_wasm_product_adapters`, `tokio`, and `tracing`. The two additional authority/conversation crates are required by the preserved gate-route and fallback-agent signatures; neither owns a concrete channel or composition policy.
 
 Add a crate test that constructs `FinalReplyDeliverySettings::default()` and asserts all four bounds are non-zero. Run `cargo test -p ironclaw_channel_delivery`; expected compilation failure because the exported types are absent.
 
-- [ ] **Step 2: Move services, observer, actionable, routing, hooks, and triggered code**
+- [x] **Step 2: Move services, observer, actionable, routing, hooks, and triggered code**
 
 Use the locked module responsibilities. Replace composition-qualified prompt/projection calls with product-workflow imports. Make `CompositePostSubmitDeliveryHook` public because runtime assembly is now a downstream consumer. Replace production `NonZeroUsize::new(...).expect(...)` defaults with safe `NonZeroUsize` constants/fallbacks that contain no unwrap/expect.
 
-- [ ] **Step 3: Preserve tests at the new owner**
+- [x] **Step 3: Preserve tests at the new owner**
 
 Move generic unit tests into `src/tests.rs`. Replace composition-owned Slack fixtures with a local recording `ChannelDeliveryProtocol`, local target provider, and host-mediated egress recorder. Keep composition Slack/Telegram whole-path tests as downstream contract tests, not as the engine's unit-test dependency.
 
-- [ ] **Step 4: Rewire all consumers and delete the old production file**
+- [x] **Step 4: Rewire all consumers and delete the old production file**
 
 Re-export only factory-local target registry items from composition `outbound`; import delivery engine types directly from `ironclaw_channel_delivery`. Confirm:
 
@@ -250,7 +250,7 @@ rg -n "outbound::channel_delivery" crates
 
 Expected: first command succeeds and second command prints no production references.
 
-- [ ] **Step 5: Run crate, architecture, Slack, and Telegram delivery tests**
+- [x] **Step 5: Run crate, architecture, Slack, and Telegram delivery tests**
 
 ```bash
 cargo test -p ironclaw_channel_delivery
@@ -261,7 +261,9 @@ cargo test -p ironclaw_reborn_composition --features test-support,webui-v2-beta,
 
 Expected: all pass; generic code contains no `slack` or `telegram` branch.
 
-- [ ] **Step 6: Commit the delivery owner**
+Observed: `cargo test -p ironclaw_channel_delivery` passed 87 unit tests plus the public API test; targeted Clippy passed with `-D warnings`; both dependency/composition boundary suites passed; the all-feature composition target compiled successfully with 1,529 unrelated tests filtered by the historical `channel_delivery` filter.
+
+- [x] **Step 6: Commit the delivery owner**
 
 ```bash
 git add Cargo.toml Cargo.lock crates/ironclaw_channel_delivery crates/ironclaw_reborn_composition crates/ironclaw_architecture
@@ -700,7 +702,7 @@ git commit -m "docs(reborn): complete PR 6159 architecture evidence"
 
 ## Material Acceptance Matrix
 
-- [ ] **A1 — Delivery ownership:** Task 3; new crate tests plus composition path ratchet.
+- [x] **A1 — Delivery ownership:** Task 3; `cargo test -p ironclaw_channel_delivery`, targeted Clippy, both Reborn boundary suites, and the deleted composition path ratchet pass.
 - [ ] **A2 — Concrete Telegram state:** Task 5; state tests plus deleted-trait/test-store ratchets.
 - [ ] **A3 — Concrete Bot API:** Task 6; mediated HTTP tests plus deleted-symbol ratchet.
 - [ ] **A4 — DTO cleanup:** Tasks 2, 6, and 7; exact JSON tests plus deleted-symbol/accessor audit.

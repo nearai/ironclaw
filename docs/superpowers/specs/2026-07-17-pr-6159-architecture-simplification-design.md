@@ -414,8 +414,9 @@ This checklist is the durable mapping from the approved design to implementation
 implementation plan expands each row into test-first steps and updates its checkbox only
 after the named evidence is green.
 
-- [ ] **A1 — Delivery ownership:** generic live/triggered/actionable delivery behavior is
-  owned by `ironclaw_channel_delivery`; composition contains factories only.
+- [x] **A1 — Delivery ownership:** generic live/triggered/actionable delivery behavior is
+  owned by `ironclaw_channel_delivery`; its 87 unit tests, public API test, targeted Clippy,
+  and Reborn dependency/composition boundary suites pass, and the old composition path is gone.
 - [ ] **A2 — Concrete Telegram state:** setup, pairing, binding, and DM-target services use
   one filesystem-backed state; the six named same-crate store/provider/resolver traits are
   gone.

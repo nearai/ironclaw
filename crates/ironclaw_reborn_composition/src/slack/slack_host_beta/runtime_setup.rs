@@ -18,7 +18,6 @@ use crate::RebornRuntime;
 use crate::extension_host::extension_lifecycle::{
     ExtensionActivationMode, RebornLocalExtensionManagementPort,
 };
-use crate::outbound::channel_delivery::{PostSubmitDeliveryHook, TriggeredRunDeliveryDriver};
 use crate::outbound::outbound_preferences::OutboundDeliveryTargetEntry;
 use crate::outbound::{OutboundDeliveryTargetProvider, OutboundDeliveryTargetRegistrationOutcome};
 use crate::slack::slack_actor_identity::SlackUserIdentityActorResolver;
@@ -50,6 +49,7 @@ use crate::slack::slack_setup::{
     SlackInstallationSetup, SlackInstallationSetupStore, SlackInstallationSetupUpdate,
     SlackSetupService,
 };
+use ironclaw_channel_delivery::{PostSubmitDeliveryHook, TriggeredRunDeliveryDriver};
 use ironclaw_channel_host::identity::RebornUserIdentityLookup;
 
 use super::{

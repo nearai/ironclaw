@@ -225,19 +225,19 @@ pub use slack::slack_connectable_channel::{
 pub use webui::facade::build_webui_services_with_slack_and_telegram_host_mounts;
 // Exported under either channel-host feature: the delivery observer and the
 // triggered-run driver are adapter-generic machinery in
-// `outbound::channel_delivery`; each channel host injects its own
+// `ironclaw_channel_delivery`; each channel host injects its own
 // adapter/egress/sink plus a `ChannelDeliveryProtocol`.
-#[cfg(feature = "telegram-v2-host-beta")]
-pub use ironclaw_telegram_extension::telegram_channel_routes::{
-    WEBUI_V2_CHANNELS_TELEGRAM_PAIRING_PATH, WEBUI_V2_CHANNELS_TELEGRAM_SETUP_PATH,
-};
 #[cfg(any(feature = "slack-v2-host-beta", feature = "telegram-v2-host-beta"))]
-pub use outbound::channel_delivery::{
+pub use ironclaw_channel_delivery::{
     FinalReplyDeliveryObserver, FinalReplyDeliveryServices, FinalReplyDeliverySettings,
 };
 #[cfg(any(feature = "slack-v2-host-beta", feature = "telegram-v2-host-beta"))]
-pub use outbound::channel_delivery::{
+pub use ironclaw_channel_delivery::{
     NoopPostSubmitDeliveryHook, PostSubmitDeliveryHook, TriggeredRunDeliveryDriver,
+};
+#[cfg(feature = "telegram-v2-host-beta")]
+pub use ironclaw_telegram_extension::telegram_channel_routes::{
+    WEBUI_V2_CHANNELS_TELEGRAM_PAIRING_PATH, WEBUI_V2_CHANNELS_TELEGRAM_SETUP_PATH,
 };
 #[cfg(feature = "slack-v2-host-beta")]
 pub use slack::slack_egress::{

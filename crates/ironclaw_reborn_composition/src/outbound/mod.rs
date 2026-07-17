@@ -1,8 +1,3 @@
-// Adapter-generic delivery machinery for the channel hosts; compiled only
-// when at least one channel host feature is on (its workflow/adapter deps
-// are channel-gated).
-#[cfg(any(feature = "slack-v2-host-beta", feature = "telegram-v2-host-beta"))]
-pub(crate) mod channel_delivery;
 pub(crate) mod outbound_delivery_capability_surface;
 pub(crate) mod outbound_preferences;
 

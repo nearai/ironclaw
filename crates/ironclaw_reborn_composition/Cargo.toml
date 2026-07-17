@@ -46,7 +46,10 @@ root-llm-provider = [
 # budget pipeline end-to-end. Enable with `cargo test --features
 # test-support` (plus whatever feature surface the test crate also
 # requires, e.g. `webui-v2-beta`).
-test-support = ["ironclaw_host_runtime/test-support"]
+test-support = [
+    "ironclaw_channel_delivery/test-support",
+    "ironclaw_host_runtime/test-support",
+]
 # Expose the narrow `extension_installation_store_for_migration` accessor for
 # the v1→Reborn migration tool (`ironclaw_reborn_migration`). Ships zero bytes in
 # a default production binary; mirrors the `test-support` substrate seams.
@@ -125,6 +128,7 @@ deadpool-postgres = { version = "0.14", optional = true }
 futures = "0.3"
 ironclaw_auth = { path = "../ironclaw_auth" }
 ironclaw_channel_host = { path = "../ironclaw_channel_host" }
+ironclaw_channel_delivery = { path = "../ironclaw_channel_delivery" }
 ironclaw_common = { path = "../ironclaw_common" }
 ironclaw_capabilities = { path = "../ironclaw_capabilities" }
 ironclaw_approvals = { path = "../ironclaw_approvals" }

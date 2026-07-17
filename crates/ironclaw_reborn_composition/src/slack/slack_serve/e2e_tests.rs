@@ -68,13 +68,13 @@ use ironclaw_wasm_product_adapters::{
 use tower::ServiceExt;
 
 use super::*;
-use crate::outbound::channel_delivery::{
-    FinalReplyDeliveryObserver, FinalReplyDeliveryServices, FinalReplyDeliverySettings,
-    PostSubmitDeliveryHook, TriggeredRunDeliveryDriver,
-};
 use crate::{
     AuthChallengeProvider, RebornUserIdentityLookup, RebornUserIdentityLookupError,
     SlackUserIdentityActorResolver,
+};
+use ironclaw_channel_delivery::{
+    FinalReplyDeliveryObserver, FinalReplyDeliveryServices, FinalReplyDeliverySettings,
+    PostSubmitDeliveryHook, TriggeredRunDeliveryDriver,
 };
 
 #[path = "e2e_auth_challenge.rs"]

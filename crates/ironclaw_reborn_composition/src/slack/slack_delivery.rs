@@ -2,7 +2,7 @@
 //! vendor seam.
 //!
 //! The final-reply observer and triggered-run delivery driver live in
-//! [`crate::outbound::channel_delivery`]; this module supplies only the
+//! [`ironclaw_channel_delivery`]; this module supplies only the
 //! Slack-native protocol details behind [`ChannelDeliveryProtocol`]: stored
 //! `reply:` ref decoding, the `D…` DM-channel classification, and the
 //! `chat.postMessage`/`chat.delete` Web API status messages.
@@ -15,11 +15,11 @@ use ironclaw_product_adapters::{
 use ironclaw_turns::ReplyTargetBindingRef;
 use serde::{Deserialize, Serialize};
 
-use crate::outbound::channel_delivery::{
-    ChannelDeliveryProtocol, FinalReplyDeliveryError, PostedChannelMessage,
-};
 use crate::slack::slack_outbound_targets::{
     slack_conversation_id_from_reply_target_binding_ref, slack_reply_target_is_personal_dm,
+};
+use ironclaw_channel_delivery::{
+    ChannelDeliveryProtocol, FinalReplyDeliveryError, PostedChannelMessage,
 };
 
 const SLACK_API_HOST: &str = "slack.com";

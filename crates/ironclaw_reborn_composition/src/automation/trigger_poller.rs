@@ -25,9 +25,9 @@ pub(crate) use crate::automation::trigger_poller_trusted_submit::AccessCheckerTr
 pub(crate) use crate::automation::trigger_poller_trusted_submit::ConversationContentRefMaterializer;
 #[cfg(any(test, feature = "test-support"))]
 pub(crate) use crate::automation::trigger_poller_trusted_submit::TenantScopedTrustedTriggerFireAuthorizer;
-#[cfg(any(feature = "slack-v2-host-beta", feature = "telegram-v2-host-beta"))]
-use crate::outbound::channel_delivery::PostSubmitDeliveryHook;
 use crate::runtime_input::TriggerPollerSettings;
+#[cfg(any(feature = "slack-v2-host-beta", feature = "telegram-v2-host-beta"))]
+use ironclaw_channel_delivery::PostSubmitDeliveryHook;
 
 mod active_run_lookup;
 pub(crate) use active_run_lookup::SnapshotActiveRunLookup;
@@ -351,7 +351,7 @@ mod tests {
         use tokio_util::sync::CancellationToken;
 
         use super::super::{POST_SUBMIT_HOOK_PENDING_CAPACITY, PostSubmitHookObserver};
-        use crate::outbound::channel_delivery::PostSubmitDeliveryHook;
+        use ironclaw_channel_delivery::PostSubmitDeliveryHook;
 
         #[derive(Default)]
         struct RecordingHook {

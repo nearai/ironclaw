@@ -1,3096 +1,29 @@
-//! Adapter-generic channel delivery machinery for immediate-ACK Reborn
-//! webhooks: the final-reply delivery observer and the triggered-run delivery
-//! driver.
-//!
-//! Push-channel webhooks must 2xx quickly, so the observer runs after the
-//! workflow accepts an inbound message, waits for the submitted run to
-//! finish, reads the finalized assistant reply, and sends it through the
-//! host-mediated product outbound delivery seam. Everything channel-specific
-//! (adapter, egress, sink, and the [`ChannelDeliveryProtocol`] details —
-//! stored-ref decoding, DM classification, status messages) is injected by
-//! the owning channel host; nothing here keys on a concrete channel.
-// arch-exempt: large_file, busy-thread / RejectedBusy hint logic stays here to share observer/test fixtures with final-reply delivery; decomposition tracked in #4818.
-
-use std::collections::hash_map::DefaultHasher;
-use std::hash::{Hash, Hasher};
 use std::num::NonZeroUsize;
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
 use chrono::Utc;
 use ironclaw_outbound::{
-    CommunicationDeliveryIntent, CommunicationDeliveryResolutionRequest, CommunicationModality,
-    CommunicationPreferenceRepository, DeliveredGateRouteRecord, DeliveredGateRouteStore,
-    OutboundError, OutboundPolicyService, OutboundStateStore, ProjectionUpdateRef,
-    ReplyTargetBindingClaim, ReplyTargetBindingValidator, ReplyTargetValidationRequest,
-    RunNotificationContext, RunNotificationEventKind, RunNotificationOrigin, SourceRouteContext,
-    TriggerCommunicationContext, TriggerFireSlot, TriggerOriginRef, TriggerSourceKind,
+    CommunicationPreferenceRepository, DeliveredGateRouteStore,
     TriggeredRunDeliveryOutcomeKind, TriggeredRunDeliveryRecord, TriggeredRunDeliveryStore,
-    ValidatedReplyTargetBinding,
 };
 use ironclaw_product_adapters::{
-    ApprovalPromptContextView, AuthPromptView, EgressRequest, EgressResponse, ExternalActorRef,
-    ExternalConversationRef, ExternalEventId, FinalReplyView, GatePromptView, OutboundDeliverySink,
-    ProductAdapter, ProductAdapterError, ProductInboundAck, ProductInboundEnvelope,
-    ProductInboundPayload, ProductOutboundPayload, ProductRejection, ProductRejectionKind,
-    ProductWorkflowRejectionKind, ProtocolHttpEgress, ProtocolHttpEgressError,
+    ApprovalPromptContextView, EgressRequest,
+    ExternalConversationRef, OutboundDeliverySink, ProductAdapterError, ProductInboundAck, ProductInboundEnvelope,
+    ProductInboundPayload, ProductOutboundPayload, ProductRejectionKind,
+    ProductWorkflowRejectionKind, ProtocolHttpEgress,
 };
 use ironclaw_product_workflow::{
-    ConversationBindingService, ProductOutboundDeliveryRequest, ProductOutboundTargetResolver,
-    ProductWorkflowError, ResolveBindingRequest, ResolvedBinding,
-    VerifiedProductOutboundTargetMetadata, approval_prompt_context_view, enrich_auth_prompt_view,
-    is_approval_gate_ref, prepare_and_render_product_outbound,
+    AuthChallengeProvider, BlockedAuthFlowCanceller, ConversationBindingService, ProductWorkflowError,
+    ResolveBindingRequest, ResolvedBinding,
 };
-use ironclaw_run_state::ApprovalRequestStore;
-use ironclaw_threads::{FinalizedAssistantMessageByRunRequest, SessionThreadService, ThreadScope};
 use ironclaw_triggers::TriggerFire;
 use ironclaw_turns::{
-    GateRef, GetRunStateRequest, ReplyTargetBindingRef, TurnActor, TurnCoordinator,
-    TurnErrorCategory, TurnRunId, TurnRunState, TurnScope, TurnStatus,
+    ReplyTargetBindingRef, TurnRunId, TurnScope,
 };
 use ironclaw_wasm_product_adapters::ImmediateAckWorkflowObserver;
-use std::collections::{HashSet, VecDeque};
-use tokio::sync::Semaphore;
 
-use crate::{AuthChallengeProvider, BlockedAuthFlowCanceller};
-
-// The per-channel protocol seam this machinery is generic over lives in
-// `ironclaw_channel_host` so channel host crates can implement it without a
-// composition dependency; re-exported here so composition-internal consumers
-// keep one canonical path to the delivery module's vocabulary.
-pub(crate) use ironclaw_channel_host::delivery_protocol::{
-    ChannelDeliveryProtocol, FinalReplyDeliveryError, PostedChannelMessage,
-};
-
-const MAX_RUN_POLL_INTERVAL: Duration = Duration::from_secs(5);
-const DEFAULT_TRIGGERED_RUN_DELIVERY_MAX_WAIT: Duration = Duration::from_secs(30 * 60);
-const RUN_POLL_JITTER_BUCKETS: u32 = 5;
-const CHANNEL_WORKING_MESSAGE: &str = "Ironclaw is thinking...";
-const CHANNEL_AUTH_CANCELED_MESSAGE: &str = "Authentication canceled.";
-/// Posted when a run blocks on a credential-entry (non-OAuth) auth challenge:
-/// entering a secret in chat is a security risk, so it must be done in the web app.
-const CHANNEL_AUTH_UNAVAILABLE_MESSAGE: &str = "Setting this up needs a credential (an API key or token). Sharing one here is a security risk — anything entered in chat is stored in the conversation — so credential-based connections can only be set up in the Ironclaw web app. Connect it there, then ask me again here.";
-const CHANNEL_DELIVERY_TIMEOUT_MESSAGE: &str =
-    "This is taking longer than expected — check the WebUI for the result.";
-const CHANNEL_DELIVERY_ERROR_MESSAGE: &str =
-    "Something went wrong delivering the result here. Check the WebUI.";
-/// Posted when the blocking run is `BlockedApproval` and no gate_ref is available.
-const CHANNEL_BUSY_APPROVAL_MESSAGE: &str = "Ironclaw is waiting on a pending approval before taking new messages — reply `approve` or `deny` (or `approve gate:<ref>`) to resume.";
-/// Posted for any other non-terminal blocking state, or when the state lookup fails.
-const CHANNEL_BUSY_GENERIC_MESSAGE: &str = "Ironclaw is still working on a previous message and can't take this one yet — please resend it once the current task finishes.";
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct BlockedActionableMarker {
-    status: TurnStatus,
-    gate_ref: Option<String>,
-}
-
-struct ChannelActionableNotification {
-    event_kind: RunNotificationEventKind,
-    payload: ProductOutboundPayload,
-    /// Gate ref for approval prompts on triggered runs; consumed by the
-    /// delivered-gate route record so a DM reply can resolve the gate on the
-    /// triggered run's thread. `None` for live-run notifications (same-thread
-    /// replies need no routing) and non-approval and non-auth kinds.
-    gate_ref_for_routing: Option<String>,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct FinalReplyDeliverySettings {
-    pub poll_interval: Duration,
-    pub max_wait: Duration,
-    pub max_concurrent_deliveries: NonZeroUsize,
-    /// Bounds the total number of spawned delivery tasks (active + waiting for a
-    /// delivery permit). When this limit is reached, new trigger fires are
-    /// recorded as `Skipped` rather than spawning an unbounded waiting task.
-    pub max_pending_deliveries: NonZeroUsize,
-}
-
-impl Default for FinalReplyDeliverySettings {
-    fn default() -> Self {
-        Self {
-            poll_interval: Duration::from_millis(250),
-            max_wait: Duration::from_secs(120),
-            max_concurrent_deliveries: NonZeroUsize::new(64).expect("non-zero literal"), // safety: static default literal is non-zero.
-            max_pending_deliveries: NonZeroUsize::new(256).expect("non-zero literal"), // safety: static default literal is non-zero.
-        }
-    }
-}
-
-pub struct FinalReplyDeliveryServices {
-    /// Channel-specific protocol details (ref decoding, DM classification,
-    /// status messages) — supplied by the owning channel host.
-    pub channel_protocol: Arc<dyn ChannelDeliveryProtocol>,
-    pub binding_service: Arc<dyn ConversationBindingService>,
-    pub thread_service: Arc<dyn SessionThreadService>,
-    pub turn_coordinator: Arc<dyn TurnCoordinator>,
-    pub outbound_store: Arc<dyn OutboundStateStore>,
-    pub route_store: Arc<dyn DeliveredGateRouteStore>,
-    pub communication_preferences: Arc<dyn CommunicationPreferenceRepository>,
-    pub adapter: Arc<dyn ProductAdapter>,
-    pub egress: Arc<dyn ProtocolHttpEgress>,
-    pub delivery_sink: Arc<dyn OutboundDeliverySink>,
-    /// Resolves auth challenges for `BlockedAuth` runs. Only link-based OAuth
-    /// challenges are surfaced in Slack; other challenge kinds are denied (see the
-    /// `BlockedAuth` arm of `notification_for_actionable_state`).
-    pub auth_challenges: Option<Arc<dyn AuthChallengeProvider>>,
-    /// Cancels the durable `AuthFlow` record whenever a `BlockedAuth` run is
-    /// auto-cancelled by the Slack delivery path. Threaded through the shared
-    /// `cancel_auth_blocked_run` helper, so it covers every caller that cancels a
-    /// blocked-auth run: the live observer non-OAuth deny arm, the triggered
-    /// non-OAuth deny arm, and the OAuth send-time DM backstop. The Slack path
-    /// cancels the run directly via `TurnCoordinator` (it does not go through the
-    /// canonical `AuthInteractionService` deny path), which would otherwise leave
-    /// the flow record non-terminal (#4952); this cancels the flow alongside the
-    /// run, after the run cancel succeeds. `None` (e.g. no `flow_record_source`
-    /// wired in) skips the flow cancel and still cancels the run — backward-compatible.
-    pub auth_flow_canceller: Option<Arc<dyn BlockedAuthFlowCanceller>>,
-    /// Store used to resolve an approval gate's request details (tool/action/reason)
-    /// so the Slack approval prompt can say WHAT is being approved — the same
-    /// source the WebUI projection reads. `None` disables the enrichment.
-    pub approval_requests: Option<Arc<dyn ApprovalRequestStore>>,
-}
-
-/// Maximum number of (conversation, external_event_id) pairs remembered for hint dedup.
-/// FIFO eviction beyond this cap keeps memory O(1); a false-negative after
-/// eviction just means one extra hint, which is harmless.
-const HINT_SEEN_CAP: usize = 256;
-
-/// Throttle key for the busy-thread hint: one hint per (conversation fingerprint, external event id).
-///
-/// Using `ExternalEventId` instead of `TurnRunId` means:
-/// - Transport retries of the **same** Slack event share the same `external_event_id`, so
-///   they are deduplicated here — no duplicate hints on retries.
-/// - Each **new** human message has a distinct `external_event_id`, so each new message
-///   gets a fresh hint even if the same blocking run is still active.
-type HintSeenKey = (String, ExternalEventId);
-type HintSeenSet = Mutex<(VecDeque<HintSeenKey>, HashSet<HintSeenKey>)>;
-
-pub struct FinalReplyDeliveryObserver {
-    services: FinalReplyDeliveryServices,
-    settings: FinalReplyDeliverySettings,
-    delivery_permits: Arc<Semaphore>,
-    /// Per-observer throttle: at most one busy-thread hint per
-    /// (conversation fingerprint, external_event_id) pair.
-    /// Transport retries of the same Slack event share the same external_event_id, so
-    /// they are deduplicated here. Each distinct new human message gets a fresh hint
-    /// even if the same blocking run is still active.
-    /// Bounded FIFO eviction keeps memory O(1); a false-negative after eviction just
-    /// means one extra hint, harmless.
-    hint_seen: HintSeenSet,
-    /// Single-flight guard: at most one live `deliver_final_reply` loop per run_id.
-    ///
-    /// A gate-resolution ack (`ApprovalResolution(Allow)` / `AuthResolution(Allowed)`)
-    /// carries the same `submitted_run_id` as the original user-message ack because it
-    /// resumes the pre-existing run rather than creating a new one. Without this guard,
-    /// each resolution ack would spawn a second delivery loop for the same run while the
-    /// original loop is still watching — N resolutions ⇒ N+1 concurrent loops ⇒ gate N
-    /// posted N times. The original loop detects the unblock and posts the next gate
-    /// exactly once, so resolution-ack loops are always redundant duplicates.
-    active_delivery_run_ids: Mutex<HashSet<TurnRunId>>,
-}
-
-/// RAII guard that removes a `run_id` from `active_delivery_run_ids` on drop.
-///
-/// Acquired before the delivery semaphore permit so that a concurrent ack for
-/// the same run_id is rejected immediately — without competing for a permit and
-/// without the TOCTOU window that existed when the permit was acquired first.
-///
-/// Panic-safe: `Drop` uses `unwrap_or_else(|e| e.into_inner())` to tolerate a
-/// poisoned mutex, so the run_id is always removed even if `deliver_final_reply`
-/// panics.
-struct RunDeliveryGuard<'a> {
-    set: &'a Mutex<HashSet<TurnRunId>>,
-    run_id: TurnRunId,
-}
-
-impl Drop for RunDeliveryGuard<'_> {
-    fn drop(&mut self) {
-        self.set
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .remove(&self.run_id);
-    }
-}
-
-impl FinalReplyDeliveryObserver {
-    pub fn new(services: FinalReplyDeliveryServices) -> Self {
-        Self::with_settings(services, FinalReplyDeliverySettings::default())
-    }
-
-    pub fn with_settings(
-        services: FinalReplyDeliveryServices,
-        settings: FinalReplyDeliverySettings,
-    ) -> Self {
-        Self {
-            services,
-            settings,
-            delivery_permits: Arc::new(Semaphore::new(settings.max_concurrent_deliveries.get())),
-            hint_seen: Mutex::new((VecDeque::new(), HashSet::new())),
-            active_delivery_run_ids: Mutex::new(HashSet::new()),
-        }
-    }
-
-    async fn deliver_final_reply(
-        &self,
-        envelope: ProductInboundEnvelope,
-        ack: ProductInboundAck,
-    ) -> Result<(), FinalReplyDeliveryError> {
-        if is_accepted_auth_denial(&envelope, &ack) {
-            self.services
-                .channel_protocol
-                .post_status_message(
-                    self.services.egress.as_ref(),
-                    envelope.external_conversation_ref(),
-                    CHANNEL_AUTH_CANCELED_MESSAGE,
-                )
-                .await?;
-            return Ok(());
-        }
-        if !should_deliver_after_ack(&envelope, &ack) {
-            return Ok(());
-        }
-        let Some(run_id) = submitted_run_id(&ack) else {
-            return Ok(());
-        };
-        let binding = self
-            .services
-            .binding_service
-            .lookup_binding(ResolveBindingRequest::from_envelope(&envelope))
-            .await?;
-        let actor = TurnActor::new(binding.actor_user_id.clone());
-        let thread_scope = thread_scope_from_binding(&binding)?;
-        let scope = turn_scope_from_thread_scope(&binding, &thread_scope)?;
-        // Foreign-run guard: a resolution bridged to a triggered run (the
-        // delivered-gate-route rewrite) resumes a run that lives in the
-        // trigger's own scope, not this Slack conversation's scope. That run is
-        // delivered by its own triggered-delivery loop (`deliver_triggered_run`),
-        // so the live observer must not also poll it here under the conversation
-        // scope — the run isn't found there, which would otherwise surface as a
-        // spurious "something went wrong" delivery error. Skip cleanly and let
-        // the triggered loop own continuation, matching the regular inbound flow.
-        //
-        // The skip only applies to bridged gate/auth resolution payloads. A
-        // normal UserMessage (or other non-resolution payload) must never be
-        // silently dropped here — surface the error instead.
-        let payload_can_bridge_to_foreign_run = matches!(
-            envelope.payload(),
-            ProductInboundPayload::ApprovalResolution(_)
-                | ProductInboundPayload::ScopedApprovalResolution(_)
-                | ProductInboundPayload::AuthResolution(_)
-        );
-        match self
-            .services
-            .turn_coordinator
-            .get_run_state(GetRunStateRequest {
-                scope: scope.clone(),
-                run_id,
-            })
-            .await
-        {
-            Ok(_) => {}
-            Err(error)
-                if payload_can_bridge_to_foreign_run
-                    && matches!(error.category(), TurnErrorCategory::ScopeNotFound) =>
-            {
-                tracing::debug!(
-                    target = "ironclaw::reborn::slack_delivery",
-                    %run_id,
-                    "skipping live Slack delivery: run is not in this conversation scope (triggered/foreign run); its own delivery loop owns continuation"
-                );
-                return Ok(());
-            }
-            Err(error) => return Err(error.into()),
-        }
-        let mut delivered_blocked_marker = None;
-        let mut working_message = None;
-        let mut messages_to_delete_after_final = Vec::new();
-        loop {
-            let actionable_state = self
-                .wait_for_actionable(
-                    &scope,
-                    run_id,
-                    delivered_blocked_marker.as_ref(),
-                    &envelope,
-                    &mut working_message,
-                )
-                .await
-                .map_err(|err| {
-                    // If we already delivered a blocked-state notification
-                    // (approval/auth prompt), a timeout does not leave the user
-                    // in silence — convert to the quieter variant so A3 does
-                    // not double-post.
-                    if matches!(err, FinalReplyDeliveryError::RunWaitTimedOut { .. })
-                        && delivered_blocked_marker.is_some()
-                    {
-                        FinalReplyDeliveryError::RunWaitTimedOutAfterNotification { run_id }
-                    } else {
-                        err
-                    }
-                })?;
-            if matches!(
-                actionable_state.status,
-                TurnStatus::BlockedApproval | TurnStatus::BlockedAuth
-            ) {
-                self.delete_status_message_if_present(working_message.take())
-                    .await;
-            }
-            let Some(notification) = self
-                .notification_for_actionable_state(
-                    &envelope,
-                    &binding,
-                    &thread_scope,
-                    &scope,
-                    run_id,
-                    &actionable_state,
-                )
-                .await?
-            else {
-                return Ok(());
-            };
-            let next_blocked_marker = blocked_actionable_marker(&actionable_state);
-            let event_kind = notification.event_kind;
-            let gate_ref_for_routing = notification.gate_ref_for_routing.clone();
-            let posted_messages = self
-                .deliver_run_notification(
-                    &envelope,
-                    &scope,
-                    &actor,
-                    run_id,
-                    &actionable_state,
-                    notification,
-                )
-                .await?;
-            if (event_kind == RunNotificationEventKind::ApprovalNeeded
-                || event_kind == RunNotificationEventKind::AuthRequired)
-                && let Some(gate_ref_str) = gate_ref_for_routing.as_deref()
-            {
-                // Derive the space id from the envelope's conversation ref so that
-                // posted-message refs carry the Slack team id (space_id). Inbound
-                // events set space_id = team_id, so without this the fingerprints
-                // would differ and a reply in the prompt thread would not match.
-                let envelope_space_id =
-                    conversations_ref_from_product_ref(envelope.external_conversation_ref())
-                        .ok()
-                        .and_then(|r| r.space_id().map(str::to_string));
-                record_gate_route_if_needed(
-                    self.services.route_store.as_ref(),
-                    run_id,
-                    &scope.tenant_id,
-                    &binding.actor_user_id,
-                    gate_ref_str,
-                    &scope,
-                    &posted_messages,
-                    Some(envelope.external_conversation_ref()),
-                    envelope_space_id.as_deref(),
-                )
-                .await;
-            }
-
-            let Some(marker) = next_blocked_marker else {
-                self.delete_status_message_if_present(working_message.take())
-                    .await;
-                for message in messages_to_delete_after_final {
-                    self.delete_posted_status_message(message).await;
-                }
-                return Ok(());
-            };
-            if posted_messages.is_empty() {
-                // The marker is still recorded below so the wait loop doesn't
-                // hot-loop re-rendering the same prompt, but a blocked-state
-                // notification that posted nothing means the user was NOT
-                // told why the run stopped — exactly how the Telegram
-                // AuthPrompt defer stub turned an auth gate into silence
-                // (2026-07-17). Keep this loud.
-                tracing::warn!(
-                    target = "ironclaw::reborn::slack_delivery",
-                    %run_id,
-                    ?event_kind,
-                    "blocked-state notification rendered no channel messages; the user was not notified (adapter deferred or outbound policy suppressed the prompt)"
-                );
-            }
-            if event_kind == RunNotificationEventKind::AuthRequired {
-                messages_to_delete_after_final.extend(posted_messages);
-            }
-            delivered_blocked_marker = Some(marker);
-        }
-    }
-
-    async fn notification_for_actionable_state(
-        &self,
-        envelope: &ProductInboundEnvelope,
-        binding: &ResolvedBinding,
-        thread_scope: &ThreadScope,
-        scope: &TurnScope,
-        run_id: TurnRunId,
-        state: &TurnRunState,
-    ) -> Result<Option<ChannelActionableNotification>, FinalReplyDeliveryError> {
-        let notification = match state.status {
-            TurnStatus::Completed => {
-                let Some(text) = self
-                    .read_latest_assistant_text(thread_scope, binding, run_id)
-                    .await?
-                else {
-                    tracing::warn!(
-                        %run_id,
-                        "completed channel run has no finalized assistant message; skipping final reply delivery"
-                    );
-                    return Ok(None);
-                };
-                ChannelActionableNotification {
-                    event_kind: RunNotificationEventKind::FinalReplyReady,
-                    payload: ProductOutboundPayload::FinalReply(FinalReplyView {
-                        turn_run_id: run_id,
-                        text,
-                        generated_at: Utc::now(),
-                    }),
-                    gate_ref_for_routing: None,
-                }
-            }
-            TurnStatus::BlockedApproval => {
-                let Some(gate_ref) = state.gate_ref.as_ref() else {
-                    tracing::warn!(
-                        %run_id,
-                        "channel run is blocked on approval without a gate ref; skipping approval prompt delivery"
-                    );
-                    return Ok(None);
-                };
-                // Look up WHAT is being approved from the ApprovalRequestStore by
-                // gate ref — the same source the WebUI gate projection uses — so
-                // the prompt names the capability/reason instead of a generic step.
-                let approval_context = approval_prompt_context_view(
-                    self.services.approval_requests.as_deref(),
-                    gate_ref,
-                    &binding.actor_user_id,
-                    scope,
-                )
-                .await;
-                ChannelActionableNotification {
-                    event_kind: RunNotificationEventKind::ApprovalNeeded,
-                    payload: ProductOutboundPayload::GatePrompt(channel_approval_gate_prompt_view(
-                        run_id,
-                        gate_ref,
-                        approval_context.as_ref(),
-                    )),
-                    gate_ref_for_routing: Some(gate_ref.as_str().to_string()),
-                }
-            }
-            TurnStatus::BlockedAuth => {
-                let Some(gate_ref) = state.gate_ref.as_ref() else {
-                    tracing::warn!(
-                        %run_id,
-                        "channel run is blocked on auth without a gate ref; skipping auth handling"
-                    );
-                    return Ok(None);
-                };
-                let view = enrich_auth_prompt_view(
-                    AuthPromptView {
-                        turn_run_id: run_id,
-                        auth_request_ref: gate_ref.as_str().to_string(),
-                        invocation_id: None,
-                        headline: "Authentication required".to_string(),
-                        body: "Authenticate to continue this run.".to_string(),
-                        challenge_kind: None,
-                        provider: None,
-                        account_label: None,
-                        authorization_url: None,
-                        expires_at: None,
-                        connection: None,
-                    },
-                    &binding.actor_user_id,
-                    scope,
-                    &state.credential_requirements,
-                    self.services.auth_challenges.as_deref(),
-                )
-                .await?;
-                // Only link-based OAuth is allowed over Slack: the user
-                // authenticates on the provider's site via `authorization_url` and
-                // the callback stores the credential server-side — nothing secret
-                // is entered into the chat surface. Any other challenge (manual
-                // token / API-key entry, etc.) would have the user paste a
-                // credential into Slack, so deny it: cancel the run (same outcome
-                // as `auth deny`) and redirect them to the web app.
-                if view.authorization_url.is_some() {
-                    ChannelActionableNotification {
-                        event_kind: RunNotificationEventKind::AuthRequired,
-                        payload: ProductOutboundPayload::AuthPrompt(channel_auth_prompt_view(
-                            envelope, view,
-                        )),
-                        gate_ref_for_routing: Some(gate_ref.as_str().to_string()),
-                    }
-                } else {
-                    // Deny: cancel the parked run (a backend `cancel_run`, same
-                    // outcome as `auth deny`) and post the denial directly. We
-                    // post directly — like the busy-thread hint — rather than as a
-                    // RunNotification FinalReply, because the outbound-policy /
-                    // communication-preference machinery is for agent replies, not
-                    // system notices, and gates the synthetic reply. Terminal: no
-                    // notification, so the delivery loop ends here.
-                    self.cancel_slack_auth_blocked_run(
-                        scope,
-                        TurnActor::new(binding.actor_user_id.clone()),
-                        run_id,
-                        gate_ref.as_str(),
-                    )
-                    .await?;
-                    if let Err(error) = self
-                        .services
-                        .channel_protocol
-                        .post_status_message(
-                            self.services.egress.as_ref(),
-                            envelope.external_conversation_ref(),
-                            CHANNEL_AUTH_UNAVAILABLE_MESSAGE,
-                        )
-                        .await
-                    {
-                        tracing::debug!(
-                            target = "ironclaw::reborn::slack_delivery",
-                            %error,
-                            "failed to post Slack auth-unavailable notice (best-effort)"
-                        );
-                    }
-                    return Ok(None);
-                }
-            }
-            _ => return Ok(None),
-        };
-        Ok(Some(notification))
-    }
-
-    /// Auto-deny a Slack run that blocked on interactive auth (disabled on this
-    /// channel). Thin wrapper over the shared [`cancel_auth_blocked_run`] so the
-    /// live observer and the triggered delivery path cancel identically.
-    async fn cancel_slack_auth_blocked_run(
-        &self,
-        scope: &TurnScope,
-        actor: TurnActor,
-        run_id: TurnRunId,
-        gate_ref: &str,
-    ) -> Result<(), FinalReplyDeliveryError> {
-        cancel_auth_blocked_run(
-            self.services.turn_coordinator.as_ref(),
-            self.services.auth_flow_canceller.as_deref(),
-            scope,
-            actor,
-            run_id,
-            Some(gate_ref),
-        )
-        .await
-    }
-
-    async fn deliver_run_notification(
-        &self,
-        envelope: &ProductInboundEnvelope,
-        scope: &TurnScope,
-        actor: &TurnActor,
-        run_id: TurnRunId,
-        state: &TurnRunState,
-        notification: ChannelActionableNotification,
-    ) -> Result<Vec<PostedChannelMessage>, FinalReplyDeliveryError> {
-        let ChannelActionableNotification {
-            event_kind,
-            payload,
-            gate_ref_for_routing: _,
-        } = notification;
-        let reply_target = state.reply_target_binding_ref.clone();
-        let target_authority = ObservedChannelReplyTargetAuthority {
-            channel_protocol: Arc::clone(&self.services.channel_protocol),
-            scope: scope.clone(),
-            actor: actor.clone(),
-            expected_target: reply_target.clone(),
-            external_conversation_ref: envelope.external_conversation_ref().clone(),
-            external_actor_ref: Some(envelope.external_actor_ref().clone()),
-        };
-        let projection_access_policy = AllowNoProjectionAccess;
-        let outbound_policy = OutboundPolicyService::new(
-            self.services.outbound_store.as_ref(),
-            &projection_access_policy,
-            &target_authority,
-        );
-        let projection_id = channel_run_notification_projection_id(run_id, event_kind);
-        let projection_ref = ProjectionUpdateRef::new(projection_id.clone())
-            .map_err(|reason| FinalReplyDeliveryError::InvalidProjectionRef { reason })?;
-        let delivery = ironclaw_outbound::PrepareCommunicationDeliveryRequest {
-            resolution_request: CommunicationDeliveryResolutionRequest {
-                scope: scope.clone(),
-                actor: actor.clone(),
-                modality: CommunicationModality::Text,
-                intent: CommunicationDeliveryIntent::RunNotification(RunNotificationContext {
-                    event_kind,
-                    origin: RunNotificationOrigin::LiveSourceRoute {
-                        source_route: SourceRouteContext {
-                            reply_target_binding_ref: reply_target,
-                        },
-                    },
-                }),
-            },
-            turn_run_id: Some(run_id),
-            projection_ref,
-            attempted_at: Utc::now(),
-        };
-        let tracked_egress = TrackingPostEgress::new(
-            self.services.egress.clone(),
-            Arc::clone(&self.services.channel_protocol),
-        );
-        let _outcome = prepare_and_render_product_outbound(
-            &outbound_policy,
-            self.services.communication_preferences.as_ref(),
-            &target_authority,
-            ProductOutboundDeliveryRequest {
-                delivery,
-                payload,
-                projection_cursor: ironclaw_product_adapters::ProjectionCursor::new(projection_id)
-                    .map_err(|error| FinalReplyDeliveryError::InvalidProjectionRef {
-                        reason: error.to_string(),
-                    })?,
-                adapter: self.services.adapter.as_ref(),
-                egress: &tracked_egress,
-                delivery_sink: self.services.delivery_sink.as_ref(),
-                require_direct_message_target: false,
-            },
-        )
-        .await?;
-        Ok(tracked_egress.take_posted_messages())
-    }
-
-    async fn wait_for_actionable(
-        &self,
-        scope: &TurnScope,
-        run_id: TurnRunId,
-        delivered_blocked_marker: Option<&BlockedActionableMarker>,
-        envelope: &ProductInboundEnvelope,
-        working_message: &mut Option<PostedChannelMessage>,
-    ) -> Result<TurnRunState, FinalReplyDeliveryError> {
-        let start = Instant::now();
-        let mut poll_interval = self.settings.poll_interval;
-        loop {
-            let state = self
-                .services
-                .turn_coordinator
-                .get_run_state(GetRunStateRequest {
-                    scope: scope.clone(),
-                    run_id,
-                })
-                .await?;
-            if state.status.is_terminal() {
-                return Ok(state);
-            }
-            if let Some(marker) = blocked_actionable_marker(&state)
-                && Some(&marker) != delivered_blocked_marker
-            {
-                return Ok(state);
-            }
-            if start.elapsed() >= self.settings.max_wait {
-                return Err(FinalReplyDeliveryError::RunWaitTimedOut { run_id });
-            }
-            if working_message.is_none() && blocked_actionable_marker(&state).is_none() {
-                *working_message = self.post_working_message(envelope).await;
-            }
-            tokio::time::sleep(jittered_poll_interval(poll_interval, &run_id)).await;
-            poll_interval = poll_interval.saturating_mul(2).min(MAX_RUN_POLL_INTERVAL);
-        }
-    }
-
-    async fn read_latest_assistant_text(
-        &self,
-        thread_scope: &ThreadScope,
-        binding: &ResolvedBinding,
-        run_id: TurnRunId,
-    ) -> Result<Option<String>, FinalReplyDeliveryError> {
-        Ok(self
-            .services
-            .thread_service
-            .finalized_assistant_message_by_run(FinalizedAssistantMessageByRunRequest {
-                scope: thread_scope.clone(),
-                thread_id: binding.thread_id.clone(),
-                turn_run_id: run_id.to_string(),
-            })
-            .await?
-            .and_then(|message| message.content))
-    }
-
-    async fn post_working_message(
-        &self,
-        envelope: &ProductInboundEnvelope,
-    ) -> Option<PostedChannelMessage> {
-        match self
-            .services
-            .channel_protocol
-            .post_status_message(
-                self.services.egress.as_ref(),
-                envelope.external_conversation_ref(),
-                CHANNEL_WORKING_MESSAGE,
-            )
-            .await
-        {
-            Ok(message) => Some(message),
-            Err(error) => {
-                tracing::warn!(
-                    target = "ironclaw::reborn::slack_delivery",
-                    error = %error,
-                    "failed to post Slack working indicator"
-                );
-                None
-            }
-        }
-    }
-
-    async fn delete_status_message_if_present(&self, message: Option<PostedChannelMessage>) {
-        if let Some(message) = message {
-            self.delete_posted_status_message(message).await;
-        }
-    }
-
-    async fn delete_posted_status_message(&self, message: PostedChannelMessage) {
-        if let Err(error) = self
-            .services
-            .channel_protocol
-            .delete_status_message(self.services.egress.as_ref(), &message)
-            .await
-        {
-            tracing::warn!(
-                target = "ironclaw::reborn::slack_delivery",
-                error = %error,
-                "failed to delete Slack prompt/status message"
-            );
-        }
-    }
-
-    async fn post_rejection_hint_if_authorized(
-        &self,
-        envelope: &ProductInboundEnvelope,
-        ack: &ProductInboundAck,
-    ) -> bool {
-        let Some(hint) = rejection_hint_for_resolution(envelope, ack) else {
-            return false;
-        };
-        if let Err(error) = self
-            .services
-            .binding_service
-            .lookup_binding(ResolveBindingRequest::from_envelope(envelope))
-            .await
-        {
-            tracing::debug!(
-                target = "ironclaw::reborn::slack_delivery",
-                error = %error,
-                "skipped Slack rejection hint because the originating conversation was not authorized"
-            );
-            return true;
-        }
-        if let Err(error) = self
-            .services
-            .channel_protocol
-            .post_status_message(
-                self.services.egress.as_ref(),
-                envelope.external_conversation_ref(),
-                hint,
-            )
-            .await
-        {
-            tracing::debug!(
-                target = "ironclaw::reborn::slack_delivery",
-                error = %error,
-                "failed to post rejection hint to Slack (best-effort)"
-            );
-        }
-        true
-    }
-
-    /// Model B: a first-contact DM from a Slack user with no identity binding is
-    /// rejected with `BindingRequired`. Instead of silently dropping it, greet
-    /// them with a connect nudge — but ONLY in a 1:1 DM. An unbound user's
-    /// app-mention in a shared channel also rejects with `BindingRequired`, and
-    /// the host nudge must never be posted into a shared channel where everyone
-    /// sees a message addressed to one person, so this gates on the DM channel
-    /// id prefix ('D') and skips shared/group conversations. Deliberately
-    /// performs NO binding lookup (the sender is unbound by definition) and
-    /// posts only a fixed, host-authored message — no agent turn runs, no tools
-    /// execute, no data is read. Slack transport retries arrive as `Duplicate`
-    /// (not `Rejected`), so this fires at most once per inbound event.
-    async fn post_connect_nudge_if_unbound_user_message(
-        &self,
-        envelope: &ProductInboundEnvelope,
-        ack: &ProductInboundAck,
-    ) -> bool {
-        let ProductInboundAck::Rejected(rejection) = ack else {
-            return false;
-        };
-        if !matches!(rejection.kind, ProductRejectionKind::BindingRequired) {
-            return false;
-        }
-        if !matches!(envelope.payload(), ProductInboundPayload::UserMessage(_)) {
-            return false;
-        }
-        // Only nudge in a 1:1 DM. An unbound user's app-mention in a SHARED
-        // channel also rejects with `BindingRequired`; posting the host connect
-        // nudge there would drop a message addressed to one user into a channel
-        // everyone can see. Slack DM (im) channel ids start with 'D'; shared
-        // channels ('C') and multi-person/group DMs ('G') are excluded, and a
-        // missing/blank conversation ref fails closed (no post).
-        if !self
-            .services
-            .channel_protocol
-            .is_direct_message_conversation(envelope.external_conversation_ref().conversation_id())
-        {
-            return false;
-        }
-        if let Err(error) = self
-            .services
-            .channel_protocol
-            .post_status_message(
-                self.services.egress.as_ref(),
-                envelope.external_conversation_ref(),
-                self.services.channel_protocol.connect_nudge_message(),
-            )
-            .await
-        {
-            tracing::debug!(
-                target = "ironclaw::reborn::slack_delivery",
-                error = %error,
-                "failed to post Slack connect nudge (best-effort)"
-            );
-        }
-        true
-    }
-}
-
-// arch-exempt: too_many_args, needs a GateRouteRecordingContext bundle (store + scope identity + posted refs), plan docs/plans/2026-06-10-slack-gate-feedback-and-routing.md Phase C
-#[allow(clippy::too_many_arguments)]
-async fn record_gate_route_if_needed(
-    route_store: &dyn DeliveredGateRouteStore,
-    run_id: TurnRunId,
-    tenant_id: &ironclaw_host_api::TenantId,
-    user_id: &ironclaw_host_api::UserId,
-    gate_ref: &str,
-    scope: &TurnScope,
-    posted_messages: &[PostedChannelMessage],
-    envelope_conv_ref: Option<&ExternalConversationRef>,
-    // Slack team id to attach to each posted-message conversation ref so that
-    // inbound replies (which carry team_id as space_id) match the fingerprint.
-    // A no-space fallback variant is always recorded too, for events that omit
-    // team_id; the fingerprint set deduplicates when the two are identical
-    // (i.e. when `posted_space_id` is None).
-    posted_space_id: Option<&str>,
-) {
-    let mut conversation_fingerprints = std::collections::BTreeSet::new();
-
-    for msg in posted_messages {
-        // Record a space-qualified ref (matches inbound Slack events that carry team_id).
-        if let Some(space) = posted_space_id
-            && let Ok(conv_ref) = ironclaw_conversations::ExternalConversationRef::new(
-                Some(space),
-                &msg.conversation_id,
-                Some(&msg.message_ref),
-                None,
-            )
-        {
-            conversation_fingerprints.insert(conv_ref.conversation_fingerprint());
-        }
-        // Also record the root conversation for bare replies sent directly in
-        // the DM/channel instead of as a threaded reply to the prompt.
-        if let Some(space) = posted_space_id
-            && let Ok(conv_ref) = ironclaw_conversations::ExternalConversationRef::new(
-                Some(space),
-                &msg.conversation_id,
-                None,
-                None,
-            )
-        {
-            conversation_fingerprints.insert(conv_ref.conversation_fingerprint());
-        }
-        // Always record a no-space fallback ref for events that omit team_id.
-        if let Ok(conv_ref) = ironclaw_conversations::ExternalConversationRef::new(
-            None,
-            &msg.conversation_id,
-            Some(&msg.message_ref),
-            None,
-        ) {
-            conversation_fingerprints.insert(conv_ref.conversation_fingerprint());
-        }
-        if let Ok(conv_ref) = ironclaw_conversations::ExternalConversationRef::new(
-            None,
-            &msg.conversation_id,
-            None,
-            None,
-        ) {
-            conversation_fingerprints.insert(conv_ref.conversation_fingerprint());
-        }
-    }
-
-    if let Some(env_ref) = envelope_conv_ref
-        && let Ok(env_conv_ref) = conversations_ref_from_product_ref(env_ref)
-    {
-        let env_no_msg = env_conv_ref.without_message_id();
-        conversation_fingerprints.insert(env_no_msg.conversation_fingerprint());
-    }
-
-    if conversation_fingerprints.is_empty() {
-        return;
-    }
-
-    let record = DeliveredGateRouteRecord {
-        tenant_id: tenant_id.clone(),
-        user_id: user_id.clone(),
-        gate_ref: gate_ref.to_string(),
-        run_id,
-        scope: scope.clone(),
-        recorded_at: Utc::now(),
-        delivered_conversation_fingerprints: conversation_fingerprints.into_iter().collect(),
-    };
-
-    if let Err(error) = route_store.record_delivered_gate_route(record).await {
-        // silent-ok: route recording is best-effort; resolution falls back to
-        // explicit gate refs and the hint path, so a write failure never
-        // aborts delivery.
-        tracing::debug!(
-            target = "ironclaw::reborn::slack_delivery",
-            %run_id,
-            error = %error,
-            "failed to record delivered gate route"
-        );
-        return;
-    }
-
-    if let Err(sweep_err) = route_store
-        .sweep_expired_delivered_gate_routes(Utc::now())
-        .await
-    {
-        // silent-ok: sweep is opportunistic; expired routes are filtered at
-        // lookup time, so a failed sweep never affects correctness.
-        tracing::debug!(
-            target = "ironclaw::reborn::slack_delivery",
-            %run_id,
-            error = %sweep_err,
-            "delivered gate route sweep failed"
-        );
-    }
-}
-
-fn conversations_ref_from_product_ref(
-    conv_ref: &ExternalConversationRef,
-) -> Result<ironclaw_conversations::ExternalConversationRef, ironclaw_conversations::InboundTurnError>
-{
-    ironclaw_conversations::ExternalConversationRef::new(
-        conv_ref.space_id(),
-        conv_ref.conversation_id(),
-        conv_ref.topic_id(),
-        conv_ref.reply_target_message_id(),
-    )
-}
-
-/// Egress decorator that records posted-message handles from adapter-rendered
-/// responses (via the channel protocol's sniffing) so placeholder/working
-/// messages can be deleted and gate routes can reference the posted message.
-struct TrackingPostEgress {
-    inner: Arc<dyn ProtocolHttpEgress>,
-    protocol: Arc<dyn ChannelDeliveryProtocol>,
-    posted_messages: Arc<Mutex<Vec<PostedChannelMessage>>>,
-}
-
-impl TrackingPostEgress {
-    fn new(inner: Arc<dyn ProtocolHttpEgress>, protocol: Arc<dyn ChannelDeliveryProtocol>) -> Self {
-        Self {
-            inner,
-            protocol,
-            posted_messages: Arc::new(Mutex::new(Vec::new())),
-        }
-    }
-
-    fn take_posted_messages(&self) -> Vec<PostedChannelMessage> {
-        std::mem::take(
-            &mut *self
-                .posted_messages
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner()),
-        )
-    }
-}
-
-#[async_trait]
-impl ProtocolHttpEgress for TrackingPostEgress {
-    async fn send(
-        &self,
-        request: EgressRequest,
-    ) -> Result<EgressResponse, ProtocolHttpEgressError> {
-        let request_path = request.path().as_str().to_string();
-        let response = self.inner.send(request).await?;
-        if let Some(message) = self
-            .protocol
-            .posted_message_from_render_response(&request_path, response.body())
-        {
-            self.posted_messages
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner())
-                .push(message);
-        }
-        Ok(response)
-    }
-}
-
-fn blocked_actionable_marker(state: &TurnRunState) -> Option<BlockedActionableMarker> {
-    match state.status {
-        TurnStatus::BlockedApproval | TurnStatus::BlockedAuth => Some(BlockedActionableMarker {
-            status: state.status,
-            gate_ref: state
-                .gate_ref
-                .as_ref()
-                .map(|gate| gate.as_str().to_string()),
-        }),
-        _ => None,
-    }
-}
-
-fn channel_run_notification_projection_id(
-    run_id: TurnRunId,
-    event_kind: RunNotificationEventKind,
-) -> String {
-    let suffix = match event_kind {
-        RunNotificationEventKind::FinalReplyReady => "final",
-        RunNotificationEventKind::ProgressUpdate => "progress",
-        RunNotificationEventKind::ApprovalNeeded => "approval",
-        RunNotificationEventKind::AuthRequired => "auth",
-        RunNotificationEventKind::RunBlocked => "blocked",
-        RunNotificationEventKind::DeliveryStatus => "delivery-status",
-    };
-    format!("slack-run-notification:{suffix}:{run_id}")
-}
-
-/// Adapts a resolved auth-prompt view for Slack delivery. OAuth setup links are
-/// only safe to post in a private DM, so the `authorization_url` is stripped for
-/// any non-DM (channel) target.
-fn channel_auth_prompt_view(
-    envelope: &ProductInboundEnvelope,
-    mut view: ironclaw_product_adapters::AuthPromptView,
-) -> ironclaw_product_adapters::AuthPromptView {
-    if !auth_setup_link_is_private(envelope) {
-        view.authorization_url = None;
-    }
-    view
-}
-
-fn auth_setup_link_is_private(envelope: &ProductInboundEnvelope) -> bool {
-    matches!(
-        envelope.payload(),
-        ProductInboundPayload::UserMessage(payload)
-            if payload.trigger == ironclaw_product_adapters::ProductTriggerReason::DirectChat
-    )
-}
-
-fn channel_approval_gate_prompt_view(
-    run_id: TurnRunId,
-    gate_ref: &GateRef,
-    context: Option<&ApprovalPromptContextView>,
-) -> GatePromptView {
-    let gate_ref_str = gate_ref.as_str();
-
-    // Body carries only the semantic *What/Why* of the gate. The channel-specific
-    // *how to reply* (which differs for a DM vs a channel thread, and is the same
-    // for every gate) is appended once by the Slack adapter's
-    // `gate_prompt_reply_instruction` — keeping the two from duplicating the
-    // reply instructions and keeping the message short.
-    let body = match context {
-        Some(ctx) => {
-            let mut body = format!("*What:* {}", ctx.tool_name);
-            if let Some(reason) = ctx.reason.as_deref() {
-                body.push_str(&format!("\n*Why:* {reason}"));
-            }
-            body
-        }
-        None => "A step in this workflow needs your approval to continue.".to_string(),
-    };
-
-    GatePromptView {
-        turn_run_id: run_id,
-        gate_ref: gate_ref_str.to_string(),
-        invocation_id: None,
-        headline: "Approval needed".to_string(),
-        body,
-        allow_always: is_approval_gate_ref(gate_ref_str),
-        approval_context: context.cloned(),
-    }
-}
-
-/// Cancel a run parked on an interactive-auth gate with a `Policy` reason — the
-/// same `cancel_run` the auth-deny resolution uses. Idempotent per run
-/// (`slack-auth-block:{run_id}`) so repeated observer/delivery passes are safe.
-/// Shared by the live observer path ([`FinalReplyDeliveryObserver::cancel_slack_auth_blocked_run`])
-/// and the triggered delivery path ([`triggered_notification_for_state`]) so the
-/// cancellation contract cannot drift between them.
-async fn cancel_auth_blocked_run(
-    coordinator: &dyn TurnCoordinator,
-    auth_flow_canceller: Option<&dyn BlockedAuthFlowCanceller>,
-    scope: &TurnScope,
-    actor: TurnActor,
-    run_id: TurnRunId,
-    gate_ref: Option<&str>,
-) -> Result<(), FinalReplyDeliveryError> {
-    // Resolve the flow-cancel target BEFORE `cancel_run` consumes `actor`. Owner
-    // Resolution mirrors `enrich_auth_prompt_view`: an explicit turn owner
-    // (shared/team subject) wins, else the acting user. When `gate_ref` is absent
-    // there is no flow to resolve, so the flow cancel is skipped entirely (not
-    // encoded as an empty ref).
-    let flow_cancel_target = match (auth_flow_canceller, gate_ref) {
-        (Some(canceller), Some(gate_ref)) => {
-            let owner_user_id = scope
-                .explicit_owner_user_id()
-                .unwrap_or(&actor.user_id)
-                .clone();
-            Some((canceller, owner_user_id, gate_ref))
-        }
-        _ => None,
-    };
-
-    let idempotency_key = ironclaw_turns::IdempotencyKey::new(format!("slack-auth-block:{run_id}"))
-        .map_err(|err| FinalReplyDeliveryError::StatusMessage {
-            reason: format!("invalid idempotency key for slack auth block: {err}"),
-        })?;
-    // Cancel the run FIRST — it is the user-visible terminal action. `cancel_run` is
-    // idempotent (`slack-auth-block:{run_id}`), so repeated passes are safe. If it
-    // fails we return here and leave the durable `AuthFlow` (and the still-usable
-    // auth prompt) intact: marking the flow terminal while the run is still
-    // `BlockedAuth` would be the inverse state drift this fix is meant to prevent,
-    // and the OAuth backstop relies on a failed cancel leaving the prompt usable.
-    coordinator
-        .cancel_run(ironclaw_turns::CancelRunRequest {
-            scope: scope.clone(),
-            actor,
-            run_id,
-            reason: ironclaw_turns::SanitizedCancelReason::Policy,
-            idempotency_key,
-        })
-        .await?;
-
-    // Run is now terminal — cancel the stale `AuthFlow` record alongside it (#4952).
-    // Best-effort cleanliness: a flow-cancel failure does not surface, since the
-    // run (the user-visible action) has already been cancelled.
-    if let Some((canceller, owner_user_id, gate_ref)) = flow_cancel_target
-        && let Err(error) = canceller
-            .cancel_blocked_auth_flow(scope, &owner_user_id, run_id, gate_ref)
-            .await
-    {
-        tracing::debug!(
-            target = "ironclaw::reborn::slack_delivery",
-            %run_id,
-            %error,
-            "failed to cancel stale auth flow on Slack auth auto-deny (best-effort)"
-        );
-    }
-    Ok(())
-}
-
-fn jittered_poll_interval(base: Duration, run_id: &TurnRunId) -> Duration {
-    if base.is_zero() {
-        return base;
-    }
-    let mut hasher = DefaultHasher::new();
-    run_id.to_string().hash(&mut hasher);
-    let bucket = hasher.finish() as u32 % RUN_POLL_JITTER_BUCKETS;
-    (base + base / RUN_POLL_JITTER_BUCKETS * bucket).min(MAX_RUN_POLL_INTERVAL)
-}
-
-#[async_trait]
-impl ImmediateAckWorkflowObserver for FinalReplyDeliveryObserver {
-    async fn observe_workflow_ack(&self, envelope: ProductInboundEnvelope, ack: ProductInboundAck) {
-        // A2: rejected approval/auth feedback is a single best-effort post, not a
-        // long-running final delivery. Handle it before taking the shared delivery
-        // semaphore so it cannot queue behind runs that may poll until max_wait.
-        if self
-            .post_rejection_hint_if_authorized(&envelope, &ack)
-            .await
-        {
-            return;
-        }
-        if self
-            .post_connect_nudge_if_unbound_user_message(&envelope, &ack)
-            .await
-        {
-            return;
-        }
-        // A2b: Busy-thread hint — the user's message was silently dropped
-        // because a run is busy (pending gate or generic RejectedBusy). Post a
-        // one-shot state-aware hint so the user knows to approve/deny/wait (gate
-        // cases) or simply retry later (running-state cases) rather than being
-        // left in silence. Same best-effort semantics as A2: post failure → debug! only.
-        //
-        // Authorization: only post if the binding lookup succeeds, matching the
-        // same guard used by `post_rejection_hint_if_authorized`.
-        //
-        // Inline await is safe: the protocol ACK already returned before this
-        // observer runs, and the runner's admission permit in runner_immediate_ack.rs
-        // bounds the lifetime of this entire post-ACK task. A detached spawn would
-        // escape `drain_immediate_ack_tasks` shutdown/drain without adding any
-        // backpressure benefit.
-        if let Some(active_run_id) = busy_hint_user_message_run_id(&envelope, &ack) {
-            // Throttle: at most one hint per (conversation, external_event_id) pair.
-            // Slack transport retries carry the same event id → deduplicated without
-            // duplicate posts. Each new human message has a distinct event id → each
-            // gets a fresh hint, even if the same blocking run is still active.
-            // Check before the coordinator call to avoid a round-trip on repeats.
-            let conv_key = envelope
-                .external_conversation_ref()
-                .conversation_fingerprint();
-            let throttle_key = (conv_key, envelope.external_event_id().clone());
-            let already_seen = {
-                let mut guard = self.hint_seen.lock().unwrap_or_else(|e| e.into_inner());
-                let (queue, set) = &mut *guard;
-                if set.contains(&throttle_key) {
-                    true
-                } else {
-                    // FIFO eviction to keep the set bounded at O(1) memory.
-                    if set.len() >= HINT_SEEN_CAP
-                        && let Some(oldest) = queue.pop_front()
-                    {
-                        set.remove(&oldest);
-                    }
-                    set.insert(throttle_key.clone());
-                    queue.push_back(throttle_key);
-                    false
-                }
-            };
-            if already_seen {
-                tracing::debug!(
-                    target = "ironclaw::reborn::slack_delivery",
-                    "busy-thread hint suppressed: already posted for this (conversation, event_id) pair (transport retry)"
-                );
-                return;
-            }
-            // Derive the scope for the active run state lookup so the hint can be
-            // state-specific (pending gate vs generic busy). When the conversation
-            // has no resolvable binding — e.g. a gate delivered into a fresh DM
-            // that never carried a prior user message — fall back to the generic
-            // busy copy rather than going silent. Posting a generic "I'm waiting
-            // on approval" back to the conversation that just messaged us leaks no
-            // data: it is a reply to the sender's own conversation. The user's
-            // choice here is to never be left without feedback while a gate is open.
-            let hint = match self
-                .services
-                .binding_service
-                .lookup_binding(ResolveBindingRequest::from_envelope(&envelope))
-                .await
-            {
-                Ok(binding) => {
-                    busy_hint_from_run_state(
-                        self.services.turn_coordinator.as_ref(),
-                        self.services.approval_requests.as_deref(),
-                        &binding,
-                        active_run_id,
-                    )
-                    .await
-                }
-                Err(error) => {
-                    tracing::debug!(
-                        target = "ironclaw::reborn::slack_delivery",
-                        error = %error,
-                        "busy-thread hint falling back to generic copy because the conversation binding was not resolved"
-                    );
-                    CHANNEL_BUSY_GENERIC_MESSAGE.to_string()
-                }
-            };
-            if let Err(post_err) = self
-                .services
-                .channel_protocol
-                .post_status_message(
-                    self.services.egress.as_ref(),
-                    envelope.external_conversation_ref(),
-                    &hint,
-                )
-                .await
-            {
-                tracing::debug!(
-                    target = "ironclaw::reborn::slack_delivery",
-                    error = %post_err,
-                    "failed to post busy-thread hint to Slack (best-effort)"
-                );
-            }
-            return;
-        }
-        // Single-flight guard: at most one live delivery loop per run_id.
-        //
-        // A gate-resolution ack (ApprovalResolution(Allow) / AuthResolution(Allowed))
-        // carries the same submitted_run_id as the original user-message ack because
-        // it resumes the pre-existing run. The original loop is still alive and will
-        // observe the unblock on its next poll, posting the next gate or final reply
-        // exactly once. Spawning a second loop for the same run_id would produce
-        // duplicate posts (N resolutions ⇒ N+1 loops ⇒ gate N posted N times).
-        //
-        // `should_deliver_after_ack` only filters Deny resolutions; Allow resolutions
-        // pass through here. We guard by run_id rather than by ack type so the fix
-        // is robust to future ack variants that may also target an existing run.
-        //
-        // IMPORTANT: the guard is checked and inserted BEFORE acquiring the delivery
-        // semaphore permit. Without this ordering, a second ack (L2) for the same
-        // run_id could block on the permit while L1 is delivering; when L1 releases
-        // the permit and removes the run_id, L2 would wake and pass a now-empty guard
-        // set — the exact TOCTOU race this ordering closes.
-        //
-        // The `RunDeliveryGuard` RAII type ensures the run_id is removed on drop even
-        // if `deliver_final_reply` panics, preventing a permanent delivery block.
-        let _delivery_guard = if let Some(run_id) = submitted_run_id(&ack) {
-            let already_delivering = {
-                let mut guard = self
-                    .active_delivery_run_ids
-                    .lock()
-                    .unwrap_or_else(|e| e.into_inner());
-                if guard.contains(&run_id) {
-                    true
-                } else {
-                    guard.insert(run_id);
-                    false
-                }
-            };
-            if already_delivering {
-                tracing::debug!(
-                    target = "ironclaw::reborn::slack_delivery",
-                    %run_id,
-                    "skipping redundant delivery loop: a loop is already watching this run"
-                );
-                return;
-            }
-            Some(RunDeliveryGuard {
-                set: &self.active_delivery_run_ids,
-                run_id,
-            })
-        } else {
-            None
-        };
-        let Ok(_permit) = self.delivery_permits.clone().acquire_owned().await else {
-            tracing::warn!(
-                target = "ironclaw::reborn::slack_delivery",
-                "channel final reply delivery skipped because delivery semaphore was closed"
-            );
-            return;
-        };
-        let delivery_result = self.deliver_final_reply(envelope.clone(), ack).await;
-        // `_delivery_guard` is dropped here automatically, removing the run_id from
-        // `active_delivery_run_ids` even if `deliver_final_reply` returned an error.
-        // Explicit drop makes the cleanup point visible at the call site.
-        drop(_delivery_guard);
-        if let Err(error) = delivery_result {
-            tracing::warn!(
-                target = "ironclaw::reborn::slack_delivery",
-                error = %error,
-                "channel final reply delivery failed after immediate ACK"
-            );
-            // A3: Best-effort feedback post so the user is not left in silence.
-            // Skip if a blocked-state notification was already delivered — the
-            // user already saw an approval/auth prompt and is not in silence.
-            let feedback = match &error {
-                FinalReplyDeliveryError::RunWaitTimedOut { .. } => {
-                    Some(CHANNEL_DELIVERY_TIMEOUT_MESSAGE)
-                }
-                FinalReplyDeliveryError::RunWaitTimedOutAfterNotification { .. } => None,
-                _ => Some(CHANNEL_DELIVERY_ERROR_MESSAGE),
-            };
-            if let Some(feedback) = feedback
-                && let Err(post_err) = self
-                    .services
-                    .channel_protocol
-                    .post_status_message(
-                        self.services.egress.as_ref(),
-                        envelope.external_conversation_ref(),
-                        feedback,
-                    )
-                    .await
-            {
-                tracing::debug!(
-                    target = "ironclaw::reborn::slack_delivery",
-                    error = %post_err,
-                    "failed to post delivery-error feedback to Slack (best-effort)"
-                );
-            }
-        }
-    }
-
-    async fn observe_workflow_error(
-        &self,
-        envelope: ProductInboundEnvelope,
-        error: ProductAdapterError,
-    ) {
-        let Some(ack) = rejection_ack_for_workflow_error(&error) else {
-            return;
-        };
-        // An unbound user's first inbound resolves as a `BindingRequired`
-        // workflow *error*, surfaced here — NOT as an `Ok(Rejected)` ack in
-        // `observe_workflow_ack`. `post_rejection_hint_if_authorized` is a
-        // guaranteed no-op for them (its binding lookup fails by definition),
-        // so without the connect nudge an unbound 1:1 DM gets total silence.
-        // Mirror the ack-path ordering: authorized rejection hint first, then
-        // the connect nudge for unbound DMs.
-        if self
-            .post_rejection_hint_if_authorized(&envelope, &ack)
-            .await
-        {
-            return;
-        }
-        self.post_connect_nudge_if_unbound_user_message(&envelope, &ack)
-            .await;
-    }
-}
-
-/// Fail closed when a delivery that must reach a personal DM (e.g. carries an
-/// OAuth authorization_url) resolves to a non-DM target.
-fn enforce_direct_message_if_required(
-    protocol: &dyn ChannelDeliveryProtocol,
-    target: &ReplyTargetBindingRef,
-    require_direct_message: bool,
-) -> Result<(), ProductWorkflowError> {
-    if require_direct_message && !protocol.reply_target_is_personal_dm(target) {
-        return Err(ProductWorkflowError::OutboundTargetNotDirectMessage);
-    }
-    Ok(())
-}
-
-struct ObservedChannelReplyTargetAuthority {
-    channel_protocol: Arc<dyn ChannelDeliveryProtocol>,
-    scope: TurnScope,
-    actor: TurnActor,
-    expected_target: ReplyTargetBindingRef,
-    external_conversation_ref: ExternalConversationRef,
-    external_actor_ref: Option<ExternalActorRef>,
-}
-
-#[async_trait]
-impl ReplyTargetBindingValidator for ObservedChannelReplyTargetAuthority {
-    async fn validate_reply_target(
-        &self,
-        request: ReplyTargetValidationRequest,
-    ) -> Result<ReplyTargetBindingClaim, OutboundError> {
-        if request.scope != self.scope
-            || request.actor != self.actor
-            || request.candidate.target != self.expected_target
-        {
-            return Err(OutboundError::AccessDenied);
-        }
-        Ok(ReplyTargetBindingClaim::new(request.candidate.target))
-    }
-}
-
-#[async_trait]
-impl ProductOutboundTargetResolver for ObservedChannelReplyTargetAuthority {
-    async fn resolve_product_outbound_target_metadata(
-        &self,
-        target: &ValidatedReplyTargetBinding,
-        require_direct_message: bool,
-    ) -> Result<VerifiedProductOutboundTargetMetadata, ProductWorkflowError> {
-        if target.target() != &self.expected_target {
-            return Err(ProductWorkflowError::BindingAccessDenied);
-        }
-        // Defense in depth: honor the DM requirement even on the live-path resolver.
-        enforce_direct_message_if_required(
-            self.channel_protocol.as_ref(),
-            target.target(),
-            require_direct_message,
-        )?;
-        Ok(VerifiedProductOutboundTargetMetadata {
-            external_conversation_ref: self.external_conversation_ref.clone(),
-            external_actor_ref: self.external_actor_ref.clone(),
-        })
-    }
-}
-
-struct AllowNoProjectionAccess;
-
-#[async_trait]
-impl ironclaw_outbound::ThreadProjectionAccessPolicy for AllowNoProjectionAccess {
-    async fn authorize_projection_access(
-        &self,
-        _request: ironclaw_outbound::ThreadProjectionAccessRequest,
-    ) -> Result<ironclaw_outbound::ThreadProjectionAccessClaim, OutboundError> {
-        Err(OutboundError::AccessDenied)
-    }
-}
-
-fn submitted_run_id(ack: &ProductInboundAck) -> Option<TurnRunId> {
-    match ack {
-        ProductInboundAck::Accepted {
-            submitted_run_id, ..
-        } => Some(*submitted_run_id),
-        ProductInboundAck::Duplicate { .. } => None,
-        ProductInboundAck::DeferredBusy { .. }
-        | ProductInboundAck::RejectedBusy { .. }
-        | ProductInboundAck::Rejected(_)
-        | ProductInboundAck::CommandResult { .. }
-        | ProductInboundAck::NoOp => None,
-    }
-}
-
-fn should_deliver_after_ack(envelope: &ProductInboundEnvelope, ack: &ProductInboundAck) -> bool {
-    if submitted_run_id(ack).is_none() {
-        return false;
-    }
-    !matches!(
-        envelope.payload(),
-        ProductInboundPayload::AuthResolution(payload)
-            if matches!(
-                &payload.result,
-                ironclaw_product_adapters::AuthResolutionResult::Denied
-            )
-    ) && !matches!(
-        envelope.payload(),
-        ProductInboundPayload::ApprovalResolution(payload)
-            if payload.decision == ironclaw_product_adapters::ApprovalDecision::Deny
-    ) && !matches!(
-        envelope.payload(),
-        ProductInboundPayload::ScopedApprovalResolution(payload)
-            if payload.decision == ironclaw_product_adapters::ApprovalDecision::Deny
-    )
-}
-
-/// Returns the user-facing hint to post when a resolution attempt (approval or
-/// auth) is rejected. Returns `None` for non-resolution payloads (e.g. user
-/// messages) or for any `Duplicate` ack regardless of the prior ack inside it.
-fn rejection_hint_for_resolution(
-    envelope: &ProductInboundEnvelope,
-    ack: &ProductInboundAck,
-) -> Option<&'static str> {
-    // `Duplicate` is keyed on the external event id (see `ActionFingerprintKey`
-    // in ironclaw_product_workflow): Slack transport retries reuse the same
-    // event id, so the same event arriving N times produces Duplicate{original}
-    // on the second through Nth delivery. A user re-typing "approve" produces a
-    // new event id and therefore a fresh `Rejected` ack, never `Duplicate`.
-    // Posting a hint on `Duplicate{Rejected}` would repeat the side effect N
-    // times on transport retries while suppressing it loses nothing — the
-    // original processing already posted the hint.
-    let ProductInboundAck::Rejected(effective_rejection) = ack else {
-        return None;
-    };
-    // Only post feedback for resolution-type payloads; user messages and other
-    // payloads that happen to be rejected produce no channel noise.
-    let is_resolution = matches!(
-        envelope.payload(),
-        ProductInboundPayload::ApprovalResolution(_)
-            | ProductInboundPayload::ScopedApprovalResolution(_)
-            | ProductInboundPayload::AuthResolution(_)
-    );
-    if !is_resolution {
-        return None;
-    }
-    let hint = match envelope.payload() {
-        ProductInboundPayload::AuthResolution(_) => {
-            effective_rejection.kind.user_facing_auth_hint()
-        }
-        _ => effective_rejection.kind.user_facing_hint(),
-    };
-    Some(hint)
-}
-
-/// Returns `Some(active_run_id)` when the ack + payload combination should trigger
-/// the busy-thread hint flow: a `DeferredBusy` (legacy) or `RejectedBusy` ack on a
-/// `UserMessage` payload.
-///
-/// `RejectedBusy { active_run_id: Some(run_id) }` carries a live blocking run whose
-/// state can be fetched to produce a gate-aware hint.  When `active_run_id` is `None`
-/// (e.g. a replay with no live run) we return `None` — there is no run state to
-/// inspect so no hint is appropriate.
-///
-/// `Duplicate { prior }` — `RejectedBusy` is a settled outcome, so a Slack transport
-/// retry of the same external event arrives as `Duplicate { prior: RejectedBusy { .. } }`.
-/// We unwrap the prior and re-apply the same extraction so that `Duplicate { prior:
-/// RejectedBusy { active_run_id: Some(run) } }` still yields the blocking run id.
-/// The per-(conversation, event_id) throttle prevents a double-post when the first
-/// delivery already succeeded — the retry only posts if the original hint was lost.
-/// `Duplicate { prior: DeferredBusy { active_run_id, .. } }` yields `Some(active_run_id)` —
-/// the recursive call re-applies the same extraction on the prior ack.  DeferredBusy is never
-/// settled upstream (so this wrapping is unreachable in practice), but when it does occur the
-/// run id is surfaced rather than silently dropped.
-///
-/// Returns `None` for all non-user-message payloads (resolution/control payloads must
-/// stay silent).
-fn busy_hint_user_message_run_id(
-    envelope: &ProductInboundEnvelope,
-    ack: &ProductInboundAck,
-) -> Option<TurnRunId> {
-    // Only reply to user messages — resolution/control/noop payloads must stay silent.
-    if !matches!(envelope.payload(), ProductInboundPayload::UserMessage(_)) {
-        return None;
-    }
-    match ack {
-        ProductInboundAck::DeferredBusy { active_run_id, .. } => Some(*active_run_id),
-        // RejectedBusy with a live blocking run → hint is gated on the run state.
-        // RejectedBusy with no run (replay / no live run) → no hint.
-        ProductInboundAck::RejectedBusy {
-            active_run_id: Some(run_id),
-            ..
-        } => Some(*run_id),
-        ProductInboundAck::RejectedBusy {
-            active_run_id: None,
-            ..
-        } => None,
-        // Unwrap Duplicate and re-apply extraction on the prior ack.
-        // RejectedBusy is a settled outcome, so transport retries arrive as
-        // Duplicate{RejectedBusy{..}} — the prior still carries the blocking run id.
-        // DeferredBusy is never settled upstream, so Duplicate{DeferredBusy} is
-        // unreachable in practice; but when it occurs the recursive call yields
-        // Some(active_run_id) from the prior — the run id is not silently dropped.
-        ProductInboundAck::Duplicate { prior } => busy_hint_user_message_run_id(envelope, prior),
-        _ => None,
-    }
-}
-
-/// Looks up the blocking run's state and returns the appropriate busy-thread hint
-/// copy.
-///
-/// - `BlockedApproval` with `Some(gate_ref)` → approval wording with concrete `approve {ref}` command
-/// - `BlockedApproval` with `None` gate_ref  → approval wording without a specific gate command
-/// - `BlockedAuth` with `Some(gate_ref)`     → auth wording with concrete `auth deny {ref}` command
-/// - `BlockedAuth` with `None` gate_ref      → auth wording without the deny command
-/// - anything else / lookup failure           → generic wording
-///
-/// Never returns an error — lookup failures degrade to the generic copy.
-async fn busy_hint_from_run_state(
-    coordinator: &dyn TurnCoordinator,
-    approval_requests: Option<&dyn ApprovalRequestStore>,
-    binding: &ResolvedBinding,
-    active_run_id: TurnRunId,
-) -> String {
-    let scope = match (|| -> Result<TurnScope, ProductWorkflowError> {
-        let thread_scope = thread_scope_from_binding(binding)?;
-        turn_scope_from_thread_scope(binding, &thread_scope)
-    })() {
-        Ok(s) => s,
-        Err(err) => {
-            tracing::debug!(
-                target = "ironclaw::reborn::slack_delivery",
-                error = %err,
-                "busy-thread hint scope derivation failed; using generic copy"
-            );
-            return CHANNEL_BUSY_GENERIC_MESSAGE.to_string();
-        }
-    };
-    match coordinator
-        .get_run_state(GetRunStateRequest {
-            scope: scope.clone(),
-            run_id: active_run_id,
-        })
-        .await
-    {
-        Ok(state) => match state.status {
-            TurnStatus::BlockedApproval => match state.gate_ref.as_ref() {
-                // Name both the blocking gate ref AND what it would approve (the
-                // tool/capability), so the user sees exactly what is holding the
-                // conversation and what `approve` would authorize. The blocking
-                // run is in this thread's scope (that is why the thread is busy),
-                // so the approval request resolves under the derived scope.
-                Some(gate_ref) => {
-                    let what = approval_prompt_context_view(
-                        approval_requests,
-                        gate_ref,
-                        &binding.actor_user_id,
-                        &scope,
-                    )
-                    .await
-                    .map(|ctx| ctx.tool_name);
-                    match what {
-                        Some(tool) => format!(
-                            "Ironclaw is waiting on your approval for `{tool}` before taking new \
-                             messages — reply `approve {ref}` to authorize it or `deny {ref}` to \
-                             decline.",
-                            ref = gate_ref.as_str()
-                        ),
-                        None => format!(
-                            "Ironclaw is waiting on a pending approval (`{ref}`) before taking new \
-                             messages — reply `approve {ref}` or `deny {ref}` to respond.",
-                            ref = gate_ref.as_str()
-                        ),
-                    }
-                }
-                None => CHANNEL_BUSY_APPROVAL_MESSAGE.to_string(),
-            },
-            // Auth gates can't be completed in Slack (credential sharing is a
-            // security risk), but still name the blocking ref so the user can
-            // decline it here and knows what is holding the thread.
-            TurnStatus::BlockedAuth => match state.gate_ref.as_ref() {
-                Some(gate_ref) => format!(
-                    "Ironclaw is waiting on authentication before taking new messages. Reply \
-                     `auth deny {ref}` to decline it here, or complete the connection in the \
-                     Ironclaw web app to resume.",
-                    ref = gate_ref.as_str()
-                ),
-                None => CHANNEL_BUSY_GENERIC_MESSAGE.to_string(),
-            },
-            _ => CHANNEL_BUSY_GENERIC_MESSAGE.to_string(),
-        },
-        Err(err) => {
-            tracing::debug!(
-                target = "ironclaw::reborn::slack_delivery",
-                error = %err,
-                "busy-thread hint run-state lookup failed; using generic copy"
-            );
-            CHANNEL_BUSY_GENERIC_MESSAGE.to_string()
-        }
-    }
-}
-
-fn rejection_ack_for_workflow_error(error: &ProductAdapterError) -> Option<ProductInboundAck> {
-    match error {
-        ProductAdapterError::WorkflowRejected {
-            kind,
-            retryable: false,
-            ..
-        } => Some(ProductInboundAck::Rejected(ProductRejection::permanent(
-            product_rejection_kind_for_workflow_rejection(*kind),
-            "workflow rejected resolution",
-        ))),
-        _ => None,
-    }
-}
-
-fn product_rejection_kind_for_workflow_rejection(
-    kind: ProductWorkflowRejectionKind,
-) -> ProductRejectionKind {
-    match kind {
-        ProductWorkflowRejectionKind::ScopeNotFound => ProductRejectionKind::BindingRequired,
-        ProductWorkflowRejectionKind::Unauthorized => ProductRejectionKind::AccessDenied,
-        ProductWorkflowRejectionKind::InvalidRequest => ProductRejectionKind::InvalidRequest,
-        ProductWorkflowRejectionKind::Ambiguous => ProductRejectionKind::AmbiguousResolution,
-        ProductWorkflowRejectionKind::ThreadBusy
-        | ProductWorkflowRejectionKind::AdmissionRejected
-        | ProductWorkflowRejectionKind::Unavailable
-        | ProductWorkflowRejectionKind::Conflict => ProductRejectionKind::PolicyDenied,
-    }
-}
-
-fn is_accepted_auth_denial(envelope: &ProductInboundEnvelope, ack: &ProductInboundAck) -> bool {
-    submitted_run_id(ack).is_some()
-        && matches!(
-            envelope.payload(),
-            ProductInboundPayload::AuthResolution(payload)
-                if matches!(
-                    &payload.result,
-                    ironclaw_product_adapters::AuthResolutionResult::Denied
-                )
-        )
-}
-
-// ── Triggered-run delivery ──────────────────────────────────────────────────
-//
-// When a trigger fires and the poller submits a run, this driver watches the
-// run to completion and delivers the result to the creator's personal Slack DM
-// using the same polling machinery as the observer path (above).
-
-/// Composition-owned hook invoked by the trigger poller after a successful fire
-/// submission has been durably settled in trigger storage. The composition root
-/// wires a real implementation (behind the `slack-v2-host-beta` feature) or a
-/// no-op.
-#[async_trait]
-pub trait PostSubmitDeliveryHook: Send + Sync {
-    /// Called with the original trigger fire, the submitted run id, and the
-    /// turn scope the run was submitted under. The trigger poller invokes this
-    /// hook from a detached task after the accepted fire appears as settled, so
-    /// hook latency cannot delay settlement and delivery cannot precede the
-    /// persisted run/thread mapping. Implementations may still spawn their own
-    /// longer-lived delivery tasks when they need bounded admission or shutdown
-    /// tracking.
-    async fn on_trigger_submitted(&self, fire: TriggerFire, run_id: TurnRunId, scope: TurnScope);
-}
-
-/// No-op hook used when the Slack host-beta feature is not active.
-pub struct NoopPostSubmitDeliveryHook;
-
-#[async_trait]
-impl PostSubmitDeliveryHook for NoopPostSubmitDeliveryHook {
-    async fn on_trigger_submitted(
-        &self,
-        _fire: TriggerFire,
-        _run_id: TurnRunId,
-        _scope: TurnScope,
-    ) {
-    }
-}
-
-/// Key-deduplicated fan-out over multiple [`PostSubmitDeliveryHook`]s.
-///
-/// The trigger poller's post-submit slot is a single `OnceLock`; with more
-/// than one channel host (Slack + Telegram) each needs its own hook. The
-/// runtime installs one composite into that slot on the first
-/// `add_trigger_post_submit_hook` call and appends later hooks to it, so the
-/// poller-side consumer ([`crate::automation::trigger_poller`]) is unchanged.
-///
-/// Keys are per-host constants (e.g. `slack-host-beta`): a second add under an
-/// existing key is rejected (`false`) instead of appended, preserving the old
-/// single-slot idempotency — a host that mounts twice never double-delivers.
-#[derive(Default)]
-pub(crate) struct CompositePostSubmitDeliveryHook {
-    hooks: std::sync::RwLock<Vec<(String, Arc<dyn PostSubmitDeliveryHook>)>>,
-}
-
-impl CompositePostSubmitDeliveryHook {
-    /// Append `hook` under `hook_key`. Returns `false` (and drops the hook)
-    /// when the key is already registered.
-    pub(crate) fn add(&self, hook_key: &str, hook: Arc<dyn PostSubmitDeliveryHook>) -> bool {
-        let mut hooks = self
-            .hooks
-            .write()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        if hooks.iter().any(|(existing, _)| existing == hook_key) {
-            return false;
-        }
-        hooks.push((hook_key.to_string(), hook));
-        true
-    }
-
-    fn snapshot(&self) -> Vec<Arc<dyn PostSubmitDeliveryHook>> {
-        self.hooks
-            .read()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .iter()
-            .map(|(_, hook)| Arc::clone(hook))
-            .collect()
-    }
-}
-
-impl std::fmt::Debug for CompositePostSubmitDeliveryHook {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let keys: Vec<String> = self
-            .hooks
-            .read()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .iter()
-            .map(|(key, _)| key.clone())
-            .collect();
-        formatter
-            .debug_struct("CompositePostSubmitDeliveryHook")
-            .field("hooks", &keys)
-            .finish()
-    }
-}
-
-#[async_trait]
-impl PostSubmitDeliveryHook for CompositePostSubmitDeliveryHook {
-    async fn on_trigger_submitted(&self, fire: TriggerFire, run_id: TurnRunId, scope: TurnScope) {
-        // Each hook runs in its own task so one slow or panicking hook cannot
-        // delay or skip the others; the poller already detaches the whole
-        // settlement (`spawn_post_submit_delivery`), so awaiting the joins here
-        // only bounds this composite call, not trigger settlement.
-        let handles: Vec<tokio::task::JoinHandle<()>> = self
-            .snapshot()
-            .into_iter()
-            .map(|hook| {
-                let fire = fire.clone();
-                let scope = scope.clone();
-                tokio::spawn(async move { hook.on_trigger_submitted(fire, run_id, scope).await })
-            })
-            .collect();
-        for handle in handles {
-            if let Err(error) = handle.await {
-                tracing::debug!(
-                    target = "ironclaw::reborn::trigger_delivery",
-                    %run_id,
-                    %error,
-                    "post-submit delivery hook task failed; other hooks were unaffected"
-                );
-            }
-        }
-    }
-}
-
-/// Drives triggered-run delivery for a single submitted run.
-///
-/// Spawns a background task that polls the run to completion (or gate) and
-/// delivers the result to the creator's personal Slack DM. Personal scope only:
-/// if the trigger has a `project_id` the delivery is skipped with `Denied`.
-pub struct TriggeredRunDeliveryDriver {
-    services: FinalReplyDeliveryServices,
-    settings: FinalReplyDeliverySettings,
-    delivery_permits: Arc<Semaphore>,
-    /// Bounds the total number of spawned delivery tasks (active + waiting).
-    /// Acquired via `try_acquire_owned` before spawning; released when the task
-    /// exits. Overflow is recorded as `Skipped` without spawning.
-    pending_permits: Arc<Semaphore>,
-    delivery_store: Arc<dyn TriggeredRunDeliveryStore>,
-    route_store: Arc<dyn DeliveredGateRouteStore>,
-    /// Fallback agent id used when the submitted `TurnScope::agent_id` is
-    /// `None`. Must match the `default_agent_id` that
-    /// `ConversationContentRefMaterializer` (and `record_trigger_prompt`)
-    /// uses so the thread-scope key aligns with where the run was stored.
-    fallback_agent_id: ironclaw_host_api::AgentId,
-    /// Resolves per-trigger delivery targets (`TriggerFire::delivery_target`)
-    /// into reply-target bindings. Consulted only for fires that carry a
-    /// target; fires without one use the creator's preference as before.
-    /// Production wiring (`build_triggered_run_delivery_hook`) always supplies
-    /// it; when absent (reduced test drivers), a fire carrying a target fails
-    /// closed as `TargetUnavailable` — see
-    /// `driver_fire_with_unresolvable_delivery_target_records_target_unavailable`.
-    outbound_target_provider: Option<Arc<dyn crate::outbound::OutboundDeliveryTargetProvider>>,
-}
-
-impl TriggeredRunDeliveryDriver {
-    pub fn new(
-        services: FinalReplyDeliveryServices,
-        delivery_store: Arc<dyn TriggeredRunDeliveryStore>,
-        route_store: Arc<dyn DeliveredGateRouteStore>,
-        fallback_agent_id: ironclaw_host_api::AgentId,
-    ) -> Self {
-        Self::with_settings(
-            services,
-            FinalReplyDeliverySettings {
-                max_wait: DEFAULT_TRIGGERED_RUN_DELIVERY_MAX_WAIT,
-                ..FinalReplyDeliverySettings::default()
-            },
-            delivery_store,
-            route_store,
-            fallback_agent_id,
-        )
-    }
-
-    pub fn with_settings(
-        services: FinalReplyDeliveryServices,
-        settings: FinalReplyDeliverySettings,
-        delivery_store: Arc<dyn TriggeredRunDeliveryStore>,
-        route_store: Arc<dyn DeliveredGateRouteStore>,
-        fallback_agent_id: ironclaw_host_api::AgentId,
-    ) -> Self {
-        let delivery_permits = Arc::new(Semaphore::new(settings.max_concurrent_deliveries.get()));
-        let pending_permits = Arc::new(Semaphore::new(settings.max_pending_deliveries.get()));
-        Self {
-            services,
-            settings,
-            delivery_permits,
-            pending_permits,
-            delivery_store,
-            route_store,
-            fallback_agent_id,
-            outbound_target_provider: None,
-        }
-    }
-
-    /// Wire the outbound delivery target provider used to resolve per-trigger
-    /// delivery targets. Production wiring must call this; without it, fires
-    /// carrying a `delivery_target` fail closed as `TargetUnavailable`.
-    pub(crate) fn with_outbound_target_provider(
-        mut self,
-        provider: Arc<dyn crate::outbound::OutboundDeliveryTargetProvider>,
-    ) -> Self {
-        self.outbound_target_provider = Some(provider);
-        self
-    }
-
-    /// Acquire a permit from the pending-delivery semaphore for testing.
-    ///
-    /// Allows tests to hold the pending slot without spawning a real delivery
-    /// task, making it straightforward to assert `Skipped` outcomes when the
-    /// queue is full.
-    #[cfg(test)]
-    pub fn try_acquire_pending_permit(&self) -> Option<tokio::sync::OwnedSemaphorePermit> {
-        Arc::clone(&self.pending_permits).try_acquire_owned().ok()
-    }
-
-    /// Returns the `CommunicationPreferenceRepository` wired into this driver's
-    /// `FinalReplyDeliveryServices.communication_preferences`.
-    ///
-    /// Production call site: `build_triggered_run_delivery_hook` in
-    /// `slack_host_beta.rs` — the store it passes here must be pointer-equal to
-    /// `local_runtime.outbound_preferences` so WebUI-written preferences are
-    /// visible to Slack delivery.  Use `Arc::ptr_eq` in tests to assert this.
-    /// This accessor is for tests only and compiles to nothing in production binaries.
-    #[cfg(test)]
-    pub(crate) fn communication_preferences_for_test(
-        &self,
-    ) -> Arc<dyn ironclaw_outbound::CommunicationPreferenceRepository> {
-        Arc::clone(&self.services.communication_preferences)
-    }
-}
-
-#[async_trait]
-impl PostSubmitDeliveryHook for TriggeredRunDeliveryDriver {
-    async fn on_trigger_submitted(&self, fire: TriggerFire, run_id: TurnRunId, scope: TurnScope) {
-        // Fail closed for non-personal triggers (project_id set means shared/project scope).
-        if fire.project_id.is_some() {
-            tracing::debug!(
-                %run_id,
-                "triggered run delivery denied: project-scoped trigger is not personal scope"
-            );
-            self.record_outcome(run_id, TriggeredRunDeliveryOutcomeKind::Denied)
-                .await;
-            return;
-        }
-
-        // Guard against unbounded task accumulation: if the pending-delivery
-        // queue is full, record Skipped immediately without spawning.
-        let Ok(pending_permit) = Arc::clone(&self.pending_permits).try_acquire_owned() else {
-            tracing::warn!(
-                target: "ironclaw::reborn::slack_delivery",
-                %run_id,
-                "triggered run delivery skipped: pending delivery queue full"
-            );
-            self.record_outcome(run_id, TriggeredRunDeliveryOutcomeKind::Skipped)
-                .await;
-            return;
-        };
-
-        // Clone the Arcs we need into the spawned task.
-        let permits = Arc::clone(&self.delivery_permits);
-        let services = FinalReplyDeliveryServices {
-            channel_protocol: Arc::clone(&self.services.channel_protocol),
-            binding_service: Arc::clone(&self.services.binding_service),
-            thread_service: Arc::clone(&self.services.thread_service),
-            turn_coordinator: Arc::clone(&self.services.turn_coordinator),
-            outbound_store: Arc::clone(&self.services.outbound_store),
-            route_store: Arc::clone(&self.route_store),
-            communication_preferences: Arc::clone(&self.services.communication_preferences),
-            adapter: Arc::clone(&self.services.adapter),
-            egress: Arc::clone(&self.services.egress),
-            delivery_sink: Arc::clone(&self.services.delivery_sink),
-            auth_challenges: self.services.auth_challenges.clone(),
-            auth_flow_canceller: self.services.auth_flow_canceller.clone(),
-            approval_requests: self.services.approval_requests.clone(),
-        };
-        let settings = self.settings;
-        let delivery_store = Arc::clone(&self.delivery_store);
-        let fallback_agent_id = self.fallback_agent_id.clone();
-        let outbound_target_provider = self.outbound_target_provider.clone();
-
-        tokio::spawn(async move {
-            // Hold the pending permit for the full lifetime of this task so it
-            // counts against the pending-delivery cap until delivery completes.
-            let _pending_permit = pending_permit;
-
-            let Ok(_permit) = permits.clone().acquire_owned().await else {
-                tracing::warn!(
-                    target = "ironclaw::reborn::slack_delivery",
-                    %run_id,
-                    "triggered run delivery skipped: delivery semaphore closed"
-                );
-                record_triggered_run_outcome(
-                    &*delivery_store,
-                    run_id,
-                    TriggeredRunDeliveryOutcomeKind::Skipped,
-                )
-                .await;
-                return;
-            };
-
-            let outcome = deliver_triggered_run(
-                &services,
-                &settings,
-                &fire,
-                run_id,
-                scope,
-                &*delivery_store,
-                &fallback_agent_id,
-                outbound_target_provider.as_deref(),
-            )
-            .await;
-            tracing::debug!(
-                target = "ironclaw::reborn::slack_delivery",
-                %run_id,
-                ?outcome,
-                "triggered run delivery completed"
-            );
-        });
-    }
-}
-
-impl TriggeredRunDeliveryDriver {
-    async fn record_outcome(&self, run_id: TurnRunId, outcome: TriggeredRunDeliveryOutcomeKind) {
-        record_triggered_run_outcome(&*self.delivery_store, run_id, outcome).await;
-    }
-}
-
-/// Inner delivery coroutine for a single triggered run.
-///
-/// ## Invariant: a parked-awaiting-user run is terminal-for-delivery
-///
-/// After the actionable gate/auth prompt for a `BlockedApproval` / `BlockedAuth`
-/// run has been delivered, the run typically *stays* blocked until the user acts
-/// (approve / re-auth) — which is the common case, not a failure. The wait loop
-/// re-enters `wait_for_actionable_triggered` to handle the eventual transition to
-/// `Completed` (deliver the final reply, delete the stale OAuth prompt). If that
-/// re-wait hits the `max_wait` backstop, the run is parked awaiting the user: that
-/// is a successful, terminal-for-delivery outcome (`Delivered`) — NEVER record
-/// `Failed` for it, and never poll it for `Completed`. The `max_wait` backstop is
-/// the failure signal ONLY for runs that never reached an actionable state at all
-/// (still running / stuck), distinguished here by `delivered_blocked_marker`. See
-/// `docs/plans/2026-06-25-slack-delivery-blocked-terminal.md` for the production
-/// incident (23× spurious `Failed` after 30-min polls) this guards against.
-// arch-exempt: too_many_args, needs a triggered-delivery context bundle (services + settings + fire + run identity + delivery store + fallback agent + target provider), plan docs/plans/2026-06-10-slack-gate-feedback-and-routing.md Phase C
-#[allow(clippy::too_many_arguments)]
-async fn deliver_triggered_run(
-    services: &FinalReplyDeliveryServices,
-    settings: &FinalReplyDeliverySettings,
-    fire: &TriggerFire,
-    run_id: TurnRunId,
-    scope: TurnScope,
-    delivery_store: &dyn TriggeredRunDeliveryStore,
-    fallback_agent_id: &ironclaw_host_api::AgentId,
-    outbound_target_provider: Option<&dyn crate::outbound::OutboundDeliveryTargetProvider>,
-) -> TriggeredRunDeliveryOutcomeKind {
-    // The actor is the trigger creator.
-    let actor = TurnActor::new(fire.creator_user_id.clone());
-
-    // Derive the TriggerCommunicationContext for the outbound origin.
-    let trigger_context = match triggered_communication_context(fire) {
-        Ok(ctx) => ctx,
-        Err(reason) => {
-            tracing::warn!(
-                target = "ironclaw::reborn::slack_delivery",
-                %run_id,
-                %reason,
-                "triggered run delivery skipped: cannot build trigger context"
-            );
-            let outcome = TriggeredRunDeliveryOutcomeKind::Failed;
-            record_triggered_run_outcome(delivery_store, run_id, outcome).await;
-            return outcome;
-        }
-    };
-
-    // Resolve the per-trigger delivery target (when the fire carries one) into
-    // a reply-target binding BEFORE any delivery work. The resolution engine
-    // then prefers this source route over the creator's user-global preference
-    // (`RunNotificationOrigin::TriggeredFromSourceRoute`). Resolution failures
-    // fail closed — a stale or foreign target must never silently fall back to
-    // another conversation.
-    let per_trigger_source_route = match &fire.delivery_target {
-        None => None,
-        Some(target) => {
-            let resolved =
-                resolve_per_trigger_delivery_route(outbound_target_provider, fire, &scope, target)
-                    .await;
-            match resolved {
-                Ok(route) => Some(route),
-                Err(outcome) => {
-                    tracing::warn!(
-                        target = "ironclaw::reborn::slack_delivery",
-                        %run_id,
-                        ?outcome,
-                        "triggered run delivery stopped: per-trigger delivery target did not resolve"
-                    );
-                    record_triggered_run_outcome(delivery_store, run_id, outcome).await;
-                    return outcome;
-                }
-            }
-        }
-    };
-
-    // Build a thread scope for reading the finalized assistant message.
-    // The turn scope's thread_id is the canonical thread for this trigger session.
-    // Use the scope's agent_id when present; otherwise fall back to the configured
-    // fallback_agent_id — the same value record_trigger_prompt uses — so the key
-    // matches the thread that was stored at submit time.
-    let thread_scope = ThreadScope {
-        tenant_id: scope.tenant_id.clone(),
-        agent_id: scope
-            .agent_id
-            .clone()
-            .unwrap_or_else(|| fallback_agent_id.clone()),
-        project_id: scope.project_id.clone(),
-        owner_user_id: scope.explicit_owner_user_id().cloned(),
-        mission_id: None,
-    };
-
-    // Build the reply-target authority: resolves from the per-trigger source
-    // route when present, otherwise from the creator's personal preference.
-    let authority = TriggeredChannelReplyTargetAuthority {
-        channel_protocol: Arc::clone(&services.channel_protocol),
-        scope: scope.clone(),
-        actor: actor.clone(),
-        trigger_context: trigger_context.clone(),
-        per_trigger_source_route,
-        resolved_space_id: std::sync::Mutex::new(None),
-    };
-
-    let mut delivered_blocked_marker: Option<BlockedActionableMarker> = None;
-    let mut messages_to_delete_after_final = Vec::new();
-
-    loop {
-        // Poll until the run reaches an actionable state.
-        let state = match wait_for_actionable_triggered(
-            services,
-            &scope,
-            run_id,
-            settings,
-            &delivered_blocked_marker,
-        )
-        .await
-        {
-            Ok(s) => s,
-            Err(FinalReplyDeliveryError::RunWaitTimedOut { .. })
-                if delivered_blocked_marker.is_some() =>
-            {
-                // The run is parked in a Blocked* state (awaiting the user's
-                // approval or re-auth) AFTER we already delivered its actionable
-                // gate/auth prompt. This is the common, expected case — the user
-                // simply has not acted within the wait backstop. The prompt is
-                // out; the user's resolution arrives later as a separate inbound
-                // event and is bridged back via the delivered-gate route. Treat
-                // this as a successful, terminal-for-delivery outcome instead of
-                // polling to the backstop and recording a generic `Failed` (which
-                // also clobbers the `Delivered` we already earned). Mirrors the
-                // live-run path's `RunWaitTimedOutAfterNotification` "quiet
-                // success" semantics. The auth prompt must remain actionable, so
-                // we intentionally do NOT delete `messages_to_delete_after_final`
-                // here — they are cleaned up only on a real terminal final reply.
-                tracing::debug!(
-                    target = "ironclaw::reborn::slack_delivery",
-                    %run_id,
-                    "triggered run parked awaiting user after delivering blocked prompt; recording Delivered"
-                );
-                let outcome = TriggeredRunDeliveryOutcomeKind::Delivered;
-                record_triggered_run_outcome(delivery_store, run_id, outcome).await;
-                return outcome;
-            }
-            Err(err) => {
-                tracing::warn!(
-                    target = "ironclaw::reborn::slack_delivery",
-                    %run_id,
-                    error = %err,
-                    "triggered run wait failed"
-                );
-                let outcome = TriggeredRunDeliveryOutcomeKind::Failed;
-                record_triggered_run_outcome(delivery_store, run_id, outcome).await;
-                return outcome;
-            }
-        };
-
-        // Build the notification payload. The trigger prompt becomes the short
-        // routine label in the footer appended to every triggered Slack message.
-        let trigger_label = triggered_label_from_prompt(&fire.prompt);
-        let notification = match triggered_notification_for_state(
-            services,
-            &scope,
-            &thread_scope,
-            &actor,
-            &state,
-            run_id,
-            &trigger_label,
-        )
-        .await
-        {
-            Ok(Some(n)) => n,
-            Ok(None) => {
-                // Run completed with no assistant message — normal "skipped" outcome.
-                let outcome = TriggeredRunDeliveryOutcomeKind::Skipped;
-                record_triggered_run_outcome(delivery_store, run_id, outcome).await;
-                return outcome;
-            }
-            Err(err) => {
-                tracing::warn!(
-                    target = "ironclaw::reborn::slack_delivery",
-                    %run_id,
-                    error = %err,
-                    "triggered run notification build failed"
-                );
-                let outcome = TriggeredRunDeliveryOutcomeKind::Failed;
-                record_triggered_run_outcome(delivery_store, run_id, outcome).await;
-                return outcome;
-            }
-        };
-
-        let next_blocked_marker = blocked_actionable_marker(&state);
-        let event_kind = notification.event_kind;
-        let gate_ref_for_routing = notification.gate_ref_for_routing.clone();
-
-        // Compute the DM requirement from the payload BEFORE it is moved into the call.
-        // AuthPrompt payloads with an authorization_url must only be delivered to a
-        // personal DM; pass this requirement through the delivery request so the
-        // resolver enforces it at send time (closing the snapshot-vs-send race).
-        let require_direct_message_target = matches!(
-            &notification.payload,
-            ProductOutboundPayload::AuthPrompt(view)
-                if view.authorization_url.is_some()
-        );
-
-        // Build the delivery request and deliver.
-        let delivery_result = deliver_triggered_notification(
-            services,
-            &scope,
-            &actor,
-            run_id,
-            &state,
-            &authority,
-            notification,
-            require_direct_message_target,
-        )
-        .await;
-
-        match delivery_result {
-            Ok(posted_messages) => {
-                if (event_kind == RunNotificationEventKind::ApprovalNeeded
-                    || event_kind == RunNotificationEventKind::AuthRequired)
-                    && let Some(gate_ref) = gate_ref_for_routing.as_deref()
-                {
-                    // Read the space id that was captured during target resolution.
-                    let space_id = {
-                        let space_id_guard = authority
-                            .resolved_space_id
-                            .lock()
-                            .unwrap_or_else(|poisoned| poisoned.into_inner());
-                        space_id_guard.clone()
-                    };
-                    record_gate_route_if_needed(
-                        services.route_store.as_ref(),
-                        run_id,
-                        &scope.tenant_id,
-                        &fire.creator_user_id,
-                        gate_ref,
-                        &scope,
-                        &posted_messages,
-                        None,
-                        space_id.as_deref(),
-                    )
-                    .await;
-                }
-                if let Some(marker) = next_blocked_marker
-                    && matches!(
-                        event_kind,
-                        RunNotificationEventKind::ApprovalNeeded
-                            | RunNotificationEventKind::AuthRequired
-                    )
-                {
-                    if event_kind == RunNotificationEventKind::AuthRequired {
-                        messages_to_delete_after_final.extend(posted_messages);
-                    }
-                    delivered_blocked_marker = Some(marker);
-                    // Loop again to wait for the next actionable state.
-                    continue;
-                }
-                // Terminal delivery — clean up auth messages that should not persist.
-                for message in messages_to_delete_after_final {
-                    delete_triggered_slack_message(services, message).await;
-                }
-                let outcome = TriggeredRunDeliveryOutcomeKind::Delivered;
-                record_triggered_run_outcome(delivery_store, run_id, outcome).await;
-                return outcome;
-            }
-            Err(TriggeredNotificationFailure::OAuthTargetNotDm) => {
-                // Authority backstop tripped: the payload carried an OAuth
-                // authorization_url but the send-time binding was not a personal DM.
-                // Suppress the URL (fail closed), cancel the blocked run, then post
-                // the auth-unavailable notice as a terminal FinalReply — mirrors the
-                // non-OAuth deny branch in `triggered_notification_for_state`.
-                tracing::debug!(
-                    target = "ironclaw::reborn::slack_delivery",
-                    %run_id,
-                    "triggered run OAuth URL suppressed by send-time backstop: resolved \
-                     target is not a personal DM; cancelling run"
-                );
-                // Cancel the blocked run FIRST. Do NOT remove the existing auth
-                // prompt until the run is actually canceled: a transient cancel
-                // failure must leave the prompt in place (the user may still be able
-                // to finish), so on failure we record `Failed` and return without
-                // deleting anything.
-                if let Err(err) = cancel_auth_blocked_run(
-                    services.turn_coordinator.as_ref(),
-                    services.auth_flow_canceller.as_deref(),
-                    &scope,
-                    actor.clone(),
-                    run_id,
-                    state.gate_ref.as_ref().map(|gate_ref| gate_ref.as_str()),
-                )
-                .await
-                {
-                    tracing::debug!(
-                        target = "ironclaw::reborn::slack_delivery",
-                        %run_id,
-                        error = %err,
-                        "triggered run OAuth backstop: cancel_auth_blocked_run failed"
-                    );
-                    let outcome = TriggeredRunDeliveryOutcomeKind::Failed;
-                    record_triggered_run_outcome(delivery_store, run_id, outcome).await;
-                    return outcome;
-                }
-                // Post the auth-unavailable notice as a terminal FinalReply.
-                // require_direct_message_target is false: the notice is plain text
-                // with no OAuth URL, so no DM restriction applies.
-                let notice = ChannelActionableNotification {
-                    event_kind: RunNotificationEventKind::FinalReplyReady,
-                    payload: ProductOutboundPayload::FinalReply(FinalReplyView {
-                        turn_run_id: run_id,
-                        text: format!(
-                            "{CHANNEL_AUTH_UNAVAILABLE_MESSAGE}{}",
-                            triggered_update_footer(&trigger_label)
-                        ),
-                        generated_at: Utc::now(),
-                    }),
-                    gate_ref_for_routing: None,
-                };
-                let outcome = match deliver_triggered_notification(
-                    services, &scope, &actor, run_id, &state, &authority, notice, false,
-                )
-                .await
-                {
-                    Ok(_) => TriggeredRunDeliveryOutcomeKind::Delivered,
-                    Err(TriggeredNotificationFailure::NoDefaultConfigured) => {
-                        TriggeredRunDeliveryOutcomeKind::NoDefaultConfigured
-                    }
-                    Err(TriggeredNotificationFailure::Denied) => {
-                        TriggeredRunDeliveryOutcomeKind::Denied
-                    }
-                    Err(TriggeredNotificationFailure::OAuthTargetNotDm)
-                    | Err(TriggeredNotificationFailure::Other(_)) => {
-                        TriggeredRunDeliveryOutcomeKind::Failed
-                    }
-                };
-                // The run is now canceled, so any OAuth auth-prompt messages posted
-                // to a DM in earlier iterations are stale — remove them. This runs
-                // only after a successful cancel and after the replacement notice has
-                // been attempted, so we never strip the prompt while the run is still
-                // live.
-                for message in messages_to_delete_after_final.drain(..) {
-                    delete_triggered_slack_message(services, message).await;
-                }
-                record_triggered_run_outcome(delivery_store, run_id, outcome).await;
-                return outcome;
-            }
-            Err(failure) => {
-                tracing::warn!(
-                    target = "ironclaw::reborn::slack_delivery",
-                    %run_id,
-                    reason = %failure,
-                    "triggered run delivery failed"
-                );
-                let outcome = match failure {
-                    TriggeredNotificationFailure::NoDefaultConfigured => {
-                        TriggeredRunDeliveryOutcomeKind::NoDefaultConfigured
-                    }
-                    TriggeredNotificationFailure::Denied => TriggeredRunDeliveryOutcomeKind::Denied,
-                    TriggeredNotificationFailure::OAuthTargetNotDm => {
-                        unreachable!("OAuthTargetNotDm is handled by the dedicated arm above")
-                    }
-                    TriggeredNotificationFailure::Other(_) => {
-                        TriggeredRunDeliveryOutcomeKind::Failed
-                    }
-                };
-                record_triggered_run_outcome(delivery_store, run_id, outcome).await;
-                return outcome;
-            }
-        }
-    }
-}
-
-/// Waits for the given run to reach an actionable state (Completed, BlockedApproval, BlockedAuth).
-async fn wait_for_actionable_triggered(
-    services: &FinalReplyDeliveryServices,
-    scope: &TurnScope,
-    run_id: TurnRunId,
-    settings: &FinalReplyDeliverySettings,
-    delivered_blocked_marker: &Option<BlockedActionableMarker>,
-) -> Result<TurnRunState, FinalReplyDeliveryError> {
-    let start = std::time::Instant::now();
-    let mut poll_interval = settings.poll_interval;
-    loop {
-        let state = services
-            .turn_coordinator
-            .get_run_state(GetRunStateRequest {
-                scope: scope.clone(),
-                run_id,
-            })
-            .await?;
-        if state.status.is_terminal() {
-            return Ok(state);
-        }
-        if let Some(marker) = blocked_actionable_marker(&state)
-            && Some(&marker) != delivered_blocked_marker.as_ref()
-        {
-            return Ok(state);
-        }
-        if start.elapsed() >= settings.max_wait {
-            return Err(FinalReplyDeliveryError::RunWaitTimedOut { run_id });
-        }
-        tokio::time::sleep(jittered_poll_interval(poll_interval, &run_id)).await;
-        poll_interval = poll_interval.saturating_mul(2).min(MAX_RUN_POLL_INTERVAL);
-    }
-}
-
-/// Footer for triggered **gate** prompts (approval / OAuth auth). The user can
-/// act on this specific request in Slack, but cannot otherwise drive the run.
-/// `label` is a short trigger identifier (truncated prompt); omitted when empty.
-fn triggered_gate_footer(label: &str) -> String {
-    let label = label.trim();
-    let lead = if label.is_empty() {
-        "From a triggered event.".to_string()
-    } else {
-        format!("From a triggered event: “{label}”.")
-    };
-    format!(
-        "\n\n_{lead} You can respond to this request here — to otherwise interact \
-         with this run, open the Ironclaw web app._"
-    )
-}
-
-/// Footer for triggered **updates / final replies**. These are output only —
-/// there is nothing to act on in Slack, so it points the user to the web app.
-fn triggered_update_footer(label: &str) -> String {
-    let label = label.trim();
-    let lead = if label.is_empty() {
-        "From a triggered event.".to_string()
-    } else {
-        format!("From a triggered event: “{label}”.")
-    };
-    format!(
-        "\n\n_{lead} You can't interact with triggered events here — open the \
-         Ironclaw web app to interact with this run._"
-    )
-}
-
-/// Truncate a trigger prompt to a short single-line label for the footer.
-fn triggered_label_from_prompt(prompt: &str) -> String {
-    const MAX_LABEL_CHARS: usize = 60;
-    let first_line = prompt.lines().next().unwrap_or("").trim();
-    if first_line.chars().count() <= MAX_LABEL_CHARS {
-        first_line.to_string()
-    } else {
-        let truncated: String = first_line.chars().take(MAX_LABEL_CHARS).collect();
-        format!("{truncated}…")
-    }
-}
-
-/// Builds the notification payload for a triggered run's actionable state.
-///
-/// ## Triggered Slack surface contract
-///
-/// A triggered run is **output-only over Slack, plus gate-resolution input** —
-/// it is NOT a conversational channel. This function is the single place those
-/// outputs are minted, and it only ever produces three of the nine
-/// [`ProductOutboundPayload`] variants:
-///
-/// - `BlockedApproval` → `GatePrompt` (approve/deny)
-/// - `BlockedAuth`     → `AuthPrompt` (OAuth link) or, for non-OAuth, a cancel +
-///   `FinalReply` carrying the auth-unavailable notice
-/// - `Completed`       → `FinalReply` (the result)
-///
-/// Anything else (`Running`, etc.) yields `None` — triggered Slack deliberately
-/// does NOT stream `Progress` / `CapabilityActivity` / projection payloads; those
-/// belong to the live WebUI channel.
-///
-/// On the inbound side the triggered run only consumes gate **resolutions**
-/// (`ApprovalResolution` / `ScopedApprovalResolution` / `AuthResolution`), bridged
-/// back into the trigger's scope via the delivered-gate-route fingerprint. A
-/// free-text Slack reply parses as a `UserMessage` and starts a *separate* run in
-/// the DM's own scope — it never reaches the triggered run. If you extend this
-/// function, preserve that boundary: do not mint conversational/streaming payloads
-/// here, and do not assume inbound free-text can address a triggered run.
-async fn triggered_notification_for_state(
-    services: &FinalReplyDeliveryServices,
-    scope: &TurnScope,
-    thread_scope: &ThreadScope,
-    actor: &TurnActor,
-    state: &TurnRunState,
-    run_id: TurnRunId,
-    trigger_label: &str,
-) -> Result<Option<ChannelActionableNotification>, FinalReplyDeliveryError> {
-    match state.status {
-        TurnStatus::Completed => {
-            // Read finalized assistant message.
-            let Some(text) = services
-                .thread_service
-                .finalized_assistant_message_by_run(FinalizedAssistantMessageByRunRequest {
-                    scope: thread_scope.clone(),
-                    thread_id: scope.thread_id.clone(),
-                    turn_run_id: run_id.to_string(),
-                })
-                .await?
-                .and_then(|m| m.content)
-            else {
-                tracing::warn!(
-                    target = "ironclaw::reborn::slack_delivery",
-                    %run_id,
-                    "completed triggered run has no finalized assistant message; skipping delivery"
-                );
-                return Ok(None);
-            };
-            Ok(Some(ChannelActionableNotification {
-                event_kind: RunNotificationEventKind::FinalReplyReady,
-                payload: ProductOutboundPayload::FinalReply(FinalReplyView {
-                    turn_run_id: run_id,
-                    text: format!("{text}{}", triggered_update_footer(trigger_label)),
-                    generated_at: Utc::now(),
-                }),
-                gate_ref_for_routing: None,
-            }))
-        }
-        TurnStatus::BlockedApproval => {
-            let Some(gate_ref) = state.gate_ref.as_ref() else {
-                tracing::warn!(
-                    target = "ironclaw::reborn::slack_delivery",
-                    %run_id,
-                    "triggered run blocked on approval without gate ref; skipping"
-                );
-                return Ok(None);
-            };
-            // Render the triggered approval prompt exactly like the regular
-            // inbound flow: What/Why context (the tool + reason) via the shared
-            // `channel_approval_gate_prompt_view`, with the channel-specific reply
-            // instruction appended once by the adapter. The approval request is
-            // stored under this triggered run's scope, so the context resolves
-            // here.
-            let context = approval_prompt_context_view(
-                services.approval_requests.as_deref(),
-                gate_ref,
-                &actor.user_id,
-                scope,
-            )
-            .await;
-            let mut prompt = channel_approval_gate_prompt_view(run_id, gate_ref, context.as_ref());
-            prompt.body.push_str(&triggered_gate_footer(trigger_label));
-            Ok(Some(ChannelActionableNotification {
-                event_kind: RunNotificationEventKind::ApprovalNeeded,
-                payload: ProductOutboundPayload::GatePrompt(prompt),
-                gate_ref_for_routing: Some(gate_ref.as_str().to_string()),
-            }))
-        }
-        TurnStatus::BlockedAuth => {
-            let Some(gate_ref) = state.gate_ref.as_ref() else {
-                tracing::warn!(
-                    target = "ironclaw::reborn::slack_delivery",
-                    %run_id,
-                    "triggered run blocked on auth without gate ref; skipping"
-                );
-                return Ok(None);
-            };
-            let mut view = enrich_auth_prompt_view(
-                AuthPromptView {
-                    turn_run_id: run_id,
-                    auth_request_ref: gate_ref.as_str().to_string(),
-                    invocation_id: None,
-                    headline: "Authentication required".to_string(),
-                    body: "Authentication required to continue this automation.".to_string(),
-                    challenge_kind: None,
-                    provider: None,
-                    account_label: None,
-                    authorization_url: None,
-                    expires_at: None,
-                    connection: None,
-                },
-                &actor.user_id,
-                scope,
-                &state.credential_requirements,
-                services.auth_challenges.as_deref(),
-            )
-            .await?;
-            view.body.push_str(&triggered_gate_footer(trigger_label));
-            // Only link-based OAuth is allowed over Slack. The `require_direct_message_target`
-            // flag is set on the `ProductOutboundDeliveryRequest` when the payload carries
-            // an `authorization_url`, and the resolver enforces the DM constraint at send
-            // time — it returns `OutboundTargetNotDirectMessage` if the resolved binding is
-            // not a personal DM, which `classify_delivery_error` maps to `OAuthTargetNotDm`,
-            // causing `deliver_triggered_run` to cancel the run and post the auth-unavailable
-            // notice. We do not need to pre-check the DM status here.
-            if view.authorization_url.is_some() {
-                Ok(Some(ChannelActionableNotification {
-                    event_kind: RunNotificationEventKind::AuthRequired,
-                    payload: ProductOutboundPayload::AuthPrompt(view),
-                    gate_ref_for_routing: Some(gate_ref.as_str().to_string()),
-                }))
-            } else {
-                // Non-OAuth challenge (manual token / API-key entry). Deny: cancel the
-                // parked run and post the auth-unavailable notice directly.
-                cancel_auth_blocked_run(
-                    services.turn_coordinator.as_ref(),
-                    services.auth_flow_canceller.as_deref(),
-                    scope,
-                    actor.clone(),
-                    run_id,
-                    Some(gate_ref.as_str()),
-                )
-                .await?;
-                Ok(Some(ChannelActionableNotification {
-                    event_kind: RunNotificationEventKind::FinalReplyReady,
-                    payload: ProductOutboundPayload::FinalReply(FinalReplyView {
-                        turn_run_id: run_id,
-                        text: format!(
-                            "{CHANNEL_AUTH_UNAVAILABLE_MESSAGE}{}",
-                            triggered_update_footer(trigger_label)
-                        ),
-                        generated_at: Utc::now(),
-                    }),
-                    gate_ref_for_routing: None,
-                }))
-            }
-        }
-        _ => Ok(None),
-    }
-}
-
-/// Typed failure classification for a single triggered-run notification delivery
-/// attempt. Avoids string-contains pattern matching on error messages.
-enum TriggeredNotificationFailure {
-    /// The creator has no personal delivery target configured.
-    NoDefaultConfigured,
-    /// The resolved target is inaccessible or rejected the delivery.
-    Denied,
-    /// The payload carries an OAuth `authorization_url` but the send-time
-    /// binding resolved to a non-personal-DM target. Posting the OAuth URL
-    /// to a shared channel would leak it to every member. The resolver returns
-    /// [`ProductWorkflowError::OutboundTargetNotDirectMessage`] when
-    /// `require_direct_message_target` is true and the binding is not a DM;
-    /// `classify_delivery_error` maps that to this variant. `deliver_triggered_run`
-    /// handles it by cancelling the run and posting the auth-unavailable notice.
-    OAuthTargetNotDm,
-    /// Any other delivery or transport failure.
-    Other(String),
-}
-
-impl std::fmt::Display for TriggeredNotificationFailure {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::NoDefaultConfigured => write!(f, "no default delivery target configured"),
-            Self::Denied => write!(f, "delivery target access denied"),
-            Self::OAuthTargetNotDm => {
-                write!(
-                    f,
-                    "OAuth authorization_url suppressed: send-time target is not a personal DM"
-                )
-            }
-            Self::Other(reason) => write!(f, "{reason}"),
-        }
-    }
-}
-
-/// Delivers a triggered-run notification, returning the list of posted Slack messages.
-// arch-exempt: too_many_args, needs a delivery-request bundle (services + scope + actor + state + authority + notification), plan #4953
-#[allow(clippy::too_many_arguments)]
-async fn deliver_triggered_notification(
-    services: &FinalReplyDeliveryServices,
-    scope: &TurnScope,
-    actor: &TurnActor,
-    run_id: TurnRunId,
-    state: &TurnRunState,
-    authority: &TriggeredChannelReplyTargetAuthority,
-    notification: ChannelActionableNotification,
-    require_direct_message_target: bool,
-) -> Result<Vec<PostedChannelMessage>, TriggeredNotificationFailure> {
-    let ChannelActionableNotification {
-        event_kind,
-        payload,
-        // The caller extracts gate_ref_for_routing before this call and records
-        // the delivered-gate route record on success; it is not needed here.
-        gate_ref_for_routing: _,
-    } = notification;
-
-    let _reply_target = state.reply_target_binding_ref.clone();
-    let projection_access_policy = AllowNoProjectionAccess;
-    let outbound_policy = OutboundPolicyService::new(
-        services.outbound_store.as_ref(),
-        &projection_access_policy,
-        authority,
-    );
-    let projection_id = channel_run_notification_projection_id(run_id, event_kind);
-    let projection_ref = ProjectionUpdateRef::new(projection_id.clone()).map_err(|reason| {
-        TriggeredNotificationFailure::Other(format!("invalid_projection_ref: {reason}"))
-    })?;
-    // A fire-resolved per-trigger route becomes the source route the engine
-    // prefers for the final reply; without one, the creator's user-global
-    // preference resolves as before.
-    let origin = match &authority.per_trigger_source_route {
-        Some(source_route) => RunNotificationOrigin::TriggeredFromSourceRoute {
-            trigger: authority.trigger_context.clone(),
-            source_route: SourceRouteContext {
-                reply_target_binding_ref: source_route.clone(),
-            },
-        },
-        None => RunNotificationOrigin::Triggered {
-            trigger: authority.trigger_context.clone(),
-        },
-    };
-    let delivery = ironclaw_outbound::PrepareCommunicationDeliveryRequest {
-        resolution_request: CommunicationDeliveryResolutionRequest {
-            scope: scope.clone(),
-            actor: actor.clone(),
-            modality: CommunicationModality::Text,
-            intent: CommunicationDeliveryIntent::RunNotification(RunNotificationContext {
-                event_kind,
-                origin,
-            }),
-        },
-        turn_run_id: Some(run_id),
-        projection_ref,
-        attempted_at: Utc::now(),
-    };
-
-    let tracked_egress = TrackingPostEgress::new(
-        Arc::clone(&services.egress),
-        Arc::clone(&services.channel_protocol),
-    );
-    let render_result = prepare_and_render_product_outbound(
-        &outbound_policy,
-        services.communication_preferences.as_ref(),
-        authority,
-        ProductOutboundDeliveryRequest {
-            delivery,
-            payload,
-            projection_cursor: ironclaw_product_adapters::ProjectionCursor::new(projection_id)
-                .map_err(|e| {
-                    TriggeredNotificationFailure::Other(format!("invalid_projection_cursor: {e}"))
-                })?,
-            adapter: services.adapter.as_ref(),
-            egress: &tracked_egress,
-            delivery_sink: services.delivery_sink.as_ref(),
-            require_direct_message_target,
-        },
-    )
-    .await;
-
-    if let Err(error) = render_result {
-        return Err(classify_delivery_error(error));
-    }
-
-    Ok(tracked_egress.take_posted_messages())
-}
-
-/// Classify a [`ProductOutboundDeliveryError`] into the typed
-/// [`TriggeredNotificationFailure`] variants used for outcome recording.
-fn classify_delivery_error(
-    error: ironclaw_product_workflow::ProductOutboundDeliveryError,
-) -> TriggeredNotificationFailure {
-    use ironclaw_outbound::OutboundError;
-    use ironclaw_product_workflow::ProductOutboundDeliveryError;
-    match &error {
-        ProductOutboundDeliveryError::Workflow {
-            source: ProductWorkflowError::OutboundTargetNotDirectMessage,
-            ..
-        } => TriggeredNotificationFailure::OAuthTargetNotDm,
-        ProductOutboundDeliveryError::Outbound(OutboundError::PreferenceTargetMissing {
-            ..
-        }) => TriggeredNotificationFailure::NoDefaultConfigured,
-        ProductOutboundDeliveryError::Outbound(OutboundError::AccessDenied) => {
-            TriggeredNotificationFailure::Denied
-        }
-        _ => TriggeredNotificationFailure::Other(error.to_string()),
-    }
-}
-
-async fn delete_triggered_slack_message(
-    services: &FinalReplyDeliveryServices,
-    message: PostedChannelMessage,
-) {
-    if let Err(error) = services
-        .channel_protocol
-        .delete_status_message(services.egress.as_ref(), &message)
-        .await
-    {
-        tracing::warn!(
-            target = "ironclaw::reborn::slack_delivery",
-            error = %error,
-            "failed to delete triggered delivery auth message"
-        );
-    }
-}
-
-async fn record_triggered_run_outcome(
-    store: &dyn TriggeredRunDeliveryStore,
-    run_id: TurnRunId,
-    outcome: TriggeredRunDeliveryOutcomeKind,
-) {
-    let record = TriggeredRunDeliveryRecord {
-        run_id,
-        outcome,
-        recorded_at: Utc::now(),
-    };
-    if let Err(error) = store.record_triggered_run_delivery(record).await {
-        tracing::warn!(
-            target = "ironclaw::reborn::slack_delivery",
-            %run_id,
-            error = %error,
-            "failed to record triggered run delivery outcome (best-effort)"
-        );
-    }
-}
-
-/// Resolve a fire's per-trigger delivery target id into the reply-target
-/// binding the resolution engine should prefer over the user preference.
-///
-/// Fail-closed contract: any missing provider, malformed id, foreign/stale
-/// target (`Ok(None)`), or provider backend error yields a terminal outcome
-/// instead of a route — delivery never guesses a substitute conversation.
-async fn resolve_per_trigger_delivery_route(
-    outbound_target_provider: Option<&dyn crate::outbound::OutboundDeliveryTargetProvider>,
-    fire: &TriggerFire,
-    scope: &TurnScope,
-    target: &ironclaw_triggers::TriggerDeliveryTargetId,
-) -> Result<ReplyTargetBindingRef, TriggeredRunDeliveryOutcomeKind> {
-    let Some(provider) = outbound_target_provider else {
-        tracing::warn!(
-            target = "ironclaw::reborn::slack_delivery",
-            "per-trigger delivery target present but no outbound target provider is wired"
-        );
-        return Err(TriggeredRunDeliveryOutcomeKind::TargetUnavailable);
-    };
-    let target_id = ironclaw_product_workflow::RebornOutboundDeliveryTargetId::new(target.as_str())
-        .map_err(|error| {
-            tracing::warn!(
-                target = "ironclaw::reborn::slack_delivery",
-                %error,
-                "per-trigger delivery target id failed outbound target id validation"
-            );
-            TriggeredRunDeliveryOutcomeKind::TargetUnavailable
-        })?;
-    // The caller for target ownership checks is the trigger creator in the
-    // fire's scope — the same identity that selected the target at creation.
-    let caller = ironclaw_product_workflow::WebUiAuthenticatedCaller::new(
-        scope.tenant_id.clone(),
-        fire.creator_user_id.clone(),
-        scope.agent_id.clone(),
-        scope.project_id.clone(),
-    );
-    match provider
-        .resolve_outbound_delivery_target(&caller, &target_id)
-        .await
-    {
-        Ok(Some(entry)) => Ok(entry.reply_target_binding_ref),
-        Ok(None) => {
-            tracing::warn!(
-                target = "ironclaw::reborn::slack_delivery",
-                "per-trigger delivery target did not resolve for the trigger creator (stale, foreign, or disconnected)"
-            );
-            Err(TriggeredRunDeliveryOutcomeKind::TargetUnavailable)
-        }
-        Err(error) => {
-            tracing::warn!(
-                target = "ironclaw::reborn::slack_delivery",
-                %error,
-                "outbound delivery target lookup failed during triggered delivery"
-            );
-            Err(TriggeredRunDeliveryOutcomeKind::Failed)
-        }
-    }
-}
-
-/// Build a `TriggerCommunicationContext` from the fire's identity.
-fn triggered_communication_context(
-    fire: &TriggerFire,
-) -> Result<TriggerCommunicationContext, String> {
-    let trigger_origin_ref = TriggerOriginRef::new(fire.identity.trigger_id().to_string())
-        .map_err(|e| format!("invalid trigger origin ref: {e}"))?;
-    let fire_slot = TriggerFireSlot::new(fire.identity.fire_slot().to_rfc3339())
-        .map_err(|e| format!("invalid fire slot: {e}"))?;
-    Ok(TriggerCommunicationContext {
-        trigger_origin_ref,
-        trigger_source_kind: TriggerSourceKind::Schedule,
-        fire_slot,
-    })
-}
-
-/// Reply-target authority for triggered-run delivery.
-///
-/// Resolves the delivery target from the creator's personal communication
-/// preference (via `CommunicationPreferenceRepository`). Validates that the
-/// reply target is the one the resolution engine chose (no substitution).
-struct TriggeredChannelReplyTargetAuthority {
-    channel_protocol: Arc<dyn ChannelDeliveryProtocol>,
-    scope: TurnScope,
-    actor: TurnActor,
-    trigger_context: TriggerCommunicationContext,
-    /// Reply-target binding resolved from the trigger's own `delivery_target`
-    /// at fire time. When present, delivery uses
-    /// `RunNotificationOrigin::TriggeredFromSourceRoute` so the resolution
-    /// engine prefers it over the creator's user-global preference.
-    per_trigger_source_route: Option<ReplyTargetBindingRef>,
-    /// Space id (Slack team id) captured during
-    /// `resolve_product_outbound_target_metadata`. Updated on every resolution.
-    /// Used after delivery to attach the team id to posted-message gate-route
-    /// refs so inbound replies (which carry team_id as space_id)
-    /// fingerprint-match the recorded ref.
-    resolved_space_id: std::sync::Mutex<Option<String>>,
-}
-
-#[async_trait]
-impl ReplyTargetBindingValidator for TriggeredChannelReplyTargetAuthority {
-    async fn validate_reply_target(
-        &self,
-        request: ReplyTargetValidationRequest,
-    ) -> Result<ReplyTargetBindingClaim, OutboundError> {
-        // The resolution engine chose this target from the creator's personal preference.
-        // We trust it as long as the scope and actor match.
-        if request.scope != self.scope || request.actor != self.actor {
-            return Err(OutboundError::AccessDenied);
-        }
-        Ok(ReplyTargetBindingClaim::new(request.candidate.target))
-    }
-}
-
-#[async_trait]
-impl ProductOutboundTargetResolver for TriggeredChannelReplyTargetAuthority {
-    async fn resolve_product_outbound_target_metadata(
-        &self,
-        target: &ValidatedReplyTargetBinding,
-        require_direct_message: bool,
-    ) -> Result<VerifiedProductOutboundTargetMetadata, ProductWorkflowError> {
-        // Single enforcement point for the OAuth DM rule: when the delivery request
-        // requires a direct-message target (i.e. the payload carries an OAuth
-        // authorization_url), enforce that the EXACT send-time binding is a personal
-        // DM. Checked against the binding resolved NOW (at send time), making it
-        // race-free against the pre-loop preference snapshot going stale.
-        enforce_direct_message_if_required(
-            self.channel_protocol.as_ref(),
-            target.target(),
-            require_direct_message,
-        )?;
-
-        // Decode the conversation from the binding ref. Slack refs were built
-        // by `slack_personal_dm_reply_target_binding_ref` /
-        // `slack_shared_channel_reply_target_binding_ref` and encode space +
-        // conversation in length-prefixed segments; Telegram refs use the
-        // adapter's `tg:` encoding. We extract only what we need
-        // (conversation id + optional space/team id) to reconstruct the
-        // `ExternalConversationRef` for the adapter.
-        let (conversation_id, space_id) = self
-            .channel_protocol
-            .conversation_id_from_reply_target_binding_ref(target.target())
-            .ok_or_else(|| ProductWorkflowError::BindingResolutionFailed {
-            reason: format!(
-                "triggered delivery: cannot extract a channel conversation from binding ref '{}'",
-                target.target().as_str()
-            ),
-        })?;
-        // Store the resolved space id so that, after deliver_triggered_notification
-        // returns posted messages, we can attach the team id to gate-route refs.
-        *self
-            .resolved_space_id
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner()) = space_id.clone();
-        let external_conversation_ref =
-            ExternalConversationRef::new(space_id.as_deref(), &conversation_id, None, None)
-                .map_err(|e| ProductWorkflowError::BindingResolutionFailed {
-                    reason: format!("triggered delivery conversation ref: {e}"),
-                })?;
-        Ok(VerifiedProductOutboundTargetMetadata {
-            external_conversation_ref,
-            external_actor_ref: None,
-        })
-    }
-}
-
-fn turn_scope_from_thread_scope(
-    binding: &ResolvedBinding,
-    thread_scope: &ThreadScope,
-) -> Result<TurnScope, ProductWorkflowError> {
-    let Some(agent_id) = binding.agent_id.clone() else {
-        return Err(ProductWorkflowError::BindingResolutionFailed {
-            reason: "resolved binding missing agent_id required for turn scope".to_string(),
-        });
-    };
-    Ok(TurnScope::new_with_owner(
-        binding.tenant_id.clone(),
-        Some(agent_id),
-        binding.project_id.clone(),
-        binding.thread_id.clone(),
-        thread_scope.owner_user_id.clone(),
-    ))
-}
-
-fn thread_scope_from_binding(
-    binding: &ResolvedBinding,
-) -> Result<ThreadScope, ProductWorkflowError> {
-    let Some(agent_id) = binding.agent_id.clone() else {
-        return Err(ProductWorkflowError::BindingResolutionFailed {
-            reason: "resolved binding missing agent_id required for thread scope".to_string(),
-        });
-    };
-    Ok(ThreadScope {
-        tenant_id: binding.tenant_id.clone(),
-        agent_id,
-        project_id: binding.project_id.clone(),
-        owner_user_id: binding.subject_user_id.clone(),
-        mission_id: None,
-    })
-}
-
-// Test fixtures exercise the Slack outbound-target decoders (real refs, DM
-// provisioning), so the suite needs the Slack feature; the telegram-only build
-// covers this module's generic machinery through the Telegram host tests.
-#[cfg(all(test, feature = "slack-v2-host-beta"))]
+#[cfg(test)]
 mod tests {
     use super::*;
     use ironclaw_product_adapters::{
@@ -3204,17 +137,25 @@ mod tests {
     // the plan explicitly forbids exposing `host_state_filesystem` from
     // `RebornRuntime` for that purpose.
 
+    use ironclaw_channel_host::outbound_targets::{
+        OutboundDeliveryTargetEntry, OutboundDeliveryTargetProvider,
+    };
     use ironclaw_outbound::{
         CommunicationPreferenceRecord, DeliveryDefaultScope, InMemoryDeliveredGateRouteStore,
         InMemoryOutboundStateStore, InMemoryTriggeredRunDeliveryStore,
         WriteCommunicationPreferenceRequest,
     };
+    use ironclaw_product_adapters::redaction::RedactedString;
     use ironclaw_product_adapters::{
-        EgressCredentialHandle, EgressResponse, FakeOutboundDeliverySink, FakeProtocolHttpEgress,
-        ProductAdapterId, ProtocolHttpEgressError,
+        DeclaredEgressHost, DeclaredEgressTarget, DeliveryStatus, EgressCredentialHandle,
+        EgressHeader, EgressMethod, EgressPath, EgressResponse, FakeOutboundDeliverySink,
+        FakeProtocolHttpEgress, ProductAdapter, ProductAdapterCapabilities, ProductAdapterHealth,
+        ProductAdapterId, ProductOutboundEnvelope, ProductRenderOutcome, ProductSurfaceKind,
+        ProtocolHttpEgressError,
     };
-    use ironclaw_slack_v2_adapter::{
-        SlackV2Adapter, SlackV2AdapterConfig, slack_request_signature_auth_requirement,
+    use ironclaw_product_workflow::{
+        RebornOutboundDeliveryTargetCapabilities, RebornOutboundDeliveryTargetId,
+        RebornOutboundDeliveryTargetSummary, RebornServicesError, WebUiAuthenticatedCaller,
     };
     use ironclaw_threads::{
         AppendAssistantDraftRequest, EnsureThreadRequest, InMemorySessionThreadService,
@@ -3229,6 +170,345 @@ mod tests {
     };
 
     // --- Minimal inline fakes ------------------------------------------------
+
+    const TEST_CHANNEL_HOST: &str = "slack.com";
+    const TEST_CHANNEL_CREDENTIAL_HANDLE: &str = "slack_bot_token";
+
+    #[derive(Debug)]
+    struct TestChannelAdapter {
+        adapter_id: ProductAdapterId,
+        installation_id: AdapterInstallationId,
+        capabilities: ProductAdapterCapabilities,
+        auth_requirement: AuthRequirement,
+        declared_egress: Vec<DeclaredEgressTarget>,
+    }
+
+    impl TestChannelAdapter {
+        fn new(installation_id: &str) -> Self {
+            let credential_handle = EgressCredentialHandle::new(TEST_CHANNEL_CREDENTIAL_HANDLE)
+                .expect("test credential handle");
+            Self {
+                adapter_id: ProductAdapterId::new("slack_v2").expect("test adapter id"),
+                installation_id: AdapterInstallationId::new(installation_id)
+                    .expect("test installation id"),
+                capabilities: ProductAdapterCapabilities::external_channel_default(),
+                auth_requirement: AuthRequirement::SharedSecretHeader {
+                    header_name: "X-Test-Signature".to_string(),
+                },
+                declared_egress: vec![DeclaredEgressTarget::new(
+                    DeclaredEgressHost::new(TEST_CHANNEL_HOST).expect("test channel host"),
+                    Some(credential_handle),
+                )],
+            }
+        }
+    }
+
+    #[async_trait]
+    impl ProductAdapter for TestChannelAdapter {
+        fn adapter_id(&self) -> &ProductAdapterId {
+            &self.adapter_id
+        }
+
+        fn installation_id(&self) -> &AdapterInstallationId {
+            &self.installation_id
+        }
+
+        fn surface_kind(&self) -> ProductSurfaceKind {
+            ProductSurfaceKind::ExternalChannel
+        }
+
+        fn capabilities(&self) -> &ProductAdapterCapabilities {
+            &self.capabilities
+        }
+
+        fn auth_requirement(&self) -> &AuthRequirement {
+            &self.auth_requirement
+        }
+
+        fn declared_egress(&self) -> &[DeclaredEgressTarget] {
+            &self.declared_egress
+        }
+
+        fn parse_inbound(
+            &self,
+            _raw_payload: &[u8],
+            _auth_evidence: &ProtocolAuthEvidence,
+        ) -> Result<ParsedProductInbound, ProductAdapterError> {
+            Err(ProductAdapterError::Internal {
+                detail: RedactedString::new("test adapter does not parse inbound payloads"),
+            })
+        }
+
+        async fn render_outbound(
+            &self,
+            envelope: ProductOutboundEnvelope,
+            egress: &dyn ProtocolHttpEgress,
+            delivery_sink: &dyn OutboundDeliverySink,
+        ) -> Result<ProductRenderOutcome, ProductAdapterError> {
+            let run_id = test_payload_run_id(&envelope.payload);
+            let attempt_id = envelope.delivery_attempt_id;
+            let binding_ref = envelope.target.reply_target_binding_ref.clone();
+            let text = match &envelope.payload {
+                ProductOutboundPayload::FinalReply(view) => view.text.clone(),
+                ProductOutboundPayload::GatePrompt(view) => format!(
+                    "{}\n\n{}\n\nReply `approve` or `deny` in this chat. If several approvals are pending here, use `approve {}` or `deny {}`.",
+                    view.headline, view.body, view.gate_ref, view.gate_ref
+                ),
+                ProductOutboundPayload::AuthPrompt(view) => {
+                    let mut text = format!(
+                        "{}\n\n{}\n\nReply `auth deny {}` here to cancel this run.",
+                        view.headline, view.body, view.auth_request_ref
+                    );
+                    if let Some(url) = &view.authorization_url {
+                        text.push_str("\n\nSetup link: ");
+                        text.push_str(url);
+                    }
+                    text
+                }
+                _ => return Ok(ProductRenderOutcome::Deferred),
+            };
+            let request = test_post_message_request(
+                envelope.target.external_conversation_ref.conversation_id(),
+                &text,
+            )?;
+            let response = match egress.send(request).await {
+                Ok(response) => response,
+                Err(error) => {
+                    delivery_sink
+                        .record(DeliveryStatus::FailedRetryable {
+                            attempt_id,
+                            target: binding_ref,
+                            run_id,
+                            reason: RedactedString::new(error.to_string()),
+                        })
+                        .await;
+                    return Err(error.into());
+                }
+            };
+            let accepted = (200..300).contains(&response.status())
+                && serde_json::from_slice::<serde_json::Value>(response.body())
+                    .ok()
+                    .and_then(|value| value.get("ok").and_then(serde_json::Value::as_bool))
+                    .unwrap_or(false);
+            if !accepted {
+                let reason = RedactedString::new("test channel rejected outbound message");
+                delivery_sink
+                    .record(DeliveryStatus::FailedPermanent {
+                        attempt_id,
+                        target: binding_ref,
+                        run_id,
+                        reason: reason.clone(),
+                    })
+                    .await;
+                return Err(ProductAdapterError::EgressDenied { reason });
+            }
+            delivery_sink
+                .record(DeliveryStatus::Delivered {
+                    attempt_id,
+                    target: binding_ref,
+                    run_id,
+                })
+                .await;
+            Ok(ProductRenderOutcome::DeliveryRecorded)
+        }
+
+        fn health(&self) -> ProductAdapterHealth {
+            ProductAdapterHealth::Healthy
+        }
+    }
+
+    #[derive(Debug, Default)]
+    struct TestChannelDeliveryProtocol;
+
+    #[async_trait]
+    impl ChannelDeliveryProtocol for TestChannelDeliveryProtocol {
+        fn conversation_id_from_reply_target_binding_ref(
+            &self,
+            target: &ReplyTargetBindingRef,
+        ) -> Option<(String, Option<String>)> {
+            decode_test_binding_ref(target)
+                .map(|decoded| (decoded.conversation_id, decoded.space_id))
+        }
+
+        fn reply_target_is_personal_dm(&self, target: &ReplyTargetBindingRef) -> bool {
+            let Some(decoded) = decode_test_binding_ref(target) else {
+                return false;
+            };
+            decoded.conversation_id.starts_with('D') && decoded.has_actor
+        }
+
+        fn posted_message_from_render_response(
+            &self,
+            path: &str,
+            body: &[u8],
+        ) -> Option<PostedChannelMessage> {
+            if path != "/api/chat.postMessage" {
+                return None;
+            }
+            posted_test_message(body)
+        }
+
+        fn connect_nudge_message(&self) -> &'static str {
+            "👋 To use me, connect your Slack account in the Ironclaw web app."
+        }
+
+        fn is_direct_message_conversation(&self, conversation_id: &str) -> bool {
+            conversation_id.starts_with('D')
+        }
+
+        async fn post_status_message(
+            &self,
+            egress: &dyn ProtocolHttpEgress,
+            conversation: &ExternalConversationRef,
+            text: &str,
+        ) -> Result<PostedChannelMessage, FinalReplyDeliveryError> {
+            let response = egress
+                .send(
+                    test_post_message_request(conversation.conversation_id(), text).map_err(
+                        |error| FinalReplyDeliveryError::StatusMessage {
+                            reason: error.to_string(),
+                        },
+                    )?,
+                )
+                .await
+                .map_err(|error| FinalReplyDeliveryError::StatusMessage {
+                    reason: error.to_string(),
+                })?;
+            if !(200..300).contains(&response.status()) {
+                return Err(FinalReplyDeliveryError::StatusMessage {
+                    reason: format!("test channel returned HTTP {}", response.status()),
+                });
+            }
+            posted_test_message(response.body()).ok_or_else(|| {
+                FinalReplyDeliveryError::StatusMessage {
+                    reason: "test channel returned an invalid message response".to_string(),
+                }
+            })
+        }
+
+        async fn delete_status_message(
+            &self,
+            egress: &dyn ProtocolHttpEgress,
+            message: &PostedChannelMessage,
+        ) -> Result<(), FinalReplyDeliveryError> {
+            let body = serde_json::to_vec(&serde_json::json!({
+                "channel": message.conversation_id,
+                "ts": message.message_ref,
+            }))
+            .map_err(|error| FinalReplyDeliveryError::StatusMessage {
+                reason: error.to_string(),
+            })?;
+            let request = test_channel_request("/api/chat.delete", body).map_err(|error| {
+                FinalReplyDeliveryError::StatusMessage {
+                    reason: error.to_string(),
+                }
+            })?;
+            let response = egress.send(request).await.map_err(|error| {
+                FinalReplyDeliveryError::StatusMessage {
+                    reason: error.to_string(),
+                }
+            })?;
+            if (200..300).contains(&response.status()) {
+                Ok(())
+            } else {
+                Err(FinalReplyDeliveryError::StatusMessage {
+                    reason: format!("test channel returned HTTP {}", response.status()),
+                })
+            }
+        }
+    }
+
+    #[derive(Debug)]
+    struct DecodedTestBinding {
+        conversation_id: String,
+        space_id: Option<String>,
+        has_actor: bool,
+    }
+
+    fn decode_test_binding_ref(target: &ReplyTargetBindingRef) -> Option<DecodedTestBinding> {
+        let mut raw = target.as_str().strip_prefix("reply:")?;
+        let (adapter, rest) = take_test_binding_segment(raw, "adapter")?;
+        if adapter != "slack_v2" {
+            return None;
+        }
+        raw = rest;
+        for name in ["installation", "agent", "project"] {
+            let (_, rest) = take_test_binding_segment(raw, name)?;
+            raw = rest;
+        }
+        let (space, rest) = take_test_binding_segment(raw, "space")?;
+        let (conversation, rest) = take_test_binding_segment(rest, "conversation")?;
+        let (_, rest) = take_test_binding_segment(rest, "topic")?;
+        let has_actor = take_test_binding_segment(rest, "actor_kind")
+            .and_then(|(_, rest)| take_test_binding_segment(rest, "actor"))
+            .is_some();
+        Some(DecodedTestBinding {
+            conversation_id: conversation.to_string(),
+            space_id: (!space.is_empty()).then(|| space.to_string()),
+            has_actor,
+        })
+    }
+
+    fn take_test_binding_segment<'a>(raw: &'a str, name: &str) -> Option<(&'a str, &'a str)> {
+        let raw = raw.strip_prefix(name)?.strip_prefix(':')?;
+        let (length, raw) = raw.split_once(':')?;
+        let length = length.parse::<usize>().ok()?;
+        let value = raw.get(..length)?;
+        let rest = raw.get(length..)?.strip_prefix(';')?;
+        Some((value, rest))
+    }
+
+    fn test_channel_request(
+        path: &'static str,
+        body: Vec<u8>,
+    ) -> Result<EgressRequest, ProductAdapterError> {
+        Ok(EgressRequest::new(
+            DeclaredEgressHost::new(TEST_CHANNEL_HOST)?,
+            EgressMethod::post(),
+            EgressPath::new(path)?,
+        )
+        .with_header(EgressHeader::new("content-type", "application/json")?)
+        .with_body(body)
+        .with_credential_handle(Some(EgressCredentialHandle::new(
+            TEST_CHANNEL_CREDENTIAL_HANDLE,
+        )?)))
+    }
+
+    fn test_post_message_request(
+        conversation_id: &str,
+        text: &str,
+    ) -> Result<EgressRequest, ProductAdapterError> {
+        let body = serde_json::to_vec(&serde_json::json!({
+            "channel": conversation_id,
+            "text": text,
+            "mrkdwn": false,
+        }))
+        .map_err(|error| ProductAdapterError::Internal {
+            detail: RedactedString::new(error.to_string()),
+        })?;
+        test_channel_request("/api/chat.postMessage", body)
+    }
+
+    fn posted_test_message(body: &[u8]) -> Option<PostedChannelMessage> {
+        let value: serde_json::Value = serde_json::from_slice(body).ok()?;
+        if !value.get("ok")?.as_bool()? {
+            return None;
+        }
+        Some(PostedChannelMessage {
+            conversation_id: value.get("channel")?.as_str()?.to_string(),
+            message_ref: value.get("ts")?.as_str()?.to_string(),
+        })
+    }
+
+    fn test_payload_run_id(payload: &ProductOutboundPayload) -> Option<TurnRunId> {
+        match payload {
+            ProductOutboundPayload::FinalReply(view) => Some(view.turn_run_id),
+            ProductOutboundPayload::Progress(view) => Some(view.turn_run_id),
+            ProductOutboundPayload::GatePrompt(view) => Some(view.turn_run_id),
+            ProductOutboundPayload::AuthPrompt(view) => Some(view.turn_run_id),
+            _ => None,
+        }
+    }
 
     /// Scripted run-state entry: status + optional approval/auth gate ref.
     #[derive(Clone)]
@@ -3485,8 +765,7 @@ mod tests {
             seg("actor_kind", "slack_user"),
             seg("actor", "U123"),
         );
-        crate::slack::slack_outbound_targets::slack_reply_target_binding_ref_from_raw(raw)
-            .expect("test binding ref")
+        ReplyTargetBindingRef::new(format!("reply:{raw}")).expect("test binding ref")
     }
 
     /// Seed a personal communication preference pointing at a Slack DM channel
@@ -3556,15 +835,8 @@ mod tests {
             .expect("seed preference");
     }
 
-    /// Build a `SlackV2Adapter` with the given installation_id.
-    fn test_adapter(installation_id: &str) -> Arc<SlackV2Adapter> {
-        Arc::new(SlackV2Adapter::new(SlackV2AdapterConfig {
-            adapter_id: ProductAdapterId::new("slack_v2").expect("adapter id"),
-            installation_id: AdapterInstallationId::new(installation_id).expect("installation id"),
-            egress_credential_handle: EgressCredentialHandle::new("slack_bot_token")
-                .expect("credential handle"),
-            auth_requirement: slack_request_signature_auth_requirement(),
-        }))
+    fn test_adapter(installation_id: &str) -> Arc<TestChannelAdapter> {
+        Arc::new(TestChannelAdapter::new(installation_id))
     }
 
     fn make_services(
@@ -3596,7 +868,7 @@ mod tests {
         auth_flow_canceller: Option<Arc<dyn BlockedAuthFlowCanceller>>,
     ) -> FinalReplyDeliveryServices {
         FinalReplyDeliveryServices {
-            channel_protocol: Arc::new(crate::slack::slack_delivery::SlackDeliveryProtocol),
+            channel_protocol: Arc::new(TestChannelDeliveryProtocol),
             binding_service: Arc::new(TestNoopConversationBindingService),
             thread_service,
             turn_coordinator: coordinator,
@@ -3880,37 +1152,67 @@ mod tests {
         );
     }
 
-    /// Build the real Slack outbound-target provider over in-memory stores with
-    /// one shared-channel route (`channel_id` owned by the creator user) so
-    /// per-trigger delivery target resolution runs the production path.
+    struct StaticOutboundTargetProvider {
+        entries: Vec<OutboundDeliveryTargetEntry>,
+    }
+
+    #[async_trait]
+    impl OutboundDeliveryTargetProvider for StaticOutboundTargetProvider {
+        async fn list_outbound_delivery_targets(
+            &self,
+            _caller: &WebUiAuthenticatedCaller,
+        ) -> Result<Vec<OutboundDeliveryTargetEntry>, RebornServicesError> {
+            Ok(self.entries.clone())
+        }
+    }
+
+    /// Build a channel-neutral outbound-target provider with one shared route.
     fn shared_channel_target_provider(
         install: &str,
         scope: &TurnScope,
         channel_id: &str,
-    ) -> Arc<crate::slack::slack_outbound_targets::SlackHostBetaOutboundTargetProvider> {
-        use crate::slack::slack_channel_routes::InMemorySlackChannelRouteStore;
-        use crate::slack::slack_outbound_targets::{
-            InMemorySlackPersonalDmTargetStore, SlackConfiguredChannelRoute,
-            SlackHostBetaOutboundTargetProvider, SlackOutboundTargetProviderConfig,
-        };
-        Arc::new(SlackHostBetaOutboundTargetProvider::new(
-            SlackOutboundTargetProviderConfig {
-                tenant_id: scope.tenant_id.clone(),
-                agent_id: scope.agent_id.clone().expect("test scope has agent"),
-                project_id: scope.project_id.clone(),
-                installation_id: AdapterInstallationId::new(install).expect("installation id"),
-                team_id: crate::slack::slack_serve::SlackTeamId::new("T123"),
-                configured_channel_routes: vec![SlackConfiguredChannelRoute::new(
-                    channel_id.to_string(),
-                    scope
-                        .explicit_owner_user_id()
-                        .cloned()
-                        .expect("test scope has owner"),
-                )],
-            },
-            Arc::new(InMemorySlackChannelRouteStore::new()),
-            Arc::new(InMemorySlackPersonalDmTargetStore::new()),
-        ))
+    ) -> Arc<dyn OutboundDeliveryTargetProvider> {
+        fn seg(name: &str, value: &str) -> String {
+            format!("{}:{}:{};", name, value.len(), value)
+        }
+        let raw = format!(
+            "{}{}{}{}{}{}{}",
+            seg("adapter", "slack_v2"),
+            seg("installation", install),
+            seg(
+                "agent",
+                scope
+                    .agent_id
+                    .as_ref()
+                    .expect("test scope has agent")
+                    .as_str()
+            ),
+            seg("project", ""),
+            seg("space", "T123"),
+            seg("conversation", channel_id),
+            seg("topic", ""),
+        );
+        let target_id =
+            RebornOutboundDeliveryTargetId::new(format!("slack:shared-channel:T123:{channel_id}"))
+                .expect("target id");
+        Arc::new(StaticOutboundTargetProvider {
+            entries: vec![OutboundDeliveryTargetEntry {
+                summary: RebornOutboundDeliveryTargetSummary::new(
+                    target_id,
+                    "test-channel",
+                    channel_id,
+                    Some("test shared channel".to_string()),
+                )
+                .expect("target summary"),
+                capabilities: RebornOutboundDeliveryTargetCapabilities {
+                    final_replies: true,
+                    gate_prompts: true,
+                    auth_prompts: true,
+                },
+                reply_target_binding_ref: ReplyTargetBindingRef::new(format!("reply:{raw}"))
+                    .expect("shared target binding ref"),
+            }],
+        })
     }
 
     /// A fire carrying a per-trigger delivery target must deliver to THAT
@@ -4642,7 +1944,7 @@ mod tests {
 
         let thread_service = Arc::new(InMemorySessionThreadService::default());
         let services = FinalReplyDeliveryServices {
-            channel_protocol: Arc::new(crate::slack::slack_delivery::SlackDeliveryProtocol),
+            channel_protocol: Arc::new(TestChannelDeliveryProtocol),
             binding_service: Arc::new(FakeConversationBindingService::new()),
             thread_service,
             turn_coordinator: coordinator,
@@ -5029,7 +2331,9 @@ mod tests {
     /// call carrying the opaque bot-token handle — instead of the silence the
     /// unwired v1 protocol produced. One seam-level case; the scenario matrix
     /// above stays single-protocol per the consolidation rule.
-    #[cfg(feature = "telegram-v2-host-beta")]
+    // The concrete Telegram whole-path case remains in the Telegram owner;
+    // this crate's protocol-neutral matrix is exercised by local doubles.
+    #[cfg(any())]
     #[tokio::test]
     async fn deferred_busy_ack_posts_hint_into_telegram_dm_through_telegram_protocol() {
         use ironclaw_telegram_extension::telegram_adapter::{
@@ -5853,7 +3157,7 @@ mod tests {
         // Override the default `make_observer` so we can inject the no-binding service.
         let thread_service = Arc::new(InMemorySessionThreadService::default());
         let services = FinalReplyDeliveryServices {
-            channel_protocol: Arc::new(crate::slack::slack_delivery::SlackDeliveryProtocol),
+            channel_protocol: Arc::new(TestChannelDeliveryProtocol),
             binding_service: Arc::new(TestNoopConversationBindingService),
             thread_service,
             turn_coordinator: coordinator,
@@ -6316,7 +3620,7 @@ mod tests {
         let binding_service = Arc::new(FakeConversationBindingService::new());
         let thread_service = Arc::new(InMemorySessionThreadService::default());
         let services = FinalReplyDeliveryServices {
-            channel_protocol: Arc::new(crate::slack::slack_delivery::SlackDeliveryProtocol),
+            channel_protocol: Arc::new(TestChannelDeliveryProtocol),
             binding_service,
             thread_service,
             turn_coordinator: coordinator,
@@ -6394,7 +3698,7 @@ mod tests {
             TurnStatus::Running,
         ));
         let services = FinalReplyDeliveryServices {
-            channel_protocol: Arc::new(crate::slack::slack_delivery::SlackDeliveryProtocol),
+            channel_protocol: Arc::new(TestChannelDeliveryProtocol),
             // Errors on lookup_binding, so delivery fails after the Accepted
             // ack and before any polling.
             binding_service: Arc::new(TestNoopConversationBindingService),
@@ -6676,7 +3980,7 @@ mod tests {
         let binding_service = Arc::new(FakeConversationBindingService::new());
         let thread_service = Arc::new(InMemorySessionThreadService::default());
         let services = FinalReplyDeliveryServices {
-            channel_protocol: Arc::new(crate::slack::slack_delivery::SlackDeliveryProtocol),
+            channel_protocol: Arc::new(TestChannelDeliveryProtocol),
             binding_service,
             thread_service,
             turn_coordinator: coordinator,
@@ -7581,8 +4885,7 @@ mod tests {
             seg("conversation", "C0SHARED"),
             seg("topic", ""),
         );
-        crate::slack::slack_outbound_targets::slack_reply_target_binding_ref_from_raw(raw)
-            .expect("test shared-channel binding ref")
+        ReplyTargetBindingRef::new(format!("reply:{raw}")).expect("test shared-channel binding ref")
     }
 
     /// Security regression: triggered OAuth auth whose delivery target is a SHARED
@@ -8176,7 +5479,7 @@ mod tests {
         // Wire the no-agent binding service directly.
         let thread_service = Arc::new(InMemorySessionThreadService::default());
         let services = FinalReplyDeliveryServices {
-            channel_protocol: Arc::new(crate::slack::slack_delivery::SlackDeliveryProtocol),
+            channel_protocol: Arc::new(TestChannelDeliveryProtocol),
             binding_service: Arc::new(NoAgentConversationBindingService),
             thread_service,
             turn_coordinator: coordinator,
@@ -8243,7 +5546,7 @@ mod tests {
         use ironclaw_product_workflow::FakeConversationBindingService;
         let thread_service = Arc::new(InMemorySessionThreadService::default());
         let services = FinalReplyDeliveryServices {
-            channel_protocol: Arc::new(crate::slack::slack_delivery::SlackDeliveryProtocol),
+            channel_protocol: Arc::new(TestChannelDeliveryProtocol),
             binding_service: Arc::new(FakeConversationBindingService::new()),
             thread_service,
             // ErroringTurnCoordinator: get_run_state always returns Err.
@@ -8580,7 +5883,7 @@ mod tests {
         // Build an observer with a very short max_wait so delivery times out quickly.
         let thread_service = Arc::new(InMemorySessionThreadService::default());
         let services = FinalReplyDeliveryServices {
-            channel_protocol: Arc::new(crate::slack::slack_delivery::SlackDeliveryProtocol),
+            channel_protocol: Arc::new(TestChannelDeliveryProtocol),
             binding_service: Arc::new(
                 ironclaw_product_workflow::FakeConversationBindingService::new(),
             ),
@@ -8666,7 +5969,7 @@ mod tests {
         let outbound = Arc::new(InMemoryOutboundStateStore::default());
         let thread_service = Arc::new(InMemorySessionThreadService::default());
         let services = FinalReplyDeliveryServices {
-            channel_protocol: Arc::new(crate::slack::slack_delivery::SlackDeliveryProtocol),
+            channel_protocol: Arc::new(TestChannelDeliveryProtocol),
             binding_service: Arc::new(
                 ironclaw_product_workflow::FakeConversationBindingService::new(),
             ),
@@ -9053,11 +6356,8 @@ mod tests {
         let install = "test-install";
         let agent = "test-agent";
         let binding_ref = test_slack_shared_channel_binding_ref(install, agent);
-        let result = enforce_direct_message_if_required(
-            &crate::slack::slack_delivery::SlackDeliveryProtocol,
-            &binding_ref,
-            true,
-        );
+        let result =
+            enforce_direct_message_if_required(&TestChannelDeliveryProtocol, &binding_ref, true);
         assert!(
             matches!(
                 result,
@@ -9072,11 +6372,8 @@ mod tests {
         let install = "test-install";
         let agent = "test-agent";
         let binding_ref = test_slack_shared_channel_binding_ref(install, agent);
-        let result = enforce_direct_message_if_required(
-            &crate::slack::slack_delivery::SlackDeliveryProtocol,
-            &binding_ref,
-            false,
-        );
+        let result =
+            enforce_direct_message_if_required(&TestChannelDeliveryProtocol, &binding_ref, false);
         assert!(
             result.is_ok(),
             "shared channel + require=false must not be rejected"
@@ -9088,11 +6385,8 @@ mod tests {
         let install = "test-install";
         let agent = "test-agent";
         let binding_ref = test_slack_binding_ref(install, agent);
-        let result = enforce_direct_message_if_required(
-            &crate::slack::slack_delivery::SlackDeliveryProtocol,
-            &binding_ref,
-            true,
-        );
+        let result =
+            enforce_direct_message_if_required(&TestChannelDeliveryProtocol, &binding_ref, true);
         assert!(
             result.is_ok(),
             "personal DM binding + require=true must not be rejected"
