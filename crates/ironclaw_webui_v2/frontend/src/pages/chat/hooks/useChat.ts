@@ -422,15 +422,24 @@ export function useChat(threadId) {
     // pre-submit optimistic twin.
     onRunSettled: (_runId, { success }) => {
       const localRunAdmission = localRunAdmissionRef.current;
-      if (localRunAdmission?.runId === _runId) {
-        localRunAdmissionRef.current = null;
-      } else if (_runId && localRunAdmission && !localRunAdmission.runId) {
+      if (_runId && localRunAdmission && !localRunAdmission.runId) {
         // The terminal SSE can arrive before the POST response exposes run_id.
         localRunAdmissionRef.current = {
           ...localRunAdmission,
           runId: _runId,
           settledBeforeResponse: true,
         };
+      } else if (
+        localRunAdmission?.runId === _runId ||
+        localRunAdmission?.threadId === threadId
+      ) {
+        // A recovery/retry can rebase execution onto a different run id from
+        // the one returned by the original submit. The terminal projection is
+        // authoritative for this thread, which can only have one active run,
+        // so release the local admission even when those ids differ. Keeping
+        // the original id here silently drops every subsequent same-thread
+        // send before it reaches the server.
+        localRunAdmissionRef.current = null;
       }
       // submitBusyRef is released by send()'s `finally` when the POST settles —
       // it is NOT this callback's to clear. Releasing the POST re-entrancy guard

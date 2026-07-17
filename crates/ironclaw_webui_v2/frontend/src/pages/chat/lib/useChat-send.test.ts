@@ -5334,7 +5334,7 @@ test("useChat.send: active run refuses duplicate submit before network call", as
   assert.deepEqual(renderedMessages, []);
 });
 
-test("useChat.send: accepted run blocks another submit until settlement", async () => {
+test("useChat.send: failed rebased run releases admission for a follow-up", async () => {
   const threadId = "thread-1";
   let renderedMessages = [];
   let sendCalls = 0;
@@ -5412,9 +5412,12 @@ test("useChat.send: accepted run blocks another submit until settlement", async 
 
   context.chatEventsArgs.setIsProcessing(false);
   context.chatEventsArgs.setActiveRun(null);
-  context.chatEventsArgs.onRunSettled("run-1", { success: true });
+  // Recovery may terminate a rebased run id instead of the id returned by
+  // the original submit. The thread is terminal either way, so the original
+  // local admission must not silently swallow the next message.
+  context.chatEventsArgs.onRunSettled("run-1-rebased", { success: false });
 
-  const third = await chat.send("message after settlement");
+  const third = await chat.send("what was wrong?");
 
   assert.equal(third.run_id, "run-2");
   assert.equal(sendCalls, 2);
