@@ -126,26 +126,7 @@ impl ChannelAdapter for TelegramChannelAdapter {
                 reason: error.to_string(),
             })? {
             TelegramInboundEvent::Ignore => Ok(InboundOutcome::Ignore),
-            TelegramInboundEvent::Message(message) => {
-                let attachments = message
-                    .attachments
-                    .into_iter()
-                    .map(|descriptor| AttachmentRef {
-                        vendor_ref: descriptor.external_file_id.clone(),
-                        mime_hint: Some(descriptor.mime_type.clone()),
-                        descriptor,
-                    })
-                    .collect();
-                Ok(InboundOutcome::Messages(vec![NormalizedInboundMessage {
-                    actor: message.actor,
-                    conversation: message.conversation,
-                    event_id: message.event_id,
-                    text: message.text,
-                    trigger: message.trigger,
-                    attachments,
-                    reply_context: None,
-                }]))
-            }
+            TelegramInboundEvent::Message(message) => Ok(InboundOutcome::Messages(vec![*message])),
         }
     }
 

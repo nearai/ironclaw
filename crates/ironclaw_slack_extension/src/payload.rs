@@ -6,11 +6,12 @@
 //! trusted context outside this crate after verifying Slack request signatures.
 
 use ironclaw_product_adapters::{
-    AdapterInstallationId, ApprovalDecision, ApprovalResolutionPayload, AuthResolutionPayload,
-    AuthResolutionResult, ExternalActorRef, ExternalConversationRef, ExternalEventId,
-    ParsedProductInbound, ProductAdapterError, ProductAttachmentDescriptor, ProductAttachmentKind,
-    ProductInboundPayload, ProductTriggerReason, ProtocolAuthEvidence,
-    ScopedApprovalResolutionPayload, UserMessagePayload,
+    AdapterInstallationId, ApprovalDecision, ApprovalResolutionPayload, AttachmentRef,
+    AuthResolutionPayload, AuthResolutionResult, ExternalActorRef, ExternalConversationRef,
+    ExternalEventId, NormalizedInboundMessage, ParsedProductInbound, ProductAdapterError,
+    ProductAttachmentDescriptor, ProductAttachmentKind, ProductInboundPayload,
+    ProductTriggerReason, ProtocolAuthEvidence, ScopedApprovalResolutionPayload,
+    UserMessagePayload,
 };
 use serde::Deserialize;
 use thiserror::Error;
@@ -120,18 +121,7 @@ pub fn parse_slack_event(
 pub enum SlackInboundEvent {
     UrlVerification { challenge: String },
     Ignore,
-    Message(Box<SlackNormalizedMessage>),
-}
-
-/// One normalized Slack user message.
-#[derive(Debug)]
-pub struct SlackNormalizedMessage {
-    pub event_id: ExternalEventId,
-    pub actor: ExternalActorRef,
-    pub conversation: ExternalConversationRef,
-    pub text: String,
-    pub attachments: Vec<ProductAttachmentDescriptor>,
-    pub trigger: ProductTriggerReason,
+    Message(Box<NormalizedInboundMessage>),
 }
 
 /// Parse one host-verified Slack Events API request into its normalized
@@ -198,16 +188,27 @@ pub fn normalize_slack_event(
     match parsed.payload {
         ProductInboundPayload::UserMessage(message) => {
             let trigger = message.trigger;
-            Ok(SlackInboundEvent::Message(Box::new(
-                SlackNormalizedMessage {
-                    event_id: parsed.external_event_id,
-                    actor: parsed.external_actor_ref,
-                    conversation: parsed.external_conversation_ref,
-                    text: message.text,
-                    attachments: message.attachments,
-                    trigger,
-                },
-            )))
+            let attachments = message
+                .attachments
+                .into_iter()
+                .map(|descriptor| AttachmentRef {
+                    vendor_ref: descriptor.external_file_id.clone(),
+                    mime_hint: Some(descriptor.mime_type.clone()),
+                    descriptor,
+                })
+                .collect();
+            Ok(SlackInboundEvent::Message(Box::new(NormalizedInboundMessage {
+                actor: parsed.external_actor_ref,
+                conversation: parsed.external_conversation_ref,
+                event_id: parsed.external_event_id,
+                text: message.text,
+                trigger,
+                attachments,
+                // Reply routing rides the conversation ref's thread anchors
+                // (pre-coordinator delivery path); adopted when the P5
+                // delivery coordinator consumes stored contexts.
+                reply_context: None,
+            })))
         }
         // try_parse_user_message downgrades bot/system/subtype messages to
         // NoOp — authenticated no-ops for the channel contract.

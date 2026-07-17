@@ -55,29 +55,7 @@ impl ChannelAdapter for SlackChannelAdapter {
                 }))
             }
             SlackInboundEvent::Ignore => Ok(InboundOutcome::Ignore),
-            SlackInboundEvent::Message(message) => {
-                let attachments = message
-                    .attachments
-                    .into_iter()
-                    .map(|descriptor| AttachmentRef {
-                        vendor_ref: descriptor.external_file_id.clone(),
-                        mime_hint: Some(descriptor.mime_type.clone()),
-                        descriptor,
-                    })
-                    .collect();
-                Ok(InboundOutcome::Messages(vec![NormalizedInboundMessage {
-                    actor: message.actor,
-                    conversation: message.conversation,
-                    event_id: message.event_id,
-                    text: message.text,
-                    trigger: message.trigger,
-                    attachments,
-                    // Reply routing rides the conversation ref's thread
-                    // anchors (pre-coordinator delivery path); adopted when
-                    // the P5 delivery coordinator consumes stored contexts.
-                    reply_context: None,
-                }]))
-            }
+            SlackInboundEvent::Message(message) => Ok(InboundOutcome::Messages(vec![*message])),
         }
     }
 

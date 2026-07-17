@@ -105,6 +105,7 @@ pub enum InboundOutcome {
 }
 
 /// One normalized inbound message.
+#[derive(Debug)]
 pub struct NormalizedInboundMessage {
     pub actor: ExternalActorRef,
     pub conversation: ExternalConversationRef,

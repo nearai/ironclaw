@@ -78,7 +78,6 @@ impl BoundCapabilityAdapter for SnapshotBoundCapability {
             .map(|reservation| reservation.id);
         let call = ToolCall {
             capability_id: request.capability_id,
-            invocation_id: scope.invocation_id,
             scope: request.scope,
             input: request.input,
             deadline: None,
@@ -92,10 +91,7 @@ impl BoundCapabilityAdapter for SnapshotBoundCapability {
         // restricted-egress port lands with its first native consumer (the
         // extracted channel crates) — lane-backed adapters reach the network
         // through their staged host-egress pipeline, never through ports.
-        let ports = ToolPorts {
-            egress: None,
-            state: None,
-        };
+        let ports = ToolPorts { egress: None };
         let result = self
             .binding
             .adapter

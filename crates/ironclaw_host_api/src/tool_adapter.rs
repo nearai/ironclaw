@@ -15,7 +15,7 @@
 use async_trait::async_trait;
 
 use crate::{
-    CapabilityDisplayOutputPreview, CapabilityId, InvocationId, MountView, NetworkMethod,
+    CapabilityDisplayOutputPreview, CapabilityId, MountView, NetworkMethod,
     ResourceEstimate, ResourceReservation, ResourceScope, RuntimeCredentialAuthRequirement,
     RuntimeDispatchErrorKind, SecretHandle, Timestamp,
 };
@@ -24,8 +24,8 @@ use crate::{
 #[derive(Debug)]
 pub struct ToolCall {
     pub capability_id: CapabilityId,
-    pub invocation_id: InvocationId,
-    /// Actor/turn authority scope for this invocation.
+    /// Actor/turn authority scope for this invocation (carries the
+    /// invocation identity).
     pub scope: ResourceScope,
     /// Schema-validated input.
     pub input: serde_json::Value,
@@ -83,7 +83,6 @@ pub enum ToolError {
 /// an adapter cannot reach authority its manifest never named.
 pub struct ToolPorts<'a> {
     pub egress: Option<&'a dyn RestrictedEgress>,
-    pub state: Option<&'a dyn ScopedToolState>,
 }
 
 /// Invoke one declared (or MCP-discovered) capability.
@@ -158,38 +157,16 @@ pub enum RestrictedEgressError {
     DeadlineExceeded,
 }
 
-/// Scoped key-value state for one extension installation: namespaced by the
-/// host (tenant/extension), bounded, and never shared across extensions.
-#[async_trait]
-pub trait ScopedToolState: Send + Sync {
-    async fn get(&self, key: &str) -> Result<Option<Vec<u8>>, ScopedToolStateError>;
-    async fn put(&self, key: &str, value: Vec<u8>) -> Result<(), ScopedToolStateError>;
-    async fn delete(&self, key: &str) -> Result<(), ScopedToolStateError>;
-}
-
-/// Typed scoped-state failures.
-#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
-pub enum ScopedToolStateError {
-    #[error("invalid state key: {reason}")]
-    InvalidKey { reason: String },
-    #[error("state value exceeds the host size cap")]
-    ValueTooLarge,
-    #[error("state backend unavailable: {reason}")]
-    Unavailable { reason: String },
-}
-
 impl ToolCall {
     /// Convenience constructor for the common shape; resource bookkeeping
     /// defaults to empty and is filled by the dispatcher.
     pub fn new(
         capability_id: CapabilityId,
-        invocation_id: InvocationId,
         scope: ResourceScope,
         input: serde_json::Value,
     ) -> Self {
         Self {
             capability_id,
-            invocation_id,
             scope,
             input,
             deadline: None,

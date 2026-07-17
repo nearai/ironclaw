@@ -6,7 +6,7 @@
 use std::collections::BTreeSet;
 
 use ironclaw_host_api::{
-    InvocationId, RequestedTrustClass, ToolCall, ToolCallResources, ToolError, ToolPorts,
+    RequestedTrustClass, ToolCall, ToolCallResources, ToolError, ToolPorts,
     TrustClass, VirtualPath,
 };
 
@@ -105,7 +105,6 @@ fn binder_services(
 fn call(capability_id: &str, input: Value) -> ToolCall {
     ToolCall {
         capability_id: CapabilityId::new(capability_id).unwrap(),
-        invocation_id: InvocationId::new(),
         scope: sample_scope(),
         input,
         deadline: None,
@@ -123,10 +122,7 @@ async fn binder_routes_by_capability_id_through_the_first_party_lane() {
     let binder = services.extension_lane_tool_binder();
 
     let adapter = binder.bind_package(Arc::new(package)).expect("binds");
-    let ports = ToolPorts {
-        egress: None,
-        state: None,
-    };
+    let ports = ToolPorts { egress: None };
 
     let result = adapter
         .invoke(
@@ -169,10 +165,7 @@ async fn binder_preserves_the_auth_gate_payload_across_the_tool_abi() {
     let err = adapter
         .invoke(
             call("acme-gated.locked", serde_json::json!({})),
-            &ToolPorts {
-                egress: None,
-                state: None,
-            },
+            &ToolPorts { egress: None },
         )
         .await
         .unwrap_err();
@@ -319,10 +312,7 @@ async fn binder_invokes_a_discovered_mcp_tool_through_the_tool_adapter() {
     let adapter = binder
         .bind_package(Arc::new(discovered))
         .expect("discovered MCP package binds through the MCP lane");
-    let ports = ToolPorts {
-        egress: None,
-        state: None,
-    };
+    let ports = ToolPorts { egress: None };
 
     let result = adapter
         .invoke(

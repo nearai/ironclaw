@@ -58,23 +58,6 @@ pub enum BindError {
     Load { reason: String },
 }
 
-impl ResolvedExtensionManifestExt for ResolvedExtensionManifest {}
-
-/// Manifest-shape queries the binding rule consumes. A blanket impl on the
-/// resolved contract keeps the rule out of the manifest crate.
-pub trait ResolvedExtensionManifestExt {
-    /// Whether the manifest declares any tools (static `[[tools]]` or an
-    /// `[mcp]` server whose discovered tools are model-callable).
-    fn declares_tools(&self, resolved: &ResolvedExtensionManifest) -> bool {
-        !resolved.tools.is_empty() || resolved.mcp.is_some()
-    }
-
-    /// Whether the manifest declares a channel surface.
-    fn declares_channel(&self, resolved: &ResolvedExtensionManifest) -> bool {
-        resolved.channel.is_some()
-    }
-}
-
 /// Check bound adapters against the resolved contract: declared surfaces must
 /// be bound, and nothing undeclared may be bound (overview §4.0).
 pub fn check_binding(

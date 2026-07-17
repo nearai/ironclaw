@@ -15,10 +15,10 @@
 //! out-of-band `None` path.
 
 use ironclaw_product_adapters::{
-    AdapterInstallationId, ExternalActorRef, ExternalConversationRef, ExternalEventId,
-    InboundCommandPayload, ParsedProductInbound, ProductAdapterError, ProductAttachmentDescriptor,
-    ProductAttachmentKind, ProductInboundPayload, ProductTriggerReason, ProtocolAuthEvidence,
-    UserMessagePayload,
+    AdapterInstallationId, AttachmentRef, ExternalActorRef, ExternalConversationRef,
+    ExternalEventId, InboundCommandPayload, NormalizedInboundMessage, ParsedProductInbound,
+    ProductAdapterError, ProductAttachmentDescriptor, ProductAttachmentKind,
+    ProductInboundPayload, ProductTriggerReason, ProtocolAuthEvidence, UserMessagePayload,
 };
 use serde::Deserialize;
 use thiserror::Error;
@@ -146,19 +146,9 @@ pub fn parse_telegram_update(
 #[derive(Debug)]
 pub enum TelegramInboundEvent {
     Ignore,
-    Message(Box<TelegramNormalizedMessage>),
+    Message(Box<NormalizedInboundMessage>),
 }
 
-/// One normalized Telegram message.
-#[derive(Debug)]
-pub struct TelegramNormalizedMessage {
-    pub event_id: ExternalEventId,
-    pub actor: ExternalActorRef,
-    pub conversation: ExternalConversationRef,
-    pub text: String,
-    pub attachments: Vec<ProductAttachmentDescriptor>,
-    pub trigger: ProductTriggerReason,
-}
 
 /// Parse one HOST-VERIFIED Telegram update into its normalized channel form.
 /// Pure protocol work — no I/O, no secrets; the host executed the
@@ -202,14 +192,26 @@ pub fn normalize_telegram_update(
             .unwrap_or_default(),
         group_trigger_policy,
     );
+    let attachments = attachments
+        .into_iter()
+        .map(|descriptor| AttachmentRef {
+            vendor_ref: descriptor.external_file_id.clone(),
+            mime_hint: Some(descriptor.mime_type.clone()),
+            descriptor,
+        })
+        .collect();
     Ok(TelegramInboundEvent::Message(Box::new(
-        TelegramNormalizedMessage {
-            event_id,
+        NormalizedInboundMessage {
             actor,
             conversation,
+            event_id,
             text,
-            attachments,
             trigger,
+            attachments,
+            // Reply routing rides the conversation ref's thread anchors
+            // (pre-coordinator delivery path); adopted when the P5 delivery
+            // coordinator consumes stored contexts.
+            reply_context: None,
         },
     )))
 }
