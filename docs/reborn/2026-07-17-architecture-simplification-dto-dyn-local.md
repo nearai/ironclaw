@@ -25,6 +25,11 @@ annotations and `.claude/rules/architecture.md` cite them; additions get
   Result-wrapped (§3/§5.3); facade count corrected to the 88-method trait
   block; `CapabilityOutcome` is ten variants; type-count restated as
   mirrors-not-names (§3/§7); Slice 0 scoped around merged #6200 (§9).
+- **r5** 2026-07-17 — added §5.10 (the five routing surfaces, one table) and
+  §5.11 (composition end-state: assembler module sketch, inputs, boot-fail-
+  closed, definition of done). Review fixes: type total settled at ~11 across
+  §3/§7/§9; §6 admission gate held through process exec (no
+  admitted-but-unlaunched window).
 
 This note proposes a **fundamental** simplification of the Reborn host/runtime
 internals. The goal is to remove three recurring costs without weakening any
@@ -419,7 +424,8 @@ per-lane requests + ~6 result shapes): the new path is 3 host-side request
 states (`LoopRequest`, `Invocation`, `Authorized`) + the same ~3 per-lane
 requests (they **must survive** — the lane boundary is a trust boundary, §2) +
 5 channel types (`Resolution`, `Outcome`, `Blocked`, `Suspension`,
-`HostFailure`) ≈ **~12 vs. ~14**. The raw count barely moves because the result
+`HostFailure`) = **~11 vs. ~14** — the one total used everywhere in this doc
+(§7, §9). The raw count moves only modestly because the result
 side deliberately *gains* vocabulary: one overloaded ten-variant enum becomes
 five channels with distinct semantics. The claim this doc actually makes is not
 "fewer type names" — it is **zero mirrors**: the request path drops from 5
@@ -1226,6 +1232,76 @@ are the concrete enforcement for the products-in-composition ratchet (§10).
    body of this doc's `dispatch(auth)` (the lane is sealed inside `Authorized`, §5.3.2) for the FirstParty/Wasm/Mcp lanes; the
    `Process` lane is the same shape with a `ProcessSandbox` handle in place of raw egress.
 
+### 5.10 The five routing surfaces — the whole system in one table
+
+Everything in the target structure routes through exactly five surfaces. This
+table is the mental model a reviewer should carry; if a change doesn't fit one
+of these rows, it is either policy data (`DeploymentConfig`) or it is in the
+wrong place:
+
+| # | Surface | What routes through it | What it seals/binds | Trust status |
+| --- | --- | --- | --- | --- |
+| 1 | `ProductSurface` (§5.2) | every user-initiated action: 6 turn-lifecycle methods + `invoke` (all mutations) + `query` (all reads) | **actor-bound at mint** — one facade per authenticated session; IDs are designators, never bearer authority | product boundary (trusted↔trusted) |
+| 2 | `AgentLoopHost` (§5.4) | everything the agent loop may do: prompt, model, invoke, transcript, checkpoint, input, cancellation | the loop's membrane — below it the loop cannot name secrets, the dispatcher, or the network | **trust boundary** (untrusted loop → host) |
+| 3 | `authorize()` + `dispatch()` (§5.3) | every effect, from every origin — both membranes and automation resolve into the same `Invocation` | origin/actor/scope sealed at the membrane; policy folded once; `Authorized` = sealed, single-use, lane-bound, deadline-bounded witness | trusted kernel — the convergence point |
+| 4 | `RuntimeLane` (§4.2, §5.5) | execution of extension/tool code: `FirstParty \| Wasm \| Mcp \| Process` | lane sealed inside `Authorized`; lanes receive only derived mediated handles (`ToolPorts`), never ambient authority; returned data is untrusted | **trust boundary** (host → untrusted execution, and back) |
+| 5 | Substrate ports (§5.5) | all mechanism: `RootFilesystem` (single storage plane), `ProcessSandbox` (only OS-process path, served-predicate gated §6), `SecretBroker`, `NetworkPolicy` | backend/medium is injected config, never a type; changes when a backend is added, **never for a feature** | trusted mechanism, kernel-mediated |
+
+The one-line flow: **product/loop → membrane (1 or 2, origin sealed) → kernel
+pipeline (3) → lane (4) → substrates (5).**
+
+Two things deliberately *not* on the list: **`DeploymentConfig` is data, not a
+surface** — nothing routes through it; it selects backends and policy values at
+`build_runtime` — and **composition is an assembler, not a surface** (§5.11). A
+mental model that has either as a routing layer is the drift this structure
+exists to prevent.
+
+### 5.11 Composition end-state: the assembler, fully shrunk
+
+When every §5.8/§4.4 move lands, `ironclaw_reborn_composition` is a small crate
+whose only job is turning a `DeploymentConfig` value into a wired `Runtime`:
+
+```
+ironclaw_reborn_composition/
+├── lib.rs           build_runtime(cfg: DeploymentConfig) -> Runtime   — the one entry point
+├── deployment.rs    DeploymentConfig + LOCAL_DEV / HOSTED / ENTERPRISE constants (data, §4.4)
+├── substrates.rs    RootFilesystem backend selection; ProcessSandbox from ProcessPolicy
+│                    (incl. the served-predicate admission gate, §6); SecretBroker; NetworkPolicy
+├── stores.rs        Filesystem*Store<F> instantiation over the one backend (§4.3)
+├── kernel.rs        turn coordinator + runner/scheduler; authorize()+dispatch() assembly;
+│                    RuntimeLane construction with mediated substrate handles
+├── surfaces.rs      ProductSurface impl (actor-bound mint hook handed to ingress);
+│                    AgentLoopHost factory with config-gated decorators (§4.4.1)
+└── registry.rs      accepts descriptor sets (capability + view) and the product-neutral
+                     adapter factory registry AS INPUTS; activates DeploymentConfig ids
+```
+
+Order of a few thousand lines of declarative wiring. The three deployment modes
+are three constants on one page; the entire local/hosted diff is data.
+
+**What it receives instead of owning.** Two inputs, both constructed *above* it
+in the binary crates (which is where product adapters get linked): the adapter
+factory registry keyed by `ExtensionId`, and the descriptor sets. Composition
+never names `slack`, `webui`, a route, or a vendor — it activates ids. One
+consequence stated plainly: "config lists an adapter id that isn't linked"
+moved from a compile error to a boot error, so `build_runtime` **fails closed
+and loudly on any unresolvable id at startup** — a silent skip would be a
+misconfigured deployment masquerading as a working one.
+
+**What is gone** (destinations in the §5.8 table): the ~40.6K Slack host tree,
+~32.7K `product_auth` (→ recipes + one `AuthEngine`), ~14.5K `runtime/`
+LocalDev wiring (→ config-gated middleware + promoted first-party
+capabilities), `llm_admin`/`automation` (→ descriptor sets; routines invoke
+under `Automation` origin), `outbound/` (→ adapter deliver paths), and every
+`LocalDev*`/`InMemory*` type.
+
+**Definition of done** = the §10 ratchets for this crate flipped: no
+product/transport identifier (the URT Deletion/Addition tests), `Local*`
+allowlist empty, `InMemory*Store` allowlist empty, no mode branching (consumes
+resolved policy values only), and no handler reaching store internals. The
+test of the end-state in one sentence: *if shipping a feature requires editing
+composition, the feature is being built in the wrong crate.*
+
 ---
 
 ## 6. Case study: the shell cross-tenant escape (issue #6170)
@@ -1282,19 +1358,27 @@ miss the transition's sweep, and start *after* the deployment became served.
 So the check and the transition share one admission gate (an epoch/lock over
 the host-process registry):
 
-1. `spawn` executes {validate predicate, register the process in the
-   host-process registry} **atomically under the current epoch** — a process
-   is never running-but-unregistered.
+1. `spawn` holds the admission gate **from validation through successful
+   process start**: {validate predicate, register in the host-process
+   registry, exec, confirm started} all execute under the current epoch — the
+   gate is not released between check and exec, so a process is never
+   running-but-unregistered *and* never admitted-but-launching outside the
+   gate. (Spawn holds the gate only for process start, not process lifetime —
+   the hold is short and bounded.)
 2. A serving transition (second user authenticating, tunnel/listener coming
-   up) executes, in order: **block new admissions** (advance the epoch — every
-   subsequent spawn fails closed) → **kill every registered host process tree
-   and confirm exit** → only then **publish the new user/ingress fact**. The
-   second user's session, or the tunnel, does not exist until containment is
-   re-established.
-3. The race has two outcomes and no third: a spawn admitted under the old
-   epoch is in the registry and dies in step 2's sweep; a spawn arriving after
-   the epoch advance fails closed. Killed, not drained — a drained host
-   process is a live cross-tenant window.
+   up) acquires the same gate **exclusively**, then executes in order:
+   **block new admissions** (advance the epoch — every subsequent spawn fails
+   closed) → **kill every registered host process tree and confirm exit** →
+   only then **publish the new user/ingress fact**. Because the transition
+   holds the gate, no spawn can be between validation and exec while the
+   sweep runs. The second user's session, or the tunnel, does not exist until
+   containment is re-established.
+3. The race has two outcomes and no third: a spawn that acquired the gate
+   before the transition has fully started and is in the registry — it dies
+   in step 2's sweep; a spawn that arrives after fails the epoch check
+   closed. There is no admitted-but-unlaunched window, because exec happens
+   under the gate. Killed, not drained — a drained host process is a live
+   cross-tenant window.
 
 The §11.2 matrix test drives exactly this transition with barriers (spawn held
 at the admission gate while the transition fires, both interleavings asserted),
@@ -1322,7 +1406,7 @@ containment. That is the entire thesis in one incident.
 
 | | Now | After |
 | --- | --- | --- |
-| Types per capability call | ~14 (5 near-identical request mirrors + one overloaded 10-variant outcome enum) | ~12 like-for-like, **zero mirrors**: request states 5 → 3; outcome enum → 5 typed channels; per-lane types survive (trust boundary) — count mirrors, not names (§3) |
+| Types per capability call | ~14 (5 near-identical request mirrors + one overloaded 10-variant outcome enum) | ~11 like-for-like (3 host request states + ~3 lane requests + 5 channels), **zero mirrors**: request states 5 → 3; outcome enum → 5 typed channels; per-lane types survive (trust boundary) — count mirrors, not names (§3) |
 | Hot-path `dyn` seams | 6+ | 2 + 1 lane enum |
 | Policy decision sites | 4 crates | 1 `authorize()` |
 | Store impls per domain | 2–4 hand-written | 1 (`FsStore<F>`); in-memory is a backend, not a store |
@@ -1422,7 +1506,7 @@ mid-migration:
   when the last delegated check is inlined; mark that PR explicitly (it is the
   security milestone of Slice C, not the type introduction).
 - **Type count rises before it falls.** During C the five old request shapes and
-  the new vocabulary coexist (~14 → ~18 → ~9–10). The §10 mirror-DTO ratchet's
+  the new vocabulary coexist (~14 → ~18 → ~11, the §3 total). The §10 mirror-DTO ratchet's
   allowlist is what makes this safe: the old five are frozen entries that may
   only disappear.
 
