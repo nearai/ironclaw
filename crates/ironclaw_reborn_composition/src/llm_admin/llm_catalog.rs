@@ -168,18 +168,47 @@ pub fn resolve_llm_selection_against_catalog(
 /// overlay the stored key onto the config this function returns. This
 /// function itself stays store-agnostic (pure catalog/selection resolution)
 /// so the store lookup lives in exactly one place: the CLI call site.
+///
+/// Never masks a real misconfiguration: normal (non-keyless) resolution is
+/// tried first, and the keyless retry only kicks in on the exact
+/// `ApiKeyEnvUnset` outcome (a required key whose configured env var simply
+/// isn't set — the case this function exists to tolerate, because the
+/// caller has already confirmed a key is durably stored). Any other error —
+/// notably `ApiKeyEnvUnconfigured`, a catalog entry that requires a key but
+/// has no `api_key_env` to even name — propagates unconditionally instead
+/// of being silently retried keyless, which would otherwise turn a genuine
+/// catalog misconfiguration into a config with no API key set and no error
+/// at all.
 pub fn resolve_llm_selection_allow_missing_key(
     selection: &LlmSlotSelection,
     user_providers_path: Option<&Path>,
 ) -> Result<ironclaw_llm::LlmConfig, RebornLlmCatalogError> {
     let registry = ProviderRegistry::try_load_from_path(user_providers_path)
         .map_err(|source| RebornLlmCatalogError::CatalogLoad { source })?;
-    let provider_id = selection
-        .provider_id
-        .as_deref()
-        .ok_or(RebornLlmCatalogError::MissingProviderId)?;
-    let keyless_registry = registry_with_provider_treated_as_keyless(&registry, provider_id);
-    resolve_against_registry(selection, &keyless_registry)
+    resolve_allow_missing_key_against_registry(selection, &registry)
+}
+
+/// Registry-level counterpart of [`resolve_llm_selection_allow_missing_key`],
+/// factored out so it's directly unit-testable against a synthetic
+/// registry (mirrors `resolve_against_registry`'s relationship to
+/// [`resolve_llm_selection_against_catalog`]) without touching the
+/// filesystem.
+fn resolve_allow_missing_key_against_registry(
+    selection: &LlmSlotSelection,
+    registry: &ProviderRegistry,
+) -> Result<ironclaw_llm::LlmConfig, RebornLlmCatalogError> {
+    match resolve_against_registry(selection, registry) {
+        Ok(config) => Ok(config),
+        Err(RebornLlmCatalogError::ApiKeyEnvUnset { .. }) => {
+            let provider_id = selection
+                .provider_id
+                .as_deref()
+                .ok_or(RebornLlmCatalogError::MissingProviderId)?;
+            let keyless_registry = registry_with_provider_treated_as_keyless(registry, provider_id);
+            resolve_against_registry(selection, &keyless_registry)
+        }
+        Err(other) => Err(other),
+    }
 }
 
 /// Clone `registry`, marking the catalog entry matching `provider_id`
@@ -628,6 +657,34 @@ mod tests {
         assert!(
             provider.api_key.is_none(),
             "no api key should be resolved from the (still-unset) env var"
+        );
+    }
+
+    /// Coderabbit fix: before this fix, `resolve_llm_selection_allow_missing_key`
+    /// unconditionally retried keyless — even for a provider whose catalog
+    /// entry is genuinely misconfigured (`api_key_required = true` but no
+    /// `api_key_env` to even name). That masked a real
+    /// `ApiKeyEnvUnconfigured` misconfiguration as a silent keyless
+    /// resolution. Only the exact `ApiKeyEnvUnset` outcome (a configured env
+    /// var that's simply unset) may retry keyless now; every other error,
+    /// including this one, must propagate unchanged.
+    #[test]
+    fn allow_missing_key_does_not_mask_a_missing_api_key_env_configuration() {
+        let malformed = ProviderDefinition {
+            api_key_env: None,
+            ..provider_with_required_key("alpha", "UNUSED_ENV_NAME")
+        };
+        let registry = ProviderRegistry::new(vec![malformed]);
+        let selection = LlmSlotSelection {
+            provider_id: Some("alpha".to_string()),
+            ..Default::default()
+        };
+
+        let err = resolve_allow_missing_key_against_registry(&selection, &registry)
+            .expect_err("a provider requiring a key but missing `api_key_env` must surface, not resolve keyless");
+        assert!(
+            matches!(err, RebornLlmCatalogError::ApiKeyEnvUnconfigured { .. }),
+            "unexpected error: {err:?}"
         );
     }
 
