@@ -10,8 +10,10 @@ import asyncio
 import time
 from contextlib import closing
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Awaitable, Callable, Mapping
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 
 def evidence_hash(value: object) -> str:
@@ -42,6 +44,18 @@ class TriggerRecordEvidence:
     schedule_kind: str
     next_run_at: str | None
     delivery_target: str | None = field(repr=False)
+    schedule_expression: str = field(default="", repr=False)
+    schedule_timezone: str = ""
+    schedule_at: str | None = field(default=None, repr=False)
+
+    @property
+    def schedule(self) -> "TriggerScheduleEvidence":
+        return TriggerScheduleEvidence(
+            kind=self.schedule_kind,
+            expression=self.schedule_expression,
+            timezone=self.schedule_timezone,
+            at=self.schedule_at,
+        )
 
 
 @dataclass(frozen=True)
@@ -50,6 +64,15 @@ class TriggerSnapshot:
     records: tuple[TriggerRecordEvidence, ...] = ()
     delivery_target_column_present: bool = False
     error: str | None = None
+    malformed_count: int = 0
+
+
+@dataclass(frozen=True)
+class TriggerScheduleEvidence:
+    kind: str
+    expression: str = field(default="", repr=False)
+    timezone: str = ""
+    at: str | None = field(default=None, repr=False)
 
 
 @dataclass(frozen=True)
@@ -59,9 +82,27 @@ class TriggerCreateInvocation:
     prompt: str = field(repr=False)
     schedule_kind: str
     delivery_target_id: str | None = field(repr=False)
+    tenant_id: str = field(default="", repr=False)
+    schedule_expression: str = field(default="", repr=False)
+    schedule_timezone: str = ""
+    schedule_at: str | None = field(default=None, repr=False)
+
+    @property
+    def schedule(self) -> TriggerScheduleEvidence:
+        return TriggerScheduleEvidence(
+            kind=self.schedule_kind,
+            expression=self.schedule_expression,
+            timezone=self.schedule_timezone,
+            at=self.schedule_at,
+        )
 
     @classmethod
-    def from_preview(cls, preview: Mapping[str, object]) -> "TriggerCreateInvocation":
+    def from_preview(
+        cls,
+        preview: Mapping[str, object],
+        *,
+        tenant_id: str = "",
+    ) -> "TriggerCreateInvocation":
         raw_input = _json_object(
             preview.get("input")
             if "input" in preview
@@ -88,6 +129,19 @@ class TriggerCreateInvocation:
             raise ValueError("trigger_create preview omitted required identity fields")
         if schedule_kind not in {"cron", "once"}:
             raise ValueError("trigger_create preview had an unsupported schedule kind")
+        schedule_timezone = schedule.get("timezone")
+        if not isinstance(schedule_timezone, str) or not schedule_timezone:
+            raise ValueError("trigger_create preview omitted schedule timezone")
+        schedule_expression = schedule.get("expression") if schedule_kind == "cron" else ""
+        schedule_at = schedule.get("at") if schedule_kind == "once" else None
+        if schedule_kind == "cron" and (
+            not isinstance(schedule_expression, str) or not schedule_expression
+        ):
+            raise ValueError("trigger_create preview omitted cron expression")
+        if schedule_kind == "once" and (
+            not isinstance(schedule_at, str) or not schedule_at
+        ):
+            raise ValueError("trigger_create preview omitted once timestamp")
         target = raw_input.get("delivery_target_id")
         if target is not None and not isinstance(target, str):
             raise ValueError("trigger_create preview delivery_target_id was malformed")
@@ -97,6 +151,10 @@ class TriggerCreateInvocation:
             prompt=str(values["prompt"]),
             schedule_kind=schedule_kind,
             delivery_target_id=target,
+            tenant_id=tenant_id,
+            schedule_expression=str(schedule_expression),
+            schedule_timezone=schedule_timezone,
+            schedule_at=str(schedule_at) if schedule_at is not None else None,
         )
 
 
@@ -105,6 +163,16 @@ class RoutineValidation:
     valid: bool
     error: str | None
     safe_summary: dict[str, object]
+    inconclusive: bool = False
+
+
+@dataclass(frozen=True)
+class TriggerInvocationEvidence:
+    checked: bool
+    invocations: tuple[TriggerCreateInvocation, ...] = ()
+    run_terminal: bool = False
+    error: str | None = None
+    malformed_count: int = 0
 
 
 @dataclass(frozen=True)
@@ -145,7 +213,13 @@ def read_trigger_snapshot(reborn_home: Path) -> TriggerSnapshot:
     if not db_path.exists():
         return TriggerSnapshot(checked=False, error="reborn-local-dev.db missing")
     try:
-        with closing(sqlite3.connect(f"{db_path.resolve().as_uri()}?mode=ro", uri=True)) as db:
+        with closing(
+            sqlite3.connect(
+                f"{db_path.resolve().as_uri()}?mode=ro",
+                uri=True,
+                timeout=0.0,
+            )
+        ) as db:
             columns = {
                 str(row[1]) for row in db.execute("PRAGMA table_info(trigger_records)").fetchall()
             }
@@ -154,7 +228,10 @@ def read_trigger_snapshot(reborn_home: Path) -> TriggerSnapshot:
                 "trigger_id",
                 "name",
                 "prompt",
+                "schedule_expression",
+                "schedule_timezone",
                 "schedule_kind",
+                "schedule_at",
                 "next_run_at",
             }
             missing = sorted(required - columns)
@@ -167,24 +244,53 @@ def read_trigger_snapshot(reborn_home: Path) -> TriggerSnapshot:
             target_column = "delivery_target" if has_target else "NULL"
             rows = db.execute(
                 "SELECT tenant_id, trigger_id, name, prompt, schedule_kind, "
-                f"next_run_at, {target_column} FROM trigger_records"
+                "schedule_expression, schedule_timezone, schedule_at, next_run_at, "
+                f"{target_column} FROM trigger_records"
             ).fetchall()
     except sqlite3.Error as exc:
         return TriggerSnapshot(checked=False, error=f"{type(exc).__name__}: {exc}")
+    records: list[TriggerRecordEvidence] = []
+    malformed_count = 0
+    for row in rows:
+        required = (*row[:5], row[6], row[8])
+        kind = row[4]
+        expression = row[5]
+        schedule_at = row[7]
+        malformed = (
+            any(not isinstance(value, str) or not value for value in required)
+            or kind not in {"cron", "once"}
+            or (kind == "cron" and (not isinstance(expression, str) or not expression))
+            or (kind == "once" and (not isinstance(schedule_at, str) or not schedule_at))
+            or (row[9] is not None and not isinstance(row[9], str))
+        )
+        if malformed:
+            malformed_count += 1
+            continue
+        records.append(
+            TriggerRecordEvidence(
+                key=TriggerKey(row[0], row[1]),
+                name=row[2],
+                prompt=row[3],
+                schedule_kind=kind,
+                schedule_expression=expression,
+                schedule_timezone=row[6],
+                schedule_at=schedule_at,
+                next_run_at=row[8],
+                delivery_target=row[9],
+            )
+        )
+    if malformed_count:
+        return TriggerSnapshot(
+            checked=False,
+            records=tuple(records),
+            delivery_target_column_present=has_target,
+            error="malformed trigger_records schedule or identity evidence",
+            malformed_count=malformed_count,
+        )
     return TriggerSnapshot(
         checked=True,
+        records=tuple(records),
         delivery_target_column_present=has_target,
-        records=tuple(
-            TriggerRecordEvidence(
-                key=TriggerKey(str(row[0]), str(row[1])),
-                name=str(row[2]),
-                prompt=str(row[3]),
-                schedule_kind=str(row[4]),
-                next_run_at=str(row[5]) if row[5] is not None else None,
-                delivery_target=str(row[6]) if row[6] is not None else None,
-            )
-            for row in rows
-        ),
     )
 
 
@@ -218,14 +324,15 @@ def validate_trigger_delta(
         )
     record = created[0]
     mismatches = []
+    if record.key.tenant_id != invocation.tenant_id:
+        mismatches.append("tenant_id")
     if record.key.trigger_id != invocation.trigger_id:
         mismatches.append("trigger_id")
     if record.name != invocation.name:
         mismatches.append("name")
     if record.prompt != invocation.prompt:
         mismatches.append("prompt")
-    if record.schedule_kind != invocation.schedule_kind:
-        mismatches.append("schedule_kind")
+    mismatches.extend(_schedule_mismatches(record.schedule, invocation.schedule))
     if record.delivery_target != invocation.delivery_target_id:
         mismatches.append("delivery_target")
     summary.update(
@@ -248,11 +355,43 @@ def validate_trigger_delta(
     return RoutineValidation(True, None, summary)
 
 
+def _schedule_mismatches(
+    record: TriggerScheduleEvidence,
+    invocation: TriggerScheduleEvidence,
+) -> list[str]:
+    mismatches: list[str] = []
+    if record.kind != invocation.kind:
+        return ["schedule_kind"]
+    if record.timezone != invocation.timezone:
+        mismatches.append("schedule_timezone")
+    if record.kind == "cron":
+        if record.expression != invocation.expression:
+            mismatches.append("schedule_expression")
+    elif record.kind == "once":
+        record_at = _schedule_instant(record.at, record.timezone)
+        invocation_at = _schedule_instant(invocation.at, invocation.timezone)
+        if record_at is None or invocation_at is None or record_at != invocation_at:
+            mismatches.append("schedule_at")
+    return mismatches
+
+
+def _schedule_instant(value: str | None, timezone_name: str) -> datetime | None:
+    if not value:
+        return None
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=ZoneInfo(timezone_name))
+    except (ValueError, ZoneInfoNotFoundError):
+        return None
+    return parsed.astimezone(timezone.utc)
+
+
 async def wait_for_trigger_validation(
     before: TriggerSnapshot,
     *,
     snapshot_reader: Callable[[], TriggerSnapshot],
-    invocation_reader: Callable[[], list[TriggerCreateInvocation]],
+    invocation_reader: Callable[[], object],
     timeout: float,
     poll_interval: float,
     monotonic: Callable[[], float] = time.monotonic,
@@ -267,14 +406,42 @@ async def wait_for_trigger_validation(
     """
     deadline = monotonic() + timeout
     last_after = before
-    last_invocations: list[TriggerCreateInvocation] = []
+    last_invocations: tuple[TriggerCreateInvocation, ...] = ()
+    last_run_terminal = False
     while True:
         last_after = snapshot_reader()
-        last_invocations = invocation_reader()
+        raw_invocations = invocation_reader()
+        if isinstance(raw_invocations, TriggerInvocationEvidence):
+            invocation_evidence = raw_invocations
+        else:
+            invocation_evidence = TriggerInvocationEvidence(
+                checked=bool(getattr(raw_invocations, "checked", True)),
+                invocations=tuple(raw_invocations),  # type: ignore[arg-type]
+                run_terminal=bool(getattr(raw_invocations, "run_terminal", True)),
+                error=getattr(raw_invocations, "error", None),
+            )
+        if not last_after.checked or not invocation_evidence.checked:
+            error = (
+                last_after.error
+                or invocation_evidence.error
+                or "typed trigger evidence could not be read"
+            )
+            return RoutineValidation(
+                False,
+                error,
+                {
+                    "before_checked": before.checked,
+                    "after_checked": last_after.checked,
+                    "invocations_checked": invocation_evidence.checked,
+                },
+                inconclusive=True,
+            )
+        last_invocations = invocation_evidence.invocations
+        last_run_terminal = invocation_evidence.run_terminal
         prior = {record.key for record in before.records}
         new_count = sum(record.key not in prior for record in last_after.records)
         terminal_count = len(last_invocations)
-        if terminal_count == 1 and new_count >= 1:
+        if last_run_terminal and terminal_count == 1 and new_count >= 1:
             validation = validate_trigger_delta(
                 before,
                 last_after,
@@ -282,7 +449,7 @@ async def wait_for_trigger_validation(
             )
             validation.safe_summary["terminal_invocation_count"] = terminal_count
             return validation
-        if terminal_count > 1 and new_count >= terminal_count:
+        if last_run_terminal and terminal_count > 1 and new_count >= terminal_count:
             return RoutineValidation(
                 False,
                 f"observed {terminal_count} terminal trigger_create invocations; "
@@ -292,6 +459,7 @@ async def wait_for_trigger_validation(
                     "after_checked": last_after.checked,
                     "terminal_invocation_count": terminal_count,
                     "new_record_count": new_count,
+                    "submitted_run_terminal": last_run_terminal,
                 },
             )
         now = monotonic()
@@ -304,6 +472,7 @@ async def wait_for_trigger_validation(
                     "after_checked": last_after.checked,
                     "terminal_invocation_count": terminal_count,
                     "new_record_count": new_count,
+                    "submitted_run_terminal": last_run_terminal,
                 },
             )
         await sleep(min(poll_interval, deadline - now))
@@ -314,7 +483,13 @@ def read_default_target_snapshot(reborn_home: Path) -> DefaultTargetSnapshot:
     if not db_path.exists():
         return DefaultTargetSnapshot(checked=False, error="reborn-local-dev.db missing")
     try:
-        with closing(sqlite3.connect(f"{db_path.resolve().as_uri()}?mode=ro", uri=True)) as db:
+        with closing(
+            sqlite3.connect(
+                f"{db_path.resolve().as_uri()}?mode=ro",
+                uri=True,
+                timeout=0.0,
+            )
+        ) as db:
             rows = db.execute(
                 "SELECT path, contents FROM root_filesystem_entries "
                 "WHERE path LIKE '%/outbound/communication-preferences/%' AND is_dir = 0 "

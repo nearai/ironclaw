@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import re
 from collections.abc import Mapping, Sequence
+from itertools import islice
 from typing import Any
 
 
@@ -22,6 +23,19 @@ _SENSITIVE_KEY_NAMES = {
     "state",
     "token",
     "accesstoken",
+    "privatecredentials",
+    "privatekey",
+    "signingcredentials",
+    "signingkey",
+}
+_SENSITIVE_KEY_SUFFIXES = {
+    "cookie",
+    "credential",
+    "credentials",
+    "key",
+    "password",
+    "secret",
+    "token",
 }
 _SENSITIVE_KEY_PATTERN = (
     r"(?:api[_-]?key|authorization|client[_-]?secret|code|cookie|id[_-]?token|"
@@ -53,7 +67,7 @@ _ANTHROPIC_KEY = re.compile(r"sk-ant-[A-Za-z0-9_-]{10,}")
 _OPENAI_KEY = re.compile(r"sk-[A-Za-z0-9_-]{20,}")
 # Slack entity IDs begin with one of these documented families and a digit.
 # Requiring the second character to be numeric avoids matching normal prose.
-_SLACK_ENTITY_ID = re.compile(r"\b[TCGDUWBASE][0-9][A-Z0-9]{7,}\b")
+_SLACK_ENTITY_ID = re.compile(r"\b[TCGDUWBASEF][0-9][A-Z0-9]{7,}\b")
 
 
 def _text(value: object) -> str:
@@ -67,6 +81,20 @@ def _text(value: object) -> str:
 
 def _normalized_key(value: object) -> str:
     return re.sub(r"[^a-z0-9]", "", _text(value).lower())
+
+
+def _is_sensitive_key(value: object) -> bool:
+    raw = _text(value)
+    normalized = _normalized_key(raw)
+    if normalized in _SENSITIVE_KEY_NAMES:
+        return True
+    separated = [part for part in re.split(r"[^A-Za-z0-9]+", raw) if part]
+    if len(separated) > 1 and separated[-1].lower() in _SENSITIVE_KEY_SUFFIXES:
+        return True
+    return re.search(
+        r"(?:Secret|Token|Key|Cookie|Password|Credential|Credentials)$",
+        raw,
+    ) is not None
 
 
 def _sanitize_text(value: str, literal_secrets: Sequence[str]) -> str:
@@ -139,10 +167,10 @@ def sanitize_diagnostic(
             active.add(identity)
             try:
                 result: dict[str, object] = {}
-                entries = list(item.items())[:max_items]
+                entries = list(islice(item.items(), max_items))
                 for raw_key, raw_value in entries:
                     key = _sanitize_text(_text(raw_key), literal_secrets)
-                    if _normalized_key(raw_key) in _SENSITIVE_KEY_NAMES:
+                    if _is_sensitive_key(raw_key):
                         result[key] = "<REDACTED>"
                     else:
                         result[key] = walk(raw_value, depth + 1)

@@ -1380,6 +1380,66 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
         self.assertEqual(result.details["routine_evidence"], validation.safe_summary)
         wait_evidence.assert_awaited_once()
 
+    def test_routine_creation_maps_evidence_read_failure_to_inconclusive(self):
+        async def fake_live_chat_case(_ctx, **kwargs):
+            return run_live_qa.ProbeResult(
+                provider="test",
+                mode=f"live:{kwargs['case_name']}",
+                success=True,
+                latency_ms=1,
+                details={
+                    "text_excerpt": "created",
+                    "assistant_reply_wait_reason": "final_reply_observed",
+                    "submission_identity": {
+                        "accepted_message_ref": "message",
+                        "thread_id": "thread",
+                        "turn_id": "turn",
+                        "run_id": "run",
+                    },
+                },
+            )
+
+        validation = types.SimpleNamespace(
+            valid=False,
+            error="database is locked",
+            inconclusive=True,
+            safe_summary={
+                "before_record_count": 0,
+                "after_record_count": 0,
+                "new_record_count": 0,
+                "wait_ms": 2,
+            },
+        )
+        with (
+            patch.object(run_live_qa, "_live_chat_case", side_effect=fake_live_chat_case),
+            patch.object(
+                run_live_qa,
+                "read_trigger_snapshot",
+                return_value=self._checked_trigger_baseline(),
+            ),
+            patch.object(
+                run_live_qa,
+                "_wait_for_current_turn_trigger_validation",
+                return_value=validation,
+            ),
+        ):
+            result = asyncio.run(
+                run_live_qa._routine_creation_case(
+                    self._dummy_ctx(),
+                    case_name="qa_test_routine",
+                    prompt="create it",
+                    marker="marker",
+                    routine_name="routine",
+                    required_text=["routine"],
+                )
+            )
+
+        self.assertFalse(result.success)
+        self.assertEqual(result.details.get("failure_class"), "infrastructure")
+        self.assertEqual(result.details.get("failure_status"), "inconclusive")
+        self.assertTrue(result.details.get("inconclusive"))
+        self.assertFalse(result.details.get("blocking", True))
+
     def test_routed_routine_missing_delivery_column_fails_before_chat(self):
         from scripts.reborn_webui_v2_live_qa.routine_evidence import TriggerSnapshot
 
@@ -1457,7 +1517,93 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
                 Path("/tmp/home"), [identity]
             )
 
-        self.assertEqual(targets, ["slack-final"])
+        self.assertTrue(targets.checked)
+        self.assertEqual(list(targets.target_ids), ["slack-final"])
+
+    def test_routed_routine_maps_outbound_preview_read_failure_to_inconclusive(self):
+        from scripts.reborn_webui_v2_live_qa.routine_evidence import (
+            DefaultTargetSnapshot,
+            TriggerKey,
+            TriggerRecordEvidence,
+            TriggerSnapshot,
+        )
+
+        class UnreadableTargets(list):
+            checked = False
+            error = "malformed outbound target capability preview"
+
+        async def fake_creation(_ctx, **kwargs):
+            return run_live_qa.ProbeResult(
+                provider="test",
+                mode=f"live:{kwargs['case_name']}",
+                success=True,
+                latency_ms=1,
+                details={
+                    "assistant_reply_wait_reason": "final_reply_observed",
+                    "submission_identities": [
+                        {"thread_id": "thread", "run_id": "run"}
+                    ],
+                },
+            )
+
+        schema = TriggerSnapshot(
+            checked=True,
+            delivery_target_column_present=True,
+        )
+        persisted = TriggerSnapshot(
+            checked=True,
+            delivery_target_column_present=True,
+            records=(
+                TriggerRecordEvidence(
+                    TriggerKey("tenant", "trigger"),
+                    "routine-name-1234000",
+                    "task",
+                    "once",
+                    "2026-07-16T12:00:00Z",
+                    "target-secret",
+                ),
+            ),
+        )
+        with (
+            patch.object(run_live_qa.time, "time", return_value=1234.0),
+            patch.object(
+                run_live_qa,
+                "read_trigger_snapshot",
+                side_effect=(schema, persisted),
+            ),
+            patch.object(
+                run_live_qa,
+                "_routine_creation_case",
+                side_effect=fake_creation,
+            ),
+            patch.object(
+                run_live_qa,
+                "_outbound_final_reply_targets",
+                return_value=DefaultTargetSnapshot(checked=True),
+            ),
+            patch.object(
+                run_live_qa,
+                "_current_turn_outbound_final_reply_target_ids",
+                return_value=UnreadableTargets(),
+            ),
+        ):
+            result = asyncio.run(
+                run_live_qa._slack_delivery_routine_case(
+                    self._dummy_ctx(),
+                    case_name="qa_routed",
+                    routine_prefix="routine-name",
+                    marker_prefix="MARKER",
+                    routine_instruction="do work",
+                    required_delivery_text=[],
+                    require_persisted_delivery_target=True,
+                )
+            )
+
+        self.assertFalse(result.success)
+        self.assertEqual(result.details.get("failure_class"), "infrastructure")
+        self.assertEqual(result.details.get("failure_status"), "inconclusive")
+        self.assertFalse(result.details.get("blocking", True))
+        self.assertIn("malformed", result.details["error"])
 
     def test_strategy_doc_knowledge_requires_current_turn_google_docs_evidence(self):
         captured: dict[str, object] = {}
@@ -1536,12 +1682,9 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
                         "invocation_id": "invocation-2",
                         "capability_id": "google-docs.read_content",
                         "input": {"document_id": "doc-id"},
-                        "output": {
-                            "document_id": "doc-id",
-                            "content": captured.get("extra_details", {}).get(
-                                "strategy_phrase", ""
-                            ),
-                        },
+                        "output": captured.get("extra_details", {}).get(
+                            "strategy_phrase", ""
+                        ),
                     },
                 ],
             ),
@@ -1612,6 +1755,11 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
                 run_live_qa,
                 "_current_turn_capability_evidence",
                 return_value=evidence,
+            ),
+            patch.object(
+                run_live_qa,
+                "_current_turn_capability_previews",
+                return_value=[],
             ),
         ):
             result = asyncio.run(
@@ -1712,7 +1860,7 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
                 "invocation_id": "c",
                 "capability_id": "google-docs.read_content",
                 "input": {"document_id": "doc-secret"},
-                "output": {"document_id": "doc-secret", "content": f"body {phrase}"},
+                "output": f"body {phrase}",
             },
         ]
 
@@ -3420,6 +3568,88 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
         self.assertEqual(
             evidence["statuses"],
             {"slack.get_conversation_history": []},
+        )
+
+    def test_current_turn_capability_evidence_reads_terminal_run_and_tenant_scope(self):
+        capability_id = run_live_qa.TRIGGER_CREATE_CAPABILITY_ID
+        with tempfile.TemporaryDirectory() as tmpdir:
+            reborn_home = Path(tmpdir)
+            db_path = reborn_home / "local-dev" / "reborn-local-dev.db"
+            db_path.parent.mkdir(parents=True)
+            with closing(sqlite3.connect(db_path)) as db, db:
+                db.execute(
+                    "CREATE TABLE root_filesystem_entries "
+                    "(path TEXT, contents TEXT, is_dir INTEGER, content_type TEXT, "
+                    "kind TEXT)"
+                )
+                db.execute(
+                    "CREATE TABLE root_filesystem_events "
+                    "(seq INTEGER PRIMARY KEY, path TEXT, payload TEXT)"
+                )
+                db.execute(
+                    "INSERT INTO root_filesystem_entries VALUES "
+                    "('/turns/rows/v1/runs/run-current.json', ?, 0, "
+                    "'application/json', 'turn_run')",
+                    (
+                        json.dumps(
+                            {
+                                "journal_seq": 4,
+                                "value": {
+                                    "run_id": "run-current",
+                                    "status": "Completed",
+                                },
+                            }
+                        ),
+                    ),
+                )
+                event = {
+                    "kind": "capability_activity_succeeded",
+                    "scope": {
+                        "tenant_id": "tenant-current",
+                        "thread_id": "thread-current",
+                        "invocation_id": "invocation-current",
+                    },
+                    "parent_invocation_id": "run-current",
+                    "capability_id": capability_id,
+                }
+                db.execute(
+                    "INSERT INTO root_filesystem_events VALUES "
+                    "(1, '/events/runtime/test', ?)",
+                    (json.dumps(event),),
+                )
+                run_state = {
+                    "invocation_id": "invocation-current",
+                    "capability_id": capability_id,
+                    "scope": {
+                        "tenant_id": "tenant-current",
+                        "thread_id": "thread-current",
+                    },
+                    "status": "completed",
+                }
+                db.execute(
+                    "INSERT INTO root_filesystem_entries VALUES "
+                    "('/run-state/invocation-current.json', ?, 0, "
+                    "'application/json', 'run_state_record')",
+                    (json.dumps(run_state),),
+                )
+
+            evidence = run_live_qa._current_turn_capability_evidence(
+                reborn_home,
+                {
+                    "accepted_message_ref": "message-current",
+                    "thread_id": "thread-current",
+                    "turn_id": "turn-current",
+                    "run_id": "run-current",
+                },
+                [capability_id],
+                {"completed"},
+            )
+
+        self.assertEqual(evidence["run_status"], "Completed")
+        self.assertTrue(evidence["run_terminal"])
+        self.assertEqual(
+            evidence["terminal_sequence"][0]["tenant_id"],
+            "tenant-current",
         )
 
     def test_slack_correctness_evidence_read_failure_is_inconclusive(self):

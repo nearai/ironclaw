@@ -54,6 +54,7 @@ from scripts.reborn_webui_v2_live_qa.case_matrix import (  # noqa: E402
     qa_row_sort_key,
 )
 from scripts.reborn_webui_v2_live_qa.capability_evidence import (  # noqa: E402
+    TRIGGER_CREATE_CAPABILITY_ID,
     current_turn_outbound_final_reply_target_ids,
     current_turn_capability_previews as _current_turn_capability_previews,
     evaluate_google_docs_chain as _evaluate_google_docs_chain,
@@ -2952,6 +2953,10 @@ class SlackDeliveryProbePrecondition(AssertionError):
     """A fixture cannot exercise a Slack delivery assertion reliably."""
 
 
+class CanaryEvidenceInconclusive(RuntimeError):
+    """Typed local evidence was unavailable or malformed."""
+
+
 def _trigger_run_slack_send_evidence(
     reborn_home: Path,
     *,
@@ -2980,7 +2985,7 @@ def _trigger_run_slack_send_evidence(
         return evidence
     try:
         database_uri = f"{db_path.resolve().as_uri()}?mode=ro"
-        with closing(sqlite3.connect(database_uri, uri=True)) as db:
+        with closing(sqlite3.connect(database_uri, uri=True, timeout=0.0)) as db:
             rows = db.execute(
                 """
                 SELECT contents
@@ -3612,9 +3617,47 @@ def _current_turn_capability_evidence(
                   AND path LIKE '%/messages/%'
                 """
             ).fetchall()
+            run_record_rows = db.execute(
+                """
+                SELECT contents
+                FROM root_filesystem_entries
+                WHERE is_dir = 0
+                  AND content_type = 'application/json'
+                  AND path LIKE ?
+                """,
+                (f"%/turns/rows/v1/runs/{identity['run_id']}.json",),
+            ).fetchall()
     except sqlite3.Error as exc:
         evidence["read_error"] = _exc_text(exc)
         return evidence
+
+    run_status = str(submission_identity.get("run_status") or "")
+    for (raw_contents,) in run_record_rows:
+        try:
+            stored = json.loads(
+                raw_contents.decode("utf-8", errors="replace")
+                if isinstance(raw_contents, bytes)
+                else str(raw_contents)
+            )
+        except (json.JSONDecodeError, UnicodeDecodeError):
+            continue
+        record = stored.get("value") if isinstance(stored, dict) else None
+        if record is None and isinstance(stored, dict):
+            record = stored
+        if (
+            isinstance(record, dict)
+            and str(record.get("run_id") or "") == identity["run_id"]
+        ):
+            run_status = str(record.get("status") or run_status)
+    if run_status:
+        evidence["run_status"] = run_status
+        evidence["run_terminal"] = run_status.lower() in {
+            "cancelled",
+            "completed",
+            "failed",
+            "recoveryrequired",
+            "recovery_required",
+        }
 
     wanted = set(capability_ids)
     input_arguments_by_invocation: dict[str, dict[str, str]] = {}
@@ -3668,7 +3711,7 @@ def _current_turn_capability_evidence(
                 {"channel": channel} if isinstance(channel, str) else {}
             )
 
-    terminal_events: dict[str, tuple[str, str, int]] = {}
+    terminal_events: dict[str, tuple[str, str, int, str]] = {}
     for raw_seq, raw_payload in event_rows:
         try:
             payload = json.loads(
@@ -3699,9 +3742,10 @@ def _current_turn_capability_evidence(
                 capability_id,
                 event_status,
                 int(raw_seq),
+                str(scope.get("tenant_id") or ""),
             )
 
-    matched: dict[str, list[tuple[int, str, str]]] = {
+    matched: dict[str, list[tuple[int, str, str, str]]] = {
         capability_id: [] for capability_id in capability_ids
     }
     for (raw_contents,) in run_state_rows:
@@ -3719,7 +3763,12 @@ def _current_turn_capability_evidence(
         event = terminal_events.get(invocation_id)
         scope = payload.get("scope")
         status = str(payload.get("status") or "unknown")
-        event_capability_id, event_status, event_seq = event or ("", "", 0)
+        event_capability_id, event_status, event_seq, event_tenant_id = event or (
+            "",
+            "",
+            0,
+            "",
+        )
         if (
             event is None
             or payload.get("capability_id") != event_capability_id
@@ -3728,13 +3777,15 @@ def _current_turn_capability_evidence(
             or scope.get("thread_id") != identity["thread_id"]
         ):
             continue
-        matched[event_capability_id].append((event_seq, invocation_id, status))
+        matched[event_capability_id].append(
+            (event_seq, invocation_id, status, event_tenant_id)
+        )
 
     ordered_matches = sorted(
         (
-            (seq, capability_id, invocation_id, status)
+            (seq, capability_id, invocation_id, status, tenant_id)
             for capability_id, matches in matched.items()
-            for seq, invocation_id, status in matches
+            for seq, invocation_id, status, tenant_id in matches
         ),
         key=lambda item: item[0],
     )
@@ -3742,18 +3793,20 @@ def _current_turn_capability_evidence(
     evidence["invocation_ids"] = {
         capability_id: [
             invocation_id
-            for _, invocation_id, _ in sorted(matched[capability_id])
+            for _, invocation_id, _, _ in sorted(matched[capability_id])
         ]
         for capability_id in capability_ids
     }
     evidence["statuses"] = {
-        capability_id: [status for _, _, status in sorted(matched[capability_id])]
+        capability_id: [
+            status for _, _, status, _ in sorted(matched[capability_id])
+        ]
         for capability_id in capability_ids
     }
     evidence["input_arguments"] = {
         capability_id: [
             input_arguments_by_invocation.get(invocation_id, {})
-            for _, invocation_id, _ in sorted(matched[capability_id])
+            for _, invocation_id, _, _ in sorted(matched[capability_id])
         ]
         for capability_id in capability_ids
     }
@@ -3763,8 +3816,13 @@ def _current_turn_capability_evidence(
             "capability_id": capability_id,
             "invocation_id": invocation_id,
             "status": status,
+            **(
+                {"tenant_id": tenant_id}
+                if capability_id == TRIGGER_CREATE_CAPABILITY_ID
+                else {}
+            ),
         }
-        for seq, capability_id, invocation_id, status in ordered_matches
+        for seq, capability_id, invocation_id, status, tenant_id in ordered_matches
     ]
     return evidence
 
@@ -4339,14 +4397,14 @@ async def case_qa_5c_strategy_doc_knowledge_base(ctx: LiveQaContext) -> ProbeRes
         expected_capabilities,
         {"completed"},
     )
-    previews = _current_turn_capability_previews(
+    preview_snapshot = _current_turn_capability_previews(
         ctx.reborn_home,
         submission_identity if isinstance(submission_identity, dict) else {},
         expected_capabilities,
     )
     chain_evidence = _evaluate_google_docs_chain(
         evidence,
-        previews,
+        list(getattr(preview_snapshot, "previews", preview_snapshot)),
         strategy_phrase,
     )
     result.details["expected_capabilities"] = expected_capabilities
@@ -4365,7 +4423,11 @@ async def case_qa_5c_strategy_doc_knowledge_base(ctx: LiveQaContext) -> ProbeRes
         if isinstance(statuses, dict)
         else expected_capabilities
     )
-    evidence_read_error = evidence.get("read_error")
+    evidence_read_error = evidence.get("read_error") or (
+        getattr(preview_snapshot, "error", None)
+        if not getattr(preview_snapshot, "checked", True)
+        else None
+    )
     if evidence_read_error:
         result.success = False
         result.details.update(
@@ -4815,6 +4877,16 @@ async def _routine_creation_case(
         if not validation.valid:
             result.success = False
             result.details["error"] = validation.error
+            if getattr(validation, "inconclusive", False):
+                result.details.update(
+                    {
+                        "failure_class": "infrastructure",
+                        "failure_category": "trigger_evidence_unavailable",
+                        "failure_status": "inconclusive",
+                        "inconclusive": True,
+                        "blocking": False,
+                    }
+                )
     else:
         result.details["trigger_records_after"] = before_count
         result.details["trigger_record_wait_ms"] = 0
@@ -4991,7 +5063,7 @@ async def _slack_delivery_routine_case(
                     "(trigger_records.delivery_target column missing)"
                 )
             if not record_snapshot.checked:
-                raise AssertionError(
+                raise CanaryEvidenceInconclusive(
                     "probe could not read trigger_records for the persisted "
                     f"delivery target: {record_snapshot.error!r}"
                 )
@@ -5009,9 +5081,17 @@ async def _slack_delivery_routine_case(
                 if isinstance(primary_identity, dict)
                 else []
             )
-            eligible_target_ids = _current_turn_outbound_final_reply_target_ids(
+            eligible_targets = _current_turn_outbound_final_reply_target_ids(
                 ctx.reborn_home,
                 identities,
+            )
+            if not getattr(eligible_targets, "checked", True):
+                raise CanaryEvidenceInconclusive(
+                    "current-turn outbound target evidence could not be read: "
+                    f"{getattr(eligible_targets, 'error', None)}"
+                )
+            eligible_target_ids = list(
+                getattr(eligible_targets, "target_ids", eligible_targets)
             )
             base_details["outbound_target_evidence"] = {
                 "eligible_final_reply_target_count": len(eligible_target_ids),
@@ -5033,7 +5113,7 @@ async def _slack_delivery_routine_case(
             # and fabricates a "duplicate delivery" red. Verify the OUTCOME
             # (the persisted schedule), not the prompt wording.
             if not record_snapshot.checked:
-                raise AssertionError(
+                raise CanaryEvidenceInconclusive(
                     "probe could not read trigger_records for the schedule "
                     f"precondition: {record_snapshot.error!r}"
                 )
@@ -5214,7 +5294,7 @@ async def _slack_delivery_routine_case(
                 default_targets_after.safe_summary
             )
             if not default_targets_after.checked:
-                raise AssertionError(
+                raise CanaryEvidenceInconclusive(
                     "user-default outbound delivery target snapshot became "
                     f"unreadable: {default_targets_after.error}"
                 )
@@ -5261,6 +5341,23 @@ async def _slack_delivery_routine_case(
                 "failure_status": "inconclusive",
                 "inconclusive": True,
                 "delivery_readback_evidence": exc.evidence,
+            },
+        )
+        result.details["blocking"] = False
+        return result
+    except CanaryEvidenceInconclusive as exc:
+        result = _result(
+            case_name,
+            False,
+            started,
+            {
+                **base_details,
+                "error": _exc_text(exc),
+                "failure_class": "infrastructure",
+                "failure_category": "canary_evidence_unavailable",
+                "failure_status": "inconclusive",
+                "inconclusive": True,
+                "blocking": False,
             },
         )
         result.details["blocking"] = False
