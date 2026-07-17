@@ -86,15 +86,15 @@ emit_results_json() {
 }
 
 write_persona_credential_summary() {
-  local -a live_integrations=()
-  local -a stubbed_integrations=()
+  local -a configured_credentials=()
+  local -a fallback_credentials=()
   local integration credential_env
 
   while IFS=: read -r integration credential_env; do
     if [[ -n "${!credential_env:-}" ]]; then
-      live_integrations+=("${integration}")
+      configured_credentials+=("${integration}")
     else
-      stubbed_integrations+=("${integration}")
+      fallback_credentials+=("${integration}")
     fi
   done <<'EOF'
 github:LIVE_CANARY_GITHUB_TOKEN
@@ -105,15 +105,15 @@ composio:LIVE_CANARY_COMPOSIO_API_KEY
 EOF
 
   local IFS=,
-  if [[ ${#live_integrations[@]} -gt 0 ]]; then
-    printf 'persona_live_integrations=%s\n' "${live_integrations[*]}"
+  if [[ ${#configured_credentials[@]} -gt 0 ]]; then
+    printf 'persona_credentials_configured=%s\n' "${configured_credentials[*]}"
   else
-    printf 'persona_live_integrations=\n'
+    printf 'persona_credentials_configured=\n'
   fi
-  if [[ ${#stubbed_integrations[@]} -gt 0 ]]; then
-    printf 'persona_stubbed_integrations=%s\n' "${stubbed_integrations[*]}"
+  if [[ ${#fallback_credentials[@]} -gt 0 ]]; then
+    printf 'persona_credentials_fallback=%s\n' "${fallback_credentials[*]}"
   else
-    printf 'persona_stubbed_integrations=\n'
+    printf 'persona_credentials_fallback=\n'
   fi
 }
 

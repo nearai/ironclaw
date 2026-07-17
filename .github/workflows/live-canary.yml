@@ -1007,14 +1007,15 @@ jobs:
       LLM_BACKEND: anthropic
       ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
       ANTHROPIC_MODEL: ${{ vars.LIVE_ANTHROPIC_MODEL || 'claude-sonnet-4-6' }}
-      # Real third-party credentials forwarded into the persona harness.
-      # The harness reads these env vars per
-      # tests/e2e_live_personas.rs::PERSONA_CREDENTIALS — present →
-      # real API call lands; absent → dummy fallback satisfies the
-      # auth pre-flight and the agent recovers via workspace tools.
-      # Add each secret in repo settings (Settings → Secrets and
-      # variables → Actions) if you want the lane to exercise that
-      # integration end-to-end.
+      # Optional third-party credentials made available to the persona
+      # harness. The harness reads these env vars per
+      # tests/e2e_live_personas.rs::PERSONA_CREDENTIALS; an absent or empty
+      # value uses a dummy fallback so auth pre-flight does not block
+      # live-model persona and workspace behavior. A configured credential
+      # is only available if the model selects that integration: a passing
+      # persona case does not prove an external provider call or success.
+      # Provider coverage requires provider-issued evidence and readback in
+      # a dedicated probe.
       LIVE_CANARY_GITHUB_TOKEN: ${{ secrets.LIVE_CANARY_GITHUB_TOKEN }}
       LIVE_CANARY_GOOGLE_OAUTH_TOKEN: ${{ secrets.LIVE_CANARY_GOOGLE_OAUTH_TOKEN }}
       LIVE_CANARY_SLACK_BOT_TOKEN: ${{ secrets.LIVE_CANARY_SLACK_BOT_TOKEN }}

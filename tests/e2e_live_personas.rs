@@ -82,29 +82,35 @@ mod persona_tests {
         // canary runs because no `github_token` was seeded.
         //
         // Each credential is read from a `LIVE_CANARY_<NAME>` env var
-        // when present, falling back to a dummy value otherwise. Two
-        // execution modes:
+        // when it is non-empty, falling back to a dummy value otherwise.
+        // Two harness configurations are possible:
         //
-        //   - Local / canary CI with the secret wired through (preferred):
-        //     real credential reaches the WASM tool, which hits the real
-        //     external API end-to-end. This is what we actually want the
-        //     persona-rotating lane to verify.
+        //   - Local / canary CI with a secret wired through: the configured
+        //     credential is available if the model selects that integration.
         //
-        //   - Local without env, or canary without the secret set: dummy
-        //     value satisfies the auth pre-flight, the tool's API call
-        //     fails with 401, the agent recovers via workspace tools, and
-        //     the workspace-content assertions still pass (every needle
-        //     in DEV_*_CHECKS comes from the user's own message, not from
-        //     API data).
+        //   - Local without a non-empty env value: the dummy value satisfies
+        //     the auth pre-flight so the persona can continue via workspace
+        //     tools if a selected integration cannot authenticate.
+        //
+        // The assertions below verify live-model persona and workspace
+        // behavior. They do not prove that the model selected an integration
+        // or that an external provider accepted a request. Provider coverage
+        // requires provider-issued evidence and readback in a separate probe.
         let mut builder = LiveTestHarnessBuilder::new(test_name)
             .with_auto_approve_tools(true)
             .with_max_tool_iterations(60)
             .with_skills_dir(repo_skills_dir());
         for (name, env_var, fallback) in PERSONA_CREDENTIALS {
-            let value = std::env::var(env_var).unwrap_or_else(|_| (*fallback).to_string());
+            let value = persona_credential_value(std::env::var(env_var).ok(), fallback);
             builder = builder.with_secret(*name, value);
         }
         builder.build().await
+    }
+
+    fn persona_credential_value(configured: Option<String>, fallback: &str) -> String {
+        configured
+            .filter(|value| !value.is_empty())
+            .unwrap_or_else(|| fallback.to_string())
     }
 
     /// Credentials referenced by the persona-rotating skill set.
@@ -116,8 +122,8 @@ mod persona_tests {
     ///   - `env_var`: the env var the test harness reads first; set in
     ///     `.github/workflows/live-canary.yml` from a GH Actions secret
     ///     for the canary lane, or exported locally for repro runs.
-    ///   - `dummy_fallback`: used when the env var is unset. Satisfies
-    ///     the auth pre-flight; tools will 401 against the real API.
+    ///   - `dummy_fallback`: used when the env var is unset or empty. It
+    ///     satisfies auth pre-flight but is not valid provider authorization.
     const PERSONA_CREDENTIALS: &[(&str, &str, &str)] = &[
         (
             "github_token",
@@ -145,6 +151,19 @@ mod persona_tests {
             "mock-composio-persona-canary",
         ),
     ];
+
+    #[test]
+    fn persona_credential_value_uses_fallback_for_empty_or_missing_values() {
+        assert_eq!(
+            persona_credential_value(Some("configured".to_string()), "fallback"),
+            "configured"
+        );
+        assert_eq!(
+            persona_credential_value(Some(String::new()), "fallback"),
+            "fallback"
+        );
+        assert_eq!(persona_credential_value(None, "fallback"), "fallback");
+    }
 
     struct PersonaCheck {
         needles: &'static [&'static str],

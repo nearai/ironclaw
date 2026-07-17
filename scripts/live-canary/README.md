@@ -264,8 +264,12 @@ probes bind expected terminal capability evidence to the current turn/run
 rather than trusting response prose alone.
 
 The `persona-rotating` environment summary records only integration names in
-`persona_live_integrations` and `persona_stubbed_integrations` (`github`,
-`google`, `slack`, `telegram`, `composio`). It never writes credential values.
+`persona_credentials_configured` and `persona_credentials_fallback` (`github`,
+`google`, `slack`, `telegram`, `composio`). A configured credential is merely
+available to the harness if the model selects that integration; the summary
+does not prove an external call or provider success. Provider coverage requires
+provider-issued evidence and readback in a dedicated probe. The summary never
+writes credential values.
 
 ## Secrets And Account Material
 

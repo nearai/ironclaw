@@ -201,9 +201,11 @@ The live canary reporter no longer waits for jobs owned by other workflows.
 ## Persona lane truthfulness
 
 The persona lane remains a valid live-LLM canary even when third-party
-integration credentials are absent, but it must report which integrations were
-real and which used dummy fallbacks. A persona result must not claim external
-provider coverage unless provider-issued evidence was observed.
+integration credentials are absent, but it must report which credentials were
+configured and which integrations used dummy fallbacks. Credential presence
+only makes an integration available if the model selects it. A persona result
+must not claim external provider coverage unless provider-issued evidence and
+readback were observed.
 
 ## Testing strategy
 

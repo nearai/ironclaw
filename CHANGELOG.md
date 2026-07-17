@@ -34,7 +34,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### CI / Release
 
-- *(canary)* separate fail-closed contract health, nonblocking behavioral warnings, and infrastructure/precondition inconclusives; retier model-variance probes as warnings; isolate each Reborn live-QA agent working directory; gate Slack global recall on a bounded fresh-index preflight with no model call on stale/error paths; require durable routine and current-turn capability evidence; move mock auth/workflow, replay, and upgrade checks to their deterministic or dedicated owners; consolidate the scheduled Reborn suite to 39 cases while retaining the full 47-case manual/local target; and report name-only live-versus-stubbed persona integration coverage.
+- *(canary)* separate fail-closed contract health, nonblocking behavioral warnings, and infrastructure/precondition inconclusives; retier model-variance probes as warnings; isolate each Reborn live-QA agent working directory; gate Slack global recall on a bounded fresh-index preflight with no model call on stale/error paths; require durable routine and current-turn capability evidence; move mock auth/workflow, replay, and upgrade checks to their deterministic or dedicated owners; consolidate the scheduled Reborn suite to 39 cases while retaining the full 47-case manual/local target; and report name-only configured-versus-fallback persona credentials without claiming provider success.
 
 ### Removed
 

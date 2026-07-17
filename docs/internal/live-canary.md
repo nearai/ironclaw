@@ -35,7 +35,7 @@ the convenience choice `all`:
 | Lane | Live signal | GitHub trigger |
 | --- | --- | --- |
 | `public-smoke` | Real Anthropic model with public tool and mission journeys | Manual |
-| `persona-rotating` | Real-model multi-turn persona workflow; third-party integrations are live only where credentials are present | Manual |
+| `persona-rotating` | Real-model multi-turn persona and workspace behavior; optional third-party credentials are available but do not prove provider success | Manual |
 | `private-oauth` | Transparent OAuth refresh against a dedicated account on the `ironclaw-live` self-hosted runner | Manual |
 | `provider-matrix` | Equivalent live behavior through Anthropic and OpenAI-compatible adapters | Manual |
 | `release-public-full` | Full public live suite for release candidates | Manual |
@@ -180,20 +180,24 @@ capability evidence fails; an evidence read error is infrastructure
 inconclusive. Persisted result details redact Slack entity IDs and omit the
 full response body.
 
-### Persona credential coverage
+### Persona credential configuration
 
-The rotating persona lane can exercise GitHub, Google, Slack, Telegram, and
-Composio. Its `env-summary.txt` contains only name-level coverage:
+The rotating persona lane verifies live-model multi-turn persona and workspace
+behavior. GitHub, Google, Slack, Telegram, and Composio credentials can be made
+available to its harness. Its `env-summary.txt` contains only name-level
+configuration:
 
 ```text
-persona_live_integrations=github,slack
-persona_stubbed_integrations=google,telegram,composio
+persona_credentials_configured=github,slack
+persona_credentials_fallback=google,telegram,composio
 ```
 
 The exact names vary with configured secrets. Credential values are never
-written. An absent credential uses the harness's stub fallback, so persona
-behavior can still run while the summary makes clear which integrations were
-actually live.
+written. An absent or empty credential uses the harness's dummy fallback so
+persona behavior can still run. A configured credential is only available if
+the model selects that integration, and a passing persona case does not prove
+an external provider call or success. Provider coverage requires
+provider-issued evidence and readback in a dedicated probe.
 
 ## Required repository configuration
 

@@ -559,23 +559,25 @@ git commit -m "ci: separate live and hermetic canary lanes"
 
 Expected: ownership tests PASS and all YAML parses.
 
-### Task 7: Report persona credential coverage
+### Task 7: Report persona credential configuration
 
 **Files:**
 - Modify: scripts/live-canary/run.sh
 - Modify: scripts/live-canary/test_run_dispatch.py
 
 **Interfaces:**
-- Adds presence-only persona_live_integrations and persona_stubbed_integrations lines to env-summary.txt.
+- Adds presence-only `persona_credentials_configured` and
+  `persona_credentials_fallback` lines to `env-summary.txt`. These fields
+  report harness configuration, not provider-verified coverage.
 
 - [ ] **Step 1: Write failing persona summary test**
 
 Run persona-rotating with a temporary fake cargo executable, set only the GitHub and Slack credential variables, locate env-summary.txt, and assert:
 
 ~~~python
-self.assertIn("persona_live_integrations=github,slack", summary)
+self.assertIn("persona_credentials_configured=github,slack", summary)
 self.assertIn(
-    "persona_stubbed_integrations=google,telegram,composio",
+    "persona_credentials_fallback=google,telegram,composio",
     summary,
 )
 self.assertNotIn("secret-github-value", summary)
@@ -592,7 +594,13 @@ Expected: FAIL because no presence summary exists.
 
 - [ ] **Step 3: Implement presence-only reporting**
 
-Add a write_persona_credential_summary helper that maps github, google, slack, telegram, and composio to their LIVE_CANARY environment names, appends names to live or stubbed arrays based only on non-empty presence, and prints comma-separated names. Call it from write_env_summary only for persona-rotating. Never print values.
+Add a `write_persona_credential_summary` helper that maps GitHub, Google,
+Slack, Telegram, and Composio to their `LIVE_CANARY` environment names, appends
+names to configured or fallback arrays based only on non-empty presence, and
+prints comma-separated names. Call it from `write_env_summary` only for
+`persona-rotating`. Never print values or describe credential presence as
+provider coverage; provider coverage requires provider-issued evidence and
+readback.
 
 - [ ] **Step 4: Verify GREEN and commit**
 
@@ -600,7 +608,7 @@ Add a write_persona_credential_summary helper that maps github, google, slack, t
 python3 -m pytest scripts/live-canary/test_run_dispatch.py -v
 shellcheck scripts/live-canary/run.sh scripts/live-canary/upgrade-canary.sh
 git add scripts/live-canary/run.sh scripts/live-canary/test_run_dispatch.py
-git commit -m "chore(canary): report live persona integrations"
+git commit -m "chore(canary): report persona credential configuration"
 ~~~
 
 Expected: dispatcher tests PASS and ShellCheck is clean.
@@ -613,7 +621,9 @@ Expected: dispatcher tests PASS and ShellCheck is clean.
 - Modify: CHANGELOG.md
 
 **Interfaces:**
-- Documents live-only lanes, CI/release owners, report tiers, Slack freshness, workspace isolation, and persona evidence.
+- Documents live-only lanes, CI/release owners, report tiers, Slack freshness,
+  workspace isolation, and the boundary between persona credential
+  configuration and provider-issued evidence.
 
 - [ ] **Step 1: Update README lane ownership**
 
@@ -629,7 +639,9 @@ Behavioral quality: 1/3 passed, 2 warnings
 Infrastructure/preconditions: 0 inconclusive
 ~~~
 
-Document live eligibility, search-index latency, isolated agent workspaces, dedicated upgrade dispatch, and persona live-versus-stubbed summaries.
+Document live eligibility, search-index latency, isolated agent workspaces,
+dedicated upgrade dispatch, and persona configured-versus-fallback credential
+summaries that do not claim provider coverage.
 
 - [ ] **Step 3: Add changelog entry**
 

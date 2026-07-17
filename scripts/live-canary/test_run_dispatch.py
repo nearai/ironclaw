@@ -111,8 +111,8 @@ class RunShDispatchTests(unittest.TestCase):
         self.assertIn("--non-telegram-qa-cases", result.stdout)
         self.assertNotIn("--all-cases", result.stdout)
         self.assertNotIn("--case all", result.stdout)
-        self.assertNotIn("persona_live_integrations=", summary)
-        self.assertNotIn("persona_stubbed_integrations=", summary)
+        self.assertNotIn("persona_credentials_configured=", summary)
+        self.assertNotIn("persona_credentials_fallback=", summary)
 
     def test_reborn_specific_cases_dispatch_as_repeated_case_flags(self):
         result, _summary = self.run_dispatch(
@@ -123,28 +123,33 @@ class RunShDispatchTests(unittest.TestCase):
         self.assertIn("--case qa_8b_hn_keyword_live_chat", result.stdout)
         self.assertNotIn("--all-cases", result.stdout)
 
-    def test_persona_summary_reports_live_and_stubbed_integrations_without_secrets(self):
+    def test_persona_summary_reports_configured_and_fallback_credentials_without_secrets(
+        self,
+    ):
         summary = self.run_persona_dispatch(
             LIVE_CANARY_GITHUB_TOKEN="secret-github-value",
             LIVE_CANARY_SLACK_BOT_TOKEN="secret-slack-value",
         )
         summary_lines = summary.splitlines()
 
-        self.assertIn("persona_live_integrations=github,slack", summary_lines)
         self.assertIn(
-            "persona_stubbed_integrations=google,telegram,composio",
+            "persona_credentials_configured=github,slack",
+            summary_lines,
+        )
+        self.assertIn(
+            "persona_credentials_fallback=google,telegram,composio",
             summary_lines,
         )
         self.assertNotIn("secret-github-value", summary)
         self.assertNotIn("secret-slack-value", summary)
 
-    def test_persona_summary_treats_empty_credentials_as_stubbed(self):
+    def test_persona_summary_treats_empty_credentials_as_fallback(self):
         summary = self.run_persona_dispatch(LIVE_CANARY_GOOGLE_OAUTH_TOKEN="")
         summary_lines = summary.splitlines()
 
-        self.assertIn("persona_live_integrations=", summary_lines)
+        self.assertIn("persona_credentials_configured=", summary_lines)
         self.assertIn(
-            "persona_stubbed_integrations=github,google,slack,telegram,composio",
+            "persona_credentials_fallback=github,google,slack,telegram,composio",
             summary_lines,
         )
 
