@@ -144,6 +144,8 @@ fn failed_run_state() -> RebornGetRunStateResponse {
         checkpoint_id: None,
         gate_ref: None,
         failure: Some(SanitizedFailure::new("model_unavailable").expect("sanitized failure")),
+        usage: None,
+        cost: None,
     }
 }
 

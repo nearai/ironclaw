@@ -4,6 +4,8 @@
 //! instead of reaching into turn coordination, thread stores, runtime lanes, DB
 //! stores, dispatchers, or capability hosts directly.
 
+// arch-exempt: large_file, holds the ~70-method RebornServicesApi god interface awaiting the JIT domain-port split, plan #5985
+
 use std::{
     collections::{HashMap, HashSet},
     net::{IpAddr, Ipv4Addr, Ipv6Addr},
@@ -107,10 +109,11 @@ use ironclaw_approvals::{
     ToolPermissionOverrideStore, ToolPermissionState, permission_mode_allows_persistent_approval,
 };
 pub use llm_config::{
-    CodexLoginStart, LlmActiveSelection, LlmConfigService, LlmConfigServiceError,
-    LlmConfigSnapshot, LlmModelsResult, LlmProbeRequest, LlmProbeResult, LlmProviderView,
-    NearAiAuthProvider, NearAiLoginRequest, NearAiLoginStart, NearAiWalletLoginRequest,
-    NearAiWalletLoginResult, SetActiveLlmRequest, UpsertLlmProviderRequest,
+    ActiveModelReader, CodexLoginStart, LlmActiveSelection, LlmConfigService,
+    LlmConfigServiceError, LlmConfigSnapshot, LlmModelsResult, LlmProbeRequest, LlmProbeResult,
+    LlmProviderView, NearAiAuthProvider, NearAiLoginRequest, NearAiLoginStart,
+    NearAiWalletLoginRequest, NearAiWalletLoginResult, SetActiveLlmRequest,
+    UpsertLlmProviderRequest,
 };
 pub use project_fs::{
     ProjectFilesystemReader, ProjectFsEntry, ProjectFsEntryKind, ProjectFsError, ProjectFsFile,
@@ -2713,6 +2716,8 @@ pub struct RebornServices {
     skill_activation_recorder: Option<Arc<SkillActivationRecorder>>,
     skill_activation_clearer: Option<Arc<SkillActivationClearer>>,
     llm_config: Option<Arc<dyn LlmConfigService>>,
+    // arch-exempt: optional_arc, genuinely optional — the active-model reader is wired only under the root-llm-provider feature; cold-boot/no-LLM builds and tests run without it (mirrors the sibling optional llm_config field), plan #5985
+    active_model_reader: Option<Arc<dyn ActiveModelReader>>,
     operator_approval_config: Option<RebornOperatorApprovalConfig>,
     thread_operation_locks: Arc<ThreadOperationLocks>,
 }
@@ -2751,6 +2756,7 @@ impl RebornServices {
             skill_activation_recorder: None,
             skill_activation_clearer: None,
             llm_config: None,
+            active_model_reader: None,
             operator_approval_config: None,
             thread_operation_locks: Arc::new(StdMutex::new(HashMap::new())),
         }
@@ -2816,6 +2822,18 @@ impl RebornServices {
 
     pub fn with_llm_config_service(mut self, llm_config: Arc<dyn LlmConfigService>) -> Self {
         self.llm_config = Some(llm_config);
+        self
+    }
+
+    /// Wire the read-only port exposing the runtime's live active/default model
+    /// id. Without it, `get_run_state` cannot price a default-model run (one
+    /// submitted without an explicit `model`, so it carries no
+    /// `resolved_model_route`): such a run reports token `usage` but no `cost`.
+    pub fn with_active_model_reader(
+        mut self,
+        active_model_reader: Arc<dyn ActiveModelReader>,
+    ) -> Self {
+        self.active_model_reader = Some(active_model_reader);
         self
     }
 
@@ -3621,6 +3639,7 @@ impl RebornServicesApi for RebornServices {
             actor,
             client_action_id,
             content,
+            requested_model,
         } = command
         else {
             return Err(RebornServicesError::internal_invariant());
@@ -3755,7 +3774,7 @@ impl RebornServicesApi for RebornServices {
         )?;
         let product_context = ironclaw_product_context::resolve_web_ui(scope.product_owner(&actor));
         let submit = SubmitTurnRequest {
-            requested_model: None,
+            requested_model,
             scope: scope.clone(),
             actor,
             accepted_message_ref: accepted_message_ref.clone(),
@@ -4510,7 +4529,18 @@ impl RebornServicesApi for RebornServices {
             })
             .await
             .map_err(map_turn_error)?;
-        Ok(state.into())
+        // Price a default-model run (no `resolved_model_route`) against the
+        // runtime's live active model. Cheap synchronous read; `None` when no
+        // reader is wired or no concrete model is configured, in which case the
+        // run reports usage without cost (unchanged behavior).
+        let active_model = self
+            .active_model_reader
+            .as_ref()
+            .and_then(|reader| reader.active_model_id());
+        Ok(RebornGetRunStateResponse::from_run_state(
+            state,
+            active_model.as_deref(),
+        ))
     }
 
     async fn list_threads(
