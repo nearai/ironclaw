@@ -51,7 +51,8 @@ pub(crate) mod test_fixtures {
 
     impl FakeIdentityLookup {
         pub(crate) fn bind(&self, provider: &str, provider_user_id: &str, user: &str) {
-            self.bindings.lock().expect("lock").insert( // safety: test-only fixture
+            let mut bindings = self.bindings.lock().expect("lock"); // safety: test-only fixture
+            bindings.insert(
                 (provider.to_string(), provider_user_id.to_string()),
                 UserId::new(user).expect("valid user id"), // safety: test-only fixture
             );

@@ -79,7 +79,7 @@ fn operator_caller() -> WebUiAuthenticatedCaller {
 fn member_caller(user: &str) -> WebUiAuthenticatedCaller {
     WebUiAuthenticatedCaller::new(
         TenantId::new("tenant-a").expect("tenant"), // safety: test-only fixture
-        UserId::new(user).expect("member"), // safety: test-only fixture
+        UserId::new(user).expect("member"),         // safety: test-only fixture
         Some(AgentId::new("agent-a").expect("agent")), // safety: test-only fixture
         None,
     )

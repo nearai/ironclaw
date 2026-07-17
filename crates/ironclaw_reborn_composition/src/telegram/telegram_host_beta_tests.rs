@@ -74,7 +74,7 @@ async fn telegram_runtime_with(
 fn host_config() -> TelegramHostRuntimeConfig {
     TelegramHostRuntimeConfig::new(
         TenantId::new(TENANT).expect("tenant"), // safety: test-only fixture
-        AgentId::new(AGENT).expect("agent"), // safety: test-only fixture
+        AgentId::new(AGENT).expect("agent"),    // safety: test-only fixture
         None,
         UserId::new(OPERATOR).expect("operator"), // safety: test-only fixture
         Some("https://ironclaw.example".to_string()),
