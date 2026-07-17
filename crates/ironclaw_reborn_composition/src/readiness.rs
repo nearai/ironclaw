@@ -14,6 +14,7 @@ pub enum RebornReadinessState {
     DevOnly,
     HostedSingleTenantValidated,
     HostedSingleTenantVolumePreviewValidated,
+    HostedSingleTenantMultiUserValidated,
     ProductionValidated,
     MigrationDryRunValidated,
 }
@@ -79,6 +80,7 @@ pub enum RebornReadinessDiagnosticReason {
     Disabled,
     DevOnlyProfile,
     HostedSingleTenantVolumePreview,
+    HostedSingleTenantMultiUser,
     Missing,
     LocalOnly,
     Unverified,
@@ -92,6 +94,7 @@ impl RebornReadinessDiagnosticReason {
             Self::Disabled => "disabled",
             Self::DevOnlyProfile => "dev-only-profile",
             Self::HostedSingleTenantVolumePreview => "hosted-single-tenant-volume-preview",
+            Self::HostedSingleTenantMultiUser => "hosted-single-tenant-multi-user",
             Self::Missing => "missing",
             Self::LocalOnly => "local-only",
             Self::Unverified => "unverified",
@@ -120,6 +123,7 @@ impl<'de> Deserialize<'de> for RebornReadinessDiagnosticReason {
             "disabled" => Self::Disabled,
             "dev-only-profile" => Self::DevOnlyProfile,
             "hosted-single-tenant-volume-preview" => Self::HostedSingleTenantVolumePreview,
+            "hosted-single-tenant-multi-user" => Self::HostedSingleTenantMultiUser,
             "missing" => Self::Missing,
             "local-only" => Self::LocalOnly,
             "unverified" => Self::Unverified,
@@ -287,6 +291,10 @@ pub(crate) fn readiness_contract_for_profile(
             RebornReadinessState::HostedSingleTenantVolumePreviewValidated,
             vec![RebornReadinessDiagnostic::hosted_single_tenant_volume()],
         ),
+        RebornCompositionProfile::HostedSingleTenantMultiUser => (
+            RebornReadinessState::HostedSingleTenantMultiUserValidated,
+            vec![RebornReadinessDiagnostic::hosted_single_tenant_multi_user()],
+        ),
         RebornCompositionProfile::Production => {
             (RebornReadinessState::ProductionValidated, Vec::new())
         }
@@ -330,6 +338,16 @@ impl RebornReadinessDiagnostic {
             profile: RebornCompositionProfile::HostedSingleTenant,
             component: RebornReadinessDiagnosticComponent::CompositionProfile,
             reason: RebornReadinessDiagnosticReason::Unverified,
+            status: RebornReadinessDiagnosticStatus::Info,
+            blocks_production: false,
+        }
+    }
+
+    pub fn hosted_single_tenant_multi_user() -> Self {
+        Self {
+            profile: RebornCompositionProfile::HostedSingleTenantMultiUser,
+            component: RebornReadinessDiagnosticComponent::CompositionProfile,
+            reason: RebornReadinessDiagnosticReason::HostedSingleTenantMultiUser,
             status: RebornReadinessDiagnosticStatus::Info,
             blocks_production: false,
         }

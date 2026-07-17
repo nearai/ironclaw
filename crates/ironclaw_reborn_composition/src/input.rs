@@ -319,10 +319,10 @@ impl RebornBuildInput {
         pool: deadpool_postgres::Pool,
         secret_master_key: ironclaw_secrets::SecretMaterial,
     ) -> Result<Self, RebornBuildError> {
-        if profile != RebornCompositionProfile::HostedSingleTenant {
+        if !profile.uses_hosted_single_tenant_postgres_storage_input() {
             return Err(RebornBuildError::InvalidConfig {
                 reason: format!(
-                    "hosted single-tenant Postgres storage requires profile=hosted-single-tenant; got profile={profile}"
+                    "hosted single-tenant Postgres storage requires profile=hosted-single-tenant or profile=hosted-single-tenant-multi-user; got profile={profile}"
                 ),
             });
         }
@@ -347,10 +347,10 @@ impl RebornBuildInput {
         root: PathBuf,
         config_file: Option<&ironclaw_reborn_config::RebornConfigFile>,
     ) -> Result<Self, RebornBuildError> {
-        if profile != RebornCompositionProfile::HostedSingleTenant {
+        if !profile.uses_hosted_single_tenant_postgres_storage_input() {
             return Err(RebornBuildError::InvalidConfig {
                 reason: format!(
-                    "hosted single-tenant Postgres storage requires profile=hosted-single-tenant; got profile={profile}"
+                    "hosted single-tenant Postgres storage requires profile=hosted-single-tenant or profile=hosted-single-tenant-multi-user; got profile={profile}"
                 ),
             });
         }

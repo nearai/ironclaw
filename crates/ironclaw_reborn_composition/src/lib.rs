@@ -144,8 +144,9 @@ pub use llm_admin::provider_admin_product_command::RebornProviderAdminProductCom
 pub use llm_admin::provider_repo::{ProviderRepo, ProviderRepoError};
 pub use local_runtime_profile::{
     RebornLocalRuntimeProfileError, RebornLocalRuntimeProfileOptions,
-    hosted_single_tenant_runtime_policy, hosted_single_tenant_volume_runtime_policy,
-    local_dev_runtime_policy, local_dev_yolo_runtime_policy, local_runtime_build_input,
+    hosted_single_tenant_multi_user_runtime_policy, hosted_single_tenant_runtime_policy,
+    hosted_single_tenant_volume_runtime_policy, local_dev_runtime_policy,
+    local_dev_yolo_runtime_policy, local_runtime_build_input,
     local_runtime_build_input_with_options,
 };
 pub use observability::budget::build_default_budget_accountant;

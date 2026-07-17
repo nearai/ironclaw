@@ -872,6 +872,11 @@ fn status_response_from_readiness(readiness: &RebornReadiness) -> RebornOperator
             RebornOperatorStatusSeverity::Warning,
             Some("mounted-volume hosted preview is ready for single-tenant validation but is not production storage".to_string()),
         ),
+        crate::RebornReadinessState::HostedSingleTenantMultiUserValidated => (
+            RebornOperatorStatusState::Ready,
+            RebornOperatorStatusSeverity::Info,
+            None,
+        ),
         crate::RebornReadinessState::ProductionValidated => (
             RebornOperatorStatusState::Ready,
             RebornOperatorStatusSeverity::Info,

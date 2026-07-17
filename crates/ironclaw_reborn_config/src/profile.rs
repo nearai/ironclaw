@@ -22,6 +22,15 @@ pub enum RebornProfile {
     /// persistent volume. Intended for SSO-only Railway-style deployments while
     /// the full PostgreSQL production composition continues to mature.
     HostedSingleTenantVolume,
+    /// Single-tenant hosted startup with durable PostgreSQL storage, same as
+    /// `HostedSingleTenant`, but running under the sandboxed
+    /// `HostedMultiTenant`+`SecureDefault` runtime policy (no host process
+    /// execution) instead of the shell-capable local-dev policy shape.
+    ///
+    /// The delta is sandboxing only: storage and owner scoping are unchanged
+    /// from `HostedSingleTenant`; this profile does not add per-user data
+    /// isolation.
+    HostedSingleTenantMultiUser,
     /// Production startup. Future runtime composition must fail closed here if
     /// required durable services are absent.
     Production,
@@ -31,11 +40,12 @@ pub enum RebornProfile {
 }
 
 impl RebornProfile {
-    const ALL: [Self; 6] = [
+    const ALL: [Self; 7] = [
         Self::LocalDev,
         Self::LocalDevYolo,
         Self::HostedSingleTenant,
         Self::HostedSingleTenantVolume,
+        Self::HostedSingleTenantMultiUser,
         Self::Production,
         Self::MigrationDryRun,
     ];
@@ -58,6 +68,7 @@ impl RebornProfile {
             Self::LocalDevYolo => "local-dev-yolo",
             Self::HostedSingleTenant => "hosted-single-tenant",
             Self::HostedSingleTenantVolume => "hosted-single-tenant-volume",
+            Self::HostedSingleTenantMultiUser => "hosted-single-tenant-multi-user",
             Self::Production => "production",
             Self::MigrationDryRun => "migration-dry-run",
         }
@@ -66,7 +77,9 @@ impl RebornProfile {
     pub fn starts_hosted_single_tenant_listener(self) -> bool {
         matches!(
             self,
-            Self::HostedSingleTenant | Self::HostedSingleTenantVolume
+            Self::HostedSingleTenant
+                | Self::HostedSingleTenantVolume
+                | Self::HostedSingleTenantMultiUser
         )
     }
 
@@ -81,6 +94,7 @@ impl RebornProfile {
         match self {
             Self::HostedSingleTenant => "hosted-single-tenant",
             Self::HostedSingleTenantVolume => "hosted-single-tenant-volume",
+            Self::HostedSingleTenantMultiUser => "hosted-single-tenant-multi-user",
             Self::LocalDev | Self::LocalDevYolo | Self::Production | Self::MigrationDryRun => {
                 "local-dev"
             }
@@ -94,6 +108,7 @@ impl RebornProfile {
                 | Self::LocalDevYolo
                 | Self::HostedSingleTenant
                 | Self::HostedSingleTenantVolume
+                | Self::HostedSingleTenantMultiUser
         )
     }
 }
@@ -107,6 +122,7 @@ impl FromStr for RebornProfile {
             "local-dev-yolo" => Ok(Self::LocalDevYolo),
             "hosted-single-tenant" => Ok(Self::HostedSingleTenant),
             "hosted-single-tenant-volume" => Ok(Self::HostedSingleTenantVolume),
+            "hosted-single-tenant-multi-user" => Ok(Self::HostedSingleTenantMultiUser),
             "production" => Ok(Self::Production),
             "migration-dry-run" => Ok(Self::MigrationDryRun),
             other => Err(RebornConfigError::InvalidProfile {

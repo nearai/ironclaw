@@ -16,6 +16,8 @@ use ironclaw_reborn_composition::SlackPersonalSetupServiceSlot;
 use ironclaw_reborn_composition::host_api::UserId;
 use ironclaw_reborn_composition::host_api::{AgentId, TenantId};
 #[cfg(feature = "postgres")]
+use ironclaw_reborn_composition::hosted_single_tenant_multi_user_runtime_policy;
+#[cfg(feature = "postgres")]
 use ironclaw_reborn_composition::hosted_single_tenant_runtime_policy;
 use ironclaw_reborn_composition::{
     CredentialRefreshSettings, OAuthClientConfig, OperatorLogLayer, PollSettings, RebornBuildInput,
@@ -281,12 +283,12 @@ pub(crate) async fn open_trigger_access_store_for_profile(
     local_store_path: &Path,
 ) -> anyhow::Result<Arc<dyn LocalTriggerAccessStore>> {
     match profile {
-        RebornProfile::HostedSingleTenant => {
+        RebornProfile::HostedSingleTenant | RebornProfile::HostedSingleTenantMultiUser => {
             #[cfg(feature = "postgres")]
             {
-                let services = runtime_input.services.as_ref().context(
-                    "profile=hosted-single-tenant requires runtime services before trigger-fire access can be wired",
-                )?;
+                let services = runtime_input.services.as_ref().with_context(|| format!(
+                    "profile={profile} requires runtime services before trigger-fire access can be wired"
+                ))?;
                 let store = services
                     .open_hosted_single_tenant_trigger_access_store()
                     .await
@@ -299,7 +301,7 @@ pub(crate) async fn open_trigger_access_store_for_profile(
                 let _ = runtime_input;
                 let _ = local_store_path;
                 anyhow::bail!(
-                    "profile=hosted-single-tenant requires the `postgres` feature for trigger-fire access"
+                    "profile={profile} requires the `postgres` feature for trigger-fire access"
                 );
             }
         }
@@ -641,12 +643,14 @@ pub(crate) fn build_services_input_with_options(
         | RebornProfile::HostedSingleTenantVolume => {
             build_standalone_local_runtime_services_input(profile, owner_id, config, options)?
         }
-        RebornProfile::HostedSingleTenant => build_hosted_single_tenant_services_input(
-            profile,
-            owner_id,
-            config,
-            config_file.as_ref(),
-        )?,
+        RebornProfile::HostedSingleTenant | RebornProfile::HostedSingleTenantMultiUser => {
+            build_hosted_single_tenant_services_input(
+                profile,
+                owner_id,
+                config,
+                config_file.as_ref(),
+            )?
+        }
         RebornProfile::Production | RebornProfile::MigrationDryRun => {
             // MigrationDryRun needs production storage handles so follow-up migration
             // code can inspect durable schema state; this branch only constructs
@@ -722,8 +726,16 @@ fn build_hosted_single_tenant_services_input(
 ) -> anyhow::Result<RebornBuildInput> {
     let workspace_root = std::env::current_dir()
         .context("failed to resolve current directory for hosted single-tenant workspace")?;
-    let runtime_policy = hosted_single_tenant_runtime_policy()
-        .context("failed to resolve hosted single-tenant runtime policy")?;
+    // `hosted-single-tenant-multi-user` shares the Postgres storage wiring below
+    // with `hosted-single-tenant` but resolves against the sandboxed
+    // HostedMultiTenant+SecureDefault policy instead of the shell-capable
+    // local-dev policy shape (issue #6170).
+    let runtime_policy = if profile == RebornProfile::HostedSingleTenantMultiUser {
+        hosted_single_tenant_multi_user_runtime_policy()
+    } else {
+        hosted_single_tenant_runtime_policy()
+    }
+    .context("failed to resolve hosted single-tenant runtime policy")?;
     Ok(
         RebornBuildInput::hosted_single_tenant_postgres_from_config_and_env(
             composition_profile(profile),
@@ -915,6 +927,9 @@ fn composition_profile(profile: RebornProfile) -> RebornCompositionProfile {
         RebornProfile::HostedSingleTenantVolume => {
             RebornCompositionProfile::HostedSingleTenantVolume
         }
+        RebornProfile::HostedSingleTenantMultiUser => {
+            RebornCompositionProfile::HostedSingleTenantMultiUser
+        }
         RebornProfile::Production => RebornCompositionProfile::Production,
         RebornProfile::MigrationDryRun => RebornCompositionProfile::MigrationDryRun,
     }
@@ -1028,6 +1043,7 @@ fn reject_unsupported_runtime_sections(
         && !matches!(
             profile,
             RebornProfile::HostedSingleTenant
+                | RebornProfile::HostedSingleTenantMultiUser
                 | RebornProfile::Production
                 | RebornProfile::MigrationDryRun
         )
@@ -2320,6 +2336,64 @@ secret_master_key_env = "IRONCLAW_REBORN_SECRET_MASTER_KEY"
         );
         assert_eq!(policy.requested_profile.as_str(), "local_dev");
         assert!(!services.grants_trusted_laptop_access());
+        drop(pool_max_size);
+        drop(secret_master_key);
+        drop(postgres_url);
+        drop(database_sslmode);
+        drop(allow_cleartext);
+    }
+
+    #[cfg(feature = "postgres")]
+    #[test]
+    fn build_runtime_input_hosted_single_tenant_multi_user_constructs_postgres_input() {
+        // issue #6170: hosted-single-tenant-multi-user shares the Postgres
+        // storage wiring with hosted-single-tenant but must resolve the
+        // sandboxed HostedMultiTenant+SecureDefault policy (no host process
+        // execution), not the shell-capable local-dev policy shape.
+        let _lock = lock_runtime_env();
+        let (_enabled, _interval) = clear_trigger_poller_env();
+        let (database_sslmode, allow_cleartext) = clear_reborn_postgres_tls_env();
+        let postgres_url = EnvGuard::set(
+            "IRONCLAW_REBORN_POSTGRES_URL",
+            "postgres://event_user:RAW_PASSWORD_SENTINEL_3162@db.example.com/events?sslmode=require",
+        );
+        let secret_master_key =
+            EnvGuard::set("IRONCLAW_REBORN_SECRET_MASTER_KEY", "test-master-key");
+        let pool_max_size = EnvGuard::set("IRONCLAW_REBORN_POSTGRES_POOL_MAX_SIZE", "1");
+        let (_temp, config) = boot_config_with_config_toml(
+            "hosted-single-tenant-multi-user",
+            r#"
+[storage]
+backend = "postgres"
+url_env = "IRONCLAW_REBORN_POSTGRES_URL"
+secret_master_key_env = "IRONCLAW_REBORN_SECRET_MASTER_KEY"
+"#,
+        );
+
+        let runtime_input =
+            build_runtime_input(&config, RuntimeInputCaller::Serve).expect("runtime input");
+        let services = runtime_input.services.expect("services input");
+        let policy = services.runtime_policy().expect("runtime policy");
+
+        assert_eq!(
+            services.profile(),
+            RebornCompositionProfile::HostedSingleTenantMultiUser
+        );
+        assert_eq!(policy.requested_profile.as_str(), "secure_default");
+        assert_eq!(policy.process_backend.as_str(), "none");
+        assert!(!services.grants_trusted_laptop_access());
+        assert_eq!(
+            local_runtime_storage_root(
+                &config,
+                ironclaw_reborn_config::RebornProfile::HostedSingleTenantMultiUser,
+            )
+            .file_name()
+            .and_then(|name| name.to_str()),
+            Some("hosted-single-tenant-multi-user"),
+            "hosted-single-tenant-multi-user must use its own storage scratch subdir, distinct \
+             from hosted-single-tenant, so shell-capable and sandboxed profiles never share \
+             local runtime scratch state"
+        );
         drop(pool_max_size);
         drop(secret_master_key);
         drop(postgres_url);

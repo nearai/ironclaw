@@ -461,6 +461,17 @@ fn enforce_runtime_cutover_gate(
             }
             Ok(())
         }
+        RebornCompositionProfile::HostedSingleTenantMultiUser => {
+            if readiness.state != RebornReadinessState::HostedSingleTenantMultiUserValidated {
+                return Err(RebornRuntimeError::InvalidArgument {
+                    reason: format!(
+                        "profile=hosted-single-tenant-multi-user cannot start Reborn runtime before hosted single-tenant multi-user readiness is validated; required_state=HostedSingleTenantMultiUserValidated, state={:?}",
+                        readiness.state
+                    ),
+                });
+            }
+            Ok(())
+        }
         RebornCompositionProfile::LocalDev | RebornCompositionProfile::LocalDevYolo => Ok(()),
     }
 }
@@ -3021,7 +3032,9 @@ impl RebornRuntime {
 ///
 /// **Currently supported profiles:** `RebornCompositionProfile::LocalDev`,
 /// `RebornCompositionProfile::LocalDevYolo`,
-/// `RebornCompositionProfile::HostedSingleTenant`, and
+/// `RebornCompositionProfile::HostedSingleTenant`,
+/// `RebornCompositionProfile::HostedSingleTenantVolume`,
+/// `RebornCompositionProfile::HostedSingleTenantMultiUser`, and
 /// `RebornCompositionProfile::Production` are wired end-to-end here. Production
 /// starts only after readiness diagnostics validate that live traffic can be
 /// exposed without a partial cutover.
@@ -3165,7 +3178,8 @@ pub async fn build_reborn_runtime(
         RebornCompositionProfile::LocalDev
         | RebornCompositionProfile::LocalDevYolo
         | RebornCompositionProfile::HostedSingleTenant
-        | RebornCompositionProfile::HostedSingleTenantVolume => {
+        | RebornCompositionProfile::HostedSingleTenantVolume
+        | RebornCompositionProfile::HostedSingleTenantMultiUser => {
             let local_runtime =
                 services
                     .local_runtime
@@ -5087,6 +5101,50 @@ output_schema_ref = "schemas/write.output.json"
         assert!(reason.contains("hosted-single-tenant"), "reason: {reason}");
         assert!(
             reason.contains("HostedSingleTenantValidated"),
+            "reason: {reason}"
+        );
+    }
+
+    #[test]
+    fn runtime_cutover_gate_allows_hosted_single_tenant_multi_user_readiness() {
+        let readiness = readiness_for_runtime_gate(
+            RebornCompositionProfile::HostedSingleTenantMultiUser,
+            RebornReadinessState::HostedSingleTenantMultiUserValidated,
+            Vec::new(),
+        );
+
+        super::enforce_runtime_cutover_gate(
+            RebornCompositionProfile::HostedSingleTenantMultiUser,
+            &readiness,
+        )
+        .expect("validated hosted single-tenant multi-user runtime can start");
+    }
+
+    #[test]
+    fn runtime_cutover_gate_rejects_foreign_hosted_readiness_for_multi_user() {
+        // The shell-capable profile's readiness state must not validate the
+        // sandboxed multi-user profile's cutover — the dedicated state exists
+        // to keep those postures discriminated.
+        let readiness = readiness_for_runtime_gate(
+            RebornCompositionProfile::HostedSingleTenantMultiUser,
+            RebornReadinessState::HostedSingleTenantValidated,
+            Vec::new(),
+        );
+
+        let error = super::enforce_runtime_cutover_gate(
+            RebornCompositionProfile::HostedSingleTenantMultiUser,
+            &readiness,
+        )
+        .expect_err("multi-user runtime requires its own validated readiness state");
+        let RebornRuntimeError::InvalidArgument { reason } = error else {
+            panic!("expected invalid argument, got {error:?}");
+        };
+        assert!(
+            reason.contains("hosted-single-tenant-multi-user"),
+            "reason: {reason}"
+        );
+        assert!(
+            reason.contains("HostedSingleTenantMultiUserValidated"),
             "reason: {reason}"
         );
     }

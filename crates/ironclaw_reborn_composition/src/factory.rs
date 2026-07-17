@@ -1265,7 +1265,8 @@ pub async fn build_reborn_services(
         RebornCompositionProfile::LocalDev
         | RebornCompositionProfile::LocalDevYolo
         | RebornCompositionProfile::HostedSingleTenant
-        | RebornCompositionProfile::HostedSingleTenantVolume => build_local_runtime(input).await,
+        | RebornCompositionProfile::HostedSingleTenantVolume
+        | RebornCompositionProfile::HostedSingleTenantMultiUser => build_local_runtime(input).await,
         RebornCompositionProfile::Production | RebornCompositionProfile::MigrationDryRun => {
             build_production_shaped(input).await
         }
@@ -1401,12 +1402,13 @@ async fn build_local_runtime(input: RebornBuildInput) -> Result<RebornServices, 
         postgres_resource_governor_singleton,
     ) = match storage {
         RebornStorageInput::LocalDev { .. }
-            if profile == RebornCompositionProfile::HostedSingleTenant =>
+            if profile.uses_hosted_single_tenant_postgres_storage_input() =>
         {
             return Err(RebornBuildError::InvalidConfig {
-                    reason: "profile=hosted-single-tenant requires hosted single-tenant Postgres storage input"
-                        .to_string(),
-                });
+                reason: format!(
+                    "profile={profile} requires hosted single-tenant Postgres storage input"
+                ),
+            });
         }
         RebornStorageInput::LocalDev {
             root,
@@ -1422,7 +1424,7 @@ async fn build_local_runtime(input: RebornBuildInput) -> Result<RebornServices, 
         ),
         #[cfg(feature = "postgres")]
         RebornStorageInput::HostedSingleTenantPostgres { .. }
-            if profile != RebornCompositionProfile::HostedSingleTenant =>
+            if !profile.uses_hosted_single_tenant_postgres_storage_input() =>
         {
             return Err(RebornBuildError::InvalidConfig {
                 reason: format!("{profile} profile requires local-runtime storage input"),
@@ -5903,6 +5905,35 @@ mod tests {
         let error = match build_reborn_services(input).await {
             Ok(_) => {
                 panic!("hosted single-tenant must use hosted single-tenant Postgres storage")
+            }
+            Err(error) => error,
+        };
+        let RebornBuildError::InvalidConfig { reason } = error else {
+            panic!("expected invalid config, got {error:?}");
+        };
+        assert!(
+            reason.contains("hosted single-tenant Postgres storage input"),
+            "reason: {reason}"
+        );
+    }
+
+    #[tokio::test]
+    async fn hosted_single_tenant_multi_user_rejects_local_dev_storage_input() {
+        // issue #6170: the multi-user profile shares the HostedSingleTenant
+        // Postgres storage contract, not the local-dev/volume one — a
+        // LocalDev storage input must fail closed here too.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut input = RebornBuildInput::local_dev(
+            "hosted-single-tenant-multi-user-local-storage-owner",
+            dir.path().join("local-dev"),
+        );
+        input.profile = RebornCompositionProfile::HostedSingleTenantMultiUser;
+
+        let error = match build_reborn_services(input).await {
+            Ok(_) => {
+                panic!(
+                    "hosted single-tenant multi-user must use hosted single-tenant Postgres storage"
+                )
             }
             Err(error) => error,
         };

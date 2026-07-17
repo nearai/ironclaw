@@ -600,7 +600,7 @@ fn profile_list_json_is_stable_and_does_not_resolve_reborn_home() {
     let json: serde_json::Value = serde_json::from_str(stdout.trim()).expect("valid JSON");
     assert_eq!(json["selector"], "IRONCLAW_REBORN_PROFILE");
     let profiles = json["profiles"].as_array().expect("profiles array");
-    assert_eq!(profiles.len(), 6);
+    assert_eq!(profiles.len(), 7);
     assert!(
         profiles
             .iter()
@@ -623,6 +623,10 @@ fn profile_list_json_is_stable_and_does_not_resolve_reborn_home() {
             .any(|profile| profile["name"] == "hosted-single-tenant-volume"
                 && profile["default"] == false)
     );
+    assert!(profiles.iter().any(
+        |profile| profile["name"] == "hosted-single-tenant-multi-user"
+            && profile["default"] == false
+    ));
     assert!(
         profiles
             .iter()

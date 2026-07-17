@@ -97,6 +97,22 @@ pub fn hosted_single_tenant_runtime_policy() -> Result<ResolvedRuntimePolicy, Re
 /// scoped virtual filesystem, brokered network, brokered secret handles, and
 /// ask-always approval posture from the resolver-owned secure default.
 pub fn hosted_single_tenant_volume_runtime_policy() -> Result<ResolvedRuntimePolicy, ResolveError> {
+    hosted_multi_tenant_secure_default_policy()
+}
+
+/// Resolved policy for the hosted single-tenant profile with the same
+/// processless, sandboxed shape as [`hosted_single_tenant_volume_runtime_policy`],
+/// but paired with durable Postgres storage instead of the local-runtime
+/// volume. Shares the resolver call so the two policies cannot drift.
+pub fn hosted_single_tenant_multi_user_runtime_policy()
+-> Result<ResolvedRuntimePolicy, ResolveError> {
+    hosted_multi_tenant_secure_default_policy()
+}
+
+/// Shared resolver call behind both the volume-backed and Postgres-backed
+/// hosted single-tenant multi-user profiles: `resolve(HostedMultiTenant,
+/// SecureDefault)`. Process execution is impossible under this policy.
+fn hosted_multi_tenant_secure_default_policy() -> Result<ResolvedRuntimePolicy, ResolveError> {
     let request = ironclaw_runtime_policy::ResolveRequest::new(
         DeploymentMode::HostedMultiTenant,
         RuntimeProfile::SecureDefault,
@@ -139,6 +155,7 @@ fn local_runtime_policy(
         }
         RebornCompositionProfile::Disabled
         | RebornCompositionProfile::HostedSingleTenant
+        | RebornCompositionProfile::HostedSingleTenantMultiUser
         | RebornCompositionProfile::Production
         | RebornCompositionProfile::MigrationDryRun => {
             return Err(RebornLocalRuntimeProfileError::UnsupportedProfile { profile });

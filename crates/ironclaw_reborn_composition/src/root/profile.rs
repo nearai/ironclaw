@@ -12,6 +12,7 @@ pub enum RebornCompositionProfile {
     LocalDevYolo,
     HostedSingleTenant,
     HostedSingleTenantVolume,
+    HostedSingleTenantMultiUser,
     Production,
     MigrationDryRun,
 }
@@ -24,6 +25,7 @@ impl RebornCompositionProfile {
             Self::LocalDevYolo => "local-dev-yolo",
             Self::HostedSingleTenant => "hosted-single-tenant",
             Self::HostedSingleTenantVolume => "hosted-single-tenant-volume",
+            Self::HostedSingleTenantMultiUser => "hosted-single-tenant-multi-user",
             Self::Production => "production",
             Self::MigrationDryRun => "migration-dry-run",
         }
@@ -44,6 +46,7 @@ impl RebornCompositionProfile {
                 | Self::LocalDevYolo
                 | Self::HostedSingleTenant
                 | Self::HostedSingleTenantVolume
+                | Self::HostedSingleTenantMultiUser
         )
     }
 
@@ -54,6 +57,17 @@ impl RebornCompositionProfile {
         )
     }
 
+    /// Whether this profile is wired against the hosted single-tenant
+    /// Postgres storage path (shared guard for `input.rs` and `factory.rs`
+    /// storage-pairing checks so `HostedSingleTenant` and
+    /// `HostedSingleTenantMultiUser` cannot drift from each other).
+    pub fn uses_hosted_single_tenant_postgres_storage_input(self) -> bool {
+        matches!(
+            self,
+            Self::HostedSingleTenant | Self::HostedSingleTenantMultiUser
+        )
+    }
+
     pub fn starts_live_runtime(self) -> bool {
         matches!(
             self,
@@ -61,6 +75,7 @@ impl RebornCompositionProfile {
                 | Self::LocalDevYolo
                 | Self::HostedSingleTenant
                 | Self::HostedSingleTenantVolume
+                | Self::HostedSingleTenantMultiUser
                 | Self::Production
         )
     }
@@ -68,7 +83,9 @@ impl RebornCompositionProfile {
     pub fn uses_hosted_extension_installation_state(self) -> bool {
         matches!(
             self,
-            Self::HostedSingleTenant | Self::HostedSingleTenantVolume
+            Self::HostedSingleTenant
+                | Self::HostedSingleTenantVolume
+                | Self::HostedSingleTenantMultiUser
         )
     }
 
@@ -78,7 +95,8 @@ impl RebornCompositionProfile {
             | Self::LocalDev
             | Self::LocalDevYolo
             | Self::HostedSingleTenant
-            | Self::HostedSingleTenantVolume => {
+            | Self::HostedSingleTenantVolume
+            | Self::HostedSingleTenantMultiUser => {
                 ironclaw_reborn_event_store::RebornProfile::LocalDev
             }
             Self::Production | Self::MigrationDryRun => {
@@ -99,6 +117,7 @@ impl FromStr for RebornCompositionProfile {
             "local-dev-yolo" => Ok(Self::LocalDevYolo),
             "hosted-single-tenant" => Ok(Self::HostedSingleTenant),
             "hosted-single-tenant-volume" => Ok(Self::HostedSingleTenantVolume),
+            "hosted-single-tenant-multi-user" => Ok(Self::HostedSingleTenantMultiUser),
             "production" => Ok(Self::Production),
             "migration-dry-run" => Ok(Self::MigrationDryRun),
             _ => Err(RebornCompositionProfileParseError { value: normalized }),
