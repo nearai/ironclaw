@@ -202,8 +202,14 @@ In-chat `builtin.extension_activate` with an unpaired caller parks the run
 Egress targets only the declared `api.telegram.org` host; the bot token
 travels as an opaque credential handle substituted into the URL path by the
 mediated host egress (`{telegram_bot_token}` placeholder — token bytes never
-appear in adapter-visible state, URLs built in composition, or logs). The
-adapter's `DeliveryStatus` mapping is the honesty contract:
+appear in adapter-visible state, URLs built in composition, or logs).
+
+Final replies render as plain text. Replies over Telegram's 4096-UTF-16-unit
+message cap split into **ordered lossless `sendMessage` chunks** (never inside
+a character), sent sequentially; a mid-sequence failure stops the remaining
+chunks and records ONE honest failure status for the attempt — already-sent
+chunks stand, and the attempt is never reported `Delivered` over a partial
+reply. The adapter's `DeliveryStatus` mapping is the honesty contract:
 
 | Telegram response | DeliveryStatus |
 |---|---|

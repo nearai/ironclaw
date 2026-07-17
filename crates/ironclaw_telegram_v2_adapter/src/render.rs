@@ -164,37 +164,73 @@ fn telegram_reply_target_from_conversation_ref(
 }
 
 /// Render a `FinalReplyView` into a `sendMessage` egress request.
+/// Telegram caps message text at 4096 UTF-16 code units (its length
+/// semantics); longer final replies are split into ordered lossless chunks.
+pub const TELEGRAM_MESSAGE_MAX_UTF16_UNITS: usize = 4096;
+
+/// Split `text` into ordered chunks of at most `max_units` UTF-16 code units,
+/// never inside a character (a surrogate pair's 2 units stay together).
+/// Concatenating the chunks reproduces the input exactly. Empty input yields
+/// one empty chunk so the caller still sends exactly one message.
+fn chunk_text_utf16(text: &str, max_units: usize) -> Vec<&str> {
+    if text.is_empty() {
+        return vec![text];
+    }
+    let mut chunks = Vec::new();
+    let mut start = 0usize;
+    let mut units = 0usize;
+    for (offset, ch) in text.char_indices() {
+        let ch_units = ch.len_utf16();
+        if units + ch_units > max_units && units > 0 {
+            chunks.push(&text[start..offset]);
+            start = offset;
+            units = 0;
+        }
+        units += ch_units;
+    }
+    chunks.push(&text[start..]);
+    chunks
+}
+
+/// Render a final reply as one or more ordered `sendMessage` requests: one
+/// request per ≤4096-UTF-16-unit chunk (qa-telegram:C3). The adapter sends
+/// them sequentially and stops at the first failure so partial delivery is
+/// reported honestly.
 pub fn render_final_reply(
     reply: &TelegramReplyTarget,
     view: &FinalReplyView,
     credential_handle: EgressCredentialHandle,
-) -> Result<EgressRequest, TelegramRenderError> {
-    let mut body = serde_json::Map::new();
-    body.insert(
-        "chat_id".into(),
-        serde_json::Value::Number(reply.chat_id.into()),
-    );
-    body.insert("text".into(), serde_json::Value::String(view.text.clone()));
-    if let Some(topic_id) = reply.topic_id {
-        body.insert(
-            "message_thread_id".into(),
-            serde_json::Value::Number(topic_id.into()),
-        );
-    }
-    if let Some(reply_to) = reply.reply_message_id {
-        body.insert(
-            "reply_to_message_id".into(),
-            serde_json::Value::Number(reply_to.into()),
-        );
-    }
-    let body_bytes =
-        serde_json::to_vec(&serde_json::Value::Object(body)).expect("body serializes to JSON"); // safety: body is a serde_json::Value::Object built from owned Strings/Numbers; serialization cannot fail
-
-    Ok(build_egress_request(
-        "/sendMessage",
-        body_bytes,
-        credential_handle,
-    ))
+) -> Result<Vec<EgressRequest>, TelegramRenderError> {
+    chunk_text_utf16(&view.text, TELEGRAM_MESSAGE_MAX_UTF16_UNITS)
+        .into_iter()
+        .map(|chunk| {
+            let mut body = serde_json::Map::new();
+            body.insert(
+                "chat_id".into(),
+                serde_json::Value::Number(reply.chat_id.into()),
+            );
+            body.insert("text".into(), serde_json::Value::String(chunk.to_string()));
+            if let Some(topic_id) = reply.topic_id {
+                body.insert(
+                    "message_thread_id".into(),
+                    serde_json::Value::Number(topic_id.into()),
+                );
+            }
+            if let Some(reply_to) = reply.reply_message_id {
+                body.insert(
+                    "reply_to_message_id".into(),
+                    serde_json::Value::Number(reply_to.into()),
+                );
+            }
+            let body_bytes = serde_json::to_vec(&serde_json::Value::Object(body))
+                .expect("body serializes to JSON"); // safety: body is a serde_json::Value::Object built from owned Strings/Numbers; serialization cannot fail
+            Ok(build_egress_request(
+                "/sendMessage",
+                body_bytes,
+                credential_handle.clone(),
+            ))
+        })
+        .collect()
 }
 
 /// Render a `ProgressUpdateView` (typing indicator) into a
@@ -306,8 +342,10 @@ mod tests {
             text: "hello!".into(),
             generated_at: Utc::now(),
         };
-        let request =
+        let requests =
             render_final_reply(&reply(-100, Some(7), Some(42)), &view, handle()).expect("render");
+        assert_eq!(requests.len(), 1, "short replies stay a single message");
+        let request = &requests[0];
         assert_eq!(request.host().as_str(), TELEGRAM_API_HOST);
         assert_eq!(request.method().as_str(), "POST");
         assert_eq!(request.path().as_str(), "/sendMessage");
@@ -368,11 +406,74 @@ mod tests {
             text: "reactive reply".into(),
             generated_at: Utc::now(),
         };
-        let request = render_final_reply(&resolved, &view, handle()).expect("render");
+        let requests = render_final_reply(&resolved, &view, handle()).expect("render");
+        let request = &requests[0];
         assert_eq!(request.path().as_str(), "/sendMessage");
         let body: serde_json::Value = serde_json::from_slice(request.body()).expect("body json");
         assert_eq!(body["chat_id"], -100);
         assert_eq!(body["reply_to_message_id"], 42);
+    }
+
+    /// qa-telegram:C3 — replies over 4096 UTF-16 units split into ordered
+    /// lossless chunks, each within the limit and carrying the same chat
+    /// addressing.
+    #[test]
+    fn final_reply_over_4096_units_splits_into_ordered_lossless_chunks() {
+        let text = "x".repeat(9000);
+        let view = FinalReplyView {
+            turn_run_id: TurnRunId::new(),
+            text: text.clone(),
+            generated_at: Utc::now(),
+        };
+        let requests =
+            render_final_reply(&reply(-100, Some(7), None), &view, handle()).expect("render");
+        assert_eq!(requests.len(), 3, "9000 ASCII units -> 4096 + 4096 + 808");
+        let mut reassembled = String::new();
+        for request in &requests {
+            assert_eq!(request.path().as_str(), "/sendMessage");
+            let body: serde_json::Value =
+                serde_json::from_slice(request.body()).expect("body json");
+            assert_eq!(body["chat_id"], -100, "every chunk addresses the chat");
+            assert_eq!(body["message_thread_id"], 7, "topic rides every chunk");
+            let chunk = body["text"].as_str().expect("text");
+            assert!(
+                chunk.encode_utf16().count() <= TELEGRAM_MESSAGE_MAX_UTF16_UNITS,
+                "chunk within Telegram's UTF-16 limit"
+            );
+            reassembled.push_str(chunk);
+        }
+        assert_eq!(reassembled, text, "ordered chunks reassemble losslessly");
+    }
+
+    /// Surrogate pairs (2 UTF-16 units) are never split across a chunk
+    /// boundary, and multi-byte text still reassembles exactly.
+    #[test]
+    fn chunk_boundaries_never_split_a_surrogate_pair() {
+        // '🦀' is 2 UTF-16 units; 2049 of them = 4098 units > one chunk.
+        let text = "🦀".repeat(2049);
+        let view = FinalReplyView {
+            turn_run_id: TurnRunId::new(),
+            text: text.clone(),
+            generated_at: Utc::now(),
+        };
+        let requests =
+            render_final_reply(&reply(555, None, None), &view, handle()).expect("render");
+        assert_eq!(
+            requests.len(),
+            2,
+            "4098 units -> 4096-boundary forces 2 chunks"
+        );
+        let mut reassembled = String::new();
+        for request in &requests {
+            let body: serde_json::Value =
+                serde_json::from_slice(request.body()).expect("body json");
+            let chunk = body["text"].as_str().expect("text");
+            let units = chunk.encode_utf16().count();
+            assert!(units <= TELEGRAM_MESSAGE_MAX_UTF16_UNITS);
+            assert_eq!(units % 2, 0, "no torn surrogate pair at a boundary");
+            reassembled.push_str(chunk);
+        }
+        assert_eq!(reassembled, text);
     }
 
     #[test]

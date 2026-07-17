@@ -50,7 +50,7 @@ by exact test name — `cargo test <name>` locates each.
 | `qa-telegram:B7`<br>DRAFT — qa-telegram:B7 | **draft** | DRAFT parent — carried by B7:01 |
 | `qa-telegram:B7:01:telegram-setup-api-authorization`<br>Telegram setup APIs distinguish member denial from masked cross-tenant targets | **covered** | `cargo test -p ironclaw_telegram_extension` telegram_channel_routes::handler_tests::{setup_routes_mask_cross_tenant_probes_as_not_found, setup_routes_forbid_same_tenant_member_but_pairing_is_self_service} |
 | `qa-telegram:C1`<br>A paired Telegram DM routes to its member-owned thread | **covered** | `cargo test --test reborn_integration_telegram_journey` whole-journey seam 4 + telegram_two_users_stay_isolated_across_pairing_reply_and_unpair (thread ownership per bound user) |
-| `qa-telegram:C3`<br>Telegram splits responses over 4096 characters into ordered lossless messages | **gap-product** | NOT IMPLEMENTED: no 4096 chunking exists in `render_final_reply` (one sendMessage per reply; >4096 gets Telegram 400 → honest FailedPermanent). #6116's descendant render has the same shape, so implementing main-side would diverge the adapter from its fold target. Owner call: implement at the fold or accept truncation-by-failure. No test written (would pin a missing feature). |
+| `qa-telegram:C3`<br>Telegram splits responses over 4096 characters into ordered lossless messages | **covered** | Implemented 2026-07-17 (was gap-product): `cargo test -p ironclaw_telegram_v2_adapter` render::{final_reply_over_4096_units_splits_into_ordered_lossless_chunks, chunk_boundaries_never_split_a_surrogate_pair} + adapter::{render_outbound_sends_chunks_sequentially_and_records_one_delivered, render_outbound_records_retryable_when_a_middle_chunk_fails}. Chunking is UTF-16-unit based (Telegram length semantics); mid-sequence failure stops and records one honest FailedRetryable. |
 | `qa-telegram:C4`<br>Telegram sends deterministic plain text without parse_mode | **covered** | `cargo test -p ironclaw_telegram_v2_adapter` render::final_reply_renders_with_topic_and_reply_target (body carries chat_id/text only — no parse_mode key) + `cargo test --test reborn_integration_telegram_journey` rendered-reply asserts |
 | `qa-telegram:C5`<br>Telegram routes attachment captions but refuses captionless media without a model turn | **partial** | `cargo test -p ironclaw_telegram_v2_adapter` payload::private_chat_with_photo_emits_attachment_descriptor_no_bytes (caption routing) + `cargo test -p ironclaw_telegram_extension` telegram_dispatch::textless_message_follows_pairing_split. The 'model-visible attachment note for captionless media' half is model-behavior — Recorded-Model tier. |
 | `qa-telegram:C6`<br>A paired Telegram start command is a static no-op | **covered** | Implemented 2026-07-17 (was a shipped-vs-row divergence — the hint was pairedness-agnostic): `cargo test -p ironclaw_telegram_extension` telegram_dispatch::{paired_start_without_payload_is_a_silent_no_op, start_without_payload_acks_silently_when_lookup_is_down}. |
@@ -222,10 +222,10 @@ by exact test name — `cargo test <name>` locates each.
 
 ## Tally
 
-- **covered**: 71
+- **covered**: 72
 - **divergence**: 1
 - **draft**: 19
-- **gap-product**: 1
+- **gap-product**: 0
 - **needs-test**: 2
 - **not-automated**: 59
 - **partial**: 7
