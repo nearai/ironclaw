@@ -26,10 +26,22 @@ type RenameAutomationVariables = {
   name: string;
 };
 
+type ActionMutationContext = {
+  sequence: number;
+};
+
+function isLatestAutomationAction(
+  context: ActionMutationContext | undefined,
+  latestSequence: number
+) {
+  return context?.sequence === latestSequence;
+}
+
 export function useAutomations(includeCompleted = false) {
   const { t, lang } = useI18n();
   const queryClient = useQueryClient();
   const [hasActionError, setHasActionError] = React.useState(false);
+  const latestActionSequence = React.useRef(0);
   const query = useQuery({
     queryKey: ["automations", { includeCompleted }],
     queryFn: () =>
@@ -77,36 +89,55 @@ export function useAutomations(includeCompleted = false) {
   const clearActionError = React.useCallback(() => {
     setHasActionError(false);
   }, []);
-  const showActionError = React.useCallback((error: unknown) => {
-    console.error("Automation action failed:", error);
-    setHasActionError(true);
-  }, []);
-  const handleActionSuccess = React.useCallback(() => {
+  const beginAction = React.useCallback((): ActionMutationContext => {
+    const sequence = latestActionSequence.current + 1;
+    latestActionSequence.current = sequence;
     clearActionError();
+    return { sequence };
+  }, [clearActionError]);
+  const showActionError = React.useCallback((
+    _error: unknown,
+    _variables: unknown,
+    context: ActionMutationContext | undefined
+  ) => {
+    // A newer action deliberately supersedes older results: starting any
+    // action clears the banner, and a late completion must not resurrect it.
+    if (isLatestAutomationAction(context, latestActionSequence.current)) {
+      setHasActionError(true);
+    }
+  }, []);
+  const handleActionSuccess = React.useCallback((
+    _data: unknown,
+    _variables: unknown,
+    context: ActionMutationContext | undefined
+  ) => {
+    if (isLatestAutomationAction(context, latestActionSequence.current)) {
+      clearActionError();
+    }
     invalidateAutomations();
   }, [clearActionError, invalidateAutomations]);
   const pauseMutation = useMutation({
     mutationFn: (automationId: string) => pauseAutomation({ automationId }),
-    onMutate: clearActionError,
+    onMutate: beginAction,
     onError: showActionError,
     onSuccess: handleActionSuccess,
   });
   const resumeMutation = useMutation({
     mutationFn: (automationId: string) => resumeAutomation({ automationId }),
-    onMutate: clearActionError,
+    onMutate: beginAction,
     onError: showActionError,
     onSuccess: handleActionSuccess,
   });
   const renameMutation = useMutation({
     mutationFn: ({ automationId, name }: RenameAutomationVariables) =>
       renameAutomation({ automationId, name }),
-    onMutate: clearActionError,
+    onMutate: beginAction,
     onError: showActionError,
     onSuccess: handleActionSuccess,
   });
   const deleteMutation = useMutation({
     mutationFn: (automationId: string) => deleteAutomation({ automationId }),
-    onMutate: clearActionError,
+    onMutate: beginAction,
     onError: showActionError,
     onSuccess: handleActionSuccess,
   });
