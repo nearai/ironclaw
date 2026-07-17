@@ -243,6 +243,8 @@ jobs:
         run: |
           scripts/ci/test-check-include-str-paths.sh
           scripts/ci/test-check-hermetic-env.sh
+          scripts/ci/test-classify-test-scope.sh
+          scripts/ci/test-package-feature-flags.sh
 
   clippy:
     name: Clippy (${{ matrix.name }})

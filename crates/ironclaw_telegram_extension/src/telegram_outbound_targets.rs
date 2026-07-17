@@ -562,14 +562,22 @@ impl ironclaw_channel_host::delivery_protocol::ChannelDeliveryProtocol
         let message_id: i64 = message.message_ref.parse().map_err(|_| {
             status_error("telegram posted-message handle has a non-numeric message id")
         })?;
-        telegram_status_call(
+        let result = telegram_status_call(
             egress,
             "deleteMessage",
             TELEGRAM_DELETE_MESSAGE_PATH,
             serde_json::json!({ "chat_id": chat_id, "message_id": message_id }),
         )
-        .await
-        .map(|_| ())
+        .await?;
+        // Deletion evidence is the provider's `result: true` — an ok envelope
+        // carrying `false` (or no result) did NOT delete anything and must
+        // not report success.
+        if result != serde_json::Value::Bool(true) {
+            return Err(status_error(
+                "Telegram deleteMessage did not confirm deletion",
+            ));
+        }
+        Ok(())
     }
 }
 
@@ -784,6 +792,32 @@ mod telegram_delivery_protocol_tests {
             serde_json::from_slice(&calls[1].body).expect("deleteMessage body is JSON");
         assert_eq!(body["chat_id"], 555);
         assert_eq!(body["message_id"], 42);
+    }
+
+    /// Deletion evidence is `result: true` — an ok envelope whose result is
+    /// `false` (or missing) did not delete anything and must surface as a
+    /// failure, never optimistic success.
+    #[tokio::test]
+    async fn delete_status_message_requires_result_true() {
+        for stale_body in [
+            br#"{"ok":true,"result":false}"#.to_vec(),
+            br#"{"ok":true}"#.to_vec(),
+        ] {
+            let egress = telegram_recording_egress();
+            egress.program_response(TELEGRAM_API_HOST, Ok(EgressResponse::new(200, stale_body)));
+            let posted = ironclaw_channel_host::delivery_protocol::PostedChannelMessage {
+                conversation_id: "555".to_string(),
+                message_ref: "42".to_string(),
+            };
+            let error = TelegramDeliveryProtocol
+                .delete_status_message(egress.as_ref(), &posted)
+                .await
+                .expect_err("unconfirmed deletion must fail");
+            assert!(
+                error.to_string().contains("did not confirm deletion"),
+                "stable evidence-shaped reason, got: {error}"
+            );
+        }
     }
 
     #[tokio::test]

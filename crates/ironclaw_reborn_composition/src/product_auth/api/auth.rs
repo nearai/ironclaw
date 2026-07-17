@@ -53,11 +53,7 @@ use crate::{AuthChallengeProvider, AuthChallengeView, BlockedAuthFlowCanceller};
 
 pub(crate) const AUTH_CONTINUATION_DISPATCH_FAILED_CODE: &str = "auth_continuation_dispatch_failed";
 
-// The dispatch port (and its `ProductAuthTurnGateResumeDispatcher` impl)
-// lives in `ironclaw_channel_host::auth_continuation` so channel host crates
-// can hold the dispatcher without a composition dependency; re-exported here
-// as the canonical product-auth path composition consumers already use.
-pub use ironclaw_channel_host::auth_continuation::RebornAuthContinuationDispatcher;
+use ironclaw_channel_host::auth_continuation::RebornAuthContinuationDispatcher;
 
 #[cfg(test)]
 #[derive(Debug, Default)]

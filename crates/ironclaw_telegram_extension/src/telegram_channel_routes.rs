@@ -274,7 +274,13 @@ impl From<TelegramPairingError> for TelegramRouteError {
 
 impl From<TelegramChannelSetupActivationError> for TelegramRouteError {
     fn from(error: TelegramChannelSetupActivationError) -> Self {
-        TelegramRouteError::UserFacing(error.to_string())
+        // The activation reason originates in the lifecycle backend and can
+        // carry internal detail; the admin gets a stable category while the
+        // cause stays in protected diagnostics.
+        tracing::debug!(reason = %error, "telegram setup activation failed; setup rolled back");
+        TelegramRouteError::UserFacing(
+            "Telegram channel activation failed — the setup change was rolled back.".to_string(),
+        )
     }
 }
 
@@ -695,7 +701,8 @@ mod handler_tests {
     #[tokio::test]
     async fn save_setup_rolls_back_when_activation_fails() {
         let (setup, pairing) = configured_services().await;
-        let before = setup.status().await.expect("status");
+        let before =
+            serde_json::to_value(setup.status().await.expect("status")).expect("status serializes");
         let activation = Arc::new(FlaggedActivation {
             fail: AtomicBool::new(true),
             calls: AtomicUsize::new(0),
@@ -707,23 +714,31 @@ mod handler_tests {
         let (router, _descriptors) = telegram_channel_route_parts(config);
         let app = router.layer(axum::Extension(operator_caller()));
 
+        // The save genuinely mutates observable state (a NEW webhook URL and
+        // a revision bump), so a rollback that only restored the revision but
+        // kept the mutated record would fail the full-status comparison.
         let (status, body) = send(
             &app,
             "PUT",
             WEBUI_V2_CHANNELS_TELEGRAM_SETUP_PATH,
-            Some(r#"{"bot_token":"123:abc"}"#),
+            Some(r#"{"webhook_url":"https://rolled-back.example/hook"}"#),
         )
         .await;
         assert_eq!(status, StatusCode::CONFLICT, "activation failure surfaces");
         assert!(
-            body.contains("activation backend rejected the package"),
-            "admin-facing reason survives sanitization: {body}"
+            body.contains("Telegram channel activation failed"),
+            "the admin sees the stable sanitized category: {body}"
+        );
+        assert!(
+            !body.contains("activation backend rejected the package"),
+            "raw backend error text must not cross the HTTP boundary: {body}"
         );
         assert_eq!(activation.calls.load(Ordering::SeqCst), 1);
-        let after = setup.status().await.expect("status");
+        let after =
+            serde_json::to_value(setup.status().await.expect("status")).expect("status serializes");
         assert_eq!(
-            before.revision, after.revision,
-            "failed activation must roll the record back to the previous revision"
+            before, after,
+            "failed activation must roll the COMPLETE setup status back to the previous save"
         );
     }
 

@@ -1248,6 +1248,72 @@ mod tests {
         assert_eq!(fixture.submitted.load(Ordering::SeqCst), 0);
     }
 
+    /// qa-telegram:S5 — malformed webhook JSON fails safely: no turn, no
+    /// reply, no body echo. The shipped classification for a VERIFIED but
+    /// unparseable body is a deliberate silent 200 ack (a permanently
+    /// unparseable update would otherwise be redelivered by Telegram
+    /// forever); the catalog row drafts a 4xx here — divergence recorded in
+    /// docs/qa/telegram-coverage-map.md for owner adjudication. Unverified
+    /// malformed bodies never get this far (the 401 tests above).
+    #[tokio::test]
+    async fn telegram_updates_handler_acks_malformed_json_without_turn_or_reply() {
+        let fixture = dynamic_fixture(true).await;
+        let secret = fixture.webhook_secret.clone().expect("configured secret");
+        let response = post_to_state(
+            &fixture.state,
+            "{not-json%%".to_string(),
+            vec![(TELEGRAM_SECRET_TOKEN_HEADER, secret)],
+        )
+        .await;
+
+        assert_eq!(
+            response.status(),
+            StatusCode::OK,
+            "verified-but-unparseable updates are acked so Telegram stops redelivering"
+        );
+        fixture.state.drain_immediate_ack_tasks().await;
+        assert_eq!(
+            fixture.submitted.load(Ordering::SeqCst),
+            0,
+            "malformed payloads must never start a turn"
+        );
+        assert!(
+            fixture.bot_api.sends().is_empty(),
+            "malformed payloads must never trigger replies"
+        );
+    }
+
+    /// qa-slack:E17 (telegram leg) — a Slack-shaped payload cannot dispatch
+    /// through Telegram ingress even with telegram's own valid secret header:
+    /// it parses to no Telegram update, so no turn and no reply exist for it.
+    #[tokio::test]
+    async fn telegram_updates_handler_rejects_foreign_channel_payload_without_turn() {
+        let fixture = dynamic_fixture(true).await;
+        let secret = fixture.webhook_secret.clone().expect("configured secret");
+        let slack_shaped = r#"{"token":"deprecated","team_id":"T123","api_app_id":"A1","event":{"type":"message","channel":"D123","user":"U1","text":"hi","ts":"1.2"},"type":"event_callback"}"#;
+        let response = post_to_state(
+            &fixture.state,
+            slack_shaped.to_string(),
+            vec![(TELEGRAM_SECRET_TOKEN_HEADER, secret)],
+        )
+        .await;
+
+        // A foreign payload is VALID JSON with none of Telegram's update
+        // fields: it classifies as non-actionable — acked so the sender stops
+        // retrying — and produces neither a turn nor a reply.
+        assert_eq!(response.status(), StatusCode::OK);
+        fixture.state.drain_immediate_ack_tasks().await;
+        assert_eq!(
+            fixture.submitted.load(Ordering::SeqCst),
+            0,
+            "foreign-channel payloads must never start a turn"
+        );
+        assert!(
+            fixture.bot_api.sends().is_empty(),
+            "foreign-channel payloads must never trigger replies"
+        );
+    }
+
     #[tokio::test]
     async fn telegram_updates_handler_acks_non_actionable_update_with_valid_secret() {
         let fixture = dynamic_fixture(true).await;

@@ -160,12 +160,21 @@ pub use observability::operator_logs::{
     OperatorLogLayer, capture_tracing_log, operator_log_buffer,
 };
 pub use observability::trajectory_observer::RebornTrajectoryObserver;
+// The continuation-dispatch port lives in ironclaw_channel_host so channel
+// host crates can hold it without a composition dependency; composition's
+// facade re-exports it for its own downstream consumers (root test suites,
+// the CLI) alongside the product-auth service surface that produces it.
+pub use ironclaw_channel_host::auth_continuation::RebornAuthContinuationDispatcher;
+#[cfg(feature = "slack-v2-host-beta")]
+pub use ironclaw_channel_host::identity::{
+    RebornUserIdentityLookup, RebornUserIdentityLookupError,
+};
 pub use product_auth::api::auth::{
-    RebornAuthContinuationDispatcher, RebornAuthProductError, RebornCredentialLifecycleError,
-    RebornManualTokenChallenge, RebornManualTokenError, RebornManualTokenSetupRequest,
-    RebornManualTokenSubmitRequest, RebornManualTokenSubmitResponse, RebornOAuthCallbackError,
-    RebornOAuthCallbackOutcome, RebornOAuthCallbackRequest, RebornOAuthCallbackResponse,
-    RebornProductAuthServicePorts, RebornProductAuthServices,
+    RebornAuthProductError, RebornCredentialLifecycleError, RebornManualTokenChallenge,
+    RebornManualTokenError, RebornManualTokenSetupRequest, RebornManualTokenSubmitRequest,
+    RebornManualTokenSubmitResponse, RebornOAuthCallbackError, RebornOAuthCallbackOutcome,
+    RebornOAuthCallbackRequest, RebornOAuthCallbackResponse, RebornProductAuthServicePorts,
+    RebornProductAuthServices,
 };
 #[cfg(feature = "slack-v2-host-beta")]
 pub use product_auth::serve::SlackPersonalOAuthBindingConfig;
@@ -201,8 +210,7 @@ pub use runtime_input::{
 pub use runtime_input::{RebornProviderFactory, ResolvedRebornLlm};
 #[cfg(feature = "slack-v2-host-beta")]
 pub use slack::slack_actor_identity::{
-    RebornUserIdentityLookup, RebornUserIdentityLookupError, SlackUserIdentityActorResolver,
-    slack_user_identity_provider_user_id,
+    SlackUserIdentityActorResolver, slack_user_identity_provider_user_id,
 };
 #[cfg(feature = "slack-v2-host-beta")]
 pub use slack::slack_channel_routes::{

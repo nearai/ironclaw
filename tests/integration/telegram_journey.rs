@@ -98,11 +98,18 @@ const INTERACTIVE_MODEL_PROFILE: &str = "interactive_model";
 struct ScriptedTelegramNetwork {
     requests: Mutex<Vec<NetworkHttpRequest>>,
     sent_messages: Mutex<u32>,
+    /// When set, the next `/sendMessage` answers with this HTTP status and an
+    /// `ok:false` envelope (then clears) — the F3 blocked-recipient shape.
+    fail_next_send: Mutex<Option<u16>>,
 }
 
 impl ScriptedTelegramNetwork {
     fn requests(&self) -> Vec<NetworkHttpRequest> {
         self.requests.lock().expect("network requests lock").clone()
+    }
+
+    fn fail_next_send_message(&self, status: u16) {
+        *self.fail_next_send.lock().expect("fail toggle lock") = Some(status);
     }
 
     fn request_bodies_for(&self, url_substr: &str) -> Vec<Value> {
@@ -147,6 +154,12 @@ impl NetworkHttpEgress for ScriptedTelegramNetwork {
         } else if url.ends_with("/setWebhook") || url.ends_with("/deleteWebhook") {
             json_response(200, json!({"ok": true, "result": true}))
         } else if url.ends_with("/sendMessage") {
+            if let Some(status) = self.fail_next_send.lock().expect("fail toggle lock").take() {
+                return Ok(json_response(
+                    status,
+                    json!({"ok": false, "description": "scripted send failure"}),
+                ));
+            }
             let mut sent = self.sent_messages.lock().expect("sent counter lock");
             *sent += 1;
             json_response(200, json!({"ok": true, "result": {"message_id": *sent}}))
@@ -264,13 +277,17 @@ async fn call_route(
 
 /// A private-chat Telegram `message` update.
 fn dm_update(update_id: i64, text: &str) -> Value {
+    dm_update_from(update_id, TG_USER_ID, TG_CHAT_ID, text)
+}
+
+fn dm_update_from(update_id: i64, tg_user: i64, chat_id: i64, text: &str) -> Value {
     json!({
         "update_id": update_id,
         "message": {
             "message_id": update_id,
             "date": 1_700_000_000,
-            "chat": {"id": TG_CHAT_ID, "type": "private"},
-            "from": {"id": TG_USER_ID, "is_bot": false, "first_name": "Journey"},
+            "chat": {"id": chat_id, "type": "private"},
+            "from": {"id": tg_user, "is_bot": false, "first_name": "Journey"},
             "text": text,
         }
     })
@@ -320,13 +337,18 @@ impl JourneyStack {
     /// Deliver a verified private-chat webhook update and drain the
     /// immediate-ack dispatch tasks so its turn/consume settles.
     async fn webhook_dm(&self, secret: &str, update_id: i64, text: &str) -> StatusCode {
+        self.webhook_update(secret, dm_update(update_id, text))
+            .await
+    }
+
+    async fn webhook_update(&self, secret: &str, update: Value) -> StatusCode {
         let (status, _body) = call_route(
             self.mounts.events.router.clone(),
             Method::POST,
             "/webhooks/extensions/telegram/updates",
             None,
             &[(SECRET_HEADER, secret)],
-            Some(dm_update(update_id, text)),
+            Some(update),
         )
         .await;
         if let Some(drain) = self.mounts.events.drain.as_ref() {
@@ -338,17 +360,25 @@ impl JourneyStack {
     /// Poll the scripted network for a `sendMessage` into the DM chat whose
     /// text matches `predicate`.
     async fn wait_for_dm_send(&self, predicate: impl Fn(&str) -> bool) -> Result<Value, String> {
+        self.wait_for_send_in(TG_CHAT_ID, predicate).await
+    }
+
+    async fn wait_for_send_in(
+        &self,
+        chat_id: i64,
+        predicate: impl Fn(&str) -> bool,
+    ) -> Result<Value, String> {
         for _ in 0..200 {
             let sends = self.network.request_bodies_for("/sendMessage");
             if let Some(body) = sends.iter().find(|body| {
-                body["chat_id"] == TG_CHAT_ID && body["text"].as_str().is_some_and(&predicate)
+                body["chat_id"] == chat_id && body["text"].as_str().is_some_and(&predicate)
             }) {
                 return Ok(body.clone());
             }
             tokio::time::sleep(Duration::from_millis(25)).await;
         }
         Err(format!(
-            "no matching DM sendMessage; captured: {:?}",
+            "no matching sendMessage for chat {chat_id}; captured: {:?}",
             self.network.request_bodies_for("/sendMessage")
         ))
     }
@@ -433,32 +463,68 @@ async fn admin_save(stack: &JourneyStack) -> String {
 /// Mint a pairing code via the real pairing route and consume it over the
 /// verified webhook; asserts the pairing facade flips to connected.
 async fn pair_via_webhook(stack: &JourneyStack, secret: &str, update_id: i64) {
+    pair_user_via_webhook(
+        stack,
+        secret,
+        &stack.caller.clone(),
+        TG_USER_ID,
+        TG_CHAT_ID,
+        update_id,
+    )
+    .await;
+}
+
+/// Multi-user variant: mint the code AS `caller` and consume it from the
+/// given telegram identity.
+async fn pair_user_via_webhook(
+    stack: &JourneyStack,
+    secret: &str,
+    caller: &WebUiAuthenticatedCaller,
+    tg_user: i64,
+    chat_id: i64,
+    update_id: i64,
+) {
+    let code = issue_pairing_code(stack, caller).await;
+    let status = stack
+        .webhook_update(
+            secret,
+            dm_update_from(update_id, tg_user, chat_id, &format!("/start {code}")),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "verified /start consume acks 200");
+    assert_eq!(
+        pairing_connected(stack, caller).await,
+        true,
+        "consume must bind the telegram account"
+    );
+}
+
+async fn issue_pairing_code(stack: &JourneyStack, caller: &WebUiAuthenticatedCaller) -> String {
     let (status, body) = call_route(
         stack.mounts.protected_routes().router,
         Method::POST,
         "/api/webchat/v2/channels/telegram/pairing",
-        Some(stack.caller.clone()),
+        Some(caller.clone()),
         &[],
         Some(json!({})),
     )
     .await;
     assert_eq!(status, StatusCode::OK, "pairing issue: {body}");
-    let code = body["code"].as_str().expect("pairing code").to_string();
-    let status = stack
-        .webhook_dm(secret, update_id, &format!("/start {code}"))
-        .await;
-    assert_eq!(status, StatusCode::OK, "verified /start consume acks 200");
+    body["code"].as_str().expect("pairing code").to_string()
+}
+
+async fn pairing_connected(stack: &JourneyStack, caller: &WebUiAuthenticatedCaller) -> bool {
     let (status, body) = call_route(
         stack.mounts.protected_routes().router,
         Method::GET,
         "/api/webchat/v2/channels/telegram/pairing",
-        Some(stack.caller.clone()),
+        Some(caller.clone()),
         &[],
         None,
     )
     .await;
     assert_eq!(status, StatusCode::OK);
-    assert_eq!(body["connected"], true, "consume must bind: {body}");
+    body["connected"] == true
 }
 
 #[tokio::test]
@@ -711,12 +777,29 @@ async fn telegram_whole_journey_setup_pair_resume_and_dm_reply() {
         .list_outbound_delivery_targets(caller.clone())
         .await
         .expect("outbound targets list");
-    let targets_json = serde_json::to_value(&targets).expect("targets serialize");
+    let expected_target_id = format!("telegram:dm:{installation}:{USER}");
+    let dm_target = targets
+        .targets
+        .iter()
+        .find(|option| option.target.target_id.as_str() == expected_target_id)
+        .unwrap_or_else(|| {
+            panic!(
+                "pairing must record the DM delivery target {expected_target_id}; got: {:?}",
+                targets
+                    .targets
+                    .iter()
+                    .map(|option| option.target.target_id.as_str())
+                    .collect::<Vec<_>>()
+            )
+        });
+    assert_eq!(
+        dm_target.target.channel.as_str(),
+        "telegram",
+        "the DM target is a telegram-channel entry"
+    );
     assert!(
-        targets_json
-            .to_string()
-            .contains(&format!("telegram:dm:{installation}:{USER}")),
-        "pairing must record the DM delivery target: {targets_json}"
+        dm_target.capabilities.final_replies,
+        "the paired DM target must accept final replies"
     );
 
     // ── Seam 4: paired DM turn renders the reply through the revision
@@ -864,6 +947,229 @@ async fn telegram_dm_slack_install_gates_with_action_needed_notice_not_silence()
         "a follow-up DM to a gated conversation must still get host feedback \
          (busy hint or reply), got no new sends: {all_sends:?}"
     );
+
+    stack.runtime.shutdown().await.expect("runtime shuts down");
+}
+
+/// Multi-user identity isolation through the production stack.
+///
+/// Covers (docs/qa/telegram-coverage-map.md): qa-telegram:D1:01 (threads
+/// owned by the bound user), qa-telegram:D1:02 (replies return only to the
+/// originating bound user), qa-telegram:D4 (unpairing A leaves B intact),
+/// qa-telegram:P6 integration leg (an identity bound to another user is
+/// refused a re-bind by code), qa-telegram:R2 (self-service disconnect
+/// unpairs only the requester), qa-multitenant-setup:J5:03 (one paired user
+/// plus an unbound provider identity coexist without bleed), and
+/// qa-telegram:R8 (a DM after removal gets the static hint, no turn).
+#[tokio::test]
+async fn telegram_two_users_stay_isolated_across_pairing_reply_and_unpair() {
+    const USER_B: &str = "tg-journey-user-b";
+    const TG_USER_B: i64 = 9002;
+    const TG_CHAT_B: i64 = 556;
+
+    // FIFO: A's DM reply, B's DM reply, B's post-unpair reply. A's
+    // post-unpair DM must consume NOTHING (hint only, no turn).
+    let stack = build_journey_stack([
+        RebornScriptedReply::text("isolated reply for user A"),
+        RebornScriptedReply::text("isolated reply for user B"),
+        RebornScriptedReply::text("user B still works"),
+    ])
+    .await;
+    let caller_a = stack.caller.clone();
+    let caller_b = WebUiAuthenticatedCaller::new(
+        TenantId::new(TENANT).expect("tenant"),
+        UserId::new(USER_B).expect("user"),
+        Some(AgentId::new(AGENT).expect("agent")),
+        None,
+    );
+
+    let secret = admin_save(&stack).await;
+    pair_user_via_webhook(&stack, &secret, &caller_a, TG_USER_ID, TG_CHAT_ID, 1).await;
+    pair_user_via_webhook(&stack, &secret, &caller_b, TG_USER_B, TG_CHAT_B, 2).await;
+
+    // Each DM routes to ITS user's thread and replies to ITS chat only.
+    let status = stack.webhook_dm(&secret, 3, "hello from A").await;
+    assert_eq!(status, StatusCode::OK);
+    let reply_a = stack
+        .wait_for_dm_send(|text| text.contains("isolated reply for user A"))
+        .await
+        .expect("A's DM gets A's reply");
+    assert_eq!(reply_a["chat_id"], TG_CHAT_ID);
+
+    let status = stack
+        .webhook_update(
+            &secret,
+            dm_update_from(4, TG_USER_B, TG_CHAT_B, "hello from B"),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK);
+    let reply_b = stack
+        .wait_for_send_in(TG_CHAT_B, |text| text.contains("isolated reply for user B"))
+        .await
+        .expect("B's DM gets B's reply");
+    assert_eq!(
+        reply_b["chat_id"], TG_CHAT_B,
+        "B's reply must land in B's chat only"
+    );
+    let cross_bleed = stack
+        .network
+        .request_bodies_for("/sendMessage")
+        .iter()
+        .any(|body| {
+            (body["chat_id"] == TG_CHAT_ID
+                && body["text"].as_str().is_some_and(|t| t.contains("user B")))
+                || (body["chat_id"] == TG_CHAT_B
+                    && body["text"].as_str().is_some_and(|t| t.contains("user A")))
+        });
+    assert!(!cross_bleed, "replies must never cross user boundaries");
+
+    // P6: a code minted by B cannot re-bind A's telegram identity.
+    let code_b = issue_pairing_code(&stack, &caller_b).await;
+    let status = stack
+        .webhook_update(
+            &secret,
+            dm_update_from(5, TG_USER_ID, TG_CHAT_ID, &format!("/start {code_b}")),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK);
+    stack
+        .wait_for_dm_send(|text| text.contains("already paired"))
+        .await
+        .expect("the already-bound identity gets an explicit refusal");
+    assert!(
+        pairing_connected(&stack, &caller_a).await,
+        "A's binding survives the re-bind attempt"
+    );
+
+    // D4/R2: A disconnects; B is untouched.
+    let (status, _body) = call_route(
+        stack.mounts.protected_routes().router,
+        Method::DELETE,
+        "/api/webchat/v2/channels/telegram/pairing",
+        Some(caller_a.clone()),
+        &[],
+        None,
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::NO_CONTENT,
+        "self-service unpair succeeds"
+    );
+    assert!(!pairing_connected(&stack, &caller_a).await, "A unpaired");
+    assert!(pairing_connected(&stack, &caller_b).await, "B still paired");
+
+    // R8: A's DM now fails closed with the static hint (no turn consumed).
+    let sends_before = stack.network.request_bodies_for("/sendMessage").len();
+    let status = stack.webhook_dm(&secret, 6, "hello again from A").await;
+    assert_eq!(status, StatusCode::OK);
+    stack
+        .wait_for_dm_send(|text| text.contains("Pair your account"))
+        .await
+        .expect("unpaired A gets the static pairing hint");
+    let _ = sends_before;
+
+    // B keeps working end to end.
+    let status = stack
+        .webhook_update(
+            &secret,
+            dm_update_from(7, TG_USER_B, TG_CHAT_B, "still working?"),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK);
+    let reply = stack
+        .wait_for_send_in(TG_CHAT_B, |text| text.contains("user B still works"))
+        .await
+        .expect("B's channel is unaffected by A's unpair");
+    assert_eq!(reply["chat_id"], TG_CHAT_B);
+
+    stack.runtime.shutdown().await.expect("runtime shuts down");
+}
+
+/// Delivery idempotency and honest failure through the production stack.
+///
+/// Covers (docs/qa/telegram-coverage-map.md): qa-telegram:F1 (a retried
+/// update produces exactly one turn and one reply), qa-telegram:F3:01 (a
+/// blocked-recipient 403 on the reply send does not retry-storm),
+/// qa-telegram:F3:02 (the next send succeeds once the failure clears), and
+/// the integration leg of qa-telegram:F2 (send outages surface as honest
+/// failures — the DeliveryStatus mapping itself is pinned by
+/// ironclaw_telegram_v2_adapter's render tests).
+#[tokio::test]
+async fn telegram_duplicate_updates_and_send_failures_stay_honest() {
+    let stack = build_journey_stack([
+        RebornScriptedReply::text("first reply"),
+        RebornScriptedReply::text("reply during outage"),
+        RebornScriptedReply::text("reply after recovery"),
+    ])
+    .await;
+    let secret = admin_save(&stack).await;
+    pair_via_webhook(&stack, &secret, 1).await;
+
+    // F1: the same update delivered twice (Telegram redelivery) produces
+    // exactly one turn and one reply.
+    let update = dm_update(2, "count me once");
+    assert_eq!(
+        stack.webhook_update(&secret, update.clone()).await,
+        StatusCode::OK
+    );
+    assert_eq!(stack.webhook_update(&secret, update).await, StatusCode::OK);
+    stack
+        .wait_for_dm_send(|text| text.contains("first reply"))
+        .await
+        .expect("the update produces its reply");
+    // Settle any straggling duplicate dispatch before counting.
+    tokio::time::sleep(Duration::from_millis(150)).await;
+    let first_replies = stack
+        .network
+        .request_bodies_for("/sendMessage")
+        .iter()
+        .filter(|body| {
+            body["text"]
+                .as_str()
+                .is_some_and(|text| text.contains("first reply"))
+        })
+        .count();
+    assert_eq!(
+        first_replies, 1,
+        "a redelivered update must not produce a second turn or reply"
+    );
+
+    // F3:01 — the recipient blocks the bot: the reply send gets a 403.
+    // Honest failure, no retry storm (the adapter maps 403 to
+    // FailedUnauthorized — a terminal, non-retryable delivery status).
+    stack.network.fail_next_send_message(403);
+    assert_eq!(
+        stack
+            .webhook_dm(&secret, 3, "talk to me during the outage")
+            .await,
+        StatusCode::OK
+    );
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    let outage_attempts = stack
+        .network
+        .requests()
+        .iter()
+        .filter(|request| {
+            request.url.ends_with("/sendMessage")
+                && String::from_utf8_lossy(&request.body).contains("reply during outage")
+        })
+        .count();
+    assert_eq!(
+        outage_attempts, 1,
+        "a 403 delivery failure must not retry-storm the Bot API"
+    );
+
+    // F3:02 — the block clears; the next turn's reply delivers normally.
+    assert_eq!(
+        stack.webhook_dm(&secret, 4, "are we back?").await,
+        StatusCode::OK
+    );
+    let recovered = stack
+        .wait_for_dm_send(|text| text.contains("reply after recovery"))
+        .await
+        .expect("delivery recovers after the blocked-recipient failure clears");
+    assert_eq!(recovered["chat_id"], TG_CHAT_ID);
 
     stack.runtime.shutdown().await.expect("runtime shuts down");
 }
