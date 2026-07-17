@@ -304,8 +304,8 @@ Separate the **data plane** (the payload, which never changes shape) from the
 // ── ironclaw_host_api (the bottom crate everyone already depends on) ──
 // The loop's pre-trust request — the one genuine loop→host transition (§1.1):
 struct LoopRequest { activity_id: ActivityId, capability: CapabilityId, input_ref: InputRef, resume: Option<ResumeToken> }
-// The host-side payload, resolved at the membrane (input deref'd, actor+scope bound):
-struct Invocation  { activity_id: ActivityId, capability: CapabilityId, input: Json, scope: Scope, actor: ActorId, estimate: Estimate }
+// The host-side payload, resolved at the membrane (input deref'd, actor+scope+origin bound):
+struct Invocation  { activity_id: ActivityId, capability: CapabilityId, input: Json, scope: Scope, actor: ActorId, origin: InvocationOrigin, estimate: Estimate }
 struct Authorized  { /* Invocation + trust/approval/reservation/mounts — SEALED: private, built only by authorize() */ }
 enum   Blocked     { Approval(GateRef), Auth(GateRef), Resource(GateRef) }  // re-entrant gates
 enum   HostFailure { Transient(ErrRef), Permanent(ErrRef) }                 // infra/storage/obligation-cleanup failure
@@ -335,6 +335,11 @@ fn dispatch (auth: &Authorized, lane: &RuntimeLane) -> Result<Outcome, HostFailu
   failure (`Transient` retryable vs `Permanent`); `Outcome` = the tool's own success or
   recoverable failure (model-visible). `invoke = Result<Outcome, InvokeError>` with
   `InvokeError = Blocked | HostFailure` — each failure class in its own channel.
+- **`origin` is sealed at the membrane, like `actor` and `scope`.** The loop is not the
+  only caller of this pipeline: products invoke capabilities directly (settings mutations,
+  admin actions — `ProductSurface::invoke`, §5.2) and so does automation. Each entry point
+  can mint only its own `InvocationOrigin` variant (§5.2.1), and `authorize()` folds origin
+  into policy — per-origin capability allowlists, origin-dependent approval semantics.
 - **`activity_id` is the invocation's idempotency identity** — what §1.1's "dead-future
   `idempotency_key`" *becomes* (unified with the existing `activity_id`, not deleted). The
   host records the authorize/outcome against `activity_id` **before** dispatch; a retry of
@@ -625,16 +630,28 @@ The kernel is the only layer that owns authority; substrates are mechanism it
 mediates; products and loops are replaceable userland reaching the kernel through
 exactly two interfaces (`ProductSurface`, `AgentLoopHost`).
 
-### 5.2 The clean product-surface interface — one, generic, feature-agnostic
+### 5.2 The clean product-surface interface — turn lifecycle plus two generic conduits
 
-Every product talks to the system through **one** narrow interface. Adding a feature
-never adds a method here (that was the change-amplification cost — a feature touching
-5–8 crates because each product method was per-feature). A feature is a new capability
-+ descriptor; the product interface is unchanged.
+Every product talks to the system through **one** narrow interface. An earlier
+draft of this section claimed six conversation methods could carry the whole
+product; that fails by inspection — the proto-`ProductSurface` this replaces
+(`RebornServicesApi`, `ironclaw_product_workflow/src/reborn_services.rs`) has
+**~251 async methods** (verified 2026-07-17), and most are not conversation
+operations: settings mutations, extension install/configure, thread/project
+listing, LLM admin. A conversation API cannot absorb them, and per-feature
+methods must not return (that was the change-amplification cost — a feature
+touching 5–8 crates because each product method was per-feature). The
+resolution is the repo's own standing rule (`.claude/rules/tools.md`):
+**user-triggered mutations go through capability authorization; pure reads go
+through typed query contracts.** Applied here, the product surface is the
+*turn lifecycle* — the kernel's own state machine, irreducible as methods —
+plus **two generic conduits that never grow: `invoke` for commands, `query`
+for reads.**
 
 ```rust
-/// The ONLY surface a product uses. A generic conduit, not a per-feature API.
+/// The ONLY surface a product uses. Turn lifecycle + two conduits; frozen.
 trait ProductSurface {
+    // ── Turn lifecycle — the kernel's state machine (§11.1); irreducible ──
     fn open_conversation(&self, actor: Actor, source: SourceBinding) -> ConversationId;
     fn submit_turn(&self, conv: ConversationId, msg: InboundMessage,
                    idem: IdempotencyKey) -> Result<TurnRunId, SubmitError>;   // all inbound → one door
@@ -642,18 +659,138 @@ trait ProductSurface {
     fn reply(&self, run: TurnRunId) -> Result<AssistantReply, ReplyError>;
     fn resolve_gate(&self, gate: GateRef, decision: GateDecision) -> Result<(), GateError>; // approval/auth
     fn cancel(&self, run: TurnRunId, idem: IdempotencyKey) -> Result<(), CancelError>;
+
+    // ── Commands: the product-side twin of AgentLoopHost::invoke (§5.4).
+    //    Same resolve → authorize → dispatch pipeline (§3), different origin. ──
+    fn invoke(&self, actor: AuthenticatedActor, capability: CapabilityId,
+              input: Json, idem: IdempotencyKey) -> Result<Outcome, InvokeError>;
+
+    // ── Reads: view descriptors over projections; scope-checked, no dispatch. ──
+    fn query(&self, actor: AuthenticatedActor, view: ViewRef,
+             params: Json, cursor: Option<Cursor>) -> Result<ViewPage, QueryError>;
 }
 ```
 
-Six methods, all feature-agnostic. A new settings page, a new tool, a new model
-selector — none add a method; they add a capability the loop can invoke and
-(optionally) one event variant on the projection stream.
+A feature — a settings page, a new tool, a model selector, an admin action —
+adds a **capability descriptor** (+ handler on the `FirstParty` lane) and/or a
+**view descriptor**, and optionally one event variant on the projection
+stream. Never a method. This generalizes §13.3's synthetic-capability
+promotion: the four synthetic product tools are simply the *first four* facade
+operations to make the migration every mutation makes.
+
+### 5.2.1 Origin is part of the `Invocation`, folded by `authorize()`
+
+```rust
+enum InvocationOrigin {
+    LoopRun(TurnRunId),      // model-initiated, trust-attenuated
+    Product(ProductKind),    // direct authenticated user action
+    Automation(RoutineId),   // routine / heartbeat / scheduled
+}
+```
+
+`Invocation` (§3) gains `origin: InvocationOrigin` as a **required** field,
+sealed at the membrane exactly like `actor` and `scope`: product ingress can
+only mint `Product`, the loop host can only mint `LoopRun` — neither can claim
+the other's origin. The seeds already exist in the vocabulary:
+`ExecutionContext.authenticated_actor_user_id` ("authenticated human actor
+sealed by trusted ingress") is the actor binding, and `Principal::System` is
+the automation identity.
+
+Three consequences, all landing in the single `authorize()` fold:
+
+1. **Per-origin capability policy, deny-by-default.** Every descriptor
+   declares which origins may invoke it (`settings.llm_provider_set` →
+   Product-only; `shell` → LoopRun-only; `skill_activate` → both). This is a
+   security *upgrade* over the facade, where the loop/product split is
+   implicit in which trait happens to have the method; after the change it is
+   one auditable declaration per capability. The corresponding risk must be
+   named: the namespace becomes one flat surface, so an origin-policy bug
+   exposes an admin capability to the model. Deny-by-default plus an
+   `ironclaw_architecture` test — *a descriptor with no explicit origin
+   declaration fails* — is the non-negotiable mitigation, not a nicety.
+2. **Approval semantics differ by origin — deliberately.** Approval gates
+   exist to obtain user consent for *model-initiated* actions. A
+   `Product`-origin invocation carries its consent in the act — the user
+   clicked. So `authorize()` auto-satisfies approval gates for `Product`
+   origin, while **auth gates** (credential needed → `Blocked::Auth` →
+   `resolve_gate`) and **resource gates** apply uniformly to every origin.
+   Extension OAuth onboarding from a settings page and from a mid-turn tool
+   call become literally one code path — the shared-resolver requirement the
+   extension/auth invariants (CLAUDE.md) have demanded all along.
+3. **Automation stops being special.** Routines/heartbeat invoke with
+   `Automation` origin under the same descriptor policy — deleting the
+   parallel dispatch path that `composition/src/automation/` (§5.8) wires
+   today.
+
+### 5.2.2 Reads are views, not dispatch
+
+Forcing `GET`-shaped reads through authorize/dispatch/idempotency records is
+ceremony with no invariant behind it, and `tools.md` already draws the line
+("pure product reads through typed query/facade contracts"). The split is
+CQRS-shaped: **commands are capability descriptors; reads are view
+descriptors over the read models/projections**, registered as data the same
+way. `query(view, params, cursor)` is the request/response half of the read
+side; `events(conv, cursor)` is the streaming half. Access is scope-checked
+at the view boundary; no dispatch pipeline, no idempotency record.
+
+### 5.2.3 What irreducibly stays as methods
+
+- **Turn lifecycle.** `submit_turn` cannot itself be a capability without
+  circularity — capabilities execute *inside* turns, and the coordinator owns
+  the active-lock and idempotency machinery that gives `submit` its meaning.
+  These six methods are frozen because the *turn model* is frozen (§11.1).
+- **Identity/session establishment** (SSO, pairing). An invocation cannot be
+  authorized before the actor is known; login lives below the
+  `AuthenticatedActor` boundary, in ingress (§5.8).
+- **Transport** (asset serving, SSE/WS framing) stays in the adapters.
+
+### 5.2.4 The honest cost: type safety moves from the compiler to descriptors
+
+~251 typed methods become descriptors + `Json` input — the compile-time
+contract becomes a runtime schema check. Per `.claude/rules/types.md` this is
+acceptable exactly when the `Json` is treated as a boundary format:
+
+- **Handlers deserialize into a typed request struct as their first act**
+  (identical to capability handlers today); no stringly-typed value crosses
+  into internal flow.
+- **The frontend contract is generated from descriptor schemas** (TS types
+  from the same source of truth), so wire and handler cannot drift.
+- **Every capability ships a conformance case** in the §11.7 harness:
+  allow/deny per origin, invalid input, idempotent replay.
+
+**Atomicity rule: one user gesture = one capability.** Compound operations
+(persist-then-reload, `.claude/rules/error-handling.md`) live *inside* one
+handler, which owns the transaction/rollback — a product never sequences two
+`invoke`s and hopes.
+
+### 5.2.5 Migration and ratchet (feeds §10)
+
+1. **Freeze the facade now.** Check in the current `RebornServicesApi` method
+   set as a set-membership allowlist in `ironclaw_architecture`; any *new*
+   facade method fails CI. New product features land as descriptors from day
+   one — the ratchet stops the bleeding before any migration happens.
+2. **Slice 1 is already decided:** the four synthetic tools (§13.3).
+3. **Then facade mutations, opportunistically** — settings first (simplest
+   handlers), each migration shrinking the allowlist monotonically. Every
+   migrated mutation gains audit, idempotency, redaction, and per-origin
+   policy for free, from the one pipeline.
+4. **Reads migrate to view descriptors separately and later** — lower risk,
+   lower value.
+5. **Definition of done:** the facade *is* this trait — six turn methods +
+   `invoke` + `query` — and the URT's Deletion/Addition tests (§5.9, §10)
+   pass over it.
+
+One further payoff: a WASM extension's capabilities become invocable from
+`Product` origin under the same descriptor policy — extension settings pages
+stop needing bespoke host wiring at all, which is the URT's adapter thesis
+(§5.9) arriving from the kernel side.
 
 ### 5.3 The kernel capability interface — authorize + dispatch
 
 ```rust
 // host_api vocabulary — the frozen kernel types (§4.5)
-struct Invocation { activity_id: ActivityId, capability: CapabilityId, input: Json, scope: Scope, actor: ActorId, estimate: Estimate }
+struct Invocation { activity_id: ActivityId, capability: CapabilityId, input: Json, scope: Scope, actor: ActorId, origin: InvocationOrigin, estimate: Estimate }
+enum   InvocationOrigin { LoopRun(TurnRunId), Product(ProductKind), Automation(RoutineId) }  // sealed per entry point (§5.2.1)
 struct Authorized { /* the Invocation bound to trust/approval/reservation/mounts — SEALED: private, built only by authorize() */ }
 enum   Blocked    { Approval(GateRef), Auth(GateRef), Resource(GateRef) }
 enum   HostFailure { Transient(ErrRef), Permanent(ErrRef) }
@@ -686,6 +823,11 @@ This is the loop's boundary; it is not the only one (§2). Below it, `dispatch` 
 to an **untrusted** `RuntimeLane` (§5.5) with mediated handles, and the `Outcome` it
 returns is **untrusted data** the host validates, bounds, and redacts before it reaches the
 loop or the model. The substrate ports below are where those other two boundaries live.
+
+`AgentLoopHost::invoke` has a product-side twin — `ProductSurface::invoke` (§5.2) — and
+both funnel into the same `authorize` + `dispatch` (§5.3), distinguished only by the
+sealed `InvocationOrigin` each membrane binds (§5.2.1). There is one capability pipeline,
+entered from two membranes.
 
 ### 5.5 Substrate interfaces — mechanism behind narrow ports
 
@@ -735,9 +877,10 @@ flowchart TD
     RL["Runtime lanes: Wasm · Script · Mcp · FirstParty"]
     CFG["DeploymentConfig (data)"]
 
-    P -->|ProductSurface| TC
+    P -->|ProductSurface: turns| TC
+    P -->|"invoke (Product origin)"| CAP
     TC -->|AgentLoopHost| L
-    L -->|invoke Invocation| CAP
+    L -->|"invoke (LoopRun origin)"| CAP
     CAP --> RL
     RL --> FS
     RL --> PS
@@ -748,10 +891,11 @@ flowchart TD
     CFG -. selects .-> FS
 ```
 
-Products enter through **one** interface (`ProductSurface`); loops reach effects
-through **one** membrane (`AgentLoopHost`) that funnels to `authorize`+`dispatch`;
-substrates are mechanism the kernel mediates; and `DeploymentConfig` (data) is the
-only thing that varies per deployment. The kernel box is the slow-moving part — it
+Products enter through **one** interface (`ProductSurface`): turn traffic goes to the
+coordinator, product mutations go straight to `authorize`+`dispatch` via `invoke` under
+`Product` origin (§5.2.1); loops reach effects through **one** membrane (`AgentLoopHost`)
+that funnels to the same `authorize`+`dispatch`; substrates are mechanism the kernel
+mediates; and `DeploymentConfig` (data) is the only thing that varies per deployment. The kernel box is the slow-moving part — it
 changes when the security/recovery model changes, never when a product or feature is
 added.
 
@@ -785,7 +929,10 @@ adapters (their deliver / auth side) or the kernel, not the assembler:
 - `composition/src/outbound/` (~1.8K) — delivery → the adapter's deliver path over the
   outbound port.
 - `composition/src/automation/` (~6.1K), `llm_admin/` (~8.5K) — these are *product
-  surfaces* (a triggers UI, an admin API); each is an adapter, not composition code.
+  operations*, not composition code: their mutations become origin-declared capability
+  descriptors + handlers and their reads become view descriptors (§5.2); what remains is a
+  thin frontend, not an adapter crate's worth of host code. Automation additionally stops
+  being a parallel dispatch path — routines invoke under `Automation` origin (§5.2.1).
 - `composition/src/runtime/` (~14.5K) — the `LocalDev*` capability wiring + synthetic
   capabilities (§4.4): promote the synthetic ops to first-party capabilities; the rest is
   config-gated middleware.
@@ -926,6 +1073,7 @@ plus a test that *proves* containment. That is the entire thesis in one incident
 | `LocalDev*` identifiers | ~66 across 42 files | 0 (one `DeploymentConfig` value) |
 | Deployment modes | struct family (`Local*`/`Hosted*`) | `DeploymentConfig` constants (data) |
 | `host_api` boundary | ~124 types incl. mode/policy | neutral authority vocab, frozen by test |
+| Product facade | ~251-method `RebornServicesApi` | turn lifecycle + `invoke`/`query` (8 methods); mutations are origin-declared descriptors (§5.2) |
 
 ---
 
@@ -1026,6 +1174,7 @@ type duplication in `scripts/check-type-duplicates.py`, cross-tenant behavior in
 | `Local*` types (§4.4) | no `Local` / `LocalDev` / `Hosted` / `Enterprise` in public type names | `ironclaw_architecture` | freeze the ~66-identifier allowlist; fail on any new one | allowlist empty |
 | `host_api` freeze (§4.5) | checked-in allowlist of public type names; `runtime_policy` mode enums absent from `host_api` | `ironclaw_architecture` | freeze the allowlist (set membership); a new type needs a justified allowlist entry | mode enums moved to the edge; only neutral authority vocab remains |
 | Products in composition (§5.8) | no `slack` / `webui` / `telegram` / `openai` / HTTP-route / transport identifier in `ironclaw_reborn_composition` | `ironclaw_architecture` | freeze the current product footprint; fail on new product/transport code landing in composition | composition is assembler-only; products are adapters + a `DeploymentConfig` list |
+| Product facade (§5.2) | `RebornServicesApi` method-set allowlist; every capability descriptor declares allowed origins | `ironclaw_architecture` | freeze the current ~251-method set (set membership); fail on any new method; fail on any descriptor without an explicit origin declaration | facade = turn lifecycle + `invoke`/`query`; all mutations are origin-declared descriptors |
 
 Each axis's "hard ban" column is also its **definition of done**: the migration slice for
 that axis is complete when its ratchet flips from a frozen allowlist to an empty one (or the
@@ -1144,7 +1293,9 @@ Each kernel interface (§5) ships a conformance suite every implementation must 
 adapter/loop/backend inherits correctness instead of re-deriving it:
 
 - **`ProductSurface`** — submit/observe/reply/gate/cancel semantics + idempotency, run against
-  every product adapter (§5.8).
+  every product adapter (§5.8); plus the `invoke`/`query` conduits (§5.2): per-origin
+  allow/deny, rejection of a descriptor with no origin declaration, and idempotent replay
+  of a product mutation.
 - **`AgentLoopHost`** — the trust membrane: a loop reaches effects only through it; direct
   dispatcher/secret/network access is a compile error (boundary test).
 - **`authorize` / `dispatch`** — authority-before-effect, redaction, fail-closed.
@@ -1285,7 +1436,9 @@ decorator gating and synthetic-capability promotion are settled here.**
   scope-binding/mounts for free — closing the scope-binding gap the synthetic handlers
   have (e.g. `result_read` / `outbound_delivery` must be user-scoped). The only
   pre-promotion check is that each descriptor declares the correct scope and defaults
-  hidden until reviewed for the hosted surface.
+  hidden until reviewed for the hosted surface. This promotion is **Slice 1 of the §5.2.5
+  facade migration**: the same descriptor + per-origin-policy shape then absorbs the
+  `RebornServicesApi` mutations one by one.
 
 **Genuinely remaining (tuning/ops, not architecture):** the lease-TTL latency multiplier
 `k` in `lease_ttl ≥ k × backend_p99_write` (§12), and the default `RootFilesystem` backend
@@ -1300,6 +1453,7 @@ knobs to calibrate against measured latency, not open architectural questions.
 - `docs/reborn/2026-05-11-trust-boundary-stack-note.md` — trust-boundary baseline invariants.
 - `docs/reborn/2026-04-25-storage-catalog-and-placement.md` — storage placement.
 - `crates/ironclaw_host_api/` — the neutral vocabulary crate (target home for `Invocation`/`Authorized`/`Outcome`); ~124 public types across 21 files (§4.5).
+- `crates/ironclaw_product_workflow/src/reborn_services.rs` — `RebornServicesApi`: the ~251-method proto-`ProductSurface` that §5.2's `invoke`/`query` conduits replace (methods → origin-declared capability descriptors + view descriptors).
 - `crates/ironclaw_host_api/src/runtime_policy.rs` — `DeploymentMode` / `RuntimeProfile`: the deployment-mode enums that leaked into the kernel vocabulary (§4.4–§4.5).
 - `crates/ironclaw_runtime_policy/` — `EffectiveRuntimePolicy`: the resolved policy *data* the kernel should consume instead of a mode enum.
 - `crates/ironclaw_filesystem/src/in_memory.rs` — `InMemoryBackend: RootFilesystem`: the existing seam that makes every `InMemory*Store` deletable (§4.3).
