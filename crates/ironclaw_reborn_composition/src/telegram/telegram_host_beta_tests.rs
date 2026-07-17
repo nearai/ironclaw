@@ -2,13 +2,16 @@ use std::sync::Arc;
 
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
-use ironclaw_host_api::{AgentId, TenantId, UserId};
+use chrono::Utc;
+use ironclaw_host_api::{AgentId, TenantId, ThreadId, UserId};
 use ironclaw_loop_host::{
     HostManagedModelError, HostManagedModelGateway, HostManagedModelRequest,
     HostManagedModelResponse,
 };
 use ironclaw_product_workflow::WebUiAuthenticatedCaller;
+use ironclaw_triggers::{TriggerFire, TriggerFireIdentity, TriggerId};
 use ironclaw_turns::run_profile::LoopCapabilityPort;
+use ironclaw_turns::{TurnRunId, TurnScope};
 use tower::ServiceExt;
 
 use super::*;
@@ -200,6 +203,62 @@ async fn build_telegram_host_runtime_mounts_wires_outbound_provider_and_trigger_
     let _mounts_again = build_telegram_host_runtime_mounts(&runtime, host_config())
         .await
         .expect("second mounts build for the same config is idempotent");
+
+    runtime.shutdown().await.expect("runtime shuts down");
+}
+
+#[tokio::test]
+async fn unconfigured_dynamic_trigger_hook_records_terminal_skipped_outcome() {
+    let (runtime, _root) = telegram_runtime_with(|input| {
+        input.with_trigger_poller_settings(
+            crate::TriggerPollerSettings::enabled_with_tenant_scoped_authorizer_for_test(),
+        )
+    })
+    .await;
+    let _mounts = build_telegram_host_runtime_mounts(&runtime, host_config())
+        .await
+        .expect("telegram host mounts build");
+    let hook = runtime
+        .trigger_post_submit_hook_for_test()
+        .expect("mounted Telegram hook");
+    let run_id = TurnRunId::new();
+    let tenant_id = TenantId::new(TENANT).expect("tenant");
+    let agent_id = AgentId::new(AGENT).expect("agent");
+    let owner = UserId::new(OPERATOR).expect("owner");
+    let fire = TriggerFire {
+        identity: TriggerFireIdentity::new(tenant_id.clone(), TriggerId::new(), Utc::now()),
+        creator_user_id: owner.clone(),
+        agent_id: Some(agent_id.clone()),
+        project_id: None,
+        prompt: "unconfigured Telegram delivery".to_string(),
+        delivery_target: None,
+    };
+    let scope = TurnScope::new_with_owner(
+        tenant_id,
+        Some(agent_id),
+        None,
+        ThreadId::new("telegram-unconfigured-trigger-thread").expect("thread"),
+        Some(owner),
+    );
+
+    hook.on_trigger_submitted(fire, run_id, scope)
+        .await
+        .expect("unconfigured hook persists terminal outcome");
+
+    let record = runtime
+        .services()
+        .local_runtime
+        .as_ref()
+        .expect("local runtime")
+        .triggered_run_delivery
+        .load_triggered_run_delivery(run_id)
+        .await
+        .expect("outcome lookup")
+        .expect("terminal outcome persisted");
+    assert_eq!(
+        record.outcome,
+        ironclaw_outbound::TriggeredRunDeliveryOutcomeKind::Skipped
+    );
 
     runtime.shutdown().await.expect("runtime shuts down");
 }

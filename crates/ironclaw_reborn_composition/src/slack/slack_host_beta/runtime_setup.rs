@@ -49,7 +49,9 @@ use crate::slack::slack_setup::{
     SlackInstallationSetup, SlackInstallationSetupStore, SlackInstallationSetupUpdate,
     SlackSetupService,
 };
-use ironclaw_channel_delivery::{PostSubmitDeliveryHook, TriggeredRunDeliveryDriver};
+use ironclaw_channel_delivery::{
+    PostSubmitDeliveryError, PostSubmitDeliveryHook, TriggeredRunDeliveryDriver,
+};
 use ironclaw_channel_host::identity::RebornUserIdentityLookup;
 
 use super::{
@@ -562,14 +564,23 @@ impl DynamicSlackTriggeredRunDeliveryHook {
 
 #[async_trait::async_trait]
 impl PostSubmitDeliveryHook for DynamicSlackTriggeredRunDeliveryHook {
-    async fn on_trigger_submitted(&self, fire: TriggerFire, run_id: TurnRunId, scope: TurnScope) {
+    async fn on_trigger_submitted(
+        &self,
+        fire: TriggerFire,
+        run_id: TurnRunId,
+        scope: TurnScope,
+    ) -> Result<(), PostSubmitDeliveryError> {
         match self.current_driver().await {
-            Ok(Some(driver)) => driver.on_trigger_submitted(fire, run_id, scope).await,
+            Ok(Some(driver)) => {
+                PostSubmitDeliveryHook::on_trigger_submitted(driver.as_ref(), fire, run_id, scope)
+                    .await
+            }
             Ok(None) => {
                 tracing::debug!(
                     %run_id,
                     "Slack dynamic triggered-run delivery skipped: Slack setup is not configured"
                 );
+                Ok(())
             }
             Err(error) => {
                 tracing::warn!(
@@ -577,6 +588,7 @@ impl PostSubmitDeliveryHook for DynamicSlackTriggeredRunDeliveryHook {
                     %error,
                     "Slack dynamic triggered-run delivery skipped: delivery hook unavailable"
                 );
+                Ok(())
             }
         }
     }

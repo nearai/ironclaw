@@ -22,6 +22,8 @@ use secrecy::{ExposeSecret, SecretString};
 use serde::Deserialize;
 use thiserror::Error;
 
+use crate::telegram_account_setup::TELEGRAM_EXTENSION_ID;
+
 pub const TELEGRAM_API_HOST: &str = "api.telegram.org";
 const TELEGRAM_BOT_TOKEN_PLACEHOLDER: &str = "telegram_bot_token";
 const TELEGRAM_EGRESS_CAPABILITY_ID: &str = "telegram.egress";
@@ -213,7 +215,7 @@ fn bot_api_request(
             reason: format!("invalid capability id: {error}"),
         }
     })?;
-    let extension_id = ExtensionId::new("ironclaw_telegram").map_err(|error| {
+    let extension_id = ExtensionId::new(TELEGRAM_EXTENSION_ID).map_err(|error| {
         TelegramBotApiError::Unavailable {
             reason: format!("invalid extension id: {error}"),
         }
@@ -329,6 +331,7 @@ mod tests {
         .expect("request builds");
 
         assert_eq!(request.request.method, NetworkMethod::Post);
+        assert_eq!(request.extension_id.as_str(), TELEGRAM_EXTENSION_ID);
         assert_eq!(
             request.request.url,
             "https://api.telegram.org/bot{telegram_bot_token}/setWebhook"

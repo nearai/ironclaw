@@ -72,7 +72,8 @@ pub use approval_interaction::{
     is_approval_gate_ref,
 };
 pub use approval_prompt::{
-    ApprovalPromptLookup, approval_prompt_context_view, approval_prompt_lookup,
+    ApprovalPromptLookup, ApprovalPromptLookupError, approval_prompt_context_view,
+    approval_prompt_lookup,
 };
 /// Concrete turn-gate resume dispatcher used by the Reborn composition crate to
 /// bridge product-auth continuations into the workflow-owned turn boundary.

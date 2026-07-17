@@ -317,6 +317,36 @@ test("TelegramSetupPanel keeps dirty fields during a background setup refetch", 
   assert.equal(state.values[0].webhook_url, "https://new.example.com");
 });
 
+test("TelegramSetupPanel adopts a newer setup status while the form is pristine", () => {
+  const state = { hookIndex: 0, mutationIndex: 0, values: {}, refs: {}, effectDeps: {} };
+  const { context } = setupContext(state);
+  const initialStatus = {
+    configured: true,
+    bot_username: "ironclaw_bot",
+    bot_token_configured: true,
+    webhook_url: "https://old.example.com",
+    revision: 4,
+  };
+
+  renderPanel(context, state, { data: initialStatus });
+  renderPanel(context, state, { data: initialStatus });
+  assert.equal(state.values[0].webhook_url, "https://old.example.com");
+
+  const newerStatus = {
+    ...initialStatus,
+    webhook_url: "https://new.example.com",
+    revision: 5,
+  };
+  renderPanel(context, state, { data: newerStatus });
+
+  assert.equal(
+    state.values[0].webhook_url,
+    "https://new.example.com",
+    "a clean form tracks the latest durable setup revision",
+  );
+  assert.equal(state.values[0].bot_token, "", "the write-only token remains blank");
+});
+
 test("TelegramSetupPanel clears the stale save-success note when a field is edited", () => {
   const state = { hookIndex: 0, mutationIndex: 0, values: {}, refs: {}, effectDeps: {} };
   const savedStatus = {

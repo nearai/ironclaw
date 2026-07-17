@@ -254,30 +254,49 @@ impl DynamicTelegramInstallationResolver {
         // lifecycle/drain ownership, not to hide setup-store I/O.
         // Only Ok(None) — genuinely unconfigured — is the 401 shape; a store
         // outage stays retryable (503) so Telegram redelivers on recovery.
-        let setup = self
-            .setup_service
-            .current_setup()
-            .await
-            .map_err(map_setup_error_to_ingress_unavailable(
-                "read Telegram setup",
-            ))?
-            .ok_or(TelegramIngressError::InstallationNotFound)?;
-        let revision = setup.revision;
-        if let Some(live) = self.live_for_revision(revision).await {
-            return Ok(live);
-        }
+        for _attempt in 0..4 {
+            let setup = self
+                .setup_service
+                .current_setup()
+                .await
+                .map_err(map_setup_error_to_ingress_unavailable(
+                    "read Telegram setup",
+                ))?
+                .ok_or(TelegramIngressError::InstallationNotFound)?;
+            let revision = setup.revision;
+            if let Some(live) = self.live_for_revision(revision).await {
+                return Ok(live);
+            }
 
-        let built = self.build_installation(setup).await?;
-        let mut lifecycle = self.lifecycle.lock().await;
-        if let Some(current) = &lifecycle.current
-            && current.revision == revision
-        {
-            return Ok(current.clone());
+            let built = self.build_installation(setup.clone()).await?;
+            // A slow revision-N build must never publish after revision N+1
+            // became authoritative. Both the verifier secret and workflow were
+            // built from `setup`; confirm that exact snapshot still wins.
+            if self
+                .setup_service
+                .current_setup()
+                .await
+                .map_err(map_setup_error_to_ingress_unavailable(
+                    "confirm Telegram setup revision",
+                ))?
+                .as_ref()
+                != Some(&setup)
+            {
+                continue;
+            }
+
+            let mut lifecycle = self.lifecycle.lock().await;
+            if let Some(current) = &lifecycle.current
+                && current.revision == revision
+            {
+                return Ok(current.clone());
+            }
+            if let Some(previous) = lifecycle.current.replace(built.clone()) {
+                lifecycle.retire(previous.dispatcher);
+            }
+            return Ok(built);
         }
-        if let Some(previous) = lifecycle.current.replace(built.clone()) {
-            lifecycle.retire(previous.dispatcher);
-        }
-        Ok(built)
+        Err(TelegramIngressError::TemporarilyUnavailable)
     }
 
     async fn live_for_revision(&self, revision: u64) -> Option<LiveTelegramInstallation> {
@@ -299,18 +318,13 @@ impl DynamicTelegramInstallationResolver {
                 .map_err(map_setup_error_to_ingress_unavailable(
                     "derive Telegram installation id",
                 ))?;
-        // `webhook_secret()` re-reads the current setup record; a save racing
-        // this build can pair revision N with the N+1 secret for the losing
-        // request. Failure mode is a 401 Telegram retries, and the cache
-        // re-keys on the next update, so the window self-heals.
         let webhook_secret = self
             .setup_service
-            .webhook_secret()
+            .webhook_secret_for_setup(&setup)
             .await
             .map_err(map_setup_error_to_ingress_unavailable(
                 "resolve Telegram webhook secret",
-            ))?
-            .ok_or(TelegramIngressError::InstallationNotFound)?;
+            ))?;
         let verifier = SharedSecretHeaderAuth {
             header_name: TELEGRAM_SECRET_TOKEN_HEADER.to_string(),
             expected_secret: webhook_secret.expose_secret().to_string(),

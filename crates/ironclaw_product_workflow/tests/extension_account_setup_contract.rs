@@ -1,3 +1,4 @@
+use std::error::Error as _;
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -149,9 +150,16 @@ async fn extension_account_setup_status_outage_is_sanitized() {
         .await
         .expect_err("status outages must not look disconnected");
 
-    assert_eq!(
-        error,
-        ExtensionAccountSetupError::StatusUnavailable { extension_id }
-    );
+    assert!(matches!(
+        &error,
+        ExtensionAccountSetupError::StatusUnavailable {
+            extension_id: actual_extension_id,
+            ..
+        } if actual_extension_id == &extension_id
+    ));
     assert!(!error.to_string().contains("backend diagnostic"));
+    assert_eq!(
+        error.source().map(ToString::to_string).as_deref(),
+        Some("account connection status read failed: backend diagnostic")
+    );
 }

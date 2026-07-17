@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex as StdMutex};
+use std::sync::{Arc, Barrier as StdBarrier, Mutex as StdMutex};
 use std::time::Duration;
 
 use axum::body::Body;
@@ -216,6 +216,7 @@ impl ImmediateAckWorkflowObserver for NoopObserver {
 #[derive(Default)]
 struct FakeRevisionWorkflowBuilder {
     counters: StdMutex<HashMap<String, Arc<AtomicUsize>>>,
+    next_build_barriers: StdMutex<Option<(Arc<StdBarrier>, Arc<StdBarrier>)>>,
     builds: AtomicUsize,
 }
 
@@ -233,6 +234,10 @@ impl FakeRevisionWorkflowBuilder {
     fn builds(&self) -> usize {
         self.builds.load(Ordering::SeqCst)
     }
+
+    fn hold_next_build(&self, entered: Arc<StdBarrier>, release: Arc<StdBarrier>) {
+        *self.next_build_barriers.lock().expect("build barrier lock") = Some((entered, release));
+    }
 }
 
 impl TelegramRevisionWorkflowBuilder for FakeRevisionWorkflowBuilder {
@@ -241,6 +246,15 @@ impl TelegramRevisionWorkflowBuilder for FakeRevisionWorkflowBuilder {
         setup: &TelegramInstallationSetup,
     ) -> Result<TelegramRevisionWorkflow, TelegramRevisionWorkflowBuildError> {
         self.builds.fetch_add(1, Ordering::SeqCst);
+        let barriers = self
+            .next_build_barriers
+            .lock()
+            .expect("build barrier lock")
+            .take();
+        if let Some((entered, release)) = barriers {
+            entered.wait();
+            release.wait();
+        }
         let installation_id = setup
             .installation_id()
             .map_err(|error| TelegramRevisionWorkflowBuildError::new(error.to_string()))?;
@@ -652,6 +666,80 @@ async fn telegram_updates_bot_swap_rekeys_workflow_and_rejects_old_secret() {
         fixture.revision_workflows.builds(),
         2,
         "one workflow assembly per setup revision"
+    );
+}
+
+/// A revision-N workflow build can be slower than an admin bot swap. The
+/// completed stale build must be discarded: it may neither replace revision
+/// N+1 nor combine N's installation identity with N+1's webhook secret.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn concurrent_bot_swap_discards_stale_revision_build_atomically() {
+    let fixture = dynamic_fixture(true).await;
+    let old_secret = fixture.webhook_secret.clone().expect("configured secret");
+    let entered = Arc::new(StdBarrier::new(2));
+    let release = Arc::new(StdBarrier::new(2));
+    fixture
+        .revision_workflows
+        .hold_next_build(Arc::clone(&entered), Arc::clone(&release));
+
+    let stale_state = fixture.state.clone();
+    let stale_request = tokio::spawn(async move {
+        post_to_state(
+            &stale_state,
+            String::from_utf8(private_text_update_body(42, 555, Some("stale build")))
+                .expect("utf8 body"),
+            vec![(TELEGRAM_SECRET_TOKEN_HEADER, old_secret)],
+        )
+        .await
+    });
+    tokio::task::spawn_blocking(move || entered.wait())
+        .await
+        .expect("stale build reaches barrier");
+
+    fixture.bot_api.set_bot_identity(7777, "other_qa_bot");
+    fixture
+        .setup
+        .save_with_previous(TelegramInstallationSetupUpdate {
+            bot_token: Some(SecretString::from("777:xyz".to_string())),
+            webhook_url_override: None,
+        })
+        .await
+        .expect("bot swap saves while old build is paused");
+    let new_secret = current_webhook_secret(&fixture.setup).await;
+    tokio::task::spawn_blocking(move || release.wait())
+        .await
+        .expect("stale build releases");
+
+    let stale_response = stale_request.await.expect("stale request joins");
+    assert_eq!(
+        stale_response.status(),
+        StatusCode::UNAUTHORIZED,
+        "the old secret must be checked against the new atomic revision after stale build discard"
+    );
+
+    let new_installation = AdapterInstallationId::new("tg-bot-7777").expect("valid id");
+    bind_paired_sender(&fixture.lookup, &new_installation, "42", "ben");
+    let current_response = post_to_state(
+        &fixture.state,
+        String::from_utf8(private_text_update_body(42, 555, Some("current build")))
+            .expect("utf8 body"),
+        vec![(TELEGRAM_SECRET_TOKEN_HEADER, new_secret)],
+    )
+    .await;
+    assert_eq!(current_response.status(), StatusCode::OK);
+    fixture.state.drain_immediate_ack_tasks().await;
+    assert_eq!(
+        fixture
+            .revision_workflows
+            .counter_for_installation(new_installation.as_str())
+            .load(Ordering::SeqCst),
+        1,
+        "only the current installation workflow may receive the post-swap update"
+    );
+    assert_eq!(
+        fixture.submitted.load(Ordering::SeqCst),
+        0,
+        "the stale workflow must never receive a verified update"
     );
 }
 

@@ -19,6 +19,52 @@
 - Touched production Telegram source files must contain fewer than 1,000 physical lines.
 - Do not rebase the PR, alter schemas/wire contracts, perform a full Unified Extension Runtime migration, or clean unrelated code.
 
+## Material Review-Closure Checklist
+
+This checklist is the acceptance record for the full CodeRabbit pass. An item
+is complete only when the production path and a meaningful caller/seam test are
+both present where the finding requires behavioral proof.
+
+- [x] Terminal delivery-honesty absence proof drains the runtime before its final assertion.
+- [x] Setup persistence uses bounded CAS with conflict and rollback-race coverage.
+- [x] Recorded Bot API requests fail loudly on malformed JSON.
+- [x] Account-status failures retain their internal cause while exposing sanitized copy.
+- [x] Auth-challenge tests assert every forwarded authority argument.
+- [x] Bot API mediation uses the canonical Telegram extension id.
+- [x] Unconfigured/broken dynamic trigger hooks persist terminal outcomes.
+- [x] Ingress builds identity, secret, adapter, and workflow from one atomic setup snapshot.
+- [x] Pairing codes are bound to the authenticated bot installation.
+- [x] Pairing continuation work is durable and retried from status polling.
+- [x] Unpair cleanup keeps durable metadata until actor and DM cleanup finish.
+- [x] Product connection status never exposes backend diagnostics.
+- [x] Pairing uses one validated `PairingCode` contract type.
+- [x] Clear and activation rollback use durable, restart-safe lifecycle intents.
+- [x] Binding mutation uses bounded CAS and compensates partial index failures.
+- [x] Per-user binding indexes preserve concurrent provider identities.
+- [ ] Pairing-code rotation and invalidation use bounded CAS rather than a
+      process-local lock, with stale code records non-authoritative.
+- [x] Trigger delivery tasks are bounded, lifecycle-owned, and drained on shutdown.
+- [x] Trigger outcome-store failures propagate to the managed task owner.
+- [x] Per-trigger target authority rejects same-scope target substitution.
+- [x] Approval-store outages remain actionable transient failures, not empty prompts.
+- [x] Architecture gates recognize visibility-qualified in-memory store declarations.
+- [x] Each channel owns a distinct notification projection namespace.
+- [x] Busy-hint dedup commits only after successful egress.
+- [x] Internal background-delivery diagnostics remain at debug level.
+- [x] Delivery requires provider-issued posted-message evidence.
+- [x] Webhook override precedence is documented and tested alongside the default path.
+- [x] Invalid multi-filter Cargo commands are split into runnable commands.
+- [x] CI documentation names the actual embedded frontend asset path.
+- [x] WebUI predecessor documentation names `ironclaw_webui_v2` correctly.
+- [x] Disconnect invalidates stale pairing polls before they can reconnect the UI.
+- [x] Setup UI adopts newer pristine server revisions without overwriting dirty edits.
+- [ ] Every review fix passes the necessity audit: a reachable production failure,
+      no existing simpler mechanism, no mirror DTO/local store, and no speculative
+      abstraction or persisted field.
+- [ ] Full local validation stack is green on the final diff.
+- [ ] GitHub CI is green on the pushed head.
+- [ ] Every review thread has an evidence-backed reply and is resolved.
+
 ## Locked File Structure
 
 ```text
@@ -181,7 +227,12 @@ Move the existing requirement-fallback and approval-context cases to module test
 
 - [x] **Step 2: Run the new focused tests and verify unresolved imports**
 
-Run: `cargo test -p ironclaw_product_workflow auth_prompt approval_prompt`
+Run:
+
+```bash
+cargo test -p ironclaw_product_workflow auth_prompt
+cargo test -p ironclaw_product_workflow approval_prompt
+```
 
 Expected: compilation fails because the new modules/exports do not exist.
 
@@ -194,7 +245,8 @@ Move the existing bodies without changing error mapping. Delete `BlockedAuthProm
 Run:
 
 ```bash
-cargo test -p ironclaw_product_workflow auth_prompt approval_prompt
+cargo test -p ironclaw_product_workflow auth_prompt
+cargo test -p ironclaw_product_workflow approval_prompt
 cargo test -p ironclaw_reborn_composition --features test-support,webui-v2-beta,slack-v2-host-beta,telegram-v2-host-beta,libsql --lib projection
 ```
 

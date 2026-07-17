@@ -233,7 +233,12 @@ impl TelegramInboundPreRouter {
     async fn handle_pairing_attempt(&self, code: &str, telegram_user_id: i64, chat_id: i64) {
         let reply = match self
             .pairing
-            .consume(code, &telegram_user_id.to_string(), chat_id)
+            .consume(
+                &self.installation_id,
+                code,
+                &telegram_user_id.to_string(),
+                chat_id,
+            )
             .await
         {
             Ok(PairingConsumeOutcome::Paired { .. }) => PAIRED_REPLY,

@@ -60,6 +60,9 @@ export function TelegramPairingPanel({ compact = false }) {
   const sawDisconnectedRef = React.useRef(false);
   const notifiedRef = React.useRef(false);
   const copiedTimerRef = React.useRef(null);
+  // Every disconnect advances this epoch before issuing DELETE. Polls capture
+  // the epoch they started in and may not publish a result from an older one.
+  const pairingEpochRef = React.useRef(0);
 
   const markConnected = () => {
     setConnected(true);
@@ -153,8 +156,10 @@ export function TelegramPairingPanel({ compact = false }) {
   React.useEffect(() => {
     if (connected) return undefined;
     const timer = setInterval(async () => {
+      const pairingEpoch = pairingEpochRef.current;
       try {
         const status = await getTelegramPairing();
+        if (pairingEpoch !== pairingEpochRef.current) return;
         if (status?.connected) {
           markConnected();
           return;
@@ -189,6 +194,9 @@ export function TelegramPairingPanel({ compact = false }) {
     if (isDisconnecting) return;
     setError("");
     setIsDisconnecting(true);
+    // Invalidate every poll that started before this disconnect. Its response
+    // describes the old pairing and must not reconnect the local UI.
+    pairingEpochRef.current += 1;
     try {
       await disconnectTelegramPairing();
       notifiedRef.current = false;

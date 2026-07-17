@@ -10,7 +10,8 @@ mod services;
 mod triggered;
 
 pub use hooks::{
-    CompositePostSubmitDeliveryHook, NoopPostSubmitDeliveryHook, PostSubmitDeliveryHook,
+    CompositePostSubmitDeliveryHook, NoopPostSubmitDeliveryHook, PostSubmitDeliveryError,
+    PostSubmitDeliveryHook,
 };
 pub use observer::FinalReplyDeliveryObserver;
 pub use services::{

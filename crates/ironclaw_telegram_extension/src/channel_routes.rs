@@ -260,6 +260,7 @@ impl From<crate::setup::TelegramSetupError> for TelegramRouteError {
                 // Admin-actionable outcomes: surface the sanitized message.
                 TelegramRouteError::UserFacing(error.to_string())
             }
+            E::ConcurrentUpdate => TelegramRouteError::UserFacing(error.to_string()),
             E::StoreUnavailable | E::SecretStoreUnavailable { .. } => {
                 TelegramRouteError::Unavailable
             }
@@ -273,6 +274,9 @@ impl From<TelegramPairingError> for TelegramRouteError {
             TelegramPairingError::NotConfigured => TelegramRouteError::UserFacing(
                 "an administrator must configure the Telegram bot first".to_string(),
             ),
+            TelegramPairingError::ConcurrentUpdate => {
+                TelegramRouteError::UserFacing(error.to_string())
+            }
             TelegramPairingError::StoreUnavailable { .. }
             | TelegramPairingError::Setup { .. }
             | TelegramPairingError::ContinuationDispatch { .. } => TelegramRouteError::Unavailable,

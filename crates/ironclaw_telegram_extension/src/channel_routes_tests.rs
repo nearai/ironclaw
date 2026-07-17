@@ -42,7 +42,7 @@ fn pending_pairing_status_json_matches_the_existing_route_contract() {
         serde_json::to_value(TelegramPairingStatus {
             connected: false,
             pending: Some(PairingIssue {
-                code: "ABCD2345".to_string(),
+                code: crate::pairing::PairingCode::parse("ABCD2345").expect("pairing code"),
                 deep_link: "https://t.me/ironclaw_qa_bot?start=ABCD2345".to_string(),
                 expires_at,
             }),
@@ -343,6 +343,13 @@ async fn save_setup_rolls_back_when_activation_fails() {
 #[tokio::test]
 async fn disconnect_pairing_unpairs_only_the_caller() {
     let (setup, pairing) = configured_services().await;
+    let installation_id = setup
+        .current_setup()
+        .await
+        .expect("setup read")
+        .expect("configured")
+        .installation_id()
+        .expect("installation id");
 
     // Pair two members through the real pairing service.
     for (member, tg_user) in [("member-1", 1001_i64), ("member-2", 1002_i64)] {
@@ -351,7 +358,7 @@ async fn disconnect_pairing_unpairs_only_the_caller() {
             .await
             .expect("issue");
         pairing
-            .consume(&issue.code, &tg_user.to_string(), tg_user)
+            .consume(&installation_id, &issue.code, &tg_user.to_string(), tg_user)
             .await
             .expect("consume");
     }

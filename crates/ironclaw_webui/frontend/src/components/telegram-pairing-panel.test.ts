@@ -410,6 +410,70 @@ test("TelegramPairingPanel disconnect DELETEs the pairing then mints a fresh cod
   assert.ok(JSON.stringify(repairView).includes("TG-PAIR-77"), "a fresh code renders for re-pairing");
 });
 
+test("TelegramPairingPanel ignores an old pairing poll that resolves after disconnect", async () => {
+  let resolveStalePoll;
+  const stalePoll = new Promise((resolve) => {
+    resolveStalePoll = resolve;
+  });
+  const harness = createPanelHarness({
+    pairingResponses: [
+      {
+        connected: false,
+        pending: {
+          code: "TG-PAIR-42",
+          deep_link: "https://t.me/ironclaw_bot?start=TG-PAIR-42",
+          expires_at: LIVE_EXPIRES_AT,
+        },
+      },
+      { connected: true, pending: null },
+      stalePoll,
+    ],
+    startResponses: [
+      {
+        code: "TG-PAIR-88",
+        deep_link: "https://t.me/ironclaw_bot?start=TG-PAIR-88",
+        expires_at: LIVE_EXPIRES_AT,
+      },
+    ],
+    qrResults: ["data:image/png;base64,QR1", "data:image/png;base64,QR2"],
+  });
+
+  harness.render();
+  await tick();
+  harness.render();
+  await tick();
+  harness.render();
+
+  // Model overlapping interval callbacks: the first observes connection while
+  // the second remains in flight with a snapshot from the same pairing epoch.
+  const connectionPoll = harness.fireTimers(2000);
+  const oldInFlightPoll = harness.fireTimers(2000);
+  await connectionPoll;
+  const connectedView = harness.render();
+  assert.ok(JSON.stringify(connectedView).includes("telegramPairing.paired"));
+
+  await valuesAfter(connectedView, "onClick=")[0]();
+  harness.render();
+  await tick();
+  let disconnectedView = harness.render();
+  assert.ok(JSON.stringify(disconnectedView).includes("TG-PAIR-88"));
+
+  resolveStalePoll({ connected: true, pending: null });
+  await oldInFlightPoll;
+  disconnectedView = harness.render();
+
+  assert.ok(
+    !JSON.stringify(disconnectedView).includes("telegramPairing.paired"),
+    "the pre-disconnect poll cannot restore the old connected state",
+  );
+  assert.ok(JSON.stringify(disconnectedView).includes("TG-PAIR-88"));
+  assert.equal(
+    harness.notifyCalls.length,
+    1,
+    "the stale poll does not broadcast a second connection event",
+  );
+});
+
 test("TelegramPairingPanel reports a failed mint after a successful disconnect as a load error, not a failed disconnect", async () => {
   const harness = createPanelHarness({
     pairingResponses: [{ connected: true, pending: null }],

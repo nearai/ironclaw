@@ -2414,9 +2414,13 @@ fn map_account_setup_error(error: ExtensionAccountSetupError) -> ProductWorkflow
                 ),
             }
         }
-        ExtensionAccountSetupError::StatusUnavailable { extension_id } => {
+        ExtensionAccountSetupError::StatusUnavailable {
+            extension_id,
+            source,
+        } => {
             tracing::debug!(
                 extension_id = %extension_id,
+                error = %source,
                 "extension account connection status read failed during activation"
             );
             ProductWorkflowError::Transient {

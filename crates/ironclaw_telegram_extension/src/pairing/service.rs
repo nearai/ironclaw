@@ -23,9 +23,8 @@ use ironclaw_channel_host::auth_continuation::RebornAuthContinuationDispatcher;
 
 use super::code::{mint_pairing_code, pairing_issue};
 use super::{
-    PAIRING_CODE_ALPHABET, PAIRING_CODE_LEN, PAIRING_TTL_MINUTES, PairingConsumeOutcome,
-    PairingIssue, TelegramBindingError, TelegramDmTarget, TelegramPairingError,
-    TelegramPairingRecord, TelegramPairingStatus,
+    PAIRING_TTL_MINUTES, PairingCode, PairingConsumeOutcome, PairingIssue, TelegramBindingError,
+    TelegramDmTarget, TelegramPairingError, TelegramPairingRecord, TelegramPairingStatus,
 };
 
 pub struct TelegramPairingService {
@@ -108,6 +107,14 @@ impl TelegramPairingService {
                 let installation_id = setup
                     .installation_id()
                     .map_err(TelegramPairingError::from)?;
+                if let Some(chat_id) = self
+                    .state
+                    .pending_pairing_completion_chat(&installation_id, caller)
+                    .await?
+                {
+                    self.finish_pending_pairing_completion(&installation_id, caller, chat_id)
+                        .await?;
+                }
                 self.state
                     .dm_target_for_user(&installation_id, caller)
                     .await?
@@ -120,7 +127,12 @@ impl TelegramPairingService {
                 .state
                 .live_pairing_for_user(caller)
                 .await?
-                .filter(|record| record.is_live(Utc::now()))
+                .filter(|record| {
+                    record.is_live(Utc::now())
+                        && setup
+                            .installation_id()
+                            .is_ok_and(|current| current == record.installation_id)
+                })
                 .map(|record| pairing_issue(&record, &setup.bot_username)),
             _ => None,
         };
@@ -138,21 +150,20 @@ impl TelegramPairingService {
     /// recovered by re-sending a code instead of stranding the blocked run.
     pub async fn consume(
         &self,
+        authenticated_installation_id: &AdapterInstallationId,
         raw_code: &str,
         telegram_user_id: &str,
         chat_id: i64,
     ) -> Result<PairingConsumeOutcome, TelegramPairingError> {
-        let code = raw_code.trim().to_ascii_uppercase();
-        if code.len() != PAIRING_CODE_LEN
-            || !code
-                .bytes()
-                .all(|byte| PAIRING_CODE_ALPHABET.contains(&byte))
-        {
+        let Ok(code) = PairingCode::parse(raw_code) else {
             return Ok(PairingConsumeOutcome::ExpiredOrUnknown);
-        }
+        };
         let Some(record) = self.state.pairing_for_code(&code).await? else {
             return Ok(PairingConsumeOutcome::ExpiredOrUnknown);
         };
+        if &record.installation_id != authenticated_installation_id {
+            return Ok(PairingConsumeOutcome::ExpiredOrUnknown);
+        }
         let provider_user_id =
             telegram_user_identity_provider_user_id(&record.installation_id, telegram_user_id);
         match self.state.bound_user_for(&provider_user_id).await {
@@ -213,16 +224,36 @@ impl TelegramPairingService {
         record: &TelegramPairingRecord,
         chat_id: i64,
     ) -> Result<(), TelegramPairingError> {
+        // Persist the continuation work before exposing the DM target as
+        // connected. Status polling retries this outbox entry after a failed
+        // dispatch or process restart; the user never needs to resend a
+        // consumed code to unstrand the blocked run.
+        self.state
+            .persist_pairing_completion(&record.installation_id, &record.user_id, chat_id)
+            .await?;
+        self.finish_pending_pairing_completion(&record.installation_id, &record.user_id, chat_id)
+            .await
+    }
+
+    async fn finish_pending_pairing_completion(
+        &self,
+        installation_id: &AdapterInstallationId,
+        user_id: &UserId,
+        chat_id: i64,
+    ) -> Result<(), TelegramPairingError> {
+        self.dispatch_pairing_completion(user_id).await?;
         self.state
             .upsert_dm_target(
-                &record.installation_id,
+                installation_id,
                 TelegramDmTarget {
-                    user_id: record.user_id.clone(),
+                    user_id: user_id.clone(),
                     chat_id,
                 },
             )
             .await?;
-        self.dispatch_pairing_completion(&record.user_id).await
+        self.state
+            .finish_pairing_completion(installation_id, user_id, chat_id)
+            .await
     }
 
     /// Unpair the caller: bindings + DM targets removed, pending code
@@ -251,12 +282,15 @@ impl TelegramPairingService {
             .map_err(|error| TelegramPairingError::StoreUnavailable {
                 reason: format!("telegram adapter kind invalid: {error}"),
             })?;
+        let mut installations = BTreeSet::new();
+        let mut actor_cleanups = Vec::new();
         for removed_binding in &removed {
-            let Some((installation, telegram_user_id)) =
-                removed_binding.provider_user_id.split_once(':')
-            else {
-                continue;
-            };
+            let (installation, telegram_user_id) = removed_binding
+                .provider_user_id
+                .split_once(':')
+                .ok_or_else(|| TelegramPairingError::StoreUnavailable {
+                    reason: "stored telegram binding identity is malformed".to_string(),
+                })?;
             let installation_id = ironclaw_conversations::AdapterInstallationId::new(installation)
                 .map_err(|error| TelegramPairingError::StoreUnavailable {
                     reason: format!("stored telegram binding installation invalid: {error}"),
@@ -268,34 +302,17 @@ impl TelegramPairingService {
             .map_err(|error| TelegramPairingError::StoreUnavailable {
                 reason: format!("stored telegram binding actor invalid: {error}"),
             })?;
-            self.conversation_actor_pairings
-                .unpair_external_actor_if_owned_by(
-                    &self.tenant_id,
-                    &adapter_kind,
-                    &installation_id,
-                    &actor_ref,
-                    &ExpectedExternalActorOwner {
-                        user_id: caller.clone(),
-                        binding_epoch: removed_binding
-                            .epoch
-                            .clone()
-                            .map(ExternalActorBindingEpoch::new)
-                            .transpose()
-                            .map_err(|error| TelegramPairingError::StoreUnavailable {
-                                reason: format!("stored telegram binding epoch invalid: {error}"),
-                            })?,
-                    },
-                )
-                .await
+            let binding_epoch = removed_binding
+                .epoch
+                .clone()
+                .map(ExternalActorBindingEpoch::new)
+                .transpose()
                 .map_err(|error| TelegramPairingError::StoreUnavailable {
-                    reason: error.to_string(),
+                    reason: format!("stored telegram binding epoch invalid: {error}"),
                 })?;
+            installations.insert(installation.to_string());
+            actor_cleanups.push((installation_id, actor_ref, binding_epoch));
         }
-        let mut installations: BTreeSet<String> = removed
-            .iter()
-            .filter_map(|binding| binding.provider_user_id.split_once(':'))
-            .map(|(installation, _)| installation.to_string())
-            .collect();
         if let Some(setup) = self.setup.current_setup().await? {
             installations.insert(
                 setup
@@ -305,6 +322,10 @@ impl TelegramPairingService {
                     .to_string(),
             );
         }
+        // Remove delivery authority before cleanup that can fail. Bindings are
+        // already inactive, and deleting every derived DM target makes the
+        // user observably disconnected while durable actor-cleanup metadata is
+        // retained for retry.
         for installation in installations {
             let installation_id = AdapterInstallationId::new(installation).map_err(|error| {
                 TelegramPairingError::StoreUnavailable {
@@ -315,6 +336,35 @@ impl TelegramPairingService {
                 .delete_dm_target_for_user(&installation_id, caller)
                 .await?;
         }
+        for (installation_id, actor_ref, binding_epoch) in actor_cleanups {
+            self.conversation_actor_pairings
+                .unpair_external_actor_if_owned_by(
+                    &self.tenant_id,
+                    &adapter_kind,
+                    &installation_id,
+                    &actor_ref,
+                    &ExpectedExternalActorOwner {
+                        user_id: caller.clone(),
+                        binding_epoch,
+                    },
+                )
+                .await
+                .map_err(|error| TelegramPairingError::StoreUnavailable {
+                    reason: error.to_string(),
+                })?;
+        }
+        self.state
+            .finalize_unbound_telegram_users_for_user(
+                caller,
+                &removed
+                    .iter()
+                    .map(|binding| binding.provider_user_id.clone())
+                    .collect::<Vec<_>>(),
+            )
+            .await
+            .map_err(|error| TelegramPairingError::StoreUnavailable {
+                reason: error.to_string(),
+            })?;
         Ok(())
     }
 
@@ -370,7 +420,14 @@ impl ironclaw_product_workflow::AccountConnectionStatusSource for TelegramPairin
         user_id: &UserId,
     ) -> Result<bool, ironclaw_product_workflow::AccountConnectionStatusError> {
         let status = self.status_for(user_id).await.map_err(|error| {
-            ironclaw_product_workflow::AccountConnectionStatusError::new(error.to_string())
+            tracing::debug!(
+                target: "ironclaw::reborn::telegram",
+                error = %error,
+                "telegram pairing status lookup failed"
+            );
+            ironclaw_product_workflow::AccountConnectionStatusError::new(
+                "telegram pairing status unavailable",
+            )
         })?;
         Ok(status.connected)
     }

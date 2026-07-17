@@ -12,6 +12,7 @@ pub(crate) mod pairing_test_support {
     #[derive(Default)]
     pub(crate) struct RecordingActorPairings {
         pub(crate) conditional_unpairs: Mutex<Vec<(String, String, String)>>,
+        pub(crate) fail_unpairs_remaining: std::sync::atomic::AtomicUsize,
     }
 
     impl RecordingActorPairings {
@@ -63,6 +64,19 @@ pub(crate) mod pairing_test_support {
             external_actor_ref: &ExternalActorRef,
             expected: &ExpectedExternalActorOwner,
         ) -> Result<ConditionalUnpairOutcome, InboundTurnError> {
+            if self
+                .fail_unpairs_remaining
+                .fetch_update(
+                    std::sync::atomic::Ordering::SeqCst,
+                    std::sync::atomic::Ordering::SeqCst,
+                    |remaining| remaining.checked_sub(1),
+                )
+                .is_ok()
+            {
+                return Err(InboundTurnError::DurableState {
+                    reason: "injected actor cleanup failure".to_string(),
+                });
+            }
             self.conditional_unpairs
                 .lock()
                 .expect("recording lock")
@@ -132,6 +146,7 @@ impl RebornAuthContinuationDispatcher for RecordingDispatcher {
 
 struct Fixture {
     service: TelegramPairingService,
+    installation_id: AdapterInstallationId,
     dispatcher: Arc<RecordingDispatcher>,
     state: Arc<FilesystemTelegramHostState>,
     setup: Arc<TelegramSetupService>,
@@ -188,6 +203,7 @@ async fn fixture_with_state(
     );
     Fixture {
         service,
+        installation_id: AdapterInstallationId::new("tg-bot-777").expect("installation"),
         dispatcher,
         state,
         setup,
@@ -248,13 +264,13 @@ async fn reissue_rotates_and_kills_the_old_code() {
     assert_ne!(first.code, second.code);
     let outcome = fixture
         .service
-        .consume(&first.code, "tg-1", 100)
+        .consume(&fixture.installation_id, &first.code, "tg-1", 100)
         .await
         .expect("consume old");
     assert_eq!(outcome, PairingConsumeOutcome::ExpiredOrUnknown);
     let outcome = fixture
         .service
-        .consume(&second.code, "tg-1", 100)
+        .consume(&fixture.installation_id, &second.code, "tg-1", 100)
         .await
         .expect("consume new");
     assert!(matches!(outcome, PairingConsumeOutcome::Paired { .. }));
@@ -267,7 +283,12 @@ async fn consume_happy_path_binds_targets_and_dispatches() {
     let issue = fixture.service.issue_or_rotate(&ben).await.expect("issue");
     let outcome = fixture
         .service
-        .consume(&issue.code.to_ascii_lowercase(), "tg-100", 555)
+        .consume(
+            &fixture.installation_id,
+            &issue.code.to_ascii_lowercase(),
+            "tg-100",
+            555,
+        )
         .await
         .expect("consume");
     assert_eq!(
@@ -292,7 +313,7 @@ async fn consume_happy_path_binds_targets_and_dispatches() {
 
     let replay = fixture
         .service
-        .consume(&issue.code, "tg-other", 556)
+        .consume(&fixture.installation_id, &issue.code, "tg-other", 556)
         .await
         .expect("replay");
     assert_eq!(
@@ -308,12 +329,54 @@ async fn consume_unknown_or_malformed_never_dispatches() {
     for code in ["NOPE1234", "short", "!!!!!!!!"] {
         let outcome = fixture
             .service
-            .consume(code, "tg-1", 1)
+            .consume(&fixture.installation_id, code, "tg-1", 1)
             .await
             .expect("consume");
         assert_eq!(outcome, PairingConsumeOutcome::ExpiredOrUnknown);
     }
     assert!(fixture.dispatcher.events.lock().expect("lock").is_empty());
+}
+
+#[tokio::test]
+async fn bot_swap_cannot_consume_or_project_a_stale_installation_code() {
+    let fixture = fixture(true).await;
+    let ben = user("ben");
+    let issue = fixture.service.issue_or_rotate(&ben).await.expect("issue");
+    let mut swapped = fixture
+        .setup
+        .current_setup()
+        .await
+        .expect("setup read")
+        .expect("configured");
+    swapped.bot_id = 888;
+    swapped.bot_username = "ironclaw_new_bot".to_string();
+    swapped.revision += 1;
+    swapped.updated_at = Utc::now();
+    fixture
+        .state
+        .put_telegram_installation_setup(&swapped)
+        .await
+        .expect("bot swap persists");
+    let new_installation = swapped.installation_id().expect("installation id");
+
+    assert_eq!(
+        fixture
+            .service
+            .consume(&new_installation, &issue.code, "tg-1", 1)
+            .await
+            .expect("stale code is handled"),
+        PairingConsumeOutcome::ExpiredOrUnknown,
+    );
+    assert!(
+        fixture
+            .service
+            .status_for(&ben)
+            .await
+            .expect("status")
+            .pending
+            .is_none(),
+        "the new bot must not deep-link a pending code minted for the old installation"
+    );
 }
 
 #[tokio::test]
@@ -324,7 +387,7 @@ async fn telegram_account_bound_to_other_user_is_refused() {
     let ben_issue = fixture.service.issue_or_rotate(&ben).await.expect("issue");
     fixture
         .service
-        .consume(&ben_issue.code, "tg-shared", 1)
+        .consume(&fixture.installation_id, &ben_issue.code, "tg-shared", 1)
         .await
         .expect("ben pairs");
     let illia_issue = fixture
@@ -334,7 +397,7 @@ async fn telegram_account_bound_to_other_user_is_refused() {
         .expect("issue");
     let outcome = fixture
         .service
-        .consume(&illia_issue.code, "tg-shared", 2)
+        .consume(&fixture.installation_id, &illia_issue.code, "tg-shared", 2)
         .await
         .expect("consume");
     assert_eq!(outcome, PairingConsumeOutcome::AlreadyBoundToOtherUser);
@@ -349,13 +412,13 @@ async fn same_user_re_pair_is_idempotent() {
     let first = fixture.service.issue_or_rotate(&ben).await.expect("issue");
     fixture
         .service
-        .consume(&first.code, "tg-100", 1)
+        .consume(&fixture.installation_id, &first.code, "tg-100", 1)
         .await
         .expect("pair");
     let second = fixture.service.issue_or_rotate(&ben).await.expect("issue");
     let outcome = fixture
         .service
-        .consume(&second.code, "tg-100", 1)
+        .consume(&fixture.installation_id, &second.code, "tg-100", 1)
         .await
         .expect("re-pair");
     assert_eq!(
@@ -377,8 +440,12 @@ async fn concurrent_consume_of_one_code_binds_exactly_one_winner() {
     filesystem.hold_next_reads_at(2, Arc::new(tokio::sync::Barrier::new(2)));
 
     let (first, second) = tokio::join!(
-        fixture.service.consume(&issue.code, "tg-attacker", 111),
-        fixture.service.consume(&issue.code, "tg-victim", 222),
+        fixture
+            .service
+            .consume(&fixture.installation_id, &issue.code, "tg-attacker", 111,),
+        fixture
+            .service
+            .consume(&fixture.installation_id, &issue.code, "tg-victim", 222,),
     );
     let outcomes = [first.expect("consume"), second.expect("consume")];
 
@@ -423,11 +490,10 @@ async fn concurrent_consume_of_one_code_binds_exactly_one_winner() {
 }
 
 /// A continuation dispatch that fails after the code was claimed must not
-/// strand the blocked run: re-sending the (already consumed) code from the
-/// now-bound account repairs completion — DM target upserted and the
-/// continuation dispatched.
+/// strand the blocked run: the WebUI's existing status poll drains the durable
+/// completion record — no consumed-code resend is required.
 #[tokio::test]
-async fn resend_after_failed_continuation_dispatch_repairs_completion() {
+async fn status_poll_retries_durable_completion_after_dispatch_failure() {
     let fixture = fixture_with_state(
         true,
         telegram_state(),
@@ -439,7 +505,7 @@ async fn resend_after_failed_continuation_dispatch_repairs_completion() {
 
     let error = fixture
         .service
-        .consume(&issue.code, "tg-100", 555)
+        .consume(&fixture.installation_id, &issue.code, "tg-100", 555)
         .await
         .expect_err("first consume surfaces the dispatch failure");
     assert!(matches!(
@@ -451,22 +517,15 @@ async fn resend_after_failed_continuation_dispatch_repairs_completion() {
         "failed dispatch recorded no continuation"
     );
 
-    let outcome = fixture
+    let status = fixture
         .service
-        .consume(&issue.code, "tg-100", 555)
+        .status_for(&ben)
         .await
-        .expect("resend repairs");
-    assert_eq!(
-        outcome,
-        PairingConsumeOutcome::AlreadyPairedSameUser {
-            user_id: ben.clone()
-        }
-    );
+        .expect("status poll repairs pending completion");
+    assert!(status.connected, "completion retry publishes the DM target");
     let events = fixture.dispatcher.events.lock().expect("lock").clone();
     assert_eq!(events.len(), 1, "repair re-dispatches the continuation");
     assert_eq!(events[0].scope.resource.user_id, ben);
-    let status = fixture.service.status_for(&ben).await.expect("status");
-    assert!(status.connected, "DM target present after repair");
 }
 
 #[tokio::test]
@@ -476,7 +535,7 @@ async fn unpair_removes_binding_target_and_pending_code() {
     let issue = fixture.service.issue_or_rotate(&ben).await.expect("issue");
     fixture
         .service
-        .consume(&issue.code, "tg-100", 1)
+        .consume(&fixture.installation_id, &issue.code, "tg-100", 1)
         .await
         .expect("pair");
     fixture.service.unpair(&ben).await.expect("unpair");
@@ -485,7 +544,7 @@ async fn unpair_removes_binding_target_and_pending_code() {
     let fresh = fixture.service.issue_or_rotate(&ben).await.expect("issue");
     let outcome = fixture
         .service
-        .consume(&fresh.code, "tg-100", 1)
+        .consume(&fixture.installation_id, &fresh.code, "tg-100", 1)
         .await
         .expect("re-pair after unpair");
     assert!(matches!(outcome, PairingConsumeOutcome::Paired { .. }));
@@ -508,6 +567,64 @@ async fn unpair_removes_binding_target_and_pending_code() {
     drop(fixture.setup);
 }
 
+#[tokio::test]
+async fn unpair_retries_actor_cleanup_from_durable_binding_metadata() {
+    let fixture = fixture(true).await;
+    let ben = user("ben");
+    let issue = fixture.service.issue_or_rotate(&ben).await.expect("issue");
+    fixture
+        .service
+        .consume(&fixture.installation_id, &issue.code, "tg-100", 1)
+        .await
+        .expect("pair");
+    fixture
+        .actor_pairings
+        .fail_unpairs_remaining
+        .store(1, std::sync::atomic::Ordering::SeqCst);
+
+    assert!(
+        fixture.service.unpair(&ben).await.is_err(),
+        "the injected actor cleanup failure is surfaced"
+    );
+    assert!(
+        fixture
+            .state
+            .bound_user_for(&telegram_user_identity_provider_user_id(
+                &fixture.installation_id,
+                "tg-100",
+            ))
+            .await
+            .expect("binding lookup")
+            .is_none(),
+        "the inactive binding already fails closed"
+    );
+    assert!(
+        fixture
+            .state
+            .dm_target_for_user(&fixture.installation_id, &ben)
+            .await
+            .expect("DM target lookup")
+            .is_none(),
+        "delivery authority is removed before retryable actor cleanup"
+    );
+
+    fixture
+        .service
+        .unpair(&ben)
+        .await
+        .expect("retry reconstructs and completes actor cleanup");
+    assert_eq!(
+        fixture
+            .actor_pairings
+            .conditional_unpairs
+            .lock()
+            .expect("recording lock")
+            .len(),
+        1,
+        "the retained index and epoch make cleanup retryable"
+    );
+}
+
 /// Unpair must not depend on the current bot setup: after an admin clears
 /// the deployment, a user's disconnect still removes their durable
 /// binding — reconfiguring the same bot must not silently resurrect the
@@ -519,7 +636,7 @@ async fn unpair_after_admin_cleared_setup_still_removes_the_binding() {
     let issue = fixture.service.issue_or_rotate(&ben).await.expect("issue");
     fixture
         .service
-        .consume(&issue.code, "tg-100", 1)
+        .consume(&fixture.installation_id, &issue.code, "tg-100", 1)
         .await
         .expect("pair");
 

@@ -334,7 +334,7 @@ impl FinalReplyDeliveryObserver {
                     &binding.actor_user_id,
                     scope,
                 )
-                .await;
+                .await?;
                 ChannelActionableNotification {
                     event_kind: RunNotificationEventKind::ApprovalNeeded,
                     payload: ProductOutboundPayload::GatePrompt(channel_approval_gate_prompt_view(
@@ -477,7 +477,11 @@ impl FinalReplyDeliveryObserver {
             &projection_access_policy,
             &target_authority,
         );
-        let projection_id = channel_run_notification_projection_id(run_id, event_kind);
+        let projection_id = channel_run_notification_projection_id(
+            self.services.channel_protocol.as_ref(),
+            run_id,
+            event_kind,
+        );
         let projection_ref = ProjectionUpdateRef::new(projection_id.clone())
             .map_err(|reason| FinalReplyDeliveryError::InvalidProjectionRef { reason })?;
         let delivery = ironclaw_outbound::PrepareCommunicationDeliveryRequest {
@@ -520,7 +524,11 @@ impl FinalReplyDeliveryObserver {
             },
         )
         .await?;
-        Ok(tracked_egress.take_posted_messages())
+        let posted_messages = tracked_egress.take_posted_messages();
+        if posted_messages.is_empty() {
+            return Err(FinalReplyDeliveryError::DeliveryEvidenceMissing { run_id });
+        }
+        Ok(posted_messages)
     }
 
     async fn wait_for_actionable(
@@ -595,7 +603,7 @@ impl FinalReplyDeliveryObserver {
         {
             Ok(message) => Some(message),
             Err(error) => {
-                tracing::warn!(
+                tracing::debug!(
                     target = "ironclaw::reborn::channel_delivery",
                     error = %error,
                     "failed to post Slack working indicator"

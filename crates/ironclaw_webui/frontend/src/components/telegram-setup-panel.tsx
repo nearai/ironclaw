@@ -35,15 +35,17 @@ export function TelegramSetupPanel({ action, setupQuery }) {
   const t = useT();
   const queryClient = useQueryClient();
   const [form, setForm] = React.useState(emptyForm());
-  const initializedRef = React.useRef(false);
+  const adoptedRevisionRef = React.useRef(-1);
   const dirtyRef = React.useRef(false);
   const status = setupQuery.data;
   const copy = telegramSetupCopy(action, t);
 
   React.useEffect(() => {
-    if (!status || initializedRef.current || dirtyRef.current) return;
+    if (!status || dirtyRef.current) return;
+    const revision = setupStatusRevision(status);
+    if (revision < adoptedRevisionRef.current) return;
     setForm(formFromStatus(status));
-    initializedRef.current = true;
+    adoptedRevisionRef.current = revision;
   }, [status]);
 
   const refreshConnectionQueries = () => {
@@ -57,7 +59,7 @@ export function TelegramSetupPanel({ action, setupQuery }) {
     onSuccess: (data) => {
       dirtyRef.current = false;
       setForm(formFromStatus(data));
-      initializedRef.current = true;
+      adoptedRevisionRef.current = setupStatusRevision(data);
       queryClient.setQueryData(QUERY_KEY, data);
       refreshConnectionQueries();
     },
@@ -68,7 +70,7 @@ export function TelegramSetupPanel({ action, setupQuery }) {
     onSuccess: () => {
       dirtyRef.current = false;
       // Let the refetched (now unconfigured) status re-initialize the form.
-      initializedRef.current = false;
+      adoptedRevisionRef.current = -1;
       setForm(emptyForm());
       refreshConnectionQueries();
     },
@@ -203,6 +205,11 @@ function emptyForm() {
     bot_token: "",
     webhook_url: "",
   };
+}
+
+function setupStatusRevision(status) {
+  const revision = Number(status?.revision);
+  return Number.isSafeInteger(revision) && revision >= 0 ? revision : 0;
 }
 
 function translateOptional(t, key, fallback) {

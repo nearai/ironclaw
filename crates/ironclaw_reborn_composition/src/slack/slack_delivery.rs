@@ -35,6 +35,10 @@ pub(crate) struct SlackDeliveryProtocol;
 
 #[async_trait]
 impl ChannelDeliveryProtocol for SlackDeliveryProtocol {
+    fn run_notification_projection_prefix(&self) -> &'static str {
+        "slack"
+    }
+
     fn conversation_id_from_reply_target_binding_ref(
         &self,
         target: &ReplyTargetBindingRef,
@@ -49,12 +53,13 @@ impl ChannelDeliveryProtocol for SlackDeliveryProtocol {
     fn posted_message_from_render_response(
         &self,
         path: &str,
-        body: &[u8],
+        _request_body: &[u8],
+        response_body: &[u8],
     ) -> Option<PostedChannelMessage> {
         if path != "/api/chat.postMessage" {
             return None;
         }
-        posted_slack_message_from_response(body)
+        posted_slack_message_from_response(response_body)
     }
 
     fn connect_nudge_message(&self) -> &'static str {

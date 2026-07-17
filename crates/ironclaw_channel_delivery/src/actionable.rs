@@ -43,6 +43,7 @@ pub(crate) fn blocked_actionable_marker(state: &TurnRunState) -> Option<BlockedA
 }
 
 pub(crate) fn channel_run_notification_projection_id(
+    channel_protocol: &dyn ChannelDeliveryProtocol,
     run_id: TurnRunId,
     event_kind: RunNotificationEventKind,
 ) -> String {
@@ -54,7 +55,10 @@ pub(crate) fn channel_run_notification_projection_id(
         RunNotificationEventKind::RunBlocked => "blocked",
         RunNotificationEventKind::DeliveryStatus => "delivery-status",
     };
-    format!("slack-run-notification:{suffix}:{run_id}")
+    format!(
+        "{}-run-notification:{suffix}:{run_id}",
+        channel_protocol.run_notification_projection_prefix()
+    )
 }
 
 /// Adapts a resolved auth-prompt view for Slack delivery. OAuth setup links are
@@ -245,7 +249,7 @@ impl ImmediateAckWorkflowObserver for FinalReplyDeliveryObserver {
                         set.remove(&oldest);
                     }
                     set.insert(throttle_key.clone());
-                    queue.push_back(throttle_key);
+                    queue.push_back(throttle_key.clone());
                     false
                 }
             };
@@ -298,6 +302,10 @@ impl ImmediateAckWorkflowObserver for FinalReplyDeliveryObserver {
                 )
                 .await
             {
+                let mut guard = self.hint_seen.lock().unwrap_or_else(|e| e.into_inner());
+                let (queue, set) = &mut *guard;
+                set.remove(&throttle_key);
+                queue.retain(|key| key != &throttle_key);
                 tracing::debug!(
                     target = "ironclaw::reborn::channel_delivery",
                     error = %post_err,
@@ -356,7 +364,7 @@ impl ImmediateAckWorkflowObserver for FinalReplyDeliveryObserver {
             None
         };
         let Ok(_permit) = self.delivery_permits.clone().acquire_owned().await else {
-            tracing::warn!(
+            tracing::debug!(
                 target = "ironclaw::reborn::channel_delivery",
                 "channel final reply delivery skipped because delivery semaphore was closed"
             );
@@ -368,7 +376,7 @@ impl ImmediateAckWorkflowObserver for FinalReplyDeliveryObserver {
         // Explicit drop makes the cleanup point visible at the call site.
         drop(_delivery_guard);
         if let Err(error) = delivery_result {
-            tracing::warn!(
+            tracing::debug!(
                 target = "ironclaw::reborn::channel_delivery",
                 error = %error,
                 "channel final reply delivery failed after immediate ACK"
@@ -677,14 +685,25 @@ pub(crate) async fn busy_hint_from_run_state(
                 // run is in this thread's scope (that is why the thread is busy),
                 // so the approval request resolves under the derived scope.
                 Some(gate_ref) => {
-                    let what = approval_prompt_context_view(
+                    let what = match approval_prompt_context_view(
                         approval_requests,
                         gate_ref,
                         &binding.actor_user_id,
                         &scope,
                     )
                     .await
-                    .map(|ctx| ctx.tool_name);
+                    {
+                        Ok(context) => context.map(|ctx| ctx.tool_name),
+                        Err(error) => {
+                            tracing::debug!(
+                                target = "ironclaw::reborn::channel_delivery",
+                                %error,
+                                "busy-thread approval context lookup failed; withholding actionable approval copy"
+                            );
+                            return "Ironclaw is waiting on an approval, but its details are temporarily unavailable here. Check the Ironclaw web app before responding."
+                                .to_string();
+                        }
+                    };
                     match what {
                         Some(tool) => format!(
                             "Ironclaw is waiting on your approval for `{tool}` before taking new \

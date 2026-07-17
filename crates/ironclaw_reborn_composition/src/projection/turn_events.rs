@@ -441,7 +441,7 @@ async fn blocked_prompt_payload(
                 gate_ref,
                 gate_ref_str,
             )
-            .await,
+            .await?,
         )),
         TurnStatus::BlockedResource => Ok(Some(gate_prompt(
             event,
@@ -472,18 +472,28 @@ async fn approval_gate_prompt(
     event: &TurnLifecycleEvent,
     gate_ref: &GateRef,
     gate_ref_string: String,
-) -> ProductOutboundPayload {
+) -> Result<ProductOutboundPayload, ProductAdapterError> {
     let owner_user_id = event.owner_user_id.as_ref().unwrap_or(caller_user_id);
-    let lookup =
-        approval_prompt_lookup(approval_requests, gate_ref, owner_user_id, &event.scope).await;
-    gate_prompt_with_context(
+    let lookup = approval_prompt_lookup(approval_requests, gate_ref, owner_user_id, &event.scope)
+        .await
+        .map_err(|error| {
+            tracing::debug!(
+                %error,
+                run_id = %event.run_id,
+                "approval request lookup failed during gate projection"
+            );
+            ProductAdapterError::WorkflowTransient {
+                reason: RedactedString::new("approval request lookup failed"),
+            }
+        })?;
+    Ok(gate_prompt_with_context(
         event,
         gate_ref_string,
         "Approval required",
         is_approval_gate_ref(gate_ref.as_str()),
         lookup.context,
         lookup.invocation_id,
-    )
+    ))
 }
 
 fn gate_prompt(

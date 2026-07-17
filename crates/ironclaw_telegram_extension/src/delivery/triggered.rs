@@ -3,9 +3,15 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use ironclaw_channel_delivery::{PostSubmitDeliveryHook, TriggeredRunDeliveryDriver};
+use chrono::Utc;
+use ironclaw_channel_delivery::{
+    PostSubmitDeliveryError, PostSubmitDeliveryHook, TriggeredRunDeliveryDriver,
+};
 use ironclaw_channel_host::outbound_targets::OutboundDeliveryTargetProvider;
-use ironclaw_outbound::{DeliveredGateRouteStore, TriggeredRunDeliveryStore};
+use ironclaw_outbound::{
+    DeliveredGateRouteStore, TriggeredRunDeliveryOutcomeKind, TriggeredRunDeliveryRecord,
+    TriggeredRunDeliveryStore,
+};
 use ironclaw_product_workflow::{
     ConversationBindingService, ProductWorkflowError, ResolveBindingRequest, ResolvedBinding,
 };
@@ -138,14 +144,24 @@ impl DynamicTelegramTriggeredRunDeliveryHook {
 
 #[async_trait]
 impl PostSubmitDeliveryHook for DynamicTelegramTriggeredRunDeliveryHook {
-    async fn on_trigger_submitted(&self, fire: TriggerFire, run_id: TurnRunId, scope: TurnScope) {
+    async fn on_trigger_submitted(
+        &self,
+        fire: TriggerFire,
+        run_id: TurnRunId,
+        scope: TurnScope,
+    ) -> Result<(), PostSubmitDeliveryError> {
         match self.current_driver().await {
-            Ok(Some(driver)) => driver.on_trigger_submitted(fire, run_id, scope).await,
+            Ok(Some(driver)) => {
+                PostSubmitDeliveryHook::on_trigger_submitted(driver.as_ref(), fire, run_id, scope)
+                    .await
+            }
             Ok(None) => {
                 tracing::debug!(
                     %run_id,
                     "Telegram triggered-run delivery skipped: Telegram setup is not configured"
                 );
+                self.record_terminal_outcome(run_id, TriggeredRunDeliveryOutcomeKind::Skipped)
+                    .await
             }
             Err(error) => {
                 tracing::debug!(
@@ -153,8 +169,32 @@ impl PostSubmitDeliveryHook for DynamicTelegramTriggeredRunDeliveryHook {
                     %error,
                     "Telegram triggered-run delivery skipped: delivery hook unavailable"
                 );
+                self.record_terminal_outcome(run_id, TriggeredRunDeliveryOutcomeKind::Failed)
+                    .await
             }
         }
+    }
+}
+
+impl DynamicTelegramTriggeredRunDeliveryHook {
+    async fn record_terminal_outcome(
+        &self,
+        run_id: TurnRunId,
+        outcome: TriggeredRunDeliveryOutcomeKind,
+    ) -> Result<(), PostSubmitDeliveryError> {
+        let record = TriggeredRunDeliveryRecord {
+            run_id,
+            outcome,
+            recorded_at: Utc::now(),
+        };
+        self.delivery_store
+            .record_triggered_run_delivery(record)
+            .await
+            .map_err(|reason| {
+                PostSubmitDeliveryError::new(format!(
+                    "Telegram terminal outcome persistence failed for run {run_id}: {reason}"
+                ))
+            })
     }
 }
 

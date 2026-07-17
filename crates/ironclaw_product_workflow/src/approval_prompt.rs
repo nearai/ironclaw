@@ -8,7 +8,9 @@ use ironclaw_product_adapters::{
     ApprovalPromptDetailView, ApprovalPromptScopeView,
 };
 use ironclaw_run_state::ApprovalRequestStore;
+use ironclaw_run_state::RunStateError;
 use ironclaw_turns::{GateRef, TurnActor, TurnScope};
+use thiserror::Error;
 
 use crate::{ApprovalInteractionScope, approval_request_id_from_gate_ref};
 
@@ -18,34 +20,34 @@ pub struct ApprovalPromptLookup {
     pub invocation_id: Option<InvocationId>,
 }
 
+#[derive(Debug, Error)]
+#[error("approval prompt context is temporarily unavailable")]
+pub struct ApprovalPromptLookupError {
+    #[source]
+    source: RunStateError,
+}
+
 pub async fn approval_prompt_lookup(
     approval_requests: Option<&dyn ApprovalRequestStore>,
     gate_ref: &GateRef,
     owner_user_id: &UserId,
     turn_scope: &TurnScope,
-) -> ApprovalPromptLookup {
+) -> Result<ApprovalPromptLookup, ApprovalPromptLookupError> {
     let (store, request_id) =
         match approval_requests.zip(approval_request_id_from_gate_ref(gate_ref).ok()) {
             Some(value) => value,
-            None => return ApprovalPromptLookup::default(),
+            None => return Ok(ApprovalPromptLookup::default()),
         };
     let scope =
         ApprovalInteractionScope::from_turn(turn_scope, &TurnActor::new(owner_user_id.clone()))
             .to_resource_scope();
     match store.get(&scope, request_id).await {
-        Ok(Some(record)) => ApprovalPromptLookup {
+        Ok(Some(record)) => Ok(ApprovalPromptLookup {
             context: approval_context_for_request(&record.request),
             invocation_id: Some(record.scope.invocation_id),
-        },
-        Ok(None) => ApprovalPromptLookup::default(),
-        Err(error) => {
-            tracing::debug!(
-                %error,
-                request_id = %request_id,
-                "approval request lookup failed during gate projection"
-            );
-            ApprovalPromptLookup::default()
-        }
+        }),
+        Ok(None) => Ok(ApprovalPromptLookup::default()),
+        Err(source) => Err(ApprovalPromptLookupError { source }),
     }
 }
 
@@ -54,10 +56,10 @@ pub async fn approval_prompt_context_view(
     gate_ref: &GateRef,
     owner_user_id: &UserId,
     turn_scope: &TurnScope,
-) -> Option<ApprovalPromptContextView> {
+) -> Result<Option<ApprovalPromptContextView>, ApprovalPromptLookupError> {
     approval_prompt_lookup(approval_requests, gate_ref, owner_user_id, turn_scope)
         .await
-        .context
+        .map(|lookup| lookup.context)
 }
 
 fn approval_context_for_request(request: &ApprovalRequest) -> Option<ApprovalPromptContextView> {

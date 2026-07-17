@@ -27,7 +27,6 @@ use serde::{Serialize, de::DeserializeOwned};
 pub struct FilesystemTelegramHostState {
     pub(super) filesystem: Arc<ScopedFilesystem<dyn RootFilesystem>>,
     pub(super) scope: ResourceScope,
-    pub(super) locks: Arc<ironclaw_channel_host::host_state_records::KeyedAsyncLocks>,
 }
 
 impl std::fmt::Debug for FilesystemTelegramHostState {
@@ -58,12 +57,7 @@ impl FilesystemTelegramHostState {
                 thread_id: None,
                 invocation_id: InvocationId::new(),
             },
-            locks: Arc::new(ironclaw_channel_host::host_state_records::KeyedAsyncLocks::default()),
         }
-    }
-
-    pub(super) fn lock_for(&self, key: String) -> Arc<tokio::sync::Mutex<()>> {
-        self.locks.lock_for(key)
     }
 
     pub(super) async fn read_record<T>(

@@ -15,7 +15,7 @@ use thiserror::Error;
 use crate::ChannelConnectionRequirement;
 
 /// A connection-status read failed inside the extension-owned host service.
-#[derive(Debug, Error)]
+#[derive(Debug, Clone, PartialEq, Eq, Error)]
 #[error("account connection status read failed: {reason}")]
 pub struct AccountConnectionStatusError {
     reason: String,
@@ -52,7 +52,11 @@ pub enum ExtensionAccountSetupError {
     #[error("account setup host is unavailable for extension {extension_id}")]
     HostUnavailable { extension_id: ExtensionId },
     #[error("account connection status is unavailable for extension {extension_id}")]
-    StatusUnavailable { extension_id: ExtensionId },
+    StatusUnavailable {
+        extension_id: ExtensionId,
+        #[source]
+        source: AccountConnectionStatusError,
+    },
 }
 
 #[derive(Debug)]
@@ -136,9 +140,10 @@ impl ExtensionAccountSetupRegistry {
             (entry.descriptor.clone(), status_source)
         };
 
-        let connected = status_source.connected(user_id).await.map_err(|_| {
+        let connected = status_source.connected(user_id).await.map_err(|source| {
             ExtensionAccountSetupError::StatusUnavailable {
                 extension_id: extension_id.clone(),
+                source,
             }
         })?;
         Ok((!connected).then_some(descriptor.auth_requirement))

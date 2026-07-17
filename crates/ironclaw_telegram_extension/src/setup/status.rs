@@ -62,6 +62,8 @@ pub enum TelegramSetupError {
     MissingField { field: &'static str },
     #[error("telegram setup store unavailable")]
     StoreUnavailable,
+    #[error("telegram setup changed concurrently; retry the operation")]
+    ConcurrentUpdate,
     #[error("telegram secret store unavailable: {reason}")]
     SecretStoreUnavailable { reason: &'static str },
     #[error(

@@ -30,7 +30,7 @@ taxonomy, pinned to zero by
 | Concept | Value |
 |---|---|
 | Extension id / package ref | `telegram` (visible in the user catalog; not `is_internal_extension_package_ref`) |
-| Bot token credential handle | `telegram_bot_token` (stored revision-suffixed: `telegram_bot_token_<hash>_v<revision>`) |
+| Bot token credential handle | `telegram_bot_token` (stored revision-suffixed: `telegram_bot_token_<attempt-salted-hash>_v<revision>`) |
 | Webhook secret credential handle | `telegram_webhook_secret` (same revision-suffixed shape; minted server-side, never operator-supplied) |
 | Identity provider | `telegram` |
 | Provider user key | `{installation}:{telegram_user_id}` → `tg-bot-<bot_id>:<telegram_user_id>` |
@@ -67,12 +67,16 @@ Operator-managed, one bot per deployment
      (persisted non-secret; deep links need the username, identity scoping
      needs the id).
   2. A **fresh webhook secret is minted per save revision** (OS CSPRNG).
-  3. `setWebhook(url = <public-base>/webhooks/extensions/telegram/updates,
-     secret_token, allowed_updates = ["message"])`. The path is pinned to
-     the unified-extension-runtime shape so registrations held server-side
-     by Telegram survive the #6116 port with zero re-registration.
-  4. Secrets persist under revision-suffixed handles in the shared
-     `SecretStore`; the setup record persists to durable host state.
+  3. `setWebhook` uses the normalized `webhook_url` override when supplied;
+     otherwise it derives
+     `<public-base>/webhooks/extensions/telegram/updates`. In both cases it
+     sends the fresh `secret_token` and `allowed_updates = ["message"]`. The
+     default path is pinned to the unified-extension-runtime shape so
+     registrations held server-side by Telegram survive the #6116 port with
+     zero re-registration.
+  4. Secrets persist under revision-suffixed, attempt-salted handles in the
+     shared `SecretStore`; the setup record publishes through bounded CAS.
+     Concurrent losers clean up only their own attempt's handles.
   5. The `telegram` extension is tenant-activated; **activation failure
      rolls the record back** to the previous save
      (`rollback_failed_activation_save`) so store state and runtime never
@@ -82,11 +86,13 @@ Operator-managed, one bot per deployment
 - **`GET`** returns a redacted status only
   (`configured`, `bot_username`, `bot_token_configured`, `webhook_url`,
   `revision`) — raw secrets are never echoed by any surface.
-- **`DELETE`** clears the setup: best-effort `deleteWebhook` (a
-  provider-side-revoked token does not block the clear), then the record is
-  removed. **Pairing records and history are retained** — ingress simply
-  fails closed until the deployment is reconfigured; if the same bot
-  returns, existing pairings work again.
+- **`DELETE`** first persists a fail-closed `clearing` lifecycle record, then
+  requires confirmation of `deleteWebhook` and deletion of both secret handles
+  before publishing a `cleared` tombstone. Any failure leaves enough durable
+  metadata for a later request (including after restart) to retry cleanup.
+  **Pairing records and history are retained** — ingress simply fails closed
+  until the deployment is reconfigured; if the same bot returns, existing
+  pairings work again.
 - **Bot-swap semantics:** the installation identity is the bot
   (`tg-bot-<bot_id>`). Rotating the same bot's token bumps the revision
   (and webhook secret) but keeps the installation id, so pairings survive;

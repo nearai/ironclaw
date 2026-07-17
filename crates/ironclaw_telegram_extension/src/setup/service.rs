@@ -7,7 +7,6 @@ use ironclaw_host_api::{
 };
 use ironclaw_secrets::{SecretMaterial, SecretStore, SecretStoreError};
 use secrecy::{ExposeSecret, SecretString};
-use tokio::sync::Mutex;
 
 use crate::bot_api::{HostEgressTelegramBotApi, TelegramBotIdentity};
 use crate::state::FilesystemTelegramHostState;
@@ -31,7 +30,6 @@ pub struct TelegramSetupService {
     pub(super) secret_store: Arc<dyn SecretStore>,
     pub(super) bot_api: Arc<HostEgressTelegramBotApi>,
     public_base_url: Option<String>,
-    pub(super) save_lock: Arc<Mutex<()>>,
 }
 
 impl TelegramSetupService {
@@ -56,7 +54,6 @@ impl TelegramSetupService {
             secret_store,
             bot_api,
             public_base_url,
-            save_lock: Arc::new(Mutex::new(())),
         }
     }
 
@@ -124,12 +121,12 @@ impl TelegramSetupService {
         update: TelegramInstallationSetupUpdate,
     ) -> Result<(Option<TelegramInstallationSetup>, TelegramInstallationSetup), TelegramSetupError>
     {
-        let _save_guard = self.save_lock.lock().await;
+        self.recover_pending_setup_rollback().await?;
         let previous = self.current_setup().await?;
-        let revision = previous
-            .as_ref()
-            .map(|setup| setup.revision.saturating_add(1))
-            .unwrap_or(1);
+        let revision = self
+            .state
+            .next_telegram_installation_setup_revision()
+            .await?;
 
         let bot_token = match normalize_secret(update.bot_token) {
             Some(token) => token,
@@ -145,6 +142,10 @@ impl TelegramSetupService {
         let identity = self.bot_api.get_me(&bot_token).await?;
         let webhook_url = self.effective_webhook_url(update.webhook_url_override)?;
         let webhook_secret = mint_webhook_secret();
+        // Two processes can legitimately calculate the same next revision
+        // before either wins the setup-record CAS. Keep their secret handles
+        // disjoint so the loser can clean up only its own material.
+        let save_attempt = mint_save_attempt_id();
         self.bot_api
             .set_webhook(&bot_token, &webhook_url, &webhook_secret)
             .await?;
@@ -158,6 +159,8 @@ impl TelegramSetupService {
                 &identity,
                 webhook_url,
                 revision,
+                &save_attempt,
+                previous.as_ref(),
                 &bot_token,
                 &webhook_secret,
             )
@@ -165,7 +168,7 @@ impl TelegramSetupService {
         {
             Ok(record) => Ok((previous, record)),
             Err(error) => {
-                self.compensate_remote_webhook(&bot_token, identity.id, previous.as_ref())
+                self.reconcile_remote_webhook_to_current(&bot_token, identity.id)
                     .await;
                 Err(error)
             }
@@ -180,10 +183,12 @@ impl TelegramSetupService {
         identity: &TelegramBotIdentity,
         webhook_url: String,
         revision: u64,
+        save_attempt: &str,
+        previous: Option<&TelegramInstallationSetup>,
         bot_token: &SecretString,
         webhook_secret: &SecretString,
     ) -> Result<TelegramInstallationSetup, TelegramSetupError> {
-        let record = self.build_record(identity, webhook_url, revision)?;
+        let record = self.build_record(identity, webhook_url, revision, save_attempt)?;
         self.put_secret(record.bot_token_handle.clone(), bot_token.clone())
             .await?;
         if let Err(error) = self
@@ -194,12 +199,26 @@ impl TelegramSetupService {
                 .await;
             return Err(error);
         }
-        if let Err(error) = self.state.put_telegram_installation_setup(&record).await {
-            self.best_effort_delete_secret(&record.bot_token_handle)
-                .await;
-            self.best_effort_delete_secret(&record.webhook_secret_handle)
-                .await;
-            return Err(error);
+        match self
+            .state
+            .replace_telegram_installation_setup_if_current(previous, Some(&record))
+            .await
+        {
+            Ok(true) => {}
+            Ok(false) => {
+                self.best_effort_delete_secret(&record.bot_token_handle)
+                    .await;
+                self.best_effort_delete_secret(&record.webhook_secret_handle)
+                    .await;
+                return Err(TelegramSetupError::ConcurrentUpdate);
+            }
+            Err(error) => {
+                self.best_effort_delete_secret(&record.bot_token_handle)
+                    .await;
+                self.best_effort_delete_secret(&record.webhook_secret_handle)
+                    .await;
+                return Err(error);
+            }
         }
         Ok(record)
     }
@@ -217,31 +236,37 @@ impl TelegramSetupService {
     /// The provider side rolls back too: Telegram is still registered with
     /// the SAVED revision's URL/secret, so without compensation the restored
     /// record would reject every subsequent webhook.
-    /// Clear the setup: best-effort `deleteWebhook`, then remove the durable
-    /// record. Pairing records and history are deliberately retained — an
-    /// unconfigured deployment simply fails closed at ingress.
+    /// Clear the setup through a durable cleanup saga. Pairing records and
+    /// history are deliberately retained; provider and secret cleanup must be
+    /// confirmed before the setup tombstone is finalized.
     pub async fn clear(&self) -> Result<(), TelegramSetupError> {
-        let _save_guard = self.save_lock.lock().await;
-        if let Some(setup) = self.current_setup().await? {
-            match self.secret_material(&setup.bot_token_handle).await {
-                Ok(material) => {
-                    let token = material;
-                    if let Err(error) = self.bot_api.delete_webhook(&token).await {
-                        tracing::debug!(
-                            reason = %error,
-                            "telegram deleteWebhook failed during clear; proceeding"
-                        );
-                    }
-                }
-                Err(error) => {
-                    tracing::debug!(
-                        reason = %error,
-                        "telegram bot token unavailable during clear; skipping deleteWebhook"
-                    );
-                }
-            }
+        self.recover_pending_setup_rollback().await?;
+        let Some(setup) = self.state.telegram_installation_setup_for_cleanup().await? else {
+            return Ok(());
+        };
+        if !self
+            .state
+            .begin_telegram_installation_setup_cleanup(&setup)
+            .await?
+        {
+            return Err(TelegramSetupError::ConcurrentUpdate);
         }
-        self.state.delete_telegram_installation_setup().await
+
+        // The durable Clearing record above retains both handles until every
+        // external cleanup step is confirmed. Any failure is retryable by a
+        // later clear call, including after process restart.
+        let token = self.secret_material(&setup.bot_token_handle).await?;
+        self.bot_api.delete_webhook(&token).await?;
+        self.delete_secret(&setup.webhook_secret_handle).await?;
+        self.delete_secret(&setup.bot_token_handle).await?;
+        if !self
+            .state
+            .finish_telegram_installation_setup_cleanup(&setup)
+            .await?
+        {
+            return Err(TelegramSetupError::ConcurrentUpdate);
+        }
+        Ok(())
     }
 
     /// Resolve the current bot token material (ingress/egress wiring).
@@ -260,6 +285,16 @@ impl TelegramSetupService {
         Ok(Some(
             self.secret_material(&setup.webhook_secret_handle).await?,
         ))
+    }
+
+    /// Resolve secret material from the caller's already-captured setup
+    /// snapshot. Revision builders use this instead of re-reading `current` so
+    /// authentication evidence cannot be assembled from two setup revisions.
+    pub(crate) async fn webhook_secret_for_setup(
+        &self,
+        setup: &TelegramInstallationSetup,
+    ) -> Result<SecretString, TelegramSetupError> {
+        Ok(self.secret_material(&setup.webhook_secret_handle).await?)
     }
 
     fn effective_webhook_url(
@@ -295,17 +330,24 @@ impl TelegramSetupService {
         identity: &TelegramBotIdentity,
         webhook_url: String,
         revision: u64,
+        save_attempt: &str,
     ) -> Result<TelegramInstallationSetup, TelegramSetupError> {
         let installation_key = format!("tg-bot-{}", identity.id);
         Ok(TelegramInstallationSetup {
             bot_id: identity.id,
             bot_username: identity.username.clone(),
             webhook_url,
-            bot_token_handle: bot_token_handle(&self.tenant_id, &installation_key, revision)?,
+            bot_token_handle: bot_token_handle(
+                &self.tenant_id,
+                &installation_key,
+                revision,
+                save_attempt,
+            )?,
             webhook_secret_handle: webhook_secret_handle(
                 &self.tenant_id,
                 &installation_key,
                 revision,
+                save_attempt,
             )?,
             revision,
             updated_at: Utc::now(),
@@ -327,6 +369,17 @@ impl TelegramSetupService {
             .await
             .map_err(map_secret_error)?;
         Ok(())
+    }
+
+    pub(super) async fn delete_secret(
+        &self,
+        handle: &SecretHandle,
+    ) -> Result<(), TelegramSetupError> {
+        self.secret_store
+            .delete(&self.secret_scope(), handle)
+            .await
+            .map(|_| ())
+            .map_err(map_secret_error)
     }
 
     pub(super) async fn secret_material(
@@ -363,6 +416,11 @@ fn mint_webhook_secret() -> SecretString {
     SecretString::from(sha256_hex(&random))
 }
 
+fn mint_save_attempt_id() -> String {
+    let random: [u8; 16] = rand::random();
+    sha256_hex(&random).chars().take(16).collect()
+}
+
 fn normalize_secret(value: Option<SecretString>) -> Option<SecretString> {
     let secret = value?;
     let trimmed = secret.expose_secret().trim();
@@ -379,12 +437,14 @@ fn bot_token_handle(
     tenant_id: &TenantId,
     installation_key: &str,
     revision: u64,
+    save_attempt: &str,
 ) -> Result<SecretHandle, TelegramSetupError> {
     secret_handle_for_installation(
         TELEGRAM_BOT_TOKEN_HANDLE_PREFIX,
         tenant_id,
         installation_key,
         revision,
+        save_attempt,
     )
     .map_err(|reason| TelegramSetupError::InvalidField {
         field: "bot_token",
@@ -396,12 +456,14 @@ fn webhook_secret_handle(
     tenant_id: &TenantId,
     installation_key: &str,
     revision: u64,
+    save_attempt: &str,
 ) -> Result<SecretHandle, TelegramSetupError> {
     secret_handle_for_installation(
         TELEGRAM_WEBHOOK_SECRET_HANDLE_PREFIX,
         tenant_id,
         installation_key,
         revision,
+        save_attempt,
     )
     .map_err(|reason| TelegramSetupError::InvalidField {
         field: "webhook_secret",
@@ -414,16 +476,26 @@ fn secret_handle_for_installation(
     tenant_id: &TenantId,
     installation_key: &str,
     revision: u64,
+    save_attempt: &str,
 ) -> Result<SecretHandle, ironclaw_host_api::HostApiError> {
-    let digest = sha256_hex(&secret_handle_key_material(tenant_id, installation_key));
+    let digest = sha256_hex(&secret_handle_key_material(
+        tenant_id,
+        installation_key,
+        save_attempt,
+    ));
     let digest_prefix: String = digest.chars().take(INSTALLATION_HANDLE_HASH_LEN).collect();
-    SecretHandle::new(format!("{prefix}_{}_v{revision}", digest_prefix))
+    SecretHandle::new(format!("{prefix}_{digest_prefix}_v{revision}"))
 }
 
-fn secret_handle_key_material(tenant_id: &TenantId, installation_key: &str) -> Vec<u8> {
+fn secret_handle_key_material(
+    tenant_id: &TenantId,
+    installation_key: &str,
+    save_attempt: &str,
+) -> Vec<u8> {
     let mut key = b"telegram-installation-secret:v1".to_vec();
     append_length_prefixed(&mut key, tenant_id.as_str().as_bytes());
     append_length_prefixed(&mut key, installation_key.as_bytes());
+    append_length_prefixed(&mut key, save_attempt.as_bytes());
     key
 }
 

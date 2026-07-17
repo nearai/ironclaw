@@ -170,10 +170,10 @@ jobs:
       - name: WebUI v2 frontend tests (vitest)
         working-directory: crates/ironclaw_webui/frontend
         run: pnpm test
-      # The SPA embeds into the serve binary at COMPILE time from
-      # frontend/dist, so a frontend that lints and tests but does not build
-      # still breaks every downstream binary build. Keep the build in the same
-      # job so the three gates travel together.
+      # The SPA build is embedded into the serve binary at compile time through
+      # Cargo's OUT_DIR (see ironclaw_webui/build.rs), so a frontend that lints
+      # and tests but does not build still breaks downstream binary builds.
+      # Keep the build in the same job so the three gates travel together.
       - name: Build WebUI v2 frontend
         working-directory: crates/ironclaw_webui/frontend
         run: pnpm build

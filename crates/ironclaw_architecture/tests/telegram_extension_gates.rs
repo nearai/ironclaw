@@ -132,14 +132,7 @@ fn telegram_tests_use_the_real_filesystem_state() {
     for file in rust_files(&source_root) {
         let source = std::fs::read_to_string(&file).expect("Telegram source readable");
         for (line_number, line) in source.lines().enumerate() {
-            let Some(struct_name) = line.trim_start().strip_prefix("struct InMemory") else {
-                continue;
-            };
-            if struct_name
-                .split(|character: char| !character.is_ascii_alphanumeric())
-                .next()
-                .is_some_and(|name| name.ends_with("Store"))
-            {
+            if in_memory_store_declaration(line).is_some() {
                 offenders.push(format!("{}:{}", file.display(), line_number + 1));
             }
         }
@@ -149,6 +142,38 @@ fn telegram_tests_use_the_real_filesystem_state() {
         "Telegram tests must exercise FilesystemTelegramHostState over an in-memory filesystem; parallel domain stores found:\n{}",
         offenders.join("\n")
     );
+}
+
+fn in_memory_store_declaration(line: &str) -> Option<&str> {
+    let mut tokens = line
+        .split(|character: char| !(character.is_ascii_alphanumeric() || character == '_'))
+        .filter(|token| !token.is_empty());
+    while let Some(token) = tokens.next() {
+        if token != "struct" {
+            continue;
+        }
+        return tokens
+            .next()
+            .filter(|name| name.starts_with("InMemory") && name.ends_with("Store"));
+    }
+    None
+}
+
+#[test]
+fn in_memory_store_gate_catches_all_rust_visibility_forms() {
+    for declaration in [
+        "struct InMemoryPairingStore;",
+        "pub struct InMemoryPairingStore;",
+        "pub(crate) struct InMemoryPairingStore;",
+        "pub(super) struct InMemoryPairingStore;",
+    ] {
+        assert_eq!(
+            in_memory_store_declaration(declaration),
+            Some("InMemoryPairingStore"),
+            "missed declaration: {declaration}"
+        );
+    }
+    assert_eq!(in_memory_store_declaration("struct FilesystemStore;"), None);
 }
 
 #[test]

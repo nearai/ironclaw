@@ -173,11 +173,13 @@ impl ProtocolHttpEgress for TrackingPostEgress {
         request: EgressRequest,
     ) -> Result<EgressResponse, ProtocolHttpEgressError> {
         let request_path = request.path().as_str().to_string();
+        let request_body = request.body().to_vec();
         let response = self.inner.send(request).await?;
-        if let Some(message) = self
-            .protocol
-            .posted_message_from_render_response(&request_path, response.body())
-        {
+        if let Some(message) = self.protocol.posted_message_from_render_response(
+            &request_path,
+            &request_body,
+            response.body(),
+        ) {
             self.posted_messages
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner())

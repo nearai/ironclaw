@@ -33,22 +33,21 @@ use crate::actionable::{
     channel_approval_gate_prompt_view, channel_run_notification_projection_id,
     enforce_direct_message_if_required, jittered_poll_interval,
 };
-use crate::hooks::PostSubmitDeliveryHook;
+use crate::hooks::{PostSubmitDeliveryError, PostSubmitDeliveryHook};
 use crate::routing::{TrackingPostEgress, record_gate_route_if_needed};
 use crate::services::*;
 
 /// Drives triggered-run delivery for a single submitted run.
 ///
-/// Spawns a background task that polls the run to completion (or gate) and
-/// delivers the result to the configured channel target. Project-scoped fires
-/// are denied by the existing product policy.
+/// Polls the run to completion (or gate) and delivers the result to the
+/// configured channel target inside the trigger poller's managed task.
+/// Project-scoped fires are denied by the existing product policy.
 pub struct TriggeredRunDeliveryDriver {
     services: FinalReplyDeliveryServices,
     pub(crate) settings: FinalReplyDeliverySettings,
     delivery_permits: Arc<Semaphore>,
-    /// Bounds the total number of spawned delivery tasks (active + waiting).
-    /// Acquired via `try_acquire_owned` before spawning; released when the task
-    /// exits. Overflow is recorded as `Skipped` without spawning.
+    /// Bounds the total number of admitted delivery calls (active + waiting).
+    /// Acquired via `try_acquire_owned`; overflow is recorded as `Skipped`.
     pending_permits: Arc<Semaphore>,
     delivery_store: Arc<dyn TriggeredRunDeliveryStore>,
     route_store: Arc<dyn DeliveredGateRouteStore>,
@@ -69,6 +68,21 @@ pub struct TriggeredRunDeliveryDriver {
 }
 
 impl TriggeredRunDeliveryDriver {
+    /// Test-support wrapper for the existing direct behavior corpus. Runtime
+    /// delivery goes through [`PostSubmitDeliveryHook`], which returns
+    /// authoritative persistence failures to its managed task owner.
+    #[cfg(any(test, feature = "test-support"))]
+    pub async fn on_trigger_submitted(
+        &self,
+        fire: TriggerFire,
+        run_id: TurnRunId,
+        scope: TurnScope,
+    ) {
+        if let Err(error) = self.run_post_submit_delivery(fire, run_id, scope).await {
+            panic!("test delivery must persist its terminal outcome for run {run_id}: {error}");
+        }
+    }
+
     pub fn new(
         services: FinalReplyDeliveryServices,
         delivery_store: Arc<dyn TriggeredRunDeliveryStore>,
@@ -148,7 +162,23 @@ impl TriggeredRunDeliveryDriver {
 
 #[async_trait]
 impl PostSubmitDeliveryHook for TriggeredRunDeliveryDriver {
-    async fn on_trigger_submitted(&self, fire: TriggerFire, run_id: TurnRunId, scope: TurnScope) {
+    async fn on_trigger_submitted(
+        &self,
+        fire: TriggerFire,
+        run_id: TurnRunId,
+        scope: TurnScope,
+    ) -> Result<(), PostSubmitDeliveryError> {
+        self.run_post_submit_delivery(fire, run_id, scope).await
+    }
+}
+
+impl TriggeredRunDeliveryDriver {
+    async fn run_post_submit_delivery(
+        &self,
+        fire: TriggerFire,
+        run_id: TurnRunId,
+        scope: TurnScope,
+    ) -> Result<(), PostSubmitDeliveryError> {
         // Fail closed for non-personal triggers (project_id set means shared/project scope).
         if fire.project_id.is_some() {
             tracing::debug!(
@@ -156,24 +186,26 @@ impl PostSubmitDeliveryHook for TriggeredRunDeliveryDriver {
                 "triggered run delivery denied: project-scoped trigger is not personal scope"
             );
             self.record_outcome(run_id, TriggeredRunDeliveryOutcomeKind::Denied)
-                .await;
-            return;
+                .await
+                .map_err(outcome_persistence_error)?;
+            return Ok(());
         }
 
-        // Guard against unbounded task accumulation: if the pending-delivery
-        // queue is full, record Skipped immediately without spawning.
+        // Guard against unbounded delivery accumulation: if the pending queue
+        // is full, record Skipped immediately.
         let Ok(pending_permit) = Arc::clone(&self.pending_permits).try_acquire_owned() else {
-            tracing::warn!(
+            tracing::debug!(
                 target: "ironclaw::reborn::channel_delivery",
                 %run_id,
                 "triggered run delivery skipped: pending delivery queue full"
             );
             self.record_outcome(run_id, TriggeredRunDeliveryOutcomeKind::Skipped)
-                .await;
-            return;
+                .await
+                .map_err(outcome_persistence_error)?;
+            return Ok(());
         };
 
-        // Clone the Arcs we need into the spawned task.
+        // Clone the retained ports used for this managed delivery call.
         let permits = Arc::clone(&self.delivery_permits);
         let services = FinalReplyDeliveryServices {
             channel_protocol: Arc::clone(&self.services.channel_protocol),
@@ -195,50 +227,61 @@ impl PostSubmitDeliveryHook for TriggeredRunDeliveryDriver {
         let fallback_agent_id = self.fallback_agent_id.clone();
         let outbound_target_provider = self.outbound_target_provider.clone();
 
-        tokio::spawn(async move {
-            // Hold the pending permit for the full lifetime of this task so it
-            // counts against the pending-delivery cap until delivery completes.
-            let _pending_permit = pending_permit;
+        // The trigger poller invokes this hook from its bounded lifecycle
+        // owner. Await the actual delivery here so shutdown can drain it.
+        let _pending_permit = pending_permit;
 
-            let Ok(_permit) = permits.clone().acquire_owned().await else {
-                tracing::warn!(
-                    target = "ironclaw::reborn::channel_delivery",
-                    %run_id,
-                    "triggered run delivery skipped: delivery semaphore closed"
-                );
-                record_triggered_run_outcome(
-                    &*delivery_store,
-                    run_id,
-                    TriggeredRunDeliveryOutcomeKind::Skipped,
-                )
-                .await;
-                return;
-            };
-
-            let outcome = deliver_triggered_run(
-                &services,
-                &settings,
-                &fire,
-                run_id,
-                scope,
-                &*delivery_store,
-                &fallback_agent_id,
-                outbound_target_provider.as_deref(),
-            )
-            .await;
+        let Ok(_permit) = permits.clone().acquire_owned().await else {
             tracing::debug!(
                 target = "ironclaw::reborn::channel_delivery",
                 %run_id,
-                ?outcome,
-                "triggered run delivery completed"
+                "triggered run delivery skipped: delivery semaphore closed"
             );
-        });
+            record_triggered_run_outcome(
+                &*delivery_store,
+                run_id,
+                TriggeredRunDeliveryOutcomeKind::Skipped,
+            )
+            .await
+            .map_err(outcome_persistence_error)?;
+            return Ok(());
+        };
+
+        let outcome = deliver_triggered_run(
+            &services,
+            &settings,
+            &fire,
+            run_id,
+            scope,
+            &*delivery_store,
+            &fallback_agent_id,
+            outbound_target_provider.as_deref(),
+        )
+        .await
+        .map_err(outcome_persistence_error)?;
+        tracing::debug!(
+            target = "ironclaw::reborn::channel_delivery",
+            %run_id,
+            ?outcome,
+            "triggered run delivery completed"
+        );
+        Ok(())
     }
 }
 
+fn outcome_persistence_error(reason: String) -> PostSubmitDeliveryError {
+    PostSubmitDeliveryError::new(format!(
+        "authoritative triggered-delivery outcome persistence failed: {reason}"
+    ))
+}
+
 impl TriggeredRunDeliveryDriver {
-    async fn record_outcome(&self, run_id: TurnRunId, outcome: TriggeredRunDeliveryOutcomeKind) {
-        record_triggered_run_outcome(&*self.delivery_store, run_id, outcome).await;
+    async fn record_outcome(
+        &self,
+        run_id: TurnRunId,
+        outcome: TriggeredRunDeliveryOutcomeKind,
+    ) -> Result<(), String> {
+        record_triggered_run_outcome(&*self.delivery_store, run_id, outcome).await
     }
 }
 
@@ -269,25 +312,9 @@ async fn deliver_triggered_run(
     delivery_store: &dyn TriggeredRunDeliveryStore,
     fallback_agent_id: &ironclaw_host_api::AgentId,
     outbound_target_provider: Option<&dyn OutboundDeliveryTargetProvider>,
-) -> TriggeredRunDeliveryOutcomeKind {
+) -> Result<TriggeredRunDeliveryOutcomeKind, String> {
     // The actor is the trigger creator.
     let actor = TurnActor::new(fire.creator_user_id.clone());
-
-    // Derive the TriggerCommunicationContext for the outbound origin.
-    let trigger_context = match triggered_communication_context(fire) {
-        Ok(ctx) => ctx,
-        Err(reason) => {
-            tracing::warn!(
-                target = "ironclaw::reborn::channel_delivery",
-                %run_id,
-                %reason,
-                "triggered run delivery skipped: cannot build trigger context"
-            );
-            let outcome = TriggeredRunDeliveryOutcomeKind::Failed;
-            record_triggered_run_outcome(delivery_store, run_id, outcome).await;
-            return outcome;
-        }
-    };
 
     // Resolve the per-trigger delivery target (when the fire carries one) into
     // a reply-target binding BEFORE any delivery work. The resolution engine
@@ -310,8 +337,8 @@ async fn deliver_triggered_run(
                         ?outcome,
                         "triggered run delivery stopped: per-trigger delivery target did not resolve"
                     );
-                    record_triggered_run_outcome(delivery_store, run_id, outcome).await;
-                    return outcome;
+                    record_triggered_run_outcome(delivery_store, run_id, outcome).await?;
+                    return Ok(outcome);
                 }
             }
         }
@@ -335,13 +362,25 @@ async fn deliver_triggered_run(
 
     // Build the reply-target authority: resolves from the per-trigger source
     // route when present, otherwise from the creator's personal preference.
-    let authority = TriggeredChannelReplyTargetAuthority {
-        channel_protocol: Arc::clone(&services.channel_protocol),
-        scope: scope.clone(),
-        actor: actor.clone(),
-        trigger_context: trigger_context.clone(),
+    let authority = match TriggeredChannelReplyTargetAuthority::from_fire(
+        Arc::clone(&services.channel_protocol),
+        scope.clone(),
+        actor.clone(),
+        fire,
         per_trigger_source_route,
-        resolved_space_id: std::sync::Mutex::new(None),
+    ) {
+        Ok(authority) => authority,
+        Err(reason) => {
+            tracing::warn!(
+                target = "ironclaw::reborn::channel_delivery",
+                %run_id,
+                %reason,
+                "triggered run delivery skipped: cannot build trigger context"
+            );
+            let outcome = TriggeredRunDeliveryOutcomeKind::Failed;
+            record_triggered_run_outcome(delivery_store, run_id, outcome).await?;
+            return Ok(outcome);
+        }
     };
 
     let mut delivered_blocked_marker: Option<BlockedActionableMarker> = None;
@@ -381,8 +420,8 @@ async fn deliver_triggered_run(
                     "triggered run parked awaiting user after delivering blocked prompt; recording Delivered"
                 );
                 let outcome = TriggeredRunDeliveryOutcomeKind::Delivered;
-                record_triggered_run_outcome(delivery_store, run_id, outcome).await;
-                return outcome;
+                record_triggered_run_outcome(delivery_store, run_id, outcome).await?;
+                return Ok(outcome);
             }
             Err(err) => {
                 tracing::warn!(
@@ -392,8 +431,8 @@ async fn deliver_triggered_run(
                     "triggered run wait failed"
                 );
                 let outcome = TriggeredRunDeliveryOutcomeKind::Failed;
-                record_triggered_run_outcome(delivery_store, run_id, outcome).await;
-                return outcome;
+                record_triggered_run_outcome(delivery_store, run_id, outcome).await?;
+                return Ok(outcome);
             }
         };
 
@@ -415,8 +454,8 @@ async fn deliver_triggered_run(
             Ok(None) => {
                 // Run completed with no assistant message — normal "skipped" outcome.
                 let outcome = TriggeredRunDeliveryOutcomeKind::Skipped;
-                record_triggered_run_outcome(delivery_store, run_id, outcome).await;
-                return outcome;
+                record_triggered_run_outcome(delivery_store, run_id, outcome).await?;
+                return Ok(outcome);
             }
             Err(err) => {
                 tracing::warn!(
@@ -426,8 +465,8 @@ async fn deliver_triggered_run(
                     "triggered run notification build failed"
                 );
                 let outcome = TriggeredRunDeliveryOutcomeKind::Failed;
-                record_triggered_run_outcome(delivery_store, run_id, outcome).await;
-                return outcome;
+                record_triggered_run_outcome(delivery_store, run_id, outcome).await?;
+                return Ok(outcome);
             }
         };
 
@@ -504,8 +543,8 @@ async fn deliver_triggered_run(
                     delete_triggered_channel_message(services, message).await;
                 }
                 let outcome = TriggeredRunDeliveryOutcomeKind::Delivered;
-                record_triggered_run_outcome(delivery_store, run_id, outcome).await;
-                return outcome;
+                record_triggered_run_outcome(delivery_store, run_id, outcome).await?;
+                return Ok(outcome);
             }
             Err(TriggeredNotificationFailure::OAuthTargetNotDm) => {
                 // Authority backstop tripped: the payload carried an OAuth
@@ -541,8 +580,8 @@ async fn deliver_triggered_run(
                         "triggered run OAuth backstop: cancel_auth_blocked_run failed"
                     );
                     let outcome = TriggeredRunDeliveryOutcomeKind::Failed;
-                    record_triggered_run_outcome(delivery_store, run_id, outcome).await;
-                    return outcome;
+                    record_triggered_run_outcome(delivery_store, run_id, outcome).await?;
+                    return Ok(outcome);
                 }
                 // Post the auth-unavailable notice as a terminal FinalReply.
                 // require_direct_message_target is false: the notice is plain text
@@ -584,8 +623,8 @@ async fn deliver_triggered_run(
                 for message in messages_to_delete_after_final.drain(..) {
                     delete_triggered_channel_message(services, message).await;
                 }
-                record_triggered_run_outcome(delivery_store, run_id, outcome).await;
-                return outcome;
+                record_triggered_run_outcome(delivery_store, run_id, outcome).await?;
+                return Ok(outcome);
             }
             Err(failure) => {
                 tracing::warn!(
@@ -606,8 +645,8 @@ async fn deliver_triggered_run(
                         TriggeredRunDeliveryOutcomeKind::Failed
                     }
                 };
-                record_triggered_run_outcome(delivery_store, run_id, outcome).await;
-                return outcome;
+                record_triggered_run_outcome(delivery_store, run_id, outcome).await?;
+                return Ok(outcome);
             }
         }
     }
@@ -775,7 +814,7 @@ async fn triggered_notification_for_state(
                 &actor.user_id,
                 scope,
             )
-            .await;
+            .await?;
             let mut prompt = channel_approval_gate_prompt_view(run_id, gate_ref, context.as_ref());
             prompt.body.push_str(&triggered_gate_footer(trigger_label));
             Ok(Some(ChannelActionableNotification {
@@ -920,7 +959,11 @@ async fn deliver_triggered_notification(
         &projection_access_policy,
         authority,
     );
-    let projection_id = channel_run_notification_projection_id(run_id, event_kind);
+    let projection_id = channel_run_notification_projection_id(
+        services.channel_protocol.as_ref(),
+        run_id,
+        event_kind,
+    );
     let projection_ref = ProjectionUpdateRef::new(projection_id.clone()).map_err(|reason| {
         TriggeredNotificationFailure::Other(format!("invalid_projection_ref: {reason}"))
     })?;
@@ -980,7 +1023,13 @@ async fn deliver_triggered_notification(
         return Err(classify_delivery_error(error));
     }
 
-    Ok(tracked_egress.take_posted_messages())
+    let posted_messages = tracked_egress.take_posted_messages();
+    if posted_messages.is_empty() {
+        return Err(TriggeredNotificationFailure::Other(
+            "delivery_evidence_missing".to_string(),
+        ));
+    }
+    Ok(posted_messages)
 }
 
 /// Classify a [`ProductOutboundDeliveryError`] into the typed
@@ -1026,20 +1075,13 @@ async fn record_triggered_run_outcome(
     store: &dyn TriggeredRunDeliveryStore,
     run_id: TurnRunId,
     outcome: TriggeredRunDeliveryOutcomeKind,
-) {
+) -> Result<(), String> {
     let record = TriggeredRunDeliveryRecord {
         run_id,
         outcome,
         recorded_at: Utc::now(),
     };
-    if let Err(error) = store.record_triggered_run_delivery(record).await {
-        tracing::warn!(
-            target = "ironclaw::reborn::channel_delivery",
-            %run_id,
-            error = %error,
-            "failed to record triggered run delivery outcome (best-effort)"
-        );
-    }
+    store.record_triggered_run_delivery(record).await
 }
 
 /// Resolve a fire's per-trigger delivery target id into the reply-target
@@ -1101,27 +1143,12 @@ async fn resolve_per_trigger_delivery_route(
     }
 }
 
-/// Build a `TriggerCommunicationContext` from the fire's identity.
-fn triggered_communication_context(
-    fire: &TriggerFire,
-) -> Result<TriggerCommunicationContext, String> {
-    let trigger_origin_ref = TriggerOriginRef::new(fire.identity.trigger_id().to_string())
-        .map_err(|e| format!("invalid trigger origin ref: {e}"))?;
-    let fire_slot = TriggerFireSlot::new(fire.identity.fire_slot().to_rfc3339())
-        .map_err(|e| format!("invalid fire slot: {e}"))?;
-    Ok(TriggerCommunicationContext {
-        trigger_origin_ref,
-        trigger_source_kind: TriggerSourceKind::Schedule,
-        fire_slot,
-    })
-}
-
 /// Reply-target authority for triggered-run delivery.
 ///
 /// Resolves the delivery target from the creator's personal communication
 /// preference (via `CommunicationPreferenceRepository`). Validates that the
 /// reply target is the one the resolution engine chose (no substitution).
-struct TriggeredChannelReplyTargetAuthority {
+pub(crate) struct TriggeredChannelReplyTargetAuthority {
     channel_protocol: Arc<dyn ChannelDeliveryProtocol>,
     scope: TurnScope,
     actor: TurnActor,
@@ -1139,15 +1166,50 @@ struct TriggeredChannelReplyTargetAuthority {
     resolved_space_id: std::sync::Mutex<Option<String>>,
 }
 
+impl TriggeredChannelReplyTargetAuthority {
+    pub(crate) fn from_fire(
+        channel_protocol: Arc<dyn ChannelDeliveryProtocol>,
+        scope: TurnScope,
+        actor: TurnActor,
+        fire: &TriggerFire,
+        per_trigger_source_route: Option<ReplyTargetBindingRef>,
+    ) -> Result<Self, String> {
+        let trigger_origin_ref = TriggerOriginRef::new(fire.identity.trigger_id().to_string())
+            .map_err(|error| format!("invalid trigger origin ref: {error}"))?;
+        let fire_slot = TriggerFireSlot::new(fire.identity.fire_slot().to_rfc3339())
+            .map_err(|error| format!("invalid fire slot: {error}"))?;
+        Ok(Self {
+            channel_protocol,
+            scope,
+            actor,
+            trigger_context: TriggerCommunicationContext {
+                trigger_origin_ref,
+                trigger_source_kind: TriggerSourceKind::Schedule,
+                fire_slot,
+            },
+            per_trigger_source_route,
+            resolved_space_id: std::sync::Mutex::new(None),
+        })
+    }
+}
+
 #[async_trait]
 impl ReplyTargetBindingValidator for TriggeredChannelReplyTargetAuthority {
     async fn validate_reply_target(
         &self,
         request: ReplyTargetValidationRequest,
     ) -> Result<ReplyTargetBindingClaim, OutboundError> {
-        // The resolution engine chose this target from the creator's personal preference.
-        // We trust it as long as the scope and actor match.
+        // Scope and actor remain necessary, but a trigger-selected route is
+        // also sealed authority: the resolution engine may not substitute a
+        // different candidate from a later user-global preference.
         if request.scope != self.scope || request.actor != self.actor {
+            return Err(OutboundError::AccessDenied);
+        }
+        if self
+            .per_trigger_source_route
+            .as_ref()
+            .is_some_and(|sealed| sealed != &request.candidate.target)
+        {
             return Err(OutboundError::AccessDenied);
         }
         Ok(ReplyTargetBindingClaim::new(request.candidate.target))

@@ -183,6 +183,7 @@ mod tests {
         capabilities: ProductAdapterCapabilities,
         auth_requirement: AuthRequirement,
         declared_egress: Vec<DeclaredEgressTarget>,
+        emit_egress: bool,
     }
 
     impl TestChannelAdapter {
@@ -201,6 +202,14 @@ mod tests {
                     DeclaredEgressHost::new(TEST_CHANNEL_HOST).expect("test channel host"),
                     Some(credential_handle),
                 )],
+                emit_egress: true,
+            }
+        }
+
+        fn empty_success(installation_id: &str) -> Self {
+            Self {
+                emit_egress: false,
+                ..Self::new(installation_id)
             }
         }
     }
@@ -247,6 +256,9 @@ mod tests {
             egress: &dyn ProtocolHttpEgress,
             delivery_sink: &dyn OutboundDeliverySink,
         ) -> Result<ProductRenderOutcome, ProductAdapterError> {
+            if !self.emit_egress {
+                return Ok(ProductRenderOutcome::DeliveryRecorded);
+            }
             let run_id = test_payload_run_id(&envelope.payload);
             let attempt_id = envelope.delivery_attempt_id;
             let binding_ref = envelope.target.reply_target_binding_ref.clone();
@@ -324,6 +336,10 @@ mod tests {
 
     #[async_trait]
     impl ChannelDeliveryProtocol for TestChannelDeliveryProtocol {
+        fn run_notification_projection_prefix(&self) -> &'static str {
+            "slack"
+        }
+
         fn conversation_id_from_reply_target_binding_ref(
             &self,
             target: &ReplyTargetBindingRef,
@@ -342,12 +358,13 @@ mod tests {
         fn posted_message_from_render_response(
             &self,
             path: &str,
-            body: &[u8],
+            _request_body: &[u8],
+            response_body: &[u8],
         ) -> Option<PostedChannelMessage> {
             if path != "/api/chat.postMessage" {
                 return None;
             }
-            posted_test_message(body)
+            posted_test_message(response_body)
         }
 
         fn connect_nudge_message(&self) -> &'static str {
@@ -1434,6 +1451,117 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn per_trigger_authority_rejects_same_scope_target_substitution() {
+        let scope = personal_turn_scope();
+        let fire = minimal_trigger_fire(None);
+        let actor = ironclaw_turns::TurnActor::new(fire.creator_user_id.clone());
+        let sealed = ReplyTargetBindingRef::new("reply:sealed-trigger-target")
+            .expect("sealed target");
+        let substituted = ReplyTargetBindingRef::new("reply:different-user-preference")
+            .expect("substituted target");
+        let authority = TriggeredChannelReplyTargetAuthority::from_fire(
+            Arc::new(TestChannelDeliveryProtocol),
+            scope.clone(),
+            actor.clone(),
+            &fire,
+            Some(sealed),
+        )
+        .expect("trigger authority");
+        let candidate = ironclaw_outbound::OutboundPushCandidate {
+            tenant_id: scope.tenant_id.clone(),
+            agent_id: scope.agent_id.clone(),
+            project_id: scope.project_id.clone(),
+            thread_id: scope.thread_id.clone(),
+            turn_run_id: Some(TurnRunId::new()),
+            target: substituted,
+            kind: ironclaw_outbound::OutboundPushKind::FinalReply,
+            projection_ref: ironclaw_outbound::ProjectionUpdateRef::new(
+                "projection:target-substitution",
+            )
+            .expect("projection ref"),
+            requires_reply_target_revalidation: true,
+        };
+        let outbound_store = ironclaw_outbound::InMemoryOutboundStateStore::default();
+        let policy = ironclaw_outbound::OutboundPolicyService::new(
+            &outbound_store,
+            &AllowNoProjectionAccess,
+            &authority,
+        );
+        let decision = policy
+            .prepare_delivery_attempt(ironclaw_outbound::PrepareOutboundDeliveryRequest {
+            scope: scope.clone(),
+            actor,
+            modality: ironclaw_outbound::CommunicationModality::Text,
+            candidate,
+            attempted_at: Utc::now(),
+        })
+        .await
+        .expect("policy records rejection");
+
+        assert!(matches!(
+            decision,
+            ironclaw_outbound::OutboundDeliveryDecision::Rejected { attempt }
+                if attempt.failure_kind
+                    == Some(ironclaw_outbound::DeliveryFailureKind::AuthorizationRevoked)
+        ));
+    }
+
+    #[tokio::test]
+    async fn triggered_adapter_success_without_posted_message_evidence_records_failed() {
+        let install = "test-install";
+        let scope = personal_turn_scope();
+        let run_id = TurnRunId::new();
+        let binding_ref =
+            test_slack_binding_ref(install, scope.agent_id.as_ref().expect("agent").as_str());
+        let coordinator = Arc::new(ScriptedTurnCoordinator::with_single_status(
+            TurnStatus::Completed,
+        ));
+        let thread_service = Arc::new(InMemorySessionThreadService::default());
+        seed_finalized_assistant_message(&thread_service, &scope, run_id, "No evidence").await;
+        let outbound = Arc::new(InMemoryOutboundStateStore::default());
+        seed_personal_preference(&outbound, &scope, binding_ref).await;
+        let egress = Arc::new(FakeProtocolHttpEgress::new(vec!["slack.com".to_string()]));
+        egress.allow_credential_handle("slack_bot_token");
+        let delivery_store = Arc::new(InMemoryTriggeredRunDeliveryStore::default());
+        let route_store = Arc::new(InMemoryDeliveredGateRouteStore::default());
+        let mut services = make_services(
+            coordinator,
+            thread_service,
+            egress.clone(),
+            outbound,
+            install,
+        );
+        services.adapter = Arc::new(TestChannelAdapter::empty_success(install));
+        let driver = TriggeredRunDeliveryDriver::with_settings(
+            services,
+            FinalReplyDeliverySettings {
+                poll_interval: std::time::Duration::ZERO,
+                max_wait: std::time::Duration::from_secs(1),
+                max_concurrent_deliveries: NonZeroUsize::new(1).expect("non-zero"),
+                max_pending_deliveries: NonZeroUsize::new(8).expect("non-zero"),
+            },
+            delivery_store.clone(),
+            route_store,
+            scope.agent_id.clone().expect("test scope has agent"),
+        );
+
+        driver
+            .on_trigger_submitted(minimal_trigger_fire(None), run_id, scope)
+            .await;
+
+        assert_eq!(
+            wait_for_delivery_record(&delivery_store, run_id)
+                .await
+                .outcome,
+            TriggeredRunDeliveryOutcomeKind::Failed,
+        );
+        assert!(
+            egress.calls().is_empty(),
+            "the dishonest adapter emitted no provider side-effect evidence"
+        );
+    }
+
+    #[tokio::test]
     async fn driver_approval_gate_body_contains_approve_keyword_without_http_url() {
         let install = "test-install";
         let gate_ref_str = "gate:approval-test-001";
@@ -1598,6 +1726,62 @@ mod tests {
                 .iter()
                 .any(|c| c.path == "/api/chat.postMessage"),
             "no egress expected for denied trigger"
+        );
+    }
+
+    #[tokio::test]
+    async fn managed_driver_propagates_authoritative_outcome_write_failure() {
+        struct FailingOutcomeStore;
+
+        #[async_trait]
+        impl TriggeredRunDeliveryStore for FailingOutcomeStore {
+            async fn record_triggered_run_delivery(
+                &self,
+                _record: TriggeredRunDeliveryRecord,
+            ) -> Result<(), String> {
+                Err("test outcome store outage".to_string())
+            }
+
+            async fn load_triggered_run_delivery(
+                &self,
+                _run_id: TurnRunId,
+            ) -> Result<Option<TriggeredRunDeliveryRecord>, String> {
+                Ok(None)
+            }
+        }
+
+        let scope = personal_turn_scope();
+        let services = make_services(
+            Arc::new(ScriptedTurnCoordinator::with_single_status(
+                TurnStatus::Completed,
+            )),
+            Arc::new(InMemorySessionThreadService::default()),
+            Arc::new(FakeProtocolHttpEgress::new(vec!["slack.com".to_string()])),
+            Arc::new(InMemoryOutboundStateStore::default()),
+            "test-install",
+        );
+        let driver = TriggeredRunDeliveryDriver::new(
+            services,
+            Arc::new(FailingOutcomeStore),
+            Arc::new(InMemoryDeliveredGateRouteStore::default()),
+            scope.agent_id.clone().expect("test scope has agent"),
+        );
+        let fire = minimal_trigger_fire(Some(
+            ironclaw_host_api::ProjectId::new("some-project").expect("project"),
+        ));
+
+        let error = PostSubmitDeliveryHook::on_trigger_submitted(
+            &driver,
+            fire,
+            TurnRunId::new(),
+            scope,
+        )
+        .await
+        .expect_err("managed caller must receive the store failure");
+
+        assert!(
+            error.to_string().contains("test outcome store outage"),
+            "the durable failure cause must reach the task owner: {error}"
         );
     }
 
@@ -5593,17 +5777,22 @@ mod tests {
         );
     }
 
-    /// Slack post failure → no panic, ack path unaffected.
-    ///
-    /// The post is best-effort; a transport error must be swallowed with debug!
-    /// and the observer must return normally.
+    /// A failed hint post must release its dedup reservation so the transport's
+    /// retry of the same event can succeed.
     #[tokio::test]
-    async fn deferred_busy_post_failure_is_best_effort() {
+    async fn deferred_busy_post_failure_allows_same_event_retry() {
         let install = "test-install";
         let egress = Arc::new(FakeProtocolHttpEgress::new(vec!["slack.com".to_string()]));
         egress.allow_credential_handle("slack_bot_token");
         // Program a transport failure for the hint post.
         egress.program_response("slack.com", Err(ProtocolHttpEgressError::Timeout));
+        egress.program_response(
+            "slack.com",
+            Ok(EgressResponse::new(
+                200,
+                slack_post_ok_json("D123", "retry-after-failure.1"),
+            )),
+        );
 
         let outbound = Arc::new(InMemoryOutboundStateStore::default());
         let coordinator = Arc::new(ScriptedTurnCoordinator::with_single_status(
@@ -5611,17 +5800,22 @@ mod tests {
         ));
         let observer = make_observer(coordinator, egress.clone(), outbound, install);
 
-        let env = envelope(user_message_payload());
-        let ack = deferred_busy_ack();
-
-        // Must not panic regardless of the egress failure.
-        observer.observe_workflow_ack(env, ack).await;
+        observer
+            .observe_workflow_ack(envelope(user_message_payload()), deferred_busy_ack())
+            .await;
+        observer
+            .observe_workflow_ack(envelope(user_message_payload()), deferred_busy_ack())
+            .await;
 
         // The call was recorded even though the programmed result was an error.
         let calls = egress.calls();
-        assert!(
-            calls.iter().any(|c| c.path == "/api/chat.postMessage"),
-            "egress must have been called even when the hint post fails (best-effort)"
+        assert_eq!(
+            calls
+                .iter()
+                .filter(|call| call.path == "/api/chat.postMessage")
+                .count(),
+            2,
+            "the failed first post cannot suppress the same event's successful retry"
         );
     }
 
@@ -6842,12 +7036,13 @@ mod composite_hook_tests {
             _fire: TriggerFire,
             run_id: TurnRunId,
             _scope: TurnScope,
-        ) {
+        ) -> Result<(), PostSubmitDeliveryError> {
             self.calls
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner())
                 .push(run_id);
             self.notify.notify_one();
+            Ok(())
         }
     }
 
@@ -6862,7 +7057,7 @@ mod composite_hook_tests {
             _fire: TriggerFire,
             _run_id: TurnRunId,
             _scope: TurnScope,
-        ) {
+        ) -> Result<(), PostSubmitDeliveryError> {
             panic!("composite hook test: intentional hook failure");
         }
     }
@@ -6912,7 +7107,10 @@ mod composite_hook_tests {
 
         let run_id = TurnRunId::new();
         let (fire, scope) = settlement_parts(run_id);
-        composite.on_trigger_submitted(fire, run_id, scope).await;
+        composite
+            .on_trigger_submitted(fire, run_id, scope)
+            .await
+            .expect("all hooks succeed");
 
         assert_eq!(slack_hook.calls(), vec![run_id]);
         assert_eq!(telegram_hook.calls(), vec![run_id]);
@@ -6927,7 +7125,11 @@ mod composite_hook_tests {
 
         let run_id = TurnRunId::new();
         let (fire, scope) = settlement_parts(run_id);
-        composite.on_trigger_submitted(fire, run_id, scope).await;
+        let error = composite
+            .on_trigger_submitted(fire, run_id, scope)
+            .await
+            .expect_err("the panicking hook is reported to the task owner");
+        assert!(error.to_string().contains("hook task join failed"));
 
         let calls =
             tokio::time::timeout(StdDuration::from_secs(1), surviving_hook.wait_for_calls(1))
@@ -6939,6 +7141,7 @@ mod composite_hook_tests {
 
 #[cfg(test)]
 mod protocol_seam_tests {
+    use ironclaw_outbound::RunNotificationEventKind;
     use ironclaw_product_adapters::{
         DeclaredEgressHost, EgressMethod, EgressPath, EgressRequest, EgressResponse,
         ProtocolHttpEgress, ProtocolHttpEgressError,
@@ -6961,10 +7164,16 @@ mod protocol_seam_tests {
 
     /// Fake protocol that recognizes exactly one path as a trackable post.
     #[derive(Debug)]
-    struct PathTrackingProtocol;
+    struct PathTrackingProtocol {
+        prefix: &'static str,
+    }
 
     #[async_trait]
     impl ChannelDeliveryProtocol for PathTrackingProtocol {
+        fn run_notification_projection_prefix(&self) -> &'static str {
+            self.prefix
+        }
+
         fn conversation_id_from_reply_target_binding_ref(
             &self,
             _target: &ReplyTargetBindingRef,
@@ -6979,7 +7188,8 @@ mod protocol_seam_tests {
         fn posted_message_from_render_response(
             &self,
             path: &str,
-            _body: &[u8],
+            _request_body: &[u8],
+            _response_body: &[u8],
         ) -> Option<PostedChannelMessage> {
             (path == "/api/tracked.post").then(|| PostedChannelMessage {
                 conversation_id: "conv-1".to_string(),
@@ -7029,7 +7239,10 @@ mod protocol_seam_tests {
     #[tokio::test]
     async fn tracking_egress_records_only_protocol_recognized_posts() {
         let tracked =
-            TrackingPostEgress::new(Arc::new(CannedEgress), Arc::new(PathTrackingProtocol));
+            TrackingPostEgress::new(
+                Arc::new(CannedEgress),
+                Arc::new(PathTrackingProtocol { prefix: "test" }),
+            );
 
         tracked
             .send(request("/api/unrelated"))
@@ -7051,5 +7264,29 @@ mod protocol_seam_tests {
                 message_ref: "ref-1".to_string(),
             }]
         );
+    }
+
+    #[test]
+    fn channel_projection_namespaces_are_protocol_owned_and_distinct() {
+        let run_id = TurnRunId::new();
+        let slack = PathTrackingProtocol { prefix: "slack" };
+        let telegram = PathTrackingProtocol { prefix: "telegram" };
+        let slack_id = channel_run_notification_projection_id(
+            &slack,
+            run_id,
+            RunNotificationEventKind::FinalReplyReady,
+        );
+        let telegram_id = channel_run_notification_projection_id(
+            &telegram,
+            run_id,
+            RunNotificationEventKind::FinalReplyReady,
+        );
+
+        assert_eq!(slack_id, format!("slack-run-notification:final:{run_id}"));
+        assert_eq!(
+            telegram_id,
+            format!("telegram-run-notification:final:{run_id}")
+        );
+        assert_ne!(slack_id, telegram_id);
     }
 }

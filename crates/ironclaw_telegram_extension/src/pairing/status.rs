@@ -10,9 +10,75 @@ pub const PAIRING_CODE_ALPHABET: &[u8] = b"ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
 pub const PAIRING_CODE_LEN: usize = 8;
 pub const PAIRING_TTL_MINUTES: i64 = 15;
 
+/// Canonical, validated pairing-code value used by persistence, minting, and
+/// API projections. External text is normalized exactly once at ingress.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(try_from = "String", into = "String")]
+pub struct PairingCode(String);
+
+impl PairingCode {
+    pub fn parse(value: impl AsRef<str>) -> Result<Self, PairingCodeError> {
+        let normalized = value.as_ref().trim().to_ascii_uppercase();
+        if normalized.len() != PAIRING_CODE_LEN
+            || !normalized
+                .bytes()
+                .all(|byte| PAIRING_CODE_ALPHABET.contains(&byte))
+        {
+            return Err(PairingCodeError);
+        }
+        Ok(Self(normalized))
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+
+    pub(super) fn generated(value: String) -> Self {
+        debug_assert_eq!(value.len(), PAIRING_CODE_LEN);
+        debug_assert!(
+            value
+                .bytes()
+                .all(|byte| PAIRING_CODE_ALPHABET.contains(&byte))
+        );
+        Self(value)
+    }
+}
+
+impl std::ops::Deref for PairingCode {
+    type Target = str;
+
+    fn deref(&self) -> &Self::Target {
+        self.as_str()
+    }
+}
+
+impl std::fmt::Display for PairingCode {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(self.as_str())
+    }
+}
+
+impl TryFrom<String> for PairingCode {
+    type Error = PairingCodeError;
+
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::parse(value)
+    }
+}
+
+impl From<PairingCode> for String {
+    fn from(value: PairingCode) -> Self {
+        value.0
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Error)]
+#[error("invalid telegram pairing code")]
+pub struct PairingCodeError;
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TelegramPairingRecord {
-    pub code: String,
+    pub code: PairingCode,
     pub tenant_id: TenantId,
     pub user_id: UserId,
     pub installation_id: AdapterInstallationId,
@@ -37,6 +103,8 @@ pub enum TelegramPairingError {
     Setup { reason: String },
     #[error("pairing continuation dispatch failed: {reason}")]
     ContinuationDispatch { reason: String },
+    #[error("telegram pairing changed concurrently; retry")]
+    ConcurrentUpdate,
 }
 
 impl From<TelegramSetupError> for TelegramPairingError {
@@ -72,7 +140,7 @@ pub struct TelegramDmTarget {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct PairingIssue {
-    pub code: String,
+    pub code: PairingCode,
     pub deep_link: String,
     pub expires_at: DateTime<Utc>,
 }

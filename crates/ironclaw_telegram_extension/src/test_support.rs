@@ -100,6 +100,27 @@ impl RecordingBotApi {
             .set_set_webhook_response(provider_rejection(status));
     }
 
+    pub(crate) fn hold_next_set_webhooks_at(
+        &self,
+        call_count: usize,
+        barrier: Arc<tokio::sync::Barrier>,
+    ) {
+        *lock(&self.network.set_webhook_barrier) = Some((call_count, barrier));
+    }
+
+    pub(crate) fn accept_set_webhook(&self) {
+        self.network.set_set_webhook_response(ok_response());
+    }
+
+    pub(crate) fn reject_delete_webhook(&self, status: u16) {
+        self.network
+            .set_delete_webhook_response(provider_rejection(status));
+    }
+
+    pub(crate) fn accept_delete_webhook(&self) {
+        self.network.set_delete_webhook_response(ok_response());
+    }
+
     pub(crate) fn fail_sends(&self) {
         self.network.fail_sends.store(true, Ordering::SeqCst);
     }
@@ -114,6 +135,8 @@ struct RecordingTelegramNetwork {
     requests: Arc<Mutex<Vec<NetworkHttpRequest>>>,
     get_me_response: Arc<Mutex<NetworkHttpResponse>>,
     set_webhook_response: Arc<Mutex<NetworkHttpResponse>>,
+    delete_webhook_response: Arc<Mutex<NetworkHttpResponse>>,
+    set_webhook_barrier: Arc<Mutex<Option<(usize, Arc<tokio::sync::Barrier>)>>>,
     fail_sends: Arc<AtomicBool>,
 }
 
@@ -123,6 +146,8 @@ impl Default for RecordingTelegramNetwork {
             requests: Arc::new(Mutex::new(Vec::new())),
             get_me_response: Arc::new(Mutex::new(bot_identity_response(4242, "ironclaw_qa_bot"))),
             set_webhook_response: Arc::new(Mutex::new(ok_response())),
+            delete_webhook_response: Arc::new(Mutex::new(ok_response())),
+            set_webhook_barrier: Arc::new(Mutex::new(None)),
             fail_sends: Arc::new(AtomicBool::new(false)),
         }
     }
@@ -141,6 +166,10 @@ impl RecordingTelegramNetwork {
         *lock(&self.set_webhook_response) = response;
     }
 
+    fn set_delete_webhook_response(&self, response: NetworkHttpResponse) {
+        *lock(&self.delete_webhook_response) = response;
+    }
+
     fn calls(&self) -> Vec<RecordedBotApiCall> {
         lock(&self.requests)
             .iter()
@@ -155,12 +184,51 @@ impl NetworkHttpEgress for RecordingTelegramNetwork {
         &self,
         request: NetworkHttpRequest,
     ) -> Result<NetworkHttpResponse, NetworkHttpError> {
+        if request.url.ends_with("/setWebhook") {
+            let barrier = {
+                let mut slot = lock(&self.set_webhook_barrier);
+                if let Some((remaining, barrier)) = slot.as_mut() {
+                    let barrier = Arc::clone(barrier);
+                    *remaining = remaining.saturating_sub(1);
+                    if *remaining == 0 {
+                        *slot = None;
+                    }
+                    Some(barrier)
+                } else {
+                    None
+                }
+            };
+            if let Some(barrier) = barrier {
+                barrier.wait().await;
+            }
+        }
         let response = if request.url.ends_with("/getMe") {
             lock(&self.get_me_response).clone()
         } else if request.url.ends_with("/setWebhook") {
             lock(&self.set_webhook_response).clone()
+        } else if request.url.ends_with("/deleteWebhook") {
+            lock(&self.delete_webhook_response).clone()
         } else if request.url.ends_with("/sendMessage") && self.fail_sends.load(Ordering::SeqCst) {
             provider_rejection(403)
+        } else if request.url.ends_with("/sendMessage") {
+            let body: serde_json::Value = serde_json::from_slice(&request.body)
+                .expect("recorded sendMessage request must contain valid JSON");
+            let chat_id = body
+                .get("chat_id")
+                .and_then(serde_json::Value::as_i64)
+                .expect("recorded sendMessage request must contain an integer chat_id");
+            network_response(
+                200,
+                serde_json::json!({
+                    "ok": true,
+                    "result": {
+                        "message_id": 1,
+                        "chat": { "id": chat_id, "type": "private" }
+                    }
+                })
+                .to_string()
+                .into_bytes(),
+            )
         } else {
             ok_response()
         };
@@ -170,20 +238,38 @@ impl NetworkHttpEgress for RecordingTelegramNetwork {
 }
 
 fn recorded_call(request: &NetworkHttpRequest) -> Option<RecordedBotApiCall> {
-    let body: serde_json::Value = serde_json::from_slice(&request.body).ok()?;
     if request.url.ends_with("/getMe") {
         Some(RecordedBotApiCall::GetMe)
     } else if request.url.ends_with("/setWebhook") {
+        let body: serde_json::Value = serde_json::from_slice(&request.body)
+            .expect("recorded setWebhook request must contain valid JSON");
         Some(RecordedBotApiCall::SetWebhook {
-            url: body.get("url")?.as_str()?.to_string(),
-            secret: body.get("secret_token")?.as_str()?.to_string(),
+            url: body
+                .get("url")
+                .and_then(serde_json::Value::as_str)
+                .expect("recorded setWebhook request must contain a string url")
+                .to_string(),
+            secret: body
+                .get("secret_token")
+                .and_then(serde_json::Value::as_str)
+                .expect("recorded setWebhook request must contain a string secret_token")
+                .to_string(),
         })
     } else if request.url.ends_with("/deleteWebhook") {
         Some(RecordedBotApiCall::DeleteWebhook)
     } else if request.url.ends_with("/sendMessage") {
+        let body: serde_json::Value = serde_json::from_slice(&request.body)
+            .expect("recorded sendMessage request must contain valid JSON");
         Some(RecordedBotApiCall::SendMessage {
-            chat_id: body.get("chat_id")?.as_i64()?,
-            text: body.get("text")?.as_str()?.to_string(),
+            chat_id: body
+                .get("chat_id")
+                .and_then(serde_json::Value::as_i64)
+                .expect("recorded sendMessage request must contain an integer chat_id"),
+            text: body
+                .get("text")
+                .and_then(serde_json::Value::as_str)
+                .expect("recorded sendMessage request must contain string text")
+                .to_string(),
         })
     } else {
         None
@@ -328,10 +414,6 @@ impl FaultInjectingFilesystem {
         self.fail_writes.store(true, Ordering::SeqCst);
     }
 
-    pub(crate) fn fail_deletes(&self) {
-        self.fail_deletes.store(true, Ordering::SeqCst);
-    }
-
     pub(crate) fn fail_versioned_writes(&self) {
         self.fail_versioned_writes.store(true, Ordering::SeqCst);
     }
@@ -378,6 +460,10 @@ impl RootFilesystem for FaultInjectingFilesystem {
         if self.fail_reads.load(Ordering::SeqCst) {
             return Err(Self::injected(path, FilesystemOperation::ReadFile));
         }
+        // Capture the backend snapshot before waiting so concurrent tests pin
+        // a true read/read/write interleaving rather than merely releasing two
+        // readers whose actual reads can still occur sequentially.
+        let result = self.inner.get(path).await;
         let barrier = {
             let mut slot = match self.next_read_barrier.lock() {
                 Ok(slot) => slot,
@@ -397,7 +483,7 @@ impl RootFilesystem for FaultInjectingFilesystem {
         if let Some(barrier) = barrier {
             barrier.wait().await;
         }
-        self.inner.get(path).await
+        result
     }
 
     async fn list_dir(&self, path: &VirtualPath) -> Result<Vec<DirEntry>, FilesystemError> {
@@ -413,5 +499,16 @@ impl RootFilesystem for FaultInjectingFilesystem {
             return Err(Self::injected(path, FilesystemOperation::Delete));
         }
         self.inner.delete(path).await
+    }
+
+    async fn delete_if_version(
+        &self,
+        path: &VirtualPath,
+        expected_version: ironclaw_filesystem::RecordVersion,
+    ) -> Result<(), FilesystemError> {
+        if self.fail_deletes.load(Ordering::SeqCst) {
+            return Err(Self::injected(path, FilesystemOperation::Delete));
+        }
+        self.inner.delete_if_version(path, expected_version).await
     }
 }

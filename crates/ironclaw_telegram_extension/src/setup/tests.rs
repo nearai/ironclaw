@@ -43,19 +43,21 @@ fn service_with_secret_store(
     )
 }
 
-/// Delegating secret store whose `put` can be switched to fail —
+/// Delegating secret store whose mutations can be switched to fail —
 /// everything else forwards to a real in-memory store.
 #[derive(Debug)]
-struct FailingPutSecretStore {
+struct FaultInjectingSecretStore {
     inner: InMemorySecretStore,
     fail_puts: std::sync::atomic::AtomicBool,
+    fail_deletes: std::sync::atomic::AtomicBool,
 }
 
-impl FailingPutSecretStore {
+impl FaultInjectingSecretStore {
     fn new() -> Self {
         Self {
             inner: InMemorySecretStore::new(),
             fail_puts: std::sync::atomic::AtomicBool::new(false),
+            fail_deletes: std::sync::atomic::AtomicBool::new(false),
         }
     }
 
@@ -63,10 +65,20 @@ impl FailingPutSecretStore {
         self.fail_puts
             .store(true, std::sync::atomic::Ordering::SeqCst);
     }
+
+    fn fail_deletes(&self) {
+        self.fail_deletes
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    fn accept_deletes(&self) {
+        self.fail_deletes
+            .store(false, std::sync::atomic::Ordering::SeqCst);
+    }
 }
 
 #[async_trait]
-impl ironclaw_secrets::SecretStore for FailingPutSecretStore {
+impl ironclaw_secrets::SecretStore for FaultInjectingSecretStore {
     async fn put(
         &self,
         scope: ResourceScope,
@@ -102,6 +114,11 @@ impl ironclaw_secrets::SecretStore for FailingPutSecretStore {
         scope: &ResourceScope,
         handle: &SecretHandle,
     ) -> Result<bool, SecretStoreError> {
+        if self.fail_deletes.load(std::sync::atomic::Ordering::SeqCst) {
+            return Err(SecretStoreError::StoreUnavailable {
+                reason: "test secret deletion outage".to_string(),
+            });
+        }
         self.inner.delete(scope, handle).await
     }
 
@@ -191,6 +208,32 @@ async fn save_happy_path_validates_registers_and_persists() {
     let status = service.status().await.expect("status");
     assert!(status.configured && status.bot_token_configured);
     assert_eq!(status.bot_username.as_deref(), Some("ironclaw_qa_bot"));
+}
+
+#[tokio::test]
+async fn save_uses_explicit_https_webhook_override_instead_of_public_base() {
+    let store = telegram_state();
+    let bot_api = Arc::new(RecordingBotApi::default());
+    let service = service_with(
+        Arc::clone(&store),
+        Arc::clone(&bot_api),
+        Some("https://default.example"),
+    );
+    let override_url = "https://tunnel.example/custom/telegram";
+
+    let (_, saved) = service
+        .save_with_previous(TelegramInstallationSetupUpdate {
+            bot_token: Some(SecretString::from("123:abc".to_string())),
+            webhook_url_override: Some(format!("  {override_url}  ")),
+        })
+        .await
+        .expect("override save succeeds");
+
+    assert_eq!(saved.webhook_url, override_url);
+    assert!(matches!(
+        bot_api.calls().get(1),
+        Some(BotApiCall::SetWebhook { url, .. }) if url == override_url
+    ));
 }
 
 #[tokio::test]
@@ -297,6 +340,64 @@ async fn rotation_bumps_revision_and_keeps_installation_identity() {
 }
 
 #[tokio::test]
+async fn concurrent_same_bot_saves_publish_one_winner_without_deleting_its_secrets() {
+    let store = telegram_state();
+    let bot_api = Arc::new(RecordingBotApi::default());
+    bot_api.hold_next_set_webhooks_at(2, Arc::new(tokio::sync::Barrier::new(2)));
+    let service = Arc::new(service_with(
+        Arc::clone(&store),
+        Arc::clone(&bot_api),
+        Some("https://ironclaw.example"),
+    ));
+
+    let first_service = Arc::clone(&service);
+    let second_service = Arc::clone(&service);
+    let (first, second) = tokio::join!(
+        async move {
+            first_service
+                .save_with_previous(update_with_token("123:first"))
+                .await
+        },
+        async move {
+            second_service
+                .save_with_previous(update_with_token("123:second"))
+                .await
+        }
+    );
+
+    let successes = [&first, &second]
+        .into_iter()
+        .filter(|result| result.is_ok())
+        .count();
+    let conflicts = [&first, &second]
+        .into_iter()
+        .filter(|result| matches!(result, Err(TelegramSetupError::ConcurrentUpdate)))
+        .count();
+    assert_eq!(successes, 1, "exactly one setup CAS may publish");
+    assert_eq!(conflicts, 1, "the losing caller receives a conflict");
+
+    let winning_token = service
+        .bot_token()
+        .await
+        .expect("winner token resolves")
+        .expect("winner token remains present");
+    let token = winning_token.expose_secret();
+    assert!(
+        token == "123:first" || token == "123:second",
+        "the losing save must clean only its attempt-scoped handles"
+    );
+    assert_eq!(
+        service
+            .current_setup()
+            .await
+            .expect("winner setup reads")
+            .expect("winner setup exists")
+            .revision,
+        1
+    );
+}
+
+#[tokio::test]
 async fn blank_token_keeps_existing_material() {
     let store = telegram_state();
     let bot_api = Arc::new(RecordingBotApi::default());
@@ -345,6 +446,100 @@ async fn clear_deletes_webhook_and_record() {
 }
 
 #[tokio::test]
+async fn clear_keeps_retryable_intent_when_delete_webhook_fails() {
+    let store = telegram_state();
+    let bot_api = Arc::new(RecordingBotApi::default());
+    let service = service_with(
+        Arc::clone(&store),
+        Arc::clone(&bot_api),
+        Some("https://ironclaw.example"),
+    );
+    let (_, saved) = service
+        .save_with_previous(update_with_token("123:abc"))
+        .await
+        .expect("save");
+    bot_api.reject_delete_webhook(503);
+
+    assert!(matches!(
+        service
+            .clear()
+            .await
+            .expect_err("provider outage fails clear"),
+        TelegramSetupError::BotApi { .. }
+    ));
+    assert!(
+        service
+            .current_setup()
+            .await
+            .expect("normal read")
+            .is_none(),
+        "clearing setup must fail closed"
+    );
+    assert_eq!(
+        store
+            .telegram_installation_setup_for_cleanup()
+            .await
+            .expect("cleanup intent reads"),
+        Some(saved),
+        "provider failure must retain the handles needed for restart-safe retry"
+    );
+
+    bot_api.accept_delete_webhook();
+    service.clear().await.expect("retry completes cleanup");
+    assert!(
+        store
+            .telegram_installation_setup_for_cleanup()
+            .await
+            .expect("cleanup state reads")
+            .is_none()
+    );
+}
+
+#[tokio::test]
+async fn clear_keeps_retryable_intent_when_secret_deletion_fails() {
+    let store = telegram_state();
+    let secret_store = Arc::new(FaultInjectingSecretStore::new());
+    let bot_api = Arc::new(RecordingBotApi::default());
+    let service = service_with_secret_store(
+        Arc::clone(&store),
+        Arc::clone(&secret_store) as Arc<dyn SecretStore>,
+        bot_api,
+        Some("https://ironclaw.example"),
+    );
+    let (_, saved) = service
+        .save_with_previous(update_with_token("123:abc"))
+        .await
+        .expect("save");
+    secret_store.fail_deletes();
+
+    assert!(matches!(
+        service
+            .clear()
+            .await
+            .expect_err("secret outage fails clear"),
+        TelegramSetupError::SecretStoreUnavailable { .. }
+    ));
+    assert_eq!(
+        store
+            .telegram_installation_setup_for_cleanup()
+            .await
+            .expect("cleanup intent reads"),
+        Some(saved),
+        "secret deletion failure must retain durable cleanup metadata"
+    );
+
+    secret_store.accept_deletes();
+    service.clear().await.expect("retry completes cleanup");
+    assert!(
+        store
+            .telegram_installation_setup_for_cleanup()
+            .await
+            .expect("cleanup state reads")
+            .is_none()
+    );
+}
+
+#[tokio::test]
 async fn rollback_restores_previous_record_and_previous_webhook_registration() {
     let store = telegram_state();
     let bot_api = Arc::new(RecordingBotApi::default());
@@ -379,6 +574,99 @@ async fn rollback_restores_previous_record_and_previous_webhook_registration() {
     }
 }
 
+#[tokio::test]
+async fn rollback_keeps_intent_until_compensating_set_webhook_succeeds() {
+    let store = telegram_state();
+    let bot_api = Arc::new(RecordingBotApi::default());
+    let service = service_with(
+        Arc::clone(&store),
+        Arc::clone(&bot_api),
+        Some("https://ironclaw.example"),
+    );
+    let (_, first) = service
+        .save_with_previous(update_with_token("123:abc"))
+        .await
+        .expect("first save");
+    let (previous, second) = service
+        .save_with_previous(update_with_token("123:rotated"))
+        .await
+        .expect("second save");
+    bot_api.reject_set_webhook(503);
+
+    assert!(matches!(
+        service
+            .rollback_failed_activation_save(&second, previous.as_ref())
+            .await
+            .expect_err("provider rollback outage surfaces"),
+        TelegramSetupError::BotApi { .. }
+    ));
+    assert!(
+        service
+            .current_setup()
+            .await
+            .expect("normal read")
+            .is_none()
+    );
+    assert_eq!(
+        store
+            .telegram_installation_setup_rollback_intent()
+            .await
+            .expect("rollback intent reads"),
+        Some((second.clone(), Some(first.clone()), false))
+    );
+
+    bot_api.accept_set_webhook();
+    service
+        .rollback_failed_activation_save(&second, previous.as_ref())
+        .await
+        .expect("retry completes rollback");
+    assert_eq!(service.current_setup().await.expect("read"), Some(first));
+}
+
+#[tokio::test]
+async fn rollback_keeps_intent_until_failed_revision_secrets_are_deleted() {
+    let store = telegram_state();
+    let secret_store = Arc::new(FaultInjectingSecretStore::new());
+    let bot_api = Arc::new(RecordingBotApi::default());
+    let service = service_with_secret_store(
+        Arc::clone(&store),
+        Arc::clone(&secret_store) as Arc<dyn SecretStore>,
+        bot_api,
+        Some("https://ironclaw.example"),
+    );
+    let (_, first) = service
+        .save_with_previous(update_with_token("123:abc"))
+        .await
+        .expect("first save");
+    let (previous, second) = service
+        .save_with_previous(update_with_token("123:rotated"))
+        .await
+        .expect("second save");
+    secret_store.fail_deletes();
+
+    assert!(matches!(
+        service
+            .rollback_failed_activation_save(&second, previous.as_ref())
+            .await
+            .expect_err("secret cleanup outage surfaces"),
+        TelegramSetupError::SecretStoreUnavailable { .. }
+    ));
+    assert_eq!(
+        store
+            .telegram_installation_setup_rollback_intent()
+            .await
+            .expect("rollback intent reads"),
+        Some((second.clone(), Some(first.clone()), true))
+    );
+
+    secret_store.accept_deletes();
+    service
+        .rollback_failed_activation_save(&second, previous.as_ref())
+        .await
+        .expect("retry completes rollback and secret cleanup");
+    assert_eq!(service.current_setup().await.expect("read"), Some(first));
+}
+
 async fn current_webhook_secret(service: &TelegramSetupService) -> String {
     service
         .webhook_secret()
@@ -396,7 +684,7 @@ async fn current_webhook_secret(service: &TelegramSetupService) -> String {
 #[tokio::test]
 async fn failed_secret_persist_deletes_fresh_webhook_when_no_previous() {
     let store = telegram_state();
-    let secret_store = Arc::new(FailingPutSecretStore::new());
+    let secret_store = Arc::new(FaultInjectingSecretStore::new());
     secret_store.fail_puts();
     let bot_api = Arc::new(RecordingBotApi::default());
     let service = service_with_secret_store(
@@ -494,4 +782,47 @@ async fn rollback_after_bot_swap_deletes_the_new_bots_webhook() {
         "bot-swap rollback must delete the new bot's registration, got {:?}",
         bot_api.calls()
     );
+}
+
+#[tokio::test]
+async fn bot_swap_rollback_keeps_intent_until_compensating_delete_webhook_succeeds() {
+    let store = telegram_state();
+    let bot_api = Arc::new(RecordingBotApi::default());
+    let service = service_with(
+        Arc::clone(&store),
+        Arc::clone(&bot_api),
+        Some("https://ironclaw.example"),
+    );
+    let (_, first) = service
+        .save_with_previous(update_with_token("123:abc"))
+        .await
+        .expect("first save");
+    bot_api.set_bot_identity(5555, "other_bot");
+    let (previous, second) = service
+        .save_with_previous(update_with_token("555:swap"))
+        .await
+        .expect("bot swap saves");
+    bot_api.reject_delete_webhook(503);
+
+    assert!(matches!(
+        service
+            .rollback_failed_activation_save(&second, previous.as_ref())
+            .await
+            .expect_err("provider rollback outage surfaces"),
+        TelegramSetupError::BotApi { .. }
+    ));
+    assert_eq!(
+        store
+            .telegram_installation_setup_rollback_intent()
+            .await
+            .expect("rollback intent reads"),
+        Some((second.clone(), Some(first.clone()), false))
+    );
+
+    bot_api.accept_delete_webhook();
+    service
+        .rollback_failed_activation_save(&second, previous.as_ref())
+        .await
+        .expect("retry completes bot-swap rollback");
+    assert_eq!(service.current_setup().await.expect("read"), Some(first));
 }

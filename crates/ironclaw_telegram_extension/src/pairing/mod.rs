@@ -15,9 +15,9 @@ mod status;
 
 pub use service::TelegramPairingService;
 pub use status::{
-    PAIRING_CODE_ALPHABET, PAIRING_CODE_LEN, PAIRING_TTL_MINUTES, PairingConsumeOutcome,
-    PairingIssue, RemovedTelegramBinding, TelegramBindingError, TelegramDmTarget,
-    TelegramPairingError, TelegramPairingRecord, TelegramPairingStatus,
+    PAIRING_CODE_ALPHABET, PAIRING_CODE_LEN, PAIRING_TTL_MINUTES, PairingCode, PairingCodeError,
+    PairingConsumeOutcome, PairingIssue, RemovedTelegramBinding, TelegramBindingError,
+    TelegramDmTarget, TelegramPairingError, TelegramPairingRecord, TelegramPairingStatus,
 };
 
 #[cfg(test)]

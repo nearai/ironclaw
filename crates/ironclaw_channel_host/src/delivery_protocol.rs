@@ -21,6 +21,11 @@ use thiserror::Error;
 /// the generic machinery never keys on a concrete channel.
 #[async_trait]
 pub trait ChannelDeliveryProtocol: Send + Sync {
+    /// Stable channel-owned namespace for run-notification projections. Slack
+    /// keeps its legacy `slack` prefix; every other channel must use a distinct
+    /// value so composite delivery cannot alias cursor/idempotency identities.
+    fn run_notification_projection_prefix(&self) -> &'static str;
+
     /// Decode a stored reply-target binding ref into
     /// `(conversation_id, space_id)`. `None` for a ref this channel does not
     /// own — the formats are channel-exclusive, so a foreign ref fails closed.
@@ -39,7 +44,8 @@ pub trait ChannelDeliveryProtocol: Send + Sync {
     fn posted_message_from_render_response(
         &self,
         path: &str,
-        body: &[u8],
+        request_body: &[u8],
+        response_body: &[u8],
     ) -> Option<PostedChannelMessage>;
 
     /// First-contact greeting for a sender who has not connected their
@@ -83,6 +89,8 @@ pub struct PostedChannelMessage {
 pub enum FinalReplyDeliveryError {
     #[error("workflow binding failed: {0}")]
     Workflow(#[from] ironclaw_product_workflow::ProductWorkflowError),
+    #[error("approval prompt lookup failed: {0}")]
+    ApprovalPrompt(#[from] ironclaw_product_workflow::ApprovalPromptLookupError),
     #[error("turn coordinator failed: {0}")]
     Turn(#[from] ironclaw_turns::TurnError),
     #[error("thread service failed: {0}")]
@@ -104,4 +112,6 @@ pub enum FinalReplyDeliveryError {
     RunWaitTimedOutAfterNotification { run_id: TurnRunId },
     #[error("invalid projection ref: {reason}")]
     InvalidProjectionRef { reason: String },
+    #[error("run {run_id} produced no posted-message delivery evidence")]
+    DeliveryEvidenceMissing { run_id: TurnRunId },
 }

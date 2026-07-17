@@ -115,6 +115,10 @@ async fn telegram_status_call(
 impl ironclaw_channel_host::delivery_protocol::ChannelDeliveryProtocol
     for TelegramDeliveryProtocol
 {
+    fn run_notification_projection_prefix(&self) -> &'static str {
+        "telegram"
+    }
+
     fn conversation_id_from_reply_target_binding_ref(
         &self,
         target: &ironclaw_turns::ReplyTargetBindingRef,
@@ -137,10 +141,26 @@ impl ironclaw_channel_host::delivery_protocol::ChannelDeliveryProtocol
 
     fn posted_message_from_render_response(
         &self,
-        _path: &str,
-        _body: &[u8],
+        path: &str,
+        request_body: &[u8],
+        response_body: &[u8],
     ) -> Option<ironclaw_channel_host::delivery_protocol::PostedChannelMessage> {
-        None
+        if path != TELEGRAM_SEND_MESSAGE_PATH {
+            return None;
+        }
+        let request: serde_json::Value = serde_json::from_slice(request_body).ok()?;
+        let response: TelegramStatusEnvelope = serde_json::from_slice(response_body).ok()?;
+        if !response.ok {
+            return None;
+        }
+        let message_id = response.result?.get("message_id")?.as_i64()?;
+        let conversation_id = request.get("chat_id")?.as_i64()?.to_string();
+        Some(
+            ironclaw_channel_host::delivery_protocol::PostedChannelMessage {
+                conversation_id,
+                message_ref: message_id.to_string(),
+            },
+        )
     }
 
     fn connect_nudge_message(&self) -> &'static str {
@@ -493,5 +513,32 @@ mod telegram_delivery_protocol_tests {
         assert!(protocol.is_direct_message_conversation("555"));
         assert!(!protocol.is_direct_message_conversation("-100123"));
         assert!(!protocol.is_direct_message_conversation("not-a-chat-id"));
+    }
+
+    #[test]
+    fn rendered_send_message_response_produces_telegram_delivery_evidence() {
+        let protocol = TelegramDeliveryProtocol;
+        assert_eq!(protocol.run_notification_projection_prefix(), "telegram");
+        assert_eq!(
+            protocol.posted_message_from_render_response(
+                "/sendMessage",
+                br#"{"chat_id":555,"text":"hello"}"#,
+                br#"{"ok":true,"result":{"message_id":42}}"#,
+            ),
+            Some(PostedChannelMessage {
+                conversation_id: "555".to_string(),
+                message_ref: "42".to_string(),
+            })
+        );
+        assert!(
+            protocol
+                .posted_message_from_render_response(
+                    "/sendMessage",
+                    br#"{"chat_id":555}"#,
+                    br#"{"ok":true,"result":true}"#,
+                )
+                .is_none(),
+            "a provider response without a message id is not delivery evidence"
+        );
     }
 }

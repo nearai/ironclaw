@@ -146,7 +146,7 @@ impl RebornOperatorToolCatalog for ActiveRegistryOperatorToolCatalog {
 /// This bundle deliberately exposes facade-shaped product handles consumed
 /// by WebChat v2 and the optional product-auth OAuth routes. HTTP routing, auth
 /// middleware, static assets, and SSE transport live in the `ironclaw_webui`
-/// crate (which folded up the former `ironclaw_webui` route surface); only
+/// crate (which folded up the former `ironclaw_webui_v2` route surface); only
 /// the host-supplied route-mount vocabulary stays in the
 /// [`crate::webui::route_mounts`] module here. Lower runtime handles stay behind
 /// the existing Reborn runtime / composition services.

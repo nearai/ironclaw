@@ -561,7 +561,7 @@ async fn webui_event_stream_projects_spawn_approval_context() {
 }
 
 #[tokio::test]
-async fn webui_event_stream_keeps_approval_prompt_when_request_lookup_fails() {
+async fn webui_event_stream_fails_transiently_when_approval_request_lookup_fails() {
     let tenant_id = TenantId::new("webui-events-approval-fallback-tenant").unwrap();
     let user_id = UserId::new("webui-events-approval-fallback-user").unwrap();
     let agent_id = AgentId::new("webui-events-approval-fallback-agent").unwrap();
@@ -612,7 +612,7 @@ async fn webui_event_stream_keeps_approval_prompt_when_request_lookup_fails() {
         }),
     );
 
-    let events = services
+    let error = services
         .webui_event_stream()
         .drain(ProjectionSubscriptionRequest {
             actor,
@@ -620,19 +620,14 @@ async fn webui_event_stream_keeps_approval_prompt_when_request_lookup_fails() {
             after_cursor: None,
         })
         .await
-        .unwrap();
+        .expect_err("approval-store outages must not render a contextless actionable prompt");
 
-    let prompt = events
-        .iter()
-        .find_map(|event| match event.payload() {
-            ProductOutboundPayload::GatePrompt(prompt) => Some(prompt),
-            _ => None,
-        })
-        .expect("approval gate prompt");
-
-    assert_eq!(prompt.gate_ref, gate_ref.as_str());
-    assert!(prompt.allow_always);
-    assert!(prompt.approval_context.is_none());
+    assert!(error.is_retryable());
+    assert!(
+        !error
+            .to_string()
+            .contains("injected approval lookup failure")
+    );
 }
 
 #[tokio::test]

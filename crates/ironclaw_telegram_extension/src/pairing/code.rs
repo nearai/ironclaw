@@ -1,4 +1,6 @@
-use super::{PAIRING_CODE_ALPHABET, PAIRING_CODE_LEN, PairingIssue, TelegramPairingRecord};
+use super::{
+    PAIRING_CODE_ALPHABET, PAIRING_CODE_LEN, PairingCode, PairingIssue, TelegramPairingRecord,
+};
 
 pub(super) fn pairing_issue(record: &TelegramPairingRecord, bot_username: &str) -> PairingIssue {
     PairingIssue {
@@ -8,11 +10,12 @@ pub(super) fn pairing_issue(record: &TelegramPairingRecord, bot_username: &str) 
     }
 }
 
-pub(super) fn mint_pairing_code() -> String {
-    (0..PAIRING_CODE_LEN)
+pub(super) fn mint_pairing_code() -> PairingCode {
+    let code: String = (0..PAIRING_CODE_LEN)
         .map(|_| {
             let index = rand::random_range(0..PAIRING_CODE_ALPHABET.len());
             PAIRING_CODE_ALPHABET[index] as char
         })
-        .collect()
+        .collect();
+    PairingCode::generated(code)
 }

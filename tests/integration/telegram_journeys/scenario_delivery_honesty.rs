@@ -131,5 +131,24 @@ async fn telegram_duplicate_updates_and_send_failures_stay_honest() {
         "exactly one delivered recovery reply after the failure clears"
     );
 
+    // Terminal absence seam: shutdown drains/cancels the production runtime's
+    // delivery work. Only after that lifecycle fence can we prove no delayed
+    // retry followed the terminal 403.
     stack.runtime.shutdown().await.expect("runtime shuts down");
+    let final_outage_outcomes: Vec<u16> = stack
+        .network
+        .send_outcomes()
+        .iter()
+        .filter(|(body, _)| {
+            body["text"]
+                .as_str()
+                .is_some_and(|text| text.contains("reply during outage"))
+        })
+        .map(|(_, status)| *status)
+        .collect();
+    assert_eq!(
+        final_outage_outcomes,
+        vec![403],
+        "after the runtime's terminal drain, the unauthorized reply still has exactly one attempt"
+    );
 }

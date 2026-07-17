@@ -1883,6 +1883,15 @@ impl RebornRuntime {
             .is_some_and(|slot| slot.get().is_some())
     }
 
+    #[cfg(all(test, feature = "telegram-v2-host-beta"))]
+    pub(crate) fn trigger_post_submit_hook_for_test(
+        &self,
+    ) -> Option<Arc<dyn ironclaw_channel_delivery::PostSubmitDeliveryHook>> {
+        self.post_submit_hook_slot
+            .as_ref()
+            .and_then(|slot| slot.get().cloned())
+    }
+
     /// Wire the per-caller channel-connection facade into the already-built
     /// extension-lifecycle capability handler. Must be called after
     /// [`build_reborn_runtime`] returns and after the facade is constructed
