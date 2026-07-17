@@ -21,15 +21,19 @@ import {
   ZIndexSection,
 } from "./components/token-sections";
 import {
+  AvatarSkeletonSection,
   BadgeSection,
   ButtonSection,
   CardSection,
+  CheckboxSwitchSection,
+  DropdownPopoverSection,
   IconSection,
   InputSection,
   ModalSection,
   PrimitivesSection,
   SelectMenuSection,
   TabsSection,
+  TooltipSection,
 } from "./components/component-sections";
 
 const THEME_STORAGE_KEY = "ironclaw:v2-theme";
@@ -77,7 +81,11 @@ const SECTIONS = [
       { id: "input", name: "Inputs", icon: "terminal", render: InputSection, blurb: "Input, Textarea, Select, Label, and the FormField wrapper with hint/error slots." },
       { id: "select-menu", name: "SelectMenu", icon: "chevron", render: SelectMenuSection, blurb: "Listbox-backed custom select: option tones, keyboard support, and an inline prefix label for dense toolbars." },
       { id: "tabs", name: "Tabs", icon: "list", render: TabsSection, blurb: "Underline tab row for single-select filters — sized by the control tokens so it aligns with adjacent toolbar controls." },
-      { id: "modal", name: "Modal", icon: "plus", render: ModalSection, blurb: "The only dialog primitive. Escape + backdrop close, scroll lock, modal layer." },
+      { id: "modal", name: "Modal", icon: "plus", render: ModalSection, blurb: "Radix Dialog + IronClaw motion. Escape + backdrop close, focus trap, modal layer." },
+      { id: "tooltip", name: "Tooltip", icon: "spark", render: TooltipSection, blurb: "Radix Tooltip for short hover/focus hints." },
+      { id: "controls", name: "Checkbox / Switch / Radio / Slider", icon: "check", render: CheckboxSwitchSection, blurb: "Radix form controls styled with --v2-* tokens." },
+      { id: "menus", name: "Dropdown / Popover", icon: "more", render: DropdownPopoverSection, blurb: "Action menus (DropdownMenu) and anchored content (Popover)." },
+      { id: "display", name: "Avatar / Skeleton / Scroll", icon: "layers", render: AvatarSkeletonSection, blurb: "Avatar, Skeleton, Separator, and ScrollArea." },
       { id: "icons", name: "Icons", icon: "settings", render: IconSection, blurb: "Inline 24px stroke icons. Add new glyphs to icons.tsx, never inline new SVG." },
       { id: "primitives", name: "Primitives", icon: "shield", render: PrimitivesSection, blurb: "Higher-level composites: StatCard, FlowList, EmptyPanel, SectionHeader, SubLabel." },
     ],

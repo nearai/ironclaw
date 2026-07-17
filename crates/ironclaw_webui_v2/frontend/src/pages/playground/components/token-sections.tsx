@@ -390,7 +390,7 @@ export function ZIndexSection({ theme }) {
       <div className="flex flex-wrap gap-6">
         {/* Derived from the token catalog so a renamed/added scrim can't
             drift; the usage notes here are layer-specific, so they live
-            in the ternary below rather than tokens.js. */}
+            in the ternary below rather than tokens.ts. */}
         {COLOR_TOKENS.flatMap((group) => group.tokens)
           .filter((token) => token.var.startsWith("--v2-scrim"))
           .map(({ var: name }) => {

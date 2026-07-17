@@ -1,5 +1,5 @@
 /**
- * tokens.js — machine-readable catalog of the v2 design tokens.
+ * tokens.ts — machine-readable catalog of the v2 design tokens.
  *
  * The canonical *values* live in src/styles/app.css as `--v2-*`
  * custom properties (light + dark themes) — backfilled from the

@@ -6,12 +6,23 @@
  * drift from what pages ship.
  */
 import { useState } from "react";
+import { Avatar, AvatarFallback } from "../../../design-system/avatar";
 import { Badge } from "../../../design-system/badge";
 import { Button } from "../../../design-system/button";
 import { Card, CardBody, CardFooter, CardHeader, CardLabel } from "../../../design-system/card";
+import { Checkbox } from "../../../design-system/checkbox";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuLabel,
+  DropdownMenuSeparator,
+  DropdownMenuTrigger,
+} from "../../../design-system/dropdown-menu";
 import { Icon } from "../../../design-system/icons";
 import { FormField, Input, Select, Textarea } from "../../../design-system/input";
 import { Modal, ModalBody, ModalFooter } from "../../../design-system/modal";
+import { Popover, PopoverContent, PopoverTrigger } from "../../../design-system/popover";
 import {
   EmptyPanel,
   FlowList,
@@ -19,8 +30,15 @@ import {
   StatCard,
   SubLabel,
 } from "../../../design-system/primitives";
+import { RadioGroup, RadioGroupItem } from "../../../design-system/radio-group";
+import { ScrollArea } from "../../../design-system/scroll-area";
 import { SelectMenu } from "../../../design-system/select-menu";
+import { Separator } from "../../../design-system/separator";
+import { Skeleton } from "../../../design-system/skeleton";
+import { Slider } from "../../../design-system/slider";
+import { Switch } from "../../../design-system/switch";
 import { Tabs } from "../../../design-system/tabs";
+import { Tooltip, TooltipProvider } from "../../../design-system/tooltip";
 import { STATUS_CANON } from "../../../design-system/tokens";
 import { SectionTitle } from "./token-sections";
 
@@ -126,7 +144,7 @@ export function BadgeSection() {
       <p className="mb-3 max-w-[62ch] text-sm leading-6 text-[var(--v2-text-muted)]">
         The one mapping from product status words to tokens. Text, dots,
         and progress fills for a status must all come from the same pair
-        (STATUS_CANON in design-system/tokens.js) — never a second hue.
+        (STATUS_CANON in design-system/tokens.ts) — never a second hue.
       </p>
       <div className="flex flex-col gap-2">
         {STATUS_CANON.map((entry) => (
@@ -465,6 +483,138 @@ export function PrimitivesSection() {
           <Button size="sm">New automation</Button>
         </EmptyPanel>
       </div>
+    </div>
+  );
+}
+
+/* ── Overlay / form controls (Radix) ──────────────────────────────── */
+
+export function TooltipSection() {
+  return (
+    <div>
+      <ImportLine>import {"{ Tooltip, TooltipProvider }"} from "../../design-system/tooltip";</ImportLine>
+      <SectionTitle>Hover / focus tip</SectionTitle>
+      <TooltipProvider>
+        <Tooltip content="Open the agent settings">
+          <Button variant="secondary" size="sm">Hover me</Button>
+        </Tooltip>
+      </TooltipProvider>
+    </div>
+  );
+}
+
+export function CheckboxSwitchSection() {
+  const [checked, setChecked] = useState(true);
+  const [enabled, setEnabled] = useState(false);
+  const [plan, setPlan] = useState("pro");
+  const [volume, setVolume] = useState([40]);
+  return (
+    <div>
+      <ImportLine>import {"{ Checkbox }"} from "../../design-system/checkbox";
+import {"{ Switch }"} from "../../design-system/switch";
+import {"{ RadioGroup, RadioGroupItem }"} from "../../design-system/radio-group";
+import {"{ Slider }"} from "../../design-system/slider";</ImportLine>
+
+      <SectionTitle>Checkbox + Switch</SectionTitle>
+      <Row>
+        <label className="inline-flex items-center gap-2 text-sm text-[var(--v2-text)]">
+          <Checkbox checked={checked} onCheckedChange={(v) => setChecked(v === true)} />
+          Email digests
+        </label>
+        <label className="inline-flex items-center gap-2 text-sm text-[var(--v2-text)]">
+          <Switch checked={enabled} onCheckedChange={setEnabled} />
+          Auto-run
+        </label>
+      </Row>
+
+      <SectionTitle>RadioGroup</SectionTitle>
+      <RadioGroup value={plan} onValueChange={setPlan} className="max-w-sm">
+        {["free", "pro", "team"].map((value) => (
+          <label key={value} className="flex items-center gap-2 text-sm text-[var(--v2-text)]">
+            <RadioGroupItem value={value} id={`plan-${value}`} />
+            {value}
+          </label>
+        ))}
+      </RadioGroup>
+
+      <SectionTitle>Slider</SectionTitle>
+      <div className="max-w-sm">
+        <Slider value={volume} onValueChange={setVolume} max={100} step={1} />
+        <Caption>{volume[0]}%</Caption>
+      </div>
+    </div>
+  );
+}
+
+export function DropdownPopoverSection() {
+  return (
+    <div>
+      <ImportLine>import {"{ DropdownMenu, DropdownMenuTrigger, DropdownMenuContent, DropdownMenuItem }"} from "../../design-system/dropdown-menu";
+import {"{ Popover, PopoverTrigger, PopoverContent }"} from "../../design-system/popover";</ImportLine>
+
+      <SectionTitle>DropdownMenu</SectionTitle>
+      <DropdownMenu>
+        <DropdownMenuTrigger asChild>
+          <Button variant="secondary" size="sm">Actions</Button>
+        </DropdownMenuTrigger>
+        <DropdownMenuContent align="start">
+          <DropdownMenuLabel>Thread</DropdownMenuLabel>
+          <DropdownMenuItem>Rename</DropdownMenuItem>
+          <DropdownMenuItem>Pin</DropdownMenuItem>
+          <DropdownMenuSeparator />
+          <DropdownMenuItem>Delete</DropdownMenuItem>
+        </DropdownMenuContent>
+      </DropdownMenu>
+
+      <SectionTitle>Popover</SectionTitle>
+      <Popover>
+        <PopoverTrigger asChild>
+          <Button variant="outline" size="sm">Open popover</Button>
+        </PopoverTrigger>
+        <PopoverContent align="start">
+          <p className="text-sm leading-6 text-[var(--v2-text-muted)]">
+            Anchored content for denser chrome — menus stay in DropdownMenu / SelectMenu.
+          </p>
+        </PopoverContent>
+      </Popover>
+    </div>
+  );
+}
+
+export function AvatarSkeletonSection() {
+  return (
+    <div>
+      <ImportLine>import {"{ Avatar, AvatarFallback }"} from "../../design-system/avatar";
+import {"{ Skeleton }"} from "../../design-system/skeleton";
+import {"{ Separator }"} from "../../design-system/separator";
+import {"{ ScrollArea }"} from "../../design-system/scroll-area";</ImportLine>
+
+      <SectionTitle>Avatar</SectionTitle>
+      <Row>
+        <Avatar>
+          <AvatarFallback>IC</AvatarFallback>
+        </Avatar>
+        <Avatar className="h-10 w-10">
+          <AvatarFallback>AG</AvatarFallback>
+        </Avatar>
+      </Row>
+
+      <SectionTitle>Skeleton + Separator</SectionTitle>
+      <div className="max-w-sm space-y-3">
+        <Skeleton className="h-4 w-2/3" />
+        <Skeleton className="h-4 w-full" />
+        <Separator />
+        <Skeleton className="h-20 w-full" />
+      </div>
+
+      <SectionTitle>ScrollArea</SectionTitle>
+      <ScrollArea className="h-28 max-w-sm rounded-[12px] border border-[var(--v2-panel-border)] p-3">
+        <div className="space-y-2 text-sm text-[var(--v2-text-muted)]">
+          {Array.from({ length: 12 }, (_, i) => (
+            <div key={i}>Scrollable row {i + 1}</div>
+          ))}
+        </div>
+      </ScrollArea>
     </div>
   );
 }

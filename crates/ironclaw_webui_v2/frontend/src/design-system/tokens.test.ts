@@ -12,9 +12,9 @@ import {
   STATUS_CANON,
   TYPE_TOKENS,
   Z_TOKENS,
-} from "./tokens.js";
+} from "./tokens";
 
-// tokens.js is the machine-readable *index* of the design system; the
+// tokens.ts is the machine-readable *index* of the design system; the
 // canonical *values* live in app.css. These tests pin the contract between
 // the two: every catalogued token must resolve at runtime (a stale catalog
 // entry renders as an empty var() — invisible breakage), and the catalog
@@ -54,7 +54,7 @@ test("every catalogued token is defined in app.css", () => {
   assert.deepEqual(
     missing,
     [],
-    "tokens.js lists custom properties that app.css never defines — a stale catalog entry resolves var() to nothing at runtime",
+    "tokens.ts lists custom properties that app.css never defines — a stale catalog entry resolves var() to nothing at runtime",
   );
 });
 

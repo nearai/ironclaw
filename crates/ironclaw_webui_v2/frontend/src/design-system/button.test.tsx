@@ -140,8 +140,10 @@ test("outline and danger Buttons use theme-aware semantic colors (#6039)", () =>
     children: "Remove",
   }) as ReactElement<ButtonElementProps>;
 
-  assert.match(outline.props.className ?? "", /text-\[var\(--v2-accent-text\)\]/);
-  assert.match(outline.props.className ?? "", /hover:bg-\[var\(--v2-accent-soft\)\]/);
+  // Outline is the nux secondary role: strong text + fill-to-accent on hover.
+  assert.match(outline.props.className ?? "", /text-\[var\(--v2-text-strong\)\]/);
+  assert.match(outline.props.className ?? "", /hover:bg-\[var\(--v2-accent\)\]/);
+  assert.match(outline.props.className ?? "", /hover:text-\[var\(--v2-on-accent\)\]/);
   assert.match(danger.props.className ?? "", /text-\[var\(--v2-danger-text\)\]/);
   assert.match(danger.props.className ?? "", /hover:bg-\[var\(--v2-danger-soft\)\]/);
   assert.doesNotMatch(outline.props.className ?? "", /#8fc8f2|#4ca7e6/i);
