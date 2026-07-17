@@ -240,11 +240,16 @@ fn mint_state_token() -> String {
 /// to the server, and it would also leave the SPA on a confusing
 /// post-login URL. The percent-decoded form is also checked so `%23`
 /// smuggling fails.
-pub(super) fn sanitize_redirect(input: Option<String>) -> Option<String> {
+// `pub(crate)`: `cli_token_login::CliTokenLoginConfig::with_redirect_after`
+// reuses this same validation for its own `redirect_after` setter rather
+// than re-deriving the RFC-3986/protocol-relative/fragment rules, so the
+// two `redirect_after` setters in this crate can never drift onto
+// different notions of "safe".
+pub(crate) fn sanitize_redirect(input: Option<String>) -> Option<String> {
     input.filter(|raw| is_safe_redirect(raw))
 }
 
-pub(super) fn is_safe_redirect(url: &str) -> bool {
+pub(crate) fn is_safe_redirect(url: &str) -> bool {
     if !check_redirect_chars(url) {
         return false;
     }
