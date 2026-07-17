@@ -37,6 +37,7 @@ mod command_dispatch;
 mod commands;
 mod conversation_binding;
 mod error;
+mod extension_account_setup;
 #[cfg(any(test, feature = "test-support"))]
 mod fakes;
 // Durable filesystem-backed idempotency ledger. Gated behind `storage` so the
@@ -111,6 +112,10 @@ pub use conversation_binding::{
     StaticProductActorUserResolver, StaticProductInstallationResolver,
 };
 pub use error::{AuthContinuationRejectionKind, ProductWorkflowError};
+pub use extension_account_setup::{
+    AccountConnectionStatusError, AccountConnectionStatusSource, ExtensionAccountSetupDescriptor,
+    ExtensionAccountSetupError, ExtensionAccountSetupRegistry,
+};
 #[cfg(any(test, feature = "test-support"))]
 pub use fakes::{
     FakeBeforeInboundPolicy, FakeConversationBindingService, FakeIdempotencyLedger,

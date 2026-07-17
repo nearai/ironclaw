@@ -563,18 +563,18 @@ fn mint_pairing_code() -> String {
         .collect()
 }
 
-/// The extension lifecycle's pairedness probe: composition fills its generic
-/// paired-status slot with the pairing service so in-chat `telegram`
+/// The extension lifecycle's narrow connection-status probe. Composition
+/// connects the pairing service to Telegram's declared account-setup entry so
 /// activation can gate on the caller's pairing state without holding the full
 /// pairing surface.
 #[async_trait]
-impl ironclaw_channel_host::paired_status::ChannelPairedStatusSource for TelegramPairingService {
-    async fn paired(
+impl ironclaw_product_workflow::AccountConnectionStatusSource for TelegramPairingService {
+    async fn connected(
         &self,
         user_id: &UserId,
-    ) -> Result<bool, ironclaw_channel_host::paired_status::ChannelPairedStatusError> {
+    ) -> Result<bool, ironclaw_product_workflow::AccountConnectionStatusError> {
         let status = self.status_for(user_id).await.map_err(|error| {
-            ironclaw_channel_host::paired_status::ChannelPairedStatusError::new(error.to_string())
+            ironclaw_product_workflow::AccountConnectionStatusError::new(error.to_string())
         })?;
         Ok(status.connected)
     }

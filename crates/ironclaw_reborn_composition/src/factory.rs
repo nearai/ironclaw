@@ -98,7 +98,8 @@ use ironclaw_processes::ProcessServices;
 ))]
 use ironclaw_product_workflow::ChannelConnectionFacade;
 use ironclaw_product_workflow::{
-    LifecycleProductSurfaceContext, ProductAuthTurnGateResumeDispatcher, ProjectService,
+    ExtensionAccountSetupRegistry, LifecycleProductSurfaceContext,
+    ProductAuthTurnGateResumeDispatcher, ProjectService,
 };
 use ironclaw_projects::ProjectRepository;
 use ironclaw_resources::InMemoryResourceGovernor;
@@ -1938,6 +1939,21 @@ async fn build_local_runtime(input: RebornBuildInput) -> Result<RebornServices, 
             },
         )?,
     );
+    let account_setups = ExtensionAccountSetupRegistry::default();
+    #[cfg(feature = "telegram-v2-host-beta")]
+    {
+        let descriptor =
+            ironclaw_telegram_extension::telegram_account_setup_descriptor().map_err(|error| {
+                RebornBuildError::InvalidConfig {
+                    reason: format!("Telegram account setup could not be declared: {error}"),
+                }
+            })?;
+        if !account_setups.declare(descriptor) {
+            return Err(RebornBuildError::InvalidConfig {
+                reason: "Telegram account setup was declared more than once".to_string(),
+            });
+        }
+    }
     let extension_management = Arc::new(
         RebornLocalExtensionManagementPort::new(
             extension_filesystem,
@@ -1950,6 +1966,7 @@ async fn build_local_runtime(input: RebornBuildInput) -> Result<RebornServices, 
             // their installs are tenant-shared, everyone else's are private.
             nearai_mcp_owner_scope.user_id.clone(),
         )
+        .with_account_setup_registry(account_setups)
         .with_removal_cleanup_registry(removal_cleanup),
     );
     let lifecycle_facade =

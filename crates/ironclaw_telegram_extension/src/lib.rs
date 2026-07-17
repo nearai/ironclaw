@@ -18,6 +18,7 @@
 
 #![warn(unreachable_pub)]
 
+pub mod telegram_account_setup;
 pub mod telegram_actor_identity;
 pub mod telegram_adapter;
 pub mod telegram_bot_api;
@@ -31,3 +32,7 @@ pub mod telegram_outbound_targets;
 pub mod telegram_pairing;
 pub mod telegram_serve;
 pub mod telegram_setup;
+
+pub use telegram_account_setup::{
+    TELEGRAM_EXTENSION_ID, TelegramHostBuildError, telegram_account_setup_descriptor,
+};

@@ -10,7 +10,6 @@
   - `host_ingress.rs` — manifest-projected ingress descriptors + host-API contract registry (base) and installation rate limiting + sanitized webhook error mapping (`webhook-serve` feature).
   - `host_state_records.rs` — JSON record read/write over `ScopedFilesystem` + per-key async locks for channel host states.
   - `auth_continuation.rs` — the continuation-dispatch port pairing/OAuth completions resume blocked turns through.
-  - `paired_status.rs` — the generic per-user pairedness slot extension lifecycles gate channel activation on.
 - The generic delivery observer/driver these ports plug into stay in `ironclaw_reborn_composition::outbound::channel_delivery`.
 
 ## What This Crate Owns

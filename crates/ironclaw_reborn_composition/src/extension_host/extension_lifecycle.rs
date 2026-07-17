@@ -20,7 +20,8 @@ use ironclaw_host_api::{
 };
 use ironclaw_product_adapter_registry::PRODUCT_ADAPTER_HOST_API_ID;
 use ironclaw_product_workflow::{
-    ChannelConnectionRequirement, LifecycleBlockerRef, LifecycleExtensionSummary,
+    ChannelConnectionRequirement, ExtensionAccountSetupDescriptor, ExtensionAccountSetupError,
+    ExtensionAccountSetupRegistry, LifecycleBlockerRef, LifecycleExtensionSummary,
     LifecycleExtensionSurfaceKind, LifecycleInstalledExtensionSummary, LifecyclePackageKind,
     LifecyclePackageRef, LifecyclePhase, LifecycleProductPayload, LifecycleProductResponse,
     LifecycleReadinessBlocker, LifecycleSearchExtensionSummary, ProductWorkflowError,
@@ -132,12 +133,10 @@ pub(crate) struct RebornLocalExtensionManagementPort {
     /// not re-derive admin-ness.
     tenant_operator_user_id: UserId,
     removal_cleanup: Arc<ExtensionRemovalCleanupRegistry>,
-    /// Per-user Telegram pairedness probe; filled by the telegram host mounts
-    /// at serve time. Unfilled = the deployment never enabled the Telegram
-    /// host, so telegram activation fails closed instead of parking a run no
-    /// pairing surface could ever resume.
-    #[cfg(feature = "telegram-v2-host-beta")]
-    telegram_paired_source: ironclaw_channel_host::paired_status::ChannelPairedStatusSlot,
+    /// Product-owned setup metadata and extension-owned connection-status
+    /// sources. Descriptors are declared during composition; sources connect
+    /// only when their host surface is mounted.
+    account_setups: ExtensionAccountSetupRegistry,
 }
 
 /// Concurrent `import_bundle` decodes allowed before further uploads wait.
@@ -330,17 +329,21 @@ impl RebornLocalExtensionManagementPort {
             import_decode_semaphore: Arc::new(Semaphore::new(MAX_CONCURRENT_IMPORT_DECODES)),
             tenant_operator_user_id,
             removal_cleanup: Arc::new(ExtensionRemovalCleanupRegistry::empty()),
-            #[cfg(feature = "telegram-v2-host-beta")]
-            telegram_paired_source: Default::default(),
+            account_setups: ExtensionAccountSetupRegistry::default(),
         }
     }
 
-    /// The slot the telegram host mounts fill with the pairedness probe.
-    #[cfg(feature = "telegram-v2-host-beta")]
-    pub(crate) fn telegram_paired_status_slot(
-        &self,
-    ) -> ironclaw_channel_host::paired_status::ChannelPairedStatusSlot {
-        self.telegram_paired_source.clone()
+    pub(crate) fn with_account_setup_registry(
+        mut self,
+        account_setups: ExtensionAccountSetupRegistry,
+    ) -> Self {
+        self.account_setups = account_setups;
+        self
+    }
+
+    #[allow(dead_code)]
+    pub(crate) fn account_setup_registry(&self) -> ExtensionAccountSetupRegistry {
+        self.account_setups.clone()
     }
 
     pub(crate) fn with_removal_cleanup_registry(
@@ -379,7 +382,7 @@ impl RebornLocalExtensionManagementPort {
     /// host activations (e.g. Slack host-beta channel setup) that operate a
     /// shared install and therefore act as the operator rather than any
     /// individual member.
-    #[cfg(any(feature = "slack-v2-host-beta", feature = "telegram-v2-host-beta"))]
+    #[allow(dead_code)]
     pub(crate) fn tenant_operator_user_id(&self) -> &UserId {
         &self.tenant_operator_user_id
     }
@@ -554,51 +557,14 @@ impl RebornLocalExtensionManagementPort {
         // confirms a private credentialed install exists (#5525 review).
         ensure_caller_may_operate(&installation, caller)?;
         let package = self.lifecycle_package(&extension_id).await?;
-        let requirements = package_runtime_credential_auth_requirements(&package);
-        #[cfg(feature = "telegram-v2-host-beta")]
-        let requirements = self
-            .with_telegram_pairing_requirement(package_ref, &package, caller, requirements)
-            .await?;
-        Ok(requirements)
-    }
-
-    /// In-chat `extension_activate` parks BlockedAuth on ANY missing
-    /// requirement; Telegram's per-user "credential" is the pairing binding,
-    /// so an unpaired caller gets a synthesized provider="telegram" Pairing
-    /// requirement here. The resumed run recomputes this list — a paired
-    /// caller yields no requirement and activation proceeds (the
-    /// self-correcting BlockedAuth shape the fanout relies on).
-    #[cfg(feature = "telegram-v2-host-beta")]
-    async fn with_telegram_pairing_requirement(
-        &self,
-        package_ref: &LifecyclePackageRef,
-        package: &ExtensionPackage,
-        caller: &UserId,
-        mut requirements: Vec<RuntimeCredentialAuthRequirement>,
-    ) -> Result<Vec<RuntimeCredentialAuthRequirement>, ProductWorkflowError> {
-        use crate::extension_host::available_extensions::TELEGRAM_EXTENSION_ID;
-        if package_ref.id.as_str() != TELEGRAM_EXTENSION_ID
-            || !package_declares_inbound_product_adapter(package)
+        let mut requirements = package_runtime_credential_auth_requirements(&package);
+        if let Some(requirement) = self
+            .account_setups
+            .missing_requirement(&extension_id, caller)
+            .await
+            .map_err(map_account_setup_error)?
         {
-            return Ok(requirements);
-        }
-        let Some(source) = self.telegram_paired_source.get() else {
-            return Err(ProductWorkflowError::InvalidBindingRequest {
-                reason: "the Telegram channel is not enabled on this deployment".to_string(),
-            });
-        };
-        // An unfilled slot above is a configuration fault (invalid request);
-        // a pairing-status READ failure is an availability fault — classify
-        // it transient/retryable and keep the store error out of the
-        // product-facing reason (debug diagnostic only).
-        let paired = source.paired(caller).await.map_err(|error| {
-            tracing::debug!(%error, "telegram pairing status read failed during activation");
-            ProductWorkflowError::Transient {
-                reason: "telegram pairing status is temporarily unavailable".to_string(),
-            }
-        })?;
-        if !paired {
-            requirements.push(telegram_pairing_auth_requirement()?);
+            requirements.push(requirement);
         }
         Ok(requirements)
     }
@@ -1101,7 +1067,11 @@ impl RebornLocalExtensionManagementPort {
             // claimant already activated this exact package. Treat that state
             // as the authoritative success instead of re-publishing and
             // risking a conflicting failure followed by credential rollback.
-            return Ok(activation_success_response(package_ref, &active_package));
+            return Ok(activation_success_response(
+                package_ref,
+                &active_package,
+                self.account_setups.descriptor(extension_id),
+            ));
         }
         self.enable_lifecycle_package(extension_id).await?;
         if let Err(error) = self
@@ -1142,7 +1112,11 @@ impl RebornLocalExtensionManagementPort {
             return Err(error);
         }
 
-        Ok(activation_success_response(package_ref, &active_package))
+        Ok(activation_success_response(
+            package_ref,
+            &active_package,
+            self.account_setups.descriptor(extension_id),
+        ))
     }
 
     pub(crate) async fn package_requires_hosted_mcp_discovery(
@@ -2156,13 +2130,20 @@ fn package_visible_capability_ids(package: &ExtensionPackage) -> Vec<String> {
 fn activation_success_response(
     package_ref: LifecyclePackageRef,
     package: &ExtensionPackage,
+    account_setup: Option<ExtensionAccountSetupDescriptor>,
 ) -> LifecycleProductResponse {
     let visible_capability_ids = package_visible_capability_ids(package);
-    let message = activation_success_message(&package_ref, package, &visible_capability_ids);
+    let message = activation_success_message(
+        &package_ref,
+        package,
+        &visible_capability_ids,
+        account_setup.as_ref(),
+    );
     let connection_required = if package_declares_inbound_product_adapter(package) {
         Some(channel_connection_requirement(
             package_ref.id.as_str(),
             package.manifest.name.as_str(),
+            account_setup.as_ref(),
         ))
     } else {
         None
@@ -2215,13 +2196,11 @@ fn activation_success_message(
     package_ref: &LifecyclePackageRef,
     package: &ExtensionPackage,
     visible_capability_ids: &[String],
+    account_setup: Option<&ExtensionAccountSetupDescriptor>,
 ) -> String {
     if package_declares_inbound_product_adapter(package) {
-        #[cfg(feature = "telegram-v2-host-beta")]
-        if package_ref.id.as_str()
-            == crate::extension_host::available_extensions::TELEGRAM_EXTENSION_ID
-        {
-            return "Telegram is installed as an inbound entrypoint. If WebChat shows a Telegram pairing panel, tell the user to pair via the link, the QR code, or by sending the shown code to the bot in Telegram — nothing is pasted into this chat. Once paired the user can DM the bot directly. Telegram exposes no tools and cannot read messages or send on the user's behalf.".to_string();
+        if let Some(account_setup) = account_setup {
+            return account_setup.activation_success_message.clone();
         }
         if package_ref.id.as_str() == "slack_bot" {
             return "Slack is installed as an inbound entrypoint. If WebChat shows a Slack account connection panel, tell the user to configure Slack OAuth for this extension rather than pasting anything into normal chat. If the user's Slack account is already connected, continue the user's original request; Slack DMs and WebUI chat can use the same user-scoped Slack tools.".to_string();
@@ -2257,17 +2236,10 @@ fn activation_success_message(
 pub(crate) fn channel_connection_requirement(
     channel_id: &str,
     display_name: &str,
+    account_setup: Option<&ExtensionAccountSetupDescriptor>,
 ) -> ChannelConnectionRequirement {
-    #[cfg(feature = "telegram-v2-host-beta")]
-    if channel_id == crate::extension_host::available_extensions::TELEGRAM_EXTENSION_ID {
-        return ChannelConnectionRequirement {
-            channel: "telegram".to_string(),
-            strategy: RebornChannelConnectStrategy::WebGeneratedCode,
-            instructions: "Pair your Telegram account: tap the link or scan the QR in the pairing panel, or send the shown code to the bot in Telegram.".to_string(),
-            input_placeholder: String::new(),
-            submit_label: "Open pairing".to_string(),
-            error_message: "Telegram pairing failed. Get a fresh code and try again.".to_string(),
-        };
+    if let Some(account_setup) = account_setup {
+        return account_setup.connection_requirement.clone();
     }
     if channel_id == "slack_bot" {
         ChannelConnectionRequirement {
@@ -2291,30 +2263,6 @@ pub(crate) fn channel_connection_requirement(
             error_message: "Pairing failed. Check the code and try again.".to_string(),
         }
     }
-}
-
-/// The synthesized requirement an unpaired caller must satisfy: provider
-/// `telegram`, setup `Pairing`. The provider string is what the
-/// BlockedAuthResumeFanout matches against the pairing-completion event.
-#[cfg(feature = "telegram-v2-host-beta")]
-pub(crate) fn telegram_pairing_auth_requirement()
--> Result<RuntimeCredentialAuthRequirement, ProductWorkflowError> {
-    use crate::extension_host::available_extensions::TELEGRAM_EXTENSION_ID;
-    Ok(RuntimeCredentialAuthRequirement {
-        provider: ironclaw_host_api::RuntimeCredentialAccountProviderId::new(
-            ironclaw_telegram_extension::telegram_actor_identity::TELEGRAM_IDENTITY_PROVIDER,
-        )
-        .map_err(|error| ProductWorkflowError::InvalidBindingRequest {
-            reason: error.to_string(),
-        })?,
-        setup: ironclaw_host_api::RuntimeCredentialAccountSetup::Pairing,
-        requester_extension: ExtensionId::new(TELEGRAM_EXTENSION_ID).map_err(|error| {
-            ProductWorkflowError::InvalidBindingRequest {
-                reason: error.to_string(),
-            }
-        })?,
-        provider_scopes: Vec::new(),
-    })
 }
 
 fn package_declares_inbound_product_adapter(package: &ExtensionPackage) -> bool {
@@ -2451,6 +2399,31 @@ fn map_search_credential_stage_error(
             ProductWorkflowError::Transient {
                 reason: "extension product auth credential state is temporarily unavailable"
                     .to_string(),
+            }
+        }
+    }
+}
+
+fn map_account_setup_error(error: ExtensionAccountSetupError) -> ProductWorkflowError {
+    match error {
+        ExtensionAccountSetupError::HostUnavailable { extension_id } => {
+            ProductWorkflowError::InvalidBindingRequest {
+                reason: format!(
+                    "the account setup host for extension {} is not enabled on this deployment",
+                    extension_id.as_str()
+                ),
+            }
+        }
+        ExtensionAccountSetupError::StatusUnavailable { extension_id } => {
+            tracing::debug!(
+                extension_id = %extension_id,
+                "extension account connection status read failed during activation"
+            );
+            ProductWorkflowError::Transient {
+                reason: format!(
+                    "account connection status is temporarily unavailable for extension {}",
+                    extension_id.as_str()
+                ),
             }
         }
     }
@@ -2738,7 +2711,8 @@ mod tests {
             .expect("valid package ref");
         let package = fixture_extension_package().package;
         let visible_capability_ids = vec!["fixture.search".to_string()];
-        let message = activation_success_message(&package_ref, &package, &visible_capability_ids);
+        let message =
+            activation_success_message(&package_ref, &package, &visible_capability_ids, None);
         assert!(message.contains("fixture.search"));
         assert!(
             message.contains("callable by exact name"),
@@ -2757,7 +2731,7 @@ mod tests {
         let package_ref = LifecyclePackageRef::new(LifecyclePackageKind::Extension, "fixture")
             .expect("valid package ref");
         let package = fixture_extension_package().package;
-        let message = activation_success_message(&package_ref, &package, &[]);
+        let message = activation_success_message(&package_ref, &package, &[], None);
         assert!(message.contains("Extension activation succeeded"));
         assert!(
             !message.contains("callable by exact name"),
@@ -4185,11 +4159,44 @@ output_schema_ref = "schemas/run.output.json"
         );
     }
 
+    /// A declared account-setup extension whose host was not mounted must fail
+    /// closed instead of parking a run that no connection surface can resume.
     /// A pairing-status store outage during telegram activation preflight is
     /// an availability fault: it must classify as retryable `Transient` (not
-    /// the non-retryable `InvalidBindingRequest` reserved for the unfilled
-    /// slot / configuration fault) and must not leak the store error text
-    /// into the product-facing reason.
+    /// the non-retryable `InvalidBindingRequest` reserved for the unmounted
+    /// host / configuration fault) and must not leak the store error text into
+    /// the product-facing reason.
+    #[cfg(feature = "telegram-v2-host-beta")]
+    #[tokio::test]
+    async fn telegram_declared_without_mounted_host_fails_closed_through_activation_requirements() {
+        let (_dir, _storage_root, port, _active_registry, _installation_store) =
+            extension_management_port_fixture_with_catalog_and_service(
+                AvailableExtensionCatalog::from_first_party_assets().expect("first-party catalog"),
+                ExtensionLifecycleService::new(ExtensionRegistry::new()),
+            );
+        let telegram_ref = LifecyclePackageRef::new(LifecyclePackageKind::Extension, "telegram")
+            .expect("telegram ref");
+        port.install(telegram_ref.clone(), &lifecycle_owner())
+            .await
+            .expect("install telegram extension");
+        assert!(
+            port.account_setup_registry().declare(
+                ironclaw_telegram_extension::telegram_account_setup_descriptor()
+                    .expect("Telegram account setup descriptor")
+            )
+        );
+
+        let error = port
+            .activation_credential_requirements(&telegram_ref, &lifecycle_owner())
+            .await
+            .expect_err("a declared setup without its mounted host must fail closed");
+
+        assert!(
+            matches!(error, ProductWorkflowError::InvalidBindingRequest { .. }),
+            "an unmounted host is a non-retryable composition fault, got {error:?}"
+        );
+    }
+
     #[cfg(feature = "telegram-v2-host-beta")]
     #[tokio::test]
     async fn telegram_pairing_status_outage_is_transient_through_activation_requirements() {
@@ -4197,14 +4204,13 @@ output_schema_ref = "schemas/run.output.json"
         struct FailingPairedSource;
 
         #[async_trait::async_trait]
-        impl ironclaw_channel_host::paired_status::ChannelPairedStatusSource for FailingPairedSource {
-            async fn paired(
+        impl ironclaw_product_workflow::AccountConnectionStatusSource for FailingPairedSource {
+            async fn connected(
                 &self,
                 _user_id: &UserId,
-            ) -> Result<bool, ironclaw_channel_host::paired_status::ChannelPairedStatusError>
-            {
+            ) -> Result<bool, ironclaw_product_workflow::AccountConnectionStatusError> {
                 Err(
-                    ironclaw_channel_host::paired_status::ChannelPairedStatusError::new(
+                    ironclaw_product_workflow::AccountConnectionStatusError::new(
                         "test pairing store outage",
                     ),
                 )
@@ -4221,10 +4227,13 @@ output_schema_ref = "schemas/run.output.json"
         port.install(telegram_ref.clone(), &lifecycle_owner())
             .await
             .expect("install telegram extension");
+        let descriptor = ironclaw_telegram_extension::telegram_account_setup_descriptor()
+            .expect("Telegram account setup descriptor");
+        let extension_id = descriptor.extension_id.clone();
+        assert!(port.account_setup_registry().declare(descriptor));
         assert!(
-            port.telegram_paired_status_slot()
-                .fill(Arc::new(FailingPairedSource)),
-            "slot fills once"
+            port.account_setup_registry()
+                .connect(&extension_id, Arc::new(FailingPairedSource))
         );
 
         let error = port
@@ -8570,35 +8579,5 @@ output_schema_ref = "schemas/search.output.json"
             LifecycleReadinessBlocker::Runtime { ref_id: Some(ref_id) }
                 if ref_id.as_str() == expected_ref
         )));
-    }
-}
-
-#[cfg(all(test, feature = "telegram-v2-host-beta"))]
-mod telegram_gate_tests {
-    use super::*;
-
-    #[test]
-    fn telegram_connection_requirement_is_web_generated_code_with_no_input() {
-        let requirement = channel_connection_requirement("telegram", "Telegram");
-        assert_eq!(requirement.channel, "telegram");
-        assert_eq!(
-            requirement.strategy,
-            RebornChannelConnectStrategy::WebGeneratedCode
-        );
-        assert!(
-            requirement.input_placeholder.is_empty(),
-            "WebGeneratedCode displays a code; it never collects one"
-        );
-    }
-
-    #[test]
-    fn telegram_pairing_requirement_matches_the_fanout_contract() {
-        let requirement = telegram_pairing_auth_requirement().expect("requirement builds");
-        assert_eq!(requirement.provider.as_str(), "telegram");
-        assert_eq!(
-            requirement.setup,
-            ironclaw_host_api::RuntimeCredentialAccountSetup::Pairing
-        );
-        assert_eq!(requirement.requester_extension.as_str(), "telegram");
     }
 }

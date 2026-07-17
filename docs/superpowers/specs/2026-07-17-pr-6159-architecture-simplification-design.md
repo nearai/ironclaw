@@ -426,8 +426,9 @@ after the named evidence is green.
 - [ ] **A4 — DTO cleanup:** `TelegramPairingStatusResponse`,
   `ResolvedTelegramIngress`, dead wrappers, and unused public accessors are gone while
   public JSON and behavior remain byte-compatible.
-- [ ] **A5 — Generic lifecycle:** activation uses an `ExtensionId`-keyed account-setup
-  registry; generic lifecycle code contains no Telegram knowledge.
+- [x] **A5 — Generic lifecycle:** activation uses an `ExtensionId`-keyed account-setup
+  registry; generic lifecycle code contains no Telegram policy, and Telegram owns its descriptor,
+  pairing requirement, connection projection, activation copy, and connection-status source.
 - [ ] **A6 — Telegram-owned runtime behavior:** revision caching, dispatcher decoration,
   triggered hook construction, outbound target construction, and Telegram fallbacks live
   in `ironclaw_telegram_extension`.

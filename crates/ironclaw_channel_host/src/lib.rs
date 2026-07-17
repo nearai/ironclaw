@@ -18,4 +18,3 @@ pub mod host_ingress;
 pub mod host_state_records;
 pub mod identity;
 pub mod outbound_targets;
-pub mod paired_status;

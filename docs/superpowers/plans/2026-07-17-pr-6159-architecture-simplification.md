@@ -320,23 +320,23 @@ impl ExtensionAccountSetupRegistry {
 
 `ExtensionAccountSetupError` has exact variants `HostUnavailable { extension_id }` and `StatusUnavailable { extension_id }` so lifecycle preserves invalid-binding versus transient mapping.
 
-- [ ] **Step 1: Add registry state-transition tests**
+- [x] **Step 1: Add registry state-transition tests**
 
 Test undeclared extension, declared-but-unconnected fail-closed, connected/disconnected users, duplicate declaration, duplicate connection, and status outage. Run `cargo test -p ironclaw_product_workflow extension_account_setup`; expected compile failure.
 
-- [ ] **Step 2: Implement the registry with a bounded owner-controlled map**
+- [x] **Step 2: Implement the registry with a bounded owner-controlled map**
 
 Use `Arc<RwLock<BTreeMap<ExtensionId, Entry>>>`; each entry contains one immutable descriptor plus an `OnceLock<Arc<dyn AccountConnectionStatusSource>>`. Do not add an extension-specific enum or string branch.
 
-- [ ] **Step 3: Make lifecycle generic**
+- [x] **Step 3: Make lifecycle generic**
 
 Replace `telegram_paired_source` with `account_setups: ExtensionAccountSetupRegistry`. `activation_credential_requirements` calls `missing_requirement(&extension_id, caller)`. Connection projection and success copy consult the descriptor by extension id, then fall back to the existing generic behavior. Remove every production occurrence of `telegram` from `extension_lifecycle.rs`; move Telegram copy and requirement construction into the Telegram crate.
 
-- [ ] **Step 4: Register Telegram's descriptor and status source in host assembly**
+- [x] **Step 4: Register Telegram's descriptor and status source in host assembly**
 
 Telegram exports `telegram_account_setup_descriptor() -> Result<ExtensionAccountSetupDescriptor, TelegramHostBuildError>` and implements `AccountConnectionStatusSource` for `TelegramPairingService`. Composition declares the descriptor while constructing local extension management and connects the pairing service when Telegram mounts are built.
 
-- [ ] **Step 5: Delete the old channel-host slot and run lifecycle regressions**
+- [x] **Step 5: Delete the old channel-host slot and run lifecycle regressions**
 
 ```bash
 cargo test -p ironclaw_product_workflow extension_account_setup
@@ -346,7 +346,7 @@ cargo test -p ironclaw_architecture --test telegram_extension_gates generic_exte
 
 Expected: all pass, including fail-closed and transient-error caller tests.
 
-- [ ] **Step 6: Commit the registry**
+- [x] **Step 6: Commit the registry**
 
 ```bash
 git add crates/ironclaw_product_workflow crates/ironclaw_channel_host crates/ironclaw_reborn_composition crates/ironclaw_telegram_extension
@@ -706,7 +706,9 @@ git commit -m "docs(reborn): complete PR 6159 architecture evidence"
 - [ ] **A2 — Concrete Telegram state:** Task 5; state tests plus deleted-trait/test-store ratchets.
 - [ ] **A3 — Concrete Bot API:** Task 6; mediated HTTP tests plus deleted-symbol ratchet.
 - [ ] **A4 — DTO cleanup:** Tasks 2, 6, and 7; exact JSON tests plus deleted-symbol/accessor audit.
-- [ ] **A5 — Generic lifecycle:** Task 4; registry tests plus lifecycle source ratchet.
+- [x] **A5 — Generic lifecycle:** Task 4; six registry transition tests, 101 focused
+  lifecycle tests, Telegram descriptor and idempotent mount regressions, the lifecycle source
+  ratchet, and targeted product-workflow/Telegram/composition Clippy all pass.
 - [ ] **A6 — Telegram-owned runtime behavior:** Task 8; owner tests plus assembly-only ratchet.
 - [ ] **A7 — Focused files:** Tasks 5 and 7; 999-line physical-file ratchet.
 - [ ] **A8 — Ratchets:** Task 1, turned green by Tasks 3-8; architecture suite.

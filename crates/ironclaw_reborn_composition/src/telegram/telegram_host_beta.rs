@@ -27,19 +27,20 @@ use std::num::NonZeroUsize;
 use std::sync::Arc;
 
 use ironclaw_conversations::RebornFilesystemConversationServices;
-use ironclaw_host_api::{AgentId, ProjectId, ResourceScope, TenantId, UserId};
+use ironclaw_host_api::{AgentId, ExtensionId, ProjectId, ResourceScope, TenantId, UserId};
 use ironclaw_outbound::{DeliveredGateRouteStore, TriggeredRunDeliveryStore};
 use ironclaw_product_adapters::{
     DeliveryStatus, EgressCredentialHandle, OutboundDeliverySink, ProductAdapter,
     ProtocolHttpEgress,
 };
 use ironclaw_product_workflow::{
-    ApprovalInteractionService, AuthInteractionService, ChannelConnectionFacade,
-    ConnectableChannelsProductFacade, ConversationBindingService, DefaultInboundTurnService,
-    DefaultProductWorkflow, LifecyclePackageKind, LifecyclePackageRef, LifecyclePhase,
-    ProductActorUserResolver, ProductConversationBindingService, ProductInstallationKey,
-    ProductInstallationScope, ProductWorkflowError, RebornFilesystemIdempotencyLedger,
-    ResolveBindingRequest, ResolvedBinding, StaticProductInstallationResolver,
+    AccountConnectionStatusSource, ApprovalInteractionService, AuthInteractionService,
+    ChannelConnectionFacade, ConnectableChannelsProductFacade, ConversationBindingService,
+    DefaultInboundTurnService, DefaultProductWorkflow, LifecyclePackageKind, LifecyclePackageRef,
+    LifecyclePhase, ProductActorUserResolver, ProductConversationBindingService,
+    ProductInstallationKey, ProductInstallationScope, ProductWorkflowError,
+    RebornFilesystemIdempotencyLedger, ResolveBindingRequest, ResolvedBinding,
+    StaticProductInstallationResolver,
 };
 use ironclaw_safety::{SafetyConfig, SafetyLayer};
 use ironclaw_threads::SessionThreadService;
@@ -47,7 +48,6 @@ use ironclaw_triggers::TriggerFire;
 use ironclaw_turns::{TurnCoordinator, TurnRunId, TurnScope};
 use ironclaw_wasm_product_adapters::EgressPolicy;
 use sha2::{Digest, Sha256};
-use thiserror::Error;
 use tokio::sync::Mutex;
 
 use crate::RebornRuntime;
@@ -61,7 +61,7 @@ use ironclaw_channel_delivery::{
     PostSubmitDeliveryHook, TriggeredRunDeliveryDriver,
 };
 use ironclaw_channel_host::identity::RebornUserIdentityLookup;
-use ironclaw_channel_host::paired_status::ChannelPairedStatusSource;
+pub use ironclaw_telegram_extension::TelegramHostBuildError;
 use ironclaw_telegram_extension::telegram_actor_identity::{
     TELEGRAM_V2_ADAPTER_ID, TelegramUserIdentityActorResolver,
 };
@@ -129,22 +129,6 @@ impl TelegramHostRuntimeConfig {
             public_base_url,
         }
     }
-}
-
-#[derive(Debug, Error)]
-pub enum TelegramHostBuildError {
-    #[error("Telegram host requires local runtime HTTP egress")]
-    RuntimeHttpEgressUnavailable,
-    #[error("Telegram host requires durable host state")]
-    DurableHostStateUnavailable,
-    #[error("Telegram host requires composed product-auth services")]
-    ProductAuthUnavailable,
-    #[error("Telegram host conversation store unavailable: {reason}")]
-    ConversationStoreUnavailable { reason: String },
-    #[error("Telegram host outbound delivery target registration failed: {reason}")]
-    OutboundDeliveryTargetRegistration { reason: String },
-    #[error("invalid Telegram host config field {field}: {reason}")]
-    InvalidConfig { field: &'static str, reason: String },
 }
 
 /// The route mounts plus WebUI facades the `serve` layer wires from one
@@ -538,11 +522,25 @@ pub async fn build_telegram_host_runtime_mounts(
         channel_routes = channel_routes.with_setup_activation(Arc::new(
             DynamicTelegramChannelSetupActivation::new(Arc::clone(extension_management)),
         ));
-        // Fill the lifecycle port's pairedness slot so `telegram` extension
-        // activation can gate on the caller's pairing state.
-        extension_management
-            .telegram_paired_status_slot()
-            .fill(Arc::clone(&pairing) as Arc<dyn ChannelPairedStatusSource>);
+        // Connect the extension-owned status source to the product-owned
+        // descriptor declared by the runtime factory. A missing declaration or
+        // duplicate connection is a composition fault and fails closed.
+        let extension_id = ExtensionId::new(ironclaw_telegram_extension::TELEGRAM_EXTENSION_ID)
+            .map_err(|error| invalid_config("account_setup", error.to_string()))?;
+        let account_setups = extension_management.account_setup_registry();
+        if account_setups.descriptor(&extension_id).is_none() {
+            return Err(invalid_config(
+                "account_setup",
+                "Telegram account setup was not declared".to_string(),
+            ));
+        }
+        // Rebuilding mounts with the same config is intentionally idempotent.
+        // A duplicate connection keeps the first source; both pairing-service
+        // instances read the same durable state.
+        let _ = account_setups.connect(
+            &extension_id,
+            Arc::clone(&pairing) as Arc<dyn AccountConnectionStatusSource>,
+        );
     }
 
     let connectable: Arc<dyn ConnectableChannelsProductFacade> = Arc::new(

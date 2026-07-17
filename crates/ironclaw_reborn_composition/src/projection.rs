@@ -61,8 +61,6 @@ use runtime_replay::{
     DeliveredRuntimePayload, RuntimePayloadCandidate, RuntimePayloadResolution, RuntimePayloads,
     replay_payload_candidates, snapshot_payload_candidates,
 };
-// Only the channel-host delivery path (feature-gated) consumes this re-export.
-#[cfg(any(feature = "slack-v2-host-beta", feature = "telegram-v2-host-beta"))]
 use turn_events::{
     FailureExplanationProvider, ModelFailureExplanationProvider, TurnEventBridge, TurnEventDrain,
     TurnEventPayload, turn_status_wire,
