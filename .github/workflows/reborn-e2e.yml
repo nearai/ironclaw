@@ -270,7 +270,8 @@ jobs:
           product_ref="$(git rev-parse HEAD)"
           artifact_dir="artifacts/reborn-webui-v2-binary"
           mkdir -p "${artifact_dir}"
-          tar -C target/debug -czf "${artifact_dir}/ironclaw-reborn.tar.gz" ironclaw
+          cp target/debug/ironclaw target/debug/ironclaw-reborn
+          tar -C target/debug -czf "${artifact_dir}/ironclaw-reborn.tar.gz" ironclaw ironclaw-reborn
           (
             cd "${artifact_dir}"
             sha256sum ironclaw-reborn.tar.gz > ironclaw-reborn.tar.gz.sha256

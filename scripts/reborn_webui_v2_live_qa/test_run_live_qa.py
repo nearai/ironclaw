@@ -7257,6 +7257,11 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
             "webui-v2-beta,slack-v2-host-beta",
             prepare_body,
         )
+        self.assertIn("cp target/debug/ironclaw target/debug/ironclaw-reborn", prepare_body)
+        self.assertIn(
+            "ironclaw-reborn.tar.gz ironclaw ironclaw-reborn",
+            prepare_body,
+        )
         self.assertIn("using the canary fallback build", prepare_body)
         self.assertIn("prepared-reborn-webui-v2-binary-${{ steps.target.outputs.checkout_ref }}", prepare_body)
         self.assertIn("path: artifacts/prepared-reborn-webui-v2-binary/", prepare_body)
@@ -7275,6 +7280,11 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
         )
         self.assertIn(
             '["openai-compat-beta","slack-v2-host-beta","webui-v2-beta"]',
+            reborn_e2e,
+        )
+        self.assertIn("cp target/debug/ironclaw target/debug/ironclaw-reborn", reborn_e2e)
+        self.assertIn(
+            "ironclaw-reborn.tar.gz\" ironclaw ironclaw-reborn",
             reborn_e2e,
         )
         self.assertIn(

@@ -825,7 +825,8 @@ jobs:
           set -euo pipefail
           rm -rf artifacts/prepared-reborn-webui-v2-binary
           mkdir -p artifacts/prepared-reborn-webui-v2-binary
-          tar -C target/debug -czf artifacts/prepared-reborn-webui-v2-binary/ironclaw-reborn.tar.gz ironclaw
+          cp target/debug/ironclaw target/debug/ironclaw-reborn
+          tar -C target/debug -czf artifacts/prepared-reborn-webui-v2-binary/ironclaw-reborn.tar.gz ironclaw ironclaw-reborn
           (
             cd artifacts/prepared-reborn-webui-v2-binary
             sha256sum ironclaw-reborn.tar.gz > ironclaw-reborn.tar.gz.sha256
