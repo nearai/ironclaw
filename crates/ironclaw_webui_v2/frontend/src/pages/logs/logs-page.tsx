@@ -1,6 +1,11 @@
 // @ts-nocheck
 import { useOutletContext } from "react-router";
 import React from "react";
+import { Badge } from "../../design-system/badge";
+import { Button } from "../../design-system/button";
+import { Checkbox } from "../../design-system/checkbox";
+import { Input } from "../../design-system/input";
+import { SelectMenu } from "../../design-system/select-menu";
 import { useT } from "../../lib/i18n";
 import { useLogs } from "./hooks/useLogs";
 
@@ -101,17 +106,19 @@ function LogEntry({ entry }) {
   );
 }
 
-function ToolbarSelect({ value, onChange, options, labelKey, t }) {
+function ToolbarSelect({ value, onChange, options, labelKey, t, ariaLabel }) {
   return (
-    <select
+    <SelectMenu
       value={value}
-      onChange={(e) => onChange(e.currentTarget.value)}
-      className="v2-select h-8 min-w-0 rounded-[8px] px-2.5 py-0 text-xs"
-    >
-      {options.map(
-        (opt) => (<option key={opt} value={opt}>{t(labelKey(opt))}</option>)
-      )}
-    </select>
+      onChange={onChange}
+      ariaLabel={ariaLabel}
+      align="left"
+      className="min-w-[7.5rem]"
+      options={options.map((opt) => ({
+        value: opt,
+        label: t(labelKey(opt)),
+      }))}
+    />
   );
 }
 
@@ -184,55 +191,52 @@ export function LogsPage() {
           options={LEVELS}
           labelKey={(opt) => (opt === "all" ? "logs.levelAll" : `logs.level.${opt}`)}
           t={t}
+          ariaLabel={t("logs.levelAll")}
         />
 
         {/* Target filter */}
-        <input
+        <Input
           type="text"
+          size="sm"
           value={targetFilter}
           onInput={(e) => setTargetFilter(e.currentTarget.value)}
           placeholder={t("logs.filterTarget")}
-          className="h-8 min-w-[10rem] flex-1 rounded-[8px] border border-[var(--v2-panel-border)] bg-[var(--v2-surface-muted)] px-3 text-xs text-[var(--v2-text-base)] placeholder:text-[var(--v2-text-muted)] focus:outline-none focus:ring-1 focus:ring-[var(--v2-accent)]"
+          className="min-w-[10rem] flex-1"
         />
 
-        <div className="flex items-center gap-2 ml-auto">
+        <div className="ml-auto flex items-center gap-2">
           <span className="hidden tabular-nums text-xs text-[var(--v2-text-muted)] sm:inline">
             {t("logs.entryCount", { count: totalCount })}
           </span>
 
           {/* Auto-scroll toggle */}
           <label className="flex cursor-pointer items-center gap-1.5 text-xs text-[var(--v2-text-muted)]">
-            <input
-              type="checkbox"
+            <Checkbox
               checked={autoScroll}
-              onChange={(e) => setAutoScroll(e.target.checked)}
-              className="h-3.5 w-3.5 accent-[var(--v2-accent)]"
+              onCheckedChange={(checked) => setAutoScroll(checked === true)}
             />
             {t("logs.autoScroll")}
           </label>
 
           {/* Pause/Resume */}
-          <button
+          <Button
+            size="sm"
+            variant={paused ? "secondary" : "ghost"}
             onClick={togglePause}
-            className={[
-              "h-8 rounded-[8px] px-3 text-xs font-medium",
-              paused
-                ? "bg-[var(--v2-accent-soft)] text-[var(--v2-accent-text)] hover:bg-[color-mix(in_srgb,var(--v2-accent)_18%,transparent)]"
-                : "border border-[var(--v2-panel-border)] text-[var(--v2-text-muted)] hover:bg-[var(--v2-surface-muted)] hover:text-[var(--v2-text-strong)]",
-            ].join(" ")}
           >
             {paused ? t("logs.resume") : t("logs.pause")}
-          </button>
+          </Button>
 
           {/* Clear */}
-          <button
+          <Button
+            size="sm"
+            variant="ghost"
             onClick={() => {
               if (confirm(t("logs.confirmClear"))) clearEntries();
             }}
-            className="h-8 rounded-[8px] border border-[var(--v2-panel-border)] px-3 text-xs text-[var(--v2-text-muted)] hover:bg-[var(--v2-surface-muted)] hover:text-[var(--v2-text-strong)]"
           >
             {t("logs.clear")}
-          </button>
+          </Button>
         </div>
 
         {activeScope.length > 0 &&
@@ -265,10 +269,11 @@ export function LogsPage() {
               options={SERVER_LEVELS}
               labelKey={(opt) => `logs.level.${opt}`}
               t={t}
+              ariaLabel={t("logs.serverLevel")}
             />
-            <span className="ml-auto tabular-nums">
+            <span className="ml-auto inline-flex items-center gap-2 tabular-nums">
               {t("logs.entryCount", { count: totalCount })}
-              {paused ? (<span className="ml-1 text-yellow-400">{t("logs.pausedBadge")}</span>) : null}
+              {paused ? <Badge tone="warning" size="sm" label={t("logs.pausedBadge")} /> : null}
             </span>
           </div>
         )}

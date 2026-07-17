@@ -32,12 +32,15 @@ function FeedbackBanner({ result, onDismiss }) {
       ].join(" ")}
     >
       <span className="min-w-0 flex-1">{result.message}</span>
-      <button
+      <Button
+        type="button"
+        size="sm"
+        variant="ghost"
         onClick={onDismiss}
         className="shrink-0 opacity-70 hover:opacity-100"
       >
         {t("jobs.dismiss")}
-      </button>
+      </Button>
     </div>
   );
 }

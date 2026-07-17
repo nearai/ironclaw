@@ -2,6 +2,9 @@
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { Button } from "../../../design-system/button";
 import { Icon } from "../../../design-system/icons";
+import { Input } from "../../../design-system/input";
+import { Modal, ModalBody } from "../../../design-system/modal";
+import { Skeleton } from "../../../design-system/skeleton";
 import React from "react";
 import { useT } from "../../../lib/i18n";
 import {
@@ -161,18 +164,18 @@ export function ConfigureModal({ extension, onActivate, onClose, onSaved }) {
         onClose={onClose}
         title={t("extensions.configureName").replace("{name}", extensionName)}
       >
-        <p className="mb-4 text-sm leading-6 text-iron-300">
+        <p className="mb-4 text-sm leading-6 text-[var(--v2-text-muted)]">
           {channelPairingInstructions}
         </p>
         <div className="flex flex-col gap-2 sm:flex-row sm:items-center">
-          <input
+          <Input
             type="text"
             value={pairingCode}
             onChange={(event) => setPairingCode(event.currentTarget.value)}
             onKeyDown={(event) => event.key === "Enter" && submitPairing()}
             placeholder={channelPairingPlaceholder}
             aria-label={channelPairingPlaceholder}
-            className="h-9 min-w-0 flex-1 rounded-md border border-white/12 bg-white/[0.04] px-3 font-mono text-sm text-iron-100 outline-none placeholder:text-iron-700 focus:border-signal/45"
+            className="min-w-0 flex-1 font-mono"
           />
           <Button
             variant="primary"
@@ -184,7 +187,7 @@ export function ConfigureModal({ extension, onActivate, onClose, onSaved }) {
           </Button>
         </div>
         {pairingMutation.isError &&
-        (<p role="alert" className="mt-3 text-xs leading-5 text-red-300">
+        (<p role="alert" className="mt-3 text-xs leading-5 text-[var(--v2-danger-text)]">
           {channelPairingError}
         </p>)}
       </ModalShell>
@@ -195,13 +198,9 @@ export function ConfigureModal({ extension, onActivate, onClose, onSaved }) {
     return (
       <ModalShell onClose={onClose} title={t("extensions.configureName").replace("{name}", extensionName)}>
         <div className="space-y-3">
-          {[1, 2].map(
-            (i) =>
-              (<div
-                key={i}
-                className="v2-skeleton h-10 w-full rounded-md"
-              />)
-          )}
+          {[1, 2].map((i) => (
+            <Skeleton key={i} className="h-10 w-full" />
+          ))}
         </div>
       </ModalShell>
     );
@@ -441,41 +440,15 @@ function httpsUrl(value) {
 
 function ModalShell({ onClose, title, children }) {
   const t = useT();
-  const titleId = React.useId();
-  React.useEffect(() => {
-    const handleKey = (e) => {
-      if (e.key === "Escape") onClose();
-    };
-    window.addEventListener("keydown", handleKey);
-    return () => window.removeEventListener("keydown", handleKey);
-  }, [onClose]);
-
   return (
-    <div
-      className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm"
-      onClick={(e) => {
-        if (e.target === e.currentTarget) onClose();
-      }}
+    <Modal
+      open
+      onClose={onClose}
+      title={title}
+      closeLabel={t("common.close")}
+      size="md"
     >
-      <div
-        role="dialog"
-        aria-modal="true"
-        aria-labelledby={titleId}
-        className="v2-panel mx-4 w-full max-w-lg rounded-2xl p-6"
-        onClick={(e) => e.stopPropagation()}
-      >
-        <div className="mb-5 flex items-center justify-between">
-          <h3 id={titleId} className="text-lg font-semibold text-white">{title}</h3>
-          <button
-            onClick={onClose}
-            aria-label={t("common.close")}
-            className="grid h-8 w-8 place-items-center rounded-md text-iron-300 hover:bg-white/[0.06] hover:text-white"
-          >
-            <Icon name="close" className="h-4 w-4" />
-          </button>
-        </div>
-        {children}
-      </div>
-    </div>
+      <ModalBody>{children}</ModalBody>
+    </Modal>
   );
 }

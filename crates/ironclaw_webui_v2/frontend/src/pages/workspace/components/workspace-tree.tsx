@@ -1,5 +1,8 @@
 import { useQuery } from "@tanstack/react-query";
+import { Button } from "../../../design-system/button";
+import { Skeleton } from "../../../design-system/skeleton";
 import { useT } from "../../../lib/i18n";
+import { cn } from "../../../utils/cn";
 import { listWorkspace } from "../lib/workspace-api";
 import { areaDisplayName, sortEntries } from "../lib/workspace-presenters";
 
@@ -41,8 +44,10 @@ function TreeNode({ entry, depth, selectedPath, expandedPaths, filter, onToggleD
     const children = visibleEntries(childQuery.data?.entries, filter, expandedPaths);
     return (
       <div>
-        <button
+        <Button
           type="button"
+          variant="ghost"
+          size="sm"
           onClick={() => {
             // Navigate so the main pane lists this folder, and toggle its
             // expansion in the tree — one click drives both the master (tree)
@@ -50,22 +55,24 @@ function TreeNode({ entry, depth, selectedPath, expandedPaths, filter, onToggleD
             onSelectFile(entry.path);
             onToggleDirectory(entry.path);
           }}
-          className={[
-            "flex min-h-8 w-full items-center gap-2 rounded-md px-2 text-left text-sm hover:bg-white/[0.05] hover:text-white",
-            selectedPath === entry.path ? "bg-signal/10 text-signal" : "text-iron-200",
-          ].join(" ")}
+          className={cn(
+            "h-auto w-full justify-start gap-2 px-2 py-1.5 text-left",
+            selectedPath === entry.path
+              ? "bg-[var(--v2-accent-soft)] text-[var(--v2-accent-text)]"
+              : "text-[var(--v2-text)]"
+          )}
           style={{ paddingLeft: `${8 + depth * 16}px` }}
           aria-expanded={isExpanded}
         >
-          <span className={["w-3 text-[10px]", isExpanded ? "rotate-90" : ""].join(" ")}>{">"}</span>
+          <span className={cn("w-3 text-[10px]", isExpanded && "rotate-90")}>{">"}</span>
           <span className="min-w-0 truncate font-semibold">{displayName}</span>
-        </button>
+        </Button>
         {isExpanded && (
           <div className="space-y-1">
             {childQuery.isLoading
-              ? (<div className="px-4 py-2 text-xs text-iron-400">{t("workspace.loading")}</div>)
+              ? (<div className="space-y-1 px-4 py-2"><Skeleton className="h-3 w-24" /><span className="sr-only">{t("workspace.loading")}</span></div>)
               : childQuery.isError
-              ? (<div className="px-4 py-2 text-xs text-red-300">{t("workspace.unableOpenDirectory")}</div>)
+              ? (<div className="px-4 py-2 text-xs text-[var(--v2-danger-text)]">{t("workspace.unableOpenDirectory")}</div>)
               : children.map((child) => (
                   <TreeNode
                     key={child.path}
@@ -85,17 +92,21 @@ function TreeNode({ entry, depth, selectedPath, expandedPaths, filter, onToggleD
   }
 
   return (
-    <button
+    <Button
       type="button"
+      variant="ghost"
+      size="sm"
       onClick={() => onSelectFile(entry.path)}
-      className={[
-        "flex min-h-8 w-full items-center gap-2 rounded-md px-2 text-left text-sm",
-        selectedPath === entry.path ? "bg-signal/10 text-signal" : "text-iron-300 hover:bg-white/[0.05] hover:text-white",
-      ].join(" ")}
+      className={cn(
+        "h-auto w-full justify-start gap-2 px-2 py-1.5 text-left",
+        selectedPath === entry.path
+          ? "bg-[var(--v2-accent-soft)] text-[var(--v2-accent-text)]"
+          : "text-[var(--v2-text-muted)]"
+      )}
       style={{ paddingLeft: `${24 + depth * 16}px` }}
     >
       <span className="min-w-0 truncate">{displayName}</span>
-    </button>
+    </Button>
   );
 }
 

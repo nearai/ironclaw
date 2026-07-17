@@ -1,5 +1,7 @@
 import { Navigate, useParams } from "react-router";
 import React from "react";
+import { Button } from "../../design-system/button";
+import { Card } from "../../design-system/card";
 import { ConfirmDialog } from "../../design-system/confirm-dialog";
 import { useT } from "../../lib/i18n";
 import { ActionToast } from "./components/action-toast";
@@ -22,21 +24,26 @@ function CatalogErrorBanner({ isPartial = false, isRefetching, onRetry }) {
     : "ext.catalog.loadErrorDesc";
 
   return (
-    <div
-      className={`rounded-lg border px-4 py-4 ${toneClass}`}
+    <Card
+      variant="flat"
+      padding="md"
+      className={toneClass}
       role="alert"
     >
       <p className="text-sm font-semibold">{t(titleKey)}</p>
       <p className="mt-1 text-sm">{t(descriptionKey)}</p>
-      <button
+      <Button
         type="button"
-        className="mt-4 rounded-md border border-current px-3 py-1.5 text-sm font-medium transition-opacity hover:opacity-80 disabled:cursor-not-allowed disabled:opacity-50"
+        size="sm"
+        variant="outline"
+        className="mt-4"
         onClick={onRetry}
+        loading={isRefetching}
         disabled={isRefetching}
       >
         {isRefetching ? t("ext.catalog.retrying") : t("ext.catalog.retry")}
-      </button>
-    </div>
+      </Button>
+    </Card>
   );
 }
 
