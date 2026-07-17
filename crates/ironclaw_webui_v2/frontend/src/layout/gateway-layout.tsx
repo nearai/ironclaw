@@ -31,7 +31,7 @@ export function GatewayLayout({
   onSignOut,
 }) {
   const t = useT();
-  const { theme, toggleTheme } = useInterfaceTheme();
+  const { theme, setTheme, toggleTheme } = useInterfaceTheme();
   const statusQuery = useGatewayStatus(token);
   const threadsState = useThreads();
   const location = useLocation();
@@ -176,6 +176,8 @@ export function GatewayLayout({
               globalAutoApproveEnabled,
               threadsState: routeThreadsState,
               setHeaderStatus,
+              theme,
+              setTheme,
             }}
           />
         </main>

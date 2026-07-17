@@ -631,6 +631,7 @@ registerPack("ar", {
   "workspace.emptyDir": "هذا المجلد فارغ.",
   "workspace.noMatches": "لا شيء يطابق هذه التصفية.",
   "workspace.download": "تنزيل",
+  "workspace.downloadFailed": "تعذر تنزيل هذا الملف. يُرجى المحاولة مرة أخرى.",
   "workspace.binaryPreviewUnavailable": "لا توجد معاينة مضمّنة لهذا النوع من الملفات. نزّله لعرض المحتوى.",
   "workspace.fileMeta": "{mime} · {size}",
   "workspace.subtitle": "ذاكرة دائمة",

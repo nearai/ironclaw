@@ -631,6 +631,7 @@ registerPack("de", {
   "workspace.emptyDir": "Dieser Ordner ist leer.",
   "workspace.noMatches": "Nichts entspricht dem Filter.",
   "workspace.download": "Herunterladen",
+  "workspace.downloadFailed": "Diese Datei konnte nicht heruntergeladen werden. Bitte versuche es erneut.",
   "workspace.binaryPreviewUnavailable": "Keine Inline-Vorschau für diesen Dateityp. Zum Ansehen herunterladen.",
   "workspace.fileMeta": "{mime} · {size}",
   "workspace.subtitle": "Persistente Memory",

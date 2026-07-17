@@ -4,6 +4,7 @@ import { Button } from "../../../design-system/button";
 import { EmptyPanel, Panel, StatusPill } from "../../../design-system/primitives";
 import { fetchAttachmentBlob } from "../../../lib/api";
 import { saveBlob } from "../../../lib/download";
+import { toast } from "../../../lib/toast";
 import { MarkdownRenderer } from "../../chat/components/markdown-renderer";
 import {
   formatWorkspaceFileSize,
@@ -62,11 +63,11 @@ export function WorkspaceViewer({ path, file, isLoading, onNavigate }) {
       const blob = await fetchAttachmentBlob(file.download_path);
       saveBlob(blob, fileBaseName(path));
     } catch {
-      // Best-effort download; the tree/hook surface load errors separately.
+      toast(t("workspace.downloadFailed"), { tone: "error" });
     } finally {
       setDownloading(false);
     }
-  }, [file, path]);
+  }, [file, path, t]);
 
   if (isLoading) {
     return (
@@ -98,6 +99,7 @@ export function WorkspaceViewer({ path, file, isLoading, onNavigate }) {
         <div className="flex items-center gap-2">
           <StatusPill tone="muted" label={meta} />
           <Button
+            data-testid="workspace-download"
             variant="secondary"
             size="sm"
             onClick={handleDownload}

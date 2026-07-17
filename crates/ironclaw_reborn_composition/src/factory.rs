@@ -9,15 +9,9 @@ use std::{
 #[cfg(any(feature = "libsql", feature = "postgres"))]
 use crate::product_auth::durable::{FilesystemAuthProductServices, UnavailableAuthProviderClient};
 use crate::support::fs::RebornProjectService;
-#[cfg(any(feature = "libsql", feature = "postgres"))]
 use ironclaw_approvals::{
     FilesystemAutoApproveSettingStore, FilesystemPersistentApprovalPolicyStore,
     FilesystemToolPermissionOverrideStore,
-};
-#[cfg(not(any(feature = "libsql", feature = "postgres")))]
-use ironclaw_approvals::{
-    InMemoryAutoApproveSettingStore, InMemoryPersistentApprovalPolicyStore,
-    InMemoryToolPermissionOverrideStore,
 };
 #[cfg(any(feature = "libsql", feature = "postgres"))]
 use ironclaw_auth::AuthProviderClient;
@@ -304,23 +298,35 @@ pub(crate) type LocalDevCapabilityLeaseStore =
 #[cfg(not(any(feature = "libsql", feature = "postgres")))]
 pub(crate) type LocalDevCapabilityLeaseStore = InMemoryCapabilityLeaseStore;
 
+// One store per approval domain, backend-injected — the production
+// `Filesystem*Store<F>` every deployment uses, never a bespoke `InMemory*Store`
+// (arch-simplification §4.3). The store's backend type encodes its durability:
+// the no-durable-features build backs them with `InMemoryBackend` directly, so
+// the concrete type is `<InMemoryBackend>` — which the host-runtime
+// production-wiring guard classifies `LocalOnly` (the same way the volatile
+// `InMemoryRunStateStore`/`InMemoryCapabilityLeaseStore` are flagged). Durable
+// builds use the libSQL/Postgres-backed composite root filesystem, whose type is
+// distinct and correctly classifies as a production candidate.
 #[cfg(any(feature = "libsql", feature = "postgres"))]
 pub(crate) type LocalDevPersistentApprovalPolicyStore =
     FilesystemPersistentApprovalPolicyStore<LocalDevRootFilesystem>;
 #[cfg(not(any(feature = "libsql", feature = "postgres")))]
-pub(crate) type LocalDevPersistentApprovalPolicyStore = InMemoryPersistentApprovalPolicyStore;
+pub(crate) type LocalDevPersistentApprovalPolicyStore =
+    FilesystemPersistentApprovalPolicyStore<InMemoryBackend>;
 
 #[cfg(any(feature = "libsql", feature = "postgres"))]
 pub(crate) type LocalDevToolPermissionOverrideStore =
     FilesystemToolPermissionOverrideStore<LocalDevRootFilesystem>;
 #[cfg(not(any(feature = "libsql", feature = "postgres")))]
-pub(crate) type LocalDevToolPermissionOverrideStore = InMemoryToolPermissionOverrideStore;
+pub(crate) type LocalDevToolPermissionOverrideStore =
+    FilesystemToolPermissionOverrideStore<InMemoryBackend>;
 
 #[cfg(any(feature = "libsql", feature = "postgres"))]
 pub(crate) type LocalDevAutoApproveSettingStore =
     FilesystemAutoApproveSettingStore<LocalDevRootFilesystem>;
 #[cfg(not(any(feature = "libsql", feature = "postgres")))]
-pub(crate) type LocalDevAutoApproveSettingStore = InMemoryAutoApproveSettingStore;
+pub(crate) type LocalDevAutoApproveSettingStore =
+    FilesystemAutoApproveSettingStore<InMemoryBackend>;
 
 #[cfg(any(feature = "libsql", feature = "postgres"))]
 type LocalDevProcessServices = ProcessServices<
@@ -2606,12 +2612,21 @@ async fn build_local_dev_store_graph(
         project_repository,
         turn_state_store_limits,
     } = input;
+    // Approval stores run the production `Filesystem*Store<F>` over a dedicated
+    // `InMemoryBackend` (volatile) — no bespoke `InMemory*Store`
+    // (arch-simplification §4.3). Backing them with `InMemoryBackend` *directly*
+    // (rather than the composite root filesystem) keeps the store's concrete type
+    // `<InMemoryBackend>`, so the host-runtime production-wiring guard classifies it
+    // `LocalOnly` — matching the volatile run-state/lease stores in this build.
+    let approvals_filesystem = crate::wrap_scoped(Arc::new(InMemoryBackend::new()));
     let event_log = local_dev_event_log(Arc::clone(&filesystem))?;
     let audit_log = local_dev_audit_log(Arc::clone(&filesystem))?;
     let run_state = Arc::new(InMemoryRunStateStore::new());
     let approval_requests = Arc::new(InMemoryApprovalRequestStore::new());
     let capability_leases = Arc::new(InMemoryCapabilityLeaseStore::new());
-    let persistent_approval_policies = Arc::new(InMemoryPersistentApprovalPolicyStore::new());
+    let persistent_approval_policies = Arc::new(FilesystemPersistentApprovalPolicyStore::new(
+        Arc::clone(&approvals_filesystem),
+    ));
     let turn_state = Arc::new(InMemoryTurnStateStore::with_limits(turn_state_store_limits));
     let checkpoint_state_store: Arc<dyn CheckpointStateStore> =
         Arc::new(InMemoryCheckpointStateStore::default());
@@ -2637,8 +2652,12 @@ async fn build_local_dev_store_graph(
             reason: format!("local-dev capability policy is invalid: {error}"),
         }
     })?);
-    let tool_permission_overrides = Arc::new(LocalDevToolPermissionOverrideStore::new());
-    let auto_approve_settings = Arc::new(LocalDevAutoApproveSettingStore::new());
+    let tool_permission_overrides = Arc::new(LocalDevToolPermissionOverrideStore::new(Arc::clone(
+        &approvals_filesystem,
+    )));
+    let auto_approve_settings = Arc::new(LocalDevAutoApproveSettingStore::new(Arc::clone(
+        &approvals_filesystem,
+    )));
     let memory_mounts =
         memory_mount_view(MountPermissions::read_write_list_delete()).map_err(|error| {
             RebornBuildError::InvalidConfig {

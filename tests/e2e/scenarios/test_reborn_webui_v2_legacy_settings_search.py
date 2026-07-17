@@ -303,7 +303,7 @@ async def _open_mocked_settings_page(
     await page.route("**/api/webchat/v2/extensions**", handle_extensions)
     await page.route("**/api/webchat/v2/llm/**", handle_llm)
 
-    await page.goto(f"{reborn_v2_server}/v2/settings/{tab}?token={REBORN_V2_AUTH_TOKEN}")
+    await page.goto(f"{reborn_v2_server}/settings/{tab}?token={REBORN_V2_AUTH_TOKEN}")
     search = page.get_by_placeholder(SEL_V2["settings_search_placeholder"])
     try:
         await expect(search).to_be_visible(timeout=15000)
