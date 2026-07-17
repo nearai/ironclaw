@@ -655,7 +655,7 @@ fn build_app_with_google_oauth() -> (axum::Router, Arc<RecordingAuthDispatcher>)
         .with_auth_engine(google_test_engine()),
     );
     (
-        build_app_with_product_auth_service_and_config(product_auth),
+        build_app_with_product_auth_service_config_and_extensions(product_auth, &["google-tools"]),
         dispatcher,
     )
 }
@@ -683,7 +683,7 @@ fn build_app_with_google_oauth_provider(
         .with_auth_engine(google_test_engine()),
     );
     (
-        build_app_with_product_auth_service_and_config(product_auth),
+        build_app_with_product_auth_service_config_and_extensions(product_auth, &["google-tools"]),
         dispatcher,
     )
 }
@@ -998,7 +998,9 @@ async fn product_auth_google_oauth_start_requires_bearer_auth() {
 
 #[tokio::test]
 async fn product_auth_google_oauth_start_fails_closed_without_config() {
-    let (app, _) = build_app_with_product_auth();
+    // Installed inventory present so the engine absence (not the inventory
+    // guard) is what this test pins.
+    let (app, _) = build_app_with_product_auth_and_installed_extensions(&["google-tools"]);
 
     let response = post_google_oauth_start(&app, google_oauth_start_body(json!({}))).await;
 
@@ -1548,7 +1550,8 @@ async fn product_auth_google_oauth_start_builds_provider_authorization_url() {
         )
         .with_auth_engine(google_test_engine()),
     );
-    let app = build_app_with_product_auth_service_and_config(product_auth);
+    let app =
+        build_app_with_product_auth_service_config_and_extensions(product_auth, &["google-tools"]);
 
     let response = post_google_oauth_start(&app, google_oauth_start_body(json!({}))).await;
 
@@ -1590,6 +1593,40 @@ async fn product_auth_google_oauth_start_builds_provider_authorization_url() {
 #[tokio::test]
 async fn extension_oauth_start_rejects_package_missing_from_installed_inventory() {
     let shared = Arc::new(InMemoryAuthProductServices::new());
+    let product_auth = Arc::new(RebornProductAuthServices::from_shared(
+        shared.clone(),
+        Arc::new(RecordingAuthDispatcher::default()),
+    ));
+    // No auth engine on purpose: the installed-inventory guard must fire
+    // before the engine is even resolved, so an absent extension rejects
+    // identically on engine-less deployments.
+    let app = build_app_with_product_auth_service_and_config(product_auth);
+
+    let response = post_extension_oauth_start(
+        &app,
+        "google-calendar",
+        json!({
+            "provider": "google",
+            "account_label": "work google",
+            "invocation_id": InvocationId::new().to_string(),
+            "scopes": [GOOGLE_CALENDAR_READONLY_SCOPE],
+            "expires_at": (Utc::now() + ChronoDuration::minutes(5)).to_rfc3339(),
+        }),
+    )
+    .await;
+
+    assert_eq!(response.status(), StatusCode::CONFLICT);
+    let body = read_body_string(response).await;
+    assert!(body.contains("\"code\":\"invalid_request\""));
+    assert!(
+        shared.flow_records_snapshot().is_empty(),
+        "an absent extension must be rejected before an OAuth flow is created"
+    );
+}
+
+#[tokio::test]
+async fn extension_oauth_start_for_installed_package_attaches_update_binding() {
+    let shared = Arc::new(InMemoryAuthProductServices::new());
     let product_auth = Arc::new(
         RebornProductAuthServices::from_shared(
             shared.clone(),
@@ -1597,7 +1634,8 @@ async fn extension_oauth_start_rejects_package_missing_from_installed_inventory(
         )
         .with_auth_engine(google_test_engine()),
     );
-    let app = build_app_with_product_auth_service_and_config(product_auth);
+    let app =
+        build_app_with_product_auth_service_config_and_extensions(product_auth, &["google-calendar"]);
     let invocation_id = InvocationId::new();
     let scope = AuthProductScope::new(
         ResourceScope {
@@ -1659,13 +1697,12 @@ async fn extension_oauth_start_rejects_package_missing_from_installed_inventory(
             .map(|binding| binding.account_id),
         Some(account.id)
     );
-    assert_eq!(
-        flow.continuation,
-        AuthContinuationRef::LifecycleActivation {
-            package_ref: ironclaw_auth::LifecyclePackageRef::new("google-calendar")
-                .expect("lifecycle package ref"),
-        }
-    );
+    // Auth = OURS (owner decision): extension-card OAuth start creates
+    // SetupOnly flows — the retired LifecycleActivation continuation lane was
+    // excised; activation is frontend-driven after the callback completes
+    // (configure-modal `handleOauthConfigured`), pinned by
+    // `oauth_callback_with_lifecycle_activation_returns_ok_without_resume`.
+    assert_eq!(flow.continuation, AuthContinuationRef::SetupOnly);
 }
 
 #[tokio::test]

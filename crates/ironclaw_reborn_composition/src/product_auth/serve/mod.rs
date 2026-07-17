@@ -50,7 +50,9 @@ use ironclaw_host_api::ingress::{
 use ironclaw_host_api::{
     AgentId, ExtensionId, InvocationId, ProjectId, ResourceScope, TenantId, ThreadId, UserId,
 };
-use ironclaw_product_workflow::WebUiAuthenticatedCaller;
+use ironclaw_product_workflow::{
+    LifecyclePackageKind, RebornServicesApi, RebornServicesError, WebUiAuthenticatedCaller,
+};
 use lru::LruCache;
 use secrecy::{ExposeSecret, SecretString};
 use serde::{Deserialize, Deserializer, Serialize};
@@ -151,6 +153,10 @@ const RAW_OAUTH_VALUE_MAX_BYTES: usize = 4 * 1024;
 #[derive(Clone)]
 pub(crate) struct ProductAuthRouteState {
     product_auth: Arc<RebornProductAuthServices>,
+    /// Installed-inventory guard for extension OAuth starts: a flow may be
+    /// minted only for an extension the caller actually has installed
+    /// (fail-closed — an unwired lookup rejects rather than skips).
+    installed_extension_lookup: Option<Arc<dyn InstalledExtensionLookup>>,
     tenant_id: TenantId,
     default_agent_id: Option<AgentId>,
     default_project_id: Option<ProjectId>,
@@ -167,6 +173,53 @@ pub(crate) struct ProductAuthRouteState {
     pkce_verifiers: ExpiringLruCache<AuthFlowId, StoredPkceVerifier>,
 }
 
+/// Answers "does this caller have this extension installed?" for the
+/// extension OAuth start guard. Implemented over the WebUI facade
+/// (`RebornServicesApi::list_extensions`) by production wiring; tests may
+/// substitute a scripted lookup.
+#[async_trait::async_trait]
+trait InstalledExtensionLookup: Send + Sync {
+    async fn is_installed(
+        &self,
+        caller: &WebUiAuthenticatedCaller,
+        extension_id: &ExtensionId,
+    ) -> Result<bool, RebornServicesError>;
+}
+
+struct RebornServicesInstalledExtensionLookup {
+    api: Arc<dyn RebornServicesApi>,
+}
+
+#[async_trait::async_trait]
+impl InstalledExtensionLookup for RebornServicesInstalledExtensionLookup {
+    async fn is_installed(
+        &self,
+        caller: &WebUiAuthenticatedCaller,
+        extension_id: &ExtensionId,
+    ) -> Result<bool, RebornServicesError> {
+        let inventory = self.api.list_extensions(caller.clone()).await?;
+        Ok(inventory.extensions.iter().any(|extension| {
+            extension.package_ref.kind == LifecyclePackageKind::Extension
+                && extension.package_ref.id.as_str() == extension_id.as_str()
+        }))
+    }
+}
+
+#[cfg(test)]
+struct TestInstalledExtensionLookup;
+
+#[cfg(test)]
+#[async_trait::async_trait]
+impl InstalledExtensionLookup for TestInstalledExtensionLookup {
+    async fn is_installed(
+        &self,
+        _caller: &WebUiAuthenticatedCaller,
+        _extension_id: &ExtensionId,
+    ) -> Result<bool, RebornServicesError> {
+        Ok(true)
+    }
+}
+
 impl ProductAuthRouteState {
     pub(crate) fn new(
         product_auth: Arc<RebornProductAuthServices>,
@@ -176,6 +229,7 @@ impl ProductAuthRouteState {
     ) -> Self {
         Self {
             product_auth,
+            installed_extension_lookup: None,
             tenant_id,
             default_agent_id,
             default_project_id,
@@ -185,6 +239,53 @@ impl ProductAuthRouteState {
                 StoredPkceVerifier::expires_at,
             ),
         }
+    }
+
+    /// Wire the WebUI facade as the installed-extension inventory source for
+    /// the extension OAuth start guard.
+    pub(crate) fn with_webui_api(mut self, webui_api: Arc<dyn RebornServicesApi>) -> Self {
+        self.installed_extension_lookup = Some(Arc::new(RebornServicesInstalledExtensionLookup {
+            api: webui_api,
+        }));
+        self
+    }
+
+    #[cfg(test)]
+    fn with_test_installed_extension_lookup(mut self) -> Self {
+        self.installed_extension_lookup = Some(Arc::new(TestInstalledExtensionLookup));
+        self
+    }
+
+    /// Fail-closed installed-inventory guard for extension OAuth starts: no
+    /// wired lookup rejects as unavailable (never skips the check), a lookup
+    /// failure rejects as unavailable, and a missing installation rejects
+    /// with the terminal not-installed conflict.
+    pub(super) async fn require_installed_extension(
+        &self,
+        caller: &WebUiAuthenticatedCaller,
+        requester_extension: &ExtensionId,
+    ) -> Result<(), ProductAuthRouteFailure> {
+        let Some(lookup) = self.installed_extension_lookup.as_ref() else {
+            return Err(ProductAuthRouteFailure::backend_unavailable());
+        };
+        let is_installed = tokio::time::timeout(
+            PRODUCT_AUTH_BACKEND_TIMEOUT,
+            lookup.is_installed(caller, requester_extension),
+        )
+        .await
+        .map_err(|_| ProductAuthRouteFailure::backend_timeout())?
+        .map_err(|error| {
+            tracing::warn!(
+                %error,
+                extension_id = %requester_extension,
+                "installed extension lookup failed before OAuth start"
+            );
+            ProductAuthRouteFailure::backend_unavailable()
+        })?;
+        if !is_installed {
+            return Err(ProductAuthRouteFailure::extension_not_installed());
+        }
+        Ok(())
     }
 
     /// Register the post-exchange provider-identity hook. The handler
@@ -248,6 +349,10 @@ impl std::fmt::Debug for ProductAuthRouteState {
         let mut builder = formatter.debug_struct("ProductAuthRouteState");
         builder
             .field("product_auth", &"Arc<RebornProductAuthServices>")
+            .field(
+                "installed_extension_lookup",
+                &self.installed_extension_lookup.is_some(),
+            )
             .field("tenant_id", &self.tenant_id)
             .field("default_agent_id", &self.default_agent_id)
             .field("default_project_id", &self.default_project_id)
@@ -786,6 +891,12 @@ impl ProductAuthRouteFailure {
 
     fn invalid_request() -> Self {
         Self::new(StatusCode::BAD_REQUEST, AuthErrorCode::InvalidRequest)
+    }
+
+    /// The requested extension is not in the caller's installed inventory —
+    /// terminal for this start attempt (409, not retryable).
+    fn extension_not_installed() -> Self {
+        Self::new(StatusCode::CONFLICT, AuthErrorCode::InvalidRequest)
     }
 
     fn malformed_callback() -> Self {
@@ -1682,7 +1793,8 @@ mod tests {
             TenantId::new("tenant-alpha").expect("tenant"),
             None,
             None,
-        );
+        )
+        .with_test_installed_extension_lookup();
         let app = product_auth_route_mount(state)
             .protected
             .layer(axum::Extension(test_caller()));
@@ -1771,7 +1883,8 @@ mod tests {
             TenantId::new("tenant-alpha").expect("tenant"),
             None,
             None,
-        );
+        )
+        .with_test_installed_extension_lookup();
         let app = product_auth_route_mount(state.clone())
             .protected
             .layer(axum::Extension(test_caller()));
@@ -1874,7 +1987,8 @@ mod tests {
             TenantId::new("tenant-alpha").expect("tenant"),
             None,
             None,
-        );
+        )
+        .with_test_installed_extension_lookup();
         let app = product_auth_route_mount(state)
             .protected
             .layer(axum::Extension(test_caller()));
@@ -1906,6 +2020,106 @@ mod tests {
             .expect("response body");
         let json: serde_json::Value = serde_json::from_slice(&body).expect("error json");
         assert_eq!(json["code"], "backend_unavailable");
+    }
+
+    /// The installed-inventory guard is fail-closed: a state without a wired
+    /// lookup rejects the start rather than skipping the check.
+    #[tokio::test]
+    async fn installed_extension_lookup_is_required_even_in_test_builds() {
+        let state = ProductAuthRouteState::new(
+            Arc::new(RebornProductAuthServices::local_dev_in_memory(Arc::new(
+                NoopDispatcher,
+            ))),
+            TenantId::new("tenant-alpha").expect("tenant"),
+            None,
+            None,
+        );
+
+        let error = state
+            .require_installed_extension(
+                &test_caller(),
+                &ExtensionId::new("notion").expect("extension"),
+            )
+            .await
+            .expect_err("missing production lookup must fail closed");
+
+        assert_eq!(error.status, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(error.body.code, AuthErrorCode::BackendUnavailable);
+    }
+
+    /// Reports installed on the first inventory check and uninstalled on
+    /// every later one — the shape of an uninstall racing an OAuth start.
+    struct SequencedInstalledExtensionLookup {
+        calls: std::sync::atomic::AtomicUsize,
+    }
+
+    #[async_trait]
+    impl InstalledExtensionLookup for SequencedInstalledExtensionLookup {
+        async fn is_installed(
+            &self,
+            _caller: &WebUiAuthenticatedCaller,
+            _extension_id: &ExtensionId,
+        ) -> Result<bool, RebornServicesError> {
+            Ok(self
+                .calls
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+                == 0)
+        }
+    }
+
+    /// An uninstall racing the start (installed at the pre-check, gone at
+    /// the post-check) must abort the just-started flow: the caller gets the
+    /// terminal not-installed conflict and the minted flow is canceled so a
+    /// late callback cannot complete it.
+    #[tokio::test]
+    async fn extension_oauth_start_aborts_the_started_flow_when_uninstall_races() {
+        let engine = test_engine(
+            test_vendor_recipe(true, None),
+            Arc::new(PanickingDcrEgress),
+            Arc::new(InMemorySecretStore::new()),
+        );
+        let shared = Arc::new(ironclaw_auth::InMemoryAuthProductServices::new());
+        let product_auth =
+            RebornProductAuthServices::from_shared(shared.clone(), Arc::new(NoopDispatcher))
+                .with_auth_engine(engine);
+        let mut state = ProductAuthRouteState::new(
+            Arc::new(product_auth),
+            TenantId::new("tenant-alpha").expect("tenant"),
+            None,
+            None,
+        );
+        state.installed_extension_lookup = Some(Arc::new(SequencedInstalledExtensionLookup {
+            calls: std::sync::atomic::AtomicUsize::new(0),
+        }));
+        let app = product_auth_route_mount(state)
+            .protected
+            .layer(axum::Extension(test_caller()));
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/api/webchat/v2/extensions/vendorco-tools/setup/oauth/start")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "provider": "vendorco",
+                            "account_label": "work account",
+                            "scopes": ["items:read"],
+                            "expires_at": (Utc::now() + ChronoDuration::minutes(5)).to_rfc3339(),
+                            "invocation_id": InvocationId::new().to_string(),
+                        })
+                        .to_string(),
+                    ))
+                    .expect("request"),
+            )
+            .await
+            .expect("route response");
+
+        assert_eq!(response.status(), StatusCode::CONFLICT);
+        let flows = shared.flow_records_snapshot();
+        assert_eq!(flows.len(), 1);
+        assert_eq!(flows[0].status, AuthFlowStatus::Canceled);
     }
 
     /// The callback retrieves the PKCE verifier from the durable gate store

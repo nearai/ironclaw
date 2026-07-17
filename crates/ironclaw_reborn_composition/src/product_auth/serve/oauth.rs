@@ -113,6 +113,11 @@ pub(super) async fn extension_oauth_start_handler(
 ) -> Result<Json<ProductOAuthStartResponse>, ProductAuthRouteFailure> {
     let requester_extension =
         ExtensionId::new(package_id).map_err(|_| ProductAuthRouteFailure::invalid_request())?;
+    // Fail closed before any flow work: an extension absent from the
+    // caller's installed inventory must not mint an OAuth flow.
+    state
+        .require_installed_extension(&caller, &requester_extension)
+        .await?;
     let now = Utc::now();
     if request.expires_at <= now
         || request.expires_at > now + ChronoDuration::seconds(PRODUCT_AUTH_FLOW_MAX_TTL_SECONDS)
@@ -171,7 +176,7 @@ pub(super) async fn extension_oauth_start_handler(
     .await?;
     state.store_pkce_verifier(flow.id, prepared.pkce_verifier.clone(), flow.expires_at)?;
 
-    Ok(Json(ProductOAuthStartResponse {
+    let response = ProductOAuthStartResponse {
         flow_id: flow.id,
         status: flow.status,
         provider,
@@ -179,7 +184,27 @@ pub(super) async fn extension_oauth_start_handler(
         expires_at: flow.expires_at,
         continuation: flow.continuation,
         callback_scope: scope_hint(&scope),
-    }))
+    };
+    // Close the start-vs-removal race: a concurrent uninstall cancels the
+    // pending flows it can see, so a flow minted after that sweep would
+    // survive it. Re-check the inventory and abort the just-started flow
+    // (cancel + drop its process-local PKCE verifier) when the extension
+    // is gone, so a late callback cannot complete it.
+    if let Err(error) = state
+        .require_installed_extension(&caller, &requester_extension)
+        .await
+    {
+        run_with_backend_timeout(
+            state
+                .product_auth
+                .flow_manager()
+                .cancel_flow(&scope, response.flow_id),
+        )
+        .await?;
+        state.remove_pkce_verifier(response.flow_id);
+        return Err(error);
+    }
+    Ok(Json(response))
 }
 
 pub(super) async fn oauth_callback_handler(

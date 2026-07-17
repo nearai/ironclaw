@@ -554,7 +554,8 @@ pub fn webui_v2_app_with_lifecycle(
             config.tenant_id.clone(),
             config.default_agent_id.clone(),
             config.default_project_id.clone(),
-        );
+        )
+        .with_webui_api(bundle.api.clone());
         if let Some(channel_identity_binding) = config.channel_identity_binding.clone() {
             state = state.with_provider_identity_hook(channel_identity_binding_hook_factory(
                 channel_identity_binding,

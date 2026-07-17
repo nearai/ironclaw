@@ -143,6 +143,7 @@ mod tests {
             None,
             None,
         )
+        .with_test_installed_extension_lookup()
     }
 
     #[tokio::test]

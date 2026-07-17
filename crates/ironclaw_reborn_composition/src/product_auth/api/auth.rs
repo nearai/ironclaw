@@ -1237,7 +1237,6 @@ impl RebornProductAuthServices {
         })
     }
 
-    #[allow(dead_code, reason = "used by upcoming Reborn OAuth setup route wiring")]
     pub(crate) async fn ensure_oauth_callback_flow_known(
         &self,
         scope: &AuthProductScope,
@@ -1251,6 +1250,16 @@ impl RebornProductAuthServices {
         else {
             return Err(AuthProductError::UnknownOrExpiredFlow.into());
         };
+        // A replayed callback for a settled flow is idempotent-rejected with
+        // the terminal signal (409 flow_already_terminal), never "not found":
+        // the durable record exists and stays untouched — only its one-shot
+        // claim already happened. Checked before expiry so a settled flow's
+        // evidence stays stable after its window lapses, and before the
+        // PKCE-verifier lookup so a replay cannot surface the process-local
+        // cache purge (done on settle) as an incidental 404.
+        if ironclaw_auth::is_terminal_status(record.status) {
+            return Err(AuthProductError::FlowAlreadyTerminal.into());
+        }
         if record.expires_at <= Utc::now() {
             return Err(AuthProductError::UnknownOrExpiredFlow.into());
         }
