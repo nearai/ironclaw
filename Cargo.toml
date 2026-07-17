@@ -595,7 +595,7 @@ path = "tests/integration/web_access.rs"
 
 [[test]]
 name = "reborn_integration_telegram_journey"
-path = "tests/integration/telegram_journey.rs"
+path = "tests/integration/telegram_journeys/main.rs"
 
 [[test]]
 name = "reborn_integration_webui_v2_product_api"
