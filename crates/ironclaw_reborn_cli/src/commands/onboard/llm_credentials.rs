@@ -106,20 +106,25 @@ impl LlmKeyStoreOpener for LocalDevLlmKeyStoreOpener {
 
 /// Prompt for an LLM provider (via the numbered menu — see
 /// [`super::prompts::PromptSource::provider_menu`]), its API key when the
-/// selected provider requires one, and a model override, then persist
-/// what's needed: any API key value goes into the encrypted secret store via
-/// the canonical `LlmKeyStore` handle (`llm_provider_<id>_api_key`) FIRST —
-/// the same handle the webui2 settings surface writes and
-/// `apply_startup_stored_llm_key` reads at boot — and only once that
-/// succeeds does the provider selection land in `[llm.default]` in
-/// `config.toml` SECOND (existing `RebornProviderAdmin::set_provider` config
-/// machinery, the same one `ironclaw-reborn models set-provider` uses).
-/// This ordering means `config.toml` can never point at a provider whose key
-/// failed to persist durably: a `LlmKeyStore::put` failure returns an error
-/// before `set_provider` is ever called, leaving `config.toml` exactly as it
-/// was. A provider whose menu entry has `api_key_required: false` (e.g.
-/// `nearai`) skips the key prompt and secret-store write entirely — there is
-/// nothing to persist there.
+/// selected provider requires one, and a model override, then persist what's
+/// needed. Both prompts (`api_key`, `model`) run first — they're pure reads
+/// of user input with nothing durable behind them — so every fallible step
+/// remaining once a write starts is a write itself, never a prompt: any API
+/// key value goes into the encrypted secret store via the canonical
+/// `LlmKeyStore` handle (`llm_provider_<id>_api_key`) FIRST — the same handle
+/// the webui2 settings surface writes and `apply_startup_stored_llm_key`
+/// reads at boot — and only once that succeeds does the provider selection
+/// land in `[llm.default]` in `config.toml` SECOND (existing
+/// `RebornProviderAdmin::set_provider` config machinery, the same one
+/// `ironclaw-reborn models set-provider` uses). This ordering means
+/// `config.toml` can never point at a provider whose key failed to persist
+/// durably: a `LlmKeyStore::put` failure returns an error before
+/// `set_provider` is ever called, leaving `config.toml` exactly as it was —
+/// and, symmetrically, a prompt failure (e.g. Ctrl-D on the model prompt)
+/// can never leave an orphan key in the secret store, because no prompt runs
+/// after the store write starts. A provider whose menu entry has
+/// `api_key_required: false` (e.g. `nearai`) skips the key prompt and
+/// secret-store write entirely — there is nothing to persist there.
 ///
 /// Skips prompting entirely (an idempotent no-op) on a rerun where
 /// `[llm.default]` is already user-configured AND (the provider doesn't
@@ -163,7 +168,12 @@ pub(crate) fn provision_llm_credentials(
             ))
         })?;
 
-    if entry.api_key_required {
+    // Both prompts run BEFORE any write: they're pure reads of user input,
+    // so gathering them first means the only fallible steps left are the
+    // two durable writes below (store, then config) — no prompt can fail
+    // partway through with a secret already committed. See this function's
+    // doc for the store-then-config write ordering.
+    let key = if entry.api_key_required {
         let key = prompts.api_key(&canonical_provider_id)?;
         // Defense in depth: `StdinPromptSource::api_key` already re-prompts
         // on a blank answer, but this guards every `PromptSource`
@@ -174,7 +184,22 @@ pub(crate) fn provision_llm_credentials(
                 "LLM API key must not be blank"
             )));
         }
+        Some(key)
+    } else {
+        None
+    };
 
+    let default_model = admin
+        .list(Some(&canonical_provider_id), false)
+        .map_err(|error| LlmCredentialPromptError::Other(error.into()))?
+        .providers
+        .into_iter()
+        .next()
+        .map(|info| info.default_model)
+        .unwrap_or_default();
+    let model = prompts.model(&canonical_provider_id, &default_model)?;
+
+    if let Some(key) = key {
         let store = store_opener
             .open(home.path())
             .map_err(LlmCredentialPromptError::Other)?;
@@ -187,16 +212,6 @@ pub(crate) fn provision_llm_credentials(
         })
         .map_err(LlmCredentialPromptError::Other)?;
     }
-
-    let default_model = admin
-        .list(Some(&canonical_provider_id), false)
-        .map_err(|error| LlmCredentialPromptError::Other(error.into()))?
-        .providers
-        .into_iter()
-        .next()
-        .map(|info| info.default_model)
-        .unwrap_or_default();
-    let model = prompts.model(&canonical_provider_id, &default_model)?;
 
     let write_outcome = admin
         .set_provider(&canonical_provider_id, model.as_deref())
@@ -223,9 +238,11 @@ pub(crate) fn provision_llm_credentials(
 /// configure — see the regression test
 /// `provision_llm_credentials_is_idempotent_for_a_no_key_provider`.
 ///
-/// A store-open failure, or a failure to look up whether the configured
-/// provider requires a key, is treated as "can't tell" and falls through to
-/// prompting rather than erroring the whole run.
+/// A store-open failure is treated as "can't tell" and falls through to
+/// prompting rather than erroring the whole run (a fresh prompt/write can
+/// still succeed even if the pre-flight check couldn't read the store). A
+/// registry lookup failure, in contrast, is propagated — see
+/// [`provider_api_key_required`]'s doc.
 #[cfg(all(feature = "libsql", feature = "root-llm-provider"))]
 fn already_configured_outcome(
     admin: &ironclaw_reborn_composition::RebornProviderAdmin,
@@ -242,7 +259,7 @@ fn already_configured_outcome(
         return Ok(None);
     };
 
-    let Some(api_key_required) = provider_api_key_required(admin, &provider_id) else {
+    let Some(api_key_required) = provider_api_key_required(admin, &provider_id)? else {
         return Ok(None);
     };
     if !api_key_required {
@@ -283,21 +300,30 @@ fn already_configured_outcome(
 /// Whether `provider_id` requires an API key, per the full provider
 /// registry (not menu-restricted — `[llm.default]` may name a provider
 /// that's excluded from the onboard menu, e.g. one set via `models
-/// set-provider`). `None` when the lookup itself fails (unknown provider,
-/// registry load error), signalling "can't tell" to the caller.
+/// set-provider`).
+///
+/// Returns `Err` when the registry lookup itself fails (e.g. a corrupt or
+/// unreadable `providers.json`) — that's a real failure, not "unconfigured",
+/// and must not be swallowed into a silent re-prompt (a swallowed registry
+/// error here would make `already_configured_outcome` treat a broken
+/// registry the same as "never configured", re-running the interactive
+/// prompt — and on `--force`, re-writing credentials — every time). Returns
+/// `Ok(None)` only for the genuinely "can't tell" case: `provider_id` isn't
+/// in the registry's list result, or has no setup metadata attached.
 #[cfg(all(feature = "libsql", feature = "root-llm-provider"))]
 fn provider_api_key_required(
     admin: &ironclaw_reborn_composition::RebornProviderAdmin,
     provider_id: &str,
-) -> Option<bool> {
-    admin
+) -> Result<Option<bool>, LlmCredentialPromptError> {
+    let providers = admin
         .list(Some(provider_id), true)
-        .ok()?
-        .providers
+        .map_err(|error| LlmCredentialPromptError::Other(error.into()))?
+        .providers;
+    Ok(providers
         .into_iter()
-        .next()?
-        .metadata
-        .map(|metadata| metadata.api_key_required)
+        .next()
+        .and_then(|info| info.metadata)
+        .map(|metadata| metadata.api_key_required))
 }
 
 /// Without both `libsql` (the store opener) and `root-llm-provider`

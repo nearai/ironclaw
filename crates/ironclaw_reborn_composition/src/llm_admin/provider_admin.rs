@@ -294,8 +294,9 @@ impl RebornProviderAdmin {
             .filter(|def| def.id != "github_copilot")
             .filter(|def| {
                 matches!(
-                    def.setup.as_ref().map(|setup| setup.kind()),
-                    Some("api_key") | Some("session_token")
+                    def.setup.as_ref(),
+                    Some(ironclaw_llm::registry::SetupHint::ApiKey { .. })
+                        | Some(ironclaw_llm::registry::SetupHint::SessionToken { .. })
                 )
             })
             .map(|def| ProviderMenuEntry {
