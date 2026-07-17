@@ -5,9 +5,7 @@
 //! turn/outbound ports. They intentionally do not reuse the legacy Slack channel
 //! or legacy pairing store.
 
-// arch-exempt: large_file, triggered Slack gate-route e2e coverage stays with
-// the existing Slack harness; decomposition tracked in
-// docs/plans/2026-07-02-reborn-internal-module-refactor.md.
+// arch-exempt: large_file, existing Slack gate-route E2E corpus only changes imports to the shared delivery owner, plan #6159
 
 use std::num::NonZeroUsize;
 use std::sync::atomic::{AtomicUsize, Ordering};

@@ -92,6 +92,7 @@ pub struct TelegramChannelRouteConfig {
     setup_service: Arc<TelegramSetupService>,
     pairing_service: Arc<TelegramPairingService>,
     safety_layer: Arc<SafetyLayer>,
+    // arch-exempt: optional_arc, lifecycle activation is absent in supported hosts without extension management and setup remains usable with fail-closed rollback whenever the strategy is installed, plan #6159
     setup_activation: Option<Arc<dyn TelegramChannelSetupActivation>>,
 }
 

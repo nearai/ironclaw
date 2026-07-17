@@ -82,6 +82,5 @@ fn scoped_path(path: String) -> Result<ScopedPath, FilesystemError> {
 
 fn hashed_segment(value: &str) -> String {
     let digest = sha256_hex(value.as_bytes());
-    // safety: sha256_hex output is ASCII hex, so a byte slice cannot split a character.
-    digest[..PATH_HASH_LEN].to_string()
+    digest.chars().take(PATH_HASH_LEN).collect()
 }

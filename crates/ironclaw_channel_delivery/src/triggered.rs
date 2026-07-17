@@ -64,6 +64,7 @@ pub struct TriggeredRunDeliveryDriver {
     /// it; when absent (reduced test drivers), a fire carrying a target fails
     /// closed as `TargetUnavailable` — see
     /// `driver_fire_with_unresolvable_delivery_target_records_target_unavailable`.
+    // arch-exempt: optional_arc, reduced test drivers omit the cross-owner target strategy while production wiring supplies it and targeted fires fail closed without it, plan #6159
     outbound_target_provider: Option<Arc<dyn OutboundDeliveryTargetProvider>>,
 }
 
@@ -257,7 +258,7 @@ impl TriggeredRunDeliveryDriver {
 /// (still running / stuck), distinguished here by `delivered_blocked_marker`. See
 /// `docs/plans/2026-06-25-slack-delivery-blocked-terminal.md` for the production
 /// incident (23× spurious `Failed` after 30-min polls) this guards against.
-// arch-exempt: too_many_args, needs a triggered-delivery context bundle (services + settings + fire + run identity + delivery store + fallback agent + target provider), plan docs/plans/2026-06-10-slack-gate-feedback-and-routing.md Phase C
+// arch-exempt: too_many_args, the delivery algorithm receives the shared services bundle plus typed fire/run evidence and the retained cross-owner target strategy, plan #6159
 #[allow(clippy::too_many_arguments)]
 async fn deliver_triggered_run(
     services: &FinalReplyDeliveryServices,

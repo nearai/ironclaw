@@ -11,7 +11,7 @@ use ironclaw_turns::{TurnRunId, TurnScope};
 
 use crate::services::*;
 
-// arch-exempt: too_many_args, needs a GateRouteRecordingContext bundle (store + scope identity + posted refs), plan docs/plans/2026-06-10-slack-gate-feedback-and-routing.md Phase C
+// arch-exempt: too_many_args, the generic route recorder receives one cross-owner store plus typed route identity and evidence; bundling remains tracked by this architecture cleanup, plan #6159
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn record_gate_route_if_needed(
     route_store: &dyn DeliveredGateRouteStore,

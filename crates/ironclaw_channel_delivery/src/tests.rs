@@ -1,3 +1,5 @@
+// arch-exempt: large_file, this is the behavior-preserving delivery regression corpus moved intact from composition; production behavior is split across focused owner modules, plan #6159
+
 use std::num::NonZeroUsize;
 use std::sync::{Arc, Mutex};
 

@@ -416,11 +416,8 @@ fn secret_handle_for_installation(
     revision: u64,
 ) -> Result<SecretHandle, ironclaw_host_api::HostApiError> {
     let digest = sha256_hex(&secret_handle_key_material(tenant_id, installation_key));
-    // safety: sha256_hex output is ASCII hex, so a byte slice cannot split a character.
-    SecretHandle::new(format!(
-        "{prefix}_{}_v{revision}",
-        &digest[..INSTALLATION_HANDLE_HASH_LEN]
-    ))
+    let digest_prefix: String = digest.chars().take(INSTALLATION_HANDLE_HASH_LEN).collect();
+    SecretHandle::new(format!("{prefix}_{}_v{revision}", digest_prefix))
 }
 
 fn secret_handle_key_material(tenant_id: &TenantId, installation_key: &str) -> Vec<u8> {

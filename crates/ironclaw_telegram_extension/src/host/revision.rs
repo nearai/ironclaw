@@ -50,6 +50,7 @@ pub(crate) struct TelegramRevisionWorkflowParts {
 }
 
 impl TelegramRevisionWorkflowParts {
+    // arch-exempt: too_many_args, revision construction joins typed host config with retained cross-owner runtime ports at the Telegram owner boundary, plan #6159
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn new(
         config: TelegramHostConfig,
