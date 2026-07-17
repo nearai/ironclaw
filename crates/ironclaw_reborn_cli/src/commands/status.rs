@@ -144,9 +144,7 @@ fn resolve_login_link_and_note(
     home: &ironclaw_reborn_config::RebornHome,
     config_path: &std::path::Path,
 ) -> anyhow::Result<(Option<String>, Option<String>)> {
-    let config_file = ironclaw_reborn_config::RebornConfigFile::load(config_path)
-        .ok()
-        .flatten();
+    let config_file = ironclaw_reborn_config::RebornConfigFile::load(config_path)?;
     Ok(
         match crate::webui_token::resolve_login_link_announcement(home, config_file.as_ref())? {
             crate::webui_token::LoginLinkAnnouncement::Link(link) => (Some(link), None),

@@ -75,9 +75,12 @@ impl ConfigFileWrite {
 ///   `config init`/`onboard`'s stub write. See `onboard::llm_credentials`
 ///   for seeding paths and `resolve_reborn_runtime_llm` for the env fallback
 ///   a commented-out `[llm.default]` falls through to.
-/// - `nearai` needs no upfront third-party account (session-token auth via a
-///   NEAR account, `api_key_required = false`), hence preferred for a fresh
-///   install over a provider that hard-requires a key before it boots.
+/// - `nearai` is preferred for a fresh install because it's the intended
+///   session-token-auth provider (a NEAR account, no third-party API key),
+///   but that flow is not wired in reborn yet — no `SessionRenewer` attaches
+///   at `serve` boot — so `effective_api_key_required` overrides it to
+///   `true` and onboarding still asks for a `cloud-api.near.ai` API key like
+///   every other provider. See `effective_api_key_required`'s doc.
 const DEFAULT_LLM_PROVIDER_ID: &str = "nearai";
 /// Mirrors `providers.json`'s `nearai` entry's `default_model`.
 const DEFAULT_LLM_MODEL: &str = "deepseek-ai/DeepSeek-V4-Flash";
@@ -370,8 +373,11 @@ mod tests {
             Some(&config_file),
         );
         assert!(
-            resolved.is_ok(),
-            "a de-seeded stub must not fail with MissingProviderId; got: {resolved:?}"
+            !matches!(
+                &resolved,
+                Err(ironclaw_reborn_composition::RebornLlmCatalogError::MissingProviderId)
+            ),
+            "a de-seeded stub must reach env fallback, not MissingProviderId; got: {resolved:?}"
         );
     }
 }

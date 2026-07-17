@@ -618,7 +618,10 @@ mod tests {
 
     /// Companion to `missing_required_api_key_env_fails_closed`: with the
     /// keyless override applied, the same unset-env-var setup must resolve
-    /// (no API key on the resulting config).
+    /// (no API key on the resulting config). Drives
+    /// `resolve_allow_missing_key_against_registry` itself (not a
+    /// hand-built keyless registry) so the test fails if the
+    /// `ApiKeyEnvUnset` -> keyless-retry control flow regresses.
     #[test]
     fn allow_missing_key_resolves_a_required_key_provider_without_the_env_var_set() {
         let env_name = "REBORN_TEST_UNSET_API_KEY_ALLOW_MISSING_DO_NOT_SET_7d2b";
@@ -631,8 +634,7 @@ mod tests {
             provider_id: Some("alpha".to_string()),
             ..Default::default()
         };
-        let keyless_registry = registry_with_provider_treated_as_keyless(&registry, "alpha");
-        let config = resolve_against_registry(&selection, &keyless_registry)
+        let config = resolve_allow_missing_key_against_registry(&selection, &registry)
             .expect("keyless resolution must succeed even though the API key env var is unset");
         let provider = config.provider.expect("registry provider config");
         assert!(

@@ -3814,6 +3814,14 @@ pub enum LocalDevKeychainMasterKeyOutcome {
 ///   matching `resolve_local_dev_secret_master_key_with_env`'s env/dotfile fallback.
 #[cfg(any(feature = "libsql", feature = "postgres"))]
 pub async fn provision_local_dev_keychain_master_key() -> LocalDevKeychainMasterKeyOutcome {
+    // `has_master_key()` collapses "no key yet" and "backend/permission/locked
+    // error probing the keychain" into the same `false` — a false negative
+    // here falls through to `generate` + `store` below, which overwrites
+    // whatever key the keychain actually holds. Same accepted-risk class as
+    // the TOCTOU documented on this function's only caller
+    // (`ironclaw_reborn_cli::commands::onboard::master_key::provision_master_key`):
+    // LocalDev, single-operator, run-once-by-hand; worst case is a
+    // wrongly-regenerated key recoverable by re-entering one API key.
     if ironclaw_secrets::keychain::has_master_key().await {
         return LocalDevKeychainMasterKeyOutcome::AlreadyPresent;
     }

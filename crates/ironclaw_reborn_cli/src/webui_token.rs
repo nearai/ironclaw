@@ -475,7 +475,7 @@ pub(crate) fn resolve_login_link_announcement(
             env_var_name: env_var_name.to_string(),
         });
     }
-    Ok(match login_link(home) {
+    Ok(match login_link(home)? {
         Some(link) => LoginLinkAnnouncement::Link(link),
         None => LoginLinkAnnouncement::Unavailable,
     })
@@ -507,17 +507,20 @@ fn validate_token_entropy(
 /// prints a login link (`onboard`, `status`) so the construction lives in
 /// one place.
 #[cfg(feature = "webui-v2-beta")]
-pub(crate) fn login_link(home: &ironclaw_reborn_config::RebornHome) -> Option<String> {
-    if !webui_token_file_is_valid(home.path()).unwrap_or(false) {
-        return None;
-    }
-    let token = fs::read_to_string(webui_token_file_path(home.path())).ok()?;
-    Some(format!(
-        "http://{}:{}/login?token={}",
-        crate::commands::serve::DEFAULT_SERVE_HOST,
-        crate::commands::serve::DEFAULT_SERVE_PORT,
-        token.trim()
-    ))
+pub(crate) fn login_link(
+    home: &ironclaw_reborn_config::RebornHome,
+) -> anyhow::Result<Option<String>> {
+    let token = read_token_file_checked(&webui_token_file_path(home.path()))?;
+    Ok(token
+        .filter(|contents| contents.trim().len() >= WEBUI_TOKEN_MIN_BYTES)
+        .map(|contents| {
+            format!(
+                "http://{}:{}/login?token={}",
+                crate::commands::serve::DEFAULT_SERVE_HOST,
+                crate::commands::serve::DEFAULT_SERVE_PORT,
+                contents.trim()
+            )
+        }))
 }
 
 #[cfg(test)]

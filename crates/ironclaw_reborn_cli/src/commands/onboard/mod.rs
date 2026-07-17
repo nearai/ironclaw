@@ -386,4 +386,39 @@ mod tests {
             "import_history must still append history_import regardless of llm_configured"
         );
     }
+
+    /// Same guarantee as `pending_steps_omits_llm_credentials_once_configured`,
+    /// but driven through `write_onboarding_marker` (the production caller) —
+    /// parses the actual `.onboard-completed.json` `steps_pending` field
+    /// rather than calling `pending_steps` directly.
+    #[test]
+    fn write_onboarding_marker_steps_pending_reflects_llm_configured() {
+        let (_tmp, context) = crate::context::RebornCliContext::test_context();
+        let home = context.boot_config().home();
+        std::fs::create_dir_all(home.path()).expect("create reborn home");
+
+        let marker_path = home.path().join("configured.json");
+        write_onboarding_marker(home, &marker_path, false, false, true)
+            .expect("write marker (llm configured)");
+        let marker: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&marker_path).expect("read marker"))
+                .expect("marker must be valid JSON");
+        assert_eq!(
+            marker["steps_pending"],
+            serde_json::json!(["model_selection", "channel_setup"]),
+            "steps_pending must omit llm_credentials once configured: {marker}"
+        );
+
+        let marker_path = home.path().join("unconfigured.json");
+        write_onboarding_marker(home, &marker_path, false, false, false)
+            .expect("write marker (llm not configured)");
+        let marker: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&marker_path).expect("read marker"))
+                .expect("marker must be valid JSON");
+        assert_eq!(
+            marker["steps_pending"],
+            serde_json::json!(["llm_credentials", "model_selection", "channel_setup"]),
+            "steps_pending must include llm_credentials when not configured: {marker}"
+        );
+    }
 }
