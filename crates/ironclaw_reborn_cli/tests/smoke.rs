@@ -13,6 +13,19 @@ fn reborn_bin() -> &'static str {
     env!("CARGO_BIN_EXE_ironclaw-reborn")
 }
 
+/// Shared builder for every real-binary spawn in this file: `Command::new(reborn_bin())`
+/// with `env_clear()` and `IRONCLAW_DISABLE_OS_KEYCHAIN=1` already applied — the
+/// suppression a spawned real binary needs the same way `cfg!(test)` suppresses
+/// keychain access for in-process unit tests (see
+/// `ironclaw_secrets::keychain::os_keychain_suppressed`). Callers chain further
+/// `.env(...)`/`.arg(...)` calls on top; this only centralizes the two lines every
+/// site needs regardless of what else it sets up.
+fn reborn_command() -> Command {
+    let mut command = Command::new(reborn_bin());
+    command.env_clear().env("IRONCLAW_DISABLE_OS_KEYCHAIN", "1");
+    command
+}
+
 fn assert_stdout_file_action(stdout: &str, file_name: &str, action: &str) {
     let prefix = format!("{action}: ");
     assert!(
@@ -34,11 +47,9 @@ fn assert_stdout_labeled_action(stdout: &str, label: &str, action: &str) {
 }
 
 fn isolated_no_llm_command(workspace: &Path, reborn_home: &Path) -> Command {
-    let mut command = Command::new(reborn_bin());
+    let mut command = reborn_command();
     command
         .current_dir(workspace)
-        .env_clear()
-        .env("IRONCLAW_DISABLE_OS_KEYCHAIN", "1")
         .env("HOME", workspace.join("isolated-home"))
         .env("LLM_USE_CODEX_AUTH", "false")
         .env("LLM_BACKEND", "")
@@ -535,10 +546,8 @@ fn extension_search_does_not_seed_reborn_config() {
     let temp = tempfile::tempdir().expect("tempdir");
     let reborn_home = temp.path().join("reborn-home");
 
-    let output = Command::new(reborn_bin())
+    let output = reborn_command()
         .args(["extension", "search", "--json"])
-        .env_clear()
-        .env("IRONCLAW_DISABLE_OS_KEYCHAIN", "1")
         .env("IRONCLAW_REBORN_HOME", &reborn_home)
         .env("HOME", temp.path().join("home"))
         .output()
@@ -557,11 +566,9 @@ fn extension_search_does_not_seed_reborn_config() {
 
 #[test]
 fn profile_list_shows_supported_profiles_without_reborn_home() {
-    let output = Command::new(reborn_bin())
+    let output = reborn_command()
         .arg("profile")
         .arg("list")
-        .env_clear()
-        .env("IRONCLAW_DISABLE_OS_KEYCHAIN", "1")
         .output()
         .expect("ironclaw-reborn profile list should run");
 
@@ -592,12 +599,10 @@ fn profile_list_shows_supported_profiles_without_reborn_home() {
 
 #[test]
 fn profile_list_json_is_stable_and_does_not_resolve_reborn_home() {
-    let output = Command::new(reborn_bin())
+    let output = reborn_command()
         .arg("profile")
         .arg("list")
         .arg("--json")
-        .env_clear()
-        .env("IRONCLAW_DISABLE_OS_KEYCHAIN", "1")
         .output()
         .expect("ironclaw-reborn profile list --json should run");
 
@@ -708,11 +713,9 @@ fn skills_list_reports_reborn_skill_data() {
     let v1_home = temp.path().join("v1-home");
     write_reborn_skill(&reborn_home, "catalog-helper", "catalog helper");
 
-    let output = Command::new(reborn_bin())
+    let output = reborn_command()
         .arg("skills")
         .arg("list")
-        .env_clear()
-        .env("IRONCLAW_DISABLE_OS_KEYCHAIN", "1")
         .env("IRONCLAW_REBORN_HOME", &reborn_home)
         .env("IRONCLAW_BASE_DIR", &v1_home)
         .output()
@@ -761,12 +764,10 @@ fn skills_list_verbose_reports_reborn_skill_details() {
     let reborn_home = temp.path().join("reborn-home");
     write_verbose_reborn_skill(&reborn_home, "verbose-helper", "verbose helper");
 
-    let output = Command::new(reborn_bin())
+    let output = reborn_command()
         .arg("skills")
         .arg("list")
         .arg("--verbose")
-        .env_clear()
-        .env("IRONCLAW_DISABLE_OS_KEYCHAIN", "1")
         .env("IRONCLAW_REBORN_HOME", &reborn_home)
         .output()
         .expect("ironclaw-reborn skills list --verbose should run");
@@ -799,13 +800,11 @@ fn skills_list_json_reports_reborn_skill_data() {
     let reborn_home = temp.path().join("reborn-home");
     write_reborn_skill(&reborn_home, "json-helper", "json helper");
 
-    let output = Command::new(reborn_bin())
+    let output = reborn_command()
         .arg("skills")
         .arg("list")
         .arg("--json")
         .arg("--verbose")
-        .env_clear()
-        .env("IRONCLAW_DISABLE_OS_KEYCHAIN", "1")
         .env("IRONCLAW_REBORN_HOME", &reborn_home)
         .output()
         .expect("ironclaw-reborn skills list --json should run");
@@ -845,11 +844,9 @@ fn assert_skill_source(json: &serde_json::Value, name: &str, source: &str) {
 fn skills_list_rejects_unsupported_profiles() {
     for profile in ["production", "migration-dry-run"] {
         let temp = tempfile::tempdir().expect("tempdir");
-        let output = Command::new(reborn_bin())
+        let output = reborn_command()
             .arg("skills")
             .arg("list")
-            .env_clear()
-            .env("IRONCLAW_DISABLE_OS_KEYCHAIN", "1")
             .env("IRONCLAW_REBORN_HOME", temp.path().join("reborn-home"))
             .env("IRONCLAW_REBORN_PROFILE", profile)
             .output()
@@ -895,11 +892,9 @@ fn logs_json_verbose_includes_status_details() {
 #[test]
 fn models_list_reports_reborn_provider_catalog_without_v1_state() {
     let temp = tempfile::tempdir().expect("tempdir");
-    let output = Command::new(reborn_bin())
+    let output = reborn_command()
         .arg("models")
         .arg("list")
-        .env_clear()
-        .env("IRONCLAW_DISABLE_OS_KEYCHAIN", "1")
         .env("HOME", temp.path())
         .output()
         .expect("ironclaw-reborn models list should run");
@@ -927,12 +922,10 @@ fn models_list_reports_reborn_provider_catalog_without_v1_state() {
 #[test]
 fn models_status_json_reports_routes_not_configured_without_v1_state() {
     let temp = tempfile::tempdir().expect("tempdir");
-    let output = Command::new(reborn_bin())
+    let output = reborn_command()
         .arg("models")
         .arg("status")
         .arg("--json")
-        .env_clear()
-        .env("IRONCLAW_DISABLE_OS_KEYCHAIN", "1")
         .env("HOME", temp.path())
         .output()
         .expect("ironclaw-reborn models status --json should run");
@@ -966,12 +959,10 @@ api_key_env = "OPENAI_API_KEY"
     )
     .expect("write config");
 
-    let output = Command::new(reborn_bin())
+    let output = reborn_command()
         .arg("models")
         .arg("status")
         .arg("--json")
-        .env_clear()
-        .env("IRONCLAW_DISABLE_OS_KEYCHAIN", "1")
         .env("IRONCLAW_REBORN_HOME", &reborn_home)
         .output()
         .expect("ironclaw-reborn models status --json should run");
@@ -996,14 +987,12 @@ api_key_env = "OPENAI_API_KEY"
 fn models_set_provider_writes_reborn_config_without_v1_state() {
     let temp = tempfile::tempdir().expect("tempdir");
     let reborn_home = temp.path().join("reborn-home");
-    let output = Command::new(reborn_bin())
+    let output = reborn_command()
         .arg("models")
         .arg("set-provider")
         .arg("openai")
         .arg("--model")
         .arg("gpt-5-mini")
-        .env_clear()
-        .env("IRONCLAW_DISABLE_OS_KEYCHAIN", "1")
         .env("IRONCLAW_REBORN_HOME", &reborn_home)
         .output()
         .expect("ironclaw-reborn models set-provider should run");
@@ -1057,12 +1046,10 @@ api_key_env = "OPENAI_API_KEY"
     )
     .expect("write config");
 
-    let output = Command::new(reborn_bin())
+    let output = reborn_command()
         .arg("models")
         .arg("set")
         .arg("gpt-5.3-codex")
-        .env_clear()
-        .env("IRONCLAW_DISABLE_OS_KEYCHAIN", "1")
         .env("IRONCLAW_REBORN_HOME", &reborn_home)
         .output()
         .expect("ironclaw-reborn models set should run");
@@ -1088,12 +1075,10 @@ api_key_env = "OPENAI_API_KEY"
 fn models_set_without_provider_fails_without_panicking() {
     let temp = tempfile::tempdir().expect("tempdir");
     let reborn_home = temp.path().join("reborn-home");
-    let output = Command::new(reborn_bin())
+    let output = reborn_command()
         .arg("models")
         .arg("set")
         .arg("gpt-5.3-codex")
-        .env_clear()
-        .env("IRONCLAW_DISABLE_OS_KEYCHAIN", "1")
         .env("IRONCLAW_REBORN_HOME", &reborn_home)
         .output()
         .expect("ironclaw-reborn models set should run");
@@ -1110,11 +1095,9 @@ fn models_set_without_provider_fails_without_panicking() {
 #[cfg(not(feature = "root-llm-provider"))]
 #[test]
 fn models_list_no_default_features_does_not_resolve_reborn_home() {
-    let output = Command::new(reborn_bin())
+    let output = reborn_command()
         .arg("models")
         .arg("list")
-        .env_clear()
-        .env("IRONCLAW_DISABLE_OS_KEYCHAIN", "1")
         .output()
         .expect("ironclaw-reborn models list should run");
 
@@ -1134,12 +1117,10 @@ fn models_list_no_default_features_does_not_resolve_reborn_home() {
 #[cfg(not(feature = "root-llm-provider"))]
 #[test]
 fn models_status_no_default_features_does_not_resolve_reborn_home() {
-    let output = Command::new(reborn_bin())
+    let output = reborn_command()
         .arg("models")
         .arg("status")
         .arg("--json")
-        .env_clear()
-        .env("IRONCLAW_DISABLE_OS_KEYCHAIN", "1")
         .output()
         .expect("ironclaw-reborn models status should run");
 
@@ -1161,10 +1142,8 @@ fn models_write_commands_report_root_llm_provider_required_without_default_featu
         &["models", "set", "gpt-5.3-codex"][..],
         &["models", "set-provider", "openai"][..],
     ] {
-        let output = Command::new(reborn_bin())
+        let output = reborn_command()
             .args(args)
-            .env_clear()
-            .env("IRONCLAW_DISABLE_OS_KEYCHAIN", "1")
             .output()
             .expect("ironclaw-reborn models write command should run");
 
@@ -1188,10 +1167,8 @@ fn assert_empty_not_wired_surface(
     collection_key: &str,
     count_key: &str,
 ) {
-    let output = Command::new(reborn_bin())
+    let output = reborn_command()
         .args(args)
-        .env_clear()
-        .env("IRONCLAW_DISABLE_OS_KEYCHAIN", "1")
         .output()
         .expect("ironclaw-reborn command should run");
 
@@ -1211,10 +1188,8 @@ fn assert_empty_not_wired_surface(
 
     let mut json_args = args.to_vec();
     json_args.push("--json");
-    let output = Command::new(reborn_bin())
+    let output = reborn_command()
         .args(json_args)
-        .env_clear()
-        .env("IRONCLAW_DISABLE_OS_KEYCHAIN", "1")
         .output()
         .expect("ironclaw-reborn JSON command should run");
     assert!(
@@ -1274,10 +1249,8 @@ fn reborn_cli_skill_root(reborn_home: &std::path::Path) -> std::path::PathBuf {
 }
 
 fn assert_verbose_detail(args: &[&str], expected_detail: &str) {
-    let output = Command::new(reborn_bin())
+    let output = reborn_command()
         .args(args)
-        .env_clear()
-        .env("IRONCLAW_DISABLE_OS_KEYCHAIN", "1")
         .output()
         .expect("ironclaw-reborn verbose command should run");
 
@@ -1296,10 +1269,8 @@ fn assert_json_verbose_detail(
     count_key: &str,
     expected_detail: &str,
 ) {
-    let output = Command::new(reborn_bin())
+    let output = reborn_command()
         .args(args)
-        .env_clear()
-        .env("IRONCLAW_DISABLE_OS_KEYCHAIN", "1")
         .output()
         .expect("ironclaw-reborn JSON verbose command should run");
 
@@ -1405,12 +1376,10 @@ fn config_path_reports_default_reborn_home_without_creating_directories() {
 
 #[test]
 fn completion_generates_zsh_script_without_reborn_home() {
-    let output = Command::new(reborn_bin())
+    let output = reborn_command()
         .arg("completion")
         .arg("--shell")
         .arg("zsh")
-        .env_clear()
-        .env("IRONCLAW_DISABLE_OS_KEYCHAIN", "1")
         .output()
         .expect("ironclaw-reborn completion should run");
 
@@ -1433,12 +1402,10 @@ fn completion_generates_zsh_script_without_reborn_home() {
 
 #[test]
 fn completion_generates_bash_script_without_reborn_home() {
-    let output = Command::new(reborn_bin())
+    let output = reborn_command()
         .arg("completion")
         .arg("--shell")
         .arg("bash")
-        .env_clear()
-        .env("IRONCLAW_DISABLE_OS_KEYCHAIN", "1")
         .output()
         .expect("ironclaw-reborn completion should run");
 
@@ -1455,11 +1422,9 @@ fn completion_generates_bash_script_without_reborn_home() {
 #[cfg(feature = "webui-v2-beta")]
 #[test]
 fn serve_help_mentions_host_and_port() {
-    let output = Command::new(reborn_bin())
+    let output = reborn_command()
         .arg("serve")
         .arg("--help")
-        .env_clear()
-        .env("IRONCLAW_DISABLE_OS_KEYCHAIN", "1")
         .output()
         .expect("ironclaw-reborn serve --help should run");
 
@@ -1525,11 +1490,9 @@ fn serve_boots_without_user_id_env_var() {
     std::fs::create_dir_all(&home).expect("home dir");
     let port = unused_local_port();
 
-    let mut child = Command::new(reborn_bin())
+    let mut child = reborn_command()
         .args(["serve", "--host", "127.0.0.1", "--port"])
         .arg(port.to_string())
-        .env_clear()
-        .env("IRONCLAW_DISABLE_OS_KEYCHAIN", "1")
         .env("HOME", &home)
         .env("IRONCLAW_REBORN_HOME", &reborn_home)
         .env_remove("IRONCLAW_REBORN_PROFILE")
@@ -1613,11 +1576,9 @@ fn a_real_env_var_beats_the_config_default_end_to_end() {
     std::fs::create_dir_all(&home).expect("home dir");
     let port = unused_local_port();
 
-    let mut child = Command::new(reborn_bin())
+    let mut child = reborn_command()
         .args(["serve", "--host", "127.0.0.1", "--port"])
         .arg(port.to_string())
-        .env_clear()
-        .env("IRONCLAW_DISABLE_OS_KEYCHAIN", "1")
         .env("HOME", &home)
         .env("IRONCLAW_REBORN_HOME", &reborn_home)
         .env(
@@ -1682,11 +1643,9 @@ fn serve_with_env_auth_seeds_reborn_config_before_binding() {
     std::fs::create_dir_all(&home).expect("home dir");
     let port = unused_local_port();
 
-    let mut child = Command::new(reborn_bin())
+    let mut child = reborn_command()
         .args(["serve", "--host", "127.0.0.1", "--port"])
         .arg(port.to_string())
-        .env_clear()
-        .env("IRONCLAW_DISABLE_OS_KEYCHAIN", "1")
         .env("HOME", &home)
         .env("IRONCLAW_REBORN_HOME", &reborn_home)
         .env(
@@ -1823,11 +1782,9 @@ fn serve_resolves_bearer_token_from_reborn_home_webui_token_file() {
     .expect("seed webui-token file");
     let port = unused_local_port();
 
-    let mut child = Command::new(reborn_bin())
+    let mut child = reborn_command()
         .args(["serve", "--host", "127.0.0.1", "--port"])
         .arg(port.to_string())
-        .env_clear()
-        .env("IRONCLAW_DISABLE_OS_KEYCHAIN", "1")
         .env("HOME", &home)
         .env("IRONCLAW_REBORN_HOME", &reborn_home)
         .env_remove("IRONCLAW_REBORN_WEBUI_TOKEN")
@@ -1886,11 +1843,9 @@ fn serve_env_slack_enabled_mounts_slack_events_route() {
     std::fs::create_dir_all(&home).expect("home dir");
     let port = unused_local_port();
 
-    let mut child = Command::new(reborn_bin())
+    let mut child = reborn_command()
         .args(["serve", "--host", "127.0.0.1", "--port"])
         .arg(port.to_string())
-        .env_clear()
-        .env("IRONCLAW_DISABLE_OS_KEYCHAIN", "1")
         .env("HOME", &home)
         .env("IRONCLAW_REBORN_HOME", &reborn_home)
         .env(
@@ -2252,11 +2207,9 @@ fn serve_mounts_cli_login_route_without_sso() {
     let port = unused_local_port();
     let webui_token = "reborn-smoke-test-token-0123456789abcdef";
 
-    let mut child = Command::new(reborn_bin())
+    let mut child = reborn_command()
         .args(["serve", "--host", "127.0.0.1", "--port"])
         .arg(port.to_string())
-        .env_clear()
-        .env("IRONCLAW_DISABLE_OS_KEYCHAIN", "1")
         .env("HOME", &home)
         .env("IRONCLAW_REBORN_HOME", &reborn_home)
         .env("IRONCLAW_REBORN_WEBUI_TOKEN", webui_token)
@@ -2346,11 +2299,9 @@ fn serve_with_sso_does_not_double_mount_session_exchange() {
     std::fs::create_dir_all(&home).expect("home dir");
     let port = unused_local_port();
 
-    let mut child = Command::new(reborn_bin())
+    let mut child = reborn_command()
         .args(["serve", "--host", "127.0.0.1", "--port"])
         .arg(port.to_string())
-        .env_clear()
-        .env("IRONCLAW_DISABLE_OS_KEYCHAIN", "1")
         .env("HOME", &home)
         .env("IRONCLAW_REBORN_HOME", &reborn_home)
         .env(
@@ -2559,11 +2510,9 @@ fn doctor_uses_reborn_home_override_without_touching_v1_state() {
 
 #[test]
 fn repl_help_mentions_composed_runtime() {
-    let output = Command::new(reborn_bin())
+    let output = reborn_command()
         .arg("repl")
         .arg("--help")
-        .env_clear()
-        .env("IRONCLAW_DISABLE_OS_KEYCHAIN", "1")
         .output()
         .expect("ironclaw-reborn repl --help should run");
 
@@ -2586,10 +2535,8 @@ fn repl_exit_command_seeds_reborn_config() {
     let home_dir = temp.path().join("home");
     let v1_base_dir = temp.path().join("v1-state");
 
-    let mut child = Command::new(reborn_bin())
+    let mut child = reborn_command()
         .arg("repl")
-        .env_clear()
-        .env("IRONCLAW_DISABLE_OS_KEYCHAIN", "1")
         .env("IRONCLAW_REBORN_HOME", &reborn_home)
         .env("HOME", &home_dir)
         .env("IRONCLAW_BASE_DIR", &v1_base_dir)
@@ -2668,10 +2615,8 @@ fn repl_resolves_codex_auth_env_without_openai_api_key() {
     )
     .expect("write codex auth fixture");
 
-    let mut child = Command::new(reborn_bin())
+    let mut child = reborn_command()
         .arg("repl")
-        .env_clear()
-        .env("IRONCLAW_DISABLE_OS_KEYCHAIN", "1")
         .env("IRONCLAW_REBORN_HOME", &reborn_home)
         .env("HOME", &home_dir)
         .env("LLM_BACKEND", "openai_codex")
@@ -2725,10 +2670,8 @@ fn repl_resolves_codex_api_key_auth_env_without_openai_api_key() {
     )
     .expect("write codex auth fixture");
 
-    let mut child = Command::new(reborn_bin())
+    let mut child = reborn_command()
         .arg("repl")
-        .env_clear()
-        .env("IRONCLAW_DISABLE_OS_KEYCHAIN", "1")
         .env("IRONCLAW_REBORN_HOME", &reborn_home)
         .env("HOME", &home_dir)
         .env("LLM_BACKEND", "openai_codex")
@@ -2776,10 +2719,8 @@ fn run_rejects_codex_backend_when_auth_file_is_missing() {
     let reborn_home = temp.path().join("reborn-home");
     let missing_codex_auth_path = temp.path().join("missing-codex-auth.json");
 
-    let output = Command::new(reborn_bin())
+    let output = reborn_command()
         .args(["run", "-m", "ping"])
-        .env_clear()
-        .env("IRONCLAW_DISABLE_OS_KEYCHAIN", "1")
         .env("IRONCLAW_REBORN_HOME", &reborn_home)
         .env("LLM_BACKEND", "openai_codex")
         .env("CODEX_AUTH_PATH", &missing_codex_auth_path)
@@ -2806,10 +2747,8 @@ fn run_rejects_codex_backend_when_auth_file_is_missing() {
 fn repl_help_command_prints_repl_commands_and_exits_on_exit() {
     let temp = tempfile::tempdir().expect("tempdir");
 
-    let mut child = Command::new(reborn_bin())
+    let mut child = reborn_command()
         .arg("repl")
-        .env_clear()
-        .env("IRONCLAW_DISABLE_OS_KEYCHAIN", "1")
         .env("IRONCLAW_REBORN_HOME", temp.path().join("reborn-home"))
         .env("HOME", temp.path().join("home"))
         .stdin(Stdio::piped())
@@ -2842,10 +2781,8 @@ fn repl_help_command_prints_repl_commands_and_exits_on_exit() {
 fn run_help_command_prints_repl_commands_and_exits_on_quit() {
     let temp = tempfile::tempdir().expect("tempdir");
 
-    let mut child = Command::new(reborn_bin())
+    let mut child = reborn_command()
         .arg("run")
-        .env_clear()
-        .env("IRONCLAW_DISABLE_OS_KEYCHAIN", "1")
         .env("IRONCLAW_REBORN_HOME", temp.path().join("reborn-home"))
         .env("HOME", temp.path().join("home"))
         .stdin(Stdio::piped())
@@ -2881,10 +2818,8 @@ fn repl_piped_message_exits_nonzero_when_runtime_does_not_produce_reply() {
     let temp = tempfile::tempdir().expect("tempdir");
     let reborn_home = temp.path().join("reborn-home");
 
-    let mut child = Command::new(reborn_bin())
+    let mut child = reborn_command()
         .arg("repl")
-        .env_clear()
-        .env("IRONCLAW_DISABLE_OS_KEYCHAIN", "1")
         .env("IRONCLAW_REBORN_HOME", &reborn_home)
         .env("HOME", temp.path().join("home"))
         .stdin(Stdio::piped())
@@ -2939,12 +2874,10 @@ fn run_message_exits_nonzero_when_runtime_does_not_produce_reply() {
     let temp = tempfile::tempdir().expect("tempdir");
     let reborn_home = temp.path().join("reborn-home");
 
-    let output = Command::new(reborn_bin())
+    let output = reborn_command()
         .arg("run")
         .arg("--message")
         .arg("hello")
-        .env_clear()
-        .env("IRONCLAW_DISABLE_OS_KEYCHAIN", "1")
         .env("IRONCLAW_REBORN_HOME", &reborn_home)
         .env("HOME", temp.path().join("home"))
         .output()
@@ -2987,10 +2920,8 @@ fn run_message_exits_nonzero_when_runtime_does_not_produce_reply() {
 fn run_piped_stdin_exits_nonzero_when_runtime_does_not_produce_reply() {
     let temp = tempfile::tempdir().expect("tempdir");
 
-    let mut child = Command::new(reborn_bin())
+    let mut child = reborn_command()
         .arg("run")
-        .env_clear()
-        .env("IRONCLAW_DISABLE_OS_KEYCHAIN", "1")
         .env("IRONCLAW_REBORN_HOME", temp.path().join("reborn-home"))
         .env("HOME", temp.path().join("home"))
         .stdin(Stdio::piped())
@@ -3225,10 +3156,8 @@ fn doctor_rejects_reborn_home_equal_to_relative_explicit_v1_base_dir() {
 
 #[test]
 fn doctor_rejects_empty_reborn_home_override() {
-    let output = Command::new(reborn_bin())
+    let output = reborn_command()
         .arg("doctor")
-        .env_clear()
-        .env("IRONCLAW_DISABLE_OS_KEYCHAIN", "1")
         .env("IRONCLAW_REBORN_HOME", "")
         .output()
         .expect("ironclaw-reborn doctor should run");
@@ -3243,10 +3172,8 @@ fn doctor_rejects_empty_reborn_home_override() {
 
 #[test]
 fn doctor_rejects_relative_reborn_home_override() {
-    let output = Command::new(reborn_bin())
+    let output = reborn_command()
         .arg("doctor")
-        .env_clear()
-        .env("IRONCLAW_DISABLE_OS_KEYCHAIN", "1")
         .env("IRONCLAW_REBORN_HOME", "relative/reborn")
         .output()
         .expect("ironclaw-reborn doctor should run");
@@ -3264,10 +3191,8 @@ fn doctor_rejects_relative_reborn_home_override() {
 
 #[test]
 fn doctor_rejects_missing_home_for_default_reborn_home() {
-    let output = Command::new(reborn_bin())
+    let output = reborn_command()
         .arg("doctor")
-        .env_clear()
-        .env("IRONCLAW_DISABLE_OS_KEYCHAIN", "1")
         .output()
         .expect("ironclaw-reborn doctor should run");
 
@@ -3450,16 +3375,10 @@ fn onboard_bootstraps_reborn_home_without_touching_v1_state() {
     let reborn_home = temp.path().join("reborn-home");
     let v1_home = temp.path().join("v1-home");
 
-    let output = Command::new(reborn_bin())
+    let output = reborn_command()
         .arg("onboard")
-        .env_clear()
-        .env("IRONCLAW_DISABLE_OS_KEYCHAIN", "1")
         .env("IRONCLAW_REBORN_HOME", &reborn_home)
         .env("IRONCLAW_BASE_DIR", &v1_home)
-        // Keychain access must be suppressed for a spawned real binary the
-        // same way `cfg!(test)` suppresses it for in-process unit tests —
-        // see `ironclaw_secrets::keychain::os_keychain_suppressed`.
-        .env("IRONCLAW_DISABLE_OS_KEYCHAIN", "1")
         .output()
         .expect("ironclaw-reborn onboard should run");
 
@@ -3526,11 +3445,9 @@ fn onboard_is_idempotent_for_the_webui_token_file() {
     let temp = tempfile::tempdir().expect("tempdir");
     let reborn_home = temp.path().join("reborn-home");
 
-    let first = Command::new(reborn_bin())
+    let first = reborn_command()
         .arg("onboard")
-        .env_clear()
         .env("IRONCLAW_REBORN_HOME", &reborn_home)
-        .env("IRONCLAW_DISABLE_OS_KEYCHAIN", "1")
         .output()
         .expect("first onboard should run");
     assert!(
@@ -3541,11 +3458,9 @@ fn onboard_is_idempotent_for_the_webui_token_file() {
     let token_path = reborn_home.join("webui-token");
     let first_token = std::fs::read_to_string(&token_path).expect("read webui-token");
 
-    let second = Command::new(reborn_bin())
+    let second = reborn_command()
         .arg("onboard")
-        .env_clear()
         .env("IRONCLAW_REBORN_HOME", &reborn_home)
-        .env("IRONCLAW_DISABLE_OS_KEYCHAIN", "1")
         .output()
         .expect("second onboard should run");
     assert!(
@@ -3571,38 +3486,21 @@ fn onboard_is_idempotent_for_the_webui_token_file() {
 /// `serve` reads the bearer from onboard's provisioned `webui-token` file
 /// and the default owner id from `RebornHome`'s seeded config.
 ///
-/// What "serve actually requires" turned out to be, verified by running this
-/// test against onboard's raw output and watching it fail: onboard's default
-/// `config.toml` seeds an ACTIVE `[llm.default]` pinned to the catalog's
-/// `openai` entry (`api_key_env = "OPENAI_API_KEY"`,
-/// `api_key_required = true` in `providers.json`) — see
-/// `commands/config/init.rs`'s `CONFIG_STUB` — and `serve` resolves that slot
-/// at startup, not lazily on first `send_user_message`
-/// (`resolve_reborn_runtime_llm`, called from `build_runtime_input_with_options`
-/// before the async runtime even starts). For an `api_key_required` provider
-/// that resolution fails closed on a missing env var BEFORE the stored-key
-/// overlay (`apply_stored_api_key`) ever runs — its own doc says so
-/// explicitly: "Custom providers that rely on a stored key must be written
-/// into the overlay with `api_key_required = false`, otherwise resolution
-/// fails closed on the missing env var before this injection runs." So a
-/// stored `openai` key cannot substitute for the absent env var; the
-/// documented stored-beats-env precedence only overrides an already-resolved
-/// value, it does not waive `api_key_required`.
-///
-/// `nearai` — onboard's own interactive `DEFAULT_LLM_PROVIDER`, the
-/// zero-friction default — is the one catalog entry this actually works for:
-/// `providers.json`'s `nearai` entry carries `"api_key_required": false`
-/// (session-token auth, not a bearer key), so resolution succeeds with no key
-/// at all and `apply_stored_api_key`'s `nearai` branch still applies a stored
-/// key when present. So this test patches `config.toml` from the stub's
-/// `openai` selection to `nearai` — the selection onboard's own interactive
-/// prompt would have written had a terminal been available — then seeds the
-/// key through the same `open_local_dev_secret_store` + `LlmKeyStore::put`
-/// opener `provision_llm_credentials` uses (bypassing the prompt UI, matching
+/// `config.toml`'s stub now seeds `nearai` — `commands/config/init.rs`'s
+/// `DEFAULT_LLM_PROVIDER_ID`, shared with onboard's own interactive prompt
+/// default, so the two paths can't drift apart — which carries
+/// `"api_key_required": false` in `providers.json` (session-token auth, not
+/// a bearer key). `serve` resolves the `[llm.default]` slot at startup, not
+/// lazily on first `send_user_message` (`resolve_reborn_runtime_llm`, called
+/// from `build_runtime_input_with_options` before the async runtime even
+/// starts), so this test must boot against the stub exactly as onboard wrote
+/// it — no config surgery. A key is still seeded through the same
+/// `open_local_dev_secret_store` + `LlmKeyStore::put` opener
+/// `provision_llm_credentials` uses (bypassing the prompt UI, matching
 /// `provision_llm_credentials_writes_config_and_secret_store_through_fake_prompts`'s
-/// seeding pattern). The real production path for landing both is `onboard`
-/// run interactively or `ironclaw-reborn models set-provider`; this test only
-/// substitutes for the terminal a CI box doesn't have.
+/// seeding pattern) to exercise the stored-key overlay path a real
+/// interactive onboarding run would also take; it is not required for
+/// `serve` to boot since `api_key_required = false`.
 /// This is the config+files-only daemon case `service install` produces: no
 /// env vars carried through the launchd/systemd unit environment at all.
 #[cfg(feature = "webui-v2-beta")]
@@ -3613,10 +3511,8 @@ fn onboard_then_serve_boots_with_an_empty_environment() {
     let home = temp.path().join("home");
     std::fs::create_dir_all(&home).expect("home dir");
 
-    let onboard_output = Command::new(reborn_bin())
+    let onboard_output = reborn_command()
         .arg("onboard")
-        .env_clear()
-        .env("IRONCLAW_DISABLE_OS_KEYCHAIN", "1")
         .env("HOME", &home)
         .env("IRONCLAW_REBORN_HOME", &reborn_home)
         .output()
@@ -3640,25 +3536,15 @@ fn onboard_then_serve_boots_with_an_empty_environment() {
         "onboard must provision the webui-token file `serve` reads as a fallback"
     );
 
-    // Rewrite the stub's `[llm.default]` selection from `openai` (hard-requires
-    // OPENAI_API_KEY, see the doc comment above) to `nearai` (session-token
-    // auth, `api_key_required = false`) — the selection onboard's own
-    // interactive `DEFAULT_LLM_PROVIDER` would have written.
     let config_path = reborn_home.join("config.toml");
     let config_text = std::fs::read_to_string(&config_path).expect("read seeded config.toml");
     assert!(
-        config_text.contains("provider_id = \"openai\""),
-        "the CONFIG_STUB this test targets must still default to openai: {config_text}"
+        config_text.contains("provider_id = \"nearai\""),
+        "the config stub must default to the zero-friction nearai slot so serve boots headless \
+         with no LLM env vars set: {config_text}"
     );
-    let config_text = config_text
-        .replace("provider_id = \"openai\"", "provider_id = \"nearai\"")
-        .replace(
-            "api_key_env = \"OPENAI_API_KEY\"",
-            "api_key_env = \"NEARAI_API_KEY\"",
-        );
-    std::fs::write(&config_path, config_text).expect("rewrite config.toml to the nearai slot");
 
-    // Land the LLM key the rewritten `[llm.default]` can use (not required —
+    // Land the LLM key the stub's `[llm.default]` can use (not required —
     // `api_key_required = false` — but seeded anyway to exercise the same
     // stored-key overlay path a real onboarding run would), through the same
     // opener onboard's own interactive path uses — no env var, no terminal.
@@ -3704,11 +3590,9 @@ fn onboard_then_serve_boots_with_an_empty_environment() {
     });
 
     let port = unused_local_port();
-    let mut child = Command::new(reborn_bin())
+    let mut child = reborn_command()
         .args(["serve", "--host", "127.0.0.1", "--port"])
         .arg(port.to_string())
-        .env_clear()
-        .env("IRONCLAW_DISABLE_OS_KEYCHAIN", "1")
         .env("HOME", &home)
         .env("IRONCLAW_REBORN_HOME", &reborn_home)
         .stdout(Stdio::piped())
@@ -3726,10 +3610,8 @@ fn onboard_dry_run_is_read_only() {
     let temp = tempfile::tempdir().expect("tempdir");
     let reborn_home = temp.path().join("reborn-home");
 
-    let output = Command::new(reborn_bin())
+    let output = reborn_command()
         .args(["onboard", "--dry-run", "--import-history"])
-        .env_clear()
-        .env("IRONCLAW_DISABLE_OS_KEYCHAIN", "1")
         .env("IRONCLAW_REBORN_HOME", &reborn_home)
         .output()
         .expect("ironclaw-reborn onboard --dry-run should run");
@@ -3759,10 +3641,8 @@ fn onboard_dry_run_reports_existing_marker_as_preserved() {
     let marker_path = reborn_home.join(".onboard-completed.json");
     std::fs::write(&marker_path, "custom marker\n").expect("write marker");
 
-    let output = Command::new(reborn_bin())
+    let output = reborn_command()
         .args(["onboard", "--dry-run"])
-        .env_clear()
-        .env("IRONCLAW_DISABLE_OS_KEYCHAIN", "1")
         .env("IRONCLAW_REBORN_HOME", &reborn_home)
         .output()
         .expect("ironclaw-reborn onboard --dry-run should run");
@@ -3830,11 +3710,9 @@ fn onboard_import_history_records_pending_step() {
     let temp = tempfile::tempdir().expect("tempdir");
     let reborn_home = temp.path().join("reborn-home");
 
-    let output = Command::new(reborn_bin())
+    let output = reborn_command()
         .args(["onboard", "--import-history"])
-        .env_clear()
         .env("IRONCLAW_REBORN_HOME", &reborn_home)
-        .env("IRONCLAW_DISABLE_OS_KEYCHAIN", "1")
         .output()
         .expect("ironclaw-reborn onboard --import-history should run");
 
@@ -3867,11 +3745,9 @@ fn onboard_preserves_existing_config_without_force() {
     )
     .expect("write marker");
 
-    let output = Command::new(reborn_bin())
+    let output = reborn_command()
         .arg("onboard")
-        .env_clear()
         .env("IRONCLAW_REBORN_HOME", &reborn_home)
-        .env("IRONCLAW_DISABLE_OS_KEYCHAIN", "1")
         .output()
         .expect("ironclaw-reborn onboard should run");
 
@@ -3914,11 +3790,9 @@ fn onboard_with_force_overwrites_existing_files_and_marker() {
     )
     .expect("write marker");
 
-    let output = Command::new(reborn_bin())
+    let output = reborn_command()
         .args(["onboard", "--force"])
-        .env_clear()
         .env("IRONCLAW_REBORN_HOME", &reborn_home)
-        .env("IRONCLAW_DISABLE_OS_KEYCHAIN", "1")
         .output()
         .expect("ironclaw-reborn onboard --force should run");
 
@@ -3964,11 +3838,9 @@ fn onboard_reports_suppressed_master_key_fallback_and_still_succeeds() {
     let temp = tempfile::tempdir().expect("tempdir");
     let reborn_home = temp.path().join("reborn-home");
 
-    let output = Command::new(reborn_bin())
+    let output = reborn_command()
         .arg("onboard")
-        .env_clear()
         .env("IRONCLAW_REBORN_HOME", &reborn_home)
-        .env("IRONCLAW_DISABLE_OS_KEYCHAIN", "1")
         .output()
         .expect("ironclaw-reborn onboard should run");
 
@@ -4011,11 +3883,9 @@ fn onboard_master_key_provisioning_is_a_noop_once_a_dotfile_is_cached() {
     )
     .expect("seed cached master-key dotfile");
 
-    let output = Command::new(reborn_bin())
+    let output = reborn_command()
         .arg("onboard")
-        .env_clear()
         .env("IRONCLAW_REBORN_HOME", &reborn_home)
-        .env("IRONCLAW_DISABLE_OS_KEYCHAIN", "1")
         .output()
         .expect("ironclaw-reborn onboard should run");
 
@@ -4464,10 +4334,8 @@ fn run_confirm_host_access_requires_home_or_userprofile() {
     let reborn_home = temp.path().join("reborn-home");
     std::fs::create_dir_all(&reborn_home).expect("reborn home");
 
-    let output = Command::new(reborn_bin())
+    let output = reborn_command()
         .args(["run", "--confirm-host-access", "-m", "ping"])
-        .env_clear()
-        .env("IRONCLAW_DISABLE_OS_KEYCHAIN", "1")
         .env("IRONCLAW_REBORN_HOME", &reborn_home)
         .env("IRONCLAW_REBORN_PROFILE", "local-dev-yolo")
         .output()
@@ -4490,10 +4358,8 @@ fn run_confirm_host_access_uses_userprofile_when_home_is_absent() {
     std::fs::create_dir_all(&reborn_home).expect("reborn home");
     std::fs::create_dir_all(&host_home).expect("host home");
 
-    let output = Command::new(reborn_bin())
+    let output = reborn_command()
         .args(["run", "--confirm-host-access", "-m", "ping"])
-        .env_clear()
-        .env("IRONCLAW_DISABLE_OS_KEYCHAIN", "1")
         .env("IRONCLAW_REBORN_HOME", &reborn_home)
         .env("IRONCLAW_REBORN_PROFILE", "local-dev-yolo")
         .env("USERPROFILE", &host_home)
@@ -5020,11 +4886,9 @@ fn local_yolo_command(temp: &tempfile::TempDir, args: &[&str]) -> Command {
     let home = temp.path().join("home");
     std::fs::create_dir_all(&reborn_home).expect("reborn home");
     std::fs::create_dir_all(&home).expect("home");
-    let mut command = Command::new(reborn_bin());
+    let mut command = reborn_command();
     command
         .args(args)
-        .env_clear()
-        .env("IRONCLAW_DISABLE_OS_KEYCHAIN", "1")
         .env("IRONCLAW_REBORN_HOME", reborn_home)
         .env("IRONCLAW_REBORN_PROFILE", "local-dev-yolo")
         .env("HOME", home);

@@ -164,6 +164,36 @@ impl RebornProviderAdmin {
         })
     }
 
+    /// Resolve `provider` (an id or alias) to its canonical registry id
+    /// without writing anything.
+    ///
+    /// Used by callers that must land a provider-keyed secret (e.g. an
+    /// onboarding API-key prompt) *before* committing the `config.toml`
+    /// selection via [`Self::set_provider`] — landing the key first and the
+    /// config second means a store failure never leaves `config.toml`
+    /// pointing at a provider whose key isn't durably stored. This resolves
+    /// the same canonical id `set_provider` would land in `[llm.default]`,
+    /// so the secret-store handle and the config selection always agree.
+    pub fn resolve_provider_id(&self, provider: &str) -> Result<String, RebornProviderAdminError> {
+        let provider = provider.trim();
+        if provider.is_empty() {
+            return Err(RebornProviderAdminError::InvalidRequest {
+                reason: "provider id cannot be empty".to_string(),
+            });
+        }
+        let home = self.boot.home();
+        let registry = self.load_registry()?;
+        let def =
+            registry
+                .find(provider)
+                .ok_or_else(|| RebornProviderAdminError::UnknownProvider {
+                    provider: provider.to_string(),
+                    providers_file: home.providers_file_path(),
+                    known: known_provider_ids(&registry),
+                })?;
+        Ok(def.id.clone())
+    }
+
     pub fn set_provider(
         &self,
         provider: &str,

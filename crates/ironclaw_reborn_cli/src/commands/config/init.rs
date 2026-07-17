@@ -59,6 +59,25 @@ impl ConfigFileWrite {
     }
 }
 
+/// Canonical zero-friction LLM default: the provider the `config.toml` stub
+/// seeds AND the default interactive `onboard` offers
+/// (`commands::onboard::provision_llm_credentials`'s prompt default via
+/// `DEFAULT_LLM_PROVIDER`) come from these three constants so the two paths
+/// cannot drift out of agreement about which provider a fresh install boots
+/// against — see the `run_warns_when_falling_back_to_stub_gateway` /
+/// `onboard_then_serve_boots_with_an_empty_environment` smoke coverage that
+/// exercises the stub as-written with no LLM env vars set.
+///
+/// `nearai` requires no upfront third-party account (session-token auth via
+/// a NEAR account, `api_key_required = false` in `providers.json`), which is
+/// why it is the zero-friction default for a fresh desktop install rather
+/// than a provider that hard-requires an API key before it will boot.
+pub(crate) const DEFAULT_LLM_PROVIDER_ID: &str = "nearai";
+/// Mirrors `providers.json`'s `nearai` entry's `default_model`.
+pub(crate) const DEFAULT_LLM_MODEL: &str = "deepseek-ai/DeepSeek-V4-Flash";
+/// Mirrors `providers.json`'s `nearai` entry's `api_key_env`.
+pub(crate) const DEFAULT_LLM_API_KEY_ENV: &str = "NEARAI_API_KEY";
+
 pub(crate) fn write_default_config_files(
     home: &RebornHome,
     force: bool,
@@ -208,9 +227,12 @@ regex_activation_enabled = true
 # LLM slot selection. `provider_id` references an entry in
 # providers.json (built-in or user-overlay). `model` / `base_url` /
 # `api_key_env` override the catalog defaults for this deployment.
-provider_id = "openai"
-model       = "gpt-4o-mini"
-api_key_env = "OPENAI_API_KEY"
+# `nearai` needs no upfront API key (session-token auth) so this stub
+# boots as-is; run `ironclaw-reborn models set-provider <provider>` to
+# switch to a different provider.
+provider_id = "{default_llm_provider_id}"
+model       = "{default_llm_model}"
+api_key_env = "{default_llm_api_key_env}"
 
 # [llm.mission]
 # # Reserved for the future planned-driver "mission" slot.
@@ -227,6 +249,9 @@ api_key_env = "OPENAI_API_KEY"
 # # from WebUI channel setup after the server starts.
 "#,
         api_version = REBORN_CONFIG_API_VERSION,
+        default_llm_provider_id = DEFAULT_LLM_PROVIDER_ID,
+        default_llm_model = DEFAULT_LLM_MODEL,
+        default_llm_api_key_env = DEFAULT_LLM_API_KEY_ENV,
     )
 }
 

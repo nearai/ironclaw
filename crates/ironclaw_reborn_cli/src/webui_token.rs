@@ -376,6 +376,34 @@ fn validate_token_entropy(
     ))
 }
 
+/// The CLI-printed bootstrap link into the browser session (see
+/// `ironclaw_reborn_webui_ingress::cli_token_login`'s module doc for the
+/// flow it plugs into) — `Some` only when a valid `webui-token` file is
+/// present (it always is right after `ensure_webui_token_file` runs, but
+/// this is also called from contexts, like `status`, where onboarding may
+/// not have run). Uses `serve`'s own default host:port constants rather
+/// than duplicating the literals — see their doc comment in
+/// `commands/serve.rs`.
+///
+/// Shared home for both callers that print a login link
+/// (`commands::onboard::OnboardCommand::finish_with_service_and_login_link`
+/// and `commands::status::resolve_login_link`) so the host:port/token
+/// construction lives in exactly one place rather than being re-derived
+/// per caller.
+#[cfg(feature = "webui-v2-beta")]
+pub(crate) fn login_link(home: &ironclaw_reborn_config::RebornHome) -> Option<String> {
+    if !webui_token_file_is_valid(home.path()) {
+        return None;
+    }
+    let token = fs::read_to_string(webui_token_file_path(home.path())).ok()?;
+    Some(format!(
+        "http://{}:{}/login?token={}",
+        crate::commands::serve::DEFAULT_SERVE_HOST,
+        crate::commands::serve::DEFAULT_SERVE_PORT,
+        token.trim()
+    ))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

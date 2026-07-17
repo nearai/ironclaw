@@ -15,7 +15,7 @@ pub(crate) struct StatusDto {
     pub model_slots: Vec<String>,
     pub drivers: DriversSnapshot,
     /// The CLI-token `/login?token=` bootstrap link (see
-    /// `commands/onboard::login_link`), present only when a valid
+    /// `webui_token::login_link`), present only when a valid
     /// `webui-token` file exists under `reborn_home`. `None` on a build
     /// without the `webui-v2-beta` feature, where there is no `serve` to
     /// link into.

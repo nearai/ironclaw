@@ -145,6 +145,16 @@ ironclaw_reborn_composition = { path = "../ironclaw_reborn_composition", version
 # second, non-serializing lock domain (the #6015 flake). Dev-only: the lock is
 # reached solely from `#[cfg(test)]` code in `runtime::test_env`.
 ironclaw_common = { path = "../ironclaw_common", version = "0.4.2" }
+# Unconditional (not the feature-gated `dep:async-trait` optional dependency
+# above): `commands::onboard::mod`'s RED test for the write-first-then-config
+# ordering (item 2, onboarding review fixes) implements a fake
+# `ironclaw_secrets::SecretStore` whose `put` always fails, which needs
+# `#[async_trait::async_trait]` in every feature combination `cargo test`
+# runs, not just under `webui-v2-beta`.
+async-trait = "0.1"
+# Same RED test's fake `SecretStore` impl takes `ResourceScope` /
+# `SecretHandle` / `Timestamp` in its trait method signatures.
+ironclaw_host_api = { path = "../ironclaw_host_api", version = "0.1.0" }
 
 [[bin]]
 name = "ironclaw-reborn"

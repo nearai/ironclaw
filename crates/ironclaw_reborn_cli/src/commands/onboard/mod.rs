@@ -1,5 +1,5 @@
-use std::io::{IsTerminal, Write as _};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use clap::Args;
 use ironclaw_reborn_config::RebornHome;
@@ -7,6 +7,12 @@ use ironclaw_reborn_config::RebornHome;
 use crate::commands::config::init::{ExistingConfigPolicy, write_default_config_files};
 use crate::context::RebornCliContext;
 use crate::file_write::{FileWriteAction, write_atomic};
+
+mod master_key;
+mod prompts;
+
+use master_key::{MasterKeyProvisionOutcome, provision_master_key};
+use prompts::{LlmCredentialPromptError, PromptSource, StdinPromptSource};
 
 const ONBOARDING_MARKER_FILE: &str = ".onboard-completed.json";
 
@@ -54,20 +60,26 @@ impl OnboardCommand {
         // operator-copied env var keyed to the current token value.
         let webui_token_action = crate::webui_token::ensure_webui_token_file(home.path())?;
         let master_key_outcome = provision_master_key(home)?;
-        let llm_outcome =
-            match provision_llm_credentials(home, context.boot_config(), &mut StdinPromptSource) {
-                Ok(outcome) => outcome,
-                // A non-interactive session (headless CI, a piped/scripted
-                // invocation) is expected and normal — mirrors
-                // `MasterKeyProvisionOutcome::Suppressed` above: onboarding must
-                // not fail just because there is no terminal to prompt on.
-                // `ironclaw-reborn models set-provider` remains the
-                // non-interactive path to configure a provider afterward.
-                Err(LlmCredentialPromptError::NonInteractive) => {
-                    LlmCredentialProvisionOutcome::SkippedNonInteractive
-                }
-                Err(LlmCredentialPromptError::Other(error)) => return Err(error),
-            };
+        let mut prompts = StdinPromptSource;
+        let llm_outcome = match provision_llm_credentials(
+            home,
+            context.boot_config(),
+            &mut prompts,
+            &LocalDevLlmKeyStoreOpener,
+            self.force,
+        ) {
+            Ok(outcome) => outcome,
+            // A non-interactive session (headless CI, a piped/scripted
+            // invocation) is expected and normal — mirrors
+            // `MasterKeyProvisionOutcome::Suppressed` above: onboarding must
+            // not fail just because there is no terminal to prompt on.
+            // `ironclaw-reborn models set-provider` remains the
+            // non-interactive path to configure a provider afterward.
+            Err(LlmCredentialPromptError::NonInteractive) => {
+                LlmCredentialProvisionOutcome::SkippedNonInteractive
+            }
+            Err(LlmCredentialPromptError::Other(error)) => return Err(error),
+        };
         // Computed after `llm_outcome` (not before, as in an earlier
         // revision) so the marker's `steps_pending` reflects what actually
         // happened this run rather than unconditionally listing
@@ -75,6 +87,7 @@ impl OnboardCommand {
         let llm_configured = matches!(
             llm_outcome,
             LlmCredentialProvisionOutcome::Configured { .. }
+                | LlmCredentialProvisionOutcome::AlreadyConfigured { .. }
         );
         let marker_action = write_onboarding_marker(
             home,
@@ -115,7 +128,9 @@ impl OnboardCommand {
         println!("- config.toml and providers.json available");
         println!("- webui bearer token provisioned (used by `serve` when the env var is unset)");
         println!("- onboarding completion marker available");
-        if let LlmCredentialProvisionOutcome::Configured { provider_id, .. } = &llm_outcome {
+        if let LlmCredentialProvisionOutcome::Configured { provider_id, .. }
+        | LlmCredentialProvisionOutcome::AlreadyConfigured { provider_id, .. } = &llm_outcome
+        {
             println!("- LLM provider `{provider_id}` credentials stored");
         }
         println!();
@@ -136,7 +151,7 @@ impl OnboardCommand {
         }
 
         #[cfg(feature = "webui-v2-beta")]
-        self.finish_with_service_and_login_link(&context, home)?;
+        self.finish_with_service_and_login_link(&context, home, prompts.is_interactive())?;
 
         Ok(())
     }
@@ -148,13 +163,19 @@ impl OnboardCommand {
     /// link `serve` will accept once it's running, using the same
     /// `webui-token` value `ensure_webui_token_file` already provisioned
     /// above.
+    ///
+    /// `interactive` is the same [`PromptSource::is_interactive`] reading the
+    /// LLM-credential prompt step already made — passed down rather than
+    /// re-derived, so `should_install_service` doesn't need its own
+    /// `IsTerminal` check (see that method's doc).
     #[cfg(feature = "webui-v2-beta")]
     fn finish_with_service_and_login_link(
         &self,
         context: &RebornCliContext,
         home: &RebornHome,
+        interactive: bool,
     ) -> anyhow::Result<()> {
-        let service_outcome = if self.should_install_service() {
+        let service_outcome = if self.should_install_service(interactive) {
             match crate::commands::service::install_and_start(context) {
                 Ok(()) => ServiceStartOutcome::InstalledAndStarted,
                 Err(error) => ServiceStartOutcome::Failed(error.to_string()),
@@ -172,7 +193,7 @@ impl OnboardCommand {
             );
         }
 
-        if let Some(login_link) = login_link(home) {
+        if let Some(login_link) = crate::webui_token::login_link(home) {
             println!("login_link: {login_link}");
         }
         println!("hint: add Gmail or Slack any time: ironclaw-reborn config set --help");
@@ -185,9 +206,15 @@ impl OnboardCommand {
     /// piped/scripted invocation) must never attempt a launchd/systemd
     /// install regardless of the flag — mirrors the LLM-credential prompt's
     /// own non-interactive short-circuit above.
+    ///
+    /// `interactive` comes from the same [`PromptSource::is_interactive`]
+    /// reading used to gate the LLM-credential prompts
+    /// (`prompts::StdinPromptSource` is the sole `IsTerminal` check in this
+    /// command), rather than this method independently re-deriving "is this
+    /// session interactive" via its own `stdin().is_terminal()` call.
     #[cfg(feature = "webui-v2-beta")]
-    fn should_install_service(&self) -> bool {
-        !self.no_service && std::io::stdin().is_terminal()
+    fn should_install_service(&self, interactive: bool) -> bool {
+        !self.no_service && interactive
     }
 }
 
@@ -218,150 +245,35 @@ impl ServiceStartOutcome {
     }
 }
 
-/// The CLI-printed bootstrap link into the browser session (see
-/// `ironclaw_reborn_webui_ingress::cli_token_login`'s module doc for the
-/// flow it plugs into) — `Some` only when a valid `webui-token` file is
-/// present (it always is right after `ensure_webui_token_file` runs above,
-/// but this is also called from contexts, like `status`, where onboarding
-/// may not have run). Uses `serve`'s own default host:port constants rather
-/// than duplicating the literals — see their doc comment in `commands/serve.rs`.
-#[cfg(feature = "webui-v2-beta")]
-pub(crate) fn login_link(home: &RebornHome) -> Option<String> {
-    if !crate::webui_token::webui_token_file_is_valid(home.path()) {
-        return None;
-    }
-    let token =
-        std::fs::read_to_string(crate::webui_token::webui_token_file_path(home.path())).ok()?;
-    Some(format!(
-        "http://{}:{}/login?token={}",
-        crate::commands::serve::DEFAULT_SERVE_HOST,
-        crate::commands::serve::DEFAULT_SERVE_PORT,
-        token.trim()
-    ))
-}
-
 pub(crate) fn onboarding_marker_path(home: &RebornHome) -> PathBuf {
     home.path().join(ONBOARDING_MARKER_FILE)
 }
 
-/// Outcome of onboarding's OS-keychain master-key provisioning attempt.
-///
-/// Every variant is a successful `execute()` (exit 0) — this is a status
-/// enum, not an error type. `Suppressed` is expected and normal on headless
-/// Linux/CI (`IRONCLAW_DISABLE_OS_KEYCHAIN`) or when the OS denies the
-/// keychain prompt: the resolver chain
-/// (`ironclaw_reborn_composition::factory::resolve_local_dev_secret_master_key_with_env`)
-/// still has the dotfile auto-generation fallback, so onboarding must not
-/// fail just because the keychain step didn't provision anything.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum MasterKeyProvisionOutcome {
-    /// A cached `.reborn-local-dev-secrets-master-key` dotfile already
-    /// exists under this Reborn home; nothing to provision.
-    DotfileAlreadyPresent,
-    /// The OS keychain already has a master key from a prior onboarding run.
-    KeychainAlreadyPresent,
-    /// A fresh key was generated and stored in the OS keychain.
-    Provisioned,
-    /// The OS keychain is unavailable (suppressed under test/CI, or the OS
-    /// denied the write). `serve`/`onboard` still work: the resolver falls
-    /// through to the `SECRETS_MASTER_KEY` env var, then to auto-generating
-    /// and caching the dotfile on first boot.
-    Suppressed,
-}
-
-impl MasterKeyProvisionOutcome {
-    fn display_line(self) -> &'static str {
-        match self {
-            Self::DotfileAlreadyPresent => "cached dotfile already present",
-            Self::KeychainAlreadyPresent => "already provisioned in OS keychain",
-            Self::Provisioned => "provisioned in OS keychain",
-            Self::Suppressed => "OS keychain unavailable; falling back to env/dotfile",
-        }
-    }
-}
-
-/// Provision a local-dev secrets master key in the OS keychain on a fresh
-/// desktop: if there is no cached dotfile AND the keychain has no key,
-/// generate one and store it. A second run (dotfile or keychain already
-/// populated) is a no-op. Never fails `execute()` — an unavailable/denied
-/// keychain is reported via [`MasterKeyProvisionOutcome::Suppressed`] and
-/// onboarding continues, matching the resolver's own env/dotfile fallback
-/// (`crates/ironclaw_reborn_composition/src/factory.rs`).
-#[cfg(any(feature = "libsql", feature = "postgres"))]
-fn provision_master_key(home: &RebornHome) -> anyhow::Result<MasterKeyProvisionOutcome> {
-    let dotfile_path = home
-        .path()
-        .join(ironclaw_reborn_composition::LOCAL_DEV_SECRETS_MASTER_KEY_PATH);
-    if dotfile_path.exists() {
-        return Ok(MasterKeyProvisionOutcome::DotfileAlreadyPresent);
-    }
-
-    crate::runtime::block_on_cli(async move {
-        if ironclaw_secrets::keychain::has_master_key().await {
-            return Ok::<_, anyhow::Error>(MasterKeyProvisionOutcome::KeychainAlreadyPresent);
-        }
-        let key = ironclaw_secrets::keychain::generate_master_key();
-        match ironclaw_secrets::keychain::store_master_key(&key).await {
-            Ok(()) => Ok(MasterKeyProvisionOutcome::Provisioned),
-            Err(_) => Ok(MasterKeyProvisionOutcome::Suppressed),
-        }
-    })
-}
-
-/// Without a storage backend feature there is no secret store to provision a
-/// master key for at all — the master-key resolver lives behind the same
-/// `libsql`/`postgres` feature gate in `ironclaw_reborn_composition`.
-#[cfg(not(any(feature = "libsql", feature = "postgres")))]
-fn provision_master_key(_home: &RebornHome) -> anyhow::Result<MasterKeyProvisionOutcome> {
-    Ok(MasterKeyProvisionOutcome::Suppressed)
-}
-
-/// Default LLM provider offered by the onboarding prompt. `nearai` requires
-/// no upfront third-party account (session-token setup via a NEAR account),
-/// which is why it's the zero-friction default for a fresh desktop install.
-const DEFAULT_LLM_PROVIDER: &str = "nearai";
-
-/// Where onboard's two LLM-credential prompts (provider id, API key) come
-/// from. Injected so [`provision_llm_credentials`] is testable with a fixed
-/// answer sequence, and so [`StdinPromptSource`] is the *only* place that
-/// decides "is this session interactive" — matching the injected-lookup
-/// convention `resolve_google_oauth_config` already established
-/// (`crate::runtime::resolve_google_oauth_config`, which takes a `lookup`
-/// closure rather than reading `std::env` inline) and the "only `main.rs`
-/// may exit; `execute()` returns typed errors" rule: this trait's methods
-/// return [`LlmCredentialPromptError::NonInteractive`] rather than calling
-/// `process::exit`.
-pub(crate) trait PromptSource {
-    /// Prompt for the LLM provider id. `default` is used verbatim when the
-    /// operator submits an empty answer.
-    fn provider(&mut self, default: &str) -> Result<String, LlmCredentialPromptError>;
-    /// Prompt for `provider`'s API key with input masked (not echoed).
-    fn api_key(&mut self, provider: &str) -> Result<String, LlmCredentialPromptError>;
-}
-
-#[derive(Debug, thiserror::Error)]
-pub(crate) enum LlmCredentialPromptError {
-    /// stdin is not a terminal (headless CI, a piped/scripted invocation).
-    /// Callers should treat this as "skip, don't fail" — see
-    /// `OnboardCommand::execute`'s handling next to
-    /// `MasterKeyProvisionOutcome::Suppressed`, the same non-fatal shape for
-    /// an unavailable interactive input.
-    #[error(
-        "onboarding LLM credential prompts require an interactive terminal; run \
-         `ironclaw-reborn models set-provider <provider>` and set the provider's API key env \
-         var instead, or rerun `onboard` from an interactive shell"
-    )]
-    NonInteractive,
-    #[error(transparent)]
-    Other(#[from] anyhow::Error),
-}
+/// Default LLM provider offered by the onboarding prompt. Reuses
+/// `config::init`'s [`DEFAULT_LLM_PROVIDER_ID`](crate::commands::config::init::DEFAULT_LLM_PROVIDER_ID)
+/// — the same constant the `config.toml` stub seeds — so the interactive
+/// prompt default and the non-interactive stub can never drift apart on
+/// which provider a fresh install boots against.
+use crate::commands::config::init::DEFAULT_LLM_PROVIDER_ID as DEFAULT_LLM_PROVIDER;
 
 /// Outcome of onboard's LLM provider/API-key prompt step. Every variant is a
 /// successful `execute()` (exit 0) — mirrors [`MasterKeyProvisionOutcome`]'s
 /// shape: `SkippedNonInteractive` is expected and normal, not a failure.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum LlmCredentialProvisionOutcome {
-    Configured { provider_id: String, model: String },
+    Configured {
+        provider_id: String,
+        model: String,
+    },
+    /// `[llm.default]` was already pointed at a provider AND the encrypted
+    /// secret store already has a key for it (see
+    /// [`already_configured_outcome`]) — this run skipped prompting
+    /// entirely rather than re-asking for credentials that are already
+    /// durably stored.
+    AlreadyConfigured {
+        provider_id: String,
+        model: String,
+    },
     SkippedNonInteractive,
 }
 
@@ -371,54 +283,154 @@ impl LlmCredentialProvisionOutcome {
             Self::Configured { provider_id, model } => {
                 format!("configured provider `{provider_id}` (model `{model}`)")
             }
+            Self::AlreadyConfigured { provider_id, model } => {
+                format!(
+                    "already configured (provider `{provider_id}`, model `{model}`); use \
+                     --force to reconfigure"
+                )
+            }
             Self::SkippedNonInteractive => "skipped (non-interactive session)".to_string(),
         }
     }
 }
 
-/// Prompt for an LLM provider + API key and persist both: the provider
-/// selection goes to `[llm.default]` in `config.toml` (existing
+/// Where [`provision_llm_credentials`] gets its (already-open) encrypted
+/// secret store from. Injected — mirrors [`PromptSource`] — so a test can
+/// supply a store whose `put` fails, proving the write-ordering guarantee
+/// (secret stored before config is written; see
+/// [`provision_llm_credentials`]'s doc) without touching the real
+/// local-dev libsql-backed store.
+trait LlmKeyStoreOpener {
+    fn open(&self, home_path: &Path) -> anyhow::Result<Arc<dyn ironclaw_secrets::SecretStore>>;
+}
+
+/// Production [`LlmKeyStoreOpener`]: opens the real local-dev encrypted
+/// secret store `serve` later reads from (see
+/// `ironclaw_reborn_composition::open_local_dev_secret_store`'s doc for why
+/// this is the same physical storage `serve` opens).
+struct LocalDevLlmKeyStoreOpener;
+
+impl LlmKeyStoreOpener for LocalDevLlmKeyStoreOpener {
+    fn open(&self, home_path: &Path) -> anyhow::Result<Arc<dyn ironclaw_secrets::SecretStore>> {
+        let home_path = home_path.to_path_buf();
+        crate::runtime::block_on_cli(async move {
+            ironclaw_reborn_composition::open_local_dev_secret_store(&home_path)
+                .await
+                .map_err(anyhow::Error::from)
+        })
+    }
+}
+
+/// Prompt for an LLM provider + API key and persist both: the key value goes
+/// into the encrypted secret store via the canonical `LlmKeyStore` handle
+/// (`llm_provider_<id>_api_key`) FIRST — the same handle the webui2 settings
+/// surface writes and `apply_startup_stored_llm_key` reads at boot — and
+/// only once that succeeds does the provider selection land in
+/// `[llm.default]` in `config.toml` SECOND (existing
 /// `RebornProviderAdmin::set_provider` config machinery, the same one
-/// `ironclaw-reborn models set-provider` uses); the key value goes into the
-/// encrypted secret store via the canonical `LlmKeyStore` handle
-/// (`llm_provider_<id>_api_key`) — the same handle the webui2 settings
-/// surface writes and `apply_startup_stored_llm_key` reads at boot, so no
-/// new read-side mapping is needed for the stored key to take effect.
+/// `ironclaw-reborn models set-provider` uses). This ordering means
+/// `config.toml` can never point at a provider whose key failed to persist
+/// durably: a `LlmKeyStore::put` failure returns an error before
+/// `set_provider` is ever called, leaving `config.toml` exactly as it was.
 ///
 /// Gathers both prompt answers before writing anything: a non-interactive
 /// `provider()` or `api_key()` failure must leave config.toml and the secret
 /// store untouched, not partially written.
+///
+/// Skips prompting entirely (an idempotent no-op) on a rerun where
+/// `[llm.default]` is already user-configured AND the store already has a
+/// key for that provider, unless `force` is set — see
+/// [`already_configured_outcome`].
 #[cfg(all(feature = "libsql", feature = "root-llm-provider"))]
 fn provision_llm_credentials(
     home: &RebornHome,
     boot: &ironclaw_reborn_config::RebornBootConfig,
     prompts: &mut dyn PromptSource,
+    store_opener: &dyn LlmKeyStoreOpener,
+    force: bool,
 ) -> Result<LlmCredentialProvisionOutcome, LlmCredentialPromptError> {
+    if !prompts.is_interactive() {
+        return Err(LlmCredentialPromptError::NonInteractive);
+    }
+
+    let admin = ironclaw_reborn_composition::RebornProviderAdmin::new(boot.clone());
+
+    if !force && let Some(outcome) = already_configured_outcome(&admin, home, store_opener)? {
+        return Ok(outcome);
+    }
+
     let provider = prompts.provider(DEFAULT_LLM_PROVIDER)?;
     let key = prompts.api_key(&provider)?;
 
-    let admin = ironclaw_reborn_composition::RebornProviderAdmin::new(boot.clone());
-    let write_outcome = admin
-        .set_provider(&provider, None)
+    let canonical_provider_id = admin
+        .resolve_provider_id(&provider)
         .map_err(|error| LlmCredentialPromptError::Other(error.into()))?;
 
-    let home_path = home.path().to_path_buf();
-    let provider_id = write_outcome.provider_id.clone();
+    let store = store_opener
+        .open(home.path())
+        .map_err(LlmCredentialPromptError::Other)?;
+    let provider_id_for_store = canonical_provider_id.clone();
     crate::runtime::block_on_cli(async move {
-        let store = ironclaw_reborn_composition::open_local_dev_secret_store(&home_path)
-            .await
-            .map_err(anyhow::Error::from)?;
         ironclaw_reborn_composition::LlmKeyStore::new(store)
-            .put(&provider_id, ironclaw_secrets::SecretMaterial::from(key))
+            .put(
+                &provider_id_for_store,
+                ironclaw_secrets::SecretMaterial::from(key),
+            )
             .await
             .map_err(anyhow::Error::from)
     })
     .map_err(LlmCredentialPromptError::Other)?;
 
+    let write_outcome = admin
+        .set_provider(&provider, None)
+        .map_err(|error| LlmCredentialPromptError::Other(error.into()))?;
+
     Ok(LlmCredentialProvisionOutcome::Configured {
         provider_id: write_outcome.provider_id,
         model: write_outcome.model,
     })
+}
+
+/// `Some` when `[llm.default]` already names a provider AND the encrypted
+/// secret store already has a key stored for it — the idempotent-rerun
+/// case [`provision_llm_credentials`] must skip prompting for (a bare
+/// stub-seeded `[llm.default]` with no stored key, e.g. right after a fresh
+/// `onboard` on a headless box, does NOT count: that provider has never
+/// actually been credentialed, so a later interactive rerun must still
+/// prompt). A store-open failure is treated as "can't tell" and falls
+/// through to prompting rather than erroring the whole run.
+fn already_configured_outcome(
+    admin: &ironclaw_reborn_composition::RebornProviderAdmin,
+    home: &RebornHome,
+    store_opener: &dyn LlmKeyStoreOpener,
+) -> Result<Option<LlmCredentialProvisionOutcome>, LlmCredentialPromptError> {
+    let status = admin
+        .status()
+        .map_err(|error| LlmCredentialPromptError::Other(error.into()))?;
+    let Some(selection) = status.default else {
+        return Ok(None);
+    };
+    let Some(provider_id) = selection.provider_id else {
+        return Ok(None);
+    };
+    let Ok(store) = store_opener.open(home.path()) else {
+        return Ok(None);
+    };
+    let provider_id_for_check = provider_id.clone();
+    let has_key = crate::runtime::block_on_cli(async move {
+        ironclaw_reborn_composition::LlmKeyStore::new(store)
+            .exists(&provider_id_for_check)
+            .await
+            .map_err(anyhow::Error::from)
+    })
+    .map_err(LlmCredentialPromptError::Other)?;
+    if !has_key {
+        return Ok(None);
+    }
+    Ok(Some(LlmCredentialProvisionOutcome::AlreadyConfigured {
+        provider_id,
+        model: selection.model.unwrap_or_default(),
+    }))
 }
 
 /// Without both `libsql` (the store opener) and `root-llm-provider`
@@ -430,105 +442,10 @@ fn provision_llm_credentials(
     _home: &RebornHome,
     _boot: &ironclaw_reborn_config::RebornBootConfig,
     _prompts: &mut dyn PromptSource,
+    _store_opener: &dyn LlmKeyStoreOpener,
+    _force: bool,
 ) -> Result<LlmCredentialProvisionOutcome, LlmCredentialPromptError> {
     Ok(LlmCredentialProvisionOutcome::SkippedNonInteractive)
-}
-
-/// Production [`PromptSource`]: reads the provider id as a plain line, the
-/// API key with terminal echo suppressed. The *only* place in this module
-/// that checks [`IsTerminal`] or touches the real terminal — everything
-/// else goes through the trait, matching the "only `main.rs` may exit"
-/// convention (this impl never calls `process::exit`; it returns
-/// [`LlmCredentialPromptError::NonInteractive`] and lets the caller decide).
-struct StdinPromptSource;
-
-impl PromptSource for StdinPromptSource {
-    fn provider(&mut self, default: &str) -> Result<String, LlmCredentialPromptError> {
-        if !std::io::stdin().is_terminal() {
-            return Err(LlmCredentialPromptError::NonInteractive);
-        }
-        print!("LLM provider [{default}]: ");
-        std::io::stdout()
-            .flush()
-            .map_err(|error| LlmCredentialPromptError::Other(error.into()))?;
-        let mut input = String::new();
-        std::io::stdin()
-            .read_line(&mut input)
-            .map_err(|error| LlmCredentialPromptError::Other(error.into()))?;
-        let trimmed = input.trim();
-        Ok(if trimmed.is_empty() {
-            default.to_string()
-        } else {
-            trimmed.to_string()
-        })
-    }
-
-    fn api_key(&mut self, provider: &str) -> Result<String, LlmCredentialPromptError> {
-        if !std::io::stdin().is_terminal() {
-            return Err(LlmCredentialPromptError::NonInteractive);
-        }
-        print!("{provider} API key (input hidden): ");
-        std::io::stdout()
-            .flush()
-            .map_err(|error| LlmCredentialPromptError::Other(error.into()))?;
-        let key =
-            read_masked_line().map_err(|error| LlmCredentialPromptError::Other(error.into()))?;
-        println!();
-        Ok(key)
-    }
-}
-
-/// Read one line with terminal echo suppressed, showing `*` per character.
-///
-/// Ported from v1's `src/setup/prompts.rs` (`secret_input`/
-/// `read_secret_line`) — same crossterm raw-mode key-event loop — per this
-/// repo's "porting = copy, never depend" convention (v1 is read for shape,
-/// not imported; `ironclaw_secrets::keychain::os_keychain_suppressed` was
-/// ported into the Reborn stack the same way for the master-key work this
-/// command already does above).
-fn read_masked_line() -> std::io::Result<String> {
-    use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
-    use crossterm::{execute, style::Print, terminal};
-
-    let mut input = String::new();
-    terminal::enable_raw_mode()?;
-    let result = (|| -> std::io::Result<()> {
-        loop {
-            if let Event::Key(KeyEvent {
-                code,
-                modifiers,
-                kind: KeyEventKind::Press,
-                ..
-            }) = event::read()?
-            {
-                match code {
-                    KeyCode::Enter => break,
-                    KeyCode::Backspace if !input.is_empty() => {
-                        input.pop();
-                        execute!(std::io::stdout(), Print("\x08 \x08"))?;
-                        std::io::stdout().flush()?;
-                    }
-                    KeyCode::Backspace => {}
-                    KeyCode::Char('c') if modifiers.contains(KeyModifiers::CONTROL) => {
-                        return Err(std::io::Error::new(
-                            std::io::ErrorKind::Interrupted,
-                            "Ctrl-C",
-                        ));
-                    }
-                    KeyCode::Char(c) => {
-                        input.push(c);
-                        execute!(std::io::stdout(), Print('*'))?;
-                        std::io::stdout().flush()?;
-                    }
-                    _ => {}
-                }
-            }
-        }
-        Ok(())
-    })();
-    terminal::disable_raw_mode()?;
-    result?;
-    Ok(input)
 }
 
 fn print_dry_run(
@@ -658,6 +575,10 @@ mod tests {
     }
 
     impl PromptSource for FakePromptSource {
+        fn is_interactive(&self) -> bool {
+            true
+        }
+
         fn provider(&mut self, _default: &str) -> Result<String, LlmCredentialPromptError> {
             Ok(self.provider.to_string())
         }
@@ -670,8 +591,12 @@ mod tests {
     struct NonInteractivePromptSource;
 
     impl PromptSource for NonInteractivePromptSource {
+        fn is_interactive(&self) -> bool {
+            false
+        }
+
         fn provider(&mut self, _default: &str) -> Result<String, LlmCredentialPromptError> {
-            Err(LlmCredentialPromptError::NonInteractive)
+            unreachable!("provider() must not be called once is_interactive() is false")
         }
 
         fn api_key(&mut self, _provider: &str) -> Result<String, LlmCredentialPromptError> {
@@ -679,36 +604,156 @@ mod tests {
         }
     }
 
-    /// RED (B2 step 1): a fake interactive `PromptSource` answering
-    /// `("nearai", "sk-test-value")` must land the provider selection in
-    /// `config.toml` and the key value in the encrypted secret store,
-    /// readable back through a *fresh* open of the same root — proving the
-    /// opener and `LlmKeyStore::put`/`read` agree on physical storage.
-    #[test]
-    fn provision_llm_credentials_writes_config_and_secret_store_through_fake_prompts() {
-        let (_tmp, context) = RebornCliContext::test_context();
-        let home = context.boot_config().home();
-        std::fs::create_dir_all(home.path()).expect("create reborn home");
-        // Seed a cached master-key dotfile so the store opener's resolver
-        // never reaches the OS keychain step in this test — this test must
-        // pass whether or not the invoking `cargo test` run happens to have
-        // `IRONCLAW_DISABLE_OS_KEYCHAIN` exported (see
-        // `ironclaw_reborn_composition::factory`'s
-        // `open_local_dev_secret_store_opens_a_working_store_over_the_bare_root`
-        // for the same seeding pattern).
+    /// A [`PromptSource`] whose prompt methods panic if called — used to
+    /// prove an idempotent rerun (item 3) skips prompting entirely rather
+    /// than merely tolerating a repeated answer.
+    struct PanickingPromptSource;
+
+    impl PromptSource for PanickingPromptSource {
+        fn is_interactive(&self) -> bool {
+            true
+        }
+
+        fn provider(&mut self, _default: &str) -> Result<String, LlmCredentialPromptError> {
+            panic!("provider() must not be called on an idempotent, already-configured rerun")
+        }
+
+        fn api_key(&mut self, _provider: &str) -> Result<String, LlmCredentialPromptError> {
+            panic!("api_key() must not be called on an idempotent, already-configured rerun")
+        }
+    }
+
+    /// A [`LlmKeyStoreOpener`] whose store's `put` always fails — used to
+    /// prove `provision_llm_credentials` writes the secret store BEFORE
+    /// `config.toml`: a `put` failure must leave `config.toml` untouched.
+    struct FailingLlmKeyStoreOpener;
+
+    impl LlmKeyStoreOpener for FailingLlmKeyStoreOpener {
+        fn open(
+            &self,
+            _home_path: &Path,
+        ) -> anyhow::Result<Arc<dyn ironclaw_secrets::SecretStore>> {
+            Ok(Arc::new(FailingSecretStore))
+        }
+    }
+
+    struct FailingSecretStore;
+
+    #[async_trait::async_trait]
+    impl ironclaw_secrets::SecretStore for FailingSecretStore {
+        async fn put(
+            &self,
+            _scope: ironclaw_host_api::ResourceScope,
+            _handle: ironclaw_host_api::SecretHandle,
+            _material: ironclaw_secrets::SecretMaterial,
+            _expires_at: Option<ironclaw_host_api::Timestamp>,
+        ) -> Result<ironclaw_secrets::SecretMetadata, ironclaw_secrets::SecretStoreError> {
+            Err(ironclaw_secrets::SecretStoreError::StoreUnavailable {
+                reason: "simulated failure for write-ordering RED test".to_string(),
+            })
+        }
+
+        async fn metadata(
+            &self,
+            _scope: &ironclaw_host_api::ResourceScope,
+            _handle: &ironclaw_host_api::SecretHandle,
+        ) -> Result<Option<ironclaw_secrets::SecretMetadata>, ironclaw_secrets::SecretStoreError>
+        {
+            unreachable!("not exercised by provision_llm_credentials")
+        }
+
+        async fn metadata_for_scope(
+            &self,
+            _scope: &ironclaw_host_api::ResourceScope,
+        ) -> Result<Vec<ironclaw_secrets::SecretMetadata>, ironclaw_secrets::SecretStoreError>
+        {
+            unreachable!("not exercised by provision_llm_credentials")
+        }
+
+        async fn delete(
+            &self,
+            _scope: &ironclaw_host_api::ResourceScope,
+            _handle: &ironclaw_host_api::SecretHandle,
+        ) -> Result<bool, ironclaw_secrets::SecretStoreError> {
+            unreachable!("not exercised by provision_llm_credentials")
+        }
+
+        async fn lease_once(
+            &self,
+            _scope: &ironclaw_host_api::ResourceScope,
+            _handle: &ironclaw_host_api::SecretHandle,
+        ) -> Result<ironclaw_secrets::SecretLease, ironclaw_secrets::SecretStoreError> {
+            unreachable!("not exercised by provision_llm_credentials")
+        }
+
+        async fn consume(
+            &self,
+            _scope: &ironclaw_host_api::ResourceScope,
+            _lease_id: ironclaw_secrets::SecretLeaseId,
+        ) -> Result<ironclaw_secrets::SecretMaterial, ironclaw_secrets::SecretStoreError> {
+            unreachable!("not exercised by provision_llm_credentials")
+        }
+
+        async fn revoke(
+            &self,
+            _scope: &ironclaw_host_api::ResourceScope,
+            _lease_id: ironclaw_secrets::SecretLeaseId,
+        ) -> Result<ironclaw_secrets::SecretLease, ironclaw_secrets::SecretStoreError> {
+            unreachable!("not exercised by provision_llm_credentials")
+        }
+
+        async fn leases_for_scope(
+            &self,
+            _scope: &ironclaw_host_api::ResourceScope,
+        ) -> Result<Vec<ironclaw_secrets::SecretLease>, ironclaw_secrets::SecretStoreError>
+        {
+            unreachable!("not exercised by provision_llm_credentials")
+        }
+    }
+
+    /// Seed a cached master-key dotfile so the real local-dev store opener's
+    /// resolver never reaches the OS keychain step in a test — see
+    /// `ironclaw_reborn_composition::factory`'s
+    /// `open_local_dev_secret_store_opens_a_working_store_over_the_bare_root`
+    /// for the same seeding pattern.
+    fn seed_cached_master_key(home: &RebornHome) {
         std::fs::write(
             home.path()
                 .join(ironclaw_reborn_composition::LOCAL_DEV_SECRETS_MASTER_KEY_PATH),
             ironclaw_secrets::keychain::generate_master_key_hex(),
         )
         .expect("seed cached master key");
+    }
+
+    /// RED (B2 step 1): a fake interactive `PromptSource` answering
+    /// `("nearai", "sk-test-value")` must land the provider selection in
+    /// `config.toml` and the key value in the encrypted secret store,
+    /// readable back through a *fresh* open of the same root — proving the
+    /// opener and `LlmKeyStore::put`/`read` agree on physical storage.
+    ///
+    /// Also proves item 3's idempotent-rerun guard: a second call with a
+    /// `PanickingPromptSource` (whose prompt methods panic if invoked) must
+    /// return `AlreadyConfigured` without ever calling `provider()`/
+    /// `api_key()` — proving the rerun is skipped, not merely tolerated.
+    #[test]
+    fn provision_llm_credentials_writes_config_and_secret_store_through_fake_prompts() {
+        let (_tmp, context) = RebornCliContext::test_context();
+        let home = context.boot_config().home();
+        std::fs::create_dir_all(home.path()).expect("create reborn home");
+        seed_cached_master_key(home);
 
         let mut prompts = FakePromptSource {
             provider: "nearai",
             key: "sk-test-value",
         };
-        let outcome = provision_llm_credentials(home, context.boot_config(), &mut prompts)
-            .expect("provision must succeed with a fake interactive source");
+        let outcome = provision_llm_credentials(
+            home,
+            context.boot_config(),
+            &mut prompts,
+            &LocalDevLlmKeyStoreOpener,
+            false,
+        )
+        .expect("provision must succeed with a fake interactive source");
         assert_eq!(
             outcome,
             LlmCredentialProvisionOutcome::Configured {
@@ -740,14 +785,34 @@ mod tests {
             config_text.contains("provider_id = \"nearai\""),
             "config.toml: {config_text}"
         );
+
+        // Item 3: a rerun with an already-configured provider + stored key
+        // must skip prompting entirely.
+        let mut second_prompts = PanickingPromptSource;
+        let second_outcome = provision_llm_credentials(
+            home,
+            context.boot_config(),
+            &mut second_prompts,
+            &LocalDevLlmKeyStoreOpener,
+            false,
+        )
+        .expect("an idempotent rerun must succeed without prompting");
+        assert_eq!(
+            second_outcome,
+            LlmCredentialProvisionOutcome::AlreadyConfigured {
+                provider_id: "nearai".to_string(),
+                model: "deepseek-ai/DeepSeek-V4-Flash".to_string(),
+            }
+        );
     }
 
     /// RED (B2 step 2): a non-interactive fake source must surface as a
     /// typed [`LlmCredentialPromptError::NonInteractive`] — never a panic or
-    /// process exit — and must not write anything: `api_key()` is
-    /// `unreachable!()` (proving prompting stops at the first failure) and
-    /// `config.toml` must not exist afterward (proving no store/config touch
-    /// happens before both prompts have succeeded).
+    /// process exit — and must not write anything: `provider()`/`api_key()`
+    /// are `unreachable!()` (proving the interactivity check short-circuits
+    /// before either prompt runs) and `config.toml` must not exist
+    /// afterward (proving no store/config touch happens before both prompts
+    /// have succeeded).
     #[test]
     fn provision_llm_credentials_propagates_non_interactive_error_without_touching_anything() {
         let (_tmp, context) = RebornCliContext::test_context();
@@ -755,12 +820,49 @@ mod tests {
         std::fs::create_dir_all(home.path()).expect("create reborn home");
 
         let mut prompts = NonInteractivePromptSource;
-        let error = provision_llm_credentials(home, context.boot_config(), &mut prompts)
-            .expect_err("a non-interactive source must return a typed error");
+        let error = provision_llm_credentials(
+            home,
+            context.boot_config(),
+            &mut prompts,
+            &LocalDevLlmKeyStoreOpener,
+            false,
+        )
+        .expect_err("a non-interactive source must return a typed error");
         assert!(matches!(error, LlmCredentialPromptError::NonInteractive));
         assert!(
             !home.config_file_path().exists(),
             "a non-interactive prompt failure must not write config.toml"
+        );
+    }
+
+    /// RED (item 2, write ordering): a store whose `put` always fails must
+    /// leave `config.toml` completely untouched — proving the secret is
+    /// written BEFORE the provider selection, not after. Under the old
+    /// ordering (config first, store second) `config.toml` would already
+    /// carry `provider_id = "nearai"` by the time the store write failed.
+    #[test]
+    fn provision_llm_credentials_leaves_config_untouched_when_the_store_put_fails() {
+        let (_tmp, context) = RebornCliContext::test_context();
+        let home = context.boot_config().home();
+        std::fs::create_dir_all(home.path()).expect("create reborn home");
+
+        let mut prompts = FakePromptSource {
+            provider: "nearai",
+            key: "sk-test-value",
+        };
+        let error = provision_llm_credentials(
+            home,
+            context.boot_config(),
+            &mut prompts,
+            &FailingLlmKeyStoreOpener,
+            false,
+        )
+        .expect_err("a failing store put must surface as an error");
+        assert!(matches!(error, LlmCredentialPromptError::Other(_)));
+        assert!(
+            !home.config_file_path().exists(),
+            "a failed key-store write must leave config.toml untouched — store first, config \
+             second"
         );
     }
 }

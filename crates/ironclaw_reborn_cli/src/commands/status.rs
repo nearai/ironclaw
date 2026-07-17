@@ -66,13 +66,13 @@ fn build_status_dto(context: &RebornCliContext) -> anyhow::Result<StatusDto> {
 /// `status` reprints the CLI-token login link `onboard` originally printed
 /// — the returning-user story: `sessionStorage` is per-browser-session, so
 /// a closed browser needs a fresh link, and `status` is the way to get one
-/// without rerunning `onboard`. Reuses `onboard`'s own resolver
-/// (`commands::onboard::login_link`) rather than re-deriving the
+/// without rerunning `onboard`. Reuses the shared `webui_token::login_link`
+/// resolver (also used by `commands::onboard`) rather than re-deriving the
 /// host:port/token construction here — see this repo's shared-resolver
 /// convention for auth-adjacent links.
 #[cfg(feature = "webui-v2-beta")]
 fn resolve_login_link(home: &ironclaw_reborn_config::RebornHome) -> Option<String> {
-    crate::commands::onboard::login_link(home)
+    crate::webui_token::login_link(home)
 }
 
 #[cfg(not(feature = "webui-v2-beta"))]

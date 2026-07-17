@@ -4835,6 +4835,7 @@ dependencies = [
  "dotenvy",
  "hex",
  "ironclaw_common",
+ "ironclaw_host_api",
  "ironclaw_reborn_composition",
  "ironclaw_reborn_config",
  "ironclaw_reborn_traces",
