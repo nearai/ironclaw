@@ -64,7 +64,6 @@ const FROZEN_INMEMORY_STORES: &[&str] = &[
     "InMemoryOpenAiCompatRefStore",
     "InMemorySecretStore",
     "InMemorySessionStore",
-    "InMemoryTriggeredRunDeliveryStore",
     // --- pub(crate) stores the visibility-aware scanner also inventories
     //     (same debt class, just crate-private) ---
     "InMemorySecretsStore",

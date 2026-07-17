@@ -23,8 +23,7 @@ use ironclaw_host_api::{AgentId, ApprovalRequestId, ProjectId, TenantId, ThreadI
 use ironclaw_outbound::test_support::in_memory_backed_outbound_state_store;
 use ironclaw_outbound::{
     CommunicationPreferenceRecord, CommunicationPreferenceRepository, DeliveredGateRouteStore,
-    DeliveryDefaultScope, InMemoryTriggeredRunDeliveryStore, OutboundStateStore,
-    WriteCommunicationPreferenceRequest,
+    DeliveryDefaultScope, OutboundStateStore, WriteCommunicationPreferenceRequest,
 };
 use ironclaw_product_adapters::{
     AdapterInstallationId, AuthRequirement, AuthResolutionPayload, AuthResolutionResult,
@@ -1085,7 +1084,7 @@ async fn triggered_approval_prompt_route_resolves_dm_approve_on_foreign_scope() 
             max_concurrent_deliveries: NonZeroUsize::new(4).expect("nonzero"), // safety: static test literal is non-zero.
             max_pending_deliveries: NonZeroUsize::new(16).expect("nonzero"), // safety: static test literal is non-zero.
         },
-        Arc::new(InMemoryTriggeredRunDeliveryStore::default()),
+        Arc::new(in_memory_backed_outbound_state_store()),
         harness.route_store.clone(),
         AgentId::new(AGENT).expect("agent"), // safety: static test agent id is valid.
     );
@@ -1344,7 +1343,7 @@ async fn triggered_auth_prompt_route_delivers_dm_setup_link_on_foreign_scope() {
             max_concurrent_deliveries: NonZeroUsize::new(4).expect("nonzero"), // safety: static test literal is non-zero.
             max_pending_deliveries: NonZeroUsize::new(16).expect("nonzero"), // safety: static test literal is non-zero.
         },
-        Arc::new(InMemoryTriggeredRunDeliveryStore::default()),
+        Arc::new(in_memory_backed_outbound_state_store()),
         route_store,
         AgentId::new(AGENT).expect("agent"), // safety: static test agent id is valid.
     );
@@ -1481,7 +1480,7 @@ async fn triggered_auth_prompt_oauth_target_not_dm_suppresses_setup_link_and_can
             max_concurrent_deliveries: NonZeroUsize::new(4).expect("nonzero"), // safety: static test literal is non-zero.
             max_pending_deliveries: NonZeroUsize::new(16).expect("nonzero"), // safety: static test literal is non-zero.
         },
-        Arc::new(InMemoryTriggeredRunDeliveryStore::default()),
+        Arc::new(in_memory_backed_outbound_state_store()),
         route_store,
         AgentId::new(AGENT).expect("agent"), // safety: static test agent id is valid.
     );
