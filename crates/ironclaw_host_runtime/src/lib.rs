@@ -48,6 +48,7 @@ mod latency;
 pub mod memory_context;
 mod obligations;
 mod planner;
+mod post_edit_check;
 mod process_aliases;
 mod process_output;
 mod process_port;
@@ -112,6 +113,10 @@ pub use obligations::{
     RuntimeCredentialAccountRequest, RuntimeCredentialAccountResolver,
 };
 pub use planner::{ExecutionPlan, PlannerError, plan_capability};
+pub use post_edit_check::{
+    POST_EDIT_CHECK_ENV, POST_EDIT_CHECK_TIMEOUT_ENV, PostEditCheckConfig,
+    PostEditCheckConfigError, PostEditCheckService,
+};
 pub use process_output::{SavedCommandOutput, SavedCommandOutputSanitization};
 pub use process_port::{
     CommandExecutionOutput, CommandExecutionRequest, LocalHostProcessPort, RuntimeProcessError,

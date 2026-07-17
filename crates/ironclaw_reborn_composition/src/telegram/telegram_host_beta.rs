@@ -15,7 +15,7 @@ use crate::extension_host::extension_lifecycle::{
     ExtensionActivationMode, RebornLocalExtensionManagementPort,
 };
 use crate::outbound::OutboundDeliveryTargetRegistrationOutcome;
-use crate::webui::webui_serve::{ProtectedRouteMount, PublicRouteDrain, PublicRouteMount};
+use crate::webui::route_mounts::{ProtectedRouteMount, PublicRouteDrain, PublicRouteMount};
 use ironclaw_telegram_extension::channel_routes::{
     TelegramChannelSetupActivation, TelegramChannelSetupActivationError,
     telegram_channel_route_parts,

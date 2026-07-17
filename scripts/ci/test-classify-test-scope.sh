@@ -89,6 +89,14 @@ has_legacy_tests=false
 has_reborn_tests=true"
 
 assert_scope \
+  "reborn channel delivery support crate" \
+  "crates/ironclaw_channel_delivery/src/lib.rs" \
+  "docs_only=false
+has_core_code=true
+has_legacy_tests=false
+has_reborn_tests=true"
+
+assert_scope \
   "reborn telegram extension crate" \
   "crates/ironclaw_telegram_extension/src/telegram_pairing.rs" \
   "docs_only=false

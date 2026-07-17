@@ -29,6 +29,10 @@ assert_flags() {
 # build silently skips those suites.
 assert_flags ironclaw_channel_host "--features webhook-serve"
 
+# The delivery-support crate exposes its production surface without feature
+# gates; only downstream tests opt into its test-support seam.
+assert_flags ironclaw_channel_delivery ""
+
 # The telegram host crate is deliberately flag-free: its whole surface is
 # unconditional inside the crate.
 assert_flags ironclaw_telegram_extension ""

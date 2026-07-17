@@ -149,17 +149,17 @@ jobs:
         with:
           node-version: "22"
           cache: "pnpm"
-          cache-dependency-path: crates/ironclaw_webui_v2/frontend/pnpm-lock.yaml
+          cache-dependency-path: crates/ironclaw_webui/frontend/pnpm-lock.yaml
       # `no-undef` over WebUI v2 JavaScript catches production modules that reference a
       # symbol they never imported. The VM-based component suites stub
       # every collaborator through a `vm` context, so that class of bug (e.g. an
       # htm `${Component}` used without an import) passes the unit tests and only
       # surfaces at runtime — this is the gate the eval harness cannot provide.
       - name: Install WebUI v2 frontend deps
-        working-directory: crates/ironclaw_webui_v2/frontend
+        working-directory: crates/ironclaw_webui/frontend
         run: pnpm install --frozen-lockfile
       - name: Lint WebUI v2 JS
-        working-directory: crates/ironclaw_webui_v2/frontend
+        working-directory: crates/ironclaw_webui/frontend
         run: pnpm lint
       # The full vitest suite (chat, extensions, telegram/slack panels, gate
       # routing, channels tab, configure modal — the vm-tsx harness) previously
@@ -168,14 +168,14 @@ jobs:
       # vm-tsx setup file is declared in vite.config.ts setupFiles; no extra
       # CI configuration beyond node + pnpm is needed.
       - name: WebUI v2 frontend tests (vitest)
-        working-directory: crates/ironclaw_webui_v2/frontend
+        working-directory: crates/ironclaw_webui/frontend
         run: pnpm test
       # The SPA embeds into the serve binary at COMPILE time from
       # frontend/dist, so a frontend that lints and tests but does not build
       # still breaks every downstream binary build. Keep the build in the same
       # job so the three gates travel together.
       - name: Build WebUI v2 frontend
-        working-directory: crates/ironclaw_webui_v2/frontend
+        working-directory: crates/ironclaw_webui/frontend
         run: pnpm build
 
   deny-check:
@@ -274,14 +274,14 @@ jobs:
         with:
           node-version: "22"
           cache: "pnpm"
-          cache-dependency-path: crates/ironclaw_webui_v2/frontend/pnpm-lock.yaml
+          cache-dependency-path: crates/ironclaw_webui/frontend/pnpm-lock.yaml
       - name: Enable pnpm
         if: contains(matrix.flags, '--all-features')
         run: corepack enable pnpm
       - name: Install WebUI frontend dependencies
         if: contains(matrix.flags, '--all-features')
         run: |
-          cd crates/ironclaw_webui_v2/frontend
+          cd crates/ironclaw_webui/frontend
           pnpm install --frozen-lockfile
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
@@ -330,14 +330,14 @@ jobs:
         with:
           node-version: "22"
           cache: "pnpm"
-          cache-dependency-path: crates/ironclaw_webui_v2/frontend/pnpm-lock.yaml
+          cache-dependency-path: crates/ironclaw_webui/frontend/pnpm-lock.yaml
       - name: Enable pnpm
         if: contains(matrix.flags, '--all-features')
         run: corepack enable pnpm
       - name: Install WebUI frontend dependencies
         if: contains(matrix.flags, '--all-features')
         run: |
-          cd crates/ironclaw_webui_v2/frontend
+          cd crates/ironclaw_webui/frontend
           pnpm install --frozen-lockfile
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:

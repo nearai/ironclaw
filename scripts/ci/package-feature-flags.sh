@@ -69,7 +69,7 @@ case "${package}" in
     # fallback would otherwise add now that the crate declares a `libsql` feature.
     printf '%s\n' "--features contract-tests"
     ;;
-  ironclaw_reborn_webui_ingress)
+  ironclaw_webui)
     printf '%s\n' "--features dev-in-memory-session"
     ;;
   ironclaw_host_runtime)
@@ -78,9 +78,6 @@ case "${package}" in
     # is gated behind `feature = "test-support"`. libsql exercises the embedded
     # DB paths without a Postgres server (which the crate-tests job has none of).
     printf '%s\n' "--features test-support,libsql"
-    ;;
-  ironclaw_webui_v2)
-    printf '%s\n' "--features webui-v2-beta"
     ;;
   ironclaw_channel_host)
     # `webhook-serve` compiles + runs the installation rate limiter and
@@ -95,6 +92,7 @@ case "${package}" in
     printf '%s\n' "--features openai-compat-beta,libsql"
     ;;
   ironclaw_architecture | \
+  ironclaw_channel_delivery | \
   ironclaw_product_adapter_registry | \
   ironclaw_product_context | \
   ironclaw_reborn_config | \

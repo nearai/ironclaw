@@ -1,4 +1,5 @@
 #![allow(dead_code)]
+// arch-exempt: large_file, mechanical lease-store test repoint to FilesystemCapabilityLeaseStore<InMemoryBackend> helper (arch-simplification §4.3), no new test logic, plan #6168
 
 use super::legacy_capability_fixture_to_v2;
 use std::{
@@ -13,7 +14,8 @@ use async_trait::async_trait;
 use chrono::Utc;
 use ironclaw_approvals::LeaseApproval;
 use ironclaw_authorization::{
-    GrantAuthorizer, InMemoryCapabilityLeaseStore, TrustAwareCapabilityDispatchAuthorizer,
+    FilesystemCapabilityLeaseStore, GrantAuthorizer, TrustAwareCapabilityDispatchAuthorizer,
+    in_memory_backed_capability_lease_store,
 };
 use ironclaw_capabilities::{
     CapabilityHost, CapabilityObligationHandler, CapabilityObligationPhase,
@@ -24,6 +26,7 @@ use ironclaw_events::{
     InMemoryEventSink, ReadScope,
 };
 use ironclaw_extensions::{ExtensionManifest, ExtensionPackage, ExtensionRegistry, ManifestSource};
+use ironclaw_filesystem::InMemoryBackend;
 #[cfg(feature = "libsql")]
 use ironclaw_filesystem::LibSqlRootFilesystem;
 #[cfg(feature = "libsql")]
@@ -43,10 +46,10 @@ use ironclaw_network::{
     NetworkHttpEgress, NetworkHttpError, NetworkHttpRequest, NetworkHttpResponse, NetworkUsage,
 };
 use ironclaw_processes::{
-    BackgroundFailureStage, BackgroundProcessManager, InMemoryProcessResultStore,
-    InMemoryProcessStore, ProcessError, ProcessExecutionRequest, ProcessExecutionResult,
-    ProcessExecutor, ProcessResultRecord, ProcessResultStore, ProcessServices, ProcessStart,
-    ProcessStatus, ProcessStore,
+    BackgroundFailureStage, BackgroundProcessManager, FilesystemProcessResultStore,
+    FilesystemProcessStore, ProcessError, ProcessExecutionRequest, ProcessExecutionResult,
+    ProcessExecutor, ProcessResultRecord, ProcessResultStore, ProcessStart, ProcessStatus,
+    ProcessStore,
 };
 use ironclaw_resources::{
     InMemoryResourceGovernor, ResourceAccount, ResourceError, ResourceGovernor, ResourceLimits,
@@ -216,8 +219,8 @@ pub(crate) fn assert_completed_outcome(
 pub(crate) type InMemoryHostRuntimeServices = HostRuntimeServices<
     LocalFilesystem,
     InMemoryResourceGovernor,
-    InMemoryProcessStore,
-    InMemoryProcessResultStore,
+    FilesystemProcessStore<InMemoryBackend>,
+    FilesystemProcessResultStore<InMemoryBackend>,
 >;
 
 pub(crate) struct InMemoryRecordingCombinedRunStateApprovalStore {
@@ -378,7 +381,7 @@ pub(crate) struct ApprovalResumeFixture {
     pub(crate) services: InMemoryHostRuntimeServices,
     pub(crate) run_state: Arc<InMemoryRunStateStore>,
     pub(crate) approval_requests: Arc<InMemoryApprovalRequestStore>,
-    pub(crate) capability_leases: Arc<InMemoryCapabilityLeaseStore>,
+    pub(crate) capability_leases: Arc<FilesystemCapabilityLeaseStore<InMemoryBackend>>,
     pub(crate) events: InMemoryEventSink,
 }
 
@@ -392,14 +395,14 @@ pub(crate) fn approval_resume_fixture_with_manifest(
 ) -> ApprovalResumeFixture {
     let run_state = Arc::new(InMemoryRunStateStore::new());
     let approval_requests = Arc::new(InMemoryApprovalRequestStore::new());
-    let capability_leases = Arc::new(InMemoryCapabilityLeaseStore::new());
+    let capability_leases = Arc::new(in_memory_backed_capability_lease_store());
     let events = InMemoryEventSink::new();
     let services = HostRuntimeServices::new(
         Arc::new(registry_with_manifest(manifest)),
         Arc::new(LocalFilesystem::new()),
         Arc::new(InMemoryResourceGovernor::new()),
         Arc::new(ApprovalThenGrantAuthorizer),
-        ProcessServices::in_memory(),
+        ironclaw_processes::in_memory_backed_process_services(),
         CapabilitySurfaceVersion::new("surface-v1").unwrap(),
     )
     .with_trust_policy(Arc::new(local_manifest_trust_policy(
@@ -432,7 +435,7 @@ pub(crate) fn resume_runtime_with_empty_registry(
         Arc::new(LocalFilesystem::new()),
         Arc::new(InMemoryResourceGovernor::new()),
         Arc::new(ApprovalThenGrantAuthorizer),
-        ProcessServices::in_memory(),
+        ironclaw_processes::in_memory_backed_process_services(),
         CapabilitySurfaceVersion::new("surface-v1").unwrap(),
     )
     .with_trust_policy(Arc::new(local_manifest_trust_policy(
@@ -458,7 +461,7 @@ pub(crate) fn resume_runtime_with_policy(
         Arc::new(LocalFilesystem::new()),
         Arc::new(InMemoryResourceGovernor::new()),
         Arc::new(ApprovalThenGrantAuthorizer),
-        ProcessServices::in_memory(),
+        ironclaw_processes::in_memory_backed_process_services(),
         CapabilitySurfaceVersion::new("surface-v1").unwrap(),
     )
     .with_trust_policy(Arc::new(local_manifest_trust_policy(
@@ -1044,7 +1047,7 @@ pub(crate) async fn spawn_obligation_fixture(
         reservation_id,
         secret_handle,
         executor,
-        Arc::new(InMemoryProcessResultStore::new()),
+        Arc::new(ironclaw_processes::in_memory_backed_process_result_store()),
     )
     .await
 }
@@ -1062,7 +1065,7 @@ where
         reservation_id,
         secret_handle,
         executor,
-        Arc::new(InMemoryProcessStore::new()),
+        Arc::new(ironclaw_processes::in_memory_backed_process_store()),
         result_store,
     )
     .await
@@ -1279,7 +1282,7 @@ impl ProcessResultStore for FailingProcessResultStore {
 }
 
 pub(crate) struct FailingTerminalProcessStore {
-    pub(crate) inner: InMemoryProcessStore,
+    pub(crate) inner: FilesystemProcessStore<InMemoryBackend>,
     pub(crate) fail_complete: bool,
     pub(crate) fail_fail: bool,
     pub(crate) attempts: std::sync::Mutex<Vec<&'static str>>,
@@ -1288,7 +1291,7 @@ pub(crate) struct FailingTerminalProcessStore {
 impl FailingTerminalProcessStore {
     pub(crate) fn fail_complete() -> Self {
         Self {
-            inner: InMemoryProcessStore::new(),
+            inner: ironclaw_processes::in_memory_backed_process_store(),
             fail_complete: true,
             fail_fail: false,
             attempts: std::sync::Mutex::new(Vec::new()),
@@ -1297,7 +1300,7 @@ impl FailingTerminalProcessStore {
 
     pub(crate) fn fail_fail() -> Self {
         Self {
-            inner: InMemoryProcessStore::new(),
+            inner: ironclaw_processes::in_memory_backed_process_store(),
             fail_complete: false,
             fail_fail: true,
             attempts: std::sync::Mutex::new(Vec::new()),
@@ -1512,7 +1515,12 @@ pub(crate) async fn wait_for_sandbox_process_result(
             && let Some(result) = result_store.get(scope, process_id).await.unwrap()
         {
             assert_eq!(result.status, ProcessStatus::Completed);
-            assert_eq!(result.output, Some(json!({"executor": "process_sandbox"})));
+            // Filesystem result store externalizes output behind `output_ref`;
+            // read the bytes through the store, not the inline record field (§4.3).
+            assert_eq!(
+                result_store.output(scope, process_id).await.unwrap(),
+                Some(json!({"executor": "process_sandbox"}))
+            );
             return;
         }
         tokio::time::sleep(Duration::from_millis(5)).await;
@@ -1697,6 +1705,7 @@ pub(crate) fn execution_context_without_grants() -> ExecutionContext {
 
 pub(crate) fn execution_context_without_grants_for_scope(scope: ResourceScope) -> ExecutionContext {
     let context = ExecutionContext {
+        run_id: None,
         invocation_id: scope.invocation_id,
         correlation_id: CorrelationId::new(),
         process_id: None,
@@ -1749,6 +1758,7 @@ pub(crate) fn execution_context_with_effect_grants_for_scope(
     allowed_effects: Vec<EffectKind>,
 ) -> ExecutionContext {
     let context = ExecutionContext {
+        run_id: None,
         invocation_id: scope.invocation_id,
         correlation_id: CorrelationId::new(),
         process_id: None,
@@ -1894,7 +1904,7 @@ pub(crate) fn assert_local_only_runtime_policy_rejected(
         Arc::new(LocalFilesystem::new()),
         Arc::new(InMemoryResourceGovernor::new()),
         Arc::new(GrantAuthorizer::new()),
-        ProcessServices::in_memory(),
+        ironclaw_processes::in_memory_backed_process_services(),
         CapabilitySurfaceVersion::new("surface-v1").unwrap(),
     )
     .with_runtime_policy(runtime_policy);
@@ -2078,7 +2088,7 @@ pub(crate) async fn wasm_runtime_for_component(
         filesystem,
         Arc::clone(&governor),
         authorizer,
-        ProcessServices::in_memory(),
+        ironclaw_processes::in_memory_backed_process_services(),
         CapabilitySurfaceVersion::new("surface-v1").unwrap(),
     )
     .with_runtime_http_egress(Arc::clone(&http))
@@ -2118,7 +2128,7 @@ pub(crate) async fn wasm_runtime_for_component_with_slow_zero_body_http(
         filesystem,
         Arc::clone(&governor),
         authorizer,
-        ProcessServices::in_memory(),
+        ironclaw_processes::in_memory_backed_process_services(),
         CapabilitySurfaceVersion::new("surface-v1").unwrap(),
     )
     .with_runtime_http_egress(Arc::clone(&http))

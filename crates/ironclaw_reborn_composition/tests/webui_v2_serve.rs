@@ -36,12 +36,12 @@ use ironclaw_product_workflow::{
     WebUiResolveGateRequest, WebUiRetryRunRequest, WebUiSendMessageRequest,
     WebUiSetupExtensionRequest,
 };
-use ironclaw_reborn_composition::{
-    PublicRouteMount, RebornReadiness, RebornWebuiBundle, WebuiAuthentication, WebuiAuthenticator,
-    WebuiServeConfig, WebuiServeError, webui_v2_app,
-};
+use ironclaw_reborn_composition::{PublicRouteMount, RebornReadiness, RebornWebuiBundle};
 use ironclaw_threads::{SessionThreadRecord, ThreadScope};
 use ironclaw_turns::{EventCursor, RunProfileId, RunProfileVersion, TurnRunId, TurnStatus};
+use ironclaw_webui::{
+    WebuiAuthentication, WebuiAuthenticator, WebuiServeConfig, WebuiServeError, webui_v2_app,
+};
 use serde_json::json;
 use tower::ServiceExt;
 
@@ -1862,7 +1862,7 @@ async fn ws_upgrade_uses_canonical_host_over_client_host_when_configured() {
     //      Host, NOT canonical_host) must be rejected.
     //   2. A WS upgrade with `Origin: http://app.example.com` (matching
     //      canonical_host) must succeed.
-    use ironclaw_reborn_composition::WebuiServeConfig;
+    use ironclaw_webui::WebuiServeConfig;
 
     let services = Arc::new(StubServices::default());
     let bundle = RebornWebuiBundle {
@@ -1876,7 +1876,7 @@ async fn ws_upgrade_uses_canonical_host_over_client_host_when_configured() {
         vec![HeaderValue::from_static("http://localhost:1234")],
     )
     .with_canonical_host("app.example.com");
-    let app = ironclaw_reborn_composition::webui_v2_app(bundle, config).expect("app");
+    let app = ironclaw_webui::webui_v2_app(bundle, config).expect("app");
     let (addr, handle) = spawn_serve(app).await;
 
     // (1) Origin matches Host but NOT canonical_host — fail.
@@ -2046,7 +2046,7 @@ async fn setup_extension_returns_lifecycle_projection_via_facade() {
 async fn rate_limit_is_independent_per_caller() {
     // Two distinct authenticators / users — alice exhausts her budget
     // but bob's requests still get through.
-    use ironclaw_reborn_composition::WebuiServeConfig;
+    use ironclaw_webui::WebuiServeConfig;
 
     struct UserSwitch;
     #[async_trait]
@@ -2129,7 +2129,7 @@ async fn rate_limit_is_independent_per_caller() {
 async fn every_webui_v2_descriptor_is_mounted_on_composed_app() {
     let (app, _services) = build_app();
 
-    for descriptor in ironclaw_webui_v2::webui_v2_routes() {
+    for descriptor in ironclaw_webui::webui_v2::webui_v2_routes() {
         let method = match descriptor.method() {
             NetworkMethod::Get => Method::GET,
             NetworkMethod::Post => Method::POST,
@@ -2229,14 +2229,14 @@ fn expand_route_pattern(pattern: &str) -> String {
         .replace("{package_id}", "ext-fake")
 }
 
-// ─── static SPA mount (`ironclaw_webui_v2`) ────────────────────
+// ─── static SPA mount (`ironclaw_webui`) ────────────────────
 //
 // The composition mounts the embedded SPA bundle at the gateway root. These
 // tests drive that mount through the same composed router production uses, so
 // a regression that drops the static router (or accidentally routes the SPA
 // through the bearer-auth middleware) fails here. Per
 // `.claude/rules/testing.md` ("Test Through the
-// Caller") — the standalone router test in `ironclaw_webui_v2`
+// Caller") — the standalone router test in `ironclaw_webui`
 // does not exercise the composition seam, so this layer needs its
 // own coverage.
 
@@ -2921,7 +2921,7 @@ async fn js_client_resolve_gate_path_decodes_percent_encoded_gate_ref() {
 
 /// Locks the [`WebuiServeConfig::with_public_router`] seam: a
 /// host-supplied router (today wired by
-/// `ironclaw_reborn_webui_ingress::webui_v2_auth_router`) must
+/// `ironclaw_webui::webui_v2_auth_router`) must
 /// reach its handler WITHOUT going through the bearer-auth
 /// middleware, and must still pick up the outer security headers
 /// applied to every other response. Regression guard for issue

@@ -196,7 +196,7 @@ jobs:
         with:
           node-version: "22"
           cache: "pnpm"
-          cache-dependency-path: crates/ironclaw_webui_v2/frontend/pnpm-lock.yaml
+          cache-dependency-path: crates/ironclaw_webui/frontend/pnpm-lock.yaml
 
       - name: Enable pnpm
         run: corepack enable pnpm
@@ -206,7 +206,7 @@ jobs:
 
       - name: Install WebUI frontend dependencies
         run: |
-          cd crates/ironclaw_webui_v2/frontend
+          cd crates/ironclaw_webui/frontend
           pnpm install --frozen-lockfile
 
       - name: Restore Rust cache
@@ -317,14 +317,14 @@ jobs:
         with:
           node-version: "22"
           cache: "pnpm"
-          cache-dependency-path: crates/ironclaw_webui_v2/frontend/pnpm-lock.yaml
+          cache-dependency-path: crates/ironclaw_webui/frontend/pnpm-lock.yaml
 
       - name: Enable pnpm
         run: corepack enable pnpm
 
       - name: Install WebUI frontend dependencies
         run: |
-          cd crates/ironclaw_webui_v2/frontend
+          cd crates/ironclaw_webui/frontend
           pnpm install --frozen-lockfile
 
       - name: Restore Rust cache

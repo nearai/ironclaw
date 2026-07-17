@@ -1,3 +1,4 @@
+// arch-exempt: large_file, trace-commons capability family shares one dispatch surface, plan #4539
 //! First-party Trace Commons capabilities: onboard, status, credits, profile token, profile set,
 //! and account login link.
 //!
@@ -1358,6 +1359,7 @@ mod tests {
     /// Uses the system scope so no validated user/tenant id is needed.
     fn test_request(input: Value) -> FirstPartyCapabilityRequest {
         FirstPartyCapabilityRequest {
+            run_id: None,
             capability_id: CapabilityId::new(TRACE_COMMONS_ONBOARD_CAPABILITY_ID).unwrap(),
             scope: ResourceScope::system(),
             authenticated_actor_user_id: None,
@@ -1372,6 +1374,7 @@ mod tests {
                 secret_store: None,
                 audit_sink: None,
                 unsafe_raw_diagnostics_allowed: false,
+                post_edit_check: None,
             },
             input,
         }

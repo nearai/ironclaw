@@ -9,7 +9,7 @@ use std::future::Future;
 use std::pin::Pin;
 use std::sync::{Arc, LazyLock};
 
-use crate::webui::webui_serve::{PublicRouteDrain, PublicRouteMount};
+use crate::webui::route_mounts::{PublicRouteDrain, PublicRouteMount};
 use axum::{
     Router,
     body::Bytes,
