@@ -129,14 +129,17 @@ fn query_unit_state(runner: &mut dyn ServiceCommandRunner) -> Result<SystemdUnit
     })
 }
 
+/// Combines a primary operation failure with any errors hit while rolling
+/// back its partial effects. The primary is kept as the error's `source()`
+/// (via `.context()`) rather than flattened into a single formatted string,
+/// so an operator inspecting the chain (`{:?}`/`{:#}`/`.source()`) can still
+/// see the underlying cause (e.g. permission-denied vs. disk-full) beneath
+/// the rollback outcome, instead of losing it inside one opaque message.
 fn combined_failure(primary: anyhow::Error, rollback_errors: Vec<String>) -> anyhow::Error {
     if rollback_errors.is_empty() {
         primary
     } else {
-        anyhow::anyhow!(
-            "{primary:#}; rollback failures: {}",
-            rollback_errors.join("; ")
-        )
+        primary.context(format!("rollback failures: {}", rollback_errors.join("; ")))
     }
 }
 
@@ -990,10 +993,56 @@ mod tests {
             }
         }
 
+        // Top-level `Display` (`to_string()`) now only shows the rollback
+        // context, matching anyhow's chain convention; the primary failure
+        // lives in `source()`/`{:#}` — see `enable_failure_preserves_primary_error_as_source`.
         let rendered = error.to_string();
-        assert!(rendered.contains("systemctl enable"), "{rendered}");
-        assert!(rendered.contains("reload restored unit"), "{rendered}");
         assert!(rendered.contains("rollback failures"), "{rendered}");
+        assert!(rendered.contains("reload restored unit"), "{rendered}");
+
+        let chained = format!("{error:#}");
+        assert!(chained.contains("systemctl enable"), "{chained}");
+        assert!(chained.contains("reload restored unit"), "{chained}");
+        assert!(chained.contains("rollback failures"), "{chained}");
+    }
+
+    #[test]
+    fn enable_failure_preserves_primary_error_as_source() {
+        // RED-then-green regression for the reviewer-flagged flattening bug:
+        // `combined_failure` used to fold the primary error into a single
+        // formatted string via `anyhow!("{primary:#}; ...")`, which drops
+        // the source chain entirely (`.source()` was `None`). An operator
+        // could no longer tell a permission-denied primary failure apart
+        // from a disk-full one once a rollback step also failed. This
+        // asserts the primary is preserved as the combined error's source.
+        let _lock = crate::runtime::test_env::lock_runtime_env();
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let prior = std::env::var_os("HOME");
+        // SAFETY: serialized by `lock_runtime_env`; restored below.
+        unsafe { std::env::set_var("HOME", tmp.path()) };
+        let mut runner = RecordingRunner {
+            fail_args: Some(vec!["--user", "enable", SYSTEMD_UNIT]),
+            fail_nth_args: Some((vec!["--user", "daemon-reload"], 2)),
+            ..RecordingRunner::default()
+        };
+        let error = install_with_runner(&sample_invocation(), &mut runner)
+            .expect_err("enable and compensating reload failure must surface");
+        // SAFETY: serialized by `lock_runtime_env`.
+        unsafe {
+            match prior {
+                Some(value) => std::env::set_var("HOME", value),
+                None => std::env::remove_var("HOME"),
+            }
+        }
+
+        let source = error
+            .source()
+            .expect("combined failure must retain a source chain");
+        let source_text = format!("{source:#}");
+        assert!(
+            source_text.contains("systemctl enable"),
+            "primary error text must survive under source(): {source_text}"
+        );
     }
 
     #[test]
