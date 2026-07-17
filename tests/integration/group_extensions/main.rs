@@ -22,6 +22,7 @@ mod support;
 mod scenario_activate_then_active_cross_thread;
 mod scenario_credential_extension_lifecycle_state_machine;
 mod scenario_extension_activation_reauth_gate;
+mod scenario_google_family_install_gate_and_shared_account;
 mod scenario_install_then_visible_cross_thread;
 mod scenario_install_unknown_extension_id_fails_safely;
 mod scenario_remove_then_absent_cross_thread;
@@ -120,6 +121,18 @@ async fn extensions_group_e2e() {
     report.record(
         "extension_activation_reauth_gate",
         scenario_extension_activation_reauth_gate::run(&g).await,
+    );
+
+    // Scenario 10: the Google-family install-and-connect journeys — a
+    // wrongly-scoped shared google account must not satisfy a calendar
+    // activation (parks a renderable google gate), bulk installs park
+    // INDEPENDENT gates, denial leaves a clean retry, and one
+    // correctly-scoped google account then unlocks calendar AND drive.
+    // Runs last: phase 4 revokes the group's gmail-scoped google account,
+    // which scenario 5's dispatch arm must consume first.
+    report.record(
+        "google_family_install_gate_and_shared_account",
+        scenario_google_family_install_gate_and_shared_account::run(&g).await,
     );
 
     report.assert_all_passed();

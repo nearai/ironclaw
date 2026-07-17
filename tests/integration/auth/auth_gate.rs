@@ -20,10 +20,10 @@
 //! tool-error class/reason distinguishes them.
 
 #[allow(dead_code)]
-#[path = "support/mod.rs"]
+#[path = "../support/mod.rs"]
 mod reborn_support;
 #[allow(dead_code)]
-#[path = "../support/mod.rs"]
+#[path = "../../support/mod.rs"]
 mod support;
 
 use ironclaw_turns::{GateRef, TurnStatus};

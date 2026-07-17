@@ -12,10 +12,10 @@
 // The support tree is large and shared; a single-test file exercises only a
 // slice of it, so suppress dead-code warnings on the includes.
 #[allow(dead_code)]
-#[path = "support/mod.rs"]
+#[path = "../support/mod.rs"]
 mod reborn_support;
 #[allow(dead_code)]
-#[path = "../support/mod.rs"]
+#[path = "../../support/mod.rs"]
 mod support;
 
 use chrono::{Duration, Utc};

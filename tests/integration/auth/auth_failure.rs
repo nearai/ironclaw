@@ -16,10 +16,10 @@
 //! All three tests gated on `any(feature = "libsql", feature = "postgres")`.
 
 #[allow(dead_code)]
-#[path = "support/mod.rs"]
+#[path = "../support/mod.rs"]
 mod reborn_support;
 #[allow(dead_code)]
-#[path = "../support/mod.rs"]
+#[path = "../../support/mod.rs"]
 mod support;
 
 #[cfg(any(feature = "libsql", feature = "postgres"))]
