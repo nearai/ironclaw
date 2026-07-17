@@ -414,10 +414,11 @@ const LOCAL_DEV: DeploymentConfig = DeploymentConfig {
 
 `build_runtime(LOCAL_DEV)` wires the ordinary `FilesystemTurnStateStore<InMemoryBackend>`,
 the ordinary approval/capability/lease substrates, and the ordinary ports — with
-these values. There is no `LocalDev*` type because there is nothing local-dev
-*implements*; it only *chooses*. The same is true of hosted and enterprise: each is a
-`DeploymentConfig` constant, and the difference between them is data a reviewer can
-read in one place, not a struct family spread across 42 files.
+these values. The same is true of hosted and enterprise: each is a `DeploymentConfig`
+constant, and the difference between them is data a reviewer can read in one place,
+not a struct family spread across 42 files. (An audit of what the `LocalDev*` code
+*actually does* — §4.4.1 — confirms this holds, with the refinement that a little of
+it is shared *behavior* the config gates rather than pure data.)
 
 The `LocalDev*` identifiers fall in three buckets:
 
@@ -453,6 +454,60 @@ rename to `NodeTraceSubmission*` only if convenient).
 Enforce it with an `ironclaw_architecture` test: **no public type name contains
 `Local`/`LocalDev`/`Hosted`/`Enterprise`.** A deployment mode is a config value that
 selects backends and policy; it is never a type the kernel or a substrate names.
+
+### 4.4.1 Audit: does `DeploymentConfig` express everything? (verified 2026-07-17)
+
+A four-cluster audit of the ~40 `LocalDev*` types (policies, stores, capability
+wiring, trust/evidence) answers this concretely: **`DeploymentConfig` expresses every
+genuine local-dev *choice*, but the `LocalDev*` family is three different things, and
+only the first is pure config data.** Reaching zero `LocalDev*` types is three moves,
+not one:
+
+1. **Already config (most of it).** The local-dev capability policy is *literally a
+   TOML file* (`local_dev_capability_policy.toml`) deserialized into the
+   `LocalDev*Policy`/`*Profile` structs — allowlists, approval widths, mount
+   references, network presets. The stores are the *same* shared types production
+   uses: `production_turn_state_store<F>` is called by **both** local-dev and prod,
+   differing only by backend (`InMemoryBackend`/disk/libSQL/Postgres). The
+   `LocalDevOverride` trust seam is **inert** (`evaluate()` returns `Ok(None)`,
+   disabled, no prod opt-in) and its data model is a package→trust allowlist. →
+   relocate into `DeploymentConfig` verbatim.
+
+2. **Mis-prefixed shared substrate — not local at all (de-prefix, don't configify).**
+   Several `LocalDev*` types are genuine *code* but nothing about them is
+   local-dev-specific; every deployment needs them, and they read authoritative state
+   and fail closed: the approval/resource `*GateEvidence` readers (they *verify a
+   loop's blocked claim* against the real stores — no synthesis, no auto-approve), the
+   `ApprovalLeaseTermsProvider` (merges static policy with per-user extension grants),
+   the auth-interaction read-model, and `LocalDevCapabilityIo` (which already has a
+   hosted twin `ProductLiveCapabilityIo`). → **de-prefix and move to the owning
+   substrate crate; shared by all deployments, not config.**
+
+3. **Genuine local-only mechanism — config-*gated*, not config-*data* (the real
+   residue).** One cluster is truly local-only behavior: the capability-port decorator
+   stack hosted never applies — synthetic product tools, host-execution surface
+   disclosure, and a mid-run surface-refresh wrapper. Behavior is code, not data. But
+   the *base* port is the identical `HostRuntimeLoopCapabilityPortFactory` prod uses;
+   the decorators are shared middleware that a **boolean in `DeploymentConfig`**
+   switches on. → one port builder, config-gated decorators, no `LocalDev*` factory.
+
+The sharpest finding sits in category 3: the "synthetic capabilities"
+(`builtin.project_create`, `skill_activate`, `result_read`, `outbound_delivery_*`)
+exist only because local-dev lacks the runtime lane that would expose these product
+operations as real host capabilities — so it bolts them on as handlers. The correct
+fix is not a config flag but Reborn's own rule (*everything goes through
+capabilities*): **make them first-party capabilities dispatched through the normal
+lane, with visibility governed by capability-surface policy.** That deletes the
+synthetic mechanism outright and makes the operations available and audited
+everywhere, not just local-dev.
+
+**Verdict.** `DeploymentConfig` expresses every *selection*; it does not — and should
+not — turn *behavior* into data. Behavior stays as shared, feature-agnostic mechanism
+the config switches on. No `LocalDev*` type needs to survive. **Security note:** the
+audit found no trust or approval bypass — the trust override is inert, provider trust
+is minted only at the non-privileged `user_trusted` tier, and the gate-evidence
+readers fail closed. Local-dev is more permissive via *policy values* (wider approval,
+wildcard network, host process), never via code that defeats a check.
 
 ### 4.5 Name and freeze the kernel boundary
 
@@ -582,9 +637,14 @@ lanes, then the `RuntimeLane` enum, then the mediator-trait collapse (§4.2).
    remain separately-typed witnesses passed as a tuple to preserve sealed
    construction guarantees (see the trust-boundary stack note,
    `docs/reborn/2026-05-11-trust-boundary-stack-note.md`)?
-3. Is `DeploymentConfig` expressive enough to encode every current
-   LocalDev/HostedDev/EnterpriseDev difference as data, or do some differences
-   genuinely need code paths?
+3. ~~Is `DeploymentConfig` expressive enough to encode every current
+   LocalDev/HostedDev/EnterpriseDev difference as data?~~ **Answered (§4.4.1):** it
+   expresses every *selection*; the `LocalDev*` code residue is not all config — part
+   de-prefixes into shared substrates, part becomes config-*gated* shared middleware,
+   and the four synthetic product-ops should be promoted to first-party capabilities.
+   Remaining sub-question: which `DeploymentConfig` fields gate the local-only
+   decorators, and does promoting the synthetic capabilities to a real lane change any
+   hosted capability surface?
 
 ---
 
