@@ -277,9 +277,28 @@ pub(super) fn status() -> Result<()> {
     status_with_runner(&mut OsServiceCommandRunner)
 }
 
+/// Secondary detail line for a non-`active` raw `ActiveState`, e.g. a
+/// crashed unit (`failed`) versus one that was simply never started
+/// (`inactive`). `None` when the raw state doesn't warrant a detail line
+/// (unit is `active`; line 1 already says `running`).
+///
+/// Chosen rule: always show the raw state when not running — simplest and
+/// most minimal; no allowlist of "interesting" states to keep in sync with
+/// systemd's ActiveState vocabulary (active/reloading/inactive/failed/
+/// activating/deactivating).
+fn systemd_status_detail(raw_state: &str) -> Option<String> {
+    let trimmed = raw_state.trim();
+    if trimmed == "active" {
+        None
+    } else {
+        Some(format!("  systemd ActiveState: {trimmed}"))
+    }
+}
+
 fn status_with_runner(runner: &mut dyn ServiceCommandRunner) -> Result<()> {
     let file = unit_path()?;
     let installed = file.exists();
+    let mut detail = None;
     let running = if installed {
         // `is-active` uses non-zero exits for ordinary inactive states.
         // `show` returns those states in stdout and reserves failure for a
@@ -294,11 +313,15 @@ fn status_with_runner(runner: &mut dyn ServiceCommandRunner) -> Result<()> {
                 SYSTEMD_UNIT,
             ]),
         )?;
+        detail = systemd_status_detail(&state);
         state.trim() == "active"
     } else {
         false
     };
     println!("Service: {}", super::status_label(installed, running));
+    if let Some(detail) = detail {
+        println!("{detail}");
+    }
     println!("Unit: {}", file.display());
     Ok(())
 }
@@ -1144,6 +1167,20 @@ mod tests {
                 "systemctl daemon-reload",
                 "systemctl start",
             ]
+        );
+    }
+
+    #[test]
+    fn status_detail_line_reports_raw_failed_state_but_omits_for_active() {
+        assert_eq!(
+            systemd_status_detail("failed\n"),
+            Some("  systemd ActiveState: failed".to_string()),
+            "a crashed unit's raw ActiveState must survive as a detail line"
+        );
+        assert_eq!(
+            systemd_status_detail("active\n"),
+            None,
+            "line 1 already says running; no redundant detail line for active"
         );
     }
 
