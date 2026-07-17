@@ -87,7 +87,7 @@ where
 {
     filesystem: Arc<ScopedFilesystem<F>>,
     scope: ResourceScope,
-    locks: Arc<crate::support::fs::host_state_records::KeyedAsyncLocks>,
+    locks: Arc<ironclaw_channel_host::host_state_records::KeyedAsyncLocks>,
 }
 
 impl<F> Clone for FilesystemSlackHostState<F>
@@ -137,7 +137,7 @@ where
                 thread_id: None,
                 invocation_id: InvocationId::new(),
             },
-            locks: Arc::new(crate::support::fs::host_state_records::KeyedAsyncLocks::default()),
+            locks: Arc::new(ironclaw_channel_host::host_state_records::KeyedAsyncLocks::default()),
         }
     }
 
@@ -152,7 +152,7 @@ where
     where
         T: DeserializeOwned,
     {
-        crate::support::fs::host_state_records::read_json_record(
+        ironclaw_channel_host::host_state_records::read_json_record(
             &self.filesystem,
             &self.scope,
             path,
@@ -170,7 +170,7 @@ where
     where
         T: Serialize,
     {
-        crate::support::fs::host_state_records::write_json_record(
+        ironclaw_channel_host::host_state_records::write_json_record(
             &self.filesystem,
             &self.scope,
             path,

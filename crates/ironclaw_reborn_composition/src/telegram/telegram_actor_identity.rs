@@ -15,7 +15,7 @@ use ironclaw_product_workflow::{
     ResolvedProductActorUser,
 };
 
-use crate::channel_identity::RebornUserIdentityLookup;
+use ironclaw_channel_host::identity::RebornUserIdentityLookup;
 
 /// Identity provider key for Telegram bindings. Deliberately the bare vendor
 /// name (never `telegram_personal`/`telegram_bot` — retired taxonomy).
@@ -172,7 +172,7 @@ mod tests {
             &self,
             provider: &str,
             provider_user_id: &str,
-        ) -> Result<Option<UserId>, crate::channel_identity::RebornUserIdentityLookupError>
+        ) -> Result<Option<UserId>, ironclaw_channel_host::identity::RebornUserIdentityLookupError>
         {
             Ok(self
                 .resolve_user_identity_with_binding_epoch(provider, provider_user_id)
@@ -186,7 +186,7 @@ mod tests {
             provider_user_id: &str,
         ) -> Result<
             Option<(UserId, Option<ExternalActorBindingEpoch>)>,
-            crate::channel_identity::RebornUserIdentityLookupError,
+            ironclaw_channel_host::identity::RebornUserIdentityLookupError,
         > {
             Ok(self
                 .bindings
@@ -207,7 +207,7 @@ mod tests {
             &self,
             provider: &str,
             user_id: &UserId,
-        ) -> Result<bool, crate::channel_identity::RebornUserIdentityLookupError> {
+        ) -> Result<bool, ironclaw_channel_host::identity::RebornUserIdentityLookupError> {
             Ok(self.bindings.lock().expect("lock").iter().any(
                 |((bound_provider, _), (bound, _))| bound_provider == provider && bound == user_id,
             ))

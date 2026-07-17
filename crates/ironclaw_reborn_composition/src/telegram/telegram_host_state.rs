@@ -21,7 +21,6 @@ use ironclaw_host_api::{
 use ironclaw_product_adapters::AdapterInstallationId;
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 
-use crate::channel_identity::{RebornUserIdentityLookup, RebornUserIdentityLookupError};
 use crate::telegram::telegram_pairing::{
     TelegramBindingError, TelegramDmTarget, TelegramDmTargetStore, TelegramPairingError,
     TelegramPairingRecord, TelegramPairingStore, TelegramUserBindingStore,
@@ -29,6 +28,7 @@ use crate::telegram::telegram_pairing::{
 use crate::telegram::telegram_setup::{
     TelegramInstallationSetup, TelegramInstallationSetupStore, TelegramSetupError,
 };
+use ironclaw_channel_host::identity::{RebornUserIdentityLookup, RebornUserIdentityLookupError};
 
 pub(crate) const TELEGRAM_INSTALLATION_SETUP_PATH: &str =
     "/tenant-shared/telegram-setup/installation.json";
@@ -45,7 +45,7 @@ where
 {
     filesystem: Arc<ScopedFilesystem<F>>,
     scope: ResourceScope,
-    locks: Arc<crate::support::fs::host_state_records::KeyedAsyncLocks>,
+    locks: Arc<ironclaw_channel_host::host_state_records::KeyedAsyncLocks>,
 }
 
 impl<F> Clone for FilesystemTelegramHostState<F>
@@ -95,7 +95,7 @@ where
                 thread_id: None,
                 invocation_id: InvocationId::new(),
             },
-            locks: Arc::new(crate::support::fs::host_state_records::KeyedAsyncLocks::default()),
+            locks: Arc::new(ironclaw_channel_host::host_state_records::KeyedAsyncLocks::default()),
         }
     }
 
@@ -110,7 +110,7 @@ where
     where
         T: DeserializeOwned,
     {
-        crate::support::fs::host_state_records::read_json_record(
+        ironclaw_channel_host::host_state_records::read_json_record(
             &self.filesystem,
             &self.scope,
             path,
@@ -128,7 +128,7 @@ where
     where
         T: Serialize,
     {
-        crate::support::fs::host_state_records::write_json_record(
+        ironclaw_channel_host::host_state_records::write_json_record(
             &self.filesystem,
             &self.scope,
             path,

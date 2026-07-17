@@ -88,14 +88,14 @@ impl SlackEventsWebhookDispatcher for NativeProductAdapterRunner {
 #[derive(Clone)]
 pub struct SlackIngressService {
     resolver: Arc<dyn SlackInstallationResolver>,
-    installation_rate_limiter: crate::host_ingress::InstallationRateLimiter,
+    installation_rate_limiter: ironclaw_channel_host::host_ingress::InstallationRateLimiter,
 }
 
 impl SlackIngressService {
     pub fn new(resolver: Arc<dyn SlackInstallationResolver>) -> Self {
         Self::with_rate_limit_config(
             resolver,
-            crate::host_ingress::InstallationRateLimitConfig::new(
+            ironclaw_channel_host::host_ingress::InstallationRateLimitConfig::new(
                 super::slack_serve::installation::SLACK_INSTALLATION_MAX_REQUESTS,
                 super::slack_serve::installation::SLACK_INSTALLATION_RATE_WINDOW,
             ),
@@ -104,13 +104,12 @@ impl SlackIngressService {
 
     pub(crate) fn with_rate_limit_config(
         resolver: Arc<dyn SlackInstallationResolver>,
-        rate_limit: crate::host_ingress::InstallationRateLimitConfig,
+        rate_limit: ironclaw_channel_host::host_ingress::InstallationRateLimitConfig,
     ) -> Self {
         Self {
             resolver,
-            installation_rate_limiter: crate::host_ingress::InstallationRateLimiter::new(
-                rate_limit,
-            ),
+            installation_rate_limiter:
+                ironclaw_channel_host::host_ingress::InstallationRateLimiter::new(rate_limit),
         }
     }
 
@@ -251,7 +250,7 @@ pub fn slack_events_route_descriptors() -> Vec<IngressRouteDescriptor> {
 /// compile-time constant, so either is a build-time invariant violation,
 /// surfaced at startup.
 static SLACK_INGRESS_DESCRIPTORS: LazyLock<SlackIngressDescriptors> = LazyLock::new(|| {
-    let descriptors = crate::host_ingress::bundled_host_ingress_descriptors(
+    let descriptors = ironclaw_channel_host::host_ingress::bundled_host_ingress_descriptors(
         crate::extension_host::available_extensions::slack_bot_manifest_toml(),
     )
     .unwrap_or_else(|error| {
@@ -270,10 +269,11 @@ fn bundled_slack_post_descriptor(
     descriptors: &[IngressRouteDescriptor],
     route_id: &str,
 ) -> IngressRouteDescriptor {
-    let descriptor = crate::host_ingress::descriptor_for_route(descriptors, route_id)
-        .unwrap_or_else(|error| {
-            panic!("bundled Slack manifest must declare host-ingress route {route_id}: {error}")
-        });
+    let descriptor =
+        ironclaw_channel_host::host_ingress::descriptor_for_route(descriptors, route_id)
+            .unwrap_or_else(|error| {
+                panic!("bundled Slack manifest must declare host-ingress route {route_id}: {error}")
+            });
     // The mount functions wire their handlers with `post(...)`; fail closed at
     // projection time if the manifest ever declares another method.
     if descriptor.method() != NetworkMethod::Post {
@@ -306,9 +306,9 @@ fn ingress_error_response(error: SlackIngressError) -> Response {
                 error = %error,
                 "Slack Events API envelope metadata parse failed"
             );
-            crate::host_ingress::webhook_error_response(
+            ironclaw_channel_host::host_ingress::webhook_error_response(
                 StatusCode::BAD_REQUEST,
-                crate::host_ingress::WebhookErrorCategory::MalformedPayload,
+                ironclaw_channel_host::host_ingress::WebhookErrorCategory::MalformedPayload,
             )
         }
         SlackIngressError::InstallationNotFound => {
@@ -317,9 +317,9 @@ fn ingress_error_response(error: SlackIngressError) -> Response {
                 reason = "not_found",
                 "Slack Events API installation resolution failed"
             );
-            crate::host_ingress::webhook_error_response(
+            ironclaw_channel_host::host_ingress::webhook_error_response(
                 StatusCode::UNAUTHORIZED,
-                crate::host_ingress::WebhookErrorCategory::Authentication,
+                ironclaw_channel_host::host_ingress::WebhookErrorCategory::Authentication,
             )
         }
         SlackIngressError::AmbiguousInstallation => {
@@ -328,9 +328,9 @@ fn ingress_error_response(error: SlackIngressError) -> Response {
                 reason = "ambiguous",
                 "Slack Events API installation resolution failed"
             );
-            crate::host_ingress::webhook_error_response(
+            ironclaw_channel_host::host_ingress::webhook_error_response(
                 StatusCode::UNAUTHORIZED,
-                crate::host_ingress::WebhookErrorCategory::Authentication,
+                ironclaw_channel_host::host_ingress::WebhookErrorCategory::Authentication,
             )
         }
         SlackIngressError::InstallationRateLimited {
@@ -343,9 +343,9 @@ fn ingress_error_response(error: SlackIngressError) -> Response {
                 adapter_installation_id = %adapter_installation_id,
                 "Slack Events API installation rate limit exceeded"
             );
-            crate::host_ingress::webhook_error_response(
+            ironclaw_channel_host::host_ingress::webhook_error_response(
                 StatusCode::TOO_MANY_REQUESTS,
-                crate::host_ingress::WebhookErrorCategory::Capacity,
+                ironclaw_channel_host::host_ingress::WebhookErrorCategory::Capacity,
             )
         }
         SlackIngressError::ConversationStoreUnavailable { reason } => {
@@ -356,23 +356,23 @@ fn ingress_error_response(error: SlackIngressError) -> Response {
             );
             // Storage/infra outage, not an auth failure: 503 so Slack retries
             // delivery instead of treating the installation as unauthorized.
-            crate::host_ingress::webhook_error_response(
+            ironclaw_channel_host::host_ingress::webhook_error_response(
                 StatusCode::SERVICE_UNAVAILABLE,
-                crate::host_ingress::WebhookErrorCategory::TemporarilyUnavailable,
+                ironclaw_channel_host::host_ingress::WebhookErrorCategory::TemporarilyUnavailable,
             )
         }
     }
 }
 
 fn runner_error_response(error: RunnerError) -> Response {
-    let (status, category) = crate::host_ingress::runner_error_status(&error);
+    let (status, category) = ironclaw_channel_host::host_ingress::runner_error_status(&error);
     tracing::debug!(
         target = "ironclaw::reborn::slack_events",
         status = status.as_u16(),
         error = %error,
         "Slack Events API webhook rejected"
     );
-    crate::host_ingress::webhook_error_response(status, category)
+    ironclaw_channel_host::host_ingress::webhook_error_response(status, category)
 }
 
 #[cfg(test)]

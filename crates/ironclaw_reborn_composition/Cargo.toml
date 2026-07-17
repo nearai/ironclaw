@@ -75,6 +75,7 @@ slack-v2-host-beta = [
     "webui-v2-beta",
     "dep:ironclaw_slack_v2_adapter",
     "dep:ironclaw_wasm_product_adapters",
+    "ironclaw_channel_host/webhook-serve",
     "ironclaw_product_workflow/storage",
 ]
 # Host-mounted Telegram Bot API webhook ingress + pairing for the single
@@ -84,6 +85,7 @@ telegram-v2-host-beta = [
     "webui-v2-beta",
     "dep:ironclaw_telegram_v2_adapter",
     "dep:ironclaw_wasm_product_adapters",
+    "ironclaw_channel_host/webhook-serve",
     "ironclaw_product_workflow/storage",
 ]
 openai-compat-beta = [
@@ -122,6 +124,7 @@ chrono = "0.4"
 deadpool-postgres = { version = "0.14", optional = true }
 futures = "0.3"
 ironclaw_auth = { path = "../ironclaw_auth" }
+ironclaw_channel_host = { path = "../ironclaw_channel_host" }
 ironclaw_common = { path = "../ironclaw_common" }
 ironclaw_capabilities = { path = "../ironclaw_capabilities" }
 ironclaw_approvals = { path = "../ironclaw_approvals" }

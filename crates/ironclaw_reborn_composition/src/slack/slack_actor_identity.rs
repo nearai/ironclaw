@@ -12,7 +12,9 @@ use ironclaw_product_workflow::{
 };
 use ironclaw_slack_v2_adapter::{SLACK_USER_ACTOR_KIND, SLACK_V2_ADAPTER_ID};
 
-pub use crate::channel_identity::{RebornUserIdentityLookup, RebornUserIdentityLookupError};
+pub use ironclaw_channel_host::identity::{
+    RebornUserIdentityLookup, RebornUserIdentityLookupError,
+};
 
 pub(crate) const SLACK_IDENTITY_PROVIDER: &str = "slack";
 

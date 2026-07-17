@@ -29,7 +29,6 @@ mod admin_user_directory;
 mod approval_test_support;
 mod automation;
 mod blocked_auth_resume;
-mod channel_identity;
 mod error;
 mod extension_host;
 mod factory;
@@ -56,8 +55,6 @@ pub use product_auth::api::auth_prompt::{
 };
 #[cfg(any(feature = "slack-v2-host-beta", feature = "telegram-v2-host-beta"))]
 mod delivered_gate_routing;
-#[cfg(any(feature = "slack-v2-host-beta", feature = "telegram-v2-host-beta"))]
-mod host_ingress;
 mod readiness;
 mod retry_disposition;
 mod root;

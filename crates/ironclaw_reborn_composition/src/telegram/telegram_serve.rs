@@ -39,7 +39,6 @@ use secrecy::ExposeSecret;
 use thiserror::Error;
 use tokio::sync::Mutex;
 
-use crate::channel_identity::RebornUserIdentityLookup;
 use crate::telegram::telegram_actor_identity::TELEGRAM_V2_ADAPTER_ID;
 use crate::telegram::telegram_dispatch::TelegramInboundPreRouter;
 use crate::telegram::telegram_pairing::TelegramPairingService;
@@ -48,6 +47,7 @@ use crate::telegram::telegram_setup::{
     TelegramSetupService,
 };
 use crate::webui::webui_serve::{PublicRouteDrain, PublicRouteMount};
+use ironclaw_channel_host::identity::RebornUserIdentityLookup;
 
 /// `/webhooks/extensions/telegram/updates` — aliases the setup-pipeline
 /// constant so the path `setWebhook` registers and the path this module
@@ -524,14 +524,14 @@ impl DynamicTelegramDispatcherLifecycle {
 #[derive(Clone)]
 pub(crate) struct TelegramIngressService {
     resolver: Arc<dyn TelegramInstallationResolver>,
-    installation_rate_limiter: crate::host_ingress::InstallationRateLimiter,
+    installation_rate_limiter: ironclaw_channel_host::host_ingress::InstallationRateLimiter,
 }
 
 impl TelegramIngressService {
     pub(crate) fn new(resolver: Arc<dyn TelegramInstallationResolver>) -> Self {
         Self::with_rate_limit_config(
             resolver,
-            crate::host_ingress::InstallationRateLimitConfig::new(
+            ironclaw_channel_host::host_ingress::InstallationRateLimitConfig::new(
                 TELEGRAM_INSTALLATION_MAX_REQUESTS,
                 TELEGRAM_INSTALLATION_RATE_WINDOW,
             ),
@@ -540,13 +540,12 @@ impl TelegramIngressService {
 
     pub(crate) fn with_rate_limit_config(
         resolver: Arc<dyn TelegramInstallationResolver>,
-        rate_limit: crate::host_ingress::InstallationRateLimitConfig,
+        rate_limit: ironclaw_channel_host::host_ingress::InstallationRateLimitConfig,
     ) -> Self {
         Self {
             resolver,
-            installation_rate_limiter: crate::host_ingress::InstallationRateLimiter::new(
-                rate_limit,
-            ),
+            installation_rate_limiter:
+                ironclaw_channel_host::host_ingress::InstallationRateLimiter::new(rate_limit),
         }
     }
 
@@ -670,7 +669,7 @@ pub(crate) fn telegram_updates_route_descriptors() -> Vec<IngressRouteDescriptor
 /// non-POST method: `TELEGRAM_MANIFEST` is a compile-time constant, so either
 /// is a build-time invariant violation, surfaced at startup.
 static TELEGRAM_INGRESS_DESCRIPTORS: LazyLock<TelegramIngressDescriptors> = LazyLock::new(|| {
-    let descriptors = crate::host_ingress::bundled_host_ingress_descriptors(
+    let descriptors = ironclaw_channel_host::host_ingress::bundled_host_ingress_descriptors(
         crate::extension_host::available_extensions::telegram_manifest_toml(),
     )
     .unwrap_or_else(|error| {
@@ -689,10 +688,13 @@ fn bundled_telegram_post_descriptor(
     descriptors: &[IngressRouteDescriptor],
     route_id: &str,
 ) -> IngressRouteDescriptor {
-    let descriptor = crate::host_ingress::descriptor_for_route(descriptors, route_id)
-        .unwrap_or_else(|error| {
-            panic!("bundled Telegram manifest must declare host-ingress route {route_id}: {error}")
-        });
+    let descriptor =
+        ironclaw_channel_host::host_ingress::descriptor_for_route(descriptors, route_id)
+            .unwrap_or_else(|error| {
+                panic!(
+                    "bundled Telegram manifest must declare host-ingress route {route_id}: {error}"
+                )
+            });
     // The mount function wires its handler with `post(...)`; fail closed at
     // projection time if the manifest ever declares another method.
     if descriptor.method() != NetworkMethod::Post {
@@ -722,9 +724,9 @@ fn ingress_error_response(error: TelegramIngressError) -> Response {
                 reason = "not_found",
                 "Telegram updates installation resolution failed"
             );
-            crate::host_ingress::webhook_error_response(
+            ironclaw_channel_host::host_ingress::webhook_error_response(
                 StatusCode::UNAUTHORIZED,
-                crate::host_ingress::WebhookErrorCategory::Authentication,
+                ironclaw_channel_host::host_ingress::WebhookErrorCategory::Authentication,
             )
         }
         TelegramIngressError::TemporarilyUnavailable => {
@@ -733,9 +735,9 @@ fn ingress_error_response(error: TelegramIngressError) -> Response {
                 reason = "unavailable",
                 "Telegram updates installation resolution temporarily unavailable"
             );
-            crate::host_ingress::webhook_error_response(
+            ironclaw_channel_host::host_ingress::webhook_error_response(
                 StatusCode::SERVICE_UNAVAILABLE,
-                crate::host_ingress::WebhookErrorCategory::TemporarilyUnavailable,
+                ironclaw_channel_host::host_ingress::WebhookErrorCategory::TemporarilyUnavailable,
             )
         }
         TelegramIngressError::InstallationRateLimited {
@@ -748,23 +750,23 @@ fn ingress_error_response(error: TelegramIngressError) -> Response {
                 adapter_installation_id = %adapter_installation_id,
                 "Telegram updates installation rate limit exceeded"
             );
-            crate::host_ingress::webhook_error_response(
+            ironclaw_channel_host::host_ingress::webhook_error_response(
                 StatusCode::TOO_MANY_REQUESTS,
-                crate::host_ingress::WebhookErrorCategory::Capacity,
+                ironclaw_channel_host::host_ingress::WebhookErrorCategory::Capacity,
             )
         }
     }
 }
 
 fn runner_error_response(error: RunnerError) -> Response {
-    let (status, category) = crate::host_ingress::runner_error_status(&error);
+    let (status, category) = ironclaw_channel_host::host_ingress::runner_error_status(&error);
     tracing::debug!(
         target = "ironclaw::reborn::telegram_updates",
         status = status.as_u16(),
         error = %error,
         "Telegram updates webhook rejected"
     );
-    crate::host_ingress::webhook_error_response(status, category)
+    ironclaw_channel_host::host_ingress::webhook_error_response(status, category)
 }
 
 fn map_setup_error_to_ingress_unavailable(
@@ -1499,7 +1501,7 @@ mod tests {
         let resolver = Arc::new(FakeTelegramResolver::new(Arc::new(dispatcher)));
         let state = TelegramUpdatesRouteState::new(TelegramIngressService::with_rate_limit_config(
             resolver,
-            crate::host_ingress::InstallationRateLimitConfig::new(
+            ironclaw_channel_host::host_ingress::InstallationRateLimitConfig::new(
                 NonZeroU32::new(1).expect("nonzero"),
                 Duration::from_secs(60),
             ),

@@ -36,7 +36,6 @@ use ironclaw_wasm_product_adapters::{
 use serde::Deserialize;
 use tokio::sync::Mutex;
 
-use crate::channel_identity::RebornUserIdentityLookup;
 use crate::telegram::telegram_actor_identity::{
     TELEGRAM_IDENTITY_PROVIDER, telegram_user_identity_provider_user_id,
 };
@@ -46,6 +45,7 @@ use crate::telegram::telegram_pairing::{
 };
 use crate::telegram::telegram_serve::TelegramUpdatesWebhookDispatcher;
 use crate::telegram::telegram_setup::TelegramSetupService;
+use ironclaw_channel_host::identity::RebornUserIdentityLookup;
 
 const TRACING_TARGET: &str = "ironclaw::reborn::telegram_updates";
 const PRIVATE_CHAT_KIND: &str = "private";
@@ -395,7 +395,6 @@ pub(crate) mod test_fixtures {
     use secrecy::SecretString;
 
     use super::*;
-    use crate::channel_identity::RebornUserIdentityLookupError;
     use crate::product_auth::api::auth::RebornAuthContinuationDispatcher;
     use crate::telegram::telegram_bot_api::{TelegramBotApiError, TelegramBotIdentity};
     use crate::telegram::telegram_pairing::{
@@ -406,6 +405,7 @@ pub(crate) mod test_fixtures {
         TelegramInstallationSetup, TelegramInstallationSetupStore, TelegramInstallationSetupUpdate,
         TelegramSetupError,
     };
+    use ironclaw_channel_host::identity::RebornUserIdentityLookupError;
 
     pub(crate) const FIXTURE_BOT_ID: i64 = 4242;
     pub(crate) const FIXTURE_BOT_USERNAME: &str = "ironclaw_qa_bot";

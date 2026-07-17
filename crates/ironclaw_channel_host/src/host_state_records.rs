@@ -17,12 +17,12 @@ use serde::{Serialize, de::DeserializeOwned};
 /// Weak-map of per-key `tokio::sync::Mutex` locks: entries evaporate once the
 /// last holder drops, so the map stays bounded by live keys.
 #[derive(Debug, Default)]
-pub(crate) struct KeyedAsyncLocks {
+pub struct KeyedAsyncLocks {
     locks: Mutex<HashMap<String, Weak<tokio::sync::Mutex<()>>>>,
 }
 
 impl KeyedAsyncLocks {
-    pub(crate) fn lock_for(&self, key: String) -> Arc<tokio::sync::Mutex<()>> {
+    pub fn lock_for(&self, key: String) -> Arc<tokio::sync::Mutex<()>> {
         let mut locks = self
             .locks
             .lock()
@@ -37,7 +37,7 @@ impl KeyedAsyncLocks {
     }
 }
 
-pub(crate) async fn read_json_record<F, T>(
+pub async fn read_json_record<F, T>(
     filesystem: &ScopedFilesystem<F>,
     scope: &ResourceScope,
     path: &ScopedPath,
@@ -59,7 +59,7 @@ where
     Ok(Some((value, versioned.version)))
 }
 
-pub(crate) async fn write_json_record<F, T>(
+pub async fn write_json_record<F, T>(
     filesystem: &ScopedFilesystem<F>,
     scope: &ResourceScope,
     path: &ScopedPath,

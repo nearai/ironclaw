@@ -2,9 +2,10 @@
 //!
 //! Maps a channel provider identity (`slack`, `telegram`, …) plus an
 //! installation-scoped provider user id to a Reborn [`UserId`]. Originally
-//! Slack-owned; moved here unchanged so every channel host (each behind its
-//! own cargo feature) can consume it without cross-feature coupling. The
-//! Slack module re-exports these names for its existing consumers.
+//! Slack-owned inside composition; moved here unchanged so every channel
+//! host — composition's Slack module and standalone channel host crates —
+//! consumes one definition. Composition's Slack module re-exports these
+//! names for its existing consumers.
 
 use ironclaw_conversations::ExternalActorBindingEpoch;
 use ironclaw_host_api::UserId;

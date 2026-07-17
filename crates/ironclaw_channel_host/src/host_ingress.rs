@@ -18,15 +18,29 @@
 //! `required_credentials`);
 //! this module only projects the descriptors and selects one by id.
 
-use ironclaw_extensions::{ExtensionManifestRecord, ManifestSource};
+use ironclaw_extensions::{
+    ExtensionManifestRecord, HostApiContractRegistry, ManifestSource, ManifestV2Error,
+};
 use ironclaw_host_api::ingress::IngressRouteDescriptor;
 use ironclaw_product_adapter_registry::product_adapter_sections;
 use thiserror::Error;
 
-use crate::extension_host::host_api_contracts::product_extension_host_api_contract_registry;
+/// The host-API contract registry every product-extension manifest parse uses:
+/// the default host ports plus the product-adapter section contract. Shared by
+/// bundled-extension installation and serve-time ingress projection so the two
+/// paths can never diverge on parsing context.
+pub fn product_extension_host_api_contract_registry()
+-> Result<HostApiContractRegistry, ManifestV2Error> {
+    let mut registry = ironclaw_host_runtime::default_host_api_contract_registry()?;
+    ironclaw_product_adapter_registry::register_product_adapter_host_api_contract(&mut registry)
+        .map_err(|error| ManifestV2Error::Invalid {
+            reason: format!("product adapter host API contract registration failed: {error}"),
+        })?;
+    Ok(registry)
+}
 
 #[derive(Debug, Error)]
-pub(crate) enum HostIngressProjectionError {
+pub enum HostIngressProjectionError {
     #[error("bundled manifest failed to project host-ingress routes: {reason}")]
     Projection { reason: String },
     #[error("bundled manifest declares no host-ingress route {route_id}")]
@@ -42,7 +56,7 @@ pub(crate) enum HostIngressProjectionError {
 /// `webhook_signature`), and by the registry for ingress credential coherence.
 /// Intended for compile-time bundled manifests, so callers may treat a failure
 /// as a startup invariant violation.
-pub(crate) fn bundled_host_ingress_descriptors(
+pub fn bundled_host_ingress_descriptors(
     manifest_toml: &str,
 ) -> Result<Vec<IngressRouteDescriptor>, HostIngressProjectionError> {
     let host_ports = ironclaw_host_runtime::default_host_port_catalog().map_err(projection)?;
@@ -64,7 +78,7 @@ pub(crate) fn bundled_host_ingress_descriptors(
 }
 
 /// Select the descriptor for `route_id` from an already-projected set.
-pub(crate) fn descriptor_for_route(
+pub fn descriptor_for_route(
     descriptors: &[IngressRouteDescriptor],
     route_id: &str,
 ) -> Result<IngressRouteDescriptor, HostIngressProjectionError> {
@@ -87,16 +101,16 @@ fn projection(error: impl std::fmt::Display) -> HostIngressProjectionError {
 /// keyed on `(tenant, adapter installation)`. Shared by every channel host;
 /// serve layers map [`InstallationRateExceeded`] onto their own sanitized
 /// ingress error shapes.
-#[cfg(any(feature = "slack-v2-host-beta", feature = "telegram-v2-host-beta"))]
+#[cfg(feature = "webhook-serve")]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct InstallationRateLimitConfig {
-    pub(crate) max_requests: std::num::NonZeroU32,
-    pub(crate) window: std::time::Duration,
+pub struct InstallationRateLimitConfig {
+    pub max_requests: std::num::NonZeroU32,
+    pub window: std::time::Duration,
 }
 
-#[cfg(any(feature = "slack-v2-host-beta", feature = "telegram-v2-host-beta"))]
+#[cfg(feature = "webhook-serve")]
 impl InstallationRateLimitConfig {
-    pub(crate) fn new(max_requests: std::num::NonZeroU32, window: std::time::Duration) -> Self {
+    pub fn new(max_requests: std::num::NonZeroU32, window: std::time::Duration) -> Self {
         Self {
             max_requests,
             window,
@@ -104,33 +118,33 @@ impl InstallationRateLimitConfig {
     }
 }
 
-#[cfg(any(feature = "slack-v2-host-beta", feature = "telegram-v2-host-beta"))]
+#[cfg(feature = "webhook-serve")]
 /// The limiter refused a request for this installation within the window.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct InstallationRateExceeded {
-    pub(crate) tenant_id: ironclaw_host_api::TenantId,
-    pub(crate) adapter_installation_id: ironclaw_product_adapters::AdapterInstallationId,
+pub struct InstallationRateExceeded {
+    pub tenant_id: ironclaw_host_api::TenantId,
+    pub adapter_installation_id: ironclaw_product_adapters::AdapterInstallationId,
 }
 
-#[cfg(any(feature = "slack-v2-host-beta", feature = "telegram-v2-host-beta"))]
+#[cfg(feature = "webhook-serve")]
 #[derive(Clone)]
-pub(crate) struct InstallationRateLimiter {
+pub struct InstallationRateLimiter {
     config: InstallationRateLimitConfig,
     buckets: std::sync::Arc<
         std::sync::Mutex<std::collections::HashMap<InstallationRateLimitKey, RateLimitBucket>>,
     >,
 }
 
-#[cfg(any(feature = "slack-v2-host-beta", feature = "telegram-v2-host-beta"))]
+#[cfg(feature = "webhook-serve")]
 impl InstallationRateLimiter {
-    pub(crate) fn new(config: InstallationRateLimitConfig) -> Self {
+    pub fn new(config: InstallationRateLimitConfig) -> Self {
         Self {
             config,
             buckets: std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
         }
     }
 
-    pub(crate) fn check(
+    pub fn check(
         &self,
         tenant_id: &ironclaw_host_api::TenantId,
         adapter_installation_id: &ironclaw_product_adapters::AdapterInstallationId,
@@ -174,7 +188,7 @@ impl InstallationRateLimiter {
     }
 }
 
-#[cfg(any(feature = "slack-v2-host-beta", feature = "telegram-v2-host-beta"))]
+#[cfg(feature = "webhook-serve")]
 impl std::fmt::Debug for InstallationRateLimiter {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter
@@ -184,21 +198,21 @@ impl std::fmt::Debug for InstallationRateLimiter {
     }
 }
 
-#[cfg(any(feature = "slack-v2-host-beta", feature = "telegram-v2-host-beta"))]
+#[cfg(feature = "webhook-serve")]
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 struct InstallationRateLimitKey {
     tenant_id: ironclaw_host_api::TenantId,
     adapter_installation_id: ironclaw_product_adapters::AdapterInstallationId,
 }
 
-#[cfg(any(feature = "slack-v2-host-beta", feature = "telegram-v2-host-beta"))]
+#[cfg(feature = "webhook-serve")]
 #[derive(Debug, Clone)]
 struct RateLimitBucket {
     last_refilled_at: std::time::Instant,
     tokens: f64,
 }
 
-#[cfg(any(feature = "slack-v2-host-beta", feature = "telegram-v2-host-beta"))]
+#[cfg(feature = "webhook-serve")]
 impl RateLimitBucket {
     fn full(now: std::time::Instant, config: &InstallationRateLimitConfig) -> Self {
         Self {
@@ -231,13 +245,13 @@ impl RateLimitBucket {
     }
 }
 
-#[cfg(any(feature = "slack-v2-host-beta", feature = "telegram-v2-host-beta"))]
+#[cfg(feature = "webhook-serve")]
 /// Sanitized webhook error vocabulary shared by every channel host's public
 /// ingress route: the response body is `{"error": <category>}` and never
 /// carries provider or internal detail.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
 #[serde(rename_all = "snake_case")]
-pub(crate) enum WebhookErrorCategory {
+pub enum WebhookErrorCategory {
     Authentication,
     Capacity,
     MalformedPayload,
@@ -245,14 +259,14 @@ pub(crate) enum WebhookErrorCategory {
     TemporarilyUnavailable,
 }
 
-#[cfg(any(feature = "slack-v2-host-beta", feature = "telegram-v2-host-beta"))]
+#[cfg(feature = "webhook-serve")]
 #[derive(Debug, serde::Serialize)]
 struct WebhookErrorBody {
     error: WebhookErrorCategory,
 }
 
-#[cfg(any(feature = "slack-v2-host-beta", feature = "telegram-v2-host-beta"))]
-pub(crate) fn webhook_error_response(
+#[cfg(feature = "webhook-serve")]
+pub fn webhook_error_response(
     status: axum::http::StatusCode,
     category: WebhookErrorCategory,
 ) -> axum::response::Response {
@@ -260,12 +274,12 @@ pub(crate) fn webhook_error_response(
     (status, axum::Json(WebhookErrorBody { error: category })).into_response()
 }
 
-#[cfg(any(feature = "slack-v2-host-beta", feature = "telegram-v2-host-beta"))]
+#[cfg(feature = "webhook-serve")]
 /// The shared `RunnerError` → HTTP mapping every channel webhook uses:
 /// authentication failures 401, capacity 429, retryable adapter/workflow
 /// faults 503, everything else a sanitized 400. Serve layers add their own
 /// per-target debug diagnostics around it.
-pub(crate) fn runner_error_status(
+pub fn runner_error_status(
     error: &ironclaw_wasm_product_adapters::RunnerError,
 ) -> (axum::http::StatusCode, WebhookErrorCategory) {
     use axum::http::StatusCode;
@@ -294,10 +308,7 @@ pub(crate) fn runner_error_status(
     }
 }
 
-#[cfg(all(
-    test,
-    any(feature = "slack-v2-host-beta", feature = "telegram-v2-host-beta")
-))]
+#[cfg(all(test, feature = "webhook-serve"))]
 mod installation_rate_limiter_tests {
     use super::*;
 

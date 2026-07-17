@@ -58,69 +58,13 @@ use crate::product_auth::api::auth_prompt::{
 };
 use crate::{AuthChallengeProvider, BlockedAuthFlowCanceller};
 
-/// Per-channel protocol details the adapter-generic delivery machinery needs:
-/// stored reply-target ref decoding, personal-DM classification,
-/// render-response tracking, and the lightweight status/notification messages
-/// posted around the adapter render path. Each channel host supplies its own
-/// implementation when constructing [`FinalReplyDeliveryServices`] — this
-/// module never keys on a concrete channel.
-#[async_trait]
-pub trait ChannelDeliveryProtocol: Send + Sync {
-    /// Decode a stored reply-target binding ref into
-    /// `(conversation_id, space_id)`. `None` for a ref this channel does not
-    /// own — the formats are channel-exclusive, so a foreign ref fails closed.
-    fn conversation_id_from_reply_target_binding_ref(
-        &self,
-        target: &ReplyTargetBindingRef,
-    ) -> Option<(String, Option<String>)>;
-
-    /// `true` iff the ref is a personal direct-message target for this
-    /// channel. Backs the OAuth-DM delivery rule.
-    fn reply_target_is_personal_dm(&self, target: &ReplyTargetBindingRef) -> bool;
-
-    /// Sniff an adapter-rendered egress response for a posted-message handle
-    /// (used to later delete placeholder/working messages). `None` when the
-    /// response is not a trackable post.
-    fn posted_message_from_render_response(
-        &self,
-        path: &str,
-        body: &[u8],
-    ) -> Option<PostedChannelMessage>;
-
-    /// First-contact greeting for a sender who has not connected their
-    /// account (fixed, host-authored text only — no agent runs).
-    fn connect_nudge_message(&self) -> &'static str;
-
-    /// Whether an external conversation id denotes a 1:1 direct message in
-    /// this channel's id scheme (Slack: `D…` channel ids; Telegram: positive
-    /// private-chat ids). Gates host-authored nudges out of shared surfaces.
-    fn is_direct_message_conversation(&self, conversation_id: &str) -> bool;
-
-    /// Post a lightweight host-authored status/notification message to the
-    /// conversation, outside the adapter render path.
-    async fn post_status_message(
-        &self,
-        egress: &dyn ProtocolHttpEgress,
-        conversation: &ExternalConversationRef,
-        text: &str,
-    ) -> Result<PostedChannelMessage, FinalReplyDeliveryError>;
-
-    /// Delete a previously posted status message. Best-effort; channels
-    /// without deletion return `Ok(())`.
-    async fn delete_status_message(
-        &self,
-        egress: &dyn ProtocolHttpEgress,
-        message: &PostedChannelMessage,
-    ) -> Result<(), FinalReplyDeliveryError>;
-}
-
-/// Channel-opaque handle to a posted status message (conversation plus the
-/// channel's message reference, e.g. Slack's `ts`).
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct PostedChannelMessage {
-    pub conversation_id: String,
-    pub message_ref: String,
-}
+// The per-channel protocol seam this machinery is generic over lives in
+// `ironclaw_channel_host` so channel host crates can implement it without a
+// composition dependency; re-exported here so composition-internal consumers
+// keep one canonical path to the delivery module's vocabulary.
+pub(crate) use ironclaw_channel_host::delivery_protocol::{
+    ChannelDeliveryProtocol, FinalReplyDeliveryError, PostedChannelMessage,
+};
 
 const MAX_RUN_POLL_INTERVAL: Duration = Duration::from_secs(5);
 const DEFAULT_TRIGGERED_RUN_DELIVERY_MAX_WAIT: Duration = Duration::from_secs(30 * 60);
@@ -1462,33 +1406,6 @@ impl ImmediateAckWorkflowObserver for FinalReplyDeliveryObserver {
         self.post_connect_nudge_if_unbound_user_message(&envelope, &ack)
             .await;
     }
-}
-
-#[derive(Debug, thiserror::Error)]
-pub enum FinalReplyDeliveryError {
-    #[error("workflow binding failed: {0}")]
-    Workflow(#[from] ProductWorkflowError),
-    #[error("turn coordinator failed: {0}")]
-    Turn(#[from] ironclaw_turns::TurnError),
-    #[error("thread service failed: {0}")]
-    Thread(#[from] ironclaw_threads::SessionThreadError),
-    #[error("outbound delivery failed: {0}")]
-    Outbound(#[from] ironclaw_product_workflow::ProductOutboundDeliveryError),
-    #[error("adapter failed: {0}")]
-    Adapter(#[from] ProductAdapterError),
-    #[error("channel status-message helper failed: {reason}")]
-    StatusMessage { reason: String },
-    #[error("outbound policy failed: {0}")]
-    OutboundPolicy(#[from] OutboundError),
-    #[error("run {run_id} did not finish before the channel delivery timeout")]
-    RunWaitTimedOut { run_id: TurnRunId },
-    /// Timeout after at least one blocked-state notification (approval/auth
-    /// prompt) was already delivered. The user is not in silence, so no
-    /// additional feedback message is needed.
-    #[error("run {run_id} did not reach a terminal state after delivering a blocked notification")]
-    RunWaitTimedOutAfterNotification { run_id: TurnRunId },
-    #[error("invalid projection ref: {reason}")]
-    InvalidProjectionRef { reason: String },
 }
 
 /// Fail closed when a delivery that must reach a personal DM (e.g. carries an

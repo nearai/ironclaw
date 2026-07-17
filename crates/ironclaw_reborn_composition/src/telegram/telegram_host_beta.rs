@@ -55,7 +55,6 @@ use thiserror::Error;
 use tokio::sync::Mutex;
 
 use crate::RebornRuntime;
-use crate::channel_identity::RebornUserIdentityLookup;
 use crate::extension_host::extension_lifecycle::{
     ExtensionActivationMode, RebornLocalExtensionManagementPort,
 };
@@ -94,6 +93,7 @@ use crate::telegram::telegram_setup::{
     TelegramInstallationSetup, TelegramInstallationSetupStore, TelegramSetupService,
 };
 use crate::webui::webui_serve::{ProtectedRouteMount, PublicRouteMount};
+use ironclaw_channel_host::identity::RebornUserIdentityLookup;
 
 const TELEGRAM_IDEMPOTENCY_LEDGER_SETTLED_LIMIT: usize = 10_000;
 const TELEGRAM_IDEMPOTENCY_LEDGER_PRUNE_INTERVAL: usize = 1_000;

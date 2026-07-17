@@ -12,58 +12,22 @@ use ironclaw_outbound::{
 };
 use ironclaw_product_workflow::{
     OutboundPreferencesProductFacade, RebornOutboundDeliveryModality,
-    RebornOutboundDeliveryTargetCapabilities, RebornOutboundDeliveryTargetId,
-    RebornOutboundDeliveryTargetListResponse, RebornOutboundDeliveryTargetOption,
-    RebornOutboundDeliveryTargetStatus, RebornOutboundDeliveryTargetSummary,
-    RebornOutboundPreferencesResponse, RebornServicesError, RebornServicesErrorCode,
-    RebornServicesErrorKind, RebornSetOutboundPreferencesRequest, WebUiAuthenticatedCaller,
+    RebornOutboundDeliveryTargetId, RebornOutboundDeliveryTargetListResponse,
+    RebornOutboundDeliveryTargetOption, RebornOutboundDeliveryTargetStatus,
+    RebornOutboundDeliveryTargetSummary, RebornOutboundPreferencesResponse, RebornServicesError,
+    RebornServicesErrorCode, RebornServicesErrorKind, RebornSetOutboundPreferencesRequest,
+    WebUiAuthenticatedCaller,
 };
 use ironclaw_turns::ReplyTargetBindingRef;
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct OutboundDeliveryTargetEntry {
-    pub(crate) summary: RebornOutboundDeliveryTargetSummary,
-    pub(crate) capabilities: RebornOutboundDeliveryTargetCapabilities,
-    pub(crate) reply_target_binding_ref: ReplyTargetBindingRef,
-}
-
-#[async_trait]
-pub(crate) trait OutboundDeliveryTargetProvider: Send + Sync {
-    async fn list_outbound_delivery_targets(
-        &self,
-        caller: &WebUiAuthenticatedCaller,
-    ) -> Result<Vec<OutboundDeliveryTargetEntry>, RebornServicesError>;
-
-    async fn resolve_outbound_delivery_target(
-        &self,
-        caller: &WebUiAuthenticatedCaller,
-        target_id: &RebornOutboundDeliveryTargetId,
-    ) -> Result<Option<OutboundDeliveryTargetEntry>, RebornServicesError> {
-        Ok(self
-            .list_outbound_delivery_targets(caller)
-            .await?
-            .into_iter()
-            .find(|entry| {
-                entry.capabilities.final_replies
-                    && entry.summary.target_id.as_str() == target_id.as_str()
-            }))
-    }
-
-    async fn resolve_reply_target_binding(
-        &self,
-        caller: &WebUiAuthenticatedCaller,
-        target: &ReplyTargetBindingRef,
-    ) -> Result<Option<OutboundDeliveryTargetEntry>, RebornServicesError> {
-        Ok(self
-            .list_outbound_delivery_targets(caller)
-            .await?
-            .into_iter()
-            .find(|entry| {
-                entry.capabilities.final_replies
-                    && entry.reply_target_binding_ref.as_str() == target.as_str()
-            }))
-    }
-}
+// The provider port + entry shape channel hosts implement live in
+// `ironclaw_channel_host` (a host crate cannot depend on composition);
+// re-imported here so the registries and facade below keep their one
+// canonical composition-internal path.
+pub(crate) use ironclaw_channel_host::outbound_targets::{
+    OutboundDeliveryTargetEntry, OutboundDeliveryTargetProvider,
+    OutboundDeliveryTargetRegistrationOutcome,
+};
 
 pub(crate) struct OutboundDeliveryTargetRegistry {
     providers: Vec<Arc<dyn OutboundDeliveryTargetProvider>>,
@@ -86,12 +50,6 @@ impl OutboundDeliveryTargetRegistry {
 
 pub(crate) struct MutableOutboundDeliveryTargetRegistry {
     providers: RwLock<BTreeMap<String, Arc<dyn OutboundDeliveryTargetProvider>>>,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum OutboundDeliveryTargetRegistrationOutcome {
-    Registered,
-    Replaced,
 }
 
 impl std::fmt::Debug for MutableOutboundDeliveryTargetRegistry {
@@ -523,6 +481,7 @@ mod tests {
         CommunicationModality, CommunicationPreferenceRepository, CommunicationPreferenceVersion,
         DeliveryDefaultScope, InMemoryOutboundStateStore, VersionedCommunicationPreferenceRecord,
     };
+    use ironclaw_product_workflow::RebornOutboundDeliveryTargetCapabilities;
 
     use super::*;
 
