@@ -2441,6 +2441,16 @@ fn serve_mounts_cli_login_route_without_sso() {
 /// Security: an env-sourced webui bearer token must not get a mounted
 /// CLI-token `/login?token=` route — that route puts the bearer in a public
 /// URL query string, where an edge/proxy would capture it in access logs.
+///
+/// Under root-path serving (#6152) an unmounted `/login` isn't a hard 404:
+/// the root SPA wildcard (`static_router`) only fails closed for namespaces
+/// composition actually reserved (derived from mounted route descriptors —
+/// see `webui_serve.rs::static_router_config_from_descriptors`), so a route
+/// nobody mounted here falls through to the ordinary SPA shell like any
+/// other client-side path. The security property under test is narrower and
+/// still holds: the response must be the generic SPA shell, not this
+/// route's own handler (a 302/303 redirect carrying a freshly minted
+/// session bearer's ticket).
 #[cfg(feature = "webui-v2-beta")]
 #[test]
 fn serve_does_not_mount_cli_login_route_when_token_is_env_sourced() {
@@ -2466,7 +2476,7 @@ fn serve_does_not_mount_cli_login_route_when_token_is_env_sourced() {
         .expect("ironclaw-reborn serve should start");
     wait_for_serve_banner(&mut child);
 
-    let login_status = http_status_line(
+    let login_response = http_response(
         port,
         "GET /login?token=irrelevant HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n",
         "cli login probe with env-sourced token",
@@ -2475,17 +2485,33 @@ fn serve_does_not_mount_cli_login_route_when_token_is_env_sourced() {
     let _ = child.kill();
     let _ = child.wait();
 
-    let login_status = login_status.expect("login probe must complete");
+    let login_response = login_response.expect("login probe must complete");
     assert!(
-        login_status.contains(" 404 "),
-        "the CLI-only /login route must not mount for an env-sourced token, got: {login_status}"
+        login_response.status_line.contains(" 200 "),
+        "an unmounted /login must fall through to the ordinary SPA shell \
+         (200), got: {}",
+        login_response.status_line
+    );
+    assert!(
+        login_response.header("location").is_none(),
+        "the CLI-only /login route's redirect-with-session-ticket handler \
+         must not run for an env-sourced token, got Location: {:?}",
+        login_response.header("location")
+    );
+    assert_eq!(
+        login_response.header("content-type"),
+        Some("text/html; charset=utf-8"),
+        "must be the generic SPA shell response, not a route-specific body"
     );
 }
 
 /// With an SSO provider configured, `serve` must not also mount the
 /// CLI-token-login route's own `/auth/session/exchange` — that would
-/// register the path twice. Proven by the CLI-only `/login?token=` route
-/// being absent (404) while `/auth/providers` stays up.
+/// register the path twice. Proven by the CLI-only `/login?token=` route's
+/// handler not running (see `serve_does_not_mount_cli_login_route_when_token_is_env_sourced`
+/// for why an unmounted `/login` is a 200 SPA-shell fallthrough rather than a
+/// 404 under root-path serving, not this route's own redirect) while
+/// `/auth/providers` stays up.
 #[cfg(feature = "webui-v2-beta")]
 #[test]
 fn serve_with_sso_does_not_double_mount_session_exchange() {
@@ -2517,7 +2543,7 @@ fn serve_with_sso_does_not_double_mount_session_exchange() {
         .expect("ironclaw-reborn serve should start");
     wait_for_serve_banner(&mut child);
 
-    let login_status = http_status_line(
+    let login_response = http_response(
         port,
         "GET /login?token=irrelevant HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n",
         "cli login probe under SSO",
@@ -2536,12 +2562,16 @@ fn serve_with_sso_does_not_double_mount_session_exchange() {
     let _ = child.kill();
     let _ = child.wait();
 
-    let login_status = login_status.expect("cli login probe must complete");
+    let login_response = login_response.expect("cli login probe must complete");
     let providers_status = providers_status.expect("providers probe must complete");
     assert!(
-        login_status.contains(" 404 "),
-        "the CLI-only /login route must not mount when SSO is configured \
-         (its own /auth/session/exchange would collide with the SSO surface's), got: {login_status}"
+        login_response.status_line.contains(" 200 ") && login_response.header("location").is_none(),
+        "the CLI-only /login route's own redirect-with-session-ticket \
+         handler must not run when SSO is configured (its own \
+         /auth/session/exchange would collide with the SSO surface's) — \
+         expected the ordinary SPA-shell fallthrough, got: {} location={:?}",
+        login_response.status_line,
+        login_response.header("location")
     );
     assert!(
         providers_status.contains(" 200 "),
@@ -3956,7 +3986,7 @@ fn onboard_login_link_then_bearer_authorizes_a_protected_request() {
         .header("location")
         .expect("redirect must carry a Location header");
     assert!(
-        location.starts_with("/v2?login_ticket="),
+        location.starts_with("/?login_ticket="),
         "redirect must land on the SPA with a login_ticket, got: {location}"
     );
     let ticket = location
