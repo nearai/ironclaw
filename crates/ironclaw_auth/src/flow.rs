@@ -297,7 +297,7 @@ pub trait AuthFlowManager: Send + Sync {
     /// Contract: when the request's continuation is setup-class
     /// ([`is_setup_class_continuation`]), creation itself supersedes — it
     /// cancels every prior non-terminal setup-class flow for the same owner
-    /// root + provider (RFC 9700 §4.7.1) before the new flow becomes visible,
+    /// root + provider before the new flow becomes visible,
     /// so "≤1 live setup-class flow per owner+provider" holds structurally and
     /// no start route can forget it. `TurnGateResume`/`ProductActionResume`
     /// creations supersede nothing and are never superseded: a parked
@@ -372,8 +372,8 @@ pub trait AuthFlowManager: Send + Sync {
     ) -> Result<AuthFlowRecord, AuthProductError>;
 
     /// Internal building block of [`Self::create_flow`]'s supersede-on-start
-    /// contract (RFC 9700 §4.7.1): cancel any prior non-terminal setup-class
-    /// flow for the same owner+provider. Production code must not need to
+    /// contract: cancel any prior non-terminal setup-class flow for the same
+    /// owner+provider. Production code must not need to
     /// call this directly — creating the successor flow already runs it.
     ///
     /// Setup-class means [`is_setup_class_continuation`]: the web connect

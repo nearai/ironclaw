@@ -2377,7 +2377,7 @@ mod slack_personal_oauth_serve {
 /// must supersede the prior setup flow so exactly ONE live authorization
 /// request remains for the owner+provider; otherwise every abandoned popup
 /// leaves another live `AwaitingUser` flow racing to write the same credential
-/// (RFC 9700 §4.7.1).
+/// (pinned as `AuthFlowManager::create_flow`'s supersede contract).
 ///
 /// Drives BOTH start routes through the composed router, because the fix lands
 /// at the seam they share (`start_setup_oauth_flow`) and both must benefit:

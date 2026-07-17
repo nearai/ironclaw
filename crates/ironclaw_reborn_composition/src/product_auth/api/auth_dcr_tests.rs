@@ -191,7 +191,8 @@ impl CapabilityObligationHandler for NoopObligationHandler {
     }
 }
 
-/// Supersede-on-start (RFC 9700 §4.7.1) must also cover the DCR start route:
+/// Supersede-on-start (the `AuthFlowManager::create_flow` contract) must also
+/// cover the DCR start route:
 /// non-Google extension providers (e.g. Notion) reach flow creation through
 /// the DCR registry rather than `start_setup_oauth_flow`, and a re-opened
 /// connect popup must not leave two live authorization requests racing to

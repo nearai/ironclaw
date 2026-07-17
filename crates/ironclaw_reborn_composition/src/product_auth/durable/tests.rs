@@ -1392,6 +1392,69 @@ async fn create_flow_supersedes_prior_live_setup_class_flows_in_the_durable_stor
     );
 }
 
+/// Durable twin of the contract-suite concurrency pin: the supersede walk and
+/// the flow insert run inside one per-owner-root critical section, so two
+/// Connect clicks racing on the same durable root cannot both observe "no
+/// live predecessor" and both survive. The InMemoryBackend's real await
+/// points make the interleavings reachable without fault injection.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn concurrent_setup_creates_leave_exactly_one_live_flow_in_the_durable_store() {
+    for round in 0..10 {
+        let filesystem = test_filesystem();
+        let secret_store: Arc<dyn SecretStore> = Arc::new(InMemorySecretStore::new());
+        let service = Arc::new(test_service(filesystem, secret_store));
+        let provider = AuthProviderId::new("github").unwrap();
+        let barrier = Arc::new(tokio::sync::Barrier::new(6));
+        let mut racers = Vec::new();
+        for racer_index in 0..6 {
+            let service = Arc::clone(&service);
+            let provider = provider.clone();
+            let barrier = Arc::clone(&barrier);
+            racers.push(tokio::spawn(async move {
+                let scope = test_scope();
+                barrier.wait().await;
+                service
+                    .create_flow(NewAuthFlow {
+                        id: None,
+                        scope,
+                        kind: AuthFlowKind::IntegrationCredential,
+                        provider,
+                        challenge: AuthChallenge::OAuthUrl {
+                            authorization_url: OAuthAuthorizationUrl::new(
+                                "https://example.com/oauth/authorize?race=1",
+                            )
+                            .unwrap(),
+                            expires_at: Utc::now() + Duration::minutes(10),
+                        },
+                        continuation: AuthContinuationRef::SetupOnly,
+                        update_binding: None,
+                        opaque_state_hash: Some(state_hash(&format!("race-{racer_index}"))),
+                        pkce_verifier_hash: Some(pkce_hash(&format!("race-{racer_index}"))),
+                        expires_at: Utc::now() + Duration::minutes(10),
+                    })
+                    .await
+            }));
+        }
+        for racer in racers {
+            racer
+                .await
+                .expect("racer task completes")
+                .expect("each racing create_flow succeeds");
+        }
+        let live = service
+            .flow_records_under_scope_root(&test_scope())
+            .await
+            .expect("list flows under the shared root")
+            .into_iter()
+            .filter(|(flow, _)| flow.status == AuthFlowStatus::AwaitingUser)
+            .count();
+        assert_eq!(
+            live, 1,
+            "round {round}: concurrent durable setup creates must leave exactly one live flow"
+        );
+    }
+}
+
 /// #4a lifecycle lock — the removal entrypoints cancel a pending flow through
 /// the one shared cleanup, so "disconnect via the bot's `extension_remove` tool"
 /// and "disconnect via the web UI" cannot diverge into duplicated behaviour.

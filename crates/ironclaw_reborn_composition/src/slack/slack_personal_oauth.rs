@@ -25,6 +25,7 @@ use ironclaw_auth::{
     pkce_s256_challenge, pkce_verifier_hash,
 };
 use ironclaw_host_api::ExtensionId;
+use ironclaw_product_adapters::AdapterInstallationId;
 use ironclaw_product_workflow::WebUiAuthenticatedCaller;
 use secrecy::{ExposeSecret, SecretString};
 
@@ -174,7 +175,10 @@ pub(crate) async fn start_extension_oauth_flow(
         .connection_scope_resolver
         .resolve_personal_connection_scope()
         .await
-        .map_err(|_| ProductAuthRouteFailure::backend_unavailable())?
+        .map_err(|error| {
+            tracing::debug!(%error, "Slack personal OAuth connection scope unavailable");
+            ProductAuthRouteFailure::backend_unavailable()
+        })?
         .ok_or_else(ProductAuthRouteFailure::backend_unavailable)?;
 
     let flow = run_with_backend_timeout(
@@ -245,8 +249,17 @@ pub(crate) async fn slack_personal_oauth_callback_handler(
 /// durably even across a crash (the flow is `Failed`, and a re-hit callback
 /// re-enters this hook through `reconcile_failed_lifecycle_oauth`). Earlier
 /// failure stages committed nothing durable — the start path keeps no
-/// connection state — so there is nothing to release; a defensive row check
-/// keeps the flow retryable if stamped rows are unexpectedly present.
+/// connection state — so with no stamped rows there is nothing to release.
+///
+/// Cleanup authority is the stamped rows themselves: each row's provider user
+/// id carries the installation the bind actually wrote under. Re-resolving the
+/// connection scope here could drift (the operator repointing Slack setup
+/// between the bind and this hook) and would sweep an owner this generation
+/// never touched, orphaning the real rows. When rows exist they are reclaimed
+/// through the journaled sweep whatever the reported stage — a post-bind
+/// completion failure classifies as `Terminal` — and the resolver is consulted
+/// only when no rows survive, to settle a possibly still-active generation
+/// record.
 fn slack_personal_oauth_abandon_hook(
     state: ProductAuthRouteState,
     callback_scope: AuthProductScope,
@@ -262,65 +275,147 @@ fn slack_personal_oauth_abandon_hook(
             return Err(ProductAuthRouteFailure::backend_unavailable());
         };
         let connection_epoch = SlackConnectionEpoch::new(flow_id);
-        // The bind derived the owner from this same resolution at callback
-        // time, so terminal cleanup targeting the same resolution reaches
-        // exactly the rows this generation stamped.
-        let connection_scope = match config
-            .connection_scope_resolver
-            .resolve_personal_connection_scope()
+        let stamped_rows = match config
+            .binding_rollback_store
+            .user_identity_bindings_for_user_at_epoch(
+                crate::slack::slack_actor_identity::SLACK_IDENTITY_PROVIDER,
+                &callback_scope.resource.user_id,
+                None,
+                Some(connection_epoch),
+            )
             .await
         {
-            Ok(Some(connection_scope)) => connection_scope,
-            Ok(None) => {
-                tracing::debug!(
-                    flow_id = %flow_id,
-                    "Slack terminal cleanup found no configured connection scope; nothing to clean"
-                );
-                return Ok(());
-            }
+            Ok(rows) => rows,
             Err(error) => {
-                tracing::warn!(
+                tracing::debug!(
                     %error,
                     flow_id = %flow_id,
-                    "failed to resolve Slack connection scope for terminal cleanup"
+                    "retaining Slack OAuth flow because identity cleanup could not be verified"
                 );
                 return Err(ProductAuthRouteFailure::backend_unavailable());
             }
         };
-        let connection_owner = SlackConnectionOwner::new(
-            callback_scope.resource.tenant_id.clone(),
-            callback_scope.resource.user_id.clone(),
-            connection_scope.installation_id,
-        );
-        let provider_user_id_prefix = format!("{}:", connection_owner.installation_id().as_str());
-        if matches!(
-            failure_stage,
-            RebornOAuthCallbackFailureStage::ContinuationSideEffect
-                | RebornOAuthCallbackFailureStage::ContinuationCompensation
-        ) {
+        let mut stamped_installations: Vec<AdapterInstallationId> = Vec::new();
+        for row in &stamped_rows {
+            let provider_user_id = row.binding().provider_user_id.as_str();
+            let Some((installation_id, _)) =
+                crate::slack::slack_actor_identity::parse_slack_user_identity_provider_user_id(
+                    provider_user_id,
+                )
+            else {
+                // A stamped row whose installation cannot be derived cannot be
+                // reclaimed by any owner-scoped sweep; keep the flow retryable
+                // rather than settling it as cleaned.
+                tracing::warn!(
+                    flow_id = %flow_id,
+                    provider_user_id,
+                    "retaining Slack OAuth flow because a stamped identity row names no installation"
+                );
+                return Err(ProductAuthRouteFailure::backend_unavailable());
+            };
+            if !stamped_installations.contains(&installation_id) {
+                stamped_installations.push(installation_id);
+            }
+        }
+        if stamped_installations.is_empty() {
+            if !matches!(
+                failure_stage,
+                RebornOAuthCallbackFailureStage::ContinuationSideEffect
+                    | RebornOAuthCallbackFailureStage::ContinuationCompensation
+            ) {
+                // Terminal-stage failures (denied, claim, exchange, malformed,
+                // abort) with no stamped rows never committed anything
+                // durable: there is no start-time state to release.
+                return Ok(());
+            }
+            // Nothing stamped by this generation survives (the in-process
+            // rollback unwound it, or the bind never landed). The owner's
+            // generation record may still hold this failed generation if the
+            // rollback's settle was lost; settle it via the current
+            // resolution — with no rows there is no bind-time authority to
+            // prefer, and `Ok(None)` (setup removed) leaves nothing to settle.
+            let connection_scope = match config
+                .connection_scope_resolver
+                .resolve_personal_connection_scope()
+                .await
+            {
+                Ok(Some(connection_scope)) => connection_scope,
+                Ok(None) => {
+                    tracing::debug!(
+                        flow_id = %flow_id,
+                        "Slack terminal cleanup found no configured connection scope; nothing to clean"
+                    );
+                    return Ok(());
+                }
+                Err(error) => {
+                    tracing::warn!(
+                        %error,
+                        flow_id = %flow_id,
+                        "failed to resolve Slack connection scope for terminal cleanup"
+                    );
+                    return Err(ProductAuthRouteFailure::backend_unavailable());
+                }
+            };
+            let connection_owner = SlackConnectionOwner::new(
+                callback_scope.resource.tenant_id.clone(),
+                callback_scope.resource.user_id.clone(),
+                connection_scope.installation_id,
+            );
+            match config
+                .lifecycle_store
+                .begin_failed_connection_cleanup(&connection_owner, connection_epoch)
+                .await
+            {
+                Ok(()) => {}
+                // The generation record already moved on — the in-process
+                // rollback restored a previous generation or settled it — and
+                // with no stamped rows there is nothing left to reclaim.
+                Err(SlackUserBindingLifecycleError::StaleEpoch) => return Ok(()),
+                Err(error) => {
+                    tracing::warn!(
+                        %error,
+                        flow_id = %flow_id,
+                        "failed to fence terminal Slack OAuth epoch before identity cleanup"
+                    );
+                    return Err(ProductAuthRouteFailure::backend_unavailable());
+                }
+            }
+            if let Err(error) = config
+                .lifecycle_store
+                .complete_failed_connection_cleanup(&connection_owner, connection_epoch)
+                .await
+            {
+                tracing::warn!(
+                    %error,
+                    flow_id = %flow_id,
+                    "failed to settle terminal Slack OAuth epoch after identity cleanup"
+                );
+                return Err(ProductAuthRouteFailure::backend_unavailable());
+            }
+            return Ok(());
+        }
+        // Rows stamped with this generation exist, so the bind committed
+        // durable state regardless of the reported failure stage — a
+        // post-bind completion failure surfaces as `Terminal` through the
+        // blanket error conversion. Reclaim them through the journaled sweep,
+        // targeting exactly the installations the rows name.
+        for installation_id in stamped_installations {
+            let connection_owner = SlackConnectionOwner::new(
+                callback_scope.resource.tenant_id.clone(),
+                callback_scope.resource.user_id.clone(),
+                installation_id,
+            );
+            let provider_user_id_prefix =
+                format!("{}:", connection_owner.installation_id().as_str());
             if let Err(error) = config
                 .lifecycle_store
                 .begin_failed_connection_cleanup(&connection_owner, connection_epoch)
                 .await
             {
-                // `StaleEpoch` here means the generation record already moved
-                // on — the in-process rollback restored a previous generation
-                // or settled the record — so the journaled sweep has nothing
-                // it may safely fence. Rows stamped with this failed
-                // generation cannot be authorized by ingress (the record is
-                // not Active at this epoch) and any residue is owner-swept on
-                // disconnect.
-                if error == SlackUserBindingLifecycleError::StaleEpoch
-                    && !stamped_rows_exist_for_epoch(
-                        config.binding_rollback_store.as_ref(),
-                        &callback_scope,
-                        provider_user_id_prefix.as_str(),
-                        connection_epoch,
-                    )
-                    .await?
-                {
-                    return Ok(());
-                }
+                // `StaleEpoch` with this generation's rows still stamped means
+                // the owner's record moved past the generation while its rows
+                // survive; fail closed (retryable) rather than sweeping
+                // without the journal fence.
                 tracing::warn!(
                     %error,
                     flow_id = %flow_id,
@@ -357,55 +452,9 @@ fn slack_personal_oauth_abandon_hook(
                 );
                 return Err(ProductAuthRouteFailure::backend_unavailable());
             }
-            return Ok(());
-        }
-        // Terminal-stage failures (denied, claim, exchange, malformed) never
-        // reached the identity bind: nothing durable was written and there is
-        // no start-time state to release. Verify defensively so an unexpected
-        // stamped row keeps the flow retryable instead of being silently
-        // orphaned.
-        if stamped_rows_exist_for_epoch(
-            config.binding_rollback_store.as_ref(),
-            &callback_scope,
-            provider_user_id_prefix.as_str(),
-            connection_epoch,
-        )
-        .await?
-        {
-            tracing::debug!(
-                flow_id = %flow_id,
-                "retaining Slack OAuth flow because identity cleanup is still pending"
-            );
-            return Err(ProductAuthRouteFailure::backend_unavailable());
         }
         Ok(())
     })
-}
-
-async fn stamped_rows_exist_for_epoch(
-    binding_rollback_store: &dyn crate::slack::slack_personal_binding::RebornUserIdentityBindingDeleteStore,
-    callback_scope: &AuthProductScope,
-    provider_user_id_prefix: &str,
-    connection_epoch: SlackConnectionEpoch,
-) -> Result<bool, ProductAuthRouteFailure> {
-    match binding_rollback_store
-        .user_identity_bindings_for_user_at_epoch(
-            crate::slack::slack_actor_identity::SLACK_IDENTITY_PROVIDER,
-            &callback_scope.resource.user_id,
-            Some(provider_user_id_prefix),
-            Some(connection_epoch),
-        )
-        .await
-    {
-        Ok(bindings) => Ok(!bindings.is_empty()),
-        Err(error) => {
-            tracing::debug!(
-                %error,
-                "retaining Slack OAuth flow because identity cleanup could not be verified"
-            );
-            Err(ProductAuthRouteFailure::backend_unavailable())
-        }
-    }
 }
 
 fn slack_personal_identity_hook(

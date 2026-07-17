@@ -8,6 +8,7 @@ use super::domain::{
     update_account_from_request, validate_bound_update_authority, validate_callback_claim,
     validate_flow_update_binding, validate_manual_token_flow, validate_selection_flow,
 };
+use super::paths::flow_root;
 use super::{
     FilesystemAuthProductServices, credential_status_for_completed_flow, is_terminal_status,
     scope_matches,
@@ -50,6 +51,21 @@ where
         // `AuthFlowManager::create_flow` contract): cancel the prior live
         // setup-class flows before this one becomes visible, so the walk can
         // never observe — and cancel — the flow it is clearing the way for.
+        //
+        // The walk and the insert below must form one critical section per
+        // owner root: two racing setup creates could otherwise each list the
+        // root before either insert lands, both find no live predecessor, and
+        // both survive. Lock ordering is root → per-flow (`cancel_flow` takes
+        // "flow:{id}" inside); no path takes them in the other order.
+        let root_lock = if is_setup_class_continuation(&request.continuation) {
+            Some(self.lock_for(format!("flow-root:{}", flow_root(&request.scope)?)))
+        } else {
+            None
+        };
+        let _root_guard = match &root_lock {
+            Some(lock) => Some(lock.lock().await),
+            None => None,
+        };
         if is_setup_class_continuation(&request.continuation) {
             self.cancel_superseded_setup_flows(&request.scope, &request.provider)
                 .await?;

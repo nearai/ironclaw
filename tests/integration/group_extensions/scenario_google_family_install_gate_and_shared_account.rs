@@ -75,17 +75,19 @@ pub async fn run(g: &RebornIntegrationGroup) -> HarnessResult<()> {
                 calendar_state.credential_requirements
             )
         })?;
-    if !calendar_requirement
-        .provider_scopes
-        .iter()
-        .any(|scope| scope.contains("calendar"))
-    {
-        return Err(format!(
-            "the parked requirement must carry the SELECTED capability's calendar \
-             scopes (what the OAuth card renders); got {:?}",
-            calendar_requirement.provider_scopes
-        )
-        .into());
+    for expected_scope in [GOOGLE_CALENDAR_READONLY_SCOPE, GOOGLE_CALENDAR_EVENTS_SCOPE] {
+        if !calendar_requirement
+            .provider_scopes
+            .iter()
+            .any(|scope| scope == expected_scope)
+        {
+            return Err(format!(
+                "the parked requirement must carry the SELECTED capability's calendar \
+                 scopes (what the OAuth card renders); missing {expected_scope}; got {:?}",
+                calendar_requirement.provider_scopes
+            )
+            .into());
+        }
     }
     // The wrong-scope account surfaced EXCLUSIVELY as the gate — no misleading
     // error-shaped tool result (#5878 shape).

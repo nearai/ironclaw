@@ -1321,6 +1321,43 @@ async fn create_flow_for_a_parked_turn_gate_does_not_supersede_setup_flows() {
     );
 }
 
+/// The `create_flow` supersede contract must hold under CONCURRENCY, not just
+/// sequentially: two Connect clicks racing each other must still leave
+/// exactly one live setup-class flow. The cancel walk and the insert happen
+/// under one state lock, so no interleaving can let two creates each observe
+/// "no live predecessor" and both survive. Multi-threaded runtime + a start
+/// barrier + repeated rounds to actually exercise the interleavings.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn concurrent_setup_creates_leave_exactly_one_live_flow() {
+    for round in 0..20 {
+        let services = std::sync::Arc::new(InMemoryAuthProductServices::new());
+        let owner = scope("alice");
+        let barrier = std::sync::Arc::new(tokio::sync::Barrier::new(8));
+        let mut racers = Vec::new();
+        for _ in 0..8 {
+            let services = std::sync::Arc::clone(&services);
+            let owner = owner.clone();
+            let barrier = std::sync::Arc::clone(&barrier);
+            racers.push(tokio::spawn(async move {
+                barrier.wait().await;
+                setup_flow_with(&services, owner, provider(), AuthContinuationRef::SetupOnly).await
+            }));
+        }
+        for racer in racers {
+            racer.await.expect("racer task completes");
+        }
+        let live = services
+            .flow_records_snapshot()
+            .into_iter()
+            .filter(|flow| flow.status == AuthFlowStatus::AwaitingUser)
+            .count();
+        assert_eq!(
+            live, 1,
+            "round {round}: concurrent setup creates must leave exactly one live flow"
+        );
+    }
+}
+
 /// The internal supersede walk `create_flow` routes through: it reports the
 /// superseded ids, matches on the owner root (not full scope equality — each
 /// popup re-open mints a fresh invocation id), spares every bystander class,

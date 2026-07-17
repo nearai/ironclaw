@@ -4251,6 +4251,40 @@ mod tests {
         }
     }
 
+    /// Resolver double replaying scripted resolutions in call order, then
+    /// holding the final one — models an operator repointing Slack setup at a
+    /// different installation partway through a callback's lifecycle.
+    #[cfg(feature = "slack-v2-host-beta")]
+    struct QueuedSlackPersonalConnectionScopeResolver {
+        queue: Mutex<std::collections::VecDeque<Option<SlackPersonalConnectionScope>>>,
+    }
+
+    #[cfg(feature = "slack-v2-host-beta")]
+    impl QueuedSlackPersonalConnectionScopeResolver {
+        fn new(scopes: impl IntoIterator<Item = Option<SlackPersonalConnectionScope>>) -> Self {
+            Self {
+                queue: Mutex::new(scopes.into_iter().collect()),
+            }
+        }
+    }
+
+    #[cfg(feature = "slack-v2-host-beta")]
+    #[async_trait]
+    impl SlackPersonalConnectionScopeResolver for QueuedSlackPersonalConnectionScopeResolver {
+        async fn resolve_personal_connection_scope(
+            &self,
+        ) -> Result<Option<SlackPersonalConnectionScope>, String> {
+            let mut queue = self.queue.lock().expect("resolver queue lock");
+            if queue.len() > 1 {
+                return Ok(queue.pop_front().expect("non-empty resolver queue"));
+            }
+            Ok(queue
+                .front()
+                .cloned()
+                .expect("scripted resolver queue must not start empty"))
+        }
+    }
+
     /// Delegates every flow operation to the in-memory fake but fails
     /// `complete_oauth_callback`, modeling a completion failure (flow-store
     /// IO, CAS mismatch) that lands after the identity hook already bound.
@@ -4630,6 +4664,145 @@ mod tests {
         assert!(
             binding_store.bindings().is_empty(),
             "identity binding written by the hook must be rolled back when completion fails"
+        );
+    }
+
+    /// Slack setup may be repointed at a different installation between a
+    /// callback's identity bind and its terminal cleanup. The cleanup's
+    /// authority is the rows the bind stamped — each carries the installation
+    /// it was written under — not a fresh resolution, which after the drift
+    /// names an owner this generation never touched and orphans the stamped
+    /// row until a full owner disconnect happens to sweep it.
+    #[cfg(feature = "slack-v2-host-beta")]
+    #[tokio::test]
+    async fn slack_personal_terminal_cleanup_targets_the_bound_installation_after_setup_drift() {
+        let shared = Arc::new(InMemoryAuthProductServices::new());
+        let dispatcher = Arc::new(RecordingDispatcher::default());
+        let provider_identity = OAuthProviderIdentity::new(
+            "U123",
+            Some("T123".to_string()),
+            Some("E123".to_string()),
+            Some("A123".to_string()),
+        )
+        .expect("provider identity");
+        let provider_client = Arc::new(SlackIdentityProviderClient::new(provider_identity));
+        let failing_flows = Arc::new(FailingCompletionFlowManager {
+            inner: shared.clone(),
+            fail_create: false,
+        });
+        let product_auth = Arc::new(RebornProductAuthServices::new(
+            failing_flows,
+            shared.clone(),
+            shared.clone(),
+            shared.clone(),
+            provider_client.clone(),
+            shared.clone(),
+            dispatcher,
+        ));
+        let tenant_id = TenantId::new("tenant-alpha").expect("tenant");
+        let user_id = UserId::new("user-alpha").expect("user");
+        let installation_id = AdapterInstallationId::new("install-alpha").expect("installation");
+        let owner =
+            SlackConnectionOwner::new(tenant_id.clone(), user_id.clone(), installation_id.clone());
+        let lifecycle_store = Arc::new(TestSlackLifecycleStore::default());
+        let binding_store = Arc::new(RecordingBindingStore::default());
+        let binding_service = Arc::new(SlackPersonalUserBindingService::new(
+            [SlackPersonalBindingInstallation {
+                tenant_id: tenant_id.clone(),
+                installation_id: installation_id.clone(),
+                selector: SlackInstallationSelector::app_team("A123", "T123"),
+            }],
+            Arc::new(ActivatingBindingStore {
+                inner: binding_store.clone(),
+                lifecycle_store: lifecycle_store.clone(),
+                owner: owner.clone(),
+            }),
+        ));
+        // Start and bind resolve install-alpha; by the time the terminal hook
+        // runs, the operator has repointed setup at install-drifted.
+        let resolver = Arc::new(QueuedSlackPersonalConnectionScopeResolver::new([
+            Some(SlackPersonalConnectionScope {
+                installation_id: installation_id.clone(),
+            }),
+            Some(SlackPersonalConnectionScope {
+                installation_id: installation_id.clone(),
+            }),
+            Some(SlackPersonalConnectionScope {
+                installation_id: AdapterInstallationId::new("install-drifted")
+                    .expect("drifted installation"),
+            }),
+        ]));
+        let state = ProductAuthRouteState::new(product_auth, tenant_id.clone(), None, None)
+            .with_test_installed_extension_lookup()
+            .with_slack_personal_oauth(slack_personal_oauth_test_slot().await)
+            .with_slack_personal_oauth_binding(SlackPersonalOAuthBindingConfig::new(
+                binding_service,
+                resolver,
+                binding_store.clone(),
+                lifecycle_store.clone(),
+            ));
+
+        let invocation_id = InvocationId::new();
+        let Json(start_response) = extension_oauth_start_handler(
+            State(state.clone()),
+            Extension(WebUiAuthenticatedCaller::new(
+                tenant_id.clone(),
+                user_id.clone(),
+                None,
+                None,
+            )),
+            Path("slack".to_string()),
+            Json(ExtensionOAuthStartRequest {
+                provider: SLACK_PERSONAL_PROVIDER_ID.to_string(),
+                account_label: "personal slack".to_string(),
+                scopes: vec!["search:read".to_string()],
+                expires_at: Utc::now() + ChronoDuration::minutes(5),
+                invocation_id: Some(invocation_id.to_string()),
+            }),
+        )
+        .await
+        .expect("start slack oauth flow");
+        let state_value = Url::parse(start_response.authorization_url.as_str())
+            .expect("authorization url")
+            .query_pairs()
+            .find_map(|(name, value)| (name == "state").then(|| value.into_owned()))
+            .expect("oauth state");
+        let encoded_state =
+            url::form_urlencoded::byte_serialize(state_value.as_bytes()).collect::<String>();
+        let uri = format!(
+            "{SLACK_PERSONAL_OAUTH_CALLBACK_PATH}?state={encoded_state}&code=slack-auth-code"
+        )
+        .parse::<Uri>()
+        .expect("callback uri");
+
+        // The in-process rollback's row delete fails, modeling the fault
+        // window that leaves the stamped row for terminal cleanup to reclaim.
+        binding_store.fail_next_delete();
+        slack_personal_oauth_callback_handler(
+            State(state),
+            RawQuery(uri.query().map(str::to_string)),
+            uri,
+            HeaderMap::new(),
+        )
+        .await
+        .expect_err("completion failure must surface as a callback error");
+
+        assert!(
+            binding_store.bindings().is_empty(),
+            "terminal cleanup must remove the row stamped under the BOUND installation even \
+             after setup drifts; leftover: {:?}",
+            binding_store.bindings(),
+        );
+        let entries = lifecycle_store
+            .entries
+            .lock()
+            .expect("lifecycle entries lock");
+        assert!(
+            entries
+                .iter()
+                .any(|entry| entry.owner == owner
+                    && entry.state == SlackConnectionState::Disconnected),
+            "the failed generation must settle Disconnected for the installation the bind stamped"
         );
     }
 
@@ -5365,9 +5538,15 @@ mod tests {
         );
     }
 
+    /// A completion failure whose in-process rollback ALSO fails must not
+    /// strand the stamped identity row: the terminal-failure hook reclaims
+    /// rows carrying the failed generation immediately (their installation is
+    /// read off the rows themselves), the generation record settles
+    /// Disconnected so ingress never authorizes the residue, a later
+    /// disconnect converges as a no-op, and a clean reconnect may start.
     #[cfg(feature = "slack-v2-host-beta")]
     #[tokio::test]
-    async fn slack_personal_oauth_failed_identity_rollback_allows_disconnect_then_reconnect() {
+    async fn slack_personal_oauth_failed_identity_rollback_is_reclaimed_then_reconnects() {
         let shared = Arc::new(InMemoryAuthProductServices::new());
         let provider_identity = OAuthProviderIdentity::new(
             "U123",
@@ -5459,10 +5638,10 @@ mod tests {
         )
         .await
         .expect_err("flow completion failure surfaces");
-        assert_eq!(
-            binding_store.bindings().len(),
-            1,
-            "the scripted rollback failure leaves the identity for explicit cleanup"
+        assert!(
+            binding_store.bindings().is_empty(),
+            "the terminal-failure hook must reclaim the row the failed rollback stranded, \
+             keyed by the generation the row itself carries"
         );
 
         let connection_epoch = SlackConnectionEpoch::new(start_response.flow_id);
@@ -5474,6 +5653,8 @@ mod tests {
             Some((connection_epoch, SlackConnectionState::Disconnected)),
             "a failed identity rollback must never leave ingress active"
         );
+        // A user-driven disconnect on the already-reclaimed owner must still
+        // converge (AllOwned fence over an empty store) rather than error.
         let fence = lifecycle_store
             .begin_disconnect(&owner)
             .await
@@ -5486,7 +5667,7 @@ mod tests {
                 fence.cleanup_selector().epoch(),
             )
             .await
-            .expect("disconnect retries the failed identity cleanup");
+            .expect("disconnect sweep stays idempotent on a reclaimed owner");
         lifecycle_store
             .complete_disconnect(&owner, fence.fence_epoch())
             .await

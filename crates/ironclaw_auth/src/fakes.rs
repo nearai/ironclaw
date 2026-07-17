@@ -133,6 +133,41 @@ impl InMemoryAuthProductServices {
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
     }
+
+    /// The supersede walk over already-locked state, shared by `create_flow`
+    /// (which must run walk + insert inside one lock acquisition — two racing
+    /// setup creates could otherwise both observe "no live predecessor" and
+    /// both survive) and the standalone `cancel_superseded_setup_flows`
+    /// building block.
+    ///
+    /// Owner granularity (tenant/user/agent/project + surface + session):
+    /// setup flows are thread-less and each re-opened connect popup mints a
+    /// fresh invocation, so `flow_shares_setup_owner_root` — not full scope
+    /// equality — is the correct predicate here, mirroring the durable
+    /// store's per-owner+surface+session flow-root listing. Records are
+    /// mutated in place rather than routed through `cancel_flow`, whose
+    /// full-scope check would reject the prior invocation's scope.
+    fn supersede_setup_flows_locked(
+        state: &mut AuthState,
+        scope: &crate::AuthProductScope,
+        provider: &crate::AuthProviderId,
+    ) -> Vec<AuthFlowId> {
+        let now = Utc::now();
+        let mut superseded = Vec::new();
+        for record in state.flows.values_mut() {
+            if crate::flow_shares_setup_owner_root(&record.scope, scope)
+                && &record.provider == provider
+                && crate::is_setup_class_continuation(&record.continuation)
+                && !crate::is_terminal_status(record.status)
+            {
+                record.status = AuthFlowStatus::Canceled;
+                record.error = Some(crate::AuthErrorCode::Canceled);
+                record.updated_at = now;
+                superseded.push(record.id);
+            }
+        }
+        superseded
+    }
 }
 
 #[async_trait]
@@ -181,14 +216,14 @@ impl AuthFlowRecordSource for InMemoryAuthProductServices {
 #[async_trait]
 impl AuthFlowManager for InMemoryAuthProductServices {
     async fn create_flow(&self, request: NewAuthFlow) -> Result<AuthFlowRecord, AuthProductError> {
-        // Supersede-on-start happens at the creation seam itself (see the
-        // `AuthFlowManager::create_flow` contract), before the state lock so
-        // the walk's own locking cannot re-enter it.
-        if crate::is_setup_class_continuation(&request.continuation) {
-            self.cancel_superseded_setup_flows(&request.scope, &request.provider)
-                .await?;
-        }
         let mut state = self.lock_state();
+        // Supersede-on-start happens at the creation seam itself (see the
+        // `AuthFlowManager::create_flow` contract), under the SAME lock
+        // acquisition as the insert below: walk + insert must be one critical
+        // section or two racing creates both observe "no live predecessor".
+        if crate::is_setup_class_continuation(&request.continuation) {
+            Self::supersede_setup_flows_locked(&mut state, &request.scope, &request.provider);
+        }
         if let Some(binding) = &request.update_binding {
             let account = state
                 .accounts
@@ -532,28 +567,8 @@ impl AuthFlowManager for InMemoryAuthProductServices {
         scope: &crate::AuthProductScope,
         provider: &crate::AuthProviderId,
     ) -> Result<Vec<AuthFlowId>, AuthProductError> {
-        // Owner granularity (tenant/user/agent/project + surface + session):
-        // setup flows are thread-less and each re-opened connect popup mints a
-        // fresh invocation, so `flow_shares_setup_owner_root` — not full scope
-        // equality — is the correct predicate here, mirroring the durable
-        // store's per-owner+surface+session flow-root listing. Records are
-        // mutated in place rather than routed through `cancel_flow`, whose
-        // full-scope check would reject the prior invocation's scope.
-        let now = Utc::now();
         let mut state = self.lock_state();
-        let mut superseded = Vec::new();
-        for record in state.flows.values_mut() {
-            if crate::flow_shares_setup_owner_root(&record.scope, scope)
-                && &record.provider == provider
-                && crate::is_setup_class_continuation(&record.continuation)
-                && !crate::is_terminal_status(record.status)
-            {
-                record.status = AuthFlowStatus::Canceled;
-                record.error = Some(crate::AuthErrorCode::Canceled);
-                record.updated_at = now;
-                superseded.push(record.id);
-            }
-        }
+        let mut superseded = Self::supersede_setup_flows_locked(&mut state, scope, provider);
         superseded.sort();
         Ok(superseded)
     }

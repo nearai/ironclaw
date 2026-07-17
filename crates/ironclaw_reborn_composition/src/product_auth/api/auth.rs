@@ -1645,8 +1645,8 @@ impl RebornProductAuthServices {
         &self,
         request: RebornOAuthStartFlowRequest,
     ) -> Result<AuthFlowRecord, AuthProductError> {
-        // Supersede-on-start (RFC 9700 §4.7.1) is `create_flow`'s own contract
-        // now: minting the setup-class flow below cancels any prior live
+        // Supersede-on-start is `create_flow`'s own contract now (see
+        // `AuthFlowManager::create_flow`): minting the setup-class flow below cancels any prior live
         // setup-class flow for the same owner+provider, so a re-opened connect
         // popup cannot leave two live authorization requests racing to write
         // the same credential. A superseded flow's stored verifier is dead
@@ -1814,8 +1814,8 @@ impl RebornProductAuthServices {
         let Some(registry) = &self.dcr_oauth_registry else {
             return Ok(None);
         };
-        // Supersede-on-start (RFC 9700 §4.7.1) is `create_flow`'s own
-        // contract: DCR providers (e.g. Notion) reach flow creation through
+        // Supersede-on-start is `create_flow`'s own contract (see
+        // `AuthFlowManager::create_flow`): DCR providers (e.g. Notion) reach flow creation through
         // the registry rather than the plain setup seam, and inherit it there
         // — the exact per-route omission #6130 had to patch here is now
         // structurally impossible. Superseded flows' verifier material ages
