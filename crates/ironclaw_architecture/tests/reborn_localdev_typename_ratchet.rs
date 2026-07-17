@@ -8,15 +8,25 @@
 //! all of it to a `DeploymentConfig` value.
 //!
 //! That migration is incremental, so this test **freezes the current set of
-//! `LocalDev*` type definitions** (struct/enum/trait/type alias, `pub` or
-//! `pub(crate)`) and fails on any change:
+//! pub-visible `LocalDev*` type definitions** (struct/enum/trait/type alias)
+//! and fails on any change:
 //!
 //! - a **new** `LocalDev*` type (not in the allowlist) fails — the deployment
 //!   mode must resolve to policy data at the composition edge, not grow another
 //!   type;
+//! - a **second definition** of a frozen name (same file or another
+//!   module/crate) fails — occurrences are preserved and multiplicity is
+//!   checked explicitly;
 //! - **deleting** one without trimming [`FROZEN_LOCALDEV_TYPES`] also fails — so
 //!   the allowlist shrinks in lock-step as Slice B lands (§10: compare set
 //!   membership, never a count), and reviewers watch it get shorter.
+//!
+//! Scanner semantics (shared with the other §10 ratchets — see
+//! [`ratchet_support`]): comments/strings stripped before matching; covers
+//! `pub`/`pub(crate)`/`pub(super)`/`pub(in …)` and `unsafe`/`auto` trait
+//! modifiers; skips `tests/`, `examples/`, and `benches/` trees; line-based,
+//! not cfg-aware — a pub-visible definition in an inline `#[cfg(test)]` module
+//! in src IS inventoried (keep test doubles under `tests/`).
 //!
 //! Definition of done for this axis (§4.4/§10): the allowlist reaches the empty
 //! set — no `LocalDev*` type remains; local-dev is one `DeploymentConfig`
@@ -26,8 +36,20 @@
 //! — is a separate concern, so this ratchet stays high-signal with a clean
 //! empty-set goal.)
 
-use std::collections::BTreeSet;
-use std::path::{Path, PathBuf};
+mod ratchet_support;
+
+use std::collections::{BTreeMap, BTreeSet};
+use std::path::PathBuf;
+
+use ratchet_support::{
+    TypeDefOccurrence, collect_type_defs, duplicate_definitions, scan_type_defs, workspace_root,
+};
+
+const KEYWORDS: &[&str] = &["struct ", "enum ", "trait ", "type "];
+
+fn is_localdev_type(ident: &str) -> bool {
+    ident.starts_with("LocalDev")
+}
 
 /// The frozen inventory of `LocalDev*` type definitions under `crates/`, as of
 /// the store-consolidation ratchet (§10). Every entry is a deployment-mode-as-type
@@ -70,19 +92,40 @@ const FROZEN_LOCALDEV_TYPES: &[&str] = &[
 #[test]
 fn reborn_localdev_typename_allowlist_is_frozen_and_only_shrinks() {
     let crates_dir = workspace_root().join("crates");
-    let mut found = BTreeSet::new();
-    collect_localdev_type_defs(&crates_dir, &mut found);
+    let mut found: BTreeMap<String, Vec<TypeDefOccurrence>> = BTreeMap::new();
+    collect_type_defs(
+        &crates_dir,
+        KEYWORDS,
+        &is_localdev_type,
+        &[
+            "reborn_inmemory_store_ratchet.rs",
+            "reborn_localdev_typename_ratchet.rs",
+        ],
+        &mut found,
+    );
 
     let frozen: BTreeSet<&str> = FROZEN_LOCALDEV_TYPES.iter().copied().collect();
-    let found_refs: BTreeSet<&str> = found.iter().map(String::as_str).collect();
+    let found_refs: BTreeSet<&str> = found.keys().map(String::as_str).collect();
 
-    let added: Vec<&&str> = found_refs.difference(&frozen).collect();
+    let added: Vec<(&str, &Vec<TypeDefOccurrence>)> = found
+        .iter()
+        .filter(|(name, _)| !frozen.contains(name.as_str()))
+        .map(|(name, paths)| (name.as_str(), paths))
+        .collect();
     assert!(
         added.is_empty(),
         "New `LocalDev*` type definitions are banned (arch-simplification §4.4/§10): a \
          deployment mode is a `DeploymentConfig` value, never a type. Offending new types: \
          {added:?}. Resolve the mode to policy data at the composition edge instead of \
          adding a type."
+    );
+
+    let duplicated = duplicate_definitions(&found);
+    assert!(
+        duplicated.is_empty(),
+        "Each frozen LocalDev* type name must have exactly one definition; a second \
+         same-named definition elsewhere is new debt hiding behind an allowlist entry \
+         (§10): {duplicated:?}"
     );
 
     let removed: Vec<&&str> = frozen.difference(&found_refs).collect();
@@ -94,105 +137,139 @@ fn reborn_localdev_typename_allowlist_is_frozen_and_only_shrinks() {
     );
 }
 
-/// Self-test for the scanner: extract exactly the `LocalDev*` type definitions,
-/// ignoring references, string literals, comments, and non-`LocalDev` types.
+/// Self-test for the shared scanner as this ratchet configures it: all four
+/// definition keywords, restricted visibility, `unsafe`/`auto` trait modifiers,
+/// and — because comments and strings are stripped before matching —
+/// definition-shaped text in comments and plain/raw string literals is ignored.
 #[test]
 fn localdev_type_def_scanner_self_test() {
-    let sample = r#"
+    let sample = r##"
         pub struct LocalDevWidget { x: u8 }
         pub(crate) type LocalDevAlias = u8;
         pub enum LocalDevMode { A, B }
         pub trait LocalDevPort {}
-        struct LocalDevPrivate;              // not pub / pub(crate) -> ignored
+        pub unsafe trait LocalDevUnsafePort {}  // modifier tolerated
+        pub(crate) unsafe trait LocalDevScopedUnsafePort {}
+        struct LocalDevPrivate;              // not pub-visible -> ignored
         pub struct HostedWidget;             // not LocalDev -> ignored
-        let x = "LocalDevStringLiteral";     // string literal -> ignored
-        // pub struct LocalDevCommented      // comment -> ignored (line-based)
+        let x = "pub struct LocalDevStringLiteral";  // string literal -> ignored
+        // pub struct LocalDevLineCommented  -> ignored
+        /*
+        pub enum LocalDevBlockCommented { A }
+        */
+        let raw = r#"
+        pub type LocalDevRawString = u8;
+        "#;
         fn build_local_dev_runtime() {}      // fn, not a type -> ignored
-    "#;
-    let mut out = BTreeSet::new();
-    scan_source_for_localdev_type_defs(sample, &mut out);
-    let got: Vec<&str> = out.iter().map(String::as_str).collect();
+    "##;
+    let got: Vec<String> = scan_type_defs(sample, KEYWORDS, &is_localdev_type)
+        .into_iter()
+        .map(|(ident, _)| ident)
+        .collect();
     assert_eq!(
         got,
         vec![
+            "LocalDevWidget",
             "LocalDevAlias",
             "LocalDevMode",
             "LocalDevPort",
-            "LocalDevWidget",
+            "LocalDevUnsafePort",
+            "LocalDevScopedUnsafePort",
         ],
-        "scanner must match only `pub`/`pub(crate)` LocalDev* type definitions"
+        "scanner must match pub-visible LocalDev* type definitions outside \
+         comments and strings, in source order"
     );
 }
 
-fn collect_localdev_type_defs(dir: &Path, out: &mut BTreeSet<String>) {
-    let entries = std::fs::read_dir(dir)
-        .unwrap_or_else(|err| panic!("failed to read {}: {err}", dir.display()));
-    for entry in entries {
-        let entry = entry.unwrap_or_else(|err| panic!("failed to read dir entry: {err}"));
-        let path = entry.path();
-        if path.is_dir() {
-            if path.file_name().and_then(|n| n.to_str()) == Some("target") {
-                continue;
-            }
-            collect_localdev_type_defs(&path, out);
-            continue;
+/// Same-file multiplicity: two same-named `LocalDev*` definitions in one file
+/// (e.g. a struct in one module, a type alias in another) must be flagged.
+#[test]
+fn localdev_same_file_duplicate_detection_self_test() {
+    let sample = r#"
+        mod first {
+            pub struct LocalDevDupThing;
         }
-        if path.extension().and_then(|ext| ext.to_str()) != Some("rs") {
-            continue;
+        mod second {
+            pub type LocalDevDupThing = u8;
         }
-        // This ratchet file's own self-test fixture contains sample `LocalDev*`
-        // type lines; don't count them.
-        if path.file_name().and_then(|n| n.to_str()) == Some("reborn_localdev_typename_ratchet.rs")
-        {
-            continue;
-        }
-        let contents = std::fs::read_to_string(&path)
-            .unwrap_or_else(|err| panic!("failed to read {}: {err}", path.display()));
-        scan_source_for_localdev_type_defs(&contents, out);
+    "#;
+    let occurrences = scan_type_defs(sample, KEYWORDS, &is_localdev_type);
+    let idents: Vec<&str> = occurrences
+        .iter()
+        .map(|(ident, _)| ident.as_str())
+        .collect();
+    assert_eq!(
+        idents,
+        vec!["LocalDevDupThing", "LocalDevDupThing"],
+        "same-file duplicates must be preserved by the scan"
+    );
+
+    let mut found: BTreeMap<String, Vec<TypeDefOccurrence>> = BTreeMap::new();
+    for (ident, cfg_gated) in occurrences {
+        found.entry(ident).or_default().push(TypeDefOccurrence {
+            path: PathBuf::from("crate_a/src/lib.rs"),
+            cfg_gated,
+        });
     }
+    let duplicated = duplicate_definitions(&found);
+    assert_eq!(
+        duplicated.len(),
+        1,
+        "a same-file duplicate must be flagged by the multiplicity check"
+    );
+    assert_eq!(duplicated[0].1.len(), 2);
 }
 
-/// Line-based scan: pull the identifier from any `pub`/`pub(crate)`
-/// `struct`/`enum`/`trait`/`type` definition whose name starts with `LocalDev`.
-fn scan_source_for_localdev_type_defs(source: &str, out: &mut BTreeSet<String>) {
-    for line in source.lines() {
-        let mut rest = line.trim_start();
-        let Some(after_pub) = rest.strip_prefix("pub") else {
-            continue;
-        };
-        rest = after_pub.trim_start();
-        // optional `(crate)` / `(super)` visibility scope
-        if let Some(open) = rest.strip_prefix('(') {
-            let Some(close) = open.find(')') else {
-                continue;
-            };
-            rest = open[close + 1..].trim_start();
-        }
-        let mut matched = None;
-        for kw in ["struct ", "enum ", "trait ", "type "] {
-            if let Some(after_kw) = rest.strip_prefix(kw) {
-                matched = Some(after_kw);
-                break;
-            }
-        }
-        let Some(after_kw) = matched else {
-            continue;
-        };
-        let ident: String = after_kw
-            .trim_start()
-            .chars()
-            .take_while(|c| c.is_alphanumeric() || *c == '_')
-            .collect();
-        if ident.starts_with("LocalDev") {
-            out.insert(ident);
-        }
-    }
-}
+/// Regression for the composition `factory.rs` pattern: a durable/no-durable
+/// alias pair — the SAME name defined twice, each under a mutually exclusive
+/// `#[cfg(...)]` — is legitimate and must NOT be flagged as a duplicate. A
+/// mixed pair (only one occurrence gated) is still flagged.
+#[test]
+fn localdev_cfg_gated_alias_pair_is_not_a_duplicate() {
+    let sample = r#"
+        #[cfg(any(
+            not(feature = "inmemory-turn-state"),
+            any(feature = "libsql", feature = "postgres")
+        ))]
+        pub(crate) type LocalDevCfgPairStore = DurableImpl;
+        #[cfg(not(any(feature = "libsql", feature = "postgres")))]
+        pub(crate) type LocalDevCfgPairStore = VolatileImpl;
+    "#;
+    let occurrences = scan_type_defs(sample, KEYWORDS, &is_localdev_type);
+    assert_eq!(occurrences.len(), 2, "both cfg branches must be scanned");
+    assert!(
+        occurrences.iter().all(|(_, cfg_gated)| *cfg_gated),
+        "both branch definitions must be marked cfg-gated"
+    );
 
-fn workspace_root() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .and_then(|path| path.parent())
-        .expect("architecture crate must live under crates/ironclaw_architecture")
-        .to_path_buf()
+    let mut found: BTreeMap<String, Vec<TypeDefOccurrence>> = BTreeMap::new();
+    for (ident, cfg_gated) in occurrences {
+        found.entry(ident).or_default().push(TypeDefOccurrence {
+            path: PathBuf::from("crate_a/src/factory.rs"),
+            cfg_gated,
+        });
+    }
+    assert!(
+        duplicate_definitions(&found).is_empty(),
+        "an all-cfg-gated same-name pair is mutually exclusive, not duplicate debt"
+    );
+
+    // Mixed: one gated, one not — still duplicate debt.
+    let mixed_sample = r#"
+        #[cfg(feature = "libsql")]
+        pub(crate) type LocalDevMixedThing = A;
+        pub(crate) type LocalDevMixedThing = B;
+    "#;
+    let mut mixed: BTreeMap<String, Vec<TypeDefOccurrence>> = BTreeMap::new();
+    for (ident, cfg_gated) in scan_type_defs(mixed_sample, KEYWORDS, &is_localdev_type) {
+        mixed.entry(ident).or_default().push(TypeDefOccurrence {
+            path: PathBuf::from("crate_a/src/factory.rs"),
+            cfg_gated,
+        });
+    }
+    assert_eq!(
+        duplicate_definitions(&mixed).len(),
+        1,
+        "a partially cfg-gated same-name pair must still be flagged"
+    );
 }
