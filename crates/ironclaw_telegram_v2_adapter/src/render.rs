@@ -6,9 +6,9 @@
 //! token at request time).
 
 use ironclaw_product_adapters::{
-    DeclaredEgressHost, EgressCredentialHandle, EgressHeader, EgressMethod, EgressPath,
-    EgressRequest, ExternalConversationRef, FinalReplyView, ProductOutboundTarget, ProgressKind,
-    ProgressUpdateView,
+    AuthPromptView, DeclaredEgressHost, EgressCredentialHandle, EgressHeader, EgressMethod,
+    EgressPath, EgressRequest, ExternalConversationRef, FinalReplyView, GatePromptView,
+    ProductOutboundTarget, ProgressKind, ProgressUpdateView,
 };
 use ironclaw_turns::ReplyTargetBindingRef;
 use thiserror::Error;
@@ -201,7 +201,67 @@ pub fn render_final_reply(
     view: &FinalReplyView,
     credential_handle: EgressCredentialHandle,
 ) -> Result<Vec<EgressRequest>, TelegramRenderError> {
-    chunk_text_utf16(&view.text, TELEGRAM_MESSAGE_MAX_UTF16_UNITS)
+    Ok(render_text_message_chunks(
+        reply,
+        &view.text,
+        credential_handle,
+    ))
+}
+
+/// Render a `BlockedAuth` prompt as `sendMessage` requests. The authorization
+/// URL is the actionable part: the user opens it in a browser, consents on
+/// the provider's site, and the parked run resumes through the OAuth
+/// callback — nothing secret ever enters the chat. The shared channel
+/// delivery driver only routes link-shaped challenges here (credential-entry
+/// challenges take its deny arm), but render defensively when the URL is
+/// absent rather than going silent.
+pub fn render_auth_prompt(
+    reply: &TelegramReplyTarget,
+    view: &AuthPromptView,
+    credential_handle: EgressCredentialHandle,
+) -> Result<Vec<EgressRequest>, TelegramRenderError> {
+    let mut text = format!("{}\n\n{}", view.headline, view.body);
+    match &view.authorization_url {
+        Some(url) => {
+            text.push_str(
+                "\n\nOpen this link to authorize — I'll continue automatically once it's done:\n",
+            );
+            text.push_str(url);
+        }
+        None => {
+            text.push_str(
+                "\n\nFinish this in the IronClaw web app (Extensions), then ask me again here.",
+            );
+        }
+    }
+    Ok(render_text_message_chunks(reply, &text, credential_handle))
+}
+
+/// Render a `BlockedApproval` prompt as `sendMessage` requests. Telegram's
+/// inbound dispatch has no `approve`/`deny` parsing yet, so the honest copy
+/// directs the decision to the web app instead of claiming an in-chat reply
+/// works.
+pub fn render_gate_prompt(
+    reply: &TelegramReplyTarget,
+    view: &GatePromptView,
+    credential_handle: EgressCredentialHandle,
+) -> Result<Vec<EgressRequest>, TelegramRenderError> {
+    let text = format!(
+        "{}\n\n{}\n\nApprove or deny this from the IronClaw web app — I can't take approvals in this chat yet.",
+        view.headline, view.body
+    );
+    Ok(render_text_message_chunks(reply, &text, credential_handle))
+}
+
+/// Shared `sendMessage` builder: split `text` into ≤4096-UTF-16-unit chunks
+/// and produce one ordered request per chunk, each carrying the full chat
+/// addressing (chat id, topic, reply-to).
+fn render_text_message_chunks(
+    reply: &TelegramReplyTarget,
+    text: &str,
+    credential_handle: EgressCredentialHandle,
+) -> Vec<EgressRequest> {
+    chunk_text_utf16(text, TELEGRAM_MESSAGE_MAX_UTF16_UNITS)
         .into_iter()
         .map(|chunk| {
             let mut body = serde_json::Map::new();
@@ -224,11 +284,7 @@ pub fn render_final_reply(
             }
             let body_bytes = serde_json::to_vec(&serde_json::Value::Object(body))
                 .expect("body serializes to JSON"); // safety: body is a serde_json::Value::Object built from owned Strings/Numbers; serialization cannot fail
-            Ok(build_egress_request(
-                "/sendMessage",
-                body_bytes,
-                credential_handle.clone(),
-            ))
+            build_egress_request("/sendMessage", body_bytes, credential_handle.clone())
         })
         .collect()
 }

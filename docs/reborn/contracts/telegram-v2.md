@@ -221,7 +221,21 @@ adapter's `DeliveryStatus` mapping is the honesty contract:
 | 5xx, 429 | `FailedRetryable` (the mediated egress first honors ONE declared `retry_after` ≤ 5s with an in-place resend; a longer flood wait or a second 429 surfaces immediately) |
 | 401, 403 (user blocked the bot / token revoked) | `FailedUnauthorized` |
 | other 4xx (e.g. 400), render errors | `FailedPermanent` |
-| non-final-reply payloads | `Deferred` |
+| progress (typing) when not advertised, projection/keep-alive payloads | `Deferred` |
+
+**Blocked-run prompts render — they are never deferred.** A run that parks
+`BlockedAuth` with a link-shaped challenge gets its `AuthPrompt` delivered as
+a plain-text `sendMessage` carrying the authorization URL (tap → browser →
+provider consent → the OAuth callback resumes the parked run; nothing secret
+enters the chat). Credential-entry challenges never reach the adapter — the
+shared delivery driver's deny arm cancels the run and posts the
+"set this up in the web app" notice directly. A `BlockedApproval` run's
+`GatePrompt` renders with copy directing the approve/deny decision to the web
+app (Telegram inbound has no `approve`/`deny` parsing yet). Both prompts ride
+the same chunking + honesty mapping above and record `Delivered` with the
+originating `run_id`. (Regression 2026-07-17: the adapter used to record
+these `Deferred`, so an auth-gated DM watched "thinking…" get deleted and
+then silence.)
 
 A failed send is recorded as failed — never optimistic `Delivered`. Paired
 users' DM `chat_id`s (captured at consume time) are the deployment's

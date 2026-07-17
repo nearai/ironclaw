@@ -12,7 +12,9 @@ use ironclaw_product_adapters::{
 use ironclaw_turns::{ReplyTargetBindingRef, TurnRunId};
 
 use crate::payload::{GroupTriggerPolicy, TELEGRAM_API_HOST, parse_telegram_update};
-use crate::render::{render_final_reply, render_progress_typing};
+use crate::render::{
+    render_auth_prompt, render_final_reply, render_gate_prompt, render_progress_typing,
+};
 
 /// Configuration for a Telegram v2 adapter installation.
 #[derive(Debug, Clone)]
@@ -190,6 +192,8 @@ impl ProductAdapter for TelegramV2Adapter {
         let run_id: Option<TurnRunId> = match &envelope.payload {
             ProductOutboundPayload::FinalReply(view) => Some(view.turn_run_id),
             ProductOutboundPayload::Progress(view) => Some(view.turn_run_id),
+            ProductOutboundPayload::GatePrompt(view) => Some(view.turn_run_id),
+            ProductOutboundPayload::AuthPrompt(view) => Some(view.turn_run_id),
             _ => None,
         };
 
@@ -281,23 +285,49 @@ impl ProductAdapter for TelegramV2Adapter {
                     }
                 }
             }
-            ProductOutboundPayload::GatePrompt(_) | ProductOutboundPayload::AuthPrompt(_) => {
-                // Deferred to #3094. The workflow renders a placeholder body
-                // via this branch in fake contract tests; real production
-                // flows do not produce gate envelopes for Telegram yet.
-                record_status(
-                    delivery_sink,
-                    DeliveryStatus::Deferred {
-                        attempt_id,
-                        target: target_binding.clone(),
-                        run_id: None,
-                        reason: RedactedString::new(
-                            "gate/auth prompts deferred to #3094 on Telegram",
-                        ),
-                    },
-                )
-                .await;
-                return Ok(ProductRenderOutcome::Deferred);
+            ProductOutboundPayload::AuthPrompt(view) => {
+                // The shared channel delivery driver produces these for every
+                // Telegram run that parks `BlockedAuth` with a link-shaped
+                // challenge. Deferring here left the DM silent after the
+                // working message was deleted (Ben's 2026-07-17 regression).
+                match resolved_target.clone().and_then(|reply| {
+                    render_auth_prompt(&reply, &view, self.config.egress_credential_handle.clone())
+                }) {
+                    Ok(reqs) => reqs,
+                    Err(render_err) => {
+                        record_status(
+                            delivery_sink,
+                            DeliveryStatus::FailedPermanent {
+                                attempt_id,
+                                target: target_binding.clone(),
+                                run_id,
+                                reason: RedactedString::new(render_err.to_string()),
+                            },
+                        )
+                        .await;
+                        return Err(map_render_error(render_err));
+                    }
+                }
+            }
+            ProductOutboundPayload::GatePrompt(view) => {
+                match resolved_target.clone().and_then(|reply| {
+                    render_gate_prompt(&reply, &view, self.config.egress_credential_handle.clone())
+                }) {
+                    Ok(reqs) => reqs,
+                    Err(render_err) => {
+                        record_status(
+                            delivery_sink,
+                            DeliveryStatus::FailedPermanent {
+                                attempt_id,
+                                target: target_binding.clone(),
+                                run_id,
+                                reason: RedactedString::new(render_err.to_string()),
+                            },
+                        )
+                        .await;
+                        return Err(map_render_error(render_err));
+                    }
+                }
             }
             ProductOutboundPayload::CapabilityActivity(_)
             | ProductOutboundPayload::CapabilityDisplayPreview(_)
@@ -1186,5 +1216,139 @@ mod tests {
             statuses[0],
             DeliveryStatus::FailedPermanent { .. }
         ));
+    }
+
+    /// Ben's regression (2026-07-17): a Telegram run parked `BlockedAuth`
+    /// with an OAuth-shaped challenge produced SILENCE — the shared channel
+    /// delivery driver built an `AuthPrompt` (authorization URL and all), but
+    /// this adapter's stub arm recorded `Deferred` and rendered nothing, so
+    /// the DM saw "thinking…" get deleted and then no message. An auth prompt
+    /// must deliver a `sendMessage` carrying the authorization link.
+    #[tokio::test]
+    async fn render_outbound_auth_prompt_sends_link_message_and_records_delivered() {
+        let adapter = TelegramV2Adapter::new(config(false));
+        let egress = FakeProtocolHttpEgress::new(["api.telegram.org".to_string()]);
+        egress.allow_credential_handle("telegram_bot_token");
+        let sink = ironclaw_product_adapters::FakeOutboundDeliverySink::new();
+        let run_id = ironclaw_turns::TurnRunId::new();
+        let envelope = ProductOutboundEnvelope {
+            adapter_id: adapter.adapter_id().clone(),
+            installation_id: adapter.installation_id().clone(),
+            target: test_outbound_target(),
+            projection_cursor: test_projection_cursor(),
+            payload: ProductOutboundPayload::AuthPrompt(
+                ironclaw_product_adapters::AuthPromptView {
+                    turn_run_id: run_id,
+                    auth_request_ref: "auth:flow-1".into(),
+                    invocation_id: None,
+                    headline: "Authorization needed".into(),
+                    body: "Connect your Google account to continue this run.".into(),
+                    challenge_kind: None,
+                    provider: Some("google".into()),
+                    account_label: None,
+                    authorization_url: Some(
+                        "https://accounts.google.com/o/oauth2/v2/auth?client_id=test".into(),
+                    ),
+                    expires_at: None,
+                    connection: None,
+                },
+            ),
+            delivery_attempt_id: uuid::Uuid::new_v4(),
+        };
+
+        adapter
+            .render_outbound(envelope, &egress, &sink)
+            .await
+            .expect("auth prompt renders");
+
+        let calls = egress.calls();
+        assert_eq!(calls.len(), 1, "auth prompt is one sendMessage");
+        assert_eq!(calls[0].path.as_str(), "/sendMessage");
+        let body: serde_json::Value = serde_json::from_slice(&calls[0].body).expect("body json");
+        assert_eq!(body["chat_id"], -100);
+        let text = body["text"].as_str().expect("text");
+        assert!(text.contains("Authorization needed"), "headline: {text}");
+        assert!(
+            text.contains("https://accounts.google.com/o/oauth2/v2/auth?client_id=test"),
+            "the authorization URL is the actionable part of the prompt: {text}"
+        );
+        assert!(
+            body.get("parse_mode").is_none(),
+            "prompts are plain text — no parse_mode (qa-telegram:C4)"
+        );
+        let statuses = sink.statuses();
+        assert_eq!(statuses.len(), 1);
+        assert!(
+            matches!(
+                statuses[0],
+                DeliveryStatus::Delivered {
+                    run_id: Some(recorded),
+                    ..
+                } if recorded == run_id
+            ),
+            "delivered with the originating run id for correlation, got {:?}",
+            statuses[0]
+        );
+    }
+
+    /// Companion to the auth-prompt regression: a `BlockedApproval` run's
+    /// `GatePrompt` also rendered to nothing. Telegram's inbound dispatch has
+    /// no `approve`/`deny` parsing yet, so the prompt must say the decision
+    /// happens in the web app — but it must SAY it, not stay silent.
+    #[tokio::test]
+    async fn render_outbound_gate_prompt_sends_webapp_redirect_and_records_delivered() {
+        let adapter = TelegramV2Adapter::new(config(false));
+        let egress = FakeProtocolHttpEgress::new(["api.telegram.org".to_string()]);
+        egress.allow_credential_handle("telegram_bot_token");
+        let sink = ironclaw_product_adapters::FakeOutboundDeliverySink::new();
+        let run_id = ironclaw_turns::TurnRunId::new();
+        let envelope = ProductOutboundEnvelope {
+            adapter_id: adapter.adapter_id().clone(),
+            installation_id: adapter.installation_id().clone(),
+            target: test_outbound_target(),
+            projection_cursor: test_projection_cursor(),
+            payload: ProductOutboundPayload::GatePrompt(
+                ironclaw_product_adapters::GatePromptView {
+                    turn_run_id: run_id,
+                    gate_ref: "gate:approval-1".into(),
+                    invocation_id: None,
+                    headline: "Approval needed".into(),
+                    body: "I want to write notes.md to your workspace.".into(),
+                    allow_always: false,
+                    approval_context: None,
+                },
+            ),
+            delivery_attempt_id: uuid::Uuid::new_v4(),
+        };
+
+        adapter
+            .render_outbound(envelope, &egress, &sink)
+            .await
+            .expect("gate prompt renders");
+
+        let calls = egress.calls();
+        assert_eq!(calls.len(), 1, "gate prompt is one sendMessage");
+        assert_eq!(calls[0].path.as_str(), "/sendMessage");
+        let body: serde_json::Value = serde_json::from_slice(&calls[0].body).expect("body json");
+        assert_eq!(body["chat_id"], -100);
+        let text = body["text"].as_str().expect("text");
+        assert!(text.contains("Approval needed"), "headline: {text}");
+        assert!(
+            text.contains("IronClaw web app"),
+            "the prompt directs the decision to the web app: {text}"
+        );
+        let statuses = sink.statuses();
+        assert_eq!(statuses.len(), 1);
+        assert!(
+            matches!(
+                statuses[0],
+                DeliveryStatus::Delivered {
+                    run_id: Some(recorded),
+                    ..
+                } if recorded == run_id
+            ),
+            "delivered with the originating run id for correlation, got {:?}",
+            statuses[0]
+        );
     }
 }

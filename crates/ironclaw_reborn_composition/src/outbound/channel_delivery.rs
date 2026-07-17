@@ -399,6 +399,20 @@ impl FinalReplyDeliveryObserver {
                 }
                 return Ok(());
             };
+            if posted_messages.is_empty() {
+                // The marker is still recorded below so the wait loop doesn't
+                // hot-loop re-rendering the same prompt, but a blocked-state
+                // notification that posted nothing means the user was NOT
+                // told why the run stopped — exactly how the Telegram
+                // AuthPrompt defer stub turned an auth gate into silence
+                // (2026-07-17). Keep this loud.
+                tracing::warn!(
+                    target = "ironclaw::reborn::slack_delivery",
+                    %run_id,
+                    ?event_kind,
+                    "blocked-state notification rendered no channel messages; the user was not notified (adapter deferred or outbound policy suppressed the prompt)"
+                );
+            }
             if event_kind == RunNotificationEventKind::AuthRequired {
                 messages_to_delete_after_final.extend(posted_messages);
             }
@@ -423,7 +437,7 @@ impl FinalReplyDeliveryObserver {
                 else {
                     tracing::warn!(
                         %run_id,
-                        "completed Slack run has no finalized assistant message; skipping final reply delivery"
+                        "completed channel run has no finalized assistant message; skipping final reply delivery"
                     );
                     return Ok(None);
                 };
@@ -441,7 +455,7 @@ impl FinalReplyDeliveryObserver {
                 let Some(gate_ref) = state.gate_ref.as_ref() else {
                     tracing::warn!(
                         %run_id,
-                        "Slack run is blocked on approval without a gate ref; skipping approval prompt delivery"
+                        "channel run is blocked on approval without a gate ref; skipping approval prompt delivery"
                     );
                     return Ok(None);
                 };
@@ -469,7 +483,7 @@ impl FinalReplyDeliveryObserver {
                 let Some(gate_ref) = state.gate_ref.as_ref() else {
                     tracing::warn!(
                         %run_id,
-                        "Slack run is blocked on auth without a gate ref; skipping auth handling"
+                        "channel run is blocked on auth without a gate ref; skipping auth handling"
                     );
                     return Ok(None);
                 };
@@ -1337,7 +1351,7 @@ impl ImmediateAckWorkflowObserver for FinalReplyDeliveryObserver {
         let Ok(_permit) = self.delivery_permits.clone().acquire_owned().await else {
             tracing::warn!(
                 target = "ironclaw::reborn::slack_delivery",
-                "Slack final reply delivery skipped because delivery semaphore was closed"
+                "channel final reply delivery skipped because delivery semaphore was closed"
             );
             return;
         };
@@ -1350,7 +1364,7 @@ impl ImmediateAckWorkflowObserver for FinalReplyDeliveryObserver {
             tracing::warn!(
                 target = "ironclaw::reborn::slack_delivery",
                 error = %error,
-                "Slack final reply delivery failed after immediate ACK"
+                "channel final reply delivery failed after immediate ACK"
             );
             // A3: Best-effort feedback post so the user is not left in silence.
             // Skip if a blocked-state notification was already delivered — the

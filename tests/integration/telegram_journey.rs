@@ -446,6 +446,34 @@ impl JourneyStack {
 async fn build_journey_stack(
     replies: impl IntoIterator<Item = RebornScriptedReply>,
 ) -> JourneyStack {
+    build_journey_stack_customized(replies, |input| input).await
+}
+
+/// Journey stack with a Google OAuth provider client configured through the
+/// production `with_google_oauth_backend` seam — the same wiring `serve`
+/// applies from env. With a provider configured, a run that parks
+/// `BlockedAuth` on a `google` credential requirement gets a link-shaped
+/// challenge (authorization URL), driving the delivery driver's link-prompt
+/// arm instead of the credential-entry deny arm.
+async fn build_journey_stack_with_google_oauth(
+    replies: impl IntoIterator<Item = RebornScriptedReply>,
+) -> JourneyStack {
+    build_journey_stack_customized(replies, |input| {
+        let google = ironclaw_reborn_composition::OAuthClientConfig::new(
+            "journey-google-client",
+            "http://127.0.0.1:8745/api/reborn/product-auth/oauth/callback",
+            None,
+        )
+        .expect("test google oauth client config");
+        input.with_google_oauth_backend(google)
+    })
+    .await
+}
+
+async fn build_journey_stack_customized(
+    replies: impl IntoIterator<Item = RebornScriptedReply>,
+    customize: impl FnOnce(RebornBuildInput) -> RebornBuildInput,
+) -> JourneyStack {
     let root = tempdir().expect("runtime storage tempdir");
     let storage_root = root.path().join("local-dev");
     let network = Arc::new(ScriptedTelegramNetwork::default());
@@ -458,6 +486,7 @@ async fn build_journey_stack(
         )
         .with_runtime_policy(local_dev_runtime_policy().expect("local-dev policy"))
         .with_network_http_egress_for_test(Arc::clone(&network) as Arc<dyn NetworkHttpEgress>);
+    let input = customize(input);
     let runtime = build_reborn_runtime(
         RebornRuntimeInput::from_services(input)
             .with_identity(RebornRuntimeIdentity {
@@ -963,13 +992,12 @@ async fn telegram_dm_slack_install_gates_with_action_needed_notice_not_silence()
         .expect("the DM turn must post the working message, not silence");
 
     // Slack's activation parks on its personal-OAuth credential requirement.
-    // Local-dev has no slack OAuth client config, so the challenge is
+    // This stack has no slack OAuth client config, so the challenge is
     // credential-entry shaped and the observer takes the deny arm: it cancels
     // the blocked run and posts the host-authored "set this up in the web
     // app" notice — via the SAME wired status path that used to fail
-    // silently. (A deployment with slack OAuth configured takes the
-    // link-prompt arm instead and renders the authorization URL through the
-    // adapter; either way the DM is never silent.)
+    // silently. The OAuth-configured link-prompt arm is pinned separately by
+    // `telegram_dm_gated_install_posts_oauth_authorization_link_not_silence`.
     let notice = stack
         .wait_for_dm_send(|text| text.contains("credential-based connections can only be set up"))
         .await
@@ -1002,6 +1030,61 @@ async fn telegram_dm_slack_install_gates_with_action_needed_notice_not_silence()
         all_sends.len() > before_follow_up,
         "a follow-up DM to a gated conversation must still get host feedback \
          (busy hint or reply), got no new sends: {all_sends:?}"
+    );
+
+    stack.runtime.shutdown().await.expect("runtime shuts down");
+}
+
+/// Ben's second regression (2026-07-17): the OAuth-CONFIGURED sibling of the
+/// scenario above. With a provider client configured, a gated install parks
+/// `BlockedAuth` with a link-shaped challenge and the delivery driver takes
+/// the link-prompt arm — building an `AuthPrompt` whose authorization URL the
+/// adapter must deliver to the DM. The Telegram adapter used to record that
+/// prompt `Deferred` and render nothing, so the DM watched "thinking…" get
+/// deleted and then SILENCE while the driver waited for an authorization
+/// nobody was ever offered. Pins: the auth prompt reaches the chat as a
+/// `sendMessage` carrying the authorization URL.
+#[tokio::test]
+async fn telegram_dm_gated_install_posts_oauth_authorization_link_not_silence() {
+    // FIFO: install + activate; activate parks on the google OAuth gate, so
+    // the post-resume entry and the follow-up entry may stay unconsumed
+    // (nobody completes OAuth inside this test).
+    let stack = build_journey_stack_with_google_oauth([
+        RebornScriptedReply::tool_call(
+            "builtin.extension_install",
+            json!({"extension_id": "gmail"}),
+        ),
+        RebornScriptedReply::tool_call(
+            "builtin.extension_activate",
+            json!({"extension_id": "gmail"}),
+        ),
+        RebornScriptedReply::text("gmail is connected"),
+        RebornScriptedReply::text("still here"),
+    ])
+    .await;
+
+    let secret = admin_save(&stack).await;
+    pair_via_webhook(&stack, &secret, 1).await;
+
+    let status = stack.webhook_dm(&secret, 2, "can you set up gmail?").await;
+    assert_eq!(status, StatusCode::OK, "paired DM webhook acks 200");
+
+    stack
+        .wait_for_dm_send(|text| text.contains("Ironclaw is thinking"))
+        .await
+        .expect("the DM turn must post the working message");
+
+    // The actionable prompt: headline/body plus the Google authorization URL
+    // rendered by the adapter — the tap-to-authorize path.
+    let prompt = stack
+        .wait_for_dm_send(|text| text.contains("accounts.google.com"))
+        .await
+        .expect("the gated install must DM the authorization link, not silence");
+    assert_eq!(prompt["chat_id"], TG_CHAT_ID);
+    let text = prompt["text"].as_str().expect("prompt text");
+    assert!(
+        text.contains("Open this link to authorize"),
+        "prompt explains the link is the way to continue: {text}"
     );
 
     stack.runtime.shutdown().await.expect("runtime shuts down");
