@@ -20,7 +20,8 @@ use ironclaw_host_api::{
 };
 use ironclaw_host_runtime::{
     BUILTIN_FIRST_PARTY_PROVIDER, CapabilitySurfaceVersion as HostRuntimeCapabilitySurfaceVersion,
-    HostRuntime, HostRuntimeServices, RuntimeProcessPort, builtin_first_party_handlers,
+    HostRuntime, HostRuntimeServices, RuntimeProcessPort, TriggerCreateHook,
+    builtin_first_party_handlers, builtin_first_party_handlers_with_trigger_create_hook,
     builtin_first_party_package,
 };
 use ironclaw_network::{PolicyNetworkHttpEgress, ReqwestNetworkTransport};
@@ -107,6 +108,61 @@ pub(crate) fn local_dev_host_runtime_with_registry_and_runtime_http_egress(
     }
 
     Ok(Arc::new(services.host_runtime_for_local_testing()))
+}
+
+/// #5886: a minimal `HostRuntime` whose ONLY first-party handlers are the
+/// trigger-management verbs, built with a caller-supplied (real)
+/// `TriggerActiveRunLookup` instead of the bare `builtin_first_party_handlers`
+/// default (which always resolves `Missing`). Used to give
+/// `builtin.trigger_list` a correct `active_hold` projection when the calling
+/// harness's OWN baked-in lookup is scoped to a turn-state store the caller's
+/// real runs never write to — see
+/// `HostRuntimeCapabilityHarness::install_trigger_active_run_lookup_for_test`,
+/// which wraps this runtime with `TriggerActiveRunLookupHostRuntime` so only
+/// `builtin.trigger_list` dispatch routes here.
+pub(crate) fn local_dev_trigger_only_host_runtime(
+    storage_root: PathBuf,
+    trigger_repository: Arc<dyn ironclaw_triggers::TriggerRepository>,
+    active_run_lookup: Arc<dyn ironclaw_triggers::TriggerActiveRunLookup>,
+) -> HarnessResult<Arc<dyn HostRuntime>> {
+    let mut registry = ExtensionRegistry::new();
+    registry.insert(builtin_first_party_package()?)?;
+    let services = HostRuntimeServices::new(
+        Arc::new(registry),
+        local_dev_root_filesystem(storage_root, LocalDevRootMounts::core_builtins())?,
+        Arc::new(InMemoryResourceGovernor::new()),
+        Arc::new(GrantAuthorizer::new()),
+        ironclaw_processes::ProcessServices::in_memory(),
+        HostRuntimeCapabilitySurfaceVersion::new("reborn-app-v1")?,
+    )
+    .with_first_party_capabilities(Arc::new(
+        builtin_first_party_handlers_with_trigger_create_hook(
+            trigger_repository,
+            Arc::new(NoopTestTriggerCreateHook),
+            active_run_lookup,
+        )?,
+    ))
+    .with_trust_policy(Arc::new(first_party_trust_policy()?));
+
+    Ok(Arc::new(services.host_runtime_for_local_testing()))
+}
+
+/// Test-only `TriggerCreateHook`: this runtime never dispatches
+/// `builtin.trigger_create` (only `builtin.trigger_list` is ever routed to
+/// it — see `local_dev_trigger_only_host_runtime`'s doc), so the hook body is
+/// never exercised. Required only to satisfy
+/// `builtin_first_party_handlers_with_trigger_create_hook`'s signature.
+#[derive(Debug)]
+struct NoopTestTriggerCreateHook;
+
+#[async_trait::async_trait]
+impl TriggerCreateHook for NoopTestTriggerCreateHook {
+    async fn after_trigger_persisted(
+        &self,
+        _record: &ironclaw_triggers::TriggerRecord,
+    ) -> Result<(), ironclaw_triggers::TriggerError> {
+        Ok(())
+    }
 }
 
 pub(crate) fn local_dev_host_runtime_with_registry_and_egress(

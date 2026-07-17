@@ -7,6 +7,13 @@ publish = false
 [package.metadata.ironclaw]
 layer = "kernel"
 
+[features]
+# In-memory-backed approval store constructors for this crate's own tests and
+# downstream integration tiers. The stores themselves are the production
+# `Filesystem*Store<InMemoryBackend>`; the helpers just wire the in-memory
+# backend seam. Ships zero bytes in production binaries.
+test-support = []
+
 [dependencies]
 async-trait = "0.1"
 chrono = { version = "0.4", default-features = false, features = ["clock", "serde"] }

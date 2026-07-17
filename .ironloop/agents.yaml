@@ -6,6 +6,8 @@ reviewers:
     network_access: true
     auto_review:
       enabled: true
+      user_open: true
+      user_update: false
 
 developers:
   - id: implementer

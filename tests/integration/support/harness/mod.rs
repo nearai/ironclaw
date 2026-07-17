@@ -64,6 +64,7 @@ pub(crate) use super::doubles::{
     RecordingCapabilityResultWriter, RecordingDelegatingCapabilityPort, RecordingHostRuntime,
     RecordingNetworkHttpEgress, RecordingNetworkHttpTransport, RecordingRuntimeHttpEgress,
     RecordingTestCapabilityPort, StaticCapabilitySurfaceProfileResolver,
+    TriggerActiveRunLookupHostRuntime,
 };
 pub(crate) use assembly::{
     LocalDevRootMounts, bundled_extension_provider_trust, capability_ids_from_strs,
@@ -106,10 +107,18 @@ impl HarnessCapabilityMode {
     /// `HostRuntimeCapabilityHarness::install_durable_capability_io`'s doc
     /// for why the durable-io swap must happen here rather than at harness
     /// construction (issue #5838).
+    ///
+    /// `turn_store` is the caller's REAL shared turn-state store
+    /// (`group.rs`'s `GroupSharedStorage.turn_store`), consumed only by the
+    /// `HostRuntime` arm and only when that harness opted into
+    /// `.with_trigger_active_run_lookup_for_test()` — see
+    /// `HostRuntimeCapabilityHarness::install_trigger_active_run_lookup_for_test`'s
+    /// doc (#5886).
     pub(crate) fn into_parts(
         self,
         milestone_sink: Arc<ironclaw_turns::run_profile::InMemoryLoopHostMilestoneSink>,
         turn_thread_service: Arc<dyn ironclaw_threads::SessionThreadService>,
+        turn_store: Arc<ironclaw_turns::FilesystemTurnStateStore<HarnessTurnBackend>>,
     ) -> HarnessResult<HarnessCapabilityParts> {
         match self {
             Self::Recording(port) => {
@@ -130,6 +139,9 @@ impl HarnessCapabilityMode {
             Self::HostRuntime(harness) => {
                 if harness.durable_capability_io_requested {
                     harness.install_durable_capability_io(turn_thread_service);
+                }
+                if harness.trigger_active_run_lookup_requested {
+                    harness.install_trigger_active_run_lookup_for_test(turn_store)?;
                 }
                 Ok((
                     harness.capability_factory(milestone_sink),
@@ -160,7 +172,11 @@ struct OutboundTargetToolsParts {
 }
 
 pub(crate) struct HostRuntimeCapabilityHarness {
-    runtime: Arc<dyn HostRuntime>,
+    /// Interior-mutable (not a plain `Arc`) so `install_trigger_active_run_lookup_for_test`
+    /// (#5886) can re-wrap it with `TriggerActiveRunLookupHostRuntime` AFTER
+    /// this harness is already `Arc`'d — the same chicken-and-egg constraint
+    /// `io`/`result_writer_io` document above `install_durable_capability_io`.
+    runtime: Mutex<Arc<dyn HostRuntime>>,
     approval_parts: Option<RebornLocalDevApprovalTestParts>,
     auto_approve_settings: Option<Arc<dyn ironclaw_approvals::AutoApproveSettingStore>>,
     pending_approval_scopes: Arc<Mutex<HashMap<ApprovalRequestId, ResourceScope>>>,
@@ -298,6 +314,11 @@ pub(crate) struct HostRuntimeCapabilityHarness {
     /// harnesses; `None` for the lower-level constructors and the Echo backend.
     /// Read via `reborn_services_for_test`.
     reborn_services: Option<ironclaw_reborn_composition::RebornServices>,
+    /// Set from `HostRuntimeHarnessOptions::with_trigger_active_run_lookup_for_test()`
+    /// (#5886) at construction; read by `HarnessCapabilityMode::into_parts` to
+    /// decide whether to call `install_trigger_active_run_lookup_for_test` once
+    /// the caller's real shared turn-state store is available.
+    trigger_active_run_lookup_requested: bool,
 }
 
 impl HostRuntimeCapabilityHarness {
@@ -409,6 +430,50 @@ impl HostRuntimeCapabilityHarness {
             .await
             .map_err(|error| format!("scoped credential account creation failed: {error:?}"))?;
         Ok(())
+    }
+
+    /// Flip every non-revoked credential account for `provider` under
+    /// `scope`'s credential-owner view to `Revoked`, returning how many were
+    /// flipped. Models an EXTERNAL revocation (the user revoked the grant on
+    /// the provider's side) through the same production transition the
+    /// refresh sweep's `report_terminal_refresh_status` performs:
+    /// `CredentialAccountService::update_status(.., Revoked)`. Companion to
+    /// [`Self::seed_credential_account_with_material`] for the #5878
+    /// activation-with-revoked-credential shape.
+    pub(crate) async fn revoke_credential_accounts_for_provider(
+        &self,
+        scope: &ResourceScope,
+        provider: &str,
+    ) -> HarnessResult<usize> {
+        let product_auth = self
+            .product_auth
+            .as_ref()
+            .ok_or("harness missing local-dev product auth (not built via new_with_options)")?;
+        let scope = AuthProductScope::credential_owner(scope, AuthSurface::Api);
+        let provider_id = AuthProviderId::new(provider)?;
+        let accounts = product_auth
+            .credential_account_record_source_for_test()
+            .accounts_for_owner(&scope)
+            .await
+            .map_err(|error| format!("account enumeration for revoke failed: {error:?}"))?;
+        let mut revoked = 0;
+        for account in accounts {
+            if account.provider != provider_id || account.status == CredentialAccountStatus::Revoked
+            {
+                continue;
+            }
+            // Pass the account's OWN stored scope: `update_status` requires
+            // full scope equality, and the stored scope carries the minting
+            // invocation id no reconstructed scope can reproduce (same
+            // pattern as the refresh sweep's terminal-status write).
+            product_auth
+                .credential_account_service()
+                .update_status(&account.scope, account.id, CredentialAccountStatus::Revoked)
+                .await
+                .map_err(|error| format!("revoking account {} failed: {error:?}", account.id))?;
+            revoked += 1;
+        }
+        Ok(revoked)
     }
 
     /// The fixed user this harness dispatches first-party capabilities under
@@ -524,6 +589,7 @@ impl HostRuntimeCapabilityHarness {
             activate_bundled_extensions_for_test,
             project_service_fault_injection,
             durable_capability_io,
+            trigger_active_run_lookup_requested,
         } = options;
         let root = Arc::new(tempfile::tempdir()?);
         let storage_root = root.path().join("local-dev");
@@ -668,7 +734,7 @@ impl HostRuntimeCapabilityHarness {
             Arc::clone(&pending_approval_scopes),
         ));
         Ok(Self {
-            runtime,
+            runtime: Mutex::new(runtime),
             approval_parts,
             auto_approve_settings,
             pending_approval_scopes,
@@ -706,6 +772,7 @@ impl HostRuntimeCapabilityHarness {
             persistent_approval_policies,
             trigger_repository,
             reborn_services: Some(services),
+            trigger_active_run_lookup_requested,
         })
     }
 
@@ -717,7 +784,11 @@ impl HostRuntimeCapabilityHarness {
     /// runtime), so parking sits outside the existing recorder at the same
     /// `HostRuntime` trait-object seam.
     pub(crate) fn park_capability_dispatch(mut self, gate: ParkingCapabilityGate) -> Self {
-        self.runtime = Arc::new(ParkingHostRuntime::new(self.runtime, gate));
+        let inner = self
+            .runtime
+            .into_inner()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        self.runtime = Mutex::new(Arc::new(ParkingHostRuntime::new(inner, gate)));
         self
     }
 
@@ -800,6 +871,50 @@ impl HostRuntimeCapabilityHarness {
         *self.io.lock().unwrap() = io;
         *self.result_writer_io.lock().unwrap() = result_writer_io;
         *self.durable_capability_io_thread_service.lock().unwrap() = Some(thread_service);
+    }
+
+    /// #5886: re-wire `builtin.trigger_list` dispatch to a REAL
+    /// `TriggerActiveRunLookup` built over `turn_store` — the caller's actual
+    /// shared turn-state store, where the group's real triggered runs (and
+    /// their `BlockedApproval` gates) are recorded. This harness's own
+    /// baked-in lookup (from `new_with_options` -> `build_reborn_services`)
+    /// is scoped to a DIFFERENT, disjoint turn-state store this harness's
+    /// capability dispatch never actually writes through in group-based
+    /// tests (`group.rs`'s `into_group` routes real dispatch over its own
+    /// shared coordinator/turn_store), so it can never see the run and
+    /// `trigger_list` always omits `active_hold`.
+    ///
+    /// `turn_store` MUST be the SAME store the caller's runs actually persist
+    /// to (`group.rs`'s `GroupSharedStorage.turn_store`) — mirrors
+    /// `install_durable_capability_io`'s same interior-mutability constraint:
+    /// that store only exists AFTER this harness is already built and `Arc`'d,
+    /// so this runs post-construction, from `HarnessCapabilityMode::into_parts`,
+    /// gated on `trigger_active_run_lookup_requested`.
+    fn install_trigger_active_run_lookup_for_test(
+        &self,
+        turn_store: Arc<ironclaw_turns::FilesystemTurnStateStore<HarnessTurnBackend>>,
+    ) -> HarnessResult<()> {
+        let repo = self
+            .trigger_repository_for_test()
+            .ok_or("trigger_active_run_lookup wiring requires a captured trigger repository")?;
+        let active_run_lookup =
+            ironclaw_reborn_composition::test_support::local_dev_trigger_active_run_lookup_for_test(
+                turn_store,
+            );
+        let trigger_lookup_storage_root = self.root.path().join("trigger-active-run-lookup");
+        std::fs::create_dir_all(&trigger_lookup_storage_root)?;
+        let trigger_runtime = assembly::local_dev_trigger_only_host_runtime(
+            trigger_lookup_storage_root,
+            repo,
+            active_run_lookup,
+        )?;
+        let inner = self.runtime.lock().unwrap().clone();
+        *self.runtime.lock().unwrap() = Arc::new(TriggerActiveRunLookupHostRuntime::new(
+            inner,
+            trigger_runtime,
+            CapabilityId::new(ironclaw_host_runtime::TRIGGER_LIST_CAPABILITY_ID)?,
+        ));
+        Ok(())
     }
 
     fn invocations(&self) -> Vec<CapabilityInvocation> {
@@ -1375,11 +1490,15 @@ impl HostRuntimeCapabilityHarness {
             });
         let tool_permission_overrides: Arc<dyn ironclaw_approvals::ToolPermissionOverrideStore> =
             self.tool_permission_overrides.clone().unwrap_or_else(|| {
-                Arc::new(ironclaw_approvals::InMemoryCapabilityPermissionOverrideStore::new())
+                Arc::new(
+                    ironclaw_approvals::test_support::in_memory_backed_capability_permission_override_store(),
+                )
             });
         let auto_approve_settings: Arc<dyn ironclaw_approvals::AutoApproveSettingStore> =
             self.auto_approve_settings.clone().unwrap_or_else(|| {
-                Arc::new(ironclaw_approvals::InMemoryAutoApproveSettingStore::new())
+                Arc::new(
+                    ironclaw_approvals::test_support::in_memory_backed_auto_approve_setting_store(),
+                )
             });
         let persistent_approval_policies: Arc<
             dyn ironclaw_approvals::PersistentApprovalPolicyStore,
@@ -1387,7 +1506,9 @@ impl HostRuntimeCapabilityHarness {
             .persistent_approval_policies
             .clone()
             .unwrap_or_else(|| {
-                Arc::new(ironclaw_approvals::InMemoryPersistentApprovalPolicyStore::new())
+                Arc::new(
+                    ironclaw_approvals::test_support::in_memory_backed_persistent_approval_policy_store(),
+                )
             });
         let outbound_preferences_facade = self.outbound_target_tools.as_ref().map(|parts| {
             Arc::clone(&parts.facade)
@@ -1496,7 +1617,7 @@ impl HostRuntimeCapabilityHarness {
             .collect();
         let parts =
             ironclaw_reborn_composition::test_support::RefreshingLocalDevCapabilityPortTestParts {
-                runtime: Arc::clone(&self.runtime),
+                runtime: self.runtime.lock().unwrap().clone(),
                 run_context: run_context.clone(),
                 fallback_user_id: dispatch_user,
                 // All four mount views = this harness's single `mounts` view.
