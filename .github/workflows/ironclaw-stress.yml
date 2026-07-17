@@ -222,7 +222,7 @@ jobs:
           cargo build --release \
             --package ironclaw_reborn_cli \
             --features webui-v2-beta,postgres,inmemory-turn-state \
-            --bin ironclaw-reborn
+            --bin ironclaw
           cargo build --release --package ironclaw_stress
 
       - name: Run hosted-single-tenant Postgres API capacity workload
@@ -259,7 +259,7 @@ jobs:
           EOF
 
           IRONCLAW_REBORN_HOME="$RUNNER_TEMP/ironclaw-reborn-home" \
-            target/release/ironclaw-reborn serve \
+            target/release/ironclaw serve \
               --host 127.0.0.1 \
               --port 18080 \
               > target/ironclaw-stress/postgres-api-server.log \

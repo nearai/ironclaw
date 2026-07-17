@@ -44,7 +44,7 @@ if [ "$REBORN_PORT" = "0" ]; then
   echo "error: REBORN_PORT=0 (kernel-assigned port) isn't usable for browser onboarding." >&2
   echo "       Set a fixed REBORN_PORT, or run the test-harness form directly:" >&2
   echo "       cargo run -q -p ironclaw_reborn_cli --features webui-v2-beta \\" >&2
-  echo "         --bin ironclaw-reborn -- serve --port 0" >&2
+  echo "         --bin ironclaw -- serve --port 0" >&2
   exit 1
 fi
 
@@ -101,7 +101,7 @@ if [ -z "${IRONCLAW_REBORN_WEBUI_TOKEN:-}" ]; then
   export IRONCLAW_REBORN_WEBUI_TOKEN="$(openssl rand -hex 32)"
 fi
 
-CARGO=(cargo run -q -p ironclaw_reborn_cli --features webui-v2-beta --bin ironclaw-reborn --)
+CARGO=(cargo run -q -p ironclaw_reborn_cli --features webui-v2-beta --bin ironclaw --)
 
 # Configure the model route (compiles the binary on first run).
 set_provider_args=(models set-provider "$PROVIDER")

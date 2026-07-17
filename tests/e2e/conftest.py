@@ -389,11 +389,11 @@ class ManagedIronclawServer:
 
 @pytest.fixture(scope="session")
 def ironclaw_binary():
-    """Ensure the legacy ironclaw-v1 binary is built. Returns its path."""
+    """Ensure ironclaw binary is built. Returns the binary path."""
     target_dir = _cargo_target_dir()
     binary = target_dir / "debug" / "ironclaw-v1"
     if _binary_needs_rebuild(binary):
-        print("Building legacy ironclaw-v1 (this may take a while)...")
+        print("Building ironclaw (this may take a while)...")
         subprocess.run(
             [
                 "cargo", "build",
@@ -423,13 +423,14 @@ def ironclaw_reborn_binary():
     the binary path. Used by the Reborn WebUI v2 smoke scenario.
     """
     target_dir = _cargo_target_dir()
-    binary = target_dir / "debug" / "ironclaw-reborn"
+    binary = target_dir / "debug" / "ironclaw"
     if _binary_needs_rebuild(binary):
         print("Building ironclaw-reborn (webui-v2-beta; this may take a while)...")
         subprocess.run(
             [
                 "cargo", "build",
                 "-p", "ironclaw_reborn_cli",
+                "--bin", "ironclaw",
                 "--features", "webui-v2-beta",
             ],
             cwd=ROOT,
@@ -452,7 +453,7 @@ def ironclaw_reborn_openai_compat_binary():
     OpenAI-compatible E2E explicitly proves the route-bearing binary.
     """
     target_dir = _cargo_target_dir()
-    binary = target_dir / "debug" / "ironclaw-reborn"
+    binary = target_dir / "debug" / "ironclaw"
     stamp = target_dir / "debug" / ".ironclaw-reborn-openai-compat-beta.stamp"
     input_mtime = max(
         _latest_mtime(ROOT / "Cargo.toml"),
@@ -473,6 +474,7 @@ def ironclaw_reborn_openai_compat_binary():
             [
                 "cargo", "build",
                 "-p", "ironclaw_reborn_cli",
+                "--bin", "ironclaw",
                 "--features", "openai-compat-beta",
             ],
             cwd=ROOT,

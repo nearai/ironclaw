@@ -79,9 +79,6 @@ repository = "https://github.com/nearai/ironclaw"
 [package.metadata.ironclaw]
 layer = "legacy"
 
-[package.metadata.dist]
-dist = false
-
 [[bin]]
 name = "ironclaw-v1"
 path = "src/main.rs"

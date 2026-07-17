@@ -47,7 +47,7 @@ jobs:
           fi
 
   build:
-    name: Build legacy ironclaw-v1 (libsql)
+    name: Build ironclaw (libsql)
     needs: matrix-config
     runs-on: ubuntu-latest
     timeout-minutes: 30

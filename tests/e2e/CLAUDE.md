@@ -56,7 +56,7 @@ The suite has grown to ~65+ scenario files. The table below is a **representativ
 subset grouped by surface**, not an exhaustive list — run `pytest scenarios/ --co -q`
 from `tests/e2e/` for the full, current set.
 
-**Legacy `ironclaw-v1` gateway (browser via `page` / `SEL`):**
+**Legacy `ironclaw` gateway (browser via `page` / `SEL`):**
 
 | File | What it tests |
 |------|--------------|
@@ -73,7 +73,7 @@ from `tests/e2e/` for the full, current set.
 | File | What it tests |
 |------|--------------|
 | `test_reborn_webui_v2_smoke.py` | Canonical v2 smoke: serve boots, SPA renders authed shell, bearer auth + `?token=` shim scope, text turn persists/streams, thread list/delete, timeline pagination, composer-while-running, approval-gate send block, **new-chat-while-a-run-is-active (the #5256 `submitBusyRef` deadlock regression)** |
-| `test_reborn_gateway_smoke.py` | Legacy `ironclaw-v1` web channel (`/api/chat/*`) under `ENGINE_V2` — NOT the Reborn binary |
+| `test_reborn_gateway_smoke.py` | Legacy `ironclaw` web channel (`/api/chat/*`) under `ENGINE_V2` — NOT the reborn binary |
 | `test_reborn_v2_file_download.py` | Agent-produced workspace files are downloadable from the v2 UI |
 | `test_v2_activity_shell.py` | v2 activity shell rendering |
 | `test_v2_*_flow.py` / `test_v2_engine_*.py` | v2 auth/OAuth matrix (GitHub PAT, GSuite, Notion MCP) and v2-engine approval/auth/tool-lifecycle/error-handling |
@@ -120,7 +120,7 @@ All fixtures are defined in `tests/e2e/conftest.py`. Running `pytest scenarios/`
 
 | Fixture | What it does |
 |---------|-------------|
-| `ironclaw_binary` | Legacy gateway binary. Checks `target/debug/ironclaw-v1`; if absent, runs `cargo build -p ironclaw --bin ironclaw-v1 --no-default-features --features libsql` (timeout 600s). |
+| `ironclaw_binary` | Legacy gateway binary. Checks `target/debug/ironclaw`; if absent, runs `cargo build --no-default-features --features libsql` (timeout 600s). |
 | `ironclaw_reborn_binary` | Reborn v2 binary. Builds `target/debug/ironclaw-reborn` with `--features webui-v2-beta` (transitively `libsql`) when stale/missing. Used by the v2 SPA scenarios. |
 | `reborn_v2_server` | Starts `ironclaw-reborn serve` (v2 SPA at `/`, `local-dev` profile) against `mock_llm_server`; config written via `_write_config_toml` (selects the `openai` provider pointed at the mock). Waits for `/api/health`; SIGINT teardown. (Module-scoped, defined in `test_reborn_webui_v2_smoke.py`.) |
 | `reborn_v2_browser` | Chromium instance for the v2 scenarios, independent of the legacy `browser` fixture (generous launch timeout + retry). |

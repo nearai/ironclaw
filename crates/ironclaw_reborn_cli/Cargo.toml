@@ -138,5 +138,5 @@ ironclaw_reborn_composition = { path = "../ironclaw_reborn_composition", version
 ironclaw_common = { path = "../ironclaw_common", version = "0.4.2" }
 
 [[bin]]
-name = "ironclaw-reborn"
+name = "ironclaw"
 path = "src/main.rs"

@@ -508,7 +508,7 @@ async def start_gateway_stack(
             extra_env=extra_gateway_env,
         )
         gateway_proc = subprocess.Popen(
-            [str(ROOT / "target" / "debug" / "ironclaw"), "--no-onboard"],
+            [str(ROOT / "target" / "debug" / "ironclaw-v1"), "--no-onboard"],
             cwd=ROOT,
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,

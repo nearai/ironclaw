@@ -368,7 +368,7 @@ def _cargo_target_dir() -> Path:
 
 
 def _reborn_binary() -> Path:
-    return _cargo_target_dir() / "debug" / "ironclaw-reborn"
+    return _cargo_target_dir() / "debug" / "ironclaw"
 
 
 def build_reborn_binary() -> Path:
@@ -388,7 +388,7 @@ def build_reborn_binary() -> Path:
             "--features",
             features,
             "--bin",
-            "ironclaw-reborn",
+            "ironclaw",
         ],
         cwd=ROOT,
         env=build_env,
