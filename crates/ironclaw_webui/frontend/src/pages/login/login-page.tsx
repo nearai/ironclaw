@@ -104,6 +104,18 @@ export function LoginPage({ initialToken, error, oauthRedirectAfter = "/", onSub
           providers={oauthProviders}
           redirectAfter={oauthRedirectAfter}
         />
+
+        {/* No OAuth providers configured is the local single-user desktop
+            signal (`/auth/providers` returns an empty list when no SSO is
+            set up) — point that user at the CLI command that reprints
+            their login link instead of leaving them stuck on a bare form. */}
+        {oauthProviders.length === 0 &&
+          (<p className="mt-6 text-center text-xs text-[var(--v2-text-faint)]">
+            {t("login.localDevHint")}{" "}
+            <code className="rounded bg-[var(--v2-surface-soft)] px-1 py-0.5 font-mono">
+              ironclaw-reborn status
+            </code>
+          </p>)}
       </Card>
     </main>
   );
