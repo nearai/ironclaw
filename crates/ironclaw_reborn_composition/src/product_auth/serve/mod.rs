@@ -2060,10 +2060,7 @@ mod tests {
             _caller: &WebUiAuthenticatedCaller,
             _extension_id: &ExtensionId,
         ) -> Result<bool, RebornServicesError> {
-            Ok(self
-                .calls
-                .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
-                == 0)
+            Ok(self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst) == 0)
         }
     }
 

@@ -15,14 +15,13 @@ use std::{
 };
 
 use async_trait::async_trait;
+use ironclaw_common::llm_costs::{default_cost, model_cost};
 use ironclaw_host_api::{CapabilityId, ProviderToolName, sha256_digest_token};
 use ironclaw_llm::{
     ChatMessage, CompletionRequest, CompletionResponse, CompletionStreamSink, ContentPart,
     FinishReason, ImageUrl, LlmError, LlmProvider, Role, ToolCall, ToolCompletionRequest,
     ToolCompletionResponse, ToolDefinition, clean_response, contains_codex_text_tool_call_syntax,
-    costs::{default_cost, model_cost},
-    recover_codex_text_tool_calls_from_tool_names,
-    vision_models::is_vision_model,
+    recover_codex_text_tool_calls_from_tool_names, vision_models::is_vision_model,
 };
 use ironclaw_loop_host::{
     HostManagedModelError, HostManagedModelErrorKind, HostManagedModelGateway,
@@ -137,9 +136,9 @@ impl LlmModelProfilePolicy {
     }
 
     /// Build a [`StaticModelCostTable`] mapping every allowed `ModelProfileId`
-    /// to its per-token price via [`ironclaw_llm::costs::model_cost`].
+    /// to its per-token price via [`ironclaw_common::llm_costs::model_cost`].
     /// Profiles whose `model_override` is unknown to the LLM cost table
-    /// fall back to [`ironclaw_llm::costs::default_cost`] (roughly GPT-4o
+    /// fall back to [`ironclaw_common::llm_costs::default_cost`] (roughly GPT-4o
     /// pricing) so the accountant always reconciles to a non-zero spend
     /// for an unknown provider — fail-safe, not silent.
     pub fn build_cost_table(&self) -> StaticModelCostTable {

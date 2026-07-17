@@ -1,3 +1,4 @@
+// arch-exempt: large_file, WebUI bundle composition awaiting Reborn composition helper extraction, plan #4471
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -459,6 +460,14 @@ pub(crate) fn build_webui_services_with_channel_connection(
     #[cfg(feature = "root-llm-provider")]
     if let Some(llm_config) = build_llm_config_service(runtime) {
         api = api.with_llm_config_service(llm_config);
+    }
+
+    // Wire the live active-model reader so a default-model run (no explicit
+    // `model`, hence no `resolved_model_route`) is still priced — against the
+    // model that actually ran, tracking operator model swaps.
+    #[cfg(feature = "root-llm-provider")]
+    if let Some(active_model_reader) = runtime.webui_active_model_reader() {
+        api = api.with_active_model_reader(active_model_reader);
     }
 
     Ok(RebornWebuiBundle {

@@ -23,6 +23,8 @@ pub mod loopback_oauth;
 mod oauth;
 mod provider;
 mod scope;
+#[cfg(any(test, feature = "test-support"))]
+pub mod test_support;
 
 pub use account_state::{AuthAccountLastError, AuthAccountState, project_auth_account_state};
 pub use cleanup::{

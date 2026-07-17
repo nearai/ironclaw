@@ -290,6 +290,10 @@ insta = { version = "1.46.3", features = ["yaml"] }
 ironclaw_llm = { path = "crates/ironclaw_llm", version = "0.1.0", features = ["testing"] }
 ironclaw_agent_loop = { path = "crates/ironclaw_agent_loop", version = "0.1.0", features = ["test-support"] }
 ironclaw_approvals = { path = "crates/ironclaw_approvals", version = "0.1.0" }
+# Pull the auth crate's `test-support` feature in only for tests so the
+# `test_support::conformance` OAuth-flow suite (used by the
+# `reborn_integration_oauth_connect` test) doesn't ship in release binaries.
+ironclaw_auth = { path = "crates/ironclaw_auth", version = "0.1.0", features = ["test-support"] }
 # C-ATTACH: `InboundAttachment` for `submit_turn_with_image_attachment`.
 ironclaw_attachments = { path = "crates/ironclaw_attachments", version = "0.1.0" }
 ironclaw_authorization = { path = "crates/ironclaw_authorization", version = "0.1.0" }

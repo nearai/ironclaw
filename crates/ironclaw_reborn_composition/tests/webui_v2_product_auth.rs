@@ -1634,8 +1634,10 @@ async fn extension_oauth_start_for_installed_package_attaches_update_binding() {
         )
         .with_auth_engine(google_test_engine()),
     );
-    let app =
-        build_app_with_product_auth_service_config_and_extensions(product_auth, &["google-calendar"]);
+    let app = build_app_with_product_auth_service_config_and_extensions(
+        product_auth,
+        &["google-calendar"],
+    );
     let invocation_id = InvocationId::new();
     let scope = AuthProductScope::new(
         ResourceScope {
