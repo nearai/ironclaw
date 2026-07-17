@@ -82,10 +82,6 @@ export async function updateSetting(key, value) {
   return { success: true, entry: data.entry, value: data.entry?.value };
 }
 
-export enum SettingsImportFailureReason {
-  NoSupportedSettings = "no_supported_settings",
-}
-
 type SettingsImportUpdateResult = Awaited<ReturnType<typeof updateSetting>>;
 
 export type SettingsImportSuccess = {
@@ -94,23 +90,21 @@ export type SettingsImportSuccess = {
   results: SettingsImportUpdateResult[];
 };
 
-export type SettingsImportFailure = {
+export type NoSupportedSettingsImportFailure = {
   success: false;
   imported: 0;
   results: SettingsImportUpdateResult[];
-  reason: SettingsImportFailureReason;
   message: string;
 };
 
-export type SettingsImportResult = SettingsImportSuccess | SettingsImportFailure;
+export type SettingsImportResult =
+  | SettingsImportSuccess
+  | NoSupportedSettingsImportFailure;
 
-export class SettingsImportError extends Error {
-  readonly reason: SettingsImportFailureReason;
-
-  constructor(failure: SettingsImportFailure) {
+export class NoSupportedSettingsImportError extends Error {
+  constructor(failure: NoSupportedSettingsImportFailure) {
     super(failure.message);
-    this.name = "SettingsImportError";
-    this.reason = failure.reason;
+    this.name = "NoSupportedSettingsImportError";
   }
 }
 
@@ -127,7 +121,6 @@ export async function importSettings(
       success: false,
       imported: 0,
       results: imported,
-      reason: SettingsImportFailureReason.NoSupportedSettings,
       message: "No supported settings were found in the selected file",
     };
   }

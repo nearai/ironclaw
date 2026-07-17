@@ -4,7 +4,7 @@ import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import {
   fetchSettingsExport,
   importSettings as importSettingsPayload,
-  SettingsImportError,
+  NoSupportedSettingsImportError,
   updateSetting,
 } from "../lib/settings-api";
 import { throwIfApiFailed } from "../lib/api-result";
@@ -62,7 +62,7 @@ export function useSettings() {
     mutationFn: async (payload) => {
       const result = await importSettingsPayload(payload);
       if (result.success === false) {
-        throw new SettingsImportError(result);
+        throw new NoSupportedSettingsImportError(result);
       }
       return result;
     },

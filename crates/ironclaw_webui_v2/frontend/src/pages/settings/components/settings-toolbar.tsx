@@ -4,7 +4,7 @@ import { Icon } from "../../../design-system/icons";
 import React from "react";
 import { useT } from "../../../lib/i18n";
 import { saveBlob } from "../../../lib/download";
-import { SettingsImportError } from "../lib/settings-api";
+import { NoSupportedSettingsImportError } from "../lib/settings-api";
 
 function downloadJson(filename, data) {
   saveBlob(
@@ -87,7 +87,7 @@ export function SettingsToolbar({
         await onImport(payload);
         showMessage("success", t("settings.importSuccess"));
       } catch (error) {
-        if (error instanceof SettingsImportError) {
+        if (error instanceof NoSupportedSettingsImportError) {
           showMessage("error", t("settings.importNoSupported"));
           return;
         }
