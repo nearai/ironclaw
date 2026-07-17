@@ -872,7 +872,50 @@ lanes, then the `RuntimeLane` enum, then the mediator-trait collapse (§4.2).
 
 ---
 
-## 10. Open questions
+## 10. Enforcement: anti-slippage ratchets
+
+The refactoring is incremental and long-running (§9), so each axis needs a check that
+holds the line *during* the migration, not only after. The pattern — matching the repo's
+existing ratchet culture (e.g. the coverage-regression ratchet, #5718): **for every axis,
+add a check now that freezes the current instance count or allowlist and fails on any NEW
+instance — so the debt can only shrink — then flip it to a hard ban as that axis
+completes.** The homes already exist: structural bans in
+`crates/ironclaw_architecture/tests/`, added-line greps in `scripts/pre-commit-safety.sh`,
+type duplication in `scripts/check-type-duplicates.py`, cross-tenant behavior in
+`tests/integration/`.
+
+| Axis (§) | Check | Home | Ratchet now | Hard ban when the axis lands |
+| --- | --- | --- | --- | --- |
+| Process isolation (§6, #6170) | two-user shell cannot read another user's files; no served profile resolves to `ProcessBackendKind::LocalHost` | `tests/integration/`, `ironclaw_architecture` | **add the two-user escape test now** (red today, green on fix) | host process port unreachable from any hosted composition; `SandboxMount` has no host-path constructor |
+| Mirror DTOs (§3, §4.1) | cross-crate structural duplicate count | `scripts/check-type-duplicates.py` (exists) | wire to CI; freeze at the current backlog count (~32) | one canonical capability request shape (`Invocation`); the five mirrors deleted |
+| `dyn` mediators (§4.2) | production-impl count per mediator trait; `Option<Arc<…>>` + always-set `with_*` | `ironclaw_architecture`; `pre-commit-safety.sh` | freeze the single-prod-impl set; flag new `Option<Arc<` builders | `RuntimeAdapter` is a closed enum; `HostRuntime` / `CapabilityDispatcher` traits deleted |
+| `InMemory*Store` (§4.3) | `pub struct InMemory\w*Store` allowlist | `ironclaw_architecture` | freeze the current list; fail on any new one | list empty; tests use `Fs<InMemoryBackend>` |
+| `Local*` types (§4.4) | no `Local` / `LocalDev` / `Hosted` / `Enterprise` in public type names | `ironclaw_architecture` | freeze the ~66-identifier allowlist; fail on any new one | allowlist empty |
+| `host_api` freeze (§4.5) | public-type-count snapshot; `runtime_policy` mode enums absent from `host_api` | `ironclaw_architecture` | freeze at ~124; require a justification comment for additions | mode enums moved to the edge; only neutral authority vocab remains |
+| Products in composition (§5.8) | no `slack` / `webui` / `telegram` / `openai` / HTTP-route / transport identifier in `ironclaw_reborn_composition` | `ironclaw_architecture` | freeze the current product footprint; fail on new product/transport code landing in composition | composition is assembler-only; products are adapters + a `DeploymentConfig` list |
+
+Each axis's "hard ban" column is also its **definition of done**: the migration slice for
+that axis is complete when its ratchet flips from a frozen allowlist to an empty one (or the
+structural assertion passes). Until then the frozen allowlist is the contract — it may only
+get shorter.
+
+Two rules from the guidance layer apply, because a guardrail is itself code
+(`.claude/rules/review-discipline.md`, `ironclaw-reborn-skill-maintainer`):
+
+- **Every check ships with its own self-test**, and any `scripts/*.sh` check must run in
+  **both** hook-install paths (`.githooks/` and the `dev-setup.sh` symlink) — a check only
+  one path runs is not enforced.
+- **No `Local*`-style hard ban can land today** — 66 identifiers exist; it must start as a
+  frozen allowlist and shrink. The same holds for `InMemory*Store` and the composition
+  product footprint. Asserting a hard ban before the debt is paid just breaks the build.
+
+The standing safety invariant (§6) is already codified in
+`.claude/rules/safety-and-sandbox.md` ("Process and shell execution: real OS isolation, per
+tenant"); the process-isolation row above is its mechanical backing.
+
+---
+
+## 11. Open questions
 
 1. Should `TurnRun` and `ironclaw_processes` converge on a shared leased-work-unit
    abstraction, or stay deliberately separate with a documented rationale?
