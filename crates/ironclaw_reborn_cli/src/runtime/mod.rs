@@ -869,6 +869,15 @@ pub(crate) fn resolve_google_oauth_config_from_env()
     resolve_google_oauth_config(optional_nonempty_env)
 }
 
+/// Status-surface variant of [`resolve_google_oauth_config_from_env`]:
+/// re-runs the same env-based resolution but keeps the `Unconfigured` vs.
+/// `PartiallyConfigured` distinction instead of collapsing both to `None`,
+/// so `ironclaw-reborn status` can report *why* Google OAuth is disabled.
+pub(crate) fn resolve_google_oauth_config_state_from_env() -> anyhow::Result<GoogleOAuthResolution>
+{
+    resolve_google_oauth_config_state(optional_nonempty_env)
+}
+
 #[cfg(feature = "slack-v2-host-beta")]
 pub(crate) fn resolve_slack_personal_oauth_redirect_uri_from_env()
 -> anyhow::Result<Option<OAuthRedirectUri>> {
@@ -887,9 +896,35 @@ fn resolve_slack_personal_oauth_redirect_uri(
     Ok(Some(uri))
 }
 
-fn resolve_google_oauth_config(
+/// Outcome of resolving Google OAuth config from env (and, once merged, the
+/// widened `[google]` config.toml section). Distinguishes "nothing set at
+/// all" from "asymmetrically partial" (`client_id` present without
+/// `redirect_uri`, or vice versa) so callers can log/report specifically —
+/// both degrade to no active Google OAuth backend rather than a boot
+/// failure. `client_secret` is intentionally NOT part of the asymmetry: a
+/// missing secret alone still yields `Configured` (public-client PKCE).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum GoogleOAuthConfigState {
+    /// No Google OAuth vars/config present at all — silent, not a
+    /// misconfiguration.
+    Unconfigured,
+    /// Exactly one of `client_id`/`redirect_uri` is present. Names the
+    /// missing key (`"client_id"` or `"redirect_uri"`) for status/log
+    /// surfacing.
+    PartiallyConfigured { missing: &'static str },
+}
+
+/// Either a fully resolved Google OAuth backend config, or a
+/// [`GoogleOAuthConfigState`] explaining why one wasn't built.
+#[derive(Debug, Clone)]
+pub(crate) enum GoogleOAuthResolution {
+    Configured(ResolvedGoogleOAuthConfig),
+    Disabled(GoogleOAuthConfigState),
+}
+
+fn resolve_google_oauth_config_state(
     mut lookup: impl FnMut(&str) -> Option<String>,
-) -> anyhow::Result<Option<ResolvedGoogleOAuthConfig>> {
+) -> anyhow::Result<GoogleOAuthResolution> {
     let reborn_client_id = lookup("IRONCLAW_REBORN_GOOGLE_CLIENT_ID");
     let reborn_redirect_uri = lookup("IRONCLAW_REBORN_GOOGLE_OAUTH_REDIRECT_URI");
     let reborn_client_secret = lookup("IRONCLAW_REBORN_GOOGLE_CLIENT_SECRET");
@@ -908,21 +943,55 @@ fn resolve_google_oauth_config(
         && legacy_redirect_uri.is_none()
         && legacy_hosted_domain_hint.is_none()
     {
-        return Ok(None);
+        return Ok(GoogleOAuthResolution::Disabled(
+            GoogleOAuthConfigState::Unconfigured,
+        ));
     }
 
-    let client_id = reborn_client_id
-        .or(legacy_client_id)
-        .ok_or_else(|| {
-            anyhow::anyhow!(
-                "IRONCLAW_REBORN_GOOGLE_CLIENT_ID or GOOGLE_CLIENT_ID is required for Google OAuth setup"
-            )
-        })?;
-    let redirect_uri = reborn_redirect_uri.or(legacy_redirect_uri).ok_or_else(|| {
-        anyhow::anyhow!(
-            "IRONCLAW_REBORN_GOOGLE_OAUTH_REDIRECT_URI or GOOGLE_OAUTH_REDIRECT_URI is required for Google OAuth setup"
-        )
-    })?;
+    let client_id = reborn_client_id.or(legacy_client_id);
+    let redirect_uri = reborn_redirect_uri.or(legacy_redirect_uri);
+
+    let (client_id, redirect_uri) = match (client_id, redirect_uri) {
+        (Some(client_id), Some(redirect_uri)) => (client_id, redirect_uri),
+        (Some(_), None) => {
+            tracing::warn!(
+                target = "ironclaw::reborn::cli::google_oauth",
+                missing = "redirect_uri",
+                "Google OAuth partially configured (client_id set, redirect_uri missing); \
+                 disabling until IRONCLAW_REBORN_GOOGLE_OAUTH_REDIRECT_URI or \
+                 `config set google.redirect_uri` is set"
+            );
+            return Ok(GoogleOAuthResolution::Disabled(
+                GoogleOAuthConfigState::PartiallyConfigured {
+                    missing: "redirect_uri",
+                },
+            ));
+        }
+        (None, Some(_)) => {
+            tracing::warn!(
+                target = "ironclaw::reborn::cli::google_oauth",
+                missing = "client_id",
+                "Google OAuth partially configured (redirect_uri set, client_id missing); \
+                 disabling until IRONCLAW_REBORN_GOOGLE_CLIENT_ID or \
+                 `config set google.client_id` is set"
+            );
+            return Ok(GoogleOAuthResolution::Disabled(
+                GoogleOAuthConfigState::PartiallyConfigured {
+                    missing: "client_id",
+                },
+            ));
+        }
+        (None, None) => {
+            // Neither client_id nor redirect_uri set, but some other
+            // Google var (client_secret / hosted_domain_hint) is —
+            // treat as unconfigured rather than partial: those two
+            // fields alone don't signal OAuth setup intent.
+            return Ok(GoogleOAuthResolution::Disabled(
+                GoogleOAuthConfigState::Unconfigured,
+            ));
+        }
+    };
+
     let client_secret = reborn_client_secret
         .or(legacy_client_secret)
         .map(SecretString::from);
@@ -946,10 +1015,21 @@ fn resolve_google_oauth_config(
         "Google OAuth backend config resolved from environment"
     );
 
-    Ok(Some(ResolvedGoogleOAuthConfig {
-        client,
-        hosted_domain_hint,
-    }))
+    Ok(GoogleOAuthResolution::Configured(
+        ResolvedGoogleOAuthConfig {
+            client,
+            hosted_domain_hint,
+        },
+    ))
+}
+
+fn resolve_google_oauth_config(
+    lookup: impl FnMut(&str) -> Option<String>,
+) -> anyhow::Result<Option<ResolvedGoogleOAuthConfig>> {
+    match resolve_google_oauth_config_state(lookup)? {
+        GoogleOAuthResolution::Configured(config) => Ok(Some(config)),
+        GoogleOAuthResolution::Disabled(_) => Ok(None),
+    }
 }
 
 /// Read an env var with lenient presence semantics: unset OR
@@ -1329,9 +1409,10 @@ mod tests {
     #[cfg(feature = "webui-v2-beta")]
     use super::with_run_local_trigger_fire_access_checker;
     use super::{
-        RuntimeInputCaller, RuntimeInputOptions, apply_credential_refresh_override, block_on_cli,
-        build_runtime_input, build_runtime_input_with_options, no_assistant_text_message,
-        protect_reborn_log_filter, resolve_google_oauth_config,
+        GoogleOAuthConfigState, GoogleOAuthResolution, RuntimeInputCaller, RuntimeInputOptions,
+        apply_credential_refresh_override, block_on_cli, build_runtime_input,
+        build_runtime_input_with_options, no_assistant_text_message, protect_reborn_log_filter,
+        resolve_google_oauth_config, resolve_google_oauth_config_state,
         resolve_slack_personal_oauth_redirect_uri, runner_settings,
     };
     // Only the `#[cfg(feature = "libsql")]` hosted-volume test consumes this.
@@ -3358,17 +3439,67 @@ poll_interval_secs = 15
     }
 
     #[test]
-    fn resolve_google_oauth_config_errors_when_client_id_missing() {
+    fn resolve_google_oauth_config_returns_none_and_warns_when_client_id_present_but_redirect_uri_missing()
+     {
+        let vars = HashMap::from([(
+            "IRONCLAW_REBORN_GOOGLE_CLIENT_ID",
+            "reborn-client.apps.googleusercontent.com",
+        )]);
+
+        let config =
+            resolve_google_oauth_config(|name| vars.get(name).map(|value| value.to_string()))
+                .expect("asymmetric partial Google OAuth config must degrade, not fail boot");
+        assert!(
+            config.is_none(),
+            "client_id-without-redirect_uri must not build an active OAuth backend"
+        );
+
+        let state =
+            resolve_google_oauth_config_state(|name| vars.get(name).map(|value| value.to_string()))
+                .expect("asymmetric partial Google OAuth config must degrade, not fail boot");
+        match state {
+            GoogleOAuthResolution::Disabled(disabled) => assert_eq!(
+                disabled,
+                GoogleOAuthConfigState::PartiallyConfigured {
+                    missing: "redirect_uri"
+                }
+            ),
+            GoogleOAuthResolution::Configured(_) => {
+                panic!("expected Disabled(PartiallyConfigured), got Configured")
+            }
+        }
+    }
+
+    #[test]
+    fn resolve_google_oauth_config_returns_none_and_warns_when_redirect_uri_present_but_client_id_missing()
+     {
         let vars = HashMap::from([(
             "IRONCLAW_REBORN_GOOGLE_OAUTH_REDIRECT_URI",
             "http://127.0.0.1:3000/api/reborn/product-auth/oauth/google/callback",
         )]);
 
-        let error =
+        let config =
             resolve_google_oauth_config(|name| vars.get(name).map(|value| value.to_string()))
-                .expect_err("redirect-only Google OAuth config must fail closed");
+                .expect("asymmetric partial Google OAuth config must degrade, not fail boot");
+        assert!(
+            config.is_none(),
+            "redirect_uri-without-client_id must not build an active OAuth backend"
+        );
 
-        assert!(error.to_string().contains("GOOGLE_CLIENT_ID"));
+        let state =
+            resolve_google_oauth_config_state(|name| vars.get(name).map(|value| value.to_string()))
+                .expect("asymmetric partial Google OAuth config must degrade, not fail boot");
+        match state {
+            GoogleOAuthResolution::Disabled(disabled) => assert_eq!(
+                disabled,
+                GoogleOAuthConfigState::PartiallyConfigured {
+                    missing: "client_id"
+                }
+            ),
+            GoogleOAuthResolution::Configured(_) => {
+                panic!("expected Disabled(PartiallyConfigured), got Configured")
+            }
+        }
     }
 
     #[test]
@@ -3423,7 +3554,7 @@ poll_interval_secs = 15
     }
 
     #[test]
-    fn resolve_google_oauth_config_uses_legacy_client_vars_as_configuration_signal() {
+    fn resolve_google_oauth_config_treats_legacy_client_vars_without_redirect_as_partial() {
         let vars = HashMap::from([
             (
                 "GOOGLE_CLIENT_ID",
@@ -3432,10 +3563,24 @@ poll_interval_secs = 15
             ("GOOGLE_CLIENT_SECRET", "legacy-client-secret"),
         ]);
 
-        let error =
+        let config =
             resolve_google_oauth_config(|name| vars.get(name).map(|value| value.to_string()))
-                .expect_err("legacy client vars without redirect URI must not be ignored");
+                .expect("legacy client vars without redirect URI must degrade, not fail boot");
+        assert!(config.is_none());
 
-        assert!(error.to_string().contains("GOOGLE_OAUTH_REDIRECT_URI"));
+        let state =
+            resolve_google_oauth_config_state(|name| vars.get(name).map(|value| value.to_string()))
+                .expect("legacy client vars without redirect URI must degrade, not fail boot");
+        match state {
+            GoogleOAuthResolution::Disabled(disabled) => assert_eq!(
+                disabled,
+                GoogleOAuthConfigState::PartiallyConfigured {
+                    missing: "redirect_uri"
+                }
+            ),
+            GoogleOAuthResolution::Configured(_) => {
+                panic!("expected Disabled(PartiallyConfigured), got Configured")
+            }
+        }
     }
 }

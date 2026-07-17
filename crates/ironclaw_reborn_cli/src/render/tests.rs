@@ -39,6 +39,7 @@ fn sample_status() -> StatusDto {
         login_link: Some("http://127.0.0.1:3000/login?token=sample-token".to_string()),
         login_note: None,
         service: ServiceStateDto::Running,
+        google_oauth_degraded: None,
     }
 }
 
@@ -162,6 +163,25 @@ fn status_render_text_omits_login_link_line_when_absent() {
         !text.contains("login_link:"),
         "no login_link line should be printed when the DTO carries None: {text}"
     );
+}
+
+#[test]
+fn status_render_text_omits_google_oauth_line_when_not_degraded() {
+    let text = render_to_string(&sample_status());
+    assert!(
+        !text.contains("google_oauth:"),
+        "no google_oauth line should be printed when the DTO carries None: {text}"
+    );
+}
+
+#[test]
+fn status_render_text_includes_google_oauth_line_when_degraded() {
+    let mut status = sample_status();
+    status.google_oauth_degraded =
+        Some("partially configured (missing redirect_uri) — disabled".to_string());
+    let text = render_to_string(&status);
+    assert!(text.contains("google_oauth:"));
+    assert!(text.contains("partially configured (missing redirect_uri) — disabled"));
 }
 
 #[test]
