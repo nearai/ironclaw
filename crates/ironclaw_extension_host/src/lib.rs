@@ -41,5 +41,5 @@ pub use recipes::{SnapshotAuthRecipeResolver, VendorRecipeConflict, unified_vend
 pub use resolver::SnapshotToolResolver;
 pub use state::{AuthAccountState, InstallationState};
 pub use store::{
-    InMemoryInstallationRecordStore, InstallationRecord, InstallationRecordStore, StoreError,
+    RehydratedInstallationRecordStore, InstallationRecord, InstallationRecordStore, StoreError,
 };

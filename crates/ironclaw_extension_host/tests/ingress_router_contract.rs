@@ -24,7 +24,7 @@ use ironclaw_extension_host::ingress::{
 use ironclaw_extension_host::test_support::resolve_manifest_toml;
 use ironclaw_extension_host::{
     ExtensionBindings, ExtensionEntrypoint, ExtensionHost, ExtensionHostDeps, ExtensionLoader,
-    InMemoryInstallationRecordStore, InstallationRecord, InstallationRecordStore,
+    RehydratedInstallationRecordStore, InstallationRecord, InstallationRecordStore,
     InstallationState, LifecycleError, LoadContext, LoadedExtension, SnapshotConflict,
 };
 use ironclaw_host_api::SecretHandle;
@@ -349,7 +349,7 @@ async fn harness(options: HarnessOptions) -> Harness {
         inbound_calls: Arc::clone(&adapter_calls),
         seen: Arc::clone(&adapter_seen),
     });
-    let store = Arc::new(InMemoryInstallationRecordStore::default());
+    let store = Arc::new(RehydratedInstallationRecordStore::default());
     let host = Arc::new(
         ExtensionHost::new(ExtensionHostDeps {
             store: Arc::clone(&store) as Arc<dyn InstallationRecordStore>,

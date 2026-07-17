@@ -31,7 +31,7 @@ use std::time::Duration;
 use async_trait::async_trait;
 use ironclaw_extension_host::{
     BindError, DrainController, EgressFactory, ExtensionBindings, ExtensionEntrypoint,
-    ExtensionHost, ExtensionHostDeps, ExtensionLoader, HookError, InMemoryInstallationRecordStore,
+    ExtensionHost, ExtensionHostDeps, ExtensionLoader, HookError, RehydratedInstallationRecordStore,
     InstallationRecord, InstallationState, LoadContext, LoadedExtension, NativeExtensionFactory,
     SnapshotToolResolver,
 };
@@ -112,7 +112,7 @@ pub(crate) async fn build_generic_extension_host(
             // The facade owns durable lifecycle state in P2b; this store is
             // the host's working set, rehydrated below from the facade's
             // durable records at every boot.
-            store: Arc::new(InMemoryInstallationRecordStore::default()),
+            store: Arc::new(RehydratedInstallationRecordStore::default()),
             loader,
             drain: Arc::new(GenerationDrain),
             egress,

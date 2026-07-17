@@ -574,7 +574,7 @@ async fn slack_test_extension_host() -> Arc<ironclaw_extension_host::ExtensionHo
     };
     use ironclaw_extension_host::{
         BindContext, BindError, ExtensionBindings, ExtensionEntrypoint, ExtensionHost,
-        ExtensionHostDeps, ExtensionLoader, InMemoryInstallationRecordStore, InstallationRecord,
+        ExtensionHostDeps, ExtensionLoader, RehydratedInstallationRecordStore, InstallationRecord,
         InstallationState, LoadContext, LoadedExtension,
     };
 
@@ -611,7 +611,7 @@ async fn slack_test_extension_host() -> Arc<ironclaw_extension_host::ExtensionHo
     };
     let host = Arc::new(
         ExtensionHost::new(ExtensionHostDeps {
-            store: Arc::new(InMemoryInstallationRecordStore::default()),
+            store: Arc::new(RehydratedInstallationRecordStore::default()),
             loader: Arc::new(SlackTestLoader),
             drain: Arc::new(RecordingDrain::default()),
             egress: Arc::new(FakeEgressFactory),

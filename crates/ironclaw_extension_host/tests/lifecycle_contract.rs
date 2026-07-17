@@ -19,7 +19,7 @@ use ironclaw_extension_host::test_support::{
     tool_and_channel_manifest,
 };
 use ironclaw_extension_host::{
-    ExtensionBindings, ExtensionHost, ExtensionHostDeps, InMemoryInstallationRecordStore,
+    ExtensionBindings, ExtensionHost, ExtensionHostDeps, RehydratedInstallationRecordStore,
     InstallationRecord, InstallationRecordStore, InstallationState, LifecycleError,
 };
 use ironclaw_host_api::ToolAdapter;
@@ -27,7 +27,7 @@ use ironclaw_product_adapters::ChannelAdapter;
 
 struct Harness {
     host: ExtensionHost,
-    store: Arc<InMemoryInstallationRecordStore>,
+    store: Arc<RehydratedInstallationRecordStore>,
     load_calls: Arc<AtomicUsize>,
 }
 
@@ -36,7 +36,7 @@ async fn harness_with(bindings: ExtensionBindings, _channel: Arc<FakeChannelAdap
 }
 
 async fn harness_full(bindings: ExtensionBindings, fail_load: bool) -> Harness {
-    let store = Arc::new(InMemoryInstallationRecordStore::default());
+    let store = Arc::new(RehydratedInstallationRecordStore::default());
     let load_calls = Arc::new(AtomicUsize::new(0));
     let deps = ExtensionHostDeps {
         store: Arc::clone(&store) as Arc<dyn InstallationRecordStore>,
@@ -410,7 +410,7 @@ async fn extension_capability_colliding_with_a_host_builtin_fails_activation() {
     use ironclaw_host_api::CapabilityId;
 
     let channel = Arc::new(FakeChannelAdapter::default());
-    let store = Arc::new(InMemoryInstallationRecordStore::default());
+    let store = Arc::new(RehydratedInstallationRecordStore::default());
     let deps = ExtensionHostDeps {
         store: Arc::clone(&store) as Arc<dyn InstallationRecordStore>,
         loader: Arc::new(FakeLoader {
