@@ -1486,7 +1486,7 @@ impl HostRuntimeCapabilityHarness {
             .as_ref()
             .map(|parts| Arc::clone(&parts.capability_leases))
             .unwrap_or_else(|| {
-                Arc::new(ironclaw_authorization::InMemoryCapabilityLeaseStore::new())
+                Arc::new(ironclaw_authorization::in_memory_backed_capability_lease_store())
             });
         let tool_permission_overrides: Arc<dyn ironclaw_approvals::ToolPermissionOverrideStore> =
             self.tool_permission_overrides.clone().unwrap_or_else(|| {

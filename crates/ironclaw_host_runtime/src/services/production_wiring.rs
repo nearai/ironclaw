@@ -3,13 +3,13 @@ use std::any::{TypeId, type_name};
 use thiserror::Error;
 
 use ironclaw_approvals::FilesystemPersistentApprovalPolicyStore;
+use ironclaw_authorization::FilesystemCapabilityLeaseStore;
 use ironclaw_filesystem::InMemoryBackend;
 
 use super::{
     DurableAuditSink, DurableEventSink, EmptyWasmRuntimeCredentials, InMemoryApprovalRequestStore,
-    InMemoryAuditSink, InMemoryCapabilityLeaseStore, InMemoryCredentialBroker,
-    InMemoryDurableAuditLog, InMemoryDurableEventLog, InMemoryEventSink,
-    InMemoryProcessResultStore, InMemoryProcessStore, InMemoryResourceGovernor,
+    InMemoryAuditSink, InMemoryCredentialBroker, InMemoryDurableAuditLog, InMemoryDurableEventLog,
+    InMemoryEventSink, InMemoryProcessResultStore, InMemoryProcessStore, InMemoryResourceGovernor,
     InMemoryRunStateStore, InMemorySecretStore, InMemoryTurnStateStore, LocalFilesystem,
     LocalHostProcessPort, NoopTurnRunWakeNotifier, RebornEventStoreError, RuntimeKind,
 };
@@ -295,14 +295,14 @@ fn classify_component_type<T: ?Sized + 'static>() -> ProductionImplementationRea
             || type_id == TypeId::of::<InMemoryProcessResultStore>()
             || type_id == TypeId::of::<InMemoryRunStateStore>()
             || type_id == TypeId::of::<InMemoryApprovalRequestStore>()
-            || type_id == TypeId::of::<InMemoryCapabilityLeaseStore>()
-            // The persistent-approval store no longer has a bespoke in-memory
-            // implementation; "in-memory" is now the `InMemoryBackend` behind
-            // the one production `FilesystemPersistentApprovalPolicyStore<F>`
+            // The persistent-approval and capability-lease stores no longer have
+            // bespoke in-memory implementations; "in-memory" is now the
+            // `InMemoryBackend` behind the one production `Filesystem*Store<F>`
             // (arch-simplification §4.3). A store backed by `InMemoryBackend` is
             // still local-only; the durable libSQL/Postgres monomorphizations are
             // distinct types and correctly classify as production candidates.
             || type_id == TypeId::of::<FilesystemPersistentApprovalPolicyStore<InMemoryBackend>>()
+            || type_id == TypeId::of::<FilesystemCapabilityLeaseStore<InMemoryBackend>>()
             || type_id == TypeId::of::<InMemoryEventSink>()
             || type_id == TypeId::of::<InMemoryDurableEventLog>()
             || type_id == TypeId::of::<InMemoryAuditSink>()

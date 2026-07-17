@@ -1,4 +1,5 @@
 #![allow(dead_code)]
+// arch-exempt: large_file, mechanical lease-store test repoint to FilesystemCapabilityLeaseStore<InMemoryBackend> helper (arch-simplification §4.3), no new test logic, plan #6168
 
 use super::legacy_capability_fixture_to_v2;
 use std::{
@@ -13,7 +14,8 @@ use async_trait::async_trait;
 use chrono::Utc;
 use ironclaw_approvals::LeaseApproval;
 use ironclaw_authorization::{
-    GrantAuthorizer, InMemoryCapabilityLeaseStore, TrustAwareCapabilityDispatchAuthorizer,
+    FilesystemCapabilityLeaseStore, GrantAuthorizer, TrustAwareCapabilityDispatchAuthorizer,
+    in_memory_backed_capability_lease_store,
 };
 use ironclaw_capabilities::{
     CapabilityHost, CapabilityObligationHandler, CapabilityObligationPhase,
@@ -24,6 +26,7 @@ use ironclaw_events::{
     InMemoryEventSink, ReadScope,
 };
 use ironclaw_extensions::{ExtensionManifest, ExtensionPackage, ExtensionRegistry, ManifestSource};
+use ironclaw_filesystem::InMemoryBackend;
 #[cfg(feature = "libsql")]
 use ironclaw_filesystem::LibSqlRootFilesystem;
 #[cfg(feature = "libsql")]
@@ -378,7 +381,7 @@ pub(crate) struct ApprovalResumeFixture {
     pub(crate) services: InMemoryHostRuntimeServices,
     pub(crate) run_state: Arc<InMemoryRunStateStore>,
     pub(crate) approval_requests: Arc<InMemoryApprovalRequestStore>,
-    pub(crate) capability_leases: Arc<InMemoryCapabilityLeaseStore>,
+    pub(crate) capability_leases: Arc<FilesystemCapabilityLeaseStore<InMemoryBackend>>,
     pub(crate) events: InMemoryEventSink,
 }
 
@@ -392,7 +395,7 @@ pub(crate) fn approval_resume_fixture_with_manifest(
 ) -> ApprovalResumeFixture {
     let run_state = Arc::new(InMemoryRunStateStore::new());
     let approval_requests = Arc::new(InMemoryApprovalRequestStore::new());
-    let capability_leases = Arc::new(InMemoryCapabilityLeaseStore::new());
+    let capability_leases = Arc::new(in_memory_backed_capability_lease_store());
     let events = InMemoryEventSink::new();
     let services = HostRuntimeServices::new(
         Arc::new(registry_with_manifest(manifest)),

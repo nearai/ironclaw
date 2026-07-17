@@ -12,9 +12,7 @@ use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 use ironclaw_approvals::{ApprovalResolver, PersistentApprovalPolicyStore};
-use ironclaw_authorization::{
-    CapabilityLeaseStore, InMemoryCapabilityLeaseStore, TrustAwareCapabilityDispatchAuthorizer,
-};
+use ironclaw_authorization::{CapabilityLeaseStore, TrustAwareCapabilityDispatchAuthorizer};
 use ironclaw_capabilities::CapabilityObligationHandler;
 use ironclaw_dispatcher::{
     RuntimeAdapter, RuntimeAdapterRequest, RuntimeAdapterResult, RuntimeDispatcher,

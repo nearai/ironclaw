@@ -1,3 +1,4 @@
+// arch-exempt: large_file, mechanical lease-store test repoint to FilesystemCapabilityLeaseStore<InMemoryBackend> helper (arch-simplification §4.3), no new test logic, plan #6168
 // Contract tests for `CapabilityHost::auth_resume_json`.
 //
 // Covers: lease survival across auth-gate re-dispatch, concurrent-claim race
@@ -7,6 +8,7 @@
 use ironclaw_approvals::*;
 use ironclaw_authorization::*;
 use ironclaw_capabilities::*;
+use ironclaw_filesystem::InMemoryBackend;
 use ironclaw_host_api::*;
 use ironclaw_run_state::*;
 use serde_json::json;
@@ -293,7 +295,7 @@ async fn auth_resume_json_rejects_fingerprint_mismatch_on_approval_request() {
     let dispatcher = RecordingDispatcher::default();
     let run_state = InMemoryRunStateStore::new();
     let approval_requests = InMemoryApprovalRequestStore::new();
-    let leases = InMemoryCapabilityLeaseStore::new();
+    let leases = in_memory_backed_capability_lease_store();
 
     // Phase 1: invoke (needs approval).
     let block_host = CapabilityHost::new(&registry, &dispatcher, &ApprovalAuthorizer)
@@ -389,7 +391,7 @@ async fn auth_resume_json_with_approval_request_id_claims_active_lease_and_dispa
     let dispatcher = RecordingDispatcher::default();
     let run_state = InMemoryRunStateStore::new();
     let approval_requests = InMemoryApprovalRequestStore::new();
-    let leases = InMemoryCapabilityLeaseStore::new();
+    let leases = in_memory_backed_capability_lease_store();
 
     // Phase 1: first invocation triggers approval.
     let block_host = CapabilityHost::new(&registry, &dispatcher, &ApprovalAuthorizer)
@@ -564,7 +566,7 @@ async fn auth_resume_json_rejects_approval_not_yet_approved() {
     let dispatcher = RecordingDispatcher::default();
     let run_state = InMemoryRunStateStore::new();
     let approval_requests = InMemoryApprovalRequestStore::new();
-    let leases = InMemoryCapabilityLeaseStore::new();
+    let leases = in_memory_backed_capability_lease_store();
 
     // Start and block at auth.
     let context = execution_context(CapabilitySet {
@@ -838,7 +840,7 @@ async fn auth_resume_after_real_approval_bounce_reuses_claimed_lease() {
     let dispatcher = FirstCallAuthRequiredDispatcher::default();
     let run_state = InMemoryRunStateStore::new();
     let approval_requests = InMemoryApprovalRequestStore::new();
-    let leases = InMemoryCapabilityLeaseStore::new();
+    let leases = in_memory_backed_capability_lease_store();
 
     // ── Phase 1: invoke_json → BlockedApproval ──────────────────────────────
     let block_host = CapabilityHost::new(&registry, &dispatcher, &ApprovalAuthorizer)
@@ -1075,7 +1077,7 @@ async fn auth_resume_json_terminal_dispatch_failure_revokes_claimed_lease() {
     let dispatcher = TerminalFailDispatcher::default();
     let run_state = InMemoryRunStateStore::new();
     let approval_requests = InMemoryApprovalRequestStore::new();
-    let leases = InMemoryCapabilityLeaseStore::new();
+    let leases = in_memory_backed_capability_lease_store();
 
     // Phase 1: invoke → BlockedApproval.
     let block_host = CapabilityHost::new(&registry, &dispatcher, &ApprovalAuthorizer)
@@ -1216,7 +1218,7 @@ async fn auth_resume_json_non_terminal_auth_bounce_leaves_lease_claimed() {
     let dispatcher = AlwaysAuthRequiredDispatcher;
     let run_state = InMemoryRunStateStore::new();
     let approval_requests = InMemoryApprovalRequestStore::new();
-    let leases = InMemoryCapabilityLeaseStore::new();
+    let leases = in_memory_backed_capability_lease_store();
 
     // Phase 1: invoke → BlockedApproval.
     let block_host = CapabilityHost::new(&registry, &dispatcher, &ApprovalAuthorizer)
@@ -1341,18 +1343,18 @@ async fn concurrent_auth_resume_claim_loser_returns_lease_error_without_failing_
     use async_trait::async_trait;
     use std::sync::atomic::{AtomicBool, Ordering};
 
-    // A lease store that delegates everything to an inner InMemoryCapabilityLeaseStore
+    // A lease store that delegates everything to an inner FilesystemCapabilityLeaseStore<InMemoryBackend>
     // except `claim()`, which returns InactiveLease { status: Claimed } once the
     // `fail_next_claim` flag is set — simulating the loser of a concurrent claim race.
     struct ClaimFailingLeaseStore {
-        inner: InMemoryCapabilityLeaseStore,
+        inner: FilesystemCapabilityLeaseStore<InMemoryBackend>,
         fail_next_claim: AtomicBool,
     }
 
     impl ClaimFailingLeaseStore {
         fn new() -> Self {
             Self {
-                inner: InMemoryCapabilityLeaseStore::new(),
+                inner: in_memory_backed_capability_lease_store(),
                 fail_next_claim: AtomicBool::new(false),
             }
         }
@@ -1645,7 +1647,7 @@ async fn auth_resume_json_rejected_prior_approval_fails_blocked_auth_run() {
     let dispatcher = RecordingDispatcher::default();
     let run_state = InMemoryRunStateStore::new();
     let approval_requests = InMemoryApprovalRequestStore::new();
-    let leases = InMemoryCapabilityLeaseStore::new();
+    let leases = in_memory_backed_capability_lease_store();
 
     // Start and block at auth.
     let context = execution_context(CapabilitySet {
@@ -1783,7 +1785,7 @@ async fn concurrent_auth_resume_reuse_loser_does_not_double_dispatch() {
     use tokio::sync::{Barrier, Notify};
 
     // ── Barrier lease store ──────────────────────────────────────────────────
-    // Wraps InMemoryCapabilityLeaseStore and inserts a Barrier(2) inside
+    // Wraps FilesystemCapabilityLeaseStore<InMemoryBackend> and inserts a Barrier(2) inside
     // `leases_for_scope`.  Both concurrent callers block at the barrier
     // inside the helper scan, then both are released together.  This
     // guarantees both see the Claimed lease before either calls
@@ -1791,7 +1793,7 @@ async fn concurrent_auth_resume_reuse_loser_does_not_double_dispatch() {
     // machine transition: one wins (Claimed→Dispatching), the other loses
     // (sees Dispatching → InactiveLease{Dispatching}).
     struct BarrierLeaseStore {
-        inner: InMemoryCapabilityLeaseStore,
+        inner: FilesystemCapabilityLeaseStore<InMemoryBackend>,
         /// Both concurrent auth_resume_json callers rendezvous here after
         /// `leases_for_scope` returns so they race on `begin_dispatch_claimed`.
         scan_barrier: StdArc<Barrier>,
@@ -1804,7 +1806,7 @@ async fn concurrent_auth_resume_reuse_loser_does_not_double_dispatch() {
     impl BarrierLeaseStore {
         fn new(barrier: StdArc<Barrier>) -> Self {
             Self {
-                inner: InMemoryCapabilityLeaseStore::new(),
+                inner: in_memory_backed_capability_lease_store(),
                 scan_barrier: barrier,
                 barrier_armed: std::sync::atomic::AtomicBool::new(false),
             }
@@ -2213,7 +2215,7 @@ async fn auth_resume_json_authorization_deny_revokes_dispatching_lease() {
     let registry = registry_with_echo_capability();
     let run_state = InMemoryRunStateStore::new();
     let approval_requests = InMemoryApprovalRequestStore::new();
-    let leases = InMemoryCapabilityLeaseStore::new();
+    let leases = in_memory_backed_capability_lease_store();
 
     // ── Phase 1: invoke → BlockedApproval ──────────────────────────────────
     let block_dispatcher = AuthRequiredOnFirstCall;
@@ -2367,7 +2369,7 @@ async fn auth_resume_json_authorization_require_approval_revokes_dispatching_lea
     let registry = registry_with_echo_capability();
     let run_state = InMemoryRunStateStore::new();
     let approval_requests = InMemoryApprovalRequestStore::new();
-    let leases = InMemoryCapabilityLeaseStore::new();
+    let leases = in_memory_backed_capability_lease_store();
 
     // ── Phase 1: invoke → BlockedApproval ──────────────────────────────────
     let block_host = CapabilityHost::new(&registry, &AlwaysAuthRequired, &ApprovalAuthorizer)
@@ -2611,7 +2613,7 @@ async fn auth_resume_json_unknown_invocation_when_run_record_missing() {
 async fn setup_blocked_auth_run_with_stores(
     run_state: &InMemoryRunStateStore,
     approval_requests: &InMemoryApprovalRequestStore,
-    leases: &InMemoryCapabilityLeaseStore,
+    leases: &FilesystemCapabilityLeaseStore<InMemoryBackend>,
     context: &ExecutionContext,
 ) {
     let scope = &context.resource_scope;
@@ -2641,7 +2643,7 @@ async fn auth_resume_json_approval_request_mismatch_action() {
     let dispatcher = RecordingDispatcher::default();
     let run_state = InMemoryRunStateStore::new();
     let approval_requests = InMemoryApprovalRequestStore::new();
-    let leases = InMemoryCapabilityLeaseStore::new();
+    let leases = in_memory_backed_capability_lease_store();
 
     let context = execution_context(CapabilitySet {
         grants: vec![dispatch_grant()],
@@ -2725,7 +2727,7 @@ async fn auth_resume_json_approval_request_mismatch_correlation_id() {
     let dispatcher = RecordingDispatcher::default();
     let run_state = InMemoryRunStateStore::new();
     let approval_requests = InMemoryApprovalRequestStore::new();
-    let leases = InMemoryCapabilityLeaseStore::new();
+    let leases = in_memory_backed_capability_lease_store();
 
     let context = execution_context(CapabilitySet {
         grants: vec![dispatch_grant()],
@@ -2815,7 +2817,7 @@ async fn auth_resume_json_approval_request_mismatch_requested_by() {
     let dispatcher = RecordingDispatcher::default();
     let run_state = InMemoryRunStateStore::new();
     let approval_requests = InMemoryApprovalRequestStore::new();
-    let leases = InMemoryCapabilityLeaseStore::new();
+    let leases = in_memory_backed_capability_lease_store();
 
     let context = execution_context(CapabilitySet {
         grants: vec![dispatch_grant()],
@@ -2944,7 +2946,7 @@ async fn concurrent_auth_resume_fresh_active_lease_loser_does_not_double_dispatc
     // caller that runs `matching_approval_lease` during this window finds None
     // (lease is Claimed, not Active) and falls into the REUSE branch.
     struct GatedLeaseStore {
-        inner: InMemoryCapabilityLeaseStore,
+        inner: FilesystemCapabilityLeaseStore<InMemoryBackend>,
         claim_entered: StdArc<Notify>,
         claim_release: StdArc<Notify>,
         armed: std::sync::atomic::AtomicBool,
@@ -2953,7 +2955,7 @@ async fn concurrent_auth_resume_fresh_active_lease_loser_does_not_double_dispatc
     impl GatedLeaseStore {
         fn new(claim_entered: StdArc<Notify>, claim_release: StdArc<Notify>) -> Self {
             Self {
-                inner: InMemoryCapabilityLeaseStore::new(),
+                inner: in_memory_backed_capability_lease_store(),
                 claim_entered,
                 claim_release,
                 armed: std::sync::atomic::AtomicBool::new(false),
@@ -3263,7 +3265,7 @@ async fn auth_resume_json_unknown_capability_does_not_strand_active_approval_lea
     let dispatcher = RecordingDispatcher::default();
     let run_state = InMemoryRunStateStore::new();
     let approval_requests = InMemoryApprovalRequestStore::new();
-    let leases = InMemoryCapabilityLeaseStore::new();
+    let leases = in_memory_backed_capability_lease_store();
 
     // Seed the run in BlockedAuth state (as it would be after a prior auth gate).
     let context = execution_context(CapabilitySet {
@@ -3397,7 +3399,7 @@ async fn auth_resume_json_unknown_capability_does_not_strand_claimed_approval_le
     let dispatcher = RecordingDispatcher::default();
     let run_state = InMemoryRunStateStore::new();
     let approval_requests = InMemoryApprovalRequestStore::new();
-    let leases = InMemoryCapabilityLeaseStore::new();
+    let leases = in_memory_backed_capability_lease_store();
 
     let context = execution_context(CapabilitySet {
         grants: vec![dispatch_grant()],

@@ -16,12 +16,12 @@ use ironclaw_approvals::{
 #[cfg(any(feature = "libsql", feature = "postgres"))]
 use ironclaw_auth::AuthProviderClient;
 use ironclaw_auth::{AuthProductScope, AuthSurface};
-#[cfg(any(feature = "libsql", feature = "postgres"))]
+// Used by both the durable (`<LocalDevRootFilesystem>`) and no-durable
+// (`<InMemoryBackend>`) capability-lease aliases/builders, so the import is
+// unconditional (arch-simplification §4.3).
 use ironclaw_authorization::FilesystemCapabilityLeaseStore;
 #[cfg(any(feature = "libsql", feature = "postgres"))]
 use ironclaw_authorization::GrantAuthorizer;
-#[cfg(not(any(feature = "libsql", feature = "postgres")))]
-use ironclaw_authorization::InMemoryCapabilityLeaseStore;
 #[cfg(not(any(feature = "libsql", feature = "postgres")))]
 use ironclaw_conversations::InMemoryConversationServices;
 use ironclaw_conversations::{
@@ -289,8 +289,14 @@ pub(crate) type LocalDevApprovalRequestStore = InMemoryApprovalRequestStore;
 #[cfg(any(feature = "libsql", feature = "postgres"))]
 pub(crate) type LocalDevCapabilityLeaseStore =
     FilesystemCapabilityLeaseStore<LocalDevRootFilesystem>;
+// One capability-lease store, backend-injected — the production
+// `FilesystemCapabilityLeaseStore<F>` every deployment uses, never a bespoke
+// `InMemory*Store` (arch-simplification §4.3). The no-durable-features build
+// backs it with `InMemoryBackend` directly, so the concrete type is
+// `<InMemoryBackend>`, which the host-runtime production-wiring guard classifies
+// `LocalOnly`.
 #[cfg(not(any(feature = "libsql", feature = "postgres")))]
-pub(crate) type LocalDevCapabilityLeaseStore = InMemoryCapabilityLeaseStore;
+pub(crate) type LocalDevCapabilityLeaseStore = FilesystemCapabilityLeaseStore<InMemoryBackend>;
 
 // One store per approval domain, backend-injected — the production
 // `Filesystem*Store<F>` every deployment uses, never a bespoke `InMemory*Store`
@@ -298,7 +304,7 @@ pub(crate) type LocalDevCapabilityLeaseStore = InMemoryCapabilityLeaseStore;
 // the no-durable-features build backs them with `InMemoryBackend` directly, so
 // the concrete type is `<InMemoryBackend>` — which the host-runtime
 // production-wiring guard classifies `LocalOnly` (the same way the volatile
-// `InMemoryRunStateStore`/`InMemoryCapabilityLeaseStore` are flagged). Durable
+// `InMemoryRunStateStore` is flagged). Durable
 // builds use the libSQL/Postgres-backed composite root filesystem, whose type is
 // distinct and correctly classifies as a production candidate.
 #[cfg(any(feature = "libsql", feature = "postgres"))]
@@ -2583,7 +2589,9 @@ async fn build_local_dev_store_graph(
     let audit_log = local_dev_audit_log(Arc::clone(&filesystem))?;
     let run_state = Arc::new(InMemoryRunStateStore::new());
     let approval_requests = Arc::new(InMemoryApprovalRequestStore::new());
-    let capability_leases = Arc::new(InMemoryCapabilityLeaseStore::new());
+    let capability_leases = Arc::new(FilesystemCapabilityLeaseStore::new(crate::wrap_scoped(
+        Arc::new(InMemoryBackend::new()),
+    )));
     let persistent_approval_policies = Arc::new(FilesystemPersistentApprovalPolicyStore::new(
         Arc::clone(&approvals_filesystem),
     ));

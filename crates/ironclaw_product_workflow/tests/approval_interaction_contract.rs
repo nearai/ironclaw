@@ -15,7 +15,7 @@ use ironclaw_approvals::{
     },
 };
 use ironclaw_authorization::{
-    CapabilityLeaseStatus, CapabilityLeaseStore, InMemoryCapabilityLeaseStore,
+    CapabilityLeaseStatus, CapabilityLeaseStore, in_memory_backed_capability_lease_store,
 };
 use ironclaw_events::InMemoryAuditSink;
 use ironclaw_host_api::{
@@ -2645,7 +2645,7 @@ async fn approval_resolver_port_preserves_audit_sink() {
         .save_pending(resource_scope.clone(), request)
         .await
         .expect("save approval");
-    let leases = Arc::new(InMemoryCapabilityLeaseStore::new());
+    let leases = Arc::new(in_memory_backed_capability_lease_store());
     let audit = Arc::new(InMemoryAuditSink::new());
     let resolver = ApprovalResolverPort::new(approvals, leases).with_audit_sink(audit.clone());
 
@@ -2687,7 +2687,7 @@ async fn approval_resolver_port_retries_missing_lease_for_approved_request() {
         .approve(&resource_scope, request_id)
         .await
         .expect("mark approved");
-    let leases = Arc::new(InMemoryCapabilityLeaseStore::new());
+    let leases = Arc::new(in_memory_backed_capability_lease_store());
     let resolver = ApprovalResolverPort::new(approvals, leases.clone());
 
     resolver
@@ -2730,7 +2730,7 @@ async fn approval_resolver_port_retries_missing_spawn_lease_for_approved_request
         .approve(&resource_scope, request_id)
         .await
         .expect("mark approved");
-    let leases = Arc::new(InMemoryCapabilityLeaseStore::new());
+    let leases = Arc::new(in_memory_backed_capability_lease_store());
     let resolver = ApprovalResolverPort::new(approvals, leases.clone());
     let mut approval = dispatch_lease_approval(Principal::User(alpha_actor.user_id));
     approval
@@ -2766,7 +2766,7 @@ async fn approval_resolver_port_does_not_duplicate_existing_lease_for_approved_r
         .save_pending(resource_scope.clone(), request)
         .await
         .expect("save approval");
-    let leases = Arc::new(InMemoryCapabilityLeaseStore::new());
+    let leases = Arc::new(in_memory_backed_capability_lease_store());
     let resolver = ApprovalResolverPort::new(approvals, leases.clone());
     let approval = dispatch_lease_approval(Principal::User(alpha_actor.user_id.clone()));
     resolver
@@ -2803,7 +2803,7 @@ async fn approval_resolver_port_reissues_when_existing_dispatch_lease_is_claimed
         .save_pending(resource_scope.clone(), request)
         .await
         .expect("save approval");
-    let leases = Arc::new(InMemoryCapabilityLeaseStore::new());
+    let leases = Arc::new(in_memory_backed_capability_lease_store());
     let resolver = ApprovalResolverPort::new(approvals, leases.clone());
     let approval = dispatch_lease_approval(Principal::User(alpha_actor.user_id.clone()));
     resolver
@@ -2866,7 +2866,7 @@ async fn approval_resolver_port_does_not_duplicate_existing_spawn_lease_for_appr
         .save_pending(resource_scope.clone(), request)
         .await
         .expect("save approval");
-    let leases = Arc::new(InMemoryCapabilityLeaseStore::new());
+    let leases = Arc::new(in_memory_backed_capability_lease_store());
     let resolver = ApprovalResolverPort::new(approvals, leases.clone());
     let mut approval = dispatch_lease_approval(Principal::User(alpha_actor.user_id));
     approval
