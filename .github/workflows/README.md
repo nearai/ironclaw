@@ -65,8 +65,10 @@ Rules for a roll-up job that is (or may become) required:
 `ironclaw-reborn` binary. The tag-driven `release.yml` calls it and will not run
 its `host` job unless every target succeeds. The existing `release.yml` also
 owns the pull-request trigger, so a PR can validate the reusable workflow before
-that new workflow file reaches the default branch. After merge, the compile-only
-workflow can also run directly through `workflow_dispatch`.
+that new workflow file reaches the default branch. Pull-request runs skip the
+cargo-dist plan, packaging, host, and Docker jobs; those release jobs remain
+tag-only. After merge, the compile-only workflow can also run directly through
+`workflow_dispatch`.
 
 | Rust target | GitHub runner |
 |---|---|

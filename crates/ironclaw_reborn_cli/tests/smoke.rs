@@ -246,8 +246,11 @@ fn release_ci_compiles_reborn_for_all_supported_targets_without_docker_publish()
     assert!(
         release_workflow.contains("publishing: ${{ !github.event.pull_request }}")
             && release_workflow.contains("needs.plan.outputs.publishing == 'true'")
+            && release_workflow.contains(
+                "  plan:\n    # Pull requests use this existing workflow only as the trusted entry point\n    # for the Reborn compile matrix. Keep cargo-dist's release planning tag-only.\n    if: ${{ github.event_name != 'pull_request' }}"
+            )
             && compile_workflow.contains("permissions:\n  contents: read"),
-        "PR compile validation must remain read-only and must not enter release publishing"
+        "PR compile validation must remain read-only and must skip cargo-dist planning and release publishing"
     );
     let docker_job = release_workflow
         .split_once("  docker-image:\n")
