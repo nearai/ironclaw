@@ -16,9 +16,10 @@ function loadUseAutomations() {
     },
   }).outputText;
   const mutationConfigs = [];
-  const stateUpdates = [];
   const invalidations = [];
   const consoleErrors = [];
+  const dismissedToastIds = [];
+  const toastCalls = [];
   const context = {
     AUTOMATIONS_BASE_REFETCH_MS: 30000,
     React: {
@@ -26,13 +27,15 @@ function loadUseAutomations() {
       useEffect: () => {},
       useMemo: (factory) => factory(),
       useRef: (initial) => ({ current: initial }),
-      useState: (initial) => [initial, (value) => stateUpdates.push(value)],
     },
     automationSummary: () => ({}),
     console: {
       error: (...args) => consoleErrors.push(args),
     },
     deleteAutomation: () => {},
+    dismissToast: (id) => {
+      if (id != null) dismissedToastIds.push(id);
+    },
     globalThis: {},
     listAutomations: () => {},
     nextAutomationsRefetchDelay: () => null,
@@ -42,7 +45,11 @@ function loadUseAutomations() {
     resumeAutomation: () => {},
     setTimeout,
     clearTimeout,
-    useI18n: () => ({ lang: "en", t: (key) => key }),
+    toast: (...args) => {
+      toastCalls.push(args);
+      return "toast-41";
+    },
+    useI18n: () => ({ lang: "en", t: (key) => `translated:${key}` }),
     useMutation: (config) => {
       mutationConfigs.push(config);
       return { isPending: false, mutate: () => {} };
@@ -66,19 +73,21 @@ function loadUseAutomations() {
 
   return {
     consoleErrors,
+    dismissedToastIds,
     invalidations,
     mutationConfigs,
-    stateUpdates,
+    toastCalls,
     useAutomations: context.globalThis.__testExports.useAutomations,
   };
 }
 
-test("automation action results only update the latest action state", () => {
+test("only the latest automation action controls the error toast", () => {
   const {
     consoleErrors,
+    dismissedToastIds,
     invalidations,
     mutationConfigs,
-    stateUpdates,
+    toastCalls,
     useAutomations,
   } = loadUseAutomations();
   useAutomations();
@@ -103,23 +112,30 @@ test("automation action results only update the latest action state", () => {
     "automation-1",
     firstAction
   );
-  assert.deepEqual(stateUpdates, [false, false]);
+  assert.deepEqual(toastCalls, []);
 
   mutationConfigs[2].onError(
     new Error("raw backend detail"),
     { automationId: "automation-2", name: "New name" },
     secondAction
   );
-  assert.deepEqual(stateUpdates, [false, false, true]);
+  assert.deepEqual(
+    JSON.parse(JSON.stringify(toastCalls)),
+    [[
+      "translated:automations.error.actionFailed",
+      { tone: "error" },
+    ]]
+  );
   assert.deepEqual(consoleErrors, []);
 
   const thirdAction = mutationConfigs[1].onMutate("automation-3");
+  assert.deepEqual(dismissedToastIds, ["toast-41"]);
   mutationConfigs[2].onSuccess(
     { updated: true },
     { automationId: "automation-2", name: "New name" },
     secondAction
   );
-  assert.deepEqual(stateUpdates, [false, false, true, false]);
+  assert.deepEqual(dismissedToastIds, ["toast-41"]);
   assert.equal(invalidations.length, 1);
 
   mutationConfigs[1].onSuccess(
@@ -127,6 +143,6 @@ test("automation action results only update the latest action state", () => {
     "automation-3",
     thirdAction
   );
-  assert.deepEqual(stateUpdates, [false, false, true, false, false]);
+  assert.deepEqual(dismissedToastIds, ["toast-41"]);
   assert.equal(invalidations.length, 2);
 });

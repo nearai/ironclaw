@@ -8,6 +8,7 @@ import {
   resumeAutomation,
 } from "../../../lib/api";
 import { useI18n } from "../../../lib/i18n";
+import { dismissToast, toast } from "../../../lib/toast";
 
 import {
   automationSummary,
@@ -40,8 +41,8 @@ function isLatestAutomationAction(
 export function useAutomations(includeCompleted = false) {
   const { t, lang } = useI18n();
   const queryClient = useQueryClient();
-  const [hasActionError, setHasActionError] = React.useState(false);
   const latestActionSequence = React.useRef(0);
+  const actionErrorToastId = React.useRef<string | null>(null);
   const query = useQuery({
     queryKey: ["automations", { includeCompleted }],
     queryFn: () =>
@@ -87,7 +88,8 @@ export function useAutomations(includeCompleted = false) {
     queryClient.invalidateQueries({ queryKey: ["automations"] });
   }, [queryClient]);
   const clearActionError = React.useCallback(() => {
-    setHasActionError(false);
+    dismissToast(actionErrorToastId.current);
+    actionErrorToastId.current = null;
   }, []);
   const beginAction = React.useCallback((): ActionMutationContext => {
     const sequence = latestActionSequence.current + 1;
@@ -101,11 +103,14 @@ export function useAutomations(includeCompleted = false) {
     context: ActionMutationContext | undefined
   ) => {
     // A newer action deliberately supersedes older results: starting any
-    // action clears the banner, and a late completion must not resurrect it.
+    // action clears the toast, and a late completion must not resurrect it.
     if (isLatestAutomationAction(context, latestActionSequence.current)) {
-      setHasActionError(true);
+      clearActionError();
+      actionErrorToastId.current = toast(t("automations.error.actionFailed"), {
+        tone: "error",
+      });
     }
-  }, []);
+  }, [clearActionError, t]);
   const handleActionSuccess = React.useCallback((
     _data: unknown,
     _variables: unknown,
@@ -154,8 +159,6 @@ export function useAutomations(includeCompleted = false) {
       renameMutation.isPending ||
       deleteMutation.isPending,
     error: query.error || null,
-    actionError: hasActionError,
-    dismissActionError: clearActionError,
     pauseAutomation: pauseMutation.mutate,
     resumeAutomation: resumeMutation.mutate,
     renameAutomation: renameMutation.mutate,

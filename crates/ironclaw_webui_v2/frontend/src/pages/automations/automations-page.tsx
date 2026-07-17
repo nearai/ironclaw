@@ -1,5 +1,4 @@
 import React from "react";
-import { Icon } from "../../design-system/icons";
 import { useT } from "../../lib/i18n";
 import { AutomationDeliveryDefaultsPanel } from "./components/automation-delivery-defaults-panel";
 import { AutomationsList } from "./components/automations-list";
@@ -58,27 +57,6 @@ export function AutomationsPage() {
               {t("automations.error.loadFailed")}
             </div>
           )}
-          {automationsState.actionError &&
-          (
-            <div
-              role="alert"
-              data-testid="automation-action-error"
-              className="flex items-center gap-3 rounded-xl border border-red-400/30 bg-red-500/10 px-4 py-3 text-sm text-red-200"
-            >
-              <span className="min-w-0 flex-1">
-                {t("automations.error.actionFailed")}
-              </span>
-              <button
-                type="button"
-                onClick={automationsState.dismissActionError}
-                aria-label={t("common.dismiss")}
-                className="shrink-0 opacity-70 transition-opacity hover:opacity-100"
-              >
-                <Icon name="close" className="h-3.5 w-3.5" />
-              </button>
-            </div>
-          )}
-
           {showErrorOnly
             ? null
             : (
