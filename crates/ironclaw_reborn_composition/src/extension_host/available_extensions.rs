@@ -94,8 +94,7 @@ const NEARAI_MCP_MANIFEST: &str =
 const SLACK_BOT_MANIFEST: &str =
     include_str!("../../../ironclaw_first_party_extensions/assets/slack_bot/manifest.toml");
 #[cfg(feature = "telegram-v2-host-beta")]
-const TELEGRAM_MANIFEST: &str =
-    include_str!("../../../ironclaw_first_party_extensions/assets/telegram/manifest.toml");
+use ironclaw_telegram_extension::telegram_manifest::TELEGRAM_MANIFEST;
 const NEARAI_EXTENSION_ID: &str = HostManagedCredentialExtension::NearAi.id();
 #[cfg(feature = "slack-v2-host-beta")]
 pub(crate) const SLACK_BOT_EXTENSION_ID: &str = "slack_bot";
@@ -750,13 +749,6 @@ pub(crate) fn slack_bot_manifest_digest() -> String {
 #[cfg(feature = "slack-v2-host-beta")]
 pub(crate) fn slack_bot_manifest_toml() -> &'static str {
     SLACK_BOT_MANIFEST
-}
-
-/// The Telegram channel manifest — `telegram_serve` projects the
-/// `telegram.updates` host-ingress route descriptor from here.
-#[cfg(feature = "telegram-v2-host-beta")]
-pub(crate) fn telegram_manifest_toml() -> &'static str {
-    TELEGRAM_MANIFEST
 }
 
 #[cfg(feature = "telegram-v2-host-beta")]

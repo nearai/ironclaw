@@ -23,35 +23,35 @@ use ironclaw_product_adapters::AdapterInstallationId;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-use crate::product_auth::api::auth::RebornAuthContinuationDispatcher;
-use crate::telegram::telegram_actor_identity::{
+use crate::telegram_actor_identity::{
     TELEGRAM_IDENTITY_PROVIDER, telegram_user_identity_provider_user_id,
 };
-use crate::telegram::telegram_setup::{TelegramSetupError, TelegramSetupService};
+use crate::telegram_setup::{TelegramSetupError, TelegramSetupService};
+use ironclaw_channel_host::auth_continuation::RebornAuthContinuationDispatcher;
 
-pub(crate) const PAIRING_CODE_ALPHABET: &[u8] = b"ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
-pub(crate) const PAIRING_CODE_LEN: usize = 8;
-pub(crate) const PAIRING_TTL_MINUTES: i64 = 15;
+pub const PAIRING_CODE_ALPHABET: &[u8] = b"ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
+pub const PAIRING_CODE_LEN: usize = 8;
+pub const PAIRING_TTL_MINUTES: i64 = 15;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub(crate) struct TelegramPairingRecord {
-    pub(crate) code: String,
-    pub(crate) tenant_id: TenantId,
-    pub(crate) user_id: UserId,
-    pub(crate) installation_id: AdapterInstallationId,
-    pub(crate) created_at: DateTime<Utc>,
-    pub(crate) expires_at: DateTime<Utc>,
-    pub(crate) consumed_at: Option<DateTime<Utc>>,
+pub struct TelegramPairingRecord {
+    pub code: String,
+    pub tenant_id: TenantId,
+    pub user_id: UserId,
+    pub installation_id: AdapterInstallationId,
+    pub created_at: DateTime<Utc>,
+    pub expires_at: DateTime<Utc>,
+    pub consumed_at: Option<DateTime<Utc>>,
 }
 
 impl TelegramPairingRecord {
-    pub(crate) fn is_live(&self, now: DateTime<Utc>) -> bool {
+    pub fn is_live(&self, now: DateTime<Utc>) -> bool {
         self.consumed_at.is_none() && self.expires_at > now
     }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
-pub(crate) enum TelegramPairingError {
+pub enum TelegramPairingError {
     #[error("telegram pairing store unavailable: {reason}")]
     StoreUnavailable { reason: String },
     #[error("telegram is not configured by an administrator yet")]
@@ -71,7 +71,7 @@ impl From<TelegramSetupError> for TelegramPairingError {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
-pub(crate) enum TelegramBindingError {
+pub enum TelegramBindingError {
     #[error("telegram binding store unavailable: {reason}")]
     StoreUnavailable { reason: String },
     #[error("this telegram account is already paired to another user")]
@@ -80,7 +80,7 @@ pub(crate) enum TelegramBindingError {
 
 /// Pending pairing codes: one live code per user per installation.
 #[async_trait]
-pub(crate) trait TelegramPairingStore: Send + Sync + std::fmt::Debug {
+pub trait TelegramPairingStore: Send + Sync + std::fmt::Debug {
     /// Insert the caller's pending code, replacing (rotating) any live one.
     async fn upsert_pending_pairing(
         &self,
@@ -113,9 +113,9 @@ pub(crate) trait TelegramPairingStore: Send + Sync + std::fmt::Debug {
 }
 
 /// Write/delete side of the telegram identity bindings (reads go through
-/// [`crate::slack::slack_actor_identity::RebornUserIdentityLookup`]).
+/// [`ironclaw_channel_host::identity::RebornUserIdentityLookup`]).
 #[async_trait]
-pub(crate) trait TelegramUserBindingStore: Send + Sync + std::fmt::Debug {
+pub trait TelegramUserBindingStore: Send + Sync + std::fmt::Debug {
     /// Bind `{installation}:{telegram_user_id}` → user. Rebinding the same
     /// pair is idempotent; a different user yields `AlreadyBoundToOtherUser`.
     async fn bind_telegram_user(
@@ -144,14 +144,14 @@ pub(crate) trait TelegramUserBindingStore: Send + Sync + std::fmt::Debug {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub(crate) struct TelegramDmTarget {
-    pub(crate) user_id: UserId,
-    pub(crate) chat_id: i64,
+pub struct TelegramDmTarget {
+    pub user_id: UserId,
+    pub chat_id: i64,
 }
 
 /// Paired users' DM chat ids — the outbound delivery targets.
 #[async_trait]
-pub(crate) trait TelegramDmTargetStore: Send + Sync + std::fmt::Debug {
+pub trait TelegramDmTargetStore: Send + Sync + std::fmt::Debug {
     async fn upsert_dm_target(
         &self,
         installation_id: &AdapterInstallationId,
@@ -172,27 +172,27 @@ pub(crate) trait TelegramDmTargetStore: Send + Sync + std::fmt::Debug {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-pub(crate) struct PairingIssue {
-    pub(crate) code: String,
-    pub(crate) deep_link: String,
-    pub(crate) expires_at: DateTime<Utc>,
+pub struct PairingIssue {
+    pub code: String,
+    pub deep_link: String,
+    pub expires_at: DateTime<Utc>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-pub(crate) struct TelegramPairingStatus {
-    pub(crate) connected: bool,
-    pub(crate) pending: Option<PairingIssue>,
+pub struct TelegramPairingStatus {
+    pub connected: bool,
+    pub pending: Option<PairingIssue>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum PairingConsumeOutcome {
+pub enum PairingConsumeOutcome {
     Paired { user_id: UserId },
     AlreadyPairedSameUser { user_id: UserId },
     AlreadyBoundToOtherUser,
     ExpiredOrUnknown,
 }
 
-pub(crate) struct TelegramPairingService {
+pub struct TelegramPairingService {
     tenant_id: TenantId,
     agent_id: AgentId,
     project_id: Option<ProjectId>,
@@ -212,7 +212,7 @@ impl std::fmt::Debug for TelegramPairingService {
 impl TelegramPairingService {
     // arch-exempt: too_many_args, mirrors the slack binder shape until the telegram host mounts bundle owns the aggregation, plan #6116
     #[allow(clippy::too_many_arguments)]
-    pub(crate) fn new(
+    pub fn new(
         tenant_id: TenantId,
         agent_id: AgentId,
         project_id: Option<ProjectId>,
@@ -236,7 +236,7 @@ impl TelegramPairingService {
 
     /// Mint (or rotate) the caller's pairing code. Fails closed when the
     /// admin has not configured the bot — no code is ever minted first.
-    pub(crate) async fn issue_or_rotate(
+    pub async fn issue_or_rotate(
         &self,
         caller: &UserId,
     ) -> Result<PairingIssue, TelegramPairingError> {
@@ -264,7 +264,7 @@ impl TelegramPairingService {
         Ok(pairing_issue(&record, &setup.bot_username))
     }
 
-    pub(crate) async fn status_for(
+    pub async fn status_for(
         &self,
         caller: &UserId,
     ) -> Result<TelegramPairingStatus, TelegramPairingError> {
@@ -302,7 +302,7 @@ impl TelegramPairingService {
     /// bound to the code's user re-runs the completion effects — including on
     /// an already-consumed code — so a consume that failed after the claim is
     /// recovered by re-sending a code instead of stranding the blocked run.
-    pub(crate) async fn consume(
+    pub async fn consume(
         &self,
         raw_code: &str,
         telegram_user_id: &str,
@@ -400,7 +400,7 @@ impl TelegramPairingService {
     /// even though the user disconnected. Bindings are removed across every
     /// installation, and DM targets are derived from the removed provider ids
     /// plus the current setup (when one exists).
-    pub(crate) async fn unpair(&self, caller: &UserId) -> Result<(), TelegramPairingError> {
+    pub async fn unpair(&self, caller: &UserId) -> Result<(), TelegramPairingError> {
         self.pairing_store.invalidate_for_user(caller).await?;
         let removed = self
             .binding_store
@@ -494,6 +494,23 @@ fn mint_pairing_code() -> String {
         .collect()
 }
 
+/// The extension lifecycle's pairedness probe: composition fills its generic
+/// paired-status slot with the pairing service so in-chat `telegram`
+/// activation can gate on the caller's pairing state without holding the full
+/// pairing surface.
+#[async_trait]
+impl ironclaw_channel_host::paired_status::ChannelPairedStatusSource for TelegramPairingService {
+    async fn paired(
+        &self,
+        user_id: &UserId,
+    ) -> Result<bool, ironclaw_channel_host::paired_status::ChannelPairedStatusError> {
+        let status = self.status_for(user_id).await.map_err(|error| {
+            ironclaw_channel_host::paired_status::ChannelPairedStatusError::new(error.to_string())
+        })?;
+        Ok(status.connected)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::collections::HashMap;
@@ -504,10 +521,8 @@ mod tests {
     use secrecy::SecretString;
 
     use super::*;
-    use crate::telegram::telegram_bot_api::{
-        TelegramBotApi, TelegramBotApiError, TelegramBotIdentity,
-    };
-    use crate::telegram::telegram_setup::{
+    use crate::telegram_bot_api::{TelegramBotApi, TelegramBotApiError, TelegramBotIdentity};
+    use crate::telegram_setup::{
         TelegramInstallationSetup, TelegramInstallationSetupStore, TelegramInstallationSetupUpdate,
         TelegramSetupService,
     };
@@ -666,8 +681,10 @@ mod tests {
                 .filter(|(key, (bound, _))| {
                     bound == user_id
                         && installation.is_none_or(|installation| {
-                            crate::telegram::telegram_actor_identity::
-                                provider_user_id_in_installation(key, installation)
+                            crate::telegram_actor_identity::provider_user_id_in_installation(
+                                key,
+                                installation,
+                            )
                         })
                 })
                 .map(|(key, _)| key.clone())

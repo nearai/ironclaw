@@ -479,6 +479,7 @@ fn untrusted_ingress_paths_cannot_submit_host_trusted_inbound() {
         "crates/ironclaw_wasm_product_adapters/src",
         "crates/ironclaw_webui_v2/src",
         "crates/ironclaw_telegram_v2_adapter/src",
+        "crates/ironclaw_telegram_extension/src",
         "crates/ironclaw_slack_v2_adapter/src",
     ];
 

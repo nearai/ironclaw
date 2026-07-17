@@ -219,6 +219,10 @@ pub use webui::facade::build_webui_services_with_slack_and_telegram_host_mounts;
 // triggered-run driver are adapter-generic machinery in
 // `outbound::channel_delivery`; each channel host injects its own
 // adapter/egress/sink plus a `ChannelDeliveryProtocol`.
+#[cfg(feature = "telegram-v2-host-beta")]
+pub use ironclaw_telegram_extension::telegram_channel_routes::{
+    WEBUI_V2_CHANNELS_TELEGRAM_PAIRING_PATH, WEBUI_V2_CHANNELS_TELEGRAM_SETUP_PATH,
+};
 #[cfg(any(feature = "slack-v2-host-beta", feature = "telegram-v2-host-beta"))]
 pub use outbound::channel_delivery::{
     FinalReplyDeliveryObserver, FinalReplyDeliveryServices, FinalReplyDeliverySettings,
@@ -251,17 +255,13 @@ pub use slack::slack_serve::{
 #[cfg(feature = "slack-v2-host-beta")]
 pub use slack::slack_setup::SlackPersonalSetupServiceSlot;
 #[cfg(feature = "telegram-v2-host-beta")]
-pub use telegram::telegram_channel_routes::{
-    WEBUI_V2_CHANNELS_TELEGRAM_PAIRING_PATH, WEBUI_V2_CHANNELS_TELEGRAM_SETUP_PATH,
-};
-#[cfg(feature = "telegram-v2-host-beta")]
-pub use telegram::telegram_connectable_channel::build_webui_services_with_telegram_host_mounts;
-#[cfg(feature = "telegram-v2-host-beta")]
 pub use telegram::telegram_host_beta::{
     TelegramHostBuildError, TelegramHostMounts, TelegramHostRuntimeConfig,
     build_telegram_host_runtime_mounts,
 };
 pub use web_access::register_bundled_web_access_first_party_handlers;
+#[cfg(feature = "telegram-v2-host-beta")]
+pub use webui::facade::build_webui_services_with_telegram_host_mounts;
 pub use webui::facade::{RebornWebuiBundle, build_webui_services};
 #[cfg(feature = "webui-v2-beta")]
 pub use webui::webui_rate_limit::RateLimitConfigError;

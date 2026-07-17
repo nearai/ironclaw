@@ -21,24 +21,22 @@ use ironclaw_product_workflow::{
 };
 use ironclaw_telegram_v2_adapter::build_reply_target_binding;
 
-use crate::outbound::OutboundDeliveryTargetProvider;
-use crate::outbound::outbound_preferences::OutboundDeliveryTargetEntry;
-use crate::telegram::telegram_pairing::{
-    TelegramDmTarget, TelegramDmTargetStore, TelegramPairingError,
-};
-use crate::telegram::telegram_setup::{TelegramSetupError, TelegramSetupService};
+use crate::telegram_pairing::{TelegramDmTarget, TelegramDmTargetStore, TelegramPairingError};
+use crate::telegram_setup::{TelegramSetupError, TelegramSetupService};
+use ironclaw_channel_host::outbound_targets::OutboundDeliveryTargetEntry;
+use ironclaw_channel_host::outbound_targets::OutboundDeliveryTargetProvider;
 
 /// Outbound delivery targets for the Telegram channel host: exactly one
 /// personal-DM entry for the authenticated caller when the bot is configured
 /// and the caller is paired; empty otherwise.
-pub(crate) struct TelegramOutboundTargetProvider {
+pub struct TelegramOutboundTargetProvider {
     tenant_id: TenantId,
     setup_service: Arc<TelegramSetupService>,
     dm_target_store: Arc<dyn TelegramDmTargetStore>,
 }
 
 impl TelegramOutboundTargetProvider {
-    pub(crate) fn new(
+    pub fn new(
         tenant_id: TenantId,
         setup_service: Arc<TelegramSetupService>,
         dm_target_store: Arc<dyn TelegramDmTargetStore>,
@@ -177,7 +175,7 @@ mod tests {
     use ironclaw_turns::ReplyTargetBindingRef;
 
     use super::*;
-    use crate::telegram::telegram_dispatch::test_fixtures::{
+    use crate::telegram_dispatch::test_fixtures::{
         FIXTURE_BOT_USERNAME, InMemoryDmTargetStore, RecordingBotApi, configured_setup_service,
         fixture_installation_id, unconfigured_setup_service,
     };
@@ -363,7 +361,7 @@ mod tests {
     }
 }
 
-/// Telegram's [`crate::outbound::channel_delivery::ChannelDeliveryProtocol`]:
+/// Telegram's [`ironclaw_channel_host::delivery_protocol::ChannelDeliveryProtocol`]:
 /// `tg:` binding-ref decoding and positive-chat-id DM classification. Status
 /// messages are deliberately unwired in v1 — the pre-router owns Telegram's
 /// static replies, and the delivery machinery's working/notification posts
@@ -371,10 +369,12 @@ mod tests {
 /// telegram egress policy); the error here preserves that behavior without a
 /// network round-trip.
 #[derive(Debug, Default)]
-pub(crate) struct TelegramDeliveryProtocol;
+pub struct TelegramDeliveryProtocol;
 
 #[async_trait::async_trait]
-impl crate::outbound::channel_delivery::ChannelDeliveryProtocol for TelegramDeliveryProtocol {
+impl ironclaw_channel_host::delivery_protocol::ChannelDeliveryProtocol
+    for TelegramDeliveryProtocol
+{
     fn conversation_id_from_reply_target_binding_ref(
         &self,
         target: &ironclaw_turns::ReplyTargetBindingRef,
@@ -399,7 +399,7 @@ impl crate::outbound::channel_delivery::ChannelDeliveryProtocol for TelegramDeli
         &self,
         _path: &str,
         _body: &[u8],
-    ) -> Option<crate::outbound::channel_delivery::PostedChannelMessage> {
+    ) -> Option<ironclaw_channel_host::delivery_protocol::PostedChannelMessage> {
         None
     }
 
@@ -422,11 +422,11 @@ impl crate::outbound::channel_delivery::ChannelDeliveryProtocol for TelegramDeli
         _conversation: &ironclaw_product_adapters::ExternalConversationRef,
         _text: &str,
     ) -> Result<
-        crate::outbound::channel_delivery::PostedChannelMessage,
-        crate::outbound::channel_delivery::FinalReplyDeliveryError,
+        ironclaw_channel_host::delivery_protocol::PostedChannelMessage,
+        ironclaw_channel_host::delivery_protocol::FinalReplyDeliveryError,
     > {
         Err(
-            crate::outbound::channel_delivery::FinalReplyDeliveryError::StatusMessage {
+            ironclaw_channel_host::delivery_protocol::FinalReplyDeliveryError::StatusMessage {
                 reason: "telegram status messages are not wired".to_string(),
             },
         )
@@ -435,8 +435,8 @@ impl crate::outbound::channel_delivery::ChannelDeliveryProtocol for TelegramDeli
     async fn delete_status_message(
         &self,
         _egress: &dyn ironclaw_product_adapters::ProtocolHttpEgress,
-        _message: &crate::outbound::channel_delivery::PostedChannelMessage,
-    ) -> Result<(), crate::outbound::channel_delivery::FinalReplyDeliveryError> {
+        _message: &ironclaw_channel_host::delivery_protocol::PostedChannelMessage,
+    ) -> Result<(), ironclaw_channel_host::delivery_protocol::FinalReplyDeliveryError> {
         Ok(())
     }
 }
@@ -449,7 +449,9 @@ mod telegram_delivery_protocol_tests {
     };
 
     use super::TelegramDeliveryProtocol;
-    use crate::outbound::channel_delivery::{ChannelDeliveryProtocol, FinalReplyDeliveryError};
+    use ironclaw_channel_host::delivery_protocol::{
+        ChannelDeliveryProtocol, FinalReplyDeliveryError,
+    };
 
     /// Egress that panics if the protocol touches the network.
     #[derive(Debug)]
@@ -486,7 +488,7 @@ mod telegram_delivery_protocol_tests {
         protocol
             .delete_status_message(
                 &PanicEgress,
-                &crate::outbound::channel_delivery::PostedChannelMessage {
+                &ironclaw_channel_host::delivery_protocol::PostedChannelMessage {
                     conversation_id: "555".to_string(),
                     message_ref: "1".to_string(),
                 },

@@ -23,20 +23,20 @@ use secrecy::{ExposeSecret, SecretString};
 use serde::Deserialize;
 use thiserror::Error;
 
-pub(crate) const TELEGRAM_API_HOST: &str = "api.telegram.org";
+pub const TELEGRAM_API_HOST: &str = "api.telegram.org";
 const TELEGRAM_BOT_TOKEN_PLACEHOLDER: &str = "telegram_bot_token";
 const TELEGRAM_EGRESS_CAPABILITY_ID: &str = "telegram.egress";
 const TELEGRAM_EGRESS_TIMEOUT_MS: u32 = 10_000;
 const TELEGRAM_EGRESS_RESPONSE_BODY_LIMIT_BYTES: u64 = 64 * 1024;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct TelegramBotIdentity {
-    pub(crate) id: i64,
-    pub(crate) username: String,
+pub struct TelegramBotIdentity {
+    pub id: i64,
+    pub username: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
-pub(crate) enum TelegramBotApiError {
+pub enum TelegramBotApiError {
     /// Transport-level failure reaching api.telegram.org.
     #[error("telegram bot api unavailable: {reason}")]
     Unavailable { reason: String },
@@ -55,7 +55,7 @@ pub(crate) enum TelegramBotApiError {
 /// Stable, sanitized rejection categories derived from the HTTP status —
 /// never from Telegram's free-text `description`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum TelegramBotApiRejection {
+pub enum TelegramBotApiRejection {
     /// 401/404 — invalid or revoked bot token.
     Unauthorized,
     /// 403 — the bot is blocked or lacks access.
@@ -89,7 +89,7 @@ fn classify_rejection(status: u16) -> TelegramBotApiRejection {
 /// The hermetic seam for every Telegram Bot API call the host makes outside
 /// the adapter render path. Tests substitute a recording fake.
 #[async_trait]
-pub(crate) trait TelegramBotApi: Send + Sync + std::fmt::Debug {
+pub trait TelegramBotApi: Send + Sync + std::fmt::Debug {
     async fn get_me(
         &self,
         bot_token: &SecretString,
@@ -113,7 +113,7 @@ pub(crate) trait TelegramBotApi: Send + Sync + std::fmt::Debug {
 }
 
 /// Production implementation over the shared mediated host HTTP egress port.
-pub(crate) struct HostEgressTelegramBotApi {
+pub struct HostEgressTelegramBotApi {
     host_egress: HostRuntimeHttpEgressPort,
     scope_template: ResourceScope,
 }
@@ -125,17 +125,14 @@ impl std::fmt::Debug for HostEgressTelegramBotApi {
 }
 
 impl HostEgressTelegramBotApi {
-    pub(crate) fn new(
-        host_egress: HostRuntimeHttpEgressPort,
-        scope_template: ResourceScope,
-    ) -> Self {
+    pub fn new(host_egress: HostRuntimeHttpEgressPort, scope_template: ResourceScope) -> Self {
         Self {
             host_egress,
             scope_template,
         }
     }
 
-    pub(crate) fn arced(
+    pub fn arced(
         host_egress: HostRuntimeHttpEgressPort,
         scope_template: ResourceScope,
     ) -> Arc<dyn TelegramBotApi> {

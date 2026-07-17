@@ -12,7 +12,7 @@
 //! - bare `/start` and any message from an unpaired sender get a throttled
 //!   static onboarding hint (at most one per chat per window);
 //! - ordinary messages from paired senders are forwarded to the wrapped
-//!   [`crate::telegram::telegram_serve::TelegramUpdatesWebhookDispatcher`]
+//!   [`crate::telegram_serve::TelegramUpdatesWebhookDispatcher`]
 //!   runner so the normal ProductWorkflow path runs.
 //!
 //! Static replies are best-effort: send failures are logged at debug and
@@ -36,15 +36,15 @@ use ironclaw_wasm_product_adapters::{
 use serde::Deserialize;
 use tokio::sync::Mutex;
 
-use crate::telegram::telegram_actor_identity::{
+use crate::telegram_actor_identity::{
     TELEGRAM_IDENTITY_PROVIDER, telegram_user_identity_provider_user_id,
 };
-use crate::telegram::telegram_bot_api::TelegramBotApi;
-use crate::telegram::telegram_pairing::{
+use crate::telegram_bot_api::TelegramBotApi;
+use crate::telegram_pairing::{
     PAIRING_CODE_ALPHABET, PAIRING_CODE_LEN, PairingConsumeOutcome, TelegramPairingService,
 };
-use crate::telegram::telegram_serve::TelegramUpdatesWebhookDispatcher;
-use crate::telegram::telegram_setup::TelegramSetupService;
+use crate::telegram_serve::TelegramUpdatesWebhookDispatcher;
+use crate::telegram_setup::TelegramSetupService;
 use ironclaw_channel_host::identity::RebornUserIdentityLookup;
 
 const TRACING_TARGET: &str = "ironclaw::reborn::telegram_updates";
@@ -64,7 +64,7 @@ const IDENTITY_LOOKUP_UNAVAILABLE_REASON: &str = "telegram identity lookup unava
 
 /// Pairing-aware admission router for one resolved Telegram installation.
 /// Sits between the verified ingress route and the wrapped native runner.
-pub(crate) struct TelegramInboundPreRouter {
+pub struct TelegramInboundPreRouter {
     pairing: Arc<TelegramPairingService>,
     lookup: Arc<dyn RebornUserIdentityLookup>,
     bot_api: Arc<dyn TelegramBotApi>,
@@ -76,7 +76,7 @@ pub(crate) struct TelegramInboundPreRouter {
 }
 
 impl TelegramInboundPreRouter {
-    pub(crate) fn new(
+    pub fn new(
         pairing: Arc<TelegramPairingService>,
         lookup: Arc<dyn RebornUserIdentityLookup>,
         bot_api: Arc<dyn TelegramBotApi>,
@@ -377,7 +377,7 @@ struct FromLite {
 /// here so `telegram_serve`'s route tests reuse the same fixtures instead of
 /// standing up a second copy.
 #[cfg(test)]
-pub(crate) mod test_fixtures {
+pub mod test_fixtures {
     use std::collections::HashMap;
     use std::sync::Mutex as StdMutex;
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -395,26 +395,26 @@ pub(crate) mod test_fixtures {
     use secrecy::SecretString;
 
     use super::*;
-    use crate::product_auth::api::auth::RebornAuthContinuationDispatcher;
-    use crate::telegram::telegram_bot_api::{TelegramBotApiError, TelegramBotIdentity};
-    use crate::telegram::telegram_pairing::{
+    use crate::telegram_bot_api::{TelegramBotApiError, TelegramBotIdentity};
+    use crate::telegram_pairing::{
         TelegramBindingError, TelegramDmTarget, TelegramDmTargetStore, TelegramPairingError,
         TelegramPairingRecord, TelegramPairingStore, TelegramUserBindingStore,
     };
-    use crate::telegram::telegram_setup::{
+    use crate::telegram_setup::{
         TelegramInstallationSetup, TelegramInstallationSetupStore, TelegramInstallationSetupUpdate,
         TelegramSetupError,
     };
+    use ironclaw_channel_host::auth_continuation::RebornAuthContinuationDispatcher;
     use ironclaw_channel_host::identity::RebornUserIdentityLookupError;
 
-    pub(crate) const FIXTURE_BOT_ID: i64 = 4242;
-    pub(crate) const FIXTURE_BOT_USERNAME: &str = "ironclaw_qa_bot";
+    pub const FIXTURE_BOT_ID: i64 = 4242;
+    pub const FIXTURE_BOT_USERNAME: &str = "ironclaw_qa_bot";
 
     /// Records `sendMessage` calls; setup-time calls (`getMe`, `setWebhook`,
     /// `deleteWebhook`) succeed with a fixed bot identity unless a test swaps
     /// it via [`RecordingBotApi::set_bot_identity`] (bot-swap scenarios).
     #[derive(Debug)]
-    pub(crate) struct RecordingBotApi {
+    pub struct RecordingBotApi {
         sends: StdMutex<Vec<(i64, String)>>,
         fail_sends: AtomicBool,
         identity: StdMutex<TelegramBotIdentity>,
@@ -434,17 +434,17 @@ pub(crate) mod test_fixtures {
     }
 
     impl RecordingBotApi {
-        pub(crate) fn sends(&self) -> Vec<(i64, String)> {
+        pub fn sends(&self) -> Vec<(i64, String)> {
             self.sends.lock().expect("lock").clone()
         }
 
-        pub(crate) fn fail_sends(&self) {
+        pub fn fail_sends(&self) {
             self.fail_sends.store(true, Ordering::SeqCst);
         }
 
         /// Point `getMe` at a different bot so the next setup save models a
         /// bot swap (new installation id).
-        pub(crate) fn set_bot_identity(&self, id: i64, username: &str) {
+        pub fn set_bot_identity(&self, id: i64, username: &str) {
             *self.identity.lock().expect("lock") = TelegramBotIdentity {
                 id,
                 username: username.to_string(),
@@ -489,7 +489,7 @@ pub(crate) mod test_fixtures {
                 .push((chat_id, text.to_string()));
             if self.fail_sends.load(Ordering::SeqCst) {
                 return Err(TelegramBotApiError::Rejected {
-                    kind: crate::telegram::telegram_bot_api::TelegramBotApiRejection::Forbidden,
+                    kind: crate::telegram_bot_api::TelegramBotApiRejection::Forbidden,
                 });
             }
             Ok(())
@@ -497,7 +497,7 @@ pub(crate) mod test_fixtures {
     }
 
     #[derive(Debug, Default)]
-    pub(crate) struct InMemorySetupStore {
+    pub struct InMemorySetupStore {
         record: StdMutex<Option<TelegramInstallationSetup>>,
     }
 
@@ -524,7 +524,7 @@ pub(crate) mod test_fixtures {
     }
 
     #[derive(Debug, Default)]
-    pub(crate) struct InMemoryPairingStore {
+    pub struct InMemoryPairingStore {
         records: StdMutex<Vec<TelegramPairingRecord>>,
     }
 
@@ -595,7 +595,7 @@ pub(crate) mod test_fixtures {
     }
 
     #[derive(Debug, Default)]
-    pub(crate) struct InMemoryBindingStore {
+    pub struct InMemoryBindingStore {
         bindings: StdMutex<HashMap<String, (UserId, String)>>,
     }
 
@@ -631,8 +631,10 @@ pub(crate) mod test_fixtures {
                 .filter(|(key, (bound, _))| {
                     bound == user_id
                         && installation.is_none_or(|installation| {
-                            crate::telegram::telegram_actor_identity::
-                                provider_user_id_in_installation(key, installation)
+                            crate::telegram_actor_identity::provider_user_id_in_installation(
+                                key,
+                                installation,
+                            )
                         })
                 })
                 .map(|(key, _)| key.clone())
@@ -657,7 +659,7 @@ pub(crate) mod test_fixtures {
     }
 
     #[derive(Debug, Default)]
-    pub(crate) struct InMemoryDmTargetStore {
+    pub struct InMemoryDmTargetStore {
         targets: StdMutex<HashMap<(String, String), TelegramDmTarget>>,
     }
 
@@ -708,7 +710,7 @@ pub(crate) mod test_fixtures {
     }
 
     #[derive(Debug, Default)]
-    pub(crate) struct RecordingContinuationDispatcher {
+    pub struct RecordingContinuationDispatcher {
         events: StdMutex<Vec<AuthContinuationEvent>>,
     }
 
@@ -726,20 +728,20 @@ pub(crate) mod test_fixtures {
     /// Identity lookup fake keyed by `(provider, provider_user_id)`. `fail()`
     /// switches every read into a backend error.
     #[derive(Debug, Default)]
-    pub(crate) struct FakeIdentityLookup {
+    pub struct FakeIdentityLookup {
         bindings: StdMutex<HashMap<(String, String), UserId>>,
         fail: AtomicBool,
     }
 
     impl FakeIdentityLookup {
-        pub(crate) fn bind(&self, provider: &str, provider_user_id: &str, user: &str) {
+        pub fn bind(&self, provider: &str, provider_user_id: &str, user: &str) {
             self.bindings.lock().expect("lock").insert(
                 (provider.to_string(), provider_user_id.to_string()),
                 UserId::new(user).expect("valid user id"),
             );
         }
 
-        pub(crate) fn fail(&self) {
+        pub fn fail(&self) {
             self.fail.store(true, Ordering::SeqCst);
         }
     }
@@ -779,12 +781,12 @@ pub(crate) mod test_fixtures {
     }
 
     /// `ProductWorkflow` fake counting durable submissions.
-    pub(crate) struct CountingWorkflow {
+    pub struct CountingWorkflow {
         submitted: Arc<AtomicUsize>,
     }
 
     impl CountingWorkflow {
-        pub(crate) fn new(submitted: Arc<AtomicUsize>) -> Self {
+        pub fn new(submitted: Arc<AtomicUsize>) -> Self {
             Self { submitted }
         }
     }
@@ -819,9 +821,7 @@ pub(crate) mod test_fixtures {
         AgentId::new("agent-a").expect("valid agent")
     }
 
-    pub(crate) fn unconfigured_setup_service(
-        bot_api: Arc<RecordingBotApi>,
-    ) -> Arc<TelegramSetupService> {
+    pub fn unconfigured_setup_service(bot_api: Arc<RecordingBotApi>) -> Arc<TelegramSetupService> {
         Arc::new(TelegramSetupService::new(
             tenant_id(),
             agent_id(),
@@ -836,7 +836,7 @@ pub(crate) mod test_fixtures {
 
     /// A saved deployment bot (`tg-bot-4242`) with token + webhook secret in
     /// the in-memory secret store.
-    pub(crate) async fn configured_setup_service(
+    pub async fn configured_setup_service(
         bot_api: Arc<RecordingBotApi>,
     ) -> Arc<TelegramSetupService> {
         let setup = unconfigured_setup_service(bot_api);
@@ -850,9 +850,7 @@ pub(crate) mod test_fixtures {
         setup
     }
 
-    pub(crate) fn pairing_service_with(
-        setup: Arc<TelegramSetupService>,
-    ) -> Arc<TelegramPairingService> {
+    pub fn pairing_service_with(setup: Arc<TelegramSetupService>) -> Arc<TelegramPairingService> {
         Arc::new(TelegramPairingService::new(
             tenant_id(),
             agent_id(),
@@ -865,17 +863,13 @@ pub(crate) mod test_fixtures {
         ))
     }
 
-    pub(crate) fn fixture_installation_id() -> AdapterInstallationId {
+    pub fn fixture_installation_id() -> AdapterInstallationId {
         AdapterInstallationId::new(format!("tg-bot-{FIXTURE_BOT_ID}"))
             .expect("valid installation id")
     }
 
     /// A private-chat update body; `text: None` models a media-only message.
-    pub(crate) fn private_text_update_body(
-        from_id: i64,
-        chat_id: i64,
-        text: Option<&str>,
-    ) -> Vec<u8> {
+    pub fn private_text_update_body(from_id: i64, chat_id: i64, text: Option<&str>) -> Vec<u8> {
         let mut message = serde_json::json!({
             "message_id": 100,
             "date": 1,
@@ -904,7 +898,7 @@ mod tests {
         pairing_service_with, private_text_update_body,
     };
     use super::*;
-    use crate::telegram::telegram_serve::TELEGRAM_SECRET_TOKEN_HEADER;
+    use crate::telegram_serve::TELEGRAM_SECRET_TOKEN_HEADER;
 
     struct FakeForwardRunner {
         calls: Arc<AtomicUsize>,

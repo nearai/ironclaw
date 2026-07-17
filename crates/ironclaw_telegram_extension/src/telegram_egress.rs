@@ -31,21 +31,21 @@ use ironclaw_secrets::SecretMaterial;
 use ironclaw_wasm_product_adapters::{EgressPolicy, EgressPolicyError, EgressPolicyTarget};
 use secrecy::{ExposeSecret, SecretString};
 
-use crate::telegram::telegram_setup::TelegramSetupService;
+use crate::telegram_setup::TelegramSetupService;
 
 const TELEGRAM_EGRESS_TIMEOUT_MS: u32 = 10_000;
 const TELEGRAM_EGRESS_RESPONSE_BODY_LIMIT_BYTES: u64 = 64 * 1024;
 const TELEGRAM_EGRESS_CAPABILITY_ID: &str = "telegram.egress";
 /// Opaque credential handle the adapter renders; doubles as the literal URL
 /// placeholder the mediated egress substitutes.
-pub(crate) const TELEGRAM_BOT_TOKEN_CREDENTIAL_HANDLE: &str = "telegram_bot_token";
+pub const TELEGRAM_BOT_TOKEN_CREDENTIAL_HANDLE: &str = "telegram_bot_token";
 
 /// Resolves the opaque `telegram_bot_token` handle to the current bot token
 /// at send time. The dynamic setup-service-backed implementation re-reads the
 /// durable setup record per send, so a WebUI token rotation takes effect on
 /// the next outbound message without a rebuild.
 #[async_trait]
-pub(crate) trait TelegramEgressCredentialProvider: Send + Sync {
+pub trait TelegramEgressCredentialProvider: Send + Sync {
     async fn resolve_telegram_bot_token(
         &self,
         handle: &EgressCredentialHandle,
@@ -53,12 +53,12 @@ pub(crate) trait TelegramEgressCredentialProvider: Send + Sync {
 }
 
 /// Production provider over [`TelegramSetupService::bot_token`].
-pub(crate) struct SetupServiceTelegramEgressCredentialProvider {
+pub struct SetupServiceTelegramEgressCredentialProvider {
     setup_service: Arc<TelegramSetupService>,
 }
 
 impl SetupServiceTelegramEgressCredentialProvider {
-    pub(crate) fn new(setup_service: Arc<TelegramSetupService>) -> Self {
+    pub fn new(setup_service: Arc<TelegramSetupService>) -> Self {
         Self { setup_service }
     }
 }
@@ -91,7 +91,7 @@ impl TelegramEgressCredentialProvider for SetupServiceTelegramEgressCredentialPr
     }
 }
 
-pub(crate) struct TelegramProtocolHttpEgress {
+pub struct TelegramProtocolHttpEgress {
     host_egress: HostRuntimeHttpEgressPort,
     credentials: Arc<dyn TelegramEgressCredentialProvider>,
     policy: EgressPolicy,
@@ -99,7 +99,7 @@ pub(crate) struct TelegramProtocolHttpEgress {
 }
 
 impl TelegramProtocolHttpEgress {
-    pub(crate) fn new(
+    pub fn new(
         host_egress: HostRuntimeHttpEgressPort,
         credentials: Arc<dyn TelegramEgressCredentialProvider>,
         policy: EgressPolicy,
@@ -227,7 +227,7 @@ impl TelegramProtocolHttpEgress {
 /// carries only the literal `{telegram_bot_token}` placeholder — never raw
 /// token material — and the host egress substitutes the credential via
 /// [`RuntimeCredentialTarget::PathPlaceholder`]. Mirrors
-/// [`crate::telegram::telegram_bot_api::HostEgressTelegramBotApi`]'s URL
+/// [`crate::telegram_bot_api::HostEgressTelegramBotApi`]'s URL
 /// construction so setup-time and delivery-time egress cannot drift.
 fn telegram_bot_api_url(host: &str, path: &str) -> String {
     format!("https://{host}/bot{{{TELEGRAM_BOT_TOKEN_CREDENTIAL_HANDLE}}}{path}")

@@ -2,9 +2,10 @@
 //!
 //! Setup routes are operator-gated (tenant mismatch → 404 anti-enumeration,
 //! non-operator → 403). Pairing routes are per-authenticated-member — any
-//! signed-in user mints/reads/cancels THEIR OWN pairing. Mounted through the
-//! generic [`ProtectedRouteMount`] seam so the descriptor-driven body/rate
-//! limits apply exactly like every other bearer-authed v2 route.
+//! signed-in user mints/reads/cancels THEIR OWN pairing. Composition wraps
+//! the raw route fragment into its generic protected-route mount so the
+//! descriptor-driven body/rate limits apply exactly like every other
+//! bearer-authed v2 route.
 
 use std::sync::Arc;
 
@@ -28,13 +29,10 @@ use secrecy::SecretString;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-use crate::telegram::telegram_pairing::{
-    PairingIssue, TelegramPairingError, TelegramPairingService,
-};
-use crate::telegram::telegram_setup::{
+use crate::telegram_pairing::{PairingIssue, TelegramPairingError, TelegramPairingService};
+use crate::telegram_setup::{
     TelegramInstallationSetupStatus, TelegramInstallationSetupUpdate, TelegramSetupService,
 };
-use crate::webui::webui_serve::ProtectedRouteMount;
 
 pub const WEBUI_V2_CHANNELS_TELEGRAM_SETUP_PATH: &str = "/api/webchat/v2/channels/telegram/setup";
 pub const WEBUI_V2_CHANNELS_TELEGRAM_PAIRING_PATH: &str =
@@ -58,7 +56,7 @@ const TELEGRAM_ROUTES_RATE_WINDOW_SECONDS: std::num::NonZeroU32 =
 /// activation): the telegram host mounts wire it to lifecycle `activate` on
 /// the `telegram` package with rollback on failure.
 #[async_trait::async_trait]
-pub(crate) trait TelegramChannelSetupActivation: Send + Sync {
+pub trait TelegramChannelSetupActivation: Send + Sync {
     async fn activate_telegram_channel_after_setup_save(
         &self,
     ) -> Result<(), TelegramChannelSetupActivationError>;
@@ -66,12 +64,12 @@ pub(crate) trait TelegramChannelSetupActivation: Send + Sync {
 
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 #[error("telegram channel activation failed: {reason}")]
-pub(crate) struct TelegramChannelSetupActivationError {
+pub struct TelegramChannelSetupActivationError {
     reason: String,
 }
 
 impl TelegramChannelSetupActivationError {
-    pub(crate) fn new(reason: impl Into<String>) -> Self {
+    pub fn new(reason: impl Into<String>) -> Self {
         Self {
             reason: reason.into(),
         }
@@ -79,7 +77,7 @@ impl TelegramChannelSetupActivationError {
 }
 
 #[derive(Clone)]
-pub(crate) struct TelegramChannelRouteConfig {
+pub struct TelegramChannelRouteConfig {
     tenant_id: ironclaw_host_api::TenantId,
     operator_user_id: ironclaw_host_api::UserId,
     setup_service: Arc<TelegramSetupService>,
@@ -89,7 +87,7 @@ pub(crate) struct TelegramChannelRouteConfig {
 }
 
 impl TelegramChannelRouteConfig {
-    pub(crate) fn new(
+    pub fn new(
         setup_service: Arc<TelegramSetupService>,
         pairing_service: Arc<TelegramPairingService>,
         safety_layer: Arc<SafetyLayer>,
@@ -104,7 +102,7 @@ impl TelegramChannelRouteConfig {
         }
     }
 
-    pub(crate) fn with_setup_activation(
+    pub fn with_setup_activation(
         mut self,
         activation: Arc<dyn TelegramChannelSetupActivation>,
     ) -> Self {
@@ -113,9 +111,13 @@ impl TelegramChannelRouteConfig {
     }
 }
 
-pub(crate) fn telegram_channel_route_mount(
+/// Build the raw setup/pairing route fragment: the axum router (state
+/// applied) plus the route descriptors. Composition wraps the pair into its
+/// bearer-authed protected-route mount — this crate cannot name composition's
+/// mount types without a cycle.
+pub fn telegram_channel_route_parts(
     config: TelegramChannelRouteConfig,
-) -> ProtectedRouteMount {
+) -> (Router, Vec<IngressRouteDescriptor>) {
     let router = Router::new()
         .route(
             WEBUI_V2_CHANNELS_TELEGRAM_SETUP_PATH,
@@ -130,7 +132,7 @@ pub(crate) fn telegram_channel_route_mount(
                 .delete(disconnect_pairing_handler),
         )
         .with_state(config);
-    ProtectedRouteMount::new(router, telegram_channel_route_descriptors())
+    (router, telegram_channel_route_descriptors())
 }
 
 fn telegram_channel_route_descriptors() -> Vec<IngressRouteDescriptor> {
@@ -211,7 +213,7 @@ fn route_policy(body_limit: BodyLimitPolicy) -> IngressPolicy {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
-pub(crate) enum TelegramRouteError {
+pub enum TelegramRouteError {
     #[error("bad request")]
     BadRequest,
     #[error("forbidden")]
@@ -241,9 +243,9 @@ impl IntoResponse for TelegramRouteError {
     }
 }
 
-impl From<crate::telegram::telegram_setup::TelegramSetupError> for TelegramRouteError {
-    fn from(error: crate::telegram::telegram_setup::TelegramSetupError) -> Self {
-        use crate::telegram::telegram_setup::TelegramSetupError as E;
+impl From<crate::telegram_setup::TelegramSetupError> for TelegramRouteError {
+    fn from(error: crate::telegram_setup::TelegramSetupError) -> Self {
+        use crate::telegram_setup::TelegramSetupError as E;
         match error {
             E::InvalidField { .. } | E::MissingField { .. } => TelegramRouteError::BadRequest,
             E::PublicUrlMissing | E::BotApi { .. } => {

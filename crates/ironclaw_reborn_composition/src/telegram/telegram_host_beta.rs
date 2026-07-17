@@ -16,7 +16,8 @@
 //! inbound parsing, the product workflow's installation scope, and the
 //! delivery observer's rendering adapter — rebuilds per setup revision inside
 //! [`DynamicTelegramInstallationResolver`] via the
-//! [`crate::telegram::telegram_serve::TelegramRevisionWorkflowBuilder`] this
+//! [`ironclaw_telegram_extension::telegram_serve::TelegramRevisionWorkflowBuilder`]
+//! this
 //! module implements over revision-independent runtime parts. Configuring the
 //! bot for the first time after boot, or swapping to a different bot, takes
 //! effect on the next webhook without a process restart. A token rotation for
@@ -30,8 +31,7 @@ use ironclaw_conversations::RebornFilesystemConversationServices;
 use ironclaw_host_api::{AgentId, ProjectId, ResourceScope, TenantId, UserId};
 use ironclaw_outbound::{DeliveredGateRouteStore, TriggeredRunDeliveryStore};
 use ironclaw_product_adapters::{
-    AdapterInstallationId, AuthRequirement, DeclaredEgressTarget, DeliveryStatus,
-    EgressCredentialHandle, OutboundDeliverySink, ProductAdapter, ProductAdapterId,
+    DeliveryStatus, EgressCredentialHandle, OutboundDeliverySink, ProductAdapter,
     ProtocolHttpEgress,
 };
 use ironclaw_product_workflow::{
@@ -43,9 +43,6 @@ use ironclaw_product_workflow::{
     ResolveBindingRequest, ResolvedBinding, StaticProductInstallationResolver,
 };
 use ironclaw_safety::{SafetyConfig, SafetyLayer};
-use ironclaw_telegram_v2_adapter::{
-    GroupTriggerPolicy, TelegramV2Adapter, TelegramV2AdapterConfig, telegram_declared_egress_hosts,
-};
 use ironclaw_threads::SessionThreadService;
 use ironclaw_triggers::TriggerFire;
 use ironclaw_turns::{TurnCoordinator, TurnRunId, TurnScope};
@@ -63,37 +60,39 @@ use crate::outbound::channel_delivery::{
     PostSubmitDeliveryHook, TriggeredRunDeliveryDriver,
 };
 use crate::outbound::{OutboundDeliveryTargetProvider, OutboundDeliveryTargetRegistrationOutcome};
-use crate::telegram::telegram_actor_identity::{
+use crate::webui::webui_serve::{ProtectedRouteMount, PublicRouteDrain, PublicRouteMount};
+use ironclaw_channel_host::identity::RebornUserIdentityLookup;
+use ironclaw_channel_host::paired_status::ChannelPairedStatusSource;
+use ironclaw_telegram_extension::telegram_actor_identity::{
     TELEGRAM_V2_ADAPTER_ID, TelegramUserIdentityActorResolver,
 };
-use crate::telegram::telegram_bot_api::HostEgressTelegramBotApi;
-use crate::telegram::telegram_channel_connection::TelegramPairedStatusSource;
-use crate::telegram::telegram_channel_routes::{
-    TelegramChannelRouteConfig, TelegramChannelSetupActivation,
-    TelegramChannelSetupActivationError, telegram_channel_route_mount,
+use ironclaw_telegram_extension::telegram_adapter::{
+    telegram_adapter_for_setup, telegram_bot_token_handle, telegram_declared_egress_targets,
 };
-use crate::telegram::telegram_connectable_channel::{
+use ironclaw_telegram_extension::telegram_bot_api::HostEgressTelegramBotApi;
+use ironclaw_telegram_extension::telegram_channel_routes::{
+    TelegramChannelRouteConfig, TelegramChannelSetupActivation,
+    TelegramChannelSetupActivationError, telegram_channel_route_parts,
+};
+use ironclaw_telegram_extension::telegram_connectable_channel::{
     TelegramChannelConnectionFacade, TelegramConnectableChannelsProductFacade,
 };
-use crate::telegram::telegram_egress::{
-    SetupServiceTelegramEgressCredentialProvider, TELEGRAM_BOT_TOKEN_CREDENTIAL_HANDLE,
-    TelegramProtocolHttpEgress,
+use ironclaw_telegram_extension::telegram_egress::{
+    SetupServiceTelegramEgressCredentialProvider, TelegramProtocolHttpEgress,
 };
-use crate::telegram::telegram_host_state::FilesystemTelegramHostState;
-use crate::telegram::telegram_outbound_targets::TelegramOutboundTargetProvider;
-use crate::telegram::telegram_pairing::{
+use ironclaw_telegram_extension::telegram_host_state::FilesystemTelegramHostState;
+use ironclaw_telegram_extension::telegram_outbound_targets::TelegramOutboundTargetProvider;
+use ironclaw_telegram_extension::telegram_pairing::{
     TelegramDmTargetStore, TelegramPairingService, TelegramPairingStore, TelegramUserBindingStore,
 };
-use crate::telegram::telegram_serve::{
-    DynamicTelegramInstallationResolver, TELEGRAM_SECRET_TOKEN_HEADER,
-    TelegramInstallationResolver, TelegramRevisionWorkflow, TelegramRevisionWorkflowBuildError,
-    TelegramRevisionWorkflowBuilder, TelegramUpdatesRouteState, telegram_updates_route_mount,
+use ironclaw_telegram_extension::telegram_serve::{
+    DynamicTelegramInstallationResolver, TelegramInstallationResolver, TelegramRevisionWorkflow,
+    TelegramRevisionWorkflowBuildError, TelegramRevisionWorkflowBuilder, TelegramUpdatesRouteState,
+    telegram_updates_route_parts,
 };
-use crate::telegram::telegram_setup::{
+use ironclaw_telegram_extension::telegram_setup::{
     TelegramInstallationSetup, TelegramInstallationSetupStore, TelegramSetupService,
 };
-use crate::webui::webui_serve::{ProtectedRouteMount, PublicRouteMount};
-use ironclaw_channel_host::identity::RebornUserIdentityLookup;
 
 const TELEGRAM_IDEMPOTENCY_LEDGER_SETTLED_LIMIT: usize = 10_000;
 const TELEGRAM_IDEMPOTENCY_LEDGER_PRUNE_INTERVAL: usize = 1_000;
@@ -165,7 +164,8 @@ impl TelegramHostMounts {
     /// Bearer-authed WebUI channel routes (operator setup + per-member
     /// pairing), mounted through the generic [`ProtectedRouteMount`] seam.
     pub fn protected_routes(&self) -> ProtectedRouteMount {
-        telegram_channel_route_mount(self.channel_routes.clone())
+        let (router, descriptors) = telegram_channel_route_parts(self.channel_routes.clone());
+        ProtectedRouteMount::new(router, descriptors)
     }
 
     /// Settings connectable-channels descriptor facade for this host.
@@ -215,6 +215,16 @@ impl TelegramHostRuntimeParts {
             auth_challenge_provider: runtime.auth_challenge_provider(),
             auth_flow_canceller: runtime.blocked_auth_flow_canceller(),
         })
+    }
+}
+
+/// [`PublicRouteDrain`] adapter over the extension crate's route state: the
+/// crate exposes the inherent drain, composition owns the drain trait.
+struct TelegramUpdatesRouteDrain(TelegramUpdatesRouteState);
+
+impl PublicRouteDrain for TelegramUpdatesRouteDrain {
+    fn drain<'a>(&'a self) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + 'a>> {
+        Box::pin(self.0.drain_immediate_ack_tasks())
     }
 }
 
@@ -387,7 +397,8 @@ pub async fn build_telegram_host_runtime_mounts(
         TelegramUserIdentityActorResolver::new(Arc::clone(&identity_lookup)),
     );
 
-    let token_handle = telegram_bot_token_handle()?;
+    let token_handle =
+        telegram_bot_token_handle().map_err(|error| invalid_config(error.field, error.reason))?;
     let egress: Arc<dyn ProtocolHttpEgress> = Arc::new(TelegramProtocolHttpEgress::new(
         host_egress,
         Arc::new(SetupServiceTelegramEgressCredentialProvider::new(
@@ -439,7 +450,14 @@ pub async fn build_telegram_host_runtime_mounts(
             Arc::clone(&identity_lookup),
             Arc::clone(&revision_parts) as Arc<dyn TelegramRevisionWorkflowBuilder>,
         ));
-    let events = telegram_updates_route_mount(TelegramUpdatesRouteState::from_resolver(resolver));
+    // The extension crate hands back the raw router + manifest-projected
+    // descriptors; composition wraps them into its public-route mount shape
+    // and installs the immediate-ack drain (the crate cannot name the mount
+    // types without a cycle).
+    let updates_state = TelegramUpdatesRouteState::from_resolver(resolver);
+    let (updates_router, updates_descriptors) = telegram_updates_route_parts(updates_state.clone());
+    let events = PublicRouteMount::new(updates_router, updates_descriptors)
+        .with_drain(Arc::new(TelegramUpdatesRouteDrain(updates_state)));
 
     // Proactive delivery INTO Telegram: the caller-scoped personal-DM target
     // provider (WebUI delivery defaults + per-trigger targets), keyed by host
@@ -525,7 +543,7 @@ pub async fn build_telegram_host_runtime_mounts(
         // activation can gate on the caller's pairing state.
         extension_management
             .telegram_paired_status_slot()
-            .fill(Arc::clone(&pairing) as Arc<dyn TelegramPairedStatusSource>);
+            .fill(Arc::clone(&pairing) as Arc<dyn ChannelPairedStatusSource>);
     }
 
     let connectable: Arc<dyn ConnectableChannelsProductFacade> = Arc::new(
@@ -560,29 +578,16 @@ struct TelegramRevisionWorkflowParts {
 }
 
 impl TelegramRevisionWorkflowParts {
-    /// The Telegram rendering adapter for one setup revision (installation id
-    /// + group trigger policy come from the setup record).
+    /// The Telegram rendering adapter for one setup revision; installation
+    /// identity and group trigger policy come from the setup record, and the
+    /// construction details live with the extension crate.
     fn adapter_for_setup(
         &self,
         setup: &TelegramInstallationSetup,
-        installation_id: AdapterInstallationId,
+        installation_id: ironclaw_product_adapters::AdapterInstallationId,
     ) -> Result<Arc<dyn ProductAdapter>, TelegramHostBuildError> {
-        let adapter_id = ProductAdapterId::new(TELEGRAM_V2_ADAPTER_ID)
-            .map_err(|reason| invalid_config("adapter_id", reason.to_string()))?;
-        Ok(Arc::new(TelegramV2Adapter::new(TelegramV2AdapterConfig {
-            adapter_id,
-            installation_id,
-            group_trigger_policy: GroupTriggerPolicy {
-                bot_username: setup.bot_username.clone(),
-                bot_user_id: setup.bot_id,
-                recognized_commands: vec![],
-            },
-            egress_credential_handle: self.token_handle.clone(),
-            auth_requirement: AuthRequirement::SharedSecretHeader {
-                header_name: TELEGRAM_SECRET_TOKEN_HEADER.into(),
-            },
-            progress_push_enabled: false,
-        })))
+        telegram_adapter_for_setup(setup, installation_id, self.token_handle.clone())
+            .map_err(|error| invalid_config(error.field, error.reason))
     }
 }
 
@@ -610,8 +615,8 @@ impl TelegramRevisionWorkflowBuilder for TelegramRevisionWorkflowParts {
             Arc::clone(&self.actor_user_resolver),
             Arc::clone(&self.actor_pairings),
         );
-        let adapter_id =
-            ProductAdapterId::new(TELEGRAM_V2_ADAPTER_ID).map_err(revision_workflow_build_error)?;
+        let adapter_id = ironclaw_product_adapters::ProductAdapterId::new(TELEGRAM_V2_ADAPTER_ID)
+            .map_err(revision_workflow_build_error)?;
         let installation_resolver = StaticProductInstallationResolver::new([(
             ProductInstallationKey::new(adapter_id, installation_id.clone()),
             scope,
@@ -645,7 +650,7 @@ impl TelegramRevisionWorkflowBuilder for TelegramRevisionWorkflowParts {
         let observer = Arc::new(FinalReplyDeliveryObserver::with_settings(
             FinalReplyDeliveryServices {
                 channel_protocol: Arc::new(
-                    crate::telegram::telegram_outbound_targets::TelegramDeliveryProtocol,
+                    ironclaw_telegram_extension::telegram_outbound_targets::TelegramDeliveryProtocol,
                 ),
                 binding_service: Arc::new(binding),
                 thread_service: Arc::clone(&self.parts.thread_service),
@@ -795,7 +800,7 @@ impl DynamicTelegramTriggeredRunDeliveryHook {
             Arc::clone(&parts.local_runtime.delivered_gate_routes);
         let services = FinalReplyDeliveryServices {
             channel_protocol: Arc::new(
-                crate::telegram::telegram_outbound_targets::TelegramDeliveryProtocol,
+                ironclaw_telegram_extension::telegram_outbound_targets::TelegramDeliveryProtocol,
             ),
             binding_service: Arc::new(NoopTelegramConversationBindingService),
             thread_service: Arc::clone(&parts.thread_service),
@@ -845,20 +850,6 @@ impl PostSubmitDeliveryHook for DynamicTelegramTriggeredRunDeliveryHook {
     }
 }
 
-fn telegram_bot_token_handle() -> Result<EgressCredentialHandle, TelegramHostBuildError> {
-    EgressCredentialHandle::new(TELEGRAM_BOT_TOKEN_CREDENTIAL_HANDLE)
-        .map_err(|reason| invalid_config("bot_token_handle", reason.to_string()))
-}
-
-fn telegram_declared_egress_targets(
-    token_handle: EgressCredentialHandle,
-) -> Vec<DeclaredEgressTarget> {
-    telegram_declared_egress_hosts()
-        .into_iter()
-        .map(|host| DeclaredEgressTarget::new(host, Some(token_handle.clone())))
-        .collect()
-}
-
 fn telegram_egress_scope_template(config: &TelegramHostRuntimeConfig) -> ResourceScope {
     ResourceScope {
         tenant_id: config.tenant_id.clone(),
@@ -890,11 +881,11 @@ mod tests {
     use tower::ServiceExt;
 
     use super::*;
-    use crate::telegram::telegram_serve::TELEGRAM_UPDATES_PATH;
     use crate::{
         RebornBuildInput, RebornRuntimeIdentity, RebornRuntimeInput, build_reborn_runtime,
         local_dev_runtime_policy,
     };
+    use ironclaw_telegram_extension::telegram_serve::TELEGRAM_UPDATES_PATH;
 
     const TENANT: &str = "telegram-host-tenant";
     const AGENT: &str = "telegram-host-agent";
@@ -1000,7 +991,7 @@ mod tests {
                 .descriptors
                 .iter()
                 .any(|descriptor| descriptor.route_pattern().as_str()
-                    == crate::telegram::telegram_channel_routes::WEBUI_V2_CHANNELS_TELEGRAM_SETUP_PATH),
+                    == ironclaw_telegram_extension::telegram_channel_routes::WEBUI_V2_CHANNELS_TELEGRAM_SETUP_PATH),
             "setup route must be mounted"
         );
         assert!(
@@ -1008,7 +999,7 @@ mod tests {
                 .descriptors
                 .iter()
                 .any(|descriptor| descriptor.route_pattern().as_str()
-                    == crate::telegram::telegram_channel_routes::WEBUI_V2_CHANNELS_TELEGRAM_PAIRING_PATH),
+                    == ironclaw_telegram_extension::telegram_channel_routes::WEBUI_V2_CHANNELS_TELEGRAM_PAIRING_PATH),
             "pairing route must be mounted"
         );
 

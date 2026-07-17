@@ -23,7 +23,7 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use tokio::sync::Mutex;
 
-use crate::telegram::telegram_bot_api::{TelegramBotApi, TelegramBotApiError, TelegramBotIdentity};
+use crate::telegram_bot_api::{TelegramBotApi, TelegramBotApiError, TelegramBotIdentity};
 
 const TELEGRAM_BOT_TOKEN_HANDLE_PREFIX: &str = "telegram_bot_token";
 const TELEGRAM_WEBHOOK_SECRET_HANDLE_PREFIX: &str = "telegram_webhook_secret";
@@ -31,23 +31,23 @@ const INSTALLATION_HANDLE_HASH_LEN: usize = 24;
 
 /// The route every deployment registers with Telegram (`setWebhook`). Pinned
 /// to the unified-extension-runtime path so registrations survive the port.
-pub(crate) const TELEGRAM_UPDATES_ROUTE_PATH: &str = "/webhooks/extensions/telegram/updates";
+pub const TELEGRAM_UPDATES_ROUTE_PATH: &str = "/webhooks/extensions/telegram/updates";
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub(crate) struct TelegramInstallationSetup {
-    pub(crate) bot_id: i64,
-    pub(crate) bot_username: String,
-    pub(crate) webhook_url: String,
-    pub(crate) bot_token_handle: SecretHandle,
-    pub(crate) webhook_secret_handle: SecretHandle,
-    pub(crate) revision: u64,
-    pub(crate) updated_at: DateTime<Utc>,
+pub struct TelegramInstallationSetup {
+    pub bot_id: i64,
+    pub bot_username: String,
+    pub webhook_url: String,
+    pub bot_token_handle: SecretHandle,
+    pub webhook_secret_handle: SecretHandle,
+    pub revision: u64,
+    pub updated_at: DateTime<Utc>,
 }
 
 impl TelegramInstallationSetup {
     /// Installation identity is the bot: rotating the same bot's token keeps
     /// pairings; pointing at a different bot re-scopes them by design.
-    pub(crate) fn installation_id(&self) -> Result<AdapterInstallationId, TelegramSetupError> {
+    pub fn installation_id(&self) -> Result<AdapterInstallationId, TelegramSetupError> {
         AdapterInstallationId::new(format!("tg-bot-{}", self.bot_id)).map_err(|error| {
             TelegramSetupError::InvalidField {
                 field: "bot_id",
@@ -58,26 +58,26 @@ impl TelegramInstallationSetup {
 }
 
 #[derive(Debug, Clone, Default)]
-pub(crate) struct TelegramInstallationSetupUpdate {
+pub struct TelegramInstallationSetupUpdate {
     /// New bot token; `None`/blank means "keep the existing token".
-    pub(crate) bot_token: Option<SecretString>,
+    pub bot_token: Option<SecretString>,
     /// Explicit public webhook URL override; `None` derives it from the
     /// deployment public base URL.
-    pub(crate) webhook_url_override: Option<String>,
+    pub webhook_url_override: Option<String>,
 }
 
 /// Redacted, serialize-only status projection for the admin UI.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-pub(crate) struct TelegramInstallationSetupStatus {
-    pub(crate) configured: bool,
-    pub(crate) bot_username: Option<String>,
-    pub(crate) bot_token_configured: bool,
-    pub(crate) webhook_url: Option<String>,
-    pub(crate) revision: Option<u64>,
+pub struct TelegramInstallationSetupStatus {
+    pub configured: bool,
+    pub bot_username: Option<String>,
+    pub bot_token_configured: bool,
+    pub webhook_url: Option<String>,
+    pub revision: Option<u64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
-pub(crate) enum TelegramSetupError {
+pub enum TelegramSetupError {
     #[error("invalid telegram setup field {field}: {reason}")]
     InvalidField { field: &'static str, reason: String },
     #[error("missing telegram setup field {field}")]
@@ -103,7 +103,7 @@ impl From<TelegramBotApiError> for TelegramSetupError {
 }
 
 #[async_trait]
-pub(crate) trait TelegramInstallationSetupStore: Send + Sync + std::fmt::Debug {
+pub trait TelegramInstallationSetupStore: Send + Sync + std::fmt::Debug {
     async fn get_telegram_installation_setup(
         &self,
     ) -> Result<Option<TelegramInstallationSetup>, TelegramSetupError>;
@@ -117,7 +117,7 @@ pub(crate) trait TelegramInstallationSetupStore: Send + Sync + std::fmt::Debug {
 }
 
 #[derive(Clone)]
-pub(crate) struct TelegramSetupService {
+pub struct TelegramSetupService {
     tenant_id: TenantId,
     agent_id: AgentId,
     project_id: Option<ProjectId>,
@@ -132,7 +132,7 @@ pub(crate) struct TelegramSetupService {
 impl TelegramSetupService {
     // arch-exempt: too_many_args, mirrors SlackSetupService::new (+ bot api port and public base URL) until the host runtime config bundle aggregates these, plan #6116
     #[allow(clippy::too_many_arguments)]
-    pub(crate) fn new(
+    pub fn new(
         tenant_id: TenantId,
         agent_id: AgentId,
         project_id: Option<ProjectId>,
@@ -155,7 +155,7 @@ impl TelegramSetupService {
         }
     }
 
-    pub(crate) fn tenant_id(&self) -> &TenantId {
+    pub fn tenant_id(&self) -> &TenantId {
         &self.tenant_id
     }
 
@@ -163,32 +163,30 @@ impl TelegramSetupService {
     // dynamic provisioner Debug impls); Telegram's host wiring passes the host
     // config scope directly, so these stay for the #6116 fold's shared shape.
     #[allow(dead_code)]
-    pub(crate) fn agent_id(&self) -> &AgentId {
+    pub fn agent_id(&self) -> &AgentId {
         &self.agent_id
     }
 
     #[allow(dead_code)]
-    pub(crate) fn project_id(&self) -> Option<&ProjectId> {
+    pub fn project_id(&self) -> Option<&ProjectId> {
         self.project_id.as_ref()
     }
 
-    pub(crate) fn operator_user_id(&self) -> &UserId {
+    pub fn operator_user_id(&self) -> &UserId {
         &self.operator_user_id
     }
 
-    pub(crate) fn bot_api(&self) -> Arc<dyn TelegramBotApi> {
+    pub fn bot_api(&self) -> Arc<dyn TelegramBotApi> {
         Arc::clone(&self.bot_api)
     }
 
-    pub(crate) async fn current_setup(
+    pub async fn current_setup(
         &self,
     ) -> Result<Option<TelegramInstallationSetup>, TelegramSetupError> {
         self.store.get_telegram_installation_setup().await
     }
 
-    pub(crate) async fn status(
-        &self,
-    ) -> Result<TelegramInstallationSetupStatus, TelegramSetupError> {
+    pub async fn status(&self) -> Result<TelegramInstallationSetupStatus, TelegramSetupError> {
         let Some(setup) = self.current_setup().await? else {
             return Ok(TelegramInstallationSetupStatus {
                 configured: false,
@@ -224,7 +222,7 @@ impl TelegramSetupService {
     /// resolve the effective token → `getMe` → derive the webhook URL →
     /// mint a fresh webhook secret → `setWebhook` → persist secrets under
     /// revision-suffixed handles → persist the record.
-    pub(crate) async fn save_with_previous(
+    pub async fn save_with_previous(
         &self,
         update: TelegramInstallationSetupUpdate,
     ) -> Result<(Option<TelegramInstallationSetup>, TelegramInstallationSetup), TelegramSetupError>
@@ -377,7 +375,7 @@ impl TelegramSetupService {
     /// The provider side rolls back too: Telegram is still registered with
     /// the SAVED revision's URL/secret, so without compensation the restored
     /// record would reject every subsequent webhook.
-    pub(crate) async fn rollback_failed_activation_save(
+    pub async fn rollback_failed_activation_save(
         &self,
         saved: &TelegramInstallationSetup,
         previous: Option<&TelegramInstallationSetup>,
@@ -412,7 +410,7 @@ impl TelegramSetupService {
     /// Clear the setup: best-effort `deleteWebhook`, then remove the durable
     /// record. Pairing records and history are deliberately retained — an
     /// unconfigured deployment simply fails closed at ingress.
-    pub(crate) async fn clear(&self) -> Result<(), TelegramSetupError> {
+    pub async fn clear(&self) -> Result<(), TelegramSetupError> {
         let _save_guard = self.save_lock.lock().await;
         if let Some(setup) = self.current_setup().await? {
             match self.secret_material(&setup.bot_token_handle).await {
@@ -437,7 +435,7 @@ impl TelegramSetupService {
     }
 
     /// Resolve the current bot token material (ingress/egress wiring).
-    pub(crate) async fn bot_token(&self) -> Result<Option<SecretString>, TelegramSetupError> {
+    pub async fn bot_token(&self) -> Result<Option<SecretString>, TelegramSetupError> {
         let Some(setup) = self.current_setup().await? else {
             return Ok(None);
         };
@@ -445,7 +443,7 @@ impl TelegramSetupService {
     }
 
     /// Resolve the current webhook shared secret (ingress verification).
-    pub(crate) async fn webhook_secret(&self) -> Result<Option<SecretString>, TelegramSetupError> {
+    pub async fn webhook_secret(&self) -> Result<Option<SecretString>, TelegramSetupError> {
         let Some(setup) = self.current_setup().await? else {
             return Ok(None);
         };
@@ -965,7 +963,7 @@ mod tests {
         let store = Arc::new(InMemorySetupStore::default());
         let bot_api = Arc::new(RecordingBotApi::failing_get_me(
             TelegramBotApiError::Rejected {
-                kind: crate::telegram::telegram_bot_api::TelegramBotApiRejection::Unauthorized,
+                kind: crate::telegram_bot_api::TelegramBotApiRejection::Unauthorized,
             },
         ));
         let service = service_with(
@@ -991,7 +989,7 @@ mod tests {
                 username: "b".to_string(),
             })),
             set_webhook: Err(TelegramBotApiError::Rejected {
-                kind: crate::telegram::telegram_bot_api::TelegramBotApiRejection::InvalidRequest,
+                kind: crate::telegram_bot_api::TelegramBotApiRejection::InvalidRequest,
             }),
         });
         let service = service_with(

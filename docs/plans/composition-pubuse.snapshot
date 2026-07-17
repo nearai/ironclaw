@@ -171,11 +171,11 @@ pub use slack::slack_serve::{
 #[cfg(feature = "slack-v2-host-beta")]
 pub use slack::slack_setup::SlackPersonalSetupServiceSlot;
 #[cfg(feature = "telegram-v2-host-beta")]
-pub use telegram::telegram_channel_routes::{
+pub use ironclaw_telegram_extension::telegram_channel_routes::{
     WEBUI_V2_CHANNELS_TELEGRAM_PAIRING_PATH, WEBUI_V2_CHANNELS_TELEGRAM_SETUP_PATH,
 };
 #[cfg(feature = "telegram-v2-host-beta")]
-pub use telegram::telegram_connectable_channel::build_webui_services_with_telegram_host_mounts;
+pub use webui::facade::build_webui_services_with_telegram_host_mounts;
 #[cfg(feature = "telegram-v2-host-beta")]
 pub use telegram::telegram_host_beta::{
     TelegramHostBuildError, TelegramHostMounts, TelegramHostRuntimeConfig,

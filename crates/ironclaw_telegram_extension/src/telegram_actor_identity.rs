@@ -19,18 +19,18 @@ use ironclaw_channel_host::identity::RebornUserIdentityLookup;
 
 /// Identity provider key for Telegram bindings. Deliberately the bare vendor
 /// name (never `telegram_personal`/`telegram_bot` — retired taxonomy).
-pub(crate) const TELEGRAM_IDENTITY_PROVIDER: &str = "telegram";
+pub const TELEGRAM_IDENTITY_PROVIDER: &str = "telegram";
 
 /// The host-wired adapter id for the Telegram v2 adapter instance.
-pub(crate) const TELEGRAM_V2_ADAPTER_ID: &str = "telegram_v2";
+pub const TELEGRAM_V2_ADAPTER_ID: &str = "telegram_v2";
 
 #[derive(Clone)]
-pub(crate) struct TelegramUserIdentityActorResolver {
+pub struct TelegramUserIdentityActorResolver {
     lookup: Arc<dyn RebornUserIdentityLookup>,
 }
 
 impl TelegramUserIdentityActorResolver {
-    pub(crate) fn new(lookup: Arc<dyn RebornUserIdentityLookup>) -> Self {
+    pub fn new(lookup: Arc<dyn RebornUserIdentityLookup>) -> Self {
         Self { lookup }
     }
 }
@@ -111,7 +111,7 @@ impl ProductActorUserResolver for TelegramUserIdentityActorResolver {
     }
 }
 
-pub(crate) fn telegram_user_identity_provider_user_id(
+pub fn telegram_user_identity_provider_user_id(
     installation_id: &AdapterInstallationId,
     telegram_user_id: &str,
 ) -> String {
@@ -121,7 +121,7 @@ pub(crate) fn telegram_user_identity_provider_user_id(
 /// Whether a `{installation}:{telegram_user_id}` provider id belongs to the
 /// given installation — exact segment match, never a raw string prefix, so
 /// `tg-bot-1` can never bleed into a `tg-bot-10:…` binding.
-pub(crate) fn provider_user_id_in_installation(
+pub fn provider_user_id_in_installation(
     provider_user_id: &str,
     installation_id: &AdapterInstallationId,
 ) -> bool {
@@ -131,7 +131,7 @@ pub(crate) fn provider_user_id_in_installation(
 /// Core exact-segment comparison shared by every installation-scoping check:
 /// the candidate's `{installation}` segment (before the first `:`) must equal
 /// `installation` exactly — never a string prefix.
-pub(crate) fn installation_segment_matches(provider_user_id: &str, installation: &str) -> bool {
+pub fn installation_segment_matches(provider_user_id: &str, installation: &str) -> bool {
     provider_user_id
         .split_once(':')
         .is_some_and(|(candidate, _)| candidate == installation)

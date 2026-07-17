@@ -5,7 +5,7 @@
 //! no challenge protocol): an axum route fragment plus a manifest-projected
 //! ingress descriptor. This module does not bind listeners; the host decides
 //! whether to mount the fragment. Verified updates flow through the
-//! pairing-aware [`crate::telegram::telegram_dispatch::TelegramInboundPreRouter`],
+//! pairing-aware [`crate::telegram_dispatch::TelegramInboundPreRouter`],
 //! which wraps a [`NativeProductAdapterRunner`] for paired-sender traffic.
 
 use std::future::Future;
@@ -39,14 +39,13 @@ use secrecy::ExposeSecret;
 use thiserror::Error;
 use tokio::sync::Mutex;
 
-use crate::telegram::telegram_actor_identity::TELEGRAM_V2_ADAPTER_ID;
-use crate::telegram::telegram_dispatch::TelegramInboundPreRouter;
-use crate::telegram::telegram_pairing::TelegramPairingService;
-use crate::telegram::telegram_setup::{
+use crate::telegram_actor_identity::TELEGRAM_V2_ADAPTER_ID;
+use crate::telegram_dispatch::TelegramInboundPreRouter;
+use crate::telegram_pairing::TelegramPairingService;
+use crate::telegram_setup::{
     TELEGRAM_UPDATES_ROUTE_PATH, TelegramInstallationSetup, TelegramSetupError,
     TelegramSetupService,
 };
-use crate::webui::webui_serve::{PublicRouteDrain, PublicRouteMount};
 use ironclaw_channel_host::identity::RebornUserIdentityLookup;
 
 /// `/webhooks/extensions/telegram/updates` — aliases the setup-pipeline
@@ -55,12 +54,12 @@ use ironclaw_channel_host::identity::RebornUserIdentityLookup;
 /// Production routes come from the manifest projection, so the alias is
 /// exercised by parity tests only.
 #[cfg_attr(not(test), allow(dead_code))]
-pub(crate) const TELEGRAM_UPDATES_PATH: &str = TELEGRAM_UPDATES_ROUTE_PATH;
+pub const TELEGRAM_UPDATES_PATH: &str = TELEGRAM_UPDATES_ROUTE_PATH;
 const TELEGRAM_UPDATES_ROUTE_ID: &str = "telegram.updates";
 
 /// The header Telegram sends the `setWebhook` shared secret in
 /// (`secret_token`); verified per request before anything else runs.
-pub(crate) const TELEGRAM_SECRET_TOKEN_HEADER: &str = "X-Telegram-Bot-Api-Secret-Token";
+pub const TELEGRAM_SECRET_TOKEN_HEADER: &str = "X-Telegram-Bot-Api-Secret-Token";
 
 const TELEGRAM_BOT_TOKEN_EGRESS_HANDLE: &str = "telegram_bot_token";
 
@@ -75,7 +74,7 @@ const TELEGRAM_INSTALLATION_RATE_WINDOW: Duration = Duration::from_secs(60);
 /// The verified-update dispatch seam between the route handler and the
 /// pairing-aware pre-router (which itself wraps the native runner for
 /// paired-sender traffic). Mirrors `SlackEventsWebhookDispatcher`.
-pub(crate) trait TelegramUpdatesWebhookDispatcher: Send + Sync {
+pub trait TelegramUpdatesWebhookDispatcher: Send + Sync {
     fn verify_webhook_auth(
         &self,
         headers: &HeaderMap,
@@ -125,7 +124,7 @@ impl TelegramUpdatesWebhookDispatcher for NativeProductAdapterRunner {
 /// `ResolvedSlackInstallation`, so a bot swap re-keys the observer's adapter
 /// together with the verifier and workflow).
 #[derive(Clone)]
-pub(crate) struct ResolvedTelegramInstallation {
+pub struct ResolvedTelegramInstallation {
     tenant_id: TenantId,
     adapter_installation_id: AdapterInstallationId,
     evidence: ProtocolAuthEvidence,
@@ -134,7 +133,7 @@ pub(crate) struct ResolvedTelegramInstallation {
 }
 
 impl ResolvedTelegramInstallation {
-    pub(crate) fn new(
+    pub fn new(
         tenant_id: TenantId,
         adapter_installation_id: AdapterInstallationId,
         evidence: ProtocolAuthEvidence,
@@ -153,24 +152,24 @@ impl ResolvedTelegramInstallation {
     // Route internals read the fields directly; the accessors stay for the
     // #6116 fold's shared resolved-installation shape (mirrors Slack's).
     #[allow(dead_code)]
-    pub(crate) fn tenant_id(&self) -> &TenantId {
+    pub fn tenant_id(&self) -> &TenantId {
         &self.tenant_id
     }
 
     #[allow(dead_code)]
-    pub(crate) fn adapter_installation_id(&self) -> &AdapterInstallationId {
+    pub fn adapter_installation_id(&self) -> &AdapterInstallationId {
         &self.adapter_installation_id
     }
 
-    pub(crate) fn evidence(&self) -> &ProtocolAuthEvidence {
+    pub fn evidence(&self) -> &ProtocolAuthEvidence {
         &self.evidence
     }
 
-    pub(crate) fn dispatcher(&self) -> Arc<dyn TelegramUpdatesWebhookDispatcher> {
+    pub fn dispatcher(&self) -> Arc<dyn TelegramUpdatesWebhookDispatcher> {
         Arc::clone(&self.dispatcher)
     }
 
-    pub(crate) fn workflow_observer(&self) -> Option<Arc<dyn ImmediateAckWorkflowObserver>> {
+    pub fn workflow_observer(&self) -> Option<Arc<dyn ImmediateAckWorkflowObserver>> {
         self.workflow_observer.clone()
     }
 }
@@ -191,22 +190,22 @@ impl std::fmt::Debug for ResolvedTelegramInstallation {
 /// URL-verification handshake, so — unlike `ResolvedSlackIngress` — there is
 /// exactly one shape: an authenticated event for the resolved installation.
 #[derive(Debug, Clone)]
-pub(crate) struct ResolvedTelegramIngress {
+pub struct ResolvedTelegramIngress {
     installation: ResolvedTelegramInstallation,
 }
 
 impl ResolvedTelegramIngress {
-    pub(crate) fn new(installation: ResolvedTelegramInstallation) -> Self {
+    pub fn new(installation: ResolvedTelegramInstallation) -> Self {
         Self { installation }
     }
 
-    pub(crate) fn installation(&self) -> &ResolvedTelegramInstallation {
+    pub fn installation(&self) -> &ResolvedTelegramInstallation {
         &self.installation
     }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
-pub(crate) enum TelegramIngressError {
+pub enum TelegramIngressError {
     #[error(transparent)]
     Runner(#[from] RunnerError),
     #[error("no configured Telegram installation matched the request")]
@@ -225,7 +224,7 @@ pub(crate) enum TelegramIngressError {
     },
 }
 
-pub(crate) trait TelegramInstallationResolver: Send + Sync {
+pub trait TelegramInstallationResolver: Send + Sync {
     fn resolve_ingress<'a>(
         &'a self,
         headers: &'a HeaderMap,
@@ -240,19 +239,19 @@ pub(crate) trait TelegramInstallationResolver: Send + Sync {
 /// Per-setup-revision workflow assembly: the product workflow the runner
 /// submits verified updates into, plus the final-reply delivery observer
 /// scoped to the same installation identity.
-pub(crate) struct TelegramRevisionWorkflow {
-    pub(crate) workflow: Arc<dyn ProductWorkflow>,
-    pub(crate) workflow_observer: Option<Arc<dyn ImmediateAckWorkflowObserver>>,
+pub struct TelegramRevisionWorkflow {
+    pub workflow: Arc<dyn ProductWorkflow>,
+    pub workflow_observer: Option<Arc<dyn ImmediateAckWorkflowObserver>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 #[error("telegram revision workflow build failed: {reason}")]
-pub(crate) struct TelegramRevisionWorkflowBuildError {
-    pub(crate) reason: String,
+pub struct TelegramRevisionWorkflowBuildError {
+    pub reason: String,
 }
 
 impl TelegramRevisionWorkflowBuildError {
-    pub(crate) fn new(reason: impl Into<String>) -> Self {
+    pub fn new(reason: impl Into<String>) -> Self {
         Self {
             reason: reason.into(),
         }
@@ -263,7 +262,7 @@ impl TelegramRevisionWorkflowBuildError {
 /// (`telegram_host_beta`) assembles the real `DefaultProductWorkflow` /
 /// delivery observer from revision-independent runtime parts; serve-tier
 /// tests inject counting fakes so per-revision routing stays assertable.
-pub(crate) trait TelegramRevisionWorkflowBuilder: Send + Sync {
+pub trait TelegramRevisionWorkflowBuilder: Send + Sync {
     fn build_revision_workflow(
         &self,
         setup: &TelegramInstallationSetup,
@@ -276,7 +275,7 @@ pub(crate) trait TelegramRevisionWorkflowBuilder: Send + Sync {
 /// built verifier/adapter/runner/workflow/observer chain per setup revision.
 /// Mirrors `DynamicSlackInstallationResolver`.
 #[derive(Clone)]
-pub(crate) struct DynamicTelegramInstallationResolver {
+pub struct DynamicTelegramInstallationResolver {
     setup_service: Arc<TelegramSetupService>,
     pairing: Arc<TelegramPairingService>,
     identity_lookup: Arc<dyn RebornUserIdentityLookup>,
@@ -292,7 +291,7 @@ impl DynamicTelegramInstallationResolver {
     /// adapter without a process restart; this resolver stays self-contained
     /// by taking the builder as a constructor param instead of assembling
     /// workflows from runtime parts here.
-    pub(crate) fn new(
+    pub fn new(
         setup_service: Arc<TelegramSetupService>,
         pairing: Arc<TelegramPairingService>,
         identity_lookup: Arc<dyn RebornUserIdentityLookup>,
@@ -522,13 +521,13 @@ impl DynamicTelegramDispatcherLifecycle {
 }
 
 #[derive(Clone)]
-pub(crate) struct TelegramIngressService {
+pub struct TelegramIngressService {
     resolver: Arc<dyn TelegramInstallationResolver>,
     installation_rate_limiter: ironclaw_channel_host::host_ingress::InstallationRateLimiter,
 }
 
 impl TelegramIngressService {
-    pub(crate) fn new(resolver: Arc<dyn TelegramInstallationResolver>) -> Self {
+    pub fn new(resolver: Arc<dyn TelegramInstallationResolver>) -> Self {
         Self::with_rate_limit_config(
             resolver,
             ironclaw_channel_host::host_ingress::InstallationRateLimitConfig::new(
@@ -538,7 +537,7 @@ impl TelegramIngressService {
         )
     }
 
-    pub(crate) fn with_rate_limit_config(
+    pub fn with_rate_limit_config(
         resolver: Arc<dyn TelegramInstallationResolver>,
         rate_limit: ironclaw_channel_host::host_ingress::InstallationRateLimitConfig,
     ) -> Self {
@@ -581,7 +580,7 @@ impl TelegramIngressService {
         }
     }
 
-    pub(crate) async fn drain_installations(&self) {
+    pub async fn drain_installations(&self) {
         self.resolver.drain_installations().await;
     }
 }
@@ -600,27 +599,21 @@ impl std::fmt::Debug for TelegramIngressService {
 /// there is no static route-level workflow observer: the Telegram observer is
 /// rebuilt per setup revision and travels on the resolved installation.
 #[derive(Clone)]
-pub(crate) struct TelegramUpdatesRouteState {
+pub struct TelegramUpdatesRouteState {
     ingress: TelegramIngressService,
 }
 
 impl TelegramUpdatesRouteState {
-    pub(crate) fn new(ingress: TelegramIngressService) -> Self {
+    pub fn new(ingress: TelegramIngressService) -> Self {
         Self { ingress }
     }
 
-    pub(crate) fn from_resolver(resolver: Arc<dyn TelegramInstallationResolver>) -> Self {
+    pub fn from_resolver(resolver: Arc<dyn TelegramInstallationResolver>) -> Self {
         Self::new(TelegramIngressService::new(resolver))
     }
 
-    pub(crate) async fn drain_immediate_ack_tasks(&self) {
+    pub async fn drain_immediate_ack_tasks(&self) {
         self.ingress.drain_installations().await;
-    }
-}
-
-impl PublicRouteDrain for TelegramUpdatesRouteState {
-    fn drain<'a>(&'a self) -> Pin<Box<dyn Future<Output = ()> + Send + 'a>> {
-        Box::pin(self.drain_immediate_ack_tasks())
     }
 }
 
@@ -633,23 +626,29 @@ impl std::fmt::Debug for TelegramUpdatesRouteState {
     }
 }
 
-pub(crate) fn telegram_updates_route_mount(state: TelegramUpdatesRouteState) -> PublicRouteMount {
+/// Build the raw updates-route fragment: the axum router (state applied) plus
+/// the manifest-projected route descriptors. Composition wraps the pair into
+/// its public-route mount shape and installs
+/// [`TelegramUpdatesRouteState::drain_immediate_ack_tasks`] as the drain —
+/// this crate cannot name composition's mount types without a cycle.
+pub fn telegram_updates_route_parts(
+    state: TelegramUpdatesRouteState,
+) -> (Router, Vec<IngressRouteDescriptor>) {
     let descriptor = TELEGRAM_INGRESS_DESCRIPTORS.updates.clone();
-    PublicRouteMount::new(
+    (
         Router::new()
             .route(
                 descriptor.route_pattern().as_str(),
                 post(telegram_updates_handler),
             )
-            .with_state(state.clone()),
+            .with_state(state),
         vec![descriptor],
     )
-    .with_drain(Arc::new(state))
 }
 
 // Manifest-projection parity seam, pinned by the descriptor test.
 #[cfg_attr(not(test), allow(dead_code))]
-pub(crate) fn telegram_updates_route_descriptors() -> Vec<IngressRouteDescriptor> {
+pub fn telegram_updates_route_descriptors() -> Vec<IngressRouteDescriptor> {
     vec![TELEGRAM_INGRESS_DESCRIPTORS.updates.clone()]
 }
 
@@ -670,7 +669,7 @@ pub(crate) fn telegram_updates_route_descriptors() -> Vec<IngressRouteDescriptor
 /// is a build-time invariant violation, surfaced at startup.
 static TELEGRAM_INGRESS_DESCRIPTORS: LazyLock<TelegramIngressDescriptors> = LazyLock::new(|| {
     let descriptors = ironclaw_channel_host::host_ingress::bundled_host_ingress_descriptors(
-        crate::extension_host::available_extensions::telegram_manifest_toml(),
+        crate::telegram_manifest::telegram_manifest_toml(),
     )
     .unwrap_or_else(|error| {
         panic!("bundled Telegram manifest must project host-ingress routes: {error}")
@@ -822,15 +821,15 @@ mod tests {
     use tower::ServiceExt;
 
     use super::*;
-    use crate::telegram::telegram_actor_identity::{
+    use crate::telegram_actor_identity::{
         TELEGRAM_IDENTITY_PROVIDER, telegram_user_identity_provider_user_id,
     };
-    use crate::telegram::telegram_dispatch::test_fixtures::{
+    use crate::telegram_dispatch::test_fixtures::{
         CountingWorkflow, FakeIdentityLookup, RecordingBotApi, configured_setup_service,
         fixture_installation_id, pairing_service_with, private_text_update_body,
         unconfigured_setup_service,
     };
-    use crate::telegram::telegram_setup::TelegramInstallationSetupUpdate;
+    use crate::telegram_setup::TelegramInstallationSetupUpdate;
     use secrecy::SecretString;
 
     /// Rebuild the Telegram ingress descriptor as a Rust literal so the
@@ -988,14 +987,12 @@ mod tests {
         body: String,
         headers: Vec<(&'static str, String)>,
     ) -> Response {
-        let mount = telegram_updates_route_mount(state.clone());
+        let (router, _descriptors) = telegram_updates_route_parts(state.clone());
         let mut builder = Request::builder().method("POST").uri(TELEGRAM_UPDATES_PATH);
         for (name, value) in headers {
             builder = builder.header(name, value);
         }
-        mount
-            .router
-            .clone()
+        router
             .oneshot(
                 builder
                     .body(Body::from(body))
@@ -1180,7 +1177,7 @@ mod tests {
         struct FailingSetupStore;
 
         #[async_trait::async_trait]
-        impl crate::telegram::telegram_setup::TelegramInstallationSetupStore for FailingSetupStore {
+        impl crate::telegram_setup::TelegramInstallationSetupStore for FailingSetupStore {
             async fn get_telegram_installation_setup(
                 &self,
             ) -> Result<Option<TelegramInstallationSetup>, TelegramSetupError> {

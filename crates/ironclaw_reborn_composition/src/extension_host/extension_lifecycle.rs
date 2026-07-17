@@ -137,7 +137,7 @@ pub(crate) struct RebornLocalExtensionManagementPort {
     /// host, so telegram activation fails closed instead of parking a run no
     /// pairing surface could ever resume.
     #[cfg(feature = "telegram-v2-host-beta")]
-    telegram_paired_source: crate::telegram::telegram_channel_connection::TelegramPairedStatusSlot,
+    telegram_paired_source: ironclaw_channel_host::paired_status::ChannelPairedStatusSlot,
 }
 
 /// Concurrent `import_bundle` decodes allowed before further uploads wait.
@@ -339,7 +339,7 @@ impl RebornLocalExtensionManagementPort {
     #[cfg(feature = "telegram-v2-host-beta")]
     pub(crate) fn telegram_paired_status_slot(
         &self,
-    ) -> crate::telegram::telegram_channel_connection::TelegramPairedStatusSlot {
+    ) -> ironclaw_channel_host::paired_status::ChannelPairedStatusSlot {
         self.telegram_paired_source.clone()
     }
 
@@ -591,7 +591,7 @@ impl RebornLocalExtensionManagementPort {
         // a pairing-status READ failure is an availability fault — classify
         // it transient/retryable and keep the store error out of the
         // product-facing reason (debug diagnostic only).
-        let paired = source.telegram_paired(caller).await.map_err(|error| {
+        let paired = source.paired(caller).await.map_err(|error| {
             tracing::debug!(%error, "telegram pairing status read failed during activation");
             ProductWorkflowError::Transient {
                 reason: "telegram pairing status is temporarily unavailable".to_string(),
@@ -2302,7 +2302,7 @@ pub(crate) fn telegram_pairing_auth_requirement()
     use crate::extension_host::available_extensions::TELEGRAM_EXTENSION_ID;
     Ok(RuntimeCredentialAuthRequirement {
         provider: ironclaw_host_api::RuntimeCredentialAccountProviderId::new(
-            crate::telegram::telegram_actor_identity::TELEGRAM_IDENTITY_PROVIDER,
+            ironclaw_telegram_extension::telegram_actor_identity::TELEGRAM_IDENTITY_PROVIDER,
         )
         .map_err(|error| ProductWorkflowError::InvalidBindingRequest {
             reason: error.to_string(),
@@ -4197,17 +4197,16 @@ output_schema_ref = "schemas/run.output.json"
         struct FailingPairedSource;
 
         #[async_trait::async_trait]
-        impl crate::telegram::telegram_channel_connection::TelegramPairedStatusSource
-            for FailingPairedSource
-        {
-            async fn telegram_paired(
+        impl ironclaw_channel_host::paired_status::ChannelPairedStatusSource for FailingPairedSource {
+            async fn paired(
                 &self,
                 _user_id: &UserId,
-            ) -> Result<bool, crate::telegram::telegram_pairing::TelegramPairingError> {
+            ) -> Result<bool, ironclaw_channel_host::paired_status::ChannelPairedStatusError>
+            {
                 Err(
-                    crate::telegram::telegram_pairing::TelegramPairingError::StoreUnavailable {
-                        reason: "test pairing store outage".to_string(),
-                    },
+                    ironclaw_channel_host::paired_status::ChannelPairedStatusError::new(
+                        "test pairing store outage",
+                    ),
                 )
             }
         }

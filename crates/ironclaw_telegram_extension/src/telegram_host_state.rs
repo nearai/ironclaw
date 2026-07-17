@@ -21,16 +21,16 @@ use ironclaw_host_api::{
 use ironclaw_product_adapters::AdapterInstallationId;
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 
-use crate::telegram::telegram_pairing::{
+use crate::telegram_pairing::{
     TelegramBindingError, TelegramDmTarget, TelegramDmTargetStore, TelegramPairingError,
     TelegramPairingRecord, TelegramPairingStore, TelegramUserBindingStore,
 };
-use crate::telegram::telegram_setup::{
+use crate::telegram_setup::{
     TelegramInstallationSetup, TelegramInstallationSetupStore, TelegramSetupError,
 };
 use ironclaw_channel_host::identity::{RebornUserIdentityLookup, RebornUserIdentityLookupError};
 
-pub(crate) const TELEGRAM_INSTALLATION_SETUP_PATH: &str =
+pub const TELEGRAM_INSTALLATION_SETUP_PATH: &str =
     "/tenant-shared/telegram-setup/installation.json";
 const TELEGRAM_PAIRING_CODE_ROOT: &str = "/tenant-shared/telegram-pairing/codes";
 const TELEGRAM_PAIRING_USER_ROOT: &str = "/tenant-shared/telegram-pairing/users";
@@ -39,7 +39,7 @@ const TELEGRAM_BINDING_USER_ROOT: &str = "/tenant-shared/telegram-binding/users"
 const TELEGRAM_DM_TARGET_ROOT: &str = "/tenant-shared/telegram-dm-targets";
 const PATH_HASH_LEN: usize = 24;
 
-pub(crate) struct FilesystemTelegramHostState<F>
+pub struct FilesystemTelegramHostState<F>
 where
     F: RootFilesystem + 'static,
 {
@@ -77,7 +77,7 @@ impl<F> FilesystemTelegramHostState<F>
 where
     F: RootFilesystem + 'static,
 {
-    pub(crate) fn new(
+    pub fn new(
         filesystem: Arc<ScopedFilesystem<F>>,
         tenant_id: TenantId,
         user_id: UserId,
@@ -472,7 +472,7 @@ where
         let mut retained = Vec::new();
         for provider_user_id in index.provider_user_ids {
             let in_scope = installation.is_none_or(|installation| {
-                crate::telegram::telegram_actor_identity::provider_user_id_in_installation(
+                crate::telegram_actor_identity::provider_user_id_in_installation(
                     &provider_user_id,
                     installation,
                 )
@@ -545,7 +545,7 @@ where
         )>,
         RebornUserIdentityLookupError,
     > {
-        if provider != crate::telegram::telegram_actor_identity::TELEGRAM_IDENTITY_PROVIDER {
+        if provider != crate::telegram_actor_identity::TELEGRAM_IDENTITY_PROVIDER {
             return Ok(None);
         }
         let path = Self::binding_path(provider_user_id)
@@ -579,7 +579,7 @@ where
         user_id: &UserId,
         provider_user_id_prefix: Option<&str>,
     ) -> Result<bool, RebornUserIdentityLookupError> {
-        if provider != crate::telegram::telegram_actor_identity::TELEGRAM_IDENTITY_PROVIDER {
+        if provider != crate::telegram_actor_identity::TELEGRAM_IDENTITY_PROVIDER {
             return Ok(false);
         }
         let index_path = Self::binding_user_index_path(user_id)
@@ -608,7 +608,7 @@ fn provider_user_id_matches_installation_prefix(candidate: &str, prefix: &str) -
     if installation.is_empty() {
         return true;
     }
-    crate::telegram::telegram_actor_identity::installation_segment_matches(candidate, installation)
+    crate::telegram_actor_identity::installation_segment_matches(candidate, installation)
 }
 
 #[async_trait]
@@ -778,7 +778,7 @@ mod tests {
             assert!(
                 !state
                     .user_has_provider_binding_with_provider_user_id_prefix(
-                        crate::telegram::telegram_actor_identity::TELEGRAM_IDENTITY_PROVIDER,
+                        crate::telegram_actor_identity::TELEGRAM_IDENTITY_PROVIDER,
                         &ben,
                         Some(overlapping_prefix),
                     )
@@ -790,7 +790,7 @@ mod tests {
         assert!(
             state
                 .user_has_provider_binding_with_provider_user_id_prefix(
-                    crate::telegram::telegram_actor_identity::TELEGRAM_IDENTITY_PROVIDER,
+                    crate::telegram_actor_identity::TELEGRAM_IDENTITY_PROVIDER,
                     &ben,
                     Some("tg-bot-10:"),
                 )
