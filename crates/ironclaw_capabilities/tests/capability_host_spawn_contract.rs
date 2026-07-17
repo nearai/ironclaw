@@ -167,7 +167,7 @@ async fn capability_host_resumes_approved_spawn_and_consumes_matching_lease() {
     let process_manager = RecordingProcessManager::default();
     let run_state = InMemoryRunStateStore::new();
     let approval_requests = InMemoryApprovalRequestStore::new();
-    let leases = InMemoryCapabilityLeaseStore::new();
+    let leases = in_memory_backed_capability_lease_store();
     let block_host = CapabilityHost::new(&registry, &dispatcher, &SpawnApprovalAuthorizer)
         .with_process_manager(&process_manager)
         .with_run_state(&run_state)

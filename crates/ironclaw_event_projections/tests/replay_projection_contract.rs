@@ -2063,6 +2063,7 @@ fn scope_for_thread_with_invocation(
 
 fn execution_context_for_scope(scope: ResourceScope) -> ironclaw_host_api::ExecutionContext {
     let context = ironclaw_host_api::ExecutionContext {
+        run_id: None,
         invocation_id: scope.invocation_id,
         correlation_id: CorrelationId::new(),
         process_id: None,

@@ -168,7 +168,7 @@ const OAUTH_CALLBACK_SCOPES_MAX_BYTES: usize = 4 * 1024;
 const RAW_OAUTH_VALUE_MAX_BYTES: usize = 4 * 1024;
 
 #[derive(Clone)]
-pub(crate) struct ProductAuthRouteState {
+pub struct ProductAuthRouteState {
     product_auth: Arc<RebornProductAuthServices>,
     installed_extension_lookup: Option<Arc<dyn InstalledExtensionLookup>>,
     tenant_id: TenantId,
@@ -225,7 +225,7 @@ impl InstalledExtensionLookup for TestInstalledExtensionLookup {
 }
 
 impl ProductAuthRouteState {
-    pub(crate) fn new(
+    pub fn new(
         product_auth: Arc<RebornProductAuthServices>,
         tenant_id: TenantId,
         default_agent_id: Option<AgentId>,
@@ -245,7 +245,7 @@ impl ProductAuthRouteState {
         }
     }
 
-    pub(crate) fn with_webui_api(mut self, webui_api: Arc<dyn RebornServicesApi>) -> Self {
+    pub fn with_webui_api(mut self, webui_api: Arc<dyn RebornServicesApi>) -> Self {
         self.installed_extension_lookup = Some(Arc::new(RebornServicesInstalledExtensionLookup {
             api: webui_api,
         }));
@@ -286,7 +286,7 @@ impl ProductAuthRouteState {
         Ok(())
     }
 
-    pub(crate) fn with_google_oauth(mut self, config: GoogleOAuthRouteConfig) -> Self {
+    pub fn with_google_oauth(mut self, config: GoogleOAuthRouteConfig) -> Self {
         self.google_oauth = Some(config);
         self
     }
@@ -303,7 +303,7 @@ impl ProductAuthRouteState {
     }
 
     #[cfg(feature = "slack-v2-host-beta")]
-    pub(crate) fn with_slack_personal_oauth(
+    pub fn with_slack_personal_oauth(
         mut self,
         slot: crate::slack::slack_setup::SlackPersonalSetupServiceSlot,
     ) -> Self {
@@ -340,7 +340,7 @@ impl ProductAuthRouteState {
     }
 
     #[cfg(feature = "slack-v2-host-beta")]
-    pub(crate) fn with_slack_personal_oauth_binding(
+    pub fn with_slack_personal_oauth_binding(
         mut self,
         config: SlackPersonalOAuthBindingConfig,
     ) -> Self {
@@ -432,10 +432,10 @@ impl std::fmt::Debug for SlackPersonalOAuthBindingConfig {
     }
 }
 
-pub(crate) struct ProductAuthRouteMount {
-    pub(crate) protected: Router,
-    pub(crate) public: Router,
-    pub(crate) descriptors: Vec<IngressRouteDescriptor>,
+pub struct ProductAuthRouteMount {
+    pub protected: Router,
+    pub public: Router,
+    pub descriptors: Vec<IngressRouteDescriptor>,
 }
 
 async fn extension_oauth_start_handler(
@@ -486,7 +486,7 @@ async fn extension_oauth_start_handler(
 // tool calls and must not surface raw secrets through the model-visible
 // tool-dispatch path. Contract: `docs/reborn/contracts/auth-product.md`.
 // dispatch-exempt: host-owned auth/secret ingress, not in-turn tool dispatch
-pub(crate) fn product_auth_route_mount(state: ProductAuthRouteState) -> ProductAuthRouteMount {
+pub fn product_auth_route_mount(state: ProductAuthRouteState) -> ProductAuthRouteMount {
     let public = Router::new()
         .route(OAUTH_CALLBACK_PATH, get(oauth::oauth_callback_handler))
         .route(

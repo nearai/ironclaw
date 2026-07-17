@@ -144,7 +144,7 @@ pub use policy::{
 };
 // Projection/event types that route handlers need to thread through SSE
 // (parse the resume cursor, render browser-safe event payloads). Re-exported
-// so `ironclaw_webui_v2` consumes them via the facade crate and does not need
+// so `ironclaw_webui` consumes them via the facade crate and does not need
 // a direct dependency on `ironclaw_product_adapters` — the single-facade
 // boundary is enforced by `ironclaw_architecture`.
 pub use ironclaw_product_adapters::{

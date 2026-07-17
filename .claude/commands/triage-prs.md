@@ -31,7 +31,7 @@ For each open PR, determine the primary module it touches by examining the `file
 
 | Category | Directories |
 |----------|------------|
-| **Reborn stack (most current work)** | `crates/ironclaw_runner/`, `crates/ironclaw_reborn_cli/`, `crates/ironclaw_reborn_composition/`, `crates/ironclaw_reborn_event_store/`, `crates/ironclaw_reborn_identity/`, `crates/ironclaw_reborn_openai_compat*/`, `crates/ironclaw_reborn_traces/`, `crates/ironclaw_reborn_webui_ingress/`, `crates/ironclaw_product_workflow/`, `crates/ironclaw_webui_v2*/`, `crates/ironclaw_turns/`, `crates/ironclaw_threads/`, `crates/ironclaw_agent_loop/`, `crates/ironclaw_host_runtime/`, `crates/ironclaw_loop_host/`, `crates/ironclaw_capabilities/` |
+| **Reborn stack (most current work)** | `crates/ironclaw_runner/`, `crates/ironclaw_reborn_cli/`, `crates/ironclaw_reborn_composition/`, `crates/ironclaw_reborn_event_store/`, `crates/ironclaw_reborn_identity/`, `crates/ironclaw_reborn_openai_compat*/`, `crates/ironclaw_reborn_traces/`, `crates/ironclaw_webui/`, `crates/ironclaw_product_workflow/`, `crates/ironclaw_webui*/`, `crates/ironclaw_turns/`, `crates/ironclaw_threads/`, `crates/ironclaw_agent_loop/`, `crates/ironclaw_host_runtime/`, `crates/ironclaw_loop_host/`, `crates/ironclaw_capabilities/` |
 | **Legacy v1 crates** | `crates/ironclaw_engine/`, `crates/ironclaw_gateway/`, `crates/ironclaw_oauth/`, `crates/ironclaw_embeddings/`, `crates/ironclaw_tui/` |
 | **LLM & Inference** | `crates/ironclaw_llm/` |
 | **Agent Core** | `src/agent/`, `src/skills/` |

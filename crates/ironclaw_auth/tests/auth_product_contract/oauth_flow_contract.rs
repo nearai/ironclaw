@@ -1,5 +1,23 @@
 use crate::common::*;
 
+/// Cross-implementation conformance: the shared OAuth-callback state-machine
+/// suite (`ironclaw_auth::test_support::conformance`) holds for the in-memory fake. The
+/// durable `FilesystemAuthProductServices` runs the SAME suite from the root
+/// `tests/integration/oauth_connect.rs` — together they turn the two
+/// implementations' agreement into an enforced contract instead of a
+/// coincidence of two disjoint test suites.
+#[tokio::test]
+async fn oauth_flow_state_machine_conformance_holds_for_in_memory_fake() {
+    let services = InMemoryAuthProductServices::new();
+    let owner = scope("conformance");
+    ironclaw_auth::test_support::conformance::assert_auth_flow_callback_conformance(
+        &services,
+        &owner,
+        &provider(),
+    )
+    .await;
+}
+
 async fn completed_oauth_flow_with_continuation(
     services: &InMemoryAuthProductServices,
     owner: &AuthProductScope,

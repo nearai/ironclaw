@@ -92,3 +92,6 @@ tests/fixtures/llm_traces/live/*.log
 # scripts/build-test-tools.sh; only sources/manifests/schemas/prompts are tracked.
 test-tools/*.zip
 test-tools/*/wasm-src/target/
+
+# Frontend package installs are never committed; builds restore them.
+node_modules/

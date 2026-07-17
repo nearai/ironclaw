@@ -1486,15 +1486,19 @@ impl HostRuntimeCapabilityHarness {
             .as_ref()
             .map(|parts| Arc::clone(&parts.capability_leases))
             .unwrap_or_else(|| {
-                Arc::new(ironclaw_authorization::InMemoryCapabilityLeaseStore::new())
+                Arc::new(ironclaw_authorization::in_memory_backed_capability_lease_store())
             });
         let tool_permission_overrides: Arc<dyn ironclaw_approvals::ToolPermissionOverrideStore> =
             self.tool_permission_overrides.clone().unwrap_or_else(|| {
-                Arc::new(ironclaw_approvals::InMemoryCapabilityPermissionOverrideStore::new())
+                Arc::new(
+                    ironclaw_approvals::test_support::in_memory_backed_capability_permission_override_store(),
+                )
             });
         let auto_approve_settings: Arc<dyn ironclaw_approvals::AutoApproveSettingStore> =
             self.auto_approve_settings.clone().unwrap_or_else(|| {
-                Arc::new(ironclaw_approvals::InMemoryAutoApproveSettingStore::new())
+                Arc::new(
+                    ironclaw_approvals::test_support::in_memory_backed_auto_approve_setting_store(),
+                )
             });
         let persistent_approval_policies: Arc<
             dyn ironclaw_approvals::PersistentApprovalPolicyStore,
@@ -1502,7 +1506,9 @@ impl HostRuntimeCapabilityHarness {
             .persistent_approval_policies
             .clone()
             .unwrap_or_else(|| {
-                Arc::new(ironclaw_approvals::InMemoryPersistentApprovalPolicyStore::new())
+                Arc::new(
+                    ironclaw_approvals::test_support::in_memory_backed_persistent_approval_policy_store(),
+                )
             });
         let outbound_preferences_facade = self.outbound_target_tools.as_ref().map(|parts| {
             Arc::clone(&parts.facade)
