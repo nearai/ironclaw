@@ -177,11 +177,14 @@ fn release_ci_compiles_reborn_for_all_supported_targets() {
     let root = workspace_root();
     let compile_workflow =
         std::fs::read_to_string(root.join(".github/workflows/reborn-release-compile.yml"))
-            .expect("Reborn release compile workflow");
+            .expect("Reborn release compile workflow")
+            .replace("\r\n", "\n");
     let release_workflow = std::fs::read_to_string(root.join(".github/workflows/release.yml"))
-        .expect("release workflow");
+        .expect("release workflow")
+        .replace("\r\n", "\n");
     let cli_manifest = std::fs::read_to_string(root.join("crates/ironclaw_reborn_cli/Cargo.toml"))
-        .expect("Reborn CLI manifest");
+        .expect("Reborn CLI manifest")
+        .replace("\r\n", "\n");
 
     let target_runners = [
         ("x86_64-unknown-linux-gnu", "ubuntu-22.04"),
@@ -213,7 +216,9 @@ fn release_ci_compiles_reborn_for_all_supported_targets() {
             && compile_workflow.contains("--package ironclaw_reborn_cli")
             && compile_workflow.contains("--bin ironclaw-reborn")
             && compile_workflow.contains("--target \"$TARGET\"")
-            && compile_workflow.contains(release_features),
+            && compile_workflow
+                .contains(&format!("  REBORN_RELEASE_FEATURES: {release_features}\n"))
+            && compile_workflow.contains("            --features \"$REBORN_RELEASE_FEATURES\""),
         "Reborn release CI must fully link the shipping binary and keep all target results"
     );
     assert!(
@@ -267,12 +272,24 @@ fn release_ci_compiles_reborn_for_all_supported_targets() {
         "compile evidence must stay outside cargo-dist's artifacts-* release namespace"
     );
 
+    let release_pr_trigger = concat!(
+        "  pull_request:\n",
+        "    branches:\n",
+        "      - main\n",
+        "    paths:\n",
+        "      - '.github/workflows/release.yml'\n",
+        "      - '.github/workflows/reborn-release-compile.yml'\n",
+        "      - 'Cargo.toml'\n",
+        "      - 'Cargo.lock'\n",
+        "      - 'crates/ironclaw_reborn_cli/**'\n",
+        "      - 'crates/ironclaw_webui_v2/**'\n",
+    );
     assert!(
         release_workflow.contains("uses: ./.github/workflows/reborn-release-compile.yml")
             && release_workflow.contains("needs.reborn-binary-compile.result == 'success'")
-            && release_workflow.contains("  pull_request:\n")
+            && release_workflow.contains(release_pr_trigger)
             && !compile_workflow.contains("  pull_request:\n"),
-        "the existing release workflow must own PR validation and wait for the Reborn matrix"
+        "the existing release workflow must own PR validation for main and every release input, and wait for the Reborn matrix"
     );
     assert!(
         release_workflow.contains("publishing: ${{ !github.event.pull_request }}")
