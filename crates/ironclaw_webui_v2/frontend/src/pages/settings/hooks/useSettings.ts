@@ -92,6 +92,5 @@ export function useSettings() {
     importSettings,
     isImporting: importMutation.isPending,
     saveError: mutation.error,
-    importError: importMutation.error,
   };
 }

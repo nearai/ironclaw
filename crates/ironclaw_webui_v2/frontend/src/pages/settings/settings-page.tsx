@@ -37,7 +37,6 @@ export function SettingsPage() {
     importSettings,
     isImporting,
     saveError,
-    importError,
   } = useSettings();
   const [searchQuery, setSearchQuery] = React.useState("");
 
@@ -119,15 +118,6 @@ export function SettingsPage() {
                 className="rounded-xl border border-red-400/30 bg-red-500/10 px-4 py-3 text-sm text-red-200"
               >
                 {t("error.saveFailed", { message: saveError.message })}
-              </div>
-            )}
-
-            {importError &&
-            (
-              <div
-                className="rounded-xl border border-red-400/30 bg-red-500/10 px-4 py-3 text-sm text-red-200"
-              >
-                {t("settings.importFailed", { message: importError.message })}
               </div>
             )}
 
