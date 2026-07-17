@@ -216,6 +216,16 @@ A failed send is recorded as failed — never optimistic `Delivered`. Paired
 users' DM `chat_id`s (captured at consume time) are the deployment's
 Telegram delivery targets for proactive sends.
 
+**Status messages are wired.** The host-authored notices the delivery
+machinery posts around the adapter render path — the working message
+("Ironclaw is thinking..."), busy-thread hints, and blocked-run
+approval/auth notices — ride the same policy-scoped egress as plain-text
+`sendMessage` calls (`TelegramDeliveryProtocol::post_status_message`), and
+the returned `message_id` handle lets the observer clean up its working
+message via `deleteMessage` once the reply lands. Rejections map to a
+stable `StatusMessage` error (HTTP status only; Telegram's free-text
+`description` stays a bounded debug diagnostic).
+
 ## Durable host state
 
 All host state lives on the tenant-scoped filesystem plane
