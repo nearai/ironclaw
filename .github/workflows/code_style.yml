@@ -54,7 +54,7 @@ jobs:
         run: |
           CHANGED_FILES="$(git diff --name-only "$BASE_SHA"..."$HEAD_SHA")"
 
-          if printf '%s\n' "$CHANGED_FILES" | grep -Eq '^(src/|crates/|channels-src/|tools-src/|tests/|migrations/|Cargo\.toml$|Cargo\.lock$|Dockerfile|build\.rs$|\.gitignore$|scripts/ci/|\.githooks/|scripts/check_no_panics\.py$|scripts/check_gateway_boundaries\.py$|\.github/workflows/code_style\.yml$)'; then
+          if printf '%s\n' "$CHANGED_FILES" | grep -Eq '^(src/|crates/|channels-src/|tools-src/|tests/|migrations/|Cargo\.toml$|Cargo\.lock$|Dockerfile|build\.rs$|\.gitignore$|scripts/ci/|\.githooks/|scripts/check_no_panics\.py$|scripts/check_gateway_boundaries\.py$|\.github/scripts/(pr-labeler|test-pr-labeler)\.sh$|\.github/workflows/code_style\.yml$)'; then
             echo "has_code=true" >> "$GITHUB_OUTPUT"
           else
             echo "has_code=false" >> "$GITHUB_OUTPUT"
@@ -227,6 +227,7 @@ jobs:
         run: |
           scripts/ci/test-check-include-str-paths.sh
           scripts/ci/test-check-hermetic-env.sh
+          bash .github/scripts/test-pr-labeler.sh
 
   clippy:
     name: Clippy (${{ matrix.name }})
