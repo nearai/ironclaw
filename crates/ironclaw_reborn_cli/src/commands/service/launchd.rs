@@ -167,6 +167,43 @@ fn stop_with_runner(runner: &mut dyn ServiceCommandRunner) -> Result<()> {
     Ok(())
 }
 
+pub(super) fn restart() -> Result<()> {
+    restart_with_runner(&mut OsServiceCommandRunner)
+}
+
+/// Composes [`stop_with_runner`] and [`start_with_runner`]: a running
+/// service is stopped then started, an already-stopped service is just
+/// started, and a start failure after a successful stop is reported as
+/// leaving the service stopped rather than a silent half-restart.
+fn restart_with_runner(runner: &mut dyn ServiceCommandRunner) -> Result<()> {
+    let plist = plist_path()?;
+    if !plist.exists() {
+        bail!("Service not installed. Run `ironclaw-reborn service install` first.");
+    }
+    let list =
+        runner.run_capture_checked("launchctl list", Command::new("launchctl").arg("list"))?;
+    let was_running = service_running(&list);
+
+    if was_running {
+        stop_with_runner(runner)?;
+    }
+    if let Err(start_error) = start_with_runner(runner) {
+        if was_running {
+            bail!(
+                "service restart: stop succeeded but start failed; the service is now \
+                 STOPPED: {start_error:#}"
+            );
+        }
+        return Err(start_error);
+    }
+    if was_running {
+        println!("Service restarted");
+    } else {
+        println!("Service was not running; started");
+    }
+    Ok(())
+}
+
 pub(super) fn status() -> Result<()> {
     status_with_runner(&mut OsServiceCommandRunner)
 }
@@ -609,6 +646,136 @@ mod tests {
         }
 
         assert!(result.is_err());
+    }
+
+    // ── restart ─────────────────────────────────────────────────
+
+    #[test]
+    fn restart_running_service_stops_then_starts() {
+        let _lock = crate::runtime::test_env::lock_runtime_env();
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let prior = std::env::var_os("HOME");
+        // SAFETY: serialized by `lock_runtime_env`; restored below.
+        unsafe { std::env::set_var("HOME", tmp.path()) };
+        let file = plist_path().expect("plist path");
+        std::fs::create_dir_all(file.parent().expect("plist parent")).expect("create parent");
+        std::fs::write(&file, "plist").expect("write plist");
+        let mut runner = RecordingRunner {
+            launchctl_list: format!("123\t0\t{SERVICE_LABEL}\n"),
+            ..RecordingRunner::default()
+        };
+        let result = restart_with_runner(&mut runner);
+        // SAFETY: serialized by `lock_runtime_env`.
+        unsafe {
+            match prior {
+                Some(value) => std::env::set_var("HOME", value),
+                None => std::env::remove_var("HOME"),
+            }
+        }
+
+        result.expect("restart of a running service must succeed");
+        assert_eq!(
+            runner.labels,
+            [
+                "launchctl list",
+                "launchctl list",
+                "launchctl stop",
+                "launchctl unload",
+                "launchctl load",
+                "launchctl start",
+            ]
+        );
+    }
+
+    #[test]
+    fn restart_stopped_service_just_starts() {
+        let _lock = crate::runtime::test_env::lock_runtime_env();
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let prior = std::env::var_os("HOME");
+        // SAFETY: serialized by `lock_runtime_env`; restored below.
+        unsafe { std::env::set_var("HOME", tmp.path()) };
+        let file = plist_path().expect("plist path");
+        std::fs::create_dir_all(file.parent().expect("plist parent")).expect("create parent");
+        std::fs::write(&file, "plist").expect("write plist");
+        let mut runner = RecordingRunner::default();
+        let result = restart_with_runner(&mut runner);
+        // SAFETY: serialized by `lock_runtime_env`.
+        unsafe {
+            match prior {
+                Some(value) => std::env::set_var("HOME", value),
+                None => std::env::remove_var("HOME"),
+            }
+        }
+
+        result.expect("restart of a stopped service must succeed without error");
+        assert_eq!(
+            runner.labels,
+            ["launchctl list", "launchctl load", "launchctl start"]
+        );
+    }
+
+    #[test]
+    fn restart_not_installed_errors_with_install_guidance() {
+        let _lock = crate::runtime::test_env::lock_runtime_env();
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let prior = std::env::var_os("HOME");
+        // SAFETY: serialized by `lock_runtime_env`; restored below.
+        unsafe { std::env::set_var("HOME", tmp.path()) };
+        let mut runner = RecordingRunner::default();
+        let result = restart_with_runner(&mut runner);
+        // SAFETY: serialized by `lock_runtime_env`.
+        unsafe {
+            match prior {
+                Some(value) => std::env::set_var("HOME", value),
+                None => std::env::remove_var("HOME"),
+            }
+        }
+
+        let error = result.expect_err("restart without an installed service must error");
+        assert!(error.to_string().contains("service install"));
+        assert!(runner.labels.is_empty(), "no commands should run");
+    }
+
+    #[test]
+    fn restart_reports_stopped_when_start_fails_after_successful_stop() {
+        let _lock = crate::runtime::test_env::lock_runtime_env();
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let prior = std::env::var_os("HOME");
+        // SAFETY: serialized by `lock_runtime_env`; restored below.
+        unsafe { std::env::set_var("HOME", tmp.path()) };
+        let file = plist_path().expect("plist path");
+        std::fs::create_dir_all(file.parent().expect("plist parent")).expect("create parent");
+        std::fs::write(&file, "plist").expect("write plist");
+        let mut runner = RecordingRunner {
+            launchctl_list: format!("123\t0\t{SERVICE_LABEL}\n"),
+            fail_args: Some(vec!["start", SERVICE_LABEL]),
+            ..RecordingRunner::default()
+        };
+        let result = restart_with_runner(&mut runner);
+        // SAFETY: serialized by `lock_runtime_env`.
+        unsafe {
+            match prior {
+                Some(value) => std::env::set_var("HOME", value),
+                None => std::env::remove_var("HOME"),
+            }
+        }
+
+        let error = result.expect_err("failed start after successful stop must error");
+        assert!(
+            error.to_string().contains("STOPPED"),
+            "error must report the service as stopped, got: {error}"
+        );
+        assert_eq!(
+            runner.labels,
+            [
+                "launchctl list",
+                "launchctl list",
+                "launchctl stop",
+                "launchctl unload",
+                "launchctl load",
+                "launchctl start",
+            ]
+        );
     }
 
     #[test]

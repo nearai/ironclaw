@@ -278,6 +278,50 @@ fn stop_with_runner(runner: &mut dyn ServiceCommandRunner) -> Result<()> {
     Ok(())
 }
 
+pub(super) fn restart() -> Result<()> {
+    restart_with_runner(&mut OsServiceCommandRunner)
+}
+
+/// Composes [`stop_with_runner`] and [`start_with_runner`]: a running
+/// service is stopped then started, an already-stopped service is just
+/// started, and a start failure after a successful stop is reported as
+/// leaving the service stopped rather than a silent half-restart.
+fn restart_with_runner(runner: &mut dyn ServiceCommandRunner) -> Result<()> {
+    if !unit_path()?.exists() {
+        bail!("Service not installed. Run `ironclaw-reborn service install` first.");
+    }
+    let active_state = runner.run_capture_checked(
+        "systemctl show ActiveState",
+        Command::new("systemctl").args([
+            "--user",
+            "show",
+            "--property=ActiveState",
+            "--value",
+            SYSTEMD_UNIT,
+        ]),
+    )?;
+    let was_running = active_state.trim() == "active";
+
+    if was_running {
+        stop_with_runner(runner)?;
+    }
+    if let Err(start_error) = start_with_runner(runner) {
+        if was_running {
+            bail!(
+                "service restart: stop succeeded but start failed; the service is now \
+                 STOPPED: {start_error:#}"
+            );
+        }
+        return Err(start_error);
+    }
+    if was_running {
+        println!("Service restarted");
+    } else {
+        println!("Service was not running; started");
+    }
+    Ok(())
+}
+
 pub(super) fn status() -> Result<()> {
     status_with_runner(&mut OsServiceCommandRunner)
 }
@@ -991,6 +1035,139 @@ mod tests {
         }
 
         assert!(result.is_err());
+    }
+
+    // ── restart ─────────────────────────────────────────────────
+
+    #[test]
+    fn restart_running_service_stops_then_starts() {
+        let _lock = crate::runtime::test_env::lock_runtime_env();
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let prior = std::env::var_os("HOME");
+        // SAFETY: serialized by `lock_runtime_env`; restored below.
+        unsafe { std::env::set_var("HOME", tmp.path()) };
+        let file = unit_path().expect("unit path");
+        std::fs::create_dir_all(file.parent().expect("unit parent")).expect("create parent");
+        std::fs::write(&file, "unit").expect("write unit");
+        let mut runner = RecordingRunner {
+            active_state_output: Some("active\n".to_string()),
+            ..RecordingRunner::default()
+        };
+        let result = restart_with_runner(&mut runner);
+        // SAFETY: serialized by `lock_runtime_env`.
+        unsafe {
+            match prior {
+                Some(value) => std::env::set_var("HOME", value),
+                None => std::env::remove_var("HOME"),
+            }
+        }
+
+        result.expect("restart of a running service must succeed");
+        assert_eq!(
+            runner.labels,
+            [
+                "systemctl show ActiveState",
+                "systemctl stop",
+                "systemctl daemon-reload",
+                "systemctl start",
+            ]
+        );
+    }
+
+    #[test]
+    fn restart_stopped_service_just_starts() {
+        let _lock = crate::runtime::test_env::lock_runtime_env();
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let prior = std::env::var_os("HOME");
+        // SAFETY: serialized by `lock_runtime_env`; restored below.
+        unsafe { std::env::set_var("HOME", tmp.path()) };
+        let file = unit_path().expect("unit path");
+        std::fs::create_dir_all(file.parent().expect("unit parent")).expect("create parent");
+        std::fs::write(&file, "unit").expect("write unit");
+        let mut runner = RecordingRunner {
+            active_state_output: Some("inactive\n".to_string()),
+            ..RecordingRunner::default()
+        };
+        let result = restart_with_runner(&mut runner);
+        // SAFETY: serialized by `lock_runtime_env`.
+        unsafe {
+            match prior {
+                Some(value) => std::env::set_var("HOME", value),
+                None => std::env::remove_var("HOME"),
+            }
+        }
+
+        result.expect("restart of a stopped service must succeed without error");
+        assert_eq!(
+            runner.labels,
+            [
+                "systemctl show ActiveState",
+                "systemctl daemon-reload",
+                "systemctl start",
+            ]
+        );
+    }
+
+    #[test]
+    fn restart_not_installed_errors_with_install_guidance() {
+        let _lock = crate::runtime::test_env::lock_runtime_env();
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let prior = std::env::var_os("HOME");
+        // SAFETY: serialized by `lock_runtime_env`; restored below.
+        unsafe { std::env::set_var("HOME", tmp.path()) };
+        let mut runner = RecordingRunner::default();
+        let result = restart_with_runner(&mut runner);
+        // SAFETY: serialized by `lock_runtime_env`.
+        unsafe {
+            match prior {
+                Some(value) => std::env::set_var("HOME", value),
+                None => std::env::remove_var("HOME"),
+            }
+        }
+
+        let error = result.expect_err("restart without an installed service must error");
+        assert!(error.to_string().contains("service install"));
+        assert!(runner.labels.is_empty(), "no commands should run");
+    }
+
+    #[test]
+    fn restart_reports_stopped_when_start_fails_after_successful_stop() {
+        let _lock = crate::runtime::test_env::lock_runtime_env();
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let prior = std::env::var_os("HOME");
+        // SAFETY: serialized by `lock_runtime_env`; restored below.
+        unsafe { std::env::set_var("HOME", tmp.path()) };
+        let file = unit_path().expect("unit path");
+        std::fs::create_dir_all(file.parent().expect("unit parent")).expect("create parent");
+        std::fs::write(&file, "unit").expect("write unit");
+        let mut runner = RecordingRunner {
+            active_state_output: Some("active\n".to_string()),
+            fail_args: Some(vec!["--user", "start", SYSTEMD_UNIT]),
+            ..RecordingRunner::default()
+        };
+        let result = restart_with_runner(&mut runner);
+        // SAFETY: serialized by `lock_runtime_env`.
+        unsafe {
+            match prior {
+                Some(value) => std::env::set_var("HOME", value),
+                None => std::env::remove_var("HOME"),
+            }
+        }
+
+        let error = result.expect_err("failed start after successful stop must error");
+        assert!(
+            error.to_string().contains("STOPPED"),
+            "error must report the service as stopped, got: {error}"
+        );
+        assert_eq!(
+            runner.labels,
+            [
+                "systemctl show ActiveState",
+                "systemctl stop",
+                "systemctl daemon-reload",
+                "systemctl start",
+            ]
+        );
     }
 
     #[test]

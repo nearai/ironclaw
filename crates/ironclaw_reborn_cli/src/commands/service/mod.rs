@@ -49,6 +49,9 @@ enum ServiceVerb {
     Start,
     /// Stop the running service.
     Stop,
+    /// Restart the service: stop then start if running, or just start if
+    /// stopped. Errors if the service is not installed.
+    Restart,
     /// Show service status.
     Status,
     /// Uninstall the OS service and remove the unit file.
@@ -62,6 +65,7 @@ impl ServiceCommand {
             ServiceVerb::Install => platform.install(&context),
             ServiceVerb::Start => platform.start(),
             ServiceVerb::Stop => platform.stop(),
+            ServiceVerb::Restart => platform.restart(),
             ServiceVerb::Status => platform.status(),
             ServiceVerb::Uninstall => platform.uninstall(),
         }
@@ -112,6 +116,13 @@ impl ServicePlatform {
         match self {
             Self::MacOs => launchd::stop(),
             Self::Linux => systemd::stop(),
+        }
+    }
+
+    fn restart(&self) -> Result<()> {
+        match self {
+            Self::MacOs => launchd::restart(),
+            Self::Linux => systemd::restart(),
         }
     }
 
