@@ -33,29 +33,70 @@ last ~30 days of merged PRs and open issues.
 ### 1.1 The capability call re-wraps one payload ~14 times
 
 A single `bash`/`wasm`/first-party tool call is translated through **~8 request
-shapes and ~6 result shapes across 6 crate boundaries and 6+ `dyn` seams**. The
-request structs are near-identical field-bags — all carry
-`capability_id + estimate + input + scope` — so most of the code on the path is
-mechanical `From`-style copying whose only job is to move a payload down one
-crate. Verified request types on the down-path:
+shapes and ~6 result shapes across 6 crate boundaries and 6+ `dyn` seams**. This
+is not uniform waste, and it is worth being precise about *why*, because it
+determines what is reducible. The field-level diff shows the pipeline holds only
+**three genuinely distinct states**; the extra types are duplication forced by the
+crate graph plus dead fields that ride along.
 
-| Type | Crate (defining file) |
-| --- | --- |
-| `CapabilityInvocation` | `ironclaw_turns` (`src/run_profile/host.rs`) |
-| `RuntimeCapabilityRequest` | `ironclaw_host_runtime` (`src/lib.rs`) |
-| `CapabilityInvocationRequest` | `ironclaw_capabilities` (`src/requests.rs`) |
-| `CapabilityDispatchRequest` | `ironclaw_host_api` (`src/dispatch.rs`) |
-| `RuntimeAdapterRequest<'a, F, G>` | `ironclaw_dispatcher` (`src/lib.rs`) |
-| lane requests (`ScriptExecutionRequest` / `WitToolRequest` / `FirstPartyCapabilityRequest`) | `ironclaw_scripts` / `ironclaw_wasm` / host-runtime first-party |
+Verified request types on the down-path, with what each hop actually adds or drops:
 
-`CapabilityDispatchRequest` already lives in `ironclaw_host_api` — the neutral
-vocabulary crate everyone depends on downward. That is the key signal: the
-canonical type *can* live at the bottom; the other five are re-declarations that
-diverge only by a field or two that each layer staples on.
+| Hop | Type (crate) | Fields | Change vs. previous |
+| --- | --- | --- | --- |
+| 1 | `CapabilityInvocation` (`ironclaw_turns`) | `activity_id, surface_version, capability_id, input_ref, approval_resume?, auth_resume?` | the loop's vocabulary — input by **ref**, resume tokens, pre-trust |
+| 2 | `RuntimeCapabilityRequest` (`ironclaw_host_runtime`) | `context, capability_id, estimate, input, idempotency_key?, trust_decision` | deref `input_ref`→raw `input`; +`estimate`, +`context`; +2 **dead** fields |
+| 3 | `CapabilityInvocationRequest` (`ironclaw_capabilities`) | `context, capability_id, estimate, input, trust_decision` | **identical to hop 2 minus `idempotency_key`** — zero new info |
+| 4 | `CapabilityDispatchRequest` (`ironclaw_host_api`) | `capability_id, scope, authenticated_actor_user_id?, estimate, mounts?, resource_reservation?, input` | decompose `context`→`scope`+`actor`; **drop `trust_decision`**; **+`mounts`, +`resource_reservation`** (authorization outputs) |
+| 5 | `RuntimeAdapterRequest<'a, F, G>` (`ironclaw_dispatcher`) | hop 4 + `package, descriptor, filesystem&, governor&, runtime_policy` | + resolved substrate handles for the lane |
+| — | lane requests (`ScriptExecutionRequest` / `WitToolRequest` / `FirstPartyCapabilityRequest`) | per-lane shapes | final re-wrap into the lane's own type |
 
-The `RuntimeAdapterRequest<'a, F, G>` shape — generic over closures with a
-lifetime — is itself a complexity tell: the seam is parameterized for
-flexibility that production wiring does not exercise.
+Four mechanisms produce this, each visible in the code above:
+
+1. **The dependency DAG forbids type sharing, so identical shapes are
+   re-declared.** Hops 2 and 3 are the *same struct* (`context, capability_id,
+   estimate, input, trust_decision`), differing by one field. They are distinct
+   types only because `host_runtime` (upper) and `capabilities` (lower) are
+   separate crates and the boundary rule forbids either importing the other's
+   request type. The one shareable place — `host_api`, the bottom — is used for
+   hop 4 but not the mid-flight shapes, so the mid-flight shape is declared twice.
+   This is the concrete form of "every crate boundary treated as a trust
+   boundary."
+
+2. **Three real states are modeled as five look-alike structs.** The pipeline has
+   exactly three meaningful states: *loop-expressed* (hop 1: ref-based, resume
+   tokens, pre-trust), *authorized* (hop 4: raw input + `scope` + `mounts` +
+   `resource_reservation`, the outputs of authorization), and
+   *resolved-for-a-lane* (hop 5: + substrate handles). Those transitions are
+   genuine. Because each state is modeled as "a request struct that looks like the
+   others ± a field," the three real states blur into five, and hops 2–3 fall out
+   as duplication *between* transitions rather than being transitions themselves.
+
+3. **Fields accrete but never retire — dead transitional cruft rides along.**
+   `trust_decision` is copied through hops 2–3 and dropped at hop 4; its own doc
+   comment states `DefaultHostRuntime` **ignores it entirely** ("Legacy... kept
+   for transitional request-shape compatibility... Callers must not rely on this
+   field"). `idempotency_key` at hop 2 is "advisory... does not yet implement...
+   kept so shape doesn't break when dedup is wired through downstream." Two of the
+   fields every layer copies do nothing — one dead-past, one dead-future — and each
+   new field multiplies across every type that mirrors it.
+
+4. **A context bundle is composed, then decomposed.** Hops 2–3 carry
+   `context: ExecutionContext` as one field; hop 4 explodes it into loose `scope` +
+   `authenticated_actor_user_id`. Bundling, passing, then unpacking is two more
+   struct shapes for the same information.
+
+`CapabilityDispatchRequest` already living in `ironclaw_host_api` is the key
+signal: the canonical shape *can* live at the bottom. And
+`RuntimeAdapterRequest<'a, F, G>` — generic over closures with a lifetime — is a
+complexity tell: the seam is parameterized for flexibility production wiring does
+not exercise.
+
+**Net:** of the five request types, hops 2 and 3 carry no new information (they
+exist for Mechanism 1 and are padded by Mechanism 3); the other three are genuine
+states that should be explicit and named. "~14 re-wraps" is really **~3 real
+transitions + ~2 pure duplications + dead fields copied at every hop** — so ~40%
+is pure duplication that a shared bottom-crate vocabulary removes outright, and
+the rest becomes legible once the three states are named.
 
 ### 1.2 Authority is smeared across four layers, not centralized
 
@@ -180,6 +221,30 @@ fn dispatch (inv: &Invocation, auth: &Authority, lane: &RuntimeLane) -> Outcome;
   returns one `Result<Outcome, Blocked>` shape.
 
 **Type count on a capability call: ~14 → 3.**
+
+### 3.1 The three real states, named
+
+This directly resolves the four mechanisms in §1.1. The five request types
+collapse onto the three states the field diff identified; the two duplicates and
+the dead fields disappear with them:
+
+| Real state | Carried as | Replaces |
+| --- | --- | --- |
+| loop-expressed (pre-trust) | `Invocation` (input by ref, resume tokens) | `CapabilityInvocation` |
+| authorized | `Invocation` + `&Authority` (trust, approval lease, reservation, mounts) | `RuntimeCapabilityRequest`, `CapabilityInvocationRequest`, `CapabilityDispatchRequest` |
+| resolved-for-a-lane | `Invocation` + `&Authority` + resolved handles (package, descriptor, filesystem, governor) | `RuntimeAdapterRequest` |
+
+- **Mechanism 1 (DAG re-declaration) is eliminated:** the one authorized shape is
+  `Invocation` + `&Authority`, both defined in `host_api`, so `host_runtime` and
+  `capabilities` reference it instead of each re-declaring it.
+- **Mechanism 3 (dead fields) is eliminated:** `trust_decision` vanishes because
+  trust is *computed inside* `authorize()` and lands in `Authority.trust`, never
+  carried as a request field; `idempotency_key` is either implemented once in the
+  authorization pass or deleted.
+- **Mechanism 2 (blurred states) becomes explicit:** the three transitions are
+  now named — `Invocation`, then `+ Authority`, then `+ resolved handles` — rather
+  than five near-identical structs. Mechanism 4 (compose/decompose `context`) goes
+  away because `Authority` carries `scope`/`actor` in one shape end to end.
 
 ---
 
