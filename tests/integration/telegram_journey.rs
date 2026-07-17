@@ -549,9 +549,8 @@ async fn pair_user_via_webhook(
         )
         .await;
     assert_eq!(status, StatusCode::OK, "verified /start consume acks 200");
-    assert_eq!(
+    assert!(
         pairing_connected(stack, caller).await,
-        true,
         "consume must bind the telegram account"
     );
 }
