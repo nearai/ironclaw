@@ -34,6 +34,7 @@
 pub mod action;
 pub mod approval;
 pub mod audit;
+pub mod authorized;
 pub mod capability;
 pub mod capability_profile;
 pub mod decision;
@@ -63,6 +64,7 @@ pub mod trust;
 pub use action::*;
 pub use approval::*;
 pub use audit::*;
+pub use authorized::*;
 pub use capability::*;
 pub use capability_profile::*;
 pub use decision::*;
