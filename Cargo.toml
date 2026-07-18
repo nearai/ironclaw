@@ -353,9 +353,10 @@ ironclaw_triggers = { path = "crates/ironclaw_triggers", version = "0.1.0", feat
 ironclaw_conversations = { path = "crates/ironclaw_conversations", version = "0.1.0" }
 ironclaw_trust = { path = "crates/ironclaw_trust", version = "0.1.0" }
 ironclaw_wasm = { path = "crates/ironclaw_wasm", version = "0.1.0" }
-# `InMemoryTriggeredRunDeliveryStore` for the triggered-delivery outcome-seam
-# int-tier proof (asserting a real `TriggeredRunDeliveryDriver`'s recorded
-# outcome via the same public store the composition factory accepts).
+# `ironclaw_outbound/test-support` provides the in-memory-backed
+# `FilesystemOutboundStateStore` the triggered-delivery outcome-seam int-tier
+# proof injects (asserting a real `TriggeredRunDeliveryDriver`'s recorded
+# outcome via the same public store trait the composition factory accepts).
 # Same idea for embeddings: `MockEmbeddings` is only reachable in dev builds.
 ironclaw_embeddings = { path = "crates/ironclaw_embeddings", version = "0.1.0", features = ["testing"] }
 # Named `#[case]` parametrization for the storage-backend matrix tests (slice 3).
