@@ -80,7 +80,7 @@ repository = "https://github.com/nearai/ironclaw"
 layer = "legacy"
 
 [[bin]]
-name = "ironclaw-v1"
+name = "ironclaw-legacy"
 path = "src/main.rs"
 
 [package.metadata.wix]

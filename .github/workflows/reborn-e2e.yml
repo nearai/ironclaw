@@ -140,7 +140,7 @@ jobs:
         run: >-
           cargo build
           -p ironclaw
-          --bin ironclaw-v1
+          --bin ironclaw-legacy
           --no-default-features
           --features libsql
 
