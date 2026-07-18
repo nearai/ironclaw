@@ -50,7 +50,6 @@ use ironclaw_reborn_composition::{
     local_runtime_build_input_with_options,
 };
 use ironclaw_triggers::{TriggerId, TriggerPollerWorkerConfig, TriggerRunStatus, TriggerState};
-use ironclaw_trust::{AuthorityCeiling, EffectiveTrustClass, TrustDecision, TrustProvenance};
 use ironclaw_turns::TurnStatus;
 use parity_qa_support::binary_e2e::RebornBinaryE2EHarness;
 use parity_qa_support::model_replay::{
@@ -616,7 +615,6 @@ async fn invoke_trigger_create(runtime: &RebornRuntime, input: Value) -> Value {
             CapabilityId::new(TRIGGER_CREATE_CAPABILITY_ID).expect("capability id"),
             ResourceEstimate::default(),
             input,
-            trigger_management_trust_decision(),
         ))
         .await
         .expect("trigger create invocation completes");
@@ -666,16 +664,4 @@ fn trigger_management_execution_context() -> ExecutionContext {
     context.resource_scope.agent_id = Some(agent_id);
     context.resource_scope.project_id = None;
     context
-}
-
-fn trigger_management_trust_decision() -> TrustDecision {
-    TrustDecision {
-        effective_trust: EffectiveTrustClass::user_trusted(),
-        authority_ceiling: AuthorityCeiling {
-            allowed_effects: vec![EffectKind::DispatchCapability, EffectKind::ExternalWrite],
-            max_resource_ceiling: None,
-        },
-        provenance: TrustProvenance::AdminConfig,
-        evaluated_at: Utc::now(),
-    }
 }
