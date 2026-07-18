@@ -15,6 +15,7 @@ use ironclaw_events::{
     DurableEventLog, DurableEventSink, EventSink, EventStreamKey, InMemoryDurableEventLog,
     InMemoryEventSink, ReadScope, RuntimeEventKind,
 };
+use ironclaw_filesystem::{InMemoryBackend, ScopedFilesystem};
 use ironclaw_host_api::*;
 use ironclaw_processes::*;
 use ironclaw_reborn_event_store::{
@@ -28,10 +29,10 @@ async fn process_services_complete_background_process_through_process_host_and_e
     let events = InMemoryEventSink::new();
     let event_sink: Arc<dyn EventSink> = Arc::new(events.clone());
     let process_store = Arc::new(EventingProcessStore::new(
-        InMemoryProcessStore::new(),
+        in_mem_process_store(),
         event_sink,
     ));
-    let result_store = Arc::new(InMemoryProcessResultStore::new());
+    let result_store = Arc::new(in_mem_process_result_store());
     let services = ProcessServices::new(Arc::clone(&process_store), Arc::clone(&result_store));
     let manager = services.background_manager(Arc::new(SuccessExecutor));
     let host = services.host().with_poll_interval(Duration::from_millis(5));
@@ -48,7 +49,12 @@ async fn process_services_complete_background_process_through_process_host_and_e
     let result = host.await_result(&scope, process_id).await.unwrap();
 
     assert_eq!(result.status, ProcessStatus::Completed);
-    assert_eq!(result.output, Some(json!({"ok": true})));
+    // Filesystem store externalizes output behind `output_ref` (§4.3); read via host.
+    assert_eq!(result.output, None);
+    assert_eq!(
+        host.output(&scope, process_id).await.unwrap(),
+        Some(json!({"ok": true}))
+    );
     assert_eq!(
         host.status(&scope, process_id)
             .await
@@ -96,10 +102,10 @@ async fn process_services_completed_lifecycle_projects_from_jsonl_durable_log_me
     let event_log = Arc::clone(&stores.events);
     let event_sink: Arc<dyn EventSink> = Arc::new(DurableEventSink::new(Arc::clone(&event_log)));
     let process_store = Arc::new(EventingProcessStore::new(
-        InMemoryProcessStore::new(),
+        in_mem_process_store(),
         event_sink,
     ));
-    let result_store = Arc::new(InMemoryProcessResultStore::new());
+    let result_store = Arc::new(in_mem_process_result_store());
     let services = ProcessServices::new(Arc::clone(&process_store), Arc::clone(&result_store));
     let manager = services.background_manager(Arc::new(SentinelSuccessExecutor));
     let host = services.host().with_poll_interval(Duration::from_millis(5));
@@ -120,8 +126,10 @@ async fn process_services_completed_lifecycle_projects_from_jsonl_durable_log_me
     assert_eq!(started.status, ProcessStatus::Running);
     let result = host.await_result(&scope, process_id).await.unwrap();
     assert_eq!(result.status, ProcessStatus::Completed);
+    // Filesystem store externalizes output behind `output_ref` (§4.3); read via host.
+    assert_eq!(result.output, None);
     assert_eq!(
-        result.output,
+        host.output(&scope, process_id).await.unwrap(),
         Some(json!({"ok": true, "raw": "PROCESS_OUTPUT_SENTINEL_3022"}))
     );
 
@@ -178,10 +186,10 @@ async fn process_services_failed_lifecycle_projection_sanitizes_error_and_filter
     let event_log: Arc<dyn DurableEventLog> = Arc::new(InMemoryDurableEventLog::new());
     let event_sink: Arc<dyn EventSink> = Arc::new(DurableEventSink::new(Arc::clone(&event_log)));
     let process_store = Arc::new(EventingProcessStore::new(
-        InMemoryProcessStore::new(),
+        in_mem_process_store(),
         event_sink,
     ));
-    let result_store = Arc::new(InMemoryProcessResultStore::new());
+    let result_store = Arc::new(in_mem_process_result_store());
     let services = ProcessServices::new(Arc::clone(&process_store), Arc::clone(&result_store));
     let manager = services.background_manager(Arc::new(SentinelFailureExecutor));
     let host = services.host().with_poll_interval(Duration::from_millis(5));
@@ -267,10 +275,10 @@ async fn process_host_kill_preserves_terminal_state_and_suppresses_late_completi
     let event_sink: Arc<dyn EventSink> = Arc::new(events.clone());
     let executor = Arc::new(CancelThenLateSuccessExecutor::default());
     let process_store = Arc::new(PostCompletionProbeStore::new(
-        EventingProcessStore::new(InMemoryProcessStore::new(), event_sink),
+        EventingProcessStore::new(in_mem_process_store(), event_sink),
         Arc::clone(&executor),
     ));
-    let result_store = Arc::new(InMemoryProcessResultStore::new());
+    let result_store = Arc::new(in_mem_process_result_store());
     let services = ProcessServices::new(Arc::clone(&process_store), Arc::clone(&result_store));
     let manager = services.background_manager(Arc::clone(&executor));
     let host = services.host().with_poll_interval(Duration::from_millis(5));
@@ -580,4 +588,25 @@ fn sample_scope(invocation_id: InvocationId, tenant: &str, user: &str) -> Resour
         thread_id: Some(ThreadId::new("thread-a").unwrap()),
         invocation_id,
     }
+}
+
+fn processes_test_fs() -> Arc<ScopedFilesystem<InMemoryBackend>> {
+    let mounts = MountView::new(vec![MountGrant::new(
+        MountAlias::new("/processes").expect("alias"),
+        VirtualPath::new("/engine/tenants/tenant1/users/user1/processes").expect("target"),
+        MountPermissions::read_write_list_delete(),
+    )])
+    .expect("mount view");
+    Arc::new(ScopedFilesystem::with_fixed_view(
+        Arc::new(InMemoryBackend::new()),
+        mounts,
+    ))
+}
+
+fn in_mem_process_store() -> FilesystemProcessStore<InMemoryBackend> {
+    FilesystemProcessStore::new(processes_test_fs())
+}
+
+fn in_mem_process_result_store() -> FilesystemProcessResultStore<InMemoryBackend> {
+    FilesystemProcessResultStore::new(processes_test_fs())
 }

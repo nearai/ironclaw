@@ -13,7 +13,7 @@ use ironclaw_capabilities::{
     CapabilityObligationRequest,
 };
 use ironclaw_extensions::{ExtensionManifest, ExtensionPackage, ExtensionRegistry, ManifestSource};
-use ironclaw_filesystem::LocalFilesystem;
+use ironclaw_filesystem::{DiskFilesystem, InMemoryBackend};
 use ironclaw_host_api::{
     AgentId, CapabilityDescriptor, CapabilityDispatchResult, CapabilityId, CapabilitySet,
     CorrelationId, DispatchError, EffectKind, ExecutionContext, ExtensionId, HostPortCatalog,
@@ -26,7 +26,7 @@ use ironclaw_host_api::{
 use ironclaw_network::{
     NetworkHttpEgress, NetworkHttpError, NetworkHttpRequest, NetworkHttpResponse, NetworkUsage,
 };
-use ironclaw_processes::{InMemoryProcessResultStore, InMemoryProcessStore, ProcessServices};
+use ironclaw_processes::{FilesystemProcessResultStore, FilesystemProcessStore};
 use ironclaw_resources::{
     InMemoryResourceGovernor, ResourceAccount, ResourceGovernor, ResourceTally,
 };
@@ -38,11 +38,11 @@ use serde_json::{Value, json};
 
 use super::{
     CapabilitySurfaceVersion, DeploymentMode, EffectiveRuntimePolicy, FilesystemBackendKind,
-    FirstPartyCapabilityRegistry, FirstPartyRuntimeAdapter, HostRuntimeHttpEgressPort,
-    HostRuntimeServices, LocalHostProcessPort, LocalInvocationServicesResolver, McpRuntimeAdapter,
-    NetworkMode, ProcessBackendKind, ProcessResultStore, ProcessStore, ProductionWiringComponent,
-    ProductionWiringConfig, ProductionWiringIssueKind, RootFilesystem, RuntimeAdapter,
-    RuntimeAdapterRequest, RuntimeAdapterResult, RuntimeProfile, SecretMode,
+    FirstPartyCapabilityRegistry, FirstPartyRuntimeAdapter, HostProcessPort,
+    HostRuntimeHttpEgressPort, HostRuntimeServices, LocalInvocationServicesResolver,
+    McpRuntimeAdapter, NetworkMode, ProcessBackendKind, ProcessResultStore, ProcessStore,
+    ProductionWiringComponent, ProductionWiringConfig, ProductionWiringIssueKind, RootFilesystem,
+    RuntimeAdapter, RuntimeAdapterRequest, RuntimeAdapterResult, RuntimeProfile, SecretMode,
     ServiceResolvedRuntimeAdapter,
 };
 #[cfg(unix)]
@@ -677,13 +677,13 @@ async fn service_guard_releases_reservation_on_planner_denial() {
     let adapter = ServiceResolvedRuntimeAdapter::new(
         Arc::clone(&inner),
         Arc::new(LocalInvocationServicesResolver::new(
-            Arc::new(LocalFilesystem::new()),
+            Arc::new(DiskFilesystem::new()),
             None,
-            Arc::new(LocalHostProcessPort::new()),
+            Arc::new(HostProcessPort::new()),
             None,
         )),
     );
-    let filesystem = LocalFilesystem::new();
+    let filesystem = DiskFilesystem::new();
     let governor = InMemoryResourceGovernor::new();
     let scope = sample_scope();
     let estimate = ResourceEstimate::default().set_process_count(1);
@@ -739,13 +739,13 @@ async fn service_guard_rejects_resolution_before_wasm_dispatch() {
     let adapter = ServiceResolvedRuntimeAdapter::new(
         Arc::clone(&inner),
         Arc::new(LocalInvocationServicesResolver::new(
-            Arc::new(LocalFilesystem::new()),
+            Arc::new(DiskFilesystem::new()),
             None,
-            Arc::new(LocalHostProcessPort::new()),
+            Arc::new(HostProcessPort::new()),
             None,
         )),
     );
-    let filesystem = LocalFilesystem::new();
+    let filesystem = DiskFilesystem::new();
     let governor = InMemoryResourceGovernor::new();
     let scope = sample_scope();
     let estimate = ResourceEstimate::default();
@@ -792,13 +792,13 @@ async fn service_guard_releases_reservation_on_invocation_service_resolution_den
     let adapter = ServiceResolvedRuntimeAdapter::new(
         Arc::clone(&inner),
         Arc::new(LocalInvocationServicesResolver::new(
-            Arc::new(LocalFilesystem::new()),
+            Arc::new(DiskFilesystem::new()),
             None,
-            Arc::new(LocalHostProcessPort::new()),
+            Arc::new(HostProcessPort::new()),
             None,
         )),
     );
-    let filesystem = LocalFilesystem::new();
+    let filesystem = DiskFilesystem::new();
     let governor = InMemoryResourceGovernor::new();
     let scope = sample_scope();
     let estimate = ResourceEstimate::default().set_network_egress_bytes(1);
@@ -858,13 +858,13 @@ async fn service_guard_rejects_required_secret_without_secret_store_before_dispa
     let adapter = ServiceResolvedRuntimeAdapter::new(
         Arc::clone(&inner),
         Arc::new(LocalInvocationServicesResolver::new(
-            Arc::new(LocalFilesystem::new()),
+            Arc::new(DiskFilesystem::new()),
             None,
-            Arc::new(LocalHostProcessPort::new()),
+            Arc::new(HostProcessPort::new()),
             None,
         )),
     );
-    let filesystem = LocalFilesystem::new();
+    let filesystem = DiskFilesystem::new();
     let governor = InMemoryResourceGovernor::new();
     let scope = sample_scope();
     let estimate = ResourceEstimate::default();
@@ -915,13 +915,13 @@ async fn first_party_adapter_releases_reservation_when_invocation_service_resolu
     let adapter = FirstPartyRuntimeAdapter::from_registry(
         registry,
         Arc::new(LocalInvocationServicesResolver::new(
-            Arc::new(LocalFilesystem::new()),
+            Arc::new(DiskFilesystem::new()),
             None,
-            Arc::new(LocalHostProcessPort::new()),
+            Arc::new(HostProcessPort::new()),
             None,
         )),
     );
-    let filesystem = LocalFilesystem::new();
+    let filesystem = DiskFilesystem::new();
     let governor = InMemoryResourceGovernor::new();
     let scope = sample_scope();
     let tenant_account = ResourceAccount::tenant(scope.tenant_id.clone());
@@ -1046,13 +1046,13 @@ async fn first_party_adapter_releases_reservation_when_planner_denies() {
     let adapter = FirstPartyRuntimeAdapter::from_registry(
         registry,
         Arc::new(LocalInvocationServicesResolver::new(
-            Arc::new(LocalFilesystem::new()),
+            Arc::new(DiskFilesystem::new()),
             None,
-            Arc::new(LocalHostProcessPort::new()),
+            Arc::new(HostProcessPort::new()),
             None,
         )),
     );
-    let filesystem = LocalFilesystem::new();
+    let filesystem = DiskFilesystem::new();
     let governor = InMemoryResourceGovernor::new();
     let scope = sample_scope();
     let tenant_account = ResourceAccount::tenant(scope.tenant_id.clone());
@@ -1104,17 +1104,17 @@ async fn first_party_adapter_releases_reservation_when_planner_denies() {
 }
 
 fn test_services() -> HostRuntimeServices<
-    LocalFilesystem,
+    DiskFilesystem,
     InMemoryResourceGovernor,
-    InMemoryProcessStore,
-    InMemoryProcessResultStore,
+    FilesystemProcessStore<InMemoryBackend>,
+    FilesystemProcessResultStore<InMemoryBackend>,
 > {
     HostRuntimeServices::new(
         Arc::new(ExtensionRegistry::new()),
-        Arc::new(LocalFilesystem::new()),
+        Arc::new(DiskFilesystem::new()),
         Arc::new(InMemoryResourceGovernor::new()),
         Arc::new(GrantAuthorizer::new()),
-        ProcessServices::in_memory(),
+        ironclaw_processes::in_memory_backed_process_services(),
         CapabilitySurfaceVersion::new("surface-v1").unwrap(),
     )
 }
@@ -1218,13 +1218,13 @@ async fn assert_first_party_denies_before_handler(
     let adapter = FirstPartyRuntimeAdapter::from_registry(
         registry,
         Arc::new(LocalInvocationServicesResolver::new(
-            Arc::new(LocalFilesystem::new()),
+            Arc::new(DiskFilesystem::new()),
             None,
-            Arc::new(LocalHostProcessPort::new()),
+            Arc::new(HostProcessPort::new()),
             Some(Arc::new(InMemorySecretStore::new())),
         )),
     );
-    let filesystem = LocalFilesystem::new();
+    let filesystem = DiskFilesystem::new();
     let governor = InMemoryResourceGovernor::new();
     let package = test_package(WASM_MANIFEST, "test-wasm");
 
@@ -1267,10 +1267,10 @@ impl RecordingRuntimeAdapter {
 }
 
 #[async_trait]
-impl RuntimeAdapter<LocalFilesystem, InMemoryResourceGovernor> for RecordingRuntimeAdapter {
+impl RuntimeAdapter<DiskFilesystem, InMemoryResourceGovernor> for RecordingRuntimeAdapter {
     async fn dispatch_json(
         &self,
-        request: RuntimeAdapterRequest<'_, LocalFilesystem, InMemoryResourceGovernor>,
+        request: RuntimeAdapterRequest<'_, DiskFilesystem, InMemoryResourceGovernor>,
     ) -> Result<RuntimeAdapterResult, DispatchError> {
         *self.calls.lock().unwrap() += 1;
         let usage = ResourceUsage::default();

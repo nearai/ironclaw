@@ -130,9 +130,17 @@ struct RawToolV3 {
     visibility: crate::v2::CapabilityVisibility,
     input_schema_ref: String,
     #[serde(default)]
+    output_schema_ref: Option<String>,
+    #[serde(default)]
     prompt_doc_ref: Option<String>,
     #[serde(default)]
     credentials: Vec<RawToolCredentialV3>,
+    /// Credential-free egress targets for a networked tool (e.g. a provider
+    /// endpoint that 302-redirects to pre-signed blob storage). Populates the
+    /// capability's egress allowlist directly; v2's network-effect validation
+    /// still applies.
+    #[serde(default)]
+    network_targets: Vec<ironclaw_host_api::NetworkTargetPattern>,
     #[serde(default)]
     resource_profile: Option<ironclaw_host_api::ResourceProfile>,
 }
@@ -377,12 +385,14 @@ pub(crate) fn parse_v3(
                 if !tool.credentials.is_empty()
                     || !tool.effects.is_empty()
                     || tool.resource_profile.is_some()
+                    || !tool.network_targets.is_empty()
+                    || tool.output_schema_ref.is_some()
                 {
                     return Err(ManifestV3Error::Invalid {
                         reason: format!(
                             "static tool `{}` on an [mcp] manifest inherits the server \
-                             connection template; remove its credentials, effects, and \
-                             resource_profile",
+                             connection template; remove its credentials, effects, \
+                             network_targets, output_schema_ref, and resource_profile",
                             tool.id
                         ),
                     });
@@ -405,14 +415,14 @@ pub(crate) fn parse_v3(
             }
             _ => RawCapabilityV2 {
                 id: tool.id,
-                network_targets: Vec::new(),
+                network_targets: tool.network_targets,
                 implements: Vec::new(),
                 description: tool.description,
                 effects: with_dispatch_effect(tool.effects.clone()),
                 default_permission: tool.default_permission,
                 visibility: tool.visibility,
                 input_schema_ref: tool.input_schema_ref,
-                output_schema_ref: None,
+                output_schema_ref: tool.output_schema_ref,
                 prompt_doc_ref: tool.prompt_doc_ref,
                 required_host_ports: derived_host_ports(&tool.effects, sandboxed_runtime),
                 runtime_credentials: tool

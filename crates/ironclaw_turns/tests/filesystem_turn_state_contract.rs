@@ -16,8 +16,8 @@ use async_trait::async_trait;
 use chrono::{TimeZone, Utc};
 use ironclaw_filesystem::{
     BackendCapabilities, BackendId, BackendKind, CasExpectation, CompositeRootFilesystem,
-    ContentKind, DirEntry, Entry, FileStat, FilesystemError, FilesystemOperation, InMemoryBackend,
-    IndexPolicy, LocalFilesystem, MountDescriptor, RecordVersion, RootFilesystem, ScopedFilesystem,
+    ContentKind, DirEntry, DiskFilesystem, Entry, FileStat, FilesystemError, FilesystemOperation,
+    InMemoryBackend, IndexPolicy, MountDescriptor, RecordVersion, RootFilesystem, ScopedFilesystem,
     SeqNo, StorageClass, VersionedEntry,
 };
 use ironclaw_host_api::{
@@ -50,9 +50,9 @@ fn engine_filesystem() -> InMemoryBackend {
     InMemoryBackend::new()
 }
 
-fn byte_only_filesystem() -> LocalFilesystem {
+fn byte_only_filesystem() -> DiskFilesystem {
     let storage = tempfile::tempdir().unwrap().keep();
-    let mut fs = LocalFilesystem::new();
+    let mut fs = DiskFilesystem::new();
     fs.mount_local(
         VirtualPath::new("/engine").unwrap(),
         HostPath::from_path_buf(storage),

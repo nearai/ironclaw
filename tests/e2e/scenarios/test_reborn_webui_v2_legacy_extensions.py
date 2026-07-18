@@ -2320,10 +2320,14 @@ async def test_reborn_legacy_configure_modal_enter_key_submits(
         await harness["context"].close()
 
 
-async def test_reborn_legacy_telegram_setup_preserves_token_characters(
+async def test_reborn_legacy_telegram_configure_hosts_pairing_panel(
     reborn_v2_server, reborn_v2_browser
 ):
-    token = "123456789:ABCdef_GHI-jkl_mnop-QRSTuvwxyz"
+    # #6159 retired the per-user Telegram bot-token secret form. The telegram
+    # channel now configures through the WebGeneratedCode pairing panel, which
+    # ConfigureModal hosts directly (design spec §4.2/§5) — never a manual-token
+    # form. Regression: the modal previously rendered a "Telegram Bot Token"
+    # secret entry and submitted it through /setup.
     harness = await _open_mocked_extensions_page(
         reborn_v2_server,
         reborn_v2_browser,
@@ -2350,22 +2354,6 @@ async def test_reborn_legacy_telegram_setup_preserves_token_characters(
     )
     try:
         page = harness["page"]
-        redeem_requests: list[dict] = []
-
-        async def handle_redeem(route):
-            redeem_requests.append(json.loads(route.request.post_data or "{}"))
-            await route.fulfill(
-                status=200,
-                content_type="application/json",
-                body=json.dumps(
-                    {
-                        "provider": "telegram",
-                        "provider_user_id": "123456789",
-                    }
-                ),
-            )
-
-        await page.route("**/api/webchat/v2/extensions/pairing/redeem", handle_redeem)
 
         card = _card_by_title(page, "Telegram")
         await expect(card).to_be_visible(timeout=5000)
@@ -2375,27 +2363,14 @@ async def test_reborn_legacy_telegram_setup_preserves_token_characters(
             page.get_by_role("heading", name="Configure Telegram")
         ).to_be_visible(timeout=5000)
         modal = page.get_by_label("Configure Telegram")
-        await expect(modal.get_by_text("Telegram Bot Token")).to_be_visible()
-        await modal.locator('input[type="password"]').fill(token)
-        await modal.get_by_role("button", name="Save").click()
 
-        await expect(
-            page.get_by_role("heading", name="Configure Telegram")
-        ).to_have_count(0)
-        assert redeem_requests == []
-        assert harness["activate_requests"] == []
-        assert harness["setup_submit_requests"] == [
-            {
-                "package_id": "telegram",
-                "body": {
-                    "action": "submit",
-                    "payload": {
-                        "secrets": {"telegram_bot_token": token},
-                        "fields": {},
-                    },
-                },
-            }
-        ]
+        # The modal hosts the pairing panel, not a bot-token secret form.
+        await expect(modal.get_by_test_id("telegram-pairing-panel")).to_be_visible(
+            timeout=5000
+        )
+        await expect(modal.get_by_text("Telegram Bot Token")).to_have_count(0)
+        await expect(modal.locator('input[type="password"]')).to_have_count(0)
+        assert harness["setup_submit_requests"] == []
     finally:
         await harness["context"].close()
 

@@ -85,17 +85,17 @@ impl crate::FirstPartyCapabilityHandler for GatingHandler {
 fn binder_services(
     handlers: FirstPartyCapabilityRegistry,
 ) -> HostRuntimeServices<
-    LocalFilesystem,
+    DiskFilesystem,
     InMemoryResourceGovernor,
-    InMemoryProcessStore,
-    InMemoryProcessResultStore,
+    ironclaw_processes::FilesystemProcessStore<ironclaw_filesystem::InMemoryBackend>,
+    ironclaw_processes::FilesystemProcessResultStore<ironclaw_filesystem::InMemoryBackend>,
 > {
     HostRuntimeServices::new(
         Arc::new(ExtensionRegistry::new()),
-        Arc::new(LocalFilesystem::new()),
+        Arc::new(DiskFilesystem::new()),
         Arc::new(InMemoryResourceGovernor::new()),
         Arc::new(GrantAuthorizer::new()),
-        ProcessServices::in_memory(),
+        ironclaw_processes::in_memory_backed_process_services(),
         CapabilitySurfaceVersion::new("surface-v1").unwrap(),
     )
     .with_first_party_capabilities(Arc::new(handlers))
@@ -357,7 +357,7 @@ async fn registry_resolver_allowlist_restricts_to_builtin_provider() {
             RuntimeKind,
             Arc<dyn super::super::runtime_adapters::RuntimeAdapter<_, _>>,
         >::new(),
-        Arc::new(LocalFilesystem::new()),
+        Arc::new(DiskFilesystem::new()),
         governor,
         policy_with(
             FilesystemBackendKind::HostWorkspace,

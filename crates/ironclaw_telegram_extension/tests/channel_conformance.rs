@@ -27,7 +27,7 @@ fn scripted_bot_api(request: &RestrictedEgressRequest) -> RestrictedEgressRespon
 }
 
 #[tokio::test]
-async fn telegram_channel_adapter_satisfies_the_conformance_contract() {
+async fn telegram_adapter_satisfies_the_conformance_contract() {
     run_channel_adapter_conformance(ChannelAdapterConformance {
         adapter: Arc::new(TelegramChannelAdapter::new(GroupTriggerPolicy::default())),
         extension_id: "telegram".to_string(),

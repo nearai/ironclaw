@@ -24,7 +24,12 @@ fn xml_escape(raw: &str) -> String {
 
 // ── Plist generation ────────────────────────────────────────────
 
-fn plist_content(invocation: &ServeInvocation, stdout_log: &Path, stderr_log: &Path) -> String {
+fn plist_content(
+    invocation: &ServeInvocation,
+    working_directory: &Path,
+    stdout_log: &Path,
+    stderr_log: &Path,
+) -> String {
     let program_arguments: String = std::iter::once(invocation.exe.display().to_string())
         .chain(invocation.args.iter().cloned())
         .map(|value| format!("    <string>{}</string>", xml_escape(&value)))
@@ -59,6 +64,8 @@ fn plist_content(invocation: &ServeInvocation, stdout_log: &Path, stderr_log: &P
   <true/>
   <key>KeepAlive</key>
   <true/>
+  <key>WorkingDirectory</key>
+  <string>{working_directory}</string>
   <key>EnvironmentVariables</key>
   <dict>
 {environment_variables}
@@ -71,6 +78,7 @@ fn plist_content(invocation: &ServeInvocation, stdout_log: &Path, stderr_log: &P
 </plist>
 "#,
         label = SERVICE_LABEL,
+        working_directory = xml_escape(&working_directory.display().to_string()),
         stdout = xml_escape(&stdout_log.display().to_string()),
         stderr = xml_escape(&stderr_log.display().to_string()),
     )
@@ -195,7 +203,13 @@ pub(super) fn install_with_runner(
     // target the same label/path by design (see the module doc). Either
     // way the write below atomically replaces it.
     let replaced_existing = file.exists();
-    let plist = plist_content(invocation, &stdout_log, &stderr_log);
+    // WorkingDirectory anchors cwd at `<reborn_home>/workspace`, not
+    // launchd's default `/` and not the Reborn home itself — the home is
+    // an ancestor of every default skill root, so it still trips
+    // composition's `paths_overlap` check (see `service_working_directory`).
+    let reborn_home = context.boot_config().home().path();
+    let working_directory = super::ensure_service_working_directory(reborn_home)?;
+    let plist = plist_content(invocation, &working_directory, &stdout_log, &stderr_log);
     super::write_atomic(&file, plist.as_bytes())?;
     if was_loaded {
         // A loaded job keeps running off its in-memory definition until
@@ -338,9 +352,16 @@ pub(super) fn restart_with_runner(runner: &mut dyn ServiceCommandRunner) -> Resu
     )
 }
 
-pub(super) fn status_with_runner(runner: &mut dyn ServiceCommandRunner) -> Result<()> {
-    let plist = plist_path()?;
-    let file_exists = plist.exists();
+/// Installed/running state shared by [`status_with_runner`] and
+/// [`current_state_with_runner`] so the two don't drift on how "installed"
+/// and "running" are derived from `launchctl list`.
+struct LaunchdStatusInfo {
+    installed: bool,
+    running: bool,
+}
+
+fn resolve_status_info(runner: &mut dyn ServiceCommandRunner) -> Result<LaunchdStatusInfo> {
+    let file_exists = plist_path()?.exists();
     // Query launchctl unconditionally — a plist that was removed
     // out-of-band while the job is still loaded is an orphan we must
     // still report as installed, not silently claim "not installed".
@@ -348,9 +369,31 @@ pub(super) fn status_with_runner(runner: &mut dyn ServiceCommandRunner) -> Resul
         runner.run_capture_checked("launchctl list", Command::new("launchctl").arg("list"))?;
     let running = service_running(&list);
     let installed = resolve_installed(file_exists, service_loaded(&list));
-    println!("Service: {}", super::status_label(installed, running));
+    Ok(LaunchdStatusInfo { installed, running })
+}
+
+pub(super) fn status_with_runner(runner: &mut dyn ServiceCommandRunner) -> Result<()> {
+    let plist = plist_path()?;
+    let info = resolve_status_info(runner)?;
+    println!(
+        "Service: {}",
+        super::status_label(info.installed, info.running)
+    );
     println!("Unit: {}", plist.display());
     Ok(())
+}
+
+/// Runner-injectable service-state query behind
+/// [`super::ServicePlatform::current_state_with_runner`] — see that
+/// method's doc.
+pub(super) fn current_state_with_runner(
+    runner: &mut dyn ServiceCommandRunner,
+) -> Result<super::ServiceState> {
+    let info = resolve_status_info(runner)?;
+    Ok(super::ServiceState::from_installed_running(
+        info.installed,
+        info.running,
+    ))
 }
 
 pub(super) fn uninstall_with_runner(runner: &mut dyn ServiceCommandRunner) -> Result<()> {
@@ -672,6 +715,7 @@ mod tests {
     fn plist_content_includes_label() {
         let plist = plist_content(
             &sample_invocation(),
+            Path::new("/home/op/.ironclaw/reborn"),
             Path::new("/home/op/.ironclaw/reborn/logs/serve.stdout.log"),
             Path::new("/home/op/.ironclaw/reborn/logs/serve.stderr.log"),
         );
@@ -683,6 +727,7 @@ mod tests {
     fn plist_content_includes_program_arguments() {
         let plist = plist_content(
             &sample_invocation(),
+            Path::new("/home/op/.ironclaw/reborn"),
             Path::new("/tmp/o.log"),
             Path::new("/tmp/e.log"),
         );
@@ -694,6 +739,7 @@ mod tests {
     fn plist_content_includes_environment_variables() {
         let plist = plist_content(
             &sample_invocation(),
+            Path::new("/home/op/.ironclaw/reborn"),
             Path::new("/tmp/o.log"),
             Path::new("/tmp/e.log"),
         );
@@ -705,6 +751,7 @@ mod tests {
     fn plist_content_marks_run_at_load_and_keep_alive_true() {
         let plist = plist_content(
             &sample_invocation(),
+            Path::new("/home/op/.ironclaw/reborn"),
             Path::new("/tmp/o.log"),
             Path::new("/tmp/e.log"),
         );
@@ -718,11 +765,34 @@ mod tests {
     fn plist_content_includes_stdout_and_stderr_log_paths() {
         let plist = plist_content(
             &sample_invocation(),
+            Path::new("/home/op/.ironclaw/reborn"),
             Path::new("/home/op/.ironclaw/reborn/logs/serve.stdout.log"),
             Path::new("/home/op/.ironclaw/reborn/logs/serve.stderr.log"),
         );
         assert!(plist.contains("<string>/home/op/.ironclaw/reborn/logs/serve.stdout.log</string>"));
         assert!(plist.contains("<string>/home/op/.ironclaw/reborn/logs/serve.stderr.log</string>"));
+    }
+
+    /// Pins the crash-loop fix: without WorkingDirectory, launchd runs with
+    /// cwd=`/`, which overlaps a default skill root and composition refuses
+    /// to boot. `plist_content` just writes the caller-supplied path
+    /// faithfully — see `install_with_runner` /
+    /// `ensure_service_working_directory` for the actual path choice.
+    #[test]
+    fn plist_content_includes_working_directory_line() {
+        let plist = plist_content(
+            &sample_invocation(),
+            Path::new("/home/op/.ironclaw/reborn/workspace"),
+            Path::new("/home/op/.ironclaw/reborn/logs/serve.stdout.log"),
+            Path::new("/home/op/.ironclaw/reborn/logs/serve.stderr.log"),
+        );
+        assert!(plist.contains("<key>WorkingDirectory</key>"));
+        assert!(plist.contains("<string>/home/op/.ironclaw/reborn/workspace</string>"));
+        // WorkingDirectory precedes EnvironmentVariables, matching the doc
+        // comment's placement.
+        let working_dir_index = plist.find("<key>WorkingDirectory</key>").unwrap();
+        let env_vars_index = plist.find("<key>EnvironmentVariables</key>").unwrap();
+        assert!(working_dir_index < env_vars_index);
     }
 
     #[test]
@@ -737,6 +807,7 @@ mod tests {
         };
         let plist = plist_content(
             &invocation,
+            Path::new("/home/op/.ironclaw/reborn"),
             Path::new("/tmp/o.log"),
             Path::new("/tmp/e.log"),
         );
@@ -1363,5 +1434,85 @@ mod tests {
                 None => std::env::remove_var("HOME"),
             }
         }
+    }
+
+    // ── current_state ───────────────────────────────────────────
+
+    #[test]
+    fn current_state_reports_not_installed_when_absent_everywhere() {
+        let _lock = crate::runtime::test_env::lock_runtime_env();
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let prior = std::env::var_os("HOME");
+        // SAFETY: serialized by `lock_runtime_env`; restored below.
+        unsafe { std::env::set_var("HOME", tmp.path()) };
+        let mut runner = RecordingRunner::default();
+        let state = current_state_with_runner(&mut runner);
+        // SAFETY: serialized by `lock_runtime_env`.
+        unsafe {
+            match prior {
+                Some(value) => std::env::set_var("HOME", value),
+                None => std::env::remove_var("HOME"),
+            }
+        }
+        assert_eq!(
+            state.expect("current_state must succeed"),
+            super::super::ServiceState::NotInstalled
+        );
+    }
+
+    #[test]
+    fn current_state_reports_stopped_when_loaded_but_not_running() {
+        let _lock = crate::runtime::test_env::lock_runtime_env();
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let prior = std::env::var_os("HOME");
+        // SAFETY: serialized by `lock_runtime_env`; restored below.
+        unsafe { std::env::set_var("HOME", tmp.path()) };
+        let file = plist_path().expect("plist path");
+        std::fs::create_dir_all(file.parent().expect("plist parent")).expect("create parent");
+        std::fs::write(&file, "plist").expect("write plist");
+        let mut runner = RecordingRunner {
+            launchctl_list: format!("-\t0\t{SERVICE_LABEL}\n"),
+            ..RecordingRunner::default()
+        };
+        let state = current_state_with_runner(&mut runner);
+        // SAFETY: serialized by `lock_runtime_env`.
+        unsafe {
+            match prior {
+                Some(value) => std::env::set_var("HOME", value),
+                None => std::env::remove_var("HOME"),
+            }
+        }
+        assert_eq!(
+            state.expect("current_state must succeed"),
+            super::super::ServiceState::Stopped
+        );
+    }
+
+    #[test]
+    fn current_state_reports_running_when_pid_present() {
+        let _lock = crate::runtime::test_env::lock_runtime_env();
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let prior = std::env::var_os("HOME");
+        // SAFETY: serialized by `lock_runtime_env`; restored below.
+        unsafe { std::env::set_var("HOME", tmp.path()) };
+        let file = plist_path().expect("plist path");
+        std::fs::create_dir_all(file.parent().expect("plist parent")).expect("create parent");
+        std::fs::write(&file, "plist").expect("write plist");
+        let mut runner = RecordingRunner {
+            launchctl_list: format!("123\t0\t{SERVICE_LABEL}\n"),
+            ..RecordingRunner::default()
+        };
+        let state = current_state_with_runner(&mut runner);
+        // SAFETY: serialized by `lock_runtime_env`.
+        unsafe {
+            match prior {
+                Some(value) => std::env::set_var("HOME", value),
+                None => std::env::remove_var("HOME"),
+            }
+        }
+        assert_eq!(
+            state.expect("current_state must succeed"),
+            super::super::ServiceState::Running
+        );
     }
 }

@@ -480,7 +480,7 @@ mod tests {
         ExtensionManifestRef, ExtensionRegistry, InMemoryExtensionInstallationStore,
         MANIFEST_SCHEMA_VERSION, ManifestSource,
     };
-    use ironclaw_filesystem::LocalFilesystem;
+    use ironclaw_filesystem::DiskFilesystem;
     use ironclaw_host_api::ids::ExtensionId;
     use ironclaw_host_runtime::{CapabilitySurfaceVersion, HostRuntimeServices};
     use ironclaw_processes::ProcessServices;
@@ -581,7 +581,7 @@ input_schema_ref = "schemas/echo.input.json"
     fn test_binder() -> ExtensionLaneToolBinder {
         HostRuntimeServices::new(
             Arc::new(ExtensionRegistry::new()),
-            Arc::new(LocalFilesystem::new()),
+            Arc::new(DiskFilesystem::new()),
             Arc::new(InMemoryResourceGovernor::new()),
             Arc::new(GrantAuthorizer::new()),
             ProcessServices::in_memory(),

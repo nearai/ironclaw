@@ -111,6 +111,14 @@ const TERM_COLLISIONS: &[(&str, &str)] = &[
 /// pinned by a self-test; broadening it is a gate regression, not a fix.
 const PATH_TERM_COLLISIONS: &[(&str, &str, &str)] = &[
     (
+        "crates/ironclaw_host_api/src/safe_summary.rs",
+        "github",
+        "GitHub token prefixes (ghp_/github_pat_/gho_/ghu_) in the safe-summary \
+         secret-marker scan — vendor-specific safety detection, the documented \
+         leak-scanner carve-out domain (sourcing from the inventory would weaken \
+         the scan)",
+    ),
+    (
         "crates/ironclaw_llm/src/",
         "google",
         "Google is an LLM vendor (Gemini endpoints, google/gemma model ids) inside the \
@@ -675,8 +683,11 @@ const REBORN_LAYERS: &[&str] = &[
 /// Crates that are the concrete product code (present or planned). A missing
 /// directory is tolerated so the planned extension crates are covered from
 /// the day they appear.
-const CONCRETE_EXTENSION_CRATES: &[&str] =
-    &["ironclaw_slack_extension", "ironclaw_telegram_extension"];
+const CONCRETE_EXTENSION_CRATES: &[&str] = &[
+    "ironclaw_slack_extension",
+    "ironclaw_telegram_extension",
+    "ironclaw_telegram_v2_adapter",
+];
 
 /// Generic-side crates excluded from the scan for a documented structural
 /// reason (see the module header).
@@ -1249,6 +1260,83 @@ const ALLOWLIST: &[(&str, &str)] = &[
     ("crates/ironclaw_skills/src/types.rs", "slack"),
     // lane-4: dev-dep — the sanctioned DEL-7 dev-dependency on the concrete slack crate (test linkage only); the scanner sees the crate name in Cargo.toml
     ("crates/ironclaw_reborn_composition/Cargo.toml", "slack"),
+    // lane-4: branch — the provider catalog names github_copilot (an LLM
+    // provider id, not the github extension); degenericize with the catalog
+    // slice or carve under an LLM-provider path outside composition.
+    (
+        "crates/ironclaw_reborn_composition/src/llm_admin/provider_admin.rs",
+        "github",
+    ),
+    // lane-4: doc — NEAR AI login copy names its upstream SSO providers.
+    (
+        "crates/ironclaw_reborn_composition/src/llm_admin/nearai_login_serve.rs",
+        "github",
+    ),
+    // Sixth-fold debt: the second-channel host PR's frontend surface
+    // (pairing/setup panels, setup API clients, chat/configure wiring, and
+    // localized pairing copy). Consumed by the generic descriptor-driven
+    // pairing seam (extension-runtime P2), which moves product copy and
+    // routing onto manifest-declared account-setup descriptors.
+    (
+        "crates/ironclaw_webui/frontend/src/components/telegram-pairing-panel.tsx",
+        "telegram",
+    ),
+    (
+        "crates/ironclaw_webui/frontend/src/components/telegram-setup-panel.tsx",
+        "telegram",
+    ),
+    (
+        "crates/ironclaw_webui/frontend/src/lib/channel-setup-api.ts",
+        "slack",
+    ),
+    (
+        "crates/ironclaw_webui/frontend/src/lib/channel-setup-api.ts",
+        "telegram",
+    ),
+    (
+        "crates/ironclaw_webui/frontend/src/lib/telegram-setup-api.ts",
+        "slack",
+    ),
+    (
+        "crates/ironclaw_webui/frontend/src/lib/telegram-setup-api.ts",
+        "telegram",
+    ),
+    (
+        "crates/ironclaw_webui/frontend/src/pages/chat/chat.tsx",
+        "telegram",
+    ),
+    (
+        "crates/ironclaw_webui/frontend/src/pages/chat/components/onboarding-pairing-card.tsx",
+        "telegram",
+    ),
+    ("crates/ironclaw_webui/frontend/src/i18n/ar.ts", "slack"),
+    ("crates/ironclaw_webui/frontend/src/i18n/ar.ts", "telegram"),
+    ("crates/ironclaw_webui/frontend/src/i18n/de.ts", "slack"),
+    ("crates/ironclaw_webui/frontend/src/i18n/de.ts", "telegram"),
+    ("crates/ironclaw_webui/frontend/src/i18n/en.ts", "slack"),
+    ("crates/ironclaw_webui/frontend/src/i18n/en.ts", "telegram"),
+    ("crates/ironclaw_webui/frontend/src/i18n/es.ts", "slack"),
+    ("crates/ironclaw_webui/frontend/src/i18n/es.ts", "telegram"),
+    ("crates/ironclaw_webui/frontend/src/i18n/fr.ts", "slack"),
+    ("crates/ironclaw_webui/frontend/src/i18n/fr.ts", "telegram"),
+    ("crates/ironclaw_webui/frontend/src/i18n/hi.ts", "slack"),
+    ("crates/ironclaw_webui/frontend/src/i18n/hi.ts", "telegram"),
+    ("crates/ironclaw_webui/frontend/src/i18n/ja.ts", "slack"),
+    ("crates/ironclaw_webui/frontend/src/i18n/ja.ts", "telegram"),
+    ("crates/ironclaw_webui/frontend/src/i18n/ko.ts", "slack"),
+    ("crates/ironclaw_webui/frontend/src/i18n/ko.ts", "telegram"),
+    ("crates/ironclaw_webui/frontend/src/i18n/pt-BR.ts", "slack"),
+    (
+        "crates/ironclaw_webui/frontend/src/i18n/pt-BR.ts",
+        "telegram",
+    ),
+    ("crates/ironclaw_webui/frontend/src/i18n/uk.ts", "slack"),
+    ("crates/ironclaw_webui/frontend/src/i18n/uk.ts", "telegram"),
+    ("crates/ironclaw_webui/frontend/src/i18n/zh-CN.ts", "slack"),
+    (
+        "crates/ironclaw_webui/frontend/src/i18n/zh-CN.ts",
+        "telegram",
+    ),
 ];
 
 /// One `(relative path, matched term)` scanner hit.

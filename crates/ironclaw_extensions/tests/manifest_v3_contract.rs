@@ -89,7 +89,7 @@ fn acme_fixture_parses_through_the_single_entry_point() {
     // only sandboxed runtimes (wasm/mcp) derive the egress port from the
     // network effect.
     assert!(tool.required_host_ports.is_empty());
-    // v3 drops output_schema_ref (schemas remain package assets).
+    // The acme fixture declares no output_schema_ref (optional in v3).
     assert!(tool.output_schema_ref.is_none());
 
     // Credential: vendor + per-tool scopes; the account setup derives from
@@ -379,6 +379,8 @@ fn mcp_static_tools_parse_and_inherit_the_connection_template() {
         "credentials = [{ handle = \"zeta_account\", vendor = \"zeta\", audience = { scheme = \"https\", host = \"mcp.zeta.example\" }, injection = { type = \"header\", name = \"authorization\", prefix = \"Bearer \" } }]",
         "effects = [\"network\"]",
         "resource_profile = { default_estimate = { wall_clock_ms = 5000 } }",
+        "network_targets = [{ scheme = \"https\", host_pattern = \"cdn.zeta.example\" }]",
+        "output_schema_ref = \"schemas/zeta/search.output.v1.json\"",
     ] {
         let with_divergent_tool = format!(
             "{}\n[[tools]]\nid = \"zeta.search\"\ndescription = \"Search through Zeta.\"\ndefault_permission = \"ask\"\ninput_schema_ref = \"schemas/zeta/search.input.v1.json\"\n{divergent}\n",
@@ -551,6 +553,56 @@ access_token = "/access_token"
     assert_eq!(
         v2_record.resolved().auth[0].setup,
         v3_record.resolved().auth[0].setup
+    );
+}
+
+/// Regression contract for the v3 dialect extension shipped with the
+/// redirect-egress tool port: a plain (non-`[mcp]`) `[[tools]]` entry may
+/// declare `output_schema_ref` and credential-free `network_targets`, and
+/// both thread into the normalized capability (the egress allowlist and the
+/// output-schema asset requirement read them from there).
+#[test]
+fn plain_tools_thread_output_schema_ref_and_network_targets() {
+    let toml = format!(
+        r#"
+schema_version = "{MANIFEST_SCHEMA_VERSION_V3}"
+id = "zephyrite"
+name = "Zephyrite"
+version = "0.1.0"
+description = "test"
+trust = "first_party_requested"
+
+[runtime]
+kind = "wasm"
+module = "wasm/zephyrite_tool.wasm"
+
+[[tools]]
+id = "zephyrite.fetch_log"
+description = "Fetches a build log."
+effects = ["network"]
+default_permission = "ask"
+visibility = "model"
+input_schema_ref = "schemas/zephyrite/fetch_log.input.v1.json"
+output_schema_ref = "schemas/zephyrite/fetch_log.output.v1.json"
+network_targets = [{{ scheme = "https", host_pattern = "*.blob.zephyrite.example" }}]
+"#
+    );
+    let record = parse_v3(&toml).expect("plain v3 manifest with dialect fields parses");
+    let manifest = record.manifest();
+    assert_eq!(manifest.capabilities.len(), 1);
+    let tool = &manifest.capabilities[0];
+    assert_eq!(
+        tool.output_schema_ref.as_ref().map(|r| r.as_str()),
+        Some("schemas/zephyrite/fetch_log.output.v1.json")
+    );
+    assert_eq!(tool.network_targets.len(), 1);
+    assert_eq!(
+        tool.network_targets[0].scheme,
+        Some(ironclaw_host_api::NetworkScheme::Https)
+    );
+    assert_eq!(
+        tool.network_targets[0].host_pattern,
+        "*.blob.zephyrite.example"
     );
 }
 

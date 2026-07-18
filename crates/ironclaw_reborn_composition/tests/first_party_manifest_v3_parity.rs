@@ -54,6 +54,7 @@ fn setup_kind(setup: &RuntimeCredentialAccountSetup) -> &'static str {
         RuntimeCredentialAccountSetup::ManualToken => "manual_token",
         RuntimeCredentialAccountSetup::OAuth { .. } => "oauth",
         RuntimeCredentialAccountSetup::Retired => "retired",
+        RuntimeCredentialAccountSetup::Pairing => "pairing",
     }
 }
 

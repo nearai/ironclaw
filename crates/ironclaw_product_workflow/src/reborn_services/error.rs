@@ -99,6 +99,13 @@ impl RebornServicesError {
         Self::from_status(RebornServicesErrorCode::Internal, 500, false)
     }
 
+    /// Sanitized not-found (404) error for host-composition adapters: the
+    /// requested entity/identifier is not known to any mounted facade. Client
+    /// input, not a host fault — never map this shape to `internal()`.
+    pub fn not_found() -> Self {
+        Self::from_status(RebornServicesErrorCode::NotFound, 404, false)
+    }
+
     /// Build a sanitized internal (500) error from a backend cause, logging the
     /// cause so a 500 can never leave a boundary silently.
     ///

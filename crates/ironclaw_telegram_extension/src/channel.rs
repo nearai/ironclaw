@@ -11,9 +11,8 @@
 use async_trait::async_trait;
 use ironclaw_host_api::{NetworkMethod, RestrictedEgress, RestrictedEgressRequest, SecretHandle};
 use ironclaw_product_adapters::{
-    AdapterInstallationId, ChannelAdapter, ChannelContext, ChannelError,
-    DeliveryReport, InboundOutcome, OutboundEnvelope, OutboundPart,
-    PartDeliveryOutcome, VerifiedInbound,
+    AdapterInstallationId, ChannelAdapter, ChannelContext, ChannelError, DeliveryReport,
+    InboundOutcome, OutboundEnvelope, OutboundPart, PartDeliveryOutcome, VerifiedInbound,
 };
 
 use crate::payload::{

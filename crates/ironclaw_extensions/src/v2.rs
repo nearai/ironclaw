@@ -856,6 +856,10 @@ pub(crate) fn capability_surfaces_from_parts(
                         accumulator.saw_manual_token = true;
                     }
                     RuntimeCredentialAccountSetup::Retired => {}
+                    // Pairing-setup credentials (WebGeneratedCode channel
+                    // pairing) surface through the channel connection
+                    // strategy, not as an auth-provider surface.
+                    RuntimeCredentialAccountSetup::Pairing => {}
                 }
             }
         }

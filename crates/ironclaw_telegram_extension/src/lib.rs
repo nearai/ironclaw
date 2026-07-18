@@ -27,4 +27,8 @@ pub use payload::{
     TELEGRAM_USER_ACTOR_KIND, TelegramInboundEvent, normalize_telegram_update,
     parse_telegram_update,
 };
-pub use render::{TelegramRenderError, render_final_reply, render_progress_typing};
+pub use render::{
+    TelegramRenderError, TelegramReplyTarget, build_reply_target_binding, parse_reply_target,
+    render_auth_prompt, render_final_reply, render_gate_prompt, render_progress_typing,
+    resolve_reply_target,
+};

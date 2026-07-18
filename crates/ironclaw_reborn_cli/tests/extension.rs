@@ -64,6 +64,7 @@ fn extension_install_json_uses_reborn_home_without_v1_state() {
         .arg("zztest-mcp")
         .arg("--json")
         .env_clear()
+        .env("IRONCLAW_DISABLE_OS_KEYCHAIN", "1")
         .env("IRONCLAW_REBORN_HOME", &reborn_home)
         .env("IRONCLAW_BASE_DIR", &v1_base_dir)
         .output()
@@ -108,6 +109,7 @@ fn extension_search_human_output_escapes_control_characters() {
         .arg("search")
         .arg("zztest-evil")
         .env_clear()
+        .env("IRONCLAW_DISABLE_OS_KEYCHAIN", "1")
         .env("IRONCLAW_REBORN_HOME", &reborn_home)
         .output()
         .expect("ironclaw-reborn extension search should run");
@@ -155,6 +157,7 @@ fn run_extension_json(reborn_home: &Path, args: &[&str]) -> serde_json::Value {
         .arg("extension")
         .args(args)
         .env_clear()
+        .env("IRONCLAW_DISABLE_OS_KEYCHAIN", "1")
         .env("IRONCLAW_REBORN_HOME", reborn_home)
         .output()
         .expect("ironclaw-reborn extension command should run");

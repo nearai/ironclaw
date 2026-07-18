@@ -17,7 +17,7 @@ use ironclaw_extensions::{
     CapabilityProviderHostApiContract, ExtensionManifest, ExtensionPackage, ExtensionRuntime,
     HostApiContractRegistry, ManifestSource,
 };
-use ironclaw_filesystem::{LocalFilesystem, RootFilesystem};
+use ironclaw_filesystem::{DiskFilesystem, RootFilesystem};
 use ironclaw_host_api::*;
 use ironclaw_resources::*;
 use ironclaw_wasm::wasm_sandbox_core::SandboxLimits;
@@ -691,7 +691,7 @@ impl WasmRuntimeAdapter {
 struct LocalLaneRequest<'a> {
     package: &'a ExtensionPackage,
     capability_id: &'a CapabilityId,
-    filesystem: &'a LocalFilesystem,
+    filesystem: &'a DiskFilesystem,
     governor: &'a InMemoryResourceGovernor,
     scope: ResourceScope,
     estimate: ResourceEstimate,
@@ -703,7 +703,7 @@ struct LocalLaneRequest<'a> {
 /// mirroring the production registry-lane resolver's shape at test scale.
 fn dispatcher_for(
     registry: &ironclaw_extensions::ExtensionRegistry,
-    filesystem: Arc<LocalFilesystem>,
+    filesystem: Arc<DiskFilesystem>,
     governor: Arc<InMemoryResourceGovernor>,
     adapter: &Arc<WasmRuntimeAdapter>,
 ) -> RuntimeDispatcher<'static, InMemoryResourceGovernor> {
@@ -745,7 +745,7 @@ impl ToolResolver for MapResolver {
 struct RegistryBoundWasmCapability {
     package: Arc<ExtensionPackage>,
     adapter: Arc<WasmRuntimeAdapter>,
-    filesystem: Arc<LocalFilesystem>,
+    filesystem: Arc<DiskFilesystem>,
     governor: Arc<InMemoryResourceGovernor>,
 }
 
@@ -908,9 +908,9 @@ fn capability_provider_contracts() -> HostApiContractRegistry {
     contracts
 }
 
-fn mounted_empty_extension_root() -> LocalFilesystem {
+fn mounted_empty_extension_root() -> DiskFilesystem {
     let storage = tempfile::tempdir().unwrap().keep();
-    let mut fs = LocalFilesystem::new();
+    let mut fs = DiskFilesystem::new();
     fs.mount_local(
         VirtualPath::new("/system/extensions").unwrap(),
         HostPath::from_path_buf(storage),
@@ -923,7 +923,7 @@ async fn filesystem_with_wasm_component(
     extension_id: &str,
     module_path: &str,
     wasm_bytes: &[u8],
-) -> LocalFilesystem {
+) -> DiskFilesystem {
     let fs = mounted_empty_extension_root();
     let path =
         VirtualPath::new(format!("/system/extensions/{extension_id}/{module_path}")).unwrap();

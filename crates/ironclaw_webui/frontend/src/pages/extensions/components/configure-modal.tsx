@@ -155,7 +155,6 @@ export function ConfigureModal({ extension, onActivate, onClose, onSaved }) {
     setupReadyForActivation({ extension, secrets, fields });
   const oauthBusy = oauthMutation.isPending || oauthMutation.isAuthorizing;
   const setupUrl = httpsUrl(onboarding?.setup_url);
-
   if (isPairingChannel) {
     return (
       <ModalShell

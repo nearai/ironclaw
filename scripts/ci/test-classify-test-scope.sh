@@ -81,6 +81,22 @@ has_legacy_tests=false
 has_reborn_tests=true"
 
 assert_scope \
+  "reborn telegram extension crate" \
+  "crates/ironclaw_telegram_extension/src/channel.rs" \
+  "docs_only=false
+has_core_code=true
+has_legacy_tests=false
+has_reborn_tests=true"
+
+assert_scope \
+  "reborn telegram v2 protocol adapter crate" \
+  "crates/ironclaw_telegram_v2_adapter/src/render.rs" \
+  "docs_only=false
+has_core_code=true
+has_legacy_tests=false
+has_reborn_tests=true"
+
+assert_scope \
   "reborn support crate" \
   "crates/ironclaw_outbound/src/lib.rs" \
   "docs_only=false

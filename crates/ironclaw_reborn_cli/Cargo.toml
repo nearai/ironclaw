@@ -89,6 +89,10 @@ chrono = { version = "0.4", features = ["serde"] }
 hex = "0.4.3"
 clap = { version = "4", features = ["derive", "env"] }
 clap_complete = "4.5.0"
+# Masked (echo-suppressed) API-key prompt in `onboard`. Same crate v1's setup
+# wizard uses for secret-input masking — reused here rather than adding a
+# second terminal-masking dependency.
+crossterm = "0.29"
 dotenvy = "0.15"
 ironclaw_extension_host = { path = "../ironclaw_extension_host", version = "0.1.0" }
 ironclaw_reborn_composition = { path = "../ironclaw_reborn_composition", version = "0.1.0" }
@@ -104,6 +108,7 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sha2 = "0.11"
 tempfile = "3"
+thiserror = "2"
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "signal", "io-util", "io-std", "sync", "time"] }
 tokio-util = { version = "0.7", features = ["rt"] }
 tracing = "0.1"
@@ -131,6 +136,22 @@ ironclaw_reborn_composition = { path = "../ironclaw_reborn_composition", version
 # second, non-serializing lock domain (the #6015 flake). Dev-only: the lock is
 # reached solely from `#[cfg(test)]` code in `runtime::test_env`.
 ironclaw_common = { path = "../ironclaw_common", version = "0.4.2" }
+# Unconditional (not the feature-gated `dep:async-trait` optional dependency
+# above): `commands::onboard::mod`'s write-first-then-config-ordering test
+# implements a fake `ironclaw_secrets::SecretStore` whose `put` always fails,
+# needing `#[async_trait::async_trait]` in every feature combination `cargo
+# test` runs, not just under `webui-v2-beta`.
+async-trait = "0.1"
+# Same fake `SecretStore` impl takes `ResourceScope` / `SecretHandle` /
+# `Timestamp` in its trait method signatures.
+ironclaw_host_api = { path = "../ironclaw_host_api", version = "0.1.0" }
+# Same fake `SecretStore` impl (`FailingSecretStore` in `commands::onboard::mod`'s
+# tests) implements `ironclaw_secrets::SecretStore` directly; production
+# onboarding code only ever touches secrets through
+# `ironclaw_reborn_composition::LlmKeyStore`'s facade (`put_plaintext`), so
+# this stays a dev-only dependency — see
+# `crates/ironclaw_architecture/tests/reborn_dependency_boundaries.rs::reborn_cli_binary_crate_stays_separate_from_v1_root`.
+ironclaw_secrets = { path = "../ironclaw_secrets", version = "0.1.0" }
 
 [[bin]]
 name = "ironclaw-reborn"

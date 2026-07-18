@@ -299,6 +299,48 @@ fn write_token_file(path: &Path, token: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Which of [`resolve_webui_token`]'s two sources produced the resolved
+/// bearer token. `serve` only mounts the CLI-printed `/login?token=` route
+/// when the token came from the file — an env-sourced token (e.g. a
+/// Railway-shaped deployment) must never appear in that route's query
+/// string, where it would leak into edge/proxy access logs. See
+/// `commands::serve::execute`'s `cli_login_mount` and the
+/// `onboard`/`status` login-link printers, which need the source to avoid
+/// advertising a link to an unmounted route.
+#[cfg(feature = "webui-v2-beta")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum WebuiTokenSource {
+    /// Resolved from the operator's env var (`[webui].env_token_var`,
+    /// default `IRONCLAW_REBORN_WEBUI_TOKEN`).
+    Env,
+    /// Resolved from the onboarding-provisioned
+    /// `<reborn_home>/webui-token` fallback file.
+    File,
+}
+
+/// [`resolve_webui_token`]'s result: the bearer value plus which source
+/// produced it (see [`WebuiTokenSource`]).
+///
+/// `Debug` is hand-written (not derived) to redact `value`: it doubles as
+/// the WebChat v2 bearer credential *and* the session-signing HMAC key (see
+/// the module doc), so a derived `Debug` would print the live secret
+/// verbatim into any log line or panic message that formats this struct.
+#[cfg(feature = "webui-v2-beta")]
+pub(crate) struct ResolvedWebuiToken {
+    pub(crate) value: String,
+    pub(crate) source: WebuiTokenSource,
+}
+
+#[cfg(feature = "webui-v2-beta")]
+impl std::fmt::Debug for ResolvedWebuiToken {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ResolvedWebuiToken")
+            .field("value", &"<redacted>")
+            .field("source", &self.source)
+            .finish()
+    }
+}
+
 /// Resolve the WebChat v2 bearer token with precedence:
 ///
 /// 1. `env_value` — the value of the operator's `[webui].env_token_var`
@@ -323,12 +365,15 @@ pub(crate) fn resolve_webui_token(
     env_var_name: &str,
     env_value: Option<&str>,
     reborn_home: &Path,
-) -> anyhow::Result<String> {
+) -> anyhow::Result<ResolvedWebuiToken> {
     if let Some(value) = env_value
         && !value.is_empty()
     {
         validate_token_entropy(value, env_var_name, reborn_home)?;
-        return Ok(value.to_string());
+        return Ok(ResolvedWebuiToken {
+            value: value.to_string(),
+            source: WebuiTokenSource::Env,
+        });
     }
 
     let file_path = webui_token_file_path(reborn_home);
@@ -347,7 +392,10 @@ pub(crate) fn resolve_webui_token(
             // wrongly-permissioned file in place (see
             // `repair_token_file_mode`'s doc for why repair, not reject).
             repair_token_file_mode(&file_path)?;
-            Ok(token)
+            Ok(ResolvedWebuiToken {
+                value: token,
+                source: WebuiTokenSource::File,
+            })
         }
         None => Err(anyhow::anyhow!(
             "{env_var_name} must be set to the WebChat v2 bearer token, or a token file must \
@@ -355,6 +403,82 @@ pub(crate) fn resolve_webui_token(
             file_path.display()
         )),
     }
+}
+
+/// `true` when `serve` will source its webui bearer token from the env var
+/// rather than the token file — the same precedence check
+/// [`resolve_webui_token`] makes, exposed standalone so `onboard`/`status`
+/// can decide whether printing a file-token link is even useful.
+///
+/// `Ok(false)` only for a genuinely unset/empty var. A present-but-not-UTF-8
+/// value is `Err`, not `Ok(false)` — reuses
+/// `commands::serve::present_unicode_env_var`'s unset-vs-not-unicode
+/// distinction so `onboard`/`status` can't disagree with `serve` about
+/// whether the var is "active".
+#[cfg(feature = "webui-v2-beta")]
+pub(crate) fn env_token_is_active(env_var_name: &str) -> anyhow::Result<bool> {
+    Ok(
+        crate::commands::serve::present_unicode_env_var(env_var_name)?
+            .is_some_and(|value| !value.is_empty()),
+    )
+}
+
+/// Resolve which env var name gates the webui bearer token: the operator's
+/// `[webui].env_token_var` override when set, else
+/// `commands::serve::DEFAULT_ENV_TOKEN_VAR`. Shared so `onboard`/`status`
+/// check [`env_token_is_active`] against the same name `serve` resolves
+/// against.
+#[cfg(feature = "webui-v2-beta")]
+pub(crate) fn resolve_env_token_var_name(
+    config_file: Option<&ironclaw_reborn_config::RebornConfigFile>,
+) -> &str {
+    config_file
+        .and_then(|file| file.webui.as_ref())
+        .and_then(|section| section.env_token_var.as_deref())
+        .unwrap_or(crate::commands::serve::DEFAULT_ENV_TOKEN_VAR)
+}
+
+/// What a login-link printer (`onboard`'s finale, `status`) should announce.
+/// A file-token link is only useful — and only points at a route `serve`
+/// actually mounts — when `serve` will source its bearer from the token file
+/// rather than an env var (see [`WebuiTokenSource`]'s doc for why the CLI
+/// login route is file-source-only).
+#[cfg(feature = "webui-v2-beta")]
+pub(crate) enum LoginLinkAnnouncement {
+    /// The CLI-token login link, ready to print.
+    Link(String),
+    /// The env var is active; printing a file-token link would advertise a
+    /// route `serve` won't mount. Carries the env var name so the caller can
+    /// name it in the note.
+    EnvTokenActive { env_var_name: String },
+    /// Neither source is available yet (e.g. `onboard` hasn't provisioned
+    /// the token file, or it's invalid).
+    Unavailable,
+}
+
+/// Resolve what a login-link printer should announce — see
+/// [`LoginLinkAnnouncement`]. Checks the env var first (matching
+/// `resolve_webui_token`'s own precedence): an active env var always wins,
+/// regardless of whether a valid token file also happens to exist.
+///
+/// Propagates a real error when the env var is set but not valid UTF-8 —
+/// see [`env_token_is_active`] — rather than silently treating it as
+/// inactive.
+#[cfg(feature = "webui-v2-beta")]
+pub(crate) fn resolve_login_link_announcement(
+    home: &ironclaw_reborn_config::RebornHome,
+    config_file: Option<&ironclaw_reborn_config::RebornConfigFile>,
+) -> anyhow::Result<LoginLinkAnnouncement> {
+    let env_var_name = resolve_env_token_var_name(config_file);
+    if env_token_is_active(env_var_name)? {
+        return Ok(LoginLinkAnnouncement::EnvTokenActive {
+            env_var_name: env_var_name.to_string(),
+        });
+    }
+    Ok(match login_link(home)? {
+        Some(link) => LoginLinkAnnouncement::Link(link),
+        None => LoginLinkAnnouncement::Unavailable,
+    })
 }
 
 #[cfg(feature = "webui-v2-beta")]
@@ -374,6 +498,29 @@ fn validate_token_entropy(
         webui_token_file_path(reborn_home).display(),
         value.len(),
     ))
+}
+
+/// The CLI-printed bootstrap link into the browser session — `Some` only
+/// when a valid `webui-token` file is present (may not be true in
+/// contexts like `status`, where onboarding may not have run). Uses
+/// `serve`'s own default host:port constants. Shared by every caller that
+/// prints a login link (`onboard`, `status`) so the construction lives in
+/// one place.
+#[cfg(feature = "webui-v2-beta")]
+pub(crate) fn login_link(
+    home: &ironclaw_reborn_config::RebornHome,
+) -> anyhow::Result<Option<String>> {
+    let token = read_token_file_checked(&webui_token_file_path(home.path()))?;
+    Ok(token
+        .filter(|contents| contents.trim().len() >= WEBUI_TOKEN_MIN_BYTES)
+        .map(|contents| {
+            format!(
+                "http://{}:{}/login?token={}",
+                crate::commands::serve::DEFAULT_SERVE_HOST,
+                crate::commands::serve::DEFAULT_SERVE_PORT,
+                contents.trim()
+            )
+        }))
 }
 
 #[cfg(test)]
@@ -446,9 +593,10 @@ mod tests {
     #[test]
     fn resolve_prefers_env_value_when_set() {
         let dir = tempfile::tempdir().expect("tempdir");
-        let token = resolve_webui_token("SOME_TOKEN_VAR", Some(VALID_TOKEN), dir.path())
+        let resolved = resolve_webui_token("SOME_TOKEN_VAR", Some(VALID_TOKEN), dir.path())
             .expect("env value should resolve");
-        assert_eq!(token, VALID_TOKEN);
+        assert_eq!(resolved.value, VALID_TOKEN);
+        assert_eq!(resolved.source, WebuiTokenSource::Env);
     }
 
     #[cfg(feature = "webui-v2-beta")]
@@ -458,9 +606,32 @@ mod tests {
         let path = webui_token_file_path(dir.path());
         fs::write(&path, format!("  {VALID_TOKEN}  \n")).expect("seed token file");
 
-        let token = resolve_webui_token("SOME_TOKEN_VAR", None, dir.path())
+        let resolved = resolve_webui_token("SOME_TOKEN_VAR", None, dir.path())
             .expect("file fallback should resolve");
-        assert_eq!(token, VALID_TOKEN, "file value must be trimmed");
+        assert_eq!(resolved.value, VALID_TOKEN, "file value must be trimmed");
+        assert_eq!(resolved.source, WebuiTokenSource::File);
+    }
+
+    #[cfg(feature = "webui-v2-beta")]
+    #[test]
+    fn resolved_webui_token_debug_redacts_the_value() {
+        let resolved = ResolvedWebuiToken {
+            value: VALID_TOKEN.to_string(),
+            source: WebuiTokenSource::Env,
+        };
+        let debug_output = format!("{resolved:?}");
+        assert!(
+            !debug_output.contains(VALID_TOKEN),
+            "Debug output must not contain the bearer token verbatim: {debug_output}"
+        );
+        assert!(
+            debug_output.contains("<redacted>"),
+            "Debug output should mark the value as redacted: {debug_output}"
+        );
+        assert!(
+            debug_output.contains("Env"),
+            "Debug output should still show the (non-secret) source: {debug_output}"
+        );
     }
 
     #[cfg(feature = "webui-v2-beta")]
@@ -665,14 +836,79 @@ mod tests {
         fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644))
             .expect("loosen permissions to 0644");
 
-        let token = resolve_webui_token("SOME_TOKEN_VAR", None, dir.path())
+        let resolved = resolve_webui_token("SOME_TOKEN_VAR", None, dir.path())
             .expect("a valid token with a wrong mode must still be accepted");
-        assert_eq!(token, VALID_TOKEN);
+        assert_eq!(resolved.value, VALID_TOKEN);
         let mode = fs::metadata(&path)
             .expect("stat token file")
             .permissions()
             .mode()
             & 0o777;
         assert_eq!(mode, 0o600, "mode must be repaired to 0600, got {mode:o}");
+    }
+
+    #[cfg(feature = "webui-v2-beta")]
+    #[test]
+    fn env_token_is_active_true_when_env_var_set_and_non_empty() {
+        let _guard = crate::runtime::test_env::lock_runtime_env();
+        const VAR: &str = "IRONCLAW_REBORN_CLI_TEST_TOKEN_SOURCE_ACTIVE_VAR";
+        // SAFETY: serialized by `lock_runtime_env`; restored below.
+        unsafe { std::env::set_var(VAR, "some-token-value") };
+        let active = env_token_is_active(VAR);
+        // SAFETY: serialized by `lock_runtime_env`.
+        unsafe { std::env::remove_var(VAR) };
+        assert!(
+            active.expect("a present unicode var is not an error"),
+            "a non-empty env var must count as active"
+        );
+    }
+
+    #[cfg(feature = "webui-v2-beta")]
+    #[test]
+    fn env_token_is_active_false_when_unset_or_empty() {
+        let _guard = crate::runtime::test_env::lock_runtime_env();
+        const VAR: &str = "IRONCLAW_REBORN_CLI_TEST_TOKEN_SOURCE_INACTIVE_VAR";
+        // SAFETY: serialized by `lock_runtime_env`.
+        unsafe { std::env::remove_var(VAR) };
+        assert!(
+            !env_token_is_active(VAR).expect("unset is not an error"),
+            "an unset env var is not active"
+        );
+
+        // SAFETY: serialized by `lock_runtime_env`; restored below.
+        unsafe { std::env::set_var(VAR, "") };
+        let active_when_empty = env_token_is_active(VAR);
+        // SAFETY: serialized by `lock_runtime_env`.
+        unsafe { std::env::remove_var(VAR) };
+        assert!(
+            !active_when_empty.expect("a present empty unicode var is not an error"),
+            "an empty-string env var must not count as active, matching \
+             `resolve_webui_token`'s own non-empty check"
+        );
+    }
+
+    #[cfg(feature = "webui-v2-beta")]
+    #[cfg(unix)]
+    #[test]
+    fn env_token_is_active_propagates_not_unicode_instead_of_treating_it_as_inactive() {
+        // Mirrors `commands::serve::present_unicode_env_var_propagates_not_unicode_instead_of_treating_it_as_unset`:
+        // a mangled-UTF-8 token env var must not collapse to "inactive"
+        // here while `serve` itself fails closed on the same value.
+        use std::os::unix::ffi::OsStringExt as _;
+
+        let _guard = crate::runtime::test_env::lock_runtime_env();
+        const VAR: &str = "IRONCLAW_REBORN_CLI_TEST_TOKEN_SOURCE_NON_UNICODE_VAR";
+        let invalid_utf8 = std::ffi::OsString::from_vec(vec![0xFF, 0xFE, 0xFD]);
+        // SAFETY: serialized by `lock_runtime_env`; restored below.
+        unsafe { std::env::set_var(VAR, &invalid_utf8) };
+        let result = env_token_is_active(VAR);
+        // SAFETY: serialized by `lock_runtime_env`.
+        unsafe { std::env::remove_var(VAR) };
+
+        let error = result.expect_err("non-UTF-8 env value must be a real error, not `Ok(false)`");
+        assert!(
+            error.to_string().contains(VAR),
+            "error should name the var: {error}"
+        );
     }
 }

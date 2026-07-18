@@ -27,13 +27,13 @@ fn resolver_with_lanes(
     governor: Arc<InMemoryResourceGovernor>,
     lanes: std::collections::HashMap<
         RuntimeKind,
-        Arc<dyn RuntimeAdapter<LocalFilesystem, InMemoryResourceGovernor>>,
+        Arc<dyn RuntimeAdapter<DiskFilesystem, InMemoryResourceGovernor>>,
     >,
-) -> RegistryLaneToolResolver<LocalFilesystem, InMemoryResourceGovernor> {
+) -> RegistryLaneToolResolver<DiskFilesystem, InMemoryResourceGovernor> {
     RegistryLaneToolResolver::new(
         registry,
         lanes,
-        Arc::new(LocalFilesystem::new()),
+        Arc::new(DiskFilesystem::new()),
         governor,
         policy_with(
             FilesystemBackendKind::HostWorkspace,
@@ -50,10 +50,10 @@ struct EchoLane {
 }
 
 #[async_trait]
-impl RuntimeAdapter<LocalFilesystem, InMemoryResourceGovernor> for EchoLane {
+impl RuntimeAdapter<DiskFilesystem, InMemoryResourceGovernor> for EchoLane {
     async fn dispatch_json(
         &self,
-        request: RuntimeAdapterRequest<'_, LocalFilesystem, InMemoryResourceGovernor>,
+        request: RuntimeAdapterRequest<'_, DiskFilesystem, InMemoryResourceGovernor>,
     ) -> Result<RuntimeAdapterResult, DispatchError> {
         let output = request.input;
         let usage = ResourceUsage {
@@ -122,7 +122,7 @@ async fn resolver_prebinds_and_dispatches_through_the_registered_lane() {
         .unwrap();
     let mut lanes: std::collections::HashMap<
         RuntimeKind,
-        Arc<dyn RuntimeAdapter<LocalFilesystem, InMemoryResourceGovernor>>,
+        Arc<dyn RuntimeAdapter<DiskFilesystem, InMemoryResourceGovernor>>,
     > = std::collections::HashMap::new();
     lanes.insert(
         RuntimeKind::Wasm,
@@ -227,7 +227,7 @@ async fn resolver_tracks_registry_mutations_across_versions() {
     let governor = Arc::new(InMemoryResourceGovernor::new());
     let mut lanes: std::collections::HashMap<
         RuntimeKind,
-        Arc<dyn RuntimeAdapter<LocalFilesystem, InMemoryResourceGovernor>>,
+        Arc<dyn RuntimeAdapter<DiskFilesystem, InMemoryResourceGovernor>>,
     > = std::collections::HashMap::new();
     lanes.insert(
         RuntimeKind::Wasm,
@@ -287,7 +287,7 @@ async fn resolved_binding_survives_registry_swap_mid_flight() {
     let governor = Arc::new(InMemoryResourceGovernor::new());
     let mut lanes: std::collections::HashMap<
         RuntimeKind,
-        Arc<dyn RuntimeAdapter<LocalFilesystem, InMemoryResourceGovernor>>,
+        Arc<dyn RuntimeAdapter<DiskFilesystem, InMemoryResourceGovernor>>,
     > = std::collections::HashMap::new();
     lanes.insert(
         RuntimeKind::Wasm,

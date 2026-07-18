@@ -18,6 +18,7 @@ pub(crate) mod serve;
 #[cfg(feature = "webui-v2-beta")]
 pub(crate) mod serve_sso;
 #[cfg(feature = "webui-v2-beta")]
+#[cfg(feature = "webui-v2-beta")]
 pub(crate) mod service;
 pub(crate) mod skills;
 pub(crate) mod status;

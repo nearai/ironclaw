@@ -506,9 +506,18 @@ async fn callback_handler(
         }
     };
 
+    // USER-DECIDED LAW: SSO/OAuth sessions stay non-operator; only a bearer
+    // verified via the host's operator-capable authenticator (env token or
+    // CLI's /login?token= link) may mint one. Counterpart with the
+    // caller-derived operator bit: cli_token_login.rs's login_handler.
     let bearer = match state
         .session_store
-        .create_session(state.tenant_id.clone(), user_id, state.session_lifetime)
+        .create_session(
+            state.tenant_id.clone(),
+            user_id,
+            state.session_lifetime,
+            false,
+        )
         .await
     {
         Ok(token) => token,

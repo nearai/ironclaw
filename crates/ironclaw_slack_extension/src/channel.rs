@@ -15,10 +15,9 @@ use ironclaw_host_api::{
     NetworkMethod, RestrictedEgress, RestrictedEgressError, RestrictedEgressRequest, SecretHandle,
 };
 use ironclaw_product_adapters::{
-    AdapterInstallationId, ChannelAdapter, ChannelError, DeliveryReport,
-    ExternalConversationRef, ImmediateResponse, InboundOutcome,
-    OutboundEnvelope, OutboundPart, PartDeliveryOutcome, TargetCandidate, TargetQuery,
-    VerifiedInbound,
+    AdapterInstallationId, ChannelAdapter, ChannelError, DeliveryReport, ExternalConversationRef,
+    ImmediateResponse, InboundOutcome, OutboundEnvelope, OutboundPart, PartDeliveryOutcome,
+    TargetCandidate, TargetQuery, VerifiedInbound,
 };
 use serde::Deserialize;
 

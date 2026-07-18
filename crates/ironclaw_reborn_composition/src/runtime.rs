@@ -106,7 +106,7 @@ use ironclaw_turns::run_profile::UserProfileContext;
 
 use self::latency::{trace_runtime_latency_error, trace_runtime_latency_ok};
 use self::runtime_turn_scheduler::RuntimeTurnScheduler;
-use crate::factory::{LocalDevRootFilesystem, LocalDevTurnStateStore, builtin_extension_registry};
+use crate::factory::{LocalDevTurnStateStore, builtin_extension_registry};
 use crate::local_dev_capability_policy::{LocalDevCapabilityPolicy, local_dev_capability_policy};
 #[cfg(any(test, feature = "test-support"))]
 use crate::outbound::OutboundDeliveryTargetRegistrationOutcome;
@@ -120,6 +120,7 @@ use crate::outbound::{
 use crate::projection::{RebornProjectionServices, build_reborn_projection_services};
 use crate::root::default_system_prompt::DefaultSystemPromptIdentitySource;
 use crate::turn_run_snapshot::TurnRunSnapshotSource;
+use ironclaw_filesystem::CompositeRootFilesystem;
 
 #[cfg(any(test, feature = "test-support"))]
 #[derive(Clone)]
@@ -824,9 +825,9 @@ pub(crate) fn build_local_dev_approval_interaction_service_with_turn_run_source(
 }
 
 pub(crate) type LocalDevSelectableSkillContextSource =
-    SelectableSkillContextSource<FilesystemSkillBundleSource<LocalDevRootFilesystem>>;
+    SelectableSkillContextSource<FilesystemSkillBundleSource<CompositeRootFilesystem>>;
 type LocalDevSkillExecutionAdapter =
-    SkillExecutionAdapter<FilesystemSkillBundleSource<LocalDevRootFilesystem>>;
+    SkillExecutionAdapter<FilesystemSkillBundleSource<CompositeRootFilesystem>>;
 
 // TODO(#4416): when a second test-only handle is
 // needed off the trigger poller seam (e.g. trusted_submitter,
@@ -1551,6 +1552,17 @@ impl RebornRuntime {
         self.turn_coordinator.clone()
     }
 
+    /// The runtime's turn coordinator — the same `Arc` production wiring hands
+    /// to the WebUI facade and the channel hosts
+    /// ([`RebornRuntime::webui_turn_coordinator`]) — so downstream integration
+    /// tests can poll `GetRunStateRequest` for runs submitted through the
+    /// composed surfaces (e.g. waiting on a `BlockedAuth` park and its resume).
+    /// For tests only — ships zero bytes in production builds.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn webui_turn_coordinator_for_test(&self) -> Arc<dyn TurnCoordinator> {
+        self.webui_turn_coordinator()
+    }
+
     /// The generic post-OAuth channel-identity binding config for this
     /// deployment (extension-runtime §5.5): channel extensions bind through
     /// generic discovery over the durable installation store; bindings
@@ -1744,8 +1756,9 @@ impl RebornRuntime {
     /// C-ATTACH test seam so the two views can never drift apart.
     pub(crate) fn webui_workspace_filesystem(
         &self,
-    ) -> Option<Arc<ironclaw_filesystem::ScopedFilesystem<crate::factory::LocalDevRootFilesystem>>>
-    {
+    ) -> Option<
+        Arc<ironclaw_filesystem::ScopedFilesystem<ironclaw_filesystem::CompositeRootFilesystem>>,
+    > {
         self.services.read_write_workspace_filesystem()
     }
 
@@ -1760,8 +1773,9 @@ impl RebornRuntime {
     /// a strictly read-only, multi-mount navigation view.
     pub(crate) fn webui_browse_filesystem(
         &self,
-    ) -> Option<Arc<ironclaw_filesystem::ScopedFilesystem<crate::factory::LocalDevRootFilesystem>>>
-    {
+    ) -> Option<
+        Arc<ironclaw_filesystem::ScopedFilesystem<ironclaw_filesystem::CompositeRootFilesystem>>,
+    > {
         let rt = self.services.local_runtime.as_ref()?;
         Some(Arc::new(ironclaw_filesystem::ScopedFilesystem::new(
             Arc::clone(&rt.extension_filesystem),
@@ -2423,7 +2437,7 @@ impl RebornRuntime {
 
     fn skill_execution_plan_for_run(
         &self,
-        adapter: &SkillExecutionAdapter<FilesystemSkillBundleSource<LocalDevRootFilesystem>>,
+        adapter: &SkillExecutionAdapter<FilesystemSkillBundleSource<CompositeRootFilesystem>>,
         scope: &TurnScope,
         run_id: TurnRunId,
     ) -> Result<RebornSkillExecutionPlan, RebornRuntimeError> {
@@ -3014,13 +3028,20 @@ pub async fn build_reborn_runtime(
         invocation_id: InvocationId::new(),
     };
     let mut services = build_reborn_services(services_input).await?;
-    #[cfg(feature = "root-llm-provider")]
-    let llm =
-        apply_startup_stored_llm_key(llm, crate::LlmKeyStore::new(services.secret_store())).await?;
+    // The stored key no longer feeds the model gateway here (see the
+    // post-construction reload below); the NEAR AI MCP bootstrap check is a
+    // separate consumer that inspects `llm.config.nearai.api_key` directly,
+    // so it still needs the key overlaid onto a local clone.
     #[cfg(feature = "root-llm-provider")]
     if !has_nearai_mcp_bootstrap_config {
-        bootstrap_nearai_mcp_from_effective_llm(&services, llm.as_ref(), nearai_mcp_owner_scope)
-            .await?;
+        let llm_for_mcp_bootstrap =
+            overlay_stored_llm_key_for_nearai_mcp_bootstrap(llm.clone(), &services).await?;
+        bootstrap_nearai_mcp_from_effective_llm(
+            &services,
+            llm_for_mcp_bootstrap.as_ref(),
+            nearai_mcp_owner_scope,
+        )
+        .await?;
     }
     enforce_runtime_cutover_gate(profile, &services.readiness)?;
 
@@ -3164,10 +3185,11 @@ pub async fn build_reborn_runtime(
     //    building a real gateway only to discard it wastes startup work (and, on
     //    the cold-boot path, an LLM session manager), which made
     //    timeout-sensitive tests flaky. When no override is set, build normally.
-    // Build the (optional) skill-learning provider from the resolved LLM config
-    // BEFORE the gateway consumes `llm`. Distillation/refinement runs against a
-    // stronger model (IRONCLAW_SKILL_LEARNING_MODEL), reusing the run's NEAR AI
-    // credentials with only the model overridden.
+    // Build the (optional) skill-learning provider from the resolved LLM config.
+    // Distillation/refinement runs against a stronger model
+    // (IRONCLAW_SKILL_LEARNING_MODEL), reusing the run's NEAR AI credentials
+    // with only the model overridden. `llm` no longer feeds the model gateway
+    // build below (see `build_production_model_gateway`).
     #[cfg(feature = "root-llm-provider")]
     let skill_learning_provider = match llm.as_ref() {
         Some(resolved) => build_skill_learning_provider(&resolved.config).await,
@@ -3176,13 +3198,13 @@ pub async fn build_reborn_runtime(
     #[cfg(all(feature = "root-llm-provider", any(test, feature = "test-support")))]
     let (model_gateway, llm_cost_table, llm_reload) = match model_gateway_override {
         Some(override_gateway) => (override_gateway, None, None),
-        None => build_production_model_gateway(llm).await?,
+        None => build_production_model_gateway().await?,
     };
     #[cfg(all(
         feature = "root-llm-provider",
         not(any(test, feature = "test-support"))
     ))]
-    let (model_gateway, llm_cost_table, llm_reload) = build_production_model_gateway(llm).await?;
+    let (model_gateway, llm_cost_table, llm_reload) = build_production_model_gateway().await?;
     #[cfg(all(
         not(feature = "root-llm-provider"),
         any(test, feature = "test-support")
@@ -3675,7 +3697,7 @@ pub async fn build_reborn_runtime(
         // `context/profile.json` via the workspace filesystem. When a local-dev workspace
         // filesystem is available, the `MemoryBackedUserProfileSource` adapter reads it;
         // otherwise `EmptyUserProfileSource` degrades gracefully to `None` (profile unknown).
-        // `extension_filesystem` is the raw `Arc<LocalDevRootFilesystem>` (=
+        // `extension_filesystem` is the raw `Arc<CompositeRootFilesystem>` (=
         // `CompositeRootFilesystem`) — the underlying RootFilesystem the workspace
         // mounts are built from. `MemoryBackedUserProfileSource` constructs its own
         // full virtual paths via `profile_scope_and_path` and does not use the
@@ -4041,6 +4063,29 @@ pub async fn build_reborn_runtime(
     // doesn't disturb its later use.
     #[cfg(feature = "inmemory-turn-state")]
     let turn_state_flush = local_runtime.map(|lr| Arc::clone(&lr.turn_state));
+
+    // Apply the effective LLM config (config.toml/env selection + any stored
+    // key) to the placeholder gateway exactly once, via the same live-reload
+    // path the settings UI uses (see `webui_llm_reload_trigger`). Failure
+    // degrades like a boot with no LLM configured: placeholder stays wired,
+    // operator retries through Settings -> Inference without a restart.
+    #[cfg(feature = "root-llm-provider")]
+    if let (Some(boot_config), Some(reload_parts)) = (boot.as_ref(), llm_reload.as_ref()) {
+        let boot_reload_adapter = crate::llm_admin::llm_reload::RebornLlmReloadAdapter::new(
+            boot_config.clone(),
+            Arc::clone(&reload_parts.reload_handle),
+            Arc::clone(&reload_parts.session),
+            crate::LlmKeyStore::new(services.secret_store()),
+        );
+        if let Err(error) = crate::LlmReloadTrigger::reload(&boot_reload_adapter).await {
+            tracing::warn!(
+                %error,
+                "boot-time LLM reload failed; the placeholder provider stays active until the \
+                 next successful reload (e.g. through Settings -> Inference)"
+            );
+        }
+    }
+
     let runtime = RebornRuntime {
         services,
         turn_coordinator,
@@ -4206,7 +4251,7 @@ async fn append_trusted_laptop_access_audit(
 }
 
 struct LocalDevSkillContextSource {
-    bundle_source: Arc<FilesystemSkillBundleSource<LocalDevRootFilesystem>>,
+    bundle_source: Arc<FilesystemSkillBundleSource<CompositeRootFilesystem>>,
     source: Arc<dyn HostSkillContextSource>,
     activation_source: Arc<LocalDevSelectableSkillContextSource>,
     execution_adapter: Arc<LocalDevSkillExecutionAdapter>,
@@ -4336,15 +4381,21 @@ fn local_dev_filesystem_skill_context_source(
     })
 }
 
+/// Overlay the stored LLM key (if any) onto a clone of `llm`, scoped to
+/// feeding [`bootstrap_nearai_mcp_from_effective_llm`]'s `api_key` presence
+/// check (it inspects the config directly, not the live provider). NOT the
+/// general "stored key -> live provider" mechanism — that's
+/// [`RebornLlmReloadAdapter::reload`], invoked once after boot construction.
 #[cfg(feature = "root-llm-provider")]
-async fn apply_startup_stored_llm_key(
+async fn overlay_stored_llm_key_for_nearai_mcp_bootstrap(
     llm: Option<ResolvedRebornLlm>,
-    keys: crate::LlmKeyStore,
+    services: &RebornServices,
 ) -> Result<Option<ResolvedRebornLlm>, RebornRuntimeError> {
     let Some(mut llm) = llm else {
         return Ok(None);
     };
 
+    let keys = crate::LlmKeyStore::new(services.secret_store());
     if let Some(stored) = keys
         .read(llm.provider_id())
         .await
@@ -4454,13 +4505,17 @@ impl CapabilitySurfaceProfileResolver for AllowAllCapabilitySurfaceResolver {
     }
 }
 
-/// Build the production model gateway and its (optional) LLM-derived
-/// cost table. Cfg-gated so off-feature builds short-circuit to the
-/// stub without referencing types that don't exist.
+/// Build the production model gateway. Cfg-gated so off-feature builds
+/// short-circuit to the stub without referencing types that don't exist.
+///
+/// Cold boot ALWAYS starts from the placeholder-backed swappable gateway,
+/// even when an LLM was resolved at boot — the effective config (including
+/// any stored key) is applied exactly once, right after construction,
+/// through the same live-reload path the settings UI uses
+/// (`RebornLlmReloadAdapter::reload`). No cost table is derived here: there's
+/// no real model to cost until that reload swaps in a real provider.
 #[cfg(feature = "root-llm-provider")]
-async fn build_production_model_gateway(
-    llm: Option<crate::runtime_input::ResolvedRebornLlm>,
-) -> Result<
+async fn build_production_model_gateway() -> Result<
     (
         Arc<dyn ironclaw_loop_host::HostManagedModelGateway>,
         Option<ironclaw_loop_host::StaticModelCostTable>,
@@ -4468,31 +4523,10 @@ async fn build_production_model_gateway(
     ),
     RebornRuntimeError,
 > {
-    // Even with no LLM configured at boot we build a real swappable gateway
-    // around a placeholder provider (which errors until swapped) plus a reload
-    // handle. That way the FIRST configuration made through the settings UI
-    // hot-swaps the placeholder into a working provider without a restart —
-    // otherwise a cold boot would wire a dead stub with no reload seam.
-    match llm {
-        Some(cfg) => {
-            let LlmGatewayBundle {
-                gateway,
-                policy,
-                reload,
-            } = build_llm_gateway(cfg).await?;
-            Ok((gateway, Some(policy.build_cost_table()), Some(reload)))
-        }
-        None => {
-            let LlmGatewayBundle {
-                gateway, reload, ..
-            } = build_placeholder_llm_gateway().await?;
-            // No cost table for the placeholder: there is no real model to cost,
-            // and a synthetic table would gate budgets against a model that
-            // isn't actually in use. The budget cost table is (re)derived when a
-            // real provider is configured + the binary restarts.
-            Ok((gateway, None, Some(reload)))
-        }
-    }
+    let LlmGatewayBundle {
+        gateway, reload, ..
+    } = build_placeholder_llm_gateway().await?;
+    Ok((gateway, None, Some(reload)))
 }
 
 /// Build a dedicated provider for the skill-learning model, when configured.
@@ -4547,10 +4581,6 @@ fn build_production_model_gateway() -> Result<
 #[cfg(feature = "root-llm-provider")]
 struct LlmGatewayBundle {
     gateway: Arc<dyn ironclaw_loop_host::HostManagedModelGateway>,
-    /// Policy used to derive the budget accountant's cost table — kept
-    /// alongside the gateway so the composer doesn't re-derive the
-    /// `ModelProfileId → provider-model` mapping in two places.
-    policy: ironclaw_runner::model_gateway::LlmModelProfilePolicy,
     /// Hot-swap handle + session for the live-reload path. The model gateway
     /// wraps a [`SwappableLlmProvider`], so the settings service can rebuild
     /// the provider chain from updated config and atomically swap the inner
@@ -4567,22 +4597,6 @@ pub(crate) struct RebornLlmReloadParts {
     pub(crate) session: Arc<ironclaw_llm::SessionManager>,
     pub(crate) nearai_login_states:
         Arc<crate::llm_admin::llm_config_service::NearAiLoginStateStore>,
-}
-
-#[cfg(feature = "root-llm-provider")]
-async fn build_llm_gateway(llm: ResolvedRebornLlm) -> Result<LlmGatewayBundle, RebornRuntimeError> {
-    let session = ironclaw_llm::create_session_manager(llm.config.session.clone()).await;
-    // Config is always the construction source. A caller-supplied factory (e.g.
-    // an instrumentation wrapper) then decorates the built provider; without one
-    // the config-built provider is driven as-is.
-    let built = ironclaw_llm::build_static_provider_chain(&llm.config, Arc::clone(&session))
-        .await
-        .map_err(|error| RebornRuntimeError::LlmProvider(error.to_string()))?;
-    // The factory is applied *inside* `wrap_swappable_gateway` — over the
-    // swappable wrapper, not the bare config provider — so a live config reload
-    // (which swaps the swappable's inner) keeps the factory's wrapper in the
-    // call path. See `wrap_swappable_gateway`.
-    wrap_swappable_gateway(built, session, llm.provider_factory.clone())
 }
 
 /// Cold-boot gateway: no LLM configured yet. Wraps a placeholder provider (which
@@ -4632,10 +4646,9 @@ fn wrap_swappable_gateway(
         RebornRuntimeError::LlmProvider(format!("invalid interactive model profile id: {reason}"))
     })?;
     let policy = LlmModelProfilePolicy::new().allow_model_profile(model_profile_id, None);
-    let gateway = LlmProviderModelGateway::new(provider, policy.clone());
+    let gateway = LlmProviderModelGateway::new(provider, policy);
     Ok(LlmGatewayBundle {
         gateway: Arc::new(gateway),
-        policy,
         reload: RebornLlmReloadParts {
             reload_handle,
             session,

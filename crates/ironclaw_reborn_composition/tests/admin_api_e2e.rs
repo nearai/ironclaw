@@ -77,7 +77,12 @@ struct SessionTokenMinter {
 impl AdminApiTokenMinter for SessionTokenMinter {
     async fn mint(&self, tenant: &TenantId, user_id: &UserId) -> Result<SecretString, String> {
         self.store
-            .create_session(tenant.clone(), user_id.clone(), chrono::Duration::days(365))
+            .create_session(
+                tenant.clone(),
+                user_id.clone(),
+                chrono::Duration::days(365),
+                false,
+            )
             .await
             .map_err(|error| error.to_string())
     }
@@ -659,7 +664,12 @@ async fn forged_and_expired_tokens_are_rejected() {
     // Mint a genuine, in-secret bearer (validates under the harness).
     let good_store = session_store_with_secret(OPERATOR_TOKEN);
     let good_token = good_store
-        .create_session(tenant.clone(), user.clone(), chrono::Duration::days(1))
+        .create_session(
+            tenant.clone(),
+            user.clone(),
+            chrono::Duration::days(1),
+            false,
+        )
         .await
         .expect("mint valid token")
         .expose_secret()
@@ -683,7 +693,12 @@ async fn forged_and_expired_tokens_are_rejected() {
 
     // (c) a token minted under a DIFFERENT operator secret → 401 (foreign key).
     let foreign_token = session_store_with_secret("a-totally-different-operator-secret")
-        .create_session(tenant.clone(), user.clone(), chrono::Duration::days(1))
+        .create_session(
+            tenant.clone(),
+            user.clone(),
+            chrono::Duration::days(1),
+            false,
+        )
         .await
         .expect("mint foreign token")
         .expose_secret()
@@ -704,14 +719,19 @@ async fn forged_and_expired_tokens_are_rejected() {
     // minimum 1s token and let it lapse (exp is second-granularity, so wait
     // past the next whole second).
     let zero = good_store
-        .create_session(tenant.clone(), user.clone(), chrono::Duration::zero())
+        .create_session(
+            tenant.clone(),
+            user.clone(),
+            chrono::Duration::zero(),
+            false,
+        )
         .await;
     assert!(
         zero.is_err(),
         "create_session refuses a zero/negative lifetime rather than minting a dead token"
     );
     let expiring = good_store
-        .create_session(tenant, user, chrono::Duration::seconds(1))
+        .create_session(tenant, user, chrono::Duration::seconds(1), false)
         .await
         .expect("mint short-lived token")
         .expose_secret()

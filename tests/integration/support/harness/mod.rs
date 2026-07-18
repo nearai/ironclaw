@@ -227,7 +227,7 @@ pub(crate) struct HostRuntimeCapabilityHarness {
     /// request reaches this double. `None` for every other construction.
     real_egress_transport: Option<Arc<RecordingNetworkHttpTransport>>,
     /// Inert recording process port. `Some` when the harness injected a
-    /// `RecordingProcessPort`; `None` when the live `LocalHostProcessPort` was
+    /// `RecordingProcessPort`; `None` when the live `HostProcessPort` was
     /// used (`.with_live_shell()` path).
     process_port: Option<Arc<super::process::RecordingProcessPort>>,
     /// Raw local-dev memory filesystem backing the user-profile source
@@ -986,7 +986,7 @@ impl HostRuntimeCapabilityHarness {
     }
 
     /// Snapshot of every command string recorded by the inert process port.
-    /// Empty when the harness uses the live `LocalHostProcessPort`
+    /// Empty when the harness uses the live `HostProcessPort`
     /// (`.with_live_shell()` path).
     pub(crate) fn process_commands(&self) -> Vec<String> {
         self.process_port
@@ -1504,7 +1504,9 @@ impl HostRuntimeCapabilityHarness {
             .approval_parts
             .as_ref()
             .map(|parts| Arc::clone(&parts.approval_requests))
-            .unwrap_or_else(|| Arc::new(ironclaw_run_state::InMemoryApprovalRequestStore::new()));
+            .unwrap_or_else(|| {
+                Arc::new(ironclaw_run_state::in_memory_backed_approval_request_store())
+            });
         let approval_requests: Arc<dyn ironclaw_run_state::ApprovalRequestStore> =
             Arc::new(super::doubles::RecordingApprovalRequestStore {
                 inner: inner_approval_requests,

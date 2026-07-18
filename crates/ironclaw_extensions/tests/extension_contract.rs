@@ -1,3 +1,4 @@
+// arch-exempt: large_file, mechanical DiskFilesystem->DiskFilesystem Bucket-2 rename (arch-simplification §4.4), no logic change, plan #6168
 use ironclaw_extensions::*;
 use ironclaw_filesystem::*;
 use ironclaw_host_api::*;
@@ -159,7 +160,7 @@ async fn discovery_reads_host_bundled_legacy_manifests_from_filesystem_virtual_r
     std::fs::create_dir_all(storage.path().join("echo")).unwrap();
     std::fs::write(storage.path().join("echo/manifest.toml"), WASM_MANIFEST).unwrap();
 
-    let mut fs = LocalFilesystem::new();
+    let mut fs = DiskFilesystem::new();
     fs.mount_local(
         VirtualPath::new("/system/extensions").unwrap(),
         HostPath::from_path_buf(storage.path().to_path_buf()),
@@ -198,7 +199,7 @@ async fn discovery_rejects_installed_local_privileged_manifest() {
     )
     .unwrap();
 
-    let mut fs = LocalFilesystem::new();
+    let mut fs = DiskFilesystem::new();
     fs.mount_local(
         VirtualPath::new("/system/extensions").unwrap(),
         HostPath::from_path_buf(storage.path().to_path_buf()),
@@ -266,7 +267,7 @@ async fn discovery_rejects_legacy_top_level_capability_manifests() {
     std::fs::create_dir_all(storage.path().join("echo")).unwrap();
     std::fs::write(storage.path().join("echo/manifest.toml"), legacy).unwrap();
 
-    let mut fs = LocalFilesystem::new();
+    let mut fs = DiskFilesystem::new();
     fs.mount_local(
         VirtualPath::new("/system/extensions").unwrap(),
         HostPath::from_path_buf(storage.path().to_path_buf()),
@@ -300,7 +301,7 @@ async fn discovery_validates_host_api_manifest_with_supplied_contracts() {
     )
     .unwrap();
 
-    let mut fs = LocalFilesystem::new();
+    let mut fs = DiskFilesystem::new();
     fs.mount_local(
         VirtualPath::new("/system/extensions").unwrap(),
         HostPath::from_path_buf(storage.path().to_path_buf()),
@@ -340,7 +341,7 @@ async fn discovery_registers_capability_provider_projected_capabilities() {
     )
     .unwrap();
 
-    let mut fs = LocalFilesystem::new();
+    let mut fs = DiskFilesystem::new();
     fs.mount_local(
         VirtualPath::new("/system/extensions").unwrap(),
         HostPath::from_path_buf(storage.path().to_path_buf()),
@@ -748,7 +749,7 @@ async fn discovery_validates_capability_manifest_with_supplied_host_port_catalog
     )
     .unwrap();
 
-    let mut fs = LocalFilesystem::new();
+    let mut fs = DiskFilesystem::new();
     fs.mount_local(
         VirtualPath::new("/system/extensions").unwrap(),
         HostPath::from_path_buf(storage.path().to_path_buf()),
@@ -788,7 +789,7 @@ async fn discovery_rejects_manifest_id_mismatch_with_directory() {
     )
     .unwrap();
 
-    let mut fs = LocalFilesystem::new();
+    let mut fs = DiskFilesystem::new();
     fs.mount_local(
         VirtualPath::new("/system/extensions").unwrap(),
         HostPath::from_path_buf(storage.path().to_path_buf()),

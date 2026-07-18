@@ -477,6 +477,7 @@ fn untrusted_ingress_paths_cannot_submit_host_trusted_inbound() {
         "crates/ironclaw_webui/src",
         "crates/ironclaw_telegram_extension/src",
         "crates/ironclaw_slack_extension/src",
+        "crates/ironclaw_telegram_v2_adapter/src",
     ];
 
     let mut violations = Vec::new();

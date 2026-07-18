@@ -86,6 +86,7 @@ pub const BUNDLED_EXTENSION_CAPABILITY_IDS: &[&str] = &[
     "github.trigger_workflow",
     "github.get_workflow_runs",
     "github.get_workflow_run_jobs",
+    "github.get_job_logs",
     "github.get_workflow_run_artifacts",
     "github.rerun_failed_workflow_run_jobs",
     "github.rerun_workflow_job",

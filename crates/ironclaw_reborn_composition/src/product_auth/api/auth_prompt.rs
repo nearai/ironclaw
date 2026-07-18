@@ -182,6 +182,9 @@ fn auth_prompt_from_credential_requirement(
         // A retired setup kind (legacy persisted record) has no serviceable
         // challenge; keep the generic requirement-derived prompt.
         RuntimeCredentialAccountSetup::Retired => {}
+        // Pairing setups are serviced by the channel pairing surface (code
+        // redemption), not an auth-prompt challenge; keep the generic prompt.
+        RuntimeCredentialAccountSetup::Pairing => {}
     }
     view.provider = Some(provider);
     view

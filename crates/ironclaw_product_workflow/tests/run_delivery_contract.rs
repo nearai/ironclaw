@@ -14,10 +14,9 @@ use chrono::Utc;
 use ironclaw_host_api::{AgentId, TenantId, ThreadId, UserId};
 use ironclaw_outbound::{
     CommunicationModality, CommunicationPreferenceRecord, CommunicationPreferenceRepository,
-    DeliveredGateRouteStore, DeliveryDefaultScope, InMemoryDeliveredGateRouteStore,
-    InMemoryOutboundStateStore, InMemoryTriggeredRunDeliveryStore, OutboundStateStore,
-    TriggerCommunicationContext, TriggerFireSlot, TriggerOriginRef, TriggerSourceKind,
-    TriggeredRunDeliveryOutcomeKind, TriggeredRunDeliveryStore,
+    DeliveredGateRouteStore, DeliveryDefaultScope, FilesystemOutboundStateStore,
+    OutboundStateStore, TriggerCommunicationContext, TriggerFireSlot, TriggerOriginRef,
+    TriggerSourceKind, TriggeredRunDeliveryOutcomeKind, TriggeredRunDeliveryStore,
 };
 use ironclaw_product_adapters::{
     AdapterInstallationId, AuthPromptView, AuthRequirement, ChannelAdapter, ChannelError,
@@ -477,8 +476,8 @@ fn accepted_ack(run_id: TurnRunId) -> ProductInboundAck {
 struct Harness {
     observer: RunDeliveryObserver,
     adapter: Arc<RecordingChannelAdapter>,
-    store: Arc<InMemoryOutboundStateStore>,
-    route_store: Arc<InMemoryDeliveredGateRouteStore>,
+    store: Arc<FilesystemOutboundStateStore<ironclaw_filesystem::InMemoryBackend>>,
+    route_store: Arc<FilesystemOutboundStateStore<ironclaw_filesystem::InMemoryBackend>>,
     turns: Arc<ScriptedTurnCoordinator>,
     threads: Arc<InMemorySessionThreadService>,
 }
@@ -491,8 +490,9 @@ fn build_harness(
     max_wait: Duration,
 ) -> Harness {
     let adapter = Arc::new(RecordingChannelAdapter::new());
-    let store = Arc::new(InMemoryOutboundStateStore::default());
-    let route_store = Arc::new(InMemoryDeliveredGateRouteStore::default());
+    let store = Arc::new(ironclaw_outbound::test_support::in_memory_backed_outbound_state_store());
+    let route_store =
+        Arc::new(ironclaw_outbound::test_support::in_memory_backed_outbound_state_store());
     let turns = Arc::new(ScriptedTurnCoordinator::with_states(states));
     let threads = Arc::new(InMemorySessionThreadService::default());
     let coordinator = Arc::new(DeliveryCoordinator::new(
@@ -953,8 +953,8 @@ fn triggered_request(run_id: TurnRunId, project_scoped: bool) -> TriggeredRunDel
 struct TriggeredHarness {
     driver: TriggeredRunDeliveryDriver,
     adapter: Arc<RecordingChannelAdapter>,
-    store: Arc<InMemoryOutboundStateStore>,
-    delivery_store: Arc<InMemoryTriggeredRunDeliveryStore>,
+    store: Arc<FilesystemOutboundStateStore<ironclaw_filesystem::InMemoryBackend>>,
+    delivery_store: Arc<FilesystemOutboundStateStore<ironclaw_filesystem::InMemoryBackend>>,
     turns: Arc<ScriptedTurnCoordinator>,
     threads: Arc<InMemorySessionThreadService>,
 }
@@ -965,9 +965,11 @@ fn build_triggered_harness(
     personal_dm_target: bool,
 ) -> TriggeredHarness {
     let adapter = Arc::new(RecordingChannelAdapter::new());
-    let store = Arc::new(InMemoryOutboundStateStore::default());
-    let route_store = Arc::new(InMemoryDeliveredGateRouteStore::default());
-    let delivery_store = Arc::new(InMemoryTriggeredRunDeliveryStore::default());
+    let store = Arc::new(ironclaw_outbound::test_support::in_memory_backed_outbound_state_store());
+    let route_store =
+        Arc::new(ironclaw_outbound::test_support::in_memory_backed_outbound_state_store());
+    let delivery_store =
+        Arc::new(ironclaw_outbound::test_support::in_memory_backed_outbound_state_store());
     let turns = Arc::new(ScriptedTurnCoordinator::with_states(states));
     let threads = Arc::new(InMemorySessionThreadService::default());
     let coordinator = Arc::new(DeliveryCoordinator::new(
@@ -1028,7 +1030,9 @@ fn build_triggered_harness(
     }
 }
 
-async fn seed_preference(store: &InMemoryOutboundStateStore) {
+async fn seed_preference(
+    store: &FilesystemOutboundStateStore<ironclaw_filesystem::InMemoryBackend>,
+) {
     store
         .put_communication_preference(CommunicationPreferenceRecord {
             scope: DeliveryDefaultScope::personal(tenant(), user()),
@@ -1045,7 +1049,7 @@ async fn seed_preference(store: &InMemoryOutboundStateStore) {
 }
 
 async fn wait_for_outcome(
-    store: &InMemoryTriggeredRunDeliveryStore,
+    store: &FilesystemOutboundStateStore<ironclaw_filesystem::InMemoryBackend>,
     run_id: TurnRunId,
 ) -> TriggeredRunDeliveryOutcomeKind {
     for _ in 0..500 {

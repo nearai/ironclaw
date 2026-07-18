@@ -1,13 +1,15 @@
+// arch-exempt: large_file, mechanical FilesystemOutboundStateStore<ironclaw_filesystem::InMemoryBackend> -> FilesystemOutboundStateStore<InMemoryBackend> §4.3 store consolidation, no logic change, plan #6168
 use std::collections::{HashMap, HashSet};
 use std::sync::Mutex;
 
 use async_trait::async_trait;
 use chrono::Utc;
+use ironclaw_filesystem::InMemoryBackend;
 use ironclaw_host_api::{AgentId, ProjectId, TenantId, ThreadId, UserId};
 use ironclaw_outbound::{
     CommunicationDeliveryIntent, CommunicationDeliveryResolutionRequest, CommunicationModality,
     CommunicationPreferenceKey, CommunicationPreferenceRecord, CommunicationPreferenceRepository,
-    CommunicationPreferenceVersion, DeliveryDefaultScope, InMemoryOutboundStateStore,
+    CommunicationPreferenceVersion, DeliveryDefaultScope, FilesystemOutboundStateStore,
     OutboundDeliveryAttempt, OutboundError, OutboundPolicyService, OutboundStateStore,
     ReplyTargetBindingClaim, ReplyTargetBindingValidator, RunNotificationContext,
     RunNotificationEventKind, RunNotificationOrigin, ThreadProjectionAccessClaim,
@@ -201,7 +203,7 @@ fn trigger_context() -> ironclaw_outbound::TriggerCommunicationContext {
 }
 
 fn configured_policy<'a>(
-    store: &'a InMemoryOutboundStateStore,
+    store: &'a FilesystemOutboundStateStore<InMemoryBackend>,
     validator: &'a FakeReplyTargetBindingValidator,
 ) -> OutboundPolicyService<'a> {
     OutboundPolicyService::new(store, &ACCESS_POLICY, validator)
@@ -261,13 +263,13 @@ struct ScriptedChannelAdapter {
     reports: Mutex<VecDeque<Result<DeliveryReport, ChannelError>>>,
     envelopes: Mutex<Vec<OutboundEnvelope>>,
     observed_status: Mutex<Vec<ironclaw_outbound::OutboundDeliveryStatus>>,
-    store: Arc<InMemoryOutboundStateStore>,
+    store: Arc<FilesystemOutboundStateStore<ironclaw_filesystem::InMemoryBackend>>,
     scope: TurnScope,
 }
 
 impl ScriptedChannelAdapter {
     fn new(
-        store: Arc<InMemoryOutboundStateStore>,
+        store: Arc<FilesystemOutboundStateStore<ironclaw_filesystem::InMemoryBackend>>,
         scope: TurnScope,
         reports: Vec<Result<DeliveryReport, ChannelError>>,
     ) -> Self {
@@ -373,7 +375,7 @@ fn retryable_part() -> PartDeliveryOutcome {
 }
 
 fn coordinator_over(
-    store: &Arc<InMemoryOutboundStateStore>,
+    store: &Arc<FilesystemOutboundStateStore<ironclaw_filesystem::InMemoryBackend>>,
     adapter: &Arc<ScriptedChannelAdapter>,
 ) -> DeliveryCoordinator {
     DeliveryCoordinator::new(
@@ -433,7 +435,7 @@ fn coordinated_final_reply(scope: TurnScope, extension_id: &str) -> CoordinatedD
 #[tokio::test]
 async fn coordinator_persists_sending_before_the_adapter_delivers() {
     let scope = scope();
-    let store = Arc::new(InMemoryOutboundStateStore::default());
+    let store = Arc::new(ironclaw_outbound::test_support::in_memory_backed_outbound_state_store());
     let validator = FakeReplyTargetBindingValidator::default();
     validator.allow(validated_reply_target());
     let preferences = FakePreferenceRepository::default();
@@ -511,7 +513,7 @@ async fn coordinator_require_direct_message_rejects_non_dm_target_without_egress
     // `coordinator_persists_sending_before_the_adapter_delivers`, whose request
     // carries `require_direct_message_target: false`.
     let scope = scope();
-    let store = Arc::new(InMemoryOutboundStateStore::default());
+    let store = Arc::new(ironclaw_outbound::test_support::in_memory_backed_outbound_state_store());
     let validator = FakeReplyTargetBindingValidator::default();
     validator.allow(validated_reply_target());
     let preferences = FakePreferenceRepository::default();
@@ -575,7 +577,7 @@ async fn coordinator_rejected_policy_decision_does_not_reach_the_adapter() {
     // (fail-closed before any vendor egress). The failure kind is the policy's
     // AuthorizationRevoked.
     let scope = scope();
-    let store = Arc::new(InMemoryOutboundStateStore::default());
+    let store = Arc::new(ironclaw_outbound::test_support::in_memory_backed_outbound_state_store());
     let validator = FakeReplyTargetBindingValidator::default(); // target not allowed → policy rejects
     let preferences = FakePreferenceRepository::default();
     seed_preference(&preferences, &scope);
@@ -613,7 +615,7 @@ async fn coordinator_rejected_policy_decision_does_not_reach_the_adapter() {
 #[tokio::test]
 async fn coordinator_retries_fully_retryable_reports_then_delivers() {
     let scope = scope();
-    let store = Arc::new(InMemoryOutboundStateStore::default());
+    let store = Arc::new(ironclaw_outbound::test_support::in_memory_backed_outbound_state_store());
     let validator = FakeReplyTargetBindingValidator::default();
     validator.allow(validated_reply_target());
     let preferences = FakePreferenceRepository::default();
@@ -659,7 +661,7 @@ async fn coordinator_retries_fully_retryable_reports_then_delivers() {
 #[tokio::test]
 async fn coordinator_partial_multipart_failure_is_terminal_without_retry() {
     let scope = scope();
-    let store = Arc::new(InMemoryOutboundStateStore::default());
+    let store = Arc::new(ironclaw_outbound::test_support::in_memory_backed_outbound_state_store());
     let validator = FakeReplyTargetBindingValidator::default();
     validator.allow(validated_reply_target());
     let preferences = FakePreferenceRepository::default();
@@ -705,7 +707,7 @@ async fn coordinator_partial_multipart_failure_is_terminal_without_retry() {
 #[tokio::test]
 async fn coordinator_recovery_marks_interrupted_sending_attempts_unknown() {
     let scope = scope();
-    let store = Arc::new(InMemoryOutboundStateStore::default());
+    let store = Arc::new(ironclaw_outbound::test_support::in_memory_backed_outbound_state_store());
     let validator = FakeReplyTargetBindingValidator::default();
     validator.allow(validated_reply_target());
     let preferences = FakePreferenceRepository::default();
@@ -760,7 +762,7 @@ async fn coordinator_recovery_marks_interrupted_sending_attempts_unknown() {
 #[tokio::test]
 async fn coordinator_rejects_new_deliveries_while_draining() {
     let scope = scope();
-    let store = Arc::new(InMemoryOutboundStateStore::default());
+    let store = Arc::new(ironclaw_outbound::test_support::in_memory_backed_outbound_state_store());
     let validator = FakeReplyTargetBindingValidator::default();
     validator.allow(validated_reply_target());
     let preferences = FakePreferenceRepository::default();
@@ -793,7 +795,7 @@ async fn coordinator_rejects_new_deliveries_while_draining() {
 #[tokio::test]
 async fn coordinator_fails_closed_when_the_channel_is_unavailable() {
     let scope = scope();
-    let store = Arc::new(InMemoryOutboundStateStore::default());
+    let store = Arc::new(ironclaw_outbound::test_support::in_memory_backed_outbound_state_store());
     let validator = FakeReplyTargetBindingValidator::default();
     validator.allow(validated_reply_target());
     let preferences = FakePreferenceRepository::default();
@@ -868,7 +870,7 @@ fn working_notice(scope: TurnScope, extension_id: &str) -> NoticeDeliveryRequest
 #[tokio::test]
 async fn coordinator_notice_is_source_routed_and_persists_before_egress() {
     let scope = scope();
-    let store = Arc::new(InMemoryOutboundStateStore::default());
+    let store = Arc::new(ironclaw_outbound::test_support::in_memory_backed_outbound_state_store());
     let adapter = Arc::new(ScriptedChannelAdapter::new(
         Arc::clone(&store),
         scope.clone(),
@@ -934,7 +936,7 @@ async fn coordinator_notice_is_source_routed_and_persists_before_egress() {
 #[tokio::test]
 async fn coordinator_notice_rejects_policy_class_intents() {
     let scope = scope();
-    let store = Arc::new(InMemoryOutboundStateStore::default());
+    let store = Arc::new(ironclaw_outbound::test_support::in_memory_backed_outbound_state_store());
     let adapter = Arc::new(ScriptedChannelAdapter::new(
         Arc::clone(&store),
         scope.clone(),
@@ -965,7 +967,7 @@ async fn coordinator_notice_rejects_policy_class_intents() {
 #[tokio::test]
 async fn coordinator_deliver_rejects_notice_class_intents() {
     let scope = scope();
-    let store = Arc::new(InMemoryOutboundStateStore::default());
+    let store = Arc::new(ironclaw_outbound::test_support::in_memory_backed_outbound_state_store());
     let validator = FakeReplyTargetBindingValidator::default();
     validator.allow(validated_reply_target());
     let preferences = FakePreferenceRepository::default();
@@ -995,7 +997,7 @@ async fn coordinator_deliver_rejects_notice_class_intents() {
 #[tokio::test]
 async fn coordinator_cleanup_retract_parts_reach_the_adapter() {
     let scope = scope();
-    let store = Arc::new(InMemoryOutboundStateStore::default());
+    let store = Arc::new(ironclaw_outbound::test_support::in_memory_backed_outbound_state_store());
     let adapter = Arc::new(ScriptedChannelAdapter::new(
         Arc::clone(&store),
         scope.clone(),
@@ -1032,7 +1034,7 @@ async fn coordinator_cleanup_retract_parts_reach_the_adapter() {
 #[tokio::test]
 async fn coordinator_lazily_recovers_interrupted_attempts_before_a_scopes_first_delivery() {
     let scope = scope();
-    let store = Arc::new(InMemoryOutboundStateStore::default());
+    let store = Arc::new(ironclaw_outbound::test_support::in_memory_backed_outbound_state_store());
     // Durable shape a crash leaves behind: an attempt stuck in `Sending`
     // from a PREVIOUS process lifetime.
     let stray = OutboundDeliveryAttempt {
@@ -1088,7 +1090,7 @@ async fn coordinator_lazily_recovers_interrupted_attempts_before_a_scopes_first_
 #[tokio::test]
 async fn coordinator_notice_rejected_while_draining() {
     let scope = scope();
-    let store = Arc::new(InMemoryOutboundStateStore::default());
+    let store = Arc::new(ironclaw_outbound::test_support::in_memory_backed_outbound_state_store());
     let adapter = Arc::new(ScriptedChannelAdapter::new(
         Arc::clone(&store),
         scope.clone(),
@@ -1115,7 +1117,7 @@ async fn coordinator_notice_rejected_while_draining() {
 #[tokio::test]
 async fn coordinator_notice_fails_closed_when_the_channel_is_unavailable() {
     let scope = scope();
-    let store = Arc::new(InMemoryOutboundStateStore::default());
+    let store = Arc::new(ironclaw_outbound::test_support::in_memory_backed_outbound_state_store());
     let adapter = Arc::new(ScriptedChannelAdapter::new(
         Arc::clone(&store),
         scope.clone(),

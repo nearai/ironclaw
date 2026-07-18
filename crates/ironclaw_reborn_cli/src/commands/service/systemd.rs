@@ -6,6 +6,7 @@ use std::process::Command;
 
 use anyhow::{Context, Result, bail};
 
+use crate::context::RebornCliContext;
 use crate::serve_invocation::ServeInvocation;
 
 use super::{SYSTEMD_UNIT, ServiceCommandRunner, home_dir};
@@ -37,7 +38,7 @@ fn unit_quote(value: &str, escape_dollar: bool) -> Result<String> {
 
 // ── Unit generation ─────────────────────────────────────────────
 
-fn unit_content(invocation: &ServeInvocation) -> Result<String> {
+fn unit_content(invocation: &ServeInvocation, working_directory: &Path) -> Result<String> {
     let environment_lines = invocation
         .env
         .iter()
@@ -53,6 +54,12 @@ fn unit_content(invocation: &ServeInvocation) -> Result<String> {
         .collect::<Result<Vec<_>>>()?
         .join(" ");
 
+    // WorkingDirectory anchors cwd at `<reborn_home>/workspace`, not
+    // systemd's default and not the Reborn home itself — the home is an
+    // ancestor of every default skill root, so it still trips
+    // composition's `paths_overlap` check (see `service_working_directory`).
+    let working_directory = unit_quote(&working_directory.display().to_string(), false)?;
+
     Ok(format!(
         "[Unit]\n\
          Description=IronClaw Reborn daemon\n\
@@ -60,6 +67,7 @@ fn unit_content(invocation: &ServeInvocation) -> Result<String> {
          \n\
          [Service]\n\
          Type=simple\n\
+         WorkingDirectory={working_directory}\n\
          {environment_lines}\
          ExecStart={exec_start_args}\n\
          Restart=always\n\
@@ -181,6 +189,7 @@ fn config_home() -> Result<PathBuf> {
 /// [`super::ServicePlatform::install`], which discards the bool once the
 /// advisory line has been printed.
 pub(super) fn install_with_runner(
+    context: &RebornCliContext,
     invocation: &ServeInvocation,
     runner: &mut dyn ServiceCommandRunner,
 ) -> Result<bool> {
@@ -199,7 +208,9 @@ pub(super) fn install_with_runner(
     // target the same unit name/path by design (see the module doc). The
     // write below atomically replaces it.
     let replaced_existing = previous.is_some();
-    let unit = unit_content(invocation)?;
+    let reborn_home = context.boot_config().home().path();
+    let working_directory = super::ensure_service_working_directory(reborn_home)?;
+    let unit = unit_content(invocation, &working_directory)?;
     let previous_state = query_unit_state(runner)?;
     super::write_atomic(&file, unit.as_bytes())?;
     if let Err(error) = runner.run_checked(
@@ -375,9 +386,19 @@ fn resolve_installed(file_exists: bool, unit_state: SystemdUnitState) -> bool {
     file_exists || unit_state.loaded || unit_state.enabled
 }
 
-pub(super) fn status_with_runner(runner: &mut dyn ServiceCommandRunner) -> Result<()> {
-    let file = unit_path()?;
-    let file_exists = file.exists();
+/// Installed/running state (plus the raw `ActiveState` detail) shared by
+/// [`status_with_runner`] and [`current_state_with_runner`] so the two
+/// don't drift on how "installed" and "running" are derived from
+/// `systemctl show`.
+struct SystemdStatusInfo {
+    file_exists: bool,
+    installed: bool,
+    running: bool,
+    active_state: String,
+}
+
+fn resolve_status_info(runner: &mut dyn ServiceCommandRunner) -> Result<SystemdStatusInfo> {
+    let file_exists = unit_path()?.exists();
     // Query the manager unconditionally — a unit file removed out-of-band
     // while systemd still has it loaded/enabled is an orphan we must
     // still report as installed, not silently claim "not installed".
@@ -397,21 +418,48 @@ pub(super) fn status_with_runner(runner: &mut dyn ServiceCommandRunner) -> Resul
     )?;
     let running = active_state.trim() == "active";
     let installed = resolve_installed(file_exists, unit_state);
+    Ok(SystemdStatusInfo {
+        file_exists,
+        installed,
+        running,
+        active_state,
+    })
+}
+
+pub(super) fn status_with_runner(runner: &mut dyn ServiceCommandRunner) -> Result<()> {
+    let file = unit_path()?;
+    let info = resolve_status_info(runner)?;
     // Detail line stays keyed off file presence: for a genuine orphan
     // (no unit file) the `Service: running/stopped` line already covers
     // it, and there's no installed-config context to attach the raw
     // ActiveState to.
-    let detail = if file_exists {
-        systemd_status_detail(&active_state)
+    let detail = if info.file_exists {
+        systemd_status_detail(&info.active_state)
     } else {
         None
     };
-    println!("Service: {}", super::status_label(installed, running));
+    println!(
+        "Service: {}",
+        super::status_label(info.installed, info.running)
+    );
     if let Some(detail) = detail {
         println!("{detail}");
     }
     println!("Unit: {}", file.display());
     Ok(())
+}
+
+/// Runner-injectable service-state query behind
+/// [`super::ServicePlatform::current_state_with_runner`] — see that
+/// method's doc.
+pub(super) fn current_state_with_runner(
+    runner: &mut dyn ServiceCommandRunner,
+) -> Result<super::ServiceState> {
+    let info = resolve_status_info(runner)?;
+    Ok(super::ServiceState::from_installed_running(
+        info.installed,
+        info.running,
+    ))
 }
 
 /// Shared uninstall rollback: restore the previous unit file (or remove
@@ -659,6 +707,21 @@ mod tests {
         }
     }
 
+    fn sample_reborn_home() -> PathBuf {
+        PathBuf::from("/home/op/.ironclaw/reborn")
+    }
+
+    /// Resolves a `RebornCliContext` from the currently-set `$HOME` (set by
+    /// [`TempHomeGuard::set`]) — used by `install_with_runner` call sites
+    /// below, which now need `context` to derive the unit's
+    /// WorkingDirectory.
+    fn sample_context() -> RebornCliContext {
+        RebornCliContext::from_boot_config(
+            ironclaw_reborn_config::RebornBootConfig::resolve_from_env()
+                .expect("boot config must resolve under temp HOME"),
+        )
+    }
+
     #[test]
     fn unit_quote_escapes_backslash_and_double_quote() {
         assert_eq!(
@@ -682,29 +745,43 @@ mod tests {
 
     #[test]
     fn unit_content_includes_service_type() {
-        let unit = unit_content(&sample_invocation()).expect("valid unit");
+        let unit = unit_content(&sample_invocation(), &sample_reborn_home()).expect("valid unit");
         assert!(unit.contains("Type=simple"));
     }
 
     #[test]
     fn unit_content_includes_exec_start_tokens() {
-        let unit = unit_content(&sample_invocation()).expect("valid unit");
+        let unit = unit_content(&sample_invocation(), &sample_reborn_home()).expect("valid unit");
         assert!(unit.contains(r#""/usr/local/bin/ironclaw-reborn""#));
         assert!(unit.contains(r#""serve""#));
     }
 
     #[test]
     fn unit_content_includes_environment_line() {
-        let unit = unit_content(&sample_invocation()).expect("valid unit");
+        let unit = unit_content(&sample_invocation(), &sample_reborn_home()).expect("valid unit");
         assert!(unit.contains(r#"Environment="IRONCLAW_REBORN_HOME=/home/op/.ironclaw/reborn""#));
     }
 
     #[test]
     fn unit_content_includes_restart_policy_and_install_target() {
-        let unit = unit_content(&sample_invocation()).expect("valid unit");
+        let unit = unit_content(&sample_invocation(), &sample_reborn_home()).expect("valid unit");
         assert!(unit.contains("Restart=always"));
         assert!(unit.contains("RestartSec=3"));
         assert!(unit.contains("WantedBy=default.target"));
+    }
+
+    /// Pins the crash-loop fix: without WorkingDirectory, systemd's default
+    /// cwd overlaps a default skill root and composition refuses to boot.
+    /// `unit_content` just writes the caller-supplied path faithfully — see
+    /// `install_with_runner` / `ensure_service_working_directory` for the
+    /// actual path choice.
+    #[test]
+    fn unit_content_includes_working_directory_line() {
+        let unit = unit_content(&sample_invocation(), &sample_reborn_home()).expect("valid unit");
+        assert!(unit.contains(r#"WorkingDirectory="/home/op/.ironclaw/reborn""#));
+        let working_dir_index = unit.find("WorkingDirectory=").unwrap();
+        let exec_start_index = unit.find("ExecStart=").unwrap();
+        assert!(working_dir_index < exec_start_index);
     }
 
     #[test]
@@ -717,7 +794,7 @@ mod tests {
                 r#"has"quote"#.to_string(),
             )],
         };
-        let unit = unit_content(&invocation).expect("valid unit");
+        let unit = unit_content(&invocation, &sample_reborn_home()).expect("valid unit");
         assert!(unit.contains(r#"IRONCLAW_REBORN_PROFILE=has\"quote"#));
     }
 
@@ -731,7 +808,7 @@ mod tests {
                 "safe\nExecStart=/bin/evil%h".to_string(),
             )],
         };
-        let unit = unit_content(&invocation).expect("escaped unit");
+        let unit = unit_content(&invocation, &sample_reborn_home()).expect("escaped unit");
 
         assert!(
             unit.contains(r#"Environment="IRONCLAW_REBORN_PROFILE=safe\nExecStart=/bin/evil%%h""#)
@@ -843,7 +920,7 @@ mod tests {
             fail_args: Some(vec!["--user", "daemon-reload"]),
             ..RecordingRunner::default()
         };
-        let result = install_with_runner(&sample_invocation(), &mut runner);
+        let result = install_with_runner(&sample_context(), &sample_invocation(), &mut runner);
 
         assert!(result.is_err());
         assert_eq!(
@@ -865,7 +942,7 @@ mod tests {
             fail_nth_args: Some((vec!["--user", "enable", SYSTEMD_UNIT], 1)),
             ..RecordingRunner::default()
         };
-        let result = install_with_runner(&sample_invocation(), &mut runner);
+        let result = install_with_runner(&sample_context(), &sample_invocation(), &mut runner);
 
         assert!(result.is_err());
         assert_eq!(
@@ -963,7 +1040,7 @@ mod tests {
             fail_nth_args: Some((vec!["--user", "enable", SYSTEMD_UNIT], 1)),
             ..RecordingRunner::default()
         };
-        let result = install_with_runner(&sample_invocation(), &mut runner);
+        let result = install_with_runner(&sample_context(), &sample_invocation(), &mut runner);
 
         assert!(result.is_err());
         assert_eq!(
@@ -1002,7 +1079,7 @@ mod tests {
             fail_nth_args: Some((vec!["--user", "enable", SYSTEMD_UNIT], 1)),
             ..RecordingRunner::default()
         };
-        let result = install_with_runner(&sample_invocation(), &mut runner);
+        let result = install_with_runner(&sample_context(), &sample_invocation(), &mut runner);
 
         assert!(result.is_err());
         assert_eq!(
@@ -1077,7 +1154,7 @@ mod tests {
             fail_nth_args: Some((vec!["--user", "daemon-reload"], 2)),
             ..RecordingRunner::default()
         };
-        let error = install_with_runner(&sample_invocation(), &mut runner)
+        let error = install_with_runner(&sample_context(), &sample_invocation(), &mut runner)
             .expect_err("enable and compensating reload failure must surface");
 
         // Top-level `Display` (`to_string()`) now only shows the rollback
@@ -1110,7 +1187,7 @@ mod tests {
             fail_nth_args: Some((vec!["--user", "daemon-reload"], 2)),
             ..RecordingRunner::default()
         };
-        let error = install_with_runner(&sample_invocation(), &mut runner)
+        let error = install_with_runner(&sample_context(), &sample_invocation(), &mut runner)
             .expect_err("enable and compensating reload failure must surface");
 
         let source = error
@@ -1499,5 +1576,51 @@ mod tests {
                 ]
             );
         }
+    }
+
+    // ── current_state ───────────────────────────────────────────
+
+    #[test]
+    fn current_state_reports_not_installed_when_absent_everywhere() {
+        let _lock = crate::runtime::test_env::lock_runtime_env();
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let _home = TempHomeGuard::set(tmp.path());
+        let mut runner = RecordingRunner::default();
+        let state = current_state_with_runner(&mut runner).expect("current_state must succeed");
+        assert_eq!(state, super::super::ServiceState::NotInstalled);
+    }
+
+    #[test]
+    fn current_state_reports_stopped_when_installed_but_inactive() {
+        let _lock = crate::runtime::test_env::lock_runtime_env();
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let _home = TempHomeGuard::set(tmp.path());
+        let file = unit_path().expect("unit path");
+        std::fs::create_dir_all(file.parent().expect("unit parent")).expect("create parent");
+        std::fs::write(file, "unit").expect("write unit");
+        let mut runner = RecordingRunner {
+            unit_state_output: Some("LoadState=loaded\nUnitFileState=enabled\n".to_string()),
+            active_state_output: Some("inactive\n".to_string()),
+            ..RecordingRunner::default()
+        };
+        let state = current_state_with_runner(&mut runner).expect("current_state must succeed");
+        assert_eq!(state, super::super::ServiceState::Stopped);
+    }
+
+    #[test]
+    fn current_state_reports_running_when_active() {
+        let _lock = crate::runtime::test_env::lock_runtime_env();
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let _home = TempHomeGuard::set(tmp.path());
+        let file = unit_path().expect("unit path");
+        std::fs::create_dir_all(file.parent().expect("unit parent")).expect("create parent");
+        std::fs::write(file, "unit").expect("write unit");
+        let mut runner = RecordingRunner {
+            unit_state_output: Some("LoadState=loaded\nUnitFileState=enabled\n".to_string()),
+            active_state_output: Some("active\n".to_string()),
+            ..RecordingRunner::default()
+        };
+        let state = current_state_with_runner(&mut runner).expect("current_state must succeed");
+        assert_eq!(state, super::super::ServiceState::Running);
     }
 }

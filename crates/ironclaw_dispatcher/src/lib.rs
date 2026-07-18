@@ -19,8 +19,8 @@ pub use ironclaw_host_api::{
     CapabilityDisplayOutputPreview, DispatchError, RuntimeDispatchErrorKind,
 };
 use ironclaw_host_api::{
-    CapabilityId, ExtensionId, ResourceReceipt, ResourceReservation,
-    ResourceScope, ResourceUsage, RuntimeKind,
+    CapabilityId, ExtensionId, ResourceReceipt, ResourceReservation, ResourceScope, ResourceUsage,
+    RuntimeKind,
 };
 use ironclaw_resources::ResourceGovernor;
 use serde_json::Value;

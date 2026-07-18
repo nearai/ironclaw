@@ -240,11 +240,11 @@ fn mint_state_token() -> String {
 /// to the server, and it would also leave the SPA on a confusing
 /// post-login URL. The percent-decoded form is also checked so `%23`
 /// smuggling fails.
-pub(super) fn sanitize_redirect(input: Option<String>) -> Option<String> {
+pub(crate) fn sanitize_redirect(input: Option<String>) -> Option<String> {
     input.filter(|raw| is_safe_redirect(raw))
 }
 
-pub(super) fn is_safe_redirect(url: &str) -> bool {
+pub(crate) fn is_safe_redirect(url: &str) -> bool {
     if !check_redirect_chars(url) {
         return false;
     }

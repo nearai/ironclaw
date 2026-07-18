@@ -21,7 +21,8 @@ use ironclaw_host_api::{
 };
 use ironclaw_product_adapter_registry::PRODUCT_ADAPTER_HOST_API_ID;
 use ironclaw_product_workflow::{
-    ChannelConnectionFacade, ChannelConnectionRequirement, LifecycleBlockerRef,
+    ChannelConnectionFacade, ChannelConnectionRequirement, ExtensionAccountSetupDescriptor,
+    ExtensionAccountSetupError, ExtensionAccountSetupRegistry, LifecycleBlockerRef,
     LifecycleExtensionSummary, LifecycleInstalledExtensionSummary, LifecyclePackageKind,
     LifecyclePackageRef, LifecycleProductPayload, LifecycleProductResponse,
     LifecycleReadinessBlocker, LifecycleSearchExtensionSummary, ProductWorkflowError,
@@ -98,6 +99,8 @@ use install_policy::{
     ensure_caller_may_operate, install_scope_for_owner,
 };
 
+const RETIRED_SLACK_USER_EXTENSION_ID: &str = "slack_user";
+
 // This port is deliberately scoped to LocalSingleUser composition. The
 // lifecycle service models the installed extension set, while active_registry
 // is the model-visible capability surface read by host runtime dispatch.
@@ -162,6 +165,11 @@ pub(crate) struct RebornLocalExtensionManagementPort {
     /// bundle). `new` defaults to a fresh unshared (never-filled) slot for
     /// focused tests.
     channel_disconnect_slot: Arc<std::sync::OnceLock<Arc<dyn ChannelConnectionFacade>>>,
+    /// Product-owned account-setup metadata (activation message and
+    /// connection-requirement overrides). Descriptors are declared during
+    /// composition; the activation success path consults it and the pairing
+    /// seam extends it.
+    account_setups: ExtensionAccountSetupRegistry,
 }
 
 /// Concurrent `import_bundle` decodes allowed before further uploads wait.
@@ -235,6 +243,9 @@ pub(crate) async fn restore_extension_lifecycle_state(
         .await
         .map_err(map_extension_installation_error)?
     {
+        if remove_retired_internal_installation(installation_store, &installation).await? {
+            continue;
+        }
         let package_ref = LifecyclePackageRef::new(
             LifecyclePackageKind::Extension,
             installation.extension_id().as_str(),
@@ -326,6 +337,7 @@ impl RebornLocalExtensionManagementPort {
             import_decode_semaphore: Arc::new(Semaphore::new(MAX_CONCURRENT_IMPORT_DECODES)),
             tenant_operator_user_id,
             removal_cleanup: Arc::new(ExtensionRemovalCleanupRegistry::empty()),
+            account_setups: ExtensionAccountSetupRegistry::default(),
             channel_disconnect_slot: Arc::new(std::sync::OnceLock::new()),
         }
     }
@@ -547,6 +559,19 @@ impl RebornLocalExtensionManagementPort {
                 "generic extension host record cleanup failed"
             );
         }
+    }
+
+    pub(crate) fn with_account_setup_registry(
+        mut self,
+        account_setups: ExtensionAccountSetupRegistry,
+    ) -> Self {
+        self.account_setups = account_setups;
+        self
+    }
+
+    #[allow(dead_code)]
+    pub(crate) fn account_setup_registry(&self) -> ExtensionAccountSetupRegistry {
+        self.account_setups.clone()
     }
 
     pub(crate) fn with_removal_cleanup_registry(
@@ -776,7 +801,15 @@ impl RebornLocalExtensionManagementPort {
         // confirms a private credentialed install exists (#5525 review).
         ensure_caller_may_operate(&installation, caller)?;
         let package = self.lifecycle_package(&extension_id).await?;
-        let requirements = package_runtime_credential_auth_requirements(&package);
+        let mut requirements = package_runtime_credential_auth_requirements(&package);
+        if let Some(requirement) = self
+            .account_setups
+            .missing_requirement(&extension_id, caller)
+            .await
+            .map_err(map_account_setup_error)?
+        {
+            requirements.push(requirement);
+        }
         Ok(requirements)
     }
 
@@ -1306,7 +1339,11 @@ impl RebornLocalExtensionManagementPort {
             // claimant already activated this exact package. Treat that state
             // as the authoritative success instead of re-publishing and
             // risking a conflicting failure followed by credential rollback.
-            return Ok(activation_success_response(package_ref, &active_package));
+            return Ok(activation_success_response(
+                package_ref,
+                &active_package,
+                self.account_setups.descriptor(extension_id),
+            ));
         }
         self.enable_lifecycle_package(extension_id).await?;
         if let Err(error) = self
@@ -1386,8 +1423,15 @@ impl RebornLocalExtensionManagementPort {
         }
 
         let visible_capability_ids = package_visible_capability_ids(&active_package);
-        let message =
-            activation_success_message(&package_ref, &active_package, &visible_capability_ids);
+        let account_setup = ironclaw_host_api::ExtensionId::new(package_ref.id.as_str())
+            .ok()
+            .and_then(|id| self.account_setups.descriptor(&id));
+        let message = activation_success_message(
+            &package_ref,
+            &active_package,
+            &visible_capability_ids,
+            account_setup.as_ref(),
+        );
         // For an inbound-channel extension, attach the structured connect
         // requirement so WebChat can render the in-chat connection panel from
         // structured state (the activation message is model guidance only).
@@ -2524,9 +2568,15 @@ fn package_visible_capability_ids(package: &ExtensionPackage) -> Vec<String> {
 fn activation_success_response(
     package_ref: LifecyclePackageRef,
     package: &ExtensionPackage,
+    account_setup: Option<ExtensionAccountSetupDescriptor>,
 ) -> LifecycleProductResponse {
     let visible_capability_ids = package_visible_capability_ids(package);
-    let message = activation_success_message(&package_ref, package, &visible_capability_ids);
+    let message = activation_success_message(
+        &package_ref,
+        package,
+        &visible_capability_ids,
+        account_setup.as_ref(),
+    );
     let connection_required = if package_declares_inbound_product_adapter(package) {
         Some(channel_connection_requirement(
             package_ref.id.as_str(),
@@ -2584,8 +2634,12 @@ fn activation_success_message(
     package_ref: &LifecyclePackageRef,
     package: &ExtensionPackage,
     visible_capability_ids: &[String],
+    account_setup: Option<&ExtensionAccountSetupDescriptor>,
 ) -> String {
     if package_declares_inbound_product_adapter(package) {
+        if let Some(account_setup) = account_setup {
+            return account_setup.activation_success_message.clone();
+        }
         let display_name = package.manifest.name.as_str();
         let connection = channel_connection_requirement(
             package_ref.id.as_str(),
@@ -2905,6 +2959,35 @@ fn map_search_credential_stage_error(
     }
 }
 
+fn map_account_setup_error(error: ExtensionAccountSetupError) -> ProductWorkflowError {
+    match error {
+        ExtensionAccountSetupError::HostUnavailable { extension_id } => {
+            ProductWorkflowError::InvalidBindingRequest {
+                reason: format!(
+                    "the account setup host for extension {} is not enabled on this deployment",
+                    extension_id.as_str()
+                ),
+            }
+        }
+        ExtensionAccountSetupError::StatusUnavailable {
+            extension_id,
+            source,
+        } => {
+            tracing::debug!(
+                extension_id = %extension_id,
+                error = %source,
+                "extension account connection status read failed during activation"
+            );
+            ProductWorkflowError::Transient {
+                reason: format!(
+                    "account connection status is temporarily unavailable for extension {}",
+                    extension_id.as_str()
+                ),
+            }
+        }
+    }
+}
+
 fn map_extension_error(error: ExtensionError) -> ProductWorkflowError {
     match error {
         ExtensionError::Filesystem(_) | ExtensionError::LifecycleEventSink { .. } => {
@@ -2997,6 +3080,33 @@ fn compensation_failure(
     }
 }
 
+async fn remove_retired_internal_installation(
+    installation_store: &Arc<dyn ExtensionInstallationStore>,
+    installation: &ExtensionInstallation,
+) -> Result<bool, ProductWorkflowError> {
+    if installation.extension_id().as_str() != RETIRED_SLACK_USER_EXTENSION_ID {
+        return Ok(false);
+    }
+
+    tracing::info!(
+        extension_id = installation.extension_id().as_str(),
+        installation_id = installation.installation_id().as_str(),
+        "removing retired internal extension installation during lifecycle restore"
+    );
+    installation_store
+        .delete_installation(installation.installation_id())
+        .await
+        .map_err(map_extension_installation_error)?;
+    match installation_store
+        .delete_manifest(installation.extension_id())
+        .await
+    {
+        Ok(()) | Err(ExtensionInstallationError::ManifestNotFound { .. }) => {}
+        Err(error) => return Err(map_extension_installation_error(error)),
+    }
+    Ok(true)
+}
+
 #[cfg(test)]
 mod tests {
 
@@ -3036,7 +3146,7 @@ mod tests {
         SharedExtensionRegistry,
     };
     use ironclaw_filesystem::{
-        DirEntry, FileStat, FilesystemError, FilesystemOperation, LocalFilesystem,
+        DirEntry, DiskFilesystem, FileStat, FilesystemError, FilesystemOperation,
     };
     use ironclaw_host_api::{
         AgentId, CapabilityId, ExtensionLifecycleOperation, HostPath, HostPortCatalog,
@@ -3192,7 +3302,8 @@ mod tests {
             .expect("valid package ref");
         let package = fixture_extension_package().package;
         let visible_capability_ids = vec!["fixture.search".to_string()];
-        let message = activation_success_message(&package_ref, &package, &visible_capability_ids);
+        let message =
+            activation_success_message(&package_ref, &package, &visible_capability_ids, None);
         assert!(message.contains("fixture.search"));
         assert!(
             message.contains("callable by exact name"),
@@ -3211,7 +3322,7 @@ mod tests {
         let package_ref = LifecyclePackageRef::new(LifecyclePackageKind::Extension, "fixture")
             .expect("valid package ref");
         let package = fixture_extension_package().package;
-        let message = activation_success_message(&package_ref, &package, &[]);
+        let message = activation_success_message(&package_ref, &package, &[], None);
         assert!(message.contains("Extension activation succeeded"));
         assert!(
             !message.contains("callable by exact name"),
@@ -3380,15 +3491,20 @@ mod tests {
 
     #[tokio::test]
     async fn extension_activate_returns_generic_pairing_guidance_for_external_channel_package() {
+        // Deliberately a channel with NO native host in this crate: `telegram`
+        // now routes through the telegram-v2 host's own activation copy when
+        // that feature is compiled in, so a `telegram`-named fixture would no
+        // longer exercise the surface-generic external-channel path this test
+        // pins.
         let (_dir, _storage_root, facade, _active_registry, _installation_store) =
             extension_lifecycle_fixture_with_catalog_and_service(
                 AvailableExtensionCatalog::from_packages(vec![fixture_external_channel_package(
-                    "telegram", "Telegram",
+                    "signal", "Signal",
                 )]),
                 ExtensionLifecycleService::new(ExtensionRegistry::new()),
             );
-        let package_ref = LifecyclePackageRef::new(LifecyclePackageKind::Extension, "telegram")
-            .expect("valid ref");
+        let package_ref =
+            LifecyclePackageRef::new(LifecyclePackageKind::Extension, "signal").expect("valid ref");
         facade
             .execute(
                 lifecycle_surface_context(),
@@ -3410,7 +3526,7 @@ mod tests {
         assert_eq!(activate.phase, InstallationState::Active);
         let message = activate.message.as_deref().expect("activation message");
         assert!(
-            message.contains("Telegram is installed as a channel surface")
+            message.contains("Signal is installed as an external channel")
                 && message.contains("app or bot")
                 && message.contains("pairing code")
                 && message.contains("connection panel")
@@ -3431,13 +3547,13 @@ mod tests {
         let requirement = connection_required
             .as_ref()
             .expect("external channel activation must carry a structured connection requirement");
-        assert_eq!(requirement.channel, "telegram");
+        assert_eq!(requirement.channel, "signal");
         assert_eq!(
             requirement.strategy,
             RebornChannelConnectStrategy::InboundProofCode
         );
         assert!(
-            requirement.instructions.contains("Telegram"),
+            requirement.instructions.contains("Signal"),
             "generic channel copy should name the channel: {}",
             requirement.instructions
         );
@@ -5572,6 +5688,116 @@ team_id = "/team/id"
         );
     }
 
+    fn retired_slack_user_manifest() -> &'static str {
+        r#"
+schema_version = "reborn.extension_manifest.v2"
+id = "slack_user"
+name = "Retired Slack User Extension"
+version = "0.1.0"
+description = "Retired internal Slack user tools companion"
+trust = "first_party_requested"
+
+[runtime]
+kind = "wasm"
+module = "wasm/slack_user_tool.wasm"
+
+[[host_api]]
+id = "ironclaw.capability_provider/v1"
+section = "capability_provider.tools"
+
+[capability_provider.tools]
+
+[[capability_provider.tools.capabilities]]
+id = "slack_user.search"
+description = "Search Slack messages"
+effects = ["network"]
+default_permission = "ask"
+visibility = "model"
+input_schema_ref = "schemas/search.input.json"
+output_schema_ref = "schemas/search.output.json"
+"#
+    }
+
+    #[tokio::test]
+    async fn restore_removes_retired_slack_user_installation_without_catalog_entry() {
+        let installation_store = Arc::new(InMemoryExtensionInstallationStore::default());
+        let extension_id =
+            ExtensionId::new(RETIRED_SLACK_USER_EXTENSION_ID).expect("valid extension id");
+        let installation_id =
+            ExtensionInstallationId::new(RETIRED_SLACK_USER_EXTENSION_ID).expect("valid install");
+        let manifest_hash = "sha256:retired-slack-user".to_string();
+        installation_store
+            .upsert_manifest(fixture_manifest_record_with_source(
+                retired_slack_user_manifest(),
+                ManifestSource::HostBundled,
+                Some(manifest_hash.clone()),
+            ))
+            .await
+            .expect("upsert retired slack_user manifest");
+        installation_store
+            .upsert_installation(
+                ExtensionInstallation::new(
+                    installation_id.clone(),
+                    extension_id.clone(),
+                    ExtensionActivationState::Enabled,
+                    ExtensionManifestRef::new(
+                        extension_id.clone(),
+                        Some(ManifestHash::new(manifest_hash).expect("valid hash")),
+                    ),
+                    Vec::new(),
+                    chrono::Utc::now(),
+                    InstallationOwner::Tenant,
+                )
+                .expect("retired slack_user installation"),
+            )
+            .await
+            .expect("upsert retired slack_user installation");
+        let restored_lifecycle = Arc::new(Mutex::new(ExtensionLifecycleService::new(
+            ExtensionRegistry::new(),
+        )));
+        let restored_active_registry =
+            Arc::new(SharedExtensionRegistry::new(ExtensionRegistry::new()));
+        let restored_trust_policy = test_extension_trust_policy();
+        let restored_active_extensions = test_active_extension_publisher(
+            Arc::clone(&restored_active_registry),
+            Arc::clone(&restored_trust_policy),
+        );
+        let installation_store_trait: Arc<dyn ExtensionInstallationStore> =
+            installation_store.clone();
+        let filesystem: Arc<dyn RootFilesystem> = Arc::new(DiskFilesystem::new());
+
+        restore_extension_lifecycle_state(
+            &AvailableExtensionCatalog::from_packages(Vec::new()),
+            &filesystem,
+            &installation_store_trait,
+            &restored_lifecycle,
+            &restored_active_extensions,
+        )
+        .await
+        .expect("retired slack_user install is cleaned up during restore");
+
+        assert!(
+            installation_store
+                .get_installation(&installation_id)
+                .await
+                .expect("read retired installation")
+                .is_none()
+        );
+        assert!(
+            installation_store
+                .get_manifest(&extension_id)
+                .await
+                .expect("read retired manifest")
+                .is_none()
+        );
+        assert!(
+            restored_active_registry
+                .snapshot()
+                .get_extension(&extension_id)
+                .is_none()
+        );
+    }
+
     #[tokio::test]
     async fn restore_skips_installation_absent_from_catalog_and_restores_valid_installation() {
         // Regression for PR #5499 review finding: a persisted installation
@@ -5837,7 +6063,7 @@ team_id = "/team/id"
             Arc::clone(&restored_trust_policy),
         );
         let installation_store: Arc<dyn ExtensionInstallationStore> = installation_store;
-        let filesystem: Arc<dyn RootFilesystem> = Arc::new(LocalFilesystem::new());
+        let filesystem: Arc<dyn RootFilesystem> = Arc::new(DiskFilesystem::new());
 
         let error = restore_extension_lifecycle_state(
             &catalog,
@@ -6543,7 +6769,7 @@ team_id = "/team/id"
         let dir = tempfile::tempdir().expect("tempdir");
         let storage_root = dir.path().join("local-dev");
         std::fs::create_dir_all(storage_root.join("system/extensions")).expect("storage root");
-        let mut filesystem = LocalFilesystem::new();
+        let mut filesystem = DiskFilesystem::new();
         filesystem
             .mount_local(
                 VirtualPath::new("/system/extensions").expect("valid virtual path"),
@@ -7706,7 +7932,7 @@ team_id = "/team/id"
         let storage_root = dir.path().join("local-dev");
         std::fs::create_dir_all(storage_root.join("system/extensions")).expect("storage root");
 
-        let mut filesystem = LocalFilesystem::new();
+        let mut filesystem = DiskFilesystem::new();
         filesystem
             .mount_local(
                 VirtualPath::new("/projects").expect("valid virtual path"),
@@ -7820,7 +8046,7 @@ team_id = "/team/id"
         let storage_root = dir.path().join("local-dev");
         std::fs::create_dir_all(storage_root.join("system/extensions")).expect("storage root");
 
-        let mut filesystem = LocalFilesystem::new();
+        let mut filesystem = DiskFilesystem::new();
         filesystem
             .mount_local(
                 VirtualPath::new("/projects").expect("valid virtual path"),
@@ -7912,7 +8138,7 @@ team_id = "/team/id"
         let storage_root = dir.path().join("local-dev");
         std::fs::create_dir_all(storage_root.join("system/extensions")).expect("storage root");
 
-        let mut filesystem = LocalFilesystem::new();
+        let mut filesystem = DiskFilesystem::new();
         filesystem
             .mount_local(
                 VirtualPath::new("/projects").expect("valid virtual path"),
@@ -8045,7 +8271,7 @@ team_id = "/team/id"
         let dir = tempfile::tempdir().expect("tempdir");
         let storage_root = dir.path().join("local-dev");
         std::fs::create_dir_all(storage_root.join("system/extensions")).expect("storage root");
-        let mut filesystem = LocalFilesystem::new();
+        let mut filesystem = DiskFilesystem::new();
         filesystem
             .mount_local(
                 VirtualPath::new("/projects").expect("valid virtual path"),
@@ -8089,7 +8315,7 @@ team_id = "/team/id"
         let dir = tempfile::tempdir().expect("tempdir");
         let storage_root = dir.path().join("local-dev");
         std::fs::create_dir_all(storage_root.join("system/extensions")).expect("storage root");
-        let mut filesystem = LocalFilesystem::new();
+        let mut filesystem = DiskFilesystem::new();
         filesystem
             .mount_local(
                 VirtualPath::new("/projects").expect("valid virtual path"),

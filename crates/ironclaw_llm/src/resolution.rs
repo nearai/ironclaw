@@ -56,6 +56,18 @@ impl ResolvedProviderConfig {
             Self::Dedicated(config) => &config.model,
         }
     }
+
+    /// The resolved API key, if the provider carries one — the same value
+    /// (from env) that would otherwise only ever reach a live provider
+    /// client, exposed so a caller (onboard's env-detect step) can persist
+    /// it into the encrypted secret store rather than leaving it only in
+    /// the process's shell env.
+    pub fn api_key(&self) -> Option<&SecretString> {
+        match self {
+            Self::Registry(config) => config.api_key.as_ref(),
+            Self::Dedicated(config) => config.api_key.as_ref(),
+        }
+    }
 }
 
 /// Provider selection overrides supplied by a composition root.
@@ -420,7 +432,7 @@ fn apply_registry_provider_env(config: &mut RegistryProviderConfig) -> Result<()
 
 fn nearai_config_from_env(chain: &ChainSettings) -> Result<NearAiConfig, LlmError> {
     let api_key = nonempty_env("NEARAI_API_KEY").map(SecretString::from);
-    let base_url = default_nearai_base_url(api_key.is_some(), nonempty_env("NEARAI_BASE_URL"));
+    let base_url = default_nearai_base_url(nonempty_env("NEARAI_BASE_URL"));
     Ok(build_nearai_config(
         NearAiRuntimeFields {
             model: nonempty_env("NEARAI_MODEL").unwrap_or_else(|| crate::DEFAULT_MODEL.to_string()),
@@ -443,7 +455,7 @@ fn nearai_config_from_dedicated(
     } else {
         Some(resolved.base_url.clone())
     };
-    let base_url = default_nearai_base_url(api_key.is_some(), configured_base_url);
+    let base_url = default_nearai_base_url(configured_base_url);
 
     Ok(build_nearai_config(
         NearAiRuntimeFields {
@@ -487,19 +499,27 @@ fn build_nearai_config(fields: NearAiRuntimeFields, chain: &ChainSettings) -> Ne
 }
 
 pub const NEARAI_CLOUD_DEFAULT_BASE_URL: &str = "https://cloud-api.near.ai";
+/// No longer used by [`default_nearai_base_url`] (nearai always defaults to
+/// cloud regardless of key presence — see that function's doc comment).
+/// Kept only because `session.rs`'s OAuth/session-token auth URL default and
+/// v1 `src/` still reference it independently of provider-config base-URL
+/// resolution.
 pub const NEARAI_PRIVATE_DEFAULT_BASE_URL: &str = "https://private.near.ai";
 
-pub fn default_nearai_base_url(
-    api_key_present: bool,
-    configured_base_url: Option<String>,
-) -> String {
-    if let Some(base_url) = configured_base_url {
-        base_url
-    } else if api_key_present {
-        NEARAI_CLOUD_DEFAULT_BASE_URL.to_string()
-    } else {
-        NEARAI_PRIVATE_DEFAULT_BASE_URL.to_string()
-    }
+/// Resolve the nearai provider's base URL: an explicit override always wins,
+/// otherwise the cloud endpoint.
+///
+/// Used to key on API-key presence (cloud when a key was present, private
+/// otherwise), to match the session-token-only private backend's implicit
+/// no-key affordance. That coupling made resolution order load-bearing:
+/// whichever step attached the key had to run *before* this was called, and
+/// an operator-stored key (attached after resolution, from the secret store)
+/// always missed the window and landed on the keyless private default. There
+/// is now exactly one nearai default — cloud — so resolution order no longer
+/// matters and every caller (probe, resolution, snapshot display) agrees
+/// unconditionally.
+pub fn default_nearai_base_url(configured_base_url: Option<String>) -> String {
+    configured_base_url.unwrap_or_else(|| NEARAI_CLOUD_DEFAULT_BASE_URL.to_string())
 }
 
 fn is_registry_protocol(protocol: ProviderProtocol) -> bool {

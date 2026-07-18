@@ -1,0 +1,14 @@
+{
+    "update_id": 400,
+    "message": {
+        "message_id": 22,
+        "date": 1700000000,
+        "from": {"id": 777, "is_bot": false, "first_name": "Alice"},
+        "chat": {"id": 777, "type": "private"},
+        "caption": "look at this",
+        "photo": [
+            {"file_id": "AAAA", "file_size": 1024},
+            {"file_id": "BBBB", "file_size": 8192}
+        ]
+    }
+}

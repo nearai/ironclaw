@@ -262,6 +262,7 @@ async fn revoked_session_bearer_rejected() {
             TenantId::new(TENANT).expect("tenant"),
             UserId::new("session-user").expect("user"),
             ChronoDuration::hours(1),
+            false,
         )
         .await
         .expect("create_session")
@@ -312,6 +313,7 @@ async fn expired_session_bearer_rejected_on_route() {
             // Already expired: `SessionRecord::is_expired` is `now >=
             // expires_at`, so a negative lifetime is unambiguously past.
             ChronoDuration::seconds(-1),
+            false,
         )
         .await
         .expect("create_session")
@@ -355,6 +357,7 @@ async fn session_minted_for_one_tenant_does_not_authenticate_another_deployment(
             TenantId::new(TENANT).expect("tenant"),
             UserId::new("session-user").expect("user"),
             ChronoDuration::hours(1),
+            false,
         )
         .await
         .expect("create_session")
@@ -442,6 +445,7 @@ async fn query_token_honored_on_sse_events_route() {
             TenantId::new(TENANT).expect("tenant"),
             UserId::new("session-user").expect("user"),
             ChronoDuration::hours(1),
+            false,
         )
         .await
         .expect("create_session")
@@ -543,6 +547,7 @@ async fn expired_query_token_rejected_on_sse_route() {
             TenantId::new(TENANT).expect("tenant"),
             UserId::new("session-user").expect("user"),
             ChronoDuration::seconds(-1),
+            false,
         )
         .await
         .expect("create_session")
@@ -580,6 +585,7 @@ async fn query_token_rejected_on_mutation_route() {
             TenantId::new(TENANT).expect("tenant"),
             UserId::new("session-user").expect("user"),
             ChronoDuration::hours(1),
+            false,
         )
         .await
         .expect("create_session")
@@ -641,6 +647,7 @@ async fn query_token_rejected_on_websocket_route() {
             TenantId::new(TENANT).expect("tenant"),
             UserId::new("session-user").expect("user"),
             ChronoDuration::hours(1),
+            false,
         )
         .await
         .expect("create_session")
@@ -673,6 +680,7 @@ async fn cookie_session_not_honored_on_protected_route() {
             TenantId::new(TENANT).expect("tenant"),
             UserId::new("session-user").expect("user"),
             ChronoDuration::hours(1),
+            false,
         )
         .await
         .expect("create_session")

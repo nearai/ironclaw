@@ -7,6 +7,7 @@ use std::{
 };
 
 use async_trait::async_trait;
+use ironclaw_filesystem::{InMemoryBackend, ScopedFilesystem};
 use ironclaw_host_api::*;
 use ironclaw_processes::*;
 use serde_json::json;
@@ -14,12 +15,16 @@ use tokio::time::timeout;
 
 #[tokio::test]
 async fn process_host_status_reads_scoped_process_record() {
-    let store = InMemoryProcessStore::new();
+    let store = in_mem_process_store();
     let host = ProcessHost::new(&store);
     let invocation_id = InvocationId::new();
     let process_id = ProcessId::new();
     let scope = sample_scope(invocation_id, "tenant1", "user1");
-    let other_scope = sample_scope(invocation_id, "tenant2", "user1");
+    // A different project is path-isolated on a single mount; cross-tenant
+    // isolation is mount-structural (arch-simplification §4.3), covered by
+    // `filesystem_process_store_isolates_two_tenants_with_same_user_project_ids`.
+    let mut other_scope = sample_scope(invocation_id, "tenant1", "user1");
+    other_scope.project_id = Some(ProjectId::new("project2").unwrap());
 
     store
         .start(process_start(process_id, invocation_id, scope.clone()))
@@ -39,7 +44,7 @@ async fn process_host_status_reads_scoped_process_record() {
 
 #[tokio::test]
 async fn process_host_kill_transitions_running_process() {
-    let store = InMemoryProcessStore::new();
+    let store = in_mem_process_store();
     let host = ProcessHost::new(&store);
     let invocation_id = InvocationId::new();
     let process_id = ProcessId::new();
@@ -65,7 +70,7 @@ async fn process_host_kill_transitions_running_process() {
 
 #[tokio::test]
 async fn process_host_await_process_returns_terminal_exit_after_background_completion() {
-    let store = Arc::new(InMemoryProcessStore::new());
+    let store = Arc::new(in_mem_process_store());
     let manager = BackgroundProcessManager::new(store.clone(), Arc::new(DelayedSuccessExecutor));
     let host = ProcessHost::new(store.as_ref()).with_poll_interval(Duration::from_millis(5));
     let invocation_id = InvocationId::new();
@@ -86,7 +91,7 @@ async fn process_host_await_process_returns_terminal_exit_after_background_compl
 
 #[tokio::test]
 async fn process_host_kill_retries_result_side_effect_for_already_killed_process() {
-    let store = InMemoryProcessStore::new();
+    let store = in_mem_process_store();
     let result_store = Arc::new(FailOnceKillResultStore::new());
     let host = ProcessHost::new(&store).with_result_store(result_store.clone());
     let invocation_id = InvocationId::new();
@@ -135,7 +140,7 @@ async fn process_host_kill_retries_result_side_effect_for_already_killed_process
 
 #[tokio::test]
 async fn process_host_await_process_returns_terminal_exit_for_already_killed_process() {
-    let store = InMemoryProcessStore::new();
+    let store = in_mem_process_store();
     let host = ProcessHost::new(&store);
     let invocation_id = InvocationId::new();
     let process_id = ProcessId::new();
@@ -154,12 +159,16 @@ async fn process_host_await_process_returns_terminal_exit_for_already_killed_pro
 
 #[tokio::test]
 async fn process_host_await_process_fails_closed_for_unknown_or_other_scope_process() {
-    let store = InMemoryProcessStore::new();
+    let store = in_mem_process_store();
     let host = ProcessHost::new(&store);
     let invocation_id = InvocationId::new();
     let process_id = ProcessId::new();
     let scope = sample_scope(invocation_id, "tenant1", "user1");
-    let other_scope = sample_scope(invocation_id, "tenant2", "user1");
+    // A different project is path-isolated on a single mount; cross-tenant
+    // isolation is mount-structural (arch-simplification §4.3), covered by
+    // `filesystem_process_store_isolates_two_tenants_with_same_user_project_ids`.
+    let mut other_scope = sample_scope(invocation_id, "tenant1", "user1");
+    other_scope.project_id = Some(ProjectId::new("project2").unwrap());
 
     let missing = host.await_process(&scope, process_id).await.unwrap_err();
     assert!(matches!(missing, ProcessError::UnknownProcess { process_id: id } if id == process_id));
@@ -178,7 +187,7 @@ async fn process_host_await_process_fails_closed_for_unknown_or_other_scope_proc
 
 #[tokio::test]
 async fn process_host_subscribe_emits_initial_and_terminal_records() {
-    let store = InMemoryProcessStore::new();
+    let store = in_mem_process_store();
     let host = ProcessHost::new(&store).with_poll_interval(Duration::from_millis(5));
     let invocation_id = InvocationId::new();
     let process_id = ProcessId::new();
@@ -202,7 +211,7 @@ async fn process_host_subscribe_emits_initial_and_terminal_records() {
 
 #[tokio::test]
 async fn process_host_subscribe_tracks_background_completion() {
-    let store = Arc::new(InMemoryProcessStore::new());
+    let store = Arc::new(in_mem_process_store());
     let manager = BackgroundProcessManager::new(store.clone(), Arc::new(DelayedSuccessExecutor));
     let host = ProcessHost::new(store.as_ref()).with_poll_interval(Duration::from_millis(5));
     let invocation_id = InvocationId::new();
@@ -230,7 +239,7 @@ async fn process_host_subscribe_tracks_background_completion() {
 
 #[tokio::test]
 async fn process_host_subscribe_closes_after_initial_terminal_record() {
-    let store = InMemoryProcessStore::new();
+    let store = in_mem_process_store();
     let host = ProcessHost::new(&store).with_poll_interval(Duration::from_millis(5));
     let invocation_id = InvocationId::new();
     let process_id = ProcessId::new();
@@ -253,12 +262,16 @@ async fn process_host_subscribe_closes_after_initial_terminal_record() {
 
 #[tokio::test]
 async fn process_host_subscribe_fails_closed_for_unknown_or_other_scope_process() {
-    let store = InMemoryProcessStore::new();
+    let store = in_mem_process_store();
     let host = ProcessHost::new(&store);
     let invocation_id = InvocationId::new();
     let process_id = ProcessId::new();
     let scope = sample_scope(invocation_id, "tenant1", "user1");
-    let other_scope = sample_scope(invocation_id, "tenant2", "user1");
+    // A different project is path-isolated on a single mount; cross-tenant
+    // isolation is mount-structural (arch-simplification §4.3), covered by
+    // `filesystem_process_store_isolates_two_tenants_with_same_user_project_ids`.
+    let mut other_scope = sample_scope(invocation_id, "tenant1", "user1");
+    other_scope.project_id = Some(ProjectId::new("project2").unwrap());
 
     let missing = host.subscribe(&scope, process_id).await.unwrap_err();
     assert!(matches!(missing, ProcessError::UnknownProcess { process_id: id } if id == process_id));
@@ -273,14 +286,14 @@ async fn process_host_subscribe_fails_closed_for_unknown_or_other_scope_process(
 }
 
 struct FailOnceKillResultStore {
-    inner: InMemoryProcessResultStore,
+    inner: FilesystemProcessResultStore<InMemoryBackend>,
     fail_next_kill: AtomicBool,
 }
 
 impl FailOnceKillResultStore {
     fn new() -> Self {
         Self {
-            inner: InMemoryProcessResultStore::new(),
+            inner: in_mem_process_result_store(),
             fail_next_kill: AtomicBool::new(true),
         }
     }
@@ -373,4 +386,25 @@ fn sample_scope(invocation_id: InvocationId, tenant: &str, user: &str) -> Resour
         thread_id: Some(ThreadId::new("thread1").unwrap()),
         invocation_id,
     }
+}
+
+fn processes_test_fs() -> Arc<ScopedFilesystem<InMemoryBackend>> {
+    let mounts = MountView::new(vec![MountGrant::new(
+        MountAlias::new("/processes").expect("alias"),
+        VirtualPath::new("/engine/tenants/tenant1/users/user1/processes").expect("target"),
+        MountPermissions::read_write_list_delete(),
+    )])
+    .expect("mount view");
+    Arc::new(ScopedFilesystem::with_fixed_view(
+        Arc::new(InMemoryBackend::new()),
+        mounts,
+    ))
+}
+
+fn in_mem_process_store() -> FilesystemProcessStore<InMemoryBackend> {
+    FilesystemProcessStore::new(processes_test_fs())
+}
+
+fn in_mem_process_result_store() -> FilesystemProcessResultStore<InMemoryBackend> {
+    FilesystemProcessResultStore::new(processes_test_fs())
 }

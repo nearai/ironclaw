@@ -24,7 +24,8 @@ mod config;
 mod error;
 mod github;
 mod google;
-mod pending;
+// pub(crate): cli_token_login reuses pending::sanitize_redirect (see its doc).
+pub(crate) mod pending;
 mod profile;
 mod provider;
 mod provider_http;

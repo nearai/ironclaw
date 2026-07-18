@@ -207,12 +207,28 @@ function findHandler(node, bodyMarker, seen = new Set()) {
   return null;
 }
 
+
+function renderedContainsComponent(rendered, component) {
+  if (!rendered || typeof rendered !== "object") {
+    return rendered === component;
+  }
+  if (Array.isArray(rendered)) {
+    return rendered.some((value) => renderedContainsComponent(value, component));
+  }
+  if (Array.isArray(rendered.values)) {
+    return rendered.values.some((value) => renderedContainsComponent(value, component));
+  }
+  return false;
+}
+
 test("ConfigureModal renders the code-entry panel for a channel extension that uses manual setup", () => {
+  // A generic proof-code channel: the paste-box flow is the
+  // inbound_proof_code connect strategy's UI.
   const { rendered, mutationConfig } = renderModal({
     surfaces: channelSurfaces,
-    packageRef: { kind: "extension", id: "telegram" },
-    channel: "telegram",
-    displayName: "Telegram",
+    packageRef: { kind: "extension", id: "acme-messenger" },
+    channel: "acme-messenger",
+    displayName: "Acme Messenger",
     onboardingState: "pairing_required",
   });
   assert.ok(mutationConfig, "a pairing mutation must be configured");

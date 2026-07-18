@@ -42,10 +42,10 @@ use ironclaw_host_api::{
     AgentId, ApprovalRequestId, ExtensionId, InvocationId, ProjectId, ResourceScope, TenantId,
     ThreadId, UserId,
 };
+use ironclaw_outbound::test_support::in_memory_backed_outbound_state_store;
 use ironclaw_outbound::{
     CommunicationPreferenceRecord, CommunicationPreferenceRepository, DeliveredGateRouteStore,
-    DeliveryDefaultScope, InMemoryOutboundStateStore, InMemoryTriggeredRunDeliveryStore,
-    OutboundStateStore, WriteCommunicationPreferenceRequest,
+    DeliveryDefaultScope, OutboundStateStore, WriteCommunicationPreferenceRequest,
 };
 use ironclaw_product_adapters::{
     AdapterInstallationId, AuthRequirement, AuthResolutionPayload, AuthResolutionResult,
@@ -146,7 +146,8 @@ struct Harness {
     /// The harness's outbound state store — the SAME allocation the
     /// assembly's delivery deps read communication preferences from, so
     /// tests can seed the creator's personal preference.
-    outbound: Arc<InMemoryOutboundStateStore>,
+    outbound:
+        Arc<ironclaw_outbound::FilesystemOutboundStateStore<ironclaw_filesystem::InMemoryBackend>>,
     /// Keeps the harness extension host (and its published snapshot) alive.
     _host: Arc<ExtensionHost>,
     /// Keeps the assembly (and its reconcile loop + registrations) alive.
@@ -359,8 +360,9 @@ async fn build_harness_with_options(options: HarnessOptions) -> Harness {
             approvals.clone()
         };
     let route_store: Arc<dyn ironclaw_outbound::DeliveredGateRouteStore> =
-        Arc::new(ironclaw_outbound::InMemoryDeliveredGateRouteStore::default());
-    let outbound = Arc::new(InMemoryOutboundStateStore::default());
+        Arc::new(ironclaw_outbound::test_support::in_memory_backed_outbound_state_store());
+    let outbound =
+        Arc::new(ironclaw_outbound::test_support::in_memory_backed_outbound_state_store());
     let outbound_store: Arc<dyn OutboundStateStore> = outbound.clone();
     let preferences: Arc<dyn CommunicationPreferenceRepository> = outbound.clone();
     let egress = RecordingEgress::default();
@@ -1140,7 +1142,7 @@ async fn triggered_approval_prompt_route_resolves_dm_approve_on_foreign_scope() 
 
     // Seed the creator's personal DM preference so the triggered approval prompt
     // resolves to team T-A / channel D123 — the same DM the inbound approve uses.
-    let outbound = Arc::new(InMemoryOutboundStateStore::default());
+    let outbound = Arc::new(in_memory_backed_outbound_state_store());
     let dm_target = dm_reply_target_binding_ref();
     outbound
         .write_communication_preference(WriteCommunicationPreferenceRequest {
@@ -1229,7 +1231,7 @@ async fn triggered_approval_prompt_route_resolves_dm_approve_on_foreign_scope() 
             max_concurrent_deliveries: NonZeroUsize::new(4).expect("nonzero"), // safety: static test literal is non-zero.
             max_pending_deliveries: NonZeroUsize::new(16).expect("nonzero"), // safety: static test literal is non-zero.
         },
-        Arc::new(InMemoryTriggeredRunDeliveryStore::default()),
+        Arc::new(in_memory_backed_outbound_state_store()),
         Arc::new(SlackPreferenceTargetCodec),
         AgentId::new(AGENT).expect("agent"), // safety: static test agent id is valid.
     );
@@ -1416,7 +1418,7 @@ async fn triggered_auth_prompt_route_delivers_dm_setup_link_on_foreign_scope() {
 
     // Seed the creator's personal auth-prompt preference so the triggered auth
     // prompt resolves to team T-A / channel D123 — a personal DM.
-    let outbound = Arc::new(InMemoryOutboundStateStore::default());
+    let outbound = Arc::new(in_memory_backed_outbound_state_store());
     let dm_target = dm_reply_target_binding_ref();
     outbound
         .write_communication_preference(WriteCommunicationPreferenceRequest {
@@ -1480,7 +1482,7 @@ async fn triggered_auth_prompt_route_delivers_dm_setup_link_on_foreign_scope() {
     let outbound_store: Arc<dyn OutboundStateStore> = outbound.clone();
     let preferences: Arc<dyn CommunicationPreferenceRepository> = outbound;
     let route_store: Arc<dyn DeliveredGateRouteStore> =
-        Arc::new(ironclaw_outbound::InMemoryDeliveredGateRouteStore::default());
+        Arc::new(ironclaw_outbound::test_support::in_memory_backed_outbound_state_store());
     let fixture = triggered_delivery_fixture(Arc::clone(&outbound_store)).await;
     let driver_egress = fixture.driver_egress.clone();
     let services = RunDeliveryServices {
@@ -1507,7 +1509,7 @@ async fn triggered_auth_prompt_route_delivers_dm_setup_link_on_foreign_scope() {
             max_concurrent_deliveries: NonZeroUsize::new(4).expect("nonzero"), // safety: static test literal is non-zero.
             max_pending_deliveries: NonZeroUsize::new(16).expect("nonzero"), // safety: static test literal is non-zero.
         },
-        Arc::new(InMemoryTriggeredRunDeliveryStore::default()),
+        Arc::new(in_memory_backed_outbound_state_store()),
         Arc::new(SlackPreferenceTargetCodec),
         AgentId::new(AGENT).expect("agent"), // safety: static test agent id is valid.
     );
@@ -1573,7 +1575,7 @@ async fn triggered_auth_prompt_oauth_target_not_dm_suppresses_setup_link_and_can
 
     // auth_prompt_target resolves to a shared channel (not a DM); final_reply_target
     // stays the DM so the follow-up deny notice can still be delivered and inspected.
-    let outbound = Arc::new(InMemoryOutboundStateStore::default());
+    let outbound = Arc::new(in_memory_backed_outbound_state_store());
     let dm_target = dm_reply_target_binding_ref();
     let channel_target = non_dm_channel_reply_target_binding_ref();
     outbound
@@ -1612,7 +1614,7 @@ async fn triggered_auth_prompt_oauth_target_not_dm_suppresses_setup_link_and_can
     let outbound_store: Arc<dyn OutboundStateStore> = outbound.clone();
     let preferences: Arc<dyn CommunicationPreferenceRepository> = outbound;
     let route_store: Arc<dyn DeliveredGateRouteStore> =
-        Arc::new(ironclaw_outbound::InMemoryDeliveredGateRouteStore::default());
+        Arc::new(ironclaw_outbound::test_support::in_memory_backed_outbound_state_store());
     let fixture = triggered_delivery_fixture(Arc::clone(&outbound_store)).await;
     let driver_egress = fixture.driver_egress.clone();
     let services = RunDeliveryServices {
@@ -1639,7 +1641,7 @@ async fn triggered_auth_prompt_oauth_target_not_dm_suppresses_setup_link_and_can
             max_concurrent_deliveries: NonZeroUsize::new(4).expect("nonzero"), // safety: static test literal is non-zero.
             max_pending_deliveries: NonZeroUsize::new(16).expect("nonzero"), // safety: static test literal is non-zero.
         },
-        Arc::new(InMemoryTriggeredRunDeliveryStore::default()),
+        Arc::new(in_memory_backed_outbound_state_store()),
         Arc::new(SlackPreferenceTargetCodec),
         AgentId::new(AGENT).expect("agent"), // safety: static test agent id is valid.
     );
@@ -4234,7 +4236,7 @@ async fn generic_triggered_hook_routes_fire_to_the_owning_extension_driver() {
         .await
         .expect("seed personal preference"); // safety: in-memory store should not fail.
 
-    let delivery_store = Arc::new(InMemoryTriggeredRunDeliveryStore::default());
+    let delivery_store = Arc::new(in_memory_backed_outbound_state_store());
     let hook = GenericTriggeredRunDeliveryHook::new(
         Arc::clone(&harness.assembly),
         Arc::clone(&delivery_store) as Arc<dyn TriggeredRunDeliveryStore>,

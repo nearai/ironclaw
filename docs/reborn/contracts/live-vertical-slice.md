@@ -11,7 +11,7 @@
 This slice proves the first Reborn host path is runnable:
 
 ```text
-LocalFilesystem mounted at /system/extensions
+DiskFilesystem mounted at /system/extensions
 -> ExtensionDiscovery reads manifests
 -> ExtensionRegistry registers capabilities
 -> RuntimeDispatcher receives already-authorized dispatch requests
@@ -62,7 +62,7 @@ The default dispatcher example uses in-crate echo adapters so `ironclaw_dispatch
 
 The integration test `crates/ironclaw_dispatcher/tests/vertical_slice_contract.rs` validates:
 
-- extension manifests are read from `LocalFilesystem` via `/system/extensions`
+- extension manifests are read from `DiskFilesystem` via `/system/extensions`
 - extension discovery returns WASM, Script, and MCP packages
 - dispatcher crate tests exercise already-authorized `CapabilityDispatchRequest` values directly
 - higher-level caller workflow stays out of dispatcher crate dev surfaces

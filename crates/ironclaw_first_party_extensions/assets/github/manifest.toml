@@ -659,6 +659,30 @@ audience = { scheme = "https", host = "api.github.com" }
 injection = { type = "header", name = "authorization", prefix = "Bearer " }
 
 [[tools]]
+id = "github.get_job_logs"
+description = "Get the plain-text logs for a GitHub Actions workflow job."
+effects = ["network", "use_secret"]
+default_permission = "allow"
+visibility = "model"
+input_schema_ref = "schemas/github/get_job_logs.input.v1.json"
+output_schema_ref = "schemas/github/raw_output.v1.json"
+prompt_doc_ref = "prompts/github/get_job_logs.md"
+# The logs endpoint 302-redirects to a short-lived, pre-signed Azure blob URL
+# (e.g. productionresultssaN.blob.core.windows.net). The host egress follows the
+# redirect only after re-authorizing the destination against this allowlist and
+# strips the Authorization header on the hop, so the GitHub token is never sent
+# to blob storage. No credential is injected for these hosts.
+network_targets = [
+  { scheme = "https", host_pattern = "*.blob.core.windows.net" },
+]
+
+[[tools.credentials]]
+handle = "github_runtime_token"
+vendor = "github"
+audience = { scheme = "https", host = "api.github.com" }
+injection = { type = "header", name = "authorization", prefix = "Bearer " }
+
+[[tools]]
 id = "github.get_workflow_run_artifacts"
 description = "List artifacts for a GitHub Actions workflow run."
 effects = ["network", "use_secret"]

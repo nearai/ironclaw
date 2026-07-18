@@ -225,6 +225,11 @@ struct TokenPayload {
     user: String,
     iat: i64,
     exp: i64,
+    /// Operator-capability stamp (see `SessionRecord::operator`). Defaults
+    /// to non-operator so pre-existing tokens fail closed rather than
+    /// retroactively escalating.
+    #[serde(default)]
+    op: bool,
 }
 
 #[async_trait]
@@ -234,6 +239,7 @@ impl SessionStore for SignedTokenSessionStore {
         tenant_id: TenantId,
         user_id: UserId,
         lifetime: ChronoDuration,
+        operator: bool,
     ) -> Result<SecretString, SessionStoreError> {
         // A non-positive lifetime would mint a token whose `exp <= iat`;
         // `lookup` then rejects it immediately, so the caller would get
@@ -253,6 +259,7 @@ impl SessionStore for SignedTokenSessionStore {
             user: user_id.as_str().to_string(),
             iat: now.timestamp(),
             exp: expires_at.timestamp(),
+            op: operator,
         };
         let payload_json = serde_json::to_vec(&payload)
             .map_err(|err| SessionStoreError::Backend(format!("encode token payload: {err}")))?;
@@ -300,6 +307,7 @@ impl SessionStore for SignedTokenSessionStore {
             user_id,
             created_at,
             expires_at,
+            operator: payload.op,
         }))
     }
 
@@ -420,6 +428,7 @@ mod tests {
                 tenant(),
                 UserId::new("operator").expect("user"),
                 ChronoDuration::hours(1),
+                false,
             )
             .await
             .expect("create");
@@ -440,6 +449,7 @@ mod tests {
                 tenant(),
                 UserId::new("operator").expect("user"),
                 ChronoDuration::hours(1),
+                false,
             )
             .await
             .expect("create");
@@ -472,6 +482,7 @@ mod tests {
                 tenant_a.clone(),
                 UserId::new("alice").expect("user"),
                 ChronoDuration::hours(1),
+                false,
             )
             .await
             .expect("create");
@@ -500,6 +511,7 @@ mod tests {
                 user: "operator".to_string(),
                 iat: now - 100,
                 exp: now - 10,
+                op: false,
             },
         );
         assert!(store.lookup(&token).await.expect("lookup").is_none());
@@ -515,6 +527,7 @@ mod tests {
                 tenant(),
                 UserId::new("operator").expect("user"),
                 ChronoDuration::hours(1),
+                false,
             )
             .await
             .expect("create");
@@ -546,6 +559,7 @@ mod tests {
                 tenant(),
                 UserId::new("operator").expect("user"),
                 ChronoDuration::hours(1),
+                false,
             )
             .await
             .expect("create");
@@ -591,6 +605,7 @@ mod tests {
                     user: "operator".to_string(),
                     iat: base,
                     exp,
+                    op: false,
                 },
             )
         };
@@ -644,7 +659,12 @@ mod tests {
         let store = signed_store("operator-secret");
         for lifetime in [ChronoDuration::zero(), ChronoDuration::seconds(-1)] {
             let err = store
-                .create_session(tenant(), UserId::new("operator").expect("user"), lifetime)
+                .create_session(
+                    tenant(),
+                    UserId::new("operator").expect("user"),
+                    lifetime,
+                    false,
+                )
                 .await
                 .expect_err("a non-positive lifetime must error, not mint a dead token");
             assert!(matches!(err, SessionStoreError::Backend(_)));
@@ -659,6 +679,7 @@ mod tests {
                 tenant(),
                 UserId::new("operator").expect("user"),
                 ChronoDuration::MAX,
+                false,
             )
             .await
             .expect_err("a lifetime that overflows the expiry instant must error");
@@ -677,6 +698,7 @@ mod tests {
                 user: "operator".to_string(),
                 iat: now,
                 exp: now + 3600,
+                op: false,
             },
         );
         let err = store
@@ -702,6 +724,7 @@ mod tests {
                 user: String::new(),
                 iat: now,
                 exp: now + 3600,
+                op: false,
             },
         );
         let err = store
