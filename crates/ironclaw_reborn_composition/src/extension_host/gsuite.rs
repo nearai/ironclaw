@@ -164,7 +164,7 @@ impl FirstPartyCapabilityHandler for GsuiteFirstPartyHandler {
 /// survives intact to the model.
 fn google_oauth_not_configured_error() -> FirstPartyCapabilityError {
     let text = format!(
-        "Google Workspace access is not configured on this ironclaw-reborn instance.\n\n{}\n\n{}",
+        "Google Workspace access is not configured on this ironclaw instance.\n\n{}\n\n{}",
         ironclaw_reborn_config::google_remediation_text(),
         ironclaw_reborn_config::apply_step_text()
     );
@@ -299,7 +299,7 @@ fn gsuite_error(
                     format!(
                         "Google OAuth is configured but the provider rejected the request \
                          while exchanging or refreshing the token (e.g. invalid_client). \
-                         Re-run `ironclaw-reborn config set google.client_secret` to update \
+                         Re-run `ironclaw config set google.client_secret` to update \
                          the client secret, and confirm the client id/secret at \
                          https://console.cloud.google.com/apis/credentials. {}",
                         ironclaw_reborn_config::apply_step_text()

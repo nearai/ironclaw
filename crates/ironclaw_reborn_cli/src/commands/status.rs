@@ -120,7 +120,7 @@ fn resolve_google_oauth_degraded(
             missing,
         }) => Ok(Some(format!(
             "partially configured (missing google.{missing}) — disabled; fix with \
-             `ironclaw-reborn config set google.{missing} <value>`"
+             `ironclaw config set google.{missing} <value>`"
         ))),
         GoogleOAuthResolution::Disabled(GoogleOAuthConfigState::Unconfigured)
         | GoogleOAuthResolution::Configured(_) => Ok(None),

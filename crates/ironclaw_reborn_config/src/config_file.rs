@@ -348,7 +348,7 @@ pub struct WebuiSection {
 /// route. The env var overrides only this enablement gate. Installation
 /// identifiers, channel routing, and Slack secrets are configured through the
 /// WebUI channel setup surface. The deprecated fields below are **boot-rejected**,
-/// not bridged: `ironclaw-reborn serve` fails closed at startup
+/// not bridged: `ironclaw serve` fails closed at startup
 /// (`reject_legacy_slack_setup_fields`, `commands/serve_slack.rs`) if any of
 /// them are set in `config.toml`, with an error pointing the operator at the
 /// WebUI Slack OAuth setup flow instead. They remain on this struct only so a

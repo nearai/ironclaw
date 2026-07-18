@@ -179,7 +179,7 @@ fn status_render_text_includes_google_oauth_line_when_degraded() {
     let mut status = sample_status();
     status.google_oauth_degraded = Some(
         "partially configured (missing google.redirect_uri) — disabled; fix with \
-         `ironclaw-reborn config set google.redirect_uri <value>`"
+         `ironclaw config set google.redirect_uri <value>`"
             .to_string(),
     );
     let text = render_to_string(&status);

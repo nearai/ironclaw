@@ -118,7 +118,7 @@ export function LoginPage({ initialToken, error, oauthRedirectAfter = "/", onSub
           (<p className="mt-6 text-center text-xs text-[var(--v2-text-faint)]">
             {t("login.localDevHint")}{" "}
             <code className="rounded bg-[var(--v2-surface-soft)] px-1 py-0.5 font-mono">
-              ironclaw-reborn status
+              ironclaw status
             </code>
           </p>)}
       </Card>

@@ -47,14 +47,14 @@ test("login page shows the local-dev status hint when no OAuth providers are con
   const rendered = renderLoginPage({ providers: [], isLocalDev: true });
 
   assert.match(JSON.stringify(rendered), /login\.localDevHint/);
-  assert.match(JSON.stringify(rendered), /ironclaw-reborn status/);
+  assert.match(JSON.stringify(rendered), /ironclaw status/);
 });
 
 test("login page omits the local-dev hint once an OAuth provider is configured", () => {
   const rendered = renderLoginPage({ providers: ["google"], isLocalDev: true });
 
   assert.doesNotMatch(JSON.stringify(rendered), /login\.localDevHint/);
-  assert.doesNotMatch(JSON.stringify(rendered), /ironclaw-reborn status/);
+  assert.doesNotMatch(JSON.stringify(rendered), /ironclaw status/);
 });
 
 // C4 fix: no SSO configured is NOT the same signal as "this is a local
@@ -65,5 +65,5 @@ test("login page omits the local-dev hint on a non-local origin even with no OAu
   const rendered = renderLoginPage({ providers: [], isLocalDev: false });
 
   assert.doesNotMatch(JSON.stringify(rendered), /login\.localDevHint/);
-  assert.doesNotMatch(JSON.stringify(rendered), /ironclaw-reborn status/);
+  assert.doesNotMatch(JSON.stringify(rendered), /ironclaw status/);
 });

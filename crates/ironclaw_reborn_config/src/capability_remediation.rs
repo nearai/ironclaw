@@ -22,9 +22,9 @@ pub fn google_remediation_text() -> String {
      1. https://console.cloud.google.com/apis/credentials -> Create Credentials -> OAuth \
      client ID -> Desktop app\n  \
      2. Enable the Gmail API (and Calendar/Drive as needed) for the project\n  \
-     3. ironclaw-reborn config set google.client_id <id>.apps.googleusercontent.com\n  \
-     4. ironclaw-reborn config set google.client_secret   (prompts, hidden input)\n  \
-     5. ironclaw-reborn config set google.redirect_uri <redirect-uri-from-the-oauth-client>"
+     3. ironclaw config set google.client_id <id>.apps.googleusercontent.com\n  \
+     4. ironclaw config set google.client_secret   (prompts, hidden input)\n  \
+     5. ironclaw config set google.redirect_uri <redirect-uri-from-the-oauth-client>"
         .to_string()
 }
 
@@ -34,7 +34,7 @@ pub fn google_remediation_text() -> String {
 /// so every surface that tells a caller "go configure this" must also tell
 /// them the explicit next step rather than implying it happens automatically.
 pub fn apply_step_text() -> &'static str {
-    "Run `ironclaw-reborn service restart` to apply the change, then ask again."
+    "Run `ironclaw service restart` to apply the change, then ask again."
 }
 
 #[cfg(test)]
@@ -44,7 +44,7 @@ mod tests {
     #[test]
     fn apply_step_text_names_the_explicit_restart_command() {
         let text = apply_step_text();
-        assert!(text.contains("ironclaw-reborn service restart"));
+        assert!(text.contains("ironclaw service restart"));
         assert!(!text.contains("automatically"));
     }
 

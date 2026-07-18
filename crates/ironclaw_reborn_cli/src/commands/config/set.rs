@@ -1,4 +1,4 @@
-//! `ironclaw-reborn config set <key> [value]` — write one config value,
+//! `ironclaw config set <key> [value]` — write one config value,
 //! routed through `capability_config::ConfigKey`'s alias table so the
 //! destination (config.toml literal / encrypted secret store / token
 //! file), shape validation, and secret-vs-non-secret refusal all come
@@ -56,7 +56,7 @@ fn unknown_key_message(key: &str) -> String {
     format!(
         "unknown config key `{key}` for `config set`\nSupported keys: <provider>.api_key \
          (default provider `{}`), google.client_id, google.client_secret, google.redirect_uri, \
-         slack.enabled, webui.token (--rotate only)\nRun `ironclaw-reborn config list` to see \
+         slack.enabled, webui.token (--rotate only)\nRun `ironclaw config list` to see \
          all readable keys",
         super::init::DEFAULT_LLM_PROVIDER_ID,
     )
@@ -261,7 +261,7 @@ fn write_google_client_secret(
 /// `config set` never restarts anything itself: this CLI invocation may be
 /// running from inside a live `serve` process's own tool-call loop (an
 /// agent shelling out to its own CLI), and auto-restarting would let that
-/// process kill itself mid-turn. A running `ironclaw-reborn` service (or a
+/// process kill itself mid-turn. A running `ironclaw` service (or a
 /// manually run `serve`) keeps serving the old value until this step is
 /// run — one explicit, unconditional line for every caller (human, an
 /// agent's own shell tool, a script) rather than branching on TTY-ness or
@@ -275,7 +275,7 @@ fn write_google_client_secret(
 /// treat `apply_step_text` as the source of truth for the *content* of
 /// this instruction if the two ever need to change together.
 fn print_apply_step() {
-    println!("  to apply: ironclaw-reborn service restart");
+    println!("  to apply: ironclaw service restart");
 }
 
 // ── webui.token --rotate ────────────────────────────────────────
@@ -314,7 +314,7 @@ fn execute_webui_token(
     // The token file on disk is already rotated, but a running `serve`
     // process keeps the old token in memory until it restarts — so the
     // login link below (already built from the new token) only becomes
-    // valid once `ironclaw-reborn service restart` (printed above) runs.
+    // valid once `ironclaw service restart` (printed above) runs.
     #[cfg(feature = "webui-v2-beta")]
     if let Some(link) = crate::webui_token::login_link(home)? {
         println!("login_link: {link} (valid after restart)");

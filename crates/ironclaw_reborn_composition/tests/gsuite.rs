@@ -784,10 +784,7 @@ async fn bundled_gsuite_handler_returns_not_configured_tool_result_when_no_googl
         "text: {text}"
     );
     assert!(text.contains("console.cloud.google.com"), "text: {text}");
-    assert!(
-        text.contains("ironclaw-reborn service restart"),
-        "text: {text}"
-    );
+    assert!(text.contains("ironclaw service restart"), "text: {text}");
     assert_eq!(
         text.matches("service restart").count(),
         1,

@@ -1610,7 +1610,7 @@ fn config_set_google_client_id_writes_config_toml() {
         .env("IRONCLAW_REBORN_HOME", &reborn_home)
         .env("HOME", temp.path().join("home"))
         .output()
-        .expect("ironclaw-reborn config set google.client_id should run");
+        .expect("ironclaw config set google.client_id should run");
 
     assert!(
         output.status.success(),
@@ -1623,7 +1623,7 @@ fn config_set_google_client_id_writes_config_toml() {
         "stdout: {stdout}"
     );
     assert!(
-        stdout.contains("to apply: ironclaw-reborn service restart"),
+        stdout.contains("to apply: ironclaw service restart"),
         "config set must never auto-restart; it must print the explicit apply step: {stdout}"
     );
     assert_eq!(
@@ -1656,7 +1656,7 @@ fn config_set_slack_enabled_prints_restart_exactly_once() {
         .env("IRONCLAW_REBORN_HOME", &reborn_home)
         .env("HOME", temp.path().join("home"))
         .output()
-        .expect("ironclaw-reborn config set slack.enabled should run");
+        .expect("ironclaw config set slack.enabled should run");
 
     assert!(
         output.status.success(),
@@ -1666,7 +1666,7 @@ fn config_set_slack_enabled_prints_restart_exactly_once() {
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(stdout.contains("slack.enabled: saved"), "stdout: {stdout}");
     assert!(
-        stdout.contains("to apply: ironclaw-reborn service restart"),
+        stdout.contains("to apply: ironclaw service restart"),
         "config set must never auto-restart; it must print the explicit apply step: {stdout}"
     );
     assert_eq!(
@@ -1701,7 +1701,7 @@ fn config_set_google_client_id_then_status_reports_partial_from_config_file() {
         .env("IRONCLAW_REBORN_HOME", &reborn_home)
         .env("HOME", &home)
         .output()
-        .expect("ironclaw-reborn config set google.client_id should run");
+        .expect("ironclaw config set google.client_id should run");
     assert!(
         set_client_id.status.success(),
         "stderr: {}",
@@ -1713,7 +1713,7 @@ fn config_set_google_client_id_then_status_reports_partial_from_config_file() {
         .env("IRONCLAW_REBORN_HOME", &reborn_home)
         .env("HOME", &home)
         .output()
-        .expect("ironclaw-reborn status should run");
+        .expect("ironclaw status should run");
     assert!(
         status.status.success(),
         "stderr: {}",
@@ -1739,7 +1739,7 @@ fn config_set_rejects_unknown_key() {
         .env("IRONCLAW_REBORN_HOME", &reborn_home)
         .env("HOME", temp.path().join("home"))
         .output()
-        .expect("ironclaw-reborn config set should run");
+        .expect("ironclaw config set should run");
 
     assert!(!output.status.success(), "unknown key must fail");
     let stderr = String::from_utf8_lossy(&output.stderr);

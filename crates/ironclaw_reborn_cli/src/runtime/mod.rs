@@ -888,7 +888,7 @@ pub(crate) fn resolve_google_oauth_config_from_env(
 /// Status-surface variant of [`resolve_google_oauth_config_from_env`]:
 /// re-runs the same merged (env + `[google]` config.toml + secret store)
 /// resolution but keeps the `Unconfigured` vs. `PartiallyConfigured`
-/// distinction instead of collapsing both to `None`, so `ironclaw-reborn
+/// distinction instead of collapsing both to `None`, so `ironclaw
 /// status` can report *why* Google OAuth is disabled — truthfully
 /// reflecting whatever `config set google.*` last wrote, not just env vars.
 pub(crate) fn resolve_google_oauth_config_state_from_env(
