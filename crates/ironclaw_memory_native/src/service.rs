@@ -687,7 +687,9 @@ fn validate_loop_safe_summary(value: String) -> Option<String> {
     // token detector — to the single canonical `ironclaw_host_api::SafeSummary`
     // definition. (host_api's secret-token detector is a superset of the former
     // local `sk-`-only check, so this only tightens secret rejection.)
-    let value = ironclaw_host_api::SafeSummary::new(value).ok()?.into_inner();
+    let value = ironclaw_host_api::SafeSummary::new(value)
+        .ok()?
+        .into_inner();
 
     // Memory-snippet-specific extra bans: the memory context must not surface
     // descriptive runtime/error vocabulary that the capability-outcome summary
