@@ -15,7 +15,7 @@ use ironclaw_product_adapters::{
     InboundOutcome, OutboundEnvelope, OutboundPart, PartDeliveryOutcome, VerifiedInbound,
 };
 
-use crate::payload::{
+use ironclaw_telegram_v2_adapter::{
     GroupTriggerPolicy, TELEGRAM_API_HOST, TelegramInboundEvent, normalize_telegram_update,
 };
 

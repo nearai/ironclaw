@@ -24,6 +24,7 @@ chrono = { version = "0.4", features = ["serde"] }
 # contract test crate, not from the adapter library itself.
 ironclaw_host_api = { path = "../ironclaw_host_api", version = "0.1.0" }
 ironclaw_product_adapters = { path = "../ironclaw_product_adapters", version = "0.1.0" }
+ironclaw_telegram_v2_adapter = { path = "../ironclaw_telegram_v2_adapter", version = "0.1.0" }
 ironclaw_turns = { path = "../ironclaw_turns", version = "0.1.0" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

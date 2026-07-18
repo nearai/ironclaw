@@ -5334,6 +5334,7 @@ dependencies = [
  "chrono",
  "ironclaw_host_api",
  "ironclaw_product_adapters",
+ "ironclaw_telegram_v2_adapter",
  "ironclaw_turns",
  "serde",
  "serde_json",

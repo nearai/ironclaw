@@ -10,9 +10,8 @@ use ironclaw_product_adapters::test_support::conformance::{
 use ironclaw_product_adapters::{
     ExternalConversationRef, OutboundEnvelope, OutboundPart, OutboundTarget,
 };
-use ironclaw_telegram_extension::{
-    GroupTriggerPolicy, TELEGRAM_WEBHOOK_URL_CONFIG, TelegramChannelAdapter,
-};
+use ironclaw_telegram_extension::{TELEGRAM_WEBHOOK_URL_CONFIG, TelegramChannelAdapter};
+use ironclaw_telegram_v2_adapter::GroupTriggerPolicy;
 
 fn scripted_bot_api(request: &RestrictedEgressRequest) -> RestrictedEgressResponse {
     let body = if request.url.ends_with("/sendMessage") {
