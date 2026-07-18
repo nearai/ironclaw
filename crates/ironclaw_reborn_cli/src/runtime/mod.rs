@@ -917,16 +917,20 @@ fn google_oauth_client_secret_from_store(
     config: &RebornBootConfig,
 ) -> anyhow::Result<Option<SecretString>> {
     let home_path = config.home().path().to_path_buf();
-    // `open_local_dev_secret_store` opens a libSQL file directly under
-    // `home_path` and does not create that directory itself — the other
-    // callers that reach it (`onboard`, `config set`) already
-    // `create_dir_all` the reborn home before calling in. This resolver
-    // also runs on the `status` path, which must stay a read-only
-    // diagnostic that works before `onboard` has ever run (directory not
-    // yet created), so create the (possibly still-empty) directory here
-    // rather than surface a raw SQLITE_CANTOPEN.
-    std::fs::create_dir_all(&home_path)
-        .with_context(|| format!("creating reborn home directory {}", home_path.display()))?;
+    // This resolver also runs on the `status` path, which must stay a
+    // read-only diagnostic: it must not create the reborn home directory
+    // and must not trigger master-key/keychain resolution when there is
+    // nothing to read. The local-dev secret-store db file
+    // (`reborn-local-dev.db`, same filename `open_local_dev_secret_store`
+    // opens — see its home in `ironclaw_reborn_composition::factory`) can't
+    // exist without its parent directory, so its absence alone proves
+    // there is no store and therefore no secret; return early without
+    // opening anything. (A *non-pristine* headless host with a real store
+    // may still block resolving the master key via the OS keychain — that
+    // is pre-existing platform behavior outside this fix.)
+    if !home_path.join("reborn-local-dev.db").exists() {
+        return Ok(None);
+    }
     block_on_cli(async move {
         let store = ironclaw_reborn_composition::open_local_dev_secret_store(&home_path)
             .await
@@ -3936,6 +3940,41 @@ poll_interval_secs = 15
         assert_eq!(
             secrecy::ExposeSecret::expose_secret(&secret),
             "GOCSPX-store-wiring-test"
+        );
+    }
+
+    /// `status` (and anything else reaching this resolver) must stay a
+    /// read-only diagnostic on a pristine home: no directory creation, no
+    /// master-key/keychain resolution. Deliberately does NOT set
+    /// `IRONCLAW_DISABLE_OS_KEYCHAIN` — with the fix, a pristine home (no
+    /// secret-store db file yet) must short-circuit to `None` before ever
+    /// reaching the keychain, so this must complete fast regardless of that
+    /// env var. Against the unfixed resolver this creates the home
+    /// directory and falls through to real OS-keychain master-key
+    /// resolution, which hangs without a GUI session.
+    #[cfg(feature = "libsql")]
+    #[test]
+    fn google_oauth_client_secret_from_store_is_read_only_on_a_pristine_home() {
+        let _guard = lock_runtime_env();
+        let temp = tempfile::tempdir().expect("tempdir");
+        let reborn_home = temp.path().join("does-not-exist-yet");
+        let config = RebornBootConfig::resolve_from_env_parts(
+            Some(reborn_home.as_os_str().to_os_string()),
+            None,
+            None,
+            None,
+        )
+        .expect("boot config");
+
+        let secret = super::google_oauth_client_secret_from_store(&config)
+            .expect("must resolve without touching the keychain");
+        assert!(
+            secret.is_none(),
+            "a pristine home has no secret store, so there is no secret to read"
+        );
+        assert!(
+            !reborn_home.exists(),
+            "a read-only diagnostic must not create the reborn home directory"
         );
     }
 }

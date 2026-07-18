@@ -406,6 +406,14 @@ impl SecretStoreOpener for LocalDevSecretStoreOpener {
         &self,
         home_path: &Path,
     ) -> anyhow::Result<ironclaw_reborn_composition::LlmKeyStore> {
+        // `config set` is a write command: create the reborn home directory
+        // (if missing) before opening the store, mirroring
+        // `onboard::llm_credentials::open_llm_key_store` — a never-onboarded
+        // home has no directory yet, and `open_local_dev_secret_store` opens
+        // a libSQL file directly under it without creating parents itself.
+        std::fs::create_dir_all(home_path).map_err(|error| {
+            anyhow::anyhow!("create reborn home {}: {error}", home_path.display())
+        })?;
         let home_path = home_path.to_path_buf();
         crate::runtime::block_on_cli(async move {
             let store = ironclaw_reborn_composition::open_local_dev_secret_store(&home_path)
@@ -420,6 +428,11 @@ impl SecretStoreOpener for LocalDevSecretStoreOpener {
         &self,
         home_path: &Path,
     ) -> anyhow::Result<ironclaw_reborn_composition::GoogleOauthSecretStore> {
+        // See `open_llm_key_store` above: `config set` is a write command,
+        // so create the reborn home directory before opening the store.
+        std::fs::create_dir_all(home_path).map_err(|error| {
+            anyhow::anyhow!("create reborn home {}: {error}", home_path.display())
+        })?;
         let home_path = home_path.to_path_buf();
         crate::runtime::block_on_cli(async move {
             let store = ironclaw_reborn_composition::open_local_dev_secret_store(&home_path)
@@ -674,6 +687,63 @@ mod tests {
         assert_eq!(
             secrecy::ExposeSecret::expose_secret(&value),
             "GOCSPX-abc123"
+        );
+    }
+
+    /// `config set` on a secret-destination key (`google.client_secret`,
+    /// `<provider>.api_key`) is the FIRST command a never-onboarded home
+    /// might run — `onboard` may not have created the reborn home
+    /// directory yet. This drives the real `LocalDevSecretStoreOpener`
+    /// (not `FakeSecretStoreOpener`) so it actually reaches
+    /// `open_local_dev_secret_store`'s libSQL file-open, the same path
+    /// that raised a raw `SQLITE_CANTOPEN` before this fix's
+    /// `create_dir_all`. `IRONCLAW_DISABLE_OS_KEYCHAIN` is set because
+    /// master-key resolution would otherwise reach the real OS keychain —
+    /// that concern belongs to the `status` read-only-diagnostic fix, not
+    /// this write-path test.
+    #[cfg(feature = "libsql")]
+    #[test]
+    fn google_client_secret_write_creates_the_reborn_home_directory_on_a_never_onboarded_host() {
+        let _guard = crate::runtime::test_env::lock_runtime_env();
+        // Snapshot-and-restore rather than an unconditional `remove_var`:
+        // the surrounding `cargo test` invocation may itself already export
+        // `IRONCLAW_DISABLE_OS_KEYCHAIN=1` for the whole process (the gate
+        // command does), and unconditionally clearing it on the way out
+        // would wipe that out for every test running after this one for the
+        // rest of the process, sending them into the real OS keychain.
+        let prior_disable_keychain = std::env::var("IRONCLAW_DISABLE_OS_KEYCHAIN").ok();
+        // SAFETY: serialized by `lock_runtime_env()`; restored below.
+        unsafe {
+            std::env::set_var("IRONCLAW_DISABLE_OS_KEYCHAIN", "1");
+        }
+
+        let (_tmp, context) = RebornCliContext::test_context();
+        let home = context.boot_config().home();
+        assert!(
+            !home.path().exists(),
+            "sanity: test_context's reborn home must not exist yet, matching a \
+             never-onboarded host"
+        );
+
+        let result = set_value_key(
+            &context,
+            ConfigKey::GoogleClientSecret,
+            Some("GOCSPX-never-onboarded".to_string()),
+            &mut NeverPromptSource,
+            &LocalDevSecretStoreOpener,
+        );
+
+        // SAFETY: see above.
+        unsafe {
+            match &prior_disable_keychain {
+                Some(value) => std::env::set_var("IRONCLAW_DISABLE_OS_KEYCHAIN", value),
+                None => std::env::remove_var("IRONCLAW_DISABLE_OS_KEYCHAIN"),
+            }
+        }
+
+        result.expect(
+            "writing a secret-destination key must create the reborn home directory \
+             on first use, not surface a raw SQLITE_CANTOPEN",
         );
     }
 
