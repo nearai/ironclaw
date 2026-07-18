@@ -436,6 +436,7 @@ impl McpClient {
         self.thread_id
     }
 
+    // arch-exempt: large_file, review-mandated session-lifecycle fix on the existing client surface, plan #6247
     /// Terminate this client's `(user, server, thread)` session in the shared
     /// [`McpSessionManager`], if one is wired.
     ///
@@ -605,6 +606,38 @@ impl McpClient {
     /// credentials are never silently overwritten.
     async fn build_request_headers(&self) -> Result<HashMap<String, String>, ToolError> {
         let mut headers = self.custom_headers.clone();
+
+        // Resolve secret REFERENCES persisted in place of credential header
+        // values (`{{secret:...}}`, written by the programmatic install/PATCH
+        // surface — see `ExtensionManager::secretize_sensitive_headers`).
+        // Fails closed: a reference that cannot be resolved must not degrade
+        // into sending the literal marker to the backend.
+        for (header_name, value) in headers.iter_mut() {
+            let Some(secret_name) = crate::tools::mcp::config::parse_header_secret_reference(value)
+            else {
+                continue;
+            };
+            let Some(ref secrets) = self.secrets else {
+                return Err(ToolError::ExecutionFailed(format!(
+                    "header '{header_name}' references a stored credential but no secrets store is wired"
+                )));
+            };
+            let decrypted = secrets
+                .get_decrypted(&self.user_id, secret_name)
+                .await
+                .map_err(|e| {
+                    tracing::error!(
+                        server = %self.server_name,
+                        header = %header_name,
+                        error = %e,
+                        "failed to resolve header credential reference"
+                    );
+                    ToolError::ExecutionFailed(format!(
+                        "failed to resolve stored credential for header '{header_name}'"
+                    ))
+                })?;
+            *value = decrypted.expose().to_string();
+        }
 
         // Only inject OAuth token if the user hasn't set a custom Authorization header.
         let has_custom_auth = self
@@ -1335,6 +1368,82 @@ mod tests {
         let client = client.with_session_manager(session_manager);
 
         assert!(client.has_session_manager());
+    }
+
+    /// Header values persisted as `{{secret:...}}` references resolve to the
+    /// stored credential at request time; unresolvable references fail closed
+    /// instead of leaking the literal marker to the backend.
+    #[tokio::test]
+    async fn build_request_headers_resolves_secret_references() {
+        use crate::secrets::{
+            CreateSecretParams, InMemorySecretsStore, SecretsCrypto, SecretsStore,
+        };
+
+        let crypto = Arc::new(
+            SecretsCrypto::new(secrecy::SecretString::from(
+                "test-key-at-least-32-chars-long!!".to_string(),
+            ))
+            .expect("crypto"),
+        );
+        let secrets: Arc<dyn SecretsStore + Send + Sync> =
+            Arc::new(InMemorySecretsStore::new(crypto));
+        secrets
+            .create(
+                "user_a",
+                CreateSecretParams::new("mcp_svc_header_authorization", "Bearer resolved-cred"),
+            )
+            .await
+            .expect("seed secret");
+
+        let mut config = McpServerConfig::new("svc", "http://a.invalid");
+        config.headers.insert(
+            "Authorization".to_string(),
+            crate::tools::mcp::config::header_secret_reference("mcp_svc_header_authorization"),
+        );
+        config
+            .headers
+            .insert("X-Trace".to_string(), "plain".to_string());
+
+        let client = McpClient::new_authenticated(
+            config,
+            Arc::new(McpSessionManager::new()),
+            Arc::clone(&secrets),
+            "user_a",
+            None,
+        );
+
+        let headers = client
+            .build_request_headers()
+            .await
+            .expect("headers resolve");
+        assert_eq!(
+            headers.get("Authorization").map(String::as_str),
+            Some("Bearer resolved-cred"),
+            "reference must resolve to the stored credential"
+        );
+        assert_eq!(
+            headers.get("X-Trace").map(String::as_str),
+            Some("plain"),
+            "ordinary headers pass through untouched"
+        );
+
+        // Unresolvable reference → fail closed, marker never reaches the wire.
+        let mut config = McpServerConfig::new("svc", "http://a.invalid");
+        config.headers.insert(
+            "Authorization".to_string(),
+            crate::tools::mcp::config::header_secret_reference("mcp_svc_header_missing"),
+        );
+        let client = McpClient::new_authenticated(
+            config,
+            Arc::new(McpSessionManager::new()),
+            secrets,
+            "user_a",
+            None,
+        );
+        assert!(
+            client.build_request_headers().await.is_err(),
+            "missing secret behind a reference must fail the request, not degrade"
+        );
     }
 
     // ── for_thread tests ───────────────────────────────────────────────────

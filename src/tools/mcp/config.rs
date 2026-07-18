@@ -274,6 +274,14 @@ impl McpServerConfig {
         format!("mcp_{}_access_token", self.name)
     }
 
+    /// Secret name under which a sensitive header's VALUE is stored when the
+    /// config is written through the programmatic install/PATCH surface.
+    /// The persisted `headers` map then carries only a
+    /// [`header_secret_reference`] to this name — never the raw credential.
+    pub fn header_secret_name(&self, header_name: &str) -> String {
+        mcp_header_secret_name(&self.name, header_name)
+    }
+
     /// Get the secret name used to store the refresh token.
     ///
     /// Matches the convention used by the hosted OAuth flow in
@@ -529,6 +537,57 @@ pub async fn load_mcp_servers_ready(
         Some(store) => load_mcp_servers_from_db(store, user_id).await,
         None => load_mcp_servers().await,
     }
+}
+
+// arch-exempt: large_file, review-mandated secret-reference helpers colocated with the config contract they guard, plan #6247
+/// Marker wrapping a secret NAME persisted in place of a sensitive header
+/// value: `{{secret:mcp_github_header_authorization}}`. The raw credential
+/// lives in `SecretsStore`; `McpClient::build_request_headers` resolves the
+/// reference at request time. Distinct from WASM credential placeholders
+/// (`{SECRET_NAME}`) so the two injection surfaces can't be confused.
+pub const HEADER_SECRET_REF_PREFIX: &str = "{{secret:";
+const HEADER_SECRET_REF_SUFFIX: &str = "}}";
+
+/// Free-fn form of [`McpServerConfig::header_secret_name`] for callers that
+/// hold a mutable borrow of the config while iterating its headers.
+pub fn mcp_header_secret_name(server_name: &str, header_name: &str) -> String {
+    format!(
+        "mcp_{}_header_{}",
+        server_name,
+        header_name.to_ascii_lowercase().replace('-', "_")
+    )
+}
+
+/// Render a header-value secret reference for `secret_name`.
+pub fn header_secret_reference(secret_name: &str) -> String {
+    format!("{HEADER_SECRET_REF_PREFIX}{secret_name}{HEADER_SECRET_REF_SUFFIX}")
+}
+
+/// Parse a header value as a secret reference, returning the secret name.
+/// `None` for ordinary (non-reference) values.
+pub fn parse_header_secret_reference(value: &str) -> Option<&str> {
+    value
+        .strip_prefix(HEADER_SECRET_REF_PREFIX)?
+        .strip_suffix(HEADER_SECRET_REF_SUFFIX)
+}
+
+/// Whether a header NAME conventionally carries credential material.
+///
+/// The programmatic install/PATCH surface secretizes the values of these
+/// headers (persisting a [`header_secret_reference`] instead); other headers
+/// (content negotiation, tracing, etc.) stay inline. Matching is
+/// case-insensitive on the boundary-normalized name.
+pub fn is_sensitive_header_name(name: &str) -> bool {
+    let lower = name.to_ascii_lowercase();
+    lower == "authorization"
+        || lower == "proxy-authorization"
+        || lower == "cookie"
+        || lower.contains("api-key")
+        || lower.contains("api_key")
+        || lower.contains("apikey")
+        || lower.contains("token")
+        || lower.contains("secret")
+        || lower.starts_with("x-auth")
 }
 
 /// Get the default MCP servers configuration path.

@@ -1731,9 +1731,19 @@ mod tests {
             .get_mcp_server_for_test("my_server", "test")
             .await
             .expect("config must be stored");
+        // Sensitive headers are secretized: the row carries a reference and
+        // the raw credential lives in SecretsStore.
+        let auth = config.headers.get("Authorization").expect("auth header");
+        let secret_name = crate::tools::mcp::config::parse_header_secret_reference(auth)
+            .expect("Authorization must persist as a secret reference");
         assert_eq!(
-            config.headers.get("Authorization").map(String::as_str),
-            Some("Bearer tok123")
+            ext_mgr
+                .secrets()
+                .get_decrypted("test", secret_name)
+                .await
+                .expect("secret stored")
+                .expose(),
+            "Bearer tok123"
         );
         assert_eq!(
             config.oauth.as_ref().map(|o| o.client_id.as_str()),
@@ -2124,16 +2134,31 @@ mod tests {
             "error must not leak credential material: {body_text}"
         );
 
-        // Rollback: the stored config must carry the PREVIOUS header, not the
-        // one whose reactivation failed.
+        // Rollback: the stored config must carry the PREVIOUS header state.
+        // Headers are secretized on install, so the persisted value is a
+        // secret REFERENCE — and the rollback must also have restored the
+        // referenced secret's VALUE to the pre-PATCH credential ("Bearer
+        // old"), since secretize upserts by deterministic name.
         let config = ext_mgr
             .get_mcp_server_for_test("my_server", "user_a")
             .await
             .expect("config after failed patch");
+        let auth_value = config
+            .headers
+            .get("Authorization")
+            .expect("Authorization header present");
+        let secret_name = crate::tools::mcp::config::parse_header_secret_reference(auth_value)
+            .expect("persisted Authorization must be a secret reference, not plaintext");
+        let restored = ext_mgr
+            .secrets()
+            .get_decrypted("user_a", secret_name)
+            .await
+            .expect("header secret exists after rollback");
         assert_eq!(
-            config.headers.get("Authorization").map(String::as_str),
-            Some("Bearer old"),
-            "failed PATCH must restore the previous config (snapshot + rollback)"
+            restored.expose(),
+            "Bearer old",
+            "failed PATCH must restore the previous header credential value \
+             (snapshot + rollback covers the secret, not just the config row)"
         );
 
         // The seeded stale base client AND its thread fork must still be
@@ -2156,6 +2181,92 @@ mod tests {
                 .await
                 .is_none(),
             "stale thread-scoped fork must not survive a failed PATCH"
+        );
+    }
+
+    // arch-exempt: large_file, review-mandated caller-level regression tests for the PATCH surface, plan #6247
+    /// Programmatic install and PATCH move credential-bearing header VALUES
+    /// into `SecretsStore`, persisting only `{{secret:...}}` references in the
+    /// (unencrypted) `mcp_servers` settings row. Non-sensitive headers stay
+    /// inline. A PATCH replacement overwrites the stored secret in place.
+    #[tokio::test]
+    async fn test_install_and_patch_secretize_sensitive_headers() {
+        use crate::tools::mcp::config::parse_header_secret_reference;
+
+        let (ext_mgr, _t, _c, _db) = test_ext_mgr_with_db().await;
+
+        ext_mgr
+            .install_mcp_with_config(
+                "sec_server",
+                "https://mcp.example.com/mcp",
+                std::collections::HashMap::from([
+                    ("Authorization".to_string(), "Bearer raw-cred".to_string()),
+                    ("X-Trace".to_string(), "trace-abc".to_string()),
+                ]),
+                None,
+                "test",
+            )
+            .await
+            .expect("install");
+
+        let config = ext_mgr
+            .get_mcp_server_for_test("sec_server", "test")
+            .await
+            .expect("config");
+        let auth = config.headers.get("Authorization").expect("auth header");
+        let secret_name = parse_header_secret_reference(auth)
+            .expect("Authorization must persist as a secret reference");
+        assert!(
+            !auth.contains("raw-cred"),
+            "raw credential must not appear in the persisted config"
+        );
+        assert_eq!(
+            config.headers.get("X-Trace").map(String::as_str),
+            Some("trace-abc"),
+            "non-sensitive headers stay inline"
+        );
+        assert_eq!(
+            ext_mgr
+                .secrets()
+                .get_decrypted("test", secret_name)
+                .await
+                .expect("secret stored")
+                .expose(),
+            "Bearer raw-cred",
+            "raw credential lives in SecretsStore"
+        );
+
+        // PATCH (inactive server) replaces the credential: same reference
+        // name, new stored value, still no plaintext in the config.
+        ext_mgr
+            .update_mcp_server_partial(
+                "sec_server",
+                None,
+                Some(std::collections::HashMap::from([(
+                    "Authorization".to_string(),
+                    "Bearer replaced".to_string(),
+                )])),
+                None,
+                "test",
+            )
+            .await
+            .expect("patch headers");
+        let config = ext_mgr
+            .get_mcp_server_for_test("sec_server", "test")
+            .await
+            .expect("config after patch");
+        let auth = config.headers.get("Authorization").expect("auth header");
+        let secret_name = parse_header_secret_reference(auth)
+            .expect("PATCHed Authorization must persist as a secret reference");
+        assert_eq!(
+            ext_mgr
+                .secrets()
+                .get_decrypted("test", secret_name)
+                .await
+                .expect("secret stored")
+                .expose(),
+            "Bearer replaced",
+            "PATCH must overwrite the stored credential value"
         );
     }
 
@@ -2227,10 +2338,25 @@ mod tests {
             .get_mcp_server_for_test("shared_name", "user_b")
             .await
             .expect("user_b config");
+        // Both users' headers are secretized under the same deterministic
+        // secret NAME, but SecretsStore rows are user-scoped — user A's PATCH
+        // upserts user A's secret only. Resolve user B's reference in user
+        // B's scope and confirm the credential is untouched.
+        let auth_b = config_b
+            .headers
+            .get("Authorization")
+            .expect("user_b auth header");
+        let secret_name_b = crate::tools::mcp::config::parse_header_secret_reference(auth_b)
+            .expect("user_b Authorization must persist as a secret reference");
         assert_eq!(
-            config_b.headers.get("Authorization").map(String::as_str),
-            Some("Bearer user_b_token"),
-            "user B's config must not be affected by user A's PATCH"
+            ext_mgr
+                .secrets()
+                .get_decrypted("user_b", secret_name_b)
+                .await
+                .expect("user_b secret exists")
+                .expose(),
+            "Bearer user_b_token",
+            "user B's credential must not be affected by user A's PATCH"
         );
 
         // user_a's config must reflect the update.
@@ -2238,10 +2364,21 @@ mod tests {
             .get_mcp_server_for_test("shared_name", "user_a")
             .await
             .expect("user_a config");
+        let auth_a = config_a
+            .headers
+            .get("Authorization")
+            .expect("user_a auth header");
+        let secret_name_a = crate::tools::mcp::config::parse_header_secret_reference(auth_a)
+            .expect("user_a Authorization must persist as a secret reference");
         assert_eq!(
-            config_a.headers.get("Authorization").map(String::as_str),
-            Some("Bearer user_a_new"),
-            "user A's config must reflect the PATCH"
+            ext_mgr
+                .secrets()
+                .get_decrypted("user_a", secret_name_a)
+                .await
+                .expect("user_a secret exists")
+                .expose(),
+            "Bearer user_a_new",
+            "user A's credential must reflect the PATCH"
         );
     }
 }

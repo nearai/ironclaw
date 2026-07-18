@@ -224,9 +224,14 @@ fn purge_thread_forks(
     evicted
 }
 
-/// Terminate the `McpSessionManager` sessions of evicted clients. Fire this
-/// after the store's write lock is released (session cleanup takes its own
-/// lock; keeping the two disjoint avoids any ordering coupling).
+/// Terminate the `McpSessionManager` sessions of evicted clients.
+///
+/// Callers invoke this while STILL HOLDING the store's write lock so that
+/// eviction + session termination is atomic with respect to the store: a
+/// concurrent `resolve_for_thread`/activation cannot observe the replacement
+/// client and mint a fresh session that this key-only cleanup would then
+/// destroy. Lock ordering is safe: the session manager's lock is only ever
+/// taken on its own or under the clients lock, never the other way around.
 async fn terminate_sessions(evicted: Vec<Arc<McpClient>>) {
     for client in evicted {
         client.terminate_session().await;
@@ -273,21 +278,24 @@ impl McpClientStore {
         client: Arc<McpClient>,
         surface: String,
     ) {
-        let evicted = {
-            let mut clients = self.clients.write().await;
-            let evicted = purge_thread_forks(&mut clients, user_id, server_name);
-            clients.insert(
-                McpClientKey::new(user_id, server_name),
-                McpClientEntry {
-                    client,
-                    surface,
-                    last_used_seq: Arc::new(std::sync::atomic::AtomicU64::new(
-                        self.next_access_seq(),
-                    )),
-                },
-            );
-            evicted
-        };
+        let mut clients = self.clients.write().await;
+        let mut evicted = purge_thread_forks(&mut clients, user_id, server_name);
+        let new_client = Arc::clone(&client);
+        let replaced = clients.insert(
+            McpClientKey::new(user_id, server_name),
+            McpClientEntry {
+                client,
+                surface,
+                last_used_seq: Arc::new(std::sync::atomic::AtomicU64::new(self.next_access_seq())),
+            },
+        );
+        // The replaced base's own session dies with it — but only when the new
+        // client is a distinct instance (a same-Arc re-insert keeps its session).
+        if let Some(old_entry) = replaced
+            && !Arc::ptr_eq(&old_entry.client, &new_client)
+        {
+            evicted.push(old_entry.client);
+        }
         terminate_sessions(evicted).await;
     }
 
@@ -303,25 +311,26 @@ impl McpClientStore {
         client: Arc<McpClient>,
         surface: String,
     ) {
-        let evicted = {
-            let mut clients = self.clients.write().await;
-            let evicted = if key.thread_id.is_none() {
-                purge_thread_forks(&mut clients, &key.user_id, &key.server_name)
-            } else {
-                Vec::new()
-            };
-            clients.insert(
-                key,
-                McpClientEntry {
-                    client,
-                    surface,
-                    last_used_seq: Arc::new(std::sync::atomic::AtomicU64::new(
-                        self.next_access_seq(),
-                    )),
-                },
-            );
-            evicted
+        let mut clients = self.clients.write().await;
+        let mut evicted = if key.thread_id.is_none() {
+            purge_thread_forks(&mut clients, &key.user_id, &key.server_name)
+        } else {
+            Vec::new()
         };
+        let new_client = Arc::clone(&client);
+        let replaced = clients.insert(
+            key,
+            McpClientEntry {
+                client,
+                surface,
+                last_used_seq: Arc::new(std::sync::atomic::AtomicU64::new(self.next_access_seq())),
+            },
+        );
+        if let Some(old_entry) = replaced
+            && !Arc::ptr_eq(&old_entry.client, &new_client)
+        {
+            evicted.push(old_entry.client);
+        }
         terminate_sessions(evicted).await;
     }
 
@@ -340,14 +349,11 @@ impl McpClientStore {
     /// server — a fork surviving extension removal could keep using the
     /// removed configuration's credentials from inside an old thread.
     pub async fn remove(&self, user_id: &str, server_name: &str) -> Option<Arc<McpClient>> {
-        let (removed, mut evicted) = {
-            let mut clients = self.clients.write().await;
-            let evicted = purge_thread_forks(&mut clients, user_id, server_name);
-            let removed = clients
-                .remove(&McpClientKey::new(user_id, server_name))
-                .map(|entry| entry.client);
-            (removed, evicted)
-        };
+        let mut clients = self.clients.write().await;
+        let mut evicted = purge_thread_forks(&mut clients, user_id, server_name);
+        let removed = clients
+            .remove(&McpClientKey::new(user_id, server_name))
+            .map(|entry| entry.client);
         // The base client's own (thread_id: None) session dies with it too.
         evicted.extend(removed.clone());
         terminate_sessions(evicted).await;
@@ -367,18 +373,14 @@ impl McpClientStore {
     /// extension-manager-level per-server lifecycle lock is what
     /// serialises activate and remove end-to-end.
     pub async fn remove_and_check_empty(&self, user_id: &str, server_name: &str) -> bool {
-        let (empty, evicted) = {
-            let mut clients = self.clients.write().await;
-            let evicted = purge_thread_forks(&mut clients, user_id, server_name);
-            let removed = clients
+        let mut clients = self.clients.write().await;
+        let mut evicted = purge_thread_forks(&mut clients, user_id, server_name);
+        evicted.extend(
+            clients
                 .remove(&McpClientKey::new(user_id, server_name))
-                .map(|entry| entry.client);
-            let empty = !clients.keys().any(|key| key.server_name == server_name);
-            (
-                empty,
-                evicted.into_iter().chain(removed).collect::<Vec<_>>(),
-            )
-        };
+                .map(|entry| entry.client),
+        );
+        let empty = !clients.keys().any(|key| key.server_name == server_name);
         terminate_sessions(evicted).await;
         empty
     }
@@ -493,13 +495,13 @@ impl McpClientStore {
                 last_used_seq: Arc::new(std::sync::atomic::AtomicU64::new(self.next_access_seq())),
             },
         );
-        drop(guard);
-
-        // Session state must not outlive the evicted fork (after the lock:
-        // the session manager has its own lock).
+        // Terminate the victim's session while still holding the map lock so
+        // eviction + cleanup stays atomic w.r.t. concurrent resolutions (see
+        // `terminate_sessions`).
         if let Some(client) = lru_evicted {
             client.terminate_session().await;
         }
+        drop(guard);
         Some(forked)
     }
 
@@ -516,18 +518,15 @@ impl McpClientStore {
     /// LRU cap ([`MAX_THREAD_FORKS_PER_USER_SERVER`]) in `resolve_for_thread`,
     /// and forks are purged eagerly on base replace/remove.
     pub async fn evict_thread(&self, thread_id: Uuid) {
-        let evicted = {
-            let mut clients = self.clients.write().await;
-            let mut evicted = Vec::new();
-            clients.retain(|key, entry| {
-                let keep = key.thread_id != Some(thread_id);
-                if !keep {
-                    evicted.push(entry.client.clone());
-                }
-                keep
-            });
-            evicted
-        };
+        let mut clients = self.clients.write().await;
+        let mut evicted = Vec::new();
+        clients.retain(|key, entry| {
+            let keep = key.thread_id != Some(thread_id);
+            if !keep {
+                evicted.push(entry.client.clone());
+            }
+            keep
+        });
         terminate_sessions(evicted).await;
     }
 
