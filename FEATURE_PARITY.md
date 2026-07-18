@@ -551,7 +551,7 @@ Trace Commons issuer/TenantCtx note: the server-side `zmanian/tracedao-server` s
 | Config recovery on clobber | ✅ | ❌ | Restore last-known-good config on critical clobber signatures (missing metadata, missing `gateway.mode`, sharp size drops); foreground/service notices include rejected paths |
 | Modular `$include` files | ✅ | ❌ | Single-file top-level includes for isolated mutations; `plugins install`/`update` updates `plugins.json5` instead of flattening |
 | `config set --merge`/`--replace` | ✅ | ❌ | Additive vs intentional clobber for provider model maps |
-| Wrapper-based service install | ✅ | ❌ | `--wrapper`/`OPENCLAW_WRAPPER` validated executable LaunchAgent/systemd wrappers |
+| Wrapper-based service install | ✅ | ✅ (Reborn) | `--wrapper`/`OPENCLAW_WRAPPER` validated executable LaunchAgent/systemd wrappers; Reborn's `ironclaw-reborn service install` covers launchd (macOS)/systemd (Linux) with a webui-token-file fallback and atomic install + rollback on failure |
 
 ### Owner: _Unassigned_
 
@@ -649,7 +649,7 @@ Trace Commons issuer/TenantCtx note: the server-side `zmanian/tracedao-server` s
 | Model selection | ✅ | ✅ | - | TUI only |
 | Config editing | ✅ | ❌ | P3 | Raw config pending-changes diff panel with redacted reveal |
 | Debug/logs viewer | ✅ | ✅ | - | Real-time log streaming with level/target filters |
-| WebChat interface | ✅ | ✅ | - | Web gateway chat with SSE/WebSocket |
+| WebChat interface | ✅ | ✅ | - | Web gateway chat with SSE/WebSocket; Reborn serves canonical SPA routes at `/chat`, `/settings`, and `/extensions`, while legacy `/v2/*` browser URLs temporarily redirect to root equivalents and `/api/webchat/v2/*` stays unchanged |
 | Canvas system (A2UI) | ✅ | ❌ | P3 | Agent-driven UI, improved asset resolution; macOS canvas hosts pushed A2UI without auto-reload |
 | Control UI i18n | ✅ | ❌ | P3 | English, Chinese, Portuguese; expanded with Persian (fa), Dutch (nl), Vietnamese (vi), Italian (it), Arabic (ar), Thai (th), Traditional Chinese (zh-TW) |
 | WebChat theme sync | ✅ | ❌ | P3 | Sync with system dark/light mode |

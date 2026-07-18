@@ -241,7 +241,7 @@ Use this table when deciding where a new concern belongs.
 
 | Layer | May call | Must not call | Owns | Typical crates |
 | --- | --- | --- | --- | --- |
-| Products | Composition facade, product workflow, projection/read APIs | Raw stores, `RuntimeDispatcher`, concrete loop drivers, substrate internals | UX, transport normalization, user-visible replies/events, approval/auth UI | `ironclaw_reborn_cli`, `ironclaw_webui_v2`, product adapters |
+| Products | Composition facade, product workflow, projection/read APIs | Raw stores, `RuntimeDispatcher`, concrete loop drivers, substrate internals | UX, transport normalization, user-visible replies/events, approval/auth UI | `ironclaw_reborn_cli`, `ironclaw_webui`, product adapters |
 | Composition | Turn coordinator, host runtime, loop driver registry, substrates through typed constructors | Product-specific branching in lower crates, test/dev escape hatches in production | Service graph, profile mode, readiness, facade handles | `ironclaw_reborn_composition`, `ironclaw_runner` |
 | Userland loops | `AgentLoopDriverHost` ports only | `CapabilityHost`, `RuntimeDispatcher`, secret/network stores, product adapters | Prompt/model/tool strategy, retry/stop/gate decisions, loop-local checkpoints | `ironclaw_agent_loop`, loop families |
 | Kernel boundary | Substrates and runtime lanes through typed policy/authority APIs | Product UX decisions, loop strategy internals | Authorization, approvals, exact invocation leases, active locks, runner leases, validated exits, resource/process ownership | `ironclaw_turns`, `ironclaw_host_runtime`, `ironclaw_authorization`, `ironclaw_approvals` |
@@ -292,7 +292,7 @@ authority decision.
 ```mermaid
 flowchart TD
     CLI["ironclaw_reborn_cli\nUX shell"]
-    WebUI["ironclaw_webui_v2 /\nweb ingress"]
+    WebUI["ironclaw_webui /\nweb ingress"]
     Runtime["ironclaw_reborn_composition::RebornRuntime\nproduct-facing handle"]
     Factory["build_reborn_runtime /\nbuild_reborn_services"]
     Coordinator["ironclaw_turns::TurnCoordinator\nadapter-safe turn API"]

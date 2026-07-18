@@ -49,6 +49,7 @@ async fn secret_persists_across_libsql_reopen() {
     let composite = Arc::new(composite);
     let scoped = wrap_scoped(Arc::clone(&composite));
     let store = build_local_dev_secret_store_for_test(dir.path(), Arc::clone(&scoped))
+        .await
         .expect("build first secret store");
 
     let scope = test_product_scope(
@@ -93,6 +94,7 @@ async fn secret_persists_across_libsql_reopen() {
     let fresh_composite = Arc::new(fresh_composite);
     let fresh_scoped = wrap_scoped(Arc::clone(&fresh_composite));
     let fresh_store = build_local_dev_secret_store_for_test(dir.path(), fresh_scoped)
+        .await
         .expect("build fresh secret store (same root → same crypto key)");
 
     // --- Read back: the material must survive the reopen ---
@@ -125,8 +127,9 @@ async fn secret_read_back_fails_for_unknown_handle() {
         .expect("build default local-dev db roots");
     let composite = Arc::new(composite);
     let scoped = wrap_scoped(Arc::clone(&composite));
-    let store =
-        build_local_dev_secret_store_for_test(dir.path(), scoped).expect("build secret store");
+    let store = build_local_dev_secret_store_for_test(dir.path(), scoped)
+        .await
+        .expect("build secret store");
 
     let scope = test_product_scope(
         "tenant-itest",
@@ -171,8 +174,9 @@ async fn secret_read_back_fails_for_wrong_tenant_scope() {
         .expect("build default local-dev db roots");
     let composite = Arc::new(composite);
     let scoped = wrap_scoped(Arc::clone(&composite));
-    let store =
-        build_local_dev_secret_store_for_test(dir.path(), scoped).expect("build secret store");
+    let store = build_local_dev_secret_store_for_test(dir.path(), scoped)
+        .await
+        .expect("build secret store");
 
     let scope = test_product_scope(
         "tenant-itest",

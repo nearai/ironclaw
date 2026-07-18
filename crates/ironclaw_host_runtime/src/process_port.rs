@@ -16,7 +16,7 @@ use thiserror::Error;
 use tokio::process::Command;
 
 use crate::process_aliases::{
-    LocalHostWorkdirAlias, resolve_local_host_workdir, rewrite_local_host_command_aliases,
+    HostWorkdirAlias, resolve_local_host_workdir, rewrite_local_host_command_aliases,
     rewrite_local_host_output_aliases,
 };
 use crate::process_output::{
@@ -160,9 +160,9 @@ impl RuntimeProcessPort for TenantSandboxProcessPort {
     }
 }
 
-/// Local provider-host command environment handling.
+/// Host-process command environment handling.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub(crate) enum LocalHostProcessEnvMode {
+pub(crate) enum HostProcessEnvMode {
     /// Clear the child environment, forward only `SAFE_ENV_VARS`, and rewrite
     /// `HOME` to the command workdir.
     #[default]
@@ -171,24 +171,30 @@ pub(crate) enum LocalHostProcessEnvMode {
     Inherited,
 }
 
-/// Local provider-host command implementation matching the existing shell path.
+/// The host-process port: runs an OS process **directly on the host**, unsandboxed
+/// (no tenant-scoped mount containment). The name states the trust boundary plainly
+/// — renamed from `LocalHostProcessPort` because `Host` describes the boundary
+/// (host process vs sandboxed process) where `Local` obscured it (arch-simplification
+/// §4.4 Bucket 2; `docs/reborn/2026-05-11-trust-boundary-stack-note.md`). Composition
+/// must select this only for a genuinely single-user/local deployment; a multi-user
+/// served boot must route to the sandboxed process port instead (§6, issue #6170).
 #[derive(Debug, Clone, Default)]
-pub struct LocalHostProcessPort {
-    env_mode: LocalHostProcessEnvMode,
-    workdir_aliases: Vec<LocalHostWorkdirAlias>,
+pub struct HostProcessPort {
+    env_mode: HostProcessEnvMode,
+    workdir_aliases: Vec<HostWorkdirAlias>,
 }
 
-impl LocalHostProcessPort {
+impl HostProcessPort {
     pub fn new() -> Self {
         Self {
-            env_mode: LocalHostProcessEnvMode::Scrubbed,
+            env_mode: HostProcessEnvMode::Scrubbed,
             workdir_aliases: Vec::new(),
         }
     }
 
     pub fn new_inherited_env() -> Self {
         Self {
-            env_mode: LocalHostProcessEnvMode::Inherited,
+            env_mode: HostProcessEnvMode::Inherited,
             workdir_aliases: Vec::new(),
         }
     }
@@ -198,7 +204,7 @@ impl LocalHostProcessPort {
         alias: impl Into<String>,
         host_path: impl Into<PathBuf>,
     ) -> Self {
-        match LocalHostWorkdirAlias::try_new(alias, host_path) {
+        match HostWorkdirAlias::try_new(alias, host_path) {
             Ok(alias) => self.workdir_aliases.push(alias),
             Err(reason) => tracing::debug!(
                 reason = %reason,
@@ -210,7 +216,7 @@ impl LocalHostProcessPort {
 }
 
 #[async_trait]
-impl RuntimeProcessPort for LocalHostProcessPort {
+impl RuntimeProcessPort for HostProcessPort {
     async fn run_command(
         &self,
         request: CommandExecutionRequest,
@@ -225,7 +231,7 @@ impl RuntimeProcessPort for LocalHostProcessPort {
             .timeout_secs
             .map(Duration::from_secs)
             .unwrap_or(DEFAULT_COMMAND_TIMEOUT);
-        if self.env_mode == LocalHostProcessEnvMode::Inherited {
+        if self.env_mode == HostProcessEnvMode::Inherited {
             tracing::warn!(
                 host_access = "full-local",
                 "running local host command with inherited environment"
@@ -265,7 +271,7 @@ async fn execute_local_command(
     workdir: &PathBuf,
     timeout: Duration,
     extra_env: &HashMap<String, String>,
-    env_mode: LocalHostProcessEnvMode,
+    env_mode: HostProcessEnvMode,
 ) -> Result<(CapturedCommandOutput, i32), RuntimeProcessError> {
     let mut command = if cfg!(target_os = "windows") {
         let mut c = Command::new("cmd");
@@ -281,7 +287,7 @@ async fn execute_local_command(
     command.process_group(0);
 
     match env_mode {
-        LocalHostProcessEnvMode::Scrubbed => {
+        HostProcessEnvMode::Scrubbed => {
             command.env_clear();
             for var in SAFE_ENV_VARS {
                 if let Ok(val) = std::env::var(var) {
@@ -291,7 +297,7 @@ async fn execute_local_command(
             // Keep shell "~" expansion available without exposing the host user's home.
             command.env("HOME", workdir);
         }
-        LocalHostProcessEnvMode::Inherited => {}
+        HostProcessEnvMode::Inherited => {}
     }
     command.envs(extra_env);
     command
@@ -551,7 +557,7 @@ mod tests {
             &workdir.path().to_path_buf(),
             Duration::from_secs(5),
             &HashMap::new(),
-            LocalHostProcessEnvMode::Scrubbed,
+            HostProcessEnvMode::Scrubbed,
         )
         .await
         .expect("command succeeds");
@@ -581,7 +587,7 @@ mod tests {
             &workdir.path().to_path_buf(),
             Duration::from_secs(5),
             &HashMap::new(),
-            LocalHostProcessEnvMode::Scrubbed,
+            HostProcessEnvMode::Scrubbed,
         )
         .await
         .expect("command succeeds");
@@ -606,7 +612,7 @@ mod tests {
                 "IRONCLAW_REBORN_SENTINEL".to_string(),
                 "inherited".to_string(),
             )]),
-            LocalHostProcessEnvMode::Inherited,
+            HostProcessEnvMode::Inherited,
         )
         .await
         .expect("command succeeds");
@@ -620,7 +626,7 @@ mod tests {
     async fn local_host_process_port_translates_workspace_workdir_when_configured() {
         let workspace = tempfile::tempdir().expect("workspace tempdir");
         // Production canonicalizes the workspace root before wiring the alias
-        // (`LocalHostWorkdirAlias::try_new` requires a canonical host_path);
+        // (`HostWorkdirAlias::try_new` requires a canonical host_path);
         // honor that here so the alias prefix matches the canonical `$PWD` the
         // OS reports (macOS resolves `/var/...` -> `/private/var/...`).
         let workspace_root = workspace
@@ -629,8 +635,8 @@ mod tests {
             .expect("canonical workspace");
         std::fs::create_dir_all(workspace_root.join("qa-coding-smoke"))
             .expect("nested workspace dir");
-        let port = LocalHostProcessPort::new_inherited_env()
-            .with_workdir_alias("/workspace", workspace_root);
+        let port =
+            HostProcessPort::new_inherited_env().with_workdir_alias("/workspace", workspace_root);
 
         let output = port
             .run_command(CommandExecutionRequest {
@@ -659,7 +665,7 @@ mod tests {
         // path. The reverse output rewrite must restore the `/workspace` form so
         // the model reports a downloadable workspace path, not the host layout.
         let workspace = tempfile::tempdir().expect("workspace tempdir");
-        let port = LocalHostProcessPort::new_inherited_env()
+        let port = HostProcessPort::new_inherited_env()
             .with_workdir_alias("/workspace", workspace.path().to_path_buf());
 
         let output = port
@@ -682,7 +688,7 @@ mod tests {
     async fn local_host_process_port_rewrites_command_path_aliases() {
         let workspace = tempfile::tempdir().expect("workspace tempdir");
         let scratch = workspace.path().join("qa-coding-smoke");
-        let port = LocalHostProcessPort::new_inherited_env()
+        let port = HostProcessPort::new_inherited_env()
             .with_workdir_alias("/workspace", workspace.path().to_path_buf());
 
         let output = port
@@ -713,7 +719,7 @@ mod tests {
             &workdir.path().to_path_buf(),
             Duration::from_secs(5),
             &HashMap::new(),
-            LocalHostProcessEnvMode::Scrubbed,
+            HostProcessEnvMode::Scrubbed,
         )
         .await
         .expect("command succeeds");

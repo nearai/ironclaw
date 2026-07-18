@@ -2,7 +2,7 @@ use std::{path::PathBuf, sync::Arc};
 
 use crate::local_dev_mounts::scoped_skill_management_mount_view;
 use async_trait::async_trait;
-use ironclaw_filesystem::{LocalFilesystem, RootFilesystem};
+use ironclaw_filesystem::{DiskFilesystem, RootFilesystem};
 use ironclaw_host_api::{
     HostApiError, HostPath, InvocationId, MountView, ResourceScope, RuntimeHttpEgress, UserId,
     VirtualPath,
@@ -195,7 +195,7 @@ pub(crate) fn build_existing_local_dev_skill_management_port(
         });
     }
 
-    let mut filesystem = LocalFilesystem::new();
+    let mut filesystem = DiskFilesystem::new();
     filesystem.mount_local(
         VirtualPath::new("/projects")?,
         HostPath::from_path_buf(local_dev_storage_root),
@@ -667,7 +667,7 @@ fn map_local_skill_management_error(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ironclaw_filesystem::LocalFilesystem;
+    use ironclaw_filesystem::DiskFilesystem;
     use ironclaw_host_api::{
         AgentId, HostPath, MountAlias, MountGrant, MountPermissions, ProjectId, TenantId,
         VirtualPath,
@@ -810,7 +810,7 @@ mod tests {
         )
         .expect("system skill");
 
-        let mut filesystem = LocalFilesystem::new();
+        let mut filesystem = DiskFilesystem::new();
         filesystem
             .mount_local(
                 VirtualPath::new("/projects").expect("valid virtual path"),
@@ -981,7 +981,7 @@ mod tests {
         let storage_root = dir.path().join("local-dev");
         std::fs::create_dir_all(&storage_root).expect("storage root");
 
-        let mut filesystem = LocalFilesystem::new();
+        let mut filesystem = DiskFilesystem::new();
         filesystem
             .mount_local(
                 VirtualPath::new("/projects").expect("valid virtual path"),

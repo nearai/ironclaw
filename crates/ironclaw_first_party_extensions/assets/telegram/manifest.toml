@@ -1,0 +1,59 @@
+# The Telegram messaging channel — a single user-visible extension that owns
+# the Telegram Bot API webhook ingress. Zero tools: Telegram is an entrypoint
+# only; per-user connection is the WebGeneratedCode pairing flow. The
+# `telegram_webhook_secret` handle verifies the ingress route; the
+# `telegram_bot_token` handle is egress-only (never surfaced to users).
+schema_version = "reborn.extension_manifest.v2"
+id = "telegram"
+name = "Telegram"
+version = "0.1.0"
+description = "Telegram Bot API channel: DM IronClaw on Telegram after pairing your account."
+trust = "first_party_requested"
+
+[runtime]
+kind = "first_party"
+service = "telegram_v2_host_beta"
+
+[[host_api]]
+id = "ironclaw.product_adapter/v1"
+section = "product_adapter.inbound"
+
+[product_adapter.inbound]
+surface_kind = "external_channel"
+
+[product_adapter.inbound.auth]
+kind = "shared_secret_header"
+header_name = "X-Telegram-Bot-Api-Secret-Token"
+
+[product_adapter.inbound.capabilities]
+flags = ["inbound_messages", "external_final_reply_push", "delivery_status_reporting"]
+
+[[product_adapter.inbound.required_credentials]]
+handle = "telegram_bot_token"
+
+[[product_adapter.inbound.required_credentials]]
+handle = "telegram_webhook_secret"
+
+[[product_adapter.inbound.egress]]
+host = "api.telegram.org"
+credential_handle = "telegram_bot_token"
+
+[[product_adapter.inbound.host_ingress]]
+credential_handles = ["telegram_webhook_secret"]
+
+[product_adapter.inbound.host_ingress.descriptor]
+route_id = "telegram.updates"
+method = "post"
+route_pattern = "/webhooks/extensions/telegram/updates"
+
+[product_adapter.inbound.host_ingress.descriptor.policy]
+listener_class = "public_webhook"
+auth = { type = "required", schemes = ["webhook_signature"] }
+scope_source = "host_resolved"
+body_limit = { type = "limited", max_bytes = 1048576 }
+rate_limit = { type = "limited", scope = "global", max_requests = 12000, window_seconds = 60 }
+cors = "not_applicable"
+websocket_origin = "not_applicable"
+streaming = "none"
+audit = "public_callback"
+effect_path = { type = "product_workflow" }

@@ -1,0 +1,49 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta
+      name="viewport"
+      content="width=device-width, initial-scale=1.0, viewport-fit=cover"
+    />
+    <title>IronClaw</title>
+    <link
+      rel="icon"
+      type="image/png"
+      href="/assets/favicon-96x96.png"
+      sizes="96x96"
+    />
+    <link rel="icon" type="image/svg+xml" href="/assets/favicon.svg" />
+    <link rel="shortcut icon" href="/assets/favicon.ico" />
+    <link
+      rel="apple-touch-icon"
+      sizes="180x180"
+      href="/assets/apple-touch-icon.png"
+    />
+    <meta name="apple-mobile-web-app-title" content="IronClaw" />
+    <link rel="manifest" href="/assets/site.webmanifest" />
+    <link rel="stylesheet" href="/vendor/fonts/fonts.css" />
+    <script nonce="__IRONCLAW_CSP_NONCE__">
+      (() => {
+        try {
+          const stored = localStorage.getItem("ironclaw:v2-theme");
+          const theme =
+            stored === "light" || stored === "dark"
+              ? stored
+              : matchMedia("(prefers-color-scheme: dark)").matches
+              ? "dark"
+              : "light";
+          document.documentElement.dataset.theme = theme;
+          window.__IRONCLAW_INITIAL_THEME__ = theme;
+        } catch (_) {
+          document.documentElement.dataset.theme = "light";
+          window.__IRONCLAW_INITIAL_THEME__ = "light";
+        }
+      })();
+    </script>
+  </head>
+  <body class="min-h-[100dvh] bg-iron-950 text-iron-100 antialiased">
+    <div id="v2-root"></div>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>

@@ -56,6 +56,7 @@ pub(crate) fn lifecycle_credential_setup(
                 scopes: normalized_provider_scopes(scopes),
             }
         }
+        RuntimeCredentialAccountSetup::Pairing => LifecycleExtensionCredentialSetup::Pairing,
         // Retired kinds exist only in legacy persisted records, never in live
         // manifests, so this arm is unreachable from the manifest-projection
         // path; fold to the default manual shape rather than inventing a
@@ -167,6 +168,7 @@ fn normalized_runtime_credential_setup(
             scopes: normalized_provider_scopes(&scopes),
         },
         RuntimeCredentialAccountSetup::ManualToken => RuntimeCredentialAccountSetup::ManualToken,
+        RuntimeCredentialAccountSetup::Pairing => RuntimeCredentialAccountSetup::Pairing,
         RuntimeCredentialAccountSetup::Retired => RuntimeCredentialAccountSetup::Retired,
     }
 }

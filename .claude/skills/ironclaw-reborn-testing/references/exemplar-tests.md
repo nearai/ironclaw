@@ -25,8 +25,8 @@ The in-process harness (code in `tests/integration/support/`, spec in `tests/int
 
 Two tests lock the WebChat v2 surface from opposite sides — copy the pairing whenever policy is declared in one crate and enforced in another:
 
-- `crates/ironclaw_webui_v2/tests/webui_v2_descriptors_contract.rs` — locks the **declared** policy table per route (method, auth schemes, body/rate limits, CORS, audit class). Adding a route without updating it fails CI.
-- `crates/ironclaw_webui_v2/tests/webui_v2_handlers_contract.rs` — drives a **real axum router** against a stub facade, including the fail-closed case (`missing_caller_extension_returns_500`). Its header cites the test-through-the-caller rule; that's the level of intent-documentation to imitate.
+- `crates/ironclaw_webui/tests/webui_v2_descriptors_contract.rs` — locks the **declared** policy table per route (method, auth schemes, body/rate limits, CORS, audit class). Adding a route without updating it fails CI.
+- `crates/ironclaw_webui/tests/webui_v2_handlers_contract.rs` — drives a **real axum router** against a stub facade, including the fail-closed case (`missing_caller_extension_returns_500`). Its header cites the test-through-the-caller rule; that's the level of intent-documentation to imitate.
 
 The *enforcement* side (real HTTP 401/413/429/CORS through the composed app) lives in `crates/ironclaw_reborn_composition/tests/webui_v2_serve.rs` — caller-level, not middleware unit tests.
 

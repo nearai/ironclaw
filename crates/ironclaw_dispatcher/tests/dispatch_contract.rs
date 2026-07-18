@@ -36,6 +36,7 @@ async fn dispatcher_routes_wasm_capability_through_registered_adapter() {
         .with_runtime_adapter(RuntimeKind::Wasm, &adapter);
     let result = dispatcher
         .dispatch_json(CapabilityDispatchRequest {
+            run_id: None,
             capability_id: CapabilityId::new("echo.say").unwrap(),
             scope,
             authenticated_actor_user_id: None,
@@ -98,6 +99,7 @@ async fn dispatcher_routes_script_capability_through_registered_adapter() {
         .with_runtime_adapter(RuntimeKind::Script, &adapter);
     let result = dispatcher
         .dispatch_json(CapabilityDispatchRequest {
+            run_id: None,
             capability_id: CapabilityId::new("script.echo").unwrap(),
             scope,
             authenticated_actor_user_id: None,
@@ -149,6 +151,7 @@ async fn dispatcher_redacts_runtime_adapter_failure_details() {
         .with_runtime_adapter(RuntimeKind::Script, &adapter);
     let err = dispatcher
         .dispatch_json(CapabilityDispatchRequest {
+            run_id: None,
             capability_id: CapabilityId::new("script.echo").unwrap(),
             scope,
             authenticated_actor_user_id: None,
@@ -204,6 +207,7 @@ async fn dispatcher_routes_mcp_capability_through_registered_adapter() {
         .with_runtime_adapter(RuntimeKind::Mcp, &adapter);
     let result = dispatcher
         .dispatch_json(CapabilityDispatchRequest {
+            run_id: None,
             capability_id: CapabilityId::new("github-mcp.search").unwrap(),
             scope,
             authenticated_actor_user_id: None,
@@ -243,6 +247,7 @@ async fn dispatcher_fails_unknown_capability_without_reserving_resources() {
         .with_runtime_adapter(RuntimeKind::Wasm, &adapter);
     let err = dispatcher
         .dispatch_json(CapabilityDispatchRequest {
+            run_id: None,
             capability_id: CapabilityId::new("missing.say").unwrap(),
             scope,
             authenticated_actor_user_id: None,
@@ -274,6 +279,7 @@ async fn dispatcher_releases_prepared_reservation_when_validation_fails_before_a
     let dispatcher = RuntimeDispatcher::new(&registry, &fs, &governor);
     let err = dispatcher
         .dispatch_json(CapabilityDispatchRequest {
+            run_id: None,
             capability_id: CapabilityId::new("missing.say").unwrap(),
             scope,
             authenticated_actor_user_id: None,
@@ -304,6 +310,7 @@ async fn dispatcher_requires_mcp_backend_before_reserving_resources() {
     let dispatcher = RuntimeDispatcher::new(&registry, &fs, &governor);
     let err = dispatcher
         .dispatch_json(CapabilityDispatchRequest {
+            run_id: None,
             capability_id: CapabilityId::new("github-mcp.search").unwrap(),
             scope,
             authenticated_actor_user_id: None,
@@ -341,6 +348,7 @@ async fn dispatcher_requires_script_backend_before_reserving_resources() {
     let dispatcher = RuntimeDispatcher::new(&registry, &fs, &governor);
     let err = dispatcher
         .dispatch_json(CapabilityDispatchRequest {
+            run_id: None,
             capability_id: CapabilityId::new("script.echo").unwrap(),
             scope,
             authenticated_actor_user_id: None,
@@ -378,6 +386,7 @@ async fn dispatcher_requires_wasm_backend_before_reserving_resources() {
     let dispatcher = RuntimeDispatcher::new(&registry, &fs, &governor);
     let err = dispatcher
         .dispatch_json(CapabilityDispatchRequest {
+            run_id: None,
             capability_id: CapabilityId::new("echo.say").unwrap(),
             scope,
             authenticated_actor_user_id: None,
@@ -440,10 +449,10 @@ struct RecordedAdapterRequest {
 }
 
 #[async_trait]
-impl RuntimeAdapter<LocalFilesystem, InMemoryResourceGovernor> for RecordingAdapter {
+impl RuntimeAdapter<DiskFilesystem, InMemoryResourceGovernor> for RecordingAdapter {
     async fn dispatch_json(
         &self,
-        request: RuntimeAdapterRequest<'_, LocalFilesystem, InMemoryResourceGovernor>,
+        request: RuntimeAdapterRequest<'_, DiskFilesystem, InMemoryResourceGovernor>,
     ) -> Result<RuntimeAdapterResult, DispatchError> {
         self.requests.lock().unwrap().push(RecordedAdapterRequest {
             provider: request.package.id.clone(),
@@ -501,9 +510,9 @@ fn dispatch_error_for_runtime(
     }
 }
 
-fn mounted_empty_extension_root() -> LocalFilesystem {
+fn mounted_empty_extension_root() -> DiskFilesystem {
     let storage = tempfile::tempdir().unwrap().keep();
-    let mut fs = LocalFilesystem::new();
+    let mut fs = DiskFilesystem::new();
     fs.mount_local(
         VirtualPath::new("/system/extensions").unwrap(),
         HostPath::from_path_buf(storage),

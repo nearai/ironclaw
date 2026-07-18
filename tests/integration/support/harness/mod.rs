@@ -228,7 +228,7 @@ pub(crate) struct HostRuntimeCapabilityHarness {
     /// request reaches this double. `None` for every other construction.
     real_egress_transport: Option<Arc<RecordingNetworkHttpTransport>>,
     /// Inert recording process port. `Some` when the harness injected a
-    /// `RecordingProcessPort`; `None` when the live `LocalHostProcessPort` was
+    /// `RecordingProcessPort`; `None` when the live `HostProcessPort` was
     /// used (`.with_live_shell()` path).
     process_port: Option<Arc<super::process::RecordingProcessPort>>,
     /// Raw local-dev memory filesystem backing the user-profile source
@@ -430,6 +430,50 @@ impl HostRuntimeCapabilityHarness {
             .await
             .map_err(|error| format!("scoped credential account creation failed: {error:?}"))?;
         Ok(())
+    }
+
+    /// Flip every non-revoked credential account for `provider` under
+    /// `scope`'s credential-owner view to `Revoked`, returning how many were
+    /// flipped. Models an EXTERNAL revocation (the user revoked the grant on
+    /// the provider's side) through the same production transition the
+    /// refresh sweep's `report_terminal_refresh_status` performs:
+    /// `CredentialAccountService::update_status(.., Revoked)`. Companion to
+    /// [`Self::seed_credential_account_with_material`] for the #5878
+    /// activation-with-revoked-credential shape.
+    pub(crate) async fn revoke_credential_accounts_for_provider(
+        &self,
+        scope: &ResourceScope,
+        provider: &str,
+    ) -> HarnessResult<usize> {
+        let product_auth = self
+            .product_auth
+            .as_ref()
+            .ok_or("harness missing local-dev product auth (not built via new_with_options)")?;
+        let scope = AuthProductScope::credential_owner(scope, AuthSurface::Api);
+        let provider_id = AuthProviderId::new(provider)?;
+        let accounts = product_auth
+            .credential_account_record_source_for_test()
+            .accounts_for_owner(&scope)
+            .await
+            .map_err(|error| format!("account enumeration for revoke failed: {error:?}"))?;
+        let mut revoked = 0;
+        for account in accounts {
+            if account.provider != provider_id || account.status == CredentialAccountStatus::Revoked
+            {
+                continue;
+            }
+            // Pass the account's OWN stored scope: `update_status` requires
+            // full scope equality, and the stored scope carries the minting
+            // invocation id no reconstructed scope can reproduce (same
+            // pattern as the refresh sweep's terminal-status write).
+            product_auth
+                .credential_account_service()
+                .update_status(&account.scope, account.id, CredentialAccountStatus::Revoked)
+                .await
+                .map_err(|error| format!("revoking account {} failed: {error:?}", account.id))?;
+            revoked += 1;
+        }
+        Ok(revoked)
     }
 
     /// The fixed user this harness dispatches first-party capabilities under
@@ -913,7 +957,7 @@ impl HostRuntimeCapabilityHarness {
     }
 
     /// Snapshot of every command string recorded by the inert process port.
-    /// Empty when the harness uses the live `LocalHostProcessPort`
+    /// Empty when the harness uses the live `HostProcessPort`
     /// (`.with_live_shell()` path).
     pub(crate) fn process_commands(&self) -> Vec<String> {
         self.process_port
@@ -1431,7 +1475,9 @@ impl HostRuntimeCapabilityHarness {
             .approval_parts
             .as_ref()
             .map(|parts| Arc::clone(&parts.approval_requests))
-            .unwrap_or_else(|| Arc::new(ironclaw_run_state::InMemoryApprovalRequestStore::new()));
+            .unwrap_or_else(|| {
+                Arc::new(ironclaw_run_state::in_memory_backed_approval_request_store())
+            });
         let approval_requests: Arc<dyn ironclaw_run_state::ApprovalRequestStore> =
             Arc::new(super::doubles::RecordingApprovalRequestStore {
                 inner: inner_approval_requests,
@@ -1442,15 +1488,19 @@ impl HostRuntimeCapabilityHarness {
             .as_ref()
             .map(|parts| Arc::clone(&parts.capability_leases))
             .unwrap_or_else(|| {
-                Arc::new(ironclaw_authorization::InMemoryCapabilityLeaseStore::new())
+                Arc::new(ironclaw_authorization::in_memory_backed_capability_lease_store())
             });
         let tool_permission_overrides: Arc<dyn ironclaw_approvals::ToolPermissionOverrideStore> =
             self.tool_permission_overrides.clone().unwrap_or_else(|| {
-                Arc::new(ironclaw_approvals::InMemoryCapabilityPermissionOverrideStore::new())
+                Arc::new(
+                    ironclaw_approvals::test_support::in_memory_backed_capability_permission_override_store(),
+                )
             });
         let auto_approve_settings: Arc<dyn ironclaw_approvals::AutoApproveSettingStore> =
             self.auto_approve_settings.clone().unwrap_or_else(|| {
-                Arc::new(ironclaw_approvals::InMemoryAutoApproveSettingStore::new())
+                Arc::new(
+                    ironclaw_approvals::test_support::in_memory_backed_auto_approve_setting_store(),
+                )
             });
         let persistent_approval_policies: Arc<
             dyn ironclaw_approvals::PersistentApprovalPolicyStore,
@@ -1458,7 +1508,9 @@ impl HostRuntimeCapabilityHarness {
             .persistent_approval_policies
             .clone()
             .unwrap_or_else(|| {
-                Arc::new(ironclaw_approvals::InMemoryPersistentApprovalPolicyStore::new())
+                Arc::new(
+                    ironclaw_approvals::test_support::in_memory_backed_persistent_approval_policy_store(),
+                )
             });
         let outbound_preferences_facade = self.outbound_target_tools.as_ref().map(|parts| {
             Arc::clone(&parts.facade)

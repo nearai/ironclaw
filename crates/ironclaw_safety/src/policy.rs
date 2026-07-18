@@ -324,7 +324,7 @@ mod tests {
             let violations = policy.check(&payload);
             let elapsed = start.elapsed();
             assert!(
-                elapsed.as_millis() < 500,
+                elapsed.as_millis() < crate::REDOS_SCAN_BUDGET_MS,
                 "excessive_urls pattern took {}ms on 100KB near-miss",
                 elapsed.as_millis()
             );
@@ -349,7 +349,7 @@ mod tests {
             let violations = policy.check(&payload);
             let elapsed = start.elapsed();
             assert!(
-                elapsed.as_millis() < 500,
+                elapsed.as_millis() < crate::REDOS_SCAN_BUDGET_MS,
                 "obfuscated_string pattern took {}ms on 100KB near-miss",
                 elapsed.as_millis()
             );
@@ -370,7 +370,7 @@ mod tests {
             let _violations = policy.check(&payload);
             let elapsed = start.elapsed();
             assert!(
-                elapsed.as_millis() < 500,
+                elapsed.as_millis() < crate::REDOS_SCAN_BUDGET_MS,
                 "shell_injection pattern took {}ms on 100KB near-miss",
                 elapsed.as_millis()
             );
@@ -387,7 +387,7 @@ mod tests {
             let _violations = policy.check(&payload);
             let elapsed = start.elapsed();
             assert!(
-                elapsed.as_millis() < 500,
+                elapsed.as_millis() < crate::REDOS_SCAN_BUDGET_MS,
                 "sql_pattern took {}ms on 100KB near-miss",
                 elapsed.as_millis()
             );
@@ -405,7 +405,7 @@ mod tests {
             let _violations = policy.check(&payload);
             let elapsed = start.elapsed();
             assert!(
-                elapsed.as_millis() < 500,
+                elapsed.as_millis() < crate::REDOS_SCAN_BUDGET_MS,
                 "crypto_private_key pattern took {}ms on 100KB near-miss",
                 elapsed.as_millis()
             );
@@ -423,7 +423,7 @@ mod tests {
             let _violations = policy.check(&payload);
             let elapsed = start.elapsed();
             assert!(
-                elapsed.as_millis() < 500,
+                elapsed.as_millis() < crate::REDOS_SCAN_BUDGET_MS,
                 "system_file_access pattern took {}ms on 100KB near-miss",
                 elapsed.as_millis()
             );
@@ -441,7 +441,7 @@ mod tests {
             let _violations = policy.check(&payload);
             let elapsed = start.elapsed();
             assert!(
-                elapsed.as_millis() < 500,
+                elapsed.as_millis() < crate::REDOS_SCAN_BUDGET_MS,
                 "encoded_exploit pattern took {}ms on 100KB near-miss",
                 elapsed.as_millis()
             );

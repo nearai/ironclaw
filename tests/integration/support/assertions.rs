@@ -621,6 +621,107 @@ impl RebornIntegrationHarness {
         )
     }
 
+    /// Every persisted `ToolResultReference`'s `(safe_summary,
+    /// observation_status)` pair, where `observation_status` is the envelope's
+    /// parsed `model_observation.status` (`"success"` / `"error"`) when an
+    /// observation is present. Shared collector for the error-SHAPE negative
+    /// assertions below; same fail-loud decode contract as
+    /// `persisted_tool_error_summaries`.
+    async fn persisted_tool_result_reference_shapes(
+        &self,
+    ) -> HarnessResult<Vec<(String, Option<String>)>> {
+        let history = self
+            .thread_harness
+            .history(self.binding.thread_id.clone())
+            .await?;
+        history
+            .iter()
+            .filter(|message| message.kind == ironclaw_threads::MessageKind::ToolResultReference)
+            .map(|message| {
+                let Some(content) = message.content.as_deref() else {
+                    return Err("ToolResultReference message missing content".into());
+                };
+                serde_json::from_str::<ironclaw_threads::ToolResultReferenceEnvelope>(content)
+                    .map(|envelope| {
+                        let status = envelope
+                            .model_observation
+                            .as_ref()
+                            .and_then(|observation| observation.get("status"))
+                            .and_then(|status| status.as_str())
+                            .map(str::to_string);
+                        (envelope.safe_summary.as_str().to_string(), status)
+                    })
+                    .map_err(|err| {
+                        let truncated = match content.char_indices().nth(200) {
+                            Some((cutoff, _)) => format!("{}...[truncated]", &content[..cutoff]),
+                            None => content.to_string(),
+                        };
+                        format!(
+                            "failed to decode ToolResultReferenceEnvelope: {err}; raw: {truncated}"
+                        )
+                        .into()
+                    })
+            })
+            .collect()
+    }
+
+    /// Assert NO persisted `ToolResultReference` is ERROR-SHAPED — where
+    /// error-shaped means EITHER the envelope's `model_observation.status` is
+    /// `"error"` (the structural marker
+    /// `model_visible_capability_failure_observation` attaches to Failed and
+    /// Denied outcomes) OR its `safe_summary` starts with a
+    /// [`ToolErrorClass`] prefix.
+    ///
+    /// Strictly stronger than `assert_no_tool_error(class, "")` for a
+    /// "surfaced EXCLUSIVELY as the gate" pin (#5878/#6105 T2): that prefix
+    /// filter is blind to the OTHER class's prefix and to executor-synthesized
+    /// raw planner summaries (e.g. the gate-declined "auth gate denied by
+    /// user"), which persist with no class prefix — the bypass
+    /// `short_circuit_denied_resume`'s own test documents. Residual gap
+    /// (accepted): an error persisted with no observation AND a novel
+    /// unprefixed summary evades both arms.
+    ///
+    /// Scans the full thread history (not baseline-sliced) — single-turn
+    /// threads only, like [`assert_tool_error`].
+    ///
+    /// [`assert_tool_error`]: Self::assert_tool_error
+    pub async fn assert_no_error_shaped_tool_result(&self) -> HarnessResult<()> {
+        self.assert_no_error_shaped_tool_result_except(&[]).await
+    }
+
+    /// [`Self::assert_no_error_shaped_tool_result`], allowing error-shaped
+    /// references whose summary contains one of `allowed_substrings` — for
+    /// post-resume checks where one deliberate error IS the contract (a
+    /// denied gate persists its planner summary) but nothing else
+    /// error-shaped may exist.
+    pub async fn assert_no_error_shaped_tool_result_except(
+        &self,
+        allowed_substrings: &[&str],
+    ) -> HarnessResult<()> {
+        let shapes = self.persisted_tool_result_reference_shapes().await?;
+        let offending: Vec<&(String, Option<String>)> = shapes
+            .iter()
+            .filter(|(summary, status)| {
+                status.as_deref() == Some("error")
+                    || summary.starts_with(ToolErrorClass::Failed.summary_prefix())
+                    || summary.starts_with(ToolErrorClass::Denied.summary_prefix())
+            })
+            .filter(|(summary, _)| {
+                !allowed_substrings
+                    .iter()
+                    .any(|allowed| summary.contains(allowed))
+            })
+            .collect();
+        if offending.is_empty() {
+            return Ok(());
+        }
+        Err(format!(
+            "expected no error-shaped ToolResultReference beyond {allowed_substrings:?}; \
+             found (summary, observation-status) pairs {offending:?}"
+        )
+        .into())
+    }
+
     /// Assert that any captured **network** egress request whose URL
     /// contains `url_substr` carried a header named `header_name`
     /// (case-insensitive) whose value contains `value_substr` — the

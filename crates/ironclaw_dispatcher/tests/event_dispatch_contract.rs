@@ -28,6 +28,7 @@ async fn dispatcher_emits_events_for_wasm_and_script_success() {
 
     dispatcher
         .dispatch_json(CapabilityDispatchRequest {
+            run_id: None,
             capability_id: CapabilityId::new("echo-wasm.say").unwrap(),
             scope: sample_scope(),
             authenticated_actor_user_id: None,
@@ -43,6 +44,7 @@ async fn dispatcher_emits_events_for_wasm_and_script_success() {
 
     dispatcher
         .dispatch_json(CapabilityDispatchRequest {
+            run_id: None,
             capability_id: CapabilityId::new("echo-script.say").unwrap(),
             scope: sample_scope(),
             authenticated_actor_user_id: None,
@@ -100,6 +102,7 @@ async fn dispatcher_ignores_event_sink_failures_on_success() {
 
     let result = dispatcher
         .dispatch_json(CapabilityDispatchRequest {
+            run_id: None,
             capability_id: CapabilityId::new("echo-wasm.say").unwrap(),
             scope: sample_scope(),
             authenticated_actor_user_id: None,
@@ -126,6 +129,7 @@ async fn dispatcher_preserves_original_error_when_failure_event_sink_fails() {
 
     let err = dispatcher
         .dispatch_json(CapabilityDispatchRequest {
+            run_id: None,
             capability_id: CapabilityId::new("echo-script.say").unwrap(),
             scope: sample_scope(),
             authenticated_actor_user_id: None,
@@ -165,6 +169,7 @@ async fn dispatcher_logs_release_failure_without_masking_dispatch_error() {
 
     let err = dispatcher
         .dispatch_json(CapabilityDispatchRequest {
+            run_id: None,
             capability_id: CapabilityId::new("echo-script.say").unwrap(),
             scope,
             authenticated_actor_user_id: None,
@@ -207,6 +212,7 @@ async fn dispatcher_emits_redacted_runtime_error_kind_for_adapter_failure() {
 
     let err = dispatcher
         .dispatch_json(CapabilityDispatchRequest {
+            run_id: None,
             capability_id: CapabilityId::new("echo-script.say").unwrap(),
             scope: sample_scope(),
             authenticated_actor_user_id: None,
@@ -249,6 +255,7 @@ async fn dispatcher_emits_events_for_mcp_success() {
 
     dispatcher
         .dispatch_json(CapabilityDispatchRequest {
+            run_id: None,
             capability_id: CapabilityId::new("github-mcp.search").unwrap(),
             scope: sample_scope(),
             authenticated_actor_user_id: None,
@@ -288,6 +295,7 @@ async fn dispatcher_emits_failed_event_for_missing_backend_without_reserving() {
 
     let err = dispatcher
         .dispatch_json(CapabilityDispatchRequest {
+            run_id: None,
             capability_id: CapabilityId::new("echo-script.say").unwrap(),
             scope,
             authenticated_actor_user_id: None,
@@ -344,10 +352,10 @@ impl EchoAdapter {
 }
 
 #[async_trait]
-impl RuntimeAdapter<LocalFilesystem, InMemoryResourceGovernor> for EchoAdapter {
+impl RuntimeAdapter<DiskFilesystem, InMemoryResourceGovernor> for EchoAdapter {
     async fn dispatch_json(
         &self,
-        request: RuntimeAdapterRequest<'_, LocalFilesystem, InMemoryResourceGovernor>,
+        request: RuntimeAdapterRequest<'_, DiskFilesystem, InMemoryResourceGovernor>,
     ) -> Result<RuntimeAdapterResult, DispatchError> {
         adapter_result(
             self.runtime,
@@ -372,10 +380,10 @@ impl StaticAdapter {
 }
 
 #[async_trait]
-impl RuntimeAdapter<LocalFilesystem, InMemoryResourceGovernor> for StaticAdapter {
+impl RuntimeAdapter<DiskFilesystem, InMemoryResourceGovernor> for StaticAdapter {
     async fn dispatch_json(
         &self,
-        request: RuntimeAdapterRequest<'_, LocalFilesystem, InMemoryResourceGovernor>,
+        request: RuntimeAdapterRequest<'_, DiskFilesystem, InMemoryResourceGovernor>,
     ) -> Result<RuntimeAdapterResult, DispatchError> {
         adapter_result(
             self.runtime,
@@ -400,10 +408,10 @@ impl FailingRuntimeAdapter {
 }
 
 #[async_trait]
-impl RuntimeAdapter<LocalFilesystem, InMemoryResourceGovernor> for FailingRuntimeAdapter {
+impl RuntimeAdapter<DiskFilesystem, InMemoryResourceGovernor> for FailingRuntimeAdapter {
     async fn dispatch_json(
         &self,
-        _request: RuntimeAdapterRequest<'_, LocalFilesystem, InMemoryResourceGovernor>,
+        _request: RuntimeAdapterRequest<'_, DiskFilesystem, InMemoryResourceGovernor>,
     ) -> Result<RuntimeAdapterResult, DispatchError> {
         Err(dispatch_error_for_runtime(self.runtime, self.kind))
     }
@@ -455,11 +463,11 @@ fn dispatch_error_for_runtime(
     }
 }
 
-fn filesystem_with_echo_extensions() -> LocalFilesystem {
+fn filesystem_with_echo_extensions() -> DiskFilesystem {
     let storage = tempfile::tempdir().unwrap().keep();
     write_echo_extensions(&storage);
 
-    let mut fs = LocalFilesystem::new();
+    let mut fs = DiskFilesystem::new();
     fs.mount_local(
         VirtualPath::new("/system/extensions").unwrap(),
         HostPath::from_path_buf(storage),
@@ -468,7 +476,7 @@ fn filesystem_with_echo_extensions() -> LocalFilesystem {
     fs
 }
 
-async fn discover_legacy_fixture_registry(fs: &LocalFilesystem) -> ExtensionRegistry {
+async fn discover_legacy_fixture_registry(fs: &DiskFilesystem) -> ExtensionRegistry {
     ExtensionDiscovery::discover_with_manifest_contracts(
         fs,
         &VirtualPath::new("/system/extensions").unwrap(),

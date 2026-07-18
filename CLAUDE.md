@@ -27,7 +27,7 @@ This repo can be indexed into a **codebase knowledge graph** (the `codebase-memo
 
 ## Where to Build — Reborn-First
 
-**New feature work targets the Reborn stack in `crates/`, not the v1 `src/` monolith.** A Reborn feature crosses `product_workflow → composition → webui_v2 → runtime/serve → frontend`; the binary entry point is `crates/ironclaw_reborn_cli` (binary name `ironclaw-reborn`), **not** `src/main.rs`. Start from the `reborn-feature` skill — it maps those layers so you wire a feature in one pass instead of layer-by-layer.
+**New feature work targets the Reborn stack in `crates/`, not the v1 `src/` monolith.** A Reborn feature crosses `product_workflow → composition → webui_v2 → runtime/serve → frontend`; the binary entry point is `crates/ironclaw_reborn_cli` (binary name `ironclaw`), **not** `src/main.rs`. Start from the `reborn-feature` skill — it maps those layers so you wire a feature in one pass instead of layer-by-layer.
 
 `src/` is the **v1 monolith**, being retired under the roadmap's "Clean up old architecture." Maintain existing v1 behavior there when a bug requires it, but **do not build new features into `src/`** — they belong Reborn-side. The detailed `src/` layout in "Project Structure" below documents v1 for maintenance, not as the default place to add code.
 
@@ -289,7 +289,7 @@ When modifying a module with a spec, read the spec first. Code follows spec; spe
 | `src/setup/` | `src/setup/README.md` |
 | `src/tools/` | `src/tools/README.md` |
 | `src/workspace/` | `src/workspace/README.md` |
-| `crates/ironclaw_reborn_webui_ingress/` | `crates/ironclaw_reborn_webui_ingress/CLAUDE.md` |
+| `crates/ironclaw_webui/` | `crates/ironclaw_webui/CLAUDE.md` |
 | `crates/ironclaw_reborn_identity/` | `crates/ironclaw_reborn_identity/CONTRACT.md` |
 | `tests/integration/` | `tests/integration/CLAUDE.md` |
 | `tests/support/reborn_parity_qa/` | `tests/support/reborn_parity_qa/CLAUDE.md` |

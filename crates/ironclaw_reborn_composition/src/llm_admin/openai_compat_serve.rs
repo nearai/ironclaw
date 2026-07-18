@@ -1,3 +1,4 @@
+// arch-exempt: large_file, §4.4.1 mechanical inline of the redundant LocalDevRootFilesystem alias -> CompositeRootFilesystem (de-prefix, no logic change), plan #6168
 //! Reborn host composition for OpenAI-compatible API routes.
 //!
 //! The route crate owns DTOs and HTTP handlers, but the Reborn host owns the
@@ -70,7 +71,7 @@ use sha2::{Digest, Sha256};
 
 use crate::RebornBuildError;
 use crate::RebornRuntime;
-use crate::webui::webui_serve::ProtectedRouteMount;
+use crate::webui::route_mounts::ProtectedRouteMount;
 
 #[cfg(test)]
 mod tests;
@@ -1535,35 +1536,20 @@ fn response_usage_from_model_usage(usage: &LoopModelUsage, model: &str) -> OpenA
 /// silently prices at zero.
 #[cfg(feature = "root-llm-provider")]
 fn response_cost_from_model_usage(usage: &LoopModelUsage, model: &str) -> Option<OpenAiCompatCost> {
-    use rust_decimal::Decimal;
+    use ironclaw_common::llm_costs::{format_usd, price_usage};
 
-    let (input_rate, output_rate) =
-        ironclaw_llm::costs::model_cost(model).unwrap_or_else(ironclaw_llm::costs::default_cost);
-    let discount = cache_read_discount_for_model(model);
-    // `cache_read` is a subset of `input_tokens` billed at the discounted rate
-    // below, so the full-rate portion is `input_tokens - cache_read`. Otherwise
-    // cache-read tokens would be charged twice: once here and once as
-    // `cached_input_cost`. `cache_creation` is a separate write-side count
-    // billed at the full input rate.
-    let billable_input = Decimal::from(
-        usage
-            .input_tokens
-            .saturating_sub(usage.cache_read_input_tokens)
-            .saturating_add(usage.cache_creation_input_tokens),
+    let cost = price_usage(
+        model,
+        usage.input_tokens,
+        usage.output_tokens,
+        usage.cache_read_input_tokens,
+        usage.cache_creation_input_tokens,
     );
-    let input_cost = billable_input * input_rate;
-    let cached_input_cost = if discount > Decimal::ONE {
-        Decimal::from(usage.cache_read_input_tokens) * input_rate / discount
-    } else {
-        Decimal::from(usage.cache_read_input_tokens) * input_rate
-    };
-    let output_cost = Decimal::from(usage.output_tokens) * output_rate;
-    let total = input_cost + cached_input_cost + output_cost;
     Some(OpenAiCompatCost {
-        input_cost_usd: format_usd(input_cost),
-        cached_input_cost_usd: format_usd(cached_input_cost),
-        output_cost_usd: format_usd(output_cost),
-        total_cost_usd: format_usd(total),
+        input_cost_usd: format_usd(cost.input_cost),
+        cached_input_cost_usd: format_usd(cost.cached_input_cost),
+        output_cost_usd: format_usd(cost.output_cost),
+        total_cost_usd: format_usd(cost.total_cost),
         currency: OpenAiCompatCost::USD.to_string(),
     })
 }
@@ -1574,29 +1560,6 @@ fn response_cost_from_model_usage(
     _model: &str,
 ) -> Option<OpenAiCompatCost> {
     None
-}
-
-/// Cache-read discount divisor by model family, mirroring the provider defaults
-/// documented on `LlmProvider::cache_read_discount` (Anthropic 10× i.e. 90% off,
-/// OpenAI 2× i.e. 50% off, others no discount).
-#[cfg(feature = "root-llm-provider")]
-fn cache_read_discount_for_model(model: &str) -> rust_decimal::Decimal {
-    use rust_decimal::Decimal;
-    let lower = model.to_ascii_lowercase();
-    if lower.contains("claude") {
-        Decimal::from(10)
-    } else if lower.contains("gpt") || lower.starts_with("o1") || lower.starts_with("o3") {
-        Decimal::from(2)
-    } else {
-        Decimal::ONE
-    }
-}
-
-/// Format a USD `Decimal` for the wire: trimmed of trailing zeros, never in
-/// scientific notation.
-#[cfg(feature = "root-llm-provider")]
-fn format_usd(amount: rust_decimal::Decimal) -> String {
-    amount.normalize().to_string()
 }
 
 fn thread_scope_from_projection_read(
@@ -1619,9 +1582,9 @@ fn thread_scope_from_projection_read(
 }
 
 fn openai_compat_ledger_filesystem(
-    root: Arc<crate::factory::LocalDevRootFilesystem>,
+    root: Arc<ironclaw_filesystem::CompositeRootFilesystem>,
     tenant_id: &TenantId,
-) -> Result<Arc<ScopedFilesystem<crate::factory::LocalDevRootFilesystem>>, RebornBuildError> {
+) -> Result<Arc<ScopedFilesystem<ironclaw_filesystem::CompositeRootFilesystem>>, RebornBuildError> {
     Ok(Arc::new(ScopedFilesystem::with_fixed_view(
         root,
         MountView::new(vec![MountGrant::new(

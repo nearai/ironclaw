@@ -147,7 +147,7 @@ async def test_admin_token_visibility_matches_user_creation_lifecycle(
 ):
     """Creation shows the one-time token; existing-user details do not."""
     await reborn_v2_page.goto(
-        f"{reborn_v2_server}/v2/admin/users?token={REBORN_V2_AUTH_TOKEN}"
+        f"{reborn_v2_server}/admin/users?token={REBORN_V2_AUTH_TOKEN}"
     )
     created_user_id = None
     try:
@@ -293,6 +293,99 @@ async def test_secret_lifecycle(admin_client, test_user):
     r = await admin_client.delete(f"{ADMIN_BASE}/users/{uid}/secrets/abound_token")
     assert r.status_code == 200, r.text
     assert r.json()["deleted"] is True
+
+
+async def test_admin_user_detail_manages_write_only_secrets(
+    admin_client, reborn_v2_page, reborn_v2_server, test_user
+):
+    """The Admin UI provisions, replaces, and confirms deletion without echoing values."""
+    page = reborn_v2_page
+    await page.goto(
+        f"{reborn_v2_server}/v2/admin/users?token={REBORN_V2_AUTH_TOKEN}"
+    )
+    await page.get_by_role(
+        "button", name=test_user["display_name"], exact=True
+    ).click()
+    await expect(page.locator(SEL_V2["admin_user_secrets_panel"])).to_be_visible(
+        timeout=15000
+    )
+
+    handle = f"e2e_secret_{uuid.uuid4().hex[:8]}"
+    first_value = f"first-write-only-{uuid.uuid4().hex}"
+    replacement_value = f"replacement-write-only-{uuid.uuid4().hex}"
+    handle_input = page.locator(SEL_V2["admin_secret_handle_input"])
+    value_input = page.locator(SEL_V2["admin_secret_value_input"])
+    save_button = page.locator(SEL_V2["admin_secret_save"])
+    row = page.locator(SEL_V2["admin_secret_row_for"].format(handle=handle))
+
+    assert await value_input.get_attribute("type") == "password"
+    await handle_input.fill(handle)
+    await value_input.fill(first_value)
+    async with page.expect_response(
+        lambda response: response.request.method == "PUT"
+        and response.url.endswith(
+            f"{ADMIN_BASE}/users/{test_user['id']}/secrets/{handle}"
+        )
+    ) as put_info:
+        await save_button.click()
+    put_response = await put_info.value
+    assert put_response.status == 200
+    assert first_value not in await put_response.text()
+
+    await expect(row).to_be_visible(timeout=15000)
+    await expect(value_input).to_have_value("")
+    assert first_value not in await page.locator("body").inner_text()
+
+    listed = await admin_client.get(f"{ADMIN_BASE}/users/{test_user['id']}/secrets")
+    assert listed.status_code == 200, listed.text
+    assert first_value not in listed.text
+    handles = [secret["handle"] for secret in listed.json()["secrets"]]
+    assert handles.count(handle) == 1
+
+    await page.locator(
+        SEL_V2["admin_secret_replace_for"].format(handle=handle)
+    ).click()
+    await expect(handle_input).to_have_value(handle)
+    await value_input.fill(replacement_value)
+    async with page.expect_response(
+        lambda response: response.request.method == "PUT"
+        and response.url.endswith(
+            f"{ADMIN_BASE}/users/{test_user['id']}/secrets/{handle}"
+        )
+    ) as replace_info:
+        await save_button.click()
+    replace_response = await replace_info.value
+    assert replace_response.status == 200
+    assert replacement_value not in await replace_response.text()
+    await expect(value_input).to_have_value("")
+    await expect(row).to_have_count(1)
+
+    await page.locator(
+        SEL_V2["admin_secret_delete_for"].format(handle=handle)
+    ).click()
+    await expect(page.locator(SEL_V2["admin_secret_delete_dialog"])).to_be_visible()
+    await expect(row).to_be_visible()
+    async with page.expect_response(
+        lambda response: response.request.method == "DELETE"
+        and response.url.endswith(
+            f"{ADMIN_BASE}/users/{test_user['id']}/secrets/{handle}"
+        )
+    ) as delete_info:
+        await page.locator(SEL_V2["admin_secret_delete_confirm"]).click()
+    delete_response = await delete_info.value
+    assert delete_response.status == 200
+
+    await expect(row).to_have_count(0, timeout=15000)
+    await expect(page.locator(SEL_V2["admin_secret_status"])).to_contain_text(handle)
+    listed_after_delete = await admin_client.get(
+        f"{ADMIN_BASE}/users/{test_user['id']}/secrets"
+    )
+    assert listed_after_delete.status_code == 200, listed_after_delete.text
+    assert handle not in [
+        secret["handle"] for secret in listed_after_delete.json()["secrets"]
+    ]
+    assert first_value not in listed_after_delete.text
+    assert replacement_value not in listed_after_delete.text
 
 
 # ---------------------------------------------------------------
