@@ -31,11 +31,11 @@ use std::sync::Arc;
 use ironclaw_filesystem::{InMemoryBackend, ScopedFilesystem};
 use ironclaw_host_api::{MountAlias, MountGrant, MountPermissions, MountView, VirtualPath};
 
-use crate::{FilesystemApprovalRequestStore, FilesystemRunStateStore};
+use crate::{FilesystemApprovalRequestStore, FilesystemGateRecordStore, FilesystemRunStateStore};
 
-/// A fresh, volatile `ScopedFilesystem<InMemoryBackend>` mounting both
-/// `/run-state` and `/approvals` — the in-memory backend seam the run-state and
-/// approval-request stores share in tests.
+/// A fresh, volatile `ScopedFilesystem<InMemoryBackend>` mounting `/run-state`,
+/// `/approvals`, and `/gate-records` — the in-memory backend seam the run-state,
+/// approval-request, and gate-record stores share in tests.
 pub fn in_memory_backed_run_state_filesystem() -> Arc<ScopedFilesystem<InMemoryBackend>> {
     let mounts = MountView::new(vec![
         MountGrant::new(
@@ -46,6 +46,11 @@ pub fn in_memory_backed_run_state_filesystem() -> Arc<ScopedFilesystem<InMemoryB
         MountGrant::new(
             MountAlias::new("/approvals").expect("static valid mount alias"), // safety: test-support scaffolding, static literal
             VirtualPath::new("/engine/approvals").expect("static valid virtual path"), // safety: test-support scaffolding, static literal
+            MountPermissions::read_write_list_delete(),
+        ),
+        MountGrant::new(
+            MountAlias::new("/gate-records").expect("static valid mount alias"), // safety: test-support scaffolding, static literal
+            VirtualPath::new("/engine/gate-records").expect("static valid virtual path"), // safety: test-support scaffolding, static literal
             MountPermissions::read_write_list_delete(),
         ),
     ])
@@ -67,4 +72,9 @@ pub fn in_memory_backed_run_state_store() -> FilesystemRunStateStore<InMemoryBac
 pub fn in_memory_backed_approval_request_store() -> FilesystemApprovalRequestStore<InMemoryBackend>
 {
     FilesystemApprovalRequestStore::new(in_memory_backed_run_state_filesystem())
+}
+
+/// The production gate-record store over a fresh in-memory backend.
+pub fn in_memory_backed_gate_record_store() -> FilesystemGateRecordStore<InMemoryBackend> {
+    FilesystemGateRecordStore::new(in_memory_backed_run_state_filesystem())
 }
