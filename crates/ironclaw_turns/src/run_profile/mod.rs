@@ -108,12 +108,12 @@ pub use policy::{
     SteeringPolicy,
 };
 pub use prompt::HostManagedLoopPromptPort;
-pub use resolution_mapping::{MappedResolution, capability_outcome_to_resolution};
 pub use refs::{
     CapabilitySurfaceProfileId, CheckpointSchemaId, ConcurrencyClass, ContextProfileId,
     LoopDriverId, ModelProfileId, ResourceBudgetTier, RunClassId, RunProfileFingerprint,
     RunProfileSourceLayer, RunProfileSourceRef, RunnerPoolId, SchedulingClass,
 };
+pub use resolution_mapping::{MappedResolution, RefBindings, capability_outcome_to_resolution};
 pub use resolver::{
     InMemoryRunProfileRegistry, InMemoryRunProfileResolver, RunProfileDefinition,
     RunProfileRegistryError, RunProfileResolutionRequest, RunProfileResolver,

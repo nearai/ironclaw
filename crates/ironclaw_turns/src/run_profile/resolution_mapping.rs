@@ -41,21 +41,26 @@
 //! [`TurnRunId`]) are opaque prefixed strings; host_api's refs
 //! ([`ResultRef`]/[`GateRef`]/[`DenyRef`]/[`ProcessRef`]) are uuids. This pure
 //! mapping **mints a fresh uuid ref** for each host-side handle — it cannot
-//! reconstruct a meaningful uuid from an opaque loop string, and the durable
-//! ref↔record association is the later store's responsibility, not this
-//! function's. The only exception is [`TurnRunId`] → [`RunId`]: both wrap a
-//! `Uuid`, so the child run's identity is preserved via `RunId::from_uuid`.
+//! reconstruct a meaningful uuid from an opaque loop string. Every minted ref is
+//! returned **bound to its loop-side source** in [`RefBindings`], so the later
+//! wiring slice can persist the loop-ref↔uuid-ref association at the
+//! writer/store boundary — already-stored loop state (e.g. output the result
+//! writer stored under the loop ref) stays reachable instead of being stranded
+//! behind an unbound uuid. The only identity that crosses directly is
+//! [`TurnRunId`] → [`RunId`]: both wrap a `Uuid`, preserved via
+//! `RunId::from_uuid`.
 
 use ironclaw_host_api::{
-    Blocked, DenyRecord, DenyReason, DenyRef, GateRecord, GateRef, Outcome, OutcomeRefs, ProcessRef,
-    Resolution, ResultRef, RunId, SafeSummary, Suspension, ToolVerdict,
+    Blocked, DenyReason, DenyRecord, DenyRef, GateRecord, GateRef, Outcome, OutcomeRefs,
+    ProcessRef, Resolution, ResultRef, RunId, SafeSummary, Suspension, ToolVerdict,
 };
 
 use super::host::{
     CapabilityDenied, CapabilityDeniedReasonKind, CapabilityFailure, CapabilityOutcome,
-    CapabilityResultMessage, ProcessHandleSummary,
+    CapabilityResultMessage, LoopProcessRef, ProcessHandleSummary,
 };
 use super::model_observation::ModelVisibleToolObservation;
+use crate::{LoopGateRef, LoopResultRef};
 
 /// A [`Resolution`] plus the side records its opaque refs render from (§5.2.9).
 ///
@@ -69,6 +74,33 @@ pub struct MappedResolution {
     pub resolution: Resolution,
     pub gate_record: Option<GateRecord>,
     pub deny_record: Option<DenyRecord>,
+    /// Source→target associations for every freshly-minted host ref, so the
+    /// later wiring slice can persist the loop-ref↔uuid-ref correspondence at
+    /// the writer/store boundary instead of losing it in this pure function.
+    pub bindings: RefBindings,
+}
+
+/// The loop-side refs each freshly-minted host_api uuid ref replaces.
+///
+/// The pure mapping cannot reconstruct a uuid from an opaque loop string, so it
+/// mints fresh host refs — but minting without a binding would strand already-
+/// stored loop state (the result writer stored output under the *loop* ref).
+/// Each populated pair here says "the minted host ref on the right stands for
+/// the loop ref on the left"; the consumer persists that association. A `None`
+/// means the variant carried no loop-side ref for that slot (e.g. `Failed`
+/// mints a `ResultRef` handle with no loop source, `Denied` has no loop deny
+/// ref).
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct RefBindings {
+    /// Loop result ref → the minted [`ResultRef`] (on `OutcomeRefs.result` or
+    /// `GateRecord::DependentRun.result`).
+    pub result: Option<(LoopResultRef, ResultRef)>,
+    /// Loop gate ref → the minted [`GateRef`] (on the `Blocked`/`Suspended`
+    /// channel and its `GateRecord`).
+    pub gate: Option<(LoopGateRef, GateRef)>,
+    /// Loop process ref → the minted [`ProcessRef`] (on
+    /// `Suspension::Process`).
+    pub process: Option<(LoopProcessRef, ProcessRef)>,
 }
 
 impl MappedResolution {
@@ -79,6 +111,7 @@ impl MappedResolution {
             resolution,
             gate_record: None,
             deny_record: None,
+            bindings: RefBindings::default(),
         }
     }
 
@@ -89,6 +122,7 @@ impl MappedResolution {
             resolution,
             gate_record: Some(gate_record),
             deny_record: None,
+            bindings: RefBindings::default(),
         }
     }
 
@@ -98,7 +132,23 @@ impl MappedResolution {
             resolution,
             gate_record: None,
             deny_record: Some(deny_record),
+            bindings: RefBindings::default(),
         }
+    }
+
+    fn bind_result(mut self, loop_ref: LoopResultRef, minted: ResultRef) -> Self {
+        self.bindings.result = Some((loop_ref, minted));
+        self
+    }
+
+    fn bind_gate(mut self, loop_ref: LoopGateRef, minted: GateRef) -> Self {
+        self.bindings.gate = Some((loop_ref, minted));
+        self
+    }
+
+    fn bind_process(mut self, loop_ref: LoopProcessRef, minted: ProcessRef) -> Self {
+        self.bindings.process = Some((loop_ref, minted));
+        self
     }
 }
 
@@ -111,9 +161,12 @@ impl MappedResolution {
 pub fn capability_outcome_to_resolution(outcome: CapabilityOutcome) -> MappedResolution {
     match outcome {
         // Ran and succeeded. Loop-derived progress/terminate_hint/output_digest
-        // (G4) and the string result_ref are dropped; a fresh ResultRef is minted.
+        // (G4) are dropped; a fresh ResultRef is minted and bound to the loop
+        // result_ref so the stored output stays reachable.
         CapabilityOutcome::Completed(message) => {
-            MappedResolution::bare(Resolution::Done(completed_outcome(message)))
+            let (outcome, loop_result) = completed_outcome(message);
+            let minted = outcome.refs.result;
+            MappedResolution::bare(Resolution::Done(outcome)).bind_result(loop_result, minted)
         }
         // Ran and failed in a model-visible, correctable way. The recovery class
         // (error_kind) and detail (G1) are host-side and do not cross.
@@ -136,42 +189,61 @@ pub fn capability_outcome_to_resolution(outcome: CapabilityOutcome) -> MappedRes
         }
         // Re-entrant gate: needs human approval before it may run.
         CapabilityOutcome::ApprovalRequired {
+            gate_ref,
             safe_summary,
             // approval_resume is loop/host resume identity, not gate-render
             // content; it does not cross into the GateRecord.
             ..
-        } => MappedResolution::with_gate(
-            Resolution::Blocked(Blocked::Approval(GateRef::new())),
-            GateRecord::Approval {
-                summary: safe_summary_or_placeholder(safe_summary),
-            },
-        ),
+        } => {
+            let minted = GateRef::new();
+            MappedResolution::with_gate(
+                Resolution::Blocked(Blocked::Approval(minted)),
+                GateRecord::Approval {
+                    summary: safe_summary_or_placeholder(safe_summary),
+                },
+            )
+            .bind_gate(gate_ref, minted)
+        }
         // Re-entrant gate: needs a credential the caller has not supplied. The
         // host-owned credential requirements ride the record (G3).
         CapabilityOutcome::AuthRequired {
+            gate_ref,
             credential_requirements,
             safe_summary,
             // auth_resume is loop/host resume identity, not gate-render content.
             ..
-        } => MappedResolution::with_gate(
-            Resolution::Blocked(Blocked::Auth(GateRef::new())),
-            GateRecord::Auth {
-                summary: safe_summary_or_placeholder(safe_summary),
-                credential_requirements,
-            },
-        ),
+        } => {
+            let minted = GateRef::new();
+            MappedResolution::with_gate(
+                Resolution::Blocked(Blocked::Auth(minted)),
+                GateRecord::Auth {
+                    summary: safe_summary_or_placeholder(safe_summary),
+                    credential_requirements,
+                },
+            )
+            .bind_gate(gate_ref, minted)
+        }
         // Re-entrant gate: needs resource budget currently unavailable.
-        CapabilityOutcome::ResourceBlocked { safe_summary, .. } => MappedResolution::with_gate(
-            Resolution::Blocked(Blocked::Resource(GateRef::new())),
-            GateRecord::Resource {
-                summary: safe_summary_or_placeholder(safe_summary),
-            },
-        ),
+        CapabilityOutcome::ResourceBlocked {
+            gate_ref,
+            safe_summary,
+        } => {
+            let minted = GateRef::new();
+            MappedResolution::with_gate(
+                Resolution::Blocked(Blocked::Resource(minted)),
+                GateRecord::Resource {
+                    summary: safe_summary_or_placeholder(safe_summary),
+                },
+            )
+            .bind_gate(gate_ref, minted)
+        }
         // Parked work: a spawned OS process the turn now waits on. Process
         // suspensions track a ProcessRef, not a gate record; the loop summary has
         // no home on the host channel and is dropped.
-        CapabilityOutcome::SpawnedProcess(ProcessHandleSummary { .. }) => {
-            MappedResolution::bare(Resolution::Suspended(Suspension::Process(ProcessRef::new())))
+        CapabilityOutcome::SpawnedProcess(ProcessHandleSummary { process_ref, .. }) => {
+            let minted = ProcessRef::new();
+            MappedResolution::bare(Resolution::Suspended(Suspension::Process(minted)))
+                .bind_process(process_ref, minted)
         }
         // NON-suspending (the #6137 bug class): the executor appends the child
         // result and continues. Maps to Done/ChildSpawned, carrying the child's
@@ -179,59 +251,80 @@ pub fn capability_outcome_to_resolution(outcome: CapabilityOutcome) -> MappedRes
         // RunId::from_uuid; the string result_ref is replaced by a fresh ResultRef.
         CapabilityOutcome::SpawnedChildRun {
             child_run_id,
+            result_ref,
             safe_summary,
             byte_len,
             model_observation,
-            ..
-        } => MappedResolution::bare(Resolution::Done(Outcome {
-            refs: OutcomeRefs {
-                result: ResultRef::new(),
-                byte_len,
-                preview: observation_preview(model_observation),
-            },
-            verdict: ToolVerdict::ChildSpawned {
-                child_run: RunId::from_uuid(child_run_id.as_uuid()),
-            },
-            summary: safe_summary_or_placeholder(safe_summary),
-        })),
+        } => {
+            let minted = ResultRef::new();
+            MappedResolution::bare(Resolution::Done(Outcome {
+                refs: OutcomeRefs {
+                    result: minted,
+                    byte_len,
+                    preview: observation_preview(model_observation),
+                },
+                verdict: ToolVerdict::ChildSpawned {
+                    child_run: RunId::from_uuid(child_run_id.as_uuid()),
+                },
+                summary: safe_summary_or_placeholder(safe_summary),
+            }))
+            .bind_result(result_ref, minted)
+        }
         // Parked work: awaits a dependent child run. Gate-shaped, so it carries a
         // GateRecord holding the staged result handle + byte length (G2). Both the
-        // gate ref and the staged result ref are freshly minted; the loop's
-        // model_observation has no home on DependentRun and is dropped.
+        // gate ref and the staged result ref are freshly minted and bound; the
+        // loop's model_observation has no home on DependentRun and is dropped.
         CapabilityOutcome::AwaitDependentRun {
+            gate_ref,
+            result_ref,
             safe_summary,
             byte_len,
             ..
-        } => MappedResolution::with_gate(
-            Resolution::Suspended(Suspension::DependentRun(GateRef::new())),
-            GateRecord::DependentRun {
-                summary: safe_summary_or_placeholder(safe_summary),
-                result: ResultRef::new(),
-                byte_len,
-            },
-        ),
+        } => {
+            let minted_gate = GateRef::new();
+            let minted_result = ResultRef::new();
+            MappedResolution::with_gate(
+                Resolution::Suspended(Suspension::DependentRun(minted_gate)),
+                GateRecord::DependentRun {
+                    summary: safe_summary_or_placeholder(safe_summary),
+                    result: minted_result,
+                    byte_len,
+                },
+            )
+            .bind_gate(gate_ref, minted_gate)
+            .bind_result(result_ref, minted_result)
+        }
         // Parked work: a client-executed external tool the host does not run.
-        CapabilityOutcome::ExternalToolPending { safe_summary, .. } => MappedResolution::with_gate(
-            Resolution::Suspended(Suspension::ExternalTool(GateRef::new())),
-            GateRecord::ExternalTool {
-                summary: safe_summary_or_placeholder(safe_summary),
-            },
-        ),
+        CapabilityOutcome::ExternalToolPending {
+            gate_ref,
+            safe_summary,
+        } => {
+            let minted = GateRef::new();
+            MappedResolution::with_gate(
+                Resolution::Suspended(Suspension::ExternalTool(minted)),
+                GateRecord::ExternalTool {
+                    summary: safe_summary_or_placeholder(safe_summary),
+                },
+            )
+            .bind_gate(gate_ref, minted)
+        }
     }
 }
 
-/// Build the `Done` payload for a `Completed` outcome (verdict `Success`).
-fn completed_outcome(message: CapabilityResultMessage) -> Outcome {
+/// Build the `Done` payload for a `Completed` outcome (verdict `Success`),
+/// returning the loop result ref alongside so the caller can bind it to the
+/// minted [`ResultRef`].
+fn completed_outcome(message: CapabilityResultMessage) -> (Outcome, LoopResultRef) {
     let CapabilityResultMessage {
+        result_ref,
         safe_summary,
         byte_len,
         model_observation,
         // G4: progress / terminate_hint / output_digest are loop-derived and have
-        // no home on the host Outcome; result_ref (a loop string) is replaced by a
-        // freshly-minted ResultRef.
+        // no home on the host Outcome.
         ..
     } = message;
-    Outcome {
+    let outcome = Outcome {
         refs: OutcomeRefs {
             result: ResultRef::new(),
             byte_len,
@@ -239,7 +332,8 @@ fn completed_outcome(message: CapabilityResultMessage) -> Outcome {
         },
         verdict: ToolVerdict::Success,
         summary: safe_summary_or_placeholder(safe_summary),
-    }
+    };
+    (outcome, result_ref)
 }
 
 /// Build the `Done` payload for a `Failed` outcome (verdict `RecoverableFailure`).
@@ -297,8 +391,15 @@ fn safe_summary_or_placeholder(raw: String) -> SafeSummary {
 /// loop-originated denial — buckets into the model-visible catch-all
 /// [`DenyReason::PolicyDenied`].
 fn deny_reason_from_kind(kind: &CapabilityDeniedReasonKind) -> DenyReason {
-    serde_json::from_value::<DenyReason>(serde_json::Value::String(kind.as_str().to_string()))
-        .unwrap_or(DenyReason::PolicyDenied)
+    use serde::{
+        Deserialize,
+        de::{IntoDeserializer, value::StrDeserializer},
+    };
+    // Deserialize straight from the &str (no JSON Value/String allocation);
+    // DenyReason's snake_case serde tags are the match vocabulary.
+    let deserializer: StrDeserializer<'_, serde::de::value::Error> =
+        kind.as_str().into_deserializer();
+    DenyReason::deserialize(deserializer).unwrap_or(DenyReason::PolicyDenied)
 }
 
 #[cfg(test)]
@@ -358,6 +459,8 @@ mod tests {
             suspends: bool,
             gate_record: Option<&'static str>,
             deny_record: bool,
+            // (result, gate, process) binding presence
+            bindings: (bool, bool, bool),
         }
 
         let rows = vec![
@@ -368,6 +471,7 @@ mod tests {
                 suspends: false,
                 gate_record: None,
                 deny_record: false,
+                bindings: (true, false, false),
             },
             Row {
                 label: "Failed",
@@ -380,6 +484,7 @@ mod tests {
                 suspends: false,
                 gate_record: None,
                 deny_record: false,
+                bindings: (false, false, false),
             },
             Row {
                 label: "Denied",
@@ -391,6 +496,7 @@ mod tests {
                 suspends: false,
                 gate_record: None,
                 deny_record: true,
+                bindings: (false, false, false),
             },
             Row {
                 label: "ApprovalRequired",
@@ -403,6 +509,7 @@ mod tests {
                 suspends: false,
                 gate_record: Some("approval"),
                 deny_record: false,
+                bindings: (false, true, false),
             },
             Row {
                 label: "AuthRequired",
@@ -416,6 +523,7 @@ mod tests {
                 suspends: false,
                 gate_record: Some("auth"),
                 deny_record: false,
+                bindings: (false, true, false),
             },
             Row {
                 label: "ResourceBlocked",
@@ -427,6 +535,7 @@ mod tests {
                 suspends: false,
                 gate_record: Some("resource"),
                 deny_record: false,
+                bindings: (false, true, false),
             },
             Row {
                 label: "SpawnedProcess",
@@ -438,6 +547,7 @@ mod tests {
                 suspends: true,
                 gate_record: None,
                 deny_record: false,
+                bindings: (false, false, true),
             },
             Row {
                 label: "SpawnedChildRun",
@@ -453,6 +563,7 @@ mod tests {
                 suspends: false,
                 gate_record: None,
                 deny_record: false,
+                bindings: (true, false, false),
             },
             Row {
                 label: "AwaitDependentRun",
@@ -467,6 +578,7 @@ mod tests {
                 suspends: true,
                 gate_record: Some("dependent_run"),
                 deny_record: false,
+                bindings: (true, true, false),
             },
             Row {
                 label: "ExternalToolPending",
@@ -478,6 +590,7 @@ mod tests {
                 suspends: true,
                 gate_record: Some("external_tool"),
                 deny_record: false,
+                bindings: (false, true, false),
             },
         ];
 
@@ -510,6 +623,16 @@ mod tests {
                 mapped.deny_record.is_some(),
                 row.deny_record,
                 "{}: deny_record present",
+                row.label
+            );
+            assert_eq!(
+                (
+                    mapped.bindings.result.is_some(),
+                    mapped.bindings.gate.is_some(),
+                    mapped.bindings.process.is_some(),
+                ),
+                row.bindings,
+                "{}: ref bindings presence",
                 row.label
             );
             // A gate/deny record exists iff the channel renders from one; the two
@@ -687,12 +810,11 @@ mod tests {
             CapabilityDeniedReasonKind::EmptySurface,
             CapabilityDeniedReasonKind::unknown("hook_denied").unwrap(),
         ] {
-            let mapped = capability_outcome_to_resolution(CapabilityOutcome::Denied(
-                CapabilityDenied {
+            let mapped =
+                capability_outcome_to_resolution(CapabilityOutcome::Denied(CapabilityDenied {
                     reason_kind,
                     safe_summary: "denied".to_string(),
-                },
-            ));
+                }));
             match mapped.deny_record {
                 Some(DenyRecord { reason, .. }) => {
                     assert_eq!(reason, DenyReason::PolicyDenied);
@@ -710,6 +832,61 @@ mod tests {
         match mapped.deny_record {
             Some(DenyRecord { reason, .. }) => assert_eq!(reason, DenyReason::NetworkDenied),
             other => panic!("expected a DenyRecord, got {other:?}"),
+        }
+    }
+
+    /// The bindings are not merely present — each pairs the loop-side source
+    /// ref with EXACTLY the uuid ref minted into the resolution/record, so a
+    /// consumer persisting the association can make already-stored loop state
+    /// reachable through the host ref.
+    #[test]
+    fn bindings_pair_loop_refs_with_the_minted_host_refs() {
+        // Dependent run: both a gate binding and a staged-result binding.
+        let mapped = capability_outcome_to_resolution(CapabilityOutcome::AwaitDependentRun {
+            gate_ref: gate_ref(),
+            result_ref: result_ref(),
+            safe_summary: "awaiting dependent".to_string(),
+            byte_len: 9,
+            model_observation: None,
+        });
+        let (loop_gate, minted_gate) = mapped.bindings.gate.clone().expect("gate binding");
+        let (loop_result, minted_result) = mapped.bindings.result.clone().expect("result binding");
+        assert_eq!(loop_gate, gate_ref());
+        assert_eq!(loop_result, result_ref());
+        match (&mapped.resolution, &mapped.gate_record) {
+            (
+                Resolution::Suspended(Suspension::DependentRun(channel_gate)),
+                Some(GateRecord::DependentRun { result, .. }),
+            ) => {
+                assert_eq!(*channel_gate, minted_gate, "gate binding matches channel");
+                assert_eq!(*result, minted_result, "result binding matches record");
+            }
+            other => panic!("expected DependentRun channel + record, got {other:?}"),
+        }
+
+        // Completed: the result binding matches OutcomeRefs.result.
+        let mapped = capability_outcome_to_resolution(completed("ok"));
+        let (loop_result, minted_result) = mapped.bindings.result.clone().expect("result binding");
+        assert_eq!(loop_result, result_ref());
+        match &mapped.resolution {
+            Resolution::Done(outcome) => assert_eq!(outcome.refs.result, minted_result),
+            other => panic!("expected Done, got {other:?}"),
+        }
+
+        // Spawned process: the process binding matches the suspension ref.
+        let mapped = capability_outcome_to_resolution(CapabilityOutcome::SpawnedProcess(
+            ProcessHandleSummary {
+                process_ref: LoopProcessRef::new("process:pid-1").unwrap(),
+                safe_summary: "spawned".to_string(),
+            },
+        ));
+        let (loop_process, minted_process) = mapped.bindings.process.clone().expect("binding");
+        assert_eq!(loop_process, LoopProcessRef::new("process:pid-1").unwrap());
+        match &mapped.resolution {
+            Resolution::Suspended(Suspension::Process(channel_process)) => {
+                assert_eq!(*channel_process, minted_process);
+            }
+            other => panic!("expected Suspended(Process), got {other:?}"),
         }
     }
 
