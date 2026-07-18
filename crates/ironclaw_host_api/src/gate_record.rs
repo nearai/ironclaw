@@ -135,10 +135,7 @@ mod tests {
     fn gate_record_roundtrips_snake_case_for_every_variant() {
         let result = ResultRef::parse("018f6a00-0000-7000-8000-000000000001").unwrap();
         let variants = [
-            (
-                GateRecord::Approval { summary: summary() },
-                "approval",
-            ),
+            (GateRecord::Approval { summary: summary() }, "approval"),
             (
                 GateRecord::Auth {
                     summary: summary(),
@@ -146,10 +143,7 @@ mod tests {
                 },
                 "auth",
             ),
-            (
-                GateRecord::Resource { summary: summary() },
-                "resource",
-            ),
+            (GateRecord::Resource { summary: summary() }, "resource"),
             (
                 GateRecord::DependentRun {
                     summary: summary(),
@@ -170,7 +164,10 @@ mod tests {
             assert_eq!(tag_on_wire, tag, "wire tag must be snake_case");
             assert_eq!(record.summary(), &summary(), "summary() must be reachable");
             let back: GateRecord = serde_json::from_value(wire).unwrap();
-            assert_eq!(back, record, "{tag}: round-trip must reconstruct the record");
+            assert_eq!(
+                back, record,
+                "{tag}: round-trip must reconstruct the record"
+            );
         }
     }
 
