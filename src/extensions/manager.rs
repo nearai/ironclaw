@@ -3883,6 +3883,11 @@ impl ExtensionManager {
                 }
             }
         };
+        // Snapshot for rollback: if a live server fails to come back up under
+        // the new config, we restore this and re-activate it (see below) so a
+        // failed PATCH can't leave persisted-new-config + dead-server
+        // split-brain state.
+        let previous_config = config.clone();
 
         if let Some(new_url) = url {
             // When the URL changes, the previous backend's tool catalog is
@@ -3902,6 +3907,12 @@ impl ExtensionManager {
             Some(new_oauth) => config.oauth = new_oauth,
         }
 
+        // Whether this user's client is live BEFORE we evict it — a live
+        // server must come back up under the new config before we report
+        // success, or every registered wrapper starts failing dispatch
+        // ("server inactive") until a manual re-activation.
+        let was_active = self.mcp_clients.contains(user_id, name).await;
+
         self.update_mcp_server(config, user_id)
             .await
             .map_err(|e| ExtensionError::Config(e.to_string()))?;
@@ -3912,11 +3923,45 @@ impl ExtensionManager {
         // credentials until server restart.
         self.mcp_clients.remove(user_id, name).await;
 
-        tracing::info!(
-            extension = %name,
-            user_id = %user_id,
-            "MCP server config updated; cached client evicted"
-        );
+        if was_active {
+            // A live server must come back up under the new config before we
+            // report success. On failure, roll back (snapshot + rollback per
+            // `.claude/rules/error-handling.md`): restore the previous config
+            // and re-activate it, so the PATCH is atomic from the caller's
+            // point of view — either the server runs the new config, or the
+            // old config is back and the error says why.
+            if let Err(activate_err) = self.activate_mcp_locked(name, user_id).await {
+                if let Err(rollback_err) = self.update_mcp_server(previous_config, user_id).await {
+                    tracing::error!(
+                        extension = %name,
+                        user_id = %user_id,
+                        error = %rollback_err,
+                        "PATCH rollback failed to restore previous MCP config"
+                    );
+                } else if let Err(rollback_err) = self.activate_mcp_locked(name, user_id).await {
+                    tracing::warn!(
+                        extension = %name,
+                        user_id = %user_id,
+                        error = %rollback_err,
+                        "PATCH rollback restored previous MCP config but re-activation failed"
+                    );
+                }
+                return Err(ExtensionError::ActivationFailed(format!(
+                    "reactivating '{name}' under the updated config failed (previous config restored): {activate_err}"
+                )));
+            }
+            tracing::info!(
+                extension = %name,
+                user_id = %user_id,
+                "MCP server config updated; active client re-connected under new config"
+            );
+        } else {
+            tracing::info!(
+                extension = %name,
+                user_id = %user_id,
+                "MCP server config updated; cached client evicted"
+            );
+        }
 
         Ok(())
     }
@@ -6233,7 +6278,19 @@ impl ExtensionManager {
         // gone. Parallelism across different servers is preserved.
         let lifecycle_lock = self.mcp_lifecycle_lock(name).await;
         let _lifecycle_guard = lifecycle_lock.lock().await;
+        self.activate_mcp_locked(name, user_id).await
+    }
 
+    /// Body of [`Self::activate_mcp`], to be called ONLY while already holding
+    /// the per-server `mcp_lifecycle_lock`. Exists so lifecycle operations
+    /// that hold the lock themselves (e.g. `update_mcp_server_partial`
+    /// reactivating a live server after a config change) can reactivate
+    /// without deadlocking on the non-reentrant mutex.
+    async fn activate_mcp_locked(
+        &self,
+        name: &str,
+        user_id: &str,
+    ) -> Result<ActivateResult, ExtensionError> {
         // Check if already activated for this user. Note: another user may
         // already have the same server active (their client sits in
         // `mcp_clients` under a different key), in which case the global

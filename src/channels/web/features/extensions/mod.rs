@@ -2033,11 +2033,17 @@ mod tests {
         );
     }
 
-    /// PATCH updating `headers` on an installed MCP server → the stored config
-    /// reflects the new headers, and the cached McpClient for that user/server
-    /// pair is evicted (next call re-creates the client with new credentials).
+    /// PATCH on a LIVE server whose new config cannot come back up must roll
+    /// back (snapshot + rollback): the previous config is restored, the stale
+    /// client + thread fork are evicted, and the handler reports failure —
+    /// never a 200 that leaves persisted-new-config + dead-server split-brain.
+    ///
+    /// The seeded client makes the server "active"; reactivation against the
+    /// unreachable test URL fails deterministically, driving the rollback arm.
+    /// The inactive-server happy path (200 + headers updated, no reactivation)
+    /// is covered by `test_update_handler_oauth_tristate`.
     #[tokio::test]
-    async fn test_update_handler_updates_headers_and_evicts_client() {
+    async fn test_update_handler_rolls_back_when_live_reactivation_fails() {
         use axum::body::Body;
         use axum::routing::patch;
         use tower::ServiceExt;
@@ -2104,32 +2110,39 @@ mod tests {
         let resp = ServiceExt::<axum::http::Request<Body>>::oneshot(app, req)
             .await
             .expect("response");
-        assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(
+            resp.status(),
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "failed live reactivation must not report success"
+        );
         let body_bytes = axum::body::to_bytes(resp.into_body(), 1024 * 64)
             .await
             .expect("body");
-        let parsed: serde_json::Value = serde_json::from_slice(&body_bytes).expect("json response");
+        let body_text = String::from_utf8_lossy(&body_bytes).to_string();
         assert!(
-            parsed["success"].as_bool().unwrap_or(false),
-            "PATCH must succeed: {parsed}"
+            !body_text.contains("Bearer"),
+            "error must not leak credential material: {body_text}"
         );
 
-        // Verify the stored config has the new header.
+        // Rollback: the stored config must carry the PREVIOUS header, not the
+        // one whose reactivation failed.
         let config = ext_mgr
             .get_mcp_server_for_test("my_server", "user_a")
             .await
-            .expect("config after patch");
+            .expect("config after failed patch");
         assert_eq!(
             config.headers.get("Authorization").map(String::as_str),
-            Some("Bearer new"),
-            "stored header must be updated after PATCH"
+            Some("Bearer old"),
+            "failed PATCH must restore the previous config (snapshot + rollback)"
         );
 
-        // The seeded base client AND its thread fork must be evicted — a
-        // surviving entry would keep dispatching with the old credentials.
+        // The seeded stale base client AND its thread fork must still be
+        // evicted — they were built from a config we no longer trust, and
+        // rollback re-activation against the unreachable test URL cannot
+        // resurrect them.
         assert!(
             client_store.get("user_a", "my_server").await.is_none(),
-            "cached base client must be evicted by PATCH"
+            "stale cached base client must not survive a failed PATCH"
         );
         assert!(
             client_store
@@ -2142,7 +2155,7 @@ mod tests {
                 )
                 .await
                 .is_none(),
-            "thread-scoped fork must be evicted with its base by PATCH"
+            "stale thread-scoped fork must not survive a failed PATCH"
         );
     }
 

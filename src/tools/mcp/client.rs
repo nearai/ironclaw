@@ -396,6 +396,14 @@ impl McpClient {
         self
     }
 
+    /// Test-only: set the owning user id so session-manager keys line up with
+    /// the ids a test registers sessions under.
+    #[cfg(test)]
+    pub(crate) fn with_user_id(mut self, user_id: impl Into<String>) -> Self {
+        self.user_id = user_id.into();
+        self
+    }
+
     /// Get the server name as a string slice.
     ///
     /// For typed access — when feeding the name into a session-manager
@@ -426,6 +434,20 @@ impl McpClient {
     #[cfg(test)]
     pub(crate) fn thread_id(&self) -> Option<uuid::Uuid> {
         self.thread_id
+    }
+
+    /// Terminate this client's `(user, server, thread)` session in the shared
+    /// [`McpSessionManager`], if one is wired.
+    ///
+    /// Called by `McpClientStore` when the client is evicted (LRU cap, thread
+    /// eviction, base replace/remove) so session state does not outlive the
+    /// client that owned it. No-op for clients without a session manager.
+    pub(crate) async fn terminate_session(&self) {
+        if let Some(ref session_manager) = self.session_manager {
+            session_manager
+                .terminate(&self.user_id, &self.server_name, self.thread_id)
+                .await;
+        }
     }
 
     /// Materialise a thread-scoped sibling of this client.
