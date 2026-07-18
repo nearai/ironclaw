@@ -9,6 +9,11 @@ layer = "kernel"
 
 [features]
 default = []
+# In-memory-backed run-state / approval-request store constructors for this
+# crate's own tests and downstream tiers. The stores are the production
+# `Filesystem*Store<InMemoryBackend>`; the helpers just wire the in-memory backend
+# seam (arch-simplification §4.3).
+test-support = []
 postgres = ["dep:deadpool-postgres", "dep:tokio-postgres"]
 libsql = ["dep:libsql"]
 

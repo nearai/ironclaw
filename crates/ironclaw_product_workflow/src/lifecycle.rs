@@ -427,6 +427,8 @@ pub enum LifecycleExtensionCredentialSetup {
     OAuth {
         scopes: Vec<String>,
     },
+    /// Channel pairing (host-issued code consumed on the external side).
+    Pairing,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

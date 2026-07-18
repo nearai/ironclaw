@@ -6,11 +6,9 @@
 //! trusted context outside this crate after verifying Slack request signatures.
 
 use ironclaw_product_adapters::{
-    AdapterInstallationId, ApprovalDecision, ApprovalResolutionPayload, AuthResolutionPayload,
-    AuthResolutionResult, ExternalActorRef, ExternalConversationRef, ExternalEventId,
+    AdapterInstallationId, ExternalActorRef, ExternalConversationRef, ExternalEventId,
     ParsedProductInbound, ProductAdapterError, ProductAttachmentDescriptor, ProductAttachmentKind,
-    ProductInboundPayload, ProductTriggerReason, ProtocolAuthEvidence,
-    ScopedApprovalResolutionPayload, UserMessagePayload,
+    ProductInboundPayload, ProductTriggerReason, ProtocolAuthEvidence, UserMessagePayload,
 };
 use serde::Deserialize;
 use thiserror::Error;
@@ -344,48 +342,15 @@ fn parse_interaction_resolution(
     text: &str,
     source_trigger: ProductTriggerReason,
 ) -> Result<Option<ProductInboundPayload>, SlackPayloadParseError> {
+    // Slack-specific normalization (mentions may wrap or sit inside the
+    // pasted inline code) in front of the channel-neutral grammar owned by
+    // `ironclaw_product_adapters::interaction_commands` — one grammar for
+    // every channel whose busy/prompt copy advertises these commands.
     let text = strip_leading_slack_mentions(text);
-    let text = strip_wrapping_inline_code(text);
+    let text = ironclaw_product_adapters::strip_wrapping_inline_code(text);
     let text = strip_leading_slack_mentions(text);
-    let mut parts = text.split_whitespace();
-    let Some(first) = parts.next() else {
-        return Ok(None);
-    };
-    match first.to_ascii_lowercase().as_str() {
-        "approve" => {
-            parse_approval_resolution(parts.next(), ApprovalDecision::ApproveOnce, source_trigger)
-        }
-        "deny" => parse_approval_resolution(parts.next(), ApprovalDecision::Deny, source_trigger),
-        "auth" => {
-            let Some(action) = parts.next() else {
-                return malformed_interaction_noop("auth");
-            };
-            if action.eq_ignore_ascii_case("deny") {
-                let Some(auth_request_ref) = parts.next() else {
-                    return malformed_interaction_noop("auth deny");
-                };
-                if parts.next().is_some() {
-                    return malformed_interaction_noop("auth deny");
-                }
-                AuthResolutionPayload::new(auth_request_ref, AuthResolutionResult::Denied)
-                    .map(|payload| payload.with_source_trigger(source_trigger))
-                    .map(ProductInboundPayload::AuthResolution)
-                    .map(Some)
-                    .map_err(adapter_error_to_payload_error)
-            } else {
-                malformed_interaction_noop("auth")
-            }
-        }
-        _ => Ok(None),
-    }
-}
-
-fn strip_wrapping_inline_code(text: &str) -> &str {
-    let mut rest = text.trim();
-    while rest.len() >= 2 && rest.starts_with('`') && rest.ends_with('`') {
-        rest = rest[1..rest.len() - 1].trim();
-    }
-    rest
+    ironclaw_product_adapters::parse_interaction_resolution_text(text, source_trigger)
+        .map_err(adapter_error_to_payload_error)
 }
 
 fn strip_leading_slack_mentions(text: &str) -> &str {
@@ -399,43 +364,6 @@ fn strip_leading_slack_mentions(text: &str) -> &str {
         };
         rest = after_close.trim_start();
     }
-}
-
-fn parse_approval_resolution(
-    gate_ref: Option<&str>,
-    decision: ApprovalDecision,
-    source_trigger: ProductTriggerReason,
-) -> Result<Option<ProductInboundPayload>, SlackPayloadParseError> {
-    match gate_ref {
-        Some(gate_ref) => {
-            // A well-formed `gate:<ref>` wins even when the user pasted the whole
-            // instruction line (e.g. "approve gate:X or deny gate:X") — the
-            // leading verb + first gate ref are the intent; trailing tokens are
-            // ignored. Any token that is not a `gate:<ref>` is not a targeted
-            // resolution (a genuine typo like "approve this"), so fall through to
-            // a no-op regardless of whether trailing text follows — keeping
-            // single- and multi-word non-gate replies consistent.
-            if !gate_ref.starts_with("gate:") {
-                return malformed_interaction_noop("approval");
-            }
-            ApprovalResolutionPayload::new(gate_ref, decision)
-                .map(|payload| payload.with_source_trigger(source_trigger))
-                .map(ProductInboundPayload::ApprovalResolution)
-                .map(Some)
-                .map_err(adapter_error_to_payload_error)
-        }
-        None => ScopedApprovalResolutionPayload::new(decision)
-            .map(|payload| payload.with_source_trigger(source_trigger))
-            .map(ProductInboundPayload::ScopedApprovalResolution)
-            .map(Some)
-            .map_err(adapter_error_to_payload_error),
-    }
-}
-
-fn malformed_interaction_noop(
-    _command: &'static str,
-) -> Result<Option<ProductInboundPayload>, SlackPayloadParseError> {
-    Ok(Some(ProductInboundPayload::NoOp))
 }
 
 fn noop_parsed_inbound(

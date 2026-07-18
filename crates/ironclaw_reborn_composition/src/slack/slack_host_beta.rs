@@ -51,15 +51,9 @@ mod runtime_setup;
 use crate::RebornRuntime;
 use crate::outbound::{OutboundDeliveryTargetProvider, OutboundDeliveryTargetRegistrationOutcome};
 use crate::product_auth::serve::SlackPersonalOAuthBindingConfig;
-use crate::slack::slack_actor_identity::{
-    RebornUserIdentityLookup, SlackUserIdentityActorResolver,
-};
+use crate::slack::slack_actor_identity::SlackUserIdentityActorResolver;
 use crate::slack::slack_channel_routes::{
     SlackChannelRouteAdminRouteConfig, SlackChannelRouteStore, SlackChannelRouteSubjectResolver,
-};
-use crate::slack::slack_delivery::{
-    SlackFinalReplyDeliveryObserver, SlackFinalReplyDeliveryServices,
-    SlackFinalReplyDeliverySettings, TriggeredRunDeliveryDriver,
 };
 use crate::slack::slack_egress::{SlackProtocolHttpEgress, StaticSlackEgressCredentialProvider};
 use crate::slack::slack_host_state::FilesystemSlackHostState;
@@ -81,6 +75,11 @@ use crate::slack::slack_serve::{
     slack_events_route_mount,
 };
 use crate::webui::route_mounts::PublicRouteMount;
+use ironclaw_channel_delivery::{
+    FinalReplyDeliveryObserver, FinalReplyDeliveryServices, FinalReplyDeliverySettings,
+    TriggeredRunDeliveryDriver,
+};
+use ironclaw_channel_host::identity::RebornUserIdentityLookup;
 
 const SLACK_BOT_TOKEN_HANDLE: &str = "slack_bot_token";
 const SLACK_SIGNATURE_HEADER: &str = "X-Slack-Signature";
@@ -735,7 +734,8 @@ fn build_triggered_run_delivery_hook_from_parts(
     let delivery_sink: Arc<dyn OutboundDeliverySink> = Arc::new(NoopSlackDeliverySink);
     let binding_service: Arc<dyn ConversationBindingService> =
         Arc::new(NoopConversationBindingService);
-    let services = SlackFinalReplyDeliveryServices {
+    let services = FinalReplyDeliveryServices {
+        channel_protocol: Arc::new(crate::slack::slack_delivery::SlackDeliveryProtocol),
         binding_service,
         thread_service: Arc::clone(&parts.thread_service),
         turn_coordinator: Arc::clone(&parts.turn_coordinator),
@@ -1194,8 +1194,9 @@ fn build_slack_installation_record_with_resolvers(
     let preferences: Arc<dyn ironclaw_outbound::CommunicationPreferenceRepository> =
         Arc::clone(&parts.local_runtime.outbound_preferences);
     let delivery_sink: Arc<dyn OutboundDeliverySink> = Arc::new(NoopSlackDeliverySink);
-    let observer = Arc::new(SlackFinalReplyDeliveryObserver::with_settings(
-        SlackFinalReplyDeliveryServices {
+    let observer = Arc::new(FinalReplyDeliveryObserver::with_settings(
+        FinalReplyDeliveryServices {
+            channel_protocol: Arc::new(crate::slack::slack_delivery::SlackDeliveryProtocol),
             binding_service: Arc::new(binding),
             thread_service: Arc::clone(&parts.thread_service),
             turn_coordinator: Arc::clone(&parts.turn_coordinator),
@@ -1210,7 +1211,7 @@ fn build_slack_installation_record_with_resolvers(
             approval_requests: Some(Arc::clone(&parts.local_runtime.approval_requests)
                 as Arc<dyn ironclaw_run_state::ApprovalRequestStore>),
         },
-        SlackFinalReplyDeliverySettings::default(),
+        FinalReplyDeliverySettings::default(),
     ));
 
     Ok(SlackInstallationRecord::new(
@@ -1345,7 +1346,7 @@ mod tests {
     use http_body_util::BodyExt;
     use ironclaw_authorization::GrantAuthorizer;
     use ironclaw_extensions::ExtensionRegistry;
-    use ironclaw_filesystem::LocalFilesystem;
+    use ironclaw_filesystem::{DiskFilesystem, InMemoryBackend};
     use ironclaw_host_runtime::{
         CapabilitySurfaceVersion, HostRuntimeHttpEgressPort, HostRuntimeServices,
     };
@@ -1356,7 +1357,7 @@ mod tests {
     use ironclaw_network::{
         NetworkHttpEgress, NetworkHttpError, NetworkHttpRequest, NetworkHttpResponse, NetworkUsage,
     };
-    use ironclaw_processes::{InMemoryProcessResultStore, InMemoryProcessStore, ProcessServices};
+    use ironclaw_processes::{FilesystemProcessResultStore, FilesystemProcessStore};
     use ironclaw_product_workflow::{
         LifecyclePackageKind, LifecyclePackageRef, ProductActorUserResolutionRequest,
         ProductWorkflowError, RebornExtensionOnboardingState, RebornOutboundDeliveryTargetId,
@@ -4042,17 +4043,17 @@ mod tests {
     }
 
     fn test_host_runtime_services() -> HostRuntimeServices<
-        LocalFilesystem,
+        DiskFilesystem,
         InMemoryResourceGovernor,
-        InMemoryProcessStore,
-        InMemoryProcessResultStore,
+        FilesystemProcessStore<InMemoryBackend>,
+        FilesystemProcessResultStore<InMemoryBackend>,
     > {
         HostRuntimeServices::new(
             Arc::new(ExtensionRegistry::new()),
-            Arc::new(LocalFilesystem::new()),
+            Arc::new(DiskFilesystem::new()),
             Arc::new(InMemoryResourceGovernor::new()),
             Arc::new(GrantAuthorizer::new()),
-            ProcessServices::in_memory(),
+            ironclaw_processes::in_memory_backed_process_services(),
             CapabilitySurfaceVersion::new("surface-v1").expect("surface version"),
         )
     }
@@ -4377,7 +4378,7 @@ mod tests {
     /// `CommunicationPreferenceRepository` Arc that the WebUI
     /// `RebornOutboundPreferencesFacade` writes through
     /// (`local_runtime.outbound_preferences`) into
-    /// `SlackFinalReplyDeliveryServices.communication_preferences`.
+    /// `FinalReplyDeliveryServices.communication_preferences`.
     ///
     /// Pre-fix bug: `build_triggered_run_delivery_hook` constructed a fresh
     /// `FilesystemOutboundStateStore::new(Arc::clone(&local_runtime.host_state_filesystem))`

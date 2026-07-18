@@ -9,7 +9,7 @@ use ironclaw_dispatcher::{
     RuntimeAdapter, RuntimeAdapterRequest, RuntimeAdapterResult, RuntimeDispatcher,
 };
 use ironclaw_events::{InMemoryEventSink, RuntimeEventKind};
-use ironclaw_filesystem::{InMemoryBackend, LocalFilesystem};
+use ironclaw_filesystem::{DiskFilesystem, InMemoryBackend};
 use ironclaw_host_api::*;
 use ironclaw_resources::*;
 use ironclaw_run_state::*;
@@ -24,7 +24,7 @@ async fn capability_host_invokes_through_runtime_dispatcher_and_completes_run() 
         json!({"via":"runtime-dispatcher"}),
     ));
     let (registry, dispatcher, governor, events) = runtime_dispatcher_stack(Arc::clone(&adapter));
-    let run_state = InMemoryRunStateStore::new();
+    let run_state = ironclaw_run_state::in_memory_backed_run_state_store();
     let authorizer = GrantAuthorizer::new();
     let host =
         CapabilityHost::new(registry.as_ref(), &dispatcher, &authorizer).with_run_state(&run_state);
@@ -88,8 +88,8 @@ async fn capability_host_invokes_through_runtime_dispatcher_and_completes_run() 
 async fn capability_host_blocks_then_resumes_approved_dispatch_through_runtime_dispatcher() {
     let adapter = Arc::new(RecordingRuntimeAdapter::new(json!({"approved":true})));
     let (registry, dispatcher, _governor, events) = runtime_dispatcher_stack(Arc::clone(&adapter));
-    let run_state = InMemoryRunStateStore::new();
-    let approval_requests = InMemoryApprovalRequestStore::new();
+    let run_state = ironclaw_run_state::in_memory_backed_run_state_store();
+    let approval_requests = ironclaw_run_state::in_memory_backed_approval_request_store();
     let leases = in_memory_backed_capability_lease_store();
     let block_host = CapabilityHost::new(registry.as_ref(), &dispatcher, &ApprovalAuthorizer)
         .with_run_state(&run_state)
@@ -193,8 +193,8 @@ async fn capability_host_blocks_then_resumes_approved_dispatch_through_runtime_d
 async fn capability_host_rejects_resume_from_wrong_user_scope_without_dispatch_or_lease_claim() {
     let adapter = Arc::new(RecordingRuntimeAdapter::new(json!({"must_not":"dispatch"})));
     let (registry, dispatcher, _governor, _events) = runtime_dispatcher_stack(Arc::clone(&adapter));
-    let run_state = InMemoryRunStateStore::new();
-    let approval_requests = InMemoryApprovalRequestStore::new();
+    let run_state = ironclaw_run_state::in_memory_backed_run_state_store();
+    let approval_requests = ironclaw_run_state::in_memory_backed_approval_request_store();
     let leases = in_memory_backed_capability_lease_store();
     let block_host = CapabilityHost::new(registry.as_ref(), &dispatcher, &ApprovalAuthorizer)
         .with_run_state(&run_state)
@@ -279,8 +279,8 @@ async fn capability_host_rejects_resume_from_wrong_user_scope_without_dispatch_o
 async fn capability_host_rejects_expired_approval_lease_before_dispatch() {
     let adapter = Arc::new(RecordingRuntimeAdapter::new(json!({"must_not":"dispatch"})));
     let (registry, dispatcher, _governor, _events) = runtime_dispatcher_stack(Arc::clone(&adapter));
-    let run_state = InMemoryRunStateStore::new();
-    let approval_requests = InMemoryApprovalRequestStore::new();
+    let run_state = ironclaw_run_state::in_memory_backed_run_state_store();
+    let approval_requests = ironclaw_run_state::in_memory_backed_approval_request_store();
     let leases = in_memory_backed_capability_lease_store();
     let block_host = CapabilityHost::new(registry.as_ref(), &dispatcher, &ApprovalAuthorizer)
         .with_run_state(&run_state)
@@ -382,10 +382,10 @@ impl RecordingRuntimeAdapter {
 }
 
 #[async_trait]
-impl RuntimeAdapter<LocalFilesystem, InMemoryResourceGovernor> for RecordingRuntimeAdapter {
+impl RuntimeAdapter<DiskFilesystem, InMemoryResourceGovernor> for RecordingRuntimeAdapter {
     async fn dispatch_json(
         &self,
-        request: RuntimeAdapterRequest<'_, LocalFilesystem, InMemoryResourceGovernor>,
+        request: RuntimeAdapterRequest<'_, DiskFilesystem, InMemoryResourceGovernor>,
     ) -> Result<RuntimeAdapterResult, DispatchError> {
         self.requests.lock().unwrap().push(RecordedRuntimeRequest {
             capability_id: request.capability_id.clone(),
@@ -430,12 +430,12 @@ fn runtime_dispatcher_stack(
     adapter: Arc<RecordingRuntimeAdapter>,
 ) -> (
     Arc<ironclaw_extensions::ExtensionRegistry>,
-    RuntimeDispatcher<'static, LocalFilesystem, InMemoryResourceGovernor>,
+    RuntimeDispatcher<'static, DiskFilesystem, InMemoryResourceGovernor>,
     Arc<InMemoryResourceGovernor>,
     InMemoryEventSink,
 ) {
     let registry = Arc::new(registry_with_echo_capability());
-    let filesystem = Arc::new(LocalFilesystem::new());
+    let filesystem = Arc::new(DiskFilesystem::new());
     let governor = Arc::new(InMemoryResourceGovernor::new());
     let events = InMemoryEventSink::new();
     let dispatcher =
@@ -446,7 +446,9 @@ fn runtime_dispatcher_stack(
 }
 
 async fn approve_dispatch(
-    approval_requests: &InMemoryApprovalRequestStore,
+    approval_requests: &ironclaw_run_state::FilesystemApprovalRequestStore<
+        ironclaw_filesystem::InMemoryBackend,
+    >,
     leases: &FilesystemCapabilityLeaseStore<InMemoryBackend>,
     scope: &ResourceScope,
     approval_id: ApprovalRequestId,

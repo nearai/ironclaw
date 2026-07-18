@@ -16,7 +16,7 @@ use ironclaw_extensions::{
     CapabilityProviderHostApiContract, ExtensionManifest, ExtensionPackage, ExtensionRuntime,
     HostApiContractRegistry, ManifestSource,
 };
-use ironclaw_filesystem::{LocalFilesystem, RootFilesystem};
+use ironclaw_filesystem::{DiskFilesystem, RootFilesystem};
 use ironclaw_host_api::*;
 use ironclaw_resources::*;
 use ironclaw_wasm::wasm_sandbox_core::SandboxLimits;
@@ -628,10 +628,10 @@ impl WasmRuntimeAdapter {
 }
 
 #[async_trait]
-impl RuntimeAdapter<LocalFilesystem, InMemoryResourceGovernor> for WasmRuntimeAdapter {
+impl RuntimeAdapter<DiskFilesystem, InMemoryResourceGovernor> for WasmRuntimeAdapter {
     async fn dispatch_json(
         &self,
-        request: RuntimeAdapterRequest<'_, LocalFilesystem, InMemoryResourceGovernor>,
+        request: RuntimeAdapterRequest<'_, DiskFilesystem, InMemoryResourceGovernor>,
     ) -> Result<RuntimeAdapterResult, DispatchError> {
         let module_path = match &request.package.manifest.runtime {
             ExtensionRuntime::Wasm { module } => module
@@ -694,7 +694,7 @@ fn execute_prepared_wasm(
     runtime: &WitToolRuntime,
     prepared: &PreparedWitTool,
     host: WitToolHost,
-    request: RuntimeAdapterRequest<'_, LocalFilesystem, InMemoryResourceGovernor>,
+    request: RuntimeAdapterRequest<'_, DiskFilesystem, InMemoryResourceGovernor>,
 ) -> Result<RuntimeAdapterResult, DispatchError> {
     let input_json = serde_json::to_string(&request.input).map_err(|_| DispatchError::Wasm {
         kind: RuntimeDispatchErrorKind::InputEncode,
@@ -828,9 +828,9 @@ fn capability_provider_contracts() -> HostApiContractRegistry {
     contracts
 }
 
-fn mounted_empty_extension_root() -> LocalFilesystem {
+fn mounted_empty_extension_root() -> DiskFilesystem {
     let storage = tempfile::tempdir().unwrap().keep();
-    let mut fs = LocalFilesystem::new();
+    let mut fs = DiskFilesystem::new();
     fs.mount_local(
         VirtualPath::new("/system/extensions").unwrap(),
         HostPath::from_path_buf(storage),
@@ -843,7 +843,7 @@ async fn filesystem_with_wasm_component(
     extension_id: &str,
     module_path: &str,
     wasm_bytes: &[u8],
-) -> LocalFilesystem {
+) -> DiskFilesystem {
     let fs = mounted_empty_extension_root();
     let path =
         VirtualPath::new(format!("/system/extensions/{extension_id}/{module_path}")).unwrap();

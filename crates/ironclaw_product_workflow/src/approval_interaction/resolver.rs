@@ -267,13 +267,13 @@ mod tests {
         Action, ApprovalRequest, CapabilityId, CorrelationId, InvocationId, Principal,
         ResourceEstimate, UserId,
     };
-    use ironclaw_run_state::{ApprovalRequestStore, InMemoryApprovalRequestStore};
+    use ironclaw_run_state::ApprovalRequestStore;
 
     use super::*;
 
     #[tokio::test]
     async fn matching_lease_exists_rejects_pending_approval_as_stale() {
-        let approvals = Arc::new(InMemoryApprovalRequestStore::new());
+        let approvals = Arc::new(ironclaw_run_state::in_memory_backed_approval_request_store());
         let leases = Arc::new(in_memory_backed_capability_lease_store());
         let scope = resource_scope();
         let request = approval_request(None);
@@ -299,7 +299,7 @@ mod tests {
 
     #[tokio::test]
     async fn matching_lease_exists_rejects_approved_request_without_fingerprint_as_stale() {
-        let approvals = Arc::new(InMemoryApprovalRequestStore::new());
+        let approvals = Arc::new(ironclaw_run_state::in_memory_backed_approval_request_store());
         let leases = Arc::new(in_memory_backed_capability_lease_store());
         let scope = resource_scope();
         let request = approval_request(None);

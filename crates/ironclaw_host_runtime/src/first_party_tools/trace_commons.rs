@@ -1329,7 +1329,7 @@ mod tests {
 
     use async_trait::async_trait;
     use chrono::{DateTime, Utc};
-    use ironclaw_filesystem::LocalFilesystem;
+    use ironclaw_filesystem::DiskFilesystem;
     use ironclaw_host_api::{CapabilityId, ResourceEstimate, ResourceScope};
     use ironclaw_reborn_traces::contribution::{
         StandingTraceContributionPolicy, TraceCreditReport,
@@ -1366,7 +1366,7 @@ mod tests {
             estimate: ResourceEstimate::default(),
             mounts: None,
             services: InvocationServices {
-                filesystem: Arc::new(LocalFilesystem::new()),
+                filesystem: Arc::new(DiskFilesystem::new()),
                 runtime_http_egress: None,
                 tool_call_http_egress: None,
                 runtime_secret_material_stager: None,

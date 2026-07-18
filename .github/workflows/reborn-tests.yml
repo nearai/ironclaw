@@ -121,6 +121,8 @@ jobs:
                         or (.name | startswith("ironclaw_product"))
                         or (.name == "ironclaw_architecture")
                         or (.name == "ironclaw_slack_v2_adapter")
+                        or (.name == "ironclaw_channel_host")
+                        or (.name == "ironclaw_telegram_extension")
                         or (.name == "ironclaw_telegram_v2_adapter")
                         or (.name == "ironclaw_wasm_product_adapters")
                         or (.name | startswith("ironclaw_webui"))

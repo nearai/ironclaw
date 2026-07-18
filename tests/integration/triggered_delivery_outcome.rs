@@ -105,7 +105,9 @@ async fn build_triggered_run_delivery_hook_over_real_runtime_records_denied_for_
         Some(user_id),
     );
 
-    PostSubmitDeliveryHook::on_trigger_submitted(driver.as_ref(), fire, run_id, scope).await;
+    PostSubmitDeliveryHook::on_trigger_submitted(driver.as_ref(), fire, run_id, scope)
+        .await
+        .expect("managed hook persists the terminal outcome");
 
     let record = delivery_store
         .load_triggered_run_delivery(run_id)

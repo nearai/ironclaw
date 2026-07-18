@@ -63,6 +63,8 @@ uuid = { version = "1", features = ["v4", "v5", "serde"] }
 ironclaw_approvals = { path = "../ironclaw_approvals", features = ["test-support"] }
 # Enables the in-memory-backed capability-lease store constructor for tests only.
 ironclaw_authorization = { path = "../ironclaw_authorization", features = ["test-support"] }
+# Enables the in-memory-backed run-state/approval store constructors for tests only.
+ironclaw_run_state = { path = "../ironclaw_run_state", features = ["test-support"] }
 ironclaw_filesystem = { path = "../ironclaw_filesystem" }
 ironclaw_host_runtime = { path = "../ironclaw_host_runtime" }
 ironclaw_loop_host = { path = "../ironclaw_loop_host" }

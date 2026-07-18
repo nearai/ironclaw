@@ -27,6 +27,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- *(reborn)* move product-neutral channel delivery into `ironclaw_channel_delivery` and make the Telegram host own its concrete state, setup-revision workflow, and trigger-delivery behavior while composition remains mount/registration-only ([#6159](https://github.com/nearai/ironclaw/pull/6159)).
 - *(webui-v2)* serve the Reborn WebUI from root-level browser routes, with temporary `/v2` compatibility redirects that preserve deep links and login query parameters; `/api/webchat/v2/*` remains unchanged ([#6142](https://github.com/nearai/ironclaw/issues/6142)).
 - *(reborn)* raise the default agent-loop runaway backstop from 256 to 1,024 iterations and the subagent ceiling from 16 to 256 ([#5959](https://github.com/nearai/ironclaw/pull/5959)).
 - *(reborn-cli)* document the standalone `config init` atomic-write dependency on `tempfile` and call out the default runner cadence change to 5s heartbeats / 200ms polling (down from 10s / 2s).
