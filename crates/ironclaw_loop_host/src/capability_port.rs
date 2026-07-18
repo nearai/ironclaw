@@ -668,8 +668,8 @@ impl HostRuntimeLoopCapabilityPortFactory {
             Arc::clone(&self.input_resolver),
             Arc::clone(&self.result_writer),
             Arc::clone(&self.milestone_sink),
-            Arc::clone(&self.gate_record_store),
         )
+        .with_gate_record_store(Arc::clone(&self.gate_record_store))
         .with_execution_mounts(self.execution_mounts.clone())
         .with_capability_execution_mounts(self.capability_execution_mounts.clone())
         .with_trajectory_observer(self.trajectory_observer.clone())
@@ -1069,7 +1069,6 @@ impl HostRuntimeLoopCapabilityPort {
         input_resolver: Arc<dyn LoopCapabilityInputResolver>,
         result_writer: Arc<dyn LoopCapabilityResultWriter>,
         milestone_sink: Arc<dyn LoopHostMilestoneSink>,
-        gate_record_store: Arc<dyn GateRecordStore>,
     ) -> Self {
         let input_resolver: Arc<dyn LoopCapabilityInputResolver> =
             Arc::new(ProviderToolCallInputResolver::new(input_resolver));
@@ -1089,9 +1088,20 @@ impl HostRuntimeLoopCapabilityPort {
                 ProviderToolCallRegistrationStore::default(),
             ),
             trajectory_observer: None,
-            gate_record_store,
+            // Transitional no-op default; composition wires the durable store
+            // through the factory's `with_gate_record_store`, which forwards via
+            // the port-level builder below. See `NoopGateRecordStore`.
+            gate_record_store: Arc::new(NoopGateRecordStore),
             gate_records_persisted: Mutex::new(HashSet::new()),
         }
+    }
+
+    /// Wire the durable [`GateRecordStore`] this port persists pending-gate
+    /// records into (§5.2.9). Defaults to the transitional
+    /// [`NoopGateRecordStore`] when unset.
+    pub fn with_gate_record_store(mut self, store: Arc<dyn GateRecordStore>) -> Self {
+        self.gate_record_store = store;
+        self
     }
 
     /// Attach a [`CapabilityTrajectoryObserver`] notified of each capability's
@@ -6942,7 +6952,6 @@ mod tests {
             dummy_input_resolver(),
             dummy_result_writer(),
             dummy_milestone_sink(),
-            dummy_gate_record_store(),
         )
         .with_execution_mounts(execution_mounts.clone());
 
@@ -8554,10 +8563,6 @@ mod tests {
                 .find(|(saved_scope, saved_ref, _)| saved_scope == scope && *saved_ref == gate_ref)
                 .map(|(_, _, record)| record.clone()))
         }
-    }
-
-    fn dummy_gate_record_store() -> Arc<dyn GateRecordStore> {
-        Arc::new(RecordingGateRecordStore::default())
     }
 
     /// Fails the first `save` with a backend fault, then delegates to an inner
