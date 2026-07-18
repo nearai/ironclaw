@@ -352,10 +352,10 @@ impl EchoAdapter {
 }
 
 #[async_trait]
-impl RuntimeAdapter<LocalFilesystem, InMemoryResourceGovernor> for EchoAdapter {
+impl RuntimeAdapter<DiskFilesystem, InMemoryResourceGovernor> for EchoAdapter {
     async fn dispatch_json(
         &self,
-        request: RuntimeAdapterRequest<'_, LocalFilesystem, InMemoryResourceGovernor>,
+        request: RuntimeAdapterRequest<'_, DiskFilesystem, InMemoryResourceGovernor>,
     ) -> Result<RuntimeAdapterResult, DispatchError> {
         adapter_result(
             self.runtime,
@@ -380,10 +380,10 @@ impl StaticAdapter {
 }
 
 #[async_trait]
-impl RuntimeAdapter<LocalFilesystem, InMemoryResourceGovernor> for StaticAdapter {
+impl RuntimeAdapter<DiskFilesystem, InMemoryResourceGovernor> for StaticAdapter {
     async fn dispatch_json(
         &self,
-        request: RuntimeAdapterRequest<'_, LocalFilesystem, InMemoryResourceGovernor>,
+        request: RuntimeAdapterRequest<'_, DiskFilesystem, InMemoryResourceGovernor>,
     ) -> Result<RuntimeAdapterResult, DispatchError> {
         adapter_result(
             self.runtime,
@@ -408,10 +408,10 @@ impl FailingRuntimeAdapter {
 }
 
 #[async_trait]
-impl RuntimeAdapter<LocalFilesystem, InMemoryResourceGovernor> for FailingRuntimeAdapter {
+impl RuntimeAdapter<DiskFilesystem, InMemoryResourceGovernor> for FailingRuntimeAdapter {
     async fn dispatch_json(
         &self,
-        _request: RuntimeAdapterRequest<'_, LocalFilesystem, InMemoryResourceGovernor>,
+        _request: RuntimeAdapterRequest<'_, DiskFilesystem, InMemoryResourceGovernor>,
     ) -> Result<RuntimeAdapterResult, DispatchError> {
         Err(dispatch_error_for_runtime(self.runtime, self.kind))
     }
@@ -463,11 +463,11 @@ fn dispatch_error_for_runtime(
     }
 }
 
-fn filesystem_with_echo_extensions() -> LocalFilesystem {
+fn filesystem_with_echo_extensions() -> DiskFilesystem {
     let storage = tempfile::tempdir().unwrap().keep();
     write_echo_extensions(&storage);
 
-    let mut fs = LocalFilesystem::new();
+    let mut fs = DiskFilesystem::new();
     fs.mount_local(
         VirtualPath::new("/system/extensions").unwrap(),
         HostPath::from_path_buf(storage),
@@ -476,7 +476,7 @@ fn filesystem_with_echo_extensions() -> LocalFilesystem {
     fs
 }
 
-async fn discover_legacy_fixture_registry(fs: &LocalFilesystem) -> ExtensionRegistry {
+async fn discover_legacy_fixture_registry(fs: &DiskFilesystem) -> ExtensionRegistry {
     ExtensionDiscovery::discover_with_manifest_contracts(
         fs,
         &VirtualPath::new("/system/extensions").unwrap(),

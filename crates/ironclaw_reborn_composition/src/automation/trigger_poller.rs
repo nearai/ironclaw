@@ -1,13 +1,15 @@
-#[cfg(feature = "slack-v2-host-beta")]
+#[cfg(any(feature = "slack-v2-host-beta", feature = "telegram-v2-host-beta"))]
 use std::collections::VecDeque;
+#[cfg(any(feature = "slack-v2-host-beta", feature = "telegram-v2-host-beta"))]
+use std::future::Future;
 use std::sync::Arc;
-#[cfg(feature = "slack-v2-host-beta")]
+#[cfg(any(feature = "slack-v2-host-beta", feature = "telegram-v2-host-beta"))]
 use std::sync::atomic::{AtomicBool, Ordering};
-#[cfg(feature = "slack-v2-host-beta")]
+#[cfg(any(feature = "slack-v2-host-beta", feature = "telegram-v2-host-beta"))]
 use std::sync::{Mutex, OnceLock};
 use std::time::Duration;
 
-#[cfg(feature = "slack-v2-host-beta")]
+#[cfg(any(feature = "slack-v2-host-beta", feature = "telegram-v2-host-beta"))]
 use async_trait::async_trait;
 use chrono::Utc;
 use ironclaw_triggers::{
@@ -15,7 +17,7 @@ use ironclaw_triggers::{
     TriggerPollerWorkerDeps, TriggerPromptMaterializer, TriggerRepository,
     TrustedTriggerFireSubmitter,
 };
-#[cfg(feature = "slack-v2-host-beta")]
+#[cfg(any(feature = "slack-v2-host-beta", feature = "telegram-v2-host-beta"))]
 use ironclaw_triggers::{TriggerAcceptedFireSettlement, TriggerFireSettlementObserver};
 use rand::RngExt;
 use tokio::task::JoinHandle;
@@ -26,8 +28,8 @@ pub(crate) use crate::automation::trigger_poller_trusted_submit::ConversationCon
 #[cfg(any(test, feature = "test-support"))]
 pub(crate) use crate::automation::trigger_poller_trusted_submit::TenantScopedTrustedTriggerFireAuthorizer;
 use crate::runtime_input::TriggerPollerSettings;
-#[cfg(feature = "slack-v2-host-beta")]
-use crate::slack::slack_delivery::PostSubmitDeliveryHook;
+#[cfg(any(feature = "slack-v2-host-beta", feature = "telegram-v2-host-beta"))]
+use ironclaw_channel_delivery::PostSubmitDeliveryHook;
 
 mod active_run_lookup;
 pub(crate) use active_run_lookup::SnapshotActiveRunLookup;
@@ -37,6 +39,8 @@ pub(crate) const TRIGGER_POLLER_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs
 pub(crate) struct TriggerPollerRuntimeHandle {
     cancel: CancellationToken,
     handle: JoinHandle<()>,
+    #[cfg(any(feature = "slack-v2-host-beta", feature = "telegram-v2-host-beta"))]
+    post_submit_tasks: Arc<PostSubmitDeliveryTaskOwner>,
 }
 
 impl TriggerPollerRuntimeHandle {
@@ -65,6 +69,8 @@ impl TriggerPollerRuntimeHandle {
                 }
             }
         }
+        #[cfg(any(feature = "slack-v2-host-beta", feature = "telegram-v2-host-beta"))]
+        self.post_submit_tasks.drain(timeout).await;
     }
 }
 
@@ -75,7 +81,7 @@ pub(crate) struct TriggerPollerCompositionDeps {
     pub(crate) trusted_submitter: Arc<dyn TrustedTriggerFireSubmitter>,
     pub(crate) active_run_lookup: Arc<dyn TriggerActiveRunLookup>,
     /// Late-binding slot for the post-submit delivery hook.
-    #[cfg(feature = "slack-v2-host-beta")]
+    #[cfg(any(feature = "slack-v2-host-beta", feature = "telegram-v2-host-beta"))]
     pub(crate) post_submit_hook_slot: Arc<OnceLock<Arc<dyn PostSubmitDeliveryHook>>>,
 }
 
@@ -88,16 +94,21 @@ pub(crate) fn spawn_trigger_poller(
     }
     settings.worker.validate()?;
     let cancel = CancellationToken::new();
-    #[cfg(feature = "slack-v2-host-beta")]
-    let fire_settlement_observer: Arc<dyn TriggerFireSettlementObserver> = Arc::new(
-        PostSubmitHookObserver::new(deps.post_submit_hook_slot, cancel.clone()),
-    );
-    #[cfg(feature = "slack-v2-host-beta")]
+    #[cfg(any(feature = "slack-v2-host-beta", feature = "telegram-v2-host-beta"))]
+    let post_submit_observer = Arc::new(PostSubmitHookObserver::new(
+        deps.post_submit_hook_slot,
+        cancel.clone(),
+    ));
+    #[cfg(any(feature = "slack-v2-host-beta", feature = "telegram-v2-host-beta"))]
+    let post_submit_tasks = Arc::clone(&post_submit_observer.task_owner);
+    #[cfg(any(feature = "slack-v2-host-beta", feature = "telegram-v2-host-beta"))]
+    let fire_settlement_observer: Arc<dyn TriggerFireSettlementObserver> = post_submit_observer;
+    #[cfg(any(feature = "slack-v2-host-beta", feature = "telegram-v2-host-beta"))]
     let trusted_submitter = deps.trusted_submitter;
-    #[cfg(not(feature = "slack-v2-host-beta"))]
+    #[cfg(not(any(feature = "slack-v2-host-beta", feature = "telegram-v2-host-beta")))]
     let fire_settlement_observer: Arc<dyn ironclaw_triggers::TriggerFireSettlementObserver> =
         Arc::new(ironclaw_triggers::NoopTriggerFireSettlementObserver);
-    #[cfg(not(feature = "slack-v2-host-beta"))]
+    #[cfg(not(any(feature = "slack-v2-host-beta", feature = "telegram-v2-host-beta")))]
     let trusted_submitter = deps.trusted_submitter;
     let worker = TriggerPollerWorker::new(
         settings.worker.clone(),
@@ -114,35 +125,108 @@ pub(crate) fn spawn_trigger_poller(
     let handle = tokio::spawn(async move {
         run_trigger_poller(worker, settings, task_cancel).await;
     });
-    Ok(Some(TriggerPollerRuntimeHandle { cancel, handle }))
+    Ok(Some(TriggerPollerRuntimeHandle {
+        cancel,
+        handle,
+        #[cfg(any(feature = "slack-v2-host-beta", feature = "telegram-v2-host-beta"))]
+        post_submit_tasks,
+    }))
 }
 
-#[cfg(feature = "slack-v2-host-beta")]
+#[cfg(any(feature = "slack-v2-host-beta", feature = "telegram-v2-host-beta"))]
 const POST_SUBMIT_HOOK_PENDING_CAPACITY: usize = 256;
 
-#[cfg(feature = "slack-v2-host-beta")]
-fn spawn_post_submit_delivery(
+#[cfg(any(feature = "slack-v2-host-beta", feature = "telegram-v2-host-beta"))]
+#[derive(Default)]
+struct PostSubmitDeliveryTaskOwner {
+    tasks: tokio::sync::Mutex<tokio::task::JoinSet<()>>,
+}
+
+#[cfg(any(feature = "slack-v2-host-beta", feature = "telegram-v2-host-beta"))]
+impl PostSubmitDeliveryTaskOwner {
+    async fn spawn(
+        &self,
+        hook: Arc<dyn PostSubmitDeliveryHook>,
+        event: TriggerAcceptedFireSettlement,
+    ) {
+        self.spawn_task(run_post_submit_hook(hook, event)).await;
+    }
+
+    async fn spawn_task(&self, task: impl Future<Output = ()> + Send + 'static) {
+        let mut tasks = self.tasks.lock().await;
+        while let Some(joined) = tasks.try_join_next() {
+            if let Err(error) = joined {
+                tracing::debug!(%error, "post-submit delivery task join failed");
+            }
+        }
+        if tasks.len() >= POST_SUBMIT_HOOK_PENDING_CAPACITY
+            && let Some(joined) = tasks.join_next().await
+            && let Err(error) = joined
+        {
+            tracing::debug!(%error, "post-submit delivery task join failed");
+        }
+        tasks.spawn(task);
+    }
+
+    async fn drain(&self, timeout: Duration) {
+        let drain = async {
+            let mut tasks = self.tasks.lock().await;
+            while let Some(joined) = tasks.join_next().await {
+                if let Err(error) = joined {
+                    tracing::debug!(%error, "post-submit delivery task join failed during drain");
+                }
+            }
+        };
+        if tokio::time::timeout(timeout, drain).await.is_err() {
+            tracing::warn!(
+                ?timeout,
+                "post-submit delivery tasks did not drain before shutdown timeout; aborting"
+            );
+            let mut tasks = self.tasks.lock().await;
+            tasks.abort_all();
+            while let Some(joined) = tasks.join_next().await {
+                if let Err(error) = joined
+                    && error.is_panic()
+                {
+                    tracing::debug!(%error, "aborted post-submit delivery task panicked");
+                }
+            }
+        }
+    }
+}
+
+#[cfg(any(feature = "slack-v2-host-beta", feature = "telegram-v2-host-beta"))]
+async fn run_post_submit_hook(
     hook: Arc<dyn PostSubmitDeliveryHook>,
     event: TriggerAcceptedFireSettlement,
 ) {
-    tokio::spawn(async move {
-        hook.on_trigger_submitted(event.fire, event.run_id, event.turn_scope)
-            .await;
-    });
+    let run_id = event.run_id;
+    if let Err(error) = hook
+        .on_trigger_submitted(event.fire, run_id, event.turn_scope)
+        .await
+    {
+        tracing::warn!(
+            target = "ironclaw::reborn::trigger_poller",
+            %run_id,
+            %error,
+            "managed post-submit delivery did not reach an authoritative terminal state"
+        );
+    }
 }
 
 /// Bridges trigger-domain settlement notifications to the composition-owned
 /// Slack delivery hook. Delivery is detached from the poller tick only after the
 /// worker has persisted the accepted run/thread mapping.
-#[cfg(feature = "slack-v2-host-beta")]
+#[cfg(any(feature = "slack-v2-host-beta", feature = "telegram-v2-host-beta"))]
 pub(crate) struct PostSubmitHookObserver {
     pub(crate) hook_slot: Arc<OnceLock<Arc<dyn PostSubmitDeliveryHook>>>,
     pending: Arc<Mutex<VecDeque<TriggerAcceptedFireSettlement>>>,
     drain_scheduled: Arc<AtomicBool>,
     drain_cancel: CancellationToken,
+    task_owner: Arc<PostSubmitDeliveryTaskOwner>,
 }
 
-#[cfg(feature = "slack-v2-host-beta")]
+#[cfg(any(feature = "slack-v2-host-beta", feature = "telegram-v2-host-beta"))]
 impl PostSubmitHookObserver {
     fn new(
         hook_slot: Arc<OnceLock<Arc<dyn PostSubmitDeliveryHook>>>,
@@ -153,10 +237,11 @@ impl PostSubmitHookObserver {
             pending: Arc::new(Mutex::new(VecDeque::new())),
             drain_scheduled: Arc::new(AtomicBool::new(false)),
             drain_cancel,
+            task_owner: Arc::new(PostSubmitDeliveryTaskOwner::default()),
         }
     }
 
-    fn buffer_until_hook_installed(&self, event: TriggerAcceptedFireSettlement) {
+    async fn buffer_until_hook_installed(&self, event: TriggerAcceptedFireSettlement) {
         {
             let mut pending = self
                 .pending
@@ -172,10 +257,10 @@ impl PostSubmitHookObserver {
             }
             pending.push_back(event);
         }
-        self.ensure_drain_task();
+        self.ensure_drain_task().await;
     }
 
-    fn ensure_drain_task(&self) {
+    async fn ensure_drain_task(&self) {
         if self
             .drain_scheduled
             .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
@@ -188,34 +273,46 @@ impl PostSubmitHookObserver {
         let pending = Arc::clone(&self.pending);
         let drain_scheduled = Arc::clone(&self.drain_scheduled);
         let drain_cancel = self.drain_cancel.clone();
-        tokio::spawn(async move {
-            loop {
-                if let Some(hook) = hook_slot.get().cloned() {
-                    let buffered = {
-                        let mut pending = pending
-                            .lock()
-                            .unwrap_or_else(|poisoned| poisoned.into_inner());
-                        pending.drain(..).collect::<Vec<_>>()
-                    };
-                    for event in buffered {
-                        spawn_post_submit_delivery(Arc::clone(&hook), event);
-                    }
-                    drain_scheduled.store(false, Ordering::Release);
-                    return;
-                }
-                tokio::select! {
-                    _ = drain_cancel.cancelled() => {
+        let owner = Arc::clone(&self.task_owner);
+        owner
+            .spawn_task(async move {
+                loop {
+                    if let Some(hook) = hook_slot.get().cloned() {
+                        let buffered = {
+                            let mut pending = pending
+                                .lock()
+                                .unwrap_or_else(|poisoned| poisoned.into_inner());
+                            pending.drain(..).collect::<Vec<_>>()
+                        };
+                        // The startup buffer is bounded. A local joined set
+                        // preserves concurrency while the owner retains one
+                        // shutdown handle for the complete drain operation.
+                        let mut deliveries = tokio::task::JoinSet::new();
+                        for event in buffered {
+                            deliveries.spawn(run_post_submit_hook(Arc::clone(&hook), event));
+                        }
+                        while let Some(joined) = deliveries.join_next().await {
+                            if let Err(error) = joined {
+                                tracing::debug!(%error, "buffered post-submit delivery task join failed");
+                            }
+                        }
                         drain_scheduled.store(false, Ordering::Release);
                         return;
                     }
-                    _ = tokio::time::sleep(Duration::from_millis(25)) => {}
+                    tokio::select! {
+                        _ = drain_cancel.cancelled() => {
+                            drain_scheduled.store(false, Ordering::Release);
+                            return;
+                        }
+                        _ = tokio::time::sleep(Duration::from_millis(25)) => {}
+                    }
                 }
-            }
-        });
+            })
+            .await;
     }
 }
 
-#[cfg(feature = "slack-v2-host-beta")]
+#[cfg(any(feature = "slack-v2-host-beta", feature = "telegram-v2-host-beta"))]
 #[async_trait]
 impl TriggerFireSettlementObserver for PostSubmitHookObserver {
     async fn on_accepted_fire_settled(&self, event: TriggerAcceptedFireSettlement) {
@@ -224,10 +321,10 @@ impl TriggerFireSettlementObserver for PostSubmitHookObserver {
                 target = "ironclaw::reborn::trigger_poller",
                 "post-submit hook not installed; buffering trigger settlement"
             );
-            self.buffer_until_hook_installed(event);
+            self.buffer_until_hook_installed(event).await;
             return;
         };
-        spawn_post_submit_delivery(hook, event);
+        self.task_owner.spawn(hook, event).await;
     }
 }
 
@@ -326,14 +423,19 @@ mod tests {
             task_cancel.cancelled().await;
             std::future::pending::<()>().await;
         });
-        let runtime_handle = TriggerPollerRuntimeHandle { cancel, handle };
+        let runtime_handle = TriggerPollerRuntimeHandle {
+            cancel,
+            handle,
+            #[cfg(any(feature = "slack-v2-host-beta", feature = "telegram-v2-host-beta"))]
+            post_submit_tasks: Arc::new(PostSubmitDeliveryTaskOwner::default()),
+        };
 
         runtime_handle.shutdown(Duration::from_millis(1)).await;
     }
 
     // ── PostSubmitHookObserver tests ────────────────────────────────────────
 
-    #[cfg(feature = "slack-v2-host-beta")]
+    #[cfg(any(feature = "slack-v2-host-beta", feature = "telegram-v2-host-beta"))]
     mod post_submit_observer {
         use std::sync::atomic::{AtomicBool, Ordering};
         use std::sync::{Arc, Mutex};
@@ -351,7 +453,7 @@ mod tests {
         use tokio_util::sync::CancellationToken;
 
         use super::super::{POST_SUBMIT_HOOK_PENDING_CAPACITY, PostSubmitHookObserver};
-        use crate::slack::slack_delivery::PostSubmitDeliveryHook;
+        use ironclaw_channel_delivery::PostSubmitDeliveryHook;
 
         #[derive(Default)]
         struct RecordingHook {
@@ -385,12 +487,13 @@ mod tests {
                 fire: TriggerFire,
                 run_id: TurnRunId,
                 scope: TurnScope,
-            ) {
+            ) -> Result<(), ironclaw_channel_delivery::PostSubmitDeliveryError> {
                 self.calls
                     .lock()
                     .unwrap_or_else(|p| p.into_inner())
                     .push((fire, run_id, scope));
                 self.notify.notify_one();
+                Ok(())
             }
         }
 
@@ -407,10 +510,11 @@ mod tests {
                 _fire: TriggerFire,
                 _run_id: TurnRunId,
                 _scope: TurnScope,
-            ) {
+            ) -> Result<(), ironclaw_channel_delivery::PostSubmitDeliveryError> {
                 self.entered.notify_one();
                 self.release.notified().await;
                 self.completed.store(true, Ordering::SeqCst);
+                Ok(())
             }
         }
 
@@ -587,14 +691,22 @@ mod tests {
                 "hook must still be blocked until the test releases it"
             );
 
+            let task_owner = Arc::clone(&observer.task_owner);
+            let mut drain = tokio::spawn(async move {
+                task_owner.drain(Duration::from_secs(1)).await;
+            });
+            assert!(
+                tokio::time::timeout(Duration::from_millis(50), &mut drain)
+                    .await
+                    .is_err(),
+                "the lifecycle owner must retain and await the in-flight hook"
+            );
             release.notify_one();
-            tokio::time::timeout(Duration::from_secs(1), async {
-                while !completed.load(Ordering::SeqCst) {
-                    tokio::time::sleep(Duration::from_millis(10)).await;
-                }
-            })
-            .await
-            .expect("hook task should complete after release");
+            tokio::time::timeout(Duration::from_secs(1), drain)
+                .await
+                .expect("hook task should drain after release")
+                .expect("drain task joins");
+            assert!(completed.load(Ordering::SeqCst));
         }
 
         #[tokio::test]

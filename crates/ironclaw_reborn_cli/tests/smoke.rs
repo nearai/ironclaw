@@ -110,16 +110,16 @@ fn write_sparse_reborn_config(reborn_home: &Path) {
 }
 
 #[test]
-fn dockerfile_reborn_builds_with_postgres_feature() {
+fn dockerfile_reborn_builds_with_production_features() {
     let dockerfile = std::fs::read_to_string(workspace_root().join("Dockerfile.reborn"))
         .expect("Dockerfile.reborn");
 
     assert!(
         dockerfile
-            .matches("webui-v2-beta,slack-v2-host-beta,libsql,postgres")
+            .matches("webui-v2-beta,slack-v2-host-beta,telegram-v2-host-beta,libsql,postgres",)
             .count()
             >= 2,
-        "Dockerfile.reborn must compile both cargo-chef deps and final binary with libsql and postgres: {dockerfile}"
+        "Dockerfile.reborn must compile both cargo-chef deps and final binary with Slack, Telegram, libsql, and postgres: {dockerfile}"
     );
     assert!(
         dockerfile.contains("corepack enable pnpm")

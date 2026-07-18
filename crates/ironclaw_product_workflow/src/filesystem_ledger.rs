@@ -37,7 +37,7 @@ const PRUNE_LEASE_RECORD_KIND: &str = "product_workflow_prune_lease";
 const PRUNE_LEASE_SECONDS: i64 = 30;
 const PRUNE_DELETE_CONCURRENCY: usize = 16;
 
-struct FilesystemIdempotencyLedger<F>
+struct FilesystemIdempotencyLedger<F: ?Sized>
 where
     F: RootFilesystem,
 {
@@ -52,7 +52,7 @@ where
 
 impl<F> FilesystemIdempotencyLedger<F>
 where
-    F: RootFilesystem + 'static,
+    F: RootFilesystem + ?Sized + 'static,
 {
     #[cfg(any(feature = "libsql", feature = "postgres"))]
     fn new_root(filesystem: Arc<F>) -> Self {
@@ -451,7 +451,7 @@ where
 /// Construct with the same [`ScopedFilesystem`] handle used by the Reborn host
 /// stores. The supplied [`ResourceScope`] is passed to the filesystem for every
 /// operation so the filesystem's mount resolver owns any tenant/user rewriting.
-pub struct RebornFilesystemIdempotencyLedger<F>
+pub struct RebornFilesystemIdempotencyLedger<F: ?Sized>
 where
     F: RootFilesystem,
 {
@@ -460,7 +460,7 @@ where
 
 impl<F> RebornFilesystemIdempotencyLedger<F>
 where
-    F: RootFilesystem + 'static,
+    F: RootFilesystem + ?Sized + 'static,
 {
     pub fn new(filesystem: Arc<ScopedFilesystem<F>>, scope: ResourceScope) -> Self {
         Self::with_in_flight_lease(filesystem, scope, DEFAULT_IN_FLIGHT_LEASE)
@@ -506,7 +506,7 @@ where
 #[async_trait]
 impl<F> IdempotencyLedger for RebornFilesystemIdempotencyLedger<F>
 where
-    F: RootFilesystem + 'static,
+    F: RootFilesystem + ?Sized + 'static,
 {
     async fn begin_or_replay(
         &self,
@@ -662,7 +662,7 @@ fn settled_prune_interval_for(limit: NonZeroUsize) -> NonZeroUsize {
 #[cfg(any(feature = "libsql", feature = "postgres"))]
 fn root_scoped_filesystem<F>(filesystem: Arc<F>, root: &ScopedPath) -> Arc<ScopedFilesystem<F>>
 where
-    F: RootFilesystem + 'static,
+    F: RootFilesystem + ?Sized + 'static,
 {
     let alias = root_mount_alias(root);
     let mounts = MountView::new(vec![MountGrant::new(
@@ -745,7 +745,7 @@ async fn load_action<F>(
     path: &ScopedPath,
 ) -> Result<Option<(ProductInboundAction, RecordVersion)>, ProductWorkflowError>
 where
-    F: RootFilesystem,
+    F: RootFilesystem + ?Sized,
 {
     let Some(entry) = filesystem
         .get(scope, path)

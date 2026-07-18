@@ -26,8 +26,10 @@
 
 mod action;
 mod approval_interaction;
+mod approval_prompt;
 mod auth_continuation;
 mod auth_interaction;
+mod auth_prompt;
 mod automation_thread_metadata;
 mod binding;
 mod binding_ref;
@@ -35,6 +37,7 @@ mod command_dispatch;
 mod commands;
 mod conversation_binding;
 mod error;
+mod extension_account_setup;
 #[cfg(any(test, feature = "test-support"))]
 mod fakes;
 // Durable filesystem-backed idempotency ledger. Gated behind `storage` so the
@@ -68,6 +71,10 @@ pub use approval_interaction::{
     RunStateApprovalInteractionReadModel, approval_gate_ref, approval_request_id_from_gate_ref,
     is_approval_gate_ref,
 };
+pub use approval_prompt::{
+    ApprovalPromptLookup, ApprovalPromptLookupError, approval_prompt_context_view,
+    approval_prompt_lookup,
+};
 /// Concrete turn-gate resume dispatcher used by the Reborn composition crate to
 /// bridge product-auth continuations into the workflow-owned turn boundary.
 pub use auth_continuation::ProductAuthTurnGateResumeDispatcher;
@@ -78,6 +85,9 @@ pub use auth_interaction::{
     DefaultAuthInteractionService, ListPendingAuthInteractionsRequest,
     ListPendingAuthInteractionsResponse, PendingAuthInteractionView, ResolveAuthInteractionRequest,
     ResolveAuthInteractionResponse, is_auth_gate_ref,
+};
+pub use auth_prompt::{
+    AuthChallengeProvider, AuthChallengeView, BlockedAuthFlowCanceller, enrich_auth_prompt_view,
 };
 pub use automation_thread_metadata::{
     AUTOMATION_TRIGGER_THREAD_SOURCE_TAG, automation_trigger_thread_metadata_json,
@@ -103,6 +113,10 @@ pub use conversation_binding::{
     StaticProductActorUserResolver, StaticProductInstallationResolver,
 };
 pub use error::{AuthContinuationRejectionKind, ProductWorkflowError};
+pub use extension_account_setup::{
+    AccountConnectionStatusError, AccountConnectionStatusSource, ExtensionAccountSetupDescriptor,
+    ExtensionAccountSetupError, ExtensionAccountSetupRegistry,
+};
 #[cfg(any(test, feature = "test-support"))]
 pub use fakes::{
     FakeBeforeInboundPolicy, FakeConversationBindingService, FakeIdempotencyLedger,

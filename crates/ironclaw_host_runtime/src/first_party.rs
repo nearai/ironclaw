@@ -91,7 +91,7 @@ impl FirstPartyCapabilityRequest {
                 runtime_http_egress,
                 tool_call_http_egress: None,
                 runtime_secret_material_stager: None,
-                process: Arc::new(crate::LocalHostProcessPort::new()),
+                process: Arc::new(crate::HostProcessPort::new()),
                 secret_store: None,
                 audit_sink: None,
                 unsafe_raw_diagnostics_allowed: false,

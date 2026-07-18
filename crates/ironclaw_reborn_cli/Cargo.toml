@@ -70,6 +70,13 @@ slack-v2-host-beta = [
     "ironclaw_reborn_composition/slack-v2-host-beta",
     "ironclaw_webui/slack-v2-host-beta",
 ]
+# Compile in the Telegram webhook channel host. Still requires effective
+# Telegram enablement at runtime before the route is mounted: either
+# `[telegram].enabled = true` or `IRONCLAW_REBORN_TELEGRAM_ENABLED=true`.
+telegram-v2-host-beta = [
+    "webui-v2-beta",
+    "ironclaw_reborn_composition/telegram-v2-host-beta",
+]
 openai-compat-beta = [
     "webui-v2-beta",
     "ironclaw_reborn_composition/openai-compat-beta",

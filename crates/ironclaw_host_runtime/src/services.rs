@@ -12,9 +12,7 @@ use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 use ironclaw_approvals::{ApprovalResolver, PersistentApprovalPolicyStore};
-use ironclaw_authorization::{
-    CapabilityLeaseStore, InMemoryCapabilityLeaseStore, TrustAwareCapabilityDispatchAuthorizer,
-};
+use ironclaw_authorization::{CapabilityLeaseStore, TrustAwareCapabilityDispatchAuthorizer};
 use ironclaw_capabilities::CapabilityObligationHandler;
 use ironclaw_dispatcher::{
     RuntimeAdapter, RuntimeAdapterRequest, RuntimeAdapterResult, RuntimeDispatcher,
@@ -29,7 +27,7 @@ use ironclaw_extensions::{ExtensionRegistry, ExtensionRuntime, SharedExtensionRe
 use ironclaw_filesystem::LibSqlRootFilesystem;
 #[cfg(feature = "postgres")]
 use ironclaw_filesystem::PostgresRootFilesystem;
-use ironclaw_filesystem::{LocalFilesystem, RootFilesystem, ScopedFilesystem};
+use ironclaw_filesystem::{DiskFilesystem, RootFilesystem, ScopedFilesystem};
 use ironclaw_host_api::{
     CapabilityDispatcher, CapabilityId, DispatchError, ResourceReservationId, ResourceScope,
     ResourceUsage, RuntimeDispatchErrorKind, RuntimeHttpEgress, RuntimeKind, SecretHandle,
@@ -41,8 +39,8 @@ use ironclaw_host_api::{
 use ironclaw_mcp::{McpError, McpExecutionRequest, McpExecutor, McpInvocation};
 use ironclaw_network::NetworkHttpEgress;
 use ironclaw_processes::{
-    BackgroundFailureStage, InMemoryProcessResultStore, InMemoryProcessStore, ProcessExecutor,
-    ProcessManager, ProcessResultStore, ProcessServices, ProcessStore,
+    BackgroundFailureStage, ProcessExecutor, ProcessManager, ProcessResultStore, ProcessServices,
+    ProcessStore,
 };
 use ironclaw_reborn_event_store::{
     CoalescingEventSink, EventBatchConfig, RebornEventStoreConfig, RebornEventStoreError,
@@ -51,7 +49,7 @@ use ironclaw_reborn_event_store::{
 use ironclaw_resources::{FilesystemResourceGovernor, InMemoryResourceGovernor, ResourceGovernor};
 use ironclaw_run_state::{
     ApprovalRequestStore, FilesystemApprovalRequestStore, FilesystemRunStateStore,
-    InMemoryApprovalRequestStore, InMemoryRunStateStore, RunStateApprovalStore, RunStateStore,
+    RunStateApprovalStore, RunStateStore,
 };
 use ironclaw_scripts::{ScriptError, ScriptExecutionRequest, ScriptExecutor, ScriptInvocation};
 use ironclaw_secrets::{
@@ -77,9 +75,9 @@ use crate::obligations::{
 };
 use crate::{
     BuiltinObligationHandler, CapabilitySurfaceVersion, DefaultHostRuntime,
-    FirstPartyCapabilityRegistry, FirstPartyCapabilityRequest, HostRuntimeError,
+    FirstPartyCapabilityRegistry, FirstPartyCapabilityRequest, HostProcessPort, HostRuntimeError,
     HostRuntimeHttpEgressPort, InvocationServicesResolutionRequest, InvocationServicesResolver,
-    LocalHostProcessPort, LocalInvocationServicesResolver, PlannerError, PostEditCheckConfig,
+    LocalInvocationServicesResolver, PlannerError, PostEditCheckConfig,
     ProcessObligationLifecycleStore, RuntimeBackendHealth, RuntimeProcessPort,
     RuntimeSecretMaterialStager, RuntimeSecretStageError, TenantSandboxProcessPort,
     ToolCallHttpEgress, plan_capability,
@@ -322,7 +320,7 @@ where
             process_lifecycle_store,
             runtime_http_egress: Arc::new(Mutex::new(None)),
             tool_call_http_egress: Arc::new(Mutex::new(None)),
-            process_port: Arc::new(LocalHostProcessPort::new()),
+            process_port: Arc::new(HostProcessPort::new()),
             managed_process_port: true,
             tenant_sandbox_process_port: None,
             wasm_credential_provider: None,
@@ -356,7 +354,7 @@ where
                 credential_session_store: None,
                 runtime_http_egress: None,
                 runtime_http_egress_verified: false,
-                runtime_process_port: ProductionComponentType::of::<LocalHostProcessPort>(),
+                runtime_process_port: ProductionComponentType::of::<HostProcessPort>(),
                 tenant_sandbox_process_port: None,
                 wasm_credential_provider: None,
                 wasm_credential_provider_verified: false,

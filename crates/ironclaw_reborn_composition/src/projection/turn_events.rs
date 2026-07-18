@@ -5,21 +5,18 @@ use std::{
 
 use async_trait::async_trait;
 use futures::{StreamExt, stream};
-use ironclaw_host_api::{
-    Action, ApprovalRequest, InvocationId, NetworkMethod, NetworkScheme, UserId,
-};
+use ironclaw_host_api::{InvocationId, UserId};
 use ironclaw_product_adapters::{
-    ApprovalPromptActionView, ApprovalPromptContextView, ApprovalPromptDestinationView,
-    ApprovalPromptDetailView, ApprovalPromptScopeView, AuthPromptContextView, GatePromptView,
+    ApprovalPromptContextView, AuthPromptContextView, AuthPromptView, GatePromptView,
     ProductAdapterError, ProductGateKind, ProductOutboundPayload, ProductProjectionItem,
     ProductProjectionState, ProductWorkflowRejectionKind, RedactedString,
 };
 use ironclaw_product_workflow::{
-    ApprovalInteractionScope, approval_request_id_from_gate_ref, is_approval_gate_ref,
+    approval_prompt_lookup, enrich_auth_prompt_view, is_approval_gate_ref,
 };
 use ironclaw_run_state::ApprovalRequestStore;
 use ironclaw_turns::{
-    GateRef, GetRunStateRequest, ModelInvalidOutputDetailReason, SanitizedFailure, TurnActor,
+    GateRef, GetRunStateRequest, ModelInvalidOutputDetailReason, SanitizedFailure,
     TurnBlockedGateKind, TurnCoordinator, TurnError, TurnEventKind, TurnEventProjectionCursor,
     TurnEventProjectionError, TurnEventProjectionRequest, TurnEventProjectionSource,
     TurnEventReducerService, TurnLifecycleEvent, TurnRunId, TurnScope, TurnStatus,
@@ -34,9 +31,6 @@ use tokio::sync::{Mutex, OnceCell, Semaphore};
 use crate::AuthChallengeProvider;
 use crate::failure_summary::{
     pinned_failure_summary_for_category, reborn_failure_summary_for_category_and_detail,
-};
-use crate::product_auth::api::auth_prompt::{
-    BlockedAuthPromptRequest, auth_prompt_view_for_blocked_auth,
 };
 
 pub(super) const WEBUI_TURN_EVENT_PAGE_LIMIT: usize = 256;
@@ -414,19 +408,28 @@ async fn blocked_prompt_payload(
     let gate_ref_str = gate_ref.as_str().to_string();
     match event.status {
         TurnStatus::BlockedAuth => {
-            let view = auth_prompt_view_for_blocked_auth(BlockedAuthPromptRequest {
-                fallback_owner_user_id: event.owner_user_id.as_ref().unwrap_or(caller_user_id),
-                scope: &event.scope,
-                run_id: event.run_id,
-                gate_ref: &gate_ref_str,
-                invocation_id: blocked_invocation_id,
-                body: event
-                    .sanitized_reason
-                    .clone()
-                    .unwrap_or_else(|| "Authenticate to continue this run.".to_string()),
-                credential_requirements: &state.credential_requirements,
+            let view = enrich_auth_prompt_view(
+                AuthPromptView {
+                    turn_run_id: event.run_id,
+                    auth_request_ref: gate_ref_str,
+                    invocation_id: blocked_invocation_id,
+                    headline: "Authentication required".to_string(),
+                    body: event
+                        .sanitized_reason
+                        .clone()
+                        .unwrap_or_else(|| "Authenticate to continue this run.".to_string()),
+                    challenge_kind: None,
+                    provider: None,
+                    account_label: None,
+                    authorization_url: None,
+                    expires_at: None,
+                    connection: None,
+                },
+                event.owner_user_id.as_ref().unwrap_or(caller_user_id),
+                &event.scope,
+                &state.credential_requirements,
                 auth_challenges,
-            })
+            )
             .await?;
             Ok(Some(ProductOutboundPayload::AuthPrompt(view)))
         }
@@ -438,7 +441,7 @@ async fn blocked_prompt_payload(
                 gate_ref,
                 gate_ref_str,
             )
-            .await,
+            .await?,
         )),
         TurnStatus::BlockedResource => Ok(Some(gate_prompt(
             event,
@@ -469,205 +472,28 @@ async fn approval_gate_prompt(
     event: &TurnLifecycleEvent,
     gate_ref: &GateRef,
     gate_ref_string: String,
-) -> ProductOutboundPayload {
+) -> Result<ProductOutboundPayload, ProductAdapterError> {
     let owner_user_id = event.owner_user_id.as_ref().unwrap_or(caller_user_id);
-    let lookup =
-        approval_prompt_lookup(approval_requests, gate_ref, owner_user_id, &event.scope).await;
-    gate_prompt_with_context(
+    let lookup = approval_prompt_lookup(approval_requests, gate_ref, owner_user_id, &event.scope)
+        .await
+        .map_err(|error| {
+            tracing::debug!(
+                %error,
+                run_id = %event.run_id,
+                "approval request lookup failed during gate projection"
+            );
+            ProductAdapterError::WorkflowTransient {
+                reason: RedactedString::new("approval request lookup failed"),
+            }
+        })?;
+    Ok(gate_prompt_with_context(
         event,
         gate_ref_string,
         "Approval required",
         is_approval_gate_ref(gate_ref.as_str()),
         lookup.context,
         lookup.invocation_id,
-    )
-}
-
-/// Resolve an approval gate's request details (tool/action/reason) into the
-/// rendered context view, by looking it up in the `ApprovalRequestStore` by
-/// gate ref. Shared by the WebUI gate projection and the Slack approval prompt
-/// so both surface the *same* "what is being approved" data from one source.
-/// Returns `None` when no store is wired, the gate ref is not an approval ref,
-/// the request is missing, or the lookup fails.
-#[cfg(feature = "slack-v2-host-beta")]
-pub(crate) async fn approval_prompt_context_view(
-    approval_requests: Option<&dyn ApprovalRequestStore>,
-    gate_ref: &GateRef,
-    owner_user_id: &UserId,
-    turn_scope: &TurnScope,
-) -> Option<ApprovalPromptContextView> {
-    approval_prompt_lookup(approval_requests, gate_ref, owner_user_id, turn_scope)
-        .await
-        .context
-}
-
-#[derive(Debug, Default)]
-struct ApprovalPromptLookup {
-    context: Option<ApprovalPromptContextView>,
-    invocation_id: Option<InvocationId>,
-}
-
-async fn approval_prompt_lookup(
-    approval_requests: Option<&dyn ApprovalRequestStore>,
-    gate_ref: &GateRef,
-    owner_user_id: &UserId,
-    turn_scope: &TurnScope,
-) -> ApprovalPromptLookup {
-    let (store, request_id) =
-        match approval_requests.zip(approval_request_id_from_gate_ref(gate_ref).ok()) {
-            Some(value) => value,
-            None => return ApprovalPromptLookup::default(),
-        };
-    let scope =
-        ApprovalInteractionScope::from_turn(turn_scope, &TurnActor::new(owner_user_id.clone()))
-            .to_resource_scope();
-    match store.get(&scope, request_id).await {
-        Ok(Some(record)) => ApprovalPromptLookup {
-            context: approval_context_for_request(&record.request),
-            invocation_id: Some(record.scope.invocation_id),
-        },
-        Ok(None) => ApprovalPromptLookup::default(),
-        Err(error) => {
-            tracing::debug!(
-                %error,
-                request_id = %request_id,
-                "approval request lookup failed during gate projection"
-            );
-            // silent-ok: approval context is best-effort UI enrichment; gate prompts remain actionable without it
-            ApprovalPromptLookup::default()
-        }
-    }
-}
-
-fn approval_context_for_request(request: &ApprovalRequest) -> Option<ApprovalPromptContextView> {
-    let (tool_name, action, destination, details) =
-        approval_action_context(request.action.as_ref())?;
-    ApprovalPromptContextView::new(
-        tool_name,
-        action,
-        ApprovalPromptScopeView::new(
-            approval_scope_label(request),
-            request.reusable_scope.is_some(),
-        )
-        .ok()?,
-        non_empty_string(&request.reason),
-        destination,
-        details,
-    )
-    .ok()
-}
-
-fn approval_action_context(
-    action: &Action,
-) -> Option<(
-    String,
-    ApprovalPromptActionView,
-    Option<ApprovalPromptDestinationView>,
-    Vec<ApprovalPromptDetailView>,
-)> {
-    match action {
-        Action::Dispatch {
-            capability,
-            estimated_resources,
-        } => {
-            let mut details = vec![detail("Capability", capability.as_str())?];
-            if let Some(bytes) = estimated_resources.network_egress_bytes {
-                details.push(detail("Estimated network egress", format_bytes(bytes))?);
-            }
-            Some((
-                capability.as_str().to_string(),
-                ApprovalPromptActionView::new("Run tool", None).ok()?,
-                None,
-                details,
-            ))
-        }
-        Action::SpawnCapability {
-            capability,
-            estimated_resources,
-        } => {
-            let mut details = vec![detail("Capability", capability.as_str())?];
-            if let Some(process_count) = estimated_resources.process_count {
-                details.push(detail("Processes", process_count.to_string())?);
-            }
-            Some((
-                capability.as_str().to_string(),
-                ApprovalPromptActionView::new("Start tool", None).ok()?,
-                None,
-                details,
-            ))
-        }
-        Action::Network {
-            target,
-            method,
-            estimated_bytes,
-        } => {
-            let destination =
-                network_destination(method, target.scheme, &target.host, target.port)?;
-            let mut details = vec![detail("Method", method_label(method))?];
-            if let Some(bytes) = estimated_bytes {
-                details.push(detail("Estimated transfer", format_bytes(*bytes))?);
-            }
-            Some((
-                "builtin.http".to_string(),
-                ApprovalPromptActionView::new("Network request", Some(*method)).ok()?,
-                Some(destination),
-                details,
-            ))
-        }
-        _ => None,
-    }
-}
-
-fn approval_scope_label(request: &ApprovalRequest) -> &'static str {
-    if request.reusable_scope.is_some() {
-        "Reusable grant"
-    } else {
-        "This request only"
-    }
-}
-
-fn network_destination(
-    method: &NetworkMethod,
-    scheme: NetworkScheme,
-    host: &str,
-    port: Option<u16>,
-) -> Option<ApprovalPromptDestinationView> {
-    let scheme = match scheme {
-        NetworkScheme::Http => "http",
-        NetworkScheme::Https => "https",
-    };
-    let authority = match port {
-        Some(port) => format!("{host}:{port}"),
-        None => host.to_string(),
-    };
-    let url = format!("{scheme}://{authority}");
-    ApprovalPromptDestinationView::new(
-        format!("{} {url}", method_label(method)),
-        Some(url),
-        Some(host.to_string()),
-    )
-    .ok()
-}
-
-fn detail(label: impl Into<String>, value: impl Into<String>) -> Option<ApprovalPromptDetailView> {
-    ApprovalPromptDetailView::new(label, value).ok()
-}
-
-fn method_label(method: &NetworkMethod) -> String {
-    method.to_string().to_ascii_uppercase()
-}
-
-fn format_bytes(bytes: u64) -> String {
-    format!("{bytes} bytes")
-}
-
-fn non_empty_string(value: &str) -> Option<String> {
-    let trimmed = value.trim();
-    if trimmed.is_empty() {
-        None
-    } else {
-        Some(trimmed.to_string())
-    }
+    ))
 }
 
 fn gate_prompt(

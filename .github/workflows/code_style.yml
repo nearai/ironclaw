@@ -161,6 +161,22 @@ jobs:
       - name: Lint WebUI v2 JS
         working-directory: crates/ironclaw_webui/frontend
         run: pnpm lint
+      # The full vitest suite (chat, extensions, telegram/slack panels, gate
+      # routing, channels tab, configure modal — the vm-tsx harness) previously
+      # never ran in CI: only the settings-scoped subset was wired elsewhere,
+      # so whole component suites could rot silently (the PR #5362 gap). The
+      # vm-tsx setup file is declared in vite.config.ts setupFiles; no extra
+      # CI configuration beyond node + pnpm is needed.
+      - name: WebUI v2 frontend tests (vitest)
+        working-directory: crates/ironclaw_webui/frontend
+        run: pnpm test
+      # The SPA build is embedded into the serve binary at compile time through
+      # Cargo's OUT_DIR (see ironclaw_webui/build.rs), so a frontend that lints
+      # and tests but does not build still breaks downstream binary builds.
+      # Keep the build in the same job so the three gates travel together.
+      - name: Build WebUI v2 frontend
+        working-directory: crates/ironclaw_webui/frontend
+        run: pnpm build
 
   deny-check:
     name: cargo-deny
@@ -227,6 +243,8 @@ jobs:
         run: |
           scripts/ci/test-check-include-str-paths.sh
           scripts/ci/test-check-hermetic-env.sh
+          scripts/ci/test-classify-test-scope.sh
+          scripts/ci/test-package-feature-flags.sh
           bash .github/scripts/test-pr-labeler.sh
 
   clippy:

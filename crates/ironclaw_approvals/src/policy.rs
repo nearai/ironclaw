@@ -565,7 +565,7 @@ fn invalid_path(error: HostApiError) -> PersistentApprovalPolicyError {
 mod tests {
     use std::sync::Arc;
 
-    use ironclaw_filesystem::{InMemoryBackend, LocalFilesystem, ScopedFilesystem};
+    use ironclaw_filesystem::{DiskFilesystem, InMemoryBackend, ScopedFilesystem};
     use ironclaw_host_api::{
         AgentId, EffectKind, GrantConstraints, HostPath, InvocationId, MountAlias, MountGrant,
         MountPermissions, MountView, NetworkPolicy, ProjectId, ThreadId, VirtualPath,
@@ -672,7 +672,7 @@ mod tests {
     #[tokio::test]
     async fn filesystem_policy_store_rejects_versioned_mutation_on_byte_only_backend() {
         let tempdir = tempfile::tempdir().expect("tempdir");
-        let mut backend = LocalFilesystem::new();
+        let mut backend = DiskFilesystem::new();
         backend
             .mount_local(
                 VirtualPath::new("/engine").unwrap(),

@@ -67,6 +67,7 @@ fn flatten_config(
         llm: Some(llm),
         webui: Some(config.webui.clone().unwrap_or_default()),
         slack: Some(config.slack.clone().unwrap_or_default()),
+        telegram: Some(config.telegram.clone().unwrap_or_default()),
         budget: Some(config.budget.clone().unwrap_or_default()),
         trigger_poller: Some(config.trigger_poller.clone().unwrap_or_default()),
     };

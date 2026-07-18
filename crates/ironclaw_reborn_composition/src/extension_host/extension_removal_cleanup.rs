@@ -1,17 +1,29 @@
 use std::collections::BTreeMap;
 use std::sync::Arc;
-#[cfg(any(feature = "slack-v2-host-beta", test))]
+#[cfg(any(
+    feature = "slack-v2-host-beta",
+    feature = "telegram-v2-host-beta",
+    test
+))]
 use std::sync::OnceLock;
 
 use async_trait::async_trait;
-#[cfg(any(feature = "slack-v2-host-beta", test))]
+#[cfg(any(
+    feature = "slack-v2-host-beta",
+    feature = "telegram-v2-host-beta",
+    test
+))]
 pub(crate) use ironclaw_extensions::ExtensionRemovalChannelId;
 pub(crate) use ironclaw_extensions::{
     ExtensionRemovalCleanupAdapterId, ExtensionRemovalCleanupBinding,
     ExtensionRemovalCleanupRequirement,
 };
 use ironclaw_host_api::{ResourceScope, UserId};
-#[cfg(any(feature = "slack-v2-host-beta", test))]
+#[cfg(any(
+    feature = "slack-v2-host-beta",
+    feature = "telegram-v2-host-beta",
+    test
+))]
 use ironclaw_product_workflow::{ChannelConnectionFacade, WebUiAuthenticatedCaller};
 use ironclaw_product_workflow::{ProductWorkflowError, RebornServicesError};
 
@@ -19,6 +31,11 @@ use ironclaw_product_workflow::{ProductWorkflowError, RebornServicesError};
 pub(crate) const SLACK_PERSONAL_CONNECTION_CLEANUP_ADAPTER_ID: &str = "slack.personal_connection";
 #[cfg(any(feature = "slack-v2-host-beta", test))]
 pub(crate) const SLACK_EXTENSION_REMOVAL_CHANNEL_ID: &str = "slack";
+#[cfg(any(feature = "telegram-v2-host-beta", test))]
+pub(crate) const TELEGRAM_PAIRING_CONNECTION_CLEANUP_ADAPTER_ID: &str =
+    "telegram.pairing_connection";
+#[cfg(any(feature = "telegram-v2-host-beta", test))]
+pub(crate) const TELEGRAM_EXTENSION_REMOVAL_CHANNEL_ID: &str = "telegram";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct ExtensionRemovalCleanupContext {
@@ -159,6 +176,71 @@ impl ExtensionRemovalCleanupAdapter for SlackPersonalConnectionCleanupAdapter {
         let channel_connection = self.channel_connection.get().ok_or_else(|| {
             RebornServicesError::internal_from(
                 "Slack extension removal cleanup facade is unavailable",
+            )
+        })?;
+        let caller = WebUiAuthenticatedCaller::new(
+            context.scope.tenant_id.clone(),
+            context.authenticated_actor.clone(),
+            context.scope.agent_id.clone(),
+            context.scope.project_id.clone(),
+        );
+        channel_connection
+            .disconnect_channel_for_caller(caller, channel.as_str())
+            .await
+    }
+}
+
+/// Removing the `telegram` extension unpairs the removing user: cleanup
+/// routes through the shared channel-connection facade slot (filled by the
+/// telegram host mounts, or the composite when Slack is also enabled), whose
+/// `disconnect_channel_for_caller("telegram")` deletes the identity binding
+/// and DM delivery target and invalidates any pending pairing code. Only the
+/// removing user is affected; an unfilled slot fails the removal closed
+/// (never a silent skip).
+#[cfg(any(feature = "telegram-v2-host-beta", test))]
+pub(crate) struct TelegramPairingConnectionCleanupAdapter {
+    adapter_id: ExtensionRemovalCleanupAdapterId,
+    channel_connection: Arc<OnceLock<Arc<dyn ChannelConnectionFacade>>>,
+}
+
+#[cfg(any(feature = "telegram-v2-host-beta", test))]
+impl TelegramPairingConnectionCleanupAdapter {
+    pub(crate) fn new(
+        channel_connection: Arc<OnceLock<Arc<dyn ChannelConnectionFacade>>>,
+    ) -> Result<Self, ProductWorkflowError> {
+        let adapter_id =
+            ExtensionRemovalCleanupAdapterId::new(TELEGRAM_PAIRING_CONNECTION_CLEANUP_ADAPTER_ID)
+                .map_err(|error| ProductWorkflowError::InvalidBindingRequest {
+                reason: error.to_string(),
+            })?;
+        Ok(Self {
+            adapter_id,
+            channel_connection,
+        })
+    }
+}
+
+#[async_trait]
+#[cfg(any(feature = "telegram-v2-host-beta", test))]
+impl ExtensionRemovalCleanupAdapter for TelegramPairingConnectionCleanupAdapter {
+    fn adapter_id(&self) -> ExtensionRemovalCleanupAdapterId {
+        self.adapter_id.clone()
+    }
+
+    async fn cleanup(
+        &self,
+        context: &ExtensionRemovalCleanupContext,
+        binding: &ExtensionRemovalCleanupBinding,
+    ) -> Result<(), RebornServicesError> {
+        let ExtensionRemovalCleanupBinding::ChannelConnection { channel } = binding;
+        if channel.as_str() != TELEGRAM_EXTENSION_REMOVAL_CHANNEL_ID {
+            return Err(RebornServicesError::internal_from(
+                "Telegram extension removal cleanup received an unsupported binding",
+            ));
+        }
+        let channel_connection = self.channel_connection.get().ok_or_else(|| {
+            RebornServicesError::internal_from(
+                "Telegram extension removal cleanup facade is unavailable",
             )
         })?;
         let caller = WebUiAuthenticatedCaller::new(
@@ -475,5 +557,138 @@ mod tests {
             Some("project-a")
         );
         assert!(!caller.operator_webui_config);
+    }
+}
+
+#[cfg(test)]
+mod telegram_cleanup_tests {
+    use std::sync::{Arc, Mutex, OnceLock};
+
+    use async_trait::async_trait;
+    use ironclaw_host_api::{InvocationId, ResourceScope, TenantId, UserId};
+    use ironclaw_product_workflow::{
+        ChannelConnectionFacade, RebornServicesError, WebUiAuthenticatedCaller,
+    };
+
+    use super::*;
+
+    #[derive(Default)]
+    struct RecordingConnectionFacade {
+        disconnects: Mutex<Vec<(String, String)>>,
+    }
+
+    #[async_trait]
+    impl ChannelConnectionFacade for RecordingConnectionFacade {
+        async fn caller_channel_connections(
+            &self,
+            _caller: WebUiAuthenticatedCaller,
+        ) -> Result<std::collections::HashMap<String, bool>, RebornServicesError> {
+            Ok(std::collections::HashMap::from([(
+                "telegram".to_string(),
+                true,
+            )]))
+        }
+
+        async fn disconnect_channel_for_caller(
+            &self,
+            caller: WebUiAuthenticatedCaller,
+            channel: &str,
+        ) -> Result<(), RebornServicesError> {
+            self.disconnects
+                .lock()
+                .expect("disconnect lock")
+                .push((caller.user_id.as_str().to_string(), channel.to_string()));
+            Ok(())
+        }
+    }
+
+    fn context_for(user: &str) -> ExtensionRemovalCleanupContext {
+        ExtensionRemovalCleanupContext::new(
+            ResourceScope {
+                tenant_id: TenantId::new("tenant-a").expect("tenant"),
+                user_id: UserId::new(user).expect("user"),
+                agent_id: None,
+                project_id: None,
+                mission_id: None,
+                thread_id: None,
+                invocation_id: InvocationId::new(),
+            },
+            UserId::new(user).expect("user"),
+        )
+    }
+
+    fn telegram_requirement() -> ExtensionRemovalCleanupRequirement {
+        ExtensionRemovalCleanupRequirement::channel_connection(
+            ExtensionRemovalCleanupAdapterId::new(TELEGRAM_PAIRING_CONNECTION_CLEANUP_ADAPTER_ID)
+                .expect("adapter id"),
+            ExtensionRemovalChannelId::new(TELEGRAM_EXTENSION_REMOVAL_CHANNEL_ID)
+                .expect("channel id"),
+        )
+    }
+
+    #[tokio::test]
+    async fn telegram_removal_cleanup_disconnects_the_removing_user() {
+        let facade = Arc::new(RecordingConnectionFacade::default());
+        let slot: Arc<OnceLock<Arc<dyn ChannelConnectionFacade>>> = Arc::new(OnceLock::new());
+        slot.set(Arc::clone(&facade) as Arc<dyn ChannelConnectionFacade>)
+            .ok()
+            .expect("slot fills once");
+        let registry = ExtensionRemovalCleanupRegistry::try_from_adapters(vec![Arc::new(
+            TelegramPairingConnectionCleanupAdapter::new(slot).expect("adapter builds"),
+        )])
+        .expect("registry builds");
+
+        registry
+            .cleanup_requirements(&[telegram_requirement()], &context_for("ben"))
+            .await
+            .expect("cleanup succeeds");
+
+        assert_eq!(
+            facade.disconnects.lock().expect("disconnect lock").clone(),
+            vec![("ben".to_string(), "telegram".to_string())],
+            "removal unpairs exactly the removing user on the telegram channel"
+        );
+    }
+
+    #[tokio::test]
+    async fn telegram_removal_cleanup_rejects_foreign_channel_bindings() {
+        let facade = Arc::new(RecordingConnectionFacade::default());
+        let slot: Arc<OnceLock<Arc<dyn ChannelConnectionFacade>>> = Arc::new(OnceLock::new());
+        slot.set(Arc::clone(&facade) as Arc<dyn ChannelConnectionFacade>)
+            .ok()
+            .expect("slot fills once");
+        let adapter = TelegramPairingConnectionCleanupAdapter::new(slot).expect("adapter builds");
+
+        adapter
+            .cleanup(
+                &context_for("ben"),
+                &ExtensionRemovalCleanupBinding::ChannelConnection {
+                    channel: ExtensionRemovalChannelId::new("slack").expect("channel id"),
+                },
+            )
+            .await
+            .expect_err("foreign channel bindings must be rejected");
+        assert!(
+            facade
+                .disconnects
+                .lock()
+                .expect("disconnect lock")
+                .is_empty(),
+            "a foreign binding must never trigger a disconnect"
+        );
+    }
+
+    #[tokio::test]
+    async fn telegram_removal_cleanup_fails_closed_when_facade_slot_is_unfilled() {
+        let slot: Arc<OnceLock<Arc<dyn ChannelConnectionFacade>>> = Arc::new(OnceLock::new());
+        let registry = ExtensionRemovalCleanupRegistry::try_from_adapters(vec![Arc::new(
+            TelegramPairingConnectionCleanupAdapter::new(slot).expect("adapter builds"),
+        )])
+        .expect("registry builds");
+
+        registry
+            .cleanup_requirements(&[telegram_requirement()], &context_for("ben"))
+            .await
+            .expect_err("unfilled facade slot must fail the removal closed");
     }
 }

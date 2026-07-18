@@ -16,12 +16,12 @@ use ironclaw_approvals::{
 #[cfg(any(feature = "libsql", feature = "postgres"))]
 use ironclaw_auth::AuthProviderClient;
 use ironclaw_auth::{AuthProductScope, AuthSurface};
-#[cfg(any(feature = "libsql", feature = "postgres"))]
+// Used by both the durable (`<LocalDevRootFilesystem>`) and no-durable
+// (`<InMemoryBackend>`) capability-lease aliases/builders, so the import is
+// unconditional (arch-simplification §4.3).
 use ironclaw_authorization::FilesystemCapabilityLeaseStore;
 #[cfg(any(feature = "libsql", feature = "postgres"))]
 use ironclaw_authorization::GrantAuthorizer;
-#[cfg(not(any(feature = "libsql", feature = "postgres")))]
-use ironclaw_authorization::InMemoryCapabilityLeaseStore;
 #[cfg(not(any(feature = "libsql", feature = "postgres")))]
 use ironclaw_conversations::InMemoryConversationServices;
 use ironclaw_conversations::{
@@ -46,7 +46,7 @@ use ironclaw_filesystem::{
     BackendCapabilities, BackendId, BackendKind, CompositeRootFilesystem, ContentKind, IndexPolicy,
     MountDescriptor, RootFilesystem, StorageClass,
 };
-use ironclaw_filesystem::{LocalFilesystem, ScopedFilesystem};
+use ironclaw_filesystem::{DiskFilesystem, ScopedFilesystem};
 #[cfg(feature = "test-support")]
 use ironclaw_first_party_extensions::{
     EXA_MCP_HOST, NETWORK_EGRESS_LIMIT, WEB_ACCESS_EXTENSION_ID, WEB_GET_CONTENT_CAPABILITY_ID,
@@ -67,8 +67,8 @@ use ironclaw_host_api::{
 #[cfg(any(feature = "libsql", feature = "postgres"))]
 use ironclaw_host_api::{HostApiError, MountAlias, MountGrant};
 use ironclaw_host_runtime::{
-    CapabilitySurfaceVersion, FirstPartyCapabilityRegistry, HostRuntimeHttpEgressPort,
-    HostRuntimeServices, LocalHostProcessPort, PostEditCheckConfig,
+    CapabilitySurfaceVersion, FirstPartyCapabilityRegistry, HostProcessPort,
+    HostRuntimeHttpEgressPort, HostRuntimeServices, PostEditCheckConfig,
     ProductAuthProviderRuntimePorts, TriggerCreateHook,
     builtin_first_party_handlers_with_trigger_create_hook, builtin_first_party_package,
 };
@@ -84,30 +84,39 @@ use ironclaw_outbound::CommunicationPreferenceRepository;
 use ironclaw_outbound::FilesystemOutboundStateStore;
 #[cfg(not(any(feature = "libsql", feature = "postgres")))]
 use ironclaw_outbound::InMemoryOutboundStateStore;
-#[cfg(feature = "slack-v2-host-beta")]
+#[cfg(any(feature = "slack-v2-host-beta", feature = "telegram-v2-host-beta"))]
 use ironclaw_outbound::{DeliveredGateRouteStore, OutboundStateStore, TriggeredRunDeliveryStore};
 #[cfg(all(
     not(any(feature = "libsql", feature = "postgres")),
-    feature = "slack-v2-host-beta"
+    any(feature = "slack-v2-host-beta", feature = "telegram-v2-host-beta")
 ))]
 use ironclaw_outbound::{InMemoryDeliveredGateRouteStore, InMemoryTriggeredRunDeliveryStore};
 use ironclaw_processes::ProcessServices;
-#[cfg(any(feature = "slack-v2-host-beta", test))]
+#[cfg(any(
+    feature = "slack-v2-host-beta",
+    feature = "telegram-v2-host-beta",
+    test
+))]
 use ironclaw_product_workflow::ChannelConnectionFacade;
 use ironclaw_product_workflow::{
-    LifecycleProductSurfaceContext, ProductAuthTurnGateResumeDispatcher, ProjectService,
+    ExtensionAccountSetupRegistry, LifecycleProductSurfaceContext,
+    ProductAuthTurnGateResumeDispatcher, ProjectService,
 };
 use ironclaw_projects::ProjectRepository;
 use ironclaw_resources::InMemoryResourceGovernor;
+// `FilesystemBudgetGateStore` backs both the durable and the no-durable
+// (`<InMemoryBackend>`) budget-gate wiring — the deleted `InMemoryBudgetGateStore`
+// had no cfg gate either — so its import must be unconditional, not gated behind
+// the durable-backend features (arch-simplification §4.3).
+use ironclaw_resources::FilesystemBudgetGateStore;
 #[cfg(any(feature = "libsql", feature = "postgres"))]
 use ironclaw_resources::{
-    BroadcastBudgetEventSink, BudgetGateStore, FilesystemBudgetGateStore,
-    FilesystemResourceGovernor, ResourceGovernor,
+    BroadcastBudgetEventSink, BudgetGateStore, FilesystemResourceGovernor, ResourceGovernor,
 };
-#[cfg(any(feature = "libsql", feature = "postgres"))]
+// Used by both the durable (`<LocalDevRootFilesystem>`) and no-durable
+// (`<InMemoryBackend>`) run-state/approval aliases + builders, so the import is
+// unconditional (arch-simplification §4.3).
 use ironclaw_run_state::{FilesystemApprovalRequestStore, FilesystemRunStateStore};
-#[cfg(not(any(feature = "libsql", feature = "postgres")))]
-use ironclaw_run_state::{InMemoryApprovalRequestStore, InMemoryRunStateStore};
 #[cfg(any(feature = "libsql", feature = "postgres"))]
 use ironclaw_secrets::FilesystemCredentialBroker;
 #[cfg(any(feature = "libsql", feature = "postgres"))]
@@ -148,6 +157,8 @@ use ironclaw_turns::{
 use ironclaw_turns::{InMemoryCheckpointStateStore, InMemoryLoopCheckpointStore};
 
 use crate::RebornProductAuthServicePorts;
+#[cfg(feature = "telegram-v2-host-beta")]
+use crate::extension_host::available_extensions::telegram_manifest_digest;
 #[cfg(feature = "slack-v2-host-beta")]
 use crate::extension_host::available_extensions::{
     slack_bot_manifest_digest, slack_manifest_digest,
@@ -276,22 +287,33 @@ type LocalDevResourceGovernor = FilesystemResourceGovernor<LocalDevRootFilesyste
 #[cfg(not(any(feature = "libsql", feature = "postgres")))]
 type LocalDevResourceGovernor = InMemoryResourceGovernor;
 
+// One run-state / approval-request store, backend-injected — the production
+// `Filesystem*Store<F>` every deployment uses, never a bespoke `InMemory*Store`
+// (arch-simplification §4.3). The no-durable-features build backs them with
+// `InMemoryBackend` directly, so the concrete type is `<InMemoryBackend>`, which
+// the host-runtime production-wiring guard classifies `LocalOnly`.
 #[cfg(any(feature = "libsql", feature = "postgres"))]
 type LocalDevRunStateStore = FilesystemRunStateStore<LocalDevRootFilesystem>;
 #[cfg(not(any(feature = "libsql", feature = "postgres")))]
-type LocalDevRunStateStore = InMemoryRunStateStore;
+type LocalDevRunStateStore = FilesystemRunStateStore<InMemoryBackend>;
 
 #[cfg(any(feature = "libsql", feature = "postgres"))]
 pub(crate) type LocalDevApprovalRequestStore =
     FilesystemApprovalRequestStore<LocalDevRootFilesystem>;
 #[cfg(not(any(feature = "libsql", feature = "postgres")))]
-pub(crate) type LocalDevApprovalRequestStore = InMemoryApprovalRequestStore;
+pub(crate) type LocalDevApprovalRequestStore = FilesystemApprovalRequestStore<InMemoryBackend>;
 
 #[cfg(any(feature = "libsql", feature = "postgres"))]
 pub(crate) type LocalDevCapabilityLeaseStore =
     FilesystemCapabilityLeaseStore<LocalDevRootFilesystem>;
+// One capability-lease store, backend-injected — the production
+// `FilesystemCapabilityLeaseStore<F>` every deployment uses, never a bespoke
+// `InMemory*Store` (arch-simplification §4.3). The no-durable-features build
+// backs it with `InMemoryBackend` directly, so the concrete type is
+// `<InMemoryBackend>`, which the host-runtime production-wiring guard classifies
+// `LocalOnly`.
 #[cfg(not(any(feature = "libsql", feature = "postgres")))]
-pub(crate) type LocalDevCapabilityLeaseStore = InMemoryCapabilityLeaseStore;
+pub(crate) type LocalDevCapabilityLeaseStore = FilesystemCapabilityLeaseStore<InMemoryBackend>;
 
 // One store per approval domain, backend-injected — the production
 // `Filesystem*Store<F>` every deployment uses, never a bespoke `InMemory*Store`
@@ -299,9 +321,9 @@ pub(crate) type LocalDevCapabilityLeaseStore = InMemoryCapabilityLeaseStore;
 // the no-durable-features build backs them with `InMemoryBackend` directly, so
 // the concrete type is `<InMemoryBackend>` — which the host-runtime
 // production-wiring guard classifies `LocalOnly` (the same way the volatile
-// `InMemoryRunStateStore`/`InMemoryCapabilityLeaseStore` are flagged). Durable
-// builds use the libSQL/Postgres-backed composite root filesystem, whose type is
-// distinct and correctly classifies as a production candidate.
+// `<InMemoryBackend>`-backed run-state/approval/lease stores are flagged).
+// Durable builds use the libSQL/Postgres-backed composite root filesystem, whose
+// type is distinct and correctly classifies as a production candidate.
 #[cfg(any(feature = "libsql", feature = "postgres"))]
 pub(crate) type LocalDevPersistentApprovalPolicyStore =
     FilesystemPersistentApprovalPolicyStore<LocalDevRootFilesystem>;
@@ -328,10 +350,16 @@ type LocalDevProcessServices = ProcessServices<
     ironclaw_processes::FilesystemProcessStore<LocalDevRootFilesystem>,
     ironclaw_processes::FilesystemProcessResultStore<LocalDevRootFilesystem>,
 >;
+// One process store pair, backend-injected — the production
+// `FilesystemProcess*Store<F>` every deployment uses, never a bespoke
+// `InMemory*Store` (arch-simplification §4.3). The no-durable-features build
+// backs it with `InMemoryBackend` directly, so the concrete type is
+// `<InMemoryBackend>`, which the host-runtime production-wiring guard
+// classifies `LocalOnly`.
 #[cfg(not(any(feature = "libsql", feature = "postgres")))]
 type LocalDevProcessServices = ProcessServices<
-    ironclaw_processes::InMemoryProcessStore,
-    ironclaw_processes::InMemoryProcessResultStore,
+    ironclaw_processes::FilesystemProcessStore<InMemoryBackend>,
+    ironclaw_processes::FilesystemProcessResultStore<InMemoryBackend>,
 >;
 
 fn apply_runtime_process_binding<F, G, S, R>(
@@ -379,15 +407,15 @@ fn local_dev_process_port_for_policy(
     runtime_policy: &Option<ironclaw_host_api::runtime_policy::EffectiveRuntimePolicy>,
     workspace_root: &Path,
     host_home_root: Option<&LocalDevHostHomeRoot>,
-) -> Option<LocalHostProcessPort> {
+) -> Option<HostProcessPort> {
     let runtime_policy = runtime_policy.as_ref()?;
     if runtime_policy.process_backend != ProcessBackendKind::LocalHost {
         return None;
     }
     let mut process_port = if runtime_policy.secret_mode == SecretMode::InheritedEnv {
-        LocalHostProcessPort::new_inherited_env()
+        HostProcessPort::new_inherited_env()
     } else {
-        LocalHostProcessPort::new()
+        HostProcessPort::new()
     }
     .with_workdir_alias("/workspace", workspace_root);
     if let Some(host_home_root) = host_home_root {
@@ -1017,11 +1045,11 @@ pub(crate) struct RebornLocalRuntimeServices {
     /// Settings write flips it and the next turn's selection honors the new
     /// value without a restart.
     pub(crate) skill_auto_activate_learned: Arc<AtomicBool>,
-    #[cfg(feature = "slack-v2-host-beta")]
+    #[cfg(any(feature = "slack-v2-host-beta", feature = "telegram-v2-host-beta"))]
     pub(crate) outbound_state: Arc<dyn OutboundStateStore>,
-    #[cfg(feature = "slack-v2-host-beta")]
+    #[cfg(any(feature = "slack-v2-host-beta", feature = "telegram-v2-host-beta"))]
     pub(crate) delivered_gate_routes: Arc<dyn DeliveredGateRouteStore>,
-    #[cfg(feature = "slack-v2-host-beta")]
+    #[cfg(any(feature = "slack-v2-host-beta", feature = "telegram-v2-host-beta"))]
     pub(crate) triggered_run_delivery: Arc<dyn TriggeredRunDeliveryStore>,
     #[cfg(not(any(feature = "libsql", feature = "postgres")))]
     pub(crate) trigger_conversation_services: InMemoryConversationServices,
@@ -1097,7 +1125,11 @@ pub(crate) struct RebornLocalRuntimeServices {
     /// deployments without a connectable channel, in which case the handler
     /// fails closed (blocks) for any channel that declares a connection
     /// requirement. Mirrors the `post_submit_hook_slot` deferred-wiring pattern.
-    #[cfg(any(feature = "slack-v2-host-beta", test))]
+    #[cfg(any(
+        feature = "slack-v2-host-beta",
+        feature = "telegram-v2-host-beta",
+        test
+    ))]
     pub(crate) channel_connection_facade_slot:
         Arc<std::sync::OnceLock<Arc<dyn ChannelConnectionFacade>>>,
     pub(crate) runtime_http_egress: Option<Arc<dyn RuntimeHttpEgress>>,
@@ -1112,6 +1144,15 @@ pub(crate) struct RebornLocalRuntimeServices {
         feature = "slack-v2-host-beta"
     ))]
     pub(crate) host_state_filesystem: Arc<ScopedFilesystem<LocalDevRootFilesystem>>,
+    /// Telegram analog of `host_state_filesystem`: a `ScopedFilesystem` whose
+    /// fixed resolver is [`crate::telegram_host_state_mount_view`], backing the
+    /// durable Telegram setup/pairing/binding/DM-target stores plus the
+    /// telegram-scoped idempotency ledger and conversation-binding store.
+    #[cfg(all(
+        any(feature = "libsql", feature = "postgres"),
+        feature = "telegram-v2-host-beta"
+    ))]
+    pub(crate) telegram_host_state_filesystem: Arc<ScopedFilesystem<dyn RootFilesystem>>,
     #[cfg(any(feature = "libsql", feature = "postgres"))]
     pub(crate) subagent_goal_filesystem: Arc<ScopedFilesystem<LocalDevRootFilesystem>>,
     /// Tenant-scoped root filesystem used for third-party extension hook
@@ -1914,17 +1955,29 @@ async fn build_local_runtime(input: RebornBuildInput) -> Result<RebornServices, 
     .map_err(|error| RebornBuildError::InvalidConfig {
         reason: format!("extension lifecycle state could not be restored: {error}"),
     })?;
+    #[cfg_attr(
+        not(any(feature = "slack-v2-host-beta", feature = "telegram-v2-host-beta")),
+        allow(unused_mut)
+    )]
+    let mut removal_cleanup_adapters: Vec<Arc<dyn ExtensionRemovalCleanupAdapter>> = Vec::new();
     #[cfg(feature = "slack-v2-host-beta")]
-    let removal_cleanup_adapters: Vec<Arc<dyn ExtensionRemovalCleanupAdapter>> = vec![Arc::new(
+    removal_cleanup_adapters.push(Arc::new(
         SlackPersonalConnectionCleanupAdapter::new(Arc::clone(
             &store_graph.local_runtime.channel_connection_facade_slot,
         ))
         .map_err(|error| RebornBuildError::InvalidConfig {
             reason: format!("Slack extension removal cleanup could not be built: {error}"),
         })?,
-    )];
-    #[cfg(not(feature = "slack-v2-host-beta"))]
-    let removal_cleanup_adapters: Vec<Arc<dyn ExtensionRemovalCleanupAdapter>> = Vec::new();
+    ));
+    #[cfg(feature = "telegram-v2-host-beta")]
+    removal_cleanup_adapters.push(Arc::new(
+        crate::extension_host::extension_removal_cleanup::TelegramPairingConnectionCleanupAdapter::new(
+            Arc::clone(&store_graph.local_runtime.channel_connection_facade_slot),
+        )
+        .map_err(|error| RebornBuildError::InvalidConfig {
+            reason: format!("Telegram extension removal cleanup could not be built: {error}"),
+        })?,
+    ));
     let removal_cleanup = Arc::new(
         ExtensionRemovalCleanupRegistry::try_from_adapters(removal_cleanup_adapters).map_err(
             |error| RebornBuildError::InvalidConfig {
@@ -1932,6 +1985,21 @@ async fn build_local_runtime(input: RebornBuildInput) -> Result<RebornServices, 
             },
         )?,
     );
+    let account_setups = ExtensionAccountSetupRegistry::default();
+    #[cfg(feature = "telegram-v2-host-beta")]
+    {
+        let descriptor =
+            ironclaw_telegram_extension::telegram_account_setup_descriptor().map_err(|error| {
+                RebornBuildError::InvalidConfig {
+                    reason: format!("Telegram account setup could not be declared: {error}"),
+                }
+            })?;
+        if !account_setups.declare(descriptor) {
+            return Err(RebornBuildError::InvalidConfig {
+                reason: "Telegram account setup was declared more than once".to_string(),
+            });
+        }
+    }
     let extension_management = Arc::new(
         RebornLocalExtensionManagementPort::new(
             extension_filesystem,
@@ -1944,6 +2012,7 @@ async fn build_local_runtime(input: RebornBuildInput) -> Result<RebornServices, 
             // their installs are tenant-shared, everyone else's are private.
             nearai_mcp_owner_scope.user_id.clone(),
         )
+        .with_account_setup_registry(account_setups)
         .with_removal_cleanup_registry(removal_cleanup),
     );
     let lifecycle_facade =
@@ -2489,6 +2558,9 @@ async fn build_local_dev_store_graph(
         })?;
     #[cfg(feature = "slack-v2-host-beta")]
     let host_state_filesystem = local_dev_slack_host_state_filesystem(Arc::clone(&filesystem));
+    #[cfg(feature = "telegram-v2-host-beta")]
+    let telegram_host_state_filesystem =
+        local_dev_telegram_host_state_filesystem(Arc::clone(&filesystem));
     let extension_lifecycle_surface_context = local_dev_extension_lifecycle_surface_context(
         owner_user_id.clone(),
         local_runtime_identity.as_ref(),
@@ -2515,11 +2587,11 @@ async fn build_local_dev_store_graph(
             crate::outbound::MutableOutboundDeliveryTargetRegistry::default(),
         ),
         skill_auto_activate_learned: Arc::new(AtomicBool::new(true)),
-        #[cfg(feature = "slack-v2-host-beta")]
+        #[cfg(any(feature = "slack-v2-host-beta", feature = "telegram-v2-host-beta"))]
         outbound_state: outbound_stores.outbound_state,
-        #[cfg(feature = "slack-v2-host-beta")]
+        #[cfg(any(feature = "slack-v2-host-beta", feature = "telegram-v2-host-beta"))]
         delivered_gate_routes: outbound_stores.delivered_gate_routes,
-        #[cfg(feature = "slack-v2-host-beta")]
+        #[cfg(any(feature = "slack-v2-host-beta", feature = "telegram-v2-host-beta"))]
         triggered_run_delivery: outbound_stores.triggered_run_delivery,
         #[cfg(not(any(feature = "libsql", feature = "postgres")))]
         trigger_conversation_services,
@@ -2536,7 +2608,11 @@ async fn build_local_dev_store_graph(
         budget_gate_store,
         skill_management,
         extension_management: None,
-        #[cfg(any(feature = "slack-v2-host-beta", test))]
+        #[cfg(any(
+            feature = "slack-v2-host-beta",
+            feature = "telegram-v2-host-beta",
+            test
+        ))]
         channel_connection_facade_slot: Arc::new(std::sync::OnceLock::new()),
         runtime_http_egress: None,
         host_runtime_http_egress: None,
@@ -2547,6 +2623,8 @@ async fn build_local_dev_store_graph(
         workspace_filesystem,
         #[cfg(feature = "slack-v2-host-beta")]
         host_state_filesystem,
+        #[cfg(feature = "telegram-v2-host-beta")]
+        telegram_host_state_filesystem,
         subagent_goal_filesystem: Arc::clone(&scoped_filesystem),
         identity_filesystem: Arc::clone(&scoped_filesystem),
         // Set later in `build_local_runtime`, once the secret-store crypto
@@ -2606,9 +2684,19 @@ async fn build_local_dev_store_graph(
     let approvals_filesystem = crate::wrap_scoped(Arc::new(InMemoryBackend::new()));
     let event_log = local_dev_event_log(Arc::clone(&filesystem))?;
     let audit_log = local_dev_audit_log(Arc::clone(&filesystem))?;
-    let run_state = Arc::new(InMemoryRunStateStore::new());
-    let approval_requests = Arc::new(InMemoryApprovalRequestStore::new());
-    let capability_leases = Arc::new(InMemoryCapabilityLeaseStore::new());
+    // Run-state and approval-request records live under sibling aliases on the
+    // same volatile in-memory backend (§4.3), so both share `approvals_filesystem`
+    // (the full-alias in-memory scoped filesystem) — a blocked run and its approval
+    // record resolve against one consistent view.
+    let run_state = Arc::new(FilesystemRunStateStore::new(Arc::clone(
+        &approvals_filesystem,
+    )));
+    let approval_requests = Arc::new(FilesystemApprovalRequestStore::new(Arc::clone(
+        &approvals_filesystem,
+    )));
+    let capability_leases = Arc::new(FilesystemCapabilityLeaseStore::new(crate::wrap_scoped(
+        Arc::new(InMemoryBackend::new()),
+    )));
     let persistent_approval_policies = Arc::new(FilesystemPersistentApprovalPolicyStore::new(
         Arc::clone(&approvals_filesystem),
     ));
@@ -2624,8 +2712,14 @@ async fn build_local_dev_store_graph(
         in_memory_budget_event_sink,
         broadcast_budget_event_sink,
     } = build_budget_sinks();
-    let budget_gate_store: Arc<dyn ironclaw_resources::BudgetGateStore> =
-        Arc::new(ironclaw_resources::InMemoryBudgetGateStore::new());
+    // §4.3: the deleted `InMemoryBudgetGateStore` is replaced by the one
+    // production `FilesystemBudgetGateStore` over an in-memory backend. Unlike
+    // the old scope-ignoring HashMap, this scopes each gate under the caller's
+    // tenant/user mount — strictly more correct for multi-tenant no-durable
+    // deployments — while remaining volatile (fresh `InMemoryBackend`).
+    let budget_gate_store: Arc<dyn ironclaw_resources::BudgetGateStore> = Arc::new(
+        FilesystemBudgetGateStore::new(crate::wrap_scoped(Arc::new(InMemoryBackend::new()))),
+    );
     let resource_governor: Arc<LocalDevResourceGovernor> =
         Arc::new(InMemoryResourceGovernor::new().with_event_sink(Arc::clone(&budget_event_sink)));
     let skill_mounts =
@@ -2657,6 +2751,9 @@ async fn build_local_dev_store_graph(
         })?;
     #[cfg(all(feature = "postgres", feature = "slack-v2-host-beta"))]
     let host_state_filesystem = local_dev_slack_host_state_filesystem(Arc::clone(&filesystem));
+    #[cfg(all(feature = "postgres", feature = "telegram-v2-host-beta"))]
+    let telegram_host_state_filesystem =
+        local_dev_telegram_host_state_filesystem(Arc::clone(&filesystem));
     let extension_lifecycle_surface_context = local_dev_extension_lifecycle_surface_context(
         owner_user_id.clone(),
         local_runtime_identity.as_ref(),
@@ -2685,11 +2782,11 @@ async fn build_local_dev_store_graph(
             crate::outbound::MutableOutboundDeliveryTargetRegistry::default(),
         ),
         skill_auto_activate_learned: Arc::new(AtomicBool::new(true)),
-        #[cfg(feature = "slack-v2-host-beta")]
+        #[cfg(any(feature = "slack-v2-host-beta", feature = "telegram-v2-host-beta"))]
         outbound_state: outbound_stores.outbound_state,
-        #[cfg(feature = "slack-v2-host-beta")]
+        #[cfg(any(feature = "slack-v2-host-beta", feature = "telegram-v2-host-beta"))]
         delivered_gate_routes: outbound_stores.delivered_gate_routes,
-        #[cfg(feature = "slack-v2-host-beta")]
+        #[cfg(any(feature = "slack-v2-host-beta", feature = "telegram-v2-host-beta"))]
         triggered_run_delivery: outbound_stores.triggered_run_delivery,
         #[cfg(not(any(feature = "libsql", feature = "postgres")))]
         trigger_conversation_services,
@@ -2706,7 +2803,11 @@ async fn build_local_dev_store_graph(
         budget_gate_store,
         skill_management,
         extension_management: None,
-        #[cfg(any(feature = "slack-v2-host-beta", test))]
+        #[cfg(any(
+            feature = "slack-v2-host-beta",
+            feature = "telegram-v2-host-beta",
+            test
+        ))]
         channel_connection_facade_slot: Arc::new(std::sync::OnceLock::new()),
         runtime_http_egress: None,
         host_runtime_http_egress: None,
@@ -2724,7 +2825,8 @@ async fn build_local_dev_store_graph(
         extension_registry: Arc::new(ExtensionRegistry::new()),
         shared_extension_registry: None,
     });
-    let process_services = ProcessServices::in_memory();
+    let process_services =
+        ProcessServices::filesystem(crate::wrap_scoped(Arc::new(InMemoryBackend::new())));
 
     Ok(RebornLocalDevStoreGraph {
         run_state,
@@ -3140,8 +3242,8 @@ fn local_dev_project_filesystem(
     root: &Path,
     workspace_root: &Path,
     host_home_root: Option<&LocalDevHostHomeRoot>,
-) -> Result<LocalFilesystem, RebornBuildError> {
-    let mut filesystem = LocalFilesystem::new();
+) -> Result<DiskFilesystem, RebornBuildError> {
+    let mut filesystem = DiskFilesystem::new();
     filesystem.mount_local(
         VirtualPath::new("/projects")?,
         HostPath::from_path_buf(root.to_path_buf()),
@@ -3429,13 +3531,13 @@ where
 
 fn mount_local_dev_project_roots(
     root: &mut CompositeRootFilesystem,
-    local: Arc<LocalFilesystem>,
+    local: Arc<DiskFilesystem>,
 ) -> Result<(), RebornBuildError> {
     root.mount(
         local_dev_mount_descriptor(
             "/projects",
             "local-dev-project-files",
-            BackendKind::LocalFilesystem,
+            BackendKind::DiskFilesystem,
             StorageClass::FileContent,
             ContentKind::ProjectFile,
             IndexPolicy::NotIndexed,
@@ -3447,7 +3549,7 @@ fn mount_local_dev_project_roots(
         local_dev_mount_descriptor(
             "/system/extensions",
             "local-dev-system-extensions",
-            BackendKind::LocalFilesystem,
+            BackendKind::DiskFilesystem,
             StorageClass::FileContent,
             ContentKind::ExtensionPackage,
             IndexPolicy::NotIndexed,
@@ -3746,11 +3848,11 @@ fn local_dev_scoped_filesystem(
 /// See docs/plans/2026-05-29-trigger-loop-delivery-resolution-implementation.md.
 pub(crate) struct LocalDevOutboundStores {
     pub(crate) outbound_preferences: Arc<dyn CommunicationPreferenceRepository>,
-    #[cfg(feature = "slack-v2-host-beta")]
+    #[cfg(any(feature = "slack-v2-host-beta", feature = "telegram-v2-host-beta"))]
     pub(crate) outbound_state: Arc<dyn OutboundStateStore>,
-    #[cfg(feature = "slack-v2-host-beta")]
+    #[cfg(any(feature = "slack-v2-host-beta", feature = "telegram-v2-host-beta"))]
     pub(crate) delivered_gate_routes: Arc<dyn DeliveredGateRouteStore>,
-    #[cfg(feature = "slack-v2-host-beta")]
+    #[cfg(any(feature = "slack-v2-host-beta", feature = "telegram-v2-host-beta"))]
     pub(crate) triggered_run_delivery: Arc<dyn TriggeredRunDeliveryStore>,
 }
 
@@ -3768,11 +3870,11 @@ fn local_dev_outbound_store(filesystem: Arc<LocalDevRootFilesystem>) -> LocalDev
     );
     LocalDevOutboundStores {
         outbound_preferences: Arc::clone(&store) as Arc<dyn CommunicationPreferenceRepository>,
-        #[cfg(feature = "slack-v2-host-beta")]
+        #[cfg(any(feature = "slack-v2-host-beta", feature = "telegram-v2-host-beta"))]
         outbound_state: Arc::clone(&store) as Arc<dyn OutboundStateStore>,
-        #[cfg(feature = "slack-v2-host-beta")]
+        #[cfg(any(feature = "slack-v2-host-beta", feature = "telegram-v2-host-beta"))]
         delivered_gate_routes: Arc::clone(&store) as Arc<dyn DeliveredGateRouteStore>,
-        #[cfg(feature = "slack-v2-host-beta")]
+        #[cfg(any(feature = "slack-v2-host-beta", feature = "telegram-v2-host-beta"))]
         triggered_run_delivery: store as Arc<dyn TriggeredRunDeliveryStore>,
     }
 }
@@ -3791,11 +3893,11 @@ fn local_dev_outbound_store(_filesystem: Arc<LocalDevRootFilesystem>) -> LocalDe
     let outbound = Arc::new(InMemoryOutboundStateStore::default());
     LocalDevOutboundStores {
         outbound_preferences: Arc::clone(&outbound) as Arc<dyn CommunicationPreferenceRepository>,
-        #[cfg(feature = "slack-v2-host-beta")]
+        #[cfg(any(feature = "slack-v2-host-beta", feature = "telegram-v2-host-beta"))]
         outbound_state: outbound as Arc<dyn OutboundStateStore>,
-        #[cfg(feature = "slack-v2-host-beta")]
+        #[cfg(any(feature = "slack-v2-host-beta", feature = "telegram-v2-host-beta"))]
         delivered_gate_routes: Arc::new(InMemoryDeliveredGateRouteStore::default()),
-        #[cfg(feature = "slack-v2-host-beta")]
+        #[cfg(any(feature = "slack-v2-host-beta", feature = "telegram-v2-host-beta"))]
         triggered_run_delivery: Arc::new(InMemoryTriggeredRunDeliveryStore::default()),
     }
 }
@@ -3810,6 +3912,20 @@ fn local_dev_slack_host_state_filesystem(
     Arc::new(ScopedFilesystem::new(
         filesystem,
         crate::slack_host_state_mount_view,
+    ))
+}
+
+#[cfg(all(
+    any(feature = "libsql", feature = "postgres"),
+    feature = "telegram-v2-host-beta"
+))]
+fn local_dev_telegram_host_state_filesystem(
+    filesystem: Arc<LocalDevRootFilesystem>,
+) -> Arc<ScopedFilesystem<dyn RootFilesystem>> {
+    let filesystem: Arc<dyn RootFilesystem> = filesystem;
+    Arc::new(ScopedFilesystem::new(
+        filesystem,
+        crate::telegram_host_state_mount_view,
     ))
 }
 
@@ -4081,7 +4197,10 @@ pub fn builtin_first_party_trust_policy() -> Result<HostTrustPolicy, RebornBuild
         local_dev_capability_policy().map_err(|error| RebornBuildError::InvalidConfig {
             reason: format!("local-dev capability policy is invalid: {error}"),
         })?;
-    #[cfg_attr(not(feature = "slack-v2-host-beta"), allow(unused_mut))]
+    #[cfg_attr(
+        not(any(feature = "slack-v2-host-beta", feature = "telegram-v2-host-beta")),
+        allow(unused_mut)
+    )]
     let mut entries = vec![
         AdminEntry::for_local_manifest(
             policy.provider.id,
@@ -4196,6 +4315,19 @@ pub fn builtin_first_party_trust_policy() -> Result<HostTrustPolicy, RebornBuild
         Some(slack_manifest_digest()),
         HostTrustAssignment::first_party(),
         slack_user_allowed_effects(),
+        None,
+    ));
+    // Zero-tool channel package (like slack_bot): activation registers the
+    // channel surface only, so no capability effects are granted.
+    #[cfg(feature = "telegram-v2-host-beta")]
+    entries.push(AdminEntry::for_local_manifest(
+        PackageId::new("telegram").map_err(|error| RebornBuildError::InvalidConfig {
+            reason: format!("Telegram first-party package id is invalid: {error}"),
+        })?,
+        "/system/extensions/telegram/manifest.toml".to_string(),
+        Some(telegram_manifest_digest()),
+        HostTrustAssignment::first_party(),
+        Vec::new(),
         None,
     ));
     HostTrustPolicy::new(vec![Box::new(AdminConfig::with_entries(entries))]).map_err(|error| {
@@ -5812,11 +5944,11 @@ mod tests {
             project_service: Arc::clone(&base_runtime.project_service),
             outbound_preferences: Arc::clone(&base_runtime.outbound_preferences),
             skill_auto_activate_learned: Arc::clone(&base_runtime.skill_auto_activate_learned),
-            #[cfg(feature = "slack-v2-host-beta")]
+            #[cfg(any(feature = "slack-v2-host-beta", feature = "telegram-v2-host-beta"))]
             outbound_state: Arc::clone(&base_runtime.outbound_state),
-            #[cfg(feature = "slack-v2-host-beta")]
+            #[cfg(any(feature = "slack-v2-host-beta", feature = "telegram-v2-host-beta"))]
             delivered_gate_routes: Arc::clone(&base_runtime.delivered_gate_routes),
-            #[cfg(feature = "slack-v2-host-beta")]
+            #[cfg(any(feature = "slack-v2-host-beta", feature = "telegram-v2-host-beta"))]
             triggered_run_delivery: Arc::clone(&base_runtime.triggered_run_delivery),
             #[cfg(not(any(feature = "libsql", feature = "postgres")))]
             trigger_conversation_services: base_runtime.trigger_conversation_services.clone(),
@@ -5832,7 +5964,11 @@ mod tests {
             budget_gate_store: Arc::clone(&base_runtime.budget_gate_store),
             skill_management: Arc::clone(&base_runtime.skill_management),
             extension_management: base_runtime.extension_management.clone(),
-            #[cfg(any(feature = "slack-v2-host-beta", test))]
+            #[cfg(any(
+                feature = "slack-v2-host-beta",
+                feature = "telegram-v2-host-beta",
+                test
+            ))]
             channel_connection_facade_slot: Arc::clone(
                 &base_runtime.channel_connection_facade_slot,
             ),
@@ -5847,6 +5983,10 @@ mod tests {
             workspace_filesystem: Arc::clone(&base_runtime.workspace_filesystem),
             #[cfg(feature = "slack-v2-host-beta")]
             host_state_filesystem: Arc::clone(&base_runtime.host_state_filesystem),
+            #[cfg(feature = "telegram-v2-host-beta")]
+            telegram_host_state_filesystem: Arc::clone(
+                &base_runtime.telegram_host_state_filesystem,
+            ),
             #[cfg(any(feature = "libsql", feature = "postgres"))]
             identity_filesystem: Arc::clone(&base_runtime.identity_filesystem),
             #[cfg(feature = "webui-v2-beta")]
@@ -6237,7 +6377,7 @@ mod tests {
     fn attach_hosted_mcp_runtime_skips_services_without_http_egress() {
         let services = HostRuntimeServices::new(
             Arc::new(ExtensionRegistry::new()),
-            Arc::new(LocalFilesystem::new()),
+            Arc::new(DiskFilesystem::new()),
             Arc::new(InMemoryResourceGovernor::new()),
             Arc::new(GrantAuthorizer::new()),
             ProcessServices::in_memory(),
@@ -7434,7 +7574,7 @@ mod tests {
     fn attach_hosted_mcp_runtime_skips_services_without_runtime_http_egress() {
         let services = HostRuntimeServices::new(
             Arc::new(ExtensionRegistry::new()),
-            Arc::new(LocalFilesystem::new()),
+            Arc::new(DiskFilesystem::new()),
             Arc::new(InMemoryResourceGovernor::new()),
             Arc::new(GrantAuthorizer::new()),
             ProcessServices::in_memory(),

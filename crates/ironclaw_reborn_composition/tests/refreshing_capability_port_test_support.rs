@@ -20,7 +20,7 @@ use ironclaw_approvals::test_support::{
     in_memory_backed_capability_permission_override_store,
     in_memory_backed_persistent_approval_policy_store,
 };
-use ironclaw_authorization::InMemoryCapabilityLeaseStore;
+use ironclaw_authorization::in_memory_backed_capability_lease_store;
 use ironclaw_host_api::{
     AgentId, CapabilityDescriptor, CapabilityId, EffectKind, ExtensionId, MountAlias, MountGrant,
     MountPermissions, MountView, PermissionMode, ProjectId, ProviderToolName, ResourceEstimate,
@@ -50,7 +50,6 @@ use ironclaw_reborn_composition::test_support::{
     RefreshingLocalDevCapabilityPortTestParts,
     create_refreshing_local_dev_capability_port_for_test,
 };
-use ironclaw_run_state::InMemoryApprovalRequestStore;
 use ironclaw_turns::run_profile::{
     AgentLoopHostError, AgentLoopHostErrorKind, CapabilityInputRef, CapabilityInvocation,
     CapabilityOutcome, InMemoryLoopHostMilestoneSink, InMemoryRunProfileResolver, LoopRunContext,
@@ -405,8 +404,8 @@ fn test_parts(
         tool_permission_overrides: Arc::new(in_memory_backed_capability_permission_override_store()),
         auto_approve_settings: Arc::new(in_memory_backed_auto_approve_setting_store()),
         persistent_approval_policies: Arc::new(in_memory_backed_persistent_approval_policy_store()),
-        approval_requests: Arc::new(InMemoryApprovalRequestStore::new()),
-        capability_leases: Arc::new(InMemoryCapabilityLeaseStore::new()),
+        approval_requests: Arc::new(ironclaw_run_state::in_memory_backed_approval_request_store()),
+        capability_leases: Arc::new(in_memory_backed_capability_lease_store()),
         capability_execution_mount_overrides,
         additional_provider_trust,
         capability_id_filter,
