@@ -1,6 +1,6 @@
 """Live QA runner for Reborn WebUI v2.
 
-This lane intentionally starts the standalone ``ironclaw-reborn serve`` binary
+This lane intentionally starts the standalone ``ironclaw serve`` binary
 and drives the React WebUI v2 surface with Playwright. It does not use the
 legacy gateway stack and does not mock the LLM provider.
 """
@@ -395,7 +395,7 @@ def build_reborn_binary() -> Path:
     )
     binary = _reborn_binary()
     if not binary.exists():
-        raise LiveQaError(f"ironclaw-reborn binary was not produced at {binary}")
+        raise LiveQaError(f"ironclaw binary was not produced at {binary}")
     return binary
 
 
@@ -818,7 +818,7 @@ async def start_reborn_server(
     workspace_dir.mkdir(parents=True, exist_ok=True)
     out = stdout_path.open("a", encoding="utf-8")
     err = stderr_path.open("a", encoding="utf-8")
-    separator = f"\n--- ironclaw-reborn serve start {time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())} ---\n"
+    separator = f"\n--- ironclaw serve start {time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())} ---\n"
     out.write(separator)
     err.write(separator)
     out.flush()
@@ -847,7 +847,7 @@ async def start_reborn_server(
         if stderr_path.exists():
             tail = "\n".join(stderr_path.read_text(encoding="utf-8", errors="replace").splitlines()[-80:])
         raise LiveQaError(
-            f"ironclaw-reborn serve did not become healthy at {base_url}: {exc}\n{tail}"
+            f"ironclaw serve did not become healthy at {base_url}: {exc}\n{tail}"
         ) from exc
     return proc, base_url
 
@@ -7935,7 +7935,7 @@ async def run_cases(args: argparse.Namespace) -> int:
     binary = _reborn_binary() if args.skip_build else build_reborn_binary()
     if not binary.exists():
         raise LiveQaError(
-            f"ironclaw-reborn binary missing at {binary}; rerun without --skip-build"
+            f"ironclaw binary missing at {binary}; rerun without --skip-build"
         )
     results: list[ProbeResult] = []
     trace_exports: list[dict[str, object]] = []

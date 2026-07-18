@@ -2882,7 +2882,7 @@ fn config_init_writes_both_files() {
         .env_remove("USERPROFILE")
         .env("IRONCLAW_REBORN_HOME", &reborn_home)
         .output()
-        .expect("ironclaw-reborn config init should run");
+        .expect("ironclaw config init should run");
     assert!(
         output.status.success(),
         "stderr: {}",
