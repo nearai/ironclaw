@@ -1,8 +1,7 @@
 mod support;
 
-use support::legacy_capability_fixture_to_v2;
+use support::{RecordingExecutor, legacy_capability_fixture_to_v2};
 
-use async_trait::async_trait;
 use ironclaw_dispatcher::*;
 use ironclaw_extensions::*;
 use ironclaw_filesystem::*;
@@ -17,14 +16,12 @@ async fn vertical_slice_discovers_and_dispatches_registered_runtime_adapters() {
     assert_eq!(registry.extensions().count(), 3);
 
     let governor = InMemoryResourceGovernor::new();
-    let wasm_adapter = EchoAdapter::new(RuntimeKind::Wasm);
-    let script_adapter = EchoAdapter::new(RuntimeKind::Script);
-    let mcp_adapter = EchoAdapter::new(RuntimeKind::Mcp);
     let scope = sample_scope();
-    let dispatcher = RuntimeDispatcher::new(&registry, &fs, &governor)
-        .with_runtime_adapter(RuntimeKind::Wasm, &wasm_adapter)
-        .with_runtime_adapter(RuntimeKind::Script, &script_adapter)
-        .with_runtime_adapter(RuntimeKind::Mcp, &mcp_adapter);
+    let executor = RecordingExecutor::new()
+        .echo(RuntimeKind::Wasm)
+        .echo(RuntimeKind::Script)
+        .echo(RuntimeKind::Mcp);
+    let dispatcher = RuntimeDispatcher::new(&registry, &fs, &governor, executor);
 
     let wasm_scope = scope.clone();
     let wasm_account = ResourceAccount::tenant(wasm_scope.tenant_id.clone());
@@ -111,70 +108,6 @@ async fn vertical_slice_discovers_and_dispatches_registered_runtime_adapters() {
         ResourceTally::default()
     );
     assert_eq!(mcp.usage.process_count, 1);
-}
-
-#[derive(Clone)]
-struct EchoAdapter {
-    runtime: RuntimeKind,
-}
-
-impl EchoAdapter {
-    fn new(runtime: RuntimeKind) -> Self {
-        Self { runtime }
-    }
-}
-
-#[async_trait]
-impl RuntimeAdapter<DiskFilesystem, InMemoryResourceGovernor> for EchoAdapter {
-    async fn dispatch_json(
-        &self,
-        request: RuntimeAdapterRequest<'_, DiskFilesystem, InMemoryResourceGovernor>,
-    ) -> Result<RuntimeAdapterResult, DispatchError> {
-        let output = request.input;
-        let usage = ResourceUsage::default()
-            .set_output_bytes(serde_json::to_vec(&output).unwrap().len() as u64)
-            .set_process_count(u32::from(matches!(
-                self.runtime,
-                RuntimeKind::Script | RuntimeKind::Mcp
-            )));
-        let reservation = request
-            .governor
-            .reserve(request.scope, request.estimate)
-            .map_err(|_| {
-                dispatch_error_for_runtime(self.runtime, RuntimeDispatchErrorKind::Resource)
-            })?;
-        let receipt = request
-            .governor
-            .reconcile(reservation.id, usage.clone())
-            .map_err(|_| {
-                dispatch_error_for_runtime(self.runtime, RuntimeDispatchErrorKind::Resource)
-            })?;
-        Ok(RuntimeAdapterResult {
-            output,
-            display_preview: None,
-            output_bytes: usage.output_bytes,
-            usage,
-            receipt,
-        })
-    }
-}
-
-fn dispatch_error_for_runtime(
-    runtime: RuntimeKind,
-    kind: RuntimeDispatchErrorKind,
-) -> DispatchError {
-    match runtime {
-        RuntimeKind::Wasm => DispatchError::Wasm {
-            kind,
-            safe_summary: None,
-        },
-        RuntimeKind::Script => DispatchError::Script { kind },
-        RuntimeKind::Mcp => DispatchError::Mcp { kind },
-        RuntimeKind::FirstParty | RuntimeKind::System => DispatchError::UnsupportedRuntime {
-            capability: CapabilityId::new("system.unsupported").unwrap(),
-            runtime,
-        },
-    }
 }
 
 fn filesystem_with_echo_extensions() -> DiskFilesystem {

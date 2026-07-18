@@ -14,10 +14,10 @@ use super::{
     McpError, McpExecutionRequest, McpExecutor, McpInvocation, NetworkObligationPolicyStore,
     PlannerError, PreparedWitTool, ResourceGovernor, ResourceReservationId, ResourceScope,
     RootFilesystem, RuntimeAdapter, RuntimeAdapterRequest, RuntimeAdapterResult,
-    RuntimeDispatchErrorKind, RuntimeKind, ScriptError, ScriptExecutionRequest, ScriptExecutor,
-    ScriptInvocation, SharedRuntimeHttpEgress, WasmError, WasmRuntimeCredentialProvider,
-    WasmRuntimeHttpAdapter, WasmRuntimePolicyDiscarder, WitToolHost, WitToolRuntime,
-    WitToolRuntimeConfig, plan_capability, runtime_http_egress,
+    RuntimeDispatchErrorKind, RuntimeExecutor, RuntimeKind, RuntimeLane, ScriptError,
+    ScriptExecutionRequest, ScriptExecutor, ScriptInvocation, SharedRuntimeHttpEgress, WasmError,
+    WasmRuntimeCredentialProvider, WasmRuntimeHttpAdapter, WasmRuntimePolicyDiscarder, WitToolHost,
+    WitToolRuntime, WitToolRuntimeConfig, plan_capability, runtime_http_egress,
 };
 use crate::{
     FirstPartyCapabilityError,
@@ -168,6 +168,102 @@ where
             })?;
 
         self.inner.dispatch_json(request).await
+    }
+}
+
+/// Closed runtime-lane router: the host-runtime-side [`RuntimeExecutor`] the
+/// dispatcher monomorphizes over (arch-simplification §4.2, `dyn`→enum collapse
+/// of the capability hot path). Each configured lane is a field; adding a
+/// [`RuntimeLane`] variant is a compile error until the two exhaustive matches
+/// below handle it (the §4.2 safety property).
+///
+/// Lanes are `Option` because composition wires them conditionally on which
+/// runtimes are configured — exactly as the prior per-lane registry populated
+/// only the configured `RuntimeKind`s. The dispatcher checks
+/// [`RuntimeExecutor::supports_lane`] before selecting a runtime, so an
+/// unconfigured lane fails closed with `MissingRuntimeBackend` and no
+/// reservation.
+pub(super) struct RuntimeLaneExecutor {
+    first_party: Option<FirstPartyRuntimeAdapter>,
+    wasm: Option<ServiceResolvedRuntimeAdapter<WasmRuntimeAdapter>>,
+    mcp: Option<ServiceResolvedRuntimeAdapter<McpRuntimeAdapter>>,
+    process: Option<ServiceResolvedRuntimeAdapter<ScriptRuntimeAdapter>>,
+}
+
+impl RuntimeLaneExecutor {
+    pub(super) fn new(
+        first_party: Option<FirstPartyRuntimeAdapter>,
+        wasm: Option<ServiceResolvedRuntimeAdapter<WasmRuntimeAdapter>>,
+        mcp: Option<ServiceResolvedRuntimeAdapter<McpRuntimeAdapter>>,
+        process: Option<ServiceResolvedRuntimeAdapter<ScriptRuntimeAdapter>>,
+    ) -> Self {
+        Self {
+            first_party,
+            wasm,
+            mcp,
+            process,
+        }
+    }
+}
+
+#[async_trait]
+impl<F, G> RuntimeExecutor<F, G> for RuntimeLaneExecutor
+where
+    F: RootFilesystem,
+    G: ResourceGovernor,
+{
+    fn supports_lane(&self, lane: RuntimeLane) -> bool {
+        match lane {
+            RuntimeLane::FirstParty => self.first_party.is_some(),
+            RuntimeLane::Wasm => self.wasm.is_some(),
+            RuntimeLane::Mcp => self.mcp.is_some(),
+            RuntimeLane::Process => self.process.is_some(),
+        }
+    }
+
+    async fn dispatch_json(
+        &self,
+        lane: RuntimeLane,
+        request: RuntimeAdapterRequest<'_, F, G>,
+    ) -> Result<RuntimeAdapterResult, DispatchError> {
+        match lane {
+            RuntimeLane::FirstParty => {
+                dispatch_configured_lane(self.first_party.as_ref(), request).await
+            }
+            RuntimeLane::Wasm => dispatch_configured_lane(self.wasm.as_ref(), request).await,
+            RuntimeLane::Mcp => dispatch_configured_lane(self.mcp.as_ref(), request).await,
+            RuntimeLane::Process => dispatch_configured_lane(self.process.as_ref(), request).await,
+        }
+    }
+}
+
+/// Delegate to a lane's concrete adapter, or fail closed if the lane is
+/// unconfigured. The dispatcher gates this with `supports_lane`, so the `None`
+/// arm is defensive; it still releases any prepared reservation rather than
+/// leaking it.
+async fn dispatch_configured_lane<F, G, A>(
+    adapter: Option<&A>,
+    request: RuntimeAdapterRequest<'_, F, G>,
+) -> Result<RuntimeAdapterResult, DispatchError>
+where
+    F: RootFilesystem,
+    G: ResourceGovernor,
+    A: RuntimeAdapter<F, G> + ?Sized,
+{
+    match adapter {
+        Some(adapter) => adapter.dispatch_json(request).await,
+        None => {
+            release_adapter_reservation(
+                request.governor,
+                request
+                    .resource_reservation
+                    .as_ref()
+                    .map(|reservation| reservation.id),
+            );
+            Err(DispatchError::MissingRuntimeBackend {
+                runtime: request.descriptor.runtime,
+            })
+        }
     }
 }
 
