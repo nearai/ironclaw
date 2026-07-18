@@ -228,6 +228,14 @@ string_id!(SystemServiceId, "system_service", validate_name_segment);
 // names the product surface a direct-user `Product` invocation entered through.
 string_id!(ProductKind, "product", validate_name_segment);
 string_id!(RoutineId, "routine", validate_name_segment);
+// Slice-C kernel vocabulary (arch-simplification §3): an opaque correlation
+// handle to a durably-stored host-error record. The recoverability *class* rides
+// the `HostFailure` variant (transient/permanent/uncertain); the raw cause stays
+// host-owned and is retrieved only through this ref — the "sanitized category
+// plus opaque invocation ID for correlation" contract (error-handling.md). Uses
+// scope-id validation (bounded, no path separators / control chars) so it can
+// carry an existing id (invocation/correlation) verbatim.
+string_id!(ErrRef, "err_ref", validate_scope_id);
 
 /// Provider-facing tool/function name.
 ///
