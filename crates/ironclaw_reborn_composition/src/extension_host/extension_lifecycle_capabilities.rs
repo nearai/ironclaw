@@ -831,7 +831,6 @@ mod tests {
             EXTENSION_REMOVE_CAPABILITY_ID,
             remove_context,
             serde_json::json!({"extension_id": "slack"}),
-            trust_decision(),
         )
         .await
         .expect("remove succeeds");
@@ -845,7 +844,6 @@ mod tests {
             EXTENSION_REMOVE_CAPABILITY_ID,
             retry_remove_context,
             serde_json::json!({"extension_id": "slack"}),
-            trust_decision(),
         )
         .await
         .expect("retrying removal after the package is absent succeeds");
@@ -1015,7 +1013,6 @@ credential_handle = "channel_ext_token"
             EXTENSION_REMOVE_CAPABILITY_ID,
             remove_context,
             serde_json::json!({"extension_id": "channel-ext"}),
-            trust_decision(),
         )
         .await
         .expect("tool removal succeeds");
@@ -1098,7 +1095,6 @@ credential_handle = "channel_ext_token"
             EXTENSION_REMOVE_CAPABILITY_ID,
             remove_context,
             serde_json::json!({"extension_id": "slack"}),
-            trust_decision(),
         )
         .await
         .expect_err("personal cleanup without an authenticated actor must fail closed");
@@ -1312,7 +1308,6 @@ credential_handle = "channel_ext_token"
                 [EXTENSION_ACTIVATE_CAPABILITY_ID],
             ),
             serde_json::json!({"extension_id": "github"}),
-            trust_decision(),
         )
         .await;
         let RuntimeCapabilityOutcome::Failed(failure) = outcome else {
@@ -1762,7 +1757,6 @@ credential_handle = "channel_ext_token"
             capability_id,
             execution_context([capability_id]),
             input,
-            trust_decision(),
         )
         .await
     }
@@ -1777,7 +1771,6 @@ credential_handle = "channel_ext_token"
             capability_id,
             execution_context([capability_id]),
             input,
-            trust_decision(),
         )
         .await
     }

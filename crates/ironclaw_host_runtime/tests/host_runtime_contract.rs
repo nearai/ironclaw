@@ -94,7 +94,6 @@ async fn default_runtime_returns_completed_outcome_for_authorized_dispatch() {
         capability_id(),
         ResourceEstimate::default(),
         json!({"message": "hello"}),
-        trust_decision_with_dispatch_authority(),
     )
     .with_idempotency_key(IdempotencyKey::new("turn-1/tool-1").unwrap());
 
@@ -137,7 +136,6 @@ async fn default_runtime_surfaces_approval_required_with_persisted_request_id() 
         capability_id(),
         ResourceEstimate::default(),
         json!({"message": "hello"}),
-        trust_decision_with_dispatch_authority(),
     );
 
     let outcome = runtime.invoke_capability(request).await.unwrap();
@@ -181,7 +179,6 @@ async fn default_runtime_uses_combined_store_for_atomic_approval_block() {
         capability_id(),
         ResourceEstimate::default(),
         json!({"message": "hello"}),
-        trust_decision_with_dispatch_authority(),
     );
 
     let outcome = runtime.invoke_capability(request).await.unwrap();
@@ -251,7 +248,6 @@ async fn default_runtime_propagates_unavailable_when_run_state_lookup_fails_duri
         capability_id(),
         ResourceEstimate::default(),
         json!({"message": "hello"}),
-        trust_decision_with_dispatch_authority(),
     );
 
     let outcome = runtime.invoke_capability(request).await;
@@ -290,7 +286,6 @@ async fn default_runtime_returns_failed_for_unknown_capability() {
         capability_id(),
         ResourceEstimate::default(),
         json!({}),
-        trust_decision_with_dispatch_authority(),
     );
 
     let outcome = runtime.invoke_capability(request).await.unwrap();
@@ -341,7 +336,6 @@ async fn default_runtime_surfaces_authorization_failure_when_authorizer_denies()
         capability_id(),
         ResourceEstimate::default(),
         json!({}),
-        trust_decision_with_dispatch_authority(),
     );
 
     let outcome = runtime.invoke_capability(request).await.unwrap();
@@ -386,7 +380,6 @@ async fn default_runtime_idempotency_key_is_advisory_and_does_not_dedupe() {
         capability_id(),
         ResourceEstimate::default(),
         json!({"n": 1}),
-        trust_decision_with_dispatch_authority(),
     )
     .with_idempotency_key(key.clone());
     let _ = runtime.invoke_capability(request_a).await.unwrap();
@@ -397,7 +390,6 @@ async fn default_runtime_idempotency_key_is_advisory_and_does_not_dedupe() {
         capability_id(),
         ResourceEstimate::default(),
         json!({"n": 2}),
-        trust_decision_with_dispatch_authority(),
     )
     .with_idempotency_key(key);
     let _ = runtime.invoke_capability(request_b).await.unwrap();

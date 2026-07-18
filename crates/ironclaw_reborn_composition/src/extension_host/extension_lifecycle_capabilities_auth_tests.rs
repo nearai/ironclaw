@@ -9,7 +9,6 @@ use ironclaw_host_api::{
     TrustClass, UserId,
 };
 use ironclaw_host_runtime::{RuntimeCapabilityOutcome, RuntimeFailureKind};
-use ironclaw_trust::{AuthorityCeiling, EffectiveTrustClass, TrustDecision, TrustProvenance};
 
 use crate::extension_host::extension_lifecycle::RebornLocalExtensionManagementPort;
 use crate::extension_host::extension_lifecycle_capabilities::{
@@ -269,7 +268,6 @@ async fn invoke_json_with_context(
         capability_id,
         context,
         input,
-        trust_decision(),
     )
     .await
 }
@@ -285,7 +283,6 @@ async fn invoke_outcome_with_context(
         capability_id,
         context,
         input,
-        trust_decision(),
     )
     .await
 }
@@ -381,16 +378,4 @@ fn allowed_effects() -> Vec<EffectKind> {
         EffectKind::WriteFilesystem,
         EffectKind::Network,
     ]
-}
-
-fn trust_decision() -> TrustDecision {
-    TrustDecision {
-        effective_trust: EffectiveTrustClass::user_trusted(),
-        authority_ceiling: AuthorityCeiling {
-            allowed_effects: allowed_effects(),
-            max_resource_ceiling: None,
-        },
-        provenance: TrustProvenance::Default,
-        evaluated_at: chrono::Utc::now(),
-    }
 }

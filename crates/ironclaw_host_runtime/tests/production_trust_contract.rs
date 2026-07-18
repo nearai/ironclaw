@@ -5,7 +5,6 @@ use support::legacy_capability_fixture_to_v2;
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
-use chrono::Utc;
 use ironclaw_authorization::{GrantAuthorizer, TrustAwareCapabilityDispatchAuthorizer};
 use ironclaw_extensions::{ExtensionManifest, ExtensionPackage, ExtensionRegistry, ManifestSource};
 use ironclaw_host_api::*;
@@ -14,9 +13,8 @@ use ironclaw_host_runtime::{
     RuntimeCapabilityRequest, RuntimeFailureKind,
 };
 use ironclaw_trust::{
-    AdminConfig, AdminEntry, AuthorityCeiling, EffectiveTrustClass, HostTrustAssignment,
-    HostTrustPolicy, InvalidationBus, TrustDecision, TrustPolicy, TrustPolicyInput,
-    TrustProvenance,
+    AdminConfig, AdminEntry, HostTrustAssignment, HostTrustPolicy, InvalidationBus,
+    TrustPolicyInput,
 };
 use serde_json::json;
 
@@ -28,39 +26,11 @@ fn local_test_runtime_policy() -> ironclaw_host_api::runtime_policy::EffectiveRu
     .unwrap()
 }
 
-#[tokio::test]
-async fn production_runtime_ignores_caller_supplied_privileged_trust_decision() {
-    let registry = Arc::new(registry_with_manifest(LOCAL_INSTALLED_MANIFEST));
-    let dispatcher = Arc::new(CountingDispatcher::default());
-    let authorizer: Arc<dyn TrustAwareCapabilityDispatchAuthorizer> = Arc::new(GrantAuthorizer);
-    let runtime = DefaultHostRuntime::new(
-        Arc::clone(&registry),
-        dispatcher.clone(),
-        authorizer,
-        CapabilitySurfaceVersion::new("surface-v1").unwrap(),
-        local_test_runtime_policy(),
-    );
-
-    let forged_decision = privileged_local_manifest_policy()
-        .evaluate(&trust_input_for_registry(&registry))
-        .unwrap();
-    let request = RuntimeCapabilityRequest::new(
-        execution_context_with_dispatch_grant(TrustClass::FirstParty),
-        capability_id(),
-        ResourceEstimate::default(),
-        json!({"message": "must not dispatch"}),
-        forged_decision,
-    );
-
-    let outcome = runtime.invoke_capability(request).await.unwrap();
-
-    assert_authorization_failed(outcome);
-    assert_eq!(
-        dispatcher.count(),
-        0,
-        "stale or caller-supplied privileged TrustDecision must not authorize dispatch"
-    );
-}
+// The former `production_runtime_ignores_caller_supplied_privileged_trust_decision`
+// test forged a caller-supplied `trust_decision` to prove the host ignored it.
+// That attack surface is now structurally eliminated: the request types no longer
+// carry a `trust_decision` field, so there is nothing for a caller to forge — the
+// host always evaluates trust itself.
 
 #[tokio::test]
 async fn production_runtime_uses_host_policy_decision_instead_of_request_claims() {
@@ -81,7 +51,6 @@ async fn production_runtime_uses_host_policy_decision_instead_of_request_claims(
         capability_id(),
         ResourceEstimate::default(),
         json!({"message": "host policy decides"}),
-        sandbox_caller_decision(),
     );
 
     let outcome = runtime.invoke_capability(request).await.unwrap();
@@ -116,13 +85,11 @@ async fn trust_downgrade_denies_future_invocation_before_dispatch_side_effects()
     .with_trust_policy(Arc::clone(&policy));
 
     let trusted_input = trust_input_for_registry(&registry);
-    let stale_privileged_decision = policy.evaluate(&trusted_input).unwrap();
     let first = RuntimeCapabilityRequest::new(
         execution_context_with_dispatch_grant(TrustClass::Sandbox),
         capability_id(),
         ResourceEstimate::default(),
         json!({"message": "before downgrade"}),
-        sandbox_caller_decision(),
     );
     let first_outcome = runtime.invoke_capability(first).await.unwrap();
     assert!(
@@ -152,7 +119,6 @@ async fn trust_downgrade_denies_future_invocation_before_dispatch_side_effects()
         capability_id(),
         ResourceEstimate::default(),
         json!({"message": "after downgrade"}),
-        stale_privileged_decision,
     );
     let second_outcome = runtime.invoke_capability(second).await.unwrap();
 
@@ -292,15 +258,6 @@ fn execution_context_with_dispatch_grant(trust: TrustClass) -> ExecutionContext 
         MountView::default(),
     )
     .unwrap()
-}
-
-fn sandbox_caller_decision() -> TrustDecision {
-    TrustDecision {
-        effective_trust: EffectiveTrustClass::sandbox(),
-        authority_ceiling: AuthorityCeiling::empty(),
-        provenance: TrustProvenance::Default,
-        evaluated_at: Utc::now(),
-    }
 }
 
 fn capability_id() -> CapabilityId {

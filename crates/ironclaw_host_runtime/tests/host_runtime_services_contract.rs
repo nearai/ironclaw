@@ -1505,7 +1505,6 @@ async fn host_runtime_services_builds_dispatcher_runtime_and_health_from_registe
         script_capability_id(),
         ResourceEstimate::default(),
         json!({"message": "from services"}),
-        trust_decision_with_dispatch_authority(),
     );
 
     let outcome = runtime.invoke_capability(request).await.unwrap();
@@ -1623,7 +1622,6 @@ async fn host_runtime_services_writes_runtime_events_to_durable_event_log_metada
             script_capability_id(),
             ResourceEstimate::default(),
             payload.clone(),
-            trust_decision_with_dispatch_authority(),
         ))
         .await
         .unwrap();
@@ -1720,7 +1718,6 @@ async fn host_runtime_services_consumes_reborn_jsonl_event_store_without_v1_comp
             script_capability_id(),
             ResourceEstimate::default(),
             json!({"message": "from jsonl store"}),
-            trust_decision_with_dispatch_authority(),
         ))
         .await
         .unwrap();
@@ -1787,7 +1784,6 @@ async fn host_runtime_services_durable_event_replay_cursor_and_gap_behavior() {
             script_capability_id(),
             ResourceEstimate::default(),
             json!({"message": "cursor replay"}),
-            trust_decision_with_dispatch_authority(),
         ))
         .await
         .unwrap();
@@ -1881,7 +1877,6 @@ async fn host_runtime_services_runtime_events_project_through_replay_projection_
             script_capability_id(),
             ResourceEstimate::default(),
             payload.clone(),
-            trust_decision_with_dispatch_authority(),
         ))
         .await
         .unwrap();
@@ -1972,7 +1967,6 @@ async fn host_runtime_services_projection_rejects_foreign_cursor_and_surfaces_re
             script_capability_id(),
             ResourceEstimate::default(),
             json!({"message": "scope a"}),
-            trust_decision_with_dispatch_authority(),
         ))
         .await
         .unwrap();
@@ -2078,7 +2072,6 @@ async fn host_runtime_services_jsonl_event_store_projects_same_runtime_sequence_
             script_capability_id(),
             ResourceEstimate::default(),
             payload.clone(),
-            trust_decision_with_dispatch_authority(),
         ))
         .await
         .unwrap();
@@ -2180,7 +2173,6 @@ async fn host_runtime_services_approval_resolution_projects_durable_audit_metada
             script_capability_id(),
             ResourceEstimate::default(),
             input.clone(),
-            trust_decision_with_dispatch_authority(),
         ))
         .await
         .unwrap();
@@ -2568,7 +2560,6 @@ async fn host_runtime_services_resumes_approved_capability_and_consumes_lease_on
             script_capability_id(),
             estimate.clone(),
             input.clone(),
-            trust_decision_with_dispatch_authority(),
         ))
         .await
         .unwrap();
@@ -2611,7 +2602,6 @@ async fn host_runtime_services_resumes_approved_capability_and_consumes_lease_on
             script_capability_id(),
             estimate,
             input,
-            trust_decision_with_dispatch_authority(),
         ))
         .await
         .unwrap();
@@ -2668,7 +2658,6 @@ async fn host_runtime_services_resume_missing_runtime_secret_returns_auth_gate()
             script_capability_id(),
             estimate,
             input,
-            trust_decision_with_dispatch_authority(),
         ))
         .await
         .unwrap();
@@ -2729,7 +2718,6 @@ async fn host_runtime_services_resume_changed_input_fails_before_lease_claim_or_
             script_capability_id(),
             estimate,
             json!({"message": "changed"}),
-            trust_decision_with_dispatch_authority(),
         ))
         .await
         .unwrap();
@@ -2777,7 +2765,6 @@ async fn host_runtime_services_resume_wrong_user_scope_is_hidden_before_dispatch
             script_capability_id(),
             estimate,
             input,
-            trust_decision_with_dispatch_authority(),
         ))
         .await
         .unwrap();
@@ -2831,7 +2818,6 @@ async fn host_runtime_services_resume_expired_lease_fails_before_dispatch() {
             script_capability_id(),
             estimate,
             input,
-            trust_decision_with_dispatch_authority(),
         ))
         .await
         .unwrap();
@@ -2876,7 +2862,6 @@ async fn host_runtime_services_resume_trust_preflight_failure_fails_only_matchin
             script_capability_id(),
             estimate.clone(),
             input.clone(),
-            trust_decision_with_dispatch_authority(),
         ))
         .await
         .unwrap();
@@ -2898,7 +2883,6 @@ async fn host_runtime_services_resume_trust_preflight_failure_fails_only_matchin
             script_capability_id(),
             estimate.clone(),
             input.clone(),
-            trust_decision_with_dispatch_authority(),
         ))
         .await
         .unwrap_err();
@@ -2921,7 +2905,6 @@ async fn host_runtime_services_resume_trust_preflight_failure_fails_only_matchin
             script_capability_id(),
             estimate,
             input,
-            trust_decision_with_dispatch_authority(),
         ))
         .await
         .unwrap();
@@ -2974,7 +2957,6 @@ async fn host_runtime_services_resume_runtime_policy_denial_fails_matching_block
             script_capability_id(),
             estimate,
             input,
-            trust_decision_with_dispatch_authority(),
         ))
         .await
         .unwrap();
@@ -3037,7 +3019,6 @@ async fn host_runtime_services_resume_rejects_changed_actor_before_preflight_mut
                 script_capability_id(),
                 estimate.clone(),
                 input.clone(),
-                trust_decision_with_dispatch_authority(),
             ))
             .await
             .unwrap();
@@ -3074,7 +3055,6 @@ async fn host_runtime_services_resume_rejects_changed_actor_before_preflight_mut
             script_capability_id(),
             estimate,
             input,
-            trust_decision_with_dispatch_authority(),
         ))
         .await
         .unwrap();
@@ -3123,7 +3103,6 @@ async fn host_runtime_services_auth_resume_rejects_changed_actor_before_prefligh
                 script_capability_id(),
                 estimate.clone(),
                 input.clone(),
-                trust_decision_with_dispatch_authority(),
                 None,
             ))
             .await
@@ -3149,7 +3128,6 @@ async fn host_runtime_services_auth_resume_rejects_changed_actor_before_prefligh
             script_capability_id(),
             estimate,
             input,
-            trust_decision_with_dispatch_authority(),
             None,
         ))
         .await
@@ -3205,7 +3183,6 @@ async fn host_runtime_services_resume_spawn_rejects_changed_actor_before_input_a
             process_sandbox_capability_id(),
             estimate.clone(),
             input.clone(),
-            process_sandbox_trust_decision(),
         ))
         .await
         .unwrap();
@@ -3241,7 +3218,6 @@ async fn host_runtime_services_resume_spawn_rejects_changed_actor_before_input_a
                 process_sandbox_capability_id(),
                 estimate.clone(),
                 input.clone(),
-                process_sandbox_trust_decision(),
             ))
             .await
             .unwrap();
@@ -3281,7 +3257,6 @@ async fn host_runtime_services_resume_spawn_rejects_changed_actor_before_input_a
             process_sandbox_capability_id(),
             estimate.clone(),
             invalid_process_sandbox_input(),
-            process_sandbox_trust_decision(),
         ))
         .await
         .unwrap();
@@ -3301,7 +3276,6 @@ async fn host_runtime_services_resume_spawn_rejects_changed_actor_before_input_a
             process_sandbox_capability_id(),
             estimate,
             input,
-            process_sandbox_trust_decision(),
         ))
         .await
         .unwrap();
@@ -3378,7 +3352,6 @@ async fn host_runtime_services_auth_resume_dispatches_blocked_auth_run() {
             script_capability_id(),
             estimate.clone(),
             input.clone(),
-            trust_decision_with_dispatch_authority(),
         ))
         .await
         .unwrap();
@@ -3410,7 +3383,6 @@ async fn host_runtime_services_auth_resume_dispatches_blocked_auth_run() {
             script_capability_id(),
             estimate.clone(),
             input.clone(),
-            trust_decision_with_dispatch_authority(),
             Some(gate.approval_request_id),
         ))
         .await
@@ -3504,7 +3476,6 @@ async fn host_runtime_services_auth_resume_trust_preflight_failure_fails_blocked
             script_capability_id(),
             estimate.clone(),
             input.clone(),
-            trust_decision_with_dispatch_authority(),
             None,
         ))
         .await
@@ -3533,7 +3504,6 @@ async fn host_runtime_services_auth_resume_trust_preflight_failure_fails_blocked
             script_capability_id(),
             estimate.clone(),
             input.clone(),
-            trust_decision_with_dispatch_authority(),
             None,
         ))
         .await
@@ -3625,7 +3595,6 @@ async fn host_runtime_services_auth_resume_with_approval_id_fails_blocked_auth_r
             script_capability_id(),
             estimate.clone(),
             input.clone(),
-            trust_decision_with_dispatch_authority(),
             Some(orphan_approval_id),
         ))
         .await
@@ -3675,7 +3644,6 @@ async fn host_runtime_services_resume_without_backing_stores_fails_closed() {
             script_capability_id(),
             ResourceEstimate::default(),
             json!({"message": "missing stores"}),
-            trust_decision_with_dispatch_authority(),
         ))
         .await
         .unwrap();
@@ -3960,7 +3928,6 @@ async fn host_runtime_spawn_process_sandbox_blocks_for_approval_before_executor(
             process_sandbox_capability_id(),
             estimate.clone(),
             input.clone(),
-            process_sandbox_trust_decision(),
         ))
         .await
         .unwrap();
@@ -3985,7 +3952,6 @@ async fn host_runtime_spawn_process_sandbox_blocks_for_approval_before_executor(
             process_sandbox_capability_id(),
             estimate,
             input,
-            process_sandbox_trust_decision(),
         ))
         .await
         .unwrap();
@@ -4034,7 +4000,6 @@ async fn host_runtime_spawn_process_sandbox_resume_changed_input_fails_before_ex
             process_sandbox_capability_id(),
             estimate.clone(),
             input,
-            process_sandbox_trust_decision(),
         ))
         .await
         .unwrap();
@@ -4052,7 +4017,6 @@ async fn host_runtime_spawn_process_sandbox_resume_changed_input_fails_before_ex
             process_sandbox_capability_id(),
             estimate,
             json!({"run": {"command": "echo", "args": ["changed"]}}),
-            process_sandbox_trust_decision(),
         ))
         .await
         .unwrap();
@@ -4109,7 +4073,6 @@ async fn host_runtime_spawn_process_sandbox_resume_invalid_plan_fails_before_exe
             process_sandbox_capability_id(),
             estimate.clone(),
             input,
-            process_sandbox_trust_decision(),
         ))
         .await
         .unwrap();
@@ -4130,7 +4093,6 @@ async fn host_runtime_spawn_process_sandbox_resume_invalid_plan_fails_before_exe
             process_sandbox_capability_id(),
             estimate,
             invalid_process_sandbox_input(),
-            process_sandbox_trust_decision(),
         ))
         .await
         .expect("invalid sandbox resume input must not be a terminal host runtime error");
@@ -4205,7 +4167,6 @@ async fn host_runtime_spawn_process_sandbox_resume_host_failure_fails_after_appr
             process_sandbox_capability_id(),
             estimate.clone(),
             input.clone(),
-            process_sandbox_trust_decision(),
         ))
         .await
         .unwrap();
@@ -4223,7 +4184,6 @@ async fn host_runtime_spawn_process_sandbox_resume_host_failure_fails_after_appr
             process_sandbox_capability_id(),
             estimate,
             input,
-            process_sandbox_trust_decision(),
         ))
         .await
         .unwrap();
@@ -4265,7 +4225,6 @@ async fn host_runtime_services_installs_builtin_obligation_handler_with_audit_si
             script_capability_id(),
             ResourceEstimate::default(),
             json!({"message": "audited through services"}),
-            trust_decision_with_dispatch_authority(),
         ))
         .await
         .unwrap();
@@ -4308,7 +4267,6 @@ async fn host_runtime_services_maps_script_exit_failure_through_private_adapter(
             script_capability_id(),
             ResourceEstimate::default(),
             json!({"message": "fail through services"}),
-            trust_decision_with_dispatch_authority(),
         ))
         .await
         .unwrap();
@@ -4336,7 +4294,6 @@ async fn host_runtime_services_maps_mcp_client_failure_through_private_adapter()
             mcp_capability_id(),
             ResourceEstimate::default(),
             json!({"query": "fail through services"}),
-            trust_decision_with_dispatch_authority(),
         ))
         .await
         .unwrap();
@@ -4383,7 +4340,6 @@ async fn host_runtime_services_applies_scoped_mount_obligation_to_script_runtime
             script_capability_id(),
             ResourceEstimate::default(),
             json!({"message": "mount narrowed"}),
-            trust_decision_with_dispatch_authority(),
         ))
         .await
         .unwrap();
@@ -4436,7 +4392,6 @@ async fn host_runtime_services_rejects_broader_scoped_mount_before_dispatch() {
             script_capability_id(),
             ResourceEstimate::default(),
             json!({"message": "broader mount"}),
-            trust_decision_with_dispatch_authority(),
         ))
         .await
         .unwrap();
@@ -4487,7 +4442,6 @@ async fn host_runtime_services_writes_obligation_audit_records_to_durable_log_me
             script_capability_id(),
             ResourceEstimate::default(),
             payload.clone(),
-            trust_decision_with_dispatch_authority(),
         ))
         .await
         .unwrap();
@@ -4616,7 +4570,6 @@ async fn host_runtime_services_projects_resource_network_secret_obligation_audit
                 .set_network_egress_bytes(10)
                 .set_output_bytes(100),
             payload.clone(),
-            trust_decision_with_dispatch_authority(),
         ))
         .await
         .unwrap();
@@ -4729,7 +4682,6 @@ async fn host_runtime_services_enforces_output_limit_and_reconciles_resource_usa
                 .set_concurrency_slots(1)
                 .set_output_bytes(1024),
             input,
-            trust_decision_with_dispatch_authority(),
         ))
         .await
         .unwrap();
@@ -4786,7 +4738,6 @@ async fn host_runtime_services_releases_reservation_when_dispatch_preflight_fail
             script_capability_id(),
             ResourceEstimate::default().set_concurrency_slots(1),
             json!({"message": "missing runtime after reservation"}),
-            trust_decision_with_dispatch_authority(),
         ))
         .await
         .unwrap();
@@ -4838,7 +4789,6 @@ async fn host_runtime_services_fails_closed_when_durable_obligation_audit_append
             script_capability_id(),
             ResourceEstimate::default(),
             json!({"message": "must not dispatch after audit append failure"}),
-            trust_decision_with_dispatch_authority(),
         ))
         .await
         .unwrap();
@@ -6126,7 +6076,6 @@ async fn invoke_capability_missing_credential_returns_auth_before_approval() {
             script_capability_id(),
             estimate,
             input,
-            trust_decision_with_dispatch_authority(),
         ))
         .await
         .unwrap();
@@ -6213,7 +6162,6 @@ async fn invoke_capability_present_credential_proceeds_to_approval() {
             script_capability_id(),
             estimate,
             input,
-            trust_decision_with_dispatch_authority(),
         ))
         .await
         .unwrap();
@@ -6296,7 +6244,6 @@ async fn spawn_capability_present_credential_proceeds_to_approval() {
             script_capability_id(),
             estimate,
             input,
-            trust_decision_with_dispatch_authority(),
         ))
         .await
         .unwrap();
@@ -6336,7 +6283,6 @@ async fn invoke_capability_no_credential_requirement_proceeds_normally() {
             script_capability_id(),
             estimate,
             input,
-            trust_decision_with_dispatch_authority(),
         ))
         .await
         .unwrap();
@@ -6394,7 +6340,6 @@ async fn spawn_capability_missing_credential_returns_auth_before_approval() {
             script_capability_id(),
             estimate,
             input,
-            trust_decision_with_dispatch_authority(),
         ))
         .await
         .unwrap();
@@ -6468,7 +6413,6 @@ async fn invoke_capability_no_credential_requirement_with_wired_store_proceeds_n
             script_capability_id(),
             estimate,
             input,
-            trust_decision_with_dispatch_authority(),
         ))
         .await
         .unwrap();
@@ -6558,7 +6502,6 @@ async fn invoke_capability_secret_store_error_skips_preflight() {
             script_capability_id(),
             estimate.clone(),
             input.clone(),
-            trust_decision_with_dispatch_authority(),
         ))
         .await
         .unwrap();
@@ -6636,7 +6579,6 @@ async fn invoke_capability_secret_store_error_skips_preflight() {
             script_capability_id(),
             estimate,
             input,
-            trust_decision_with_dispatch_authority(),
         ))
         .await
         .unwrap();

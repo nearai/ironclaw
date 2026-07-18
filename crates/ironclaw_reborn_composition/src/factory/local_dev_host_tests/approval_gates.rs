@@ -3,7 +3,6 @@ use std::{
     time::Duration,
 };
 
-use chrono::Utc;
 use ironclaw_approvals::{
     ApprovalResolver, AutoApproveSettingInput, AutoApproveSettingStore,
     CapabilityPermissionOverrideStore, DenyApproval, LeaseApproval, PersistentApprovalAction,
@@ -22,7 +21,6 @@ use ironclaw_host_runtime::{
     RuntimeCapabilityResumeRequest, RuntimeFailureKind, SHELL_CAPABILITY_ID,
 };
 use ironclaw_run_state::{ApprovalRequestStore, ApprovalStatus};
-use ironclaw_trust::{AuthorityCeiling, EffectiveTrustClass, TrustDecision, TrustProvenance};
 
 use super::*;
 use crate::local_dev_capability_policy::local_dev_one_shot_lease_approval;
@@ -58,7 +56,6 @@ async fn local_dev_ask_destructive_shell_invocation_blocks_then_resumes_with_one
             capability_id.clone(),
             estimate.clone(),
             input.clone(),
-            trust_decision(shell_allowed_effects()),
         ))
         .await
         .expect("shell invocation returns approval gate");
@@ -84,7 +81,6 @@ async fn local_dev_ask_destructive_shell_invocation_blocks_then_resumes_with_one
             capability_id,
             estimate,
             input,
-            trust_decision(shell_allowed_effects()),
         ))
         .await
         .expect("approved shell invocation resumes");
@@ -133,7 +129,6 @@ async fn local_dev_approved_shell_uses_injected_tenant_sandbox_process_port() {
             capability_id.clone(),
             estimate.clone(),
             input.clone(),
-            trust_decision(shell_allowed_effects()),
         ))
         .await
         .expect("shell invocation returns approval gate");
@@ -148,7 +143,6 @@ async fn local_dev_approved_shell_uses_injected_tenant_sandbox_process_port() {
             capability_id,
             estimate,
             input,
-            trust_decision(shell_allowed_effects()),
         ))
         .await
         .expect("approved shell invocation resumes");
@@ -204,7 +198,6 @@ async fn local_dev_yolo_shell_invocation_asks_when_global_auto_approve_is_off() 
             capability_id.clone(),
             ResourceEstimate::default(),
             serde_json::json!({"command": "echo yolo"}),
-            trust_decision(shell_allowed_effects()),
         ))
         .await
         .expect("local-dev-yolo shell invocation resolves");
@@ -261,7 +254,6 @@ async fn local_dev_auto_approve_setting_update_skips_next_shell_gate() {
             capability_id,
             ResourceEstimate::default(),
             serde_json::json!({"command": "echo auto approve"}),
-            trust_decision(shell_allowed_effects()),
         ))
         .await
         .expect("auto-approved shell invocation succeeds");
@@ -307,7 +299,6 @@ async fn local_dev_default_allow_echo_auto_approves_when_global_unset() {
             capability_id,
             ResourceEstimate::default(),
             serde_json::json!({"message": "auto approve echo"}),
-            trust_decision(echo_spawn_allowed_effects()),
         ))
         .await
         .expect("echo invocation resolves"); // safety: test-only capability invocation assertion.
@@ -350,7 +341,6 @@ async fn local_dev_default_allow_echo_asks_when_global_auto_approve_is_off() {
             capability_id.clone(),
             ResourceEstimate::default(),
             serde_json::json!({"message": "ask for echo"}),
-            trust_decision(echo_spawn_allowed_effects()),
         ))
         .await
         .expect("echo invocation resolves");
@@ -407,7 +397,6 @@ async fn local_dev_ask_each_time_echo_approval_resume_uses_one_shot_lease() {
             capability_id.clone(),
             estimate.clone(),
             input.clone(),
-            trust_decision(echo_dispatch_allowed_effects()),
         ))
         .await
         .expect("echo invocation resolves");
@@ -429,7 +418,6 @@ async fn local_dev_ask_each_time_echo_approval_resume_uses_one_shot_lease() {
             capability_id.clone(),
             estimate.clone(),
             input.clone(),
-            trust_decision(echo_dispatch_allowed_effects()),
         ))
         .await
         .expect("pending echo approval resume resolves to non-completion");
@@ -481,7 +469,6 @@ async fn local_dev_ask_each_time_echo_approval_resume_uses_one_shot_lease() {
             capability_id,
             estimate,
             input,
-            trust_decision(echo_dispatch_allowed_effects()),
         ))
         .await
         .expect("approved echo invocation resumes");
@@ -547,7 +534,6 @@ async fn local_dev_legacy_persistent_echo_grant_does_not_override_global_off() {
             capability_id.clone(),
             ResourceEstimate::default(),
             serde_json::json!({"message": "ask despite legacy grant"}),
-            trust_decision(echo_spawn_allowed_effects()),
         ))
         .await
         .expect("echo invocation resolves");
@@ -619,7 +605,6 @@ async fn local_dev_settings_page_always_allow_echo_overrides_global_off() {
             capability_id,
             ResourceEstimate::default(),
             serde_json::json!({"message": "skip approval for echo"}),
-            trust_decision(echo_spawn_allowed_effects()),
         ))
         .await
         .expect("settings persistent echo invocation succeeds");
@@ -691,7 +676,6 @@ async fn local_dev_settings_page_always_allow_policy_skips_next_shell_gate() {
             capability_id,
             ResourceEstimate::default(),
             serde_json::json!({"command": "echo settings allow"}),
-            trust_decision(shell_allowed_effects()),
         ))
         .await
         .expect("settings persistent approval shell invocation succeeds");
@@ -751,7 +735,6 @@ async fn local_dev_yolo_explicit_ask_each_time_still_requires_approval_gate() {
             capability_id.clone(),
             ResourceEstimate::default(),
             serde_json::json!({"command": "echo yolo ask"}),
-            trust_decision(shell_allowed_effects()),
         ))
         .await
         .expect("local-dev-yolo shell invocation resolves");
@@ -821,7 +804,6 @@ async fn local_dev_denied_shell_approval_does_not_issue_resume_lease() {
             capability_id.clone(),
             estimate.clone(),
             input.clone(),
-            trust_decision(shell_allowed_effects()),
         ))
         .await
         .expect("shell invocation returns approval gate");
@@ -851,7 +833,6 @@ async fn local_dev_denied_shell_approval_does_not_issue_resume_lease() {
             capability_id,
             estimate,
             input,
-            trust_decision(shell_allowed_effects()),
         ))
         .await
         .expect("denied shell invocation returns failed outcome");
@@ -997,18 +978,6 @@ fn echo_dispatch_lease_approval() -> LeaseApproval {
     })
 }
 
-fn trust_decision(allowed_effects: Vec<EffectKind>) -> TrustDecision {
-    TrustDecision {
-        effective_trust: EffectiveTrustClass::user_trusted(),
-        authority_ceiling: AuthorityCeiling {
-            allowed_effects,
-            max_resource_ceiling: None,
-        },
-        provenance: TrustProvenance::AdminConfig,
-        evaluated_at: Utc::now(),
-    }
-}
-
 fn tenant_sandbox_process_policy() -> ironclaw_host_api::runtime_policy::EffectiveRuntimePolicy {
     let mut policy = local_dev_policy();
     policy.process_backend = ironclaw_host_api::runtime_policy::ProcessBackendKind::TenantSandbox;
@@ -1064,7 +1033,6 @@ async fn local_dev_minimal_policy_shell_invocation_asks_when_global_auto_approve
             capability_id.clone(),
             ResourceEstimate::default(),
             serde_json::json!({"command": "echo minimal"}),
-            trust_decision(shell_allowed_effects()),
         ))
         .await
         .expect("minimal shell invocation resolves"); // safety: test-only helper in #[cfg(test)] module.
@@ -1107,7 +1075,6 @@ async fn local_dev_minimal_with_enterprise_profile_still_gates_shell() {
             capability_id,
             ResourceEstimate::default(),
             serde_json::json!({"command": "echo ent"}),
-            trust_decision(shell_allowed_effects()),
         ))
         .await
         .expect("enterprise minimal shell invocation resolves"); // safety: test-only helper in #[cfg(test)] module.
@@ -1159,7 +1126,6 @@ async fn local_dev_ask_destructive_spawn_capability_blocks_then_resumes() {
             capability_id.clone(),
             estimate.clone(),
             input.clone(),
-            trust_decision(shell_allowed_effects()),
         ))
         .await
         .expect("spawn invocation returns approval gate"); // safety: test-only helper in #[cfg(test)] module.
@@ -1188,7 +1154,6 @@ async fn local_dev_ask_destructive_spawn_capability_blocks_then_resumes() {
             capability_id,
             estimate,
             input,
-            trust_decision(shell_allowed_effects()),
         ))
         .await
         .expect("approved spawn invocation resumes"); // safety: test-only helper in #[cfg(test)] module.
@@ -1233,7 +1198,6 @@ async fn local_dev_ask_destructive_spawn_dispatch_only_capability_requires_appro
             capability_id,
             ResourceEstimate::default(),
             serde_json::json!({"message": "spawn echo"}),
-            trust_decision(echo_spawn_allowed_effects()),
         ))
         .await
         .expect("spawn invocation resolves"); // safety: test-only helper in #[cfg(test)] module.
@@ -1320,7 +1284,6 @@ async fn local_dev_ungranted_capability_returns_denied_not_approval_gate() {
             capability_id,
             ResourceEstimate::default(),
             serde_json::json!({}),
-            trust_decision(shell_allowed_effects()),
         ))
         .await
         .expect("invocation completes (with failure)"); // safety: test-only helper in #[cfg(test)] module.
@@ -1362,7 +1325,6 @@ async fn local_dev_one_shot_lease_regates_on_second_invocation() {
             capability_id.clone(),
             estimate.clone(),
             input.clone(),
-            trust_decision(shell_allowed_effects()),
         ))
         .await
         .expect("first invocation"); // safety: test-only helper in #[cfg(test)] module.
@@ -1379,7 +1341,6 @@ async fn local_dev_one_shot_lease_regates_on_second_invocation() {
             capability_id.clone(),
             estimate.clone(),
             input.clone(),
-            trust_decision(shell_allowed_effects()),
         ))
         .await
         .expect("first resume"); // safety: test-only helper in #[cfg(test)] module.
@@ -1398,7 +1359,6 @@ async fn local_dev_one_shot_lease_regates_on_second_invocation() {
             capability_id,
             estimate,
             input,
-            trust_decision(shell_allowed_effects()),
         ))
         .await
         .expect("second invocation"); // safety: test-only helper in #[cfg(test)] module.

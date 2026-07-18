@@ -5,7 +5,6 @@ use ironclaw_host_runtime::{
     RuntimeFailureKind,
 };
 use ironclaw_run_state::ApprovalRequestStore;
-use ironclaw_trust::TrustDecision;
 
 use crate::local_dev_capability_policy::{
     LocalDevApprovalPolicyAction, LocalDevCapabilityPolicyError, local_dev_one_shot_lease_approval,
@@ -37,11 +36,8 @@ pub(crate) async fn invoke_json_with_local_dev_approval(
     capability_id: &str,
     context: ExecutionContext,
     input: serde_json::Value,
-    trust_decision: TrustDecision,
 ) -> Result<serde_json::Value, RuntimeFailureKind> {
-    match invoke_with_local_dev_approval(services, capability_id, context, input, trust_decision)
-        .await
-    {
+    match invoke_with_local_dev_approval(services, capability_id, context, input).await {
         RuntimeCapabilityOutcome::Completed(completed) => Ok(completed.output),
         RuntimeCapabilityOutcome::Failed(failure) => Err(failure.kind),
         other => panic!("unexpected runtime outcome: {other:?}"),
@@ -53,7 +49,6 @@ pub(crate) async fn invoke_with_local_dev_approval(
     capability_id: &str,
     context: ExecutionContext,
     input: serde_json::Value,
-    trust_decision: TrustDecision,
 ) -> RuntimeCapabilityOutcome {
     let runtime = services
         .host_runtime
@@ -71,7 +66,6 @@ pub(crate) async fn invoke_with_local_dev_approval(
             capability.clone(),
             estimate.clone(),
             input.clone(),
-            trust_decision.clone(),
         ))
         .await
         .expect("runtime invocation completes"); // safety: test-only helper in #[cfg(test)] module.
@@ -129,7 +123,6 @@ pub(crate) async fn invoke_with_local_dev_approval(
                     capability,
                     estimate,
                     input,
-                    trust_decision,
                 ))
                 .await
                 .expect("approved runtime invocation resumes") // safety: test-only helper in #[cfg(test)] module.

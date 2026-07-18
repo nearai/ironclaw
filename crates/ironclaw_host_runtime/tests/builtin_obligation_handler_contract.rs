@@ -26,7 +26,7 @@ use ironclaw_secrets::{
     InMemorySecretStore, SecretLease, SecretLeaseId, SecretMaterial, SecretMetadata, SecretStore,
     SecretStoreError,
 };
-use ironclaw_trust::{AuthorityCeiling, EffectiveTrustClass, TrustDecision, TrustProvenance};
+use ironclaw_trust::TrustDecision;
 use serde_json::json;
 
 fn local_test_runtime_policy() -> ironclaw_host_api::runtime_policy::EffectiveRuntimePolicy {
@@ -1002,7 +1002,6 @@ async fn default_host_runtime_fails_closed_when_resource_ceiling_lacks_required_
             capability_id(),
             ResourceEstimate::default(),
             json!({"message": "must not dispatch"}),
-            trust_decision(),
         ))
         .await
         .unwrap();
@@ -1047,7 +1046,6 @@ async fn default_host_runtime_dispatches_when_resource_ceiling_is_satisfied() {
             capability_id(),
             ResourceEstimate::default().set_usd(1.into()),
             json!({"message": "obligated"}),
-            trust_decision(),
         ))
         .await
         .unwrap();
@@ -1078,7 +1076,6 @@ async fn default_host_runtime_installs_configured_obligation_handler() {
             capability_id(),
             ResourceEstimate::default(),
             json!({"message": "obligated"}),
-            trust_decision(),
         ))
         .await
         .unwrap();
@@ -1265,18 +1262,6 @@ fn execution_context(grants: CapabilitySet) -> ExecutionContext {
 
 fn capability_id() -> CapabilityId {
     CapabilityId::new("echo.say").unwrap()
-}
-
-fn trust_decision() -> TrustDecision {
-    TrustDecision {
-        effective_trust: EffectiveTrustClass::sandbox(),
-        authority_ceiling: AuthorityCeiling {
-            allowed_effects: vec![EffectKind::DispatchCapability],
-            max_resource_ceiling: None,
-        },
-        provenance: TrustProvenance::Default,
-        evaluated_at: chrono::Utc::now(),
-    }
 }
 
 #[derive(Debug)]

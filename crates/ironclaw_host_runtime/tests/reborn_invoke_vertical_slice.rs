@@ -8,7 +8,6 @@ use std::sync::{
 };
 
 use async_trait::async_trait;
-use chrono::Utc;
 use ironclaw_authorization::{GrantAuthorizer, TrustAwareCapabilityDispatchAuthorizer};
 use ironclaw_dispatcher::{
     RuntimeAdapter, RuntimeAdapterRequest, RuntimeAdapterResult, RuntimeDispatcher,
@@ -26,8 +25,7 @@ use ironclaw_resources::{
 };
 use ironclaw_run_state::{RunStateStore, RunStatus};
 use ironclaw_trust::{
-    AdminConfig, AdminEntry, AuthorityCeiling, EffectiveTrustClass, HostTrustAssignment,
-    HostTrustPolicy, TrustDecision, TrustProvenance,
+    AdminConfig, AdminEntry, HostTrustAssignment, HostTrustPolicy, TrustDecision,
 };
 use serde_json::{Value, json};
 
@@ -69,7 +67,6 @@ async fn default_host_runtime_invokes_through_runtime_dispatcher_with_resources_
             capability_id(),
             estimate.clone(),
             input.clone(),
-            trust_decision(),
         ))
         .await
         .unwrap();
@@ -135,7 +132,6 @@ async fn default_host_runtime_fails_unsupported_obligations_before_runtime_dispa
             capability_id(),
             ResourceEstimate::default(),
             json!({"message":"obligation"}),
-            trust_decision(),
         ))
         .await
         .unwrap();
@@ -371,18 +367,6 @@ fn local_manifest_trust_policy() -> HostTrustPolicy {
         ),
     ]))])
     .unwrap()
-}
-
-fn trust_decision() -> TrustDecision {
-    TrustDecision {
-        effective_trust: EffectiveTrustClass::user_trusted(),
-        authority_ceiling: AuthorityCeiling {
-            allowed_effects: vec![EffectKind::DispatchCapability],
-            max_resource_ceiling: None,
-        },
-        provenance: TrustProvenance::Default,
-        evaluated_at: Utc::now(),
-    }
 }
 
 fn capability_id() -> CapabilityId {

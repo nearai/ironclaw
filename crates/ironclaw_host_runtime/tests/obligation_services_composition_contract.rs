@@ -5,7 +5,6 @@ use support::legacy_capability_fixture_to_v2;
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
-use chrono::Utc;
 use ironclaw_authorization::TrustAwareCapabilityDispatchAuthorizer;
 use ironclaw_events::InMemoryAuditSink;
 use ironclaw_extensions::{ExtensionManifest, ExtensionPackage, ExtensionRegistry, ManifestSource};
@@ -19,7 +18,7 @@ use ironclaw_network::{
 };
 use ironclaw_resources::{InMemoryResourceGovernor, ResourceGovernor};
 use ironclaw_secrets::{InMemorySecretStore, SecretMaterial, SecretStore};
-use ironclaw_trust::{AuthorityCeiling, EffectiveTrustClass, TrustDecision, TrustProvenance};
+use ironclaw_trust::TrustDecision;
 use serde_json::json;
 
 fn local_test_runtime_policy() -> ironclaw_host_api::runtime_policy::EffectiveRuntimePolicy {
@@ -92,7 +91,6 @@ async fn default_runtime_installs_configured_builtin_obligation_services() {
         capability_id(),
         ResourceEstimate::default(),
         json!({"message": "hello"}),
-        trust_decision_with_dispatch_authority(),
     );
 
     let outcome = runtime.invoke_capability(request).await.unwrap();
@@ -330,18 +328,6 @@ fn execution_context_with_dispatch_grant() -> ExecutionContext {
         MountView::default(),
     )
     .unwrap()
-}
-
-fn trust_decision_with_dispatch_authority() -> TrustDecision {
-    TrustDecision {
-        effective_trust: EffectiveTrustClass::user_trusted(),
-        authority_ceiling: AuthorityCeiling {
-            allowed_effects: vec![EffectKind::DispatchCapability],
-            max_resource_ceiling: None,
-        },
-        provenance: TrustProvenance::Default,
-        evaluated_at: Utc::now(),
-    }
 }
 
 fn capability_id() -> CapabilityId {

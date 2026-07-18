@@ -353,7 +353,6 @@ pub async fn invoke_with_context(
             capability_id(capability),
             ResourceEstimate::default(),
             input,
-            trust_decision(),
         ))
         .await
         .unwrap();
