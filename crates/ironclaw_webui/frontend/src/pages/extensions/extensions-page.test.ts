@@ -235,13 +235,28 @@ test("ExtensionsPage replaces a failed registry with a retryable error banner", 
 });
 
 test("ExtensionsPage keeps installed channels visible when only the registry fails", () => {
+  const refetch = () => {};
   const { CatalogErrorBanner, ChannelsTab, rendered } = renderExtensionsPage("channels", {
     registryError: new Error("offline"),
+    refetch,
   });
   const values = templateValues(rendered);
 
   assert.ok(values.includes(CatalogErrorBanner));
   assert.ok(values.includes(ChannelsTab));
+
+  // A catalog (registry) failure must surface the full "Extension catalog
+  // unavailable" message even on a non-registry tab — the banner text follows
+  // the failure cause, not the tab. Regression: previously the inline banner on
+  // the channels tab hardcoded the partial "Some extension data" text.
+  const [bannerProps] = componentProps(rendered, CatalogErrorBanner);
+  assert.equal(bannerProps.isCatalogError, true);
+  const text = templateText(
+    CatalogErrorBanner({ isCatalogError: true, isRefetching: false, onRetry: refetch }),
+  );
+  assert.match(text, /Extension catalog unavailable/);
+  assert.match(text, /--v2-danger-text/);
+  assert.doesNotMatch(text, /Some extension data is unavailable/);
 });
 
 test("ExtensionsPage keeps the registry visible when installed-extension enrichment fails", () => {
@@ -252,7 +267,7 @@ test("ExtensionsPage keeps the registry visible when installed-extension enrichm
   });
   const values = templateValues(rendered);
   const banner = CatalogErrorBanner({
-    isPartial: true,
+    isCatalogError: false,
     isRefetching: false,
     onRetry: refetch,
   });
@@ -260,6 +275,9 @@ test("ExtensionsPage keeps the registry visible when installed-extension enrichm
 
   assert.ok(values.includes(CatalogErrorBanner));
   assert.ok(values.includes(RegistryTab));
+  // The inline banner on the registry tab reflects the enrichment failure cause.
+  const [bannerProps] = componentProps(rendered, CatalogErrorBanner);
+  assert.equal(bannerProps.isCatalogError, false);
   assert.match(text, /Some extension data is unavailable/);
   assert.match(text, /The available extension data is shown/);
   assert.match(text, /--v2-warning-text/);
