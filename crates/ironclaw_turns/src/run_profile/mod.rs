@@ -23,6 +23,7 @@ mod policy;
 mod prompt;
 mod prompt_text;
 mod refs;
+mod resolution_mapping;
 mod resolver;
 mod runtime_context;
 mod skill_context;
@@ -107,6 +108,7 @@ pub use policy::{
     SteeringPolicy,
 };
 pub use prompt::HostManagedLoopPromptPort;
+pub use resolution_mapping::{MappedResolution, capability_outcome_to_resolution};
 pub use refs::{
     CapabilitySurfaceProfileId, CheckpointSchemaId, ConcurrencyClass, ContextProfileId,
     LoopDriverId, ModelProfileId, ResourceBudgetTier, RunClassId, RunProfileFingerprint,

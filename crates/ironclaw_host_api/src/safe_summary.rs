@@ -50,7 +50,26 @@ impl SafeSummary {
     pub fn into_inner(self) -> String {
         self.0
     }
+
+    /// An infallible, redaction-safe fallback summary.
+    ///
+    /// A caller that must produce a `SafeSummary` from an untrusted upstream
+    /// string (e.g. mapping a loop-facing `safe_summary: String` onto this type)
+    /// needs a non-panicking last resort when the upstream value fails the
+    /// redaction contract. Only this crate can construct a `SafeSummary` without
+    /// validation, so the placeholder lives here: it is built from a fixed
+    /// compile-time constant that satisfies [`validate_safe_summary`] (pinned by
+    /// `placeholder_is_valid`), so no external caller needs `unwrap`/`expect` to
+    /// obtain a value.
+    pub fn placeholder() -> Self {
+        Self(SAFE_SUMMARY_PLACEHOLDER.to_string())
+    }
 }
+
+/// The fixed, redaction-safe text backing [`SafeSummary::placeholder`]. Contains
+/// only lowercase ASCII letters and spaces, so it can never trip a delimiter,
+/// control-character, credential-marker, or secret-token rule.
+const SAFE_SUMMARY_PLACEHOLDER: &str = "capability summary unavailable";
 
 impl TryFrom<String> for SafeSummary {
     type Error = HostApiError;
@@ -193,6 +212,21 @@ mod tests {
 
     fn rejection(value: impl Into<String>) -> String {
         SafeSummary::new(value).unwrap_err().to_string()
+    }
+
+    #[test]
+    fn placeholder_is_valid() {
+        // The infallible fallback MUST satisfy the same redaction contract it
+        // bypasses at construction; if the constant ever regresses, this fails.
+        assert!(
+            validate_safe_summary(SAFE_SUMMARY_PLACEHOLDER).is_ok(),
+            "placeholder constant must satisfy the redaction rule"
+        );
+        assert_eq!(SafeSummary::placeholder().as_str(), SAFE_SUMMARY_PLACEHOLDER);
+        // And it round-trips through the wire like any other summary.
+        let wire = serde_json::to_string(&SafeSummary::placeholder()).unwrap();
+        let back: SafeSummary = serde_json::from_str(&wire).unwrap();
+        assert_eq!(back, SafeSummary::placeholder());
     }
 
     #[test]
