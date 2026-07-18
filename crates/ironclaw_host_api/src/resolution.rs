@@ -36,7 +36,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::{GateRef, ProcessRef, ResultRef, SafeSummary};
+use crate::{DenyRef, GateRef, ProcessRef, ResultRef, SafeSummary};
 
 /// A re-entrant gate: the invocation did not run and is waiting on a decision.
 /// Resolving the gate re-enters `authorize()` (§5.3.3: a resolved gate reserves
@@ -198,6 +198,57 @@ pub struct Outcome {
     pub summary: SafeSummary,
 }
 
+/// The composed answer of one capability invocation — the single value
+/// `AgentLoopHost::invoke` returns in its `Ok` arm (§3, §5.4); the `Err` arm is
+/// [`crate::HostFailure`]. This is the **five-channel** replacement for today's
+/// overloaded ten-variant `CapabilityOutcome` (§1.2): each channel is a distinct
+/// type, so a recoverable result, a terminal denial, a re-entrant gate, and
+/// parked work can never be confused for one another.
+///
+/// The §5.3 acceptance table (the definition of done) maps every one of today's
+/// ten `CapabilityOutcome` variants to exactly one channel here — see the
+/// `resolution_covers_the_full_acceptance_table` test.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Resolution {
+    /// The capability ran: success or recoverable failure (typed by the
+    /// [`Outcome`]'s [`ToolVerdict`]).
+    Done(Outcome),
+    /// Terminal policy denial — model-visible, **not** re-entrant (distinct from
+    /// every gate). `AuthorizeResult::Denied` folds into this (§3).
+    Denied(DenyRef),
+    /// A re-entrant gate: resolve it and the invocation may run.
+    Blocked(Blocked),
+    /// Parked work: the effect is in flight or handed off.
+    Suspended(Suspension),
+}
+
+impl Resolution {
+    /// Stable discriminant (matches the serde tag) for logs/routing.
+    pub fn kind(&self) -> &'static str {
+        match self {
+            Resolution::Done(_) => "done",
+            Resolution::Denied(_) => "denied",
+            Resolution::Blocked(_) => "blocked",
+            Resolution::Suspended(_) => "suspended",
+        }
+    }
+
+    /// Whether the turn parks on this resolution. ONLY [`Resolution::Suspended`]
+    /// suspends — a `Done` with a `ChildSpawned` verdict is explicitly
+    /// non-suspending (§5.3 table: the executor appends the child result and
+    /// continues). Getting this wrong is the #6137 bug class.
+    pub fn is_suspension(&self) -> bool {
+        matches!(self, Resolution::Suspended(_))
+    }
+
+    /// Whether this is a re-entrant gate (resolving it re-enters `authorize()`).
+    /// A `Denied` is terminal and is deliberately excluded.
+    pub fn is_reentrant_gate(&self) -> bool {
+        matches!(self, Resolution::Blocked(_))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -321,5 +372,91 @@ mod tests {
             err.contains("sensitive marker"),
             "rejection must be for the summary, not an id-shape artifact: {err}"
         );
+    }
+
+    fn outcome(verdict: ToolVerdict) -> Outcome {
+        Outcome {
+            refs: OutcomeRefs {
+                result: ResultRef::new("result-1").unwrap(),
+                byte_len: 1,
+            },
+            verdict,
+            summary: SafeSummary::new("ok").unwrap(),
+        }
+    }
+
+    /// The §5.3 acceptance table is the definition of done: every one of today's
+    /// ten `CapabilityOutcome` variants maps to exactly one `Resolution` channel,
+    /// with the right suspension semantics. `host_api` cannot import the turns
+    /// enum, so this pins the mapping by (today's variant → channel + suspends?).
+    #[test]
+    fn resolution_covers_the_full_acceptance_table() {
+        let proc = || ProcessRef::new("proc-1").unwrap();
+        // (today's CapabilityOutcome variant, the Resolution channel, is_suspension)
+        let rows: [(&str, Resolution, bool); 10] = [
+            ("Completed", Resolution::Done(outcome(ToolVerdict::Success)), false),
+            (
+                "Failed",
+                Resolution::Done(outcome(ToolVerdict::RecoverableFailure)),
+                false,
+            ),
+            ("Denied", Resolution::Denied(DenyRef::new("deny-1").unwrap()), false),
+            (
+                "ApprovalRequired",
+                Resolution::Blocked(Blocked::Approval(gate())),
+                false,
+            ),
+            ("AuthRequired", Resolution::Blocked(Blocked::Auth(gate())), false),
+            (
+                "ResourceBlocked",
+                Resolution::Blocked(Blocked::Resource(gate())),
+                false,
+            ),
+            (
+                "SpawnedProcess",
+                Resolution::Suspended(Suspension::Process(proc())),
+                true,
+            ),
+            // Non-suspending — the one that has bitten before (#6137, §5.3 table).
+            (
+                "SpawnedChildRun",
+                Resolution::Done(outcome(ToolVerdict::ChildSpawned)),
+                false,
+            ),
+            (
+                "AwaitDependentRun",
+                Resolution::Suspended(Suspension::DependentRun(gate())),
+                true,
+            ),
+            (
+                "ExternalToolPending",
+                Resolution::Suspended(Suspension::ExternalTool(gate())),
+                true,
+            ),
+        ];
+        assert_eq!(rows.len(), 10, "all ten CapabilityOutcome variants covered");
+        for (variant, resolution, suspends) in rows {
+            assert_eq!(
+                resolution.is_suspension(),
+                suspends,
+                "{variant}: suspension semantics"
+            );
+            // Round-trips through the wire like every channel.
+            let json = serde_json::to_value(&resolution).unwrap();
+            let back: Resolution = serde_json::from_value(json).unwrap();
+            assert_eq!(back, resolution, "{variant}: round-trip");
+        }
+    }
+
+    #[test]
+    fn resolution_channel_predicates() {
+        assert!(Resolution::Suspended(Suspension::Process(ProcessRef::new("p-1").unwrap())).is_suspension());
+        assert!(Resolution::Blocked(Blocked::Approval(gate())).is_reentrant_gate());
+        // Denied is terminal — not a re-entrant gate, not a suspension.
+        let denied = Resolution::Denied(DenyRef::new("deny-1").unwrap());
+        assert!(!denied.is_reentrant_gate());
+        assert!(!denied.is_suspension());
+        // A spawned child run completes; it does not suspend.
+        assert!(!Resolution::Done(outcome(ToolVerdict::ChildSpawned)).is_suspension());
     }
 }
