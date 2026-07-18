@@ -228,6 +228,32 @@ string_id!(SystemServiceId, "system_service", validate_name_segment);
 // names the product surface a direct-user `Product` invocation entered through.
 string_id!(ProductKind, "product", validate_name_segment);
 string_id!(RoutineId, "routine", validate_name_segment);
+// Slice-C kernel vocabulary (arch-simplification §3): an opaque correlation
+// handle to a durably-stored host-error record. The recoverability *class* rides
+// the `HostFailure` variant (transient/permanent/uncertain); the raw cause stays
+// host-owned and is retrieved only through this ref — the "sanitized category
+// plus opaque invocation ID for correlation" contract (error-handling.md).
+// Deliberately a UUID id, NOT a validated string: `HostFailure` serializes and
+// Displays this value across the sanitized error boundary, so construction must
+// be structurally incapable of smuggling raw backend/error text (an existing
+// invocation/correlation id is carried via `ErrRef::from_uuid(id.as_uuid())`).
+uuid_id!(ErrRef);
+// Slice-C kernel vocabulary (arch-simplification §3/§5.3): opaque handles into
+// durably-stored control-plane records. Each names a record the kernel produced;
+// the model-visible content (what the approver sees, the deny reason, the process
+// summary) is rendered FROM the referenced record through the gate/rendering
+// contract (§5.2.9), never carried inline on the ref. UUID ids for the same
+// structural reason as `ErrRef`: they ride serialized `Blocked`/`Suspension`/
+// verdict values across sanitized boundaries, so free text must be
+// unrepresentable — a kernel record id travels via `from_uuid`/`new`, never as
+// a caller-composed string.
+uuid_id!(GateRef);
+uuid_id!(ProcessRef);
+uuid_id!(DenyRef);
+// Handle to the durably-stored full capability output. The full bytes stay
+// host-owned and are retrieved only through this ref (§3); model-visible metadata
+// rides `OutcomeRefs`/`SafeSummary` alongside it. UUID id like its siblings.
+uuid_id!(ResultRef);
 
 /// Provider-facing tool/function name.
 ///

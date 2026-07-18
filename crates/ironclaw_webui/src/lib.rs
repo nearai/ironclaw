@@ -22,6 +22,7 @@
 //!   reads v1 secrets / settings / DB.
 
 mod auth;
+mod cli_token_login;
 mod oidc;
 mod session;
 mod signed_session_login;
@@ -60,6 +61,11 @@ pub use auth::{
     ProviderInitError, PublicRouteMount, UserDirectory, UserDirectoryError,
     empty_webui_v2_auth_providers_mount, webui_v2_auth_router,
 };
+// Host-owned CLI-token bootstrap login (`GET /login?token=`); shares the
+// OAuth surface's bearer/ticket-exchange contract (`POST
+// /auth/session/exchange`) — no new SPA code needed. See
+// `cli_token_login.rs` module docs.
+pub use cli_token_login::{CliTokenLoginConfig, build_cli_token_login};
 pub use oidc::{
     AudienceClaim, ClaimToUserIdFn, IdTokenClaims, OidcAuthenticator, OidcAuthenticatorConfig,
     OidcAuthenticatorError,

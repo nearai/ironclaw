@@ -1272,6 +1272,7 @@ mod session_store_failure {
             _tenant_id: TenantId,
             _user_id: UserId,
             _lifetime: ChronoDuration,
+            _operator: bool,
         ) -> Result<SecretString, SessionStoreError> {
             Err(SessionStoreError::Backend("simulated outage".into()))
         }
@@ -1371,6 +1372,7 @@ mod logout_revoke_failure {
             _tenant_id: TenantId,
             _user_id: UserId,
             _lifetime: ChronoDuration,
+            _operator: bool,
         ) -> Result<SecretString, SessionStoreError> {
             unreachable!("test does not drive create_session")
         }

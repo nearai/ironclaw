@@ -29,7 +29,7 @@ use ironclaw_turns::{
 use tokio::sync::{Mutex, OnceCell, Semaphore};
 
 use crate::AuthChallengeProvider;
-use crate::failure_summary::{
+use ironclaw_runner::failure_summary::{
     pinned_failure_summary_for_category, reborn_failure_summary_for_category_and_detail,
 };
 

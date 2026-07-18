@@ -543,6 +543,90 @@ fn apply_credential_refresh_override(
     Ok(settings)
 }
 
+/// Resolve the Reborn runtime's default LLM selection, tolerating a
+/// required-but-unset API key env var when a key is already durably stored
+/// for that provider in the local secret store.
+///
+/// - Without this, a key provisioned via `onboard` into the encrypted
+///   secret store (never written to config.toml/env) would boot `serve`
+///   into a fail-closed error, since `apply_startup_stored_llm_key` only
+///   runs later once the async runtime is up. Providers with
+///   `api_key_required = false` (e.g. `nearai`) never hit this path.
+/// - Only `ApiKeyEnvUnset` is treated specially; every other resolution
+///   failure surfaces unchanged, as does `ApiKeyEnvUnset` itself when no
+///   key is stored — this can only turn a real fix into a successful boot,
+///   never mask a misconfiguration.
+/// - Scoped to `RuntimeInputCaller::Serve` only: opening the secret store
+///   may fall through to the OS keychain (GUI prompt or indefinite block
+///   with no GUI session). `onboard` already pays that cost interactively;
+///   `serve` is the boot path this fix unblocks. `run` stays fail-fast so
+///   a forgotten env var doesn't hang instead of erroring clearly.
+#[cfg(all(feature = "libsql", feature = "root-llm-provider"))]
+fn resolve_reborn_runtime_llm_with_stored_key_fallback(
+    config: &RebornBootConfig,
+    config_file: Option<&ironclaw_reborn_config::RebornConfigFile>,
+    caller: RuntimeInputCaller,
+) -> anyhow::Result<Option<ironclaw_reborn_composition::ResolvedRebornLlm>> {
+    let error = match ironclaw_reborn_composition::resolve_reborn_runtime_llm(config, config_file) {
+        Ok(resolved) => return Ok(resolved),
+        Err(error) => error,
+    };
+    if caller != RuntimeInputCaller::Serve {
+        return Err(error.into());
+    }
+    let ironclaw_reborn_composition::RebornLlmCatalogError::ApiKeyEnvUnset { ref provider, .. } =
+        error
+    else {
+        return Err(error.into());
+    };
+    // `ApiKeyEnvUnset` only comes from the config-file-selection branch, so
+    // a selection should be present; defensive fallback to original error.
+    let Some(selection) = config_file.and_then(|file| file.default_llm_slot()) else {
+        return Err(error.into());
+    };
+    let provider_id = provider.clone();
+    let runtime_storage_root = local_runtime_storage_root(config, config.profile());
+    // The runtime storage root is only created lazily (onboarding writing a
+    // key, or a prior `serve` boot). If it was never created there is
+    // definitely no stored key — fail through to the original error instead
+    // of letting the secret-store opener fail on a missing directory.
+    if !runtime_storage_root.exists() {
+        return Err(error.into());
+    }
+    let has_stored_key = block_on_cli(async move {
+        let store = ironclaw_reborn_composition::open_local_dev_secret_store(&runtime_storage_root)
+            .await
+            .map_err(anyhow::Error::from)?;
+        ironclaw_reborn_composition::LlmKeyStore::new(store)
+            .exists(&provider_id)
+            .await
+            .map_err(anyhow::Error::from)
+    })?;
+    if !has_stored_key {
+        return Err(error.into());
+    }
+    ironclaw_reborn_composition::resolve_llm_selection_allow_missing_key(
+        selection,
+        Some(config.home().providers_file_path().as_path()),
+    )
+    .map(ironclaw_reborn_composition::ResolvedRebornLlm::from_llm_config)
+    .map(Some)
+    .map_err(Into::into)
+}
+
+/// Feature-off fallback: without `libsql` there is no local-dev secret store
+/// to check, so behavior here is byte-identical to calling
+/// `resolve_reborn_runtime_llm` directly — a required-but-unset API key
+/// still fails closed with `ApiKeyEnvUnset`.
+#[cfg(all(feature = "root-llm-provider", not(feature = "libsql")))]
+fn resolve_reborn_runtime_llm_with_stored_key_fallback(
+    config: &RebornBootConfig,
+    config_file: Option<&ironclaw_reborn_config::RebornConfigFile>,
+    _caller: RuntimeInputCaller,
+) -> anyhow::Result<Option<ironclaw_reborn_composition::ResolvedRebornLlm>> {
+    ironclaw_reborn_composition::resolve_reborn_runtime_llm(config, config_file).map_err(Into::into)
+}
+
 pub(crate) fn build_runtime_input_with_options(
     config: &RebornBootConfig,
     caller: RuntimeInputCaller,
@@ -571,14 +655,16 @@ pub(crate) fn build_runtime_input_with_options(
 
     #[cfg(feature = "root-llm-provider")]
     {
-        match ironclaw_reborn_composition::resolve_reborn_runtime_llm(
+        match resolve_reborn_runtime_llm_with_stored_key_fallback(
             config,
             runtime_services.config_file.as_ref(),
+            caller,
         )? {
             Some(llm) => {
                 tracing::debug!(
                     provider_id = %llm.provider_id(),
                     model = %llm.model(),
+                    base_url = %llm.base_url().unwrap_or_default(),
                     "resolved LLM selection for Reborn runtime"
                 );
                 runtime_input = runtime_input.with_resolved_llm(llm);
