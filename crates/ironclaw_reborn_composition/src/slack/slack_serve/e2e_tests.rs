@@ -23,8 +23,7 @@ use ironclaw_host_api::{AgentId, ApprovalRequestId, ProjectId, TenantId, ThreadI
 use ironclaw_outbound::test_support::in_memory_backed_outbound_state_store;
 use ironclaw_outbound::{
     CommunicationPreferenceRecord, CommunicationPreferenceRepository, DeliveredGateRouteStore,
-    DeliveryDefaultScope, InMemoryTriggeredRunDeliveryStore, OutboundStateStore,
-    WriteCommunicationPreferenceRequest,
+    DeliveryDefaultScope, OutboundStateStore, WriteCommunicationPreferenceRequest,
 };
 use ironclaw_product_adapters::{
     AdapterInstallationId, AuthRequirement, AuthResolutionPayload, AuthResolutionResult,
@@ -290,7 +289,7 @@ async fn build_harness_with_full_settings(
     ));
     let auths = Arc::new(RecordingAuthInteractionService::new(coordinator.clone()));
     let route_store: Arc<dyn ironclaw_outbound::DeliveredGateRouteStore> =
-        Arc::new(ironclaw_outbound::InMemoryDeliveredGateRouteStore::default());
+        Arc::new(ironclaw_outbound::test_support::in_memory_backed_outbound_state_store());
 
     let inbound = Arc::new(DefaultInboundTurnService::new(
         binding.clone(),
@@ -427,7 +426,8 @@ impl ApprovalInteractionService for ForeignScopeApprovalService {
 /// fallback path. Returns the harness (with `route_store` accessible) and the
 /// underlying recording approval service for request assertions.
 ///
-/// By default, two separate `InMemoryDeliveredGateRouteStore` instances are used:
+/// By default, two separate in-memory-backed `FilesystemOutboundStateStore`
+/// instances serve the route-store role:
 ///
 /// - `workflow_route_store` (exposed via `harness.route_store`): the store the
 ///   workflow queries when resolving delivered-gate-route fallback paths.  Tests
@@ -498,7 +498,7 @@ async fn build_harness_for_delivered_route_tests_with_store_mode(
     // workflow_route_store: queried by the workflow during delivered-route fallback.
     // Tests seed records here to control the outcome (Miss / Single / Ambiguous).
     let workflow_route_store: Arc<dyn ironclaw_outbound::DeliveredGateRouteStore> =
-        Arc::new(ironclaw_outbound::InMemoryDeliveredGateRouteStore::default());
+        Arc::new(ironclaw_outbound::test_support::in_memory_backed_outbound_state_store());
     // observer_route_store: written by the delivery observer when it auto-records a
     // gate route after posting an approval prompt.  Kept separate so auto-created
     // routes never bleed into the workflow's index.
@@ -506,7 +506,7 @@ async fn build_harness_for_delivered_route_tests_with_store_mode(
         if share_observer_and_workflow_route_store {
             workflow_route_store.clone()
         } else {
-            Arc::new(ironclaw_outbound::InMemoryDeliveredGateRouteStore::default())
+            Arc::new(ironclaw_outbound::test_support::in_memory_backed_outbound_state_store())
         };
 
     let inbound = Arc::new(DefaultInboundTurnService::new(
@@ -1085,7 +1085,7 @@ async fn triggered_approval_prompt_route_resolves_dm_approve_on_foreign_scope() 
             max_concurrent_deliveries: NonZeroUsize::new(4).expect("nonzero"), // safety: static test literal is non-zero.
             max_pending_deliveries: NonZeroUsize::new(16).expect("nonzero"), // safety: static test literal is non-zero.
         },
-        Arc::new(InMemoryTriggeredRunDeliveryStore::default()),
+        Arc::new(in_memory_backed_outbound_state_store()),
         harness.route_store.clone(),
         AgentId::new(AGENT).expect("agent"), // safety: static test agent id is valid.
     );
@@ -1320,7 +1320,7 @@ async fn triggered_auth_prompt_route_delivers_dm_setup_link_on_foreign_scope() {
     let outbound_store: Arc<dyn OutboundStateStore> = outbound.clone();
     let preferences: Arc<dyn CommunicationPreferenceRepository> = outbound;
     let route_store: Arc<dyn DeliveredGateRouteStore> =
-        Arc::new(ironclaw_outbound::InMemoryDeliveredGateRouteStore::default());
+        Arc::new(ironclaw_outbound::test_support::in_memory_backed_outbound_state_store());
     let services = FinalReplyDeliveryServices {
         channel_protocol: Arc::new(crate::slack::slack_delivery::SlackDeliveryProtocol),
         binding_service: Arc::new(NoopTriggeredBindingService),
@@ -1344,7 +1344,7 @@ async fn triggered_auth_prompt_route_delivers_dm_setup_link_on_foreign_scope() {
             max_concurrent_deliveries: NonZeroUsize::new(4).expect("nonzero"), // safety: static test literal is non-zero.
             max_pending_deliveries: NonZeroUsize::new(16).expect("nonzero"), // safety: static test literal is non-zero.
         },
-        Arc::new(InMemoryTriggeredRunDeliveryStore::default()),
+        Arc::new(in_memory_backed_outbound_state_store()),
         route_store,
         AgentId::new(AGENT).expect("agent"), // safety: static test agent id is valid.
     );
@@ -1457,7 +1457,7 @@ async fn triggered_auth_prompt_oauth_target_not_dm_suppresses_setup_link_and_can
     let outbound_store: Arc<dyn OutboundStateStore> = outbound.clone();
     let preferences: Arc<dyn CommunicationPreferenceRepository> = outbound;
     let route_store: Arc<dyn DeliveredGateRouteStore> =
-        Arc::new(ironclaw_outbound::InMemoryDeliveredGateRouteStore::default());
+        Arc::new(ironclaw_outbound::test_support::in_memory_backed_outbound_state_store());
     let services = FinalReplyDeliveryServices {
         channel_protocol: Arc::new(crate::slack::slack_delivery::SlackDeliveryProtocol),
         binding_service: Arc::new(NoopTriggeredBindingService),
@@ -1481,7 +1481,7 @@ async fn triggered_auth_prompt_oauth_target_not_dm_suppresses_setup_link_and_can
             max_concurrent_deliveries: NonZeroUsize::new(4).expect("nonzero"), // safety: static test literal is non-zero.
             max_pending_deliveries: NonZeroUsize::new(16).expect("nonzero"), // safety: static test literal is non-zero.
         },
-        Arc::new(InMemoryTriggeredRunDeliveryStore::default()),
+        Arc::new(in_memory_backed_outbound_state_store()),
         route_store,
         AgentId::new(AGENT).expect("agent"), // safety: static test agent id is valid.
     );
@@ -3306,7 +3306,7 @@ async fn build_harness_for_auth_fanout_test(
     ));
     let auths = Arc::new(RecordingAuthInteractionService::new(coordinator.clone()));
     let route_store: Arc<dyn ironclaw_outbound::DeliveredGateRouteStore> =
-        Arc::new(ironclaw_outbound::InMemoryDeliveredGateRouteStore::default());
+        Arc::new(ironclaw_outbound::test_support::in_memory_backed_outbound_state_store());
 
     let inbound = Arc::new(DefaultInboundTurnService::new(
         binding.clone(),

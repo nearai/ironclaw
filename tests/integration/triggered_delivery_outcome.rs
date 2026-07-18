@@ -11,7 +11,7 @@
 //! `delivery_store` is genuinely the one it records through: a project-scoped
 //! `TriggerFire` synchronously records `Denied` (`on_trigger_submitted`'s first
 //! check, before any Slack egress/adapter is touched), read back via the exact
-//! `Arc<InMemoryTriggeredRunDeliveryStore>` this test injected.
+//! `Arc<FilesystemOutboundStateStore<InMemoryBackend>>` this test injected.
 //!
 //! Does not drive a live trigger-poller fire (that full path — pairing,
 //! seeding a due `TriggerRecord`, polling for the poller to claim it — is
@@ -25,9 +25,8 @@ use std::sync::Arc;
 
 use chrono::Utc;
 use ironclaw_host_api::{AgentId, ProjectId, TenantId, ThreadId, UserId};
-use ironclaw_outbound::{
-    InMemoryTriggeredRunDeliveryStore, TriggeredRunDeliveryOutcomeKind, TriggeredRunDeliveryStore,
-};
+use ironclaw_outbound::test_support::in_memory_backed_outbound_state_store;
+use ironclaw_outbound::{TriggeredRunDeliveryOutcomeKind, TriggeredRunDeliveryStore};
 use ironclaw_reborn_composition::{
     PostSubmitDeliveryHook, RebornBuildInput, RebornRuntimeInput, SlackHostBetaChannelRoute,
     SlackHostBetaConfig, SlackInstallationSelector, SlackTeamId, build_reborn_runtime,
@@ -81,7 +80,7 @@ async fn build_triggered_run_delivery_hook_over_real_runtime_records_denied_for_
 
     // The real public factory, given OUR OWN injected store — the same
     // caller-supplied-store seam a real host binds, not a test-only shortcut.
-    let delivery_store = Arc::new(InMemoryTriggeredRunDeliveryStore::default());
+    let delivery_store = Arc::new(in_memory_backed_outbound_state_store());
     let driver = build_triggered_run_delivery_hook(&runtime, &config, delivery_store.clone())
         .expect("real driver builds over a real local-dev RebornRuntime");
 

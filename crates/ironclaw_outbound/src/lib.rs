@@ -28,7 +28,7 @@ pub use communication_preferences::{
 };
 pub use delivered_gate_routes::{
     DELIVERED_GATE_ROUTE_TTL, DeliveredGateRouteRecord, DeliveredGateRouteStore,
-    InMemoryDeliveredGateRouteStore,
+    NoopDeliveredGateRouteStore,
 };
 pub use delivery_resolution::{
     CommunicationDeliveryCandidate, CommunicationDeliveryIntent, CommunicationDeliveryKind,
@@ -48,8 +48,7 @@ pub use service::{
 };
 pub use store::OutboundStateStore;
 pub use triggered_run_delivery::{
-    InMemoryTriggeredRunDeliveryStore, TriggeredRunDeliveryOutcomeKind, TriggeredRunDeliveryRecord,
-    TriggeredRunDeliveryStore,
+    TriggeredRunDeliveryOutcomeKind, TriggeredRunDeliveryRecord, TriggeredRunDeliveryStore,
 };
 pub use types::{
     AdvanceSubscriptionCursorRequest, DeliveryFailureKind, LoadSubscriptionCursorRequest,

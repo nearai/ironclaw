@@ -106,7 +106,7 @@ use ironclaw_turns::run_profile::UserProfileContext;
 
 use self::latency::{trace_runtime_latency_error, trace_runtime_latency_ok};
 use self::runtime_turn_scheduler::RuntimeTurnScheduler;
-use crate::factory::{LocalDevRootFilesystem, LocalDevTurnStateStore, builtin_extension_registry};
+use crate::factory::{LocalDevTurnStateStore, builtin_extension_registry};
 use crate::local_dev_capability_policy::{LocalDevCapabilityPolicy, local_dev_capability_policy};
 #[cfg(any(test, feature = "test-support"))]
 use crate::outbound::outbound_preferences::OutboundDeliveryTargetEntry;
@@ -118,6 +118,7 @@ use crate::outbound::{
 use crate::projection::{RebornProjectionServices, build_reborn_projection_services};
 use crate::root::default_system_prompt::DefaultSystemPromptIdentitySource;
 use crate::turn_run_snapshot::TurnRunSnapshotSource;
+use ironclaw_filesystem::CompositeRootFilesystem;
 
 #[cfg(any(test, feature = "test-support"))]
 #[derive(Clone)]
@@ -832,9 +833,9 @@ pub(crate) fn build_local_dev_approval_interaction_service_with_turn_run_source(
 }
 
 pub(crate) type LocalDevSelectableSkillContextSource =
-    SelectableSkillContextSource<FilesystemSkillBundleSource<LocalDevRootFilesystem>>;
+    SelectableSkillContextSource<FilesystemSkillBundleSource<CompositeRootFilesystem>>;
 type LocalDevSkillExecutionAdapter =
-    SkillExecutionAdapter<FilesystemSkillBundleSource<LocalDevRootFilesystem>>;
+    SkillExecutionAdapter<FilesystemSkillBundleSource<CompositeRootFilesystem>>;
 
 // TODO(#4416): when a second test-only handle is
 // needed off the trigger poller seam (e.g. trusted_submitter,
@@ -1938,8 +1939,9 @@ impl RebornRuntime {
     /// C-ATTACH test seam so the two views can never drift apart.
     pub(crate) fn webui_workspace_filesystem(
         &self,
-    ) -> Option<Arc<ironclaw_filesystem::ScopedFilesystem<crate::factory::LocalDevRootFilesystem>>>
-    {
+    ) -> Option<
+        Arc<ironclaw_filesystem::ScopedFilesystem<ironclaw_filesystem::CompositeRootFilesystem>>,
+    > {
         self.services.read_write_workspace_filesystem()
     }
 
@@ -1954,8 +1956,9 @@ impl RebornRuntime {
     /// a strictly read-only, multi-mount navigation view.
     pub(crate) fn webui_browse_filesystem(
         &self,
-    ) -> Option<Arc<ironclaw_filesystem::ScopedFilesystem<crate::factory::LocalDevRootFilesystem>>>
-    {
+    ) -> Option<
+        Arc<ironclaw_filesystem::ScopedFilesystem<ironclaw_filesystem::CompositeRootFilesystem>>,
+    > {
         let rt = self.services.local_runtime.as_ref()?;
         Some(Arc::new(ironclaw_filesystem::ScopedFilesystem::new(
             Arc::clone(&rt.extension_filesystem),
@@ -2619,7 +2622,7 @@ impl RebornRuntime {
 
     fn skill_execution_plan_for_run(
         &self,
-        adapter: &SkillExecutionAdapter<FilesystemSkillBundleSource<LocalDevRootFilesystem>>,
+        adapter: &SkillExecutionAdapter<FilesystemSkillBundleSource<CompositeRootFilesystem>>,
         scope: &TurnScope,
         run_id: TurnRunId,
     ) -> Result<RebornSkillExecutionPlan, RebornRuntimeError> {
@@ -3871,7 +3874,7 @@ pub async fn build_reborn_runtime(
         // `context/profile.json` via the workspace filesystem. When a local-dev workspace
         // filesystem is available, the `MemoryBackedUserProfileSource` adapter reads it;
         // otherwise `EmptyUserProfileSource` degrades gracefully to `None` (profile unknown).
-        // `extension_filesystem` is the raw `Arc<LocalDevRootFilesystem>` (=
+        // `extension_filesystem` is the raw `Arc<CompositeRootFilesystem>` (=
         // `CompositeRootFilesystem`) — the underlying RootFilesystem the workspace
         // mounts are built from. `MemoryBackedUserProfileSource` constructs its own
         // full virtual paths via `profile_scope_and_path` and does not use the
@@ -4275,7 +4278,7 @@ async fn append_trusted_laptop_access_audit(
 }
 
 struct LocalDevSkillContextSource {
-    bundle_source: Arc<FilesystemSkillBundleSource<LocalDevRootFilesystem>>,
+    bundle_source: Arc<FilesystemSkillBundleSource<CompositeRootFilesystem>>,
     source: Arc<dyn HostSkillContextSource>,
     activation_source: Arc<LocalDevSelectableSkillContextSource>,
     execution_adapter: Arc<LocalDevSkillExecutionAdapter>,

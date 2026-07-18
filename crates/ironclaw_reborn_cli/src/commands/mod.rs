@@ -124,6 +124,11 @@ impl Command {
 
 /// Shared boolean parsing for channel-enablement env overrides
 /// (`IRONCLAW_REBORN_SLACK_ENABLED`, `IRONCLAW_REBORN_TELEGRAM_ENABLED`, …).
+///
+/// Only the `serve_slack` / `serve_telegram` commands consume this, and both are
+/// gated on `webui-v2-beta`; gate the definition identically so default and
+/// `libsql-only` builds don't see it as dead code.
+#[cfg(feature = "webui-v2-beta")]
 pub(crate) fn parse_channel_enabled_bool(field: &str, value: &str) -> anyhow::Result<bool> {
     match value.trim().to_ascii_lowercase().as_str() {
         "1" | "true" | "yes" | "on" => Ok(true),

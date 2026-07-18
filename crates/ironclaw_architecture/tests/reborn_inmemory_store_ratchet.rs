@@ -23,9 +23,16 @@
 //! so keep test doubles under `tests/` (or justify an allowlist entry in
 //! review).
 //!
-//! Definition of done for this axis (§10): the allowlist reaches the empty set —
-//! every store is `Filesystem*Store<InMemoryBackend>` in tests. Until then this
-//! frozen set is the contract.
+//! Definition of done for this axis (§10): the **debt** shrinks to empty — every
+//! persistence-store duplicate becomes `Filesystem*Store<InMemoryBackend>` in
+//! tests. The mechanical consolidations (A1–A8: approvals, authorization,
+//! processes, run-state, budget-gate, and the whole outbound family) are done;
+//! see the annotated `FROZEN_INMEMORY_STORES` below for the per-entry status of
+//! the remainder. Note two entries (`InMemoryBoundedSubagentGoalStore`,
+//! `InMemoryOpenAiCompatRefStore`) are **justified bounded caches**, not
+//! persistence debt — a future PR may formally split them into a justified-keep
+//! list; for now they stay frozen with a do-not-consolidate note. Until then
+//! this frozen set is the contract.
 
 mod ratchet_support;
 
@@ -43,30 +50,65 @@ fn is_inmemory_store(ident: &str) -> bool {
 }
 
 /// The frozen inventory of pub-visible `struct InMemory*Store` definitions under
-/// `crates/`, as of the run-state slice (§4.3, A4). Remove an entry in the same
-/// PR that deletes its store; never add one. Grouped by whether it is a
-/// remaining Slice-A consolidation target or a peripheral store outside the
-/// domain-store scope of §4.3 (the axis is still complete only when the whole
-/// list is empty).
+/// `crates/`. Remove an entry in the same PR that deletes its store; never add
+/// one. Comments are stripped by the scanner, so the per-entry status notes
+/// below are documentation only — the enforced contract is the string set.
+///
+/// **Status of the remainder (assessed 2026-07-18, after the mechanical §4.3
+/// slices A1–A8 landed the approvals/authorization/processes/run-state/budget-gate
+/// and the whole outbound family).** The clean mechanical consolidations are
+/// DONE; every entry still here is blocked on non-mechanical work OR is a
+/// justified keep — except the trailing pub(crate) trio, which is not yet
+/// individually triaged. Triaged entries are annotated with WHAT they need, so
+/// the next contributor picks up a scoped task instead of re-deriving the
+/// blocker; untriaged entries say so explicitly.
 const FROZEN_INMEMORY_STORES: &[&str] = &[
-    // --- remaining Slice-A domain store: turns (do last, reconcile-then-delete;
-    //     `InMemoryTurnStateStore` is also the `inmemory-turn-state` production
-    //     runtime authority, so it is not a mechanical delete) ---
+    // --- turns cluster: DEFERRED, not mechanical. `InMemoryTurnStateStore` is the
+    //     `inmemory-turn-state` production runtime authority (pessimistic Mutex,
+    //     no-CAS-livelock); a `FilesystemTurnStateStore<InMemoryBackend>` swap needs
+    //     a concurrency stress test PROVING it keeps the no-livelock property first.
+    //     `FilesystemCheckpointStateStore` already EXISTS in `ironclaw_loop_host`
+    //     (contract-tested, composition-wired) — that entry only needs the test-seam
+    //     swap + allowlist trim; LoopCheckpoint/InstructionMaterialization still need
+    //     a filesystem variant BUILT (cross-crate in `ironclaw_loop_host`). ---
     "InMemoryTurnStateStore",
     "InMemoryCheckpointStateStore",
     "InMemoryLoopCheckpointStore",
     "InMemoryInstructionMaterializationStore",
-    // --- peripheral stores (outside §4.3's five core domains; listed so the
-    //     ratchet stays exhaustive and no new InMemory store slips in) ---
+    // --- JUSTIFIED KEEPS — bounded in-memory caches serving the test/no-durable
+    //     fallback role. Durable production variants ALREADY EXIST and are wired
+    //     (`FilesystemSubagentGoalStore` in the libSQL/Postgres runner adapters;
+    //     `FilesystemOpenAiCompatRefStore` in OpenAI-compatible serving) — these
+    //     in-memory types are not missing consolidations, they are the bounded
+    //     volatile role next to those stores. Do NOT swap them for a durable
+    //     store in tests that specifically exercise the bounded/evicting cache
+    //     semantics. ---
+    //   BoundedSubagentGoal: capacity-bounded, evict-oldest (VecDeque insertion
+    //     order) cache of in-flight subagent-spawn goals — goal_store.rs.
     "InMemoryBoundedSubagentGoalStore",
-    "InMemoryDeliveredGateRouteStore",
-    "InMemoryExtensionInstallationStore",
+    //   OpenAiCompatRef: capacity-bounded with oldest-created eviction (evicts the
+    //     minimum `created_at`; reads do not refresh recency — NOT an LRU) AND the
+    //     crate's documented filesystem-free default so contract-only consumers pull
+    //     no `ironclaw_filesystem` dep (openai_compat CLAUDE.md).
     "InMemoryOpenAiCompatRefStore",
+    // --- BLOCKED — cross-crate placement. `FilesystemExtensionInstallationStore`
+    //     exists but in high `ironclaw_reborn_composition` and depends on a
+    //     composition-internal contract registry, so it can't move DOWN to
+    //     `ironclaw_extensions` (whose own tests need an in-memory store). Needs the
+    //     filesystem store (or its contract dep) relocated first. Prod already wires
+    //     Filesystem. ---
+    "InMemoryExtensionInstallationStore",
+    // --- SECURITY-SENSITIVE — secrets subsystem; deliberate careful work, not a
+    //     mechanical swap. ---
     "InMemorySecretStore",
+    // --- BUILD-FIRST — no filesystem variant exists. `InMemorySessionStore`
+    //     (webui login sessions, TTL-expiring bearer tokens) would gain restart
+    //     durability from a `FilesystemSessionStore`, but that store must be BUILT
+    //     (auth-adjacent — handle with care). ~63 usages. ---
     "InMemorySessionStore",
-    "InMemoryTriggeredRunDeliveryStore",
     // --- pub(crate) stores the visibility-aware scanner also inventories
-    //     (same debt class, just crate-private) ---
+    //     (crate-private; not yet individually triaged — assess build-vs-justified
+    //     when picked up, same as the peripheral set above). ---
     "InMemorySecretsStore",
     "InMemorySlackChannelRouteStore",
     "InMemorySlackPersonalDmTargetStore",
