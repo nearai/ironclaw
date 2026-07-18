@@ -4093,7 +4093,27 @@ impl ExtensionManager {
         // follow-up PATCH. (Same-origin path/query changes keep them; the GC
         // below deletes the unbound secrets after commit.)
         let mut credential_headers_unbound = false;
-        if url_changed && !headers_replaced && !same_url_origin(&previous_config.url, &config.url) {
+        let cross_origin_change =
+            url_changed && !same_url_origin(&previous_config.url, &config.url);
+        // A cross-origin change accompanied by header REFERENCES would bypass
+        // the unbind below: the deterministic marker is predictable, so a
+        // caller could re-supply this server's own reference alongside a new
+        // host and have the OLD credential resolved against it. Cross-origin
+        // rebinds must carry raw values (which are then freshly secretized).
+        if cross_origin_change
+            && headers_replaced
+            && config
+                .headers
+                .values()
+                .any(|v| crate::tools::mcp::config::parse_header_secret_reference(v).is_some())
+        {
+            return Err(ExtensionError::InvalidRequest(
+                "URL origin changed: header values must be supplied as raw \
+                 credentials, not secret references"
+                    .to_string(),
+            ));
+        }
+        if cross_origin_change && !headers_replaced {
             let before = config.headers.len();
             config.headers.retain(|_, v| {
                 crate::tools::mcp::config::parse_header_secret_reference(v).is_none()
@@ -4237,15 +4257,15 @@ impl ExtensionManager {
             // and re-activate it, so the PATCH is atomic from the caller's
             // point of view — either the server runs the new config, or the
             // old config is back and the error says why.
-            // Tool names registered for this server BEFORE reactivation —
-            // used to reconcile the registry against the new surface below.
-            let wrapper_prefix = crate::tools::mcp::mcp_tool_id(name, "");
-            let previously_registered: Vec<String> = self
-                .tool_registry
-                .list()
-                .await
-                .into_iter()
-                .filter(|t| t.starts_with(&wrapper_prefix))
+            // Tool names registered for THIS server before reactivation,
+            // derived from its previous cached catalog via the same
+            // `mcp_tool_id` mapping activation uses. A bare prefix scan is
+            // not server-boundary-safe (`foo_` also matches `foo_bar`'s
+            // tools), so the catalog is the source of truth here.
+            let previously_registered: Vec<String> = previous_config
+                .cached_tools
+                .iter()
+                .map(|t| crate::tools::mcp::mcp_tool_id(name, &t.name))
                 .collect();
             let activate_result = match self.activate_mcp_locked(name, user_id).await {
                 Ok(r) => r,
