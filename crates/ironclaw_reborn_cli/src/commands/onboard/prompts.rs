@@ -10,6 +10,14 @@
 //! return [`LlmCredentialPromptError::NonInteractive`] rather than calling
 //! `process::exit`.
 
+// The terminal prompt surface is consumed by LLM provisioning only when the
+// provider-admin feature is present. Keep the shared feature-off onboarding
+// shape without emitting dead-code warnings in slim builds.
+#![cfg_attr(
+    not(all(feature = "libsql", feature = "root-llm-provider")),
+    allow(dead_code)
+)]
+
 use std::io::{IsTerminal, Write as _};
 
 /// Where onboarding's LLM-credential prompts (provider menu, API key,
@@ -73,7 +81,7 @@ pub(crate) enum LlmCredentialPromptError {
     /// an unavailable interactive input.
     #[error(
         "onboarding LLM credential prompts require an interactive terminal; run \
-         `ironclaw-reborn models set-provider <provider>` and set the provider's API key env \
+         `ironclaw models set-provider <provider>` and set the provider's API key env \
          var instead, or rerun `onboard` from an interactive shell"
     )]
     NonInteractive,
@@ -94,7 +102,7 @@ impl PromptSource for StdinPromptSource {
         // Both streams matter: a redirected/piped stdout must not receive
         // the masked `*` characters `api_key`'s raw-mode read writes as the
         // operator types, even when stdin itself is a real terminal (e.g.
-        // `ironclaw-reborn onboard > log.txt` in an interactive shell).
+        // `ironclaw onboard > log.txt` in an interactive shell).
         std::io::stdin().is_terminal() && std::io::stdout().is_terminal()
     }
 

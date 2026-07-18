@@ -529,8 +529,8 @@ fn reborn_cli_binary_crate_stays_separate_from_v1_root() {
         "Reborn CLI crate package name should be ironclaw_reborn_cli"
     );
     assert!(
-        manifest.contains("[[bin]]") && manifest.contains("name = \"ironclaw-reborn\""),
-        "Reborn CLI crate must declare the ironclaw-reborn binary explicitly"
+        manifest.contains("[[bin]]") && manifest.contains("name = \"ironclaw\""),
+        "Reborn CLI crate must declare the canonical ironclaw binary explicitly"
     );
 
     let command_module_paths = [

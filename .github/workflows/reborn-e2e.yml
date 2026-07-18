@@ -137,7 +137,12 @@ jobs:
           save-if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
 
       - name: Build ironclaw with libSQL
-        run: cargo build --no-default-features --features libsql
+        run: >-
+          cargo build
+          -p ironclaw
+          --bin ironclaw-legacy
+          --no-default-features
+          --features libsql
 
       - name: Install Python
         uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
@@ -220,7 +225,7 @@ jobs:
           cargo build
           -p ironclaw_reborn_cli
           --features openai-compat-beta,slack-v2-host-beta
-          --bin ironclaw-reborn
+          --bin ironclaw
 
       - name: Mark OpenAI-compatible binary feature set
         run: touch target/debug/.ironclaw-reborn-openai-compat-beta.stamp
@@ -265,7 +270,10 @@ jobs:
           product_ref="$(git rev-parse HEAD)"
           artifact_dir="artifacts/reborn-webui-v2-binary"
           mkdir -p "${artifact_dir}"
-          tar -C target/debug -czf "${artifact_dir}/ironclaw-reborn.tar.gz" ironclaw-reborn
+          # Temporary compatibility member for downstream QA consumers; remove
+          # after every consumer invokes the canonical ironclaw binary.
+          cp target/debug/ironclaw target/debug/ironclaw-reborn
+          tar -C target/debug -czf "${artifact_dir}/ironclaw-reborn.tar.gz" ironclaw ironclaw-reborn
           (
             cd "${artifact_dir}"
             sha256sum ironclaw-reborn.tar.gz > ironclaw-reborn.tar.gz.sha256
@@ -334,7 +342,7 @@ jobs:
           save-if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
 
       - name: Build ironclaw-reborn with WebChat v2 surface
-        run: cargo build -p ironclaw_reborn_cli --features webui-v2-beta --bin ironclaw-reborn
+        run: cargo build -p ironclaw_reborn_cli --features webui-v2-beta --bin ironclaw
 
       - name: Install Python
         uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5

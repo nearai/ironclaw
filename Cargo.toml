@@ -66,6 +66,7 @@ unused_must_use = "deny"
 
 [package]
 name = "ironclaw"
+autobins = false
 version = "0.29.1"
 edition = "2024"
 rust-version.workspace = true
@@ -77,6 +78,10 @@ repository = "https://github.com/nearai/ironclaw"
 
 [package.metadata.ironclaw]
 layer = "legacy"
+
+[[bin]]
+name = "ironclaw-legacy"
+path = "src/main.rs"
 
 [package.metadata.wix]
 upgrade-guid = "D0156E61-BA37-451E-8AB9-1A2ECCCFA48F"
