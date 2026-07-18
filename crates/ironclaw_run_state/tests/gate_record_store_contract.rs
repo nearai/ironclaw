@@ -64,6 +64,36 @@ async fn gate_record_auth_variant_round_trips_credential_requirements() {
     }
 }
 
+/// The reason this store exists: a gate blocks on one turn and is rendered on a
+/// LATER resume turn, which carries a fresh `invocation_id`. The scope check
+/// must compare only the owner axes (tenant/user/agent/project/mission/thread)
+/// — if it ever included `invocation_id`, every legitimate resume load would
+/// look unknown and this test would fail.
+#[tokio::test]
+async fn gate_record_loads_on_a_later_resume_turn_with_a_new_invocation_id() {
+    let store = in_mem_gate_record_store();
+    let blocking_turn = sample_scope("tenant1", "user1");
+    let gate_ref = GateRef::new();
+    store
+        .save(
+            blocking_turn.clone(),
+            gate_ref,
+            GateRecord::Approval { summary: summary() },
+        )
+        .await
+        .unwrap();
+
+    let resume_turn = ResourceScope {
+        invocation_id: InvocationId::new(),
+        ..blocking_turn
+    };
+    assert_eq!(
+        store.load(&resume_turn, gate_ref).await.unwrap(),
+        Some(GateRecord::Approval { summary: summary() }),
+        "same owner on a later turn (new invocation_id) must still load the record"
+    );
+}
+
 #[tokio::test]
 async fn gate_record_load_of_missing_ref_returns_none() {
     let store = in_mem_gate_record_store();
