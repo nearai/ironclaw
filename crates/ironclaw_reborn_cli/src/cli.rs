@@ -3,11 +3,7 @@ use clap::{CommandFactory, Parser};
 use crate::commands::Command;
 
 #[derive(Debug, Parser)]
-#[command(
-    name = "ironclaw-reborn",
-    about = "Standalone IronClaw Reborn runtime",
-    version
-)]
+#[command(name = "ironclaw", about = "IronClaw agent runtime", version)]
 pub(crate) struct Cli {
     #[command(subcommand)]
     pub(crate) command: Command,

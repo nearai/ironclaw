@@ -1,4 +1,4 @@
-//! WebChat v2 SSO startup config for `ironclaw-reborn serve`.
+//! WebChat v2 SSO startup config for `ironclaw serve`.
 //!
 //! Compiled under the `webui-v2-beta` feature (the same feature that
 //! compiles the `serve` command). This module owns the host config side
@@ -189,7 +189,7 @@ pub(crate) fn is_cleartext_http_scheme(base_url: &str) -> bool {
 /// names would couple two unrelated surfaces: setting `GOOGLE_CLIENT_ID`
 /// just to enable login would also activate the product-auth Google
 /// resolver, which hard-errors when its required redirect URI is absent
-/// and would take down every `ironclaw-reborn` command. The distinct
+/// and would take down every `ironclaw` command. The distinct
 /// namespace keeps SSO login and product-auth independently
 /// configurable. (The browser-user *login* client and the product
 /// *credential* client are usually distinct OAuth clients anyway —

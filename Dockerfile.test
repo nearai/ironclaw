@@ -33,7 +33,7 @@ COPY channels-src/ channels-src/
 COPY wit/ wit/
 COPY providers.json providers.json
 
-RUN cargo build --release --no-default-features --features libsql --bin ironclaw
+RUN cargo build --release --package ironclaw --no-default-features --features libsql --bin ironclaw-legacy
 
 # Stage 2: Runtime
 FROM debian:bookworm-slim
@@ -42,7 +42,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates libssl3 \
     && rm -rf /var/lib/apt/lists/*
 
-COPY --from=builder /app/target/release/ironclaw /usr/local/bin/ironclaw
+COPY --from=builder /app/target/release/ironclaw-legacy /usr/local/bin/ironclaw-legacy
 
 RUN useradd -m -u 1000 -s /bin/bash ironclaw
 USER ironclaw
@@ -59,4 +59,4 @@ ENV RUST_LOG=ironclaw=info \
     LIBSQL_PATH=/home/ironclaw/test.db \
     SANDBOX_ENABLED=false
 
-ENTRYPOINT ["ironclaw", "--no-onboard"]
+ENTRYPOINT ["ironclaw-legacy", "--no-onboard"]

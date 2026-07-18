@@ -40,7 +40,7 @@ fn config_text_has_live_provider_id(config_text: &str) -> bool {
 }
 
 fn reborn_bin() -> &'static str {
-    env!("CARGO_BIN_EXE_ironclaw-reborn")
+    env!("CARGO_BIN_EXE_ironclaw")
 }
 
 /// Shared builder for every real-binary spawn in this file: `Command::new(reborn_bin())`
@@ -105,7 +105,7 @@ fn fake_reborn_bin(bin_dir: &Path) {
     use std::os::unix::fs::PermissionsExt;
 
     std::fs::create_dir_all(bin_dir).expect("fake bin dir");
-    let bin = bin_dir.join("ironclaw-reborn");
+    let bin = bin_dir.join("ironclaw");
     std::fs::write(
         &bin,
         "#!/bin/sh\nprintf 'home=%s\\n' \"$IRONCLAW_REBORN_HOME\"\nprintf 'args=%s\\n' \"$*\"\n",
@@ -159,6 +159,12 @@ fn dockerfile_reborn_builds_with_production_features() {
     assert!(
         dockerfile.matches("webui-v2-beta,libsql,postgres").count() >= 2,
         "Dockerfile.reborn must compile both cargo-chef deps and final binary with libsql and postgres: {dockerfile}"
+    );
+    assert!(
+        dockerfile.contains("--bin ironclaw")
+            && dockerfile
+                .contains("COPY --from=builder /app/target/dist/ironclaw /usr/local/bin/ironclaw"),
+        "Dockerfile.reborn must build and copy the canonical ironclaw binary: {dockerfile}"
     );
     assert!(
         dockerfile.contains("corepack enable pnpm")
@@ -642,9 +648,10 @@ fn help_mentions_reborn_commands() {
     );
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(
-        stdout.contains("Standalone IronClaw Reborn runtime"),
+        stdout.contains("IronClaw agent runtime"),
         "stdout: {stdout}"
     );
+    assert!(stdout.contains("Usage: ironclaw"), "stdout: {stdout}");
     assert!(stdout.contains("channels"), "stdout: {stdout}");
     assert!(stdout.contains("completion"), "stdout: {stdout}");
     assert!(stdout.contains("config"), "stdout: {stdout}");
@@ -1077,7 +1084,7 @@ fn skills_list_rejects_unsupported_profiles() {
         );
         let stderr = String::from_utf8_lossy(&output.stderr);
         assert!(
-            stderr.contains("ironclaw-reborn skills currently supports profile=local-dev"),
+            stderr.contains("ironclaw skills currently supports profile=local-dev"),
             "stderr: {stderr}"
         );
         assert!(
@@ -1608,11 +1615,8 @@ fn completion_generates_zsh_script_without_reborn_home() {
         String::from_utf8_lossy(&output.stderr)
     );
     let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(
-        stdout.contains("#compdef ironclaw-reborn"),
-        "stdout: {stdout}"
-    );
-    assert!(stdout.contains("_ironclaw-reborn"), "stdout: {stdout}");
+    assert!(stdout.contains("#compdef ironclaw"), "stdout: {stdout}");
+    assert!(stdout.contains("_ironclaw"), "stdout: {stdout}");
     assert!(
         stdout.contains("$+functions[compdef]"),
         "zsh completion should guard compdef: {stdout}"
@@ -1634,7 +1638,7 @@ fn completion_generates_bash_script_without_reborn_home() {
         String::from_utf8_lossy(&output.stderr)
     );
     let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(stdout.contains("_ironclaw-reborn()"), "stdout: {stdout}");
+    assert!(stdout.contains("_ironclaw()"), "stdout: {stdout}");
     assert!(stdout.contains("COMPREPLY"), "stdout: {stdout}");
 }
 
@@ -1909,7 +1913,7 @@ fn serve_with_env_auth_seeds_reborn_config_before_binding() {
             Ok(Ok(line)) => {
                 stderr_text.push_str(&line);
                 stderr_text.push('\n');
-                if stderr_text.contains("ironclaw-reborn: WebChat v2 listener") {
+                if stderr_text.contains("ironclaw: WebChat v2 listener") {
                     break;
                 }
             }
@@ -2045,7 +2049,7 @@ fn serve_resolves_bearer_token_from_reborn_home_webui_token_file() {
             Ok(Ok(line)) => {
                 stderr_text.push_str(&line);
                 stderr_text.push('\n');
-                if stderr_text.contains("ironclaw-reborn: WebChat v2 listener") {
+                if stderr_text.contains("ironclaw: WebChat v2 listener") {
                     break;
                 }
             }
@@ -2173,7 +2177,7 @@ max_body_bytes_fallback = 0
             "stderr should contain {expected:?}; got: {stderr}"
         );
         assert!(
-            !stderr.contains("ironclaw-reborn: WebChat v2 listener"),
+            !stderr.contains("ironclaw: WebChat v2 listener"),
             "serve must not bind after invalid WebUI security config; got: {stderr}"
         );
     }
@@ -2212,7 +2216,7 @@ fn serve_fails_closed_when_sso_provider_has_no_allowed_domain_allowlist() {
         "stderr should explain the missing SSO admission allowlist; got: {stderr}"
     );
     assert!(
-        !stderr.contains("ironclaw-reborn: WebChat v2 listener"),
+        !stderr.contains("ironclaw: WebChat v2 listener"),
         "serve must not bind after SSO admission misconfiguration; got: {stderr}"
     );
 }
@@ -2246,7 +2250,7 @@ fn serve_fails_closed_when_session_token_lacks_entropy_without_sso() {
         "stderr should explain the session-signing entropy floor; got: {stderr}"
     );
     assert!(
-        !stderr.contains("ironclaw-reborn: WebChat v2 listener"),
+        !stderr.contains("ironclaw: WebChat v2 listener"),
         "serve must not bind with a low-entropy session-signing secret; got: {stderr}"
     );
 }
@@ -2622,7 +2626,7 @@ fn wait_for_serve_banner(child: &mut std::process::Child) -> String {
             Ok(Ok(line)) => {
                 stderr_text.push_str(&line);
                 stderr_text.push('\n');
-                if stderr_text.contains("ironclaw-reborn: WebChat v2 listener") {
+                if stderr_text.contains("ironclaw: WebChat v2 listener") {
                     break;
                 }
             }
@@ -2672,7 +2676,7 @@ fn wait_for_serve_banner_with_capture(
         if stderr_all
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .contains("ironclaw-reborn: WebChat v2 listener")
+            .contains("ironclaw: WebChat v2 listener")
         {
             return stderr_all;
         }
@@ -2863,7 +2867,7 @@ fn repl_exit_command_seeds_reborn_config() {
     assert!(stdout.is_empty(), "stdout should stay reply-only: {stdout}");
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
-        stderr.contains("ironclaw-reborn: runtime started"),
+        stderr.contains("ironclaw: runtime started"),
         "stderr: {stderr}"
     );
     assert!(
@@ -2944,7 +2948,7 @@ fn repl_resolves_codex_auth_env_without_openai_api_key() {
     );
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
-        stderr.contains("ironclaw-reborn: runtime started"),
+        stderr.contains("ironclaw: runtime started"),
         "stderr: {stderr}"
     );
     assert!(
@@ -2999,7 +3003,7 @@ fn repl_resolves_codex_api_key_auth_env_without_openai_api_key() {
     );
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
-        stderr.contains("ironclaw-reborn: runtime started"),
+        stderr.contains("ironclaw: runtime started"),
         "stderr: {stderr}"
     );
     assert!(
@@ -3557,7 +3561,7 @@ fn config_init_writes_both_files() {
         .env_remove("USERPROFILE")
         .env("IRONCLAW_REBORN_HOME", &reborn_home)
         .output()
-        .expect("ironclaw-reborn config init should run");
+        .expect("ironclaw config init should run");
     assert!(
         output.status.success(),
         "stderr: {}",
@@ -3926,7 +3930,7 @@ fn onboard_with_complete_llm_env_then_serve_boots_from_the_env_seeded_slot() {
         .env("HOME", &home)
         .env("IRONCLAW_REBORN_HOME", &reborn_home)
         .env("OPENAI_API_KEY", "sk-smoke-test-env-detected-openai-key")
-        .env("IRONCLAW_REBORN_LOG", "info,ironclaw_reborn=debug")
+        .env("IRONCLAW_REBORN_LOG", "info,ironclaw=debug")
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
@@ -4721,7 +4725,7 @@ fn onboard_openai_key_then_serve_boots_with_env_var_unset() {
         .env("HOME", &home)
         .env("IRONCLAW_REBORN_HOME", &reborn_home)
         // No OPENAI_API_KEY: the stored key must be what makes this boot.
-        // Target is `ironclaw_reborn` (the bin's normalized crate name, not
+        // Target is `ironclaw` (the bin's normalized crate name, not
         // the `ironclaw_reborn_cli` package this test itself compiles as).
         // `ironclaw_reborn_composition=debug` is also needed to observe
         // `RebornLlmReloadAdapter::reload`'s own `key_applied` trace below —
@@ -4729,7 +4733,7 @@ fn onboard_openai_key_then_serve_boots_with_env_var_unset() {
         // for the stored-key-backed openai provider (PR #6174 item A).
         .env(
             "IRONCLAW_REBORN_LOG",
-            "info,ironclaw_reborn=debug,ironclaw_reborn_composition=debug",
+            "info,ironclaw=debug,ironclaw_reborn_composition=debug",
         )
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -4831,7 +4835,7 @@ fn onboard_nearai_then_serve_boots_with_cloud_base_url() {
         // proving the coded default itself is cloud, not a key-presence race.
         .env_remove("NEARAI_API_KEY")
         .env_remove("NEARAI_BASE_URL")
-        .env("IRONCLAW_REBORN_LOG", "info,ironclaw_reborn=debug")
+        .env("IRONCLAW_REBORN_LOG", "info,ironclaw=debug")
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
@@ -4935,7 +4939,7 @@ fn onboard_nearai_stored_key_then_serve_boots_with_cloud_base_url() {
         // it must be named explicitly.
         .env(
             "IRONCLAW_REBORN_LOG",
-            "info,ironclaw_reborn=debug,ironclaw_reborn_composition=debug",
+            "info,ironclaw=debug,ironclaw_reborn_composition=debug",
         )
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())

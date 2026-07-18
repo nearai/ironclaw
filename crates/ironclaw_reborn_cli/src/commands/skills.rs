@@ -94,7 +94,7 @@ fn build_skill_list_config(config: &RebornBootConfig) -> anyhow::Result<SkillLis
     let profile = crate::runtime::effective_profile(config, config_file.as_ref())?;
     if !profile.supports_local_runtime_skill_management() {
         anyhow::bail!(
-            "ironclaw-reborn skills currently supports profile=local-dev, profile=local-dev-yolo, profile=hosted-single-tenant, or profile=hosted-single-tenant-volume; got profile={profile}"
+            "ironclaw skills currently supports profile=local-dev, profile=local-dev-yolo, profile=hosted-single-tenant, or profile=hosted-single-tenant-volume; got profile={profile}"
         );
     }
     Ok(SkillListConfig {

@@ -83,7 +83,7 @@ RUN cargo build \
     --profile dist \
     --package ironclaw_reborn_cli \
     --features webui-v2-beta,libsql,postgres,inmemory-turn-state \
-    --bin ironclaw-reborn
+    --bin ironclaw
 
 FROM debian:bookworm-slim AS runtime
 
@@ -94,7 +94,7 @@ RUN apt-get -o Acquire::Retries=3 update \
         sqlite3 \
     && rm -rf /var/lib/apt/lists/*
 
-COPY --from=builder /app/target/dist/ironclaw-reborn /usr/local/bin/ironclaw-reborn
+COPY --from=builder /app/target/dist/ironclaw /usr/local/bin/ironclaw
 COPY docker/reborn/config.toml /opt/ironclaw/reborn/config.toml
 COPY docker/reborn/config.hosted-single-tenant.toml /opt/ironclaw/reborn/config.hosted-single-tenant.toml
 COPY docker/reborn/config.hosted-single-tenant-volume.toml /opt/ironclaw/reborn/config.hosted-single-tenant-volume.toml

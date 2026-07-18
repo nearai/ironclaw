@@ -3488,7 +3488,7 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
             ):
                 proc, base_url = asyncio.run(
                     run_live_qa.start_reborn_server(
-                        root / "ironclaw-reborn",
+                        root / "ironclaw",
                         root / "reborn-home",
                         root / "out",
                         {
@@ -3561,7 +3561,7 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
             ):
                 proc, base_url = asyncio.run(
                     run_live_qa.start_reborn_server(
-                        root / "ironclaw-reborn",
+                        root / "ironclaw",
                         reborn_home,
                         root / "out",
                         {
@@ -7355,6 +7355,11 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
             "webui-v2-beta",
             prepare_body,
         )
+        self.assertIn("cp target/debug/ironclaw target/debug/ironclaw-reborn", prepare_body)
+        self.assertIn(
+            "ironclaw-reborn.tar.gz ironclaw ironclaw-reborn",
+            prepare_body,
+        )
         self.assertIn("using the canary fallback build", prepare_body)
         self.assertIn("prepared-reborn-webui-v2-binary-${{ steps.target.outputs.checkout_ref }}", prepare_body)
         self.assertIn("path: artifacts/prepared-reborn-webui-v2-binary/", prepare_body)
@@ -7373,6 +7378,11 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
         )
         self.assertIn(
             '["openai-compat-beta","webui-v2-beta"]',
+            reborn_e2e,
+        )
+        self.assertIn("cp target/debug/ironclaw target/debug/ironclaw-reborn", reborn_e2e)
+        self.assertIn(
+            "ironclaw-reborn.tar.gz\" ironclaw ironclaw-reborn",
             reborn_e2e,
         )
         self.assertIn(
@@ -8106,7 +8116,7 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
             with tempfile.TemporaryDirectory() as tmpdir:
                 root = Path(tmpdir)
                 output_dir = root / "out"
-                binary = root / "ironclaw-reborn"
+                binary = root / "ironclaw"
                 binary.touch()
                 prepared_home = root / "prepared-home"
                 prepared_home.mkdir()
@@ -8207,7 +8217,7 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
             output_dir = root / "out"
-            binary = root / "ironclaw-reborn"
+            binary = root / "ironclaw"
             binary.touch()
             args = argparse.Namespace(
                 all_cases=False,
@@ -8336,7 +8346,7 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
             output_dir = root / "out"
-            binary = root / "ironclaw-reborn"
+            binary = root / "ironclaw"
             binary.touch()
             args = argparse.Namespace(
                 all_cases=False,
@@ -8448,7 +8458,7 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
             output_dir = root / "out"
-            binary = root / "ironclaw-reborn"
+            binary = root / "ironclaw"
             binary.touch()
             args = argparse.Namespace(
                 all_cases=False,
@@ -8516,7 +8526,7 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
             output_dir = root / "out"
-            binary = root / "ironclaw-reborn"
+            binary = root / "ironclaw"
             binary.touch()
             args = argparse.Namespace(
                 all_cases=False,
@@ -8578,7 +8588,7 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
             output_dir = root / "out"
-            binary = root / "ironclaw-reborn"
+            binary = root / "ironclaw"
             binary.touch()
             prepared_home = root / "prepared-home"
             prepared_home.mkdir()
@@ -8666,7 +8676,7 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
             output_dir = root / "out"
-            binary = root / "ironclaw-reborn"
+            binary = root / "ironclaw"
             binary.touch()
             prepared_home = root / "prepared-home"
             prepared_home.mkdir()

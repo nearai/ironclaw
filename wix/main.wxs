@@ -123,9 +123,9 @@
                         <Component Id='binary0' Guid='*'>
                             <File
                                 Id='exe0'
-                                Name='ironclaw.exe'
+                                Name='ironclaw-legacy.exe'
                                 DiskId='1'
-                                Source='$(var.CargoTargetBinDir)\ironclaw.exe'
+                                Source='$(var.CargoTargetBinDir)\ironclaw-legacy.exe'
                                 KeyPath='yes'/>
                         </Component>
                         <Component Id='binary1' Guid='*'>

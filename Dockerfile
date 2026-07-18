@@ -68,7 +68,7 @@ COPY wit/ wit/
 COPY providers.json providers.json
 COPY profiles/ profiles/
 
-RUN cargo build --profile dist --bin ironclaw
+RUN cargo build --profile dist --bin ironclaw-legacy
 
 # Stage 4b: Build all WASM extensions from source (only used by runtime-staging)
 #
@@ -128,7 +128,7 @@ RUN apt-get -o Acquire::Retries=3 update \
     && apt-get -o Acquire::Retries=3 install -y --no-install-recommends ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 
-COPY --from=builder /app/target/dist/ironclaw /usr/local/bin/ironclaw
+COPY --from=builder /app/target/dist/ironclaw-legacy /usr/local/bin/ironclaw-legacy
 COPY --from=builder /app/migrations /app/migrations
 
 # Non-root user
@@ -142,7 +142,7 @@ EXPOSE 3000
 
 ENV RUST_LOG=ironclaw=info
 
-ENTRYPOINT ["ironclaw"]
+ENTRYPOINT ["ironclaw-legacy"]
 
 # Stage 5b: Production runtime (no pre-bundled extensions)
 FROM runtime-base AS runtime

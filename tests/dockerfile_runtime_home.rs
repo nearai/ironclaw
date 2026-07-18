@@ -51,7 +51,7 @@ fn setup_fake_entrypoint() -> FakeEntrypoint {
 
     std::fs::create_dir_all(&bin_dir).expect("bin dir");
     write_executable(
-        &bin_dir.join("ironclaw-reborn"),
+        &bin_dir.join("ironclaw"),
         "#!/bin/sh\nprintf '%s\\n' \"$@\" > \"$IRONCLAW_REBORN_TEST_ARGS_FILE\"\n",
     );
     write_executable(
@@ -77,7 +77,7 @@ fn setup_fake_entrypoint_recording_cp() -> FakeEntrypoint {
 
     std::fs::create_dir_all(&bin_dir).expect("bin dir");
     write_executable(
-        &bin_dir.join("ironclaw-reborn"),
+        &bin_dir.join("ironclaw"),
         "#!/bin/sh\nprintf '%s\\n' \"$@\" > \"$IRONCLAW_REBORN_TEST_ARGS_FILE\"\n",
     );
     write_executable(
