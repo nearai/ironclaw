@@ -220,6 +220,14 @@ string_id!(
     validate_name_segment
 );
 string_id!(SystemServiceId, "system_service", validate_name_segment);
+// Slice-C kernel vocabulary (arch-simplification §3/§5.2.1): the two non-loop
+// origins of a capability invocation. Modeled as validated string newtypes
+// (not enums) because the product/routine sets are still evolving (§5.8); they
+// may harden into enums once those sets stabilize. `RoutineId` names the
+// routine/heartbeat/schedule an `Automation` invocation belongs to; `ProductKind`
+// names the product surface a direct-user `Product` invocation entered through.
+string_id!(ProductKind, "product", validate_name_segment);
+string_id!(RoutineId, "routine", validate_name_segment);
 
 /// Provider-facing tool/function name.
 ///
@@ -376,3 +384,10 @@ uuid_id!(CorrelationId);
 // over untrusted input); `None` for non-loop callers. See
 // `ExecutionContext::run_id`.
 uuid_id!(RunId);
+// Slice-C kernel vocabulary (arch-simplification §3): the idempotency identity
+// of one capability invocation. Minted host-side once per logical invocation and
+// carried across retries — a resolved `ActivityId` replays its recorded outcome
+// rather than re-running the side effect (§11.3, at-most-once). This is what
+// §1.1's "dead-future `idempotency_key`" becomes: unified into the invocation
+// identity rather than deleted.
+uuid_id!(ActivityId);
