@@ -4353,6 +4353,15 @@ impl ExtensionManager {
                 // back here would make changing an OAuth server's URL
                 // impossible.
                 Err(ExtensionError::AuthRequired) => {
+                    // The new config IS committed on this path — run the same
+                    // post-commit secret finalization as the success tail, or
+                    // superseded/unbound header secrets (whose references are
+                    // no longer persisted) would be unreachable to uninstall
+                    // cleanup and retained forever.
+                    if headers_replaced || credential_headers_unbound {
+                        self.delete_header_secrets(user_id, &superseded_header_refs, name)
+                            .await;
+                    }
                     tracing::info!(
                         extension = %name,
                         user_id = %user_id,
@@ -4439,20 +4448,11 @@ impl ExtensionManager {
             );
         }
 
-        // Success: garbage-collect header secrets the replacement dropped
-        // (or that a cross-origin URL change unbound).
+        // Post-commit finalization: garbage-collect header secrets the
+        // replacement dropped (or that a cross-origin URL change unbound).
         if headers_replaced || credential_headers_unbound {
-            for secret_name in superseded_header_refs {
-                if let Err(e) = self.secrets.delete(user_id, &secret_name).await {
-                    tracing::warn!(
-                        extension = %name,
-                        user_id = %user_id,
-                        secret = %secret_name,
-                        error = %e,
-                        "failed to delete superseded header secret"
-                    );
-                }
-            }
+            self.delete_header_secrets(user_id, &superseded_header_refs, name)
+                .await;
         }
 
         Ok(())
