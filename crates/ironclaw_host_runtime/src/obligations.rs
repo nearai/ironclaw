@@ -71,32 +71,6 @@ pub trait RuntimeCredentialAccountResolver: Send + Sync + fmt::Debug {
         &self,
         request: RuntimeCredentialAccountRequest<'_>,
     ) -> Result<RuntimeCredentialAccessSecret, CredentialStageError>;
-
-    /// Cheap existence probe for a product-auth account: does the requester
-    /// already have a usable (configured) account for this provider/setup, or
-    /// not?
-    ///
-    /// Used by the credential pre-flight
-    /// (`ironclaw_host_runtime::production::credential_preflight_check`) to
-    /// batch "account not connected" into the same `AuthRequired` gate as
-    /// missing `SecretHandle` credentials, before the approval gate and
-    /// before any sandbox spin-up. Must be a presence check only — it must
-    /// NOT lease, mint, or refresh a token (unlike `resolve_access_secret`,
-    /// which may refresh as a side effect and is therefore unsuitable for a
-    /// pre-flight probe).
-    ///
-    /// Default implementation fails open (`Ok(true)`, i.e. "assume present")
-    /// so resolvers that only implement `resolve_access_secret` — including
-    /// every test fake in this tree predating this method — are unaffected;
-    /// the dispatch-time obligation check remains the enforcement backstop
-    /// regardless of what this probe reports.
-    async fn has_account(
-        &self,
-        request: RuntimeCredentialAccountRequest<'_>,
-    ) -> Result<bool, CredentialStageError> {
-        let _ = request;
-        Ok(true)
-    }
 }
 
 /// Runtime secret material staged after `InjectSecretOnce` lease consumption.

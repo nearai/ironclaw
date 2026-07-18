@@ -598,14 +598,6 @@ where
         if let Some(secret_store) = &self.secret_store {
             runtime = runtime.with_credential_preflight_store(Arc::clone(secret_store));
         }
-        // Wire the same credential-account resolver the dispatch-time obligation
-        // handler uses (below) so the pre-flight's ProductAuthAccount presence
-        // probe and the dispatch-time InjectCredentialAccountOnce satisfaction
-        // agree on "what counts as a connected account" — one resolver, two
-        // callers (ordering-only pre-flight vs. enforcing backstop).
-        if let Some(resolver) = &self.runtime_credential_account_resolver {
-            runtime = runtime.with_credential_account_resolver(Arc::clone(resolver));
-        }
         runtime.with_obligation_handler(Arc::new(self.builtin_obligation_handler()))
     }
 

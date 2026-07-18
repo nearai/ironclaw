@@ -570,35 +570,6 @@ impl RuntimeCredentialAccountResolver for ProductAuthRuntimeCredentialResolver {
             handle,
         })
     }
-
-    /// Cheap existence probe: delegates to
-    /// [`runtime_credential_auth_requirement_configured`] — the same presence
-    /// check `missing_runtime_credential_auth_requirements` already uses for
-    /// the extension-activation credential pre-flight
-    /// (`extension_host/extension_activation_credentials.rs`) — so both
-    /// pre-flight seams agree on what "account present" means (including
-    /// treating an ambiguous `AccountSelectionRequired` as NOT present, since
-    /// that also resolves to `AuthRequired` at dispatch time via
-    /// `resolve_access_secret`/`map_account_error`) without a second
-    /// classification to drift out of sync. Selects only — never refreshes,
-    /// leases, or mints a token, unlike `resolve_access_secret`.
-    async fn has_account(
-        &self,
-        request: RuntimeCredentialAccountRequest<'_>,
-    ) -> Result<bool, CredentialStageError> {
-        let requirement = RuntimeCredentialAuthRequirement {
-            provider: request.provider.clone(),
-            setup: request.setup.clone(),
-            requester_extension: request.requester_extension.clone(),
-            provider_scopes: request.provider_scopes.to_vec(),
-        };
-        runtime_credential_auth_requirement_configured(
-            self.accounts.as_ref(),
-            request.scope,
-            &requirement,
-        )
-        .await
-    }
 }
 
 fn runtime_credential_account_selection_request(

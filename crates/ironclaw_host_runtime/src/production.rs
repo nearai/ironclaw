@@ -104,11 +104,7 @@ use crate::{
     RuntimeCapabilityCompleted, RuntimeCapabilityFailure, RuntimeCapabilityOutcome,
     RuntimeCapabilityRequest, RuntimeCapabilityResumeRequest, RuntimeFailureKind, RuntimeGateId,
     RuntimeStatusRequest, RuntimeWorkId, RuntimeWorkSummary, VisibleCapabilityRequest,
-    VisibleCapabilitySurface,
-    obligations::{
-        RuntimeCredentialAccountRequest, RuntimeCredentialAccountResolver, secret_owner_scope,
-    },
-    plan_capability,
+    VisibleCapabilitySurface, obligations::secret_owner_scope, plan_capability,
     surface::CapabilityCatalog,
 };
 
@@ -146,17 +142,6 @@ pub struct DefaultHostRuntime {
     // arch-exempt: optional_arc, credential pre-flight is disabled in minimal/test
     // host-runtime graphs that do not wire a secret store, plan #4539 (Fix B)
     credential_preflight_store: Option<Arc<dyn SecretStore>>,
-    /// Optional credential-account resolver used for pre-flight presence
-    /// checks of `ProductAuthAccount`-source requirements (Slack, gsuite,
-    /// any future OAuth-account-backed capability).
-    ///
-    /// When present, `credential_preflight_check` probes
-    /// `RuntimeCredentialAccountResolver::has_account` for each required
-    /// `ProductAuthAccount` credential the manifest declares, batching a miss
-    /// into the same `AuthRequired` outcome as a missing `SecretHandle`
-    /// secret. When absent, that half of the pre-flight is skipped; the
-    /// dispatch-time obligation check remains the enforcement backstop.
-    credential_account_resolver: Option<Arc<dyn RuntimeCredentialAccountResolver>>,
     surface_version: CapabilitySurfaceVersion,
     runtime_policy: EffectiveRuntimePolicy,
 }
@@ -223,7 +208,6 @@ impl DefaultHostRuntime {
             runtime_health: None,
             obligation_handler: None,
             credential_preflight_store: None,
-            credential_account_resolver: None,
             surface_version,
             runtime_policy,
         }
@@ -398,17 +382,6 @@ impl DefaultHostRuntime {
         secret_store: Arc<dyn SecretStore>,
     ) -> Self {
         self.credential_preflight_store = Some(secret_store);
-        self
-    }
-
-    /// Attaches the credential-account resolver used for pre-flight presence
-    /// checks of `ProductAuthAccount`-source requirements (see the
-    /// `credential_account_resolver` field doc on [`DefaultHostRuntime`]).
-    pub(crate) fn with_credential_account_resolver(
-        mut self,
-        resolver: Arc<dyn RuntimeCredentialAccountResolver>,
-    ) -> Self {
-        self.credential_account_resolver = Some(resolver);
         self
     }
 
@@ -1723,141 +1696,84 @@ impl DefaultHostRuntime {
     }
 
     /// Checks whether all required credentials declared in the capability
-    /// manifest are present — both `SecretHandle`-source credentials in the
-    /// secret store, and `ProductAuthAccount`-source credentials (e.g. Slack,
-    /// gsuite) via the credential-account resolver's cheap existence probe.
+    /// manifest are present in the secret store.
     ///
     /// `registry` is the already-snapshotted registry from the caller; the
     /// caller is responsible for taking a single snapshot and passing it here
     /// to avoid a redundant `registry.snapshot()` inside this method.
     ///
     /// Returns `Some(RuntimeCapabilityOutcome::AuthRequired)` if any required
-    /// secret or product-auth account is absent, or `None` when everything
-    /// required is present (or when neither a secret store nor a
-    /// credential-account resolver is wired for the relevant requirement
-    /// kind, i.e. that half of the pre-flight is disabled).
-    ///
-    /// Known limitation: this only reports account-level presence
-    /// (`RuntimeCredentialAccountResolver::has_account`). Extension-level
-    /// installation/enabled state (e.g. Slack's `SlackInstallationSetupStore`
-    /// in composition — whether the extension is even mounted) is invisible
-    /// here; a not-installed extension with no account will still report as
-    /// "account not connected" rather than "extension not installed". The
-    /// requirement's remediation text is expected to point at the WebUI setup
-    /// surface, which covers both cases.
+    /// secret is absent, or `None` when all secrets are present (or when no
+    /// secret store is wired, i.e. pre-flight is disabled).
     ///
     /// The dispatch-time obligation check remains the enforcement backstop —
-    /// this method provides ordering only (credentials before approval gate,
-    /// and before any sandbox spin-up).
+    /// this method provides ordering only (credentials before approval gate).
     ///
     /// ## Failure handling
     ///
-    /// On a transient secret-store or credential-account-resolver `Err`, the
-    /// pre-flight is skipped entirely (returns `None`) rather than treating
-    /// the error as "credential absent" and firing `AuthRequired`. A backend
-    /// failure must not burn a user auth interaction — the dispatch-time
-    /// obligation check enforces the credential requirement and will catch
-    /// genuine absences at execution time.
+    /// On a transient secret-store `Err`, the pre-flight is skipped entirely
+    /// (returns `None`) rather than treating the error as "credential absent"
+    /// and firing `AuthRequired`. A backend failure must not burn a user auth
+    /// interaction — the dispatch-time obligation check enforces the credential
+    /// requirement and will catch genuine absences at execution time.
     async fn credential_preflight_check(
         &self,
         capability_id: &CapabilityId,
         scope: &ResourceScope,
         registry: &ExtensionRegistry,
     ) -> Option<RuntimeCapabilityOutcome> {
+        let secret_store = self.credential_preflight_store.as_ref()?;
+
         let descriptor = registry.get_capability(capability_id)?;
 
         let (required_secrets, credential_requirements) =
             capability_credential_requirements(descriptor);
 
-        if required_secrets.is_empty() && credential_requirements.is_empty() {
+        if required_secrets.is_empty() {
             return None;
         }
 
-        if let Some(secret_store) = self.credential_preflight_store.as_ref() {
-            for handle in &required_secrets {
-                // `secret_owner_scope` is the single owner of the presence+ownership rule,
-                // shared with the dispatch-time obligation backstop
-                // (obligations::preflight_secret_injection / inject_secrets) so the paths
-                // cannot drift on "what counts as a present credential" or "which scope owns
-                // it". Here we only need presence (Some vs None) for gate ordering; the happy
-                // path intentionally re-checks at dispatch time, where the backstop is the
-                // authority. (Accepted double-read.)
-                match secret_owner_scope(secret_store.as_ref(), scope, handle)
-                    .await
-                    .map(|owner| owner.is_some())
-                {
-                    Ok(true) => {
-                        // Secret present — continue checking.
-                    }
-                    Ok(false) => {
-                        tracing::debug!(
-                            capability_id = %capability_id,
-                            secret_handle = handle.as_str(),
-                            "credential pre-flight: required secret absent; surfacing AuthRequired before approval gate"
-                        );
-                        return Some(auth_required_outcome(
-                            capability_id.clone(),
-                            required_secrets,
-                            credential_requirements,
-                        ));
-                    }
-                    Err(error) => {
-                        // Fail-open: a transient store error must not masquerade as a
-                        // missing credential and burn a user auth interaction. Skip the
-                        // pre-flight entirely — the dispatch-time obligation check is the
-                        // enforcement backstop and will catch genuine absences at execution
-                        // time. The cause is logged (sanitized; SecretStoreError carries no
-                        // raw secret material) so a backend outage still leaves a trail.
-                        tracing::debug!(
-                            capability_id = %capability_id,
-                            secret_handle = handle.as_str(),
-                            error = %error,
-                            "credential pre-flight: secret store metadata query failed; skipping pre-flight (dispatch-time check enforces)"
-                        );
-                        return None; // silent-ok: transient store error must not burn a user auth interaction; dispatch-time obligation check is the backstop
-                    }
+        for handle in &required_secrets {
+            // `secret_owner_scope` is the single owner of the presence+ownership rule,
+            // shared with the dispatch-time obligation backstop
+            // (obligations::preflight_secret_injection / inject_secrets) so the paths
+            // cannot drift on "what counts as a present credential" or "which scope owns
+            // it". Here we only need presence (Some vs None) for gate ordering; the happy
+            // path intentionally re-checks at dispatch time, where the backstop is the
+            // authority. (Accepted double-read.)
+            match secret_owner_scope(secret_store.as_ref(), scope, handle)
+                .await
+                .map(|owner| owner.is_some())
+            {
+                Ok(true) => {
+                    // Secret present — continue checking.
                 }
-            }
-        }
-
-        if let Some(resolver) = self.credential_account_resolver.as_ref() {
-            for requirement in &credential_requirements {
-                let probe = RuntimeCredentialAccountRequest {
-                    scope,
-                    provider: &requirement.provider,
-                    setup: &requirement.setup,
-                    provider_scopes: &requirement.provider_scopes,
-                    requester_extension: &requirement.requester_extension,
-                };
-                match resolver.has_account(probe).await {
-                    Ok(true) => {
-                        // Account connected — continue checking.
-                    }
-                    Ok(false) => {
-                        tracing::debug!(
-                            capability_id = %capability_id,
-                            provider = requirement.provider.as_str(),
-                            "credential pre-flight: required product-auth account not connected; surfacing AuthRequired before approval gate and sandbox spin-up"
-                        );
-                        return Some(auth_required_outcome(
-                            capability_id.clone(),
-                            required_secrets,
-                            credential_requirements,
-                        ));
-                    }
-                    Err(error) => {
-                        // Fail-open: same rationale as the secret-store transient-error
-                        // branch above — a backend hiccup in the account resolver must not
-                        // burn a user auth interaction. The dispatch-time obligation check
-                        // (via the same resolver's resolve_access_secret) is the backstop.
-                        tracing::debug!(
-                            capability_id = %capability_id,
-                            provider = requirement.provider.as_str(),
-                            error = ?error,
-                            "credential pre-flight: product-auth account existence probe failed; skipping pre-flight (dispatch-time check enforces)"
-                        );
-                        return None; // silent-ok: transient resolver error must not burn a user auth interaction; dispatch-time obligation check is the backstop
-                    }
+                Ok(false) => {
+                    tracing::debug!(
+                        capability_id = %capability_id,
+                        secret_handle = handle.as_str(),
+                        "credential pre-flight: required secret absent; surfacing AuthRequired before approval gate"
+                    );
+                    return Some(auth_required_outcome(
+                        capability_id.clone(),
+                        required_secrets,
+                        credential_requirements,
+                    ));
+                }
+                Err(error) => {
+                    // Fail-open: a transient store error must not masquerade as a
+                    // missing credential and burn a user auth interaction. Skip the
+                    // pre-flight entirely — the dispatch-time obligation check is the
+                    // enforcement backstop and will catch genuine absences at execution
+                    // time. The cause is logged (sanitized; SecretStoreError carries no
+                    // raw secret material) so a backend outage still leaves a trail.
+                    tracing::debug!(
+                        capability_id = %capability_id,
+                        secret_handle = handle.as_str(),
+                        error = %error,
+                        "credential pre-flight: secret store metadata query failed; skipping pre-flight (dispatch-time check enforces)"
+                    );
+                    return None; // silent-ok: transient store error must not burn a user auth interaction; dispatch-time obligation check is the backstop
                 }
             }
         }
