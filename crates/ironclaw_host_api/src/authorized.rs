@@ -150,9 +150,11 @@ impl Authorized {
     pub fn into_parts(
         self,
         now: Timestamp,
-    ) -> Result<(Invocation, RuntimeLane, MountView, ResourceReservation), Authorized> {
+    ) -> Result<(Invocation, RuntimeLane, MountView, ResourceReservation), Box<Authorized>> {
         if self.is_expired(now) {
-            return Err(self);
+            // Boxed: the witness is large and the expiry arm is cold
+            // (clippy::result_large_err).
+            return Err(Box::new(self));
         }
         Ok((self.invocation, self.lane, self.mounts, self.reservation))
     }
