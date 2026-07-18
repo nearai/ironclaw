@@ -16,6 +16,10 @@
 //! Definition of done: when `authorize()` is wired, the ONE production impl lives
 //! in `ironclaw_capabilities`; this test keeps it the only one.
 
+// Each integration-test binary compiles the shared module independently; this
+// binary uses only the comment/string stripper, so the other shared helpers
+// are dead code HERE (and live in the sibling ratchet binaries).
+#[allow(dead_code)]
 mod ratchet_support;
 
 use std::fs;
