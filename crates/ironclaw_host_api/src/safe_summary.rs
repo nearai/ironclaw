@@ -98,12 +98,10 @@ fn validate_safe_summary(value: &str) -> Result<(), HostApiError> {
             "must not contain NUL/control characters",
         ));
     }
-    if value.chars().any(|c| {
-        matches!(
-            c,
-            '{' | '}' | '[' | ']' | '`' | '<' | '>' | '/' | '\\'
-        )
-    }) {
+    if value
+        .chars()
+        .any(|c| matches!(c, '{' | '}' | '[' | ']' | '`' | '<' | '>' | '/' | '\\'))
+    {
         return Err(HostApiError::invalid_safe_summary(
             "must not contain raw payload or path delimiters",
         ));
@@ -176,17 +174,29 @@ mod tests {
         assert_eq!(s.as_str(), "read 3 files, no changes");
     }
 
+    fn rejection(value: impl Into<String>) -> String {
+        SafeSummary::new(value).unwrap_err().to_string()
+    }
+
     #[test]
     fn rejects_empty_and_overlong() {
-        assert!(SafeSummary::new("").is_err());
-        assert!(SafeSummary::new("x".repeat(MAX_SAFE_SUMMARY_BYTES + 1)).is_err());
+        // Assert the specific reason, not just is_err(), so an infrastructure
+        // failure can't masquerade as a validation pass.
+        assert!(rejection("").contains("must not be empty"));
+        assert!(
+            rejection("x".repeat(MAX_SAFE_SUMMARY_BYTES + 1)).contains("at most"),
+            "overlong must be rejected for length"
+        );
         assert!(SafeSummary::new("x".repeat(MAX_SAFE_SUMMARY_BYTES)).is_ok());
     }
 
     #[test]
     fn rejects_payload_and_path_delimiters() {
         for bad in ["{\"k\":1}", "a[0]", "path/to/x", "c:\\x", "<tag>", "`code`"] {
-            assert!(SafeSummary::new(bad).is_err(), "should reject {bad:?}");
+            assert!(
+                rejection(bad).contains("raw payload or path delimiters"),
+                "should reject {bad:?} for delimiters"
+            );
         }
     }
 
@@ -200,14 +210,22 @@ mod tests {
             "ghp_0123456789abcdef",
             "AKIA0123456789ABCDEF",
         ] {
-            assert!(SafeSummary::new(bad).is_err(), "should reject {bad:?}");
+            let why = rejection(bad);
+            assert!(
+                why.contains("sensitive marker") || why.contains("API-key-like tokens"),
+                "should reject {bad:?} for a credential-shaped reason, got: {why}"
+            );
         }
     }
 
     #[test]
     fn allows_descriptive_error_vocabulary() {
         // The raw cause rides a separate channel; descriptive words are allowed.
-        for ok in ["provider error", "stack trace truncated", "tool input rejected"] {
+        for ok in [
+            "provider error",
+            "stack trace truncated",
+            "tool input rejected",
+        ] {
             assert!(SafeSummary::new(ok).is_ok(), "should allow {ok:?}");
         }
     }
@@ -217,6 +235,12 @@ mod tests {
         let json = serde_json::to_string(&SafeSummary::new("ok summary").unwrap()).unwrap();
         assert_eq!(json, "\"ok summary\"");
         // A hostile wire value is rejected on deserialize, not trusted.
-        assert!(serde_json::from_str::<SafeSummary>("\"api key: sk-ant-x\"").is_err());
+        let err = serde_json::from_str::<SafeSummary>("\"api key: sk-ant-x\"")
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("sensitive marker"),
+            "wire rejection must carry the validation reason: {err}"
+        );
     }
 }

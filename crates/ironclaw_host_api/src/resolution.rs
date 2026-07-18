@@ -292,7 +292,7 @@ mod tests {
     fn outcome_roundtrips_and_carries_typed_verdict_not_a_sniffed_summary() {
         let outcome = Outcome {
             refs: OutcomeRefs {
-                result: ResultRef::new("result-01HZ0000000000000000000000").unwrap(),
+                result: ResultRef::parse("018f6a00-0000-7000-8000-000000000001").unwrap(),
                 byte_len: 4096,
             },
             verdict: ToolVerdict::RecoverableFailure,
