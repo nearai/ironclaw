@@ -449,7 +449,10 @@ impl InboundSink for GenericChannelInboundSink {
         // installation + external event fingerprint) plus identity/
         // conversation binding and turn submission — synchronous, so the
         // router's 2xx is ack-after-commit.
-        match self.config.workflow.submit_inbound(envelope.clone()).await {
+        // Boxed: the workflow admission (ledger → identity/actor resolution →
+        // conversation binding → turn submission) is the deepest subtree in
+        // this future; boxing keeps instrumented builds off the stack limit.
+        match Box::pin(self.config.workflow.submit_inbound(envelope.clone())).await {
             Ok(ack) => {
                 let duplicate = matches!(ack, ProductInboundAck::Duplicate { .. });
                 let durable = ack.is_durable_outcome();

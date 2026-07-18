@@ -527,6 +527,12 @@ jobs:
       OLLAMA_BASE_URL: ""
       OPENAI_API_KEY: ""
       CARGO_INCREMENTAL: "0"
+      # llvm-cov instrumentation inflates stack frames; the deep channel
+      # admission futures (webhook -> pairing gate -> workflow) overflow the
+      # default 2 MiB test-thread stack under instrumentation only. The
+      # deepest subtrees are Box::pin'd at their seams; this is headroom for
+      # the instrumented lane, not a substitute.
+      RUST_MIN_STACK: "8388608"
     strategy:
       fail-fast: false
       matrix:

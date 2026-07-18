@@ -1029,16 +1029,15 @@ impl crate::extension_host::extension_ingress::ChannelPairingInterceptor for Cha
                 return false;
             }
         }
-        let outcome = self
-            .consume(
-                installation_id,
-                code,
-                message.actor.kind(),
-                message.actor.id(),
-                message.conversation.space_id(),
-                message.conversation.conversation_id(),
-            )
-            .await;
+        let outcome = Box::pin(self.consume(
+            installation_id,
+            code,
+            message.actor.kind(),
+            message.actor.id(),
+            message.conversation.space_id(),
+            message.conversation.conversation_id(),
+        ))
+        .await;
         match outcome {
             Ok(outcome) => {
                 tracing::debug!(
