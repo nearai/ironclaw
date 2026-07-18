@@ -414,6 +414,76 @@ mod tests {
     }
 
     #[test]
+    fn ticket_store_evicts_oldest_at_capacity() {
+        let store = LoginTicketStore::new();
+        // Seed to capacity with deterministic, strictly increasing
+        // timestamps so eviction order is unambiguous regardless of
+        // `Instant::now()` resolution on this platform.
+        let mut tickets = Vec::with_capacity(MAX_TICKETS);
+        {
+            let mut guard = store.inner.lock();
+            let base = Instant::now();
+            for i in 0..MAX_TICKETS {
+                let ticket = format!("ticket-{i}");
+                guard.insert(
+                    ticket.clone(),
+                    LoginTicket {
+                        bearer: SecretString::from(format!("bearer-{i}")),
+                        created_at: base + Duration::from_millis(i as u64),
+                    },
+                );
+                tickets.push(ticket);
+            }
+        }
+
+        let newest = store.insert(SecretString::from("bearer-newest".to_string()));
+
+        let oldest = &tickets[0];
+        assert!(
+            store.take(oldest).is_none(),
+            "oldest ticket must be evicted once the store is at capacity"
+        );
+        assert_eq!(
+            store.take(&newest).map(|s| s.expose_secret().to_string()),
+            Some("bearer-newest".to_string())
+        );
+    }
+
+    #[test]
+    fn ticket_store_single_redemption_under_concurrent_take() {
+        // `take()` holds the store's `parking_lot::Mutex` for its whole
+        // critical section, so redemption is atomic by construction — this
+        // proves it holds under real concurrent access (Arc-shared across
+        // OS threads with a barrier to force contention), pinning the
+        // single-redemption invariant rather than just calling `take()`
+        // twice sequentially from one thread.
+        let store = Arc::new(LoginTicketStore::new());
+        let ticket = store.insert(SecretString::from("bearer-1".to_string()));
+        let barrier = Arc::new(std::sync::Barrier::new(2));
+
+        let results: Vec<Option<SecretString>> = std::thread::scope(|scope| {
+            let handles: Vec<_> = (0..2)
+                .map(|_| {
+                    let store = Arc::clone(&store);
+                    let ticket = ticket.clone();
+                    let barrier = Arc::clone(&barrier);
+                    scope.spawn(move || {
+                        barrier.wait();
+                        store.take(&ticket)
+                    })
+                })
+                .collect();
+            handles.into_iter().map(|h| h.join().unwrap()).collect()
+        });
+
+        let redeemed = results.iter().filter(|r| r.is_some()).count();
+        assert_eq!(
+            redeemed, 1,
+            "exactly one concurrent taker must redeem the ticket"
+        );
+    }
+
+    #[test]
     fn build_redirect_appends_login_ticket_query_param() {
         assert_eq!(build_redirect("/", "abc"), "/?login_ticket=abc");
         assert_eq!(

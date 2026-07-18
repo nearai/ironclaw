@@ -40,6 +40,10 @@ use crate::{LlmKeyStore, ProviderRepo, RebornProviderAdmin};
 
 const NEARAI_LOGIN_STATE_TTL: Duration = Duration::from_secs(15 * 60);
 const CODEX_LOGIN_ATTEMPT_TTL: Duration = Duration::from_secs(15 * 60);
+/// Bounds memory if callers mint NEAR AI login redirects but never complete
+/// them; mirrors `LoginTicketStore::MAX_TICKETS` in
+/// `ironclaw_webui::cli_token_login`.
+const MAX_NEARAI_LOGIN_STATES: usize = 1024;
 
 /// In-memory CSRF state for NEAR AI browser redirects. The login start endpoint
 /// issues a state token, and the public callback must consume it before any
@@ -58,6 +62,14 @@ impl NearAiLoginStateStore {
         let state = uuid::Uuid::new_v4().to_string();
         let mut states = self.states.lock().await;
         prune_expired(&mut states, Instant::now());
+        if states.len() >= MAX_NEARAI_LOGIN_STATES
+            && let Some(oldest) = states
+                .iter()
+                .min_by_key(|(_, expires_at)| **expires_at)
+                .map(|(key, _)| key.clone())
+        {
+            states.remove(&oldest);
+        }
         states.insert(state.clone(), Instant::now() + NEARAI_LOGIN_STATE_TTL);
         state
     }
@@ -74,12 +86,64 @@ impl NearAiLoginStateStore {
     }
 }
 
+/// `user_code`/`verification_uri` are `None` while a reservation is
+/// in-flight (see [`reserve_codex_login_slot`]) and `Some` once the device
+/// code has been minted.
 #[derive(Debug, Clone)]
 struct CodexLoginAttempt {
     id: uuid::Uuid,
-    user_code: String,
-    verification_uri: String,
+    user_code: Option<String>,
+    verification_uri: Option<String>,
     expires_at: Instant,
+}
+
+/// Outcome of reserving the codex-login slot for a key.
+enum CodexLoginReserveOutcome {
+    /// A device code was already minted for this key; return it.
+    Ready(CodexLoginStart),
+    /// A device-code request for this key is already in flight.
+    InFlight,
+    /// No attempt existed for this key; the caller now owns a placeholder
+    /// reservation (inserted under the same lock) and must request a device
+    /// code, then finalize or remove it.
+    Reserved,
+}
+
+/// Checks/reserves the codex-login slot for `key` under the map lock held
+/// by the caller. A placeholder (`user_code: None`) is inserted before the
+/// lock is released so a concurrent caller for the same key sees it and
+/// does not also request a device code from OpenAI (each request is a
+/// distinct, differently-coded grant — two in flight for one login attempt
+/// would leave the tracked attempt id pointing at whichever finalized last,
+/// orphaning the other flow even if the user completes it).
+fn reserve_codex_login_slot(
+    attempts: &mut HashMap<String, CodexLoginAttempt>,
+    key: &str,
+    attempt_id: uuid::Uuid,
+    now: Instant,
+) -> CodexLoginReserveOutcome {
+    attempts.retain(|_, attempt| attempt.expires_at > now);
+    if let Some(attempt) = attempts.get(key) {
+        return match (&attempt.user_code, &attempt.verification_uri) {
+            (Some(user_code), Some(verification_uri)) => {
+                CodexLoginReserveOutcome::Ready(CodexLoginStart {
+                    user_code: user_code.clone(),
+                    verification_uri: verification_uri.clone(),
+                })
+            }
+            _ => CodexLoginReserveOutcome::InFlight,
+        };
+    }
+    attempts.insert(
+        key.to_string(),
+        CodexLoginAttempt {
+            id: attempt_id,
+            user_code: None,
+            verification_uri: None,
+            expires_at: now + CODEX_LOGIN_ATTEMPT_TTL,
+        },
+    );
+    CodexLoginReserveOutcome::Reserved
 }
 
 fn prune_expired(states: &mut HashMap<String, Instant>, now: Instant) {
@@ -684,16 +748,17 @@ impl LlmConfigService for RebornLlmConfigService {
         caller: WebUiAuthenticatedCaller,
     ) -> Result<CodexLoginStart, LlmConfigServiceError> {
         let attempt_key = codex_login_attempt_key(&caller);
-        let now = Instant::now();
-        {
+        let attempt_id = uuid::Uuid::new_v4();
+        let reserved = {
             let mut attempts = self.codex_login_attempts.lock().await;
-            attempts.retain(|_, attempt| attempt.expires_at > now);
-            if let Some(attempt) = attempts.get(&attempt_key) {
-                return Ok(CodexLoginStart {
-                    user_code: attempt.user_code.clone(),
-                    verification_uri: attempt.verification_uri.clone(),
-                });
-            }
+            reserve_codex_login_slot(&mut attempts, &attempt_key, attempt_id, Instant::now())
+        };
+        match reserved {
+            CodexLoginReserveOutcome::Ready(login) => return Ok(login),
+            // A device-code request for this key is already in flight from
+            // another concurrent call; don't start a second one.
+            CodexLoginReserveOutcome::InFlight => return Err(LlmConfigServiceError::Internal),
+            CodexLoginReserveOutcome::Reserved => {}
         }
 
         // Point the login manager at the same session file the live openai_codex
@@ -707,26 +772,43 @@ impl LlmConfigService for RebornLlmConfigService {
             nonempty_env("OPENAI_CODEX_SESSION_PATH").map(std::path::PathBuf::from),
             None,
         );
-        let manager = OpenAiCodexSessionManager::new(codex_config)
-            .map_err(|_| LlmConfigServiceError::Internal)?;
-        let start = manager
-            .initiate_device_code()
-            .await
-            .map_err(|_| LlmConfigServiceError::Internal)?;
+        let manager = match OpenAiCodexSessionManager::new(codex_config) {
+            Ok(manager) => manager,
+            Err(_) => {
+                remove_codex_attempt_if_current(
+                    &self.codex_login_attempts,
+                    &attempt_key,
+                    attempt_id,
+                )
+                .await;
+                return Err(LlmConfigServiceError::Internal);
+            }
+        };
+        let start = match manager.initiate_device_code().await {
+            Ok(start) => start,
+            Err(_) => {
+                remove_codex_attempt_if_current(
+                    &self.codex_login_attempts,
+                    &attempt_key,
+                    attempt_id,
+                )
+                .await;
+                return Err(LlmConfigServiceError::Internal);
+            }
+        };
 
         let login = CodexLoginStart {
             user_code: start.user_code.clone(),
             verification_uri: start.verification_uri.clone(),
         };
-        let attempt_id = uuid::Uuid::new_v4();
         {
             let mut attempts = self.codex_login_attempts.lock().await;
             attempts.insert(
                 attempt_key.clone(),
                 CodexLoginAttempt {
                     id: attempt_id,
-                    user_code: login.user_code.clone(),
-                    verification_uri: login.verification_uri.clone(),
+                    user_code: Some(login.user_code.clone()),
+                    verification_uri: Some(login.verification_uri.clone()),
                     expires_at: Instant::now() + CODEX_LOGIN_ATTEMPT_TTL,
                 },
             );
@@ -1613,6 +1695,101 @@ mod tests {
             "state must not be reusable after a successful callback"
         );
         assert!(!store.consume("missing-state").await);
+    }
+
+    // `start_codex_login`'s real device-code request hits a live network
+    // endpoint (OpenAI), so a deterministic two-caller concurrency test
+    // through the full method would need an HTTP stub server — scaffolding
+    // disproportionate to this fix. Instead these pin the reservation
+    // primitive directly: a second reserve for the same key must observe
+    // `InFlight` (never `Reserved` again) while the first is outstanding,
+    // and a failed/removed reservation must free the key for a retry.
+    #[test]
+    fn codex_login_reservation_blocks_concurrent_same_key_start() {
+        let mut attempts = HashMap::new();
+        let key = "tenant:user";
+        let now = Instant::now();
+
+        let first = reserve_codex_login_slot(&mut attempts, key, uuid::Uuid::new_v4(), now);
+        assert!(matches!(first, CodexLoginReserveOutcome::Reserved));
+
+        // A second concurrent caller for the same key must not also reserve
+        // (and thus must not also request a device code from OpenAI).
+        let second = reserve_codex_login_slot(&mut attempts, key, uuid::Uuid::new_v4(), now);
+        assert!(matches!(second, CodexLoginReserveOutcome::InFlight));
+    }
+
+    #[test]
+    fn codex_login_reservation_ready_after_finalize() {
+        let mut attempts = HashMap::new();
+        let key = "tenant:user";
+        let now = Instant::now();
+        let attempt_id = uuid::Uuid::new_v4();
+
+        reserve_codex_login_slot(&mut attempts, key, attempt_id, now);
+        attempts.insert(
+            key.to_string(),
+            CodexLoginAttempt {
+                id: attempt_id,
+                user_code: Some("ABCD-1234".to_string()),
+                verification_uri: Some("https://example.test/device".to_string()),
+                expires_at: now + CODEX_LOGIN_ATTEMPT_TTL,
+            },
+        );
+
+        let reserved = reserve_codex_login_slot(&mut attempts, key, uuid::Uuid::new_v4(), now);
+        match reserved {
+            CodexLoginReserveOutcome::Ready(login) => {
+                assert_eq!(login.user_code, "ABCD-1234");
+            }
+            _ => panic!("expected Ready after finalize, got a non-Ready outcome instead"),
+        }
+    }
+
+    #[tokio::test]
+    async fn codex_login_reservation_removed_on_error_frees_key_for_retry() {
+        let attempts = tokio::sync::Mutex::new(HashMap::new());
+        let key = "tenant:user";
+        let attempt_id = uuid::Uuid::new_v4();
+        {
+            let mut guard = attempts.lock().await;
+            reserve_codex_login_slot(&mut guard, key, attempt_id, Instant::now());
+        }
+
+        assert!(remove_codex_attempt_if_current(&attempts, key, attempt_id).await);
+
+        let mut guard = attempts.lock().await;
+        let retried =
+            reserve_codex_login_slot(&mut guard, key, uuid::Uuid::new_v4(), Instant::now());
+        assert!(
+            matches!(retried, CodexLoginReserveOutcome::Reserved),
+            "removing a failed reservation must free the key for a fresh attempt"
+        );
+    }
+
+    #[cfg(feature = "webui-v2-beta")]
+    #[tokio::test]
+    async fn nearai_login_state_store_evicts_oldest_at_capacity() {
+        // Unexpired states within the 15-min TTL must still be bounded, or a
+        // caller that mints login redirects without ever completing them
+        // grows this map unboundedly. Fill to capacity, mint one more, and
+        // confirm the oldest state was evicted while the newest survives.
+        let store = NearAiLoginStateStore::new();
+        let mut states = Vec::with_capacity(MAX_NEARAI_LOGIN_STATES);
+        for _ in 0..MAX_NEARAI_LOGIN_STATES {
+            states.push(store.issue().await);
+        }
+        let newest = store.issue().await;
+
+        let oldest = &states[0];
+        assert!(
+            !store.consume(oldest).await,
+            "oldest state must be evicted once the store is at capacity"
+        );
+        assert!(
+            store.consume(&newest).await,
+            "newest state must survive eviction"
+        );
     }
 
     #[test]
