@@ -2047,6 +2047,15 @@ async fn build_local_runtime(input: RebornBuildInput) -> Result<RebornServices, 
     )
     .await?;
     nearai_mcp_bootstrap_outcome.log_completion();
+    // `web-access` is zero-config (no credentials, no durable-storage gate
+    // needed) — unlike NEAR AI MCP above, it can always be auto-activated
+    // rather than only when a config/credential is present. See
+    // `web_access_bootstrap`'s module doc for why this needs to exist at all:
+    // nothing in the base toolset otherwise points a session's model at the
+    // extension catalog, so it never discovers real web search on its own.
+    crate::extension_host::web_access_bootstrap::bootstrap_web_access(&extension_management)
+        .await?
+        .log_completion();
     if let Some(local_runtime) = Arc::get_mut(&mut store_graph.local_runtime) {
         local_runtime.extension_management = Some(Arc::clone(&extension_management));
         local_runtime.runtime_http_egress = Some(product_auth_runtime_ports.runtime_http_egress());
@@ -6985,7 +6994,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn local_dev_web_access_installs_activates_and_dispatches_through_host_runtime() {
+    async fn local_dev_web_access_is_auto_installed_activated_and_dispatches_through_host_runtime()
+    {
         let dir = tempfile::tempdir().expect("tempdir");
         let services = build_reborn_services(
             RebornBuildInput::local_dev_with_profile(
@@ -6998,29 +7008,11 @@ mod tests {
         .await
         .expect("local-dev services build");
         let local_runtime = services.local_runtime.as_ref().expect("local runtime");
-        let extension_management = local_runtime
-            .extension_management
-            .as_ref()
-            .expect("extension management");
-        let web_access_ref =
-            LifecyclePackageRef::new(LifecyclePackageKind::Extension, "web-access")
-                .expect("valid ref");
 
-        extension_management
-            .install(
-                web_access_ref.clone(),
-                extension_management.tenant_operator_user_id_for_test(),
-            )
-            .await
-            .expect("install Web Access");
-        extension_management
-            .activate_with_prechecked_credentials_for_test(
-                web_access_ref,
-                ExtensionActivationMode::Static,
-            )
-            .await
-            .expect("activate Web Access");
-
+        // No explicit install/activate here: `build_reborn_services` auto-bootstraps
+        // `web-access` (see `web_access_bootstrap::bootstrap_web_access`) precisely so
+        // a session never needs the model — or a test — to drive the lifecycle
+        // handshake itself. This asserts that guarantee directly.
         let context = web_access_context("web-access.search");
         enable_global_auto_approve_for_context(local_runtime, &context).await;
         let outcome = services

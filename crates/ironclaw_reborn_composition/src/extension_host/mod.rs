@@ -34,6 +34,7 @@ pub(crate) mod mcp_discovery;
 pub(crate) mod provider_instance_readiness;
 pub(crate) mod skill_learning;
 pub(crate) mod skill_listing;
+pub(crate) mod web_access_bootstrap;
 pub(crate) mod webui_extension_credentials;
 
 // Keep the bundle policy owned by `extension_bundle`; lifecycle consumes only

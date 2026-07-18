@@ -406,10 +406,9 @@ impl RebornLocalExtensionManagementPort {
     }
 
     /// The wired tenant-operator identity (#5459 P1). Used by tenant-wide
-    /// host activations (e.g. Slack host-beta channel setup) that operate a
-    /// shared install and therefore act as the operator rather than any
-    /// individual member.
-    #[allow(dead_code)]
+    /// host activations (e.g. Slack host-beta channel setup, the `web-access`
+    /// bootstrap) that operate a shared install and therefore act as the
+    /// operator rather than any individual member.
     pub(crate) fn tenant_operator_user_id(&self) -> &UserId {
         &self.tenant_operator_user_id
     }
