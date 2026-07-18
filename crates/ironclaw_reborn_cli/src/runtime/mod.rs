@@ -3759,6 +3759,65 @@ poll_interval_secs = 15
                     "http://127.0.0.1:3000/config/callback",
                     "a field env does not set must still fall back to config.toml"
                 );
+                assert_eq!(
+                    config.hosted_domain_hint.as_deref(),
+                    Some("config.example.com"),
+                    "hosted_domain_hint must also still fall back to config.toml when env \
+                     does not set it"
+                );
+            }
+            GoogleOAuthResolution::Disabled(_) => {
+                panic!("expected Configured with per-field env/config merge")
+            }
+        }
+    }
+
+    /// Companion to the test above: env must also win field-by-field for
+    /// `redirect_uri` and `hosted_domain_hint`, not just `client_id` — the
+    /// `.or_else(...)` fallback chain in `resolve_google_oauth_config_state_merged`
+    /// is repeated per field, so a bug in any one field's ordering would not
+    /// be caught by only ever overriding `client_id`.
+    #[test]
+    fn merged_resolver_env_overrides_redirect_uri_and_hosted_domain_hint() {
+        let google = GoogleSection {
+            client_id: Some("config-client.apps.googleusercontent.com".to_string()),
+            redirect_uri: Some("http://127.0.0.1:3000/config/callback".to_string()),
+            hosted_domain_hint: Some("config.example.com".to_string()),
+        };
+        let vars = HashMap::from([
+            (
+                "IRONCLAW_REBORN_GOOGLE_OAUTH_REDIRECT_URI",
+                "http://127.0.0.1:3000/env/callback",
+            ),
+            (
+                "IRONCLAW_REBORN_GOOGLE_HOSTED_DOMAIN_HINT",
+                "env.example.com",
+            ),
+        ]);
+
+        let resolution = resolve_google_oauth_config_state_merged(
+            |name| vars.get(name).map(|value| value.to_string()),
+            Some(&google),
+            None,
+        )
+        .expect("env-overridden redirect_uri/hosted_domain_hint must resolve");
+        match resolution {
+            GoogleOAuthResolution::Configured(config) => {
+                assert_eq!(
+                    config.client.client_id.as_str(),
+                    "config-client.apps.googleusercontent.com",
+                    "client_id not set by env must still fall back to config.toml"
+                );
+                assert_eq!(
+                    config.client.redirect_uri.as_str(),
+                    "http://127.0.0.1:3000/env/callback",
+                    "env must win over config.toml for redirect_uri"
+                );
+                assert_eq!(
+                    config.hosted_domain_hint.as_deref(),
+                    Some("env.example.com"),
+                    "env must win over config.toml for hosted_domain_hint"
+                );
             }
             GoogleOAuthResolution::Disabled(_) => {
                 panic!("expected Configured with per-field env/config merge")

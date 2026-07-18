@@ -96,9 +96,9 @@ pub(super) enum ShapeVerdict {
 }
 
 /// Validate `value`'s shape for `key`, independent of the
-/// secret/non-secret destination check (that one lives in
-/// `set.rs::refuse_if_wrong_shape_for_destination`, since it needs
-/// `reject_inline_secret` from `ironclaw_reborn_config`).
+/// secret/non-secret destination check (that one lives inline in
+/// `set.rs::set_value_key` via `reject_inline_secret` from
+/// `ironclaw_reborn_config`).
 pub(super) fn validate_shape(key: &ConfigKey, value: &str) -> ShapeVerdict {
     match key {
         ConfigKey::GoogleClientId => {

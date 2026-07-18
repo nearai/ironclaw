@@ -1413,6 +1413,19 @@ fn compose_product_auth_services(
     Ok(Arc::new(services))
 }
 
+/// Whether a Google OAuth backend is configured, from the composition-side
+/// signal `GsuiteFirstPartyHandler` uses to short-circuit dispatch with a
+/// "not configured" tool result instead of reaching credential resolution.
+/// Shared by `build_local_runtime` and its production-build-context
+/// counterpart so the check doesn't drift between the two call sites.
+fn google_oauth_configured(
+    oauth_provider_configs: &[crate::input::OAuthProviderBackendConfig],
+) -> bool {
+    oauth_provider_configs
+        .iter()
+        .any(|config| config.spec.provider_id == ironclaw_auth::GOOGLE_PROVIDER_ID)
+}
+
 #[cfg(any(feature = "libsql", feature = "postgres"))]
 fn production_config(
     required_runtime_backends: Vec<ironclaw_host_api::RuntimeKind>,
@@ -1455,12 +1468,8 @@ async fn build_local_runtime(input: RebornBuildInput) -> Result<RebornServices, 
         ..
     } = input;
     // Computed before `oauth_provider_configs` is consumed by
-    // `compose_provider_client` below — the cheap composition-side signal
-    // `GsuiteFirstPartyHandler` uses to short-circuit dispatch with a "not
-    // configured" tool result instead of reaching credential resolution.
-    let google_oauth_configured = oauth_provider_configs
-        .iter()
-        .any(|config| config.spec.provider_id == ironclaw_auth::GOOGLE_PROVIDER_ID);
+    // `compose_provider_client` below — see `google_oauth_configured`.
+    let google_oauth_configured = google_oauth_configured(&oauth_provider_configs);
     let local_runtime_identity_for_nearai_mcp = local_runtime_identity.clone();
     let (
         root,
@@ -5248,11 +5257,8 @@ where
         scheduler_wake_wiring,
     } = context;
     // Computed before `oauth_provider_configs` is consumed by
-    // `compose_provider_client` below — see the mirrored comment in
-    // `build_local_runtime`.
-    let google_oauth_configured = oauth_provider_configs
-        .iter()
-        .any(|config| config.spec.provider_id == ironclaw_auth::GOOGLE_PROVIDER_ID);
+    // `compose_provider_client` below — see `google_oauth_configured`.
+    let google_oauth_configured = google_oauth_configured(&oauth_provider_configs);
     let owner_user_id = UserId::new(owner_id).map_err(|error| RebornBuildError::InvalidConfig {
         reason: error.to_string(),
     })?;

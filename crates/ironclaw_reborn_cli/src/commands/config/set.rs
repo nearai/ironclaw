@@ -858,6 +858,13 @@ mod tests {
     /// do nothing at runtime — `serve` reads the env var first (see
     /// `webui_token::resolve_webui_token`'s precedence) and never notices
     /// the rotated file. Rotation must refuse instead of silently no-op'ing.
+    ///
+    /// Also pins the two edges of `configured_webui_token_env_override`'s
+    /// `.filter(|value| !value.is_empty())` check: an env var set to the
+    /// empty string counts as "unset" (rotate allowed), while a
+    /// whitespace-only value is non-empty and still counts as "set" (rotate
+    /// refused) — `set_var("", ...)`-style ambiguity is exactly what the
+    /// `is_empty()` filter (not e.g. `trim().is_empty()`) resolves.
     #[test]
     fn webui_token_rotate_refuses_when_env_override_is_set() {
         let _lock = crate::runtime::test_env::lock_runtime_env();
@@ -895,6 +902,45 @@ mod tests {
         assert_eq!(
             before, after,
             "the token file must not be rotated while the env override is active"
+        );
+
+        // Edge: empty string == unset — rotate must be ALLOWED.
+        // SAFETY: see above.
+        unsafe {
+            std::env::set_var("IRONCLAW_REBORN_WEBUI_TOKEN", "");
+        }
+        let result = execute_webui_token(&context, None, true);
+        // SAFETY: see above.
+        unsafe {
+            std::env::remove_var("IRONCLAW_REBORN_WEBUI_TOKEN");
+        }
+        result.expect("empty env var must count as unset; rotate must be allowed");
+        let after_empty = std::fs::read_to_string(&token_path).expect("read token file again");
+        assert_ne!(
+            after, after_empty,
+            "rotate must actually have run with an empty env var override"
+        );
+
+        // Edge: whitespace-only value is non-empty — rotate must be REFUSED.
+        // SAFETY: see above.
+        unsafe {
+            std::env::set_var("IRONCLAW_REBORN_WEBUI_TOKEN", "   ");
+        }
+        let result = execute_webui_token(&context, None, true);
+        // SAFETY: see above.
+        unsafe {
+            std::env::remove_var("IRONCLAW_REBORN_WEBUI_TOKEN");
+        }
+        let err =
+            result.expect_err("whitespace-only env var must still count as set; rotate refused");
+        assert!(
+            err.to_string().contains("IRONCLAW_REBORN_WEBUI_TOKEN"),
+            "error must name the overriding env var: {err}"
+        );
+        let after_whitespace = std::fs::read_to_string(&token_path).expect("read token file again");
+        assert_eq!(
+            after_empty, after_whitespace,
+            "the token file must not be rotated while a whitespace-only env override is active"
         );
     }
 }

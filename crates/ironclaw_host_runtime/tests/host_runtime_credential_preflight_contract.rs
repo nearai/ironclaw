@@ -70,6 +70,55 @@ impl RuntimeCredentialAccountResolver for FixedAccountPresenceResolver {
     }
 }
 
+/// A `RuntimeCredentialAccountResolver` fixture whose `has_account` always
+/// errors (simulating a transient backend outage), and refuses to be asked
+/// for `resolve_access_secret` (same rationale as `FixedAccountPresenceResolver`
+/// above — the pre-flight must only ever call the cheap existence probe).
+#[derive(Debug)]
+struct ErroringAccountPresenceResolver;
+
+#[async_trait]
+impl RuntimeCredentialAccountResolver for ErroringAccountPresenceResolver {
+    async fn resolve_access_secret(
+        &self,
+        _request: RuntimeCredentialAccountRequest<'_>,
+    ) -> Result<RuntimeCredentialAccessSecret, CredentialStageError> {
+        panic!(
+            "credential pre-flight must not call resolve_access_secret (that leases/refreshes); \
+             it must only call has_account"
+        );
+    }
+
+    async fn has_account(
+        &self,
+        _request: RuntimeCredentialAccountRequest<'_>,
+    ) -> Result<bool, CredentialStageError> {
+        Err(CredentialStageError::Backend)
+    }
+}
+
+/// A `RuntimeCredentialAccountResolver` fixture that implements only
+/// `resolve_access_secret` and relies on the trait's default `has_account`
+/// (`Ok(true)`, i.e. "assume present" — see the doc comment on
+/// `RuntimeCredentialAccountResolver::has_account` in `obligations.rs`).
+/// Pins that a resolver predating the presence-probe method passes through
+/// the pre-flight cleanly rather than false-positiving `AuthRequired`.
+#[derive(Debug)]
+struct DefaultHasAccountResolver;
+
+#[async_trait]
+impl RuntimeCredentialAccountResolver for DefaultHasAccountResolver {
+    async fn resolve_access_secret(
+        &self,
+        _request: RuntimeCredentialAccountRequest<'_>,
+    ) -> Result<RuntimeCredentialAccessSecret, CredentialStageError> {
+        panic!(
+            "credential pre-flight must not call resolve_access_secret (that leases/refreshes); \
+             it must only call has_account"
+        );
+    }
+}
+
 // ─── Manifests ──────────────────────────────────────────────────────────────
 
 /// A script capability that declares a required credential with
@@ -589,14 +638,14 @@ async fn spawn_capability_forged_scope_fails_before_preflight() {
 /// reports the account present.
 #[tokio::test]
 async fn product_auth_account_present_does_not_trip_preflight() {
-    let run_state = Arc::new(InMemoryRunStateStore::new());
-    let approval_requests = Arc::new(InMemoryApprovalRequestStore::new());
-    let capability_leases = Arc::new(InMemoryCapabilityLeaseStore::new());
+    let run_state = Arc::new(ironclaw_run_state::in_memory_backed_run_state_store());
+    let approval_requests = Arc::new(ironclaw_run_state::in_memory_backed_approval_request_store());
+    let capability_leases = Arc::new(in_memory_backed_capability_lease_store());
     let resolver = Arc::new(FixedAccountPresenceResolver { present: true });
 
     let services = HostRuntimeServices::new(
         Arc::new(registry_with_manifest(SCRIPT_WITH_PRODUCT_AUTH_MANIFEST)),
-        Arc::new(LocalFilesystem::new()),
+        Arc::new(DiskFilesystem::new()),
         Arc::new(InMemoryResourceGovernor::new()),
         Arc::new(GrantAuthorizer::new()),
         ProcessServices::in_memory(),
@@ -643,14 +692,14 @@ async fn product_auth_account_present_does_not_trip_preflight() {
 /// path that would spawn the process.
 #[tokio::test]
 async fn product_auth_account_absent_trips_preflight_before_sandbox() {
-    let run_state = Arc::new(InMemoryRunStateStore::new());
-    let approval_requests = Arc::new(InMemoryApprovalRequestStore::new());
-    let capability_leases = Arc::new(InMemoryCapabilityLeaseStore::new());
+    let run_state = Arc::new(ironclaw_run_state::in_memory_backed_run_state_store());
+    let approval_requests = Arc::new(ironclaw_run_state::in_memory_backed_approval_request_store());
+    let capability_leases = Arc::new(in_memory_backed_capability_lease_store());
     let resolver = Arc::new(FixedAccountPresenceResolver { present: false });
 
     let services = HostRuntimeServices::new(
         Arc::new(registry_with_manifest(SCRIPT_WITH_PRODUCT_AUTH_MANIFEST)),
-        Arc::new(LocalFilesystem::new()),
+        Arc::new(DiskFilesystem::new()),
         Arc::new(InMemoryResourceGovernor::new()),
         Arc::new(GrantAuthorizer::new()),
         ProcessServices::in_memory(),
@@ -715,9 +764,9 @@ async fn product_auth_account_absent_trips_preflight_before_sandbox() {
 /// matching the pre-existing "list everything required" outcome shape.
 #[tokio::test]
 async fn missing_secret_handle_and_missing_account_batch_into_one_auth_required() {
-    let run_state = Arc::new(InMemoryRunStateStore::new());
-    let approval_requests = Arc::new(InMemoryApprovalRequestStore::new());
-    let capability_leases = Arc::new(InMemoryCapabilityLeaseStore::new());
+    let run_state = Arc::new(ironclaw_run_state::in_memory_backed_run_state_store());
+    let approval_requests = Arc::new(ironclaw_run_state::in_memory_backed_approval_request_store());
+    let capability_leases = Arc::new(in_memory_backed_capability_lease_store());
     let secret_store = Arc::new(InMemorySecretStore::new());
     let resolver = Arc::new(FixedAccountPresenceResolver { present: false });
 
@@ -725,7 +774,7 @@ async fn missing_secret_handle_and_missing_account_batch_into_one_auth_required(
         Arc::new(registry_with_manifest(
             SCRIPT_WITH_BOTH_CREDENTIAL_KINDS_MANIFEST,
         )),
-        Arc::new(LocalFilesystem::new()),
+        Arc::new(DiskFilesystem::new()),
         Arc::new(InMemoryResourceGovernor::new()),
         Arc::new(GrantAuthorizer::new()),
         ProcessServices::in_memory(),
@@ -791,4 +840,106 @@ async fn missing_secret_handle_and_missing_account_batch_into_one_auth_required(
         }
         other => panic!("expected one batched AuthRequired naming both gaps; got {other:?}"),
     }
+}
+
+/// A transient `has_account` error must fail the pre-flight open, not
+/// closed: it must NOT surface `AuthRequired`, and dispatch must proceed to
+/// the dispatch-time obligation check (`resolve_access_secret`) as the real
+/// backstop — see the `Err(error) => { ... return None; }` branch in
+/// `credential_preflight_check` (production.rs). This is the fail-open half
+/// of the two tests above (`product_auth_account_present_does_not_trip_preflight`
+/// / `..._absent_trips_preflight_before_sandbox`), which only cover `Ok(_)`.
+#[tokio::test]
+async fn erroring_account_resolver_skips_preflight_fail_open() {
+    let run_state = Arc::new(ironclaw_run_state::in_memory_backed_run_state_store());
+    let approval_requests = Arc::new(ironclaw_run_state::in_memory_backed_approval_request_store());
+    let capability_leases = Arc::new(in_memory_backed_capability_lease_store());
+    let resolver = Arc::new(ErroringAccountPresenceResolver);
+
+    let services = HostRuntimeServices::new(
+        Arc::new(registry_with_manifest(SCRIPT_WITH_PRODUCT_AUTH_MANIFEST)),
+        Arc::new(DiskFilesystem::new()),
+        Arc::new(InMemoryResourceGovernor::new()),
+        Arc::new(GrantAuthorizer::new()),
+        ProcessServices::in_memory(),
+        CapabilitySurfaceVersion::new("surface-v1").unwrap(),
+    )
+    .with_trust_policy(Arc::new(local_manifest_trust_policy(
+        "script",
+        vec![EffectKind::DispatchCapability, EffectKind::UseSecret],
+    )))
+    .with_run_state(Arc::clone(&run_state))
+    .with_approval_requests(Arc::clone(&approval_requests))
+    .with_capability_leases(Arc::clone(&capability_leases))
+    .with_runtime_credential_account_resolver(resolver);
+    let runtime = services.host_runtime_for_local_testing();
+    let context = execution_context_without_grants();
+    let estimate = ResourceEstimate::default();
+    let input = json!({"message": "account presence probe erroring"});
+
+    let outcome = runtime
+        .invoke_capability(RuntimeCapabilityRequest::new(
+            context,
+            script_capability_id(),
+            estimate,
+            input,
+            trust_decision_with_dispatch_authority(),
+        ))
+        .await
+        .unwrap();
+
+    assert!(
+        !matches!(outcome, RuntimeCapabilityOutcome::AuthRequired(_)),
+        "a transient has_account error must not surface AuthRequired (fail-open); got {outcome:?}"
+    );
+}
+
+/// A resolver that doesn't override `has_account` (relying on the trait's
+/// default `Ok(true)`) must pass the pre-flight through cleanly — the
+/// default exists so resolvers predating the presence-probe method are
+/// unaffected (see the doc comment on `RuntimeCredentialAccountResolver::
+/// has_account`).
+#[tokio::test]
+async fn resolver_without_has_account_override_passes_preflight() {
+    let run_state = Arc::new(ironclaw_run_state::in_memory_backed_run_state_store());
+    let approval_requests = Arc::new(ironclaw_run_state::in_memory_backed_approval_request_store());
+    let capability_leases = Arc::new(in_memory_backed_capability_lease_store());
+    let resolver = Arc::new(DefaultHasAccountResolver);
+
+    let services = HostRuntimeServices::new(
+        Arc::new(registry_with_manifest(SCRIPT_WITH_PRODUCT_AUTH_MANIFEST)),
+        Arc::new(DiskFilesystem::new()),
+        Arc::new(InMemoryResourceGovernor::new()),
+        Arc::new(GrantAuthorizer::new()),
+        ProcessServices::in_memory(),
+        CapabilitySurfaceVersion::new("surface-v1").unwrap(),
+    )
+    .with_trust_policy(Arc::new(local_manifest_trust_policy(
+        "script",
+        vec![EffectKind::DispatchCapability, EffectKind::UseSecret],
+    )))
+    .with_run_state(Arc::clone(&run_state))
+    .with_approval_requests(Arc::clone(&approval_requests))
+    .with_capability_leases(Arc::clone(&capability_leases))
+    .with_runtime_credential_account_resolver(resolver);
+    let runtime = services.host_runtime_for_local_testing();
+    let context = execution_context_without_grants();
+    let estimate = ResourceEstimate::default();
+    let input = json!({"message": "resolver using default has_account"});
+
+    let outcome = runtime
+        .invoke_capability(RuntimeCapabilityRequest::new(
+            context,
+            script_capability_id(),
+            estimate,
+            input,
+            trust_decision_with_dispatch_authority(),
+        ))
+        .await
+        .unwrap();
+
+    assert!(
+        !matches!(outcome, RuntimeCapabilityOutcome::AuthRequired(_)),
+        "the default has_account (Ok(true)) must pass the pre-flight through cleanly; got {outcome:?}"
+    );
 }
