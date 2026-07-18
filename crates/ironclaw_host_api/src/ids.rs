@@ -238,6 +238,18 @@ string_id!(RoutineId, "routine", validate_name_segment);
 // be structurally incapable of smuggling raw backend/error text (an existing
 // invocation/correlation id is carried via `ErrRef::from_uuid(id.as_uuid())`).
 uuid_id!(ErrRef);
+// Slice-C kernel vocabulary (arch-simplification §3/§5.3): opaque handles into
+// durably-stored control-plane records. Each names a record the kernel produced;
+// the model-visible content (what the approver sees, the deny reason, the process
+// summary) is rendered FROM the referenced record through the gate/rendering
+// contract (§5.2.9), never carried inline on the ref. UUID ids for the same
+// structural reason as `ErrRef`: they ride serialized `Blocked`/`Suspension`/
+// verdict values across sanitized boundaries, so free text must be
+// unrepresentable — a kernel record id travels via `from_uuid`/`new`, never as
+// a caller-composed string.
+uuid_id!(GateRef);
+uuid_id!(ProcessRef);
+uuid_id!(DenyRef);
 
 /// Provider-facing tool/function name.
 ///
