@@ -395,7 +395,8 @@ def build_reborn_binary() -> Path:
     )
     binary = _reborn_binary()
     if not binary.exists():
-        raise LiveQaError(f"ironclaw binary was not produced at {binary}")
+        message = f"ironclaw binary was not produced at {binary}"
+        raise LiveQaError(message)
     return binary
 
 

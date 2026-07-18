@@ -825,6 +825,8 @@ jobs:
           set -euo pipefail
           rm -rf artifacts/prepared-reborn-webui-v2-binary
           mkdir -p artifacts/prepared-reborn-webui-v2-binary
+          # Temporary compatibility member for downstream QA consumers; remove
+          # after every consumer invokes the canonical ironclaw binary.
           cp target/debug/ironclaw target/debug/ironclaw-reborn
           tar -C target/debug -czf artifacts/prepared-reborn-webui-v2-binary/ironclaw-reborn.tar.gz ironclaw ironclaw-reborn
           (
@@ -1112,7 +1114,7 @@ jobs:
             "webui-v2-beta,slack-v2-host-beta"
           mkdir -p target/debug
           tar -C target/debug -xzf .live-qa-binary/ironclaw-reborn.tar.gz
-          chmod 755 target/debug/ironclaw
+          chmod 755 target/debug/ironclaw target/debug/ironclaw-reborn
       - name: Materialize Reborn WebUI v2 live QA sensitive secrets to files
         if: steps.filter_reborn_webui_v2_google_cases.outputs.skip_shard != '1'
         shell: bash
