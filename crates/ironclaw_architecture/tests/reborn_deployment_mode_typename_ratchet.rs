@@ -18,12 +18,16 @@
 //!   platform-hosted MCP server, vs a self-hosted one), NOT a `HostedDev`/hosted-
 //!   TIER deployment-mode leak. Justified-keep; frozen so a genuine
 //!   `HostedTierRuntime`-style leak can't slip in behind them.
-//! - `Local*` (excluding `LocalDev*`, owned by the sibling ratchet, and `Locale*`,
-//!   a Bucket-3 localization false positive) — the `LocalTriggerAccess*` family
-//!   is genuine Bucket-1 debt: §4.4 folds the `local_trigger_access` module into
-//!   "seed the owner grant from config at boot," a policy value. Shrinks as that
-//!   lands. `LocalInvocationServicesResolver` awaits a rename (its correct name
-//!   is a design call — it wires host OR sandbox ports).
+//! - `Local` as a CamelCase word anywhere in the name (excluding
+//!   `LocalDev*`-prefixed names, owned by the sibling ratchet; localization
+//!   words like `Locale`/`Localization` are excluded structurally — they
+//!   continue lowercase, so the word is not `Local`). The `LocalTriggerAccess*`
+//!   family (incl. its `Reborn*LocalTriggerAccess*` backends) is genuine
+//!   Bucket-1 debt: §4.4 folds the `local_trigger_access` module into "seed the
+//!   owner grant from config at boot," a policy value. The `RebornLocal*`
+//!   composition family is Slice-B mode-as-type debt. Shrinks as those land.
+//!   `LocalInvocationServicesResolver` awaits a rename (a design call — it
+//!   wires host OR sandbox ports).
 //!
 //! Scanner semantics (shared with the other §10 ratchets — see
 //! [`ratchet_support`]): comments/strings stripped before matching; covers
@@ -43,15 +47,41 @@ use ratchet_support::{
 
 const KEYWORDS: &[&str] = &["struct ", "enum ", "trait ", "type "];
 
-/// Matches deployment-mode-name candidates for the three prefixes this ratchet
-/// owns: `Hosted*`, `Enterprise*`, and `Local*` EXCEPT `LocalDev*` (the sibling
-/// ratchet's domain) and `Locale*` (a localization false positive). `starts_with`
-/// (not `contains`) so mid-word matches like `HookLocalId` are not flagged.
-fn is_other_mode_prefixed(ident: &str) -> bool {
-    if ident.starts_with("Hosted") || ident.starts_with("Enterprise") {
-        return true;
+/// Matches deployment-mode-name candidates for the three terms this ratchet
+/// owns — `Hosted`, `Enterprise`, `Local` — **anywhere** in the name (§4.4 says
+/// "no public type name CONTAINS" them), not just as a prefix, so mode-shaped
+/// mid-names like `RebornLocalRuntimeProfileOptions` are inventoried too.
+/// A term only matches at a CamelCase word boundary: it must be followed by an
+/// uppercase letter, digit, underscore, or the end of the name. That naturally
+/// excludes localization words — `Locale*` / `Localization*` / `Localised*`
+/// continue with a lowercase letter, so the word is not `Local` — with no
+/// hand-listed exception prefixes. `LocalDev*`-prefixed names stay with the
+/// sibling ratchet.
+fn is_other_mode_name(ident: &str) -> bool {
+    if ident.starts_with("LocalDev") {
+        return false; // sibling ratchet's domain
     }
-    ident.starts_with("Local") && !ident.starts_with("LocalDev") && !ident.starts_with("Locale")
+    contains_mode_term(ident, "Hosted")
+        || contains_mode_term(ident, "Enterprise")
+        || contains_mode_term(ident, "Local")
+}
+
+/// True when `term` occurs in `ident` as a complete CamelCase word — i.e. the
+/// character after the match is uppercase, a digit, an underscore, or the end.
+fn contains_mode_term(ident: &str, term: &str) -> bool {
+    let mut search_from = 0;
+    while let Some(pos) = ident[search_from..].find(term) {
+        let end = search_from + pos + term.len();
+        let at_word_boundary = match ident[end..].chars().next() {
+            None => true,
+            Some(next) => next.is_ascii_uppercase() || next.is_ascii_digit() || next == '_',
+        };
+        if at_word_boundary {
+            return true;
+        }
+        search_from += pos + 1;
+    }
+    false
 }
 
 /// The frozen inventory of pub-visible `Hosted*`/`Enterprise*`/`Local*`
@@ -81,6 +111,33 @@ const FROZEN_OTHER_MODE_TYPES: &[&str] = &[
     // --- Local*: pending rename — its correct name is a design call (wires host
     //     OR sandbox process ports, so "Local…" understates it).
     "LocalInvocationServicesResolver",
+    // --- mid-name matches the boundary-aware contains predicate also inventories
+    //     (§4.4's rule is "contains", not "starts with") ---
+    //   JUSTIFIED (Bucket-3 by meaning): "hook-local id" — an identifier local to
+    //     one hook, a genuine domain concept, not a deployment tier.
+    "HookLocalId",
+    //   local_trigger_access family (same Bucket-1 debt as the LocalTriggerAccess*
+    //     prefix group above — folds into config-seeded owner grants):
+    "RebornFilesystemLocalTriggerAccessStore",
+    "RebornLibSqlLocalTriggerAccessStore",
+    "RebornLocalTriggerAccessStoreError",
+    //   RebornLocal* composition family — local-dev-as-type mode names in the
+    //     composition surface; shrinks with Slice B (deployment mode becomes a
+    //     `DeploymentConfig` value):
+    "RebornLocalExtensionManagementPort",
+    "RebornLocalLifecycleFacade",
+    "RebornLocalRuntimeIdentity",
+    "RebornLocalRuntimeProfileError",
+    "RebornLocalRuntimeProfileOptions",
+    "RebornLocalRuntimeServices",
+    "RebornLocalServiceLifecycle",
+    "RebornLocalSkillManagementError",
+    "RebornLocalSkillManagementPort",
+    //   mid-name LocalDev (the sibling ratchet owns only the LocalDev prefix):
+    //     Slice-B family, shrinks with the LocalDev* collapse:
+    "RebornLocalDevApprovalTestParts",
+    "RefreshingLocalDevCapabilityPortConfig",
+    "RefreshingLocalDevCapabilityPortTestParts",
 ];
 
 #[test]
@@ -90,7 +147,7 @@ fn reborn_other_mode_typename_allowlist_is_frozen() {
     collect_type_defs(
         &crates_dir,
         KEYWORDS,
-        &is_other_mode_prefixed,
+        &is_other_mode_name,
         &[
             "reborn_inmemory_store_ratchet.rs",
             "reborn_localdev_typename_ratchet.rs",
@@ -131,10 +188,11 @@ fn reborn_other_mode_typename_allowlist_is_frozen() {
     );
 }
 
-/// Self-test for the predicate as this ratchet configures it: it flags
-/// `Hosted*`/`Enterprise*`/`Local*` but excludes `LocalDev*` (sibling ratchet),
-/// `Locale*` (localization false positive), and mid-word `Local` (e.g.
-/// `HookLocalId`).
+/// Self-test for the predicate as this ratchet configures it: it flags the
+/// mode terms at any CamelCase word boundary — prefix or mid-name — while
+/// excluding `LocalDev*`-prefixed names (sibling ratchet) and localization
+/// words (`Locale*`/`Localization*`/`Localised*`), which continue lowercase and
+/// therefore are not the word `Local`.
 #[test]
 fn other_mode_predicate_self_test() {
     let sample = r##"
@@ -143,10 +201,14 @@ fn other_mode_predicate_self_test() {
         pub struct LocalTriggerAccessSeed;       // Local* (non-Dev) -> flagged
         pub struct LocalDevApprovalGatePolicy;   // LocalDev* -> sibling ratchet, NOT flagged
         pub struct LocaleError;                  // Locale* -> localization, NOT flagged
-        pub struct HookLocalId;                  // mid-word Local -> NOT flagged
-        pub struct DiskFilesystem;               // no mode prefix -> NOT flagged
+        pub struct LocalizationProvider;         // Localization* -> NOT flagged
+        pub struct LocalisedGreeting;            // Localised* -> NOT flagged
+        pub struct RebornLocalRuntimeServices;   // mid-name Local word -> flagged
+        pub struct HookLocalId;                  // mid-name Local word -> flagged
+        pub struct SelfHostedMcpClient;          // mid-name Hosted word -> flagged
+        pub struct DiskFilesystem;               // no mode term -> NOT flagged
     "##;
-    let got: Vec<String> = scan_type_defs(sample, KEYWORDS, &is_other_mode_prefixed)
+    let got: Vec<String> = scan_type_defs(sample, KEYWORDS, &is_other_mode_name)
         .into_iter()
         .map(|(ident, _)| ident)
         .collect();
@@ -156,6 +218,9 @@ fn other_mode_predicate_self_test() {
             "HostedMcpEndpoint",
             "EnterpriseTierPolicy",
             "LocalTriggerAccessSeed",
+            "RebornLocalRuntimeServices",
+            "HookLocalId",
+            "SelfHostedMcpClient",
         ]
     );
 }
