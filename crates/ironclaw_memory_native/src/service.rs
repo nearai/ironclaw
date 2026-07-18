@@ -682,37 +682,24 @@ fn truncate_to_char_boundary(value: &str, max_bytes: usize) -> &str {
 }
 
 fn validate_loop_safe_summary(value: String) -> Option<String> {
-    if value.is_empty()
-        || value.len() > MAX_SAFE_SUMMARY_BYTES
-        || value
-            .chars()
-            .any(|character| character == '\0' || character.is_control())
-        || value.chars().any(|character| {
-            matches!(
-                character,
-                '{' | '}' | '[' | ']' | '`' | '<' | '>' | '/' | '\\'
-            )
-        })
-    {
-        return None;
-    }
+    // Delegate the shared redaction core — length bound, control-char ban,
+    // payload/path delimiter ban, credential-marker denylist, and secret-like
+    // token detector — to the single canonical `ironclaw_host_api::SafeSummary`
+    // definition. (host_api's secret-token detector is a superset of the former
+    // local `sk-`-only check, so this only tightens secret rejection.)
+    let value = ironclaw_host_api::SafeSummary::new(value).ok()?.into_inner();
 
+    // Memory-snippet-specific extra bans: the memory context must not surface
+    // descriptive runtime/error vocabulary that the capability-outcome summary
+    // channel intentionally allows. Kept local so this validator stays no weaker
+    // than before delegation.
     let lower = value.to_ascii_lowercase();
     for forbidden in [
-        "access token",
-        "api key",
-        "api_key",
-        "apikey",
-        "authorization:",
-        "bearer ",
         "host path",
         "invalid api key",
         "invalid_api_key",
-        "password",
-        "passwd",
         "provider error",
         "raw runtime",
-        "secret",
         "stack trace",
         "tool input",
         "tool_input",
@@ -721,12 +708,6 @@ fn validate_loop_safe_summary(value: String) -> Option<String> {
         if lower.contains(forbidden) {
             return None;
         }
-    }
-    if lower
-        .split(|character: char| !character.is_ascii_alphanumeric() && character != '-')
-        .any(|token| token.starts_with("sk-"))
-    {
-        return None;
     }
     Some(value)
 }
