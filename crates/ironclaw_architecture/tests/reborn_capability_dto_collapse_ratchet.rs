@@ -23,7 +23,12 @@
 //!
 //! Definition of done for this axis: every entry below is deleted (its fields
 //! now carried by `Invocation`/`Authorized`, its result variants by
-//! `Resolution`), and this file is deleted with the last of them.
+//! `Resolution`), and this file is deleted with the last of them (enforced —
+//! the test fails on an empty allowlist).
+//!
+//! Owner: the §3 capability-path collapse slice series under the #6168
+//! umbrella (authorize → dispatch → result-channel migration) trims this list
+//! in the same PRs that delete the types; reviewers hold additions to zero.
 //!
 //! Scanner semantics (shared with the other §10 ratchets — see
 //! [`ratchet_support`]): comments/strings stripped before matching; covers
@@ -45,6 +50,8 @@ const KEYWORDS: &[&str] = &["struct ", "enum ", "trait ", "type "];
 /// Remove an entry in the same PR that deletes its type; never add one.
 const FROZEN_COLLAPSE_DTOS: &[&str] = &[
     // ── request side: the ~5 near-identical shapes (§1.1) ──
+    // turns (§1.1 hop 1 — the loop's expression; `LoopRequest` replaces it, §3.1)
+    "CapabilityInvocation",
     // host_runtime (the upper mirrors)
     "RuntimeCapabilityRequest",
     "RuntimeCapabilityResumeRequest",
@@ -103,6 +110,16 @@ fn reborn_capability_dto_allowlist_is_frozen_and_only_shrinks() {
          capability-path collapse deleted one (good — §3 progress!) — trim it from \
          the allowlist in the same PR so this ratchet shrinks toward empty (§10). \
          When the last entry goes, delete this file."
+    );
+
+    // Unlike the pattern-matching ratchets (which keep guarding against NEW
+    // matches at an empty allowlist), an exact-name ratchet with an empty list
+    // can never fail again — so the end state is enforced as deletion, not an
+    // eternally-green dead test.
+    assert!(
+        !FROZEN_COLLAPSE_DTOS.is_empty(),
+        "The capability-path DTO collapse is complete (§3 end state reached). \
+         This exact-name ratchet can no longer catch anything — delete this file."
     );
 }
 
