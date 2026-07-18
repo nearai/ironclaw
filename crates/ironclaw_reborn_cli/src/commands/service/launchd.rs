@@ -353,8 +353,10 @@ pub(super) fn restart_with_runner(runner: &mut dyn ServiceCommandRunner) -> Resu
 }
 
 /// `(installed, running)` without printing anything — factored out of
-/// [`restart_with_runner`]'s own detection so any future caller can share
-/// one source of truth for "is the launchd job loaded and running".
+/// [`restart_with_runner`]'s own detection, which is its one caller today.
+/// `status_with_runner` (below) does NOT call this — it still runs the same
+/// detection inline, pre-dating this extraction. Sharing it there is a
+/// straightforward follow-up, not done here to keep this change scoped.
 pub(super) fn installed_and_running(runner: &mut dyn ServiceCommandRunner) -> Result<(bool, bool)> {
     let plist = plist_path()?;
     let installed = plist.exists();

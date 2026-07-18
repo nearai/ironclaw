@@ -361,8 +361,12 @@ pub(super) fn restart_with_runner(runner: &mut dyn ServiceCommandRunner) -> Resu
 }
 
 /// `(installed, running)` without printing anything — factored out of
-/// [`restart_with_runner`]'s own detection so any future caller can share
-/// one source of truth for "is the systemd unit loaded and active".
+/// [`restart_with_runner`]'s own detection, which is its one caller today.
+/// `status_with_runner` (below) does NOT call this: it needs the raw
+/// `ActiveState` string (not just the derived bool) for
+/// [`systemd_status_detail`]'s secondary line, so it keeps its own
+/// `systemctl show` query rather than sharing this bool-only helper. A
+/// future caller that only needs the bool pair can share it as-is.
 pub(super) fn installed_and_running(runner: &mut dyn ServiceCommandRunner) -> Result<(bool, bool)> {
     let installed = unit_path()?.exists();
     let running = if installed {

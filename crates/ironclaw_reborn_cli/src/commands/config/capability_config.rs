@@ -47,17 +47,13 @@ pub(super) enum ConfigKey {
     WebuiToken,
 }
 
-/// Default provider id for the bare `api_key` alias (no `<provider>.`
-/// prefix given).
-pub(super) const DEFAULT_LLM_API_KEY_PROVIDER: &str = "nearai";
-
 impl ConfigKey {
     /// Classify a raw `config set <key>` argument. `None` for any key
     /// `config set` does not recognize.
     pub(super) fn classify(key: &str) -> Option<Self> {
         if key == "api_key" {
             return Some(Self::LlmApiKey {
-                provider_id: DEFAULT_LLM_API_KEY_PROVIDER.to_string(),
+                provider_id: super::init::DEFAULT_LLM_PROVIDER_ID.to_string(),
             });
         }
         if let Some(provider_id) = key.strip_suffix(".api_key") {
@@ -115,11 +111,18 @@ pub(super) fn validate_shape(key: &ConfigKey, value: &str) -> ShapeVerdict {
             if value.ends_with(".apps.googleusercontent.com") {
                 ShapeVerdict::Ok
             } else {
-                ShapeVerdict::Reject(format!(
-                    "google.client_id `{value}` does not look like a Google OAuth client id \
-                     (expected it to end in `.apps.googleusercontent.com`) — copy it from the \
-                     OAuth client's page at https://console.cloud.google.com/apis/credentials"
-                ))
+                // Never echo `value` back: this key is a plausible target
+                // for a mis-pasted secret (e.g. an API key pasted into the
+                // wrong prompt), and this shape check runs after the
+                // secret-shape law in `set.rs` already let it through —
+                // describe the expected shape instead of the rejected
+                // input. See the secret-echo review fix in `set.rs`.
+                ShapeVerdict::Reject(
+                    "google.client_id does not look like a Google OAuth client id (expected it \
+                     to end in `.apps.googleusercontent.com`) — copy it from the OAuth client's \
+                     page at https://console.cloud.google.com/apis/credentials"
+                        .to_string(),
+                )
             }
         }
         ConfigKey::GoogleClientSecret => {
@@ -139,12 +142,14 @@ pub(super) fn validate_shape(key: &ConfigKey, value: &str) -> ShapeVerdict {
             if value.starts_with("http://") || value.starts_with("https://") {
                 ShapeVerdict::Ok
             } else {
-                ShapeVerdict::Reject(format!(
-                    "google.redirect_uri `{value}` does not look like a URL (expected it to \
-                     start with `http://` or `https://`) — it must exactly match a redirect URI \
-                     registered on the OAuth client at \
-                     https://console.cloud.google.com/apis/credentials"
-                ))
+                // Never echo `value` back — see the `GoogleClientId` arm
+                // above for why.
+                ShapeVerdict::Reject(
+                    "google.redirect_uri does not look like a URL (expected it to start with \
+                     `http://` or `https://`) — it must exactly match a redirect URI registered \
+                     on the OAuth client at https://console.cloud.google.com/apis/credentials"
+                        .to_string(),
+                )
             }
         }
         ConfigKey::SlackEnabled => {
@@ -196,7 +201,7 @@ mod tests {
         assert_eq!(
             ConfigKey::classify("api_key"),
             Some(ConfigKey::LlmApiKey {
-                provider_id: DEFAULT_LLM_API_KEY_PROVIDER.to_string()
+                provider_id: super::super::init::DEFAULT_LLM_PROVIDER_ID.to_string()
             })
         );
     }
@@ -291,6 +296,37 @@ mod tests {
             validate_shape(&ConfigKey::GoogleClientId, "not-a-client-id"),
             ShapeVerdict::Reject(_)
         ));
+    }
+
+    /// Thermo MUST: a Reject message must never echo the rejected value —
+    /// a value pasted into the wrong key (e.g. a secret pasted into
+    /// `google.client_id`) must not be printed back to the terminal/logs.
+    #[test]
+    fn google_client_id_reject_message_does_not_echo_the_rejected_value() {
+        let rejected_value = "sk-proj-mispasted-secret-XXXXXXXXXX";
+        let ShapeVerdict::Reject(message) =
+            validate_shape(&ConfigKey::GoogleClientId, rejected_value)
+        else {
+            panic!("expected Reject");
+        };
+        assert!(
+            !message.contains(rejected_value),
+            "message must not echo the rejected value: {message}"
+        );
+    }
+
+    #[test]
+    fn google_redirect_uri_reject_message_does_not_echo_the_rejected_value() {
+        let rejected_value = "sk-proj-mispasted-secret-XXXXXXXXXX";
+        let ShapeVerdict::Reject(message) =
+            validate_shape(&ConfigKey::GoogleRedirectUri, rejected_value)
+        else {
+            panic!("expected Reject");
+        };
+        assert!(
+            !message.contains(rejected_value),
+            "message must not echo the rejected value: {message}"
+        );
     }
 
     #[test]

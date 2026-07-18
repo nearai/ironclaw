@@ -1628,6 +1628,56 @@ fn config_set_google_client_id_writes_config_toml() {
     );
 }
 
+/// PR C review fix (item 1): `status` must read the same `[google]`
+/// config.toml section `config set google.*` writes, not just env vars —
+/// cheapest observable proof is the asymmetric-partial case, since a fully
+/// configured or fully unconfigured backend both print no `google_oauth`
+/// line at all (see `resolve_google_oauth_degraded`). Setting only
+/// `client_id` through `config set` (no env vars, no redirect_uri) must
+/// surface as "partially configured (missing redirect_uri)" — which is only
+/// possible if `status` actually read the config file this test just wrote.
+#[test]
+fn config_set_google_client_id_then_status_reports_partial_from_config_file() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let reborn_home = temp.path().join("reborn-home");
+    let home = temp.path().join("home");
+
+    let set_client_id = reborn_command()
+        .args([
+            "config",
+            "set",
+            "google.client_id",
+            "abc123.apps.googleusercontent.com",
+        ])
+        .env("IRONCLAW_REBORN_HOME", &reborn_home)
+        .env("HOME", &home)
+        .output()
+        .expect("ironclaw-reborn config set google.client_id should run");
+    assert!(
+        set_client_id.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&set_client_id.stderr)
+    );
+
+    let status = reborn_command()
+        .args(["status"])
+        .env("IRONCLAW_REBORN_HOME", &reborn_home)
+        .env("HOME", &home)
+        .output()
+        .expect("ironclaw-reborn status should run");
+    assert!(
+        status.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&status.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&status.stdout);
+    assert!(
+        stdout.contains("google_oauth") && stdout.contains("missing redirect_uri"),
+        "status must reflect the [google] config.toml section config set wrote, not just env \
+         vars: {stdout}"
+    );
+}
+
 #[test]
 fn config_set_rejects_unknown_key() {
     let temp = tempfile::tempdir().expect("tempdir");

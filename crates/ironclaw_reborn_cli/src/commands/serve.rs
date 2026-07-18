@@ -436,6 +436,17 @@ impl ServeCommand {
         }
         seed_default_config_file_if_missing(&context.boot_config().home().config_file_path())
             .map_err(anyhow::Error::from)?;
+        // Resolved synchronously, before `rt.block_on` below: `config_file`
+        // is borrowed by several `let`s above and by `async move` capture
+        // rules would otherwise need to be moved whole into the future,
+        // conflicting with those borrows. `resolve_google_oauth_config_from_env`
+        // is itself synchronous (it opens the secret store via its own
+        // internal `block_on_cli`, which already handles being called from
+        // inside a live tokio runtime — see its doc), so there is no reason
+        // to defer this into the async block at all.
+        let google_oauth_config =
+            resolve_google_oauth_config_from_env(boot_config, config_file.as_ref())
+                .context("failed to resolve Google OAuth setup config for WebUI")?;
         let rt = tokio::runtime::Builder::new_multi_thread()
             .enable_all()
             // The agent loop executes a deep async dispatch chain (turn runner ->
@@ -692,9 +703,7 @@ impl ServeCommand {
             {
                 serve_config = serve_config.with_protected_route_mount(openai_compat_mount);
             }
-            if let Some(google_oauth) = resolve_google_oauth_config_from_env()
-                .context("failed to resolve Google OAuth setup config for WebUI")?
-            {
+            if let Some(google_oauth) = google_oauth_config {
                 let mut route_config = GoogleOAuthRouteConfig::new(
                     google_oauth.client.client_id.as_str(),
                     google_oauth.client.redirect_uri.as_str(),

@@ -59,7 +59,7 @@ fn unknown_key_message(key: &str) -> String {
          (default provider `{}`), google.client_id, google.client_secret, google.redirect_uri, \
          slack.enabled, webui.token (--rotate only)\nRun `ironclaw-reborn config list` to see \
          all readable keys",
-        super::capability_config::DEFAULT_LLM_API_KEY_PROVIDER,
+        super::init::DEFAULT_LLM_PROVIDER_ID,
     )
 }
 
@@ -95,21 +95,26 @@ fn set_value_key(
         None => anyhow::bail!("`config set {label}` requires a value"),
     };
 
-    match validate_shape(&key, &value) {
-        ShapeVerdict::Reject(message) => anyhow::bail!(message),
-        ShapeVerdict::Warn(message) => eprintln!("warning: {message}"),
-        ShapeVerdict::Ok => {}
-    }
-
-    // Secret-shape law: a value destined for config.toml must not look
-    // like inline secret material (the same rule
-    // `RebornConfigFile::validate` enforces on parse, applied here before
-    // any write so the refusal happens at the CLI layer, not buried in a
-    // toml_edit write-then-validate round trip).
+    // Secret-shape law FIRST, before shape validation: a value destined
+    // for config.toml must not look like inline secret material (the same
+    // rule `RebornConfigFile::validate` enforces on parse, applied here
+    // before any write so the refusal happens at the CLI layer, not
+    // buried in a toml_edit write-then-validate round trip). This must
+    // run before `validate_shape` — a secret pasted into the wrong key
+    // (e.g. an API key pasted into `google.redirect_uri`) is caught by
+    // this law, whose error message never echoes the raw value, before
+    // `validate_shape`'s Reject arms (which describe the expected shape,
+    // not the input) ever see it.
     if key.destination() == ConfigDestination::ConfigToml
         && let Err(error) = ironclaw_reborn_config::reject_inline_secret(label.clone(), &value)
     {
         anyhow::bail!("refusing to write `{label}` to config.toml: {error}");
+    }
+
+    match validate_shape(&key, &value) {
+        ShapeVerdict::Reject(message) => anyhow::bail!(message),
+        ShapeVerdict::Warn(message) => eprintln!("warning: {message}"),
+        ShapeVerdict::Ok => {}
     }
 
     let home = context.boot_config().home();
@@ -295,6 +300,13 @@ fn execute_webui_token(
              key)"
         );
     }
+    if let Some(env_var_name) = configured_webui_token_env_override(context)? {
+        anyhow::bail!(
+            "refusing to rotate: {env_var_name} is set and non-empty — the env var overrides \
+             the token file, so rotating the file has no effect; unset {env_var_name} or rotate \
+             its value directly instead"
+        );
+    }
     println!(
         "warning: rotating the WebChat v2 token invalidates every existing browser session \
          (the token also signs sessions) — anyone signed in will need to sign in again"
@@ -312,6 +324,29 @@ fn execute_webui_token(
         println!("login_link: {link} (valid after restart)");
     }
     Ok(())
+}
+
+/// `Some(env_var_name)` when the operator's `[webui].env_token_var`
+/// (defaulting to [`crate::webui_token::DEFAULT_ENV_TOKEN_VAR`]) is set to
+/// a non-empty value in the process environment — meaning `serve` reads
+/// the token from that env var, not from the rotated file, so rotating
+/// the file would silently do nothing at runtime (see
+/// `crate::webui_token::resolve_webui_token`'s precedence). `None` means
+/// no such override is active and rotation takes effect normally.
+fn configured_webui_token_env_override(
+    context: &RebornCliContext,
+) -> anyhow::Result<Option<String>> {
+    let config_file = crate::runtime::read_config_file(context.boot_config())?;
+    let env_var_name = config_file
+        .as_ref()
+        .and_then(|file| file.webui.as_ref())
+        .and_then(|section| section.env_token_var.as_deref())
+        .unwrap_or(crate::webui_token::DEFAULT_ENV_TOKEN_VAR)
+        .to_string();
+    Ok(std::env::var(&env_var_name)
+        .ok()
+        .filter(|value| !value.is_empty())
+        .map(|_| env_var_name))
 }
 
 // ── Injected seams (mirrors onboard's PromptSource/LlmKeyStoreOpener) ──
@@ -537,6 +572,33 @@ mod tests {
         assert!(config_toml(&context).is_empty(), "must not write");
     }
 
+    /// Thermo MUST (secret-echo fix): the secret-shape law must run BEFORE
+    /// shape validation, so a value shaped like BOTH a secret AND an
+    /// invalid URL (i.e. it would also fail `validate_shape`'s URL check)
+    /// is caught by `reject_inline_secret` first — whose error never
+    /// echoes the raw value — rather than by `validate_shape`'s `Reject`
+    /// arm, which (pre-fix) interpolated the value straight into the
+    /// error message and would have echoed the secret to the terminal.
+    #[test]
+    fn secret_shaped_value_is_never_echoed_even_when_also_shape_invalid() {
+        let (_tmp, context) = RebornCliContext::test_context();
+        let secret_value = "sk-proj-1234567890abcdef1234567890";
+        let err = set_value_key(
+            &context,
+            ConfigKey::GoogleRedirectUri,
+            Some(secret_value.to_string()),
+            &mut NeverPromptSource,
+            &FailingStoreOpener,
+        )
+        .expect_err("secret-shaped value must be refused");
+        let message = err.to_string();
+        assert!(
+            !message.contains(secret_value),
+            "error must never echo the raw secret-shaped value: {message}"
+        );
+        assert!(config_toml(&context).is_empty(), "must not write");
+    }
+
     #[cfg(feature = "libsql")]
     #[test]
     fn google_client_secret_writes_secret_store_only() {
@@ -673,5 +735,48 @@ mod tests {
         execute_webui_token(&context, None, true).expect("rotate must succeed");
 
         assert!(crate::webui_token::webui_token_file_is_valid(home.path()));
+    }
+
+    /// Thermo MUST (rotate env-guard): rotating the token FILE while the
+    /// configured env var override (`[webui].env_token_var`, default
+    /// `IRONCLAW_REBORN_WEBUI_TOKEN`) is set and non-empty would silently
+    /// do nothing at runtime — `serve` reads the env var first (see
+    /// `webui_token::resolve_webui_token`'s precedence) and never notices
+    /// the rotated file. Rotation must refuse instead of silently no-op'ing.
+    #[test]
+    fn webui_token_rotate_refuses_when_env_override_is_set() {
+        let _lock = crate::runtime::test_env::lock_runtime_env();
+        let (_tmp, context) = RebornCliContext::test_context();
+        let home = context.boot_config().home();
+        std::fs::create_dir_all(home.path()).expect("mkdir");
+        crate::webui_token::rotate_webui_token_file(home.path()).expect("seed a valid token");
+        let token_path = crate::webui_token::webui_token_file_path(home.path());
+        let before = std::fs::read_to_string(&token_path).expect("read seeded token file");
+
+        // SAFETY: serialized by `lock_runtime_env()`; cleared before this
+        // test returns (mirrors `status::tests::clear_google_oauth_env`'s
+        // pattern for the same reason: this var is not restorable across a
+        // developer's local shell, only safe to force absent afterward).
+        unsafe {
+            std::env::set_var("IRONCLAW_REBORN_WEBUI_TOKEN", "operator-set-env-token-value");
+        }
+
+        let result = execute_webui_token(&context, None, true);
+
+        // SAFETY: see above.
+        unsafe {
+            std::env::remove_var("IRONCLAW_REBORN_WEBUI_TOKEN");
+        }
+
+        let err = result.expect_err("rotate must refuse while the env var overrides the token");
+        assert!(
+            err.to_string().contains("IRONCLAW_REBORN_WEBUI_TOKEN"),
+            "error must name the overriding env var: {err}"
+        );
+        let after = std::fs::read_to_string(&token_path).expect("read token file again");
+        assert_eq!(
+            before, after,
+            "the token file must not be rotated while the env override is active"
+        );
     }
 }

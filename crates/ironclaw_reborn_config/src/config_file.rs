@@ -490,23 +490,6 @@ pub struct GoogleSection {
     pub hosted_domain_hint: Option<String>,
 }
 
-impl GoogleSection {
-    pub fn set_client_id(mut self, client_id: impl Into<String>) -> Self {
-        self.client_id = Some(client_id.into());
-        self
-    }
-
-    pub fn set_redirect_uri(mut self, redirect_uri: impl Into<String>) -> Self {
-        self.redirect_uri = Some(redirect_uri.into());
-        self
-    }
-
-    pub fn set_hosted_domain_hint(mut self, hosted_domain_hint: impl Into<String>) -> Self {
-        self.hosted_domain_hint = Some(hosted_domain_hint.into());
-        self
-    }
-}
-
 /// `[budget]` section. All limits in USD. **0 = unlimited.**
 ///
 /// Composition uses these as defaults when first seeding a user/project

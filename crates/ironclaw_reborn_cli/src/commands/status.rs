@@ -78,7 +78,7 @@ fn build_status_dto_with_service_state(
         login_link,
         login_note,
         service,
-        google_oauth_degraded: resolve_google_oauth_degraded()?,
+        google_oauth_degraded: resolve_google_oauth_degraded(context.boot_config())?,
     })
 }
 
@@ -102,16 +102,20 @@ fn apply_service_suppression(
     }
 }
 
-/// Re-runs `resolve_google_oauth_config_state`'s asymmetry check (the same
-/// resolver `serve` calls at boot) purely to report *why* Google OAuth is
-/// disabled when it's partially configured — no state is persisted, so this
-/// is cheap and always current. Returns `None` when Google OAuth is either
-/// fully unconfigured or fully configured; only the partial case is
-/// reported.
-fn resolve_google_oauth_degraded() -> anyhow::Result<Option<String>> {
+/// Re-runs `resolve_google_oauth_config_state_merged`'s asymmetry check
+/// (the same merged env / `[google]` config.toml / secret-store resolver
+/// `serve` calls at boot) purely to report *why* Google OAuth is disabled
+/// when it's partially configured — no state is persisted, so this is cheap
+/// and always current, and truthfully reflects whatever `config set
+/// google.*` last wrote, not just env vars. Returns `None` when Google
+/// OAuth is either fully unconfigured or fully configured; only the
+/// partial case is reported.
+fn resolve_google_oauth_degraded(
+    config: &ironclaw_reborn_config::RebornBootConfig,
+) -> anyhow::Result<Option<String>> {
     use crate::runtime::{GoogleOAuthConfigState, GoogleOAuthResolution};
 
-    match crate::runtime::resolve_google_oauth_config_state_from_env()? {
+    match crate::runtime::resolve_google_oauth_config_state_from_env(config)? {
         GoogleOAuthResolution::Disabled(GoogleOAuthConfigState::PartiallyConfigured {
             missing,
         }) => Ok(Some(format!(

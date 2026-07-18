@@ -26,6 +26,13 @@ use crate::file_write::FileWriteAction;
 /// the token is unset or empty).
 pub(crate) const WEBUI_TOKEN_FILENAME: &str = "webui-token";
 
+/// Default name of the env var that overrides the token file at runtime,
+/// absent an operator override via `[webui].env_token_var`. Shared by
+/// `serve` (which reads it) and `config set webui.token --rotate` (which
+/// checks it before rotating, since rotating the file has no effect while
+/// this env var is set and non-empty — see `commands::config::set`).
+pub(crate) const DEFAULT_ENV_TOKEN_VAR: &str = "IRONCLAW_REBORN_WEBUI_TOKEN";
+
 /// Minimum byte length for the WebChat v2 bearer token, mirroring the
 /// server-side session-signing entropy floor: an attacker who obtains
 /// one legitimate signed session can brute-force a low-entropy key
