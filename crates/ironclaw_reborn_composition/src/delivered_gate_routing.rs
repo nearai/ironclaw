@@ -190,7 +190,8 @@ mod tests {
 
     use async_trait::async_trait;
     use ironclaw_host_api::{AgentId, TenantId, ThreadId, UserId};
-    use ironclaw_outbound::{DeliveredGateRouteRecord, InMemoryDeliveredGateRouteStore};
+    use ironclaw_outbound::DeliveredGateRouteRecord;
+    use ironclaw_outbound::test_support::in_memory_backed_outbound_state_store;
     use ironclaw_product_workflow::{
         ApprovalInteractionDecision, ListPendingApprovalsRequest, ListPendingApprovalsResponse,
         ProductWorkflowError, ResolveApprovalInteractionRequest,
@@ -301,7 +302,7 @@ mod tests {
             delivered_conversation_fingerprints: Vec::new(),
         };
 
-        let route_store = Arc::new(InMemoryDeliveredGateRouteStore::default());
+        let route_store = Arc::new(in_memory_backed_outbound_state_store());
         route_store
             .record_delivered_gate_route(route_record)
             .await
@@ -332,7 +333,7 @@ mod tests {
 
     #[tokio::test]
     async fn miss_forwards_request_unchanged() {
-        let route_store = Arc::new(InMemoryDeliveredGateRouteStore::default());
+        let route_store = Arc::new(in_memory_backed_outbound_state_store());
         // No record stored — simulates a normal same-thread live run.
 
         let inner = Arc::new(RecordingApprovalService::default());
@@ -372,7 +373,7 @@ mod tests {
             delivered_conversation_fingerprints: Vec::new(),
         };
 
-        let route_store = Arc::new(InMemoryDeliveredGateRouteStore::default());
+        let route_store = Arc::new(in_memory_backed_outbound_state_store());
         // The lookup key encodes the other user — the requesting user won't
         // find this record at all (different key). This tests the user_id
         // guard when the key happens to be present but for a different user.
@@ -414,7 +415,7 @@ mod tests {
 
     #[tokio::test]
     async fn list_pending_forwards_unchanged() {
-        let route_store = Arc::new(InMemoryDeliveredGateRouteStore::default());
+        let route_store = Arc::new(in_memory_backed_outbound_state_store());
         let inner = Arc::new(RecordingApprovalService::default());
         let service =
             DeliveredGateRoutingApprovalService::new(Arc::clone(&inner) as _, route_store);
@@ -564,7 +565,7 @@ mod tests {
             run_thread.clone(),
             Some(route_user.clone()),
         );
-        let route_store = Arc::new(InMemoryDeliveredGateRouteStore::default());
+        let route_store = Arc::new(in_memory_backed_outbound_state_store());
         route_store
             .record_delivered_gate_route(DeliveredGateRouteRecord {
                 tenant_id: route_tenant.clone(),
@@ -758,7 +759,7 @@ mod tests {
             delivered_conversation_fingerprints: Vec::new(),
         };
 
-        let route_store = Arc::new(InMemoryDeliveredGateRouteStore::default());
+        let route_store = Arc::new(in_memory_backed_outbound_state_store());
         route_store
             .record_delivered_gate_route(route_record)
             .await

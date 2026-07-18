@@ -27,12 +27,23 @@ enum SlackConnectableChannelVisibility {
     PersonalOAuthAndAdminChannelManagement,
 }
 
-pub fn build_webui_services_with_slack_host_beta_mounts(
+/// The slack-side assembly shared by both WebUI bundle builders: visibility
+/// resolution, outbound-provider collection + validation, and the
+/// personal-credential-cleanup wiring. Extracted so the slack-only and
+/// slack+telegram builders cannot silently drift — they differ only in how
+/// telegram facades are appended.
+pub(crate) struct SlackWebuiComposition {
+    pub(crate) connectable: Option<Arc<dyn ConnectableChannelsProductFacade>>,
+    pub(crate) connection: Option<Arc<dyn ironclaw_product_workflow::ChannelConnectionFacade>>,
+    pub(crate) outbound_delivery_target_providers:
+        Vec<Arc<dyn crate::outbound::OutboundDeliveryTargetProvider>>,
+}
+
+pub(crate) fn slack_webui_composition(
     runtime: &RebornRuntime,
-    event_stream: Option<Arc<dyn ProjectionStream>>,
     slack_mounts: Option<&SlackHostBetaMounts>,
     operator_route_visibility: SlackOperatorRouteVisibility,
-) -> Result<RebornWebuiBundle, RebornBuildError> {
+) -> Result<SlackWebuiComposition, RebornBuildError> {
     let visibility = match (slack_mounts.is_some(), operator_route_visibility) {
         (false, _) => SlackConnectableChannelVisibility::Hidden,
         (true, SlackOperatorRouteVisibility::Hidden) => {
@@ -46,13 +57,6 @@ pub fn build_webui_services_with_slack_host_beta_mounts(
         .filter(|mounts| !mounts.outbound_delivery_target_provider_registered)
         .map(|mounts| vec![Arc::clone(&mounts.outbound_delivery_target_provider)])
         .unwrap_or_default();
-    let connectable_channels = slack_mounts.and_then(|mounts| {
-        slack_connectable_channels(
-            visibility,
-            mounts.channel_routes.tenant_id().clone(),
-            mounts.channel_routes.operator_user_id().clone(),
-        )
-    });
     if slack_mounts.is_some() && runtime.outbound_delivery_target_provider().is_none() {
         return Err(RebornBuildError::InvalidConfig {
             reason: "outbound delivery target providers require local runtime services".to_string(),
@@ -61,21 +65,42 @@ pub fn build_webui_services_with_slack_host_beta_mounts(
     let personal_credential_cleanup = runtime.services().product_auth.clone().map(|services| {
         services as Arc<dyn crate::slack::slack_channel_connection::SlackPersonalCredentialCleanup>
     });
-    let channel_connection = slack_mounts
+    let connectable = slack_mounts.and_then(|mounts| {
+        slack_connectable_channels(
+            visibility,
+            mounts.channel_routes.tenant_id().clone(),
+            mounts.channel_routes.operator_user_id().clone(),
+        )
+    });
+    let connection = slack_mounts
         .map(|mounts| slack_channel_connection_facade(mounts, personal_credential_cleanup));
+    Ok(SlackWebuiComposition {
+        connectable,
+        connection,
+        outbound_delivery_target_providers,
+    })
+}
+
+pub fn build_webui_services_with_slack_host_beta_mounts(
+    runtime: &RebornRuntime,
+    event_stream: Option<Arc<dyn ProjectionStream>>,
+    slack_mounts: Option<&SlackHostBetaMounts>,
+    operator_route_visibility: SlackOperatorRouteVisibility,
+) -> Result<RebornWebuiBundle, RebornBuildError> {
+    let composition = slack_webui_composition(runtime, slack_mounts, operator_route_visibility)?;
     // Fill the extension-lifecycle handler's late-binding facade slot so an
     // inbound-channel activation can gate on the caller's channel connection.
     // Idempotent; shares the same facade the WebUI connectable-channel surface
     // uses.
-    if let Some(facade) = channel_connection.as_ref() {
+    if let Some(facade) = composition.connection.as_ref() {
         runtime.set_channel_connection_facade(Arc::clone(facade));
     }
     build_webui_services_with_connectable_channels(
         runtime,
         event_stream,
-        connectable_channels,
-        channel_connection,
-        outbound_delivery_target_providers,
+        composition.connectable,
+        composition.connection,
+        composition.outbound_delivery_target_providers,
     )
 }
 
@@ -217,6 +242,7 @@ mod tests {
             crate::extension_host::extension_lifecycle::channel_connection_requirement(
                 "slack_bot",
                 "Slack",
+                None,
             );
 
         assert_eq!(requirement.channel, descriptor.channel);

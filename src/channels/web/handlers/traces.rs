@@ -15,7 +15,7 @@ use crate::channels::web::auth::AuthenticatedUser;
 use crate::channels::web::platform::state::GatewayState;
 use crate::trace_client::{TraceClientHost, TraceClientScope};
 use crate::trace_contribution::{
-    ConsentScope, CreditSummary, LocalTraceSubmissionRecord, RecordedTraceContributionOptions,
+    ConsentScope, CreditSummary, NodeTraceSubmissionRecord, RecordedTraceContributionOptions,
     StandingTraceContributionPolicy, TRACE_CREDIT_NOTICE_MAX_SNOOZE_HOURS, TraceChannel,
     TraceContributionAcceptance, TraceContributionEnvelope, TraceContributionPolicyRejection,
     TraceCreditReport, TraceQueueDiagnostics, TraceQueueFlushReport, TraceQueueHold,
@@ -120,7 +120,7 @@ pub struct TraceCreditResponse {
     pub enrolled: bool,
     pub summary: CreditSummary,
     pub report: TraceCreditReport,
-    pub records: Vec<LocalTraceSubmissionRecord>,
+    pub records: Vec<NodeTraceSubmissionRecord>,
 }
 
 #[derive(Debug, Serialize)]
@@ -438,7 +438,7 @@ pub async fn traces_queue_status_handler(
 
 pub async fn traces_submissions_handler(
     AuthenticatedUser(user): AuthenticatedUser,
-) -> Result<Json<Vec<LocalTraceSubmissionRecord>>, (StatusCode, String)> {
+) -> Result<Json<Vec<NodeTraceSubmissionRecord>>, (StatusCode, String)> {
     let trace_host = TraceClientHost;
     let trace_scope = TraceClientScope::user(user.user_id.as_str());
     if let Err(error) = trace_host.sync_remote_records_for_scope(&trace_scope).await {
@@ -659,7 +659,7 @@ mod tests {
     use super::*;
     use crate::channels::web::auth::UserIdentity;
     use crate::trace_contribution::{
-        DeterministicTraceRedactor, LocalTraceSubmissionStatus, RawTraceContribution,
+        DeterministicTraceRedactor, NodeTraceSubmissionStatus, RawTraceContribution,
         TraceCreditEvent, TraceCreditEventKind, TraceQueueWarningKind,
         queue_trace_envelope_for_scope, trace_contribution_dir_for_scope,
         write_trace_policy_for_scope,
@@ -668,7 +668,7 @@ mod tests {
     use ironclaw_llm::recording::{TraceFile, TraceResponse, TraceStep, TraceToolCall};
     use std::collections::BTreeSet;
 
-    fn write_trace_records(scope: &str, records: &[LocalTraceSubmissionRecord]) {
+    fn write_trace_records(scope: &str, records: &[NodeTraceSubmissionRecord]) {
         let path = trace_contribution_dir_for_scope(Some(scope)).join("submissions.json");
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent).expect("trace record dir creates");
@@ -692,16 +692,16 @@ mod tests {
         submission_id
     }
 
-    fn submitted_record(points: f32) -> LocalTraceSubmissionRecord {
+    fn submitted_record(points: f32) -> NodeTraceSubmissionRecord {
         submitted_record_with_id(Uuid::new_v4(), points)
     }
 
-    fn submitted_record_with_id(submission_id: Uuid, points: f32) -> LocalTraceSubmissionRecord {
-        LocalTraceSubmissionRecord {
+    fn submitted_record_with_id(submission_id: Uuid, points: f32) -> NodeTraceSubmissionRecord {
+        NodeTraceSubmissionRecord {
             submission_id,
             trace_id: Uuid::new_v4(),
             endpoint: Some("https://trace.example.com/v1/traces".to_string()),
-            status: LocalTraceSubmissionStatus::Submitted,
+            status: NodeTraceSubmissionStatus::Submitted,
             server_status: Some("accepted".to_string()),
             submitted_at: Some(Utc::now()),
             revoked_at: None,

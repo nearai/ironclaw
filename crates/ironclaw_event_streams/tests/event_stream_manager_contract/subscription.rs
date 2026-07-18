@@ -12,7 +12,7 @@ async fn access_policy_runs_before_projection_or_live_subscription() {
         Arc::new(InMemoryProjectionStreamAdmissionPolicy::default()),
         Arc::clone(&update_source),
         Arc::new(NoExposureProjectionRedactionValidator),
-        Arc::new(InMemoryOutboundStateStore::default()),
+        Arc::new(in_memory_backed_outbound_state_store()),
     );
 
     let error = manager
@@ -40,7 +40,7 @@ async fn subscribe_rejects_actor_stream_user_mismatch_before_projection_or_live_
         Arc::new(InMemoryProjectionStreamAdmissionPolicy::default()),
         Arc::clone(&update_source),
         Arc::new(NoExposureProjectionRedactionValidator),
-        Arc::new(InMemoryOutboundStateStore::default()),
+        Arc::new(in_memory_backed_outbound_state_store()),
     );
 
     let error = manager
@@ -122,7 +122,7 @@ async fn valid_resume_rejects_projection_scope_mismatch() {
         Arc::new(InMemoryProjectionStreamAdmissionPolicy::default()),
         Arc::new(InMemoryProjectionUpdateSource::new(8)),
         Arc::new(NoExposureProjectionRedactionValidator),
-        Arc::new(InMemoryOutboundStateStore::default()),
+        Arc::new(in_memory_backed_outbound_state_store()),
     );
 
     let error = manager
@@ -145,7 +145,7 @@ async fn valid_resume_rejects_projection_payload_thread_mismatch() {
         Arc::new(InMemoryProjectionStreamAdmissionPolicy::default()),
         Arc::new(InMemoryProjectionUpdateSource::new(8)),
         Arc::new(NoExposureProjectionRedactionValidator),
-        Arc::new(InMemoryOutboundStateStore::default()),
+        Arc::new(in_memory_backed_outbound_state_store()),
     );
 
     let error = manager
@@ -168,7 +168,7 @@ async fn valid_resume_rejects_capability_activity_thread_mismatch() {
         Arc::new(InMemoryProjectionStreamAdmissionPolicy::default()),
         Arc::new(InMemoryProjectionUpdateSource::new(8)),
         Arc::new(NoExposureProjectionRedactionValidator),
-        Arc::new(InMemoryOutboundStateStore::default()),
+        Arc::new(in_memory_backed_outbound_state_store()),
     );
 
     let error = manager
@@ -191,7 +191,7 @@ async fn valid_resume_rejects_capability_activity_transition_thread_mismatch() {
         Arc::new(InMemoryProjectionStreamAdmissionPolicy::default()),
         Arc::new(InMemoryProjectionUpdateSource::new(8)),
         Arc::new(NoExposureProjectionRedactionValidator),
-        Arc::new(InMemoryOutboundStateStore::default()),
+        Arc::new(in_memory_backed_outbound_state_store()),
     );
 
     let error = manager
@@ -214,7 +214,7 @@ async fn subscribe_resume_rejects_redaction_failure() {
         Arc::new(InMemoryProjectionStreamAdmissionPolicy::default()),
         Arc::new(InMemoryProjectionUpdateSource::new(8)),
         Arc::new(RejectLiveUpdateRedactionValidator),
-        Arc::new(InMemoryOutboundStateStore::default()),
+        Arc::new(in_memory_backed_outbound_state_store()),
     );
 
     let error = manager
@@ -272,7 +272,7 @@ async fn subscribe_resume_maps_projection_update_errors() {
             Arc::new(InMemoryProjectionStreamAdmissionPolicy::default()),
             Arc::new(InMemoryProjectionUpdateSource::new(8)),
             Arc::new(NoExposureProjectionRedactionValidator),
-            Arc::new(InMemoryOutboundStateStore::default()),
+            Arc::new(in_memory_backed_outbound_state_store()),
         );
 
         let actual = manager

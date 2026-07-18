@@ -23,7 +23,6 @@ use ironclaw_host_api::{ProcessId, ResourceReservation, ResourceScope};
 use crate::cancellation::ProcessCancellationRegistry;
 use crate::filesystem_store::{FilesystemProcessResultStore, FilesystemProcessStore};
 use crate::host::ProcessHost;
-use crate::memory_store::{InMemoryProcessResultStore, InMemoryProcessStore};
 use crate::types::{
     ProcessError, ProcessExecutionRequest, ProcessExecutor, ProcessManager, ProcessRecord,
     ProcessResultStore, ProcessStart, ProcessStatus, ProcessStore,
@@ -138,15 +137,6 @@ where
     }
 }
 
-impl ProcessServices<InMemoryProcessStore, InMemoryProcessResultStore> {
-    pub fn in_memory() -> Self {
-        Self::new(
-            Arc::new(InMemoryProcessStore::new()),
-            Arc::new(InMemoryProcessResultStore::new()),
-        )
-    }
-}
-
 impl<F> ProcessServices<FilesystemProcessStore<F>, FilesystemProcessResultStore<F>>
 where
     F: RootFilesystem + 'static,
@@ -156,6 +146,23 @@ where
             Arc::new(FilesystemProcessStore::from_arc(Arc::clone(&filesystem))),
             Arc::new(FilesystemProcessResultStore::from_arc(filesystem)),
         )
+    }
+}
+
+#[cfg(any(test, feature = "test-support"))]
+impl
+    ProcessServices<
+        FilesystemProcessStore<ironclaw_filesystem::InMemoryBackend>,
+        FilesystemProcessResultStore<ironclaw_filesystem::InMemoryBackend>,
+    >
+{
+    /// In-memory-backed process services for tests — the production
+    /// [`filesystem`](Self::filesystem) store pair over one fresh
+    /// `InMemoryBackend` `/processes` mount (arch-simplification §4.3).
+    /// Replaces the deleted bespoke `InMemory*Store` pair; the two stores
+    /// share one backend so externalized output (`output_ref`) reads back.
+    pub fn in_memory() -> Self {
+        Self::filesystem(crate::test_support::in_memory_backed_processes_filesystem())
     }
 }
 

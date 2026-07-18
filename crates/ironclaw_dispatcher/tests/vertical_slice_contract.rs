@@ -30,6 +30,7 @@ async fn vertical_slice_discovers_and_dispatches_registered_runtime_adapters() {
     let wasm_account = ResourceAccount::tenant(wasm_scope.tenant_id.clone());
     let wasm = dispatcher
         .dispatch_json(CapabilityDispatchRequest {
+            run_id: None,
             capability_id: CapabilityId::new("echo-wasm.say").unwrap(),
             scope: wasm_scope,
             authenticated_actor_user_id: None,
@@ -56,6 +57,7 @@ async fn vertical_slice_discovers_and_dispatches_registered_runtime_adapters() {
     let script_account = ResourceAccount::tenant(script_scope.tenant_id.clone());
     let script = dispatcher
         .dispatch_json(CapabilityDispatchRequest {
+            run_id: None,
             capability_id: CapabilityId::new("echo-script.say").unwrap(),
             scope: script_scope,
             authenticated_actor_user_id: None,
@@ -85,6 +87,7 @@ async fn vertical_slice_discovers_and_dispatches_registered_runtime_adapters() {
     let mcp_account = ResourceAccount::tenant(mcp_scope.tenant_id.clone());
     let mcp = dispatcher
         .dispatch_json(CapabilityDispatchRequest {
+            run_id: None,
             capability_id: CapabilityId::new("echo-mcp.say").unwrap(),
             scope: mcp_scope,
             authenticated_actor_user_id: None,
@@ -122,10 +125,10 @@ impl EchoAdapter {
 }
 
 #[async_trait]
-impl RuntimeAdapter<LocalFilesystem, InMemoryResourceGovernor> for EchoAdapter {
+impl RuntimeAdapter<DiskFilesystem, InMemoryResourceGovernor> for EchoAdapter {
     async fn dispatch_json(
         &self,
-        request: RuntimeAdapterRequest<'_, LocalFilesystem, InMemoryResourceGovernor>,
+        request: RuntimeAdapterRequest<'_, DiskFilesystem, InMemoryResourceGovernor>,
     ) -> Result<RuntimeAdapterResult, DispatchError> {
         let output = request.input;
         let usage = ResourceUsage::default()
@@ -174,7 +177,7 @@ fn dispatch_error_for_runtime(
     }
 }
 
-fn filesystem_with_echo_extensions() -> LocalFilesystem {
+fn filesystem_with_echo_extensions() -> DiskFilesystem {
     let storage = tempfile::tempdir().unwrap().keep();
     let wasm_root = storage.join("echo-wasm");
     std::fs::create_dir_all(&wasm_root).unwrap();
@@ -200,7 +203,7 @@ fn filesystem_with_echo_extensions() -> LocalFilesystem {
     )
     .unwrap();
 
-    let mut fs = LocalFilesystem::new();
+    let mut fs = DiskFilesystem::new();
     fs.mount_local(
         VirtualPath::new("/system/extensions").unwrap(),
         HostPath::from_path_buf(storage),
@@ -209,7 +212,7 @@ fn filesystem_with_echo_extensions() -> LocalFilesystem {
     fs
 }
 
-async fn discover_legacy_fixture_registry(fs: &LocalFilesystem) -> ExtensionRegistry {
+async fn discover_legacy_fixture_registry(fs: &DiskFilesystem) -> ExtensionRegistry {
     ExtensionDiscovery::discover_with_manifest_contracts(
         fs,
         &VirtualPath::new("/system/extensions").unwrap(),

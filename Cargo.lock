@@ -3963,7 +3963,7 @@ dependencies = [
  "ironclaw_tui",
  "ironclaw_turns",
  "ironclaw_wasm",
- "ironclaw_webui_v2",
+ "ironclaw_webui",
  "json5",
  "jsonschema",
  "jsonwebtoken",
@@ -4144,6 +4144,56 @@ dependencies = [
  "thiserror 2.0.18",
  "tokio",
  "tracing",
+]
+
+[[package]]
+name = "ironclaw_channel_delivery"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "chrono",
+ "ironclaw_auth",
+ "ironclaw_channel_host",
+ "ironclaw_conversations",
+ "ironclaw_filesystem",
+ "ironclaw_host_api",
+ "ironclaw_outbound",
+ "ironclaw_product_adapters",
+ "ironclaw_product_workflow",
+ "ironclaw_run_state",
+ "ironclaw_threads",
+ "ironclaw_triggers",
+ "ironclaw_turns",
+ "ironclaw_wasm_product_adapters",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "ironclaw_channel_host"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "axum 0.8.9",
+ "ironclaw_auth",
+ "ironclaw_conversations",
+ "ironclaw_extensions",
+ "ironclaw_filesystem",
+ "ironclaw_host_api",
+ "ironclaw_host_runtime",
+ "ironclaw_outbound",
+ "ironclaw_product_adapter_registry",
+ "ironclaw_product_adapters",
+ "ironclaw_product_workflow",
+ "ironclaw_threads",
+ "ironclaw_turns",
+ "ironclaw_wasm_product_adapters",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tokio",
 ]
 
 [[package]]
@@ -4831,13 +4881,16 @@ dependencies = [
  "chrono",
  "clap",
  "clap_complete",
+ "crossterm 0.29.0",
  "dotenvy",
  "hex",
  "ironclaw_common",
+ "ironclaw_host_api",
  "ironclaw_reborn_composition",
  "ironclaw_reborn_config",
  "ironclaw_reborn_traces",
- "ironclaw_reborn_webui_ingress",
+ "ironclaw_secrets",
+ "ironclaw_webui",
  "libc",
  "rand 0.10.1",
  "reqwest 0.12.28",
@@ -4846,6 +4899,7 @@ dependencies = [
  "serde_json",
  "sha2 0.11.0",
  "tempfile",
+ "thiserror 2.0.18",
  "tokio",
  "tokio-util",
  "tracing",
@@ -4873,6 +4927,8 @@ dependencies = [
  "ironclaw_auth",
  "ironclaw_authorization",
  "ironclaw_capabilities",
+ "ironclaw_channel_delivery",
+ "ironclaw_channel_host",
  "ironclaw_common",
  "ironclaw_conversations",
  "ironclaw_event_projections",
@@ -4904,7 +4960,6 @@ dependencies = [
  "ironclaw_reborn_identity",
  "ironclaw_reborn_openai_compat",
  "ironclaw_reborn_traces",
- "ironclaw_reborn_webui_ingress",
  "ironclaw_resources",
  "ironclaw_run_state",
  "ironclaw_runner",
@@ -4913,12 +4968,13 @@ dependencies = [
  "ironclaw_secrets",
  "ironclaw_skills",
  "ironclaw_slack_v2_adapter",
+ "ironclaw_telegram_extension",
  "ironclaw_threads",
  "ironclaw_triggers",
  "ironclaw_trust",
  "ironclaw_turns",
  "ironclaw_wasm_product_adapters",
- "ironclaw_webui_v2",
+ "ironclaw_webui",
  "libc",
  "libsql",
  "lru 0.18.0",
@@ -5098,43 +5154,6 @@ dependencies = [
  "thiserror 2.0.18",
  "tokio",
  "tracing",
- "uuid",
-]
-
-[[package]]
-name = "ironclaw_reborn_webui_ingress"
-version = "0.1.0"
-dependencies = [
- "async-trait",
- "axum 0.8.9",
- "base64 0.22.1",
- "chrono",
- "hex",
- "hmac 0.13.0",
- "http 1.4.2",
- "http-body-util",
- "ironclaw_host_api",
- "ironclaw_product_workflow",
- "ironclaw_reborn_composition",
- "ironclaw_threads",
- "ironclaw_turns",
- "jsonwebtoken",
- "parking_lot",
- "rand 0.10.1",
- "rand_core 0.6.4",
- "reqwest 0.12.28",
- "rsa",
- "secrecy",
- "serde",
- "serde_json",
- "sha2 0.11.0",
- "subtle",
- "thiserror 2.0.18",
- "tokio",
- "tower 0.5.3",
- "tracing",
- "url",
- "urlencoding",
  "uuid",
 ]
 
@@ -5360,6 +5379,49 @@ dependencies = [
 ]
 
 [[package]]
+name = "ironclaw_telegram_extension"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "axum 0.8.9",
+ "chrono",
+ "http-body-util",
+ "ironclaw_auth",
+ "ironclaw_authorization",
+ "ironclaw_channel_delivery",
+ "ironclaw_channel_host",
+ "ironclaw_common",
+ "ironclaw_conversations",
+ "ironclaw_extensions",
+ "ironclaw_filesystem",
+ "ironclaw_host_api",
+ "ironclaw_host_runtime",
+ "ironclaw_network",
+ "ironclaw_outbound",
+ "ironclaw_processes",
+ "ironclaw_product_adapters",
+ "ironclaw_product_workflow",
+ "ironclaw_resources",
+ "ironclaw_run_state",
+ "ironclaw_safety",
+ "ironclaw_secrets",
+ "ironclaw_telegram_v2_adapter",
+ "ironclaw_threads",
+ "ironclaw_triggers",
+ "ironclaw_turns",
+ "ironclaw_wasm_product_adapters",
+ "rand 0.9.4",
+ "secrecy",
+ "serde",
+ "serde_json",
+ "sha2 0.11.0",
+ "thiserror 2.0.18",
+ "tokio",
+ "tower 0.5.3",
+ "tracing",
+]
+
+[[package]]
 name = "ironclaw_telegram_v2_adapter"
 version = "0.1.0"
 dependencies = [
@@ -5535,30 +5597,49 @@ dependencies = [
 ]
 
 [[package]]
-name = "ironclaw_webui_v2"
+name = "ironclaw_webui"
 version = "0.1.0"
 dependencies = [
  "async-stream",
  "async-trait",
  "axum 0.8.9",
+ "base64 0.22.1",
  "chrono",
  "futures",
+ "hex",
+ "hmac 0.13.0",
  "http 1.4.2",
  "http-body-util",
  "ironclaw_host_api",
+ "ironclaw_loop_host",
  "ironclaw_product_adapters",
  "ironclaw_product_workflow",
+ "ironclaw_reborn_composition",
+ "ironclaw_reborn_openai_compat",
  "ironclaw_threads",
  "ironclaw_turns",
- "ironclaw_webui_v2",
+ "jsonwebtoken",
+ "lru 0.18.0",
+ "parking_lot",
  "rand 0.10.1",
+ "rand_core 0.6.4",
+ "reqwest 0.12.28",
+ "rsa",
+ "secrecy",
  "serde",
  "serde_json",
+ "sha2 0.11.0",
+ "subtle",
+ "tempfile",
  "thiserror 2.0.18",
  "tokio",
  "tokio-tungstenite 0.29.0",
  "tower 0.5.3",
+ "tower-http 0.6.11",
  "tracing",
+ "url",
+ "urlencoding",
+ "uuid",
 ]
 
 [[package]]

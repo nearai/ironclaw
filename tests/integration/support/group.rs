@@ -73,9 +73,10 @@ use ironclaw_product_workflow::{
 use ironclaw_reborn_composition::build_default_budget_accountant;
 use ironclaw_reborn_composition::test_support::SlackChannelConnectionTestBundle;
 use ironclaw_reborn_config::BudgetDefaults;
+use ironclaw_resources::test_support::in_memory_backed_budget_gate_store;
 use ironclaw_resources::{
-    BudgetEventSink, BudgetGateStore, InMemoryBudgetEventSink, InMemoryBudgetGateStore,
-    InMemoryResourceGovernor, ResourceAccount, ResourceGovernor,
+    BudgetEventSink, BudgetGateStore, InMemoryBudgetEventSink, InMemoryResourceGovernor,
+    ResourceAccount, ResourceGovernor,
 };
 use ironclaw_runner::loop_driver_host::HookDispatcherBuilderFactory;
 use ironclaw_runner::loop_exit_applier::{
@@ -886,7 +887,7 @@ impl RebornIntegrationGroupBuilder {
             let accountant = build_default_budget_accountant(
                 Arc::clone(&governor) as Arc<dyn ResourceGovernor>,
                 Arc::new(ZeroCostTable) as Arc<dyn ModelCostTable>,
-                Arc::new(InMemoryBudgetGateStore::new()) as Arc<dyn BudgetGateStore>,
+                Arc::new(in_memory_backed_budget_gate_store()) as Arc<dyn BudgetGateStore>,
                 Arc::new(InMemoryBudgetEventSink::new()) as Arc<dyn BudgetEventSink>,
                 &BudgetDefaults::compiled_defaults(),
             );

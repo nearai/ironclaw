@@ -111,7 +111,7 @@ async fn shell_timeout_surfaces_recoverable_failed() {
 }
 
 /// Live-shell path (`.with_live_shell()`) — proves `builtin.shell` dispatches
-/// through the real `LocalHostProcessPort`, not the inert `RecordingProcessPort`
+/// through the real `HostProcessPort`, not the inert `RecordingProcessPort`
 /// the other tests in this file cover. Asserts both directions: (a) the real
 /// command's echoed output is visible in the model-facing tool result — only
 /// possible if an actual OS process ran — and (b) `assert_shell_ran_through_inert_port`
@@ -123,7 +123,7 @@ async fn shell_timeout_surfaces_recoverable_failed() {
 ///
 /// Runs on a larger-stack thread (mirrors
 /// `tests/reborn_qa_smoke_scenarios_e2e.rs::run_async_test_with_stack`): the
-/// real `LocalHostProcessPort` subprocess path (spawn + piped-stream capture)
+/// real `HostProcessPort` subprocess path (spawn + piped-stream capture)
 /// adds enough async-state-machine depth on top of the full
 /// `product_workflow → composition → webui_v2 → runtime` chain to overflow
 /// the default `#[tokio::test]` thread stack in a debug build.

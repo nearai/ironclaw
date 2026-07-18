@@ -4,7 +4,7 @@ use super::*;
 async fn push_candidates_are_separate_from_subscriptions_and_policy_gated() {
     let scope = projection_scope("thread-a");
     let turn_scope = turn_scope("thread-a");
-    let outbound = Arc::new(InMemoryOutboundStateStore::default());
+    let outbound = Arc::new(in_memory_backed_outbound_state_store());
     let manager = EventStreamManager::new(
         Arc::new(FakeProjectionService::new(scope.clone())),
         Arc::new(AllowAllProjectionAccessPolicy),
@@ -58,7 +58,7 @@ async fn push_candidates_require_projection_access() {
         Arc::new(InMemoryProjectionStreamAdmissionPolicy::default()),
         Arc::new(InMemoryProjectionUpdateSource::new(8)),
         Arc::new(NoExposureProjectionRedactionValidator),
-        Arc::new(InMemoryOutboundStateStore::default()),
+        Arc::new(in_memory_backed_outbound_state_store()),
     );
 
     let error = manager

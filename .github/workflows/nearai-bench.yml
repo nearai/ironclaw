@@ -239,6 +239,19 @@ jobs:
       model: ${{ needs.parse.outputs.model }}
       # Empty when unspecified → the reusable workflow defaults to ironclaw.
       framework: ${{ needs.parse.outputs.framework }}
+      # Bump from the reusable workflow's 240 default. The /benchmark path is
+      # used for the heavy container suites — claw-swe-bench-lite (80 tasks,
+      # ~3-4h at its TOML parallelism=3) and clawbench — where 240 is too low:
+      # the last full-suite run (run 29606955146) was cancelled by the 240-min
+      # job cap after only 7/350 tasks. 350 also sits above the run step's own
+      # internal `timeout --kill-after=120s 290m` guard, so an overrun is killed
+      # gracefully by that guard (which snapshots a partial run, uploads it, and
+      # posts the PR comment) instead of GitHub cancelling the job at the cap —
+      # under cancellation the compound-`if` upload/comment steps are skipped,
+      # which is why the cancelled run left no result comment. 350 < the 360-min
+      # hard cap on the ubuntu-16core runner. Lightweight suites (ironclaw-smoke,
+      # pinchbench) finish well before this — it is a ceiling, not a duration.
+      timeout-minutes: 350
       trigger-comment-id: ${{ github.event.comment.id }}
     # Scope inherited secrets to only what the reusable workflow needs.
     # Replaces `secrets: inherit`, which gave the called workflow access

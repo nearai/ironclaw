@@ -1,0 +1,45 @@
+[package]
+name = "ironclaw_channel_host"
+version = "0.1.0"
+edition = "2024"
+rust-version.workspace = true
+description = "Adapter-generic machinery shared by IronClaw Reborn channel hosts (Slack, Telegram)"
+authors = ["NEAR AI <support@near.ai>"]
+license = "MIT OR Apache-2.0"
+homepage = "https://github.com/nearai/ironclaw"
+repository = "https://github.com/nearai/ironclaw"
+publish = false
+
+[package.metadata.ironclaw]
+layer = "products"
+
+[features]
+# Webhook-serving helpers (installation rate limiting, sanitized webhook error
+# responses, runner-error HTTP mapping). Split out so hosts that only need the
+# ports/contracts (the default composition build) do not pull axum or the
+# product-adapter runner crate.
+webhook-serve = ["dep:axum", "dep:ironclaw_wasm_product_adapters"]
+
+[dependencies]
+async-trait = "0.1"
+axum = { version = "0.8", optional = true }
+ironclaw_auth = { path = "../ironclaw_auth" }
+ironclaw_conversations = { path = "../ironclaw_conversations" }
+ironclaw_extensions = { path = "../ironclaw_extensions" }
+ironclaw_filesystem = { path = "../ironclaw_filesystem" }
+ironclaw_host_api = { path = "../ironclaw_host_api" }
+ironclaw_host_runtime = { path = "../ironclaw_host_runtime" }
+ironclaw_outbound = { path = "../ironclaw_outbound" }
+ironclaw_product_adapter_registry = { path = "../ironclaw_product_adapter_registry" }
+ironclaw_product_adapters = { path = "../ironclaw_product_adapters" }
+ironclaw_product_workflow = { path = "../ironclaw_product_workflow" }
+ironclaw_threads = { path = "../ironclaw_threads" }
+ironclaw_turns = { path = "../ironclaw_turns" }
+ironclaw_wasm_product_adapters = { path = "../ironclaw_wasm_product_adapters", optional = true }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+tokio = { version = "1", features = ["sync"] }
+
+[dev-dependencies]
+tokio = { version = "1", features = ["macros", "rt"] }
