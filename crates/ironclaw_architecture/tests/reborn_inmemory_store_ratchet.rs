@@ -58,31 +58,38 @@ fn is_inmemory_store(ident: &str) -> bool {
 /// slices A1–A8 landed the approvals/authorization/processes/run-state/budget-gate
 /// and the whole outbound family).** The clean mechanical consolidations are
 /// DONE; every entry still here is blocked on non-mechanical work OR is a
-/// justified keep — so the §10 "shrink to empty" goal is not reachable by a
-/// swap. Each entry is annotated with WHAT it needs, so the next contributor
-/// picks up a scoped task instead of re-deriving the blocker. See
-/// `../.worklog/reborn-refactor.md` (store triage) for the full analysis.
+/// justified keep — except the trailing pub(crate) trio, which is not yet
+/// individually triaged. Triaged entries are annotated with WHAT they need, so
+/// the next contributor picks up a scoped task instead of re-deriving the
+/// blocker; untriaged entries say so explicitly.
 const FROZEN_INMEMORY_STORES: &[&str] = &[
     // --- turns cluster: DEFERRED, not mechanical. `InMemoryTurnStateStore` is the
     //     `inmemory-turn-state` production runtime authority (pessimistic Mutex,
     //     no-CAS-livelock); a `FilesystemTurnStateStore<InMemoryBackend>` swap needs
     //     a concurrency stress test PROVING it keeps the no-livelock property first.
-    //     Checkpoint/LoopCheckpoint/InstructionMaterialization also need a filesystem
-    //     variant BUILT (some cross-crate in `ironclaw_loop_host`). ---
+    //     `FilesystemCheckpointStateStore` already EXISTS in `ironclaw_loop_host`
+    //     (contract-tested, composition-wired) — that entry only needs the test-seam
+    //     swap + allowlist trim; LoopCheckpoint/InstructionMaterialization still need
+    //     a filesystem variant BUILT (cross-crate in `ironclaw_loop_host`). ---
     "InMemoryTurnStateStore",
     "InMemoryCheckpointStateStore",
     "InMemoryLoopCheckpointStore",
     "InMemoryInstructionMaterializationStore",
-    // --- JUSTIFIED KEEPS — bounded in-memory CACHES, not persistence-store debt.
-    //     A durable `Filesystem*` variant would be semantically wrong (you do not
-    //     persist evicted transient entries). Do NOT "consolidate" these; they are
-    //     the §4.3 duplication only in name. ---
+    // --- JUSTIFIED KEEPS — bounded in-memory caches serving the test/no-durable
+    //     fallback role. Durable production variants ALREADY EXIST and are wired
+    //     (`FilesystemSubagentGoalStore` in the libSQL/Postgres runner adapters;
+    //     `FilesystemOpenAiCompatRefStore` in OpenAI-compatible serving) — these
+    //     in-memory types are not missing consolidations, they are the bounded
+    //     volatile role next to those stores. Do NOT swap them for a durable
+    //     store in tests that specifically exercise the bounded/evicting cache
+    //     semantics. ---
     //   BoundedSubagentGoal: capacity-bounded, evict-oldest (VecDeque insertion
     //     order) cache of in-flight subagent-spawn goals — goal_store.rs.
     "InMemoryBoundedSubagentGoalStore",
-    //   OpenAiCompatRef: bounded-LRU (`max_mappings`/`with_capacity`) AND the
+    //   OpenAiCompatRef: capacity-bounded with oldest-created eviction (evicts the
+    //     minimum `created_at`; reads do not refresh recency — NOT an LRU) AND the
     //     crate's documented filesystem-free default so contract-only consumers pull
-    //     no `ironclaw_filesystem` dep (openai_compat CLAUDE.md). Test-only.
+    //     no `ironclaw_filesystem` dep (openai_compat CLAUDE.md).
     "InMemoryOpenAiCompatRefStore",
     // --- BLOCKED — cross-crate placement. `FilesystemExtensionInstallationStore`
     //     exists but in high `ironclaw_reborn_composition` and depends on a
