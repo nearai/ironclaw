@@ -233,7 +233,7 @@ impl LlmProbe for LiveLlmProbe {
 /// `--force` re-seeds from environment again.
 #[cfg(all(feature = "libsql", feature = "root-llm-provider"))]
 pub(crate) fn provision_llm_credentials(
-    home: &RebornHome,
+    _home: &RebornHome,
     boot: &ironclaw_reborn_config::RebornBootConfig,
     prompts: &mut dyn PromptSource,
     store_opener: &dyn LlmKeyStoreOpener,
@@ -241,8 +241,20 @@ pub(crate) fn provision_llm_credentials(
     force: bool,
 ) -> Result<LlmCredentialProvisionOutcome, LlmCredentialPromptError> {
     let admin = ironclaw_reborn_composition::RebornProviderAdmin::new(boot.clone());
+    // Secret-store root MUST match what `serve` opens at boot
+    // (`local_runtime_storage_root`, i.e. `<home>/<profile-subdir>`), NOT the
+    // bare home — a key written to the bare-root db is invisible to the
+    // runtime (live bug: onboarded key never reached chat turns).
+    let store_root = crate::runtime::local_runtime_storage_root(boot, boot.profile());
+    std::fs::create_dir_all(&store_root).map_err(|error| {
+        LlmCredentialPromptError::Other(anyhow::anyhow!(
+            "create secret-store root {}: {error}",
+            store_root.display()
+        ))
+    })?;
 
-    if !force && let Some(outcome) = already_configured_outcome(&admin, home, store_opener)? {
+    if !force && let Some(outcome) = already_configured_outcome(&admin, &store_root, store_opener)?
+    {
         return Ok(outcome);
     }
 
@@ -272,7 +284,7 @@ pub(crate) fn provision_llm_credentials(
         }
     }
 
-    provision_via_menu(home, &admin, prompts, store_opener, probe)
+    provision_via_menu(&store_root, &admin, prompts, store_opener, probe)
 }
 
 /// Headless counterpart of the env-detect step in [`provision_llm_credentials`]'s
@@ -306,7 +318,7 @@ fn provision_headless_from_env(
 /// [`provision_llm_credentials`]'s doc for the store-then-config write ordering.
 #[cfg(all(feature = "libsql", feature = "root-llm-provider"))]
 fn provision_via_menu(
-    home: &RebornHome,
+    store_root: &Path,
     admin: &ironclaw_reborn_composition::RebornProviderAdmin,
     prompts: &mut dyn PromptSource,
     store_opener: &dyn LlmKeyStoreOpener,
@@ -377,7 +389,7 @@ fn provision_via_menu(
 
     if let Some(key) = key {
         let store = store_opener
-            .open(home.path())
+            .open(store_root)
             .map_err(LlmCredentialPromptError::Other)?;
         let provider_id_for_store = canonical_provider_id.clone();
         crate::runtime::block_on_cli(async move {
@@ -490,7 +502,7 @@ fn probe_and_confirm_key(
 #[cfg(all(feature = "libsql", feature = "root-llm-provider"))]
 fn already_configured_outcome(
     admin: &ironclaw_reborn_composition::RebornProviderAdmin,
-    home: &RebornHome,
+    store_root: &Path,
     store_opener: &dyn LlmKeyStoreOpener,
 ) -> Result<Option<LlmCredentialProvisionOutcome>, LlmCredentialPromptError> {
     let status = admin
@@ -513,7 +525,7 @@ fn already_configured_outcome(
         }));
     }
 
-    let store = match store_opener.open(home.path()) {
+    let store = match store_opener.open(store_root) {
         Ok(store) => store,
         Err(error) => {
             tracing::debug!(
@@ -1004,7 +1016,9 @@ mod tests {
             }
         );
 
-        let home_path = home.path().to_path_buf();
+        // Verify through the RUNTIME storage root (`<home>/local-dev`) — the same
+        // db `serve` opens at boot; pins the onboard-write/serve-read convergence.
+        let home_path = home.path().join("local-dev");
         let stored = crate::runtime::block_on_cli(async move {
             let store = ironclaw_reborn_composition::open_local_dev_secret_store(&home_path)
                 .await
@@ -1087,7 +1101,9 @@ mod tests {
             }
         );
 
-        let home_path = home.path().to_path_buf();
+        // Verify through the RUNTIME storage root (`<home>/local-dev`) — the same
+        // db `serve` opens at boot; pins the onboard-write/serve-read convergence.
+        let home_path = home.path().join("local-dev");
         let stored = crate::runtime::block_on_cli(async move {
             let store = ironclaw_reborn_composition::open_local_dev_secret_store(&home_path)
                 .await
@@ -1509,7 +1525,9 @@ mod tests {
             "config.toml: {config_text}"
         );
 
-        let home_path = home.path().to_path_buf();
+        // Verify through the RUNTIME storage root (`<home>/local-dev`) — the same
+        // db `serve` opens at boot; pins the onboard-write/serve-read convergence.
+        let home_path = home.path().join("local-dev");
         let has_key = crate::runtime::block_on_cli(async move {
             let store = ironclaw_reborn_composition::open_local_dev_secret_store(&home_path)
                 .await
@@ -1754,7 +1772,9 @@ mod tests {
             }
         );
 
-        let home_path = home.path().to_path_buf();
+        // Verify through the RUNTIME storage root (`<home>/local-dev`) — the same
+        // db `serve` opens at boot; pins the onboard-write/serve-read convergence.
+        let home_path = home.path().join("local-dev");
         let stored = crate::runtime::block_on_cli(async move {
             let store = ironclaw_reborn_composition::open_local_dev_secret_store(&home_path)
                 .await
@@ -1879,7 +1899,9 @@ mod tests {
             }
         );
 
-        let home_path = home.path().to_path_buf();
+        // Verify through the RUNTIME storage root (`<home>/local-dev`) — the same
+        // db `serve` opens at boot; pins the onboard-write/serve-read convergence.
+        let home_path = home.path().join("local-dev");
         let stored = crate::runtime::block_on_cli(async move {
             let store = ironclaw_reborn_composition::open_local_dev_secret_store(&home_path)
                 .await
