@@ -149,6 +149,9 @@ fn runtime_credential_setup(
         LifecycleExtensionCredentialSetup::OAuth { scopes } => {
             ironclaw_host_api::RuntimeCredentialAccountSetup::OAuth { scopes }
         }
+        LifecycleExtensionCredentialSetup::Pairing => {
+            ironclaw_host_api::RuntimeCredentialAccountSetup::Pairing
+        }
     }
 }
 

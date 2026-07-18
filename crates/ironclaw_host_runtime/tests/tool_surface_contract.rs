@@ -1,3 +1,4 @@
+// arch-exempt: large_file, mechanical LocalFilesystem->DiskFilesystem Bucket-2 rename (arch-simplification §4.4), no logic change, plan #6168
 mod support;
 
 use support::legacy_capability_fixture_to_v2_with_schema_suffix as legacy_capability_fixture_to_v2;
@@ -18,7 +19,7 @@ use ironclaw_extensions::{
     CapabilityVisibility, ExtensionManifest, ExtensionPackage, ExtensionRegistry, ManifestSource,
 };
 use ironclaw_filesystem::{
-    DirEntry, FileStat, FileType, FilesystemError, FilesystemOperation, LocalFilesystem,
+    DirEntry, DiskFilesystem, FileStat, FileType, FilesystemError, FilesystemOperation,
     RootFilesystem,
 };
 use ironclaw_host_api::*;
@@ -1866,7 +1867,7 @@ fn hot_catalog_fixture(
     input_schema: Option<&str>,
     output_schema: &str,
     prompt_doc: &str,
-) -> (tempfile::TempDir, LocalFilesystem, ExtensionRegistry) {
+) -> (tempfile::TempDir, DiskFilesystem, ExtensionRegistry) {
     hot_catalog_fixture_with_prompt_bytes(input_schema, output_schema, prompt_doc.as_bytes())
 }
 
@@ -1874,7 +1875,7 @@ fn hot_catalog_fixture_with_prompt_bytes(
     input_schema: Option<&str>,
     output_schema: &str,
     prompt_doc: &[u8],
-) -> (tempfile::TempDir, LocalFilesystem, ExtensionRegistry) {
+) -> (tempfile::TempDir, DiskFilesystem, ExtensionRegistry) {
     let manifest = ExtensionManifest::parse(
         HOT_CAPABILITY_MANIFEST,
         ManifestSource::InstalledLocal,
@@ -1889,7 +1890,7 @@ fn hot_catalog_fixture_with_manifest(
     output_schema: &str,
     prompt_doc: &[u8],
     manifest: ExtensionManifest,
-) -> (tempfile::TempDir, LocalFilesystem, ExtensionRegistry) {
+) -> (tempfile::TempDir, DiskFilesystem, ExtensionRegistry) {
     let storage = tempdir().unwrap();
     let extension_root = storage.path().join("echo");
     std::fs::create_dir_all(extension_root.join("schemas/echo")).unwrap();
@@ -1908,7 +1909,7 @@ fn hot_catalog_fixture_with_manifest(
     .unwrap();
     std::fs::write(extension_root.join("prompts/echo/say.md"), prompt_doc).unwrap();
 
-    let mut fs = LocalFilesystem::new();
+    let mut fs = DiskFilesystem::new();
     fs.mount_local(
         VirtualPath::new("/system/extensions").unwrap(),
         HostPath::from_path_buf(storage.path().to_path_buf()),

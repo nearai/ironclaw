@@ -7,7 +7,7 @@ use std::{
 };
 
 use async_trait::async_trait;
-use ironclaw_filesystem::{InMemoryBackend, LocalFilesystem, RootFilesystem, ScopedFilesystem};
+use ironclaw_filesystem::{DiskFilesystem, InMemoryBackend, RootFilesystem, ScopedFilesystem};
 use ironclaw_host_api::*;
 use ironclaw_processes::*;
 use serde_json::json;
@@ -269,9 +269,9 @@ fn process_start(
     }
 }
 
-fn engine_filesystem() -> Arc<ScopedFilesystem<LocalFilesystem>> {
+fn engine_filesystem() -> Arc<ScopedFilesystem<DiskFilesystem>> {
     let storage = tempfile::tempdir().unwrap().keep();
-    let mut fs = LocalFilesystem::new();
+    let mut fs = DiskFilesystem::new();
     fs.mount_local(
         VirtualPath::new("/engine").unwrap(),
         HostPath::from_path_buf(storage),

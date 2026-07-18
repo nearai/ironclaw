@@ -7,8 +7,14 @@ use anyhow::{Context, anyhow};
 use clap::Args;
 #[cfg(feature = "openai-compat-beta")]
 use ironclaw_reborn_composition::build_openai_compat_route_mount;
-#[cfg(not(feature = "slack-v2-host-beta"))]
+#[cfg(feature = "telegram-v2-host-beta")]
+use ironclaw_reborn_composition::build_telegram_host_runtime_mounts;
+#[cfg(not(any(feature = "slack-v2-host-beta", feature = "telegram-v2-host-beta")))]
 use ironclaw_reborn_composition::build_webui_services;
+#[cfg(all(feature = "slack-v2-host-beta", feature = "telegram-v2-host-beta"))]
+use ironclaw_reborn_composition::build_webui_services_with_slack_and_telegram_host_mounts;
+#[cfg(all(not(feature = "slack-v2-host-beta"), feature = "telegram-v2-host-beta"))]
+use ironclaw_reborn_composition::build_webui_services_with_telegram_host_mounts;
 use ironclaw_reborn_composition::host_api::{
     AgentId, InvocationId, ProjectId, ResourceScope, SecretHandle, TenantId, UserId,
 };
@@ -255,6 +261,15 @@ impl ServeCommand {
         )?;
         #[cfg(not(feature = "slack-v2-host-beta"))]
         let _ = slack_host_beta_config;
+        let telegram_host_config = resolve_telegram_host_config_for_serve_command(
+            config_file.as_ref(),
+            &tenant_id,
+            &default_agent_id,
+            default_project_id.as_ref(),
+            &user_id,
+        )?;
+        #[cfg(not(feature = "telegram-v2-host-beta"))]
+        let _ = telegram_host_config;
 
         // Resolve listen address with explicit precedence:
         //   CLI flag (Some(...)) > config file > compile-time default.
@@ -513,17 +528,58 @@ impl ServeCommand {
             } else {
                 None
             };
+            // Telegram host mounts, after Slack's: same fail-closed shutdown
+            // path when route composition fails.
+            #[cfg(feature = "telegram-v2-host-beta")]
+            let telegram_mounts = if let Some(telegram_config) = telegram_host_config {
+                match build_telegram_host_runtime_mounts(&runtime, telegram_config)
+                    .await
+                    .context("failed to compose Telegram host routes")
+                {
+                    Ok(mounts) => Some(mounts),
+                    Err(error) => {
+                        let shutdown_result = runtime.shutdown().await;
+                        if let Err(shutdown_error) = shutdown_result {
+                            return Err(error.context(format!(
+                                "runtime shutdown after Telegram route composition failure also failed: {shutdown_error}"
+                            )));
+                        }
+                        return Err(error);
+                    }
+                }
+            } else {
+                None
+            };
             #[cfg(feature = "slack-v2-host-beta")]
             let operator_route_visibility =
                 slack_operator_route_visibility_for_authenticator(env_authenticator.as_ref());
-            #[cfg(feature = "slack-v2-host-beta")]
+            #[cfg(all(feature = "slack-v2-host-beta", feature = "telegram-v2-host-beta"))]
+            let bundle: RebornWebuiBundle = match telegram_mounts.as_ref() {
+                Some(telegram_mounts) => build_webui_services_with_slack_and_telegram_host_mounts(
+                    &runtime,
+                    None,
+                    slack_mounts.as_ref(),
+                    operator_route_visibility,
+                    telegram_mounts,
+                )?,
+                None => build_webui_services_with_slack_host_beta_mounts(
+                    &runtime,
+                    None,
+                    slack_mounts.as_ref(),
+                    operator_route_visibility,
+                )?,
+            };
+            #[cfg(all(feature = "slack-v2-host-beta", not(feature = "telegram-v2-host-beta")))]
             let bundle: RebornWebuiBundle = build_webui_services_with_slack_host_beta_mounts(
                 &runtime,
                 None,
                 slack_mounts.as_ref(),
                 operator_route_visibility,
             )?;
-            #[cfg(not(feature = "slack-v2-host-beta"))]
+            #[cfg(all(not(feature = "slack-v2-host-beta"), feature = "telegram-v2-host-beta"))]
+            let bundle: RebornWebuiBundle =
+                build_webui_services_with_telegram_host_mounts(&runtime, None, telegram_mounts.as_ref())?;
+            #[cfg(not(any(feature = "slack-v2-host-beta", feature = "telegram-v2-host-beta")))]
             let bundle: RebornWebuiBundle = build_webui_services(&runtime, None)?;
             #[cfg(feature = "openai-compat-beta")]
             let openai_compat_mount = build_openai_compat_route_mount(
@@ -636,6 +692,15 @@ impl ServeCommand {
                     .with_slack_personal_oauth_binding(slack_personal_oauth_binding)
                     .with_slack_channel_routes(slack_mounts.channel_routes);
             }
+            #[cfg(feature = "telegram-v2-host-beta")]
+            if let Some(telegram_mounts) = telegram_mounts {
+                // Bearer-authed setup/pairing routes ride the generic
+                // protected-route seam; the updates webhook is public.
+                let telegram_protected_routes = telegram_mounts.protected_routes();
+                serve_config = serve_config
+                    .with_public_route_mount(telegram_mounts.events)
+                    .with_protected_route_mount(telegram_protected_routes);
+            }
             // Public NEAR AI login callback route (token redirect target). Built
             // from the runtime's LLM seam; absent when no LLM was wired.
             #[cfg(feature = "root-llm-provider")]
@@ -722,6 +787,49 @@ fn resolve_slack_host_beta_config_for_serve_command(
         default_project_id,
         default_user_id,
         config_path,
+    )
+}
+
+#[cfg(feature = "telegram-v2-host-beta")]
+fn resolve_telegram_host_config_for_serve_command(
+    config_file: Option<&RebornConfigFile>,
+    tenant_id: &TenantId,
+    default_agent_id: &AgentId,
+    default_project_id: Option<&ProjectId>,
+    default_user_id: &UserId,
+) -> anyhow::Result<Option<ironclaw_reborn_composition::TelegramHostRuntimeConfig>> {
+    // Reuse the deployment public origin the hosted OAuth surface derives its
+    // redirect URIs from (`IRONCLAW_REBORN_WEBUI_BASE_URL`): the same origin
+    // is where Telegram must reach the updates webhook. When unset (e.g.
+    // loopback-only dev), setup derivation fails closed and the admin supplies
+    // an explicit webhook URL override through the WebUI setup surface.
+    let public_base_url = crate::commands::serve_sso::webui_public_base_url_from_env()
+        .context("invalid hosted WebUI base URL from IRONCLAW_REBORN_WEBUI_BASE_URL")?;
+    crate::commands::serve_telegram::resolve_telegram_config_for_serve(
+        config_file.and_then(|file| file.telegram.as_ref()),
+        tenant_id,
+        default_agent_id,
+        default_project_id,
+        default_user_id,
+        public_base_url,
+    )
+}
+
+#[cfg(not(feature = "telegram-v2-host-beta"))]
+fn resolve_telegram_host_config_for_serve_command(
+    config_file: Option<&RebornConfigFile>,
+    tenant_id: &TenantId,
+    default_agent_id: &AgentId,
+    default_project_id: Option<&ProjectId>,
+    default_user_id: &UserId,
+) -> anyhow::Result<Option<()>> {
+    crate::commands::serve_telegram::resolve_telegram_config_for_serve(
+        config_file.and_then(|file| file.telegram.as_ref()),
+        tenant_id,
+        default_agent_id,
+        default_project_id,
+        default_user_id,
+        None,
     )
 }
 

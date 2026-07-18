@@ -13,10 +13,11 @@ use ironclaw_host_api::{
 use ironclaw_secrets::InMemorySecretStore;
 use ironclaw_turns::{TurnRunId, TurnScope};
 
-use crate::product_auth::api::auth::{RebornAuthContinuationDispatcher, RebornProductAuthServices};
+use crate::product_auth::api::auth::RebornProductAuthServices;
 use crate::product_auth::oauth::oauth_dcr::{
     OAuthDcrProvider, OAuthDcrProviderConfig, OAuthDcrProviderRegistry,
 };
+use ironclaw_channel_host::auth_continuation::RebornAuthContinuationDispatcher;
 
 #[tokio::test]
 async fn dcr_challenge_errors_propagate_through_product_auth_provider() {

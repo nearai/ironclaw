@@ -12,7 +12,7 @@ use ironclaw_extensions::{
     CapabilityManifest, CapabilityVisibility, ExtensionManifest, ExtensionPackage,
     ExtensionRegistry, ExtensionRuntime, MANIFEST_SCHEMA_VERSION, ManifestSource,
 };
-use ironclaw_filesystem::LocalFilesystem;
+use ironclaw_filesystem::DiskFilesystem;
 use ironclaw_host_api::*;
 use ironclaw_host_runtime::{
     CapabilitySurfaceVersion, FirstPartyCapabilityError, FirstPartyCapabilityHandler,
@@ -47,7 +47,7 @@ async fn host_runtime_invokes_first_party_handler_through_capability_host() {
     let governor = Arc::new(InMemoryResourceGovernor::new());
     let runtime = HostRuntimeServices::new(
         Arc::new(first_party_registry()),
-        Arc::new(LocalFilesystem::new()),
+        Arc::new(DiskFilesystem::new()),
         Arc::clone(&governor),
         Arc::new(GrantAuthorizer::new()),
         ironclaw_processes::in_memory_backed_process_services(),
@@ -126,7 +126,7 @@ async fn first_party_handler_uses_staged_secret_through_production_host_egress()
             EffectKind::Network,
             EffectKind::UseSecret,
         ])),
-        Arc::new(LocalFilesystem::new()),
+        Arc::new(DiskFilesystem::new()),
         Arc::new(InMemoryResourceGovernor::new()),
         Arc::new(GrantAuthorizer::new()),
         ironclaw_processes::in_memory_backed_process_services(),
@@ -359,7 +359,7 @@ async fn http_error_kind_maps_all_reason_codes() {
 async fn production_wiring_rejects_first_party_registry_without_declared_handler() {
     let services = HostRuntimeServices::new(
         Arc::new(first_party_registry()),
-        Arc::new(LocalFilesystem::new()),
+        Arc::new(DiskFilesystem::new()),
         Arc::new(InMemoryResourceGovernor::new()),
         Arc::new(GrantAuthorizer::new()),
         ironclaw_processes::in_memory_backed_process_services(),
@@ -384,7 +384,7 @@ async fn production_wiring_rejects_first_party_registry_without_declared_handler
 async fn host_runtime_health_reports_missing_first_party_backend_for_empty_registry() {
     let runtime = HostRuntimeServices::new(
         Arc::new(first_party_registry()),
-        Arc::new(LocalFilesystem::new()),
+        Arc::new(DiskFilesystem::new()),
         Arc::new(InMemoryResourceGovernor::new()),
         Arc::new(GrantAuthorizer::new()),
         ironclaw_processes::in_memory_backed_process_services(),
@@ -415,7 +415,7 @@ async fn first_party_handler_error_reconciles_reported_usage_after_side_effect()
     let governor = Arc::new(InMemoryResourceGovernor::new());
     let runtime = HostRuntimeServices::new(
         Arc::new(first_party_registry()),
-        Arc::new(LocalFilesystem::new()),
+        Arc::new(DiskFilesystem::new()),
         Arc::clone(&governor),
         Arc::new(GrantAuthorizer::new()),
         ironclaw_processes::in_memory_backed_process_services(),
@@ -458,7 +458,7 @@ async fn first_party_handler_panic_fails_closed_and_releases_reservation() {
     let governor = Arc::new(InMemoryResourceGovernor::new());
     let runtime = HostRuntimeServices::new(
         Arc::new(first_party_registry()),
-        Arc::new(LocalFilesystem::new()),
+        Arc::new(DiskFilesystem::new()),
         Arc::clone(&governor),
         Arc::new(GrantAuthorizer::new()),
         ironclaw_processes::in_memory_backed_process_services(),
@@ -511,7 +511,7 @@ async fn first_party_missing_handler_fails_closed_without_side_effect_handler() 
     let events = InMemoryEventSink::new();
     let runtime = HostRuntimeServices::new(
         Arc::new(first_party_registry()),
-        Arc::new(LocalFilesystem::new()),
+        Arc::new(DiskFilesystem::new()),
         Arc::new(InMemoryResourceGovernor::new()),
         Arc::new(GrantAuthorizer::new()),
         ironclaw_processes::in_memory_backed_process_services(),
@@ -784,7 +784,7 @@ fn http_error_kind(reason: RuntimeHttpEgressReasonCode) -> RuntimeDispatchErrorK
 fn http_first_party_services(
     handle: &SecretHandle,
 ) -> HostRuntimeServices<
-    LocalFilesystem,
+    DiskFilesystem,
     InMemoryResourceGovernor,
     ironclaw_processes::FilesystemProcessStore<ironclaw_filesystem::InMemoryBackend>,
     ironclaw_processes::FilesystemProcessResultStore<ironclaw_filesystem::InMemoryBackend>,
@@ -797,7 +797,7 @@ fn http_first_party_services(
 
     HostRuntimeServices::new(
         Arc::new(first_party_http_registry()),
-        Arc::new(LocalFilesystem::new()),
+        Arc::new(DiskFilesystem::new()),
         Arc::new(InMemoryResourceGovernor::new()),
         Arc::new(GrantAuthorizer::new()),
         ironclaw_processes::in_memory_backed_process_services(),

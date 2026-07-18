@@ -5,7 +5,7 @@ use async_trait::async_trait;
 use ironclaw_authorization::GrantAuthorizer;
 use ironclaw_extensions::ExtensionRegistry;
 use ironclaw_filesystem::{
-    DirEntry, FileStat, FileType, FilesystemError, FilesystemOperation, LocalFilesystem,
+    DirEntry, DiskFilesystem, FileStat, FileType, FilesystemError, FilesystemOperation,
     RootFilesystem,
 };
 use ironclaw_host_api::runtime_policy::{
@@ -1809,8 +1809,8 @@ fn coding_capability_ids() -> [&'static str; 6] {
     ]
 }
 
-fn mounted_filesystem(path: &Path, permissions: MountPermissions) -> (LocalFilesystem, MountView) {
-    let mut filesystem = LocalFilesystem::new();
+fn mounted_filesystem(path: &Path, permissions: MountPermissions) -> (DiskFilesystem, MountView) {
+    let mut filesystem = DiskFilesystem::new();
     filesystem
         .mount_local(
             VirtualPath::new("/projects/coding-pack").unwrap(),
@@ -1827,7 +1827,7 @@ fn mounted_filesystem(path: &Path, permissions: MountPermissions) -> (LocalFiles
 }
 
 struct StatFailureFilesystem {
-    inner: LocalFilesystem,
+    inner: DiskFilesystem,
     fail_suffix: &'static str,
 }
 
@@ -1862,7 +1862,7 @@ impl RootFilesystem for StatFailureFilesystem {
 }
 
 struct StatLenOverrideFilesystem {
-    inner: LocalFilesystem,
+    inner: DiskFilesystem,
     suffix: &'static str,
     len: u64,
 }
@@ -1895,7 +1895,7 @@ impl RootFilesystem for StatLenOverrideFilesystem {
 }
 
 struct ReadFailureFilesystem {
-    inner: LocalFilesystem,
+    inner: DiskFilesystem,
     fail_suffix: &'static str,
 }
 
@@ -1930,7 +1930,7 @@ impl RootFilesystem for ReadFailureFilesystem {
 }
 
 struct WriteFailureFilesystem {
-    inner: LocalFilesystem,
+    inner: DiskFilesystem,
     fail_suffix: &'static str,
 }
 
@@ -1965,7 +1965,7 @@ impl RootFilesystem for WriteFailureFilesystem {
 }
 
 struct ReadInfrastructureFailureFilesystem {
-    inner: LocalFilesystem,
+    inner: DiskFilesystem,
     fail_suffix: &'static str,
 }
 

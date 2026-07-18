@@ -11,7 +11,7 @@ use ironclaw_authorization::GrantAuthorizer;
 use ironclaw_extensions::ExtensionRegistry;
 use ironclaw_filesystem::{
     BackendCapabilities, BackendId, BackendKind, CompositeRootFilesystem, ContentKind,
-    InMemoryBackend, IndexPolicy, LocalFilesystem, MountDescriptor, RootFilesystem, StorageClass,
+    DiskFilesystem, InMemoryBackend, IndexPolicy, MountDescriptor, RootFilesystem, StorageClass,
 };
 use ironclaw_host_api::{
     CapabilityId, CredentialStageError, EffectKind, ExtensionId, HostPath, MountAlias, MountGrant,
@@ -284,7 +284,7 @@ pub(crate) fn local_dev_root_filesystem(
     storage_root: PathBuf,
     mounts: LocalDevRootMounts,
 ) -> HarnessResult<Arc<CompositeRootFilesystem>> {
-    let mut local = LocalFilesystem::new();
+    let mut local = DiskFilesystem::new();
     local.mount_local(
         VirtualPath::new("/projects")?,
         HostPath::from_path_buf(storage_root),
@@ -308,7 +308,7 @@ pub(crate) fn local_dev_root_filesystem(
         local_dev_mount_descriptor(
             "/projects",
             "local-dev-projects",
-            BackendKind::LocalFilesystem,
+            BackendKind::DiskFilesystem,
             StorageClass::FileContent,
             ContentKind::ProjectFile,
             IndexPolicy::NotIndexed,
@@ -321,7 +321,7 @@ pub(crate) fn local_dev_root_filesystem(
             local_dev_mount_descriptor(
                 "/system/extensions/github",
                 "local-dev-github-assets",
-                BackendKind::LocalFilesystem,
+                BackendKind::DiskFilesystem,
                 StorageClass::FileContent,
                 ContentKind::ExtensionPackage,
                 IndexPolicy::NotIndexed,
@@ -335,7 +335,7 @@ pub(crate) fn local_dev_root_filesystem(
             local_dev_mount_descriptor(
                 "/system/extensions/web-access",
                 "local-dev-web-access-assets",
-                BackendKind::LocalFilesystem,
+                BackendKind::DiskFilesystem,
                 StorageClass::FileContent,
                 ContentKind::ExtensionPackage,
                 IndexPolicy::NotIndexed,

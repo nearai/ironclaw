@@ -11,8 +11,8 @@ use std::{
 use async_trait::async_trait;
 use ironclaw_events::{InMemoryEventSink, RuntimeEventKind};
 use ironclaw_filesystem::{
-    CasExpectation, DirEntry, Entry, FileStat, FilesystemError, FilesystemOperation,
-    InMemoryBackend, LocalFilesystem, RecordVersion, RootFilesystem, ScopedFilesystem,
+    CasExpectation, DirEntry, DiskFilesystem, Entry, FileStat, FilesystemError,
+    FilesystemOperation, InMemoryBackend, RecordVersion, RootFilesystem, ScopedFilesystem,
 };
 use ironclaw_host_api::*;
 use ironclaw_processes::*;
@@ -2153,7 +2153,7 @@ impl RootFilesystem for BackendErrorFilesystem {
     // After the PR #3666 fix that breaks the put/write_file recursion, the
     // trait's default `get` is `Unsupported`. A test backend that wants to
     // fault-inject through the unified read path has to override `get`
-    // explicitly — same shape that `LocalFilesystem` adopts in its native
+    // explicitly — same shape that `DiskFilesystem` adopts in its native
     // impl. Mirroring the same fault here keeps the consumer test
     // exercising the "backend error mentions not_found" propagation.
     async fn get(
@@ -2649,14 +2649,14 @@ fn stored_process_owner_root(scope: &ResourceScope) -> String {
     base
 }
 
-/// Build a `Arc<ScopedFilesystem<LocalFilesystem>>` over a fresh tempdir
+/// Build a `Arc<ScopedFilesystem<DiskFilesystem>>` over a fresh tempdir
 /// mounted at `/engine`, with the `/processes` alias resolving to the
 /// default tenant1/user1 target. Tests that need a different mount
 /// target (e.g. cross-tenant isolation tests) construct a
 /// `ScopedFilesystem` directly with their own `MountView`.
-fn engine_filesystem() -> Arc<ScopedFilesystem<LocalFilesystem>> {
+fn engine_filesystem() -> Arc<ScopedFilesystem<DiskFilesystem>> {
     let storage = tempfile::tempdir().unwrap().keep();
-    let mut fs = LocalFilesystem::new();
+    let mut fs = DiskFilesystem::new();
     fs.mount_local(
         VirtualPath::new("/engine").unwrap(),
         HostPath::from_path_buf(storage),

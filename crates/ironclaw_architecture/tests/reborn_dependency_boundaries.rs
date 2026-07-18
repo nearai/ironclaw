@@ -467,6 +467,7 @@ fn untrusted_ingress_paths_cannot_submit_host_trusted_inbound() {
     ];
     let untrusted_src_roots = [
         "crates/ironclaw_capabilities/src",
+        "crates/ironclaw_channel_host/src",
         "crates/ironclaw_first_party_extension_ports/src",
         "crates/ironclaw_first_party_extensions/src",
         "crates/ironclaw_host_api/src",
@@ -477,6 +478,7 @@ fn untrusted_ingress_paths_cannot_submit_host_trusted_inbound() {
         "crates/ironclaw_webui/src",
         "crates/ironclaw_wasm_product_adapters/src",
         "crates/ironclaw_telegram_v2_adapter/src",
+        "crates/ironclaw_telegram_extension/src",
         "crates/ironclaw_slack_v2_adapter/src",
     ];
 
@@ -2811,6 +2813,18 @@ fn boundary_rules() -> Vec<BoundaryRule> {
                 "ironclaw_network",
                 "ironclaw_engine",
                 "ironclaw_gateway",
+            ],
+        },
+        BoundaryRule {
+            // Product-neutral delivery orchestration consumes channel-host
+            // contracts but never a concrete channel or an application root.
+            crate_name: "ironclaw_channel_delivery",
+            forbidden: vec![
+                "ironclaw_reborn_composition",
+                "ironclaw_reborn_cli",
+                "ironclaw_webui_v2",
+                "ironclaw_slack_v2_adapter",
+                "ironclaw_telegram_extension",
             ],
         },
         BoundaryRule {

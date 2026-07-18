@@ -493,6 +493,11 @@ fn github_capability_calls() -> Vec<RebornScriptedProviderToolCall> {
             json!({"owner": "nearai", "repo": "ironclaw", "run_id": 12345, "filter": "all", "limit": 16, "page": 2}),
         ),
         call(
+            "github.get_job_logs",
+            "get-job-logs",
+            json!({"owner": "nearai", "repo": "ironclaw", "job_id": 67890}),
+        ),
+        call(
             "github.get_workflow_run_artifacts",
             "get-workflow-run-artifacts",
             json!({"owner": "nearai", "repo": "ironclaw", "run_id": 12345, "name": "coverage", "direction": "asc", "limit": 17, "page": 3}),
@@ -744,6 +749,7 @@ fn expected_github_http_requests() -> Vec<ExpectedGithubHttpRequest> {
         get(
             "https://api.github.com/repos/nearai/ironclaw/actions/runs/12345/jobs?per_page=16&filter=all&page=2",
         ),
+        get("https://api.github.com/repos/nearai/ironclaw/actions/jobs/67890/logs"),
         get(
             "https://api.github.com/repos/nearai/ironclaw/actions/runs/12345/artifacts?per_page=17&name=coverage&direction=asc&page=3",
         ),

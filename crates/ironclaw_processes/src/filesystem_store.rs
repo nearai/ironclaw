@@ -107,7 +107,7 @@ where
 
     /// Declare the indexed-projection fields on the per-owner `records/`
     /// prefix so `records_for_scope` can use a native `query` filter.
-    /// Tolerates `Unsupported` for byte-only backends (e.g. LocalFilesystem)
+    /// Tolerates `Unsupported` for byte-only backends (e.g. DiskFilesystem)
     /// so the existing list+get fallback path is still reachable.
     async fn ensure_indexes(&self, scope: &ResourceScope) -> Result<(), ProcessError> {
         let prefix = process_records_root(scope)?;
@@ -163,7 +163,7 @@ where
     /// and try again until either the CAS succeeds or
     /// [`MAX_CAS_RETRIES`] is exhausted.
     ///
-    /// Backends without versioning (LocalFilesystem) return version `0`
+    /// Backends without versioning (DiskFilesystem) return version `0`
     /// for every read and reject `CasExpectation::Version` with
     /// `Unsupported`; for those, [`put_with_byte_fallback`] falls
     /// through to `CasExpectation::Any` so the existing single-instance
@@ -328,7 +328,7 @@ where
         // produce the right rows. The post-query `same_scope_owner`
         // check guards the remaining sub-scope (agent/project/mission/
         // thread) axes that are not in the index spec yet. Backends
-        // without index support (LocalFilesystem) return `Unsupported`
+        // without index support (DiskFilesystem) return `Unsupported`
         // and we fall back to the legacy list+get scan.
         self.ensure_indexes(scope).await?;
         let filter = Filter::And(vec![
@@ -363,7 +363,7 @@ where
     F: RootFilesystem,
 {
     /// Legacy list+get scan used as the fallback for byte-only backends
-    /// (LocalFilesystem) that cannot serve `query` over indexed
+    /// (DiskFilesystem) that cannot serve `query` over indexed
     /// projections. Production deployments on libSQL / Postgres / the
     /// in-memory backend take the indexed path in [`records_for_scope`].
     async fn records_for_scope_via_list(
@@ -791,7 +791,7 @@ fn process_status_label(status: ProcessStatus) -> &'static str {
 
 /// `put` with a fallback to an opaque (byte-only) entry on `Unsupported`.
 ///
-/// Backends that don't yet implement records (LocalFilesystem with no
+/// Backends that don't yet implement records (DiskFilesystem with no
 /// sidecar metadata) reject `kind = Some(_)` or any non-`Any` CAS
 /// expectation. We try the indexed write first so SQL and in-memory
 /// backends get the projection, then retry with the same body stripped

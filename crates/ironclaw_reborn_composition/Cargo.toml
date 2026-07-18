@@ -46,7 +46,10 @@ root-llm-provider = [
 # budget pipeline end-to-end. Enable with `cargo test --features
 # test-support` (plus whatever feature surface the test crate also
 # requires, e.g. `webui-v2-beta`).
-test-support = ["ironclaw_host_runtime/test-support"]
+test-support = [
+    "ironclaw_channel_delivery/test-support",
+    "ironclaw_host_runtime/test-support",
+]
 # Expose the narrow `extension_installation_store_for_migration` accessor for
 # the v1→Reborn migration tool (`ironclaw_reborn_migration`). Ships zero bytes in
 # a default production binary; mirrors the `test-support` substrate seams.
@@ -77,6 +80,17 @@ slack-v2-host-beta = [
     "webui-v2-beta",
     "dep:ironclaw_slack_v2_adapter",
     "dep:ironclaw_wasm_product_adapters",
+    "ironclaw_channel_host/webhook-serve",
+    "ironclaw_product_workflow/storage",
+]
+# Host-mounted Telegram Bot API webhook ingress + pairing for the single
+# user-visible `telegram` channel extension. Off by default; host binaries
+# opt in and mount it behind their Telegram enablement/config checks.
+telegram-v2-host-beta = [
+    "webui-v2-beta",
+    "dep:ironclaw_telegram_extension",
+    "dep:ironclaw_wasm_product_adapters",
+    "ironclaw_channel_host/webhook-serve",
     "ironclaw_product_workflow/storage",
 ]
 openai-compat-beta = [
@@ -115,6 +129,8 @@ chrono = "0.4"
 deadpool-postgres = { version = "0.14", optional = true }
 futures = "0.3"
 ironclaw_auth = { path = "../ironclaw_auth" }
+ironclaw_channel_host = { path = "../ironclaw_channel_host" }
+ironclaw_channel_delivery = { path = "../ironclaw_channel_delivery" }
 ironclaw_common = { path = "../ironclaw_common" }
 ironclaw_capabilities = { path = "../ironclaw_capabilities" }
 ironclaw_approvals = { path = "../ironclaw_approvals" }
@@ -155,6 +171,7 @@ ironclaw_safety = { path = "../ironclaw_safety" }
 ironclaw_secrets = { path = "../ironclaw_secrets" }
 ironclaw_skills = { path = "../ironclaw_skills" }
 ironclaw_slack_v2_adapter = { path = "../ironclaw_slack_v2_adapter", optional = true }
+ironclaw_telegram_extension = { path = "../ironclaw_telegram_extension", optional = true }
 ironclaw_threads = { path = "../ironclaw_threads" }
 ironclaw_triggers = { path = "../ironclaw_triggers" }
 ironclaw_projects = { path = "../ironclaw_projects" }
@@ -205,6 +222,8 @@ ironclaw_authorization = { path = "../ironclaw_authorization", features = ["test
 ironclaw_processes = { path = "../ironclaw_processes", features = ["test-support"] }
 # Enables the in-memory-backed run-state/approval store constructors for tests only.
 ironclaw_run_state = { path = "../ironclaw_run_state", features = ["test-support"] }
+# Enables the in-memory-backed budget-gate store constructor for tests only.
+ironclaw_resources = { path = "../ironclaw_resources", features = ["test-support"] }
 http = "1"
 http-body-util = "0.1"
 # Admin-user-management e2e test drives the composed app with a real session

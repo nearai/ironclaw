@@ -9,10 +9,10 @@ use ironclaw_processes::{FilesystemProcessResultStore, FilesystemProcessStore};
 use ironclaw_run_state::{FilesystemApprovalRequestStore, FilesystemRunStateStore};
 
 use super::{
-    DurableAuditSink, DurableEventSink, EmptyWasmRuntimeCredentials, HostProcessPort,
-    InMemoryAuditSink, InMemoryCredentialBroker, InMemoryDurableAuditLog, InMemoryDurableEventLog,
-    InMemoryEventSink, InMemoryResourceGovernor, InMemorySecretStore, InMemoryTurnStateStore,
-    LocalFilesystem, NoopTurnRunWakeNotifier, RebornEventStoreError, RuntimeKind,
+    DiskFilesystem, DurableAuditSink, DurableEventSink, EmptyWasmRuntimeCredentials,
+    HostProcessPort, InMemoryAuditSink, InMemoryCredentialBroker, InMemoryDurableAuditLog,
+    InMemoryDurableEventLog, InMemoryEventSink, InMemoryResourceGovernor, InMemorySecretStore,
+    InMemoryTurnStateStore, NoopTurnRunWakeNotifier, RebornEventStoreError, RuntimeKind,
 };
 
 #[derive(Debug, Error)]
@@ -290,7 +290,7 @@ pub(super) fn component_name(component: Option<ProductionComponentType>) -> Opti
 fn classify_component_type<T: ?Sized + 'static>() -> ProductionImplementationReadiness {
     let type_id = TypeId::of::<T>();
     match () {
-        () if type_id == TypeId::of::<LocalFilesystem>()
+        () if type_id == TypeId::of::<DiskFilesystem>()
             || type_id == TypeId::of::<InMemoryResourceGovernor>()
             // The process lifecycle/result stores no longer have bespoke
             // in-memory implementations; "in-memory" is the `InMemoryBackend`

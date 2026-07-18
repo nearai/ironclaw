@@ -20,7 +20,7 @@ use ironclaw_events::{
     ReadScope, RuntimeEventKind,
 };
 use ironclaw_extensions::{ExtensionManifest, ExtensionPackage, ExtensionRegistry, ManifestSource};
-use ironclaw_filesystem::{InMemoryBackend, LocalFilesystem, RootFilesystem};
+use ironclaw_filesystem::{DiskFilesystem, InMemoryBackend, RootFilesystem};
 use ironclaw_host_api::*;
 use ironclaw_host_runtime::{
     BuiltinObligationServices, CapabilitySurfacePolicy, CapabilitySurfaceVersion, HostRuntime,
@@ -269,7 +269,7 @@ async fn reborn_e2e_gate_fails_unsupported_obligations_before_runtime_events_or_
     let governor = Arc::new(InMemoryResourceGovernor::new());
     let services = HostRuntimeServices::new(
         Arc::new(registry_with_manifest(SCRIPT_MANIFEST)),
-        Arc::new(LocalFilesystem::new()),
+        Arc::new(DiskFilesystem::new()),
         Arc::clone(&governor),
         Arc::new(ObligatingAuthorizer::new(vec![Obligation::AuditBefore])),
         ironclaw_processes::in_memory_backed_process_services(),
@@ -320,7 +320,7 @@ async fn reborn_e2e_gate_redacts_runtime_output_before_public_result() {
     let events = InMemoryEventSink::new();
     let services = HostRuntimeServices::new(
         Arc::new(registry_with_manifest(SCRIPT_MANIFEST)),
-        Arc::new(LocalFilesystem::new()),
+        Arc::new(DiskFilesystem::new()),
         Arc::new(InMemoryResourceGovernor::new()),
         Arc::new(ObligatingAuthorizer::new(vec![Obligation::RedactOutput])),
         ironclaw_processes::in_memory_backed_process_services(),
@@ -384,7 +384,7 @@ async fn reborn_e2e_gate_sanitizes_runtime_backend_failure_before_public_surface
     let events = InMemoryEventSink::new();
     let services = HostRuntimeServices::new(
         Arc::new(registry_with_manifest(SCRIPT_MANIFEST)),
-        Arc::new(LocalFilesystem::new()),
+        Arc::new(DiskFilesystem::new()),
         Arc::new(InMemoryResourceGovernor::new()),
         Arc::new(GrantAuthorizer::new()),
         ironclaw_processes::in_memory_backed_process_services(),
@@ -463,7 +463,7 @@ async fn reborn_e2e_gate_blocks_oversized_runtime_output_before_publication() {
     let events = InMemoryEventSink::new();
     let services = HostRuntimeServices::new(
         Arc::new(registry_with_manifest(SCRIPT_MANIFEST)),
-        Arc::new(LocalFilesystem::new()),
+        Arc::new(DiskFilesystem::new()),
         Arc::new(InMemoryResourceGovernor::new()),
         Arc::new(ObligatingAuthorizer::new(vec![
             Obligation::EnforceOutputLimit { bytes: 8 },
@@ -630,7 +630,7 @@ async fn reborn_e2e_gate_host_http_consumes_staged_policy_and_secret_once() {
 }
 
 type InMemoryServices = HostRuntimeServices<
-    LocalFilesystem,
+    DiskFilesystem,
     InMemoryResourceGovernor,
     FilesystemProcessStore<InMemoryBackend>,
     FilesystemProcessResultStore<InMemoryBackend>,
@@ -651,7 +651,7 @@ fn approval_resume_fixture() -> ApprovalFixture {
     let events = InMemoryEventSink::new();
     let services = HostRuntimeServices::new(
         Arc::new(registry_with_manifest(SCRIPT_MANIFEST)),
-        Arc::new(LocalFilesystem::new()),
+        Arc::new(DiskFilesystem::new()),
         Arc::new(InMemoryResourceGovernor::new()),
         Arc::new(ApprovalThenGrantAuthorizer),
         ironclaw_processes::in_memory_backed_process_services(),

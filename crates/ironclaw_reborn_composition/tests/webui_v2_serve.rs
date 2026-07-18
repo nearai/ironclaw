@@ -3219,3 +3219,123 @@ async fn static_automations_delivery_surfaces_save_error_and_gates_slack_hint() 
         "the Slack approval footnote must be gated on an external target existing"
     );
 }
+
+/// The Telegram public webhook mounted through the COMPOSED listener
+/// (`with_public_route_mount` → `webui_v2_app`) inherits the
+/// descriptor-driven middleware exactly like every other route — no side
+/// door. Drives the REAL runtime + telegram host mounts, not a stub router.
+///
+/// Manual-QA rows automated here (docs/qa/telegram-coverage-map.md):
+/// qa-telegram:S4 (bodies over the manifest-declared 1 MiB limit are refused
+/// as 413 BEFORE verification/parse ever runs) and qa-telegram:S6 (path
+/// probes under the webhook prefix 404 at the router without reaching the
+/// installation resolver — an unmounted path cannot consult any store).
+#[cfg(feature = "telegram-v2-host-beta")]
+#[tokio::test]
+async fn telegram_public_mount_enforces_descriptor_body_limit_and_404s_path_probes() {
+    use ironclaw_host_api::{AgentId, UserId};
+    use ironclaw_reborn_composition::{
+        RebornBuildInput, RebornRuntimeIdentity, RebornRuntimeInput, TelegramHostRuntimeConfig,
+        build_reborn_runtime, build_telegram_host_runtime_mounts,
+        build_webui_services_with_telegram_host_mounts, local_dev_runtime_policy,
+    };
+
+    let root = tempfile::tempdir().expect("tempdir");
+    let input = RebornRuntimeInput::from_services(
+        RebornBuildInput::local_dev("tg-serve-owner", root.path().join("local-dev"))
+            .with_runtime_policy(local_dev_runtime_policy().expect("local policy")),
+    )
+    .with_identity(RebornRuntimeIdentity {
+        tenant_id: TENANT.to_string(),
+        agent_id: "tg-serve-agent".to_string(),
+        source_binding_id: "tg-serve-source".to_string(),
+        reply_target_binding_id: "tg-serve-reply".to_string(),
+    });
+    let runtime = build_reborn_runtime(input).await.expect("runtime builds");
+    let mounts = build_telegram_host_runtime_mounts(
+        &runtime,
+        TelegramHostRuntimeConfig::new(
+            TenantId::new(TENANT).expect("tenant"),
+            AgentId::new("tg-serve-agent").expect("agent"),
+            None,
+            UserId::new("tg-serve-operator").expect("operator"),
+            Some("https://tg-serve.example".to_string()),
+        ),
+    )
+    .await
+    .expect("telegram mounts build");
+    let bundle = build_webui_services_with_telegram_host_mounts(&runtime, None, Some(&mounts))
+        .expect("webui bundle");
+    let config = WebuiServeConfig::new(
+        TenantId::new(TENANT).expect("tenant"),
+        Arc::new(OnlyValidToken),
+        vec![],
+    )
+    .with_public_route_mount(mounts.events);
+    let app = webui_v2_app(bundle, config).expect("webui v2 app");
+
+    // S4: one byte past the manifest-declared 1 MiB limit → 413 from the
+    // descriptor-driven middleware, before verification (no secret header
+    // supplied — an in-budget request without it 401s below).
+    let oversized = vec![b'x'; 1024 * 1024 + 1];
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/webhooks/extensions/telegram/updates")
+                .header("content-type", "application/json")
+                .body(Body::from(oversized))
+                .expect("request"),
+        )
+        .await
+        .expect("oneshot");
+    assert_eq!(
+        response.status(),
+        StatusCode::PAYLOAD_TOO_LARGE,
+        "oversized webhook bodies are refused before parse/verify"
+    );
+
+    // Control: the same route with an in-budget body reaches the verifier and
+    // fails closed on the missing secret header — proving the 413 above came
+    // from the body limit, not some upstream rejection of the route itself.
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/webhooks/extensions/telegram/updates")
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"update_id":1}"#))
+                .expect("request"),
+        )
+        .await
+        .expect("oneshot");
+    assert_eq!(
+        response.status(),
+        StatusCode::UNAUTHORIZED,
+        "in-budget unverified requests reach the fail-closed verifier"
+    );
+
+    // S6: a path probe under the webhook prefix has no route — the axum
+    // router 404s it before any installation resolver or store could run.
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/webhooks/extensions/telegram/bogus")
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"update_id":1}"#))
+                .expect("request"),
+        )
+        .await
+        .expect("oneshot");
+    assert_eq!(
+        response.status(),
+        StatusCode::NOT_FOUND,
+        "unmounted webhook paths 404 at the router, never reaching resolution"
+    );
+
+    runtime.shutdown().await.expect("runtime shuts down");
+}

@@ -18,8 +18,6 @@
 use chrono::{DateTime, Utc};
 use ironclaw_host_api::{ResourceScope, UserId};
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
-use std::sync::Mutex;
 
 use crate::{ResourceApprovalNeeded, ResourceLimits};
 
@@ -194,12 +192,14 @@ impl crate::cas_snapshot::StorageError for BudgetGateError {
 ///
 /// Every operation takes the caller's [`ResourceScope`] so a single
 /// shared store instance can naturally route work to the right tenant
-/// path under a multi-tenant deployment. The current
-/// [`InMemoryBudgetGateStore`] is single-snapshot and ignores scope
-/// (suitable for tests / single-tenant local-dev), while the
-/// filesystem-backed store uses the scope to write under the correct
-/// tenant's mount view (review feedback Thermo-Nuclear #2: scope at the
-/// store-operation boundary, not at construction).
+/// path under a multi-tenant deployment. The sole implementation,
+/// [`FilesystemBudgetGateStore`](crate::FilesystemBudgetGateStore), uses
+/// that scope to write under the correct tenant's mount view (review
+/// feedback Thermo-Nuclear #2: scope at the store-operation boundary, not
+/// at construction). Over an [`InMemoryBackend`](ironclaw_filesystem::InMemoryBackend)
+/// it is the volatile store tests and local-dev composition use — the
+/// hand-written `InMemoryBudgetGateStore` was deleted in favor of this one
+/// production store per arch-simplification §4.3.
 pub trait BudgetGateStore: Send + Sync + std::fmt::Debug {
     fn open(&self, scope: &ResourceScope, gate: BudgetApprovalGate) -> Result<(), BudgetGateError>;
     fn resolve(
@@ -223,101 +223,6 @@ pub trait BudgetGateStore: Send + Sync + std::fmt::Debug {
         &self,
         scope: &ResourceScope,
     ) -> Result<Vec<BudgetApprovalGate>, BudgetGateError>;
-}
-
-/// In-memory store used by tests and the local-dev runtime. Production
-/// composition can swap in a filesystem-backed store mirroring the
-/// resource-governor snapshot shape (deferred to a follow-up).
-#[derive(Debug, Default)]
-pub struct InMemoryBudgetGateStore {
-    gates: Mutex<HashMap<BudgetGateId, BudgetApprovalGate>>,
-}
-
-impl InMemoryBudgetGateStore {
-    pub fn new() -> Self {
-        Self::default()
-    }
-
-    fn lock(&self) -> std::sync::MutexGuard<'_, HashMap<BudgetGateId, BudgetApprovalGate>> {
-        self.gates
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-    }
-}
-
-impl BudgetGateStore for InMemoryBudgetGateStore {
-    fn open(
-        &self,
-        _scope: &ResourceScope,
-        gate: BudgetApprovalGate,
-    ) -> Result<(), BudgetGateError> {
-        let mut guard = self.lock();
-        guard.insert(gate.id, gate);
-        Ok(())
-    }
-
-    fn resolve(
-        &self,
-        _scope: &ResourceScope,
-        id: BudgetGateId,
-        outcome: BudgetGateOutcome,
-        at: DateTime<Utc>,
-    ) -> Result<BudgetApprovalGate, BudgetGateError> {
-        let mut guard = self.lock();
-        let gate = guard.get_mut(&id).ok_or(BudgetGateError::Unknown { id })?;
-        if gate.status.is_terminal() {
-            return Err(BudgetGateError::AlreadyResolved { id });
-        }
-        gate.status = match outcome {
-            BudgetGateOutcome::Approve {
-                increased_limit,
-                by,
-            } => BudgetGateStatus::Approved {
-                increased_limit,
-                by,
-                at,
-            },
-            BudgetGateOutcome::Cancel { by } => BudgetGateStatus::Cancelled { by, at },
-        };
-        Ok(gate.clone())
-    }
-
-    fn expire_pending_older_than(
-        &self,
-        _scope: &ResourceScope,
-        cutoff: DateTime<Utc>,
-    ) -> Result<Vec<BudgetApprovalGate>, BudgetGateError> {
-        let mut guard = self.lock();
-        let mut expired = Vec::new();
-        for gate in guard.values_mut() {
-            if matches!(gate.status, BudgetGateStatus::Pending) && gate.expires_at <= cutoff {
-                gate.status = BudgetGateStatus::Expired { at: cutoff };
-                expired.push(gate.clone());
-            }
-        }
-        Ok(expired)
-    }
-
-    fn get(
-        &self,
-        _scope: &ResourceScope,
-        id: BudgetGateId,
-    ) -> Result<Option<BudgetApprovalGate>, BudgetGateError> {
-        let guard = self.lock();
-        Ok(guard.get(&id).cloned())
-    }
-
-    fn list_pending(
-        &self,
-        _scope: &ResourceScope,
-    ) -> Result<Vec<BudgetApprovalGate>, BudgetGateError> {
-        let guard = self.lock();
-        Ok(guard
-            .values()
-            .filter(|g| matches!(g.status, BudgetGateStatus::Pending))
-            .cloned()
-            .collect())
-    }
 }
 
 #[cfg(test)]
@@ -352,7 +257,7 @@ mod tests {
 
     #[test]
     fn open_then_get_returns_pending_gate() {
-        let store = InMemoryBudgetGateStore::new();
+        let store = crate::test_support::in_memory_backed_budget_gate_store();
         let scope = ResourceScope::system();
         let gate = sample_gate();
         let id = gate.id;
@@ -364,7 +269,7 @@ mod tests {
 
     #[test]
     fn approve_resolves_gate_with_increased_limit() {
-        let store = InMemoryBudgetGateStore::new();
+        let store = crate::test_support::in_memory_backed_budget_gate_store();
         let scope = ResourceScope::system();
         let gate = sample_gate();
         let id = gate.id;
@@ -512,7 +417,7 @@ mod tests {
 
     #[test]
     fn cancel_resolves_gate_as_cancelled() {
-        let store = InMemoryBudgetGateStore::new();
+        let store = crate::test_support::in_memory_backed_budget_gate_store();
         let scope = ResourceScope::system();
         let gate = sample_gate();
         let id = gate.id;
@@ -534,7 +439,7 @@ mod tests {
 
     #[test]
     fn second_resolve_fails_already_resolved() {
-        let store = InMemoryBudgetGateStore::new();
+        let store = crate::test_support::in_memory_backed_budget_gate_store();
         let scope = ResourceScope::system();
         let gate = sample_gate();
         let id = gate.id;
@@ -561,7 +466,7 @@ mod tests {
 
     #[test]
     fn resolve_unknown_gate_fails_with_unknown() {
-        let store = InMemoryBudgetGateStore::new();
+        let store = crate::test_support::in_memory_backed_budget_gate_store();
         let scope = ResourceScope::system();
         let user = UserId::new("alice").unwrap();
         let unknown_id = BudgetGateId::new();
@@ -578,7 +483,7 @@ mod tests {
 
     #[test]
     fn expire_pending_older_than_marks_stale_gates_expired() {
-        let store = InMemoryBudgetGateStore::new();
+        let store = crate::test_support::in_memory_backed_budget_gate_store();
         let scope = ResourceScope::system();
         let mut gate = sample_gate();
         gate.expires_at = Utc::now() - chrono::Duration::hours(1);
@@ -592,7 +497,7 @@ mod tests {
 
     #[test]
     fn list_pending_excludes_resolved_gates() {
-        let store = InMemoryBudgetGateStore::new();
+        let store = crate::test_support::in_memory_backed_budget_gate_store();
         let scope = ResourceScope::system();
         let pending = sample_gate();
         let resolved = sample_gate();

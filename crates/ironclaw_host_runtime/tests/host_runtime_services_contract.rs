@@ -30,9 +30,9 @@ use ironclaw_events::{
     InMemoryEventSink, ReadScope, RuntimeEventKind,
 };
 use ironclaw_extensions::ExtensionRegistry;
+use ironclaw_filesystem::DiskFilesystem;
 #[cfg(feature = "libsql")]
 use ironclaw_filesystem::LibSqlRootFilesystem;
-use ironclaw_filesystem::LocalFilesystem;
 #[cfg(feature = "libsql")]
 use ironclaw_filesystem::RootFilesystem;
 use ironclaw_host_api::*;
@@ -123,7 +123,7 @@ async fn assert_alice_run_status(
 async fn production_wiring_validation_rejects_missing_components_and_local_only_defaults() {
     let services = HostRuntimeServices::new(
         Arc::new(registry_with_manifest(SCRIPT_MANIFEST)),
-        Arc::new(LocalFilesystem::new()),
+        Arc::new(DiskFilesystem::new()),
         Arc::new(InMemoryResourceGovernor::new()),
         Arc::new(GrantAuthorizer::new()),
         ironclaw_processes::in_memory_backed_process_services(),
@@ -246,7 +246,7 @@ async fn production_wiring_validation_rejects_missing_components_and_local_only_
 async fn production_wiring_validation_rejects_local_only_runtime_policy() {
     let services = HostRuntimeServices::new(
         Arc::new(registry_with_manifest(SCRIPT_MANIFEST)),
-        Arc::new(LocalFilesystem::new()),
+        Arc::new(DiskFilesystem::new()),
         Arc::new(InMemoryResourceGovernor::new()),
         Arc::new(GrantAuthorizer::new()),
         ironclaw_processes::in_memory_backed_process_services(),
@@ -298,7 +298,7 @@ async fn production_wiring_validation_rejects_each_local_only_runtime_policy_fie
 async fn production_wiring_validation_accepts_production_safe_runtime_policy_shape() {
     let services = HostRuntimeServices::new(
         Arc::new(registry_with_manifest(SCRIPT_MANIFEST)),
-        Arc::new(LocalFilesystem::new()),
+        Arc::new(DiskFilesystem::new()),
         Arc::new(InMemoryResourceGovernor::new()),
         Arc::new(GrantAuthorizer::new()),
         ironclaw_processes::in_memory_backed_process_services(),
@@ -327,7 +327,7 @@ async fn production_wiring_validation_accepts_persistent_resource_governor_compo
     ));
     let services = HostRuntimeServices::new(
         Arc::new(registry_with_manifest(SCRIPT_MANIFEST)),
-        Arc::new(LocalFilesystem::new()),
+        Arc::new(DiskFilesystem::new()),
         governor,
         Arc::new(GrantAuthorizer::new()),
         ironclaw_processes::in_memory_backed_process_services(),
@@ -370,7 +370,7 @@ async fn with_filesystem_resource_governor_persists_reservations_across_handles(
 
     let services = HostRuntimeServices::new(
         Arc::new(registry_with_manifest(SCRIPT_MANIFEST)),
-        Arc::new(LocalFilesystem::new()),
+        Arc::new(DiskFilesystem::new()),
         Arc::new(InMemoryResourceGovernor::new()),
         Arc::new(GrantAuthorizer::new()),
         ironclaw_processes::in_memory_backed_process_services(),
@@ -414,7 +414,7 @@ async fn with_filesystem_resource_governor_closes_process_reservations_on_cancel
 
     let services = HostRuntimeServices::new(
         Arc::new(registry_with_manifest(SCRIPT_MANIFEST)),
-        Arc::new(LocalFilesystem::new()),
+        Arc::new(DiskFilesystem::new()),
         Arc::new(InMemoryResourceGovernor::new()),
         Arc::new(GrantAuthorizer::new()),
         process_services,
@@ -469,7 +469,7 @@ async fn with_filesystem_resource_governor_closes_process_reservations_on_cancel
 async fn production_wiring_validation_classifies_combined_store_as_run_state_and_approvals() {
     let services = HostRuntimeServices::new(
         Arc::new(registry_with_manifest(SCRIPT_MANIFEST)),
-        Arc::new(LocalFilesystem::new()),
+        Arc::new(DiskFilesystem::new()),
         Arc::new(InMemoryResourceGovernor::new()),
         Arc::new(GrantAuthorizer::new()),
         ironclaw_processes::in_memory_backed_process_services(),
@@ -527,7 +527,7 @@ async fn production_wiring_validation_classifies_in_memory_backed_lease_store_as
     // classifier helper.
     let services = HostRuntimeServices::new(
         Arc::new(registry_with_manifest(SCRIPT_MANIFEST)),
-        Arc::new(LocalFilesystem::new()),
+        Arc::new(DiskFilesystem::new()),
         Arc::new(InMemoryResourceGovernor::new()),
         Arc::new(GrantAuthorizer::new()),
         ironclaw_processes::in_memory_backed_process_services(),
@@ -571,7 +571,7 @@ async fn production_wiring_validation_classifies_in_memory_backed_run_state_and_
     // helper (the combined-store path hard-codes `LocalOnly` and bypasses it).
     let services = HostRuntimeServices::new(
         Arc::new(registry_with_manifest(SCRIPT_MANIFEST)),
-        Arc::new(LocalFilesystem::new()),
+        Arc::new(DiskFilesystem::new()),
         Arc::new(InMemoryResourceGovernor::new()),
         Arc::new(GrantAuthorizer::new()),
         ironclaw_processes::in_memory_backed_process_services(),
@@ -612,7 +612,7 @@ async fn production_wiring_validation_classifies_in_memory_backed_run_state_and_
 async fn production_wiring_validation_rejects_unsupported_runtime_requirements() {
     let services = HostRuntimeServices::new(
         Arc::new(registry_with_manifest(SCRIPT_MANIFEST)),
-        Arc::new(LocalFilesystem::new()),
+        Arc::new(DiskFilesystem::new()),
         Arc::new(InMemoryResourceGovernor::new()),
         Arc::new(GrantAuthorizer::new()),
         ironclaw_processes::in_memory_backed_process_services(),
@@ -647,7 +647,7 @@ async fn production_wiring_validation_rejects_unsupported_runtime_requirements()
 //
 // The equivalent guardrail surface for the filesystem-backed wiring is
 // exercised by `tests/reborn_durable_restart_integration.rs` (services
-// graph restart over `LocalFilesystem`) and the `ironclaw_run_state`
+// graph restart over `DiskFilesystem`) and the `ironclaw_run_state`
 // contract suite.
 
 #[cfg(feature = "libsql")]
@@ -661,7 +661,7 @@ async fn production_root_filesystem_selection_accepts_libsql_root_filesystem() {
 
     let services = HostRuntimeServices::new(
         Arc::new(registry_with_manifest(SCRIPT_MANIFEST)),
-        Arc::new(LocalFilesystem::new()),
+        Arc::new(DiskFilesystem::new()),
         Arc::new(InMemoryResourceGovernor::new()),
         Arc::new(GrantAuthorizer::new()),
         ironclaw_processes::in_memory_backed_process_services(),
@@ -695,7 +695,7 @@ async fn production_turn_state_selection_accepts_filesystem_turn_state_store() {
 
     let services = HostRuntimeServices::new(
         Arc::new(registry_with_manifest(SCRIPT_MANIFEST)),
-        Arc::new(LocalFilesystem::new()),
+        Arc::new(DiskFilesystem::new()),
         Arc::new(InMemoryResourceGovernor::new()),
         Arc::new(GrantAuthorizer::new()),
         ironclaw_processes::in_memory_backed_process_services(),
@@ -733,7 +733,7 @@ async fn production_turn_coordinator_uses_configured_store_and_notifier() {
 
     let services = HostRuntimeServices::new(
         Arc::new(registry_with_manifest(SCRIPT_MANIFEST)),
-        Arc::new(LocalFilesystem::new()),
+        Arc::new(DiskFilesystem::new()),
         Arc::new(InMemoryResourceGovernor::new()),
         Arc::new(GrantAuthorizer::new()),
         ironclaw_processes::in_memory_backed_process_services(),
@@ -773,7 +773,7 @@ async fn production_turn_coordinator_requires_explicit_run_profile_resolver() {
 
     let services = HostRuntimeServices::new(
         Arc::new(registry_with_manifest(SCRIPT_MANIFEST)),
-        Arc::new(LocalFilesystem::new()),
+        Arc::new(DiskFilesystem::new()),
         Arc::new(InMemoryResourceGovernor::new()),
         Arc::new(GrantAuthorizer::new()),
         ironclaw_processes::in_memory_backed_process_services(),
@@ -796,7 +796,7 @@ async fn production_turn_coordinator_requires_explicit_run_profile_resolver() {
 async fn production_wiring_validation_rejects_noop_turn_wake_notifier() {
     let services = HostRuntimeServices::new(
         Arc::new(registry_with_manifest(SCRIPT_MANIFEST)),
-        Arc::new(LocalFilesystem::new()),
+        Arc::new(DiskFilesystem::new()),
         Arc::new(InMemoryResourceGovernor::new()),
         Arc::new(GrantAuthorizer::new()),
         ironclaw_processes::in_memory_backed_process_services(),
@@ -820,7 +820,7 @@ async fn production_wiring_validation_rejects_noop_turn_wake_notifier() {
 async fn production_wiring_validation_accepts_configured_turn_wake_notifier() {
     let services = HostRuntimeServices::new(
         Arc::new(registry_with_manifest(SCRIPT_MANIFEST)),
-        Arc::new(LocalFilesystem::new()),
+        Arc::new(DiskFilesystem::new()),
         Arc::new(InMemoryResourceGovernor::new()),
         Arc::new(GrantAuthorizer::new()),
         ironclaw_processes::in_memory_backed_process_services(),
@@ -852,7 +852,7 @@ async fn production_event_store_config_rejects_jsonl_without_single_node_accepta
     let temp = tempfile::tempdir().unwrap();
     let services = HostRuntimeServices::new(
         Arc::new(registry_with_manifest(SCRIPT_MANIFEST)),
-        Arc::new(LocalFilesystem::new()),
+        Arc::new(DiskFilesystem::new()),
         Arc::new(InMemoryResourceGovernor::new()),
         Arc::new(GrantAuthorizer::new()),
         ironclaw_processes::in_memory_backed_process_services(),
@@ -880,7 +880,7 @@ async fn local_reborn_event_store_config_does_not_satisfy_production_wiring() {
     let temp = tempfile::tempdir().unwrap();
     let services = HostRuntimeServices::new(
         Arc::new(registry_with_manifest(SCRIPT_MANIFEST)),
-        Arc::new(LocalFilesystem::new()),
+        Arc::new(DiskFilesystem::new()),
         Arc::new(InMemoryResourceGovernor::new()),
         Arc::new(GrantAuthorizer::new()),
         ironclaw_processes::in_memory_backed_process_services(),
@@ -921,7 +921,7 @@ async fn production_event_store_config_installs_verified_event_and_audit_sinks()
     let temp = tempfile::tempdir().unwrap();
     let services = HostRuntimeServices::new(
         Arc::new(registry_with_manifest(SCRIPT_MANIFEST)),
-        Arc::new(LocalFilesystem::new()),
+        Arc::new(DiskFilesystem::new()),
         Arc::new(InMemoryResourceGovernor::new()),
         Arc::new(GrantAuthorizer::new()),
         ironclaw_processes::in_memory_backed_process_services(),
@@ -975,7 +975,7 @@ async fn production_event_store_config_installs_verified_event_and_audit_sinks()
 async fn production_wiring_validation_uses_configured_runtime_requirements() {
     let services = HostRuntimeServices::new(
         Arc::new(registry_with_manifest(SCRIPT_MANIFEST)),
-        Arc::new(LocalFilesystem::new()),
+        Arc::new(DiskFilesystem::new()),
         Arc::new(InMemoryResourceGovernor::new()),
         Arc::new(GrantAuthorizer::new()),
         ironclaw_processes::in_memory_backed_process_services(),
@@ -1023,7 +1023,7 @@ async fn production_wiring_validation_uses_configured_runtime_requirements() {
 async fn production_wiring_validation_sees_underlying_in_memory_durable_logs() {
     let services = HostRuntimeServices::new(
         Arc::new(registry_with_manifest(SCRIPT_MANIFEST)),
-        Arc::new(LocalFilesystem::new()),
+        Arc::new(DiskFilesystem::new()),
         Arc::new(InMemoryResourceGovernor::new()),
         Arc::new(GrantAuthorizer::new()),
         ironclaw_processes::in_memory_backed_process_services(),
@@ -1058,7 +1058,7 @@ async fn production_wiring_validation_rejects_direct_durable_sink_wrappers_as_un
     let audit_log: Arc<dyn DurableAuditLog> = Arc::new(InMemoryDurableAuditLog::new());
     let services = HostRuntimeServices::new(
         Arc::new(registry_with_manifest(SCRIPT_MANIFEST)),
-        Arc::new(LocalFilesystem::new()),
+        Arc::new(DiskFilesystem::new()),
         Arc::new(InMemoryResourceGovernor::new()),
         Arc::new(GrantAuthorizer::new()),
         ironclaw_processes::in_memory_backed_process_services(),
@@ -1091,7 +1091,7 @@ async fn production_wiring_validation_rejects_direct_durable_sink_wrappers_as_un
 async fn production_wiring_validation_accepts_verified_host_http_egress_shape() {
     let services = HostRuntimeServices::new(
         Arc::new(registry_with_manifest(SCRIPT_MANIFEST)),
-        Arc::new(LocalFilesystem::new()),
+        Arc::new(DiskFilesystem::new()),
         Arc::new(InMemoryResourceGovernor::new()),
         Arc::new(GrantAuthorizer::new()),
         ironclaw_processes::in_memory_backed_process_services(),
@@ -1118,7 +1118,7 @@ async fn production_wiring_validation_accepts_verified_host_http_egress_shape() 
 async fn host_http_egress_helper_requires_graph_secret_store() {
     let services = HostRuntimeServices::new(
         Arc::new(registry_with_manifest(SCRIPT_MANIFEST)),
-        Arc::new(LocalFilesystem::new()),
+        Arc::new(DiskFilesystem::new()),
         Arc::new(InMemoryResourceGovernor::new()),
         Arc::new(GrantAuthorizer::new()),
         ironclaw_processes::in_memory_backed_process_services(),
@@ -1140,7 +1140,7 @@ async fn host_http_egress_helper_requires_graph_secret_store() {
 async fn production_wiring_validation_requires_credential_broker_when_configured() {
     let services = HostRuntimeServices::new(
         Arc::new(registry_with_manifest(SCRIPT_MANIFEST)),
-        Arc::new(LocalFilesystem::new()),
+        Arc::new(DiskFilesystem::new()),
         Arc::new(InMemoryResourceGovernor::new()),
         Arc::new(GrantAuthorizer::new()),
         ironclaw_processes::in_memory_backed_process_services(),
@@ -1172,7 +1172,7 @@ async fn production_wiring_validation_rejects_local_only_credential_broker() {
     let broker = Arc::new(InMemoryCredentialBroker::new());
     let services = HostRuntimeServices::new(
         Arc::new(registry_with_manifest(SCRIPT_MANIFEST)),
-        Arc::new(LocalFilesystem::new()),
+        Arc::new(DiskFilesystem::new()),
         Arc::new(InMemoryResourceGovernor::new()),
         Arc::new(GrantAuthorizer::new()),
         ironclaw_processes::in_memory_backed_process_services(),
@@ -1204,7 +1204,7 @@ async fn production_wiring_validation_rejects_local_only_credential_broker() {
 async fn production_wiring_validation_rejects_unverified_runtime_http_egress() {
     let services = HostRuntimeServices::new(
         Arc::new(registry_with_manifest(SCRIPT_MANIFEST)),
-        Arc::new(LocalFilesystem::new()),
+        Arc::new(DiskFilesystem::new()),
         Arc::new(InMemoryResourceGovernor::new()),
         Arc::new(GrantAuthorizer::new()),
         ironclaw_processes::in_memory_backed_process_services(),
@@ -1231,7 +1231,7 @@ async fn production_wiring_validation_rejects_unverified_runtime_http_egress() {
 async fn production_wiring_validation_tracks_process_port_for_builtin_shell() {
     let services = HostRuntimeServices::new(
         Arc::new(registry_with_builtin_first_party_package()),
-        Arc::new(LocalFilesystem::new()),
+        Arc::new(DiskFilesystem::new()),
         Arc::new(InMemoryResourceGovernor::new()),
         Arc::new(GrantAuthorizer::new()),
         ironclaw_processes::in_memory_backed_process_services(),
@@ -1255,7 +1255,7 @@ async fn production_wiring_validation_tracks_process_port_for_builtin_shell() {
 
     let services = HostRuntimeServices::new(
         Arc::new(registry_with_builtin_first_party_package()),
-        Arc::new(LocalFilesystem::new()),
+        Arc::new(DiskFilesystem::new()),
         Arc::new(InMemoryResourceGovernor::new()),
         Arc::new(GrantAuthorizer::new()),
         ironclaw_processes::in_memory_backed_process_services(),
@@ -1283,7 +1283,7 @@ async fn production_wiring_validation_tracks_process_port_for_builtin_shell() {
 async fn production_wiring_validation_tracks_tenant_sandbox_process_port_for_builtin_shell() {
     let services = HostRuntimeServices::new(
         Arc::new(registry_with_builtin_first_party_package()),
-        Arc::new(LocalFilesystem::new()),
+        Arc::new(DiskFilesystem::new()),
         Arc::new(InMemoryResourceGovernor::new()),
         Arc::new(GrantAuthorizer::new()),
         ironclaw_processes::in_memory_backed_process_services(),
@@ -1308,7 +1308,7 @@ async fn production_wiring_validation_tracks_tenant_sandbox_process_port_for_bui
 
     let services = HostRuntimeServices::new(
         Arc::new(registry_with_builtin_first_party_package()),
-        Arc::new(LocalFilesystem::new()),
+        Arc::new(DiskFilesystem::new()),
         Arc::new(InMemoryResourceGovernor::new()),
         Arc::new(GrantAuthorizer::new()),
         ironclaw_processes::in_memory_backed_process_services(),
@@ -1341,7 +1341,7 @@ async fn production_wiring_validation_tracks_tenant_sandbox_process_port_for_bui
 
     let services = HostRuntimeServices::new(
         Arc::new(registry_with_builtin_first_party_package()),
-        Arc::new(LocalFilesystem::new()),
+        Arc::new(DiskFilesystem::new()),
         Arc::new(InMemoryResourceGovernor::new()),
         Arc::new(GrantAuthorizer::new()),
         ironclaw_processes::in_memory_backed_process_services(),
@@ -1375,7 +1375,7 @@ async fn production_wiring_validation_tracks_tenant_sandbox_process_port_for_bui
 async fn production_wiring_validation_rejects_empty_verified_wasm_credentials() {
     let services = HostRuntimeServices::new(
         Arc::new(registry_with_manifest(WASM_HTTP_SUCCESS_MANIFEST)),
-        Arc::new(LocalFilesystem::new()),
+        Arc::new(DiskFilesystem::new()),
         Arc::new(InMemoryResourceGovernor::new()),
         Arc::new(GrantAuthorizer::new()),
         ironclaw_processes::in_memory_backed_process_services(),
@@ -1404,7 +1404,7 @@ async fn production_wiring_validation_rejects_empty_verified_wasm_credentials() 
 async fn production_wiring_validation_rejects_wasm_credentials_added_after_adapter() {
     let services = HostRuntimeServices::new(
         Arc::new(registry_with_manifest(WASM_HTTP_SUCCESS_MANIFEST)),
-        Arc::new(LocalFilesystem::new()),
+        Arc::new(DiskFilesystem::new()),
         Arc::new(InMemoryResourceGovernor::new()),
         Arc::new(GrantAuthorizer::new()),
         ironclaw_processes::in_memory_backed_process_services(),
@@ -1435,7 +1435,7 @@ async fn production_wiring_validation_rejects_wasm_credentials_added_after_adapt
 async fn production_wiring_validation_rejects_wasm_credentials_replaced_after_adapter() {
     let services = HostRuntimeServices::new(
         Arc::new(registry_with_manifest(WASM_HTTP_SUCCESS_MANIFEST)),
-        Arc::new(LocalFilesystem::new()),
+        Arc::new(DiskFilesystem::new()),
         Arc::new(InMemoryResourceGovernor::new()),
         Arc::new(GrantAuthorizer::new()),
         ironclaw_processes::in_memory_backed_process_services(),
@@ -1466,7 +1466,7 @@ async fn production_wiring_validation_rejects_wasm_credentials_replaced_after_ad
 #[tokio::test]
 async fn host_runtime_services_builds_dispatcher_runtime_and_health_from_registered_adapters() {
     let registry = Arc::new(registry_with_manifest(SCRIPT_MANIFEST));
-    let filesystem = Arc::new(LocalFilesystem::new());
+    let filesystem = Arc::new(DiskFilesystem::new());
     let governor = Arc::new(InMemoryResourceGovernor::new());
     let authorizer: Arc<dyn TrustAwareCapabilityDispatchAuthorizer> =
         Arc::new(GrantAuthorizer::new());
@@ -1542,7 +1542,7 @@ async fn host_runtime_services_builds_dispatcher_runtime_and_health_from_registe
 async fn host_runtime_services_wires_combined_store_for_atomic_approval_block() {
     let services = HostRuntimeServices::new(
         Arc::new(registry_with_manifest(SCRIPT_MANIFEST)),
-        Arc::new(LocalFilesystem::new()),
+        Arc::new(DiskFilesystem::new()),
         Arc::new(InMemoryResourceGovernor::new()),
         Arc::new(ApprovalThenGrantAuthorizer),
         ironclaw_processes::in_memory_backed_process_services(),
@@ -1568,7 +1568,7 @@ async fn host_runtime_services_preserves_combined_store_after_root_filesystem_se
     filesystem.run_migrations().await.unwrap();
     let services = HostRuntimeServices::new(
         Arc::new(registry_with_manifest(SCRIPT_MANIFEST)),
-        Arc::new(LocalFilesystem::new()),
+        Arc::new(DiskFilesystem::new()),
         Arc::new(InMemoryResourceGovernor::new()),
         Arc::new(ApprovalThenGrantAuthorizer),
         ironclaw_processes::in_memory_backed_process_services(),
@@ -1586,7 +1586,7 @@ async fn host_runtime_services_preserves_combined_store_after_root_filesystem_se
 #[tokio::test]
 async fn host_runtime_services_writes_runtime_events_to_durable_event_log_metadata_only() {
     let registry = Arc::new(registry_with_manifest(SCRIPT_MANIFEST));
-    let filesystem = Arc::new(LocalFilesystem::new());
+    let filesystem = Arc::new(DiskFilesystem::new());
     let governor = Arc::new(InMemoryResourceGovernor::new());
     let authorizer: Arc<dyn TrustAwareCapabilityDispatchAuthorizer> =
         Arc::new(GrantAuthorizer::new());
@@ -1699,7 +1699,7 @@ async fn host_runtime_services_consumes_reborn_jsonl_event_store_without_v1_comp
 
     let services = HostRuntimeServices::new(
         Arc::new(registry_with_manifest(SCRIPT_MANIFEST)),
-        Arc::new(LocalFilesystem::new()),
+        Arc::new(DiskFilesystem::new()),
         Arc::new(InMemoryResourceGovernor::new()),
         Arc::new(GrantAuthorizer::new()),
         ironclaw_processes::in_memory_backed_process_services(),
@@ -1765,7 +1765,7 @@ async fn host_runtime_services_durable_event_replay_cursor_and_gap_behavior() {
     ));
     let services = HostRuntimeServices::new(
         registry,
-        Arc::new(LocalFilesystem::new()),
+        Arc::new(DiskFilesystem::new()),
         Arc::new(InMemoryResourceGovernor::new()),
         Arc::new(GrantAuthorizer::new()),
         ironclaw_processes::in_memory_backed_process_services(),
@@ -1852,7 +1852,7 @@ async fn host_runtime_services_runtime_events_project_through_replay_projection_
     let event_log = Arc::new(InMemoryDurableEventLog::new());
     let services = HostRuntimeServices::new(
         registry,
-        Arc::new(LocalFilesystem::new()),
+        Arc::new(DiskFilesystem::new()),
         Arc::new(InMemoryResourceGovernor::new()),
         Arc::new(GrantAuthorizer::new()),
         ironclaw_processes::in_memory_backed_process_services(),
@@ -1940,7 +1940,7 @@ async fn host_runtime_services_projection_rejects_foreign_cursor_and_surfaces_re
     let event_log = Arc::new(InMemoryDurableEventLog::new());
     let services = HostRuntimeServices::new(
         Arc::new(registry_with_manifest(SCRIPT_MANIFEST)),
-        Arc::new(LocalFilesystem::new()),
+        Arc::new(DiskFilesystem::new()),
         Arc::new(InMemoryResourceGovernor::new()),
         Arc::new(GrantAuthorizer::new()),
         ironclaw_processes::in_memory_backed_process_services(),
@@ -2049,7 +2049,7 @@ async fn host_runtime_services_jsonl_event_store_projects_same_runtime_sequence_
     let event_log = Arc::clone(&stores.events);
     let services = HostRuntimeServices::new(
         Arc::new(registry_with_manifest(SCRIPT_MANIFEST)),
-        Arc::new(LocalFilesystem::new()),
+        Arc::new(DiskFilesystem::new()),
         Arc::new(InMemoryResourceGovernor::new()),
         Arc::new(GrantAuthorizer::new()),
         ironclaw_processes::in_memory_backed_process_services(),
@@ -2138,7 +2138,7 @@ async fn host_runtime_services_approval_resolution_projects_durable_audit_metada
     let audit_log = Arc::new(InMemoryDurableAuditLog::new());
     let services = HostRuntimeServices::new(
         Arc::new(registry_with_manifest(SCRIPT_MANIFEST)),
-        Arc::new(LocalFilesystem::new()),
+        Arc::new(DiskFilesystem::new()),
         Arc::new(InMemoryResourceGovernor::new()),
         Arc::new(SentinelApprovalAuthorizer),
         ironclaw_processes::in_memory_backed_process_services(),
@@ -2246,7 +2246,7 @@ async fn host_runtime_services_jsonl_approval_audit_projection_rejects_foreign_c
     let capability_leases = Arc::new(in_memory_backed_capability_lease_store());
     let services = HostRuntimeServices::new(
         Arc::new(registry_with_manifest(SCRIPT_MANIFEST)),
-        Arc::new(LocalFilesystem::new()),
+        Arc::new(DiskFilesystem::new()),
         Arc::new(InMemoryResourceGovernor::new()),
         Arc::new(SentinelApprovalAuthorizer),
         ironclaw_processes::in_memory_backed_process_services(),
@@ -2465,7 +2465,7 @@ async fn host_runtime_services_cancel_projects_kill_event_from_configured_event_
     let result_store = process_services.result_store();
     let runtime = HostRuntimeServices::new(
         Arc::new(registry_with_manifest(SCRIPT_MANIFEST)),
-        Arc::new(LocalFilesystem::new()),
+        Arc::new(DiskFilesystem::new()),
         Arc::new(InMemoryResourceGovernor::new()),
         Arc::new(GrantAuthorizer::new()),
         process_services,
@@ -2634,7 +2634,7 @@ async fn host_runtime_services_resume_missing_runtime_secret_returns_auth_gate()
     let script_runtime = Arc::new(RecordingScriptExecutor::default());
     let services = HostRuntimeServices::new(
         Arc::new(registry_with_manifest(SCRIPT_MANIFEST)),
-        Arc::new(LocalFilesystem::new()),
+        Arc::new(DiskFilesystem::new()),
         Arc::new(InMemoryResourceGovernor::new()),
         Arc::new(ApprovalThenSecretObligationAuthorizer {
             handle: secret_handle,
@@ -3177,7 +3177,7 @@ async fn host_runtime_services_resume_spawn_rejects_changed_actor_before_input_a
         Arc::new(registry_with_host_bundled_manifest(
             PROCESS_SANDBOX_MANIFEST,
         )),
-        Arc::new(LocalFilesystem::new()),
+        Arc::new(DiskFilesystem::new()),
         Arc::new(InMemoryResourceGovernor::new()),
         Arc::new(ApprovalThenGrantAuthorizer),
         process_services.clone(),
@@ -3216,7 +3216,7 @@ async fn host_runtime_services_resume_spawn_rejects_changed_actor_before_input_a
     let lease = approve_spawn_for_services(&services, &scope, approval_request_id, None).await;
     let broken_runtime = HostRuntimeServices::new(
         Arc::new(ExtensionRegistry::new()),
-        Arc::new(LocalFilesystem::new()),
+        Arc::new(DiskFilesystem::new()),
         Arc::new(InMemoryResourceGovernor::new()),
         Arc::new(ApprovalThenGrantAuthorizer),
         process_services,
@@ -3342,7 +3342,7 @@ async fn host_runtime_services_auth_resume_dispatches_blocked_auth_run() {
     let script_runtime = Arc::new(RecordingScriptExecutor::default());
     let services = HostRuntimeServices::new(
         Arc::new(registry_with_manifest(SCRIPT_MANIFEST)),
-        Arc::new(LocalFilesystem::new()),
+        Arc::new(DiskFilesystem::new()),
         Arc::new(InMemoryResourceGovernor::new()),
         Arc::new(ApprovalThenSecretObligationAuthorizer {
             handle: secret_handle.clone(),
@@ -3652,7 +3652,7 @@ async fn host_runtime_services_auth_resume_with_approval_id_fails_blocked_auth_r
 async fn host_runtime_services_resume_without_backing_stores_fails_closed() {
     let runtime = HostRuntimeServices::new(
         Arc::new(registry_with_manifest(SCRIPT_MANIFEST)),
-        Arc::new(LocalFilesystem::new()),
+        Arc::new(DiskFilesystem::new()),
         Arc::new(InMemoryResourceGovernor::new()),
         Arc::new(ApprovalThenGrantAuthorizer),
         ironclaw_processes::in_memory_backed_process_services(),
@@ -3695,7 +3695,7 @@ async fn host_runtime_services_registered_runtime_health_tracks_script_mcp_and_w
             MCP_MANIFEST,
             WASM_MANIFEST,
         ])),
-        Arc::new(LocalFilesystem::new()),
+        Arc::new(DiskFilesystem::new()),
         Arc::new(InMemoryResourceGovernor::new()),
         Arc::new(GrantAuthorizer::new()),
         ironclaw_processes::in_memory_backed_process_services(),
@@ -3717,7 +3717,7 @@ async fn host_runtime_services_registered_runtime_health_tracks_script_mcp_and_w
 async fn host_runtime_services_health_fails_closed_for_unregistered_required_runtime() {
     let runtime = HostRuntimeServices::new(
         Arc::new(registry_with_manifest(SCRIPT_MANIFEST)),
-        Arc::new(LocalFilesystem::new()),
+        Arc::new(DiskFilesystem::new()),
         Arc::new(InMemoryResourceGovernor::new()),
         Arc::new(GrantAuthorizer::new()),
         ironclaw_processes::in_memory_backed_process_services(),
@@ -3738,7 +3738,7 @@ async fn host_runtime_routes_system_process_sandbox_to_configured_executor() {
     let sandbox_executor = Arc::new(RecordingSandboxProcessExecutor::default());
     let runtime = HostRuntimeServices::new(
         Arc::new(registry_with_manifest(SCRIPT_MANIFEST)),
-        Arc::new(LocalFilesystem::new()),
+        Arc::new(DiskFilesystem::new()),
         Arc::new(InMemoryResourceGovernor::new()),
         Arc::new(GrantAuthorizer::new()),
         process_services,
@@ -3769,7 +3769,7 @@ async fn host_runtime_spawn_process_sandbox_routes_approved_request_to_configure
         Arc::new(registry_with_host_bundled_manifest(
             PROCESS_SANDBOX_MANIFEST,
         )),
-        Arc::new(LocalFilesystem::new()),
+        Arc::new(DiskFilesystem::new()),
         Arc::new(InMemoryResourceGovernor::new()),
         Arc::new(GrantAuthorizer::new()),
         process_services,
@@ -3806,7 +3806,7 @@ async fn host_runtime_spawn_process_sandbox_rejects_invalid_plan_before_executor
         Arc::new(registry_with_host_bundled_manifest(
             PROCESS_SANDBOX_MANIFEST,
         )),
-        Arc::new(LocalFilesystem::new()),
+        Arc::new(DiskFilesystem::new()),
         Arc::new(InMemoryResourceGovernor::new()),
         Arc::new(GrantAuthorizer::new()),
         ironclaw_processes::in_memory_backed_process_services(),
@@ -3861,7 +3861,7 @@ async fn host_runtime_spawn_process_sandbox_runtime_policy_denial_fails_before_e
         Arc::new(registry_with_host_bundled_manifest(
             PROCESS_SANDBOX_MANIFEST,
         )),
-        Arc::new(LocalFilesystem::new()),
+        Arc::new(DiskFilesystem::new()),
         Arc::new(InMemoryResourceGovernor::new()),
         Arc::new(GrantAuthorizer::new()),
         ironclaw_processes::in_memory_backed_process_services(),
@@ -3895,7 +3895,7 @@ async fn host_runtime_spawn_process_sandbox_host_failure_fails_after_preflight()
         Arc::new(registry_with_host_bundled_manifest(
             PROCESS_SANDBOX_MANIFEST,
         )),
-        Arc::new(LocalFilesystem::new()),
+        Arc::new(DiskFilesystem::new()),
         Arc::new(InMemoryResourceGovernor::new()),
         Arc::new(GrantAuthorizer::new()),
         ironclaw_processes::in_memory_backed_process_services(),
@@ -3934,7 +3934,7 @@ async fn host_runtime_spawn_process_sandbox_blocks_for_approval_before_executor(
         Arc::new(registry_with_host_bundled_manifest(
             PROCESS_SANDBOX_MANIFEST,
         )),
-        Arc::new(LocalFilesystem::new()),
+        Arc::new(DiskFilesystem::new()),
         Arc::new(InMemoryResourceGovernor::new()),
         Arc::new(ApprovalThenGrantAuthorizer),
         process_services,
@@ -4008,7 +4008,7 @@ async fn host_runtime_spawn_process_sandbox_resume_changed_input_fails_before_ex
         Arc::new(registry_with_host_bundled_manifest(
             PROCESS_SANDBOX_MANIFEST,
         )),
-        Arc::new(LocalFilesystem::new()),
+        Arc::new(DiskFilesystem::new()),
         Arc::new(InMemoryResourceGovernor::new()),
         Arc::new(ApprovalThenGrantAuthorizer),
         ironclaw_processes::in_memory_backed_process_services(),
@@ -4083,7 +4083,7 @@ async fn host_runtime_spawn_process_sandbox_resume_invalid_plan_fails_before_exe
         Arc::new(registry_with_host_bundled_manifest(
             PROCESS_SANDBOX_MANIFEST,
         )),
-        Arc::new(LocalFilesystem::new()),
+        Arc::new(DiskFilesystem::new()),
         Arc::new(InMemoryResourceGovernor::new()),
         Arc::new(ApprovalThenGrantAuthorizer),
         ironclaw_processes::in_memory_backed_process_services(),
@@ -4177,7 +4177,7 @@ async fn host_runtime_spawn_process_sandbox_resume_host_failure_fails_after_appr
         Arc::new(registry_with_host_bundled_manifest(
             PROCESS_SANDBOX_MANIFEST,
         )),
-        Arc::new(LocalFilesystem::new()),
+        Arc::new(DiskFilesystem::new()),
         Arc::new(InMemoryResourceGovernor::new()),
         Arc::new(ApprovalThenGrantAuthorizer),
         ironclaw_processes::in_memory_backed_process_services(),
@@ -4238,7 +4238,7 @@ async fn host_runtime_spawn_process_sandbox_resume_host_failure_fails_after_appr
 #[tokio::test]
 async fn host_runtime_services_installs_builtin_obligation_handler_with_audit_sink() {
     let registry = Arc::new(registry_with_manifest(SCRIPT_MANIFEST));
-    let filesystem = Arc::new(LocalFilesystem::new());
+    let filesystem = Arc::new(DiskFilesystem::new());
     let governor = Arc::new(InMemoryResourceGovernor::new());
     let audit = Arc::new(InMemoryAuditSink::new());
     let authorizer: Arc<dyn TrustAwareCapabilityDispatchAuthorizer> =
@@ -4293,7 +4293,7 @@ async fn host_runtime_services_maps_script_exit_failure_through_private_adapter(
     ));
     let services = HostRuntimeServices::new(
         Arc::new(registry_with_manifest(SCRIPT_MANIFEST)),
-        Arc::new(LocalFilesystem::new()),
+        Arc::new(DiskFilesystem::new()),
         Arc::new(InMemoryResourceGovernor::new()),
         Arc::new(ObligatingAuthorizer::new(Vec::new())),
         ironclaw_processes::in_memory_backed_process_services(),
@@ -4320,7 +4320,7 @@ async fn host_runtime_services_maps_script_exit_failure_through_private_adapter(
 async fn host_runtime_services_maps_mcp_client_failure_through_private_adapter() {
     let services = HostRuntimeServices::new(
         Arc::new(registry_with_manifest(MCP_MANIFEST)),
-        Arc::new(LocalFilesystem::new()),
+        Arc::new(DiskFilesystem::new()),
         Arc::new(InMemoryResourceGovernor::new()),
         Arc::new(ObligatingAuthorizer::new(Vec::new())),
         ironclaw_processes::in_memory_backed_process_services(),
@@ -4360,7 +4360,7 @@ async fn host_runtime_services_applies_scoped_mount_obligation_to_script_runtime
     let script_runtime = Arc::new(RecordingScriptExecutor::default());
     let services = HostRuntimeServices::new(
         Arc::new(registry_with_manifest(SCRIPT_MANIFEST)),
-        Arc::new(LocalFilesystem::new()),
+        Arc::new(DiskFilesystem::new()),
         Arc::new(InMemoryResourceGovernor::new()),
         Arc::new(ObligatingAuthorizer::new(vec![
             Obligation::UseScopedMounts {
@@ -4409,7 +4409,7 @@ async fn host_runtime_services_rejects_broader_scoped_mount_before_dispatch() {
     let script_runtime = Arc::new(RecordingScriptExecutor::default());
     let services = HostRuntimeServices::new(
         Arc::new(registry_with_manifest(SCRIPT_MANIFEST)),
-        Arc::new(LocalFilesystem::new()),
+        Arc::new(DiskFilesystem::new()),
         Arc::new(InMemoryResourceGovernor::new()),
         Arc::new(ObligatingAuthorizer::new(vec![
             Obligation::UseScopedMounts {
@@ -4451,7 +4451,7 @@ async fn host_runtime_services_rejects_broader_scoped_mount_before_dispatch() {
 #[tokio::test]
 async fn host_runtime_services_writes_obligation_audit_records_to_durable_log_metadata_only() {
     let registry = Arc::new(registry_with_manifest(SCRIPT_MANIFEST));
-    let filesystem = Arc::new(LocalFilesystem::new());
+    let filesystem = Arc::new(DiskFilesystem::new());
     let governor = Arc::new(InMemoryResourceGovernor::new());
     let audit_log = Arc::new(InMemoryDurableAuditLog::new());
     let authorizer: Arc<dyn TrustAwareCapabilityDispatchAuthorizer> =
@@ -4575,7 +4575,7 @@ async fn host_runtime_services_projects_resource_network_secret_obligation_audit
         ]));
     let services: InMemoryHostRuntimeServices = HostRuntimeServices::new(
         Arc::new(registry_with_manifest(SCRIPT_MANIFEST)),
-        Arc::new(LocalFilesystem::new()),
+        Arc::new(DiskFilesystem::new()),
         Arc::clone(&governor),
         authorizer,
         ironclaw_processes::in_memory_backed_process_services(),
@@ -4706,7 +4706,7 @@ async fn host_runtime_services_enforces_output_limit_and_reconciles_resource_usa
     ));
     let services = HostRuntimeServices::new(
         registry,
-        Arc::new(LocalFilesystem::new()),
+        Arc::new(DiskFilesystem::new()),
         Arc::clone(&governor),
         authorizer,
         ironclaw_processes::in_memory_backed_process_services(),
@@ -4765,7 +4765,7 @@ async fn host_runtime_services_releases_reservation_when_dispatch_preflight_fail
     let reservation_id = ResourceReservationId::new();
     let services = HostRuntimeServices::new(
         Arc::new(registry_with_manifest(SCRIPT_MANIFEST)),
-        Arc::new(LocalFilesystem::new()),
+        Arc::new(DiskFilesystem::new()),
         Arc::clone(&governor),
         Arc::new(ObligatingAuthorizer::new(vec![
             Obligation::ReserveResources { reservation_id },
@@ -4812,7 +4812,7 @@ async fn host_runtime_services_releases_reservation_when_dispatch_preflight_fail
 #[tokio::test]
 async fn host_runtime_services_fails_closed_when_durable_obligation_audit_append_fails() {
     let registry = Arc::new(registry_with_manifest(SCRIPT_MANIFEST));
-    let filesystem = Arc::new(LocalFilesystem::new());
+    let filesystem = Arc::new(DiskFilesystem::new());
     let governor = Arc::new(InMemoryResourceGovernor::new());
     let authorizer: Arc<dyn TrustAwareCapabilityDispatchAuthorizer> =
         Arc::new(ObligatingAuthorizer::new(vec![Obligation::AuditBefore]));
@@ -5315,7 +5315,7 @@ async fn host_runtime_services_cancel_and_status_share_process_result_and_cancel
     let registry = Arc::new(registry_with_manifest(SCRIPT_MANIFEST));
     let runtime = HostRuntimeServices::new(
         registry,
-        Arc::new(LocalFilesystem::new()),
+        Arc::new(DiskFilesystem::new()),
         Arc::new(InMemoryResourceGovernor::new()),
         Arc::new(GrantAuthorizer::new()),
         process_services,
@@ -5368,7 +5368,7 @@ async fn host_runtime_services_cancel_writes_killed_result_when_reservation_is_s
     let registry = Arc::new(registry_with_manifest(SCRIPT_MANIFEST));
     let runtime = HostRuntimeServices::new(
         registry,
-        Arc::new(LocalFilesystem::new()),
+        Arc::new(DiskFilesystem::new()),
         Arc::new(InMemoryResourceGovernor::new()),
         Arc::new(GrantAuthorizer::new()),
         process_services,
@@ -5414,7 +5414,7 @@ async fn host_runtime_services_cancel_records_kill_side_effects_when_cleanup_fai
     let registry = Arc::new(registry_with_manifest(SCRIPT_MANIFEST));
     let runtime = HostRuntimeServices::new(
         registry,
-        Arc::new(LocalFilesystem::new()),
+        Arc::new(DiskFilesystem::new()),
         Arc::new(FailingCleanupResourceGovernor),
         Arc::new(GrantAuthorizer::new()),
         process_services,
@@ -6097,7 +6097,7 @@ async fn invoke_capability_missing_credential_returns_auth_before_approval() {
     let script_runtime = Arc::new(RecordingScriptExecutor::default());
     let services = HostRuntimeServices::new(
         Arc::new(registry_with_manifest(SCRIPT_WITH_CREDENTIAL_MANIFEST)),
-        Arc::new(LocalFilesystem::new()),
+        Arc::new(DiskFilesystem::new()),
         Arc::new(InMemoryResourceGovernor::new()),
         Arc::new(ApprovalThenSecretObligationAuthorizer {
             handle: secret_handle,
@@ -6186,7 +6186,7 @@ async fn invoke_capability_present_credential_proceeds_to_approval() {
     let script_runtime = Arc::new(RecordingScriptExecutor::default());
     let services = HostRuntimeServices::new(
         Arc::new(registry_with_manifest(SCRIPT_WITH_CREDENTIAL_MANIFEST)),
-        Arc::new(LocalFilesystem::new()),
+        Arc::new(DiskFilesystem::new()),
         Arc::new(InMemoryResourceGovernor::new()),
         Arc::new(ApprovalThenSecretObligationAuthorizer {
             handle: secret_handle,
@@ -6267,7 +6267,7 @@ async fn spawn_capability_present_credential_proceeds_to_approval() {
     let script_runtime = Arc::new(RecordingScriptExecutor::default());
     let services = HostRuntimeServices::new(
         Arc::new(registry_with_manifest(SCRIPT_WITH_CREDENTIAL_MANIFEST)),
-        Arc::new(LocalFilesystem::new()),
+        Arc::new(DiskFilesystem::new()),
         Arc::new(InMemoryResourceGovernor::new()),
         // ApprovalThenGrantAuthorizer implements authorize_spawn_with_trust correctly:
         // RequireApproval when grants are empty, delegates to GrantAuthorizer when grants
@@ -6365,7 +6365,7 @@ async fn spawn_capability_missing_credential_returns_auth_before_approval() {
     let script_runtime = Arc::new(RecordingScriptExecutor::default());
     let services = HostRuntimeServices::new(
         Arc::new(registry_with_manifest(SCRIPT_WITH_CREDENTIAL_MANIFEST)),
-        Arc::new(LocalFilesystem::new()),
+        Arc::new(DiskFilesystem::new()),
         Arc::new(InMemoryResourceGovernor::new()),
         Arc::new(ApprovalThenSecretObligationAuthorizer {
             handle: secret_handle,
@@ -6439,7 +6439,7 @@ async fn invoke_capability_no_credential_requirement_with_wired_store_proceeds_n
     let secret_handle = SecretHandle::new("any_token").unwrap();
     let services = HostRuntimeServices::new(
         Arc::new(registry_with_manifest(SCRIPT_MANIFEST)),
-        Arc::new(LocalFilesystem::new()),
+        Arc::new(DiskFilesystem::new()),
         Arc::new(InMemoryResourceGovernor::new()),
         Arc::new(ApprovalThenSecretObligationAuthorizer {
             handle: secret_handle,
@@ -6522,7 +6522,7 @@ async fn invoke_capability_secret_store_error_skips_preflight() {
     let metadata_calls = Arc::new(AtomicUsize::new(0));
     let services = HostRuntimeServices::new(
         Arc::new(registry_with_manifest(SCRIPT_WITH_CREDENTIAL_MANIFEST)),
-        Arc::new(LocalFilesystem::new()),
+        Arc::new(DiskFilesystem::new()),
         Arc::new(InMemoryResourceGovernor::new()),
         // ApprovalThenGrantAuthorizer: requires approval first, grants on resume, and
         // injects NO secret obligation of its own. Credential enforcement on the resume

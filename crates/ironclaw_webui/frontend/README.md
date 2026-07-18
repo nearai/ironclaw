@@ -23,7 +23,7 @@ and generated JavaScript asset names are outside this module-import rule.
 
 `corepack pnpm build` runs Vite and writes ignored preview output to
 `frontend/dist/`. Cargo does not embed that local preview directory. When
-`webui-v2-beta` is enabled, `crates/ironclaw_webui_v2/build.rs` runs
+`webui-v2-beta` is enabled, `crates/ironclaw_webui/build.rs` runs
 `corepack pnpm install --frozen-lockfile` and a Vite production build into
 Cargo's `OUT_DIR`, then embeds that generated output into the Rust binary.
 

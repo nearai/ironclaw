@@ -1,0 +1,43 @@
+[package]
+name = "ironclaw_channel_delivery"
+version = "0.1.0"
+edition = "2024"
+rust-version.workspace = true
+description = "Product-neutral live and triggered channel delivery for IronClaw Reborn"
+authors = ["NEAR AI <support@near.ai>"]
+license = "MIT OR Apache-2.0"
+homepage = "https://github.com/nearai/ironclaw"
+repository = "https://github.com/nearai/ironclaw"
+publish = false
+
+[package.metadata.ironclaw]
+layer = "products"
+
+[features]
+default = []
+test-support = []
+
+[dependencies]
+async-trait = "0.1"
+chrono = "0.4"
+ironclaw_channel_host = { path = "../ironclaw_channel_host" }
+ironclaw_conversations = { path = "../ironclaw_conversations" }
+ironclaw_host_api = { path = "../ironclaw_host_api" }
+ironclaw_outbound = { path = "../ironclaw_outbound" }
+ironclaw_product_adapters = { path = "../ironclaw_product_adapters" }
+ironclaw_product_workflow = { path = "../ironclaw_product_workflow" }
+ironclaw_run_state = { path = "../ironclaw_run_state" }
+ironclaw_threads = { path = "../ironclaw_threads" }
+ironclaw_triggers = { path = "../ironclaw_triggers" }
+ironclaw_turns = { path = "../ironclaw_turns" }
+ironclaw_wasm_product_adapters = { path = "../ironclaw_wasm_product_adapters" }
+tokio = { version = "1", features = ["rt", "sync", "time"] }
+tracing = "0.1"
+
+[dev-dependencies]
+ironclaw_auth = { path = "../ironclaw_auth" }
+ironclaw_product_adapters = { path = "../ironclaw_product_adapters", features = ["test-support"] }
+ironclaw_product_workflow = { path = "../ironclaw_product_workflow", features = ["test-support"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }

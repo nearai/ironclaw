@@ -9,7 +9,8 @@
 //! - Resolution-stage failures (e.g. no default configured) must NOT produce
 //!   delivery-attempt rows — those rows are for attempts that reach the
 //!   transport layer. Instead we write a lightweight outcome record here.
-//! - Best-effort: a failure to record must never block or abort delivery.
+//! - Authoritative terminal state: owners propagate record failures into their
+//!   managed task lifecycle instead of reporting an unpersisted completion.
 //! - Personal scope only: non-personal triggers fail closed with `Denied`.
 
 use std::collections::HashMap;
@@ -52,9 +53,8 @@ pub struct TriggeredRunDeliveryRecord {
 
 /// Store for [`TriggeredRunDeliveryRecord`]s.
 ///
-/// Intentionally minimal: one write per run, one read per run for test
-/// assertions. Production callers treat this as best-effort and swallow
-/// store errors.
+/// Intentionally minimal: one write per run and one read per run. The channel
+/// delivery owner treats write failures as authoritative lifecycle failures.
 #[async_trait::async_trait]
 pub trait TriggeredRunDeliveryStore: Send + Sync {
     async fn record_triggered_run_delivery(

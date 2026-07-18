@@ -19,6 +19,8 @@ pub(crate) mod serve_slack;
 #[cfg(feature = "webui-v2-beta")]
 pub(crate) mod serve_sso;
 #[cfg(feature = "webui-v2-beta")]
+pub(crate) mod serve_telegram;
+#[cfg(feature = "webui-v2-beta")]
 pub(crate) mod service;
 pub(crate) mod skills;
 pub(crate) mod status;
@@ -117,5 +119,15 @@ impl Command {
             }
             Self::Traces(command) => command.execute(),
         }
+    }
+}
+
+/// Shared boolean parsing for channel-enablement env overrides
+/// (`IRONCLAW_REBORN_SLACK_ENABLED`, `IRONCLAW_REBORN_TELEGRAM_ENABLED`, …).
+pub(crate) fn parse_channel_enabled_bool(field: &str, value: &str) -> anyhow::Result<bool> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "1" | "true" | "yes" | "on" => Ok(true),
+        "0" | "false" | "no" | "off" => Ok(false),
+        _ => anyhow::bail!("{field} must be a boolean value"),
     }
 }

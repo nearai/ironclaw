@@ -1,3 +1,4 @@
+// arch-exempt: large_file, mechanical LocalFilesystem->DiskFilesystem Bucket-2 rename (arch-simplification §4.4), no logic change, plan #6168
 use std::{
     collections::{BTreeMap, HashMap},
     io::Write,
@@ -17,7 +18,7 @@ use ironclaw_events::InMemoryAuditSink;
 use ironclaw_extensions::ExtensionRegistry;
 #[cfg(feature = "libsql")]
 use ironclaw_filesystem::LibSqlRootFilesystem;
-use ironclaw_filesystem::{InMemoryBackend, LocalFilesystem, RootFilesystem};
+use ironclaw_filesystem::{DiskFilesystem, InMemoryBackend, RootFilesystem};
 use ironclaw_host_api::runtime_policy::{
     ApprovalPolicy, AuditMode, DeploymentMode, EffectiveRuntimePolicy, FilesystemBackendKind,
     NetworkMode, ProcessBackendKind, RuntimeProfile, SecretMode,
@@ -4277,7 +4278,7 @@ async fn builtin_http_save_uses_strict_host_egress_when_tool_call_port_exists() 
     );
     let runtime = HostRuntimeServices::new(
         Arc::new(registry()),
-        Arc::new(LocalFilesystem::new()),
+        Arc::new(DiskFilesystem::new()),
         Arc::new(InMemoryResourceGovernor::new()),
         Arc::new(GrantAuthorizer::new()),
         ironclaw_processes::ProcessServices::in_memory(),
@@ -6546,7 +6547,13 @@ async fn builtin_http_uses_tool_call_port_for_model_visible_partial_response() {
 }
 
 #[tokio::test]
-async fn builtin_http_returns_redirects_without_following_private_location() {
+async fn builtin_http_blocks_redirect_to_private_location() {
+    // #6140: redirect following is host-mediated and re-authorizes every hop.
+    // A 302 whose `Location` points at the link-local metadata address
+    // (169.254.169.254) is followed but denied by the private-IP policy at the
+    // second hop — before any request reaches it, so the SSRF target is never
+    // contacted. (Previously the egress did not follow and surfaced the raw 302;
+    // the SSRF outcome is preserved, now as an explicit block.)
     let transport = RecordingTransport::ok(NetworkHttpResponse {
         status: 302,
         headers: vec![(
@@ -6563,16 +6570,18 @@ async fn builtin_http_returns_redirects_without_following_private_location() {
     );
     let runtime = runtime_with_host_http_egress(network);
 
-    let output = invoke_with_context(
+    let error = invoke_with_context(
         &runtime,
         HTTP_CAPABILITY_ID,
         json!({"url": "https://api.example.test/v1/items"}),
         execution_context_with_network([HTTP_CAPABILITY_ID], http_test_policy()),
     )
     .await
-    .unwrap();
+    .unwrap_err();
 
-    assert_eq!(output["status"], json!(302));
+    assert_eq!(error, RuntimeFailureKind::PolicyDenied);
+    // Only the initial request was attempted; the redirect's link-local target
+    // was rejected at re-authorization, never contacted.
     let recorded = requests.lock().unwrap();
     assert_eq!(recorded.len(), 1);
     assert_eq!(recorded[0].url, "https://api.example.test/v1/items");
@@ -8144,7 +8153,7 @@ fn failure_input_issue<'a>(
 }
 
 fn runtime() -> impl HostRuntime {
-    runtime_with_filesystem(LocalFilesystem::new())
+    runtime_with_filesystem(DiskFilesystem::new())
 }
 
 fn runtime_with_filesystem<F>(filesystem: F) -> impl HostRuntime
@@ -8170,7 +8179,7 @@ where
 
 fn runtime_with_trigger_repository(repository: Arc<dyn TriggerRepository>) -> impl HostRuntime {
     runtime_with_filesystem_policy_and_trigger_repository(
-        LocalFilesystem::new(),
+        DiskFilesystem::new(),
         local_dev_policy(),
         repository,
     )
@@ -8182,7 +8191,7 @@ fn runtime_with_trigger_repository_and_create_hook(
 ) -> impl HostRuntime {
     HostRuntimeServices::new(
         Arc::new(registry()),
-        Arc::new(LocalFilesystem::new()),
+        Arc::new(DiskFilesystem::new()),
         Arc::new(InMemoryResourceGovernor::new()),
         Arc::new(GrantAuthorizer::new()),
         ironclaw_processes::ProcessServices::in_memory(),
@@ -8213,7 +8222,7 @@ fn runtime_with_trigger_repository_and_clock(
 ) -> impl HostRuntime {
     HostRuntimeServices::new(
         Arc::new(registry()),
-        Arc::new(LocalFilesystem::new()),
+        Arc::new(DiskFilesystem::new()),
         Arc::new(InMemoryResourceGovernor::new()),
         Arc::new(GrantAuthorizer::new()),
         ironclaw_processes::ProcessServices::in_memory(),
@@ -8943,7 +8952,7 @@ where
 {
     HostRuntimeServices::new(
         Arc::new(registry()),
-        Arc::new(LocalFilesystem::new()),
+        Arc::new(DiskFilesystem::new()),
         Arc::new(InMemoryResourceGovernor::new()),
         Arc::new(GrantAuthorizer::new()),
         ironclaw_processes::ProcessServices::in_memory(),
@@ -8969,7 +8978,7 @@ where
 {
     HostRuntimeServices::new(
         Arc::new(registry()),
-        Arc::new(LocalFilesystem::new()),
+        Arc::new(DiskFilesystem::new()),
         Arc::new(InMemoryResourceGovernor::new()),
         Arc::new(GrantAuthorizer::new()),
         ironclaw_processes::ProcessServices::in_memory(),
@@ -8989,7 +8998,7 @@ where
 fn runtime_with_policy(policy: EffectiveRuntimePolicy) -> impl HostRuntime {
     HostRuntimeServices::new(
         Arc::new(registry()),
-        Arc::new(LocalFilesystem::new()),
+        Arc::new(DiskFilesystem::new()),
         Arc::new(InMemoryResourceGovernor::new()),
         Arc::new(GrantAuthorizer::new()),
         ironclaw_processes::ProcessServices::in_memory(),
@@ -9054,7 +9063,7 @@ where
 {
     HostRuntimeServices::new(
         Arc::new(registry()),
-        Arc::new(LocalFilesystem::new()),
+        Arc::new(DiskFilesystem::new()),
         Arc::new(InMemoryResourceGovernor::new()),
         Arc::new(GrantAuthorizer::new()),
         ironclaw_processes::ProcessServices::in_memory(),
@@ -9078,7 +9087,7 @@ where
 {
     HostRuntimeServices::new(
         Arc::new(registry()),
-        Arc::new(LocalFilesystem::new()),
+        Arc::new(DiskFilesystem::new()),
         governor,
         Arc::new(GrantAuthorizer::new()),
         ironclaw_processes::ProcessServices::in_memory(),
@@ -9098,7 +9107,7 @@ where
 {
     HostRuntimeServices::new(
         Arc::new(registry()),
-        Arc::new(LocalFilesystem::new()),
+        Arc::new(DiskFilesystem::new()),
         Arc::new(InMemoryResourceGovernor::new()),
         Arc::new(GrantAuthorizer::new()),
         ironclaw_processes::ProcessServices::in_memory(),
@@ -9118,7 +9127,7 @@ where
 {
     HostRuntimeServices::new(
         Arc::new(registry()),
-        Arc::new(LocalFilesystem::new()),
+        Arc::new(DiskFilesystem::new()),
         Arc::new(InMemoryResourceGovernor::new()),
         Arc::new(GrantAuthorizer::new()),
         ironclaw_processes::ProcessServices::in_memory(),
@@ -9187,8 +9196,8 @@ fn all_builtin_capability_ids() -> Vec<&'static str> {
     ]
 }
 
-fn mounted_filesystem(path: &Path, permissions: MountPermissions) -> (LocalFilesystem, MountView) {
-    let mut filesystem = LocalFilesystem::new();
+fn mounted_filesystem(path: &Path, permissions: MountPermissions) -> (DiskFilesystem, MountView) {
+    let mut filesystem = DiskFilesystem::new();
     filesystem
         .mount_local(
             VirtualPath::new("/projects/coding-pack").unwrap(),
@@ -9226,8 +9235,8 @@ fn memory_mounts(permissions: MountPermissions) -> MountView {
     .unwrap()
 }
 
-fn mounted_skill_filesystem(path: &Path) -> (LocalFilesystem, MountView) {
-    let mut filesystem = LocalFilesystem::new();
+fn mounted_skill_filesystem(path: &Path) -> (DiskFilesystem, MountView) {
+    let mut filesystem = DiskFilesystem::new();
     filesystem
         .mount_local(
             VirtualPath::new("/projects/skills").unwrap(),
@@ -9246,8 +9255,8 @@ fn mounted_skill_filesystem(path: &Path) -> (LocalFilesystem, MountView) {
 fn mounted_host_filesystem(
     path: &Path,
     permissions: MountPermissions,
-) -> (LocalFilesystem, MountView) {
-    let mut filesystem = LocalFilesystem::new();
+) -> (DiskFilesystem, MountView) {
+    let mut filesystem = DiskFilesystem::new();
     filesystem
         .mount_local(
             VirtualPath::new("/projects/host").unwrap(),

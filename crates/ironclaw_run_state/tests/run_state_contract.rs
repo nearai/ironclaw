@@ -7,7 +7,7 @@ use std::{
 
 use async_trait::async_trait;
 use ironclaw_filesystem::{
-    DirEntry, FileStat, FilesystemError, FilesystemOperation, InMemoryBackend, LocalFilesystem,
+    DirEntry, DiskFilesystem, FileStat, FilesystemError, FilesystemOperation, InMemoryBackend,
     RootFilesystem, ScopedFilesystem,
 };
 use ironclaw_host_api::*;
@@ -1193,14 +1193,14 @@ async fn filesystem_run_state_store_isolates_two_tenants_with_same_user_project_
 /// set) surface `CasUnsupported` via `cas_update` rather than silently
 /// succeeding on a blind `CasExpectation::Absent` write.
 ///
-/// `LocalFilesystem` is used here because it is the canonical byte-only
+/// `DiskFilesystem` is used here because it is the canonical byte-only
 /// `RootFilesystem`: its `put` impl returns `Unsupported{WriteFile}` when
 /// `entry.kind.is_some()`, which `cas_update` maps to `CasUnsupported`,
 /// which `map_cas_error` surfaces as `RunStateError::Backend(...)`.
 #[tokio::test]
 async fn filesystem_approval_store_fails_closed_on_byte_only_backend() {
     let dir = tempfile::tempdir().expect("temp dir");
-    let mut local_fs = LocalFilesystem::new();
+    let mut local_fs = DiskFilesystem::new();
     local_fs
         .mount_local(
             VirtualPath::new("/engine").expect("virtual root"),
@@ -1216,7 +1216,7 @@ async fn filesystem_approval_store_fails_closed_on_byte_only_backend() {
     let err = store.save_pending(scope, approval).await.unwrap_err();
     assert!(
         matches!(&err, RunStateError::Backend(msg) if msg.contains("compare-and-swap")),
-        "expected Backend(CasUnsupported) from byte-only LocalFilesystem but got {err:?}",
+        "expected Backend(CasUnsupported) from byte-only DiskFilesystem but got {err:?}",
     );
 }
 
@@ -1228,7 +1228,7 @@ async fn filesystem_approval_store_fails_closed_on_byte_only_backend() {
 #[tokio::test]
 async fn filesystem_run_state_store_start_fails_closed_on_byte_only_backend() {
     let dir = tempfile::tempdir().expect("temp dir");
-    let mut local_fs = LocalFilesystem::new();
+    let mut local_fs = DiskFilesystem::new();
     local_fs
         .mount_local(
             VirtualPath::new("/engine").expect("virtual root"),
@@ -1252,7 +1252,7 @@ async fn filesystem_run_state_store_start_fails_closed_on_byte_only_backend() {
         .unwrap_err();
     assert!(
         matches!(&err, RunStateError::Backend(msg) if msg.contains("compare-and-swap")),
-        "expected Backend(CasUnsupported) from byte-only LocalFilesystem but got {err:?}",
+        "expected Backend(CasUnsupported) from byte-only DiskFilesystem but got {err:?}",
     );
 }
 
@@ -1529,7 +1529,7 @@ impl RootFilesystem for DisappearingApprovalReadFilesystem {
 
 /// Build an [`InMemoryBackend`] for use in tests. The backend supports
 /// full CAS semantics including `Version`-preconditioned writes, which
-/// `LocalFilesystem` does not. The `/run-state` and `/approvals` mount
+/// `DiskFilesystem` does not. The `/run-state` and `/approvals` mount
 /// aliases on the outer [`ScopedFilesystem`] resolve under `/engine/...`
 /// so the fault-injection wrappers (which match by post-resolution path)
 /// keep working unchanged.
