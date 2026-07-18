@@ -2,6 +2,7 @@
 import { useQueryClient } from "@tanstack/react-query";
 import React from "react";
 import { useT } from "../../../lib/i18n";
+import { isLocalDevOrigin } from "../../../lib/browser-origin";
 import {
   completeNearaiWalletLogin,
   fetchLlmProviders,
@@ -11,31 +12,10 @@ import {
 
 const WALLET_LOGIN_TIMEOUT_MS = 300_000;
 
-// NEAR AI's hosted auth (private.near.ai) rejects `frontend_callback` URLs that
-// point at a loopback host, so its browser sign-in (GitHub / Google / NEAR
-// Wallet) cannot complete from a local dev origin. Detect that origin so we can
-// fail fast with a clear message on click — instead of opening a doomed tab and
-// polling for five minutes only to hit the opaque error (issue #4705).
-export function isLocalDevOrigin() {
-  if (typeof window === "undefined" || !window.location) return false;
-  const host = window.location.hostname;
-  // `window.location.hostname` exposes IPv6 hosts without brackets (e.g.
-  // `http://[::1]:3000/` -> `"::1"`), so a bracketed `"[::1]"` form never
-  // appears here.
-  //
-  // The entire `127.0.0.0/8` block is loopback, not just `127.0.0.1` — some
-  // setups serve the dev UI on `127.0.1.1` (Debian's default for the hostname)
-  // or other `127.*` addresses. Matching only `127.0.0.1` would let those
-  // origins open the doomed hosted-SSO flow and wait out the full timeout
-  // instead of failing fast.
-  return (
-    host === "localhost" ||
-    host === "0.0.0.0" ||
-    host === "::1" ||
-    /^127\.\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(host) ||
-    host.endsWith(".localhost")
-  );
-}
+// `isLocalDevOrigin` moved to `src/lib/browser-origin.ts`: the login page
+// also needs it (to gate the local-install hint on more than just "no
+// OAuth providers configured"), so the single implementation lives in the
+// app-wide shared lib rather than this settings-only hook module.
 
 function walletLoginChannelName() {
   const suffix =

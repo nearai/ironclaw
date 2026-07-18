@@ -185,8 +185,11 @@ function evalIsLocalDevOrigin({ hostname }) {
   if (hostname !== undefined) {
     context.window = { location: { hostname } };
   }
+  // `isLocalDevOrigin` lives in the app-wide shared lib (not this hook
+  // module) since the login page also consumes it — see
+  // `src/lib/browser-origin.ts`.
   return runVmModuleForTest(
-    "../hooks/useProviderLogin.ts",
+    "../../../lib/browser-origin.ts",
     ["isLocalDevOrigin"],
     context,
     import.meta.url
@@ -635,11 +638,23 @@ function runProviderLogin({ hostname, activeProviderId = null, popupClosed = fal
   const openedUrls = [];
   const popups = [];
   let stateIndex = 0;
+  // `isLocalDevOrigin` now lives in `src/lib/browser-origin.ts` (imports get
+  // stripped by the VM harness), so it must be injected here like every
+  // other imported dependency below. Mirrors the real predicate exactly
+  // (pinned independently by `evalIsLocalDevOrigin`'s tests) so this test
+  // still exercises the caller's real gating behavior, not a stub.
+  const isLocalDevOriginPredicate = () =>
+    hostname === "localhost" ||
+    hostname === "0.0.0.0" ||
+    hostname === "::1" ||
+    /^127\.\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(hostname) ||
+    hostname.endsWith(".localhost");
   const context = {
     console,
     Date,
     Math,
     Promise,
+    isLocalDevOrigin: isLocalDevOriginPredicate,
     setTimeout: (cb) => {
       cb();
       return 0;
