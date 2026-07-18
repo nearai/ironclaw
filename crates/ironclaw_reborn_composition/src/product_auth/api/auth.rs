@@ -1324,7 +1324,7 @@ impl RebornProductAuthServices {
                     );
                 if pending_turn_gate {
                     if let Err(error) = self.dispatch_provider_denied_continuation(failed).await {
-                        tracing::warn!(
+                        tracing::debug!(
                             flow_id = %request.flow_id,
                             error_code = ?error.code(),
                             "provider denial was persisted but the blocked auth gate remains pending continuation retry"

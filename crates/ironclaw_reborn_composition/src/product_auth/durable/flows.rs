@@ -13,15 +13,15 @@ use super::{
     scope_matches,
 };
 use ironclaw_auth::{
-    AUTH_CONTINUATION_DISPATCH_LEASE_SECONDS, AuthChallenge, AuthContinuationDispatchClaimInput,
-    AuthContinuationDispatchOutcome, AuthContinuationDispatchSettlementInput, AuthContinuationRef,
-    AuthErrorCode, AuthFlowId, AuthFlowManager, AuthFlowRecord, AuthFlowRecordSource,
-    AuthFlowStatus, AuthProductError, CredentialAccount, CredentialAccountId,
-    CredentialAccountStatus, CredentialOwnership, CredentialSelectionInput,
-    ManualTokenCompletionInput, NewAuthFlow, NewCredentialAccount, OAuthCallbackClaimRequest,
-    OAuthCallbackFailureInput, OAuthCallbackInput, OAuthProviderExchange, ProviderCallbackOutcome,
-    TurnGateAuthFlowQuery, binding_scope_owns_account, flow_matches_durable_owner,
-    flow_matches_turn_gate_query,
+    AUTH_CONTINUATION_DISPATCH_LEASE_SECONDS, AUTH_FLOW_CANCELLATION_LEASE_SECONDS, AuthChallenge,
+    AuthContinuationDispatchClaimInput, AuthContinuationDispatchOutcome,
+    AuthContinuationDispatchSettlementInput, AuthContinuationRef, AuthErrorCode, AuthFlowId,
+    AuthFlowManager, AuthFlowRecord, AuthFlowRecordSource, AuthFlowStatus, AuthProductError,
+    CredentialAccount, CredentialAccountId, CredentialAccountStatus, CredentialOwnership,
+    CredentialSelectionInput, ManualTokenCompletionInput, NewAuthFlow, NewCredentialAccount,
+    OAuthCallbackClaimRequest, OAuthCallbackFailureInput, OAuthCallbackInput,
+    OAuthProviderExchange, ProviderCallbackOutcome, TurnGateAuthFlowQuery,
+    binding_scope_owns_account, flow_matches_durable_owner, flow_matches_turn_gate_query,
 };
 
 struct CallbackAccountWrite {
@@ -419,6 +419,77 @@ where
         self.write_flow(scope, &record, CasExpectation::Version(version))
             .await?;
         Ok(record)
+    }
+
+    async fn reserve_cancellation(
+        &self,
+        scope: &ironclaw_auth::AuthProductScope,
+        flow_id: AuthFlowId,
+    ) -> Result<AuthFlowRecord, AuthProductError> {
+        self.update_flow_with_cas(scope, flow_id, |record| {
+            let now = Utc::now();
+            match record.status {
+                AuthFlowStatus::AwaitingUser => {}
+                AuthFlowStatus::Canceling
+                    if now.signed_duration_since(record.updated_at)
+                        >= Duration::seconds(AUTH_FLOW_CANCELLATION_LEASE_SECONDS) => {}
+                AuthFlowStatus::Completed => return Ok(()),
+                AuthFlowStatus::Canceled => return Err(AuthProductError::Canceled),
+                AuthFlowStatus::CallbackReceived | AuthFlowStatus::Completing => return Ok(()),
+                AuthFlowStatus::Pending
+                | AuthFlowStatus::Canceling
+                | AuthFlowStatus::Failed
+                | AuthFlowStatus::Expired => return Err(AuthProductError::FlowAlreadyTerminal),
+            }
+            record.status = AuthFlowStatus::Canceling;
+            record.error = None;
+            record.updated_at = now;
+            Ok(())
+        })
+        .await
+    }
+
+    async fn finalize_cancellation(
+        &self,
+        scope: &ironclaw_auth::AuthProductScope,
+        flow_id: AuthFlowId,
+        expected_claimed_at: ironclaw_auth::Timestamp,
+    ) -> Result<AuthFlowRecord, AuthProductError> {
+        self.update_flow_with_cas(scope, flow_id, |record| {
+            if record.status == AuthFlowStatus::Canceled {
+                return Ok(());
+            }
+            if record.status != AuthFlowStatus::Canceling
+                || record.updated_at != expected_claimed_at
+            {
+                return Err(AuthProductError::BackendConflict);
+            }
+            record.status = AuthFlowStatus::Canceled;
+            record.error = Some(AuthErrorCode::Canceled);
+            record.updated_at = Utc::now();
+            Ok(())
+        })
+        .await
+    }
+
+    async fn rollback_cancellation(
+        &self,
+        scope: &ironclaw_auth::AuthProductScope,
+        flow_id: AuthFlowId,
+        expected_claimed_at: ironclaw_auth::Timestamp,
+    ) -> Result<AuthFlowRecord, AuthProductError> {
+        self.update_flow_with_cas(scope, flow_id, |record| {
+            if record.status != AuthFlowStatus::Canceling
+                || record.updated_at != expected_claimed_at
+            {
+                return Err(AuthProductError::BackendConflict);
+            }
+            record.status = AuthFlowStatus::AwaitingUser;
+            record.error = None;
+            record.updated_at = Utc::now();
+            Ok(())
+        })
+        .await
     }
 
     async fn mark_continuation_dispatched(

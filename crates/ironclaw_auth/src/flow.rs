@@ -31,6 +31,9 @@ pub enum AuthFlowStatus {
     /// Reserved for production stores that split durable claim, provider
     /// exchange, and account mutation across asynchronous workers.
     Completing,
+    /// Exclusive denial reservation held while the owning blocked run is
+    /// canceled. Completion paths must not mutate a flow in this state.
+    Canceling,
     Completed,
     Failed,
     Expired,
@@ -266,6 +269,11 @@ pub struct AuthContinuationDispatchSettlementInput {
 /// cannot overwrite the new owner's result.
 pub const AUTH_CONTINUATION_DISPATCH_LEASE_SECONDS: i64 = 60;
 
+/// A crashed denial worker may be replaced after this interval. Settlement is
+/// fenced by the reservation timestamp, so the stale worker cannot finalize or
+/// roll back the replacement's reservation.
+pub const AUTH_FLOW_CANCELLATION_LEASE_SECONDS: i64 = 60;
+
 /// User-selected configured credential that completes an account-selection
 /// auth flow without exposing credential internals to product surfaces.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -361,6 +369,36 @@ pub trait AuthFlowManager: Send + Sync {
         scope: &AuthProductScope,
         flow_id: AuthFlowId,
     ) -> Result<AuthFlowRecord, AuthProductError>;
+
+    /// Reserve an awaiting flow for denial before canceling its blocked run.
+    /// A completed flow is returned unchanged so completion wins the race.
+    async fn reserve_cancellation(
+        &self,
+        _scope: &AuthProductScope,
+        _flow_id: AuthFlowId,
+    ) -> Result<AuthFlowRecord, AuthProductError> {
+        Err(AuthProductError::BackendUnavailable)
+    }
+
+    /// Finalize an exact cancellation reservation after run cancellation.
+    async fn finalize_cancellation(
+        &self,
+        _scope: &AuthProductScope,
+        _flow_id: AuthFlowId,
+        _expected_claimed_at: Timestamp,
+    ) -> Result<AuthFlowRecord, AuthProductError> {
+        Err(AuthProductError::BackendUnavailable)
+    }
+
+    /// Release an exact cancellation reservation when run cancellation fails.
+    async fn rollback_cancellation(
+        &self,
+        _scope: &AuthProductScope,
+        _flow_id: AuthFlowId,
+        _expected_claimed_at: Timestamp,
+    ) -> Result<AuthFlowRecord, AuthProductError> {
+        Err(AuthProductError::BackendUnavailable)
+    }
 }
 
 /// Read-only auth-flow projection source for product interaction views.

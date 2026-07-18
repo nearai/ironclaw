@@ -46,11 +46,15 @@ message through the existing thread.
 `DefaultAuthInteractionService` in `ironclaw_product_workflow` owns the policy:
 
 1. Re-read the scoped run and verify it is parked on the exact auth gate.
-2. Cancel the active auth-flow record when one exists.
-3. Call `TurnCoordinator::cancel_run` with `SanitizedCancelReason::UserRequested`
+2. Conditionally reserve an active auth-flow record as `Canceling`. This
+   compare-and-swap transition chooses one winner against callback completion.
+3. Re-verify the exact gate and call `TurnCoordinator::cancel_run` with
+   `SanitizedCancelReason::UserRequested`
    and a typed `BlockedAuthGate` compare-and-cancel precondition carrying the
    exact gate reference.
-4. Return `ResolveAuthInteractionResponse::Canceled`.
+4. Finalize the reserved flow as `Canceled`. Roll it back to `AwaitingUser` if
+   run lookup or cancellation fails, including a stale-gate failure.
+5. Return `ResolveAuthInteractionResponse::Canceled`.
 
 All product surfaces already normalize an auth-denial action into
 `AuthInteractionDecision::Deny`, so this one change applies to Telegram, Slack,
@@ -58,11 +62,12 @@ WebUI, and future adapters. Adapters remain responsible only for parsing,
 routing, acknowledgment, and rendering.
 
 If the flow record is absent but the run is still parked on the exact gate, the
-service cancels the run. If OAuth completed concurrently, denial is stale and
-must not discard the newly established credential or cancel a run already
-resuming through the successful callback. The turn store evaluates the run
-status and gate reference atomically with cancellation, so a preflight read
-cannot race a successful resume into cancellation.
+service cancels the run. If OAuth completed before the denial reservation,
+completion wins and the service resumes the gate through the completed path.
+If denial reserves first, callback completion cannot cross the `Canceling`
+state. The turn store evaluates the run status and gate reference atomically
+with cancellation, so a preflight read cannot race a successful resume into
+cancellation.
 
 ### Provider-popup denial
 
@@ -104,12 +109,17 @@ this change.
 
 ## Failure and race handling
 
-- Flow cancellation precedes run cancellation. The run transition carries an
-  atomic `BlockedAuthGate` precondition; if the run has resumed or moved to a
-  different gate, the stale denial cannot cancel it. A retry can observe a
-  canceled flow and still cancel the run only while that exact gate remains.
-- A successful OAuth callback racing an explicit denial wins once the flow is
-  completed; the denial returns the existing stale-auth response.
+- A conditional `Canceling` reservation precedes run cancellation. The run
+  transition carries an atomic `BlockedAuthGate` precondition; if the run has
+  resumed or moved to a different gate, the stale denial cannot cancel it and
+  the reservation is rolled back. The flow is terminally canceled only after
+  the run cancellation succeeds.
+- OAuth completion and explicit denial have one durable winner. A completed
+  flow follows the completion/resume path; a callback that encounters a live
+  denial reservation fails closed without persisting credentials.
+- Cancellation settlement is timestamp-fenced. A replay finalizes a stranded
+  reservation when the exact run is already canceled, while an expired lease
+  may be reclaimed without allowing the stale worker to settle it.
 - Provider-denied continuation dispatch uses the existing gate precondition and
   actor/scope validation. A stale gate is treated as already converged.
 - Duplicate provider-denied callbacks do not resume twice after

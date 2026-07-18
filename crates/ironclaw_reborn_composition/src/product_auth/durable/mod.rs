@@ -12,8 +12,8 @@ use futures::{StreamExt as _, TryStreamExt as _, stream};
 
 use chrono::Utc;
 use ironclaw_filesystem::{
-    CasExpectation, ContentType, Entry, FileType, FilesystemError, RecordVersion, RootFilesystem,
-    ScopedFilesystem,
+    CasApply, CasExpectation, CasUpdateError, ContentType, Entry, FileType, FilesystemError,
+    RecordVersion, RootFilesystem, ScopedFilesystem, cas_update,
 };
 use ironclaw_host_api::{
     AgentId, ProjectId, ResourceScope, ScopedPath, SecretHandle, TenantId, UserId,
@@ -225,6 +225,46 @@ where
     ) -> Result<RecordVersion, AuthProductError> {
         self.write_record(&scope.resource, &flow_path(scope, record.id)?, record, cas)
             .await
+    }
+
+    async fn update_flow_with_cas<M>(
+        &self,
+        scope: &ironclaw_auth::AuthProductScope,
+        flow_id: AuthFlowId,
+        mut update: M,
+    ) -> Result<AuthFlowRecord, AuthProductError>
+    where
+        M: FnMut(&mut AuthFlowRecord) -> Result<(), AuthProductError>,
+    {
+        let path = flow_path(scope, flow_id)?;
+        let expected_scope = scope.clone();
+        cas_update(
+            self.filesystem.as_ref(),
+            &scope.resource,
+            &path,
+            |bytes: &[u8]| {
+                serde_json::from_slice::<AuthFlowRecord>(bytes)
+                    .map_err(|_| AuthProductError::BackendUnavailable)
+            },
+            |record: &AuthFlowRecord| {
+                let body =
+                    serde_json::to_vec(record).map_err(|_| AuthProductError::BackendUnavailable)?;
+                Ok(Entry::bytes(body).with_content_type(ContentType::json()))
+            },
+            |current: Option<AuthFlowRecord>| {
+                let outcome = (|| {
+                    let mut record = current.ok_or(AuthProductError::UnknownOrExpiredFlow)?;
+                    if !scope_matches(&expected_scope, &record.scope) {
+                        return Err(AuthProductError::CrossScopeDenied);
+                    }
+                    update(&mut record)?;
+                    Ok(CasApply::new(record.clone(), record))
+                })();
+                async move { outcome }
+            },
+        )
+        .await
+        .map_err(map_auth_cas_error)
     }
 
     async fn flows_for_scope(
@@ -925,6 +965,16 @@ where
         };
         let version = self.write_account(&account, cas).await?;
         Ok((account, version))
+    }
+}
+
+fn map_auth_cas_error(error: CasUpdateError<AuthProductError>) -> AuthProductError {
+    match error {
+        CasUpdateError::Apply(error) => error,
+        CasUpdateError::Backend(error) => fs_error(error),
+        CasUpdateError::Timeout
+        | CasUpdateError::RetriesExhausted
+        | CasUpdateError::CasUnsupported => AuthProductError::BackendUnavailable,
     }
 }
 

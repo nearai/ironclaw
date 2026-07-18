@@ -53,7 +53,7 @@
 
 - [ ] **Step 3: Replace denied-gate resume with exact run cancellation**
 
-  Import `CancelRunRequest` and `SanitizedCancelReason`. Keep the completed-flow stale-race guard, but after canceling any active flow call the shared helper below. Use the same helper for the missing-flow parked-gate path and for idempotent replays of a previously canceled flow.
+  Import `CancelRunRequest` and `SanitizedCancelReason`. Reserve the active auth flow first so callback completion and denial have one atomic winner. If denial wins, cancel the run with the exact `BlockedAuthGate` precondition, then finalize the flow cancellation. Roll the reservation back if run cancellation fails, including a stale-gate failure, so the flow stays usable. If completion wins, leave the flow and run on the completion path. Use the shared run-cancel helper for the missing-flow parked-gate path and for idempotent replays of a previously canceled flow.
 
   ```rust
   async fn cancel_auth_run(

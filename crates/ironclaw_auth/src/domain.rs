@@ -30,6 +30,9 @@ pub fn prepare_callback_flow(
             _ => AuthProductError::FlowAlreadyTerminal,
         });
     }
+    if record.status == AuthFlowStatus::Canceling {
+        return Err(AuthProductError::FlowAlreadyTerminal);
+    }
     expire_if_needed(record, now)?;
     if !record
         .opaque_state_hash

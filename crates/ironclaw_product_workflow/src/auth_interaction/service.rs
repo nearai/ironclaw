@@ -218,44 +218,16 @@ impl DefaultAuthInteractionService {
         AuthGateRecord::new(gate.run_id(), gate.gate_ref().clone(), completed)
     }
 
-    /// Cancel the OAuth flow if it is in an active (non-terminal) status.
-    /// Returns `Err(StaleAuth)` if the flow is already `Completed` (caller
-    /// should use the resume path instead).  No-ops for already-terminal
-    /// statuses (Failed / Expired / Canceled).
-    async fn cancel_auth_flow_if_active(
+    async fn rollback_auth_cancellation(
         &self,
         gate: &AuthGateRecord,
+        expected_claimed_at: ironclaw_auth::Timestamp,
     ) -> Result<(), ProductWorkflowError> {
-        match gate.status() {
-            AuthFlowStatus::Pending
-            | AuthFlowStatus::AwaitingUser
-            | AuthFlowStatus::CallbackReceived
-            | AuthFlowStatus::Completing => {
-                self.flow_manager
-                    .cancel_flow(&gate.flow().scope, gate.flow().id)
-                    .await
-                    .map_err(map_auth_product_error)?;
-            }
-            AuthFlowStatus::Failed | AuthFlowStatus::Expired | AuthFlowStatus::Canceled => {}
-            AuthFlowStatus::Completed => {
-                // DELIBERATE: a Deny arriving after the OAuth flow already
-                // reached Completed is rejected as StaleAuth.  This is a race
-                // (the user clicked Deny just as the OAuth callback landed).
-                // The caller (`cancel_denied_auth`) short-circuits here and the
-                // run proceeds with the credential that was just obtained.
-                //
-                // Surfacing a friendlier "already connected" message, or
-                // cancelling the run to honor the late Deny, was considered and
-                // rejected as too complex for the initial implementation.  That
-                // remains a possible follow-up; for now the late-Deny path is
-                // intentionally a no-op from the run's perspective.
-                //
-                // The existing test `deny_on_completed_flow_rejects_with_stale_auth`
-                // pins this behavior.
-                return Err(auth_rejected(AuthInteractionRejectionKind::StaleAuth));
-            }
-        }
-        Ok(())
+        self.flow_manager
+            .rollback_cancellation(&gate.flow().scope, gate.flow().id, expected_claimed_at)
+            .await
+            .map(|_| ())
+            .map_err(map_auth_product_error)
     }
 
     async fn cancel_denied_auth(
@@ -264,28 +236,90 @@ impl DefaultAuthInteractionService {
         gate: AuthGateRecord,
         run_id: TurnRunId,
     ) -> Result<ResolveAuthInteractionResponse, ProductWorkflowError> {
-        if gate.status() == AuthFlowStatus::Completed {
-            return Err(auth_rejected(AuthInteractionRejectionKind::StaleAuth));
+        let reservation = self
+            .flow_manager
+            .reserve_cancellation(&gate.flow().scope, gate.flow().id)
+            .await
+            .map_err(map_auth_product_error)?;
+        match reservation.status {
+            AuthFlowStatus::Canceling => {}
+            AuthFlowStatus::Completed => {
+                return self.resume_auth_gate(request, run_id, None).await;
+            }
+            AuthFlowStatus::CallbackReceived | AuthFlowStatus::Completing => {
+                return Err(auth_rejected(AuthInteractionRejectionKind::StaleAuth));
+            }
+            AuthFlowStatus::Pending
+            | AuthFlowStatus::AwaitingUser
+            | AuthFlowStatus::Failed
+            | AuthFlowStatus::Expired
+            | AuthFlowStatus::Canceled => {
+                return Err(auth_rejected(AuthInteractionRejectionKind::FlowUnavailable));
+            }
         }
-        match self.turn_gate_state(&request, run_id).await? {
+        let gate_state = match self.turn_gate_state(&request, run_id).await {
+            Ok(state) => state,
+            Err(error) => {
+                if let Err(rollback_error) = self
+                    .rollback_auth_cancellation(&gate, reservation.updated_at)
+                    .await
+                {
+                    tracing::debug!(
+                        flow_id = %gate.flow().id,
+                        run_id = %run_id,
+                        error = ?rollback_error,
+                        "auth denial reservation rollback failed after run-state lookup"
+                    );
+                    return Err(rollback_error);
+                }
+                return Err(error);
+            }
+        };
+        match gate_state {
             BlockedGateState::ParkedOnGate => {}
             BlockedGateState::NotParkedOnGate => {
+                self.rollback_auth_cancellation(&gate, reservation.updated_at)
+                    .await?;
                 return Err(auth_rejected(AuthInteractionRejectionKind::StaleAuth));
             }
         }
         let precondition = CancelRunPrecondition::BlockedAuthGate {
             gate_ref: gate.gate_ref().clone(),
         };
-        let response = self
+        let response = match self
             .cancel_auth_run(request, run_id, Some(precondition))
-            .await?;
-        if let Err(error) = self.cancel_auth_flow_if_active(&gate).await {
-            tracing::warn!(
+            .await
+        {
+            Ok(response) => response,
+            Err(error) => {
+                if let Err(rollback_error) = self
+                    .rollback_auth_cancellation(&gate, reservation.updated_at)
+                    .await
+                {
+                    tracing::debug!(
+                        flow_id = %gate.flow().id,
+                        run_id = %run_id,
+                        error = ?rollback_error,
+                        "auth denial reservation rollback failed after run cancellation"
+                    );
+                    return Err(rollback_error);
+                }
+                return Err(error);
+            }
+        };
+        if let Err(error) = self
+            .flow_manager
+            .finalize_cancellation(&gate.flow().scope, gate.flow().id, reservation.updated_at)
+            .await
+            .map_err(map_auth_product_error)
+        {
+            tracing::debug!(
                 flow_id = %gate.flow().id,
                 run_id = %run_id,
                 ?error,
-                "auth run was canceled but auth-flow cleanup remains pending"
+                "auth run was canceled but auth-flow cancellation finalization remains pending"
             );
+            return Err(error);
         }
         Ok(response)
     }
@@ -314,6 +348,7 @@ impl DefaultAuthInteractionService {
     async fn replay_denied_auth(
         &self,
         request: ResolveAuthInteractionRequest,
+        gate: &AuthGateRecord,
         run_id: TurnRunId,
     ) -> Result<ResolveAuthInteractionResponse, ProductWorkflowError> {
         let state = self
@@ -326,6 +361,20 @@ impl DefaultAuthInteractionService {
             .map_err(map_auth_resume_error)?;
         if state.status != TurnStatus::Cancelled {
             return Err(auth_rejected(AuthInteractionRejectionKind::StaleAuth));
+        }
+        match gate.status() {
+            AuthFlowStatus::Canceled => {}
+            AuthFlowStatus::Canceling => {
+                self.flow_manager
+                    .finalize_cancellation(
+                        &gate.flow().scope,
+                        gate.flow().id,
+                        gate.flow().updated_at,
+                    )
+                    .await
+                    .map_err(map_auth_product_error)?;
+            }
+            _ => return Err(auth_rejected(AuthInteractionRejectionKind::StaleAuth)),
         }
         // Route through cancel_run with the SAME idempotency key as the first
         // Deny. TurnCoordinator returns the cached cancellation for a repeated
@@ -436,10 +485,7 @@ impl AuthInteractionService for DefaultAuthInteractionService {
             }
             (BlockedGateState::NotParkedOnGate, AuthInteractionDecision::Deny) => {
                 let gate = self.refresh_gate(&gate).await?;
-                if gate.status() != AuthFlowStatus::Canceled {
-                    return Err(auth_rejected(AuthInteractionRejectionKind::StaleAuth));
-                }
-                self.replay_denied_auth(request, run_id).await
+                self.replay_denied_auth(request, &gate, run_id).await
             }
         }
     }

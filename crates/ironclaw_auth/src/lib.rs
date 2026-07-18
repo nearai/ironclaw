@@ -44,12 +44,13 @@ pub use domain::select_latest_duplicate_user_reusable_account;
 pub use error::{AuthErrorCode, AuthProductError};
 pub use fakes::InMemoryAuthProductServices;
 pub use flow::{
-    AUTH_CONTINUATION_DISPATCH_LEASE_SECONDS, AuthChallenge, AuthContinuationDispatchClaimInput,
-    AuthContinuationDispatchOutcome, AuthContinuationDispatchSettlementInput,
-    AuthContinuationEvent, AuthContinuationRef, AuthFlowKind, AuthFlowManager, AuthFlowOwnerScope,
-    AuthFlowRecord, AuthFlowRecordSource, AuthFlowStatus, CredentialAccountUpdateBinding,
-    CredentialSelectionInput, ManualTokenCompletionInput, NewAuthFlow, OAuthCallbackClaimRequest,
-    OAuthCallbackFailureInput, OAuthCallbackInput, ProviderCallbackOutcome, TurnGateAuthFlowQuery,
+    AUTH_CONTINUATION_DISPATCH_LEASE_SECONDS, AUTH_FLOW_CANCELLATION_LEASE_SECONDS, AuthChallenge,
+    AuthContinuationDispatchClaimInput, AuthContinuationDispatchOutcome,
+    AuthContinuationDispatchSettlementInput, AuthContinuationEvent, AuthContinuationRef,
+    AuthFlowKind, AuthFlowManager, AuthFlowOwnerScope, AuthFlowRecord, AuthFlowRecordSource,
+    AuthFlowStatus, CredentialAccountUpdateBinding, CredentialSelectionInput,
+    ManualTokenCompletionInput, NewAuthFlow, OAuthCallbackClaimRequest, OAuthCallbackFailureInput,
+    OAuthCallbackInput, ProviderCallbackOutcome, TurnGateAuthFlowQuery,
     credential_status_for_completed_flow, flow_matches_durable_owner, flow_matches_turn_gate_query,
 };
 pub use ids::{

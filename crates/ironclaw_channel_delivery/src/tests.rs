@@ -2956,6 +2956,13 @@ mod tests {
             1,
             "BlockedAuth must cancel the run exactly once"
         );
+        assert_eq!(
+            coordinator.last_cancel_precondition(),
+            Some(CancelRunPrecondition::BlockedAuthGate {
+                gate_ref: GateRef::new("gate:auth-cancel-test").expect("gate"),
+            }),
+            "the live observer must forward the exact typed auth gate"
+        );
 
         let calls = egress.calls();
         let post_calls: Vec<_> = calls

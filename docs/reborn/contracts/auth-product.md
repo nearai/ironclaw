@@ -138,9 +138,10 @@ adapter/UI-safe DTOs, and routes credential/callback/cancel decisions back
 through `AuthFlowManager` and `TurnCoordinator` with the `BlockedAuthGate`
 precondition. It consumes the auth-flow boundary here for auth gates; it must
 not create a second credential-account or OAuth-flow model.
-Only non-terminal auth-flow states are listed as pending interactions. Terminal
-states such as `failed`, `completed`, `expired`, and `canceled` must not be
-rendered as actionable auth gates.
+Only user-actionable, non-terminal auth-flow states are listed as pending
+interactions. The internal `canceling` reservation and terminal states such as
+`failed`, `completed`, `expired`, and `canceled` must not be rendered as
+actionable auth gates.
 
 Legacy web/CLI/channel auth UX may remain behavior-compatible during
 migration, but Reborn paths should enter through `ProductWorkflow` or the
@@ -230,7 +231,7 @@ flows:
 ```text
 AuthFlowKind::{integration_credential, identity_login}
 AuthFlowStatus::{pending, awaiting_user, callback_received, completing,
-                 completed, failed, expired, canceled}
+                 canceling, completed, failed, expired, canceled}
 AuthChallenge::{oauth_url, manual_token_required, account_selection_required,
                 setup_required, reauthorize_required}
 AuthContinuationRef::{setup_only, lifecycle_activation, turn_gate_resume,
@@ -257,6 +258,11 @@ Rules:
 - Public callbacks must validate and claim the scoped flow/state/provider/PKCE
   hash before exchanging raw code/verifier through non-serializable one-shot
   provider inputs and completing the flow.
+- Explicit denial reserves `awaiting_user -> canceling` with bounded CAS before
+  canceling the exact blocked run. It finalizes `canceling -> canceled` only
+  after run cancellation succeeds and rolls back to `awaiting_user` on failure.
+  Callback claim/completion must reject `canceling`, while an already-completed
+  flow remains the winner and follows its normal continuation path.
 - Once a callback is tied to a known scoped flow, missing authorization code,
   missing one-shot PKCE material, or malformed/invalid scope input must durably
   mark that flow `failed` before discarding callback material. Provider denial

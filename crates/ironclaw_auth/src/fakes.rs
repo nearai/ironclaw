@@ -520,6 +520,90 @@ impl AuthFlowManager for InMemoryAuthProductServices {
         Ok(record.clone())
     }
 
+    async fn reserve_cancellation(
+        &self,
+        scope: &crate::AuthProductScope,
+        flow_id: AuthFlowId,
+    ) -> Result<AuthFlowRecord, AuthProductError> {
+        let now = Utc::now();
+        let mut state = self.lock_state();
+        let record = state
+            .flows
+            .get_mut(&flow_id)
+            .ok_or(AuthProductError::UnknownOrExpiredFlow)?;
+        if !scope_matches(scope, &record.scope) {
+            return Err(AuthProductError::CrossScopeDenied);
+        }
+        match record.status {
+            AuthFlowStatus::AwaitingUser => {}
+            AuthFlowStatus::Canceling
+                if now.signed_duration_since(record.updated_at)
+                    >= Duration::seconds(crate::AUTH_FLOW_CANCELLATION_LEASE_SECONDS) => {}
+            AuthFlowStatus::Completed => return Ok(record.clone()),
+            AuthFlowStatus::Canceled => return Err(AuthProductError::Canceled),
+            AuthFlowStatus::CallbackReceived | AuthFlowStatus::Completing => {
+                return Ok(record.clone());
+            }
+            AuthFlowStatus::Pending
+            | AuthFlowStatus::Canceling
+            | AuthFlowStatus::Failed
+            | AuthFlowStatus::Expired => return Err(AuthProductError::FlowAlreadyTerminal),
+        }
+        record.status = AuthFlowStatus::Canceling;
+        record.error = None;
+        record.updated_at = now;
+        Ok(record.clone())
+    }
+
+    async fn finalize_cancellation(
+        &self,
+        scope: &crate::AuthProductScope,
+        flow_id: AuthFlowId,
+        expected_claimed_at: Timestamp,
+    ) -> Result<AuthFlowRecord, AuthProductError> {
+        let mut state = self.lock_state();
+        let record = state
+            .flows
+            .get_mut(&flow_id)
+            .ok_or(AuthProductError::UnknownOrExpiredFlow)?;
+        if !scope_matches(scope, &record.scope) {
+            return Err(AuthProductError::CrossScopeDenied);
+        }
+        if record.status == AuthFlowStatus::Canceled {
+            return Ok(record.clone());
+        }
+        if record.status != AuthFlowStatus::Canceling || record.updated_at != expected_claimed_at {
+            return Err(AuthProductError::BackendConflict);
+        }
+        record.status = AuthFlowStatus::Canceled;
+        record.error = Some(crate::AuthErrorCode::Canceled);
+        record.updated_at = Utc::now();
+        Ok(record.clone())
+    }
+
+    async fn rollback_cancellation(
+        &self,
+        scope: &crate::AuthProductScope,
+        flow_id: AuthFlowId,
+        expected_claimed_at: Timestamp,
+    ) -> Result<AuthFlowRecord, AuthProductError> {
+        let mut state = self.lock_state();
+        let record = state
+            .flows
+            .get_mut(&flow_id)
+            .ok_or(AuthProductError::UnknownOrExpiredFlow)?;
+        if !scope_matches(scope, &record.scope) {
+            return Err(AuthProductError::CrossScopeDenied);
+        }
+        if record.status != AuthFlowStatus::Canceling || record.updated_at != expected_claimed_at {
+            return Err(AuthProductError::BackendConflict);
+        }
+        record.status = AuthFlowStatus::AwaitingUser;
+        record.error = None;
+        record.updated_at = Utc::now();
+        Ok(record.clone())
+    }
+
     async fn mark_continuation_dispatched(
         &self,
         scope: &crate::AuthProductScope,

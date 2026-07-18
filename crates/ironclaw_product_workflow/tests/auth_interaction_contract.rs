@@ -74,6 +74,7 @@ impl AuthInteractionReadModel for FakeAuthReadModel {
 struct RecordingFlowManager {
     flow: Mutex<Option<AuthFlowRecord>>,
     cancellations: Mutex<Vec<AuthFlowId>>,
+    complete_before_cancel: Mutex<bool>,
 }
 
 impl RecordingFlowManager {
@@ -81,11 +82,25 @@ impl RecordingFlowManager {
         Self {
             flow: Mutex::new(Some(flow)),
             cancellations: Mutex::new(Vec::new()),
+            complete_before_cancel: Mutex::new(false),
         }
     }
 
     fn cancellations(&self) -> Vec<AuthFlowId> {
         self.cancellations.lock().expect("lock").clone()
+    }
+
+    fn status(&self) -> AuthFlowStatus {
+        self.flow
+            .lock()
+            .expect("lock")
+            .as_ref()
+            .expect("flow")
+            .status
+    }
+
+    fn complete_before_cancel(&self) {
+        *self.complete_before_cancel.lock().expect("lock") = true;
     }
 }
 
@@ -215,9 +230,94 @@ impl AuthFlowManager for RecordingFlowManager {
         if &record.scope != scope {
             return Err(AuthProductError::CrossScopeDenied);
         }
+        if std::mem::take(&mut *self.complete_before_cancel.lock().expect("lock")) {
+            record.status = AuthFlowStatus::Completed;
+            record.updated_at = Utc::now();
+            return Err(AuthProductError::FlowAlreadyTerminal);
+        }
         record.status = AuthFlowStatus::Canceled;
         record.updated_at = Utc::now();
         self.cancellations.lock().expect("lock").push(flow_id);
+        Ok(record.clone())
+    }
+
+    async fn reserve_cancellation(
+        &self,
+        scope: &AuthProductScope,
+        flow_id: AuthFlowId,
+    ) -> Result<AuthFlowRecord, AuthProductError> {
+        let mut flow = self.flow.lock().expect("lock");
+        let Some(record) = flow.as_mut() else {
+            return Err(AuthProductError::UnknownOrExpiredFlow);
+        };
+        if record.id != flow_id {
+            return Err(AuthProductError::UnknownOrExpiredFlow);
+        }
+        if &record.scope != scope {
+            return Err(AuthProductError::CrossScopeDenied);
+        }
+        if std::mem::take(&mut *self.complete_before_cancel.lock().expect("lock")) {
+            record.status = AuthFlowStatus::Completed;
+            record.updated_at = Utc::now();
+            return Ok(record.clone());
+        }
+        match record.status {
+            AuthFlowStatus::AwaitingUser => {
+                record.status = AuthFlowStatus::Canceling;
+                record.updated_at = Utc::now();
+                Ok(record.clone())
+            }
+            AuthFlowStatus::Completed
+            | AuthFlowStatus::CallbackReceived
+            | AuthFlowStatus::Completing => Ok(record.clone()),
+            AuthFlowStatus::Canceled => Err(AuthProductError::Canceled),
+            AuthFlowStatus::Pending
+            | AuthFlowStatus::Canceling
+            | AuthFlowStatus::Failed
+            | AuthFlowStatus::Expired => Err(AuthProductError::FlowAlreadyTerminal),
+        }
+    }
+
+    async fn finalize_cancellation(
+        &self,
+        scope: &AuthProductScope,
+        flow_id: AuthFlowId,
+        expected_claimed_at: Timestamp,
+    ) -> Result<AuthFlowRecord, AuthProductError> {
+        let mut flow = self.flow.lock().expect("lock");
+        let Some(record) = flow.as_mut() else {
+            return Err(AuthProductError::UnknownOrExpiredFlow);
+        };
+        if record.id != flow_id || &record.scope != scope {
+            return Err(AuthProductError::CrossScopeDenied);
+        }
+        if record.status != AuthFlowStatus::Canceling || record.updated_at != expected_claimed_at {
+            return Err(AuthProductError::BackendConflict);
+        }
+        record.status = AuthFlowStatus::Canceled;
+        record.updated_at = Utc::now();
+        self.cancellations.lock().expect("lock").push(flow_id);
+        Ok(record.clone())
+    }
+
+    async fn rollback_cancellation(
+        &self,
+        scope: &AuthProductScope,
+        flow_id: AuthFlowId,
+        expected_claimed_at: Timestamp,
+    ) -> Result<AuthFlowRecord, AuthProductError> {
+        let mut flow = self.flow.lock().expect("lock");
+        let Some(record) = flow.as_mut() else {
+            return Err(AuthProductError::UnknownOrExpiredFlow);
+        };
+        if record.id != flow_id || &record.scope != scope {
+            return Err(AuthProductError::CrossScopeDenied);
+        }
+        if record.status != AuthFlowStatus::Canceling || record.updated_at != expected_claimed_at {
+            return Err(AuthProductError::BackendConflict);
+        }
+        record.status = AuthFlowStatus::AwaitingUser;
+        record.updated_at = Utc::now();
         Ok(record.clone())
     }
 
@@ -831,10 +931,9 @@ async fn credential_provided_rejects_completed_flow_without_account_id() {
 }
 
 #[tokio::test]
-async fn deny_on_completed_flow_rejects_with_stale_auth() {
-    // Race: OAuth flow completed just as the user clicked Deny.
-    // `cancel_auth_flow_if_active` returns Err(StaleAuth) for Completed flows,
-    // so `resume_denied_auth` short-circuits before touching the coordinator.
+async fn deny_on_completed_flow_converges_on_completion() {
+    // Race: OAuth flow completed just as the user clicked Deny. Completion is
+    // already terminal, so it wins and the parked run follows that path.
     let actor = TurnActor::new(UserId::new("alice").unwrap());
     let scope = turn_scope("alice", "thread-a");
     let run_id = TurnRunId::new();
@@ -851,7 +950,7 @@ async fn deny_on_completed_flow_rejects_with_stale_auth() {
     let (service, _flow_manager, coordinator) =
         service_parts(flow.clone(), vec![flow], actor.clone(), gate_ref.clone());
 
-    let error = service
+    let response = service
         .resolve(ResolveAuthInteractionRequest {
             scope,
             actor,
@@ -861,19 +960,54 @@ async fn deny_on_completed_flow_rejects_with_stale_auth() {
             idempotency_key: IdempotencyKey::new("auth-action-deny-completed").unwrap(),
         })
         .await
-        .expect_err("deny on completed flow must be stale");
+        .expect("completed flow wins a concurrent denial");
 
-    assert!(
-        matches!(
-            error,
-            ProductWorkflowError::AuthInteractionRejected {
-                kind: AuthInteractionRejectionKind::StaleAuth
-            }
-        ),
-        "expected StaleAuth, got: {error:?}"
-    );
-    assert!(coordinator.resumes().is_empty());
+    assert!(matches!(
+        response,
+        ResolveAuthInteractionResponse::Resumed(_)
+    ));
+    assert_eq!(coordinator.resumes().len(), 1);
     assert!(coordinator.cancellations().is_empty());
+}
+
+#[tokio::test]
+async fn completion_wins_when_it_interleaves_before_denial_reservation() {
+    let actor = TurnActor::new(UserId::new("alice").unwrap());
+    let scope = turn_scope("alice", "thread-a");
+    let run_id = TurnRunId::new();
+    let gate_ref = make_gate_ref("gate:auth-completion-wins");
+    let flow = auth_flow(
+        AuthFlowStatus::AwaitingUser,
+        &scope,
+        &actor,
+        run_id,
+        &gate_ref,
+        None,
+        setup_challenge(),
+    );
+    let (service, flow_manager, coordinator) =
+        service_parts(flow.clone(), vec![flow], actor.clone(), gate_ref.clone());
+    flow_manager.complete_before_cancel();
+
+    let response = service
+        .resolve(ResolveAuthInteractionRequest {
+            scope,
+            actor,
+            run_id_hint: Some(run_id),
+            gate_ref,
+            decision: AuthInteractionDecision::Deny,
+            idempotency_key: IdempotencyKey::new("auth-completion-wins").unwrap(),
+        })
+        .await
+        .expect("the completed OAuth flow wins the race");
+
+    assert!(matches!(
+        response,
+        ResolveAuthInteractionResponse::Resumed(_)
+    ));
+    assert!(flow_manager.cancellations().is_empty());
+    assert!(coordinator.cancellations().is_empty());
+    assert_eq!(coordinator.resumes().len(), 1);
 }
 
 #[tokio::test]
@@ -971,6 +1105,7 @@ async fn denied_auth_does_not_cancel_run_that_left_the_gate_before_store_transit
         flow_manager.cancellations().is_empty(),
         "a run that already left the gate must keep its auth flow usable"
     );
+    assert_eq!(flow_manager.status(), AuthFlowStatus::AwaitingUser);
     assert_eq!(coordinator.status(), TurnStatus::Queued);
     assert_eq!(coordinator.cancellations().len(), 1);
 }

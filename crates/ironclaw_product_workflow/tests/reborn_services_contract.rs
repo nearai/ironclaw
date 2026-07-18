@@ -5054,7 +5054,7 @@ async fn denied_gate_resolution_with_stale_gate_ref_returns_conflict() {
         .expect_err("stale gate_ref must produce Conflict, not silent cancel");
 
     assert_eq!(err.code, RebornServicesErrorCode::Conflict);
-    assert_eq!(err.kind, RebornServicesErrorKind::BlockedApproval);
+    assert_eq!(err.kind, RebornServicesErrorKind::Conflict);
     assert_eq!(err.status_code, 409);
     assert_eq!(
         coordinator.cancellation_count(),

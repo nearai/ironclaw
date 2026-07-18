@@ -172,7 +172,8 @@ impl AuthInteractionStatus {
             AuthFlowStatus::AwaitingUser => Some(Self::AwaitingUser),
             AuthFlowStatus::CallbackReceived => Some(Self::CallbackReceived),
             AuthFlowStatus::Completing => Some(Self::Completing),
-            AuthFlowStatus::Completed
+            AuthFlowStatus::Canceling
+            | AuthFlowStatus::Completed
             | AuthFlowStatus::Failed
             | AuthFlowStatus::Expired
             | AuthFlowStatus::Canceled => None,
