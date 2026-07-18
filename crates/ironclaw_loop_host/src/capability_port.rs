@@ -1036,6 +1036,13 @@ pub struct HostRuntimeLoopCapabilityPort {
     /// from on a later resume turn (§5.2.9). Written at the capability seam when a
     /// gate/suspension outcome is produced; see `persist_gate_record_for_outcome`.
     gate_record_store: Arc<dyn GateRecordStore>,
+    /// Idempotency keys whose gate record was already persisted by this port.
+    /// A replayed invocation (same key) returns the CACHED gate outcome from
+    /// `dispatch_records`; without this guard the seam would mint a fresh
+    /// `GateRef` and persist another write-once record per retry — orphaning
+    /// records the store deliberately cannot remove. An entry is rolled back on
+    /// a failed save so the next replay retries the persist.
+    gate_records_persisted: Mutex<HashSet<IdempotencyKey>>,
 }
 
 /// Lock a poisoned-aware `Mutex` and wrap a poison error as the canonical
@@ -1083,6 +1090,7 @@ impl HostRuntimeLoopCapabilityPort {
             ),
             trajectory_observer: None,
             gate_record_store,
+            gate_records_persisted: Mutex::new(HashSet::new()),
         }
     }
 
@@ -1691,9 +1699,20 @@ impl LoopCapabilityPort for HostRuntimeLoopCapabilityPort {
     ) -> Result<CapabilityOutcome, AgentLoopHostError> {
         // Slice C result-side collapse (§3/§5.3): produce the loop-facing outcome,
         // then persist the durable host_api gate record its `Resolution` channel
-        // renders from before returning it to the loop.
+        // renders from before returning it to the loop. The idempotency key is a
+        // pure function of the request (same derivation the dispatch cache uses),
+        // computed up front so replays that return a cached gate outcome do not
+        // persist a duplicate record — see `persist_gate_record_for_outcome`.
+        let effective_input_ref = request
+            .approval_resume
+            .as_ref()
+            .map(|resume| &resume.input_ref)
+            .unwrap_or(&request.input_ref);
+        let idempotency_key =
+            invocation_idempotency_key(&self.run_context, &request, effective_input_ref)?;
         let outcome = self.invoke_capability_dispatch(request).await?;
-        self.persist_gate_record_for_outcome(&outcome).await?;
+        self.persist_gate_record_for_outcome(&idempotency_key, &outcome)
+            .await?;
         Ok(outcome)
     }
 
@@ -1737,6 +1756,7 @@ impl HostRuntimeLoopCapabilityPort {
     /// propagates, consistent with `record_loop_completed`/`record_runtime_completed`.
     async fn persist_gate_record_for_outcome(
         &self,
+        idempotency_key: &IdempotencyKey,
         outcome: &CapabilityOutcome,
     ) -> Result<(), AgentLoopHostError> {
         let mapped = capability_outcome_to_resolution(outcome.clone());
@@ -1752,11 +1772,23 @@ impl HostRuntimeLoopCapabilityPort {
                 "mapped gate record has no gate ref on its resolution channel",
             ));
         };
+        // Replay guard: the dispatch cache replays the same gate outcome for a
+        // repeated invocation (same idempotency key); persisting again would
+        // mint a fresh GateRef and orphan another write-once record per retry.
+        if !lock_mut(&self.gate_records_persisted, "gate record replay guard")?
+            .insert(idempotency_key.clone())
+        {
+            return Ok(());
+        }
         let scope = self.visible_request.context.resource_scope.clone();
-        self.gate_record_store
-            .save(scope, gate_ref, record)
-            .await
-            .map_err(gate_record_store_error)
+        if let Err(error) = self.gate_record_store.save(scope, gate_ref, record).await {
+            // Roll the guard entry back so a later replay retries the persist
+            // instead of permanently skipping it after a transient store fault.
+            lock_mut(&self.gate_records_persisted, "gate record replay guard")?
+                .remove(idempotency_key);
+            return Err(gate_record_store_error(error));
+        }
+        Ok(())
     }
 
     async fn invoke_capability_dispatch(
@@ -2198,10 +2230,11 @@ fn gate_ref_for_resolution(resolution: &Resolution) -> Option<GateRef> {
 }
 
 /// Map a gate-record store failure to a fail-closed host error. The bound cause
-/// (which may carry a host path) is logged server-side at `debug` and never
-/// interpolated into the model-visible summary (agent-loop-capabilities.md).
+/// (which may carry a host path) is logged server-side at `warn` — a genuine
+/// host storage fault operators must see — and never interpolated into the
+/// model-visible summary (agent-loop-capabilities.md).
 fn gate_record_store_error(error: RunStateError) -> AgentLoopHostError {
-    tracing::debug!(error = %error, "failed to persist capability gate record at loop host seam");
+    tracing::warn!(error = %error, "failed to persist capability gate record at loop host seam");
     AgentLoopHostError::new(
         AgentLoopHostErrorKind::Unavailable,
         "failed to persist capability gate record",
@@ -8527,6 +8560,45 @@ mod tests {
         Arc::new(RecordingGateRecordStore::default())
     }
 
+    /// Fails the first `save` with a backend fault, then delegates to an inner
+    /// [`RecordingGateRecordStore`] — for the transient-fault retry test.
+    #[derive(Debug, Default)]
+    struct FailOnceGateRecordStore {
+        failed_once: Mutex<bool>,
+        inner: RecordingGateRecordStore,
+    }
+
+    #[async_trait]
+    impl GateRecordStore for FailOnceGateRecordStore {
+        async fn save(
+            &self,
+            scope: ResourceScope,
+            gate_ref: GateRef,
+            record: GateRecord,
+        ) -> Result<(), RunStateError> {
+            let fail_now = {
+                let mut failed_once = self.failed_once.lock().expect("fail-once lock");
+                let first = !*failed_once;
+                *failed_once = true;
+                first
+            };
+            if fail_now {
+                return Err(RunStateError::Backend(
+                    "injected transient store fault".to_string(),
+                ));
+            }
+            self.inner.save(scope, gate_ref, record).await
+        }
+
+        async fn load(
+            &self,
+            scope: &ResourceScope,
+            gate_ref: GateRef,
+        ) -> Result<Option<GateRecord>, RunStateError> {
+            self.inner.load(scope, gate_ref).await
+        }
+    }
+
     const RECORDING_OUTPUT_BYTES: u64 = 12;
 
     async fn runtime_capability_port(
@@ -8654,6 +8726,114 @@ mod tests {
                 .expect("gate record load"),
             Some(record),
             "persisted gate record must round-trip via the store"
+        );
+    }
+
+    /// A replayed invocation (same idempotency key) returns the CACHED gate
+    /// outcome from the dispatch records — it must NOT persist a second gate
+    /// record: gate records are write-once with no removal API, so a duplicate
+    /// persist per retry would accumulate orphaned records under freshly-minted
+    /// `GateRef`s (2026-07-18 ironloopai review finding on #6245).
+    #[tokio::test]
+    async fn replayed_gate_invocation_does_not_persist_a_duplicate_record() {
+        let capability_id = CapabilityId::new("demo.echo").expect("valid capability id");
+        let provider_id = ExtensionId::new("demo").expect("valid provider id");
+        let gate = ironclaw_host_runtime::RuntimeApprovalGate {
+            approval_request_id: ironclaw_host_api::ApprovalRequestId::new(),
+            capability_id: capability_id.clone(),
+            reason: RuntimeBlockedReason::ApprovalRequired,
+        };
+        let store = Arc::new(RecordingGateRecordStore::default());
+        // Exactly ONE runtime outcome queued: the second invoke must be served
+        // from the dispatch cache, not the runtime.
+        let port = runtime_capability_port_with_gate_store(
+            &capability_id,
+            &provider_id,
+            Arc::new(QueuedHostRuntime::new(
+                vec![visible_capability(
+                    capability_id.clone(),
+                    provider_id.clone(),
+                )],
+                vec![Ok(RuntimeCapabilityOutcome::ApprovalRequired(gate))],
+            )),
+            Arc::new(RecordingResultWriter::default()),
+            dummy_milestone_sink(),
+            store.clone(),
+            "thread-replayed-gate-no-duplicate",
+        )
+        .await;
+
+        let invocation = visible_runtime_invocation(&port).await;
+        let first = port
+            .invoke_capability(invocation.clone())
+            .await
+            .expect("first gate outcome");
+        let replayed = port
+            .invoke_capability(invocation)
+            .await
+            .expect("replayed gate outcome");
+        assert!(
+            matches!(first, CapabilityOutcome::ApprovalRequired { .. })
+                && matches!(replayed, CapabilityOutcome::ApprovalRequired { .. }),
+            "both invocations must surface the gate"
+        );
+
+        assert_eq!(
+            store.saved().len(),
+            1,
+            "a replayed gate invocation must not persist a duplicate gate record"
+        );
+    }
+
+    /// A transient store fault must not permanently skip persistence: the
+    /// replay-guard entry is rolled back on a failed save, so the next replay
+    /// of the same invocation retries the persist and succeeds.
+    #[tokio::test]
+    async fn failed_gate_record_persist_is_retried_on_replay() {
+        let capability_id = CapabilityId::new("demo.echo").expect("valid capability id");
+        let provider_id = ExtensionId::new("demo").expect("valid provider id");
+        let gate = ironclaw_host_runtime::RuntimeApprovalGate {
+            approval_request_id: ironclaw_host_api::ApprovalRequestId::new(),
+            capability_id: capability_id.clone(),
+            reason: RuntimeBlockedReason::ApprovalRequired,
+        };
+        let store = Arc::new(FailOnceGateRecordStore::default());
+        let port = runtime_capability_port_with_gate_store(
+            &capability_id,
+            &provider_id,
+            Arc::new(QueuedHostRuntime::new(
+                vec![visible_capability(
+                    capability_id.clone(),
+                    provider_id.clone(),
+                )],
+                vec![Ok(RuntimeCapabilityOutcome::ApprovalRequired(gate))],
+            )),
+            Arc::new(RecordingResultWriter::default()),
+            dummy_milestone_sink(),
+            store.clone(),
+            "thread-failed-gate-persist-retry",
+        )
+        .await;
+
+        let invocation = visible_runtime_invocation(&port).await;
+        // First attempt: the store fails once → the seam fails closed.
+        port.invoke_capability(invocation.clone())
+            .await
+            .expect_err("first persist attempt must fail closed on the store fault");
+        // Replay: the dispatch cache serves the gate outcome and the rolled-back
+        // guard lets the persist retry — exactly one record lands.
+        let replayed = port
+            .invoke_capability(invocation)
+            .await
+            .expect("replayed invocation persists and returns the gate");
+        assert!(matches!(
+            replayed,
+            CapabilityOutcome::ApprovalRequired { .. }
+        ));
+        assert_eq!(
+            store.inner.saved().len(),
+            1,
+            "the retried persist must land exactly one record"
         );
     }
 
