@@ -3807,15 +3807,6 @@ impl ExtensionManager {
         // treatment.
         crate::tools::mcp::config::validate_url_free_of_credentials(&config.url)
             .map_err(ExtensionError::InvalidRequest)?;
-        if let Some(ref o) = config.oauth {
-            for endpoint in [o.authorization_url.as_deref(), o.token_url.as_deref()]
-                .into_iter()
-                .flatten()
-            {
-                crate::tools::mcp::config::validate_url_free_of_credentials(endpoint)
-                    .map_err(ExtensionError::InvalidRequest)?;
-            }
-        }
         // Move credential-bearing header values into SecretsStore before the
         // config is persisted: `mcp_servers` is an ordinary (unencrypted)
         // settings value, so the row must only ever carry secret REFERENCES.
@@ -3830,6 +3821,21 @@ impl ExtensionManager {
             return Err(e);
         }
         if let Some(o) = oauth {
+            // OAuth endpoint URLs are persisted verbatim — same
+            // embedded-credential rejection as server.url. Validated on the
+            // PARAMETER (config.oauth is None until this assignment).
+            for endpoint in [o.authorization_url.as_deref(), o.token_url.as_deref()]
+                .into_iter()
+                .flatten()
+            {
+                if let Err(e) =
+                    crate::tools::mcp::config::validate_url_free_of_credentials(endpoint)
+                {
+                    self.delete_header_secrets(user_id, &secret_journal, name)
+                        .await;
+                    return Err(ExtensionError::InvalidRequest(e));
+                }
+            }
             config = config.with_oauth(o);
         }
         // `add_mcp_server` calls `validate()` internally — skip the
