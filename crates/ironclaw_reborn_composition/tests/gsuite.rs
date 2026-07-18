@@ -788,5 +788,11 @@ async fn bundled_gsuite_handler_returns_not_configured_tool_result_when_no_googl
         text.contains("ironclaw-reborn service restart"),
         "text: {text}"
     );
+    assert_eq!(
+        text.matches("service restart").count(),
+        1,
+        "the restart instruction must appear exactly once (the remediation text must not \
+         embed its own restart step on top of the appended apply_step_text): {text}"
+    );
     assert!(!text.contains("restarts automatically"), "text: {text}");
 }

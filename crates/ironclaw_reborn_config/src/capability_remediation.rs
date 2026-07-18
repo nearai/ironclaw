@@ -24,8 +24,7 @@ pub fn google_remediation_text() -> String {
      2. Enable the Gmail API (and Calendar/Drive as needed) for the project\n  \
      3. ironclaw-reborn config set google.client_id <id>.apps.googleusercontent.com\n  \
      4. ironclaw-reborn config set google.client_secret   (prompts, hidden input)\n  \
-     5. ironclaw-reborn config set google.redirect_uri <redirect-uri-from-the-oauth-client>\n  \
-     6. ironclaw-reborn service restart   (config set never restarts the service for you)"
+     5. ironclaw-reborn config set google.redirect_uri <redirect-uri-from-the-oauth-client>"
         .to_string()
 }
 

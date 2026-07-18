@@ -1619,12 +1619,54 @@ fn config_set_google_client_id_writes_config_toml() {
         stdout.contains("to apply: ironclaw-reborn service restart"),
         "config set must never auto-restart; it must print the explicit apply step: {stdout}"
     );
+    assert_eq!(
+        stdout.matches("service restart").count(),
+        1,
+        "the restart instruction must appear exactly once (remediation text plus the \
+         apply-step line must not both print it): {stdout}"
+    );
 
     let config = std::fs::read_to_string(reborn_home.join("config.toml")).expect("read config");
     assert!(config.contains("[google]"), "config: {config}");
     assert!(
         config.contains("client_id = \"abc123.apps.googleusercontent.com\""),
         "config: {config}"
+    );
+}
+
+/// PR-C round-2 fix: `slack_remediation_text` used to embed its own
+/// trailing "run `service restart`" sentence on top of `print_apply_step`'s
+/// canonical line, double-printing the restart instruction. Pin the
+/// exactly-once invariant the same way the google.client_id test above
+/// does.
+#[test]
+fn config_set_slack_enabled_prints_restart_exactly_once() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let reborn_home = temp.path().join("reborn-home");
+
+    let output = reborn_command()
+        .args(["config", "set", "slack.enabled", "true"])
+        .env("IRONCLAW_REBORN_HOME", &reborn_home)
+        .env("HOME", temp.path().join("home"))
+        .output()
+        .expect("ironclaw-reborn config set slack.enabled should run");
+
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("slack.enabled: saved"), "stdout: {stdout}");
+    assert!(
+        stdout.contains("to apply: ironclaw-reborn service restart"),
+        "config set must never auto-restart; it must print the explicit apply step: {stdout}"
+    );
+    assert_eq!(
+        stdout.matches("service restart").count(),
+        1,
+        "the restart instruction must appear exactly once (remediation text plus the \
+         apply-step line must not both print it): {stdout}"
     );
 }
 

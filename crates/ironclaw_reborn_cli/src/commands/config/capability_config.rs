@@ -169,14 +169,14 @@ pub(super) fn google_remediation_text() -> String {
 
 /// Slack remediation text: per Correction A in the PR-C plan, Slack has
 /// no CLI-settable bot token/signing secret — the only supported surface
-/// is the WebUI extension setup flow.
+/// is the WebUI extension setup flow. Describes WHAT to configure only;
+/// the restart apply-step sentence is appended once by the caller (see
+/// `set.rs::print_apply_step`), not embedded here — see the module doc.
 pub(super) fn slack_remediation_text(base_url: &str) -> String {
     format!(
         "Slack setup is WebUI-only: finish connecting Slack at {base_url}/v2/extensions \
          (config set slack.enabled true|false only toggles whether the route mounts; it does \
-         not configure Slack app identity or credentials). After `config set slack.enabled`, \
-         run `ironclaw-reborn service restart` to apply it — config set never restarts the \
-         service for you."
+         not configure Slack app identity or credentials)."
     )
 }
 
@@ -393,17 +393,26 @@ mod tests {
         assert!(google.contains("config set google.client_id"));
         assert!(google.contains("config set google.client_secret"));
         assert!(google.contains("config set google.redirect_uri"));
-        assert!(
-            google.contains("ironclaw-reborn service restart"),
-            "config set never auto-restarts; remediation text must spell out the apply step"
+        // The remediation text itself must NOT embed the restart step: that
+        // sentence is appended exactly once by the surface (CLI's
+        // `print_apply_step` / composition's `apply_step_text`), never
+        // baked into the remediation text, or callers that append it too
+        // produce a duplicate "service restart" instruction.
+        assert_eq!(
+            google.matches("service restart").count(),
+            0,
+            "google_remediation_text must not embed the restart step itself \
+             (callers append it exactly once): {google}"
         );
 
         let slack = slack_remediation_text("http://127.0.0.1:3000");
         assert!(slack.contains("http://127.0.0.1:3000/v2/extensions"));
         assert!(!slack.contains("config set slack.bot_token"));
-        assert!(
-            slack.contains("ironclaw-reborn service restart"),
-            "config set never auto-restarts; remediation text must spell out the apply step"
+        assert_eq!(
+            slack.matches("service restart").count(),
+            0,
+            "slack_remediation_text must not embed the restart step itself \
+             (callers append it exactly once): {slack}"
         );
     }
 }
