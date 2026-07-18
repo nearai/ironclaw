@@ -8,17 +8,17 @@
 //!
 //! ## Redaction contract
 //!
-//! This is the canonical home for the safe-summary rule. It is an **exact,
-//! non-weakening mirror** of `ironclaw_turns`' `validate_loop_safe_summary`
-//! (the loop-facing `safe_summary: String` fields on `CapabilityOutcome` and
-//! friends). Per `tools.md`, result vocabulary belongs in `host_api`; the doc's
-//! migration folds those ad-hoc `String` fields onto this type. Until that
-//! wiring slice lands, the turns validator is a temporary duplicate that must be
-//! reconciled to delegate here — it must never diverge from the rules below, and
-//! must never become *weaker* than them. The bound (512 bytes), the payload/path
-//! delimiter ban, the credential-marker denylist, and the secret-like-token
-//! detector are all defense-in-depth: the redactor at the construction site
-//! scrubs first, and this type refuses to hold anything that slipped through.
+//! This is the canonical home for the safe-summary rule — the **single
+//! definition**. `ironclaw_turns`' `validate_loop_safe_summary` (the
+//! loop-facing `safe_summary: String` fields on `CapabilityOutcome` and
+//! friends) and `ironclaw_memory_native`'s memory-snippet validator both
+//! DELEGATE to `SafeSummary::new`; they layer only their own domain-specific
+//! concerns on top (a loop-input-encoding sentinel bypass, extra snippet
+//! vocabulary bans). Change the rule here, never in a delegate. The bound
+//! (512 bytes), the payload/path delimiter ban, the credential-marker
+//! denylist, and the secret-like-token detector are all defense-in-depth: the
+//! redactor at the construction site scrubs first, and this type refuses to
+//! hold anything that slipped through.
 
 use serde::{Deserialize, Serialize};
 
@@ -140,7 +140,25 @@ fn contains_secret_like_token(lower: &str) -> bool {
         .split(|character: char| {
             !character.is_ascii_alphanumeric() && !matches!(character, '-' | '_' | '.')
         })
-        .any(is_secret_like_token)
+        .any(has_secret_like_prefix)
+}
+
+/// True when a credential-shaped prefix starts this token or any interior
+/// segment after a `-`/`_`/`.` separator. The tokenizer above deliberately
+/// keeps those separators inside tokens so multi-part prefixes like
+/// `github_pat_` stay matchable — but that alone would let `memo_sk-abc123`
+/// hide a key behind a leading word, so every separator boundary is checked
+/// as a token start too. (Tokens are pure ASCII by construction: the split
+/// removes every non-ASCII-alphanumeric character except `-`/`_`/`.`, so
+/// byte indexing after a separator is char-boundary-safe.)
+fn has_secret_like_prefix(token: &str) -> bool {
+    if is_secret_like_token(token) {
+        return true;
+    }
+    token
+        .char_indices()
+        .filter(|(_, character)| matches!(character, '-' | '_' | '.'))
+        .any(|(index, _)| is_secret_like_token(&token[index + 1..]))
 }
 
 fn is_secret_like_token(token: &str) -> bool {
@@ -208,6 +226,13 @@ mod tests {
             "token sk-ant-abc123",
             "ghp_0123456789abcdef",
             "AKIA0123456789ABCDEF",
+            // A separator-joined leading word must not hide a key: the former
+            // memory_native tokenizer split on `_`/`.` and caught these; the
+            // canonical detector must be no weaker (regression for the
+            // boundary-scan in `has_secret_like_prefix`).
+            "note memo_sk-abc123 saved",
+            "memo.ghp_0123456789abcdef",
+            "backup_AKIA0123456789ABCDEF",
         ] {
             let why = rejection(bad);
             assert!(
@@ -224,6 +249,9 @@ mod tests {
             "provider error",
             "stack trace truncated",
             "tool input rejected",
+            // Boundary scan must not false-positive on words that merely
+            // contain a prefix mid-segment.
+            "risk-based task-list check",
         ] {
             assert!(SafeSummary::new(ok).is_ok(), "should allow {ok:?}");
         }
