@@ -3231,6 +3231,7 @@ async fn filesystem_turn_state_store_cancel_requested_heartbeat_uses_memory_leas
             scope: request.scope,
             actor: turn_actor(),
             run_id,
+            precondition: None,
             reason: SanitizedCancelReason::UserRequested,
             idempotency_key: IdempotencyKey::new("idem-fs-heartbeat-cancel-request").unwrap(),
         })

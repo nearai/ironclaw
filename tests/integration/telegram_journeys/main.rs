@@ -40,6 +40,11 @@
 //! resume, paired-DM turn + outbound render, webhook secret verification on
 //! the live route, and the in-DM extension-install gate feedback regression
 //! (see `telegram_dm_slack_install_gates_with_action_needed_notice_not_silence`).
+//! It also covers the cross-extension Slack OAuth recovery journeys: an
+//! explicit in-chat denial terminally cancels the exact run, while a
+//! provider-popup denial resumes the exact gate as denied; the Slack link is
+//! pinned to the configured workspace and both paths prove the same Telegram
+//! thread accepts a later message.
 //!
 //! One scenario file per user journey (catalog row ids in each
 //! scenario's doc-comment); the shared stack lives in `harness.rs`.
@@ -59,4 +64,5 @@ mod scenario_delivery_honesty;
 mod scenario_gated_install_deny_arm;
 mod scenario_gated_install_oauth_link;
 mod scenario_multiuser_isolation;
+mod scenario_slack_oauth_cancel_resume;
 mod scenario_unpair_repair_fresh_slate;

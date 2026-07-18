@@ -1703,6 +1703,7 @@ impl RebornIntegrationHarness {
                 scope: self.turn_scope.clone(),
                 actor: TurnActor::new(self.binding.actor_user_id.clone()),
                 run_id,
+                precondition: None,
                 reason: SanitizedCancelReason::UserRequested,
                 idempotency_key: IdempotencyKey::new(format!("cancel-{run_id}"))?,
             })

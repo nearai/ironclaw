@@ -1,6 +1,7 @@
 use super::harness::*;
 use super::reborn_support::reply::RebornScriptedReply;
 use axum::http::StatusCode;
+use ironclaw_turns::TurnStatus;
 use serde_json::json;
 use std::time::Duration;
 
@@ -14,8 +15,8 @@ use std::time::Duration;
 #[tokio::test]
 async fn telegram_dm_auth_deny_command_cancels_gate_and_frees_the_thread() {
     // FIFO: install + activate park the run; the deny CANCELS (no resume
-    // model call), so the two trailing entries serve the post-deny turns.
-    // Both carry the same text so the assertion is deterministic regardless
+    // model call), so the trailing entries serve the post-deny turns.
+    // They carry the same text so the assertion is deterministic regardless
     // of which entry the next turn consumes.
     let stack = build_journey_stack_with_google_oauth([
         RebornScriptedReply::tool_call(
@@ -41,6 +42,11 @@ async fn telegram_dm_auth_deny_command_cancels_gate_and_frees_the_thread() {
         .wait_for_dm_send(|text| text.contains("accounts.google.com"))
         .await
         .expect("the gated install DMs the authorization link first");
+
+    // Resolve the exact run from the durable thread transcript before acting
+    // on the gate. This lets the denial assertion wait for an authoritative
+    // terminal state instead of relying on a timing window.
+    let (turn_scope, run_id) = stack.run_for_dm_message("can you set up gmail?").await;
 
     // A message while the run is parked draws the busy hint that advertises
     // the in-chat decline command, gate ref included.
@@ -74,6 +80,23 @@ async fn telegram_dm_auth_deny_command_cancels_gate_and_frees_the_thread() {
         .wait_for_dm_send(|text| text.contains("Authentication canceled"))
         .await
         .expect("the in-chat decline must be acknowledged, not silent");
+
+    wait_for_run_status(
+        &stack.runtime.webui_turn_coordinator_for_test(),
+        &turn_scope,
+        run_id,
+        TurnStatus::Cancelled,
+    )
+    .await
+    .expect("explicit denial terminally cancels the exact gated run");
+    // Once the run is terminally cancelled, no late continuation can consume
+    // another model step. The install and activate calls are the only calls
+    // before the next user turn.
+    assert_eq!(
+        stack.model_trace.calls(),
+        2,
+        "explicit auth denial must not resume the canceled model run"
+    );
 
     // The thread frees. Cancellation is asynchronous after the in-chat ack,
     // so follow-ups sent while it settles draw the documented "please

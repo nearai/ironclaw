@@ -20,8 +20,8 @@ use ironclaw_product_workflow::{
 };
 use ironclaw_run_state::ApprovalRequestStore;
 use ironclaw_turns::{
-    GateRef, GetRunStateRequest, ReplyTargetBindingRef, TurnActor, TurnCoordinator, TurnRunId,
-    TurnRunState, TurnScope, TurnStatus,
+    CancelRunPrecondition, GateRef, GetRunStateRequest, ReplyTargetBindingRef, TurnActor,
+    TurnCoordinator, TurnRunId, TurnRunState, TurnScope, TurnStatus,
 };
 use ironclaw_wasm_product_adapters::ImmediateAckWorkflowObserver;
 
@@ -118,7 +118,7 @@ pub(crate) fn channel_approval_gate_prompt_view(
 
 /// Cancel a run parked on an interactive-auth gate with a `Policy` reason — the
 /// same `cancel_run` the auth-deny resolution uses. Idempotent per run
-/// (`slack-auth-block:{run_id}`) so repeated observer/delivery passes are safe.
+/// (`auth-block:{run_id}`) so repeated observer/delivery passes are safe.
 /// Shared by the live observer path ([`FinalReplyDeliveryObserver::cancel_channel_auth_blocked_run`])
 /// and the triggered delivery path ([`triggered_notification_for_state`]) so the
 /// cancellation contract cannot drift between them.
@@ -128,30 +128,36 @@ pub(crate) async fn cancel_auth_blocked_run(
     scope: &TurnScope,
     actor: TurnActor,
     run_id: TurnRunId,
-    gate_ref: Option<&str>,
+    gate_ref: Option<&GateRef>,
 ) -> Result<(), FinalReplyDeliveryError> {
     // Resolve the flow-cancel target BEFORE `cancel_run` consumes `actor`. Owner
     // Resolution mirrors `enrich_auth_prompt_view`: an explicit turn owner
     // (shared/team subject) wins, else the acting user. When `gate_ref` is absent
     // there is no flow to resolve, so the flow cancel is skipped entirely (not
     // encoded as an empty ref).
-    let flow_cancel_target = match (auth_flow_canceller, gate_ref) {
-        (Some(canceller), Some(gate_ref)) => {
+    let gate_ref = gate_ref.ok_or_else(|| FinalReplyDeliveryError::StatusMessage {
+        reason: "blocked auth cancellation is missing its typed gate ref".to_string(),
+    })?;
+    let flow_cancel_target = match auth_flow_canceller {
+        Some(canceller) => {
             let owner_user_id = scope
                 .explicit_owner_user_id()
                 .unwrap_or(&actor.user_id)
                 .clone();
             Some((canceller, owner_user_id, gate_ref))
         }
-        _ => None,
+        None => None,
     };
 
-    let idempotency_key = ironclaw_turns::IdempotencyKey::new(format!("slack-auth-block:{run_id}"))
+    let idempotency_key = ironclaw_turns::IdempotencyKey::new(format!("auth-block:{run_id}"))
         .map_err(|err| FinalReplyDeliveryError::StatusMessage {
-            reason: format!("invalid idempotency key for slack auth block: {err}"),
+            reason: format!("invalid idempotency key for auth block: {err}"),
         })?;
+    let precondition = CancelRunPrecondition::BlockedAuthGate {
+        gate_ref: gate_ref.clone(),
+    };
     // Cancel the run FIRST — it is the user-visible terminal action. `cancel_run` is
-    // idempotent (`slack-auth-block:{run_id}`), so repeated passes are safe. If it
+    // idempotent (`auth-block:{run_id}`), so repeated passes are safe. If it
     // fails we return here and leave the durable `AuthFlow` (and the still-usable
     // auth prompt) intact: marking the flow terminal while the run is still
     // `BlockedAuth` would be the inverse state drift this fix is meant to prevent,
@@ -161,6 +167,7 @@ pub(crate) async fn cancel_auth_blocked_run(
             scope: scope.clone(),
             actor,
             run_id,
+            precondition: Some(precondition),
             reason: ironclaw_turns::SanitizedCancelReason::Policy,
             idempotency_key,
         })
@@ -171,14 +178,14 @@ pub(crate) async fn cancel_auth_blocked_run(
     // run (the user-visible action) has already been cancelled.
     if let Some((canceller, owner_user_id, gate_ref)) = flow_cancel_target
         && let Err(error) = canceller
-            .cancel_blocked_auth_flow(scope, &owner_user_id, run_id, gate_ref)
+            .cancel_blocked_auth_flow(scope, &owner_user_id, run_id, gate_ref.as_str())
             .await
     {
         tracing::debug!(
             target = "ironclaw::reborn::channel_delivery",
             %run_id,
             %error,
-            "failed to cancel stale auth flow on Slack auth auto-deny (best-effort)"
+            "failed to cancel stale auth flow after channel auth auto-deny (best-effort)"
         );
     }
     Ok(())

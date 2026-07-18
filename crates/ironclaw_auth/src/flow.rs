@@ -83,15 +83,16 @@ pub enum AuthContinuationRef {
     },
 }
 
-/// Emitted by fake and future production services after an auth flow completes.
+/// Emitted after an auth flow either completes with credentials or terminates
+/// in a way that must release its typed continuation, such as provider denial.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AuthContinuationEvent {
     pub flow_id: AuthFlowId,
     pub scope: AuthProductScope,
     pub continuation: AuthContinuationRef,
-    /// Provider of the completed flow, so dispatchers can fan the completion
-    /// out to other runs blocked on the same provider's credentials without
-    /// re-reading the flow record.
+    /// Provider of the terminal flow, so completion dispatchers can fan a
+    /// granted credential out without re-reading the record and denial
+    /// dispatchers can release the exact originating continuation.
     pub provider: AuthProviderId,
     pub credential_account_id: Option<CredentialAccountId>,
     pub emitted_at: Timestamp,

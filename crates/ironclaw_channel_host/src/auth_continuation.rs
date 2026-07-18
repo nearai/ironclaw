@@ -29,8 +29,9 @@ pub trait RebornAuthContinuationDispatcher: Send + Sync {
         event: AuthContinuationEvent,
     ) -> Result<(), AuthProductError>;
 
-    /// Deny a turn gate whose backing auth flow was canceled by lifecycle
-    /// cleanup. Non-turn continuations remain cancel-only.
+    /// Deny a turn gate whose backing auth flow ended without credentials,
+    /// including provider-owned denial and lifecycle cleanup. Non-turn
+    /// continuations remain terminal without a turn side effect.
     async fn dispatch_canceled_auth_continuation(
         &self,
         _event: AuthContinuationEvent,

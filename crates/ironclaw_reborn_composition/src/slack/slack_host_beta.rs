@@ -462,6 +462,14 @@ impl SlackPersonalOAuthBindingConfig {
         tenant_id: TenantId,
         installation_id: AdapterInstallationId,
     ) -> Result<Self, String> {
+        Self::in_memory_for_tests_with_team(tenant_id, installation_id, "T-test")
+    }
+
+    fn in_memory_for_tests_with_team(
+        tenant_id: TenantId,
+        installation_id: AdapterInstallationId,
+        team_id: &str,
+    ) -> Result<Self, String> {
         let view = MountView::new(vec![MountGrant::new(
             MountAlias::new("/tenant-shared").map_err(|error| error.to_string())?,
             VirtualPath::new("/tenants/test/shared").map_err(|error| error.to_string())?,
@@ -485,7 +493,7 @@ impl SlackPersonalOAuthBindingConfig {
                 [SlackPersonalBindingInstallation {
                     tenant_id,
                     installation_id: installation_id.clone(),
-                    selector: SlackInstallationSelector::app_team("A-test", "T-test"),
+                    selector: SlackInstallationSelector::app_team("A-test", team_id),
                 }],
                 binding_store,
             ));
@@ -499,6 +507,40 @@ impl SlackPersonalOAuthBindingConfig {
             state.clone(),
             state,
         ))
+    }
+
+    /// Build one fully connected Slack OAuth fixture for caller-level journeys.
+    /// The workspace id is accepted once and drives both the authorization URL
+    /// and callback binding selector, mirroring production's single setup record.
+    pub async fn connected_in_memory_for_tests(
+        redirect_uri: ironclaw_auth::OAuthRedirectUri,
+        oauth_client_id: &str,
+        oauth_client_secret: &str,
+        tenant_id: TenantId,
+        installation_id: AdapterInstallationId,
+        team_id: &str,
+    ) -> Result<
+        (
+            crate::slack::slack_setup::SlackPersonalSetupServiceSlot,
+            Self,
+        ),
+        String,
+    > {
+        let slot = crate::slack::slack_setup::SlackPersonalSetupServiceSlot::filled_with_in_memory_setup_and_team_for_tests(
+            redirect_uri,
+            oauth_client_id,
+            oauth_client_secret,
+            team_id,
+        )
+        .await;
+        let binding = Self::in_memory_for_tests_with_team(tenant_id, installation_id, team_id)?;
+        slot.fill_gate_lifecycle(
+            crate::slack::slack_personal_oauth::SlackPersonalOAuthGateLifecycle::new(
+                Arc::clone(&binding.connection_scope_resolver),
+                Arc::clone(&binding.lifecycle_store),
+            ),
+        );
+        Ok((slot, binding))
     }
 }
 

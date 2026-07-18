@@ -328,11 +328,11 @@ impl ProductAuthRouteState {
     }
 
     #[cfg(feature = "slack-v2-host-beta")]
-    pub(crate) async fn slack_personal_oauth_credentials(
+    pub(crate) async fn slack_personal_oauth_authorization_context(
         &self,
     ) -> Result<
         (
-            ironclaw_auth::OAuthClientId,
+            crate::slack::slack_setup::SlackOAuthAuthorizationContext,
             ironclaw_auth::OAuthRedirectUri,
         ),
         ProductAuthRouteFailure,
@@ -347,12 +347,12 @@ impl ProductAuthRouteState {
             tracing::warn!("Slack personal OAuth slot not yet filled (startup race)");
             ProductAuthRouteFailure::backend_unavailable()
         })?;
-        let (client_id, _secret) = service.oauth_credentials().await.map_err(|e| {
+        let authorization = service.oauth_authorization_context().await.map_err(|e| {
             tracing::warn!(error = %e, "Slack personal OAuth credentials not configured");
             ProductAuthRouteFailure::malformed_config()
         })?;
         let redirect_uri = slot.redirect_uri().clone();
-        Ok((client_id, redirect_uri))
+        Ok((authorization, redirect_uri))
     }
 
     #[cfg(feature = "slack-v2-host-beta")]

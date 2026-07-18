@@ -520,6 +520,7 @@ impl WebUiCancelRunRequest {
                 scope: caller.turn_scope(thread_id),
                 actor: caller.actor(),
                 run_id,
+                precondition: None,
                 reason,
                 idempotency_key: client_action_id,
             },

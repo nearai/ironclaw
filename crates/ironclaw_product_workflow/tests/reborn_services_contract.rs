@@ -105,12 +105,12 @@ use ironclaw_threads::{
 };
 use ironclaw_turns::run_profile::{LoopModelRouteSnapshot, LoopModelUsage};
 use ironclaw_turns::{
-    AcceptedMessageRef, AdmissionRejection, AdmissionRejectionReason, CancelRunRequest,
-    CancelRunResponse, DefaultTurnCoordinator, EventCursor, GateRef, GetRunStateRequest,
-    InMemoryTurnStateStore, ReplyTargetBindingRef, ResumeTurnPrecondition, ResumeTurnRequest,
-    ResumeTurnResponse, RetryTurnRequest, RetryTurnResponse, RunProfileId, RunProfileVersion,
-    SanitizedFailure, SourceBindingRef, SubmitTurnRequest, SubmitTurnResponse, TurnActor,
-    TurnCapacityResource, TurnCoordinator, TurnError, TurnId, TurnOriginKind, TurnRunId,
+    AcceptedMessageRef, AdmissionRejection, AdmissionRejectionReason, CancelRunPrecondition,
+    CancelRunRequest, CancelRunResponse, DefaultTurnCoordinator, EventCursor, GateRef,
+    GetRunStateRequest, InMemoryTurnStateStore, ReplyTargetBindingRef, ResumeTurnPrecondition,
+    ResumeTurnRequest, ResumeTurnResponse, RetryTurnRequest, RetryTurnResponse, RunProfileId,
+    RunProfileVersion, SanitizedFailure, SourceBindingRef, SubmitTurnRequest, SubmitTurnResponse,
+    TurnActor, TurnCapacityResource, TurnCoordinator, TurnError, TurnId, TurnOriginKind, TurnRunId,
     TurnRunState, TurnScope, TurnStatus,
 };
 use secrecy::SecretString;
@@ -374,6 +374,14 @@ impl FakeTurnCoordinator {
 
     fn cancellation_count(&self) -> usize {
         self.cancellations.lock().expect("lock").len()
+    }
+
+    fn last_cancellation_precondition(&self) -> Option<CancelRunPrecondition> {
+        self.cancellations
+            .lock()
+            .expect("lock")
+            .last()
+            .and_then(|request| request.precondition.clone())
     }
 
     fn resumption_count(&self) -> usize {
@@ -4752,32 +4760,57 @@ async fn missing_run_state_for_auth_gate_still_routes_to_auth_interaction_servic
 }
 
 #[tokio::test]
-async fn denied_gate_resolution_cancels_run() {
-    let coordinator = Arc::new(FakeTurnCoordinator::default());
-    let services = RebornServices::new(
-        Arc::new(InMemorySessionThreadService::default()),
-        coordinator.clone(),
-    );
-    create_thread_for(&services, caller(), "thread-alpha").await;
-    coordinator.set_parked_gate(GateRef::new("gate-alpha").expect("gate"));
+async fn denied_generic_gate_resolution_forwards_typed_preconditions() {
+    for (case, status, expected) in [
+        (
+            "resource",
+            TurnStatus::BlockedResource,
+            CancelRunPrecondition::BlockedResourceGate {
+                gate_ref: GateRef::new("gate-resource").expect("gate"),
+            },
+        ),
+        (
+            "dependent",
+            TurnStatus::BlockedDependentRun,
+            CancelRunPrecondition::BlockedDependentRunGate {
+                gate_ref: GateRef::new("gate-dependent").expect("gate"),
+            },
+        ),
+    ] {
+        let coordinator = Arc::new(FakeTurnCoordinator::default());
+        let services = RebornServices::new(
+            Arc::new(InMemorySessionThreadService::default()),
+            coordinator.clone(),
+        );
+        let thread_id = format!("thread-{case}");
+        let gate_ref = match &expected {
+            CancelRunPrecondition::BlockedResourceGate { gate_ref }
+            | CancelRunPrecondition::BlockedDependentRunGate { gate_ref } => gate_ref.clone(),
+            _ => unreachable!("fixture contains only generic cancellable gates"),
+        };
+        create_thread_for(&services, caller(), &thread_id).await;
+        coordinator.set_parked_gate(gate_ref.clone());
+        coordinator.set_run_state_status(status);
 
-    let response = services
-        .resolve_gate(
-            caller(),
-            serde_json::from_value::<WebUiResolveGateRequest>(json!({
-                "client_action_id": "gate-2",
-                "thread_id": "thread-alpha",
-                "run_id": run_id_string(),
-                "gate_ref": "gate-alpha",
-                "resolution": "denied"
-            }))
-            .expect("request"),
-        )
-        .await
-        .expect("gate denial succeeds");
+        let response = services
+            .resolve_gate(
+                caller(),
+                serde_json::from_value::<WebUiResolveGateRequest>(json!({
+                    "client_action_id": format!("gate-{case}"),
+                    "thread_id": thread_id,
+                    "run_id": run_id_string(),
+                    "gate_ref": gate_ref.as_str(),
+                    "resolution": "denied"
+                }))
+                .expect("request"),
+            )
+            .await
+            .expect("generic gate denial succeeds");
 
-    assert!(matches!(response, RebornResolveGateResponse::Cancelled(_)));
-    assert_eq!(coordinator.cancellation_count(), 1);
+        assert!(matches!(response, RebornResolveGateResponse::Cancelled(_)));
+        assert_eq!(coordinator.cancellation_count(), 1);
+        assert_eq!(coordinator.last_cancellation_precondition(), Some(expected));
+    }
 }
 
 // Regression: cancel_run must reject when the authenticated user does not own

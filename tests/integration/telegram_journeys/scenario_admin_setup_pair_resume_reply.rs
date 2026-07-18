@@ -38,6 +38,8 @@ async fn telegram_whole_journey_setup_pair_resume_and_dm_reply() {
         mounts,
         webui,
         caller,
+        model_trace: _,
+        oauth_callback_public: _,
     } = stack;
     let protected = mounts.protected_routes();
 

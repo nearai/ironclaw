@@ -6,8 +6,9 @@ use ironclaw_auth::{
     CredentialAccountId, CredentialSelectionInput,
 };
 use ironclaw_turns::{
-    GateRef, GateResumeDisposition, GetRunStateRequest, ResumeTurnPrecondition, ResumeTurnRequest,
-    TurnCoordinator, TurnError, TurnErrorCategory, TurnRunId, TurnStatus,
+    CancelRunPrecondition, CancelRunRequest, GateRef, GateResumeDisposition, GetRunStateRequest,
+    ResumeTurnPrecondition, ResumeTurnRequest, SanitizedCancelReason, TurnCoordinator, TurnError,
+    TurnErrorCategory, TurnRunId, TurnStatus,
 };
 
 use super::types::is_pending_auth_status;
@@ -240,7 +241,7 @@ impl DefaultAuthInteractionService {
                 // DELIBERATE: a Deny arriving after the OAuth flow already
                 // reached Completed is rejected as StaleAuth.  This is a race
                 // (the user clicked Deny just as the OAuth callback landed).
-                // The caller (`resume_denied_auth`) short-circuits here and the
+                // The caller (`cancel_denied_auth`) short-circuits here and the
                 // run proceeds with the credential that was just obtained.
                 //
                 // Surfacing a friendlier "already connected" message, or
@@ -257,15 +258,39 @@ impl DefaultAuthInteractionService {
         Ok(())
     }
 
-    async fn resume_denied_auth(
+    async fn cancel_denied_auth(
         &self,
         request: ResolveAuthInteractionRequest,
         gate: AuthGateRecord,
         run_id: TurnRunId,
     ) -> Result<ResolveAuthInteractionResponse, ProductWorkflowError> {
         self.cancel_auth_flow_if_active(&gate).await?;
-        self.resume_auth_gate(request, run_id, Some(GateResumeDisposition::Denied))
+        let precondition = CancelRunPrecondition::BlockedAuthGate {
+            gate_ref: gate.gate_ref().clone(),
+        };
+        self.cancel_auth_run(request, run_id, Some(precondition))
             .await
+    }
+
+    async fn cancel_auth_run(
+        &self,
+        request: ResolveAuthInteractionRequest,
+        run_id: TurnRunId,
+        precondition: Option<CancelRunPrecondition>,
+    ) -> Result<ResolveAuthInteractionResponse, ProductWorkflowError> {
+        let response = self
+            .turn_coordinator
+            .cancel_run(CancelRunRequest {
+                scope: request.scope,
+                actor: request.actor,
+                run_id,
+                precondition,
+                reason: SanitizedCancelReason::UserRequested,
+                idempotency_key: request.idempotency_key,
+            })
+            .await
+            .map_err(map_auth_resume_error)?;
+        Ok(ResolveAuthInteractionResponse::Canceled(response))
     }
 
     async fn replay_denied_auth(
@@ -273,17 +298,25 @@ impl DefaultAuthInteractionService {
         request: ResolveAuthInteractionRequest,
         run_id: TurnRunId,
     ) -> Result<ResolveAuthInteractionResponse, ProductWorkflowError> {
-        // Route through resume_turn with the SAME idempotency key as the first
-        // Deny.  TurnCoordinator::resume_turn returns the cached
-        // ResumeTurnResponse for a repeated key before running the precondition
-        // check, so this is idempotent regardless of current run state.  A
-        // fresh key on a finished run still errors via the precondition
-        // (correctly StaleAuth).
-        self.resume_auth_gate(request, run_id, Some(GateResumeDisposition::Denied))
+        let state = self
+            .turn_coordinator
+            .get_run_state(GetRunStateRequest {
+                scope: request.scope.clone(),
+                run_id,
+            })
             .await
+            .map_err(map_auth_resume_error)?;
+        if state.status != TurnStatus::Cancelled {
+            return Err(auth_rejected(AuthInteractionRejectionKind::StaleAuth));
+        }
+        // Route through cancel_run with the SAME idempotency key as the first
+        // Deny. TurnCoordinator returns the cached cancellation for a repeated
+        // key. A fresh key is still safe because the exact run is already
+        // terminally canceled. Never call cancel_run here for a live run.
+        self.cancel_auth_run(request, run_id, None).await
     }
 
-    async fn resume_denied_auth_without_flow(
+    async fn cancel_denied_auth_without_flow(
         &self,
         request: ResolveAuthInteractionRequest,
         run_id: TurnRunId,
@@ -294,7 +327,10 @@ impl DefaultAuthInteractionService {
                 return Err(auth_rejected(AuthInteractionRejectionKind::MissingAuth));
             }
         }
-        self.resume_auth_gate(request, run_id, Some(GateResumeDisposition::Denied))
+        let precondition = CancelRunPrecondition::BlockedAuthGate {
+            gate_ref: request.gate_ref.clone(),
+        };
+        self.cancel_auth_run(request, run_id, Some(precondition))
             .await
     }
 }
@@ -345,7 +381,7 @@ impl AuthInteractionService for DefaultAuthInteractionService {
                 let Some(run_id) = request.run_id_hint else {
                     return Err(auth_rejected(AuthInteractionRejectionKind::MissingAuth));
                 };
-                return self.resume_denied_auth_without_flow(request, run_id).await;
+                return self.cancel_denied_auth_without_flow(request, run_id).await;
             }
             Err(error) => return Err(error),
         };
@@ -356,7 +392,7 @@ impl AuthInteractionService for DefaultAuthInteractionService {
         ) {
             (BlockedGateState::ParkedOnGate, AuthInteractionDecision::Deny) => {
                 let gate = self.refresh_gate(&gate).await?;
-                self.resume_denied_auth(request, gate, run_id).await
+                self.cancel_denied_auth(request, gate, run_id).await
             }
             (
                 BlockedGateState::ParkedOnGate,

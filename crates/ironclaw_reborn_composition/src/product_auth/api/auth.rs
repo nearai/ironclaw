@@ -52,6 +52,7 @@ use crate::product_auth::oauth::oauth_gate::{
 use crate::{AuthChallengeProvider, AuthChallengeView, BlockedAuthFlowCanceller};
 
 pub(crate) const AUTH_CONTINUATION_DISPATCH_FAILED_CODE: &str = "auth_continuation_dispatch_failed";
+const CANCELED_AUTH_CONTINUATION_DISPATCH_ATTEMPTS: usize = 2;
 
 use ironclaw_channel_host::auth_continuation::RebornAuthContinuationDispatcher;
 
@@ -1052,12 +1053,7 @@ impl RebornProductAuthServices {
             .await
             .map_err(RebornCredentialLifecycleError::from)?;
         for event in &report.canceled_turn_gate_continuations {
-            self.continuation_dispatcher
-                .dispatch_canceled_auth_continuation(event.clone())
-                .await
-                .map_err(RebornCredentialLifecycleError::from)?;
-            self.flow_manager
-                .mark_continuation_dispatched(&event.scope, event.flow_id, event.emitted_at)
+            self.dispatch_and_acknowledge_canceled_auth_continuation(event.clone())
                 .await
                 .map_err(RebornCredentialLifecycleError::from)?;
         }
@@ -1289,19 +1285,56 @@ impl RebornProductAuthServices {
                     (completed, true)
                 }
             }
-            RebornOAuthCallbackOutcome::ProviderDenied => self
-                .flow_manager
-                .complete_oauth_callback(
-                    &request.scope,
-                    OAuthCallbackInput {
-                        flow_id: request.flow_id,
-                        opaque_state_hash: request.opaque_state_hash,
-                        outcome: ProviderCallbackOutcome::Denied,
-                    },
-                )
-                .await
-                .map(|completed| (completed, true))
-                .map_err(RebornOAuthCallbackError::from)?,
+            RebornOAuthCallbackOutcome::ProviderDenied => {
+                let denial_result = self
+                    .flow_manager
+                    .complete_oauth_callback(
+                        &request.scope,
+                        OAuthCallbackInput {
+                            flow_id: request.flow_id,
+                            opaque_state_hash: request.opaque_state_hash,
+                            outcome: ProviderCallbackOutcome::Denied,
+                        },
+                    )
+                    .await;
+                let terminal_error = match denial_result {
+                    Err(AuthProductError::ProviderDenied) => AuthProductError::ProviderDenied,
+                    Err(AuthProductError::FlowAlreadyTerminal) => {
+                        AuthProductError::FlowAlreadyTerminal
+                    }
+                    Err(error) => return Err(error.into()),
+                    Ok(_) => return Err(AuthProductError::BackendUnavailable.into()),
+                };
+                let failed = self
+                    .flow_manager
+                    .get_flow(&request.scope, request.flow_id)
+                    .await
+                    .map_err(RebornOAuthCallbackAttemptError::from)?
+                    .ok_or(AuthProductError::UnknownOrExpiredFlow)
+                    .map_err(RebornOAuthCallbackAttemptError::from)?;
+                if failed.status != AuthFlowStatus::Failed
+                    || failed.error != Some(AuthErrorCode::ProviderDenied)
+                {
+                    return Err(terminal_error.into());
+                }
+                let pending_turn_gate = failed.continuation_emitted_at.is_none()
+                    && matches!(
+                        &failed.continuation,
+                        AuthContinuationRef::TurnGateResume { .. }
+                    );
+                if pending_turn_gate {
+                    if let Err(error) = self.dispatch_provider_denied_continuation(failed).await {
+                        tracing::warn!(
+                            flow_id = %request.flow_id,
+                            error_code = ?error.code(),
+                            "provider denial was persisted but the blocked auth gate remains pending continuation retry"
+                        );
+                        return Err(error.into());
+                    }
+                    return Err(AuthProductError::ProviderDenied.into());
+                }
+                return Err(terminal_error.into());
+            }
             RebornOAuthCallbackOutcome::Malformed => {
                 self.flow_manager
                     .fail_oauth_callback(
@@ -1403,6 +1436,68 @@ impl RebornProductAuthServices {
         Ok(outcome)
     }
 
+    async fn dispatch_provider_denied_continuation(
+        &self,
+        failed: AuthFlowRecord,
+    ) -> Result<AuthFlowRecord, AuthProductError> {
+        if failed.status != AuthFlowStatus::Failed
+            || failed.error != Some(AuthErrorCode::ProviderDenied)
+        {
+            return Err(AuthProductError::FlowAlreadyTerminal);
+        }
+        if failed.continuation_emitted_at.is_some()
+            || !matches!(
+                failed.continuation,
+                AuthContinuationRef::TurnGateResume { .. }
+            )
+        {
+            return Ok(failed);
+        }
+        let emitted_at = Utc::now();
+        let event = AuthContinuationEvent {
+            flow_id: failed.id,
+            scope: failed.scope.clone(),
+            continuation: failed.continuation.clone(),
+            provider: failed.provider.clone(),
+            credential_account_id: failed.credential_account_id,
+            emitted_at,
+        };
+        self.dispatch_and_acknowledge_canceled_auth_continuation(event)
+            .await
+    }
+
+    async fn dispatch_and_acknowledge_canceled_auth_continuation(
+        &self,
+        event: AuthContinuationEvent,
+    ) -> Result<AuthFlowRecord, AuthProductError> {
+        let mut attempt = 0;
+        loop {
+            attempt += 1;
+            match self
+                .continuation_dispatcher
+                .dispatch_canceled_auth_continuation(event.clone())
+                .await
+            {
+                Ok(()) => break,
+                Err(error)
+                    if error.code() == AuthErrorCode::BackendUnavailable
+                        && attempt < CANCELED_AUTH_CONTINUATION_DISPATCH_ATTEMPTS =>
+                {
+                    tracing::debug!(
+                        flow_id = %event.flow_id,
+                        attempt,
+                        "retrying transient canceled auth continuation dispatch"
+                    );
+                    tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+                }
+                Err(error) => return Err(error),
+            }
+        }
+        self.flow_manager
+            .mark_continuation_dispatched(&event.scope, event.flow_id, event.emitted_at)
+            .await
+    }
+
     #[allow(dead_code, reason = "used by upcoming Reborn OAuth setup route wiring")]
     pub(crate) async fn ensure_oauth_callback_flow_known(
         &self,
@@ -1465,6 +1560,19 @@ impl RebornProductAuthServices {
     ) -> Result<AuthFlowStatus, RebornOAuthCallbackError> {
         match self.flow_manager.get_flow(scope, flow_id).await {
             Ok(Some(record)) => {
+                if record.status == AuthFlowStatus::Failed
+                    && record.error == Some(AuthErrorCode::ProviderDenied)
+                    && record.continuation_emitted_at.is_none()
+                    && matches!(
+                        record.continuation,
+                        AuthContinuationRef::TurnGateResume { .. }
+                    )
+                {
+                    self.dispatch_provider_denied_continuation(record)
+                        .await
+                        .map_err(RebornOAuthCallbackError::from)?;
+                    return Ok(AuthFlowStatus::Failed);
+                }
                 if record.status == AuthFlowStatus::Failed
                     && record.credential_secret_fingerprint.is_some()
                 {
@@ -2126,6 +2234,72 @@ mod tests {
 
     struct RejectLifecycleContinuation;
 
+    #[derive(Default)]
+    struct RecordingCanceledContinuation {
+        events: std::sync::Mutex<Vec<AuthContinuationEvent>>,
+    }
+
+    #[derive(Default)]
+    struct FailTwiceCanceledContinuation {
+        attempts: std::sync::atomic::AtomicUsize,
+        events: std::sync::Mutex<Vec<AuthContinuationEvent>>,
+    }
+
+    impl FailTwiceCanceledContinuation {
+        fn events(&self) -> Vec<AuthContinuationEvent> {
+            self.events.lock().expect("lock").clone()
+        }
+    }
+
+    impl RecordingCanceledContinuation {
+        fn events(&self) -> Vec<AuthContinuationEvent> {
+            self.events.lock().expect("lock").clone()
+        }
+    }
+
+    #[async_trait]
+    impl RebornAuthContinuationDispatcher for RecordingCanceledContinuation {
+        async fn dispatch_auth_continuation(
+            &self,
+            _event: AuthContinuationEvent,
+        ) -> Result<(), AuthProductError> {
+            Ok(())
+        }
+
+        async fn dispatch_canceled_auth_continuation(
+            &self,
+            event: AuthContinuationEvent,
+        ) -> Result<(), AuthProductError> {
+            self.events.lock().expect("lock").push(event);
+            Ok(())
+        }
+    }
+
+    #[async_trait]
+    impl RebornAuthContinuationDispatcher for FailTwiceCanceledContinuation {
+        async fn dispatch_auth_continuation(
+            &self,
+            _event: AuthContinuationEvent,
+        ) -> Result<(), AuthProductError> {
+            Ok(())
+        }
+
+        async fn dispatch_canceled_auth_continuation(
+            &self,
+            event: AuthContinuationEvent,
+        ) -> Result<(), AuthProductError> {
+            if self
+                .attempts
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+                < CANCELED_AUTH_CONTINUATION_DISPATCH_ATTEMPTS
+            {
+                return Err(AuthProductError::BackendUnavailable);
+            }
+            self.events.lock().expect("lock").push(event);
+            Ok(())
+        }
+    }
+
     #[async_trait]
     impl RebornAuthContinuationDispatcher for RejectLifecycleContinuation {
         async fn dispatch_auth_continuation(
@@ -2197,6 +2371,241 @@ mod tests {
             .expect("flow exists");
         assert_eq!(persisted.status, AuthFlowStatus::Failed);
         assert_eq!(persisted.error, Some(AuthErrorCode::MalformedCallback));
+    }
+
+    #[tokio::test]
+    async fn provider_denied_turn_gate_dispatches_canceled_continuation() {
+        let shared = Arc::new(InMemoryAuthProductServices::new());
+        let dispatcher = Arc::new(RecordingCanceledContinuation::default());
+        let scope = test_auth_product_scope();
+        let state_hash = OpaqueStateHash::new("d".repeat(64)).expect("state hash");
+        let expires_at = Utc::now() + chrono::Duration::minutes(5);
+        let run_ref = TurnRunRef::new(TurnRunId::new().to_string()).expect("run ref");
+        let gate_ref = AuthGateRef::new("gate:provider-denied").expect("gate ref");
+        let flow = shared
+            .create_flow(NewAuthFlow {
+                id: None,
+                scope: scope.clone(),
+                kind: AuthFlowKind::IntegrationCredential,
+                provider: AuthProviderId::new("test-provider").expect("provider"),
+                challenge: AuthChallenge::OAuthUrl {
+                    authorization_url: OAuthAuthorizationUrl::new(
+                        "https://provider.example/authorize",
+                    )
+                    .expect("authorization URL"),
+                    expires_at,
+                },
+                continuation: AuthContinuationRef::TurnGateResume {
+                    turn_run_ref: run_ref.clone(),
+                    gate_ref: gate_ref.clone(),
+                },
+                update_binding: None,
+                opaque_state_hash: Some(state_hash.clone()),
+                pkce_verifier_hash: None,
+                expires_at,
+            })
+            .await
+            .expect("create flow");
+        let services = RebornProductAuthServices::from_shared(
+            shared.clone(),
+            dispatcher.clone() as Arc<dyn RebornAuthContinuationDispatcher>,
+        );
+
+        let error = services
+            .handle_oauth_callback(RebornOAuthCallbackRequest {
+                scope: scope.clone(),
+                flow_id: flow.id,
+                opaque_state_hash: state_hash.clone(),
+                outcome: RebornOAuthCallbackOutcome::ProviderDenied,
+            })
+            .await
+            .expect_err("provider denial remains an authorization failure");
+
+        assert_eq!(error.code, AuthErrorCode::ProviderDenied);
+        let persisted = shared
+            .get_flow(&scope, flow.id)
+            .await
+            .expect("load flow")
+            .expect("flow exists");
+        assert_eq!(persisted.status, AuthFlowStatus::Failed);
+        assert_eq!(persisted.error, Some(AuthErrorCode::ProviderDenied));
+        assert!(persisted.continuation_emitted_at.is_some());
+        let events = dispatcher.events();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].flow_id, flow.id);
+        assert_eq!(events[0].scope, scope);
+        assert_eq!(
+            events[0].continuation,
+            AuthContinuationRef::TurnGateResume {
+                turn_run_ref: run_ref,
+                gate_ref,
+            }
+        );
+        assert!(events[0].credential_account_id.is_none());
+
+        assert_eq!(
+            services
+                .reconcile_oauth_flow(&scope, flow.id)
+                .await
+                .expect("reconcile acknowledged provider denial"),
+            AuthFlowStatus::Failed
+        );
+        assert_eq!(
+            dispatcher.events().len(),
+            1,
+            "the durable continuation marker prevents duplicate denial dispatch"
+        );
+
+        let duplicate = services
+            .handle_oauth_callback(RebornOAuthCallbackRequest {
+                scope,
+                flow_id: flow.id,
+                opaque_state_hash: state_hash,
+                outcome: RebornOAuthCallbackOutcome::ProviderDenied,
+            })
+            .await
+            .expect_err("an acknowledged duplicate remains terminal");
+        assert_eq!(duplicate.code, AuthErrorCode::FlowAlreadyTerminal);
+        assert_eq!(dispatcher.events().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn duplicate_provider_denial_preserves_non_turn_terminal_behavior() {
+        let shared = Arc::new(InMemoryAuthProductServices::new());
+        let scope = test_auth_product_scope();
+        let state_hash = OpaqueStateHash::new("9".repeat(64)).expect("state hash");
+        let expires_at = Utc::now() + chrono::Duration::minutes(5);
+        let flow = shared
+            .create_flow(NewAuthFlow {
+                id: None,
+                scope: scope.clone(),
+                kind: AuthFlowKind::IntegrationCredential,
+                provider: AuthProviderId::new("test-provider").expect("provider"),
+                challenge: AuthChallenge::OAuthUrl {
+                    authorization_url: OAuthAuthorizationUrl::new(
+                        "https://provider.example/authorize",
+                    )
+                    .expect("authorization URL"),
+                    expires_at,
+                },
+                continuation: AuthContinuationRef::SetupOnly,
+                update_binding: None,
+                opaque_state_hash: Some(state_hash.clone()),
+                pkce_verifier_hash: None,
+                expires_at,
+            })
+            .await
+            .expect("create flow");
+        let services = RebornProductAuthServices::from_shared(
+            shared,
+            Arc::new(NoopAuthContinuationDispatcher),
+        );
+
+        let first = services
+            .handle_oauth_callback(RebornOAuthCallbackRequest {
+                scope: scope.clone(),
+                flow_id: flow.id,
+                opaque_state_hash: state_hash.clone(),
+                outcome: RebornOAuthCallbackOutcome::ProviderDenied,
+            })
+            .await
+            .expect_err("initial provider denial remains visible");
+        assert_eq!(first.code, AuthErrorCode::ProviderDenied);
+
+        let duplicate = services
+            .handle_oauth_callback(RebornOAuthCallbackRequest {
+                scope,
+                flow_id: flow.id,
+                opaque_state_hash: state_hash,
+                outcome: RebornOAuthCallbackOutcome::ProviderDenied,
+            })
+            .await
+            .expect_err("non-turn duplicate remains terminal");
+        assert_eq!(duplicate.code, AuthErrorCode::FlowAlreadyTerminal);
+    }
+
+    #[tokio::test]
+    async fn provider_denied_turn_gate_surfaces_dispatch_failure_and_reconciles() {
+        let shared = Arc::new(InMemoryAuthProductServices::new());
+        let dispatcher = Arc::new(FailTwiceCanceledContinuation::default());
+        let scope = test_auth_product_scope();
+        let state_hash = OpaqueStateHash::new("e".repeat(64)).expect("state hash");
+        let expires_at = Utc::now() + chrono::Duration::minutes(5);
+        let flow = shared
+            .create_flow(NewAuthFlow {
+                id: None,
+                scope: scope.clone(),
+                kind: AuthFlowKind::IntegrationCredential,
+                provider: AuthProviderId::new("test-provider").expect("provider"),
+                challenge: AuthChallenge::OAuthUrl {
+                    authorization_url: OAuthAuthorizationUrl::new(
+                        "https://provider.example/authorize",
+                    )
+                    .expect("authorization URL"),
+                    expires_at,
+                },
+                continuation: AuthContinuationRef::TurnGateResume {
+                    turn_run_ref: TurnRunRef::new(TurnRunId::new().to_string()).expect("run ref"),
+                    gate_ref: AuthGateRef::new("gate:provider-denied-retry").expect("gate ref"),
+                },
+                update_binding: None,
+                opaque_state_hash: Some(state_hash.clone()),
+                pkce_verifier_hash: None,
+                expires_at,
+            })
+            .await
+            .expect("create flow");
+        let services = RebornProductAuthServices::from_shared(
+            shared.clone(),
+            dispatcher.clone() as Arc<dyn RebornAuthContinuationDispatcher>,
+        );
+
+        let error = services
+            .handle_oauth_callback(RebornOAuthCallbackRequest {
+                scope: scope.clone(),
+                flow_id: flow.id,
+                opaque_state_hash: state_hash,
+                outcome: RebornOAuthCallbackOutcome::ProviderDenied,
+            })
+            .await
+            .expect_err("exhausted inline dispatch retries remain visible");
+        assert_eq!(error.code, AuthErrorCode::BackendUnavailable);
+        assert_eq!(
+            dispatcher
+                .attempts
+                .load(std::sync::atomic::Ordering::SeqCst),
+            CANCELED_AUTH_CONTINUATION_DISPATCH_ATTEMPTS
+        );
+        let pending = shared
+            .get_flow(&scope, flow.id)
+            .await
+            .expect("load flow")
+            .expect("flow exists");
+        assert_eq!(pending.status, AuthFlowStatus::Failed);
+        assert_eq!(pending.error, Some(AuthErrorCode::ProviderDenied));
+        assert!(pending.continuation_emitted_at.is_none());
+        assert!(dispatcher.events().is_empty());
+
+        assert_eq!(
+            services
+                .reconcile_oauth_flow(&scope, flow.id)
+                .await
+                .expect("retry provider-denied continuation"),
+            AuthFlowStatus::Failed
+        );
+        let reconciled = shared
+            .get_flow(&scope, flow.id)
+            .await
+            .expect("load reconciled flow")
+            .expect("flow exists");
+        assert!(reconciled.continuation_emitted_at.is_some());
+        assert_eq!(dispatcher.events().len(), 1);
+        assert_eq!(
+            dispatcher
+                .attempts
+                .load(std::sync::atomic::Ordering::SeqCst),
+            CANCELED_AUTH_CONTINUATION_DISPATCH_ATTEMPTS + 1
+        );
     }
 
     #[tokio::test]

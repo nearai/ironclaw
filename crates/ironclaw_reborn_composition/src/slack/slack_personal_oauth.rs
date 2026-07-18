@@ -19,8 +19,9 @@ use chrono::{Duration as ChronoDuration, Utc};
 use ironclaw_auth::{
     AuthContinuationRef, AuthErrorCode, AuthFlowId, AuthFlowRecord, AuthFlowRecordSource,
     AuthFlowStatus, AuthProductError, AuthProductScope, AuthProviderId, CredentialAccountLabel,
-    OAuthAuthorizationEndpoint, OAuthAuthorizeUrlRequest, OAuthCallbackState,
-    OAuthCallbackStateKind, OAuthProviderIdentity, OAuthScopeParam, PkceVerifierSecret,
+    OAuthAuthorizationEndpoint, OAuthAuthorizationUrl, OAuthAuthorizeUrlRequest,
+    OAuthCallbackState, OAuthCallbackStateKind, OAuthExtraParam, OAuthProviderIdentity,
+    OAuthRedirectUri, OAuthScopeParam, OAuthState, PkceCodeChallenge, PkceVerifierSecret,
     ProviderScope, SLACK_PERSONAL_AUTHORIZATION_ENDPOINT, SLACK_PERSONAL_PROVIDER_ID,
     build_authorization_url_with_scope_param, opaque_state_hash, pkce_s256_challenge,
     pkce_verifier_hash,
@@ -55,7 +56,7 @@ use crate::slack::slack_personal_binding::{
     SlackPersonalUserBindingRequest, SlackUserBindingLifecycleError,
 };
 use crate::slack::slack_serve::{SlackApiAppId, SlackEnterpriseId, SlackTeamId, SlackUserId};
-use crate::slack::slack_setup::SlackPersonalSetupServiceSlot;
+use crate::slack::slack_setup::{SlackOAuthAuthorizationContext, SlackPersonalSetupServiceSlot};
 
 /// Late-filled Slack-only lifecycle ports used by blocked-turn OAuth starts.
 /// The OAuth provider registry is composed before the Slack host mounts exist,
@@ -105,6 +106,31 @@ pub(crate) fn slack_personal_provider_spec() -> HostOAuthProviderSpec {
     }
 }
 
+fn slack_personal_authorization_url(
+    authorization: &SlackOAuthAuthorizationContext,
+    redirect_uri: &OAuthRedirectUri,
+    state: &OAuthState,
+    code_challenge: &PkceCodeChallenge,
+    scopes: &[ProviderScope],
+) -> Result<OAuthAuthorizationUrl, AuthProductError> {
+    let team_param = OAuthExtraParam::new("team", authorization.team_id.as_str())?;
+    let extra_params = [team_param];
+    let authorization_endpoint =
+        OAuthAuthorizationEndpoint::new(SLACK_PERSONAL_AUTHORIZATION_ENDPOINT)?;
+    build_authorization_url_with_scope_param(
+        OAuthAuthorizeUrlRequest {
+            authorization_endpoint: &authorization_endpoint,
+            client_id: &authorization.client_id,
+            redirect_uri,
+            state,
+            code_challenge,
+            scopes,
+            extra_params: &extra_params,
+        },
+        OAuthScopeParam::UserScope,
+    )
+}
+
 /// Start the Slack-owned extension OAuth flow from the shared route boundary.
 /// Provider-neutral flow persistence and callback processing remain in
 /// product-auth; Slack owns only its URL shape and binding lifecycle.
@@ -121,7 +147,7 @@ pub(crate) async fn start_extension_oauth_flow(
         return Err(ProductAuthRouteFailure::invalid_request());
     }
 
-    let (client_id, redirect_uri) = state.slack_personal_oauth_credentials().await?;
+    let (authorization, redirect_uri) = state.slack_personal_oauth_authorization_context().await?;
     if requester_extension.as_str() != SLACK_EXTENSION_ID {
         return Err(ProductAuthRouteFailure::invalid_request());
     }
@@ -175,20 +201,12 @@ pub(crate) async fn start_extension_oauth_flow(
     let pkce_secret = PkceVerifierSecret::new(pkce_verifier_secret.clone())
         .map_err(ProductAuthRouteFailure::from)?;
     let pkce_challenge = pkce_s256_challenge(&pkce_secret);
-    let authorization_endpoint =
-        OAuthAuthorizationEndpoint::new(SLACK_PERSONAL_AUTHORIZATION_ENDPOINT)
-            .map_err(ProductAuthRouteFailure::from)?;
-    let authorization_url = build_authorization_url_with_scope_param(
-        OAuthAuthorizeUrlRequest {
-            authorization_endpoint: &authorization_endpoint,
-            client_id: &client_id,
-            redirect_uri: &redirect_uri,
-            state: &opaque_state,
-            code_challenge: &pkce_challenge,
-            scopes: &requested_scopes,
-            extra_params: &[],
-        },
-        OAuthScopeParam::UserScope,
+    let authorization_url = slack_personal_authorization_url(
+        &authorization,
+        &redirect_uri,
+        &opaque_state,
+        &pkce_challenge,
+        &requested_scopes,
     )
     .map_err(ProductAuthRouteFailure::from)?;
 
@@ -702,7 +720,7 @@ impl OAuthGateProvider for SlackPersonalOAuthGateProvider {
             .slot
             .get()
             .ok_or(AuthProductError::BackendUnavailable)?;
-        let (client_id, _client_secret) = service.oauth_credentials().await.map_err(|e| {
+        let authorization = service.oauth_authorization_context().await.map_err(|e| {
             tracing::debug!(error = %e, "Slack personal OAuth credentials not configured");
             AuthProductError::BackendUnavailable
         })?;
@@ -720,19 +738,12 @@ impl OAuthGateProvider for SlackPersonalOAuthGateProvider {
         let pkce_secret = PkceVerifierSecret::new(pkce_verifier.clone())?;
         let pkce_verifier_hash = pkce_verifier_hash(&pkce_secret)?;
         let pkce_challenge = pkce_s256_challenge(&pkce_secret);
-        let authorization_endpoint =
-            OAuthAuthorizationEndpoint::new(SLACK_PERSONAL_AUTHORIZATION_ENDPOINT)?;
-        let authorization_url = build_authorization_url_with_scope_param(
-            OAuthAuthorizeUrlRequest {
-                authorization_endpoint: &authorization_endpoint,
-                client_id: &client_id,
-                redirect_uri: self.slot.redirect_uri(),
-                state: &state,
-                code_challenge: &pkce_challenge,
-                scopes: &scopes,
-                extra_params: &[],
-            },
-            OAuthScopeParam::UserScope,
+        let authorization_url = slack_personal_authorization_url(
+            &authorization,
+            self.slot.redirect_uri(),
+            &state,
+            &pkce_challenge,
+            &scopes,
         )?;
         Ok(PreparedOAuthGateFlow {
             authorization_url,

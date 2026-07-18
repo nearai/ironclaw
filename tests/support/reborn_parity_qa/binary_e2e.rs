@@ -1135,6 +1135,7 @@ impl RebornBinaryE2EHarness {
                 scope,
                 actor,
                 run_id,
+                precondition: None,
                 reason: SanitizedCancelReason::UserRequested,
                 idempotency_key: IdempotencyKey::new(idempotency_key.into())?,
             })

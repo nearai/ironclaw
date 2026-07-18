@@ -7,6 +7,7 @@ use super::reborn_support;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use crate::support::trace_llm::TraceLlm;
 use async_trait::async_trait;
 use axum::body::{Body, to_bytes};
 use axum::http::{Method, Request, StatusCode};
@@ -19,13 +20,17 @@ use ironclaw_loop_host::{
 use ironclaw_network::{
     NetworkHttpEgress, NetworkHttpError, NetworkHttpRequest, NetworkHttpResponse, NetworkUsage,
 };
+use ironclaw_product_adapters::AdapterInstallationId;
 use ironclaw_product_workflow::WebUiAuthenticatedCaller;
 use ironclaw_reborn_composition::{
-    RebornBuildInput, RebornRuntimeIdentity, RebornRuntimeInput, TelegramHostRuntimeConfig,
+    OAuthRedirectUri, ProductAuthRouteState, RebornBuildInput, RebornRuntimeIdentity,
+    RebornRuntimeInput, SlackPersonalOAuthBindingConfig, TelegramHostRuntimeConfig,
     build_reborn_runtime, build_telegram_host_runtime_mounts,
     build_webui_services_with_telegram_host_mounts, local_dev_runtime_policy,
+    product_auth_route_mount,
 };
 use ironclaw_runner::model_gateway::{LlmModelProfilePolicy, LlmProviderModelGateway};
+use ironclaw_threads::{ListThreadsForScopeRequest, ThreadHistoryRequest, ThreadScope};
 use ironclaw_turns::run_profile::ModelProfileId;
 use ironclaw_turns::{GetRunStateRequest, TurnRunId, TurnScope, TurnStatus};
 use reborn_support::reply::RebornScriptedReply;
@@ -223,8 +228,9 @@ impl HostManagedModelGateway for UniformScopeGateway {
 pub(crate) async fn scripted_chain_gateway(
     session_dir: &std::path::Path,
     replies: impl IntoIterator<Item = RebornScriptedReply>,
-) -> Arc<dyn HostManagedModelGateway> {
-    let raw: Arc<dyn LlmProvider> = Arc::new(scripted_trace_llm(replies));
+) -> (Arc<dyn HostManagedModelGateway>, Arc<TraceLlm>) {
+    let trace = Arc::new(scripted_trace_llm(replies));
+    let raw: Arc<dyn LlmProvider> = Arc::clone(&trace) as Arc<dyn LlmProvider>;
     let session = ironclaw_llm::create_session_manager(ironclaw_llm::SessionConfig {
         session_path: session_dir.join("telegram-journey.session.json"),
         ..ironclaw_llm::SessionConfig::default()
@@ -238,9 +244,12 @@ pub(crate) async fn scripted_chain_gateway(
         ModelProfileId::new(INTERACTIVE_MODEL_PROFILE).expect("model profile id"),
         None,
     );
-    Arc::new(UniformScopeGateway {
-        chain: Arc::new(LlmProviderModelGateway::new(provider, policy)),
-    })
+    (
+        Arc::new(UniformScopeGateway {
+            chain: Arc::new(LlmProviderModelGateway::new(provider, policy)),
+        }),
+        trace,
+    )
 }
 
 pub(crate) fn journey_caller() -> WebUiAuthenticatedCaller {
@@ -354,9 +363,13 @@ pub(crate) async fn wait_for_run_status(
 pub(crate) struct JourneyStack {
     pub(crate) _root: tempfile::TempDir,
     pub(crate) network: Arc<ScriptedTelegramNetwork>,
+    pub(crate) model_trace: Arc<TraceLlm>,
     pub(crate) runtime: ironclaw_reborn_composition::RebornRuntime,
     pub(crate) mounts: ironclaw_reborn_composition::TelegramHostMounts,
     pub(crate) webui: ironclaw_reborn_composition::RebornWebuiBundle,
+    /// Public product-auth callback router, present only for journeys that
+    /// exercise the real browser-provider redirect seam.
+    pub(crate) oauth_callback_public: Option<axum::Router>,
     pub(crate) caller: WebUiAuthenticatedCaller,
 }
 
@@ -368,7 +381,27 @@ impl JourneyStack {
             .await
     }
 
+    /// Deliver a verified DM while leaving the immediate-ACK delivery task
+    /// running. OAuth journeys use this production-realistic shape so the
+    /// simulated provider callback can arrive while the original delivery
+    /// loop is still watching the blocked run.
+    pub(crate) async fn webhook_dm_without_drain(
+        &self,
+        secret: &str,
+        update_id: i64,
+        text: &str,
+    ) -> StatusCode {
+        self.webhook_update_without_drain(secret, dm_update(update_id, text))
+            .await
+    }
+
     pub(crate) async fn webhook_update(&self, secret: &str, update: Value) -> StatusCode {
+        let status = self.webhook_update_without_drain(secret, update).await;
+        self.drain_webhook_tasks().await;
+        status
+    }
+
+    async fn webhook_update_without_drain(&self, secret: &str, update: Value) -> StatusCode {
         let (status, _body) = call_route(
             self.mounts.events.router.clone(),
             Method::POST,
@@ -378,10 +411,13 @@ impl JourneyStack {
             Some(update),
         )
         .await;
+        status
+    }
+
+    pub(crate) async fn drain_webhook_tasks(&self) {
         if let Some(drain) = self.mounts.events.drain.as_ref() {
             drain.drain().await;
         }
-        status
     }
 
     /// Poll the scripted network for a `sendMessage` into the DM chat whose
@@ -411,6 +447,61 @@ impl JourneyStack {
             "no matching sendMessage for chat {chat_id}; captured: {:?}",
             self.network.request_bodies_for("/sendMessage")
         ))
+    }
+
+    /// Resolve the exact durable run created for a paired Telegram DM by its
+    /// user-visible message text. Journeys use this to assert gate transitions
+    /// against authoritative run state instead of transport timing.
+    pub(crate) async fn run_for_dm_message(&self, content: &str) -> (TurnScope, TurnRunId) {
+        let thread_scope = ThreadScope {
+            tenant_id: TenantId::new(TENANT).expect("tenant"),
+            agent_id: AgentId::new(AGENT).expect("agent"),
+            project_id: None,
+            owner_user_id: Some(UserId::new(USER).expect("user")),
+            mission_id: None,
+        };
+        let thread_service = self.runtime.session_thread_service();
+        let threads = thread_service
+            .list_threads_for_scope(ListThreadsForScopeRequest {
+                scope: thread_scope.clone(),
+                limit: Some(10),
+                cursor: None,
+            })
+            .await
+            .expect("list paired DM threads");
+
+        for thread in threads
+            .threads
+            .into_iter()
+            .filter(|thread| thread.scope == thread_scope)
+        {
+            let history = thread_service
+                .list_thread_history(ThreadHistoryRequest {
+                    scope: thread_scope.clone(),
+                    thread_id: thread.thread_id.clone(),
+                })
+                .await
+                .expect("paired DM thread history");
+            let Some(run_id) = history
+                .messages
+                .iter()
+                .find(|message| message.content.as_deref() == Some(content))
+                .and_then(|message| message.turn_run_id.as_deref())
+            else {
+                continue;
+            };
+            let run_id = run_id.parse().expect("paired DM run id parses");
+            let turn_scope = TurnScope::new_with_owner(
+                TenantId::new(TENANT).expect("tenant"),
+                Some(AgentId::new(AGENT).expect("agent")),
+                None,
+                thread.thread_id,
+                Some(UserId::new(USER).expect("user")),
+            );
+            return (turn_scope, run_id);
+        }
+
+        panic!("paired DM message {content:?} carries no durable run id");
     }
 }
 
@@ -443,6 +534,53 @@ pub(crate) async fn build_journey_stack_with_google_oauth(
     .await
 }
 
+/// Journey stack with Slack personal OAuth wired exactly as the host does:
+/// one lazy setup slot feeds the gate provider, while the public callback
+/// route receives the matching lifecycle authority. The caller chooses the
+/// Slack workspace id so the journey can pin the authorization URL's `team`
+/// hint that prevents an undistributed QA app from opening in the browser's
+/// unrelated active workspace.
+pub(crate) async fn build_journey_stack_with_slack_oauth(
+    replies: impl IntoIterator<Item = RebornScriptedReply>,
+    team_id: &str,
+) -> JourneyStack {
+    let (slot, binding) = SlackPersonalOAuthBindingConfig::connected_in_memory_for_tests(
+        OAuthRedirectUri::new(format!(
+            "{PUBLIC_BASE}/api/reborn/product-auth/oauth/slack_personal/callback"
+        ))
+        .expect("Slack OAuth redirect URI"),
+        "journey-slack-client",
+        "journey-slack-secret",
+        TenantId::new(TENANT).expect("tenant"),
+        AdapterInstallationId::new("install-test").expect("installation"),
+        team_id,
+    )
+    .await
+    .expect("in-memory Slack OAuth binding config");
+
+    let slot_for_runtime = slot.clone();
+    let mut stack = build_journey_stack_customized(replies, move |input| {
+        input.with_slack_personal_oauth_lazy(slot_for_runtime)
+    })
+    .await;
+    let product_auth = stack
+        .webui
+        .product_auth
+        .clone()
+        .expect("journey runtime exposes product auth");
+    let state = ProductAuthRouteState::new(
+        product_auth,
+        TenantId::new(TENANT).expect("tenant"),
+        Some(AgentId::new(AGENT).expect("agent")),
+        None,
+    )
+    .with_webui_api(Arc::clone(&stack.webui.api))
+    .with_slack_personal_oauth(slot)
+    .with_slack_personal_oauth_binding(binding);
+    stack.oauth_callback_public = Some(product_auth_route_mount(state).public);
+    stack
+}
+
 pub(crate) async fn build_journey_stack_customized(
     replies: impl IntoIterator<Item = RebornScriptedReply>,
     customize: impl FnOnce(RebornBuildInput) -> RebornBuildInput,
@@ -450,7 +588,7 @@ pub(crate) async fn build_journey_stack_customized(
     let root = tempdir().expect("runtime storage tempdir");
     let storage_root = root.path().join("local-dev");
     let network = Arc::new(ScriptedTelegramNetwork::default());
-    let gateway = scripted_chain_gateway(root.path(), replies).await;
+    let (gateway, model_trace) = scripted_chain_gateway(root.path(), replies).await;
 
     let input = RebornBuildInput::local_dev(USER, storage_root.clone())
         .with_local_runtime_identity(
@@ -490,9 +628,11 @@ pub(crate) async fn build_journey_stack_customized(
     JourneyStack {
         _root: root,
         network,
+        model_trace,
         runtime,
         mounts,
         webui,
+        oauth_callback_public: None,
         caller: journey_caller(),
     }
 }

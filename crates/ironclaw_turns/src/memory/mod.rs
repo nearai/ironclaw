@@ -2989,6 +2989,19 @@ impl Inner {
             if record.actor != request.actor {
                 return Err(TurnError::Unauthorized);
             }
+            if let Some(precondition) = request.precondition.as_ref() {
+                if record.status.get() != precondition.required_status() {
+                    return Err(TurnError::InvalidTransition {
+                        from: record.status.get(),
+                        to: TurnStatus::Cancelled,
+                    });
+                }
+                if record.gate_ref.as_ref() != Some(precondition.gate_ref()) {
+                    return Err(TurnError::InvalidRequest {
+                        reason: "gate cancellation reference mismatch".to_string(),
+                    });
+                }
+            }
             if record.status.get().is_terminal() {
                 return Ok(CancelRunResponse {
                     run_id: record.run_id,

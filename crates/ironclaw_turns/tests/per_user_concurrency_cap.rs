@@ -260,6 +260,7 @@ async fn running_counter_decrements_on_cancel_completion() {
             scope: scope.clone(),
             actor: actor_for(&user_u()),
             run_id,
+            precondition: None,
             reason: SanitizedCancelReason::UserRequested,
             idempotency_key: IdempotencyKey::new("cap-cancel-complete-req").unwrap(),
         })
@@ -380,6 +381,7 @@ async fn running_counter_decrements_via_apply_validated_loop_exit_cancelled() {
             scope: scope.clone(),
             actor: actor_for(&user_u()),
             run_id,
+            precondition: None,
             reason: SanitizedCancelReason::UserRequested,
             idempotency_key: IdempotencyKey::new("cap-loop-exit-cancel-req").unwrap(),
         })

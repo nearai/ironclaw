@@ -37,9 +37,10 @@ use ironclaw_threads::{
     ThreadMessageId, ThreadScope,
 };
 use ironclaw_turns::{
-    AcceptedMessageRef, GateRef, GetRunStateRequest, IdempotencyKey, ResumeTurnPrecondition,
-    ResumeTurnRequest, RetryTurnRequest, SanitizedCancelReason, SubmitTurnRequest,
-    SubmitTurnResponse, TurnActor, TurnCoordinator, TurnError, TurnRunId, TurnScope, TurnStatus,
+    AcceptedMessageRef, CancelRunPrecondition, GateRef, GetRunStateRequest, IdempotencyKey,
+    ResumeTurnPrecondition, ResumeTurnRequest, RetryTurnRequest, SanitizedCancelReason,
+    SubmitTurnRequest, SubmitTurnResponse, TurnActor, TurnCoordinator, TurnError, TurnRunId,
+    TurnScope, TurnStatus,
 };
 use secrecy::{ExposeSecret as _, SecretString};
 use tokio::sync::{Mutex as AsyncMutex, OwnedMutexGuard, mpsc};
@@ -6289,22 +6290,23 @@ impl RebornServices {
                 Err(blocked_authentication_unavailable())
             }
             WebUiGateResolution::Declined => {
-                assert_generic_run_parked_on_gate(
+                let precondition = assert_generic_run_parked_on_gate(
                     self.turn_coordinator.as_ref(),
                     &scope,
                     run_id,
                     &gate_ref,
                 )
                 .await?;
-                // `cancel_run` is not gate-aware, so without this check a
-                // denied/cancelled resolution for a stale or attacker-supplied
-                // gate_ref would terminate any non-terminal run sharing run_id.
+                // Carry the validated gate into the store transition so a
+                // concurrent resume cannot turn this decision into a stale,
+                // unconditional cancellation.
                 let response = self
                     .turn_coordinator
                     .cancel_run(ironclaw_turns::CancelRunRequest {
                         scope,
                         actor,
                         run_id,
+                        precondition: Some(precondition),
                         reason: SanitizedCancelReason::UserRequested,
                         idempotency_key: client_action_id,
                     })
@@ -6426,16 +6428,14 @@ fn participant_denied() -> RebornServicesError {
     )
 }
 
-/// Reject denied/cancelled generic gate resolutions whose `gate_ref` does not
-/// match the gate the run is actually parked on. `cancel_run` is not gate-aware,
-/// so without this guard a stale or attacker-supplied `gate_ref` would cancel
-/// any non-terminal run sharing the same `run_id`.
+/// Validate a generic denied/cancelled gate resolution and return the typed
+/// compare-and-cancel condition that the turn store enforces atomically.
 async fn assert_generic_run_parked_on_gate(
     turn_coordinator: &dyn TurnCoordinator,
     scope: &TurnScope,
     run_id: TurnRunId,
     expected_gate_ref: &GateRef,
-) -> Result<(), RebornServicesError> {
+) -> Result<CancelRunPrecondition, RebornServicesError> {
     let state = turn_coordinator
         .get_run_state(GetRunStateRequest {
             scope: scope.clone(),
@@ -6449,8 +6449,21 @@ async fn assert_generic_run_parked_on_gate(
     if state.status == TurnStatus::BlockedApproval {
         return Err(blocked_approval_unavailable());
     }
-    match state.gate_ref.as_ref() {
-        Some(parked) if parked == expected_gate_ref => Ok(()),
+    if state.gate_ref.as_ref() != Some(expected_gate_ref) {
+        return Err(RebornServicesError::from_status_kind(
+            RebornServicesErrorCode::Conflict,
+            RebornServicesErrorKind::BlockedApproval,
+            409,
+            false,
+        ));
+    }
+    match state.status {
+        TurnStatus::BlockedResource => Ok(CancelRunPrecondition::BlockedResourceGate {
+            gate_ref: expected_gate_ref.clone(),
+        }),
+        TurnStatus::BlockedDependentRun => Ok(CancelRunPrecondition::BlockedDependentRunGate {
+            gate_ref: expected_gate_ref.clone(),
+        }),
         _ => Err(RebornServicesError::from_status_kind(
             RebornServicesErrorCode::Conflict,
             RebornServicesErrorKind::BlockedApproval,

@@ -1365,20 +1365,28 @@ mod tests {
 
     #[cfg(feature = "slack-v2-host-beta")]
     async fn slack_personal_oauth_test_slot() -> SlackPersonalSetupServiceSlot {
+        slack_personal_oauth_test_slot_with_client_secret(true).await
+    }
+
+    #[cfg(feature = "slack-v2-host-beta")]
+    async fn slack_personal_oauth_test_slot_with_client_secret(
+        retain_client_secret: bool,
+    ) -> SlackPersonalSetupServiceSlot {
         let redirect_uri = ironclaw_auth::OAuthRedirectUri::new(
             "http://127.0.0.1:3000/api/reborn/product-auth/oauth/slack_personal/callback",
         )
         .expect("slack oauth redirect uri");
         let slot = SlackPersonalSetupServiceSlot::new(redirect_uri);
+        let secret_store = Arc::new(InMemorySecretStore::new());
         let service = Arc::new(SlackSetupService::new(
             TenantId::new("tenant-alpha").expect("tenant"),
             AgentId::new("agent:test").expect("agent"),
             None,
             UserId::new("user:operator").expect("operator"),
             Arc::new(MemorySlackSetupStore::default()),
-            Arc::new(InMemorySecretStore::new()),
+            secret_store.clone(),
         ));
-        service
+        let setup = service
             .save(SlackInstallationSetupUpdate {
                 installation_id: "install-alpha".to_string(),
                 team_id: "T123".to_string(),
@@ -1392,6 +1400,27 @@ mod tests {
             })
             .await
             .expect("seed slack setup");
+        if !retain_client_secret {
+            let secret_scope = ResourceScope {
+                tenant_id: TenantId::new("tenant-alpha").expect("tenant"),
+                user_id: UserId::new("user:operator").expect("operator"),
+                agent_id: Some(AgentId::new("agent:test").expect("agent")),
+                project_id: None,
+                mission_id: None,
+                thread_id: None,
+                invocation_id: InvocationId::new(),
+            };
+            let handle = setup
+                .oauth_client_secret_handle
+                .as_ref()
+                .expect("seeded OAuth client secret handle");
+            assert!(
+                secret_store
+                    .delete(&secret_scope, handle)
+                    .await
+                    .expect("delete OAuth client secret")
+            );
+        }
         slot.fill(service);
         slot
     }
@@ -2332,6 +2361,11 @@ mod tests {
 
         let parsed =
             Url::parse(start_response.authorization_url.as_str()).expect("authorization url");
+        let teams = parsed
+            .query_pairs()
+            .filter_map(|(name, value)| (name == "team").then(|| value.into_owned()))
+            .collect::<Vec<_>>();
+        assert_eq!(teams, vec!["T123"]);
         let user_scope = parsed
             .query_pairs()
             .find_map(|(name, value)| (name == "user_scope").then(|| value.into_owned()))
@@ -2347,6 +2381,142 @@ mod tests {
                 "server-authorized Slack scope `{expected}` should be requested"
             );
         }
+    }
+
+    #[cfg(feature = "slack-v2-host-beta")]
+    #[tokio::test]
+    async fn slack_personal_oauth_start_with_missing_secret_publishes_no_flow() {
+        let shared = Arc::new(InMemoryAuthProductServices::new());
+        let product_auth = Arc::new(RebornProductAuthServices::from_shared(
+            shared.clone(),
+            Arc::new(RecordingDispatcher::default()),
+        ));
+        let state = ProductAuthRouteState::new(
+            product_auth,
+            TenantId::new("tenant-alpha").expect("tenant"),
+            None,
+            None,
+        )
+        .with_test_installed_extension_lookup()
+        .with_slack_personal_oauth(slack_personal_oauth_test_slot_with_client_secret(false).await);
+
+        let error = extension_oauth_start_handler(
+            State(state),
+            Extension(WebUiAuthenticatedCaller::new(
+                TenantId::new("tenant-alpha").expect("tenant"),
+                UserId::new("user-alpha").expect("user"),
+                None,
+                None,
+            )),
+            Path("slack".to_string()),
+            Json(ExtensionOAuthStartRequest {
+                provider: SLACK_PERSONAL_PROVIDER_ID.to_string(),
+                account_label: "personal slack".to_string(),
+                scopes: Vec::new(),
+                expires_at: Utc::now() + ChronoDuration::minutes(5),
+                invocation_id: Some(InvocationId::new().to_string()),
+            }),
+        )
+        .await
+        .expect_err("missing secret material must fail before flow publication");
+
+        assert_eq!(error.body.code, AuthErrorCode::MalformedConfig);
+        assert!(shared.flow_records_snapshot().is_empty());
+    }
+
+    #[cfg(feature = "slack-v2-host-beta")]
+    #[tokio::test]
+    async fn provider_denial_marker_failure_reconciles_at_least_once() {
+        let shared = Arc::new(InMemoryAuthProductServices::new());
+        let flow_manager =
+            Arc::new(FailingOnceContinuationMarkerFlowManager::failing_direct_mark(shared.clone()));
+        let dispatcher = Arc::new(RecordingDispatcher::default());
+        let services = RebornProductAuthServices::new(
+            flow_manager.clone(),
+            shared.clone(),
+            shared.clone(),
+            shared.clone(),
+            shared.clone(),
+            shared.clone(),
+            dispatcher.clone(),
+        );
+        let scope = AuthProductScope::new(
+            ResourceScope::local_default(
+                UserId::new("user-alpha").expect("user"),
+                InvocationId::new(),
+            )
+            .expect("scope"),
+            AuthSurface::Callback,
+        );
+        let state_hash =
+            ironclaw_auth::OpaqueStateHash::new("d".repeat(64)).expect("opaque state hash");
+        let expires_at = Utc::now() + ChronoDuration::minutes(5);
+        let flow = shared
+            .create_flow(ironclaw_auth::NewAuthFlow {
+                id: None,
+                scope: scope.clone(),
+                kind: ironclaw_auth::AuthFlowKind::IntegrationCredential,
+                provider: AuthProviderId::new("test-provider").expect("provider"),
+                challenge: ironclaw_auth::AuthChallenge::OAuthUrl {
+                    authorization_url: ironclaw_auth::OAuthAuthorizationUrl::new(
+                        "https://provider.example/authorize",
+                    )
+                    .expect("authorization URL"),
+                    expires_at,
+                },
+                continuation: AuthContinuationRef::TurnGateResume {
+                    turn_run_ref: ironclaw_auth::TurnRunRef::new(TurnRunId::new().to_string())
+                        .expect("run ref"),
+                    gate_ref: ironclaw_auth::AuthGateRef::new("gate:denial-marker-retry")
+                        .expect("gate ref"),
+                },
+                update_binding: None,
+                opaque_state_hash: Some(state_hash.clone()),
+                pkce_verifier_hash: None,
+                expires_at,
+            })
+            .await
+            .expect("create flow");
+
+        let error = services
+            .handle_oauth_callback(RebornOAuthCallbackRequest {
+                scope: scope.clone(),
+                flow_id: flow.id,
+                opaque_state_hash: state_hash,
+                outcome: RebornOAuthCallbackOutcome::ProviderDenied,
+            })
+            .await
+            .expect_err("first canceled-continuation marker write fails");
+        assert_eq!(error.code, AuthErrorCode::BackendUnavailable);
+        assert_eq!(dispatcher.events().len(), 1);
+        assert_eq!(flow_manager.marker_calls(), 1);
+        let pending = shared
+            .get_flow(&scope, flow.id)
+            .await
+            .expect("read pending denial")
+            .expect("flow exists");
+        assert_eq!(pending.status, AuthFlowStatus::Failed);
+        assert_eq!(pending.error, Some(AuthErrorCode::ProviderDenied));
+        assert!(pending.continuation_emitted_at.is_none());
+
+        assert_eq!(
+            services
+                .reconcile_oauth_flow(&scope, flow.id)
+                .await
+                .expect("reconcile provider denial marker"),
+            AuthFlowStatus::Failed
+        );
+        assert_eq!(dispatcher.events().len(), 2, "delivery is at least once");
+        assert_eq!(flow_manager.marker_calls(), 2);
+        assert!(
+            shared
+                .get_flow(&scope, flow.id)
+                .await
+                .expect("read acknowledged denial")
+                .expect("flow exists")
+                .continuation_emitted_at
+                .is_some()
+        );
     }
 
     #[cfg(feature = "slack-v2-host-beta")]
@@ -3339,6 +3509,17 @@ mod tests {
                 .push(event);
             Ok(())
         }
+
+        async fn dispatch_canceled_auth_continuation(
+            &self,
+            event: ironclaw_auth::AuthContinuationEvent,
+        ) -> Result<(), AuthProductError> {
+            self.events
+                .lock()
+                .expect("recording dispatcher lock")
+                .push(event);
+            Ok(())
+        }
     }
 
     #[cfg(feature = "slack-v2-host-beta")]
@@ -4119,7 +4300,8 @@ mod tests {
     #[cfg(feature = "slack-v2-host-beta")]
     struct FailingOnceContinuationMarkerFlowManager {
         inner: Arc<InMemoryAuthProductServices>,
-        fail_marker_once: AtomicBool,
+        fail_settlement_once: AtomicBool,
+        fail_direct_mark_once: AtomicBool,
         marker_calls: AtomicUsize,
     }
 
@@ -4128,7 +4310,17 @@ mod tests {
         fn new(inner: Arc<InMemoryAuthProductServices>) -> Self {
             Self {
                 inner,
-                fail_marker_once: AtomicBool::new(true),
+                fail_settlement_once: AtomicBool::new(true),
+                fail_direct_mark_once: AtomicBool::new(false),
+                marker_calls: AtomicUsize::new(0),
+            }
+        }
+
+        fn failing_direct_mark(inner: Arc<InMemoryAuthProductServices>) -> Self {
+            Self {
+                inner,
+                fail_settlement_once: AtomicBool::new(false),
+                fail_direct_mark_once: AtomicBool::new(true),
                 marker_calls: AtomicUsize::new(0),
             }
         }
@@ -4323,7 +4515,7 @@ mod tests {
             input: ironclaw_auth::AuthContinuationDispatchSettlementInput,
         ) -> Result<ironclaw_auth::AuthFlowRecord, AuthProductError> {
             self.marker_calls.fetch_add(1, Ordering::SeqCst);
-            if self.fail_marker_once.swap(false, Ordering::SeqCst) {
+            if self.fail_settlement_once.swap(false, Ordering::SeqCst) {
                 return Err(AuthProductError::BackendUnavailable);
             }
             self.inner.settle_continuation_dispatch(scope, input).await
@@ -4335,6 +4527,10 @@ mod tests {
             flow_id: ironclaw_auth::AuthFlowId,
             emitted_at: ironclaw_auth::Timestamp,
         ) -> Result<ironclaw_auth::AuthFlowRecord, AuthProductError> {
+            self.marker_calls.fetch_add(1, Ordering::SeqCst);
+            if self.fail_direct_mark_once.swap(false, Ordering::SeqCst) {
+                return Err(AuthProductError::BackendUnavailable);
+            }
             self.inner
                 .mark_continuation_dispatched(scope, flow_id, emitted_at)
                 .await

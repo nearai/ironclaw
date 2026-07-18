@@ -32,7 +32,7 @@ mod tests {
         AdapterInstallationId, AuthRequirement, ExternalActorRef, ExternalConversationRef,
         ExternalEventId, ParsedProductInbound, ProtocolAuthEvidence, TrustedInboundContext,
     };
-    use ironclaw_turns::AcceptedMessageRef;
+    use ironclaw_turns::{AcceptedMessageRef, CancelRunPrecondition};
 
     fn accepted_ack() -> ProductInboundAck {
         ProductInboundAck::Accepted {
@@ -546,7 +546,7 @@ mod tests {
         /// that does not live in the queried scope (a triggered/foreign run).
         scope_not_found: bool,
         calls: Mutex<usize>,
-        cancel_calls: Mutex<Vec<TurnRunId>>,
+        cancel_calls: Mutex<Vec<(TurnRunId, Option<CancelRunPrecondition>)>>,
         /// When set, `cancel_run` returns `Err(TurnError::Unavailable)` instead of
         /// the normal success response. Used to test the OAuth backstop cancel-failure path.
         cancel_should_fail: std::sync::atomic::AtomicBool,
@@ -597,6 +597,14 @@ mod tests {
 
         fn cancel_call_count(&self) -> usize {
             self.cancel_calls.lock().expect("cancel calls lock").len()
+        }
+
+        fn last_cancel_precondition(&self) -> Option<CancelRunPrecondition> {
+            self.cancel_calls
+                .lock()
+                .expect("cancel calls lock")
+                .last()
+                .and_then(|(_, precondition)| precondition.clone())
         }
     }
 
@@ -702,10 +710,11 @@ mod tests {
             &self,
             request: ironclaw_turns::CancelRunRequest,
         ) -> Result<ironclaw_turns::CancelRunResponse, TurnError> {
+            let run_id = request.run_id;
             self.cancel_calls
                 .lock()
                 .expect("cancel calls lock")
-                .push(request.run_id);
+                .push((run_id, request.precondition));
             if self
                 .cancel_should_fail
                 .load(std::sync::atomic::Ordering::Acquire)
@@ -715,7 +724,7 @@ mod tests {
                 });
             }
             Ok(ironclaw_turns::CancelRunResponse {
-                run_id: request.run_id,
+                run_id,
                 status: TurnStatus::Cancelled,
                 event_cursor: ironclaw_turns::EventCursor::default(),
                 already_terminal: false,
@@ -754,6 +763,49 @@ mod tests {
         let thread = ironclaw_host_api::ThreadId::new("test-thread").expect("thread");
         let owner = ironclaw_host_api::UserId::new("creator-user").expect("owner");
         TurnScope::new_with_owner(tenant, Some(agent), None, thread, Some(owner))
+    }
+
+    #[tokio::test]
+    async fn auth_block_cancel_requires_and_forwards_the_exact_typed_gate() {
+        let coordinator = ScriptedTurnCoordinator::with_single_status(TurnStatus::BlockedAuth);
+        let scope = personal_turn_scope();
+        let actor = ironclaw_turns::TurnActor::new(
+            ironclaw_host_api::UserId::new("creator-user").expect("actor"),
+        );
+        let run_id = TurnRunId::new();
+
+        let missing = cancel_auth_blocked_run(
+            &coordinator,
+            None,
+            &scope,
+            actor.clone(),
+            run_id,
+            None,
+        )
+        .await
+        .expect_err("a blocked auth run without a gate ref must not be cancelled");
+        assert!(matches!(
+            missing,
+            FinalReplyDeliveryError::StatusMessage { .. }
+        ));
+        assert_eq!(coordinator.cancel_call_count(), 0);
+
+        let gate_ref = ironclaw_turns::GateRef::new("gate:typed-auth-cancel").expect("gate");
+        cancel_auth_blocked_run(
+            &coordinator,
+            None,
+            &scope,
+            actor,
+            run_id,
+            Some(&gate_ref),
+        )
+        .await
+        .expect("typed blocked auth gate cancels");
+        assert_eq!(coordinator.cancel_call_count(), 1);
+        assert_eq!(
+            coordinator.last_cancel_precondition(),
+            Some(CancelRunPrecondition::BlockedAuthGate { gate_ref })
+        );
     }
 
     /// Build a `SlackMessageResponse` JSON that looks like a successful post.

@@ -569,7 +569,7 @@ async fn deliver_triggered_run(
                     &scope,
                     actor.clone(),
                     run_id,
-                    state.gate_ref.as_ref().map(|gate_ref| gate_ref.as_str()),
+                    state.gate_ref.as_ref(),
                 )
                 .await
                 {
@@ -875,7 +875,7 @@ async fn triggered_notification_for_state(
                     scope,
                     actor.clone(),
                     run_id,
-                    Some(gate_ref.as_str()),
+                    Some(gate_ref),
                 )
                 .await?;
                 Ok(Some(ChannelActionableNotification {

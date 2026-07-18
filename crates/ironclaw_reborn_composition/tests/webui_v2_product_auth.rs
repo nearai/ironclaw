@@ -2269,6 +2269,11 @@ mod slack_personal_oauth_serve {
             .expect("authorization url");
         let parsed = url::Url::parse(authorization_url).expect("slack authorization url");
         assert_eq!(parsed.host_str(), Some("slack.com"));
+        let teams = parsed
+            .query_pairs()
+            .filter_map(|(name, value)| (name == "team").then(|| value.into_owned()))
+            .collect::<Vec<_>>();
+        assert_eq!(teams, vec!["T-test"]);
         let user_scope = parsed
             .query_pairs()
             .find_map(|(name, value)| (name == "user_scope").then(|| value.into_owned()))

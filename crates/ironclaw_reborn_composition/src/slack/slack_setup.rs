@@ -94,6 +94,12 @@ pub(crate) struct SlackInstallationSetupUpdate {
     pub(crate) oauth_client_secret: Option<SecretString>,
 }
 
+#[derive(Debug, Clone)]
+pub(crate) struct SlackOAuthAuthorizationContext {
+    pub(crate) client_id: OAuthClientId,
+    pub(crate) team_id: SlackTeamId,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub(crate) struct SlackInstallationSetupStatus {
     pub(crate) configured: bool,
@@ -384,10 +390,18 @@ impl SlackSetupService {
     pub(crate) async fn oauth_credentials(
         &self,
     ) -> Result<(OAuthClientId, SecretString), SlackSetupError> {
+        let (client_id, client_secret, _) = self.validated_oauth_configuration().await?;
+        Ok((client_id, client_secret))
+    }
+
+    async fn validated_oauth_configuration(
+        &self,
+    ) -> Result<(OAuthClientId, SecretString, SlackTeamId), SlackSetupError> {
         let setup = self
             .current_setup()
             .await?
             .ok_or(SlackSetupError::OAuthClientNotConfigured)?;
+        let team_id = setup.team_id();
         let client_id_raw = setup
             .oauth_client_id
             .ok_or(SlackSetupError::OAuthClientNotConfigured)?;
@@ -400,7 +414,17 @@ impl SlackSetupService {
             .oauth_client_secret_handle
             .ok_or(SlackSetupError::OAuthClientNotConfigured)?;
         let client_secret = self.secret_material(&secret_handle).await?;
-        Ok((client_id, client_secret))
+        Ok((client_id, client_secret, team_id))
+    }
+
+    /// Returns the non-secret values needed to construct a Slack personal
+    /// authorization URL. The client-secret handle is still resolved here so
+    /// OAuth start fails closed when token exchange could not subsequently run.
+    pub(crate) async fn oauth_authorization_context(
+        &self,
+    ) -> Result<SlackOAuthAuthorizationContext, SlackSetupError> {
+        let (client_id, _client_secret, team_id) = self.validated_oauth_configuration().await?;
+        Ok(SlackOAuthAuthorizationContext { client_id, team_id })
     }
 
     fn validated_setup(
@@ -816,6 +840,24 @@ impl SlackPersonalSetupServiceSlot {
         oauth_client_id: &str,
         oauth_client_secret: &str,
     ) -> Self {
+        Self::filled_with_in_memory_setup_and_team_for_tests(
+            redirect_uri,
+            oauth_client_id,
+            oauth_client_secret,
+            "T-test",
+        )
+        .await
+    }
+
+    /// Variant of [`Self::filled_with_in_memory_setup_for_tests`] that lets a
+    /// caller-level journey pin the workspace hint carried by Slack's OAuth
+    /// authorization URL.
+    pub(crate) async fn filled_with_in_memory_setup_and_team_for_tests(
+        redirect_uri: OAuthRedirectUri,
+        oauth_client_id: &str,
+        oauth_client_secret: &str,
+        team_id: &str,
+    ) -> Self {
         let slot = Self::new(redirect_uri);
         let service = Arc::new(SlackSetupService::new(
             TenantId::new("tenant:test").expect("valid test tenant"),
@@ -828,7 +870,7 @@ impl SlackPersonalSetupServiceSlot {
         service
             .save(SlackInstallationSetupUpdate {
                 installation_id: "install-test".to_string(),
-                team_id: "T-test".to_string(),
+                team_id: team_id.to_string(),
                 api_app_id: "A-test".to_string(),
                 user_id: Some("user:operator".to_string()),
                 shared_subject_user_id: None,

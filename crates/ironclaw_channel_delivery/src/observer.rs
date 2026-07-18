@@ -19,8 +19,8 @@ use ironclaw_product_workflow::{
 };
 use ironclaw_threads::{FinalizedAssistantMessageByRunRequest, SessionThreadService, ThreadScope};
 use ironclaw_turns::{
-    GetRunStateRequest, TurnActor, TurnCoordinator, TurnErrorCategory, TurnRunId, TurnRunState,
-    TurnScope, TurnStatus,
+    GateRef, GetRunStateRequest, TurnActor, TurnCoordinator, TurnErrorCategory, TurnRunId,
+    TurnRunState, TurnScope, TurnStatus,
 };
 use tokio::sync::Semaphore;
 
@@ -400,7 +400,7 @@ impl FinalReplyDeliveryObserver {
                         scope,
                         TurnActor::new(binding.actor_user_id.clone()),
                         run_id,
-                        gate_ref.as_str(),
+                        gate_ref,
                     )
                     .await?;
                     if let Err(error) = self
@@ -416,7 +416,7 @@ impl FinalReplyDeliveryObserver {
                         tracing::debug!(
                             target = "ironclaw::reborn::channel_delivery",
                             %error,
-                            "failed to post Slack auth-unavailable notice (best-effort)"
+                            "failed to post channel auth-unavailable notice (best-effort)"
                         );
                     }
                     return Ok(None);
@@ -427,7 +427,7 @@ impl FinalReplyDeliveryObserver {
         Ok(Some(notification))
     }
 
-    /// Auto-deny a Slack run that blocked on interactive auth (disabled on this
+    /// Auto-deny a channel run that blocked on interactive auth (disabled on this
     /// channel). Thin wrapper over the shared [`cancel_auth_blocked_run`] so the
     /// live observer and the triggered delivery path cancel identically.
     async fn cancel_channel_auth_blocked_run(
@@ -435,7 +435,7 @@ impl FinalReplyDeliveryObserver {
         scope: &TurnScope,
         actor: TurnActor,
         run_id: TurnRunId,
-        gate_ref: &str,
+        gate_ref: &GateRef,
     ) -> Result<(), FinalReplyDeliveryError> {
         cancel_auth_blocked_run(
             self.services.turn_coordinator.as_ref(),
