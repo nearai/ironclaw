@@ -16,8 +16,12 @@
 //! Definition of done: when `authorize()` is wired, the ONE production impl lives
 //! in `ironclaw_capabilities`; this test keeps it the only one.
 
+mod ratchet_support;
+
 use std::fs;
 use std::path::{Path, PathBuf};
+
+use ratchet_support::strip_comments_and_strings;
 
 /// The single crate permitted to implement `CapabilityAuthorizer` (the kernel
 /// authorizer that owns `authorize()`).
@@ -59,15 +63,16 @@ fn capability_authorizer_is_implemented_only_by_the_kernel() {
     let mut offenders = Vec::new();
     for file in files {
         let source = fs::read_to_string(&file).unwrap_or_default();
-        for raw in source.lines() {
+        // Comments and string literals are stripped (shared ratchet lexer), so
+        // doc mentions and error-message text cannot false-positive — and a
+        // qualified path (`impl crate::CapabilityAuthorizer for`) or a
+        // multiline `impl<...>\n CapabilityAuthorizer for` header cannot evade
+        // a starts_with("impl") check: any stripped line containing the
+        // `CapabilityAuthorizer for` implementation head counts.
+        let stripped = strip_comments_and_strings(&source);
+        for raw in stripped.lines() {
             let line = raw.trim();
-            if line.starts_with("//") {
-                continue;
-            }
-            // `impl CapabilityAuthorizer for X` (allow an optional generic/where by
-            // matching the head only). The trait defn itself (`pub trait ...`) and
-            // the doc mentions do not match this shape.
-            if line.starts_with("impl") && line.contains("CapabilityAuthorizer for") {
+            if line.contains("CapabilityAuthorizer for") {
                 let path = file.to_string_lossy().to_string();
                 // Platform-agnostic containment check: `components()` avoids
                 // hardcoding a separator (Windows paths use backslashes).

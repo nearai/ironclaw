@@ -37,6 +37,16 @@ use crate::{Blocked, DenyRef, Invocation, MountView, ResourceReservation, Runtim
 /// This trait is intentionally NOT sealed to `host_api` — sealing it here would
 /// stop the kernel crate from implementing it. Its teeth are: (1) the only way to
 /// obtain an [`AuthorizationGrant`] is through it, and (2) the architecture test.
+///
+/// **Boundary scope (be precise about what this defends):** the seal enforces
+/// *workspace layering* — no crate in this repository other than the kernel may
+/// mint authority — via private fields + grant-gated construction (compiler) and
+/// the implementor ratchet (CI). An *external* embedder that implements this
+/// trait is outside the boundary by definition: it already composes the host
+/// (wires `dispatch()`, owns the stores), so a forged witness grants it nothing
+/// it does not already have. The ratchet therefore scans this workspace, and the
+/// real guarantee lands when `authorize()` inlines the four policy checks (§9's
+/// explicit security milestone).
 pub trait CapabilityAuthorizer {
     /// Mint a one-shot grant. Provided (not overridable in effect): the grant's
     /// field is private to `host_api`, so this default body is the sole source of
@@ -130,10 +140,21 @@ impl Authorized {
         now > self.deadline
     }
 
-    /// Consume the witness into its parts for the dispatch lane. Single-use: the
-    /// witness is gone afterward, so it cannot be dispatched twice.
-    pub fn into_parts(self) -> (Invocation, RuntimeLane, MountView, ResourceReservation) {
-        (self.invocation, self.lane, self.mounts, self.reservation)
+    /// Consume the witness into its parts for the dispatch lane, failing closed
+    /// on expiry: consumption checks the deadline itself (review finding on the
+    /// C.7 slice — an optional pre-check can be omitted; the consuming operation
+    /// cannot be). On expiry the intact witness comes back as `Err` so the
+    /// caller releases its reservation through [`Authorized::abort`]. Single-use
+    /// either way: an `Ok` consumes the witness, so it cannot be dispatched
+    /// twice.
+    pub fn into_parts(
+        self,
+        now: Timestamp,
+    ) -> Result<(Invocation, RuntimeLane, MountView, ResourceReservation), Authorized> {
+        if self.is_expired(now) {
+            return Err(self);
+        }
+        Ok((self.invocation, self.lane, self.mounts, self.reservation))
     }
 
     /// Unwind a not-dispatched witness (cancel between authorize and dispatch,

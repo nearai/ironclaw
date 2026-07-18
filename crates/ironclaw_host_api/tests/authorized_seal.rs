@@ -69,12 +69,28 @@ fn deadline_fails_closed_past_the_frozen_facts() {
 }
 
 #[test]
-fn single_use_consumes_into_parts() {
+fn single_use_consumes_into_parts_before_deadline() {
     let auth = seal_one(ts(1000));
-    let (inv, lane, _mounts, _res) = auth.into_parts();
+    let (inv, lane, _mounts, _res) = auth
+        .into_parts(ts(999))
+        .expect("unexpired witness must consume");
     // `auth` is moved — a second dispatch is a compile error, not a runtime bug.
     assert_eq!(lane, RuntimeLane::Process);
     assert_eq!(inv.capability.as_str(), "shell.exec");
+}
+
+#[test]
+fn into_parts_fails_closed_on_expiry_and_returns_the_witness_for_abort() {
+    // Regression (review finding on the C.7 slice): consumption itself must
+    // check the deadline — an optional is_expired() pre-check can be omitted,
+    // the consuming operation cannot be. The expired witness comes back intact
+    // so its reservation is released explicitly, not stranded.
+    let auth = seal_one(ts(1000));
+    let expired = auth
+        .into_parts(ts(1001))
+        .expect_err("expired witness must not yield dispatch parts");
+    assert!(expired.is_expired(ts(1001)));
+    let _reservation = expired.abort(); // reservation still explicitly releasable
 }
 
 #[test]
