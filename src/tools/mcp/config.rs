@@ -601,10 +601,7 @@ pub fn parse_header_secret_reference(value: &str) -> Option<&str> {
 /// Callers get an actionable message; credentials belong in headers (which
 /// this surface secretizes) — never in the URL.
 pub fn validate_url_free_of_credentials(url: &str) -> Result<(), String> {
-    let Ok(parsed) = url::Url::parse(url) else {
-        // Unparseable URLs are caught by `McpServerConfig::validate`.
-        return Ok(());
-    };
+    let parsed = url::Url::parse(url).map_err(|e| format!("URL is not parseable: {e}"))?;
     if !parsed.username().is_empty() || parsed.password().is_some() {
         return Err(
             "URL must not embed credentials (user:password@host); use headers instead".to_string(),
