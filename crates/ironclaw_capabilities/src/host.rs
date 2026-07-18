@@ -521,10 +521,12 @@ where
                         return Err(error);
                     }
                 };
-                let result = self.seal_invoke_authorization(
-                    request,
+                let result = self.seal_authorization(
+                    &request.context,
+                    &request.capability_id,
+                    &request.estimate,
+                    &request.input,
                     descriptor,
-                    &scope,
                     &obligation_outcome,
                 );
                 Ok(AuthorizeFold::Authorized(Box::new(AuthorizedFold {
@@ -735,31 +737,41 @@ where
         }
     }
 
-    /// Mint the sealed [`Authorized`] witness for an allowed invoke, or `None`
-    /// when the invocation is not yet seal-able (arch-simplification §5.3.2).
+    /// Mint the sealed [`Authorized`] witness for an allowed invoke, spawn, or
+    /// resume, or `None` when the invocation is not yet seal-able
+    /// (arch-simplification §5.3.2).
     ///
-    /// Returns `None` — leaving today's dispatch path unchanged — when a fact
-    /// the seal requires is absent: no membrane-sealed `actor`, or a
+    /// Returns `None` — leaving today's dispatch/spawn path unchanged — when a
+    /// fact the seal requires is absent: no membrane-sealed `actor`, or a
     /// host-internal `System` runtime that maps to no untrusted [`RuntimeLane`].
     /// This slice mints the witness as a forward-looking seal artifact (it does
     /// not yet gate dispatch), so an un-seal-able invocation must not regress.
     /// Every field marked `PROVISIONAL (Slice C)` is a placeholder a later slice
     /// makes authoritative once the loop membrane seals it and `dispatch()`
     /// consumes the witness.
-    fn seal_invoke_authorization(
+    ///
+    /// Shared by the invoke, spawn, and resume authorize folds so the same six
+    /// frozen facts seal every path (§9 step 2). `scope` is derived from
+    /// `context.resource_scope` — every caller's `scope` local is exactly that
+    /// value (`request.context.resource_scope.clone()`), so passing it separately
+    /// would only duplicate it.
+    fn seal_authorization(
         &self,
-        request: &CapabilityInvocationRequest,
+        context: &ExecutionContext,
+        capability_id: &CapabilityId,
+        estimate: &ResourceEstimate,
+        input: &serde_json::Value,
         descriptor: &CapabilityDescriptor,
-        scope: &ResourceScope,
         obligation_outcome: &CapabilityObligationOutcome,
     ) -> Option<AuthorizeResult> {
         // Actor is sealed at the membrane; NO fallback to `user_id`. Absent on
         // untrusted/system contexts, where the witness is simply not minted.
-        let actor = request.context.authenticated_actor_user_id.clone()?;
+        let actor = context.authenticated_actor_user_id.clone()?;
         // Lane resolved from the descriptor's runtime kind; `System` runtimes
         // have no untrusted execution lane (`None`) and are not sealed here.
         let lane = RuntimeLane::from_runtime_kind(descriptor.runtime)?;
-        let origin = match request.context.run_id {
+        let scope = &context.resource_scope;
+        let origin = match context.run_id {
             Some(run_id) => InvocationOrigin::LoopRun(run_id),
             // PROVISIONAL (Slice C): a non-loop invocation's true origin
             // (Product vs Automation, §5.2.1) is not yet threaded to the kernel.
@@ -768,16 +780,16 @@ where
             None => InvocationOrigin::Product(ProductKind::new("provisional").ok()?),
         };
         let invocation = Invocation {
-            activity_id: ActivityId::from_uuid(request.context.invocation_id.as_uuid()),
-            capability: request.capability_id.clone(),
+            activity_id: ActivityId::from_uuid(context.invocation_id.as_uuid()),
+            capability: capability_id.clone(),
             // PROVISIONAL (Slice C): the loop expresses input by reference; the
             // membrane will resolve it. Cloned here so today's dispatch keeps
-            // ownership of `request.input`.
-            input: request.input.clone(),
+            // ownership of the request `input`.
+            input: input.clone(),
             scope: scope.clone(),
             actor,
             origin,
-            estimate: request.estimate.clone(),
+            estimate: estimate.clone(),
         };
         let mounts = obligation_outcome.mounts.clone().unwrap_or_default();
         let reservation = obligation_outcome
@@ -790,7 +802,7 @@ where
             .unwrap_or_else(|| ResourceReservation {
                 id: ResourceReservationId::new(),
                 scope: scope.clone(),
-                estimate: request.estimate.clone(),
+                estimate: estimate.clone(),
             });
         // PROVISIONAL (Slice C): a fixed 5-minute validity window until the
         // deadline is derived from the shortest-lived frozen fact (§5.3.2).
@@ -1666,9 +1678,121 @@ where
         let invocation_id = request.context.invocation_id;
         let capability_id = request.capability_id.clone();
         let scope = request.context.resource_scope.clone();
+        // The pre-spawn authority fold — context validation, fingerprint,
+        // run-state start, capability lookup, trust-aware spawn authorization,
+        // obligation preparation, and (Slice C) minting the sealed `Authorized`
+        // witness — is one method mirroring `authorize()`. `spawn_json` maps its
+        // `AuthorizeFold` back to today's exact process-spawn and error behavior.
+        let (obligations, obligation_outcome) = match self.authorize_spawn(&request).await? {
+            AuthorizeFold::Authorized(fold) => {
+                let AuthorizedFold {
+                    obligations,
+                    obligation_outcome,
+                    ..
+                } = *fold;
+                (obligations, obligation_outcome)
+            }
+            AuthorizeFold::Denied { reason, .. } => {
+                return Err(CapabilityInvocationError::AuthorizationDenied {
+                    capability: request.capability_id,
+                    reason,
+                });
+            }
+            AuthorizeFold::Blocked { .. } => {
+                return Err(CapabilityInvocationError::AuthorizationRequiresApproval {
+                    capability: request.capability_id,
+                });
+            }
+        };
+
+        // Re-resolve the descriptor for the process start. `authorize_spawn`
+        // already proved the capability exists (failing the run otherwise) and
+        // the registry is immutable for the host's lifetime, so this lookup is
+        // infallible in practice; it only re-borrows the descriptor that was
+        // released when the fold returned. Fail closed on the unreachable `None`.
+        let Some(descriptor) = self.registry.get_capability(&request.capability_id) else {
+            fail_run_if_configured(self.run_state, &scope, invocation_id, "UnknownCapability")
+                .await;
+            return Err(CapabilityInvocationError::UnknownCapability {
+                capability: request.capability_id,
+            });
+        };
+
+        let effective_mounts = obligation_outcome
+            .mounts
+            .clone()
+            .unwrap_or_else(|| request.context.mounts.clone());
+        let resource_reservation_id = obligation_outcome
+            .resource_reservation
+            .as_ref()
+            .map(|reservation| reservation.id);
+
+        let process = match process_manager
+            .spawn(ProcessStart {
+                process_id: ProcessId::new(),
+                parent_process_id: request.context.process_id,
+                invocation_id,
+                scope: scope.clone(),
+                authenticated_actor_user_id: request.context.authenticated_actor_user_id.clone(),
+                extension_id: descriptor.provider.clone(),
+                capability_id: request.capability_id.clone(),
+                runtime: descriptor.runtime,
+                grants: request.context.grants.clone(),
+                mounts: effective_mounts,
+                estimated_resources: request.estimate.clone(),
+                resource_reservation_id,
+                input: request.input,
+            })
+            .await
+        {
+            Ok(process) => process,
+            Err(error) => {
+                self.abort_obligations(
+                    CapabilityObligationPhase::Spawn,
+                    &request.context,
+                    &request.capability_id,
+                    &request.estimate,
+                    obligations.as_slice(),
+                    &obligation_outcome,
+                )
+                .await;
+                fail_run_if_configured(self.run_state, &scope, invocation_id, "ProcessSpawn").await;
+                return Err(CapabilityInvocationError::from(error));
+            }
+        };
+
+        if let Some(run_state) = self.run_state {
+            complete_run_after_side_effect(
+                run_state,
+                &scope,
+                invocation_id,
+                &capability_id,
+                "spawn",
+            )
+            .await;
+        }
+
+        Ok(CapabilitySpawnResult { process })
+    }
+
+    /// The pre-spawn authority fold for `spawn_json`, extracted per
+    /// arch-simplification §9 step 2 / §5.3.2 exactly as [`Self::authorize`] does
+    /// for invoke: validate the context, fingerprint the spawn, start the run
+    /// record, resolve the descriptor, run trust-aware spawn authorization, and
+    /// on `Allow` prepare obligations and mint the sealed [`Authorized`] witness.
+    /// Every side effect the inline fold performed — run-state
+    /// `start`/`fail`/`block`, approval persist-and-rollback, obligation
+    /// `prepare`, and each early error return — stays here verbatim; `spawn_json`
+    /// only maps the returned [`AuthorizeFold`] back to today's outcome.
+    async fn authorize_spawn(
+        &self,
+        request: &CapabilitySpawnRequest,
+    ) -> Result<AuthorizeFold, CapabilityInvocationError> {
+        let invocation_id = request.context.invocation_id;
+        let scope = request.context.resource_scope.clone();
         if request.context.validate().is_err() {
             return Err(CapabilityInvocationError::AuthorizationDenied {
-                capability: request.capability_id,
+                capability: request.capability_id.clone(),
                 reason: DenyReason::InternalInvariantViolation,
             });
         }
@@ -1689,7 +1813,7 @@ where
             run_state
                 .start(RunStart {
                     invocation_id,
-                    capability_id: capability_id.clone(),
+                    capability_id: request.capability_id.clone(),
                     scope: scope.clone(),
                     authenticated_actor_user_id: request
                         .context
@@ -1703,12 +1827,10 @@ where
             fail_run_if_configured(self.run_state, &scope, invocation_id, "UnknownCapability")
                 .await;
             return Err(CapabilityInvocationError::UnknownCapability {
-                capability: request.capability_id,
+                capability: request.capability_id.clone(),
             });
         };
 
-        let obligations;
-        let obligation_outcome;
         match self
             .authorizer
             .authorize_spawn_with_trust(
@@ -1723,7 +1845,7 @@ where
                 obligations: allowed_obligations,
             } => {
                 let allowed_obligations = allowed_obligations.into_vec();
-                match self
+                let obligation_outcome = match self
                     .prepare_obligations(
                         CapabilityObligationPhase::Spawn,
                         &request.context,
@@ -1733,10 +1855,7 @@ where
                     )
                     .await
                 {
-                    Ok(outcome) => {
-                        obligations = allowed_obligations;
-                        obligation_outcome = outcome;
-                    }
+                    Ok(outcome) => outcome,
                     Err(error) => {
                         apply_run_state_transition_if_configured(
                             self.run_state,
@@ -1747,7 +1866,20 @@ where
                         .await;
                         return Err(error);
                     }
-                }
+                };
+                let result = self.seal_authorization(
+                    &request.context,
+                    &request.capability_id,
+                    &request.estimate,
+                    &request.input,
+                    descriptor,
+                    &obligation_outcome,
+                );
+                Ok(AuthorizeFold::Authorized(Box::new(AuthorizedFold {
+                    result,
+                    obligations: allowed_obligations,
+                    obligation_outcome,
+                })))
             }
             Decision::Deny { reason } => {
                 fail_run_if_configured(
@@ -1757,14 +1889,15 @@ where
                     "AuthorizationDenied",
                 )
                 .await;
-                return Err(CapabilityInvocationError::AuthorizationDenied {
-                    capability: request.capability_id,
+                Ok(AuthorizeFold::Denied {
+                    result: AuthorizeResult::Denied(DenyRef::new()),
                     reason,
-                });
+                })
             }
             Decision::RequireApproval {
                 request: mut approval,
             } => {
+                let approval_request_id = approval.id;
                 add_capability_input_display_hint(
                     &mut approval.reason,
                     &request.capability_id,
@@ -1797,7 +1930,7 @@ where
                         )
                         .await;
                         return Err(CapabilityInvocationError::ApprovalFingerprintMismatch {
-                            capability: request.capability_id,
+                            capability: request.capability_id.clone(),
                         });
                     }
                 } else {
@@ -1873,84 +2006,147 @@ where
                         )
                         .await;
                         return Err(CapabilityInvocationError::ApprovalStoreMissing {
-                            capability: request.capability_id,
+                            capability: request.capability_id.clone(),
                             store: "approval_requests",
                         });
                     }
                     (None, Some(_)) => {
                         return Err(CapabilityInvocationError::ApprovalStoreMissing {
-                            capability: request.capability_id,
+                            capability: request.capability_id.clone(),
                             store: "run_state",
                         });
                     }
                     (None, None) => {
                         return Err(CapabilityInvocationError::ApprovalStoreMissing {
-                            capability: request.capability_id,
+                            capability: request.capability_id.clone(),
                             store: "run_state and approval_requests",
                         });
                     }
                 }
-                return Err(CapabilityInvocationError::AuthorizationRequiresApproval {
-                    capability: request.capability_id,
-                });
+                Ok(AuthorizeFold::Blocked {
+                    result: AuthorizeResult::Blocked(Blocked::Approval(GateRef::from_uuid(
+                        approval_request_id.as_uuid(),
+                    ))),
+                })
             }
         }
+    }
 
-        let effective_mounts = obligation_outcome
-            .mounts
-            .clone()
-            .unwrap_or_else(|| request.context.mounts.clone());
-        let resource_reservation_id = obligation_outcome
-            .resource_reservation
-            .as_ref()
-            .map(|reservation| reservation.id);
-
-        let process = match process_manager
-            .spawn(ProcessStart {
-                process_id: ProcessId::new(),
-                parent_process_id: request.context.process_id,
-                invocation_id,
-                scope: scope.clone(),
-                authenticated_actor_user_id: request.context.authenticated_actor_user_id.clone(),
-                extension_id: descriptor.provider.clone(),
-                capability_id: request.capability_id.clone(),
-                runtime: descriptor.runtime,
-                grants: request.context.grants.clone(),
-                mounts: effective_mounts,
-                estimated_resources: request.estimate.clone(),
-                resource_reservation_id,
-                input: request.input,
-            })
+    /// Pre-dispatch authority fold shared by `resume_json` and
+    /// `auth_resume_json`, extracted per arch-simplification §9 step 2 / §5.3.2
+    /// exactly as [`Self::authorize`] does for invoke: run trust-aware
+    /// authorization and map the `Decision`. On `Deny`/`RequireApproval` every
+    /// side effect the inline fold performed stays here verbatim — the run-state
+    /// `fail` transition and the revoke of an `AlreadyClaimed` lease (transitioned
+    /// to `Dispatching` in the `auth_resume_json` preamble) so a terminal refusal
+    /// does not strand it.
+    ///
+    /// Unlike invoke/spawn, the `Authorized` fold carries only the raw
+    /// `obligations`: [`Self::dispatch_resumed_capability`] runs the authoritative
+    /// obligation preparation and the approval lease claim AFTER this returns, so
+    /// the resume paths keep their hard claim-before-dispatch ordering (a
+    /// `PendingClaim` lease stays `Active` on a `Deny`, and no second
+    /// authorization runs). The witness's `obligation_outcome` is therefore a
+    /// placeholder (`default()`) — the seal is a forward-looking artifact
+    /// (§5.3.2) that does not gate dispatch and is minted only when the
+    /// invocation is seal-able, so today's actor-less/`System` paths are
+    /// unaffected.
+    async fn authorize_resumed(
+        &self,
+        params: &ResumedDispatchParams<'_>,
+    ) -> Result<AuthorizeFold, CapabilityInvocationError> {
+        match self
+            .authorizer
+            .authorize_dispatch_with_trust(
+                &params.authorized_context,
+                params.descriptor,
+                &params.estimate,
+                &params.trust_decision,
+            )
             .await
         {
-            Ok(process) => process,
-            Err(error) => {
-                self.abort_obligations(
-                    CapabilityObligationPhase::Spawn,
-                    &request.context,
-                    &request.capability_id,
-                    &request.estimate,
-                    obligations.as_slice(),
-                    &obligation_outcome,
+            Decision::Allow {
+                obligations: allowed_obligations,
+            } => {
+                let allowed_obligations = allowed_obligations.into_vec();
+                // PROVISIONAL (Slice C): the authoritative obligation outcome is
+                // prepared post-claim in `dispatch_resumed_capability` to keep the
+                // resume claim-before-dispatch ordering, so the witness seals
+                // against an empty outcome. It is forward-looking and does not
+                // drive dispatch (which still builds from the prepared outcome in
+                // the tail), so an empty seal outcome does not regress today's
+                // path.
+                let provisional_outcome = CapabilityObligationOutcome::default();
+                let result = self.seal_authorization(
+                    &params.authorized_context,
+                    &params.capability_id,
+                    &params.estimate,
+                    &params.input,
+                    params.descriptor,
+                    &provisional_outcome,
+                );
+                Ok(AuthorizeFold::Authorized(Box::new(AuthorizedFold {
+                    result,
+                    obligations: allowed_obligations,
+                    obligation_outcome: provisional_outcome,
+                })))
+            }
+            Decision::Deny { reason } => {
+                fail_run_if_configured(
+                    Some(params.run_state),
+                    &params.scope,
+                    params.invocation_id,
+                    "AuthorizationDenied",
                 )
                 .await;
-                fail_run_if_configured(self.run_state, &scope, invocation_id, "ProcessSpawn").await;
-                return Err(CapabilityInvocationError::from(error));
+                // The AlreadyClaimed lease was transitioned to Dispatching in the
+                // auth_resume_json preamble, before this authorization check ran.
+                // A Deny is terminal — revoke the lease so it does not stay stuck
+                // in Dispatching.  PendingClaim and NoPriorLease have no pre-authz
+                // state mutation here.
+                if let ResumedLeaseState::AlreadyClaimed(store, lease) = &params.lease_state
+                    && let Err(error) = store.revoke(&params.scope, lease.grant.id).await
+                {
+                    warn!(
+                        lease_id = %lease.grant.id,
+                        revoke_error_kind = capability_lease_error_kind(&error),
+                        "failed to revoke reused approval lease after authorization refused auth-resume; lease may remain Dispatching",
+                    );
+                }
+                Ok(AuthorizeFold::Denied {
+                    result: AuthorizeResult::Denied(DenyRef::new()),
+                    reason,
+                })
             }
-        };
-
-        if let Some(run_state) = self.run_state {
-            complete_run_after_side_effect(
-                run_state,
-                &scope,
-                invocation_id,
-                &capability_id,
-                "spawn",
-            )
-            .await;
+            Decision::RequireApproval { .. } => {
+                fail_run_if_configured(
+                    Some(params.run_state),
+                    &params.scope,
+                    params.invocation_id,
+                    "AuthorizationRequiresApproval",
+                )
+                .await;
+                // Same as the Deny arm: the AlreadyClaimed lease was transitioned to
+                // Dispatching before authorization ran; a RequireApproval refusal is
+                // also terminal — revoke so it does not remain stuck in Dispatching.
+                if let ResumedLeaseState::AlreadyClaimed(store, lease) = &params.lease_state
+                    && let Err(error) = store.revoke(&params.scope, lease.grant.id).await
+                {
+                    warn!(
+                        lease_id = %lease.grant.id,
+                        revoke_error_kind = capability_lease_error_kind(&error),
+                        "failed to revoke reused approval lease after authorization refused auth-resume; lease may remain Dispatching",
+                    );
+                }
+                // The resume paths never persist a NEW approval here (they resume
+                // an already-approved invocation); today's caller returns
+                // `AuthorizationRequiresApproval` with no persisted gate, so the
+                // forward-looking Blocked witness carries a fresh correlation id.
+                Ok(AuthorizeFold::Blocked {
+                    result: AuthorizeResult::Blocked(Blocked::Approval(GateRef::new())),
+                })
+            }
         }
-
-        Ok(CapabilitySpawnResult { process })
     }
 
     /// Converging tail shared by `resume_json` and `auth_resume_json`.
@@ -1967,6 +2163,15 @@ where
         &self,
         params: ResumedDispatchParams<'_>,
     ) -> Result<CapabilityInvocationResult, CapabilityInvocationError> {
+        // Pre-dispatch authority fold (trust-aware authorization + Decision
+        // mapping) extracted to `authorize_resumed`, mirroring `authorize()`.
+        // The claim-before-dispatch ordering the resume paths depend on stays in
+        // this tail: the approval lease claim and the authoritative obligation
+        // preparation run BELOW, after the fold returns `Authorized`, so a `Deny`
+        // still leaves a `PendingClaim` lease `Active` and never a second
+        // authorization runs.
+        let fold = self.authorize_resumed(&params).await?;
+
         let ResumedDispatchParams {
             run_state,
             scope,
@@ -1974,72 +2179,24 @@ where
             capability_id,
             estimate,
             input,
-            trust_decision,
+            trust_decision: _,
             authorized_context,
-            descriptor,
+            descriptor: _,
             lease_state,
         } = params;
 
-        let obligations = match self
-            .authorizer
-            .authorize_dispatch_with_trust(
-                &authorized_context,
-                descriptor,
-                &estimate,
-                &trust_decision,
-            )
-            .await
-        {
-            Decision::Allow {
-                obligations: allowed_obligations,
-            } => allowed_obligations.into_vec(),
-            Decision::Deny { reason } => {
-                fail_run_if_configured(
-                    Some(run_state),
-                    &scope,
-                    invocation_id,
-                    "AuthorizationDenied",
-                )
-                .await;
-                // The AlreadyClaimed lease was transitioned to Dispatching in the
-                // auth_resume_json preamble, before this authorization check ran.
-                // A Deny is terminal — revoke the lease so it does not stay stuck
-                // in Dispatching.  PendingClaim and NoPriorLease have no pre-authz
-                // state mutation here.
-                if let ResumedLeaseState::AlreadyClaimed(store, lease) = &lease_state
-                    && let Err(error) = store.revoke(&scope, lease.grant.id).await
-                {
-                    warn!(
-                        lease_id = %lease.grant.id,
-                        revoke_error_kind = capability_lease_error_kind(&error),
-                        "failed to revoke reused approval lease after authorization refused auth-resume; lease may remain Dispatching",
-                    );
-                }
+        let obligations = match fold {
+            AuthorizeFold::Authorized(fold) => {
+                let AuthorizedFold { obligations, .. } = *fold;
+                obligations
+            }
+            AuthorizeFold::Denied { reason, .. } => {
                 return Err(CapabilityInvocationError::AuthorizationDenied {
                     capability: capability_id,
                     reason,
                 });
             }
-            Decision::RequireApproval { .. } => {
-                fail_run_if_configured(
-                    Some(run_state),
-                    &scope,
-                    invocation_id,
-                    "AuthorizationRequiresApproval",
-                )
-                .await;
-                // Same as the Deny arm: the AlreadyClaimed lease was transitioned to
-                // Dispatching before authorization ran; a RequireApproval refusal is
-                // also terminal — revoke so it does not remain stuck in Dispatching.
-                if let ResumedLeaseState::AlreadyClaimed(store, lease) = &lease_state
-                    && let Err(error) = store.revoke(&scope, lease.grant.id).await
-                {
-                    warn!(
-                        lease_id = %lease.grant.id,
-                        revoke_error_kind = capability_lease_error_kind(&error),
-                        "failed to revoke reused approval lease after authorization refused auth-resume; lease may remain Dispatching",
-                    );
-                }
+            AuthorizeFold::Blocked { .. } => {
                 return Err(CapabilityInvocationError::AuthorizationRequiresApproval {
                     capability: capability_id,
                 });
