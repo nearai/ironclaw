@@ -717,12 +717,7 @@ mod tests {
 
         let session_manager = Arc::new(McpSessionManager::new());
         let owner_gen = crate::tools::mcp::session::McpSessionGeneration::new();
-        session_manager.authorize_generation(
-            "user-a",
-            &McpServerName::new("invalidsession").unwrap(),
-            None,
-            owner_gen,
-        );
+        session_manager.register_generation(owner_gen);
         let transport = HttpMcpTransport::new(&url, "invalidsession").with_session_manager(
             Arc::clone(&session_manager),
             "user-a",
@@ -775,7 +770,7 @@ mod tests {
         let session_manager = Arc::new(McpSessionManager::new());
         let server_name = McpServerName::new("errorsession").unwrap();
         let owner_gen = crate::tools::mcp::session::McpSessionGeneration::new();
-        session_manager.authorize_generation("user-a", &server_name, None, owner_gen);
+        session_manager.register_generation(owner_gen);
         session_manager
             .get_or_create("user-a", &server_name, &url, None, owner_gen)
             .await;

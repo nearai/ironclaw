@@ -168,17 +168,15 @@ pub struct McpSessionManager {
     /// Maximum idle time before a session is considered stale (in seconds).
     max_idle_secs: u64,
 
-    /// The generation currently AUTHORIZED to create the session for each
-    /// key — an allowlist, not a tombstone denylist. A client instance
-    /// registers its generation at construction (newest instance wins);
-    /// `get_or_create` refuses creation for any other generation, so an
-    /// evicted in-flight client can never resurrect a session regardless of
-    /// how long it stalls. Revocation is therefore tied exactly to client
-    /// lifetime (authorization replaced when a successor is constructed,
-    /// removed on store-eviction cleanup) — no count- or time-based expiry.
-    /// Bounded by the number of live client instances, which the client
-    /// store already caps.
-    authorized: std::sync::Mutex<HashMap<McpSessionKey, McpSessionGeneration>>,
+    /// LIVE generation registry — the allowlist backing session creation.
+    /// A client instance registers its generation at construction and is
+    /// unregistered on store eviction, uninstall cleanup, or drop, so
+    /// `get_or_create` creates only for a generation whose client is still
+    /// alive: an evicted in-flight client can never resurrect a session no
+    /// matter how long it stalls. No per-key entries at all — the set is
+    /// bounded by live client instances (which the client store caps) and
+    /// carries no tombstones to retain or expire.
+    live_generations: std::sync::Mutex<std::collections::HashSet<McpSessionGeneration>>,
 }
 
 impl McpSessionManager {
@@ -187,7 +185,7 @@ impl McpSessionManager {
         Self {
             sessions: RwLock::new(HashMap::new()),
             max_idle_secs: 1800, // 30 minutes
-            authorized: std::sync::Mutex::new(HashMap::new()),
+            live_generations: std::sync::Mutex::new(std::collections::HashSet::new()),
         }
     }
 
@@ -196,25 +194,34 @@ impl McpSessionManager {
         Self {
             sessions: RwLock::new(HashMap::new()),
             max_idle_secs,
-            authorized: std::sync::Mutex::new(HashMap::new()),
+            live_generations: std::sync::Mutex::new(std::collections::HashSet::new()),
         }
     }
 
-    /// Register `generation` as the authorized creator for the key. Called
-    /// from client construction — the NEWEST instance for a key wins, which
-    /// simultaneously revokes every earlier instance's creation right.
-    pub fn authorize_generation(
-        &self,
-        user_id: &str,
-        server_name: &McpServerName,
-        thread_id: Option<Uuid>,
-        generation: McpSessionGeneration,
-    ) {
-        let mut authorized = self
-            .authorized
+    /// Register a client instance's generation as LIVE (creation right).
+    /// Called from client construction; paired with
+    /// [`Self::unregister_generation`] on eviction/uninstall/drop.
+    pub fn register_generation(&self, generation: McpSessionGeneration) {
+        self.live_generations
             .lock()
-            .expect("authorized-map mutex poisoned"); // safety: no panics while holding this lock
-        authorized.insert(Self::key(user_id, server_name, thread_id), generation);
+            .expect("live-generation mutex poisoned") // safety: no panics while holding this lock
+            .insert(generation);
+    }
+
+    /// Revoke a generation's creation right (client evicted, uninstalled, or
+    /// dropped). Idempotent.
+    pub fn unregister_generation(&self, generation: McpSessionGeneration) {
+        self.live_generations
+            .lock()
+            .expect("live-generation mutex poisoned") // safety: no panics while holding this lock
+            .remove(&generation);
+    }
+
+    fn is_live(&self, generation: McpSessionGeneration) -> bool {
+        self.live_generations
+            .lock()
+            .expect("live-generation mutex poisoned") // safety: no panics while holding this lock
+            .contains(&generation)
     }
 
     fn key(user_id: &str, server_name: &McpServerName, thread_id: Option<Uuid>) -> McpSessionKey {
@@ -240,29 +247,13 @@ impl McpSessionManager {
         let key = Self::key(user_id, server_name, thread_id);
         let mut sessions = self.sessions.write().await;
         // Creation-right check under the sessions write lock, atomic with the
-        // insert below. First-come: a key with NO authorization entry grants
-        // (and records) the right to the first creator. Once granted, only
-        // the authorized generation — replaced when a successor client is
-        // constructed, or set to an unmatchable marker on store eviction —
-        // may create or replace. An evicted/stale instance receives a
-        // detached session that is NOT stored; its writes are guard-rejected
-        // anyway.
-        {
-            let mut authorized = self
-                .authorized
-                .lock()
-                .expect("authorized-map mutex poisoned"); // safety: no panics while holding this lock
-            match authorized.get(&key) {
-                None => {
-                    authorized.insert(key.clone(), owner);
-                }
-                Some(g) if *g == owner => {}
-                Some(_) => {
-                    // ALWAYS detached — cloning the stored successor session
-                    // would hand its Mcp-Session-Id to a stale instance.
-                    return McpSession::new(server_url, owner);
-                }
-            }
+        // insert below: only a LIVE generation (its client registered at
+        // construction and not yet evicted/uninstalled/dropped) may create or
+        // replace. A stale instance receives a detached session that is NOT
+        // stored — never a clone of the stored successor session, which
+        // would hand its Mcp-Session-Id to the stale instance.
+        if !self.is_live(owner) {
+            return McpSession::new(server_url, owner);
         }
 
         if let Some(session) = sessions.get(&key) {
@@ -384,16 +375,12 @@ impl McpSessionManager {
         match owner {
             None => {
                 // Unconditional removal (server uninstall, admin cleanup):
-                // the client lifecycle for this key ends. Swap in an
-                // unmatchable marker rather than clearing — an empty slot
-                // would reopen first-come and let any lingering old client
-                // Arc re-create. A future legitimate client re-registers at
-                // construction and overwrites the marker.
-                sessions.remove(&key);
-                self.authorized
-                    .lock()
-                    .expect("authorized-map mutex poisoned") // safety: no panics while holding this lock
-                    .insert(key, McpSessionGeneration::new());
+                // the owning client's lifecycle ends with the session —
+                // revoke its generation so a lingering Arc cannot re-create.
+                // Nothing is retained: no per-key tombstones.
+                if let Some(session) = sessions.remove(&key) {
+                    self.unregister_generation(session.owner);
+                }
             }
             Some(nonce) => {
                 // Guarded self-termination (the client's own reinitialize
@@ -424,17 +411,9 @@ impl McpSessionManager {
         if sessions.get(&key).is_some_and(|s| s.owner == owner) {
             sessions.remove(&key);
         }
-        let mut authorized = self
-            .authorized
-            .lock()
-            .expect("authorized-map mutex poisoned"); // safety: no panics while holding this lock
-        if authorized.get(&key) == Some(&owner) {
-            // Replace with an unmatchable marker rather than removing: an
-            // empty slot would fall back to first-come and let the evicted
-            // instance re-create. A successor client overwrites the marker
-            // when it registers at construction.
-            authorized.insert(key, McpSessionGeneration::new());
-        }
+        // Revoke the evicted instance's creation right — set-based, so
+        // nothing per-key is retained and the revocation cannot expire.
+        self.unregister_generation(owner);
     }
 
     /// Snapshot the active `(user, server, thread_id)` triples.
@@ -474,6 +453,20 @@ mod tests {
     fn nil_gen() -> McpSessionGeneration {
         // Uuid::nil is stable across calls — all nil_gen() values are equal.
         McpSessionGeneration(Uuid::nil())
+    }
+
+    /// Register-then-create: test sessions must come from a LIVE generation,
+    /// mirroring production client construction.
+    async fn seed(
+        m: &McpSessionManager,
+        user: &str,
+        server: &McpServerName,
+        url: &str,
+        thread: Option<Uuid>,
+        generation: McpSessionGeneration,
+    ) -> McpSession {
+        m.register_generation(generation);
+        m.get_or_create(user, server, url, thread, generation).await
     }
 
     const USER_A: &str = "user-a";
@@ -524,6 +517,7 @@ mod tests {
     #[tokio::test]
     async fn test_session_manager_get_or_create() {
         let manager = McpSessionManager::new();
+        manager.register_generation(nil_gen());
         let notion = sn("notion");
 
         // First call creates a new session
@@ -553,6 +547,7 @@ mod tests {
     #[tokio::test]
     async fn test_session_manager_terminate() {
         let manager = McpSessionManager::new();
+        manager.register_generation(nil_gen());
         let notion = sn("notion");
 
         manager
@@ -581,6 +576,7 @@ mod tests {
     #[tokio::test]
     async fn test_session_manager_initialization() {
         let manager = McpSessionManager::new();
+        manager.register_generation(nil_gen());
         let notion = sn("notion");
 
         manager
@@ -607,6 +603,7 @@ mod tests {
     #[tokio::test]
     async fn test_active_sessions_tracks_user_server_pairs() {
         let manager = McpSessionManager::new();
+        manager.register_generation(nil_gen());
         let notion = sn("notion");
         let github = sn("github");
 
@@ -637,6 +634,7 @@ mod tests {
     #[tokio::test]
     async fn test_session_id_is_partitioned_per_user() {
         let manager = McpSessionManager::new();
+        manager.register_generation(nil_gen());
         let notion = sn("notion");
 
         manager
@@ -725,6 +723,7 @@ mod tests {
     #[tokio::test]
     async fn test_get_session_id_nonexistent_returns_none() {
         let manager = McpSessionManager::new();
+        manager.register_generation(nil_gen());
         assert!(
             manager
                 .get_session_id(USER_A, &sn("ghost"), None, nil_gen())
@@ -736,6 +735,7 @@ mod tests {
     #[tokio::test]
     async fn test_update_session_id_nonexistent_is_noop() {
         let manager = McpSessionManager::new();
+        manager.register_generation(nil_gen());
         // Should not panic or create a session.
         manager
             .update_session_id(
@@ -752,6 +752,7 @@ mod tests {
     #[tokio::test]
     async fn test_mark_initialized_nonexistent_is_noop() {
         let manager = McpSessionManager::new();
+        manager.register_generation(nil_gen());
         manager
             .mark_initialized(USER_A, &sn("ghost"), None, nil_gen())
             .await;
@@ -761,6 +762,7 @@ mod tests {
     #[tokio::test]
     async fn test_touch_nonexistent_is_noop() {
         let manager = McpSessionManager::new();
+        manager.register_generation(nil_gen());
         manager.touch(USER_A, &sn("ghost"), None).await;
         assert!(manager.active_sessions().await.is_empty());
     }
@@ -769,6 +771,7 @@ mod tests {
     async fn test_cleanup_stale_removes_only_stale() {
         // Use a 5-second idle timeout so we can fake staleness easily.
         let manager = McpSessionManager::with_idle_timeout(5);
+        manager.register_generation(nil_gen());
         let fresh = sn("fresh");
         let stale1 = sn("stale1");
         let stale2 = sn("stale2");
@@ -820,6 +823,7 @@ mod tests {
     #[tokio::test]
     async fn test_terminate_nonexistent_is_noop() {
         let manager = McpSessionManager::new();
+        manager.register_generation(nil_gen());
         // Should not panic.
         manager.terminate(USER_A, &sn("ghost"), None, None).await;
         assert!(manager.active_sessions().await.is_empty());
@@ -832,6 +836,7 @@ mod tests {
     #[tokio::test]
     async fn retired_generation_cannot_recreate_session() {
         let manager = McpSessionManager::new();
+        manager.register_generation(nil_gen());
         let server = sn("svc");
         let evicted_gen = test_gen();
 
@@ -856,7 +861,7 @@ mod tests {
         // A replacement generation (registered at construction, as production
         // clients do) creates and owns a fresh session.
         let replacement_gen = test_gen();
-        manager.authorize_generation(USER_A, &server, None, replacement_gen);
+        manager.register_generation(replacement_gen);
         manager
             .get_or_create(USER_A, &server, "https://b.invalid", None, replacement_gen)
             .await;
@@ -894,6 +899,7 @@ mod tests {
     #[tokio::test]
     async fn test_distinct_thread_ids_do_not_collide() {
         let manager = McpSessionManager::new();
+        manager.register_generation(nil_gen());
         let notion = sn("notion");
         let thread_a = tid(1);
         let thread_b = tid(2);
@@ -957,6 +963,7 @@ mod tests {
     #[tokio::test]
     async fn test_none_and_some_thread_id_are_distinct_slots() {
         let manager = McpSessionManager::new();
+        manager.register_generation(nil_gen());
         let notion = sn("notion");
         let thread_a = tid(42);
 
@@ -1015,6 +1022,7 @@ mod tests {
     #[tokio::test]
     async fn test_same_triple_collides() {
         let manager = McpSessionManager::new();
+        manager.register_generation(nil_gen());
         let notion = sn("notion");
         let thread_a = tid(7);
 
@@ -1060,6 +1068,7 @@ mod tests {
     #[tokio::test]
     async fn test_thread_terminate_does_not_affect_user_scoped() {
         let manager = McpSessionManager::new();
+        manager.register_generation(nil_gen());
         let notion = sn("notion");
         let thread_a = tid(99);
 

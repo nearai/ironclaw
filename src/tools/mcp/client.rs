@@ -317,14 +317,9 @@ impl McpClient {
         // client (session creates/terminates) — they must agree for the
         // generation guard to accept this instance's writes.
         let session_owner = crate::tools::mcp::session::McpSessionGeneration::new();
-        // Register as the key's authorized creator — the newest instance
-        // wins, revoking any predecessor's creation right.
-        session_manager.authorize_generation(
-            &user_id_str,
-            &validated_name,
-            thread_id,
-            session_owner,
-        );
+        // Register as a LIVE generation (creation right); revoked on store
+        // eviction, uninstall cleanup, or drop.
+        session_manager.register_generation(session_owner);
         let transport = Arc::new(
             HttpMcpTransport::new(config.url.clone(), validated_name.as_str())
                 .with_session_manager(
@@ -402,9 +397,9 @@ impl McpClient {
             .map(|c| c.headers.clone())
             .unwrap_or_default();
         let user_id: String = user_id.into();
-        // Register as the key's authorized creator (newest instance wins).
+        // Register as a LIVE generation (creation right).
         if let Some(ref sm) = session_manager {
-            sm.authorize_generation(&user_id, &name, thread_id, session_owner);
+            sm.register_generation(session_owner);
         }
 
         Self {
@@ -435,12 +430,7 @@ impl McpClient {
     /// `new_with_transport()` instead. See `create_client_from_config()`.
     #[cfg(test)]
     pub fn with_session_manager(mut self, session_manager: Arc<McpSessionManager>) -> Self {
-        session_manager.authorize_generation(
-            &self.user_id,
-            &self.server_name,
-            self.thread_id,
-            self.session_owner,
-        );
+        session_manager.register_generation(self.session_owner);
         self.session_manager = Some(session_manager);
         self
     }
@@ -560,12 +550,7 @@ impl McpClient {
         // Registered as the thread key's authorized creator (newest fork wins).
         let fork_owner = crate::tools::mcp::session::McpSessionGeneration::new();
         if let Some(ref sm) = self.session_manager {
-            sm.authorize_generation(
-                &self.user_id,
-                &self.server_name,
-                Some(thread_id),
-                fork_owner,
-            );
+            sm.register_generation(fork_owner);
         }
         let (forked_transport, initialized, next_id): (
             Arc<dyn McpTransport>,
@@ -1122,6 +1107,18 @@ impl McpClient {
 /// the source was already initialized. The `next_id` counter is SHARED
 /// (same `Arc`) so clones on the shared transport keep issuing unique,
 /// monotonically increasing request ids.
+/// Revoke this instance's LIVE creation right when it is dropped, so the
+/// live-generation registry stays bounded by actually-alive clients even for
+/// instances that never pass through the client store (CLI, transient flows).
+/// Idempotent with the store-eviction unregister.
+impl Drop for McpClient {
+    fn drop(&mut self) {
+        if let Some(ref sm) = self.session_manager {
+            sm.unregister_generation(self.session_owner);
+        }
+    }
+}
+
 impl Clone for McpClient {
     fn clone(&self) -> Self {
         Self {
@@ -1139,12 +1136,7 @@ impl Clone for McpClient {
             session_owner: {
                 let generation = crate::tools::mcp::session::McpSessionGeneration::new();
                 if let Some(ref sm) = self.session_manager {
-                    sm.authorize_generation(
-                        &self.user_id,
-                        &self.server_name,
-                        self.thread_id,
-                        generation,
-                    );
+                    sm.register_generation(generation);
                 }
                 generation
             },
