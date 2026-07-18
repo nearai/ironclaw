@@ -69,7 +69,11 @@ fn capability_authorizer_is_implemented_only_by_the_kernel() {
             // the doc mentions do not match this shape.
             if line.starts_with("impl") && line.contains("CapabilityAuthorizer for") {
                 let path = file.to_string_lossy().to_string();
-                let in_kernel = path.contains(&format!("/{KERNEL_CRATE_DIR}/"));
+                // Platform-agnostic containment check: `components()` avoids
+                // hardcoding a separator (Windows paths use backslashes).
+                let in_kernel = file
+                    .components()
+                    .any(|component| component.as_os_str() == KERNEL_CRATE_DIR);
                 if !in_kernel {
                     offenders.push(format!("{path}: {line}"));
                 }
@@ -90,8 +94,8 @@ fn capability_authorizer_is_implemented_only_by_the_kernel() {
 fn seal_ratchet_self_test_detects_a_non_kernel_impl() {
     // Guards the matcher itself: the check must fire on an impl outside the kernel.
     let sample_line = "impl CapabilityAuthorizer for RogueMinter {}";
-    let matches = sample_line.trim().starts_with("impl")
-        && sample_line.contains("CapabilityAuthorizer for");
+    let matches =
+        sample_line.trim().starts_with("impl") && sample_line.contains("CapabilityAuthorizer for");
     assert!(matches, "matcher must detect a bare non-kernel impl");
     // And must NOT fire on the trait definition or a comment.
     for benign in [
@@ -100,9 +104,8 @@ fn seal_ratchet_self_test_detects_a_non_kernel_impl() {
         "/// See CapabilityAuthorizer for details",
     ] {
         let t = benign.trim();
-        let fires = !t.starts_with("//")
-            && t.starts_with("impl")
-            && t.contains("CapabilityAuthorizer for");
+        let fires =
+            !t.starts_with("//") && t.starts_with("impl") && t.contains("CapabilityAuthorizer for");
         assert!(!fires, "matcher must not fire on: {benign}");
     }
 }
