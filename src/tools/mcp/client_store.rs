@@ -384,8 +384,13 @@ impl McpClientStore {
         // concurrent callers both miss the fast-path and double-insert.
         let mut guard = self.clients.write().await;
 
-        // Double-check under write lock in case another caller beat us.
+        // Double-check under write lock in case another caller beat us. This
+        // is a successful resolution too — bump the LRU sequence so the fork
+        // a concurrent caller just materialised doesn't look untouched.
         if let Some(entry) = guard.get(&thread_key) {
+            entry
+                .last_used_seq
+                .store(self.next_access_seq(), std::sync::atomic::Ordering::Relaxed);
             return Some(entry.client.clone());
         }
 
