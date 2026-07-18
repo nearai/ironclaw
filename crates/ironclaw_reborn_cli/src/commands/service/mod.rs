@@ -832,9 +832,10 @@ mod tests {
             ironclaw_reborn_config::RebornBootConfig::resolve_from_env()
                 .expect("boot config must resolve under temp HOME"),
         );
+        let invocation = serve_invocation().expect("serve invocation");
+        let mut runner = SuccessfulServiceCommandRunner::default();
 
-        ServicePlatform::MacOs
-            .install(&context)
+        launchd::install_with_runner(&context, &invocation, &mut runner)
             .expect("install must succeed");
         let plist_path = tmp
             .path()
@@ -845,12 +846,10 @@ mod tests {
         assert!(contents.contains("<key>IRONCLAW_REBORN_HOME</key>"));
 
         // Idempotent reinstall.
-        ServicePlatform::MacOs
-            .install(&context)
+        launchd::install_with_runner(&context, &invocation, &mut runner)
             .expect("reinstall must succeed");
         assert!(plist_path.exists());
 
-        let mut runner = SuccessfulServiceCommandRunner::default();
         launchd::uninstall_with_runner(&mut runner).expect("uninstall must succeed");
         assert!(!plist_path.exists(), "plist file must be removed");
     }
