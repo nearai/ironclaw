@@ -60,7 +60,7 @@ use ironclaw_loop_host::{
     HostManagedModelResponse,
 };
 use ironclaw_reborn_composition::{
-    RebornCompositionProfile, RebornLocalRuntimeProfileOptions, RebornRuntime,
+    RebornCompositionProfile, RebornRuntimeProfileOptions, RebornRuntime,
     RebornRuntimeIdentity, RebornRuntimeInput, RebornWebuiBundle, TriggerPollerSettings,
     build_reborn_runtime, build_webui_services, local_runtime_build_input_with_options,
 };
@@ -130,7 +130,7 @@ async fn build_timeline_runtime(root: &tempfile::TempDir) -> RebornRuntime {
         RebornCompositionProfile::LocalDevYolo,
         USER,
         root.path().join("local-dev"),
-        RebornLocalRuntimeProfileOptions {
+        RebornRuntimeProfileOptions {
             confirm_host_access: true,
         },
     )

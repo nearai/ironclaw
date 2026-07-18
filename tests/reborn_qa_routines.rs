@@ -45,7 +45,7 @@ use ironclaw_loop_host::{
     HostManagedModelRequest, HostManagedModelResponse, HostManagedToolResultContent,
 };
 use ironclaw_reborn_composition::{
-    RebornCompositionProfile, RebornLocalRuntimeProfileOptions, RebornRuntime,
+    RebornCompositionProfile, RebornRuntimeProfileOptions, RebornRuntime,
     RebornRuntimeIdentity, RebornRuntimeInput, TriggerPollerSettings, build_reborn_runtime,
     local_runtime_build_input_with_options,
 };
@@ -273,7 +273,7 @@ async fn build_qa_fire_runtime(
         RebornCompositionProfile::LocalDevYolo,
         QA_USER,
         root.path().join("local-dev"),
-        RebornLocalRuntimeProfileOptions {
+        RebornRuntimeProfileOptions {
             confirm_host_access: true,
         },
     )

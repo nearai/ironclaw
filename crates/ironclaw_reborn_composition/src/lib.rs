@@ -37,6 +37,7 @@ mod lifecycle_auth_continuation;
 mod llm_admin;
 mod local_dev_authorization;
 mod local_dev_capability_policy;
+mod deployment;
 mod local_dev_mounts;
 mod local_runtime_profile;
 mod observability;
@@ -150,7 +151,7 @@ pub use llm_admin::provider_admin_product_command::RebornProviderAdminProductCom
 #[cfg(feature = "root-llm-provider")]
 pub use llm_admin::provider_repo::{ProviderRepo, ProviderRepoError};
 pub use local_runtime_profile::{
-    RebornLocalRuntimeProfileError, RebornLocalRuntimeProfileOptions,
+    RebornRuntimeProfileError, RebornRuntimeProfileOptions,
     hosted_single_tenant_runtime_policy, hosted_single_tenant_volume_runtime_policy,
     local_dev_runtime_policy, local_dev_yolo_runtime_policy, local_runtime_build_input,
     local_runtime_build_input_with_options,

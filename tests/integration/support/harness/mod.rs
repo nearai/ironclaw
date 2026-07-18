@@ -604,7 +604,7 @@ impl HostRuntimeCapabilityHarness {
                 ironclaw_reborn_composition::RebornCompositionProfile::LocalDevYolo,
                 service_label,
                 storage_root,
-                ironclaw_reborn_composition::RebornLocalRuntimeProfileOptions {
+                ironclaw_reborn_composition::RebornRuntimeProfileOptions {
                     confirm_host_access: true,
                 },
             )?

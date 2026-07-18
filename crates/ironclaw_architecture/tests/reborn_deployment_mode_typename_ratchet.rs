@@ -127,8 +127,6 @@ const FROZEN_OTHER_MODE_TYPES: &[&str] = &[
     "RebornLocalExtensionManagementPort",
     "RebornLocalLifecycleFacade",
     "RebornLocalRuntimeIdentity",
-    "RebornLocalRuntimeProfileError",
-    "RebornLocalRuntimeProfileOptions",
     "RebornLocalRuntimeServices",
     "RebornLocalServiceLifecycle",
     "RebornLocalSkillManagementError",

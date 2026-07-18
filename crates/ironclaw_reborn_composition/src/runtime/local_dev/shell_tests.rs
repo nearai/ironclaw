@@ -65,7 +65,7 @@ async fn local_dev_yolo_shell_translates_workspace_workdir_without_scoped_mounts
             crate::RebornCompositionProfile::LocalDevYolo,
             "local-dev-shell-owner",
             storage_root,
-            crate::RebornLocalRuntimeProfileOptions {
+            crate::RebornRuntimeProfileOptions {
                 confirm_host_access: true,
             },
         )
