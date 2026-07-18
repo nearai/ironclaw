@@ -1942,6 +1942,7 @@ fn unavailable_from_run_state(error: RunStateError) -> HostRuntimeError {
         RunStateError::InvocationAlreadyExists { .. } => "run-state record already exists",
         RunStateError::UnknownApprovalRequest { .. } => "approval request not found",
         RunStateError::ApprovalRequestAlreadyExists { .. } => "approval request already exists",
+        RunStateError::GateRecordAlreadyExists { .. } => "gate record already exists",
         RunStateError::ApprovalNotPending { .. } => "approval request not pending",
         RunStateError::InvalidPath(_) => "run-state storage path invalid",
         RunStateError::Filesystem(_) => "run-state filesystem unavailable",
