@@ -881,34 +881,44 @@ pub(crate) fn resolve_google_oauth_config_from_env(
         google_oauth_client_secret_from_store(config)
     })? {
         GoogleOAuthResolution::Configured(config) => Ok(Some(config)),
-        GoogleOAuthResolution::Disabled(_) => Ok(None),
+        GoogleOAuthResolution::Disabled(state) => {
+            tracing::debug!(
+                target = "ironclaw::reborn::cli::google_oauth",
+                ?state,
+                "Google OAuth backend disabled"
+            );
+            Ok(None)
+        }
     }
 }
 
-/// Status-surface variant of [`resolve_google_oauth_config_from_env`]:
-/// re-runs the same merged (env + `[google]` config.toml + secret store)
-/// resolution but keeps the `Unconfigured` vs. `PartiallyConfigured`
-/// distinction instead of collapsing both to `None`, so `ironclaw
-/// status` can report *why* Google OAuth is disabled — truthfully
-/// reflecting whatever `config set google.*` last wrote, not just env vars.
+/// Status-surface variant of [`resolve_google_oauth_config_from_env`].
+///
+/// Status only reports the public-field asymmetry (`client_id` without
+/// `redirect_uri`, or vice versa). A client secret is optional because Google
+/// OAuth supports public-client PKCE, so stored-secret presence cannot change
+/// that classification. Keeping the store loader empty makes this diagnostic
+/// strictly read-only without adding a second secret-store opening API.
 pub(crate) fn resolve_google_oauth_config_state_from_env(
     config: &RebornBootConfig,
-) -> anyhow::Result<GoogleOAuthResolution> {
+) -> anyhow::Result<Option<GoogleOAuthConfigState>> {
     let config_file = read_config_file(config)?;
     let env = GoogleOAuthEnvInputs::read(optional_nonempty_env);
     let config_google = config_file.as_ref().and_then(|file| file.google.as_ref());
-    resolve_google_oauth_config_state_with_store_loader(env, config_google, || {
-        google_oauth_client_secret_from_store(config)
-    })
+    Ok(resolve_google_oauth_public_config_state(
+        &env,
+        config_google,
+    ))
 }
 
 /// Read the Google OAuth client secret from the encrypted local-dev secret
 /// store (the same store `config set google.client_secret` writes to via
 /// `LocalDevSecretStoreOpener` — see `commands::config::set`). Opening the
-/// store is an idempotent, safe-to-repeat operation. Callers nevertheless
-/// invoke this lazily only after public OAuth configuration is complete and
-/// no higher-precedence env secret exists, avoiding unnecessary keychain or
-/// filesystem access on unconfigured and partial hosts.
+/// store is an idempotent, safe-to-repeat operation. Boot invokes this lazily
+/// only after public OAuth configuration is complete and no higher-precedence
+/// env secret exists, avoiding unnecessary keychain or filesystem access on
+/// unconfigured and partial hosts. Status never calls this material-reading
+/// path because secret presence cannot affect its public-field diagnosis.
 ///
 /// `libsql`-gated because that is the only Cargo feature under which
 /// `config set google.client_secret` can ever have written anything here —
@@ -919,17 +929,8 @@ fn google_oauth_client_secret_from_store(
     config: &RebornBootConfig,
 ) -> anyhow::Result<Option<SecretString>> {
     let storage_root = local_runtime_storage_root(config, config.profile());
-    // This resolver also runs on the `status` path, which must stay a
-    // read-only diagnostic: it must not create the reborn home directory
-    // and must not trigger master-key/keychain resolution when there is
-    // nothing to read. The local-dev secret-store db file
-    // (`reborn-local-dev.db`, same filename `open_local_dev_secret_store`
-    // opens — see its home in `ironclaw_reborn_composition::factory`) can't
-    // exist without its parent directory, so its absence alone proves
-    // there is no store and therefore no secret; return early without
-    // opening anything. (A *non-pristine* headless host with a real store
-    // may still block resolving the master key via the OS keychain — that
-    // is pre-existing platform behavior outside this fix.)
+    // Boot may open/migrate local runtime state, but it can still avoid all
+    // keychain/filesystem writes when no store exists yet.
     if !ironclaw_reborn_composition::local_dev_db_path(&storage_root).exists() {
         return Ok(None);
     }
@@ -982,10 +983,22 @@ pub(crate) enum GoogleOAuthConfigState {
     /// No Google OAuth vars/config present at all — silent, not a
     /// misconfiguration.
     Unconfigured,
-    /// Exactly one of `client_id`/`redirect_uri` is present. Names the
-    /// missing key (`"client_id"` or `"redirect_uri"`) for status/log
-    /// surfacing.
-    PartiallyConfigured { missing: &'static str },
+    /// `client_id` is present without `redirect_uri`.
+    MissingRedirectUri,
+    /// `redirect_uri` is present without `client_id`.
+    MissingClientId,
+}
+
+impl GoogleOAuthConfigState {
+    /// Convert the closed missing-field state to an operator-facing config
+    /// key only at the CLI rendering boundary.
+    pub(crate) fn missing_config_key(&self) -> Option<&'static str> {
+        match self {
+            Self::Unconfigured => None,
+            Self::MissingRedirectUri => Some("redirect_uri"),
+            Self::MissingClientId => Some("client_id"),
+        }
+    }
 }
 
 /// Either a fully resolved Google OAuth backend config, or a
@@ -1022,10 +1035,10 @@ fn resolve_google_oauth_config_state(
 /// pre-fetched value rather than this function doing its own I/O — the same
 /// PURE lookup-closure testing seam the pre-merge env-only tests already
 /// relied on, now widened to cover the config-file and secret-store inputs
-/// too without giving this function a runtime dependency. Callers that need
-/// the live values (`resolve_google_oauth_config_from_env`,
-/// `resolve_google_oauth_config_state_from_env`) read the config file and
-/// open the secret store themselves, then pass the results in here.
+/// too without giving this function a runtime dependency. The boot caller
+/// reads config plus stored secret material; the status caller reads config
+/// but deliberately supplies no stored secret because an optional PKCE client
+/// secret cannot affect its public-field diagnosis.
 #[cfg(test)]
 fn resolve_google_oauth_config_state_merged(
     env_lookup: impl FnMut(&str) -> Option<String>,
@@ -1087,14 +1100,28 @@ impl GoogleOAuthEnvInputs {
     }
 }
 
+/// Classify only the two public fields that determine whether Google OAuth is
+/// disabled. `None` means both are present; an optional client secret cannot
+/// change this result because public-client PKCE remains valid without one.
+fn resolve_google_oauth_public_config_state(
+    env: &GoogleOAuthEnvInputs,
+    config_google: Option<&ironclaw_reborn_config::GoogleSection>,
+) -> Option<GoogleOAuthConfigState> {
+    match env.resolved_public_fields(config_google) {
+        (Some(_), Some(_)) => None,
+        (Some(_), None) => Some(GoogleOAuthConfigState::MissingRedirectUri),
+        (None, Some(_)) => Some(GoogleOAuthConfigState::MissingClientId),
+        (None, None) => Some(GoogleOAuthConfigState::Unconfigured),
+    }
+}
+
 fn resolve_google_oauth_config_state_with_store_loader(
     env: GoogleOAuthEnvInputs,
     config_google: Option<&ironclaw_reborn_config::GoogleSection>,
     load_store_client_secret: impl FnOnce() -> anyhow::Result<Option<SecretString>>,
 ) -> anyhow::Result<GoogleOAuthResolution> {
-    let (client_id, redirect_uri) = env.resolved_public_fields(config_google);
-    let should_read_store =
-        client_id.is_some() && redirect_uri.is_some() && !env.has_client_secret();
+    let should_read_store = resolve_google_oauth_public_config_state(&env, config_google).is_none()
+        && !env.has_client_secret();
     let store_client_secret = if should_read_store {
         load_store_client_secret()?
     } else {
@@ -1145,9 +1172,7 @@ fn resolve_google_oauth_config_state_from_inputs(
                  `config set google.redirect_uri` is set"
             );
             return Ok(GoogleOAuthResolution::Disabled(
-                GoogleOAuthConfigState::PartiallyConfigured {
-                    missing: "redirect_uri",
-                },
+                GoogleOAuthConfigState::MissingRedirectUri,
             ));
         }
         (None, Some(_)) => {
@@ -1159,9 +1184,7 @@ fn resolve_google_oauth_config_state_from_inputs(
                  `config set google.client_id` is set"
             );
             return Ok(GoogleOAuthResolution::Disabled(
-                GoogleOAuthConfigState::PartiallyConfigured {
-                    missing: "client_id",
-                },
+                GoogleOAuthConfigState::MissingClientId,
             ));
         }
         (None, None) => {
@@ -3674,12 +3697,9 @@ poll_interval_secs = 15
             resolve_google_oauth_config_state(|name| vars.get(name).map(|value| value.to_string()))
                 .expect("asymmetric partial Google OAuth config must degrade, not fail boot");
         match state {
-            GoogleOAuthResolution::Disabled(disabled) => assert_eq!(
-                disabled,
-                GoogleOAuthConfigState::PartiallyConfigured {
-                    missing: "redirect_uri"
-                }
-            ),
+            GoogleOAuthResolution::Disabled(disabled) => {
+                assert_eq!(disabled, GoogleOAuthConfigState::MissingRedirectUri)
+            }
             GoogleOAuthResolution::Configured(_) => {
                 panic!("expected Disabled(PartiallyConfigured), got Configured")
             }
@@ -3706,12 +3726,9 @@ poll_interval_secs = 15
             resolve_google_oauth_config_state(|name| vars.get(name).map(|value| value.to_string()))
                 .expect("asymmetric partial Google OAuth config must degrade, not fail boot");
         match state {
-            GoogleOAuthResolution::Disabled(disabled) => assert_eq!(
-                disabled,
-                GoogleOAuthConfigState::PartiallyConfigured {
-                    missing: "client_id"
-                }
-            ),
+            GoogleOAuthResolution::Disabled(disabled) => {
+                assert_eq!(disabled, GoogleOAuthConfigState::MissingClientId)
+            }
             GoogleOAuthResolution::Configured(_) => {
                 panic!("expected Disabled(PartiallyConfigured), got Configured")
             }
@@ -3788,12 +3805,9 @@ poll_interval_secs = 15
             resolve_google_oauth_config_state(|name| vars.get(name).map(|value| value.to_string()))
                 .expect("legacy client vars without redirect URI must degrade, not fail boot");
         match state {
-            GoogleOAuthResolution::Disabled(disabled) => assert_eq!(
-                disabled,
-                GoogleOAuthConfigState::PartiallyConfigured {
-                    missing: "redirect_uri"
-                }
-            ),
+            GoogleOAuthResolution::Disabled(disabled) => {
+                assert_eq!(disabled, GoogleOAuthConfigState::MissingRedirectUri)
+            }
             GoogleOAuthResolution::Configured(_) => {
                 panic!("expected Disabled(PartiallyConfigured), got Configured")
             }
@@ -4005,12 +4019,9 @@ poll_interval_secs = 15
         )
         .expect("must resolve");
         match resolution {
-            GoogleOAuthResolution::Disabled(disabled) => assert_eq!(
-                disabled,
-                GoogleOAuthConfigState::PartiallyConfigured {
-                    missing: "redirect_uri"
-                }
-            ),
+            GoogleOAuthResolution::Disabled(disabled) => {
+                assert_eq!(disabled, GoogleOAuthConfigState::MissingRedirectUri)
+            }
             GoogleOAuthResolution::Configured(_) => {
                 panic!("expected Disabled(PartiallyConfigured)")
             }
@@ -4030,12 +4041,9 @@ poll_interval_secs = 15
         let resolution = resolve_google_oauth_config_state_merged(|_| None, Some(&google), None)
             .expect("must resolve");
         match resolution {
-            GoogleOAuthResolution::Disabled(disabled) => assert_eq!(
-                disabled,
-                GoogleOAuthConfigState::PartiallyConfigured {
-                    missing: "client_id"
-                }
-            ),
+            GoogleOAuthResolution::Disabled(disabled) => {
+                assert_eq!(disabled, GoogleOAuthConfigState::MissingClientId)
+            }
             GoogleOAuthResolution::Configured(_) => {
                 panic!("expected Disabled(PartiallyConfigured)")
             }
@@ -4177,15 +4185,11 @@ poll_interval_secs = 15
         );
     }
 
-    /// `status` (and anything else reaching this resolver) must stay a
-    /// read-only diagnostic on a pristine home: no directory creation, no
-    /// master-key/keychain resolution. Deliberately does NOT set
-    /// `IRONCLAW_DISABLE_OS_KEYCHAIN` — with the fix, a pristine home (no
-    /// secret-store db file yet) must short-circuit to `None` before ever
-    /// reaching the keychain, so this must complete fast regardless of that
-    /// env var. Against the unfixed resolver this creates the home
-    /// directory and falls through to real OS-keychain master-key
-    /// resolution, which hangs without a GUI session.
+    /// Boot's stored-secret loader must avoid creating state on a pristine
+    /// home: no directory creation and no master-key/keychain resolution.
+    /// Deliberately does NOT set `IRONCLAW_DISABLE_OS_KEYCHAIN`; with no
+    /// secret-store database, the loader must short-circuit to `None` before
+    /// reaching the keychain and complete quickly without a GUI session.
     #[cfg(feature = "libsql")]
     #[test]
     fn google_oauth_client_secret_from_store_is_read_only_on_a_pristine_home() {

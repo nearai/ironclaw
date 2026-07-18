@@ -101,6 +101,9 @@ fn set_value_key(
         None => anyhow::bail!("`config set {label}` requires a value"),
     };
     let value = value.trim().to_string();
+    if key.is_secret_prompted() && value.is_empty() {
+        anyhow::bail!("`config set {label}` requires a non-blank value");
+    }
 
     // Secret-shape law FIRST, before shape validation: a value destined for
     // config.toml must not look like inline secret material. Must run before
@@ -629,6 +632,40 @@ mod tests {
             !message.contains(secret),
             "secret leaked in error: {message}"
         );
+    }
+
+    #[test]
+    fn google_client_secret_rejects_a_blank_prompt_before_opening_the_store() {
+        let (_tmp, context) = RebornCliContext::test_context();
+        let err = set_value_key(
+            &context,
+            ConfigKey::GoogleClientSecret,
+            None,
+            &mut FixedPromptSource::new(vec!["  \n\t"]),
+            &FailingStoreOpener,
+        )
+        .expect_err("a whitespace-only Google client secret must be rejected");
+
+        assert!(err.to_string().contains("requires a non-blank value"));
+        assert!(config_toml(&context).is_empty(), "must not write config");
+    }
+
+    #[test]
+    fn llm_api_key_rejects_a_blank_prompt_before_opening_the_store() {
+        let (_tmp, context) = RebornCliContext::test_context();
+        let err = set_value_key(
+            &context,
+            ConfigKey::LlmApiKey {
+                provider_id: "openai".to_string(),
+            },
+            None,
+            &mut FixedPromptSource::new(vec![" \t\n "]),
+            &FailingStoreOpener,
+        )
+        .expect_err("a whitespace-only LLM API key must be rejected");
+
+        assert!(err.to_string().contains("requires a non-blank value"));
+        assert!(config_toml(&context).is_empty(), "must not write config");
     }
 
     #[test]

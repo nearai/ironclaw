@@ -151,6 +151,12 @@ impl OnboardCommand {
         if llm_configured {
             println!("- none for LLM credentials (configured above)");
         } else {
+            #[cfg(not(all(feature = "libsql", feature = "root-llm-provider")))]
+            println!(
+                "- LLM credential provisioning is unavailable in this build: rebuild or \
+                 install `ironclaw` with `--features full`, then rerun `ironclaw onboard`"
+            );
+            #[cfg(all(feature = "libsql", feature = "root-llm-provider"))]
             println!(
                 "- configure LLM credentials: rerun `ironclaw onboard` from an \
                  interactive terminal, run \

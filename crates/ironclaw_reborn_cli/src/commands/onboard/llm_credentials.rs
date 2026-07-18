@@ -37,6 +37,7 @@ pub(crate) enum LlmCredentialProvisionOutcome {
     ConfiguredFromEnv { provider_id: String, model: String },
     /// Headless (non-interactive) session; no LLM environment variables are
     /// set at all. Nothing was seeded.
+    #[cfg(all(feature = "libsql", feature = "root-llm-provider"))]
     SkippedNonInteractive,
     /// Headless (non-interactive) session; some LLM environment
     /// configuration was present but incomplete or invalid (e.g. a
@@ -45,6 +46,11 @@ pub(crate) enum LlmCredentialProvisionOutcome {
     /// silently adopted.
     #[cfg(all(feature = "libsql", feature = "root-llm-provider"))]
     SkippedNonInteractivePartialEnv { reason: String },
+    /// This binary was built without the storage/provider features required
+    /// for interactive LLM provisioning. Unlike `SkippedNonInteractive`,
+    /// changing terminal interactivity cannot make this step available.
+    #[cfg(not(all(feature = "libsql", feature = "root-llm-provider")))]
+    UnavailableInBuild,
 }
 
 impl LlmCredentialProvisionOutcome {
@@ -65,12 +71,17 @@ impl LlmCredentialProvisionOutcome {
             Self::ConfiguredFromEnv { provider_id, model } => {
                 format!("configured provider `{provider_id}` (model `{model}`) from environment")
             }
+            #[cfg(all(feature = "libsql", feature = "root-llm-provider"))]
             Self::SkippedNonInteractive => "skipped (non-interactive session)".to_string(),
             #[cfg(all(feature = "libsql", feature = "root-llm-provider"))]
             Self::SkippedNonInteractivePartialEnv { reason } => {
                 format!(
                     "skipped (non-interactive session; partial environment LLM config: {reason})"
                 )
+            }
+            #[cfg(not(all(feature = "libsql", feature = "root-llm-provider")))]
+            Self::UnavailableInBuild => {
+                "unavailable in this build (requires `libsql` and `root-llm-provider`)".to_string()
             }
         }
     }
@@ -631,7 +642,7 @@ pub(crate) fn provision_llm_credentials(
     // LLM: onboarding must never report success over a corrupt config.toml.
     let _ = ironclaw_reborn_config::RebornConfigFile::load(&home.config_file_path())
         .map_err(|error| LlmCredentialPromptError::Other(error.into()))?;
-    Ok(LlmCredentialProvisionOutcome::SkippedNonInteractive)
+    Ok(LlmCredentialProvisionOutcome::UnavailableInBuild)
 }
 
 #[cfg(all(test, feature = "libsql", feature = "root-llm-provider"))]
