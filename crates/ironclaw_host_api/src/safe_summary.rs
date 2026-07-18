@@ -222,7 +222,10 @@ mod tests {
             validate_safe_summary(SAFE_SUMMARY_PLACEHOLDER).is_ok(),
             "placeholder constant must satisfy the redaction rule"
         );
-        assert_eq!(SafeSummary::placeholder().as_str(), SAFE_SUMMARY_PLACEHOLDER);
+        assert_eq!(
+            SafeSummary::placeholder().as_str(),
+            SAFE_SUMMARY_PLACEHOLDER
+        );
         // And it round-trips through the wire like any other summary.
         let wire = serde_json::to_string(&SafeSummary::placeholder()).unwrap();
         let back: SafeSummary = serde_json::from_str(&wire).unwrap();
