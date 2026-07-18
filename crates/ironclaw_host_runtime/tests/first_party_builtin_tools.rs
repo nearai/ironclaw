@@ -7367,6 +7367,14 @@ async fn builtin_coding_blocks_relative_workspace_protected_paths() {
     let runtime = runtime_with_filesystem(filesystem);
     let context = execution_context_with_mounts(all_builtin_capability_ids(), mounts);
 
+    invoke_with_context(
+        &runtime,
+        READ_FILE_CAPABILITY_ID,
+        json!({"path": "./README.md"}),
+        context.clone(),
+    )
+    .await
+    .unwrap();
     let root_readme_write = invoke_with_context(
         &runtime,
         WRITE_FILE_CAPABILITY_ID,
@@ -7815,6 +7823,15 @@ async fn builtin_apply_patch_matches_exact_unique_and_replace_all_behavior() {
     let runtime = runtime_with_filesystem(filesystem);
     let context = execution_context_with_mounts(all_builtin_capability_ids(), mounts);
 
+    invoke_with_context(
+        &runtime,
+        READ_FILE_CAPABILITY_ID,
+        json!({"path": "/workspace/code.rs"}),
+        context.clone(),
+    )
+    .await
+    .unwrap();
+
     let duplicate = invoke_with_context(
         &runtime,
         APPLY_PATCH_CAPABILITY_ID,
@@ -7857,13 +7874,46 @@ async fn builtin_apply_patch_matches_exact_unique_and_replace_all_behavior() {
 }
 
 #[tokio::test]
-async fn builtin_apply_patch_accepts_unique_match_without_prior_read() {
+async fn builtin_apply_patch_requires_prior_read_of_existing_file() {
     let temp = tempfile::tempdir().unwrap();
     std::fs::write(temp.path().join("code.rs"), "old\n").unwrap();
 
     let (filesystem, mounts) = mounted_filesystem(temp.path(), MountPermissions::read_write());
     let runtime = runtime_with_filesystem(filesystem);
     let context = execution_context_with_mounts(all_builtin_capability_ids(), mounts);
+
+    // Read-before-edit guard: an unread file cannot be patched, and the
+    // rejection tells the model how to recover.
+    let failure = invoke_failure_with_context(
+        &runtime,
+        APPLY_PATCH_CAPABILITY_ID,
+        json!({"path": "/workspace/code.rs", "old_string": "old", "new_string": "new"}),
+        context.clone(),
+    )
+    .await;
+    assert_eq!(failure.kind, RuntimeFailureKind::OperationFailed);
+    assert_eq!(
+        failure.message.as_deref(),
+        Some(
+            "apply_patch failed for path workspace code.rs: read it in full with read_file before \
+             editing it. Ranged reads (offset or limit) and default reads truncated at the line \
+             or byte cap do not count as having seen the whole file; a file too large to read in \
+             full cannot be edited with this tool"
+        )
+    );
+    assert_eq!(
+        std::fs::read_to_string(temp.path().join("code.rs")).unwrap(),
+        "old\n"
+    );
+
+    invoke_with_context(
+        &runtime,
+        READ_FILE_CAPABILITY_ID,
+        json!({"path": "/workspace/code.rs"}),
+        context.clone(),
+    )
+    .await
+    .unwrap();
 
     let patched = invoke_with_context(
         &runtime,
@@ -7930,15 +7980,29 @@ async fn builtin_apply_patch_rejects_when_old_string_is_no_longer_present() {
 
     std::fs::write(temp.path().join("code.rs"), "changed\n").unwrap();
 
-    let missing = invoke_with_context(
+    // Read the current content so the failure exercises the match path, not
+    // the read-before-edit guard.
+    invoke_with_context(
+        &runtime,
+        READ_FILE_CAPABILITY_ID,
+        json!({"path": "/workspace/code.rs"}),
+        context.clone(),
+    )
+    .await
+    .unwrap();
+
+    let missing = invoke_failure_with_context(
         &runtime,
         APPLY_PATCH_CAPABILITY_ID,
         json!({"path": "/workspace/code.rs", "old_string": "old", "new_string": "new"}),
         context,
     )
-    .await
-    .unwrap_err();
-    assert_eq!(missing, RuntimeFailureKind::OperationFailed);
+    .await;
+    assert_eq!(missing.kind, RuntimeFailureKind::OperationFailed);
+    assert_eq!(
+        missing.message.as_deref(),
+        Some("apply_patch failed for path workspace code.rs: old_string matched 0 times")
+    );
 }
 
 #[tokio::test]

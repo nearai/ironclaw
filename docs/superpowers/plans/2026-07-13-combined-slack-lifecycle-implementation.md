@@ -120,11 +120,11 @@
 ### Task 7: Fix Extensions and chat OAuth frontend state machines
 
 **Files:**
-- Modify: `crates/ironclaw_webui_v2/frontend/src/pages/extensions/components/configure-modal.tsx`
-- Test: `crates/ironclaw_webui_v2/frontend/src/pages/extensions/components/configure-modal.test.ts`
-- Modify: `crates/ironclaw_webui_v2/frontend/src/pages/extensions/hooks/useExtensions.ts`
-- Test: `crates/ironclaw_webui_v2/frontend/src/pages/extensions/hooks/useExtensions-oauth.test.mjs`
-- Modify: `crates/ironclaw_webui_v2/frontend/src/pages/chat/hooks/useChannelOnboarding.ts`
+- Modify: `crates/ironclaw_webui/frontend/src/pages/extensions/components/configure-modal.tsx`
+- Test: `crates/ironclaw_webui/frontend/src/pages/extensions/components/configure-modal.test.ts`
+- Modify: `crates/ironclaw_webui/frontend/src/pages/extensions/hooks/useExtensions.ts`
+- Test: `crates/ironclaw_webui/frontend/src/pages/extensions/hooks/useExtensions-oauth.test.mjs`
+- Modify: `crates/ironclaw_webui/frontend/src/pages/chat/hooks/useChannelOnboarding.ts`
 - Add/modify: caller-level chat onboarding tests
 
 - [ ] Add a failing real-shape test proving public Slack (`wasm_tool`) emits the Extensions OAuth-connected event.

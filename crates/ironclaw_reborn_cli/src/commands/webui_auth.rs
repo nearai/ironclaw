@@ -15,10 +15,10 @@ use std::sync::Arc;
 use anyhow::anyhow;
 use ironclaw_reborn_composition::host_api::{AgentId, ProjectId, TenantId};
 use ironclaw_reborn_composition::{
-    LocalTriggerAccessStore, PublicRouteMount, RebornIdentityResolver, WebuiAuthenticator,
+    LocalTriggerAccessStore, PublicRouteMount, RebornIdentityResolver,
 };
-use ironclaw_reborn_webui_ingress::{
-    CompositeAuthenticator, SessionAuthenticator, SignedSessionLoginConfig,
+use ironclaw_webui::{
+    CompositeAuthenticator, SessionAuthenticator, SignedSessionLoginConfig, WebuiAuthenticator,
     build_signed_session_login, empty_webui_v2_auth_providers_mount, signed_session_store,
 };
 use secrecy::SecretString;
@@ -158,10 +158,8 @@ mod tests {
     use super::*;
 
     use async_trait::async_trait;
-    use ironclaw_reborn_composition::WebuiAuthentication;
-    use ironclaw_reborn_webui_ingress::{
-        OAuthError, OAuthProvider, OAuthProviderName, OAuthUserProfile,
-    };
+    use ironclaw_webui::WebuiAuthentication;
+    use ironclaw_webui::{OAuthError, OAuthProvider, OAuthProviderName, OAuthUserProfile};
 
     /// Bearer verifier that accepts nothing — stands in for the env-bearer
     /// authenticator without pulling in its construction requirements.

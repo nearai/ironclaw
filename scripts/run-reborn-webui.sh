@@ -52,7 +52,7 @@ fi
 REPO_ROOT="$(git -C "$(dirname "${BASH_SOURCE[0]}")" rev-parse --show-toplevel)"
 cd "$REPO_ROOT"
 
-FRONTEND_DIR="$REPO_ROOT/crates/ironclaw_webui_v2/frontend"
+FRONTEND_DIR="$REPO_ROOT/crates/ironclaw_webui/frontend"
 if ! command -v pnpm >/dev/null 2>&1; then
   if command -v corepack >/dev/null 2>&1; then
     corepack enable pnpm

@@ -9,25 +9,19 @@ use std::{
 #[cfg(any(feature = "libsql", feature = "postgres"))]
 use crate::product_auth::durable::{FilesystemAuthProductServices, UnavailableAuthProviderClient};
 use crate::support::fs::RebornProjectService;
-#[cfg(any(feature = "libsql", feature = "postgres"))]
 use ironclaw_approvals::{
     FilesystemAutoApproveSettingStore, FilesystemPersistentApprovalPolicyStore,
     FilesystemToolPermissionOverrideStore,
 };
-#[cfg(not(any(feature = "libsql", feature = "postgres")))]
-use ironclaw_approvals::{
-    InMemoryAutoApproveSettingStore, InMemoryPersistentApprovalPolicyStore,
-    InMemoryToolPermissionOverrideStore,
-};
 #[cfg(any(feature = "libsql", feature = "postgres"))]
 use ironclaw_auth::AuthProviderClient;
 use ironclaw_auth::{AuthProductScope, AuthSurface};
-#[cfg(any(feature = "libsql", feature = "postgres"))]
+// Used by both the durable (`<LocalDevRootFilesystem>`) and no-durable
+// (`<InMemoryBackend>`) capability-lease aliases/builders, so the import is
+// unconditional (arch-simplification §4.3).
 use ironclaw_authorization::FilesystemCapabilityLeaseStore;
 #[cfg(any(feature = "libsql", feature = "postgres"))]
 use ironclaw_authorization::GrantAuthorizer;
-#[cfg(not(any(feature = "libsql", feature = "postgres")))]
-use ironclaw_authorization::InMemoryCapabilityLeaseStore;
 #[cfg(not(any(feature = "libsql", feature = "postgres")))]
 use ironclaw_conversations::InMemoryConversationServices;
 use ironclaw_conversations::{
@@ -73,8 +67,9 @@ use ironclaw_host_api::{
 #[cfg(any(feature = "libsql", feature = "postgres"))]
 use ironclaw_host_api::{HostApiError, MountAlias, MountGrant};
 use ironclaw_host_runtime::{
-    CapabilitySurfaceVersion, FirstPartyCapabilityRegistry, HostRuntimeHttpEgressPort,
-    HostRuntimeServices, LocalHostProcessPort, ProductAuthProviderRuntimePorts, TriggerCreateHook,
+    CapabilitySurfaceVersion, FirstPartyCapabilityRegistry, HostProcessPort,
+    HostRuntimeHttpEgressPort, HostRuntimeServices, PostEditCheckConfig,
+    ProductAuthProviderRuntimePorts, TriggerCreateHook,
     builtin_first_party_handlers_with_trigger_create_hook, builtin_first_party_package,
 };
 #[cfg(any(feature = "libsql", feature = "postgres"))]
@@ -109,10 +104,10 @@ use ironclaw_resources::{
     BroadcastBudgetEventSink, BudgetGateStore, FilesystemBudgetGateStore,
     FilesystemResourceGovernor, ResourceGovernor,
 };
-#[cfg(any(feature = "libsql", feature = "postgres"))]
+// Used by both the durable (`<LocalDevRootFilesystem>`) and no-durable
+// (`<InMemoryBackend>`) run-state/approval aliases + builders, so the import is
+// unconditional (arch-simplification §4.3).
 use ironclaw_run_state::{FilesystemApprovalRequestStore, FilesystemRunStateStore};
-#[cfg(not(any(feature = "libsql", feature = "postgres")))]
-use ironclaw_run_state::{InMemoryApprovalRequestStore, InMemoryRunStateStore};
 #[cfg(any(feature = "libsql", feature = "postgres"))]
 use ironclaw_secrets::FilesystemCredentialBroker;
 #[cfg(any(feature = "libsql", feature = "postgres"))]
@@ -281,50 +276,79 @@ type LocalDevResourceGovernor = FilesystemResourceGovernor<LocalDevRootFilesyste
 #[cfg(not(any(feature = "libsql", feature = "postgres")))]
 type LocalDevResourceGovernor = InMemoryResourceGovernor;
 
+// One run-state / approval-request store, backend-injected — the production
+// `Filesystem*Store<F>` every deployment uses, never a bespoke `InMemory*Store`
+// (arch-simplification §4.3). The no-durable-features build backs them with
+// `InMemoryBackend` directly, so the concrete type is `<InMemoryBackend>`, which
+// the host-runtime production-wiring guard classifies `LocalOnly`.
 #[cfg(any(feature = "libsql", feature = "postgres"))]
 type LocalDevRunStateStore = FilesystemRunStateStore<LocalDevRootFilesystem>;
 #[cfg(not(any(feature = "libsql", feature = "postgres")))]
-type LocalDevRunStateStore = InMemoryRunStateStore;
+type LocalDevRunStateStore = FilesystemRunStateStore<InMemoryBackend>;
 
 #[cfg(any(feature = "libsql", feature = "postgres"))]
 pub(crate) type LocalDevApprovalRequestStore =
     FilesystemApprovalRequestStore<LocalDevRootFilesystem>;
 #[cfg(not(any(feature = "libsql", feature = "postgres")))]
-pub(crate) type LocalDevApprovalRequestStore = InMemoryApprovalRequestStore;
+pub(crate) type LocalDevApprovalRequestStore = FilesystemApprovalRequestStore<InMemoryBackend>;
 
 #[cfg(any(feature = "libsql", feature = "postgres"))]
 pub(crate) type LocalDevCapabilityLeaseStore =
     FilesystemCapabilityLeaseStore<LocalDevRootFilesystem>;
+// One capability-lease store, backend-injected — the production
+// `FilesystemCapabilityLeaseStore<F>` every deployment uses, never a bespoke
+// `InMemory*Store` (arch-simplification §4.3). The no-durable-features build
+// backs it with `InMemoryBackend` directly, so the concrete type is
+// `<InMemoryBackend>`, which the host-runtime production-wiring guard classifies
+// `LocalOnly`.
 #[cfg(not(any(feature = "libsql", feature = "postgres")))]
-pub(crate) type LocalDevCapabilityLeaseStore = InMemoryCapabilityLeaseStore;
+pub(crate) type LocalDevCapabilityLeaseStore = FilesystemCapabilityLeaseStore<InMemoryBackend>;
 
+// One store per approval domain, backend-injected — the production
+// `Filesystem*Store<F>` every deployment uses, never a bespoke `InMemory*Store`
+// (arch-simplification §4.3). The store's backend type encodes its durability:
+// the no-durable-features build backs them with `InMemoryBackend` directly, so
+// the concrete type is `<InMemoryBackend>` — which the host-runtime
+// production-wiring guard classifies `LocalOnly` (the same way the volatile
+// `<InMemoryBackend>`-backed run-state/approval/lease stores are flagged).
+// Durable builds use the libSQL/Postgres-backed composite root filesystem, whose
+// type is distinct and correctly classifies as a production candidate.
 #[cfg(any(feature = "libsql", feature = "postgres"))]
 pub(crate) type LocalDevPersistentApprovalPolicyStore =
     FilesystemPersistentApprovalPolicyStore<LocalDevRootFilesystem>;
 #[cfg(not(any(feature = "libsql", feature = "postgres")))]
-pub(crate) type LocalDevPersistentApprovalPolicyStore = InMemoryPersistentApprovalPolicyStore;
+pub(crate) type LocalDevPersistentApprovalPolicyStore =
+    FilesystemPersistentApprovalPolicyStore<InMemoryBackend>;
 
 #[cfg(any(feature = "libsql", feature = "postgres"))]
 pub(crate) type LocalDevToolPermissionOverrideStore =
     FilesystemToolPermissionOverrideStore<LocalDevRootFilesystem>;
 #[cfg(not(any(feature = "libsql", feature = "postgres")))]
-pub(crate) type LocalDevToolPermissionOverrideStore = InMemoryToolPermissionOverrideStore;
+pub(crate) type LocalDevToolPermissionOverrideStore =
+    FilesystemToolPermissionOverrideStore<InMemoryBackend>;
 
 #[cfg(any(feature = "libsql", feature = "postgres"))]
 pub(crate) type LocalDevAutoApproveSettingStore =
     FilesystemAutoApproveSettingStore<LocalDevRootFilesystem>;
 #[cfg(not(any(feature = "libsql", feature = "postgres")))]
-pub(crate) type LocalDevAutoApproveSettingStore = InMemoryAutoApproveSettingStore;
+pub(crate) type LocalDevAutoApproveSettingStore =
+    FilesystemAutoApproveSettingStore<InMemoryBackend>;
 
 #[cfg(any(feature = "libsql", feature = "postgres"))]
 type LocalDevProcessServices = ProcessServices<
     ironclaw_processes::FilesystemProcessStore<LocalDevRootFilesystem>,
     ironclaw_processes::FilesystemProcessResultStore<LocalDevRootFilesystem>,
 >;
+// One process store pair, backend-injected — the production
+// `FilesystemProcess*Store<F>` every deployment uses, never a bespoke
+// `InMemory*Store` (arch-simplification §4.3). The no-durable-features build
+// backs it with `InMemoryBackend` directly, so the concrete type is
+// `<InMemoryBackend>`, which the host-runtime production-wiring guard
+// classifies `LocalOnly`.
 #[cfg(not(any(feature = "libsql", feature = "postgres")))]
 type LocalDevProcessServices = ProcessServices<
-    ironclaw_processes::InMemoryProcessStore,
-    ironclaw_processes::InMemoryProcessResultStore,
+    ironclaw_processes::FilesystemProcessStore<InMemoryBackend>,
+    ironclaw_processes::FilesystemProcessResultStore<InMemoryBackend>,
 >;
 
 fn apply_runtime_process_binding<F, G, S, R>(
@@ -345,19 +369,42 @@ where
     }
 }
 
+/// Composition-layer optional-env seam for the coding post-edit check
+/// (`IRONCLAW_POST_EDIT_CHECK` / `IRONCLAW_POST_EDIT_CHECK_TIMEOUT_SECS`).
+/// Parsing lives in the module-owned `PostEditCheckConfig::from_env`; this
+/// only threads the resolved config into host runtime services. The feature
+/// stays off when the command env is unset or blank.
+fn apply_post_edit_check_from_env<F, G, S, R>(
+    services: HostRuntimeServices<F, G, S, R>,
+) -> Result<HostRuntimeServices<F, G, S, R>, RebornBuildError>
+where
+    F: ironclaw_filesystem::RootFilesystem + 'static,
+    G: ironclaw_resources::ResourceGovernor + 'static,
+    S: ironclaw_processes::ProcessStore + 'static,
+    R: ironclaw_processes::ProcessResultStore + 'static,
+{
+    match PostEditCheckConfig::from_env() {
+        Ok(Some(post_edit_check)) => Ok(services.with_post_edit_check(post_edit_check)),
+        Ok(None) => Ok(services),
+        Err(error) => Err(RebornBuildError::InvalidConfig {
+            reason: error.to_string(),
+        }),
+    }
+}
+
 fn local_dev_process_port_for_policy(
     runtime_policy: &Option<ironclaw_host_api::runtime_policy::EffectiveRuntimePolicy>,
     workspace_root: &Path,
     host_home_root: Option<&LocalDevHostHomeRoot>,
-) -> Option<LocalHostProcessPort> {
+) -> Option<HostProcessPort> {
     let runtime_policy = runtime_policy.as_ref()?;
     if runtime_policy.process_backend != ProcessBackendKind::LocalHost {
         return None;
     }
     let mut process_port = if runtime_policy.secret_mode == SecretMode::InheritedEnv {
-        LocalHostProcessPort::new_inherited_env()
+        HostProcessPort::new_inherited_env()
     } else {
-        LocalHostProcessPort::new()
+        HostProcessPort::new()
     }
     .with_workdir_alias("/workspace", workspace_root);
     if let Some(host_home_root) = host_home_root {
@@ -1709,6 +1756,7 @@ async fn build_local_runtime(input: RebornBuildInput) -> Result<RebornServices, 
         services = services.with_runtime_process_port(Arc::new(process_port));
     }
     services = apply_runtime_process_binding(services, runtime_process_binding);
+    services = apply_post_edit_check_from_env(services)?;
     services = attach_hosted_mcp_runtime(services)?;
     let product_auth_runtime_ports = require_product_auth_runtime_ports(&services)?;
     let provider_composition = compose_provider_client(
@@ -2566,12 +2614,31 @@ async fn build_local_dev_store_graph(
         project_repository,
         turn_state_store_limits,
     } = input;
+    // Approval stores run the production `Filesystem*Store<F>` over a dedicated
+    // `InMemoryBackend` (volatile) — no bespoke `InMemory*Store`
+    // (arch-simplification §4.3). Backing them with `InMemoryBackend` *directly*
+    // (rather than the composite root filesystem) keeps the store's concrete type
+    // `<InMemoryBackend>`, so the host-runtime production-wiring guard classifies it
+    // `LocalOnly` — matching the volatile run-state/lease stores in this build.
+    let approvals_filesystem = crate::wrap_scoped(Arc::new(InMemoryBackend::new()));
     let event_log = local_dev_event_log(Arc::clone(&filesystem))?;
     let audit_log = local_dev_audit_log(Arc::clone(&filesystem))?;
-    let run_state = Arc::new(InMemoryRunStateStore::new());
-    let approval_requests = Arc::new(InMemoryApprovalRequestStore::new());
-    let capability_leases = Arc::new(InMemoryCapabilityLeaseStore::new());
-    let persistent_approval_policies = Arc::new(InMemoryPersistentApprovalPolicyStore::new());
+    // Run-state and approval-request records live under sibling aliases on the
+    // same volatile in-memory backend (§4.3), so both share `approvals_filesystem`
+    // (the full-alias in-memory scoped filesystem) — a blocked run and its approval
+    // record resolve against one consistent view.
+    let run_state = Arc::new(FilesystemRunStateStore::new(Arc::clone(
+        &approvals_filesystem,
+    )));
+    let approval_requests = Arc::new(FilesystemApprovalRequestStore::new(Arc::clone(
+        &approvals_filesystem,
+    )));
+    let capability_leases = Arc::new(FilesystemCapabilityLeaseStore::new(crate::wrap_scoped(
+        Arc::new(InMemoryBackend::new()),
+    )));
+    let persistent_approval_policies = Arc::new(FilesystemPersistentApprovalPolicyStore::new(
+        Arc::clone(&approvals_filesystem),
+    ));
     let turn_state = Arc::new(InMemoryTurnStateStore::with_limits(turn_state_store_limits));
     let checkpoint_state_store: Arc<dyn CheckpointStateStore> =
         Arc::new(InMemoryCheckpointStateStore::default());
@@ -2597,8 +2664,12 @@ async fn build_local_dev_store_graph(
             reason: format!("local-dev capability policy is invalid: {error}"),
         }
     })?);
-    let tool_permission_overrides = Arc::new(LocalDevToolPermissionOverrideStore::new());
-    let auto_approve_settings = Arc::new(LocalDevAutoApproveSettingStore::new());
+    let tool_permission_overrides = Arc::new(LocalDevToolPermissionOverrideStore::new(Arc::clone(
+        &approvals_filesystem,
+    )));
+    let auto_approve_settings = Arc::new(LocalDevAutoApproveSettingStore::new(Arc::clone(
+        &approvals_filesystem,
+    )));
     let memory_mounts =
         memory_mount_view(MountPermissions::read_write_list_delete()).map_err(|error| {
             RebornBuildError::InvalidConfig {
@@ -2680,7 +2751,8 @@ async fn build_local_dev_store_graph(
         extension_registry: Arc::new(ExtensionRegistry::new()),
         shared_extension_registry: None,
     });
-    let process_services = ProcessServices::in_memory();
+    let process_services =
+        ProcessServices::filesystem(crate::wrap_scoped(Arc::new(InMemoryBackend::new())));
 
     Ok(RebornLocalDevStoreGraph {
         run_state,
@@ -4735,6 +4807,19 @@ where
         }
     };
     let services = apply_production_runtime_process_binding(services, process_binding);
+    // Wire the operator post-edit check in production too (off unless
+    // IRONCLAW_POST_EDIT_CHECK is set). It runs isolated in the tenant sandbox
+    // per the runtime process binding applied above; the resolver routes it to
+    // the tenant-sandbox process port rather than the provider host.
+    let services = match PostEditCheckConfig::from_env() {
+        Ok(Some(config)) => services.with_post_edit_check(config),
+        Ok(None) => services,
+        Err(error) => {
+            return Err(crate::RebornCompositionError::InvalidConfig {
+                reason: error.to_string(),
+            });
+        }
+    };
 
     let services = services
         .try_with_host_http_egress_with_body_store(
@@ -5065,6 +5150,10 @@ where
         services,
         production_wiring.runtime_process_binding,
     );
+    // Wire the operator post-edit check in production too (off unless
+    // IRONCLAW_POST_EDIT_CHECK is set); it runs isolated in the tenant sandbox
+    // per the process binding applied above.
+    let services = apply_post_edit_check_from_env(services)?;
     let security_audit_sink = services.security_audit_sink();
 
     let turn_coordinator: Arc<dyn ironclaw_turns::TurnCoordinator> =

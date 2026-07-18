@@ -7,7 +7,7 @@ use std::{
 };
 
 use async_trait::async_trait;
-use ironclaw_filesystem::{LocalFilesystem, RootFilesystem, ScopedFilesystem};
+use ironclaw_filesystem::{InMemoryBackend, LocalFilesystem, RootFilesystem, ScopedFilesystem};
 use ironclaw_host_api::*;
 use ironclaw_processes::*;
 use serde_json::json;
@@ -15,7 +15,7 @@ use tokio::{sync::Notify, time::timeout};
 
 #[tokio::test]
 async fn process_services_wire_background_results_to_host() {
-    let services = ProcessServices::in_memory();
+    let services = in_mem_process_services();
     let manager = services.background_manager(Arc::new(SuccessExecutor));
     let invocation_id = InvocationId::new();
     let process_id = ProcessId::new();
@@ -30,7 +30,9 @@ async fn process_services_wire_background_results_to_host() {
     let result = host.await_result(&scope, process_id).await.unwrap();
 
     assert_eq!(result.status, ProcessStatus::Completed);
-    assert_eq!(result.output, Some(json!({"ok": true})));
+    // Filesystem store externalizes output behind `output_ref` (§4.3).
+    assert_eq!(result.output, None);
+    assert!(result.output_ref.is_some());
     assert_eq!(
         host.output(&scope, process_id).await.unwrap(),
         Some(json!({"ok": true}))
@@ -49,7 +51,7 @@ async fn process_services_wire_background_results_to_host() {
 
 #[tokio::test]
 async fn process_services_share_cancellation_registry_between_host_and_manager() {
-    let services = ProcessServices::in_memory();
+    let services = in_mem_process_services();
     let executor = Arc::new(CancellationAwareExecutor::default());
     let manager = services.background_manager(executor.clone());
     let invocation_id = InvocationId::new();
@@ -105,7 +107,7 @@ async fn filesystem_process_services_store_output_refs() {
 
 #[tokio::test]
 async fn background_manager_passes_spawn_mounts_and_reservation_to_executor() {
-    let services = ProcessServices::in_memory();
+    let services = in_mem_process_services();
     let executor = Arc::new(RecordingHandoffExecutor::default());
     let manager = services.background_manager(Arc::clone(&executor));
     let invocation_id = InvocationId::new();
@@ -304,4 +306,14 @@ fn sample_scope(invocation_id: InvocationId, tenant: &str, user: &str) -> Resour
         thread_id: None,
         invocation_id,
     }
+}
+
+fn in_mem_process_services() -> ProcessServices<
+    FilesystemProcessStore<InMemoryBackend>,
+    FilesystemProcessResultStore<InMemoryBackend>,
+> {
+    ProcessServices::filesystem(scoped_processes_filesystem(
+        Arc::new(InMemoryBackend::new()),
+        "/engine/tenants/tenant1/users/user1/processes",
+    ))
 }

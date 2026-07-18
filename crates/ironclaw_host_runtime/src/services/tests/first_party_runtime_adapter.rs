@@ -24,7 +24,7 @@ async fn first_party_handler_receives_authenticated_actor_distinct_from_subject_
         Arc::new(LocalInvocationServicesResolver::new(
             Arc::new(LocalFilesystem::new()),
             None,
-            Arc::new(LocalHostProcessPort::new()),
+            Arc::new(HostProcessPort::new()),
             None,
         )),
     );
@@ -42,6 +42,7 @@ async fn first_party_handler_receives_authenticated_actor_distinct_from_subject_
 
     adapter
         .dispatch_json(RuntimeAdapterRequest {
+            run_id: None,
             package: &package,
             descriptor: &descriptor,
             filesystem: &filesystem,
@@ -105,7 +106,7 @@ async fn first_party_adapter_maps_handler_auth_required_to_dispatch_auth_require
         Arc::new(LocalInvocationServicesResolver::new(
             Arc::new(LocalFilesystem::new()),
             None,
-            Arc::new(LocalHostProcessPort::new()),
+            Arc::new(HostProcessPort::new()),
             None,
         )),
     );
@@ -122,6 +123,7 @@ async fn first_party_adapter_maps_handler_auth_required_to_dispatch_auth_require
 
     let result = adapter
         .dispatch_json(RuntimeAdapterRequest {
+            run_id: None,
             package: &package,
             descriptor: &descriptor,
             filesystem: &filesystem,
@@ -167,7 +169,7 @@ async fn first_party_adapter_releases_reservation_when_handler_returns_auth_requ
         Arc::new(LocalInvocationServicesResolver::new(
             Arc::new(LocalFilesystem::new()),
             None,
-            Arc::new(LocalHostProcessPort::new()),
+            Arc::new(HostProcessPort::new()),
             None,
         )),
     );
@@ -185,6 +187,7 @@ async fn first_party_adapter_releases_reservation_when_handler_returns_auth_requ
 
     let result = adapter
         .dispatch_json(RuntimeAdapterRequest {
+            run_id: None,
             package: &package,
             descriptor: &descriptor,
             filesystem: &filesystem,
@@ -223,7 +226,7 @@ async fn first_party_adapter_forwards_required_secrets_from_auth_required_handle
         Arc::new(LocalInvocationServicesResolver::new(
             Arc::new(LocalFilesystem::new()),
             None,
-            Arc::new(LocalHostProcessPort::new()),
+            Arc::new(HostProcessPort::new()),
             None,
         )),
     );
@@ -240,6 +243,7 @@ async fn first_party_adapter_forwards_required_secrets_from_auth_required_handle
 
     let result = adapter
         .dispatch_json(RuntimeAdapterRequest {
+            run_id: None,
             package: &package,
             descriptor: &descriptor,
             filesystem: &filesystem,
@@ -287,7 +291,7 @@ async fn first_party_adapter_forwards_credential_requirements_from_auth_required
         Arc::new(LocalInvocationServicesResolver::new(
             Arc::new(LocalFilesystem::new()),
             None,
-            Arc::new(LocalHostProcessPort::new()),
+            Arc::new(HostProcessPort::new()),
             None,
         )),
     );
@@ -304,6 +308,7 @@ async fn first_party_adapter_forwards_credential_requirements_from_auth_required
 
     let result = adapter
         .dispatch_json(RuntimeAdapterRequest {
+            run_id: None,
             package: &package,
             descriptor: &descriptor,
             filesystem: &filesystem,
@@ -342,7 +347,7 @@ async fn first_party_adapter_maps_panicking_handler_to_backend() {
         Arc::new(LocalInvocationServicesResolver::new(
             Arc::new(LocalFilesystem::new()),
             None,
-            Arc::new(LocalHostProcessPort::new()),
+            Arc::new(HostProcessPort::new()),
             None,
         )),
     );
@@ -360,6 +365,7 @@ async fn first_party_adapter_maps_panicking_handler_to_backend() {
 
     let result = adapter
         .dispatch_json(RuntimeAdapterRequest {
+            run_id: None,
             package: &package,
             descriptor: &descriptor,
             filesystem: &filesystem,
@@ -528,7 +534,7 @@ async fn first_party_adapter_releases_reservation_when_reconcile_fails_after_suc
         Arc::new(LocalInvocationServicesResolver::new(
             Arc::new(LocalFilesystem::new()),
             None,
-            Arc::new(LocalHostProcessPort::new()),
+            Arc::new(HostProcessPort::new()),
             None,
         )),
     );
@@ -546,6 +552,7 @@ async fn first_party_adapter_releases_reservation_when_reconcile_fails_after_suc
 
     let result = adapter
         .dispatch_json(RuntimeAdapterRequest {
+            run_id: None,
             package: &package,
             descriptor: &descriptor,
             filesystem: &filesystem,
@@ -627,7 +634,7 @@ async fn first_party_adapter_releases_reservation_when_dispatch_future_is_cancel
         Arc::new(LocalInvocationServicesResolver::new(
             Arc::new(LocalFilesystem::new()),
             None,
-            Arc::new(LocalHostProcessPort::new()),
+            Arc::new(HostProcessPort::new()),
             None,
         )),
     );
@@ -646,6 +653,7 @@ async fn first_party_adapter_releases_reservation_when_dispatch_future_is_cancel
     let estimate = ResourceEstimate::default().set_output_bytes(128);
 
     let dispatch = adapter.dispatch_json(RuntimeAdapterRequest {
+        run_id: None,
         package: &package,
         descriptor: &descriptor,
         filesystem: &filesystem,
@@ -740,7 +748,7 @@ async fn first_party_adapter_preserves_handler_error_when_account_failed_reconci
         Arc::new(LocalInvocationServicesResolver::new(
             Arc::new(LocalFilesystem::new()),
             None,
-            Arc::new(LocalHostProcessPort::new()),
+            Arc::new(HostProcessPort::new()),
             None,
         )),
     );
@@ -758,6 +766,7 @@ async fn first_party_adapter_preserves_handler_error_when_account_failed_reconci
 
     let result = adapter
         .dispatch_json(RuntimeAdapterRequest {
+            run_id: None,
             package: &package,
             descriptor: &descriptor,
             filesystem: &filesystem,

@@ -11,12 +11,8 @@ mod process_executor;
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
-use ironclaw_approvals::{
-    ApprovalResolver, InMemoryPersistentApprovalPolicyStore, PersistentApprovalPolicyStore,
-};
-use ironclaw_authorization::{
-    CapabilityLeaseStore, InMemoryCapabilityLeaseStore, TrustAwareCapabilityDispatchAuthorizer,
-};
+use ironclaw_approvals::{ApprovalResolver, PersistentApprovalPolicyStore};
+use ironclaw_authorization::{CapabilityLeaseStore, TrustAwareCapabilityDispatchAuthorizer};
 use ironclaw_capabilities::CapabilityObligationHandler;
 use ironclaw_dispatcher::{
     RuntimeAdapter, RuntimeAdapterRequest, RuntimeAdapterResult, RuntimeDispatcher,
@@ -43,8 +39,8 @@ use ironclaw_host_api::{
 use ironclaw_mcp::{McpError, McpExecutionRequest, McpExecutor, McpInvocation};
 use ironclaw_network::NetworkHttpEgress;
 use ironclaw_processes::{
-    BackgroundFailureStage, InMemoryProcessResultStore, InMemoryProcessStore, ProcessExecutor,
-    ProcessManager, ProcessResultStore, ProcessServices, ProcessStore,
+    BackgroundFailureStage, ProcessExecutor, ProcessManager, ProcessResultStore, ProcessServices,
+    ProcessStore,
 };
 use ironclaw_reborn_event_store::{
     CoalescingEventSink, EventBatchConfig, RebornEventStoreConfig, RebornEventStoreError,
@@ -53,7 +49,7 @@ use ironclaw_reborn_event_store::{
 use ironclaw_resources::{FilesystemResourceGovernor, InMemoryResourceGovernor, ResourceGovernor};
 use ironclaw_run_state::{
     ApprovalRequestStore, FilesystemApprovalRequestStore, FilesystemRunStateStore,
-    InMemoryApprovalRequestStore, InMemoryRunStateStore, RunStateApprovalStore, RunStateStore,
+    RunStateApprovalStore, RunStateStore,
 };
 use ironclaw_scripts::{ScriptError, ScriptExecutionRequest, ScriptExecutor, ScriptInvocation};
 use ironclaw_secrets::{
@@ -79,9 +75,9 @@ use crate::obligations::{
 };
 use crate::{
     BuiltinObligationHandler, CapabilitySurfaceVersion, DefaultHostRuntime,
-    FirstPartyCapabilityRegistry, FirstPartyCapabilityRequest, HostRuntimeError,
+    FirstPartyCapabilityRegistry, FirstPartyCapabilityRequest, HostProcessPort, HostRuntimeError,
     HostRuntimeHttpEgressPort, InvocationServicesResolutionRequest, InvocationServicesResolver,
-    LocalHostProcessPort, LocalInvocationServicesResolver, PlannerError,
+    LocalInvocationServicesResolver, PlannerError, PostEditCheckConfig,
     ProcessObligationLifecycleStore, RuntimeBackendHealth, RuntimeProcessPort,
     RuntimeSecretMaterialStager, RuntimeSecretStageError, TenantSandboxProcessPort,
     ToolCallHttpEgress, plan_capability,
@@ -167,6 +163,7 @@ where
     run_profile_resolver: Option<Arc<dyn RunProfileResolver>>,
     turn_run_transition_port: Option<Arc<dyn TurnRunTransitionPort>>,
     turn_run_wake_notifier: Option<Arc<dyn TurnRunWakeNotifier>>,
+    post_edit_check: Option<PostEditCheckConfig>,
     component_types: ProductionComponentTypes,
 }
 
@@ -323,7 +320,7 @@ where
             process_lifecycle_store,
             runtime_http_egress: Arc::new(Mutex::new(None)),
             tool_call_http_egress: Arc::new(Mutex::new(None)),
-            process_port: Arc::new(LocalHostProcessPort::new()),
+            process_port: Arc::new(HostProcessPort::new()),
             managed_process_port: true,
             tenant_sandbox_process_port: None,
             wasm_credential_provider: None,
@@ -338,6 +335,7 @@ where
             run_profile_resolver: None,
             turn_run_transition_port: None,
             turn_run_wake_notifier: None,
+            post_edit_check: None,
             component_types: ProductionComponentTypes {
                 trust_policy: None,
                 trust_policy_verified: false,
@@ -356,7 +354,7 @@ where
                 credential_session_store: None,
                 runtime_http_egress: None,
                 runtime_http_egress_verified: false,
-                runtime_process_port: ProductionComponentType::of::<LocalHostProcessPort>(),
+                runtime_process_port: ProductionComponentType::of::<HostProcessPort>(),
                 tenant_sandbox_process_port: None,
                 wasm_credential_provider: None,
                 wasm_credential_provider_verified: false,
@@ -410,6 +408,10 @@ where
         if let Some(process_port) = &self.tenant_sandbox_process_port {
             invocation_services_resolver = invocation_services_resolver
                 .with_tenant_sandbox_process_port(Arc::clone(process_port));
+        }
+        if let Some(post_edit_check) = &self.post_edit_check {
+            invocation_services_resolver =
+                invocation_services_resolver.with_post_edit_check(post_edit_check.clone());
         }
         let invocation_services: Arc<dyn InvocationServicesResolver> =
             Arc::new(invocation_services_resolver);
