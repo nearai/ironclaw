@@ -144,6 +144,11 @@ impl Suspension {
 /// `Failed` → [`ToolVerdict::RecoverableFailure`] (model-visible, correctable),
 /// `SpawnedChildRun` → [`ToolVerdict::ChildSpawned`] (non-suspending — the
 /// executor appends the child result and continues).
+///
+/// `ChildSpawned` carries the spawned [`RunId`] *on the variant* (was
+/// `SpawnedChildRun.child_run_id`) so the invariant "a child ref exists exactly
+/// when a child was spawned" is unrepresentable to violate — no optional field
+/// to validate at construction or deserialization.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ToolVerdict {
@@ -152,8 +157,9 @@ pub enum ToolVerdict {
     /// The capability ran and failed in a model-visible, correctable way — NOT a
     /// `HostFailure` (that is infrastructure, §1.2). The model may retry or adapt.
     RecoverableFailure,
-    /// The capability spawned a child run; non-suspending (§5.3 table).
-    ChildSpawned,
+    /// The capability spawned a child run; non-suspending (§5.3 table). Carries
+    /// the child's [`RunId`] — a correlation ref, safe on the sanitized boundary.
+    ChildSpawned { child_run: RunId },
 }
 
 impl ToolVerdict {
@@ -162,12 +168,20 @@ impl ToolVerdict {
         matches!(self, ToolVerdict::Success)
     }
 
+    /// The spawned child run, present exactly on [`ToolVerdict::ChildSpawned`].
+    pub fn child_run(&self) -> Option<RunId> {
+        match self {
+            ToolVerdict::ChildSpawned { child_run } => Some(*child_run),
+            _ => None,
+        }
+    }
+
     /// Stable discriminant (matches the serde tag).
     pub fn kind(&self) -> &'static str {
         match self {
             ToolVerdict::Success => "success",
             ToolVerdict::RecoverableFailure => "recoverable_failure",
-            ToolVerdict::ChildSpawned => "child_spawned",
+            ToolVerdict::ChildSpawned { .. } => "child_spawned",
         }
     }
 }
@@ -187,10 +201,6 @@ pub struct OutcomeRefs {
     /// when no preview is staged.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub preview: Option<SafeSummary>,
-    /// The child run this outcome spawned (was `SpawnedChildRun.child_run_id`).
-    /// Set only for the `ToolVerdict::ChildSpawned` outcome; `None` otherwise.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub child_run: Option<RunId>,
 }
 
 /// A dispatched capability's result — tool success OR recoverable failure (§3).
@@ -336,7 +346,6 @@ mod tests {
         for (verdict, tag) in [
             (ToolVerdict::Success, "success"),
             (ToolVerdict::RecoverableFailure, "recoverable_failure"),
-            (ToolVerdict::ChildSpawned, "child_spawned"),
         ] {
             assert_eq!(
                 serde_json::to_value(verdict).unwrap(),
@@ -346,6 +355,33 @@ mod tests {
         }
         assert!(ToolVerdict::Success.is_success());
         assert!(!ToolVerdict::RecoverableFailure.is_success());
+        assert_eq!(ToolVerdict::Success.child_run(), None);
+    }
+
+    #[test]
+    fn child_spawned_verdict_carries_the_run_on_the_variant() {
+        let run = RunId::parse("018f6a00-0000-7000-8000-0000000000aa").unwrap();
+        let verdict = ToolVerdict::ChildSpawned { child_run: run };
+        assert_eq!(verdict.kind(), "child_spawned");
+        assert_eq!(verdict.child_run(), Some(run));
+        // Struct variant: externally tagged with the snake_case tag; the child
+        // ref exists exactly when a child was spawned — there is no optional
+        // field whose consistency needs validating.
+        let wire = serde_json::to_value(verdict).unwrap();
+        assert_eq!(
+            wire,
+            serde_json::json!({
+                "child_spawned": { "child_run": "018f6a00-0000-7000-8000-0000000000aa" }
+            })
+        );
+        let back: ToolVerdict = serde_json::from_value(wire).unwrap();
+        assert_eq!(back, verdict);
+        // A child_spawned tag WITHOUT the run cannot deserialize at all.
+        assert!(
+            serde_json::from_value::<ToolVerdict>(serde_json::json!({ "child_spawned": {} }))
+                .is_err(),
+            "missing child_run must be structurally unrepresentable"
+        );
     }
 
     #[test]
@@ -355,7 +391,6 @@ mod tests {
                 result: ResultRef::parse("018f6a00-0000-7000-8000-000000000001").unwrap(),
                 byte_len: 4096,
                 preview: None,
-                child_run: None,
             },
             verdict: ToolVerdict::RecoverableFailure,
             summary: SafeSummary::new("tool input rejected").unwrap(),
@@ -369,29 +404,28 @@ mod tests {
     }
 
     #[test]
-    fn outcome_refs_roundtrip_with_optional_preview_and_child_run() {
+    fn outcome_refs_roundtrip_with_optional_preview() {
         let result = ResultRef::parse("018f6a00-0000-7000-8000-000000000001").unwrap();
-        let run = RunId::parse("018f6a00-0000-7000-8000-0000000000aa").unwrap();
-        // Populated: preview and child_run both carried.
+        // Populated: the preview is carried.
         let full = OutcomeRefs {
             result,
             byte_len: 128,
             preview: Some(SafeSummary::new("staged 3 rows").unwrap()),
-            child_run: Some(run),
         };
         let back: OutcomeRefs =
             serde_json::from_value(serde_json::to_value(&full).unwrap()).unwrap();
         assert_eq!(back, full);
-        assert_eq!(back.preview.as_ref().map(SafeSummary::as_str), Some("staged 3 rows"));
-        assert_eq!(back.child_run, Some(run));
+        assert_eq!(
+            back.preview.as_ref().map(SafeSummary::as_str),
+            Some("staged 3 rows")
+        );
 
-        // Absent: both None omitted from the wire (skip_serializing_if), and a
-        // legacy payload without the fields rehydrates to None.
+        // Absent: None omitted from the wire (skip_serializing_if), and a
+        // legacy payload without the field rehydrates to None.
         let bare = OutcomeRefs {
             result,
             byte_len: 128,
             preview: None,
-            child_run: None,
         };
         let wire = serde_json::to_value(&bare).unwrap();
         assert_eq!(
@@ -400,7 +434,7 @@ mod tests {
                 "result": "018f6a00-0000-7000-8000-000000000001",
                 "byte_len": 128
             }),
-            "None fields must not appear on the wire"
+            "a None preview must not appear on the wire"
         );
         let back: OutcomeRefs = serde_json::from_value(wire).unwrap();
         assert_eq!(back, bare);
@@ -423,13 +457,18 @@ mod tests {
         );
     }
 
+    fn child_spawned() -> ToolVerdict {
+        ToolVerdict::ChildSpawned {
+            child_run: RunId::parse("018f6a00-0000-7000-8000-0000000000aa").unwrap(),
+        }
+    }
+
     fn outcome(verdict: ToolVerdict) -> Outcome {
         Outcome {
             refs: OutcomeRefs {
                 result: ResultRef::parse("018f6a00-0000-7000-8000-000000000001").unwrap(),
                 byte_len: 1,
                 preview: None,
-                child_run: None,
             },
             verdict,
             summary: SafeSummary::new("ok").unwrap(),
@@ -483,7 +522,7 @@ mod tests {
             // Non-suspending — the one that has bitten before (#6137, §5.3 table).
             (
                 "SpawnedChildRun",
-                Resolution::Done(outcome(ToolVerdict::ChildSpawned)),
+                Resolution::Done(outcome(child_spawned())),
                 false,
             ),
             (
@@ -526,7 +565,7 @@ mod tests {
         assert!(!denied.is_reentrant_gate());
         assert!(!denied.is_suspension());
         // A spawned child run completes; it does not suspend.
-        assert!(!Resolution::Done(outcome(ToolVerdict::ChildSpawned)).is_suspension());
+        assert!(!Resolution::Done(outcome(child_spawned())).is_suspension());
     }
 
     /// Table-driven wire contract: every `Resolution` channel paired with its
