@@ -181,12 +181,14 @@ impl McpClientKey {
 struct McpClientEntry {
     client: Arc<McpClient>,
     surface: String,
-    /// Milliseconds since `UNIX_EPOCH` of the last `resolve_for_thread` hit.
-    /// Only meaningful for thread-scoped entries; drives LRU eviction when a
-    /// user's fork count for one server exceeds [`MAX_THREAD_FORKS_PER_USER_SERVER`].
-    /// Behind an `Arc` so the read-path can bump it without taking the map's
-    /// write lock.
-    last_used_ms: Arc<std::sync::atomic::AtomicU64>,
+    /// Value of the store's monotonic [`McpClientStore::access_seq`] at the
+    /// last `resolve_for_thread` hit. Only meaningful for thread-scoped
+    /// entries; drives LRU eviction when a user's fork count for one server
+    /// exceeds [`MAX_THREAD_FORKS_PER_USER_SERVER`]. A per-store sequence (not
+    /// wall-clock time) so ordering is total and immune to clock ties or
+    /// backward jumps. Behind an `Arc` so the read-path can bump it without
+    /// taking the map's write lock.
+    last_used_seq: Arc<std::sync::atomic::AtomicU64>,
 }
 
 /// Upper bound on lazily-materialised thread-scoped client forks kept per
@@ -196,13 +198,6 @@ struct McpClientEntry {
 /// is reached the least-recently-used fork is evicted; a thread that comes back
 /// later simply re-materialises its fork from the base client.
 const MAX_THREAD_FORKS_PER_USER_SERVER: usize = 32;
-
-fn now_unix_ms() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_millis() as u64)
-        .unwrap_or(0)
-}
 
 /// Drop every thread-scoped fork the user materialised for `server_name`,
 /// leaving user-scoped entries intact. Called (under the caller's write lock)
@@ -224,11 +219,21 @@ fn purge_thread_forks(
 #[derive(Default)]
 pub struct McpClientStore {
     clients: RwLock<HashMap<McpClientKey, McpClientEntry>>,
+    /// Monotonic access counter backing thread-fork LRU ordering (see
+    /// [`McpClientEntry::last_used_seq`]).
+    access_seq: std::sync::atomic::AtomicU64,
 }
 
 impl McpClientStore {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Next value of the monotonic access sequence (total order across the
+    /// store; never ties, never moves backwards — unlike wall-clock time).
+    fn next_access_seq(&self) -> u64 {
+        self.access_seq
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
     }
 
     /// Insert or replace the client for `(user_id, server_name)`. The
@@ -255,7 +260,7 @@ impl McpClientStore {
             McpClientEntry {
                 client,
                 surface,
-                last_used_ms: Arc::new(std::sync::atomic::AtomicU64::new(now_unix_ms())),
+                last_used_seq: Arc::new(std::sync::atomic::AtomicU64::new(self.next_access_seq())),
             },
         );
     }
@@ -281,7 +286,7 @@ impl McpClientStore {
             McpClientEntry {
                 client,
                 surface,
-                last_used_ms: Arc::new(std::sync::atomic::AtomicU64::new(now_unix_ms())),
+                last_used_seq: Arc::new(std::sync::atomic::AtomicU64::new(self.next_access_seq())),
             },
         );
     }
@@ -367,8 +372,8 @@ impl McpClientStore {
             let guard = self.clients.read().await;
             if let Some(entry) = guard.get(&thread_key) {
                 entry
-                    .last_used_ms
-                    .store(now_unix_ms(), std::sync::atomic::Ordering::Relaxed);
+                    .last_used_seq
+                    .store(self.next_access_seq(), std::sync::atomic::Ordering::Relaxed);
                 return Some(entry.client.clone());
             }
         }
@@ -411,7 +416,7 @@ impl McpClientStore {
                 .filter(|(k, _)| {
                     k.thread_id.is_some() && k.user_id == user_id && k.server_name == server_name
                 })
-                .min_by_key(|(_, e)| e.last_used_ms.load(std::sync::atomic::Ordering::Relaxed))
+                .min_by_key(|(_, e)| e.last_used_seq.load(std::sync::atomic::Ordering::Relaxed))
                 .map(|(k, _)| k.clone())
         {
             tracing::debug!(
@@ -428,7 +433,7 @@ impl McpClientStore {
             McpClientEntry {
                 client: forked.clone(),
                 surface,
-                last_used_ms: Arc::new(std::sync::atomic::AtomicU64::new(now_unix_ms())),
+                last_used_seq: Arc::new(std::sync::atomic::AtomicU64::new(self.next_access_seq())),
             },
         );
         Some(forked)
@@ -1070,7 +1075,9 @@ mod tests {
     }
 
     // Bounded-resources guard: the per-(user, server) fork count stays at the
-    // cap, evicting least-recently-used forks; other users are unaffected.
+    // cap, and the eviction victim is exactly the least-recently-USED fork —
+    // a fork touched after materialisation must survive over an older-untouched
+    // one (sequence-based LRU, not insertion order or wall-clock).
     #[tokio::test]
     async fn thread_fork_cap_evicts_lru() {
         let store = McpClientStore::new();
@@ -1078,18 +1085,29 @@ mod tests {
         store.insert("alice", "svc", base, "sig".into()).await;
 
         let first_tid = Uuid::new_v4();
-        store
+        let second_tid = Uuid::new_v4();
+        let first_fork = store
             .resolve_for_thread("alice", "svc", Some(first_tid))
             .await
             .expect("first fork");
-        // Fill to the cap; first_tid becomes the LRU entry.
-        for _ in 1..MAX_THREAD_FORKS_PER_USER_SERVER {
+        store
+            .resolve_for_thread("alice", "svc", Some(second_tid))
+            .await
+            .expect("second fork");
+        // Fill to the cap.
+        for _ in 2..MAX_THREAD_FORKS_PER_USER_SERVER {
             store
                 .resolve_for_thread("alice", "svc", Some(Uuid::new_v4()))
                 .await
                 .expect("fork under cap");
         }
-        // One over the cap evicts exactly one (the LRU: first_tid).
+        // Touch first_tid: second_tid is now the least-recently-used fork.
+        store
+            .resolve_for_thread("alice", "svc", Some(first_tid))
+            .await
+            .expect("refresh first fork");
+
+        // One over the cap evicts exactly one — and it must be second_tid.
         store
             .resolve_for_thread("alice", "svc", Some(Uuid::new_v4()))
             .await
@@ -1106,13 +1124,21 @@ mod tests {
             forks, MAX_THREAD_FORKS_PER_USER_SERVER,
             "fork count must stay at the cap"
         );
-        // The evicted LRU thread re-materialises on demand (fresh Arc).
         assert!(
             store
-                .resolve_for_thread("alice", "svc", Some(first_tid))
+                .get_with_key(&McpClientKey::new_for_thread("alice", "svc", second_tid))
                 .await
-                .is_some(),
-            "evicted thread must be able to re-materialise"
+                .is_none(),
+            "the untouched (least-recently-used) fork must be the eviction victim"
+        );
+        // The refreshed fork survives — SAME Arc, not a re-materialisation.
+        let first_after = store
+            .get_with_key(&McpClientKey::new_for_thread("alice", "svc", first_tid))
+            .await
+            .expect("recently-used fork must survive eviction");
+        assert!(
+            Arc::ptr_eq(&first_fork, &first_after),
+            "surviving fork must be the original instance, not a re-fork"
         );
     }
 }
