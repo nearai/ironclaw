@@ -247,7 +247,7 @@ pub async fn build_telegram_host_runtime_mounts(
 }
 
 fn connect_account_status(
-    local_runtime: &crate::factory::RebornLocalRuntimeServices,
+    local_runtime: &crate::factory::RebornRuntimeSubstrate,
     account_status: Arc<dyn ironclaw_product_workflow::AccountConnectionStatusSource>,
 ) -> Result<(), TelegramHostBuildError> {
     let Some(extension_management) = &local_runtime.extension_management else {

@@ -646,7 +646,7 @@ impl SlackPersonalUserBinder for ProvisioningSlackPersonalUserBinder {
 
 #[derive(Clone)]
 struct SlackHostBetaRuntimeParts {
-    local_runtime: Arc<crate::factory::RebornLocalRuntimeServices>,
+    local_runtime: Arc<crate::factory::RebornRuntimeSubstrate>,
     thread_service: Arc<dyn SessionThreadService>,
     turn_coordinator: Arc<dyn TurnCoordinator>,
     approval_interaction_service: Arc<dyn ApprovalInteractionService>,

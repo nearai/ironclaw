@@ -1,5 +1,5 @@
 //! No-op `ProjectService` for harness-port-seam P1 Change 2: production's
-//! `RefreshingLocalDevCapabilityPortConfig::project_service` is a plain
+//! `RefreshingCapabilityPortConfig::project_service` is a plain
 //! required `Arc<dyn ProjectService>` (the synthetic `project_create`
 //! capability is always assembled by `build_inner`, independent of whether
 //! `PROJECT_CREATE_CAPABILITY_ID` is in a harness's `capability_ids`), so

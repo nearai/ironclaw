@@ -19,17 +19,17 @@ use ironclaw_turns::run_profile::{
 use super::{
     local_dev_thread_scope_for_run,
     synthetic_capability::{
-        LocalDevSyntheticCapability, LocalDevSyntheticCapabilityDescriptor,
-        LocalDevSyntheticCapabilityHandler, LocalDevSyntheticCapabilityInvocation,
+        SyntheticCapability, SyntheticCapabilityDescriptor, SyntheticCapabilityHandler,
+        SyntheticCapabilityInvocation,
     },
 };
 
 /// Test-support wrap: layers the synthetic `result_read` capability onto
 /// `inner`, mirroring how `refreshing_capability_port.rs`'s `build_inner`
-/// wires it in production (unconditionally, via `wrap_local_dev_synthetic_capabilities`).
+/// wires it in production (unconditionally, via `wrap_synthetic_capabilities`).
 /// `input_resolver`/`result_writer` MUST be the SAME shared io object the
 /// harness's capability port already uses -- see
-/// `RefreshingLocalDevCapabilityPortTestParts::input_resolver` in
+/// `RefreshingCapabilityPortTestParts::input_resolver` in
 /// `test_support/refreshing_capability_port.rs` for the identical
 /// same-object requirement. Tests only -- gated behind `test-support`,
 /// ships zero bytes in production builds.
@@ -42,7 +42,7 @@ pub(crate) fn wrap_result_read_capability_for_test(
     input_resolver: Arc<dyn ironclaw_loop_host::LoopCapabilityInputResolver>,
     result_writer: Arc<dyn ironclaw_loop_host::LoopCapabilityResultWriter>,
 ) -> Result<Arc<dyn ironclaw_turns::run_profile::LoopCapabilityPort>, AgentLoopHostError> {
-    super::synthetic_capability::wrap_local_dev_synthetic_capabilities(
+    super::synthetic_capability::wrap_synthetic_capabilities(
         inner,
         vec![result_read_capability(thread_service, fallback_user_id)?],
         run_context,
@@ -66,9 +66,9 @@ const RESULT_READ_MAX_BYTES: u64 = TOOL_RESULT_RECORD_READ_MAX_BYTES as u64;
 pub(super) fn result_read_capability(
     thread_service: Arc<dyn SessionThreadService>,
     fallback_user_id: UserId,
-) -> Result<LocalDevSyntheticCapability, AgentLoopHostError> {
-    Ok(LocalDevSyntheticCapability::new(
-        LocalDevSyntheticCapabilityDescriptor::new(
+) -> Result<SyntheticCapability, AgentLoopHostError> {
+    Ok(SyntheticCapability::new(
+        SyntheticCapabilityDescriptor::new(
             RESULT_READ_CAPABILITY_ID,
             RESULT_READ_PROVIDER_TOOL_NAME,
             "Read a bounded continuation of a previously completed tool result by result reference.",
@@ -88,7 +88,7 @@ struct ResultReadHandler {
 }
 
 #[async_trait]
-impl LocalDevSyntheticCapabilityHandler for ResultReadHandler {
+impl SyntheticCapabilityHandler for ResultReadHandler {
     fn validate_provider_arguments(
         &self,
         _arguments: &serde_json::Value,
@@ -101,7 +101,7 @@ impl LocalDevSyntheticCapabilityHandler for ResultReadHandler {
 
     async fn invoke(
         &self,
-        invocation: LocalDevSyntheticCapabilityInvocation,
+        invocation: SyntheticCapabilityInvocation,
     ) -> Result<CapabilityOutcome, AgentLoopHostError> {
         let input = match parse_result_read_input(&invocation.input) {
             Ok(input) => input,

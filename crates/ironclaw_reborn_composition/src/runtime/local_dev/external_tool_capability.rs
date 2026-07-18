@@ -1,6 +1,6 @@
 //! Loop capability decorator for client-supplied ("external") tools.
 //!
-//! Mirrors [`super::synthetic_capability::LocalDevSyntheticCapabilityPort`] but,
+//! Mirrors [`super::synthetic_capability::SyntheticCapabilityPort`] but,
 //! instead of executing a synthetic capability, it *parks* the run and returns
 //! control to the API client. The caller tool definitions come from the
 //! per-run [`ExternalToolCatalog`] (registered by the OpenAI-compatible
@@ -44,7 +44,7 @@ use ironclaw_turns::{LoopGateRef, TurnRunId};
 /// no external-tool capability could ever apply — the decorator itself is cheap
 /// and fetches specs lazily at surface-resolution time, so it is always safe to
 /// install.
-pub(super) fn wrap_local_dev_external_tools(
+pub(super) fn wrap_external_tools(
     inner: Arc<dyn LoopCapabilityPort>,
     run_context: LoopRunContext,
     input_resolver: Arc<dyn LoopCapabilityInputResolver>,
@@ -838,7 +838,7 @@ mod tests {
             .expect("register external tools");
         let catalog: Arc<dyn ExternalToolCatalog> = catalog;
         (
-            wrap_local_dev_external_tools(
+            wrap_external_tools(
                 Arc::new(EmptyInnerPort),
                 run_context.clone(),
                 Arc::new(TestInputResolver),
@@ -854,7 +854,7 @@ mod tests {
     ) -> (Arc<dyn LoopCapabilityPort>, LoopRunContext) {
         let run_context = run_context().await;
         (
-            wrap_local_dev_external_tools(
+            wrap_external_tools(
                 Arc::new(EmptyInnerPort),
                 run_context.clone(),
                 Arc::new(TestInputResolver),
@@ -985,7 +985,7 @@ mod tests {
             .register(run_context.run_id, vec![external_tool_spec("get_weather")])
             .await
             .expect("register external tool");
-        let port = wrap_local_dev_external_tools(
+        let port = wrap_external_tools(
             Arc::new(EmptyInnerPort),
             run_context.clone(),
             Arc::new(TestInputResolver),

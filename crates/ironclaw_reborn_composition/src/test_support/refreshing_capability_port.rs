@@ -2,26 +2,26 @@
 //!
 //! Lets the Reborn integration-test harness assemble its capability port
 //! through the REAL production factory
-//! (`create_refreshing_local_dev_capability_port`,
+//! (`create_refreshing_capability_port`,
 //! `runtime::local_dev::refreshing_capability_port.rs:75`) instead of hand-
 //! rebuilding the wrap order, so every current and future production layer
 //! (surface disclosure, external tools, StaleSurface refresh, the shared
-//! `LocalDevCapabilityIo`) is automatically exercised by the harness too.
+//! `StagedCapabilityIo`) is automatically exercised by the harness too.
 
 /// Typed bundle of the parts the harness controls, passed by value through
 /// the `test_support` -> `runtime` -> `runtime::local_dev` forwarding chain
 /// so no layer needs `#[allow(clippy::too_many_arguments)]`. Mirrors
-/// `RefreshingLocalDevCapabilityPortConfig` minus the no-op-by-default parts
+/// `RefreshingCapabilityPortConfig` minus the no-op-by-default parts
 /// (`external_tool_catalog`, `policy`). `extension_surface_source` itself
 /// stays no-op-by-default too — the harness supplies the raw
 /// `extension_management` port below (Change 3, harness-port-seam P1
-/// follow-up) and `create_refreshing_local_dev_capability_port_for_test`
-/// wraps it in `LocalDevExtensionSurfaceSource::new(..)` internally, the SAME
+/// follow-up) and `create_refreshing_capability_port_for_test`
+/// wraps it in `ExtensionCapabilitySurfaceSource::new(..)` internally, the SAME
 /// constructor production's `capability_wiring` calls
 /// (`runtime/local_dev.rs:132-133`) — this crate is the only place that can
 /// name the `pub(in crate::runtime)` wrapper type.
 #[cfg(feature = "test-support")]
-pub struct RefreshingLocalDevCapabilityPortTestParts {
+pub struct RefreshingCapabilityPortTestParts {
     /// Host runtime the assembled port dispatches builtin capabilities
     /// through (harness passes a recording double).
     pub runtime: std::sync::Arc<dyn ironclaw_host_runtime::HostRuntime>,
@@ -33,14 +33,14 @@ pub struct RefreshingLocalDevCapabilityPortTestParts {
     pub system_extensions_lifecycle_mounts: ironclaw_host_api::MountView,
     /// Input resolver AND [`result_writer`](Self::result_writer) must be two
     /// `Arc::clone`s of the SAME shared io object — production assigns one
-    /// `LocalDevCapabilityIo` to both roles so input-ref/result-ref
+    /// `StagedCapabilityIo` to both roles so input-ref/result-ref
     /// correlation by `call_id` works; never source them independently.
     pub input_resolver: std::sync::Arc<dyn ironclaw_loop_host::LoopCapabilityInputResolver>,
     pub result_writer: std::sync::Arc<dyn ironclaw_loop_host::LoopCapabilityResultWriter>,
     pub milestone_sink: std::sync::Arc<dyn ironclaw_turns::run_profile::LoopHostMilestoneSink>,
     /// Opaque handle built by
     /// `test_support::build_local_dev_skill_context_source_for_test`. Wraps
-    /// the crate-private `LocalDevSelectableSkillContextSource` so it never
+    /// the crate-private `ComposedSelectableSkillContextSource` so it never
     /// appears in this (public, `test-support`-gated) struct's field types;
     /// the private type is recovered internally via
     /// `SkillActivationTestSource::activation_source` when forwarding to the
@@ -61,7 +61,7 @@ pub struct RefreshingLocalDevCapabilityPortTestParts {
     /// servers) whose capabilities and provider trust get folded into the
     /// visible-capability grants on every refresh — mirrors production
     /// `capability_wiring`'s
-    /// `LocalDevExtensionSurfaceSource::new(local_runtime.extension_management.clone())`
+    /// `ExtensionCapabilitySurfaceSource::new(local_runtime.extension_management.clone())`
     /// (`runtime/local_dev.rs:132-133`). `None` (the default a harness gets by
     /// simply omitting extension setup) reproduces the no-op surface this
     /// struct always had before this field existed — extension-lane
@@ -82,18 +82,18 @@ pub struct RefreshingLocalDevCapabilityPortTestParts {
     pub approval_requests: std::sync::Arc<dyn ironclaw_run_state::ApprovalRequestStore>,
     pub capability_leases: std::sync::Arc<dyn ironclaw_authorization::CapabilityLeaseStore>,
     /// Test-only config extension (empty = production behavior). See
-    /// `RefreshingLocalDevCapabilityPortConfig::capability_execution_mount_overrides`.
+    /// `RefreshingCapabilityPortConfig::capability_execution_mount_overrides`.
     pub capability_execution_mount_overrides:
         std::collections::HashMap<ironclaw_host_api::CapabilityId, ironclaw_host_api::MountView>,
     /// Test-only config extension (empty = production behavior). See
-    /// `RefreshingLocalDevCapabilityPortConfig::additional_provider_trust`.
+    /// `RefreshingCapabilityPortConfig::additional_provider_trust`.
     pub additional_provider_trust:
         std::collections::BTreeMap<ironclaw_host_api::ExtensionId, ironclaw_trust::TrustDecision>,
     /// Test-only config extension (`None` = production behavior, i.e. no
-    /// filtering). See `RefreshingLocalDevCapabilityPortConfig::capability_id_filter`.
+    /// filtering). See `RefreshingCapabilityPortConfig::capability_id_filter`.
     pub capability_id_filter: Option<std::collections::HashSet<ironclaw_host_api::CapabilityId>>,
     /// Test-only config extension (empty = production behavior). See
-    /// `RefreshingLocalDevCapabilityPortConfig::additional_capability_grants`
+    /// `RefreshingCapabilityPortConfig::additional_capability_grants`
     /// — hand-minted grants for capability ids an ad-hoc test-only
     /// `HostRuntime` backend (mock MCP, GitHub/web-access WASM) dispatches
     /// without a real extension activation.
@@ -133,11 +133,11 @@ impl ExtensionManagementTestHandle {
 /// Reads the same `local_runtime.extension_management` handle production's
 /// `capability_wiring` reads (`runtime/local_dev.rs:132-133`) off a built
 /// `RebornServices`, for wiring
-/// [`RefreshingLocalDevCapabilityPortTestParts::extension_management`].
+/// [`RefreshingCapabilityPortTestParts::extension_management`].
 /// `None` when the services were built without a local-dev runtime (mirrors
 /// `local_dev_active_extension_authority_for_test`'s `None`-propagation
 /// shape), OR when no extension is currently active (matches production:
-/// `LocalDevExtensionSurfaceSource::new` accepts the port either way and
+/// `ExtensionCapabilitySurfaceSource::new` accepts the port either way and
 /// `snapshot()` just returns an empty surface); tests that never
 /// install/activate an extension can also just omit this call and leave the
 /// field `None` for the same no-op surface.
@@ -156,15 +156,15 @@ pub fn build_local_dev_extension_management_for_test(
 }
 
 /// Test-support entry point that drives the real
-/// `create_refreshing_local_dev_capability_port` (production's sole port
+/// `create_refreshing_capability_port` (production's sole port
 /// factory) with the harness's injectable parts, supplying the same no-op
 /// defaults production uses for the rest. Never hand-rebuilds the wrap order.
 #[cfg(feature = "test-support")]
-pub async fn create_refreshing_local_dev_capability_port_for_test(
-    parts: RefreshingLocalDevCapabilityPortTestParts,
+pub async fn create_refreshing_capability_port_for_test(
+    parts: RefreshingCapabilityPortTestParts,
 ) -> Result<
     std::sync::Arc<dyn ironclaw_turns::run_profile::LoopCapabilityPort>,
     ironclaw_turns::run_profile::AgentLoopHostError,
 > {
-    crate::runtime::create_refreshing_local_dev_capability_port_for_test(parts).await
+    crate::runtime::create_refreshing_capability_port_for_test(parts).await
 }

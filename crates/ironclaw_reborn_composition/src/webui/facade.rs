@@ -513,7 +513,7 @@ impl OperatorStatusService for ReadinessOperatorStatusService {
 struct LocalSkillsProductFacade {
     skill_management: Arc<RebornLocalSkillManagementPort>,
     // The skill activation selector's live master switch (see
-    // `RebornLocalRuntimeServices::skill_auto_activate_learned`); writing it here
+    // `RebornRuntimeSubstrate::skill_auto_activate_learned`); writing it here
     // changes the next turn's selection without a runtime rebuild. `None` when no
     // flag-reading selector is wired (the production assembly) — the toggle then
     // reports unavailable instead of writing to a flag nothing reads.

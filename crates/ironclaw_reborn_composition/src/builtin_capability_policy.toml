@@ -105,13 +105,13 @@ network = "default"
 capability = "builtin.http"
 effects = ["dispatch_capability", "network"]
 mounts = "ambient"
-network = "local_dev_wildcard"
+network = "dev_wildcard"
 
 [[grants]]
 capability = "builtin.http.save"
 effects = ["dispatch_capability", "network", "write_filesystem"]
 mounts = "workspace"
-network = "local_dev_wildcard"
+network = "dev_wildcard"
 
 [[grants]]
 capability = "builtin.memory_search"
@@ -157,7 +157,7 @@ effects = [
     "network",
 ]
 mounts = "ambient"
-network = "local_dev_wildcard"
+network = "dev_wildcard"
 
 [[grants]]
 capability = "builtin.read_file"
@@ -211,7 +211,7 @@ network = "default"
 capability = "builtin.extension_activate"
 effects = ["dispatch_capability", "read_filesystem", "write_filesystem", "network"]
 mounts = "system_extensions_lifecycle"
-network = "local_dev_wildcard"
+network = "dev_wildcard"
 
 [[grants]]
 capability = "builtin.extension_remove"
@@ -229,7 +229,7 @@ network = "default"
 capability = "builtin.skill_install"
 effects = ["dispatch_capability", "read_filesystem", "write_filesystem", "delete_filesystem", "network"]
 mounts = "skill_management"
-network = "local_dev_wildcard"
+network = "dev_wildcard"
 
 [[grants]]
 capability = "builtin.skill_remove"
@@ -271,7 +271,7 @@ network = "default"
 capability = "builtin.trace_commons.onboard"
 effects = ["dispatch_capability", "read_filesystem", "write_filesystem", "network", "external_write"]
 mounts = "ambient"
-network = "local_dev_wildcard"
+network = "dev_wildcard"
 
 [[grants]]
 capability = "builtin.trace_commons.status"
@@ -289,13 +289,13 @@ network = "default"
 capability = "builtin.trace_commons.profile_token"
 effects = ["dispatch_capability", "read_filesystem", "write_filesystem", "network", "external_write"]
 mounts = "ambient"
-network = "local_dev_wildcard"
+network = "dev_wildcard"
 
 [[grants]]
 capability = "builtin.trace_commons.profile_set"
 effects = ["dispatch_capability", "read_filesystem", "network", "external_write"]
 mounts = "ambient"
-network = "local_dev_wildcard"
+network = "dev_wildcard"
 
 [[grants]]
 capability = "builtin.outbound_delivery_target_set"

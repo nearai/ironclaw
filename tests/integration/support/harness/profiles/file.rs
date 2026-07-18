@@ -68,7 +68,7 @@ pub(crate) async fn file_tools_requiring_approval() -> HarnessResult<HostRuntime
 }
 
 /// Same capability set as [`file_tools`], but opts the harness into the real
-/// `LocalDevCapabilityIo` (durable tool-result projection seam, issue #5838)
+/// `StagedCapabilityIo` (durable tool-result projection seam, issue #5838)
 /// instead of the ephemeral `ProductLiveCapabilityIo` test double, so
 /// `read_file`'s large output is persisted durably and `result_read` can page
 /// through it. Auto-approve on, like `file_tools`.

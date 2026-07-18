@@ -1,6 +1,6 @@
 //! Reborn integration-test framework local-dev boot accessors.
 //!
-//! `build_local_dev_approval_gate_evidence_for_test`,
+//! `build_approval_gate_evidence_for_test`,
 //! `build_default_local_dev_database_roots_for_test`,
 //! `mount_local_dev_database_roots_for_test`,
 //! `build_local_dev_secret_store_for_test` — mirror the production local-dev
@@ -91,7 +91,7 @@ where
 
 /// Mirrors the production approval-gate evidence wiring done by
 /// `build_local_runtime` (runtime.rs ~line 2799) — returns the REAL
-/// `LocalDevApprovalGateEvidence` so the gate-evidence lookup logic
+/// `ApprovalRequestGateEvidence` so the gate-evidence lookup logic
 /// (the `gate:approval-` prefix parse + `ApprovalStatus::Pending` check)
 /// never drifts from production. Tests only.
 ///
@@ -102,8 +102,8 @@ where
 /// request at loop exit and genuinely pauses — mirrors the production
 /// `runtime.rs` path with the real type, never a hand-mirrored copy.
 #[cfg(feature = "test-support")]
-pub fn build_local_dev_approval_gate_evidence_for_test(
+pub fn build_approval_gate_evidence_for_test(
     approval_requests: std::sync::Arc<dyn ironclaw_run_state::ApprovalRequestStore>,
 ) -> std::sync::Arc<dyn ironclaw_runner::loop_exit_applier::ApprovalGateEvidenceStore> {
-    crate::runtime::build_local_dev_approval_gate_evidence_for_test(approval_requests)
+    crate::runtime::build_approval_gate_evidence_for_test(approval_requests)
 }

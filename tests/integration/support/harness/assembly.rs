@@ -42,7 +42,7 @@ use super::HarnessResult;
 /// resolver + result writer). Every `HostRuntimeCapabilityHarness`
 /// constructor that does not opt into `.with_durable_capability_io()`
 /// (issue #5838) uses this so both roles keep sharing one underlying object,
-/// matching production's `LocalDevCapabilityIo` invariant.
+/// matching production's `StagedCapabilityIo` invariant.
 pub(crate) fn default_capability_io_pair() -> (
     Arc<dyn ironclaw_loop_host::LoopCapabilityInputResolver>,
     Arc<dyn ironclaw_loop_host::LoopCapabilityResultWriter>,

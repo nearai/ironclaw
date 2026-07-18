@@ -819,7 +819,7 @@ impl RebornIntegrationGroupBuilder {
         .with_checkpoint_state_store(checkpoint_state_store.clone());
         if let Some(approval_requests) = capability_recorder.approval_requests_store() {
             evidence = evidence.with_approval_gate_evidence(
-                ironclaw_reborn_composition::test_support::build_local_dev_approval_gate_evidence_for_test(
+                ironclaw_reborn_composition::test_support::build_approval_gate_evidence_for_test(
                     approval_requests,
                 ),
             );

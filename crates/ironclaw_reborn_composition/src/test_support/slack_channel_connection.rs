@@ -2,7 +2,7 @@
 //!
 //! Builds the REAL [`SlackChannelConnectionFacade`] over the composed
 //! local-dev runtime's durable Slack host state and late-binds it into
-//! `RebornLocalRuntimeServices::channel_connection_facade_slot`, mirroring the
+//! `RebornRuntimeSubstrate::channel_connection_facade_slot`, mirroring the
 //! production wiring in
 //! `slack_connectable_channel::build_webui_services_with_slack_host_beta_mounts`
 //! (facade construction + `set_channel_connection_facade`). With the slot

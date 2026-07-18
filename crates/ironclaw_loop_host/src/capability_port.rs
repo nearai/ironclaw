@@ -65,7 +65,7 @@ const PROVIDER_TOOL_CALL_INPUT_REF_PREFIX: &str = "input:provider-tool-";
 /// **Input-only.** This layer stages completed outcomes through
 /// [`LoopCapabilityResultWriter`], not through the port, so it does not observe
 /// results: result events belong to whichever result-writer the composition
-/// installs (e.g. reborn's `LocalDevCapabilityIo`), keyed back to `call_id`.
+/// installs (e.g. reborn's `StagedCapabilityIo`), keyed back to `call_id`.
 /// Keeping the substrate observer input-only avoids advertising a result
 /// callback this layer would never fire.
 ///

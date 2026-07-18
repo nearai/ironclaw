@@ -29,6 +29,8 @@ mod admin_user_directory;
 mod approval_test_support;
 mod automation;
 mod blocked_auth_resume;
+mod builtin_capability_policy;
+mod deployment;
 mod error;
 mod extension_host;
 mod factory;
@@ -36,8 +38,6 @@ mod input;
 mod lifecycle_auth_continuation;
 mod llm_admin;
 mod local_dev_authorization;
-mod local_dev_capability_policy;
-mod deployment;
 mod local_dev_mounts;
 mod local_runtime_profile;
 mod observability;
@@ -80,7 +80,7 @@ pub use extension_host::skill_listing::{RebornSkillListError, list_reborn_local_
 #[cfg(feature = "test-support")]
 pub use factory::AttachmentTestSupport;
 #[cfg(feature = "test-support")]
-pub use factory::RebornLocalDevApprovalTestParts;
+pub use factory::RebornApprovalTestParts;
 #[cfg(feature = "migration-support")]
 pub use factory::extension_installation_store_for_migration;
 pub use factory::{RebornServices, build_reborn_services, builtin_first_party_trust_policy};
@@ -151,9 +151,9 @@ pub use llm_admin::provider_admin_product_command::RebornProviderAdminProductCom
 #[cfg(feature = "root-llm-provider")]
 pub use llm_admin::provider_repo::{ProviderRepo, ProviderRepoError};
 pub use local_runtime_profile::{
-    RebornRuntimeProfileError, RebornRuntimeProfileOptions,
-    hosted_single_tenant_runtime_policy, hosted_single_tenant_volume_runtime_policy,
-    local_dev_runtime_policy, local_dev_yolo_runtime_policy, local_runtime_build_input,
+    RebornRuntimeProfileError, RebornRuntimeProfileOptions, hosted_single_tenant_runtime_policy,
+    hosted_single_tenant_volume_runtime_policy, local_dev_runtime_policy,
+    local_dev_yolo_runtime_policy, local_runtime_build_input,
     local_runtime_build_input_with_options,
 };
 pub use observability::budget::build_default_budget_accountant;

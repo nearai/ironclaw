@@ -148,12 +148,12 @@ fn extension_host_cluster_stays_internal() {
         "extension_host must not become public"
     );
     assert!(
-        has_module_decl(&lib, "mod local_dev_capability_policy;"),
-        "local_dev_capability_policy is runtime-profile policy and must stay at the crate root"
+        has_module_decl(&lib, "mod builtin_capability_policy;"),
+        "builtin_capability_policy is runtime-profile policy and must stay at the crate root"
     );
     assert!(
-        !extension_host.contains("local_dev_capability_policy"),
-        "local_dev_capability_policy must not be dragged into extension_host"
+        !extension_host.contains("builtin_capability_policy"),
+        "builtin_capability_policy must not be dragged into extension_host"
     );
 
     for module in EXTENSION_HOST_INTERNAL_MODULES {

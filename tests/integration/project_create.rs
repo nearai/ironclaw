@@ -1,7 +1,7 @@
 //! E-PROJ seam smoke test: the `project_lifecycle` group surfaces the local-dev
 //! synthetic `project_create` capability; a scripted `builtin.project_create`
 //! call dispatches through the REAL synthetic-capability wrap
-//! (`wrap_local_dev_synthetic_capabilities` + `project_create_capability`) and
+//! (`wrap_synthetic_capabilities` + `project_create_capability`) and
 //! persists a project via the real `ProjectService`.
 //!
 //! A result-contains assertion alone would pass a silent-no-op regression that

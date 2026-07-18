@@ -156,7 +156,7 @@ pub(crate) struct ActiveExtensionCapability {
     pub(crate) network_targets: Vec<NetworkTargetPattern>,
     /// Who the providing extension's installation belongs to (#5459 P1).
     /// Tenant-owned capabilities are grant-minted for every user; user-owned
-    /// ones only for their owner (filtered in `LocalDevExtensionSurface`).
+    /// ones only for their owner (filtered in `ExtensionCapabilitySurface`).
     pub(crate) owner: InstallationOwner,
 }
 

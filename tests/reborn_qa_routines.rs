@@ -45,8 +45,8 @@ use ironclaw_loop_host::{
     HostManagedModelRequest, HostManagedModelResponse, HostManagedToolResultContent,
 };
 use ironclaw_reborn_composition::{
-    RebornCompositionProfile, RebornRuntimeProfileOptions, RebornRuntime,
-    RebornRuntimeIdentity, RebornRuntimeInput, TriggerPollerSettings, build_reborn_runtime,
+    RebornCompositionProfile, RebornRuntime, RebornRuntimeIdentity, RebornRuntimeInput,
+    RebornRuntimeProfileOptions, TriggerPollerSettings, build_reborn_runtime,
     local_runtime_build_input_with_options,
 };
 use ironclaw_triggers::{TriggerId, TriggerPollerWorkerConfig, TriggerRunStatus, TriggerState};

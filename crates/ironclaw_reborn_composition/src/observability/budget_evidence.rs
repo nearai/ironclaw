@@ -4,18 +4,18 @@ use async_trait::async_trait;
 use ironclaw_runner::loop_exit_applier::ResourceGateEvidenceStore;
 use ironclaw_turns::{LoopGateRef, TurnError, TurnScope};
 
-pub(crate) fn local_dev_resource_gate_evidence(
+pub(crate) fn budget_gate_evidence(
     budget_gate_store: Arc<dyn ironclaw_resources::BudgetGateStore>,
 ) -> Arc<dyn ResourceGateEvidenceStore> {
-    Arc::new(LocalDevResourceGateEvidence { budget_gate_store })
+    Arc::new(BudgetGateEvidence { budget_gate_store })
 }
 
-struct LocalDevResourceGateEvidence {
+struct BudgetGateEvidence {
     budget_gate_store: Arc<dyn ironclaw_resources::BudgetGateStore>,
 }
 
 #[async_trait]
-impl ResourceGateEvidenceStore for LocalDevResourceGateEvidence {
+impl ResourceGateEvidenceStore for BudgetGateEvidence {
     async fn pending_resource_gate(
         &self,
         scope: &TurnScope,

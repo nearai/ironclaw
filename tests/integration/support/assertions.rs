@@ -332,8 +332,8 @@ impl RebornIntegrationHarness {
 
     /// Harness-port-seam Change 4: assert the LATEST captured `tools` argument
     /// carries a definition named `name` whose `description` contains
-    /// `needle` — pins `wrap_local_dev_surface_disclosure`'s scoped-roots note
-    /// mutation (`LocalDevSurfaceDisclosure::apply_to_surface_fields`), which
+    /// `needle` — pins `wrap_surface_disclosure`'s scoped-roots note
+    /// mutation (`HostSurfaceDisclosure::apply_to_surface_fields`), which
     /// mutates `ProviderToolDefinition::description`/`parameters`, not tool
     /// presence/absence.
     pub async fn assert_model_tool_description_contains(

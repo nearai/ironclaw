@@ -1,5 +1,5 @@
 /// Test double substituting the production `LoopCapabilityPortFactory` wiring
-/// (`LocalDevLoopCapabilityPortFactory` / `HostRuntimeLoopCapabilityPortFactory`)
+/// (`RefreshingLoopCapabilityPortFactory` / `HostRuntimeLoopCapabilityPortFactory`)
 /// for the Echo (`RecordingTestCapabilityPort`) backend.
 use std::sync::Arc;
 

@@ -32,9 +32,9 @@ pub(crate) fn deployment_config_for_profile(
 ) -> Result<DeploymentConfig, RebornRuntimeProfileError> {
     match profile {
         RebornCompositionProfile::LocalDev => Ok(DeploymentConfig::local_dev()),
-        RebornCompositionProfile::LocalDevYolo => {
-            Ok(DeploymentConfig::local_dev_yolo(options.confirm_host_access))
-        }
+        RebornCompositionProfile::LocalDevYolo => Ok(DeploymentConfig::local_dev_yolo(
+            options.confirm_host_access,
+        )),
         RebornCompositionProfile::HostedSingleTenantVolume => {
             Ok(DeploymentConfig::hosted_single_tenant_volume())
         }
@@ -95,8 +95,8 @@ pub(crate) fn hosted_single_tenant_volume_build_input(
     }
 
     #[cfg(feature = "libsql")]
-    let policy = hosted_single_tenant_volume_runtime_policy()
-        .map_err(RebornRuntimeProfileError::Policy)?;
+    let policy =
+        hosted_single_tenant_volume_runtime_policy().map_err(RebornRuntimeProfileError::Policy)?;
     #[cfg(feature = "libsql")]
     Ok(RebornBuildInput::local_dev_with_profile(
         RebornCompositionProfile::HostedSingleTenantVolume,

@@ -9,10 +9,10 @@ use ironclaw_turns::run_profile::{
 };
 
 use crate::runtime::{
-    LocalDevSelectableSkillContextSource,
+    ComposedSelectableSkillContextSource,
     local_dev::synthetic_capability::{
-        LocalDevSyntheticCapability, LocalDevSyntheticCapabilityDescriptor,
-        LocalDevSyntheticCapabilityHandler, LocalDevSyntheticCapabilityInvocation,
+        SyntheticCapability, SyntheticCapabilityDescriptor, SyntheticCapabilityHandler,
+        SyntheticCapabilityInvocation,
     },
 };
 
@@ -23,10 +23,10 @@ const SKILL_ACTIVATE_DESCRIPTION: &str =
 const MAX_SKILL_ACTIVATE_NAMES: usize = 16;
 
 pub(super) fn skill_activation_capability(
-    skill_activation_source: Arc<LocalDevSelectableSkillContextSource>,
-) -> Result<LocalDevSyntheticCapability, AgentLoopHostError> {
-    Ok(LocalDevSyntheticCapability::new(
-        LocalDevSyntheticCapabilityDescriptor::new(
+    skill_activation_source: Arc<ComposedSelectableSkillContextSource>,
+) -> Result<SyntheticCapability, AgentLoopHostError> {
+    Ok(SyntheticCapability::new(
+        SyntheticCapabilityDescriptor::new(
             SKILL_ACTIVATE_CAPABILITY_ID,
             SKILL_ACTIVATE_PROVIDER_TOOL_NAME,
             SKILL_ACTIVATE_DESCRIPTION,
@@ -40,11 +40,11 @@ pub(super) fn skill_activation_capability(
 }
 
 struct SkillActivationHandler {
-    skill_activation_source: Arc<LocalDevSelectableSkillContextSource>,
+    skill_activation_source: Arc<ComposedSelectableSkillContextSource>,
 }
 
 #[async_trait]
-impl LocalDevSyntheticCapabilityHandler for SkillActivationHandler {
+impl SyntheticCapabilityHandler for SkillActivationHandler {
     fn validate_provider_arguments(
         &self,
         arguments: &serde_json::Value,
@@ -54,7 +54,7 @@ impl LocalDevSyntheticCapabilityHandler for SkillActivationHandler {
 
     async fn invoke(
         &self,
-        invocation: LocalDevSyntheticCapabilityInvocation,
+        invocation: SyntheticCapabilityInvocation,
     ) -> Result<CapabilityOutcome, AgentLoopHostError> {
         // Normalise to lowercase at the parse boundary so that `names` (passed
         // to `activate_skills_for_run`) and the response-filter set both use the

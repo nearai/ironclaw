@@ -21,8 +21,8 @@ struct BlockedAuthRun {
     gate_ref: GateRef,
 }
 
-pub(super) struct LocalDevAuthInteractionReadModel {
-    /// A trait object (not the concrete `LocalDevTurnStateStore`) so a
+pub(super) struct SnapshotAuthInteractionReadModel {
+    /// A trait object (not the concrete `ComposedTurnStateStore`) so a
     /// caller can substitute a different turn-state store's snapshot view —
     /// see `turn_run_snapshot::TurnRunSnapshotSource` and
     /// `build_webui_auth_interaction_service_with_turn_run_source`.
@@ -49,7 +49,7 @@ impl AuthInteractionService for UnavailableAuthInteractionService {
     }
 }
 
-impl LocalDevAuthInteractionReadModel {
+impl SnapshotAuthInteractionReadModel {
     pub(super) fn new(
         turn_state: Arc<dyn TurnRunSnapshotSource>,
         flow_records: Arc<dyn AuthFlowRecordSource>,
@@ -216,7 +216,7 @@ fn matching_flow_for_run(
         .cloned())
 }
 
-impl LocalDevAuthInteractionReadModel {
+impl SnapshotAuthInteractionReadModel {
     async fn owner_flows(
         &self,
         scope: &AuthInteractionScope,
@@ -226,7 +226,7 @@ impl LocalDevAuthInteractionReadModel {
 }
 
 #[async_trait]
-impl AuthInteractionReadModel for LocalDevAuthInteractionReadModel {
+impl AuthInteractionReadModel for SnapshotAuthInteractionReadModel {
     async fn auth_gates(
         &self,
         scope: &AuthInteractionScope,

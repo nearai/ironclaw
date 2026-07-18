@@ -1,13 +1,13 @@
 //! Crate-tier RED-then-GREEN coverage for the harness-port-seam P1 Change 1
-//! test-support constructor: `test_support::create_refreshing_local_dev_capability_port_for_test`
+//! test-support constructor: `test_support::create_refreshing_capability_port_for_test`
 //! must drive the REAL production capability-port factory
-//! (`create_refreshing_local_dev_capability_port`) with in-crate stub
+//! (`create_refreshing_capability_port`) with in-crate stub
 //! doubles, not a hand-rebuilt wrap order.
 //!
 //! Stubs here are intentionally minimal: a `HostRuntime` that echoes back a
 //! `VisibleCapability` per granted capability id (so `capability_id_filter`
 //! narrowing is observable), and a shared input/result io double standing in
-//! for production's `LocalDevCapabilityIo` (one object, both roles).
+//! for production's `StagedCapabilityIo` (one object, both roles).
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::Arc;
@@ -46,9 +46,8 @@ use ironclaw_product_workflow::{
     RebornUpdateMemberRoleRequest, RebornUpdateProjectRequest,
 };
 use ironclaw_reborn_composition::test_support::{
-    PROJECT_CREATE_CAPABILITY_ID, RESULT_READ_CAPABILITY_ID,
-    RefreshingLocalDevCapabilityPortTestParts,
-    create_refreshing_local_dev_capability_port_for_test,
+    PROJECT_CREATE_CAPABILITY_ID, RESULT_READ_CAPABILITY_ID, RefreshingCapabilityPortTestParts,
+    create_refreshing_capability_port_for_test,
 };
 use ironclaw_turns::run_profile::{
     AgentLoopHostError, AgentLoopHostErrorKind, CapabilityInputRef, CapabilityInvocation,
@@ -184,7 +183,7 @@ impl HostRuntime for StubHostRuntime {
     }
 }
 
-/// Stands in for production's `LocalDevCapabilityIo`: ONE object implementing
+/// Stands in for production's `StagedCapabilityIo`: ONE object implementing
 /// both `LoopCapabilityInputResolver` and `LoopCapabilityResultWriter`, so
 /// `Arc::clone`s into both config fields let input-ref/result-ref correlate
 /// through a single shared store (the invariant the config's shared-io
@@ -383,8 +382,8 @@ fn test_parts(
     capability_id_filter: Option<HashSet<CapabilityId>>,
     capability_execution_mount_overrides: HashMap<CapabilityId, ironclaw_host_api::MountView>,
     additional_provider_trust: BTreeMap<ExtensionId, ironclaw_trust::TrustDecision>,
-) -> RefreshingLocalDevCapabilityPortTestParts {
-    RefreshingLocalDevCapabilityPortTestParts {
+) -> RefreshingCapabilityPortTestParts {
+    RefreshingCapabilityPortTestParts {
         runtime,
         run_context,
         fallback_user_id: UserId::new("user-stub").expect("user id"),
@@ -430,7 +429,7 @@ async fn port_builds_and_includes_synthetic_capabilities() {
         HashMap::new(),
         BTreeMap::new(),
     );
-    let port = create_refreshing_local_dev_capability_port_for_test(parts)
+    let port = create_refreshing_capability_port_for_test(parts)
         .await
         .expect("port assembles through the real production factory");
 
@@ -456,13 +455,13 @@ async fn port_builds_and_includes_synthetic_capabilities() {
 ///
 /// This test only exercises builtin grants because there is no cheap way to
 /// inject an extension-grant fixture from this external integration-test
-/// crate: `LocalDevExtensionSurfaceSource`'s test constructors
+/// crate: `ExtensionCapabilitySurfaceSource`'s test constructors
 /// (`from_surface`/`from_active_capabilities`) are `#[cfg(test)]`-gated to
-/// the crate's own unit tests, and `RefreshingLocalDevCapabilityPortTestParts`
+/// the crate's own unit tests, and `RefreshingCapabilityPortTestParts`
 /// does not expose `extension_surface_source` at all -- the test-support
-/// constructor always wires `LocalDevExtensionSurfaceSource::new(None)`
+/// constructor always wires `ExtensionCapabilitySurfaceSource::new(None)`
 /// (empty extension surface). The whole-set semantic is pinned by the
-/// doc-comment on `RefreshingLocalDevCapabilityPortConfig::capability_id_filter`
+/// doc-comment on `RefreshingCapabilityPortConfig::capability_id_filter`
 /// and the inline comment at its `retain` call site in `build_inner`.
 #[tokio::test]
 async fn capability_id_filter_narrows_visible_surface() {
@@ -477,7 +476,7 @@ async fn capability_id_filter_narrows_visible_surface() {
         HashMap::new(),
         BTreeMap::new(),
     );
-    let port = create_refreshing_local_dev_capability_port_for_test(parts)
+    let port = create_refreshing_capability_port_for_test(parts)
         .await
         .expect("port assembles");
 
@@ -513,7 +512,7 @@ async fn capability_id_filter_some_empty_grants_zero_capabilities() {
         HashMap::new(),
         BTreeMap::new(),
     );
-    let port = create_refreshing_local_dev_capability_port_for_test(parts)
+    let port = create_refreshing_capability_port_for_test(parts)
         .await
         .expect("port assembles");
 
@@ -561,7 +560,7 @@ async fn input_and_result_refs_correlate_through_one_shared_io() {
         HashMap::new(),
         BTreeMap::new(),
     );
-    let port = create_refreshing_local_dev_capability_port_for_test(parts)
+    let port = create_refreshing_capability_port_for_test(parts)
         .await
         .expect("port assembles");
 
@@ -649,7 +648,7 @@ async fn capability_execution_mount_overrides_reach_invocation_context() {
         overrides,
         BTreeMap::new(),
     );
-    let port = create_refreshing_local_dev_capability_port_for_test(parts)
+    let port = create_refreshing_capability_port_for_test(parts)
         .await
         .expect("port assembles");
 
@@ -698,7 +697,7 @@ fn distinguishing_trust_decision() -> ironclaw_trust::TrustDecision {
             allowed_effects: vec![EffectKind::ReadFilesystem],
             max_resource_ceiling: None,
         },
-        // `Bundled` is never produced by `local_dev_visible_capability_request`
+        // `Bundled` is never produced by `visible_capability_request`
         // itself (which only ever inserts `AdminConfig`), so seeing it back
         // out proves the test's entry -- not the canonical helper's -- won.
         provenance: ironclaw_trust::TrustProvenance::Bundled,
@@ -728,7 +727,7 @@ async fn additional_provider_trust_is_forwarded_to_visible_request() {
         HashMap::new(),
         additional_provider_trust,
     );
-    let port = create_refreshing_local_dev_capability_port_for_test(parts)
+    let port = create_refreshing_capability_port_for_test(parts)
         .await
         .expect("port assembles");
     // Construction already triggers one `visible_capabilities` refresh; drive
@@ -782,7 +781,7 @@ async fn multi_entry_collection_knobs_round_trip() {
     // `builtin_trust` overrides the "builtin" provider used to invoke both
     // capabilities below, so its ceiling must cover both grants' effects
     // (`dispatch_capability`/`read_filesystem`/`write_filesystem` per
-    // local_dev_capability_policy.toml) or invocation is denied as untrusted.
+    // builtin_capability_policy.toml) or invocation is denied as untrusted.
     let mut builtin_trust = distinguishing_trust_decision();
     builtin_trust.authority_ceiling.allowed_effects = vec![
         EffectKind::DispatchCapability,
@@ -802,7 +801,7 @@ async fn multi_entry_collection_knobs_round_trip() {
         overrides,
         additional_provider_trust,
     );
-    let port = create_refreshing_local_dev_capability_port_for_test(parts)
+    let port = create_refreshing_capability_port_for_test(parts)
         .await
         .expect("port assembles");
 

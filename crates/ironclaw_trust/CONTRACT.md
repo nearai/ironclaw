@@ -144,7 +144,7 @@ matches, the policy falls through to a fail-closed default.
 | `BundledRegistry` | `package_id` AND `source == Bundled` AND (`digest` if pinned) | `(effective_trust, allowed_effects, max_resource_ceiling)` provenance `Bundled` | `Ok(None)` — fall through |
 | `AdminConfig` | `package_id` AND **exact** `PackageSource` match (incl. `LocalManifest { path }` / `Registry { url }`) AND (`digest` if pinned) | provenance `AdminConfig` | `Ok(None)` |
 | `SignedRegistry` | (currently inert; see §10) | — | `Ok(None)` always in V1 |
-| `LocalDevOverride` | (currently inert; see §10) | — | `Ok(None)` always in V1 |
+| `DevTrustOverride` | (currently inert; see §10) | — | `Ok(None)` always in V1 |
 
 Match-key rules:
 
@@ -208,7 +208,7 @@ Recommended chain order for production wiring:
     BundledRegistry,    // host-controlled, signed-bundle baseline
     SignedRegistry,     // remote signature verification (when live)
     AdminConfig,        // operator overrides
-    LocalDevOverride,   // dev-only opt-in (when live)
+    DevTrustOverride,   // dev-only opt-in (when live)
 ]
 ```
 
@@ -429,7 +429,7 @@ This slice intentionally keeps the substrate narrow:
   `Ok(None)`. Real signature verification (binding `(signer,
   package_id, digest)` so a verified signature on package X does not
   vouch for an unrelated package Y) belongs to a follow-up.
-- `LocalDevOverride` is inert — `enabled_for_test` is compiled only for
+- `DevTrustOverride` is inert — `enabled_for_test` is compiled only for
   this crate's `#[cfg(test)]` targets, so future dev-mode opt-in has a
   stable seam without exposing a production feature. The inert contract is
   pinned by test T17.

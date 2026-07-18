@@ -28,8 +28,8 @@ use ironclaw_loop_host::{
     HostManagedModelResponse,
 };
 use ironclaw_reborn_composition::{
-    RebornCompositionProfile, RebornRuntimeProfileOptions, RebornRuntime,
-    RebornRuntimeIdentity, RebornRuntimeInput, TriggerPollerSettings, build_reborn_runtime,
+    RebornCompositionProfile, RebornRuntime, RebornRuntimeIdentity, RebornRuntimeInput,
+    RebornRuntimeProfileOptions, TriggerPollerSettings, build_reborn_runtime,
     local_runtime_build_input_with_options,
 };
 use ironclaw_runner::runtime::ToolDisclosureMode;
@@ -154,7 +154,7 @@ impl HostManagedModelGateway for RecordingGateway {
 /// Whichever registrations succeed (capability visible + permitted) are
 /// forwarded together as one `capability_calls` response, which the loop
 /// will actually dispatch — including staging the real JSON input through
-/// the run's real `LocalDevCapabilityIo`, so a genuinely unpatched surface
+/// the run's real `StagedCapabilityIo`, so a genuinely unpatched surface
 /// would really create a second trigger and/or remove/pause/resume the
 /// target trigger. If every registration is denied (the fixed, expected
 /// behavior), there is nothing to dispatch and a plain reply is returned
@@ -1491,7 +1491,7 @@ async fn scheduled_trigger_denies_mutators_with_tool_disclosure(
     // would return `Ok(candidate)` for it — with a REAL, run-scoped staged
     // input, because `register_provider_tool_call` is the exact path a
     // native provider tool call uses to stage its arguments through the
-    // run's real `LocalDevCapabilityIo`. The loop would then actually
+    // run's real `StagedCapabilityIo`. The loop would then actually
     // dispatch that mutator against the staged input, and either the marker
     // trigger asserted absent below WOULD exist, or the original trigger's
     // state WOULD have changed. Reverting any one entry of the
