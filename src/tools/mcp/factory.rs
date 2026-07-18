@@ -92,7 +92,7 @@ pub async fn create_client_from_config(
                 user_id,
                 Some(server),
                 None,
-                uuid::Uuid::new_v4(),
+                crate::tools::mcp::session::McpSessionGeneration::new(),
             ))
         }
         #[cfg(unix)]
@@ -115,7 +115,7 @@ pub async fn create_client_from_config(
                 user_id,
                 Some(server),
                 None,
-                uuid::Uuid::new_v4(),
+                crate::tools::mcp::session::McpSessionGeneration::new(),
             ))
         }
         #[cfg(not(unix))]
@@ -145,7 +145,7 @@ pub async fn create_client_from_config(
             // transport must know about it to read/write the header.
             // One generation nonce shared by transport and client (see the
             // guard docs on `McpSessionManager::update_session_id`).
-            let session_owner = uuid::Uuid::new_v4();
+            let session_owner = crate::tools::mcp::session::McpSessionGeneration::new();
             let transport = Arc::new(
                 HttpMcpTransport::new(server.url.clone(), validated_name.as_str())
                     .with_session_manager(

@@ -71,6 +71,27 @@ impl McpSessionKey {
     }
 }
 
+/// Generation nonce identifying the client INSTANCE that owns a session.
+///
+/// A dedicated newtype (not a raw `Uuid`) so it can never be confused with a
+/// thread id at a call site — `terminate(user, server, thread_id, owner)`
+/// takes both, and swapping two raw `Option<Uuid>`s would compile.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct McpSessionGeneration(Uuid);
+
+impl McpSessionGeneration {
+    /// Mint a fresh generation for a new client instance.
+    pub fn new() -> Self {
+        Self(Uuid::new_v4())
+    }
+}
+
+impl Default for McpSessionGeneration {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 /// Session state for a single `(user, server[, thread])` MCP connection.
 #[derive(Debug, Clone)]
 pub struct McpSession {
@@ -82,7 +103,7 @@ pub struct McpSession {
     /// honored from the owning instance — an LRU-evicted fork whose `Arc` is
     /// still held by an in-flight call must not overwrite or destroy the
     /// session a replacement fork created under the same logical key.
-    pub owner: uuid::Uuid,
+    pub owner: McpSessionGeneration,
 
     /// Last activity timestamp for this session.
     pub last_activity: Instant,
@@ -97,7 +118,7 @@ pub struct McpSession {
 impl McpSession {
     /// Create a new session for a server, owned by `owner` (the creating
     /// client instance's nonce — see the field docs).
-    pub fn new(server_url: impl Into<String>, owner: uuid::Uuid) -> Self {
+    pub fn new(server_url: impl Into<String>, owner: McpSessionGeneration) -> Self {
         Self {
             session_id: None,
             owner,
@@ -183,7 +204,7 @@ impl McpSessionManager {
         server_name: &McpServerName,
         server_url: &str,
         thread_id: Option<Uuid>,
-        owner: Uuid,
+        owner: McpSessionGeneration,
     ) -> McpSession {
         let key = Self::key(user_id, server_name, thread_id);
         let mut sessions = self.sessions.write().await;
@@ -230,7 +251,7 @@ impl McpSessionManager {
         server_name: &McpServerName,
         session_id: Option<String>,
         thread_id: Option<Uuid>,
-        owner: Uuid,
+        owner: McpSessionGeneration,
     ) {
         let mut sessions = self.sessions.write().await;
         if let Some(session) = sessions.get_mut(&Self::key(user_id, server_name, thread_id))
@@ -247,7 +268,7 @@ impl McpSessionManager {
         user_id: &str,
         server_name: &McpServerName,
         thread_id: Option<Uuid>,
-        owner: Uuid,
+        owner: McpSessionGeneration,
     ) {
         let mut sessions = self.sessions.write().await;
         if let Some(session) = sessions.get_mut(&Self::key(user_id, server_name, thread_id))
@@ -290,7 +311,7 @@ impl McpSessionManager {
         user_id: &str,
         server_name: &McpServerName,
         thread_id: Option<Uuid>,
-        owner: Option<Uuid>,
+        owner: Option<McpSessionGeneration>,
     ) {
         let mut sessions = self.sessions.write().await;
         let key = Self::key(user_id, server_name, thread_id);
@@ -334,6 +355,17 @@ impl Default for McpSessionManager {
 mod tests {
     use super::*;
 
+    /// Shared generation for tests that don't exercise the ownership guard.
+    fn test_gen() -> McpSessionGeneration {
+        McpSessionGeneration::new()
+    }
+
+    /// A FIXED generation so seeding and guarded calls line up.
+    fn nil_gen() -> McpSessionGeneration {
+        // Uuid::nil is stable across calls — all nil_gen() values are equal.
+        McpSessionGeneration(Uuid::nil())
+    }
+
     const USER_A: &str = "user-a";
     const USER_B: &str = "user-b";
 
@@ -347,7 +379,7 @@ mod tests {
 
     #[test]
     fn test_session_creation() {
-        let session = McpSession::new("https://mcp.example.com", uuid::Uuid::nil());
+        let session = McpSession::new("https://mcp.example.com", nil_gen());
         assert!(session.session_id.is_none());
         assert!(!session.initialized);
         assert_eq!(session.server_url, "https://mcp.example.com");
@@ -355,7 +387,7 @@ mod tests {
 
     #[test]
     fn test_session_update() {
-        let mut session = McpSession::new("https://mcp.example.com", uuid::Uuid::nil());
+        let mut session = McpSession::new("https://mcp.example.com", nil_gen());
 
         session.update_session_id(Some("session-123".to_string()));
         assert_eq!(session.session_id, Some("session-123".to_string()));
@@ -366,7 +398,7 @@ mod tests {
 
     #[test]
     fn test_session_staleness() {
-        let mut session = McpSession::new("https://mcp.example.com", uuid::Uuid::nil());
+        let mut session = McpSession::new("https://mcp.example.com", nil_gen());
 
         // Fresh session should not be stale with reasonable timeout
         assert!(!session.is_stale(1800));
@@ -386,13 +418,7 @@ mod tests {
 
         // First call creates a new session
         let session1 = manager
-            .get_or_create(
-                USER_A,
-                &notion,
-                "https://mcp.notion.com",
-                None,
-                uuid::Uuid::nil(),
-            )
+            .get_or_create(USER_A, &notion, "https://mcp.notion.com", None, nil_gen())
             .await;
         assert!(session1.session_id.is_none());
 
@@ -403,19 +429,13 @@ mod tests {
                 &notion,
                 Some("session-abc".to_string()),
                 None,
-                uuid::Uuid::nil(),
+                nil_gen(),
             )
             .await;
 
         // Second call returns existing session with the ID
         let session2 = manager
-            .get_or_create(
-                USER_A,
-                &notion,
-                "https://mcp.notion.com",
-                None,
-                uuid::Uuid::nil(),
-            )
+            .get_or_create(USER_A, &notion, "https://mcp.notion.com", None, nil_gen())
             .await;
         assert_eq!(session2.session_id, Some("session-abc".to_string()));
     }
@@ -426,13 +446,7 @@ mod tests {
         let notion = sn("notion");
 
         manager
-            .get_or_create(
-                USER_A,
-                &notion,
-                "https://mcp.notion.com",
-                None,
-                uuid::Uuid::nil(),
-            )
+            .get_or_create(USER_A, &notion, "https://mcp.notion.com", None, nil_gen())
             .await;
         manager
             .update_session_id(
@@ -440,7 +454,7 @@ mod tests {
                 &notion,
                 Some("session-123".to_string()),
                 None,
-                uuid::Uuid::nil(),
+                nil_gen(),
             )
             .await;
 
@@ -449,13 +463,7 @@ mod tests {
 
         // Should create a fresh session now
         let session = manager
-            .get_or_create(
-                USER_A,
-                &notion,
-                "https://mcp.notion.com",
-                None,
-                uuid::Uuid::nil(),
-            )
+            .get_or_create(USER_A, &notion, "https://mcp.notion.com", None, nil_gen())
             .await;
         assert!(session.session_id.is_none());
     }
@@ -466,19 +474,13 @@ mod tests {
         let notion = sn("notion");
 
         manager
-            .get_or_create(
-                USER_A,
-                &notion,
-                "https://mcp.notion.com",
-                None,
-                uuid::Uuid::nil(),
-            )
+            .get_or_create(USER_A, &notion, "https://mcp.notion.com", None, nil_gen())
             .await;
 
         assert!(!manager.is_initialized(USER_A, &notion, None).await);
 
         manager
-            .mark_initialized(USER_A, &notion, None, uuid::Uuid::nil())
+            .mark_initialized(USER_A, &notion, None, nil_gen())
             .await;
 
         assert!(manager.is_initialized(USER_A, &notion, None).await);
@@ -491,31 +493,13 @@ mod tests {
         let github = sn("github");
 
         manager
-            .get_or_create(
-                USER_A,
-                &notion,
-                "https://mcp.notion.com",
-                None,
-                uuid::Uuid::nil(),
-            )
+            .get_or_create(USER_A, &notion, "https://mcp.notion.com", None, nil_gen())
             .await;
         manager
-            .get_or_create(
-                USER_A,
-                &github,
-                "https://mcp.github.com",
-                None,
-                uuid::Uuid::nil(),
-            )
+            .get_or_create(USER_A, &github, "https://mcp.github.com", None, nil_gen())
             .await;
         manager
-            .get_or_create(
-                USER_B,
-                &notion,
-                "https://mcp.notion.com",
-                None,
-                uuid::Uuid::nil(),
-            )
+            .get_or_create(USER_B, &notion, "https://mcp.notion.com", None, nil_gen())
             .await;
 
         let pairs = manager.active_sessions().await;
@@ -538,22 +522,10 @@ mod tests {
         let notion = sn("notion");
 
         manager
-            .get_or_create(
-                USER_A,
-                &notion,
-                "https://mcp.notion.com",
-                None,
-                uuid::Uuid::nil(),
-            )
+            .get_or_create(USER_A, &notion, "https://mcp.notion.com", None, nil_gen())
             .await;
         manager
-            .get_or_create(
-                USER_B,
-                &notion,
-                "https://mcp.notion.com",
-                None,
-                uuid::Uuid::nil(),
-            )
+            .get_or_create(USER_B, &notion, "https://mcp.notion.com", None, nil_gen())
             .await;
 
         manager
@@ -562,7 +534,7 @@ mod tests {
                 &notion,
                 Some("session-a".to_string()),
                 None,
-                uuid::Uuid::nil(),
+                nil_gen(),
             )
             .await;
         manager
@@ -571,7 +543,7 @@ mod tests {
                 &notion,
                 Some("session-b".to_string()),
                 None,
-                uuid::Uuid::nil(),
+                nil_gen(),
             )
             .await;
 
@@ -600,7 +572,7 @@ mod tests {
 
     #[test]
     fn test_update_session_id_none_leaves_id_unchanged() {
-        let mut session = McpSession::new("https://mcp.example.com", uuid::Uuid::nil());
+        let mut session = McpSession::new("https://mcp.example.com", nil_gen());
         session.session_id = Some("existing-id".to_string());
 
         session.update_session_id(None);
@@ -610,7 +582,7 @@ mod tests {
 
     #[test]
     fn test_touch_updates_last_activity() {
-        let mut session = McpSession::new("https://mcp.example.com", uuid::Uuid::nil());
+        let mut session = McpSession::new("https://mcp.example.com", nil_gen());
         // Push last_activity into the past so we can observe the change.
         session.last_activity = std::time::Instant::now() - std::time::Duration::from_secs(60);
         let before = session.last_activity;
@@ -647,7 +619,7 @@ mod tests {
                 &sn("ghost"),
                 Some("id".to_string()),
                 None,
-                uuid::Uuid::nil(),
+                nil_gen(),
             )
             .await;
         assert!(manager.active_sessions().await.is_empty());
@@ -657,7 +629,7 @@ mod tests {
     async fn test_mark_initialized_nonexistent_is_noop() {
         let manager = McpSessionManager::new();
         manager
-            .mark_initialized(USER_A, &sn("ghost"), None, uuid::Uuid::nil())
+            .mark_initialized(USER_A, &sn("ghost"), None, nil_gen())
             .await;
         assert!(manager.active_sessions().await.is_empty());
     }
@@ -678,13 +650,7 @@ mod tests {
         let stale2 = sn("stale2");
 
         manager
-            .get_or_create(
-                USER_A,
-                &fresh,
-                "https://fresh.example.com",
-                None,
-                uuid::Uuid::nil(),
-            )
+            .get_or_create(USER_A, &fresh, "https://fresh.example.com", None, nil_gen())
             .await;
         manager
             .get_or_create(
@@ -692,7 +658,7 @@ mod tests {
                 &stale1,
                 "https://stale1.example.com",
                 None,
-                uuid::Uuid::nil(),
+                nil_gen(),
             )
             .await;
         manager
@@ -701,7 +667,7 @@ mod tests {
                 &stale2,
                 "https://stale2.example.com",
                 None,
-                uuid::Uuid::nil(),
+                nil_gen(),
             )
             .await;
 
@@ -760,7 +726,7 @@ mod tests {
                 &notion,
                 "https://mcp.notion.com",
                 Some(thread_a),
-                uuid::Uuid::nil(),
+                nil_gen(),
             )
             .await;
         manager
@@ -769,7 +735,7 @@ mod tests {
                 &notion,
                 "https://mcp.notion.com",
                 Some(thread_b),
-                uuid::Uuid::nil(),
+                nil_gen(),
             )
             .await;
 
@@ -779,7 +745,7 @@ mod tests {
                 &notion,
                 Some("sess-thread-a".to_string()),
                 Some(thread_a),
-                uuid::Uuid::nil(),
+                nil_gen(),
             )
             .await;
         manager
@@ -788,7 +754,7 @@ mod tests {
                 &notion,
                 Some("sess-thread-b".to_string()),
                 Some(thread_b),
-                uuid::Uuid::nil(),
+                nil_gen(),
             )
             .await;
 
@@ -817,13 +783,7 @@ mod tests {
         let thread_a = tid(42);
 
         manager
-            .get_or_create(
-                USER_A,
-                &notion,
-                "https://mcp.notion.com",
-                None,
-                uuid::Uuid::nil(),
-            )
+            .get_or_create(USER_A, &notion, "https://mcp.notion.com", None, nil_gen())
             .await;
         manager
             .get_or_create(
@@ -831,7 +791,7 @@ mod tests {
                 &notion,
                 "https://mcp.notion.com",
                 Some(thread_a),
-                uuid::Uuid::nil(),
+                nil_gen(),
             )
             .await;
 
@@ -841,7 +801,7 @@ mod tests {
                 &notion,
                 Some("sess-user-scoped".to_string()),
                 None,
-                uuid::Uuid::nil(),
+                nil_gen(),
             )
             .await;
         manager
@@ -850,7 +810,7 @@ mod tests {
                 &notion,
                 Some("sess-thread-scoped".to_string()),
                 Some(thread_a),
-                uuid::Uuid::nil(),
+                nil_gen(),
             )
             .await;
 
@@ -884,7 +844,7 @@ mod tests {
                 &notion,
                 "https://mcp.notion.com",
                 Some(thread_a),
-                uuid::Uuid::nil(),
+                nil_gen(),
             )
             .await;
         manager
@@ -893,7 +853,7 @@ mod tests {
                 &notion,
                 Some("sess-v1".to_string()),
                 Some(thread_a),
-                uuid::Uuid::nil(),
+                nil_gen(),
             )
             .await;
 
@@ -904,7 +864,7 @@ mod tests {
                 &notion,
                 "https://mcp.notion.com",
                 Some(thread_a),
-                uuid::Uuid::nil(),
+                nil_gen(),
             )
             .await;
         assert_eq!(
@@ -924,13 +884,7 @@ mod tests {
         let thread_a = tid(99);
 
         manager
-            .get_or_create(
-                USER_A,
-                &notion,
-                "https://mcp.notion.com",
-                None,
-                uuid::Uuid::nil(),
-            )
+            .get_or_create(USER_A, &notion, "https://mcp.notion.com", None, nil_gen())
             .await;
         manager
             .get_or_create(
@@ -938,7 +892,7 @@ mod tests {
                 &notion,
                 "https://mcp.notion.com",
                 Some(thread_a),
-                uuid::Uuid::nil(),
+                nil_gen(),
             )
             .await;
         manager
@@ -947,7 +901,7 @@ mod tests {
                 &notion,
                 Some("sess-user".to_string()),
                 None,
-                uuid::Uuid::nil(),
+                nil_gen(),
             )
             .await;
         manager
@@ -956,7 +910,7 @@ mod tests {
                 &notion,
                 Some("sess-thread".to_string()),
                 Some(thread_a),
-                uuid::Uuid::nil(),
+                nil_gen(),
             )
             .await;
 

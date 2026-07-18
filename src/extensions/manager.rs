@@ -10061,7 +10061,7 @@ mod tests {
             "default",
             None,
             None,
-            uuid::Uuid::new_v4(),
+            crate::tools::mcp::session::McpSessionGeneration::new(),
         ));
         let client_b = Arc::new(McpClient::new_with_transport(
             "notion",
@@ -10074,7 +10074,7 @@ mod tests {
             "default",
             None,
             None,
-            uuid::Uuid::new_v4(),
+            crate::tools::mcp::session::McpSessionGeneration::new(),
         ));
 
         manager
