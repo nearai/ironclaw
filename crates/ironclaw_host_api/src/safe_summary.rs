@@ -32,7 +32,8 @@ const MAX_SAFE_SUMMARY_BYTES: usize = 512;
 /// Construction enforces the full redaction contract (see the module docs); a
 /// value that contains raw payload/path delimiters, a credential marker, or a
 /// secret-like token is rejected rather than stored.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(try_from = "String")]
 pub struct SafeSummary(String);
 
 impl SafeSummary {
@@ -46,35 +47,31 @@ impl SafeSummary {
         &self.0
     }
 
-    pub fn into_string(self) -> String {
+    pub fn into_inner(self) -> String {
         self.0
+    }
+}
+
+impl TryFrom<String> for SafeSummary {
+    type Error = HostApiError;
+
+    /// Wire revalidation matches construction (types.md canonical template): a
+    /// persisted/relayed summary is re-checked against the current redaction
+    /// rule on deserialize, never trusted transparently.
+    fn try_from(value: String) -> Result<Self, HostApiError> {
+        Self::new(value)
+    }
+}
+
+impl AsRef<str> for SafeSummary {
+    fn as_ref(&self) -> &str {
+        &self.0
     }
 }
 
 impl std::fmt::Display for SafeSummary {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(&self.0)
-    }
-}
-
-impl Serialize for SafeSummary {
-    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: serde::Serializer,
-    {
-        serializer.serialize_str(&self.0)
-    }
-}
-
-impl<'de> Deserialize<'de> for SafeSummary {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: serde::Deserializer<'de>,
-    {
-        // Revalidate on the wire: a persisted/relayed summary is re-checked
-        // against the current redaction rule, never trusted transparently.
-        let value = String::deserialize(deserializer)?;
-        Self::new(value).map_err(serde::de::Error::custom)
     }
 }
 

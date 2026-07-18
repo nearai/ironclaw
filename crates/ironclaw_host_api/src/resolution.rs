@@ -310,10 +310,16 @@ mod tests {
     fn outcome_rejects_an_unsafe_summary_on_the_wire() {
         // A hostile persisted summary cannot rehydrate into an Outcome.
         let json = serde_json::json!({
-            "refs": { "result": "result-1", "byte_len": 1 },
+            "refs": { "result": "018f6a00-0000-7000-8000-000000000001", "byte_len": 1 },
             "verdict": "success",
             "summary": "api key: sk-ant-leak"
         });
-        assert!(serde_json::from_value::<Outcome>(json).is_err());
+        let err = serde_json::from_value::<Outcome>(json)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("sensitive marker"),
+            "rejection must be for the summary, not an id-shape artifact: {err}"
+        );
     }
 }
