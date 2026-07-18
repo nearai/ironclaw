@@ -641,6 +641,22 @@ pub struct ExtensionManager {
 
 /// Sanitize a URL for logging by removing query parameters and credentials.
 /// Prevents accidental logging of API keys, OAuth tokens, or other sensitive data in URLs.
+/// Reject embedded credentials in every URL the config persists verbatim
+/// (server.url + OAuth authorization/token endpoints). Shared by the
+/// programmatic install and PATCH surfaces; runs BEFORE any secret write.
+fn validate_config_urls_free_of_credentials(config: &McpServerConfig) -> Result<(), String> {
+    crate::tools::mcp::config::validate_url_free_of_credentials(&config.url)?;
+    if let Some(ref o) = config.oauth {
+        for endpoint in [o.authorization_url.as_deref(), o.token_url.as_deref()]
+            .into_iter()
+            .flatten()
+        {
+            crate::tools::mcp::config::validate_url_free_of_credentials(endpoint)?;
+        }
+    }
+    Ok(())
+}
+
 fn sanitize_url_for_logging(url: &str) -> String {
     // If URL is very short or doesn't look like a URL, just use as-is
     if url.len() < 10 || !url.contains("://") {
@@ -3793,19 +3809,22 @@ impl ExtensionManager {
             return Err(ExtensionError::AlreadyInstalled(name.to_string()));
         }
 
+        // Assemble the FULL submitted config first, then run every validation
+        // BEFORE any secret write. This ordering is what guarantees (a) all
+        // caller-correctable failures map to InvalidRequest/400 and (b) a
+        // rejected install performs zero SecretsStore writes.
         let mut config = McpServerConfig::new(name, url).with_headers(headers);
-        // Validate the RAW header values (RFC 9110 token/CRLF checks) BEFORE
-        // secretize replaces them with well-formed references — otherwise an
-        // invalid credential value would sail through the later validation.
-        // Malformed submitted values are caller-correctable → InvalidRequest.
+        if let Some(o) = oauth {
+            config = config.with_oauth(o);
+        }
+        // RAW header values (RFC 9110 token/CRLF checks) — validated before
+        // secretize replaces them with well-formed references.
         config
             .validate()
             .map_err(|e| ExtensionError::InvalidRequest(e.to_string()))?;
-        // The URL is persisted verbatim and returned by GET /api/extensions —
-        // reject embedded credentials (userinfo, token-bearing query params).
-        // OAuth endpoint URLs are persisted the same way and get the same
-        // treatment.
-        crate::tools::mcp::config::validate_url_free_of_credentials(&config.url)
+        // server.url and OAuth endpoint URLs are persisted verbatim and
+        // returned by GET /api/extensions — reject embedded credentials.
+        validate_config_urls_free_of_credentials(&config)
             .map_err(ExtensionError::InvalidRequest)?;
         // Move credential-bearing header values into SecretsStore before the
         // config is persisted: `mcp_servers` is an ordinary (unencrypted)
@@ -3819,24 +3838,6 @@ impl ExtensionManager {
             self.delete_header_secrets(user_id, &secret_journal, name)
                 .await;
             return Err(e);
-        }
-        if let Some(o) = oauth {
-            // OAuth endpoint URLs are persisted verbatim — same
-            // embedded-credential rejection as server.url. Validated on the
-            // PARAMETER (config.oauth is None until this assignment).
-            for endpoint in [o.authorization_url.as_deref(), o.token_url.as_deref()]
-                .into_iter()
-                .flatten()
-            {
-                if let Err(e) =
-                    crate::tools::mcp::config::validate_url_free_of_credentials(endpoint)
-                {
-                    self.delete_header_secrets(user_id, &secret_journal, name)
-                        .await;
-                    return Err(ExtensionError::InvalidRequest(e));
-                }
-            }
-            config = config.with_oauth(o);
         }
         // `add_mcp_server` calls `validate()` internally — skip the
         // redundant call here. The error variant from `add_mcp_server` is
@@ -3908,6 +3909,8 @@ impl ExtensionManager {
     /// call that then fails mid-loop — so callers can delete or restore
     /// exactly the writes this invocation performed.
     /// Delete header secrets by name (failed install/PATCH cleanup).
+    /// (See also `validate_config_urls_free_of_credentials`, the shared
+    /// URL-credential gate for install/PATCH.)
     /// Best-effort per entry; failures logged with the secret NAME only.
     async fn delete_header_secrets(&self, user_id: &str, names: &[String], extension: &str) {
         for secret_name in names {
@@ -4053,26 +4056,48 @@ impl ExtensionManager {
         // split-brain state.
         let previous_config = config.clone();
 
+        // ── 1. Assemble the FULL submitted config (url, raw headers, oauth). ──
+        // Every validation runs on the assembled config BEFORE any secret
+        // write, so (a) all caller-correctable failures map to
+        // InvalidRequest/400 and (b) a rejected PATCH performs zero
+        // SecretsStore mutations.
+        let mut url_changed = false;
         if let Some(new_url) = url {
-            // Persisted verbatim + returned by GET /api/extensions — reject
-            // embedded credentials before anything is stored.
-            crate::tools::mcp::config::validate_url_free_of_credentials(&new_url)
-                .map_err(ExtensionError::InvalidRequest)?;
             // When the URL changes, the previous backend's tool catalog is
             // stale — clear it so `latent_actions_for_mcp_server` does not
             // advertise old tools for the new URL while the server is inactive.
             if config.url != new_url {
                 config.cached_tools.clear();
+                url_changed = true;
             }
             config.url = new_url;
         }
-        // Secret-value snapshot for rollback: `secretize_sensitive_headers`
-        // UPSERTS by deterministic name, so replacing a header credential
-        // overwrites the previous secret in place — restoring the config row
-        // alone would leave it referencing the NEW material. Capture the old
-        // values (decrypted, in-memory only) before the overwrite.
+        let headers_replaced = headers.is_some();
+        if let Some(h) = headers {
+            config.headers = h;
+        }
+        // Tri-state: None → unchanged, Some(None) → clear, Some(Some(_)) → replace.
+        let oauth_cleared = matches!(oauth, Some(None));
+        match oauth {
+            None => {}
+            Some(new_oauth) => config.oauth = new_oauth,
+        }
+
+        // ── 2. Validate everything (RFC 9110 raw header values, URL scheme,
+        //       embedded credentials in server.url + OAuth endpoints). ──
+        config
+            .validate()
+            .map_err(|e| ExtensionError::InvalidRequest(e.to_string()))?;
+        validate_config_urls_free_of_credentials(&config)
+            .map_err(ExtensionError::InvalidRequest)?;
+
+        // ── 3. Snapshot + secretize (headers only). ──
+        // Secret-value snapshot for rollback: secretize UPSERTS by
+        // deterministic name, so replacing a header credential overwrites the
+        // previous secret in place — restoring the config row alone would
+        // leave it referencing the NEW material.
         let mut previous_header_secrets: Vec<(String, secrecy::SecretString)> = Vec::new();
-        if headers.is_some() {
+        if headers_replaced {
             for value in previous_config.headers.values() {
                 let Some(secret_name) =
                     crate::tools::mcp::config::parse_header_secret_reference(value)
@@ -4106,26 +4131,11 @@ impl ExtensionManager {
                 }
             }
         }
-        let headers_replaced = headers.is_some();
         // Names of secrets CREATED (not overwritten) by this PATCH — every
         // later failure path must delete them in addition to restoring the
         // snapshot, or a failed request leaves fresh credentials behind.
         let mut created_new: Vec<String> = Vec::new();
-        if let Some(h) = headers {
-            config.headers = h;
-            // Pre-validate the assembled config BEFORE any secret upsert so a
-            // validation failure cannot leave overwritten secret material
-            // behind a config row that was never going to persist. Malformed
-            // submitted values are caller-correctable input → InvalidRequest
-            // (HTTP 400), not a host failure.
-            config
-                .validate()
-                .map_err(|e| ExtensionError::InvalidRequest(e.to_string()))?;
-            // Same treatment as install: replacement header credentials go to
-            // SecretsStore; the persisted row carries references only. A
-            // mid-loop failure must unwind exactly this call's writes:
-            // brand-new names (no prior snapshot) are DELETED, overwritten
-            // ones are restored from the snapshot.
+        if headers_replaced {
             let mut secret_journal = Vec::new();
             let secretize_result = self
                 .secretize_sensitive_headers(&mut config, user_id, &mut secret_journal)
@@ -4164,24 +4174,6 @@ impl ExtensionManager {
             })
             .filter(|name| !current_header_refs.contains(name))
             .collect();
-        // Tri-state: None → unchanged, Some(None) → clear, Some(Some(_)) → replace.
-        match oauth {
-            None => {}
-            Some(new_oauth) => {
-                // OAuth endpoint URLs are persisted verbatim too — same
-                // embedded-credential rejection as server.url.
-                if let Some(ref o) = new_oauth {
-                    for endpoint in [o.authorization_url.as_deref(), o.token_url.as_deref()]
-                        .into_iter()
-                        .flatten()
-                    {
-                        crate::tools::mcp::config::validate_url_free_of_credentials(endpoint)
-                            .map_err(ExtensionError::InvalidRequest)?;
-                    }
-                }
-                config.oauth = new_oauth;
-            }
-        }
 
         // Whether this user's client is live BEFORE we evict it — a live
         // server must come back up under the new config before we report
@@ -4276,6 +4268,32 @@ impl ExtensionManager {
                         error = %e,
                         "failed to delete superseded header secret"
                     );
+                }
+            }
+        }
+        // A changed URL or a cleared OAuth block invalidates the stored
+        // OAuth/DCR tokens: they were issued by (and for) the PREVIOUS
+        // backend, and the token secret names derive solely from the
+        // extension name — left in place they would be replayed against the
+        // new URL on the next authenticated call.
+        if url_changed || oauth_cleared {
+            let token_secret = previous_config.token_secret_name();
+            let stale_oauth_secrets = [
+                token_secret.clone(),
+                previous_config.refresh_token_secret_name(),
+                oauth_refresh_secret_name(&token_secret),
+                oauth_scopes_secret_name(&token_secret),
+            ];
+            for secret_name in stale_oauth_secrets {
+                match self.secrets.delete(user_id, &secret_name).await {
+                    Ok(_) => {}
+                    Err(e) => tracing::warn!(
+                        extension = %name,
+                        user_id = %user_id,
+                        secret = %secret_name,
+                        error = %e,
+                        "failed to delete stale OAuth secret after URL change/oauth clear"
+                    ),
                 }
             }
         }
