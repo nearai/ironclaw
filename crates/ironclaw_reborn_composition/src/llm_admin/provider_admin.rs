@@ -362,6 +362,34 @@ impl RebornProviderAdmin {
             })
     }
 
+    /// Re-resolve the API key for a provider previously reported by
+    /// [`Self::detect_env_llm`] — a second, targeted env re-read rather than
+    /// widening [`DetectedEnvLlm`] (which derives `Serialize` and must never
+    /// carry a raw secret) with the key. Used by onboard's env-accept path
+    /// (interactive confirm-yes and headless seed) to persist the key into
+    /// the encrypted secret store: the installed service only inherits
+    /// `IRONCLAW_REBORN_HOME`, not the operator's shell env, so a key left
+    /// only in env is invisible to it at boot.
+    ///
+    /// `Ok(None)` covers both "nothing resolvable from env" and "env now
+    /// resolves to a different provider than `provider_id`" (env changed
+    /// between the two calls) — callers must not persist a key under the
+    /// wrong provider id.
+    pub fn resolve_env_api_key(
+        &self,
+        provider_id: &str,
+    ) -> Result<Option<secrecy::SecretString>, RebornProviderAdminError> {
+        let providers_path = self.boot.home().providers_file_path();
+        let resolved =
+            ironclaw_llm::resolve_provider_config_from_env(Some(providers_path.as_path()))
+                .map_err(|source| RebornProviderAdminError::EnvDetection {
+                    source: Box::new(source),
+                })?;
+        Ok(resolved
+            .filter(|resolved| resolved.provider_id() == provider_id)
+            .and_then(|resolved| resolved.api_key().cloned()))
+    }
+
     /// Probe a candidate provider/key/model combination BEFORE it is
     /// persisted — onboard's `provision_via_menu` calls this before either
     /// durable write (secret store, then `[llm.default]`), so a rejected or

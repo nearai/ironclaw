@@ -91,10 +91,10 @@ pub(crate) trait LlmKeyStoreOpener {
 /// `ironclaw_reborn_composition::open_local_dev_secret_store`'s doc for why
 /// this is the same physical storage `serve` opens).
 #[cfg(all(feature = "libsql", feature = "root-llm-provider"))]
-pub(crate) struct LocalDevLlmKeyStoreOpener;
+pub(crate) struct EncryptedLlmKeyStoreOpener;
 
 #[cfg(all(feature = "libsql", feature = "root-llm-provider"))]
-impl LlmKeyStoreOpener for LocalDevLlmKeyStoreOpener {
+impl LlmKeyStoreOpener for EncryptedLlmKeyStoreOpener {
     fn open(&self, home_path: &Path) -> anyhow::Result<ironclaw_reborn_composition::LlmKeyStore> {
         let home_path = home_path.to_path_buf();
         crate::runtime::block_on_cli(async move {
@@ -108,7 +108,7 @@ impl LlmKeyStoreOpener for LocalDevLlmKeyStoreOpener {
 
 /// Feature-off stub: no `LlmKeyStore` type without both `libsql` and
 /// `root-llm-provider`. Exists so `execute()`'s unconditional
-/// `&LocalDevLlmKeyStoreOpener` call site compiles everywhere — the
+/// `&EncryptedLlmKeyStoreOpener` call site compiles everywhere — the
 /// feature-off `provision_llm_credentials` below never calls `open`.
 #[cfg(not(all(feature = "libsql", feature = "root-llm-provider")))]
 pub(crate) trait LlmKeyStoreOpener {
@@ -116,10 +116,10 @@ pub(crate) trait LlmKeyStoreOpener {
 }
 
 #[cfg(not(all(feature = "libsql", feature = "root-llm-provider")))]
-pub(crate) struct LocalDevLlmKeyStoreOpener;
+pub(crate) struct EncryptedLlmKeyStoreOpener;
 
 #[cfg(not(all(feature = "libsql", feature = "root-llm-provider")))]
-impl LlmKeyStoreOpener for LocalDevLlmKeyStoreOpener {
+impl LlmKeyStoreOpener for EncryptedLlmKeyStoreOpener {
     fn open(&self, _home_path: &Path) -> anyhow::Result<()> {
         Ok(())
     }
@@ -256,7 +256,7 @@ pub(crate) fn provision_llm_credentials(
     }
 
     if !prompts.is_interactive() {
-        return provision_headless_from_env(&admin);
+        return provision_headless_from_env(&store_root, store_opener, &admin);
     }
 
     match admin.detect_env_llm() {
@@ -266,6 +266,7 @@ pub(crate) fn provision_llm_credentials(
                 detected.provider_id
             );
             if prompts.confirm(&question)? {
+                persist_env_detected_key(&store_root, store_opener, &admin, &detected.provider_id)?;
                 let write_outcome = admin
                     .set_provider(&detected.provider_id, Some(detected.model.as_str()))
                     .map_err(|error| LlmCredentialPromptError::Other(error.into()))?;
@@ -289,10 +290,13 @@ pub(crate) fn provision_llm_credentials(
 /// else seeds nothing and returns a `Skipped*` outcome.
 #[cfg(all(feature = "libsql", feature = "root-llm-provider"))]
 fn provision_headless_from_env(
+    store_root: &Path,
+    store_opener: &dyn LlmKeyStoreOpener,
     admin: &ironclaw_reborn_composition::RebornProviderAdmin,
 ) -> Result<LlmCredentialProvisionOutcome, LlmCredentialPromptError> {
     match admin.detect_env_llm() {
         Ok(Some(detected)) => {
+            persist_env_detected_key(store_root, store_opener, admin, &detected.provider_id)?;
             let write_outcome = admin
                 .set_provider(&detected.provider_id, Some(detected.model.as_str()))
                 .map_err(|error| LlmCredentialPromptError::Other(error.into()))?;
@@ -308,6 +312,39 @@ fn provision_headless_from_env(
             },
         ),
     }
+}
+
+/// Persist the env-detected key for `provider_id` into the encrypted secret
+/// store — used by both the interactive confirm-yes and headless env-seed
+/// branches above. The installed service inherits only
+/// `IRONCLAW_REBORN_HOME`, not the shell env that ran onboard, so a key left
+/// only in the env var is invisible to it at boot; the store is the only
+/// channel that reaches the daemon. A no-op when the env no longer resolves
+/// a key for `provider_id` (keyless provider, or the env changed between
+/// `detect_env_llm` and this call) — never writes an empty/wrong value.
+#[cfg(all(feature = "libsql", feature = "root-llm-provider"))]
+fn persist_env_detected_key(
+    store_root: &Path,
+    store_opener: &dyn LlmKeyStoreOpener,
+    admin: &ironclaw_reborn_composition::RebornProviderAdmin,
+    provider_id: &str,
+) -> Result<(), LlmCredentialPromptError> {
+    let Some(key) = admin
+        .resolve_env_api_key(provider_id)
+        .map_err(|error| LlmCredentialPromptError::Other(error.into()))?
+    else {
+        return Ok(());
+    };
+    let store =
+        open_llm_key_store(store_root, store_opener).map_err(LlmCredentialPromptError::Other)?;
+    let provider_id = provider_id.to_string();
+    crate::runtime::block_on_cli(async move {
+        store
+            .put(&provider_id, key)
+            .await
+            .map_err(anyhow::Error::from)
+    })
+    .map_err(LlmCredentialPromptError::Other)
 }
 
 /// Create `store_root` (if missing) then open the encrypted key store there.
@@ -1014,7 +1051,7 @@ mod tests {
             home,
             context.boot_config(),
             &mut prompts,
-            &LocalDevLlmKeyStoreOpener,
+            &EncryptedLlmKeyStoreOpener,
             &StubOkProbe,
             false,
         )
@@ -1060,7 +1097,7 @@ mod tests {
             home,
             context.boot_config(),
             &mut second_prompts,
-            &LocalDevLlmKeyStoreOpener,
+            &EncryptedLlmKeyStoreOpener,
             &PanickingProbe,
             false,
         )
@@ -1099,7 +1136,7 @@ mod tests {
             home,
             context.boot_config(),
             &mut prompts,
-            &LocalDevLlmKeyStoreOpener,
+            &EncryptedLlmKeyStoreOpener,
             &StubOkProbe,
             false,
         )
@@ -1137,7 +1174,7 @@ mod tests {
             home,
             context.boot_config(),
             &mut second_prompts,
-            &LocalDevLlmKeyStoreOpener,
+            &EncryptedLlmKeyStoreOpener,
             &PanickingProbe,
             false,
         )
@@ -1180,7 +1217,7 @@ mod tests {
             home,
             context.boot_config(),
             &mut prompts,
-            &LocalDevLlmKeyStoreOpener,
+            &EncryptedLlmKeyStoreOpener,
             &StubOkProbe,
             false,
         )
@@ -1213,7 +1250,7 @@ mod tests {
             home,
             context.boot_config(),
             &mut prompts,
-            &LocalDevLlmKeyStoreOpener,
+            &EncryptedLlmKeyStoreOpener,
             &PanickingProbe,
             false,
         )
@@ -1239,7 +1276,7 @@ mod tests {
             home,
             context.boot_config(),
             &mut prompts,
-            &LocalDevLlmKeyStoreOpener,
+            &EncryptedLlmKeyStoreOpener,
             &PanickingProbe,
             false,
         )
@@ -1317,7 +1354,7 @@ mod tests {
             home,
             context.boot_config(),
             &mut prompts,
-            &LocalDevLlmKeyStoreOpener,
+            &EncryptedLlmKeyStoreOpener,
             &PanickingProbe,
             false,
         )
@@ -1353,7 +1390,7 @@ mod tests {
                 home,
                 context.boot_config(),
                 &mut prompts,
-                &LocalDevLlmKeyStoreOpener,
+                &EncryptedLlmKeyStoreOpener,
                 &PanickingProbe,
                 false,
             )
@@ -1387,7 +1424,7 @@ mod tests {
             home,
             context.boot_config(),
             &mut prompts,
-            &LocalDevLlmKeyStoreOpener,
+            &EncryptedLlmKeyStoreOpener,
             &StubOkProbe,
             false,
         )
@@ -1496,9 +1533,11 @@ mod tests {
     /// With a complete `openai` config in the environment (`OPENAI_API_KEY`
     /// set), an interactive session must ask to confirm using it, and "yes"
     /// must seed `[llm.default]` from the DETECTED provider/model via
-    /// `set_provider`, WITHOUT ever opening the secret store or calling
-    /// `api_key()`. The key stays resolvable from `OPENAI_API_KEY` at runtime
-    /// — see `provision_llm_credentials`'s doc.
+    /// `set_provider` AND persist the detected key into the encrypted secret
+    /// store. The installed service only inherits `IRONCLAW_REBORN_HOME`,
+    /// not the operator's shell env, so a key left only in `OPENAI_API_KEY`
+    /// is invisible to it at boot — the store is the only channel that
+    /// reaches the daemon. See `provision_llm_credentials`'s doc.
     #[test]
     fn provision_llm_credentials_seeds_from_env_on_interactive_confirm_yes() {
         let _env_guard = crate::runtime::test_env::lock_runtime_env();
@@ -1510,6 +1549,7 @@ mod tests {
         let (_tmp, context) = RebornCliContext::test_context();
         let home = context.boot_config().home();
         std::fs::create_dir_all(home.path()).expect("create reborn home");
+        seed_cached_master_key(home);
 
         let mut prompts = ConfirmingPromptSource {
             confirm_answer: true,
@@ -1521,7 +1561,7 @@ mod tests {
             home,
             context.boot_config(),
             &mut prompts,
-            &LocalDevLlmKeyStoreOpener,
+            &EncryptedLlmKeyStoreOpener,
             &PanickingProbe,
             false,
         );
@@ -1547,20 +1587,24 @@ mod tests {
         // Verify through the RUNTIME storage root (`<home>/local-dev`) — the same
         // db `serve` opens at boot; pins the onboard-write/serve-read convergence.
         let home_path = home.path().join("local-dev");
-        let has_key = crate::runtime::block_on_cli(async move {
+        let stored = crate::runtime::block_on_cli(async move {
             let store = ironclaw_reborn_composition::open_local_dev_secret_store(&home_path)
                 .await
                 .map_err(anyhow::Error::from)?;
             ironclaw_reborn_composition::LlmKeyStore::new(store)
-                .exists("openai")
+                .read("openai")
                 .await
                 .map_err(anyhow::Error::from)
         })
         .expect("read back through a fresh open of the same root");
-        assert!(
-            !has_key,
-            "an env-detected+confirmed seed must never write the secret store — the API key \
-             stays resolvable from its env var at runtime"
+        let material = stored.expect(
+            "an env-detected+confirmed seed must persist the key into the secret store — a \
+             service manager does not inherit the shell env, so the store is the only channel \
+             that reaches the daemon",
+        );
+        assert_eq!(
+            secrecy::ExposeSecret::expose_secret(&material),
+            "sk-env-detected-value"
         );
     }
 
@@ -1589,7 +1633,7 @@ mod tests {
             home,
             context.boot_config(),
             &mut prompts,
-            &LocalDevLlmKeyStoreOpener,
+            &EncryptedLlmKeyStoreOpener,
             &StubOkProbe,
             false,
         );
@@ -1610,7 +1654,10 @@ mod tests {
 
     /// A non-interactive session with a complete `openai` config in the
     /// environment must seed `[llm.default]` from it SILENTLY (no prompt
-    /// possible), without ever touching the secret store.
+    /// possible) AND persist the detected key into the encrypted secret
+    /// store — the installed service inherits only `IRONCLAW_REBORN_HOME`,
+    /// not the seeding shell's env, so the store is the only channel that
+    /// reaches the daemon.
     #[test]
     fn provision_llm_credentials_seeds_from_env_when_headless() {
         let _env_guard = crate::runtime::test_env::lock_runtime_env();
@@ -1622,13 +1669,14 @@ mod tests {
         let (_tmp, context) = RebornCliContext::test_context();
         let home = context.boot_config().home();
         std::fs::create_dir_all(home.path()).expect("create reborn home");
+        seed_cached_master_key(home);
 
         let mut prompts = HeadlessPromptSource;
         let outcome = provision_llm_credentials(
             home,
             context.boot_config(),
             &mut prompts,
-            &LocalDevLlmKeyStoreOpener,
+            &EncryptedLlmKeyStoreOpener,
             &PanickingProbe,
             false,
         );
@@ -1648,6 +1696,30 @@ mod tests {
         assert!(
             config_text.contains("provider_id = \"openai\""),
             "config.toml: {config_text}"
+        );
+
+        // Verify through the RUNTIME storage root (`<home>/local-dev`) — the
+        // same db `serve` opens at boot; pins the onboard-write/serve-read
+        // convergence for the headless env-seed path too.
+        let home_path = home.path().join("local-dev");
+        let stored = crate::runtime::block_on_cli(async move {
+            let store = ironclaw_reborn_composition::open_local_dev_secret_store(&home_path)
+                .await
+                .map_err(anyhow::Error::from)?;
+            ironclaw_reborn_composition::LlmKeyStore::new(store)
+                .read("openai")
+                .await
+                .map_err(anyhow::Error::from)
+        })
+        .expect("read back through a fresh open of the same root");
+        let material = stored.expect(
+            "a headless env-seed must persist the key into the secret store — a service \
+             manager does not inherit the shell env, so the store is the only channel that \
+             reaches the daemon",
+        );
+        assert_eq!(
+            secrecy::ExposeSecret::expose_secret(&material),
+            "sk-env-detected-value"
         );
     }
 
@@ -1672,7 +1744,7 @@ mod tests {
             home,
             context.boot_config(),
             &mut prompts,
-            &LocalDevLlmKeyStoreOpener,
+            &EncryptedLlmKeyStoreOpener,
             &PanickingProbe,
             false,
         );
@@ -1722,7 +1794,7 @@ mod tests {
             home,
             context.boot_config(),
             &mut prompts,
-            &LocalDevLlmKeyStoreOpener,
+            &EncryptedLlmKeyStoreOpener,
             &StubOkProbe,
             false,
         )
@@ -1778,7 +1850,7 @@ mod tests {
             home,
             context.boot_config(),
             &mut prompts,
-            &LocalDevLlmKeyStoreOpener,
+            &EncryptedLlmKeyStoreOpener,
             &probe,
             false,
         )
@@ -1854,7 +1926,7 @@ mod tests {
             home,
             context.boot_config(),
             &mut prompts,
-            &LocalDevLlmKeyStoreOpener,
+            &EncryptedLlmKeyStoreOpener,
             &probe,
             false,
         )
@@ -1905,7 +1977,7 @@ mod tests {
             home,
             context.boot_config(),
             &mut prompts,
-            &LocalDevLlmKeyStoreOpener,
+            &EncryptedLlmKeyStoreOpener,
             &probe,
             false,
         )
@@ -1967,7 +2039,7 @@ mod tests {
             home,
             context.boot_config(),
             &mut prompts,
-            &LocalDevLlmKeyStoreOpener,
+            &EncryptedLlmKeyStoreOpener,
             &probe,
             false,
         )

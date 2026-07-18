@@ -3695,10 +3695,14 @@ async fn resolve_local_dev_secret_master_key(
 /// caller in tests without mutating process-global env (which is racy under
 /// `cargo test`'s parallel harness).
 ///
-/// Resolution order: explicit/env key (validated up front) -> cached dotfile
-/// -> OS keychain (suppressed under test/CI, see
+/// Resolution order: cached dotfile -> explicit/env key -> OS keychain
+/// (suppressed under test/CI, see
 /// `ironclaw_secrets::keychain::get_master_key`) -> generate a fresh key and
-/// persist it to the dotfile. A keychain hit is returned as-is and never
+/// persist it to the dotfile. The env key is VALIDATED up front so a bad
+/// explicit value fails closed regardless of cached state, but a valid cached
+/// dotfile deliberately wins over it: the existing secret store is encrypted
+/// under the cached key, and silently switching to a different env key would
+/// make that store undecryptable. A keychain hit is returned as-is and never
 /// written to the dotfile — the dotfile and keychain are alternative sources
 /// for the same secret, not layered, so writing both would mean the two
 /// copies must agree forever.
@@ -3887,7 +3891,7 @@ fn write_local_dev_secret_master_key(path: &Path, key: &str) -> Result<(), Rebor
 /// `onboard`'s standalone keychain-provisioning step.
 #[cfg(any(feature = "libsql", feature = "postgres"))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum LocalDevKeychainMasterKeyOutcome {
+pub enum KeychainMasterKeyOutcome {
     /// The OS keychain already has a master key from a prior onboarding run.
     AlreadyPresent,
     /// A fresh key was generated and stored in the OS keychain.
@@ -3907,7 +3911,7 @@ pub enum LocalDevKeychainMasterKeyOutcome {
 /// - Never returns an error: unavailable/denied keychain reports `Suppressed`,
 ///   matching `resolve_local_dev_secret_master_key_with_env`'s env/dotfile fallback.
 #[cfg(any(feature = "libsql", feature = "postgres"))]
-pub async fn provision_local_dev_keychain_master_key() -> LocalDevKeychainMasterKeyOutcome {
+pub async fn provision_local_dev_keychain_master_key() -> KeychainMasterKeyOutcome {
     // `has_master_key()` collapses "no key yet" and "backend/permission/locked
     // error probing the keychain" into the same `false` — a false negative
     // here falls through to `generate` + `store` below, which overwrites
@@ -3917,18 +3921,18 @@ pub async fn provision_local_dev_keychain_master_key() -> LocalDevKeychainMaster
     // LocalDev, single-operator, run-once-by-hand; worst case is a
     // wrongly-regenerated key recoverable by re-entering one API key.
     if ironclaw_secrets::keychain::has_master_key().await {
-        return LocalDevKeychainMasterKeyOutcome::AlreadyPresent;
+        return KeychainMasterKeyOutcome::AlreadyPresent;
     }
     let key = ironclaw_secrets::keychain::generate_master_key();
     match ironclaw_secrets::keychain::store_master_key(&key).await {
-        Ok(()) => LocalDevKeychainMasterKeyOutcome::Provisioned,
+        Ok(()) => KeychainMasterKeyOutcome::Provisioned,
         Err(error) => {
             tracing::debug!(
                 %error,
                 "OS keychain store of local-dev secrets master key failed during onboarding; \
                  falling back to env/dotfile resolution"
             );
-            LocalDevKeychainMasterKeyOutcome::Suppressed
+            KeychainMasterKeyOutcome::Suppressed
         }
     }
 }

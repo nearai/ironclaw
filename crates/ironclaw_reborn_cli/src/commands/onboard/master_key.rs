@@ -63,13 +63,13 @@ pub(crate) fn provision_master_key(home: &RebornHome) -> anyhow::Result<MasterKe
     crate::runtime::block_on_cli(async move {
         let outcome = ironclaw_reborn_composition::provision_local_dev_keychain_master_key().await;
         Ok::<_, anyhow::Error>(match outcome {
-            ironclaw_reborn_composition::LocalDevKeychainMasterKeyOutcome::AlreadyPresent => {
+            ironclaw_reborn_composition::KeychainMasterKeyOutcome::AlreadyPresent => {
                 MasterKeyProvisionOutcome::KeychainAlreadyPresent
             }
-            ironclaw_reborn_composition::LocalDevKeychainMasterKeyOutcome::Provisioned => {
+            ironclaw_reborn_composition::KeychainMasterKeyOutcome::Provisioned => {
                 MasterKeyProvisionOutcome::Provisioned
             }
-            ironclaw_reborn_composition::LocalDevKeychainMasterKeyOutcome::Suppressed => {
+            ironclaw_reborn_composition::KeychainMasterKeyOutcome::Suppressed => {
                 MasterKeyProvisionOutcome::Suppressed
             }
         })

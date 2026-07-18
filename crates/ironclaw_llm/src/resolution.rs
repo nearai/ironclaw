@@ -56,6 +56,18 @@ impl ResolvedProviderConfig {
             Self::Dedicated(config) => &config.model,
         }
     }
+
+    /// The resolved API key, if the provider carries one — the same value
+    /// (from env) that would otherwise only ever reach a live provider
+    /// client, exposed so a caller (onboard's env-detect step) can persist
+    /// it into the encrypted secret store rather than leaving it only in
+    /// the process's shell env.
+    pub fn api_key(&self) -> Option<&SecretString> {
+        match self {
+            Self::Registry(config) => config.api_key.as_ref(),
+            Self::Dedicated(config) => config.api_key.as_ref(),
+        }
+    }
 }
 
 /// Provider selection overrides supplied by a composition root.

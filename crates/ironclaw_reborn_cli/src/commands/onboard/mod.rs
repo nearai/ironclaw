@@ -12,10 +12,12 @@ mod master_key;
 mod prompts;
 
 use llm_credentials::{
-    LiveLlmProbe, LlmCredentialProvisionOutcome, LocalDevLlmKeyStoreOpener,
+    EncryptedLlmKeyStoreOpener, LiveLlmProbe, LlmCredentialProvisionOutcome,
     provision_llm_credentials,
 };
 use master_key::{MasterKeyProvisionOutcome, provision_master_key};
+#[cfg(feature = "webui-v2-beta")]
+use prompts::PromptSource;
 use prompts::{LlmCredentialPromptError, StdinPromptSource};
 
 const ONBOARDING_MARKER_FILE: &str = ".onboard-completed.json";
@@ -68,7 +70,7 @@ impl OnboardCommand {
             home,
             context.boot_config(),
             &mut prompts,
-            &LocalDevLlmKeyStoreOpener,
+            &EncryptedLlmKeyStoreOpener,
             &LiveLlmProbe,
             self.force,
         ) {

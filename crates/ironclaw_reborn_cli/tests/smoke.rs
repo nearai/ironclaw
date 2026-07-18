@@ -4970,14 +4970,20 @@ fn onboard_nearai_then_serve_boots_with_cloud_base_url() {
 /// Companion to `onboard_nearai_then_serve_boots_with_cloud_base_url`: that
 /// test only pins the fully-keyless coded default, since `onboard`/`models
 /// set-provider` never stores a NearAI key non-interactively — a regression
-/// in `apply_startup_stored_llm_key` or its ordering relative to config
-/// resolution would still pass it. This test seeds an encrypted NearAI
-/// credential AFTER provider selection (mirroring
-/// `onboard_openai_key_then_serve_boots_with_env_var_unset`'s
-/// `seed_stored_llm_key` pattern for the required-key providers), with both
-/// NearAI env overrides removed, and asserts through the same resolved-LLM
+/// in the boot-time LLM reload (`RebornLlmReloadAdapter::reload`) or its
+/// ordering relative to config resolution would still pass it. This test
+/// seeds an encrypted NearAI credential AFTER provider selection, AT THE
+/// SAME RUNTIME STORAGE ROOT `serve` actually opens
+/// (`local_runtime_storage_root`, i.e. `<reborn_home>/local-dev` —
+/// `seed_stored_llm_key_at_runtime_root`, not the bare-root
+/// `seed_stored_llm_key`, which writes to a root `serve` never reads), with
+/// both NearAI env overrides removed. Asserts through the resolved-LLM
 /// boot-trace seam that the late-attached stored credential still resolves
-/// to the cloud endpoint — not just the coded default in isolation.
+/// to the cloud endpoint, AND — the discriminating half, since
+/// `default_nearai_base_url` is unconditionally cloud regardless of
+/// key-presence — through `RebornLlmReloadAdapter::reload`'s own
+/// `key_applied` debug trace that the seeded credential was actually found
+/// and applied to the live provider, not silently skipped.
 #[cfg(feature = "webui-v2-beta")]
 #[test]
 fn onboard_nearai_stored_key_then_serve_boots_with_cloud_base_url() {
@@ -5009,7 +5015,7 @@ fn onboard_nearai_stored_key_then_serve_boots_with_cloud_base_url() {
         String::from_utf8_lossy(&set_provider_output.stderr)
     );
 
-    seed_stored_llm_key(
+    seed_stored_llm_key_at_runtime_root(
         &reborn_home,
         "nearai",
         "session-smoke-test-stored-nearai-key",
@@ -5025,11 +5031,18 @@ fn onboard_nearai_stored_key_then_serve_boots_with_cloud_base_url() {
         .env("HOME", &home)
         .env("IRONCLAW_REBORN_HOME", &reborn_home)
         // No NEARAI_API_KEY, no NEARAI_BASE_URL: only the stored credential
-        // (applied post-resolution, via apply_startup_stored_llm_key) is
-        // present — proving the late-attached path also lands on cloud.
+        // (applied by the boot-time LLM reload) is present — proving the
+        // late-attached path also lands on cloud.
         .env_remove("NEARAI_API_KEY")
         .env_remove("NEARAI_BASE_URL")
-        .env("IRONCLAW_REBORN_LOG", "info,ironclaw_reborn=debug")
+        // `key_applied` is emitted by `ironclaw_reborn_composition`'s
+        // `RebornLlmReloadAdapter::reload`, not the `ironclaw_reborn_cli`
+        // binary crate — the default filter caps that crate at `info`, so
+        // it must be named explicitly.
+        .env(
+            "IRONCLAW_REBORN_LOG",
+            "info,ironclaw_reborn=debug,ironclaw_reborn_composition=debug",
+        )
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
@@ -5049,14 +5062,20 @@ fn onboard_nearai_stored_key_then_serve_boots_with_cloud_base_url() {
     );
     assert!(
         pre_banner_stderr.contains("base_url=https://cloud-api.near.ai"),
-        "a NearAI key stored after provider selection and applied via \
-         apply_startup_stored_llm_key must still resolve to the cloud endpoint; \
-         stderr: {pre_banner_stderr}"
+        "a NearAI key stored after provider selection and applied via the boot-time LLM reload \
+         must still resolve to the cloud endpoint; stderr: {pre_banner_stderr}"
     );
     assert!(
         !pre_banner_stderr.contains("base_url=https://private.near.ai"),
         "resolved-LLM trace must never carry the retired keyless-private default, even on the \
          late-stored-key path; stderr: {pre_banner_stderr}"
+    );
+    assert!(
+        pre_banner_stderr.contains("LLM reload applied to the live provider")
+            && pre_banner_stderr.contains("key_applied=true"),
+        "the seeded credential must actually be found and applied to the live provider — a \
+         discriminating signal independent of the unconditionally-cloud coded default: \
+         stderr: {pre_banner_stderr}"
     );
 }
 
