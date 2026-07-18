@@ -87,9 +87,8 @@ mod tests {
     use super::*;
     use ironclaw_host_api::{InvocationId, ResourceEstimate, ResourceScope, TenantId, UserId};
     use ironclaw_loop_host::ZeroCostTable;
-    use ironclaw_resources::{
-        InMemoryBudgetEventSink, InMemoryBudgetGateStore, InMemoryResourceGovernor, ResourceAccount,
-    };
+    use ironclaw_resources::test_support::in_memory_backed_budget_gate_store;
+    use ironclaw_resources::{InMemoryBudgetEventSink, InMemoryResourceGovernor, ResourceAccount};
     use rust_decimal_macros::dec;
 
     /// The helper installs the compiled-default $5 user cap on the
@@ -100,7 +99,7 @@ mod tests {
     #[tokio::test]
     async fn seeds_compiled_default_user_cap_on_first_touch() {
         let governor: Arc<dyn ResourceGovernor> = Arc::new(InMemoryResourceGovernor::new());
-        let gate_store: Arc<dyn BudgetGateStore> = Arc::new(InMemoryBudgetGateStore::new());
+        let gate_store: Arc<dyn BudgetGateStore> = Arc::new(in_memory_backed_budget_gate_store());
         let cost_table: Arc<dyn ModelCostTable> = Arc::new(ZeroCostTable);
         let event_sink: Arc<dyn BudgetEventSink> = Arc::new(InMemoryBudgetEventSink::new());
         let defaults = BudgetDefaults::compiled_defaults();

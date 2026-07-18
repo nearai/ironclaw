@@ -104,10 +104,14 @@ use ironclaw_product_workflow::{
 };
 use ironclaw_projects::ProjectRepository;
 use ironclaw_resources::InMemoryResourceGovernor;
+// `FilesystemBudgetGateStore` backs both the durable and the no-durable
+// (`<InMemoryBackend>`) budget-gate wiring — the deleted `InMemoryBudgetGateStore`
+// had no cfg gate either — so its import must be unconditional, not gated behind
+// the durable-backend features (arch-simplification §4.3).
+use ironclaw_resources::FilesystemBudgetGateStore;
 #[cfg(any(feature = "libsql", feature = "postgres"))]
 use ironclaw_resources::{
-    BroadcastBudgetEventSink, BudgetGateStore, FilesystemBudgetGateStore,
-    FilesystemResourceGovernor, ResourceGovernor,
+    BroadcastBudgetEventSink, BudgetGateStore, FilesystemResourceGovernor, ResourceGovernor,
 };
 // Used by both the durable (`<LocalDevRootFilesystem>`) and no-durable
 // (`<InMemoryBackend>`) run-state/approval aliases + builders, so the import is
@@ -2708,8 +2712,14 @@ async fn build_local_dev_store_graph(
         in_memory_budget_event_sink,
         broadcast_budget_event_sink,
     } = build_budget_sinks();
-    let budget_gate_store: Arc<dyn ironclaw_resources::BudgetGateStore> =
-        Arc::new(ironclaw_resources::InMemoryBudgetGateStore::new());
+    // §4.3: the deleted `InMemoryBudgetGateStore` is replaced by the one
+    // production `FilesystemBudgetGateStore` over an in-memory backend. Unlike
+    // the old scope-ignoring HashMap, this scopes each gate under the caller's
+    // tenant/user mount — strictly more correct for multi-tenant no-durable
+    // deployments — while remaining volatile (fresh `InMemoryBackend`).
+    let budget_gate_store: Arc<dyn ironclaw_resources::BudgetGateStore> = Arc::new(
+        FilesystemBudgetGateStore::new(crate::wrap_scoped(Arc::new(InMemoryBackend::new()))),
+    );
     let resource_governor: Arc<LocalDevResourceGovernor> =
         Arc::new(InMemoryResourceGovernor::new().with_event_sink(Arc::clone(&budget_event_sink)));
     let skill_mounts =
