@@ -323,10 +323,19 @@ mod tests {
             validate_shape(&ConfigKey::GoogleClientSecret, "GOCSPX-abc123"),
             ShapeVerdict::Ok
         );
-        assert!(matches!(
-            validate_shape(&ConfigKey::GoogleClientSecret, "old-style-secret"),
-            ShapeVerdict::Warn(_)
-        ));
+        let bogus_shaped_value = "old-style-secret-do-not-echo-me";
+        let ShapeVerdict::Warn(message) =
+            validate_shape(&ConfigKey::GoogleClientSecret, bogus_shaped_value)
+        else {
+            panic!("expected Warn");
+        };
+        // Mirrors the Reject-branch echo checks above (`google_client_id_...`,
+        // `google_redirect_uri_...`): the Warn branch must never echo the raw
+        // input either, only the Reject branch was previously pinned.
+        assert!(
+            !message.contains(bogus_shaped_value),
+            "warning message must not echo the rejected value: {message}"
+        );
     }
 
     #[test]

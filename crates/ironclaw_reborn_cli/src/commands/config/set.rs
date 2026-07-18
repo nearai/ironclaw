@@ -852,6 +852,21 @@ mod tests {
         assert!(
             crate::webui_token::webui_token_file_is_valid(home.path()).expect("query must succeed")
         );
+
+        // The rotated token file carries the bearer credential — it must
+        // be owner-read/write only, same as every other rotation/repair
+        // path in `webui_token.rs`.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let token_path = crate::webui_token::webui_token_file_path(home.path());
+            let mode = std::fs::metadata(&token_path)
+                .expect("read token file metadata")
+                .permissions()
+                .mode()
+                & 0o777;
+            assert_eq!(mode, 0o600, "rotated token file must be 0600, got {mode:o}");
+        }
     }
 
     /// Thermo MUST (rotate env-guard): rotating the token FILE while the

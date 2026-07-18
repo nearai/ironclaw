@@ -1860,6 +1860,26 @@ redirect_uri = "http://127.0.0.1:3000/oauth/google/callback"
             text.contains("redirect_uri = \"http://127.0.0.1:3000/oauth/google/callback\""),
             "config: {text}"
         );
+
+        // Idempotence: re-setting the same key with the same value must
+        // edit the existing `[google]` section in place, not append a
+        // second one.
+        update_google_oauth_config(
+            &path,
+            &GoogleOauthConfigUpdate {
+                client_id: GoogleFieldUpdate::Set("new-id.apps.googleusercontent.com".to_string()),
+                redirect_uri: GoogleFieldUpdate::Keep,
+                hosted_domain_hint: GoogleFieldUpdate::Keep,
+            },
+        )
+        .expect("update config again with the same value");
+        let text_after_repeat = fs::read_to_string(&path).expect("read config");
+        assert_eq!(
+            text_after_repeat.matches("[google]").count(),
+            1,
+            "re-setting the same key must not duplicate the [google] section header: \
+             {text_after_repeat}"
+        );
     }
 
     #[test]
@@ -1940,6 +1960,18 @@ redirect_uri = "http://127.0.0.1:3000/oauth/google/callback"
         assert_eq!(
             cfg.slack.expect("slack section present").enabled,
             Some(false)
+        );
+
+        // Idempotence: re-setting the same key with the same value must
+        // edit the existing `[slack]` section in place, not append a
+        // second one.
+        update_slack_enabled(&path, false).expect("update config again with the same value");
+        let text_after_repeat = fs::read_to_string(&path).expect("read config");
+        assert_eq!(
+            text_after_repeat.matches("[slack]").count(),
+            1,
+            "re-setting the same key must not duplicate the [slack] section header: \
+             {text_after_repeat}"
         );
     }
 
