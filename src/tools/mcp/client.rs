@@ -317,6 +317,14 @@ impl McpClient {
         // client (session creates/terminates) — they must agree for the
         // generation guard to accept this instance's writes.
         let session_owner = crate::tools::mcp::session::McpSessionGeneration::new();
+        // Register as the key's authorized creator — the newest instance
+        // wins, revoking any predecessor's creation right.
+        session_manager.authorize_generation(
+            &user_id_str,
+            &validated_name,
+            thread_id,
+            session_owner,
+        );
         let transport = Arc::new(
             HttpMcpTransport::new(config.url.clone(), validated_name.as_str())
                 .with_session_manager(
@@ -393,6 +401,11 @@ impl McpClient {
             .as_ref()
             .map(|c| c.headers.clone())
             .unwrap_or_default();
+        let user_id: String = user_id.into();
+        // Register as the key's authorized creator (newest instance wins).
+        if let Some(ref sm) = session_manager {
+            sm.authorize_generation(&user_id, &name, thread_id, session_owner);
+        }
 
         Self {
             transport,
@@ -402,7 +415,7 @@ impl McpClient {
             tools_cache: RwLock::new(None),
             session_manager,
             secrets,
-            user_id: user_id.into(),
+            user_id,
             server_config,
             custom_headers,
             thread_id,
@@ -422,6 +435,12 @@ impl McpClient {
     /// `new_with_transport()` instead. See `create_client_from_config()`.
     #[cfg(test)]
     pub fn with_session_manager(mut self, session_manager: Arc<McpSessionManager>) -> Self {
+        session_manager.authorize_generation(
+            &self.user_id,
+            &self.server_name,
+            self.thread_id,
+            self.session_owner,
+        );
         self.session_manager = Some(session_manager);
         self
     }
@@ -538,7 +557,16 @@ impl McpClient {
         // sharing the Arc is correct and avoids spawning a duplicate process.
         // The fork's generation nonce — shared by its transport and its
         // session-manager calls so the guard accepts this instance's writes.
+        // Registered as the thread key's authorized creator (newest fork wins).
         let fork_owner = crate::tools::mcp::session::McpSessionGeneration::new();
+        if let Some(ref sm) = self.session_manager {
+            sm.authorize_generation(
+                &self.user_id,
+                &self.server_name,
+                Some(thread_id),
+                fork_owner,
+            );
+        }
         let (forked_transport, initialized, next_id): (
             Arc<dyn McpTransport>,
             std::sync::Arc<tokio::sync::OnceCell<InitializeResult>>,
@@ -735,7 +763,12 @@ impl McpClient {
         }
         if let Some(ref session_manager) = self.session_manager
             && let Some(session_id) = session_manager
-                .get_session_id(&self.user_id, &self.server_name, self.thread_id)
+                .get_session_id(
+                    &self.user_id,
+                    &self.server_name,
+                    self.thread_id,
+                    self.session_owner,
+                )
                 .await
         {
             headers.insert("Mcp-Session-Id".to_string(), session_id);
@@ -923,7 +956,12 @@ impl McpClient {
             .get_or_try_init(|| async {
                 if let Some(ref session_manager) = self.session_manager
                     && session_manager
-                        .is_initialized(&self.user_id, &self.server_name, self.thread_id)
+                        .is_initialized(
+                            &self.user_id,
+                            &self.server_name,
+                            self.thread_id,
+                            self.session_owner,
+                        )
                         .await
                 {
                     return Ok(InitializeResult::default());
@@ -1098,7 +1136,18 @@ impl Clone for McpClient {
             server_config: self.server_config.clone(),
             custom_headers: self.custom_headers.clone(),
             thread_id: self.thread_id,
-            session_owner: crate::tools::mcp::session::McpSessionGeneration::new(),
+            session_owner: {
+                let generation = crate::tools::mcp::session::McpSessionGeneration::new();
+                if let Some(ref sm) = self.session_manager {
+                    sm.authorize_generation(
+                        &self.user_id,
+                        &self.server_name,
+                        self.thread_id,
+                        generation,
+                    );
+                }
+                generation
+            },
             initialized: std::sync::Arc::new(tokio::sync::OnceCell::new()),
             #[cfg(test)]
             constructor_kind: self.constructor_kind,

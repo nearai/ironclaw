@@ -716,11 +716,18 @@ mod tests {
         });
 
         let session_manager = Arc::new(McpSessionManager::new());
+        let owner_gen = crate::tools::mcp::session::McpSessionGeneration::new();
+        session_manager.authorize_generation(
+            "user-a",
+            &McpServerName::new("invalidsession").unwrap(),
+            None,
+            owner_gen,
+        );
         let transport = HttpMcpTransport::new(&url, "invalidsession").with_session_manager(
             Arc::clone(&session_manager),
             "user-a",
             None,
-            crate::tools::mcp::session::McpSessionGeneration::new(),
+            owner_gen,
         );
         let request = McpRequest::initialize(1);
 
@@ -732,7 +739,8 @@ mod tests {
                 .get_session_id(
                     "user-a",
                     &McpServerName::new("invalidsession").unwrap(),
-                    None
+                    None,
+                    owner_gen,
                 )
                 .await,
             None
@@ -766,20 +774,16 @@ mod tests {
 
         let session_manager = Arc::new(McpSessionManager::new());
         let server_name = McpServerName::new("errorsession").unwrap();
+        let owner_gen = crate::tools::mcp::session::McpSessionGeneration::new();
+        session_manager.authorize_generation("user-a", &server_name, None, owner_gen);
         session_manager
-            .get_or_create(
-                "user-a",
-                &server_name,
-                &url,
-                None,
-                crate::tools::mcp::session::McpSessionGeneration::new(),
-            )
+            .get_or_create("user-a", &server_name, &url, None, owner_gen)
             .await;
         let transport = HttpMcpTransport::new(&url, "errorsession").with_session_manager(
             Arc::clone(&session_manager),
             "user-a",
             None,
-            crate::tools::mcp::session::McpSessionGeneration::new(),
+            owner_gen,
         );
         let request = McpRequest::initialize(1);
 
@@ -788,7 +792,7 @@ mod tests {
         assert!(error.to_string().contains("500"));
         assert_eq!(
             session_manager
-                .get_session_id("user-a", &server_name, None)
+                .get_session_id("user-a", &server_name, None, owner_gen)
                 .await,
             None
         );

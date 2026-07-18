@@ -168,22 +168,18 @@ pub struct McpSessionManager {
     /// Maximum idle time before a session is considered stale (in seconds).
     max_idle_secs: u64,
 
-    /// Generations whose sessions were terminated — a RETIRED generation may
-    /// never create a session again. Without this, an evicted in-flight
-    /// client re-running its initialize path could resurrect a session after
-    /// cleanup, handing a replacement client an entry it does not own (and
-    /// therefore cannot update). Bounded ring (insertion order) so the set
-    /// cannot grow unboundedly.
-    retired: std::sync::Mutex<(
-        std::collections::VecDeque<McpSessionGeneration>,
-        std::collections::HashSet<McpSessionGeneration>,
-    )>,
+    /// The generation currently AUTHORIZED to create the session for each
+    /// key — an allowlist, not a tombstone denylist. A client instance
+    /// registers its generation at construction (newest instance wins);
+    /// `get_or_create` refuses creation for any other generation, so an
+    /// evicted in-flight client can never resurrect a session regardless of
+    /// how long it stalls. Revocation is therefore tied exactly to client
+    /// lifetime (authorization replaced when a successor is constructed,
+    /// removed on store-eviction cleanup) — no count- or time-based expiry.
+    /// Bounded by the number of live client instances, which the client
+    /// store already caps.
+    authorized: std::sync::Mutex<HashMap<McpSessionKey, McpSessionGeneration>>,
 }
-
-/// Cap on remembered retired generations. Old entries fall off the ring; a
-/// generation that outlives 4096 subsequent retirements belongs to a client
-/// long since dropped.
-const MAX_RETIRED_GENERATIONS: usize = 4096;
 
 impl McpSessionManager {
     /// Create a new session manager with default idle timeout (30 minutes).
@@ -191,10 +187,7 @@ impl McpSessionManager {
         Self {
             sessions: RwLock::new(HashMap::new()),
             max_idle_secs: 1800, // 30 minutes
-            retired: std::sync::Mutex::new((
-                std::collections::VecDeque::new(),
-                std::collections::HashSet::new(),
-            )),
+            authorized: std::sync::Mutex::new(HashMap::new()),
         }
     }
 
@@ -203,31 +196,25 @@ impl McpSessionManager {
         Self {
             sessions: RwLock::new(HashMap::new()),
             max_idle_secs,
-            retired: std::sync::Mutex::new((
-                std::collections::VecDeque::new(),
-                std::collections::HashSet::new(),
-            )),
+            authorized: std::sync::Mutex::new(HashMap::new()),
         }
     }
 
-    /// Record `generation` as retired (bounded ring). See the field docs.
-    fn retire_generation(&self, generation: McpSessionGeneration) {
-        let mut guard = self.retired.lock().expect("retired-set mutex poisoned"); // safety: no panics while holding this lock
-        let (order, set) = &mut *guard;
-        if set.insert(generation) {
-            order.push_back(generation);
-            if order.len() > MAX_RETIRED_GENERATIONS
-                && let Some(evicted) = order.pop_front()
-            {
-                set.remove(&evicted);
-            }
-        }
-    }
-
-    /// Whether `generation` has been retired.
-    fn is_retired(&self, generation: McpSessionGeneration) -> bool {
-        let guard = self.retired.lock().expect("retired-set mutex poisoned"); // safety: no panics while holding this lock
-        guard.1.contains(&generation)
+    /// Register `generation` as the authorized creator for the key. Called
+    /// from client construction — the NEWEST instance for a key wins, which
+    /// simultaneously revokes every earlier instance's creation right.
+    pub fn authorize_generation(
+        &self,
+        user_id: &str,
+        server_name: &McpServerName,
+        thread_id: Option<Uuid>,
+        generation: McpSessionGeneration,
+    ) {
+        let mut authorized = self
+            .authorized
+            .lock()
+            .expect("authorized-map mutex poisoned"); // safety: no panics while holding this lock
+        authorized.insert(Self::key(user_id, server_name, thread_id), generation);
     }
 
     fn key(user_id: &str, server_name: &McpServerName, thread_id: Option<Uuid>) -> McpSessionKey {
@@ -251,19 +238,33 @@ impl McpSessionManager {
         owner: McpSessionGeneration,
     ) -> McpSession {
         let key = Self::key(user_id, server_name, thread_id);
-        // A retired generation (its session was terminated on eviction) may
-        // never create or replace a session: an evicted in-flight client
-        // re-running initialize would otherwise resurrect an entry the
-        // replacement client cannot own. It receives a detached session that
-        // is NOT stored — its subsequent writes are guard-rejected anyway.
-        if self.is_retired(owner) {
-            let sessions = self.sessions.read().await;
-            return sessions
-                .get(&key)
-                .cloned()
-                .unwrap_or_else(|| McpSession::new(server_url, owner));
-        }
         let mut sessions = self.sessions.write().await;
+        // Creation-right check under the sessions write lock, atomic with the
+        // insert below. First-come: a key with NO authorization entry grants
+        // (and records) the right to the first creator. Once granted, only
+        // the authorized generation — replaced when a successor client is
+        // constructed, or set to an unmatchable marker on store eviction —
+        // may create or replace. An evicted/stale instance receives a
+        // detached session that is NOT stored; its writes are guard-rejected
+        // anyway.
+        {
+            let mut authorized = self
+                .authorized
+                .lock()
+                .expect("authorized-map mutex poisoned"); // safety: no panics while holding this lock
+            match authorized.get(&key) {
+                None => {
+                    authorized.insert(key.clone(), owner);
+                }
+                Some(g) if *g == owner => {}
+                Some(_) => {
+                    return sessions
+                        .get(&key)
+                        .cloned()
+                        .unwrap_or_else(|| McpSession::new(server_url, owner));
+                }
+            }
+        }
 
         if let Some(session) = sessions.get(&key) {
             // Check if session is stale
@@ -283,15 +284,21 @@ impl McpSessionManager {
     }
 
     /// Get the current session ID for `(user, server[, thread])`, if any.
+    ///
+    /// Generation-guarded READ: only the owning instance sees the id. A
+    /// stale/evicted client observing a successor's `Mcp-Session-Id` would
+    /// replay it to whatever endpoint that client still points at.
     pub async fn get_session_id(
         &self,
         user_id: &str,
         server_name: &McpServerName,
         thread_id: Option<Uuid>,
+        owner: McpSessionGeneration,
     ) -> Option<String> {
         let sessions = self.sessions.read().await;
         sessions
             .get(&Self::key(user_id, server_name, thread_id))
+            .filter(|s| s.owner == owner)
             .and_then(|s| s.session_id.clone())
     }
 
@@ -334,16 +341,20 @@ impl McpSessionManager {
         }
     }
 
-    /// Check if a session is initialized.
+    /// Check if a session is initialized. Generation-guarded READ (see
+    /// [`Self::get_session_id`]): a stale instance must not skip its own
+    /// handshake on the strength of a successor's session.
     pub async fn is_initialized(
         &self,
         user_id: &str,
         server_name: &McpServerName,
         thread_id: Option<Uuid>,
+        owner: McpSessionGeneration,
     ) -> bool {
         let sessions = self.sessions.read().await;
         sessions
             .get(&Self::key(user_id, server_name, thread_id))
+            .filter(|s| s.owner == owner)
             .map(|s| s.initialized)
             .unwrap_or(false)
     }
@@ -374,17 +385,19 @@ impl McpSessionManager {
         match owner {
             None => {
                 // Unconditional removal (server uninstall, admin cleanup):
-                // the owning client is gone for good — retire its generation.
-                if let Some(session) = sessions.remove(&key) {
-                    self.retire_generation(session.owner);
-                }
+                // the client lifecycle for this key ends — clear the
+                // authorization so no lingering instance can recreate.
+                sessions.remove(&key);
+                self.authorized
+                    .lock()
+                    .expect("authorized-map mutex poisoned") // safety: no panics while holding this lock
+                    .remove(&key);
             }
             Some(nonce) => {
                 // Guarded self-termination (the client's own reinitialize
-                // path): remove WITHOUT retiring, so the same instance can
-                // recreate its session. Store-eviction cleanup, which must
-                // bar the instance permanently, uses
-                // [`Self::terminate_and_retire`].
+                // path): remove WITHOUT touching authorization, so the same
+                // instance can recreate its session. Store-eviction cleanup
+                // uses [`Self::terminate_and_retire`].
                 if sessions.get(&key).is_some_and(|s| s.owner == nonce) {
                     sessions.remove(&key);
                 }
@@ -392,10 +405,11 @@ impl McpSessionManager {
         }
     }
 
-    /// Store-eviction termination: guarded removal PLUS permanent retirement
-    /// of `owner` — the evicted client instance may never create a session
-    /// again, even if a successor has already replaced the entry (in which
-    /// case nothing is removed but the retirement still applies).
+    /// Store-eviction termination: guarded removal PLUS revocation of the
+    /// evicted generation's creation right. If a successor has already been
+    /// authorized, its authorization is left intact (nothing is removed, and
+    /// the evicted generation already lost the right when the successor
+    /// registered).
     pub async fn terminate_and_retire(
         &self,
         user_id: &str,
@@ -408,7 +422,17 @@ impl McpSessionManager {
         if sessions.get(&key).is_some_and(|s| s.owner == owner) {
             sessions.remove(&key);
         }
-        self.retire_generation(owner);
+        let mut authorized = self
+            .authorized
+            .lock()
+            .expect("authorized-map mutex poisoned"); // safety: no panics while holding this lock
+        if authorized.get(&key) == Some(&owner) {
+            // Replace with an unmatchable marker rather than removing: an
+            // empty slot would fall back to first-come and let the evicted
+            // instance re-create. A successor client overwrites the marker
+            // when it registers at construction.
+            authorized.insert(key, McpSessionGeneration::new());
+        }
     }
 
     /// Snapshot the active `(user, server, thread_id)` triples.
@@ -561,13 +585,21 @@ mod tests {
             .get_or_create(USER_A, &notion, "https://mcp.notion.com", None, nil_gen())
             .await;
 
-        assert!(!manager.is_initialized(USER_A, &notion, None).await);
+        assert!(
+            !manager
+                .is_initialized(USER_A, &notion, None, nil_gen())
+                .await
+        );
 
         manager
             .mark_initialized(USER_A, &notion, None, nil_gen())
             .await;
 
-        assert!(manager.is_initialized(USER_A, &notion, None).await);
+        assert!(
+            manager
+                .is_initialized(USER_A, &notion, None, nil_gen())
+                .await
+        );
     }
 
     #[tokio::test]
@@ -632,23 +664,29 @@ mod tests {
             .await;
 
         assert_eq!(
-            manager.get_session_id(USER_A, &notion, None).await,
+            manager
+                .get_session_id(USER_A, &notion, None, nil_gen())
+                .await,
             Some("session-a".to_string())
         );
         assert_eq!(
-            manager.get_session_id(USER_B, &notion, None).await,
+            manager
+                .get_session_id(USER_B, &notion, None, nil_gen())
+                .await,
             Some("session-b".to_string())
         );
 
         manager.terminate(USER_A, &notion, None, None).await;
         assert!(
             manager
-                .get_session_id(USER_A, &notion, None)
+                .get_session_id(USER_A, &notion, None, nil_gen())
                 .await
                 .is_none()
         );
         assert_eq!(
-            manager.get_session_id(USER_B, &notion, None).await,
+            manager
+                .get_session_id(USER_B, &notion, None, nil_gen())
+                .await,
             Some("session-b".to_string()),
             "terminating user-A must not affect user-B's session"
         );
@@ -687,7 +725,7 @@ mod tests {
         let manager = McpSessionManager::new();
         assert!(
             manager
-                .get_session_id(USER_A, &sn("ghost"), None)
+                .get_session_id(USER_A, &sn("ghost"), None, nil_gen())
                 .await
                 .is_none()
         );
@@ -813,8 +851,10 @@ mod tests {
             "retired generation must not resurrect a session"
         );
 
-        // A replacement generation creates and owns a fresh session.
+        // A replacement generation (registered at construction, as production
+        // clients do) creates and owns a fresh session.
         let replacement_gen = test_gen();
+        manager.authorize_generation(USER_A, &server, None, replacement_gen);
         manager
             .get_or_create(USER_A, &server, "https://b.invalid", None, replacement_gen)
             .await;
@@ -829,7 +869,7 @@ mod tests {
             .await;
         assert_eq!(
             manager
-                .get_session_id(USER_A, &server, None)
+                .get_session_id(USER_A, &server, None, replacement_gen)
                 .await
                 .as_deref(),
             Some("sid-new"),
@@ -896,14 +936,14 @@ mod tests {
 
         assert_eq!(
             manager
-                .get_session_id(USER_A, &notion, Some(thread_a))
+                .get_session_id(USER_A, &notion, Some(thread_a), nil_gen())
                 .await,
             Some("sess-thread-a".to_string()),
             "Thread A's session must not be overwritten by Thread B's update"
         );
         assert_eq!(
             manager
-                .get_session_id(USER_A, &notion, Some(thread_b))
+                .get_session_id(USER_A, &notion, Some(thread_b), nil_gen())
                 .await,
             Some("sess-thread-b".to_string()),
             "Thread B's session must be independent from Thread A"
@@ -951,13 +991,15 @@ mod tests {
             .await;
 
         assert_eq!(
-            manager.get_session_id(USER_A, &notion, None).await,
+            manager
+                .get_session_id(USER_A, &notion, None, nil_gen())
+                .await,
             Some("sess-user-scoped".to_string()),
             "user-scoped slot must be independent from the thread-scoped slot"
         );
         assert_eq!(
             manager
-                .get_session_id(USER_A, &notion, Some(thread_a))
+                .get_session_id(USER_A, &notion, Some(thread_a), nil_gen())
                 .await,
             Some("sess-thread-scoped".to_string()),
             "thread-scoped slot must be independent from the user-scoped slot"
@@ -1056,13 +1098,15 @@ mod tests {
 
         assert!(
             manager
-                .get_session_id(USER_A, &notion, Some(thread_a))
+                .get_session_id(USER_A, &notion, Some(thread_a), nil_gen())
                 .await
                 .is_none(),
             "thread-scoped session must be removed"
         );
         assert_eq!(
-            manager.get_session_id(USER_A, &notion, None).await,
+            manager
+                .get_session_id(USER_A, &notion, None, nil_gen())
+                .await,
             Some("sess-user".to_string()),
             "user-scoped session must survive thread termination"
         );

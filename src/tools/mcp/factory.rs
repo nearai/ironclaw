@@ -459,7 +459,7 @@ mod tests {
         // Verify the session manager captured the session ID from the response
         // under the same `(user_id, server_name)` key the transport wrote with.
         let captured = session_manager
-            .get_session_id("test-user", &normalised_name, None)
+            .get_session_id("test-user", &normalised_name, None, client.session_owner())
             .await;
         assert_eq!(
             captured.as_deref(),

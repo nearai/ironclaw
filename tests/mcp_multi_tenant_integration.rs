@@ -768,6 +768,16 @@ mod tests {
             "stale wrapper for a tool absent from the new surface must be unregistered"
         );
 
+        // The OLD backend's bearer must never have reached the NEW endpoint —
+        // the boundary change deleted it before any reactivation attempt.
+        assert!(
+            mock_server_b
+                .recorded_requests()
+                .iter()
+                .all(|r| r.authorization.as_deref() != Some("Bearer token")),
+            "old backend's bearer token must never be sent to the replacement endpoint"
+        );
+
         mock_server_a.shutdown().await;
         mock_server_b.shutdown().await;
     }

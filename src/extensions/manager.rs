@@ -3925,6 +3925,33 @@ impl ExtensionManager {
     /// `journal` records the secret NAMES written so far — including by a
     /// call that then fails mid-loop — so callers can delete or restore
     /// exactly the writes this invocation performed.
+    /// Fail-closed variant of [`Self::delete_header_secrets`]: returns the
+    /// first deletion failure instead of warn-and-continue. Used where an
+    /// UNDELETED credential would be replayed against a new boundary
+    /// (pre-reactivation OAuth invalidation).
+    async fn delete_secrets_strict(
+        &self,
+        user_id: &str,
+        names: &[String],
+        extension: &str,
+    ) -> Result<(), ExtensionError> {
+        for secret_name in names {
+            if let Err(e) = self.secrets.delete(user_id, secret_name).await {
+                tracing::error!(
+                    extension = %extension,
+                    user_id = %user_id,
+                    secret = %secret_name,
+                    error = %e,
+                    "failed to delete stale credential; aborting"
+                );
+                return Err(ExtensionError::Config(format!(
+                    "failed to invalidate stale credential '{secret_name}'"
+                )));
+            }
+        }
+        Ok(())
+    }
+
     /// Delete header secrets by name (failed install/PATCH cleanup).
     /// (See also `validate_config_urls_free_of_credentials`, the shared
     /// URL-credential gate for install/PATCH.)
@@ -4257,6 +4284,10 @@ impl ExtensionManager {
                     previous_config.refresh_token_secret_name(),
                     oauth_refresh_secret_name(&token_secret),
                     oauth_scopes_secret_name(&token_secret),
+                    // DCR client credentials are a per-backend registration —
+                    // they die with the boundary change too.
+                    previous_config.client_id_secret_name(),
+                    previous_config.client_secret_secret_name(),
                 ];
                 for secret_name in &stale {
                     match self.secrets.get_decrypted(user_id, secret_name).await {
@@ -4319,9 +4350,27 @@ impl ExtensionManager {
         // factory treats an existing extension token as authentication and
         // would replay it against the new URL during the very reactivation
         // below. (Snapshotted BEFORE the config persist above, so a snapshot
-        // failure aborts with nothing committed.)
-        if let Some(ref stale) = stale_oauth_secret_names {
-            self.delete_header_secrets(user_id, stale, name).await;
+        // failure aborts with nothing committed.) Deletion is FAIL-CLOSED: an
+        // undeleted old bearer would be replayed against the replacement
+        // endpoint, so a deletion failure rolls the whole PATCH back.
+        if let Some(ref stale) = stale_oauth_secret_names
+            && let Err(delete_err) = self.delete_secrets_strict(user_id, stale, name).await
+        {
+            self.delete_header_secrets(user_id, &created_new, name)
+                .await;
+            self.restore_header_secrets(user_id, previous_header_secrets, name)
+                .await;
+            self.restore_header_secrets(user_id, oauth_secret_snapshot, name)
+                .await;
+            if let Err(rollback_err) = self.update_mcp_server(previous_config, user_id).await {
+                tracing::error!(
+                    extension = %name,
+                    user_id = %user_id,
+                    error = %rollback_err,
+                    "rollback persist failed after stale-credential deletion failure"
+                );
+            }
+            return Err(delete_err);
         }
 
         // Evict the cached McpClient so the next activation re-connects
