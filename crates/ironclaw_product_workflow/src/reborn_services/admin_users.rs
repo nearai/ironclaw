@@ -3,7 +3,7 @@
 //! The [`AdminUserService`] port is defined here (the contract owner) and
 //! implemented by an adapter in `ironclaw_reborn_composition` that wraps the
 //! identity user-directory and the per-user secret store. Defining the port
-//! here keeps `ironclaw_product_workflow` and `ironclaw_webui_v2` free of a
+//! here keeps `ironclaw_product_workflow` and `ironclaw_webui` free of a
 //! dependency on `ironclaw_reborn_identity` (the crate boundary the
 //! architecture tests enforce) — this is dependency inversion, a single-impl
 //! trait by design.

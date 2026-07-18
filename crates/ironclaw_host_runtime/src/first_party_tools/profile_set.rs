@@ -63,7 +63,7 @@ mod tests {
     };
     use serde_json::{Map, Value, json};
 
-    use crate::{FirstPartyCapabilityRequest, InvocationServices, LocalHostProcessPort};
+    use crate::{FirstPartyCapabilityRequest, HostProcessPort, InvocationServices};
 
     use super::*;
 
@@ -119,6 +119,7 @@ mod tests {
         mounts: Option<MountView>,
     ) -> FirstPartyCapabilityRequest {
         FirstPartyCapabilityRequest {
+            run_id: None,
             capability_id: CapabilityId::new(PROFILE_SET_CAPABILITY_ID).unwrap(),
             scope: sample_scope(),
             authenticated_actor_user_id: None,
@@ -129,10 +130,11 @@ mod tests {
                 runtime_http_egress: None,
                 tool_call_http_egress: None,
                 runtime_secret_material_stager: None,
-                process: Arc::new(LocalHostProcessPort::new()),
+                process: Arc::new(HostProcessPort::new()),
                 secret_store: None,
                 audit_sink: None,
                 unsafe_raw_diagnostics_allowed: false,
+                post_edit_check: None,
             },
             input,
         }

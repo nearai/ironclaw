@@ -22,9 +22,6 @@ from scripts.reborn_webui_v2_live_qa.root_filesystem import (
     _write_new_secret_file_0600,
 )
 
-ROOT = Path(__file__).resolve().parents[2]
-
-
 def _materialize_telegram_env_for_reborn(
     extra_env: dict[str, str] | None = None,
 ) -> tuple[dict[str, str], dict[str, object]]:
@@ -77,28 +74,20 @@ def _telegram_preflight(
     *,
     requires_telegram: bool,
 ) -> dict[str, object]:
-    channels_src = ROOT / "channels-src" / "telegram"
-    built_component = channels_src / "telegram.wasm"
-    wasip2_release_component = (
-        channels_src
-        / "target"
-        / "wasm32-wasip2"
-        / "release"
-        / "telegram_channel.wasm"
-    )
-    wasip1_release_component = (
-        channels_src
-        / "target"
-        / "wasm32-wasip1"
-        / "release"
-        / "telegram_channel.wasm"
-    )
-    component_candidates = [
-        built_component,
-        wasip2_release_component,
-        wasip1_release_component,
-    ]
-    capabilities = channels_src / "telegram.capabilities.json"
+    """Live prerequisites for the reborn `telegram` channel extension.
+
+    The shipped model is admin setup via
+    ``PUT /api/webchat/v2/channels/telegram/setup`` with the bot token as the
+    only secret (the webhook shared secret is minted server-side per save
+    revision and ``setWebhook`` registers
+    ``/webhooks/extensions/telegram/updates``), then per-user pairing via
+    ``/api/webchat/v2/channels/telegram/pairing``. The bot token env is
+    therefore the credential prerequisite; the v1 monolith WASM channel
+    artifacts (``channels-src/telegram``) are no longer part of the reborn
+    lane. ``TELEGRAM_WEBHOOK_SECRET`` presence is reported for diagnostics
+    only — the reborn host never consumes an operator-supplied webhook
+    secret.
+    """
     copied_home_mentions = False
     db_path = reborn_home / "local-dev" / "reborn-local-dev.db"
     if db_path.exists():
@@ -109,18 +98,10 @@ def _telegram_preflight(
             ).fetchone()
         copied_home_mentions = bool(row and int(row[0]) > 0)
     bot_token_present = _env_present("TELEGRAM_BOT_TOKEN", extra_env)
-    component_present = any(path.exists() for path in component_candidates)
-    ready = bool(bot_token_present and capabilities.exists() and component_present)
+    ready = bool(bot_token_present)
     reason = None
     if not ready:
-        missing: list[str] = []
-        if not bot_token_present:
-            missing.append("TELEGRAM_BOT_TOKEN")
-        if not capabilities.exists():
-            missing.append("channels-src/telegram/telegram.capabilities.json")
-        if not component_present:
-            missing.append("built telegram WASM component")
-        reason = "missing Telegram live prerequisites: " + ", ".join(missing)
+        reason = "missing Telegram live prerequisites: TELEGRAM_BOT_TOKEN"
     return {
         "requires_telegram": requires_telegram,
         "ready": ready,
@@ -128,13 +109,6 @@ def _telegram_preflight(
         "bot_token_present": bot_token_present,
         "webhook_secret_present": _env_present("TELEGRAM_WEBHOOK_SECRET", extra_env),
         "chat_id_present": _env_present("REBORN_WEBUI_V2_LIVE_QA_TELEGRAM_CHAT_ID", extra_env),
-        "capabilities_present": capabilities.exists(),
-        "built_component_present": component_present,
-        "built_component_candidates": [
-            str(path)
-            for path in component_candidates
-            if path.exists()
-        ],
         "copied_reborn_home_mentions_telegram": copied_home_mentions,
         "env_materialization": env_materialization,
     }

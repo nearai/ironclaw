@@ -27,10 +27,11 @@ regex_activation_enabled = true
 env_token_var = "IRONCLAW_REBORN_WEBUI_TOKEN"
 env_user_id_var = "IRONCLAW_REBORN_WEBUI_USER_ID"
 
-[llm.default]
-provider_id = "nearai"
-model = "deepseek-ai/DeepSeek-V4-Flash"
-api_key_env = "NEARAI_API_KEY"
+# No [llm.default] slot shipped (intentional):
+# - config.toml is sole source of truth for [llm.default], set only explicitly
+# - Railway env (NEARAI_API_KEY et al) is complete, so env-fallback
+#   (resolve_reborn_runtime_llm) resolves the LLM with no slot needed
+# - existing volumes with the old baked-in stub: see entrypoint.sh migration
 
 [slack]
 enabled = false

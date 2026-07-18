@@ -22,12 +22,12 @@ use ironclaw_host_api::{
     CapabilityId, ExtensionId, InvocationId, MissionId, ProjectId, RuntimeKind, TenantId, ThreadId,
     UserId,
 };
+use ironclaw_outbound::test_support::in_memory_backed_outbound_state_store;
 use ironclaw_outbound::{
-    AdvanceSubscriptionCursorRequest, InMemoryOutboundStateStore, LoadSubscriptionCursorRequest,
-    OutboundDeliveryAttempt, OutboundError, OutboundPushKind, OutboundPushPlan,
-    OutboundPushTargetRequest, OutboundStateStore, ProjectionSubscriptionRecord,
-    ProjectionUpdateRef, ThreadNotificationPolicy, ThreadNotificationTarget,
-    UpdateDeliveryStatusRequest,
+    AdvanceSubscriptionCursorRequest, LoadSubscriptionCursorRequest, OutboundDeliveryAttempt,
+    OutboundError, OutboundPushKind, OutboundPushPlan, OutboundPushTargetRequest,
+    OutboundStateStore, ProjectionSubscriptionRecord, ProjectionUpdateRef, ThreadNotificationPolicy,
+    ThreadNotificationTarget, UpdateDeliveryStatusRequest,
 };
 use ironclaw_turns::{ReplyTargetBindingRef, TurnActor, TurnScope};
 use tokio::{

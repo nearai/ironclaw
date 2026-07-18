@@ -327,7 +327,7 @@ Rules:
 V1 backend types:
 
 ```text
-LocalFilesystem
+DiskFilesystem
 PostgresRootFilesystem   // feature = "postgres"
 LibSqlRootFilesystem     // feature = "libsql"
 Memory/test backends as needed

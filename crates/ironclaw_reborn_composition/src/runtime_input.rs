@@ -170,6 +170,12 @@ impl ResolvedRebornLlm {
         &self.model
     }
 
+    /// Base URL of the backend `serve` actually boots with, when the
+    /// backend has one. See [`ironclaw_llm::LlmConfig::active_base_url`].
+    pub fn base_url(&self) -> Option<String> {
+        self.config.active_base_url()
+    }
+
     pub fn from_llm_config(config: ironclaw_llm::LlmConfig) -> Self {
         Self {
             provider_id: config.active_provider_id(),

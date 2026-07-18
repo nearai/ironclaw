@@ -8441,10 +8441,15 @@ fn services_with_operator_approval_config() -> RebornServices {
 
 fn services_with_operator_approval_config_parts() -> (
     RebornServices,
-    Arc<ironclaw_approvals::InMemoryPersistentApprovalPolicyStore>,
+    Arc<
+        ironclaw_approvals::FilesystemPersistentApprovalPolicyStore<
+            ironclaw_filesystem::InMemoryBackend,
+        >,
+    >,
 ) {
-    let persistent_policies =
-        Arc::new(ironclaw_approvals::InMemoryPersistentApprovalPolicyStore::new());
+    let persistent_policies = Arc::new(
+        ironclaw_approvals::test_support::in_memory_backed_persistent_approval_policy_store(),
+    );
     let policy_store: Arc<dyn PersistentApprovalPolicyStore> = persistent_policies.clone();
     let services = services_with_operator_approval_config_policy_store(policy_store);
     (services, persistent_policies)
@@ -8454,7 +8459,7 @@ fn services_with_operator_approval_config_policy_store(
     persistent_policies: Arc<dyn PersistentApprovalPolicyStore>,
 ) -> RebornServices {
     services_with_operator_approval_config_stores(
-        Arc::new(ironclaw_approvals::InMemoryAutoApproveSettingStore::new()),
+        Arc::new(ironclaw_approvals::test_support::in_memory_backed_auto_approve_setting_store()),
         persistent_policies,
     )
 }
@@ -8468,7 +8473,10 @@ fn services_with_operator_approval_config_stores(
         Arc::new(FakeTurnCoordinator::default()),
     )
     .with_operator_approval_config(
-        Arc::new(ironclaw_approvals::InMemoryToolPermissionOverrideStore::new()),
+        Arc::new(
+            ironclaw_approvals::test_support::in_memory_backed_capability_permission_override_store(
+            ),
+        ),
         auto_approve,
         persistent_policies.clone(),
         Arc::new(StaticOperatorToolCatalogForTest {
@@ -8604,7 +8612,9 @@ async fn global_auto_approve_enabled_scopes_read_by_caller_tenant_and_user() {
     let auto_approve = Arc::new(RecordingAutoApproveSettingStore::default());
     let services = services_with_operator_approval_config_stores(
         auto_approve.clone(),
-        Arc::new(ironclaw_approvals::InMemoryPersistentApprovalPolicyStore::new()),
+        Arc::new(
+            ironclaw_approvals::test_support::in_memory_backed_persistent_approval_policy_store(),
+        ),
     );
     let caller = WebUiAuthenticatedCaller::new(
         TenantId::new("tenant-scope").expect("tenant"),

@@ -503,6 +503,7 @@ where
             capability_id: request.capability_id.clone(),
             scope: request.scope.clone(),
             authenticated_actor_user_id: request.authenticated_actor_user_id,
+            run_id: request.run_id,
             estimate: request.estimate,
             mounts: request.mounts,
             services,

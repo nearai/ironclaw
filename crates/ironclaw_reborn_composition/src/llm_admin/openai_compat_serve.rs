@@ -1,3 +1,4 @@
+// arch-exempt: large_file, §4.4.1 mechanical inline of the redundant LocalDevRootFilesystem alias -> CompositeRootFilesystem (de-prefix, no logic change), plan #6168
 //! Reborn host composition for OpenAI-compatible API routes.
 //!
 //! The route crate owns DTOs and HTTP handlers, but the Reborn host owns the
@@ -70,7 +71,7 @@ use sha2::{Digest, Sha256};
 
 use crate::RebornBuildError;
 use crate::RebornRuntime;
-use crate::webui::webui_serve::ProtectedRouteMount;
+use crate::webui::route_mounts::ProtectedRouteMount;
 
 #[cfg(test)]
 mod tests;
@@ -1581,9 +1582,9 @@ fn thread_scope_from_projection_read(
 }
 
 fn openai_compat_ledger_filesystem(
-    root: Arc<crate::factory::LocalDevRootFilesystem>,
+    root: Arc<ironclaw_filesystem::CompositeRootFilesystem>,
     tenant_id: &TenantId,
-) -> Result<Arc<ScopedFilesystem<crate::factory::LocalDevRootFilesystem>>, RebornBuildError> {
+) -> Result<Arc<ScopedFilesystem<ironclaw_filesystem::CompositeRootFilesystem>>, RebornBuildError> {
     Ok(Arc::new(ScopedFilesystem::with_fixed_view(
         root,
         MountView::new(vec![MountGrant::new(
