@@ -4369,6 +4369,11 @@ impl ExtensionManager {
                     error = %rollback_err,
                     "rollback persist failed after stale-credential deletion failure"
                 );
+                return Err(ExtensionError::Config(format!(
+                    "stale-credential invalidation failed AND rolling back the config also \
+                     failed — the updated config remains persisted; re-PATCH or re-activate \
+                     to recover. deletion error: {delete_err}; rollback error: {rollback_err}"
+                )));
             }
             return Err(delete_err);
         }

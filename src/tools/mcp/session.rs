@@ -258,10 +258,9 @@ impl McpSessionManager {
                 }
                 Some(g) if *g == owner => {}
                 Some(_) => {
-                    return sessions
-                        .get(&key)
-                        .cloned()
-                        .unwrap_or_else(|| McpSession::new(server_url, owner));
+                    // ALWAYS detached — cloning the stored successor session
+                    // would hand its Mcp-Session-Id to a stale instance.
+                    return McpSession::new(server_url, owner);
                 }
             }
         }
@@ -385,13 +384,16 @@ impl McpSessionManager {
         match owner {
             None => {
                 // Unconditional removal (server uninstall, admin cleanup):
-                // the client lifecycle for this key ends — clear the
-                // authorization so no lingering instance can recreate.
+                // the client lifecycle for this key ends. Swap in an
+                // unmatchable marker rather than clearing — an empty slot
+                // would reopen first-come and let any lingering old client
+                // Arc re-create. A future legitimate client re-registers at
+                // construction and overwrites the marker.
                 sessions.remove(&key);
                 self.authorized
                     .lock()
                     .expect("authorized-map mutex poisoned") // safety: no panics while holding this lock
-                    .remove(&key);
+                    .insert(key, McpSessionGeneration::new());
             }
             Some(nonce) => {
                 // Guarded self-termination (the client's own reinitialize
