@@ -1714,9 +1714,11 @@ fn config_set_google_client_id_then_status_reports_partial_from_config_file() {
     );
     let stdout = String::from_utf8_lossy(&status.stdout);
     assert!(
-        stdout.contains("google_oauth") && stdout.contains("missing redirect_uri"),
+        stdout.contains("google_oauth")
+            && stdout.contains("missing google.redirect_uri")
+            && stdout.contains("config set google.redirect_uri"),
         "status must reflect the [google] config.toml section config set wrote, not just env \
-         vars: {stdout}"
+         vars, and must give the actionable fix command: {stdout}"
     );
 }
 
