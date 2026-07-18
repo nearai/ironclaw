@@ -25,9 +25,9 @@
 //! composition keeps the default bounded retention via plain
 //! [`FilesystemBudgetGateStore::new`].
 //!
-//! Gated behind `#[cfg(any(test, feature = "test-support"))]` so nothing here
-//! ships in production binaries; downstream crates enable the `test-support`
-//! feature from their `[dev-dependencies]`.
+//! Gated behind `#[cfg(any(test, feature = "test-support"))]` and disabled by
+//! default. Downstream crates should enable `test-support` only from their
+//! `[dev-dependencies]`.
 
 use std::sync::Arc;
 
