@@ -639,6 +639,25 @@ pub fn validate_url_free_of_credentials(url: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// Whether an OAuth `extra_params` KEY names credential material. The
+/// programmatic install/PATCH surface rejects such parameters — their values
+/// would be persisted verbatim in the unencrypted `mcp_servers` setting and
+/// copied into auth descriptors. Same substring heuristic as the URL
+/// query-key check (over-matching is acceptable; the caller gets a 400).
+pub fn is_credential_oauth_param(key: &str) -> bool {
+    let k = key.to_ascii_lowercase();
+    k == "sig"
+        || k.contains("token")
+        || k.contains("key")
+        || k.contains("secret")
+        || k.contains("password")
+        || k.contains("passwd")
+        || k.contains("auth")
+        || k.contains("credential")
+        || k.contains("signature")
+        || k.contains("assertion")
+}
+
 /// Whether a header NAME is demonstrably non-sensitive transport metadata.
 ///
 /// The programmatic install/PATCH surface secretizes header values BY

@@ -662,6 +662,18 @@ fn validate_config_urls_free_of_credentials(config: &McpServerConfig) -> Result<
         {
             crate::tools::mcp::config::validate_url_free_of_credentials(endpoint)?;
         }
+        // extra_params are persisted verbatim in the unencrypted settings row
+        // and copied into auth descriptors — credential-named parameters are
+        // rejected outright (secretization covers headers only).
+        for key in o.extra_params.keys() {
+            if crate::tools::mcp::config::is_credential_oauth_param(key) {
+                return Err(format!(
+                    "OAuth extra parameter '{key}' looks credential-bearing; \
+                     it would be persisted in plaintext — use the OAuth flow \
+                     or headers for credentials instead"
+                ));
+            }
+        }
     }
     Ok(())
 }
