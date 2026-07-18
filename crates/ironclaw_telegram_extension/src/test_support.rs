@@ -4,7 +4,7 @@ use std::sync::{Arc, Mutex};
 use async_trait::async_trait;
 use ironclaw_authorization::GrantAuthorizer;
 use ironclaw_extensions::ExtensionRegistry;
-use ironclaw_filesystem::LocalFilesystem;
+use ironclaw_filesystem::DiskFilesystem;
 use ironclaw_filesystem::{
     BackendCapabilities, CasExpectation, DirEntry, Entry, FileStat, FilesystemError,
     FilesystemOperation, InMemoryBackend, RecordVersion, RootFilesystem, ScopedFilesystem,
@@ -319,7 +319,7 @@ fn network_response(status: u16, body: Vec<u8>) -> NetworkHttpResponse {
 fn host_egress_port(network: impl NetworkHttpEgress + 'static) -> HostRuntimeHttpEgressPort {
     let services = HostRuntimeServices::new(
         Arc::new(ExtensionRegistry::new()),
-        Arc::new(LocalFilesystem::new()),
+        Arc::new(DiskFilesystem::new()),
         Arc::new(InMemoryResourceGovernor::new()),
         Arc::new(GrantAuthorizer::new()),
         ironclaw_processes::in_memory_backed_process_services(),

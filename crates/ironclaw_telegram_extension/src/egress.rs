@@ -332,7 +332,7 @@ mod tests {
     use async_trait::async_trait;
     use ironclaw_authorization::GrantAuthorizer;
     use ironclaw_extensions::ExtensionRegistry;
-    use ironclaw_filesystem::{InMemoryBackend, LocalFilesystem};
+    use ironclaw_filesystem::{DiskFilesystem, InMemoryBackend};
     use ironclaw_host_runtime::{CapabilitySurfaceVersion, HostRuntimeServices};
     use ironclaw_network::{
         NetworkHttpEgress, NetworkHttpError, NetworkHttpRequest, NetworkHttpResponse, NetworkUsage,
@@ -419,14 +419,14 @@ mod tests {
     }
 
     fn test_host_runtime_services() -> HostRuntimeServices<
-        LocalFilesystem,
+        DiskFilesystem,
         InMemoryResourceGovernor,
         FilesystemProcessStore<InMemoryBackend>,
         FilesystemProcessResultStore<InMemoryBackend>,
     > {
         HostRuntimeServices::new(
             Arc::new(ExtensionRegistry::new()),
-            Arc::new(LocalFilesystem::new()),
+            Arc::new(DiskFilesystem::new()),
             Arc::new(InMemoryResourceGovernor::new()),
             Arc::new(GrantAuthorizer::new()),
             ironclaw_processes::in_memory_backed_process_services(),
