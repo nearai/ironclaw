@@ -17,7 +17,7 @@
 //! consumer. Keeping the policy here (tested, in lockstep with the failure
 //! taxonomy) means the scheduler wiring is mechanical.
 
-use crate::FailureLane;
+use crate::failure_lane::FailureLane;
 
 /// How a terminal run failure should be retried.
 ///
@@ -115,7 +115,7 @@ pub fn retry_disposition(category: &str, retryable: bool) -> RetryDisposition {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{ALL_RUN_FAILURE_CATEGORIES, failure_lane};
+    use crate::failure_lane::{ALL_RUN_FAILURE_CATEGORIES, failure_lane};
 
     #[test]
     fn no_resumable_checkpoint_is_no_retry() {

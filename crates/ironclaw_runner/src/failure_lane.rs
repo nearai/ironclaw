@@ -136,7 +136,7 @@ pub const ALL_RUN_FAILURE_CATEGORIES: &[&str] = &[
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::reborn_failure_summary_for_category;
+    use crate::failure_summary::reborn_failure_summary_for_category;
 
     #[test]
     fn failure_lane_is_retriable_when_retryable_else_explainable() {

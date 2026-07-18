@@ -100,10 +100,13 @@ pub use ironclaw_product_workflow::{
     LifecycleExtensionSource, LifecycleExtensionSummary, LifecyclePhase, LifecycleProductPayload,
     LifecycleProductResponse, LifecycleSearchExtensionSummary,
 };
-pub use ironclaw_runner::failure_lane::{ALL_RUN_FAILURE_CATEGORIES, FailureLane, failure_lane};
-pub use ironclaw_runner::failure_summary::reborn_failure_summary_for_category;
-pub use ironclaw_runner::retry_disposition::{RetryDisposition, retry_disposition};
 pub use ironclaw_runner::runtime::DEFAULT_TURN_RUNNER_WORKER_COUNT;
+// Re-exported for `ironclaw_reborn_cli` (`runtime/mod.rs` turn-failure display):
+// the CLI consumes composition as its facade and must not grow a direct
+// `ironclaw_runner` edge for one summary helper. All other run-failure
+// classifier items moved to `ironclaw_runner::{failure_lane, failure_summary,
+// retry_disposition}` with consumers repointed (no path-preservation shims).
+pub use ironclaw_runner::failure_summary::reborn_failure_summary_for_category;
 #[cfg(any(feature = "libsql", feature = "postgres"))]
 pub use ironclaw_runtime_policy::{
     ResolveRequest as RuntimePolicyResolveRequest, resolve as resolve_runtime_policy,

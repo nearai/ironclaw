@@ -29,9 +29,6 @@ pub mod retry_disposition;
 // ironclaw_reborn_composition; they classify runner-owned categories). Re-exported
 // at the crate root so intra-cluster `crate::FailureLane` refs resolve and
 // composition can re-export them through its facade for the CLI.
-pub use failure_lane::{ALL_RUN_FAILURE_CATEGORIES, FailureLane, failure_lane};
-pub use failure_summary::reborn_failure_summary_for_category;
-pub use retry_disposition::{RetryDisposition, retry_disposition};
 #[cfg(any(
     feature = "webui-user-store",
     feature = "filesystem-local-trigger-access"
