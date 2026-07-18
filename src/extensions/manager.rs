@@ -4244,6 +4244,15 @@ impl ExtensionManager {
             return Err(ExtensionError::Config(e.to_string()));
         }
 
+        // Live pre-eviction tool surface: the persisted `cached_tools` is not
+        // a complete ownership record (startup injection registers wrappers
+        // without persisting its catalog), so also read the live client's
+        // discovery cache before evicting it.
+        let live_tool_names: Vec<String> = match self.mcp_clients.get(user_id, name).await {
+            Some(client) => client.cached_tool_names().await.unwrap_or_default(), // silent-ok: absent discovery cache means no additional names to reconcile
+            None => Vec::new(),
+        };
+
         // Evict the cached McpClient so the next activation re-connects
         // with the new config (updated headers, oauth, or URL).
         // Without this, in-memory clients would continue using stale
@@ -4262,10 +4271,12 @@ impl ExtensionManager {
             // `mcp_tool_id` mapping activation uses. A bare prefix scan is
             // not server-boundary-safe (`foo_` also matches `foo_bar`'s
             // tools), so the catalog is the source of truth here.
-            let previously_registered: Vec<String> = previous_config
+            let previously_registered: std::collections::HashSet<String> = previous_config
                 .cached_tools
                 .iter()
-                .map(|t| crate::tools::mcp::mcp_tool_id(name, &t.name))
+                .map(|t| t.name.as_str())
+                .chain(live_tool_names.iter().map(String::as_str))
+                .map(|raw| crate::tools::mcp::mcp_tool_id(name, raw))
                 .collect();
             let activate_result = match self.activate_mcp_locked(name, user_id).await {
                 Ok(r) => r,

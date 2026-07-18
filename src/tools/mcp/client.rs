@@ -441,6 +441,19 @@ impl McpClient {
     }
 
     // arch-exempt: large_file, review-mandated session-lifecycle fix on the existing client surface, plan #6247
+    /// Raw tool NAMES from the in-memory discovery cache, if a `list_tools`
+    /// has populated it. Used by the PATCH reactivation flow to capture the
+    /// live pre-eviction surface — `cached_tools` on the persisted config is
+    /// not a complete ownership record (startup injection registers wrappers
+    /// without persisting its catalog).
+    pub(crate) async fn cached_tool_names(&self) -> Option<Vec<String>> {
+        self.tools_cache
+            .read()
+            .await
+            .as_ref()
+            .map(|tools| tools.iter().map(|t| t.name.clone()).collect())
+    }
+
     /// Terminate this client's `(user, server, thread)` session in the shared
     /// [`McpSessionManager`], if one is wired.
     ///
