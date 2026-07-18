@@ -3803,8 +3803,19 @@ impl ExtensionManager {
             .map_err(|e| ExtensionError::InvalidRequest(e.to_string()))?;
         // The URL is persisted verbatim and returned by GET /api/extensions —
         // reject embedded credentials (userinfo, token-bearing query params).
+        // OAuth endpoint URLs are persisted the same way and get the same
+        // treatment.
         crate::tools::mcp::config::validate_url_free_of_credentials(&config.url)
             .map_err(ExtensionError::InvalidRequest)?;
+        if let Some(ref o) = config.oauth {
+            for endpoint in [o.authorization_url.as_deref(), o.token_url.as_deref()]
+                .into_iter()
+                .flatten()
+            {
+                crate::tools::mcp::config::validate_url_free_of_credentials(endpoint)
+                    .map_err(ExtensionError::InvalidRequest)?;
+            }
+        }
         // Move credential-bearing header values into SecretsStore before the
         // config is persisted: `mcp_servers` is an ordinary (unencrypted)
         // settings value, so the row must only ever carry secret REFERENCES.
@@ -4090,6 +4101,10 @@ impl ExtensionManager {
             }
         }
         let headers_replaced = headers.is_some();
+        // Names of secrets CREATED (not overwritten) by this PATCH — every
+        // later failure path must delete them in addition to restoring the
+        // snapshot, or a failed request leaves fresh credentials behind.
+        let mut created_new: Vec<String> = Vec::new();
         if let Some(h) = headers {
             config.headers = h;
             // Pre-validate the assembled config BEFORE any secret upsert so a
@@ -4106,18 +4121,18 @@ impl ExtensionManager {
             // brand-new names (no prior snapshot) are DELETED, overwritten
             // ones are restored from the snapshot.
             let mut secret_journal = Vec::new();
-            if let Err(e) = self
+            let secretize_result = self
                 .secretize_sensitive_headers(&mut config, user_id, &mut secret_journal)
-                .await
-            {
-                let snapshot_names: std::collections::HashSet<&str> = previous_header_secrets
-                    .iter()
-                    .map(|(n, _)| n.as_str())
-                    .collect();
-                let created_new: Vec<String> = secret_journal
-                    .into_iter()
-                    .filter(|n| !snapshot_names.contains(n.as_str()))
-                    .collect();
+                .await;
+            let snapshot_names: std::collections::HashSet<&str> = previous_header_secrets
+                .iter()
+                .map(|(n, _)| n.as_str())
+                .collect();
+            created_new = secret_journal
+                .into_iter()
+                .filter(|n| !snapshot_names.contains(n.as_str()))
+                .collect();
+            if let Err(e) = secretize_result {
                 self.delete_header_secrets(user_id, &created_new, name)
                     .await;
                 self.restore_header_secrets(user_id, previous_header_secrets, name)
@@ -4146,7 +4161,20 @@ impl ExtensionManager {
         // Tri-state: None → unchanged, Some(None) → clear, Some(Some(_)) → replace.
         match oauth {
             None => {}
-            Some(new_oauth) => config.oauth = new_oauth,
+            Some(new_oauth) => {
+                // OAuth endpoint URLs are persisted verbatim too — same
+                // embedded-credential rejection as server.url.
+                if let Some(ref o) = new_oauth {
+                    for endpoint in [o.authorization_url.as_deref(), o.token_url.as_deref()]
+                        .into_iter()
+                        .flatten()
+                    {
+                        crate::tools::mcp::config::validate_url_free_of_credentials(endpoint)
+                            .map_err(ExtensionError::InvalidRequest)?;
+                    }
+                }
+                config.oauth = new_oauth;
+            }
         }
 
         // Whether this user's client is live BEFORE we evict it — a live
@@ -4157,8 +4185,11 @@ impl ExtensionManager {
 
         // Validation/persist failure AFTER secretize has upserted header
         // secrets would leave the OLD config resolving to NEW credential
-        // material — restore the snapshot on this error path too.
+        // material — delete this PATCH's fresh secrets and restore the
+        // snapshot on this error path too.
         if let Err(e) = self.update_mcp_server(config, user_id).await {
+            self.delete_header_secrets(user_id, &created_new, name)
+                .await;
             self.restore_header_secrets(user_id, previous_header_secrets, name)
                 .await;
             return Err(ExtensionError::Config(e.to_string()));
@@ -4178,9 +4209,12 @@ impl ExtensionManager {
             // point of view — either the server runs the new config, or the
             // old config is back and the error says why.
             if let Err(activate_err) = self.activate_mcp_locked(name, user_id).await {
-                // Restore overwritten header secrets FIRST — the restored
-                // config references them by name, so the material must be
-                // back before the config row (or any re-activation) reads it.
+                // Delete this PATCH's fresh secrets, then restore overwritten
+                // ones FIRST — the restored config references them by name, so
+                // the material must be back before the config row (or any
+                // re-activation) reads it.
+                self.delete_header_secrets(user_id, &created_new, name)
+                    .await;
                 self.restore_header_secrets(user_id, previous_header_secrets, name)
                     .await;
                 // A failed rollback WRITE must not be reported as "restored" —

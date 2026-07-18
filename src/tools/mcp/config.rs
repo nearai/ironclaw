@@ -608,20 +608,21 @@ pub fn validate_url_free_of_credentials(url: &str) -> Result<(), String> {
         );
     }
     for (key, _) in parsed.query_pairs() {
+        // Substring match on the lowercased key: catches camelCase and
+        // vendor-style names (`accessKey`, `sharedCredential`, `sasToken`)
+        // that exact-name lists miss. Over-matching is acceptable — this
+        // guards a persisted-and-echoed field on a programmatic surface,
+        // and the caller gets an actionable 400.
         let k = key.to_ascii_lowercase();
-        if k == "token"
-            || k == "key"
-            || k == "secret"
-            || k == "password"
-            || k == "signature"
-            || k == "sig"
+        if k == "sig"
             || k.contains("token")
-            || k.contains("apikey")
-            || k.contains("api_key")
-            || k.contains("api-key")
+            || k.contains("key")
             || k.contains("secret")
             || k.contains("password")
+            || k.contains("passwd")
             || k.contains("auth")
+            || k.contains("credential")
+            || k.contains("signature")
         {
             return Err(format!(
                 "URL query parameter '{key}' looks credential-bearing; \
