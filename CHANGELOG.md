@@ -38,7 +38,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### CI / Release
 
-- *(release)* compile `ironclaw-reborn` across the seven supported OS/CPU targets before hosting a release ([#6160](https://github.com/nearai/ironclaw/issues/6160)).
+- *(release)* compile `ironclaw-reborn` across the seven supported OS/CPU targets as a tag-driven release preflight ([#6160](https://github.com/nearai/ironclaw/issues/6160)).
 
 ### Removed
 

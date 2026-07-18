@@ -62,13 +62,11 @@ Rules for a roll-up job that is (or may become) required:
 ## Reborn release binary compile matrix
 
 `reborn-release-compile.yml` is a compile-and-smoke preflight for the shipping
-`ironclaw-reborn` binary. The tag-driven `release.yml` calls it and will not run
-its `host` job unless every target succeeds. The existing `release.yml` also
-owns the pull-request trigger, so a PR can validate the reusable workflow before
-that new workflow file reaches the default branch. Pull-request runs skip the
-cargo-dist plan, packaging, host, and Docker jobs; those release jobs remain
-tag-only. After merge, the preflight workflow can also run directly through
-`workflow_dispatch`.
+`ironclaw-reborn` binary. The tag-only `release.yml` calls it for matching
+release tags and will not run its `host` job unless every target succeeds. The
+preflight workflow can also run directly through `workflow_dispatch`; it is not
+triggered by pull requests, so ordinary CLI and WebUI changes do not start the
+seven-platform release matrix.
 
 | Rust target | GitHub runner |
 |---|---|

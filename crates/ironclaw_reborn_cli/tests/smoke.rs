@@ -272,33 +272,26 @@ fn release_ci_compiles_reborn_for_all_supported_targets() {
         "compile evidence must stay outside cargo-dist's artifacts-* release namespace"
     );
 
-    let release_pr_trigger = concat!(
-        "  pull_request:\n",
-        "    branches:\n",
-        "      - main\n",
-        "    paths:\n",
-        "      - '.github/workflows/release.yml'\n",
-        "      - '.github/workflows/reborn-release-compile.yml'\n",
-        "      - 'Cargo.toml'\n",
-        "      - 'Cargo.lock'\n",
-        "      - 'crates/ironclaw_reborn_cli/**'\n",
-        "      - 'crates/ironclaw_webui_v2/**'\n",
+    let release_tag_trigger = concat!(
+        "  push:\n",
+        "    tags:\n",
+        "      - 'ironclaw-v[0-9]+.[0-9]+.[0-9]+*'\n",
     );
     assert!(
-        release_workflow.contains("uses: ./.github/workflows/reborn-release-compile.yml")
+        release_workflow.contains(release_tag_trigger)
+            && release_workflow.contains("uses: ./.github/workflows/reborn-release-compile.yml")
             && release_workflow.contains("needs.reborn-binary-compile.result == 'success'")
-            && release_workflow.contains(release_pr_trigger)
+            && compile_workflow.contains("  workflow_call:\n")
+            && compile_workflow.contains("  workflow_dispatch:\n")
+            && !release_workflow.contains("\n  pull_request:\n")
             && !compile_workflow.contains("  pull_request:\n"),
-        "the existing release workflow must own PR validation for main and every release input, and wait for the Reborn matrix"
+        "the tag-only release workflow must wait for the Reborn matrix while keeping an independent manual preflight"
     );
     assert!(
-        release_workflow.contains("publishing: ${{ !github.event.pull_request }}")
-            && release_workflow.contains("needs.plan.outputs.publishing == 'true'")
-            && release_workflow.contains(
-                "  plan:\n    # Pull requests use this existing workflow only as the trusted entry point\n    # for the Reborn compile matrix. Keep cargo-dist's release planning tag-only.\n    if: ${{ github.event_name != 'pull_request' }}"
-            )
+        release_workflow.contains("needs.plan.outputs.publishing == 'true'")
+            && !release_workflow.contains("if: ${{ github.event_name != 'pull_request' }}")
             && compile_workflow.contains("permissions:\n  contents: read"),
-        "PR compile validation must remain read-only and must skip cargo-dist planning and release publishing"
+        "release compilation must remain read-only without adding PR-only cargo-dist gates"
     );
     assert!(
         cli_manifest.contains("[package.metadata.dist]\ndist = false"),

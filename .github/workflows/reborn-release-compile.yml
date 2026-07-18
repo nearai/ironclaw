@@ -99,7 +99,6 @@ jobs:
         uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
           key: reborn-release-${{ matrix.target }}
-          save-if: ${{ github.event_name != 'pull_request' }}
 
       - id: build
         name: Compile ironclaw-reborn

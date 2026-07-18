@@ -42,18 +42,6 @@ on:
   push:
     tags:
       - 'ironclaw-v[0-9]+.[0-9]+.[0-9]+*'
-  # release.yml already exists on the default branch, so this trigger can
-  # validate the new reusable workflow before that new file is merged.
-  pull_request:
-    branches:
-      - main
-    paths:
-      - '.github/workflows/release.yml'
-      - '.github/workflows/reborn-release-compile.yml'
-      - 'Cargo.toml'
-      - 'Cargo.lock'
-      - 'crates/ironclaw_reborn_cli/**'
-      - 'crates/ironclaw_webui_v2/**'
 
 jobs:
   # Compile the shipping Reborn binary on every supported release target.
@@ -67,9 +55,6 @@ jobs:
 
   # Run 'dist plan' (or host) to determine what tasks we need to do
   plan:
-    # Pull requests use this existing workflow only as the trusted entry point
-    # for the Reborn compile matrix. Keep cargo-dist's release planning tag-only.
-    if: ${{ github.event_name != 'pull_request' }}
     runs-on: "ubuntu-22.04"
     outputs:
       val: ${{ steps.plan.outputs.manifest }}
