@@ -404,6 +404,17 @@ pub(crate) async fn extensions_update_handler(
         Err(e @ crate::extensions::ExtensionError::InvalidRequest(_)) => {
             Err((StatusCode::BAD_REQUEST, e.to_string()))
         }
+        // The update COMMITTED; the server awaits re-authentication under the
+        // new config (e.g. a URL change invalidated the old OAuth tokens).
+        // Not an error — telling callers the committed update "failed" would
+        // be false. `activated: false` is the machine-readable signal.
+        Err(crate::extensions::ExtensionError::AuthRequired) => {
+            let mut resp = ActionResponse::ok(format!(
+                "MCP server '{name_str}' updated; re-authentication required before activation."
+            ));
+            resp.activated = Some(false);
+            Ok(Json(resp))
+        }
         Err(e) => {
             // `ExtensionError::Config` and friends can wrap persistence or
             // backend failures — never surface their text to the client.

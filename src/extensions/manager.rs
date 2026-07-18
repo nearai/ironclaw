@@ -3814,6 +3814,14 @@ impl ExtensionManager {
         oauth: Option<OAuthConfig>,
         user_id: &str,
     ) -> Result<InstallResult, ExtensionError> {
+        // Serialize the whole install transaction on the same per-server
+        // lifecycle lock PATCH/activate/remove use — concurrent same-name
+        // installs would otherwise interleave deterministic header-secret
+        // writes with config persistence, pairing one request's credential
+        // with the other's URL.
+        let lifecycle_lock = self.mcp_lifecycle_lock(name).await;
+        let _lifecycle_guard = lifecycle_lock.lock().await;
+
         if self.get_mcp_server(name, user_id).await.is_ok() {
             return Err(ExtensionError::AlreadyInstalled(name.to_string()));
         }
@@ -4129,6 +4137,9 @@ impl ExtensionManager {
         }
         // Tri-state: None → unchanged, Some(None) → clear, Some(Some(_)) → replace.
         let oauth_cleared = matches!(oauth, Some(None));
+        // An OAuth REPLACEMENT is a credential-boundary change too: the old
+        // refresh token must never be sent to the new token endpoint.
+        let oauth_replaced = matches!(oauth, Some(Some(_)));
         match oauth {
             None => {}
             Some(new_oauth) => config.oauth = new_oauth,
@@ -4232,6 +4243,55 @@ impl ExtensionManager {
         // ("server inactive") until a manual re-activation.
         let was_active = self.mcp_clients.contains(user_id, name).await;
 
+        // OAuth credential-boundary change (URL change, oauth clear/replace):
+        // snapshot the old token secrets BEFORE anything persists — a
+        // fallible read failing after commit would leave the new config
+        // persisted while reporting failure. Deletion happens post-persist,
+        // pre-reactivation.
+        let mut oauth_secret_snapshot: Vec<(String, secrecy::SecretString)> = Vec::new();
+        let stale_oauth_secret_names: Option<Vec<String>> =
+            if url_changed || oauth_cleared || oauth_replaced {
+                let token_secret = previous_config.token_secret_name();
+                let stale = vec![
+                    token_secret.clone(),
+                    previous_config.refresh_token_secret_name(),
+                    oauth_refresh_secret_name(&token_secret),
+                    oauth_scopes_secret_name(&token_secret),
+                ];
+                for secret_name in &stale {
+                    match self.secrets.get_decrypted(user_id, secret_name).await {
+                        Ok(decrypted) => oauth_secret_snapshot.push((
+                            secret_name.clone(),
+                            secrecy::SecretString::from(decrypted.expose().to_string()),
+                        )),
+                        Err(crate::secrets::SecretError::NotFound(_)) => {}
+                        Err(e) => {
+                            tracing::error!(
+                                extension = %name,
+                                user_id = %user_id,
+                                secret = %secret_name,
+                                error = %e,
+                                "failed to snapshot OAuth secret before PATCH persist"
+                            );
+                            // Nothing persisted yet — but this PATCH's fresh
+                            // header secrets exist; unwind them.
+                            self.delete_header_secrets(user_id, &created_new, name)
+                                .await;
+                            self.restore_header_secrets(user_id, previous_header_secrets, name)
+                                .await;
+                            return Err(ExtensionError::Config(
+                                "failed to snapshot existing OAuth credential for rollback; \
+                                 PATCH aborted before any change"
+                                    .to_string(),
+                            ));
+                        }
+                    }
+                }
+                Some(stale)
+            } else {
+                None
+            };
+
         // Validation/persist failure AFTER secretize has upserted header
         // secrets would leave the OLD config resolving to NEW credential
         // material — delete this PATCH's fresh secrets and restore the
@@ -4258,42 +4318,10 @@ impl ExtensionManager {
         // backend. They must be deleted BEFORE reactivation — the client
         // factory treats an existing extension token as authentication and
         // would replay it against the new URL during the very reactivation
-        // below. Values are snapshotted first so a reactivation rollback can
-        // restore them alongside the previous config.
-        let mut oauth_secret_snapshot: Vec<(String, secrecy::SecretString)> = Vec::new();
-        if url_changed || oauth_cleared {
-            let token_secret = previous_config.token_secret_name();
-            let stale_oauth_secrets = [
-                token_secret.clone(),
-                previous_config.refresh_token_secret_name(),
-                oauth_refresh_secret_name(&token_secret),
-                oauth_scopes_secret_name(&token_secret),
-            ];
-            for secret_name in &stale_oauth_secrets {
-                match self.secrets.get_decrypted(user_id, secret_name).await {
-                    Ok(decrypted) => oauth_secret_snapshot.push((
-                        secret_name.clone(),
-                        secrecy::SecretString::from(decrypted.expose().to_string()),
-                    )),
-                    Err(crate::secrets::SecretError::NotFound(_)) => {}
-                    Err(e) => {
-                        tracing::error!(
-                            extension = %name,
-                            user_id = %user_id,
-                            secret = %secret_name,
-                            error = %e,
-                            "failed to snapshot OAuth secret before URL change"
-                        );
-                        return Err(ExtensionError::Config(
-                            "failed to snapshot existing OAuth credential for rollback; \
-                             PATCH aborted"
-                                .to_string(),
-                        ));
-                    }
-                }
-            }
-            self.delete_header_secrets(user_id, &stale_oauth_secrets, name)
-                .await;
+        // below. (Snapshotted BEFORE the config persist above, so a snapshot
+        // failure aborts with nothing committed.)
+        if let Some(ref stale) = stale_oauth_secret_names {
+            self.delete_header_secrets(user_id, stale, name).await;
         }
 
         // Evict the cached McpClient so the next activation re-connects

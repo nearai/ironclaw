@@ -496,11 +496,11 @@ impl McpClient {
     pub(crate) async fn terminate_session(&self) {
         if let Some(ref session_manager) = self.session_manager {
             session_manager
-                .terminate(
+                .terminate_and_retire(
                     &self.user_id,
                     &self.server_name,
                     self.thread_id,
-                    Some(self.session_owner),
+                    self.session_owner,
                 )
                 .await;
         }

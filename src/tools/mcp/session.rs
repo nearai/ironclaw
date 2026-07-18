@@ -76,7 +76,7 @@ impl McpSessionKey {
 /// A dedicated newtype (not a raw `Uuid`) so it can never be confused with a
 /// thread id at a call site — `terminate(user, server, thread_id, owner)`
 /// takes both, and swapping two raw `Option<Uuid>`s would compile.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct McpSessionGeneration(Uuid);
 
 impl McpSessionGeneration {
@@ -167,7 +167,23 @@ pub struct McpSessionManager {
 
     /// Maximum idle time before a session is considered stale (in seconds).
     max_idle_secs: u64,
+
+    /// Generations whose sessions were terminated — a RETIRED generation may
+    /// never create a session again. Without this, an evicted in-flight
+    /// client re-running its initialize path could resurrect a session after
+    /// cleanup, handing a replacement client an entry it does not own (and
+    /// therefore cannot update). Bounded ring (insertion order) so the set
+    /// cannot grow unboundedly.
+    retired: std::sync::Mutex<(
+        std::collections::VecDeque<McpSessionGeneration>,
+        std::collections::HashSet<McpSessionGeneration>,
+    )>,
 }
+
+/// Cap on remembered retired generations. Old entries fall off the ring; a
+/// generation that outlives 4096 subsequent retirements belongs to a client
+/// long since dropped.
+const MAX_RETIRED_GENERATIONS: usize = 4096;
 
 impl McpSessionManager {
     /// Create a new session manager with default idle timeout (30 minutes).
@@ -175,6 +191,10 @@ impl McpSessionManager {
         Self {
             sessions: RwLock::new(HashMap::new()),
             max_idle_secs: 1800, // 30 minutes
+            retired: std::sync::Mutex::new((
+                std::collections::VecDeque::new(),
+                std::collections::HashSet::new(),
+            )),
         }
     }
 
@@ -183,7 +203,31 @@ impl McpSessionManager {
         Self {
             sessions: RwLock::new(HashMap::new()),
             max_idle_secs,
+            retired: std::sync::Mutex::new((
+                std::collections::VecDeque::new(),
+                std::collections::HashSet::new(),
+            )),
         }
+    }
+
+    /// Record `generation` as retired (bounded ring). See the field docs.
+    fn retire_generation(&self, generation: McpSessionGeneration) {
+        let mut guard = self.retired.lock().expect("retired-set mutex poisoned"); // safety: no panics while holding this lock
+        let (order, set) = &mut *guard;
+        if set.insert(generation) {
+            order.push_back(generation);
+            if order.len() > MAX_RETIRED_GENERATIONS
+                && let Some(evicted) = order.pop_front()
+            {
+                set.remove(&evicted);
+            }
+        }
+    }
+
+    /// Whether `generation` has been retired.
+    fn is_retired(&self, generation: McpSessionGeneration) -> bool {
+        let guard = self.retired.lock().expect("retired-set mutex poisoned"); // safety: no panics while holding this lock
+        guard.1.contains(&generation)
     }
 
     fn key(user_id: &str, server_name: &McpServerName, thread_id: Option<Uuid>) -> McpSessionKey {
@@ -207,6 +251,18 @@ impl McpSessionManager {
         owner: McpSessionGeneration,
     ) -> McpSession {
         let key = Self::key(user_id, server_name, thread_id);
+        // A retired generation (its session was terminated on eviction) may
+        // never create or replace a session: an evicted in-flight client
+        // re-running initialize would otherwise resurrect an entry the
+        // replacement client cannot own. It receives a detached session that
+        // is NOT stored — its subsequent writes are guard-rejected anyway.
+        if self.is_retired(owner) {
+            let sessions = self.sessions.read().await;
+            return sessions
+                .get(&key)
+                .cloned()
+                .unwrap_or_else(|| McpSession::new(server_url, owner));
+        }
         let mut sessions = self.sessions.write().await;
 
         if let Some(session) = sessions.get(&key) {
@@ -317,14 +373,42 @@ impl McpSessionManager {
         let key = Self::key(user_id, server_name, thread_id);
         match owner {
             None => {
-                sessions.remove(&key);
+                // Unconditional removal (server uninstall, admin cleanup):
+                // the owning client is gone for good — retire its generation.
+                if let Some(session) = sessions.remove(&key) {
+                    self.retire_generation(session.owner);
+                }
             }
             Some(nonce) => {
+                // Guarded self-termination (the client's own reinitialize
+                // path): remove WITHOUT retiring, so the same instance can
+                // recreate its session. Store-eviction cleanup, which must
+                // bar the instance permanently, uses
+                // [`Self::terminate_and_retire`].
                 if sessions.get(&key).is_some_and(|s| s.owner == nonce) {
                     sessions.remove(&key);
                 }
             }
         }
+    }
+
+    /// Store-eviction termination: guarded removal PLUS permanent retirement
+    /// of `owner` — the evicted client instance may never create a session
+    /// again, even if a successor has already replaced the entry (in which
+    /// case nothing is removed but the retirement still applies).
+    pub async fn terminate_and_retire(
+        &self,
+        user_id: &str,
+        server_name: &McpServerName,
+        thread_id: Option<Uuid>,
+        owner: McpSessionGeneration,
+    ) {
+        let mut sessions = self.sessions.write().await;
+        let key = Self::key(user_id, server_name, thread_id);
+        if sessions.get(&key).is_some_and(|s| s.owner == owner) {
+            sessions.remove(&key);
+        }
+        self.retire_generation(owner);
     }
 
     /// Snapshot the active `(user, server, thread_id)` triples.
@@ -699,6 +783,58 @@ mod tests {
         // Should not panic.
         manager.terminate(USER_A, &sn("ghost"), None, None).await;
         assert!(manager.active_sessions().await.is_empty());
+    }
+
+    /// An evicted (retired) generation may not resurrect a session: after a
+    /// guarded terminate, its get_or_create returns a DETACHED session and the
+    /// store stays empty — a replacement generation then creates a fresh
+    /// session it fully owns.
+    #[tokio::test]
+    async fn retired_generation_cannot_recreate_session() {
+        let manager = McpSessionManager::new();
+        let server = sn("svc");
+        let evicted_gen = test_gen();
+
+        manager
+            .get_or_create(USER_A, &server, "https://a.invalid", None, evicted_gen)
+            .await;
+        manager
+            .terminate_and_retire(USER_A, &server, None, evicted_gen)
+            .await;
+        assert!(manager.active_sessions().await.is_empty());
+
+        // The evicted client re-runs its initialize path…
+        manager
+            .get_or_create(USER_A, &server, "https://a.invalid", None, evicted_gen)
+            .await;
+        // …but no session materialises in the store.
+        assert!(
+            manager.active_sessions().await.is_empty(),
+            "retired generation must not resurrect a session"
+        );
+
+        // A replacement generation creates and owns a fresh session.
+        let replacement_gen = test_gen();
+        manager
+            .get_or_create(USER_A, &server, "https://b.invalid", None, replacement_gen)
+            .await;
+        manager
+            .update_session_id(
+                USER_A,
+                &server,
+                Some("sid-new".to_string()),
+                None,
+                replacement_gen,
+            )
+            .await;
+        assert_eq!(
+            manager
+                .get_session_id(USER_A, &server, None)
+                .await
+                .as_deref(),
+            Some("sid-new"),
+            "replacement generation owns and can update the fresh session"
+        );
     }
 
     #[test]

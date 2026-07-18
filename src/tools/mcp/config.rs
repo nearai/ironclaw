@@ -607,6 +607,11 @@ pub fn validate_url_free_of_credentials(url: &str) -> Result<(), String> {
             "URL must not embed credentials (user:password@host); use headers instead".to_string(),
         );
     }
+    // Fragments have no meaning for MCP/OAuth endpoints and are a stowaway
+    // channel for credential material — reject outright.
+    if parsed.fragment().is_some() {
+        return Err("URL must not carry a fragment".to_string());
+    }
     for (key, _) in parsed.query_pairs() {
         // Substring match on the lowercased key: catches camelCase and
         // vendor-style names (`accessKey`, `sharedCredential`, `sasToken`)
