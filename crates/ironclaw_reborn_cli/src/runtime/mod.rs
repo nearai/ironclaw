@@ -32,6 +32,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::context::RebornCliContext;
 
+mod account_setups;
 mod native_extensions;
 // Crate-wide process-env lock lives here (see test_env.rs). `pub(crate)` so
 // non-runtime env-mutating tests (e.g. commands::serve_sso) serialize against
@@ -638,7 +639,8 @@ pub(crate) fn build_runtime_input_with_options(
     let services_input = runtime_services
         .services_input
         .with_native_extension_factories(native_extensions::bundled_native_extension_factories())
-        .with_channel_extension_bindings(native_extensions::bundled_channel_extension_bindings());
+        .with_channel_extension_bindings(native_extensions::bundled_channel_extension_bindings())
+        .with_account_setup_descriptors(account_setups::bundled_account_setup_descriptors());
 
     #[allow(unused_mut)]
     let mut runtime_input = RebornRuntimeInput::from_services(services_input)

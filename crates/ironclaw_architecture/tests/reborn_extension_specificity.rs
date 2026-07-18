@@ -1278,10 +1278,6 @@ const ALLOWLIST: &[(&str, &str)] = &[
     // pairing seam (extension-runtime P2), which moves product copy and
     // routing onto manifest-declared account-setup descriptors.
     (
-        "crates/ironclaw_webui/frontend/src/components/telegram-pairing-panel.tsx",
-        "telegram",
-    ),
-    (
         "crates/ironclaw_webui/frontend/src/components/telegram-setup-panel.tsx",
         "telegram",
     ),
@@ -1303,10 +1299,6 @@ const ALLOWLIST: &[(&str, &str)] = &[
     ),
     (
         "crates/ironclaw_webui/frontend/src/pages/chat/chat.tsx",
-        "telegram",
-    ),
-    (
-        "crates/ironclaw_webui/frontend/src/pages/chat/components/onboarding-pairing-card.tsx",
         "telegram",
     ),
     ("crates/ironclaw_webui/frontend/src/i18n/ar.ts", "slack"),

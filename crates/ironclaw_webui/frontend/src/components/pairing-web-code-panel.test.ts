@@ -9,7 +9,7 @@ const LIVE_EXPIRES_AT = "2026-07-16T12:01:30Z"; // BASE + 90s
 const STALE_EXPIRES_AT = "2026-07-16T11:59:00Z"; // already expired at BASE
 
 function telegramPairingPanelSourceForTest() {
-  const source = readFileSync(new URL("./telegram-pairing-panel.tsx", import.meta.url), "utf8");
+  const source = readFileSync(new URL("./pairing-web-code-panel.tsx", import.meta.url), "utf8");
   const lines = [];
   let skippingImport = false;
   for (const line of source.split("\n")) {
@@ -23,14 +23,14 @@ function telegramPairingPanelSourceForTest() {
     }
     lines.push(line.replace(/^export function /, "function "));
   }
-  return `${lines.join("\n")}\nglobalThis.__testExports = { TelegramPairingPanel, telegramBotUsernameFromDeepLink, formatPairingCountdown };`;
+  return `${lines.join("\n")}\nglobalThis.__testExports = { PairingWebCodePanel, pairingBotUsernameFromDeepLink, formatPairingCountdown };`;
 }
 
 const tick = () => new Promise((resolve) => setTimeout(resolve, 0));
 
 function tForTest(key, params = {}) {
-  if (key === "telegramPairing.expiresIn") return `Expires in ${params.time}`;
-  if (key === "telegramPairing.qrAlt") return "Telegram pairing QR";
+  if (key === "pairing.web.expiresIn") return `Expires in ${params.time}`;
+  if (key === "pairing.web.qrAlt") return "Telegram pairing QR";
   return key;
 }
 
@@ -145,26 +145,29 @@ function createPanelHarness({ pairingResponses = [], startResponses = [], qrResu
       notifyCalls.push(payload);
       return Promise.resolve([]);
     },
-    getTelegramPairing: async () => {
+    getExtensionPairingStatus: async () => {
       apiCalls.push(["get"]);
-      return takeScripted(pairingResponses, "getTelegramPairing");
+      return takeScripted(pairingResponses, "getExtensionPairingStatus");
     },
-    startTelegramPairing: async () => {
+    mintExtensionPairingCode: async () => {
       apiCalls.push(["start"]);
-      const value = takeScripted(startResponses, "startTelegramPairing");
+      const value = takeScripted(startResponses, "mintExtensionPairingCode");
       if (value && value.__reject) throw value.__reject;
       return value;
     },
-    disconnectTelegramPairing: async () => {
+    unpairExtension: async () => {
       apiCalls.push(["disconnect"]);
     },
-    telegramSetupError: (error, fallback) => error?.payload?.error || error?.message || fallback,
+    extensionPairingError: (error, fallback) => error?.payload?.error || error?.message || fallback,
   };
   vm.runInNewContext(telegramPairingPanelSourceForTest(), context);
 
   const render = (props = {}) => {
     state.hookIndex = 0;
-    const rendered = context.globalThis.__testExports.TelegramPairingPanel(props);
+    const rendered = context.globalThis.__testExports.PairingWebCodePanel({
+      extensionId: "telegram",
+      ...props,
+    });
     const queue = state.pendingEffects.splice(0);
     for (const { index, effect, deps } of queue) {
       state.effects[index]?.cleanup?.();
@@ -194,24 +197,24 @@ function createPanelHarness({ pairingResponses = [], startResponses = [], qrResu
   };
 }
 
-test("telegramBotUsernameFromDeepLink derives the bot handle from the deep link", () => {
+test("pairingBotUsernameFromDeepLink derives the bot handle from the deep link", () => {
   const harness = createPanelHarness();
-  const { telegramBotUsernameFromDeepLink, formatPairingCountdown } =
+  const { pairingBotUsernameFromDeepLink, formatPairingCountdown } =
     harness.context.globalThis.__testExports;
 
   assert.equal(
-    telegramBotUsernameFromDeepLink("https://t.me/ironclaw_bot?start=TG-PAIR-42"),
+    pairingBotUsernameFromDeepLink("https://t.me/ironclaw_bot?start=TG-PAIR-42"),
     "ironclaw_bot",
   );
-  assert.equal(telegramBotUsernameFromDeepLink("https://evil.example/ironclaw_bot"), "");
-  assert.equal(telegramBotUsernameFromDeepLink(null), "");
+  assert.equal(pairingBotUsernameFromDeepLink("https://evil.example/ironclaw_bot"), "");
+  assert.equal(pairingBotUsernameFromDeepLink(null), "");
 
   assert.equal(formatPairingCountdown(90_000), "1:30");
   assert.equal(formatPairingCountdown(5_000), "0:05");
   assert.equal(formatPairingCountdown(-1), "0:00");
 });
 
-test("TelegramPairingPanel mints a code when the stored one is stale and renders code, link, QR, username, countdown", async () => {
+test("PairingWebCodePanel mints a code when the stored one is stale and renders code, link, QR, username, countdown", async () => {
   const harness = createPanelHarness({
     pairingResponses: [
       {
@@ -250,7 +253,7 @@ test("TelegramPairingPanel mints a code when the stored one is stale and renders
   assert.ok(body.includes("Telegram pairing QR"), "QR image carries its alt text");
 });
 
-test("TelegramPairingPanel copy buttons write the code and @username to the clipboard", async () => {
+test("PairingWebCodePanel copy buttons write the code and @username to the clipboard", async () => {
   const harness = createPanelHarness({
     pairingResponses: [
       {
@@ -278,7 +281,7 @@ test("TelegramPairingPanel copy buttons write the code and @username to the clip
   assert.deepEqual(harness.clipboardWrites, ["TG-PAIR-42", "@ironclaw_bot"]);
 });
 
-test("TelegramPairingPanel flips to the renewal state at expiry and renewal re-renders a fresh code + QR", async () => {
+test("PairingWebCodePanel flips to the renewal state at expiry and renewal re-renders a fresh code + QR", async () => {
   const harness = createPanelHarness({
     pairingResponses: [
       {
@@ -311,8 +314,8 @@ test("TelegramPairingPanel flips to the renewal state at expiry and renewal re-r
   await harness.fireTimers(1000);
   const expiredView = harness.render();
   const expiredBody = JSON.stringify(expiredView);
-  assert.ok(expiredBody.includes("telegramPairing.expired"));
-  assert.ok(expiredBody.includes("telegramPairing.getNewCode"));
+  assert.ok(expiredBody.includes("pairing.web.expired"));
+  assert.ok(expiredBody.includes("pairing.web.getNewCode"));
   assert.ok(!expiredBody.includes("TG-PAIR-42"), "expired state hides the dead code");
   assert.deepEqual(valuesAfter(expiredView, "src="), [], "expired state hides the QR");
 
@@ -331,7 +334,7 @@ test("TelegramPairingPanel flips to the renewal state at expiry and renewal re-r
   ]);
 });
 
-test("TelegramPairingPanel poll flip to connected broadcasts the connection and invalidates channel caches", async () => {
+test("PairingWebCodePanel poll flip to connected broadcasts the connection and invalidates channel caches", async () => {
   const harness = createPanelHarness({
     pairingResponses: [
       {
@@ -361,10 +364,10 @@ test("TelegramPairingPanel poll flip to connected broadcasts the connection and 
   const connectedView = harness.render();
 
   const body = JSON.stringify(connectedView);
-  assert.ok(body.includes("telegramPairing.paired"));
+  assert.ok(body.includes("pairing.web.paired"));
   assert.ok(body.includes("✅"));
   assert.deepEqual(JSON.parse(JSON.stringify(harness.notifyCalls)), [
-    { channel: "telegram", source: "telegram-pairing-panel" },
+    { channel: "telegram", source: "pairing-web-code-panel" },
   ]);
   assert.deepEqual(JSON.parse(JSON.stringify(harness.invalidations)), [
     ["extensions"],
@@ -373,7 +376,7 @@ test("TelegramPairingPanel poll flip to connected broadcasts the connection and 
   assert.equal(harness.timers.active.size, 0, "connected state stops polling and countdown");
 });
 
-test("TelegramPairingPanel disconnect DELETEs the pairing then mints a fresh code, without a connect broadcast", async () => {
+test("PairingWebCodePanel disconnect DELETEs the pairing then mints a fresh code, without a connect broadcast", async () => {
   const harness = createPanelHarness({
     pairingResponses: [{ connected: true, pending: null }],
     startResponses: [
@@ -389,7 +392,7 @@ test("TelegramPairingPanel disconnect DELETEs the pairing then mints a fresh cod
   harness.render();
   await tick();
   const connectedView = harness.render();
-  assert.ok(JSON.stringify(connectedView).includes("telegramPairing.paired"));
+  assert.ok(JSON.stringify(connectedView).includes("pairing.web.paired"));
   // Mounting over an already-paired account is not a connection event.
   assert.deepEqual(harness.notifyCalls, []);
 
@@ -410,7 +413,7 @@ test("TelegramPairingPanel disconnect DELETEs the pairing then mints a fresh cod
   assert.ok(JSON.stringify(repairView).includes("TG-PAIR-77"), "a fresh code renders for re-pairing");
 });
 
-test("TelegramPairingPanel ignores an old pairing poll that resolves after disconnect", async () => {
+test("PairingWebCodePanel ignores an old pairing poll that resolves after disconnect", async () => {
   let resolveStalePoll;
   const stalePoll = new Promise((resolve) => {
     resolveStalePoll = resolve;
@@ -450,7 +453,7 @@ test("TelegramPairingPanel ignores an old pairing poll that resolves after disco
   const oldInFlightPoll = harness.fireTimers(2000);
   await connectionPoll;
   const connectedView = harness.render();
-  assert.ok(JSON.stringify(connectedView).includes("telegramPairing.paired"));
+  assert.ok(JSON.stringify(connectedView).includes("pairing.web.paired"));
 
   await valuesAfter(connectedView, "onClick=")[0]();
   harness.render();
@@ -463,7 +466,7 @@ test("TelegramPairingPanel ignores an old pairing poll that resolves after disco
   disconnectedView = harness.render();
 
   assert.ok(
-    !JSON.stringify(disconnectedView).includes("telegramPairing.paired"),
+    !JSON.stringify(disconnectedView).includes("pairing.web.paired"),
     "the pre-disconnect poll cannot restore the old connected state",
   );
   assert.ok(JSON.stringify(disconnectedView).includes("TG-PAIR-88"));
@@ -474,7 +477,7 @@ test("TelegramPairingPanel ignores an old pairing poll that resolves after disco
   );
 });
 
-test("TelegramPairingPanel reports a failed mint after a successful disconnect as a load error, not a failed disconnect", async () => {
+test("PairingWebCodePanel reports a failed mint after a successful disconnect as a load error, not a failed disconnect", async () => {
   const harness = createPanelHarness({
     pairingResponses: [{ connected: true, pending: null }],
     startResponses: [{ __reject: { payload: { error: "code mint exploded" } } }],
@@ -483,7 +486,7 @@ test("TelegramPairingPanel reports a failed mint after a successful disconnect a
   harness.render();
   await tick();
   const connectedView = harness.render();
-  assert.ok(JSON.stringify(connectedView).includes("telegramPairing.paired"));
+  assert.ok(JSON.stringify(connectedView).includes("pairing.web.paired"));
 
   await valuesAfter(connectedView, "onClick=")[0]();
   const view = harness.render();
@@ -491,10 +494,10 @@ test("TelegramPairingPanel reports a failed mint after a successful disconnect a
 
   // The DELETE succeeded: the account is disconnected, so the disconnect
   // failure copy must not appear — the surfaced error is the mint failure.
-  assert.ok(!body.includes("telegramPairing.paired"), "the account is disconnected");
+  assert.ok(!body.includes("pairing.web.paired"), "the account is disconnected");
   assert.ok(body.includes("code mint exploded"), "the mint failure surfaces");
   assert.ok(
-    !body.includes("telegramPairing.disconnectFailed"),
+    !body.includes("pairing.web.disconnectFailed"),
     "a mint failure is never reported as a failed disconnect",
   );
   assert.deepEqual(

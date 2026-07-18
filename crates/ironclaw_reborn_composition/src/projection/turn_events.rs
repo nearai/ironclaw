@@ -438,7 +438,7 @@ async fn blocked_prompt_payload(
                 gate_ref,
                 gate_ref_str,
             )
-            .await,
+            .await?,
         )),
         TurnStatus::BlockedResource => Ok(Some(gate_prompt(
             event,
@@ -469,18 +469,30 @@ async fn approval_gate_prompt(
     event: &TurnLifecycleEvent,
     gate_ref: &GateRef,
     gate_ref_string: String,
-) -> ProductOutboundPayload {
+) -> Result<ProductOutboundPayload, ProductAdapterError> {
     let owner_user_id = event.owner_user_id.as_ref().unwrap_or(caller_user_id);
-    let lookup =
-        approval_prompt_lookup(approval_requests, gate_ref, owner_user_id, &event.scope).await;
-    gate_prompt_with_context(
+    // Fail closed (#6203 parity): an approval-store outage renders as a
+    // transient stream failure, never a contextless-but-actionable prompt.
+    let lookup = approval_prompt_lookup(approval_requests, gate_ref, owner_user_id, &event.scope)
+        .await
+        .map_err(|error| {
+            tracing::debug!(
+                %error,
+                run_id = %event.run_id,
+                "approval request lookup failed during gate projection"
+            );
+            ProductAdapterError::WorkflowTransient {
+                reason: RedactedString::new("approval request lookup failed"),
+            }
+        })?;
+    Ok(gate_prompt_with_context(
         event,
         gate_ref_string,
         "Approval required",
         is_approval_gate_ref(gate_ref.as_str()),
         lookup.context,
         lookup.invocation_id,
-    )
+    ))
 }
 
 /// Resolve an approval gate's request details (tool/action/reason) into the
@@ -497,6 +509,7 @@ pub(crate) async fn approval_prompt_context_view(
 ) -> Option<ApprovalPromptContextView> {
     approval_prompt_lookup(approval_requests, gate_ref, owner_user_id, turn_scope)
         .await
+        .unwrap_or_default() // silent-ok: documented best-effort enrichment for delivery prompts; the WebUI gate projection path fails transiently instead
         .context
 }
 
@@ -511,31 +524,22 @@ async fn approval_prompt_lookup(
     gate_ref: &GateRef,
     owner_user_id: &UserId,
     turn_scope: &TurnScope,
-) -> ApprovalPromptLookup {
+) -> Result<ApprovalPromptLookup, ironclaw_run_state::RunStateError> {
     let (store, request_id) =
         match approval_requests.zip(approval_request_id_from_gate_ref(gate_ref).ok()) {
             Some(value) => value,
-            None => return ApprovalPromptLookup::default(),
+            None => return Ok(ApprovalPromptLookup::default()),
         };
     let scope =
         ApprovalInteractionScope::from_turn(turn_scope, &TurnActor::new(owner_user_id.clone()))
             .to_resource_scope();
-    match store.get(&scope, request_id).await {
-        Ok(Some(record)) => ApprovalPromptLookup {
+    Ok(match store.get(&scope, request_id).await? {
+        Some(record) => ApprovalPromptLookup {
             context: approval_context_for_request(&record.request),
             invocation_id: Some(record.scope.invocation_id),
         },
-        Ok(None) => ApprovalPromptLookup::default(),
-        Err(error) => {
-            tracing::debug!(
-                %error,
-                request_id = %request_id,
-                "approval request lookup failed during gate projection"
-            );
-            // silent-ok: approval context is best-effort UI enrichment; gate prompts remain actionable without it
-            ApprovalPromptLookup::default()
-        }
-    }
+        None => ApprovalPromptLookup::default(),
+    })
 }
 
 fn approval_context_for_request(request: &ApprovalRequest) -> Option<ApprovalPromptContextView> {

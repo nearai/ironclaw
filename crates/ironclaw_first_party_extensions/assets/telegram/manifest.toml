@@ -37,6 +37,11 @@ fields = [
   { handle = "telegram_bot_token", label = "Bot token", secret = true },
   { handle = "telegram_webhook_secret", label = "Webhook secret token", secret = true },
   { handle = "telegram_webhook_url", label = "Public webhook URL", secret = false },
+  # The bot's public @username (without the @): fills the pairing deep link
+  # `https://t.me/{bot_username}?start={code}`. The setup-provisioning hook
+  # autofills it from `getMe`; until then an admin may set it manually and
+  # the pairing panel falls back to code-only presentation when unset.
+  { handle = "bot_username", label = "Bot username", secret = false },
 ]
 
 [[channel.egress]]

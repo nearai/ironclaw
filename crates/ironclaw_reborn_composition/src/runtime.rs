@@ -1570,6 +1570,19 @@ impl RebornRuntime {
     /// provisioning opens the caller's direct conversation through the
     /// extension's own adapter. `None` when the composed runtime carries no
     /// durable channel-identity storage.
+    /// The bearer-authed generic pairing route mount (`WebGeneratedCode`
+    /// channels), when the composed runtime built any pairing service.
+    #[cfg(feature = "webui-v2-beta")]
+    pub fn channel_pairing_route_mount(
+        &self,
+    ) -> Option<crate::webui::route_mounts::ProtectedRouteMount> {
+        self.services.channel_pairing.as_ref().map(|registry| {
+            crate::extension_host::channel_pairing_serve::channel_pairing_route_mount(
+                std::sync::Arc::clone(registry),
+            )
+        })
+    }
+
     pub fn channel_identity_binding_config(
         &self,
     ) -> Option<crate::extension_host::channel_identity::ChannelIdentityBindingConfig> {
@@ -1649,6 +1662,7 @@ impl RebornRuntime {
                 credential_cleanup,
                 account_status_reader,
                 local_runtime.channel_dm_target_store.clone(),
+                self.services.channel_pairing.clone(),
             ),
         ))
     }

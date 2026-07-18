@@ -436,6 +436,7 @@ async fn build_harness_with_options(options: HarnessOptions) -> Harness {
                 max_pending_deliveries: NonZeroUsize::new(16).expect("nonzero"), // safety: static test literal is non-zero.
             },
         }),
+        channel_pairing: None,
     };
     let assembly = GenericChannelHostAssembly::start(deps);
     // Vendor extras exactly as the binary's channel-extension binding feeds

@@ -611,6 +611,11 @@ impl ServeCommand {
             if let Some(channel_identity_binding) = runtime.channel_identity_binding_config() {
                 serve_config = serve_config.with_channel_identity_binding(channel_identity_binding);
             }
+            // Generic WebGeneratedCode pairing routes (mint/status/unpair per
+            // extension), riding the shared protected-route seam.
+            if let Some(pairing_mount) = runtime.channel_pairing_route_mount() {
+                serve_config = serve_config.with_protected_route_mount(pairing_mount);
+            }
             // Public NEAR AI login callback route (token redirect target). Built
             // from the runtime's LLM seam; absent when no LLM was wired.
             #[cfg(feature = "root-llm-provider")]

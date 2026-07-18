@@ -127,6 +127,7 @@ impl AcmeIngress {
             classifier: None,
             workflow: harness.product_workflow_for_test(),
             observer: Some(Arc::clone(&observer) as Arc<dyn PostAdmissionObserver>),
+            pairing: None,
         }));
         parts.registry.register(
             "acme-messenger",

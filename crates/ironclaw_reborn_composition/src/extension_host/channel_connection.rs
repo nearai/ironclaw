@@ -173,6 +173,10 @@ pub(crate) struct GenericChannelConnectionFacade {
     /// that drops the caller's provisioned DM target. `None` when the
     /// composed runtime carries no durable channel storage.
     dm_target_store: Option<Arc<FilesystemChannelDmTargetStore>>,
+    /// Pairing services for `WebGeneratedCode` channels: their connected
+    /// state and disconnect semantics (codes + DM target + conversation-actor
+    /// cleanup) are owned by the pairing service, not the OAuth lane.
+    channel_pairing: Option<Arc<crate::extension_host::channel_pairing::ChannelPairingRegistry>>,
 }
 
 impl GenericChannelConnectionFacade {
@@ -187,6 +191,9 @@ impl GenericChannelConnectionFacade {
         credential_cleanup: Option<Arc<dyn ChannelCredentialCleanup>>,
         account_status_reader: Option<Arc<dyn ChannelAccountStatusReader>>,
         dm_target_store: Option<Arc<FilesystemChannelDmTargetStore>>,
+        channel_pairing: Option<
+            Arc<crate::extension_host::channel_pairing::ChannelPairingRegistry>,
+        >,
     ) -> Self {
         Self {
             tenant_id,
@@ -197,7 +204,17 @@ impl GenericChannelConnectionFacade {
             credential_cleanup,
             account_status_reader,
             dm_target_store,
+            channel_pairing,
         }
+    }
+
+    fn pairing_service_for(
+        &self,
+        extension_id: &str,
+    ) -> Option<Arc<crate::extension_host::channel_pairing::ChannelPairingService>> {
+        self.channel_pairing
+            .as_ref()
+            .and_then(|registry| registry.get(extension_id))
     }
 
     /// The lane entries plus generically-discovered channel extensions.
@@ -344,6 +361,16 @@ impl ChannelConnectionFacade for GenericChannelConnectionFacade {
         for entry in &entries {
             let connected = if caller.tenant_id != self.tenant_id {
                 false
+            } else if let Some(pairing) = self.pairing_service_for(&entry.extension_id) {
+                pairing
+                    .status_for(&caller.user_id)
+                    .await
+                    .map_err(|error| {
+                        RebornServicesError::internal_from(format!(
+                            "channel pairing status unavailable: {error}"
+                        ))
+                    })?
+                    .connected
             } else {
                 match self.entry_scope(entry).await? {
                     Some(scope) => self.caller_connected(entry, &caller, &scope).await?,
@@ -405,6 +432,17 @@ impl ChannelConnectionFacade for GenericChannelConnectionFacade {
         let Some(entry) = entries.iter().find(|entry| entry.extension_id == channel) else {
             return Ok(());
         };
+        if let Some(pairing) = self.pairing_service_for(&entry.extension_id) {
+            // Pairing-owned disconnect: pending codes, identity bindings, the
+            // DM target, and conversation-actor pairings drop together. The
+            // generic lane below then no-ops (no vendor credential, and the
+            // bindings are already gone) but stays for defense in depth.
+            pairing.unpair(&caller.user_id).await.map_err(|error| {
+                RebornServicesError::internal_from(format!(
+                    "channel pairing disconnect failed: {error}"
+                ))
+            })?;
+        }
         let Some(scope) = self.entry_scope(entry).await? else {
             // No connection scope means there is no installation to key the
             // vendor cleanup or prefix-scoped binding deletes — the state of
@@ -531,6 +569,7 @@ mod tests {
             identity_store.clone(),
             identity_store,
             credential_cleanup,
+            None,
             None,
             None,
         )
@@ -798,6 +837,7 @@ mod tests {
             None,
             Some(reader.clone()),
             None,
+            None,
         );
 
         let states = facade
@@ -1012,6 +1052,7 @@ team_id = "/team/id"
             None,
             None,
             Some(Arc::clone(&dm_store)),
+            None,
         );
 
         // Discovered + bound: connected.

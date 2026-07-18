@@ -16,6 +16,9 @@ import {
 } from "../lib/extension-actions";
 import { connectsViaOauth, hasChannelSurface } from "../lib/extensions-schema";
 import { redeemPairingCode } from "../lib/pairing-api";
+import { useQuery } from "@tanstack/react-query";
+import { getExtensionPairingStatus } from "../../../lib/extension-pairing-api";
+import { PairingWebCodePanel } from "../../../components/pairing-web-code-panel";
 import { activateExtension } from "../lib/extensions-api";
 import { notifyChannelConnected } from "../../../lib/channel-connection-events";
 
@@ -117,6 +120,21 @@ export function ConfigureModal({ extension, onActivate, onClose, onSaved }) {
     !connectsViaOauth(extension, secrets) &&
     hasChannelSurface(extension) &&
     (lifecycleState === "pairing" || lifecycleState === "pairing_required");
+  // WebGeneratedCode probe: the backend registers generic pairing routes only
+  // for extensions whose account-setup descriptor declares the web-minted
+  // strategy — a 404 means the channel pairs by pasted proof code instead.
+  // Probed for every non-OAuth channel surface (not just pairing lifecycle
+  // states) so an installed-but-unpaired channel still gets its panel.
+  const probeWebCodePairing =
+    !connectsViaOauth(extension, secrets) && hasChannelSurface(extension);
+  const webCodePairing = useQuery({
+    queryKey: ["extension-pairing-probe", channelId],
+    enabled: Boolean(probeWebCodePairing && channelId),
+    retry: false,
+    staleTime: 60_000,
+    queryFn: () => getExtensionPairingStatus(channelId),
+  });
+  const isWebCodeChannel = Boolean(probeWebCodePairing && webCodePairing.isSuccess);
   const channelPairingInstructions = t("pairing.instructions");
   const channelPairingPlaceholder = t("pairing.placeholder");
   const channelPairingError = t("pairing.error");
@@ -155,6 +173,19 @@ export function ConfigureModal({ extension, onActivate, onClose, onSaved }) {
     setupReadyForActivation({ extension, secrets, fields });
   const oauthBusy = oauthMutation.isPending || oauthMutation.isAuthorizing;
   const setupUrl = httpsUrl(onboarding?.setup_url);
+  if (isWebCodeChannel) {
+    // The panel is self-contained (mints/rotates codes, polls status,
+    // broadcasts channel-connected on pairing), so the modal only hosts it.
+    return (
+      <ModalShell
+        onClose={onClose}
+        title={t("extensions.configureName").replace("{name}", extensionName)}
+      >
+        <PairingWebCodePanel extensionId={channelId} displayName={extensionName} compact />
+      </ModalShell>
+    );
+  }
+
   if (isPairingChannel) {
     return (
       <ModalShell

@@ -246,11 +246,11 @@ test("OnboardingPairingCard holds a connecting state after a successful pair ins
   );
 });
 
-test("OnboardingPairingCard renders the Telegram pairing panel for web_generated_code instead of a paste box", () => {
+test("OnboardingPairingCard renders the web-code pairing panel for web_generated_code instead of a paste box", () => {
   let stateIndex = 0;
   const context = {
     Button() {},
-    TelegramPairingPanel() {},
+    PairingWebCodePanel() {},
     channelConnectionDisplayName,
     globalThis: {},
     html: (strings, ...values) => ({ strings: Array.from(strings), values }),
@@ -273,9 +273,9 @@ test("OnboardingPairingCard renders the Telegram pairing panel for web_generated
     },
   });
 
-  const panel = findComponent(rendered, context.TelegramPairingPanel);
-  assert.ok(panel, "web_generated_code renders the Telegram pairing panel");
-  assert.equal(componentProps(panel, context.TelegramPairingPanel).compact, true);
+  const panel = findComponent(rendered, context.PairingWebCodePanel);
+  assert.ok(panel, "web_generated_code renders the web-code pairing panel");
+  assert.equal(componentProps(panel, context.PairingWebCodePanel).compact, true);
   const body = JSON.stringify(rendered);
   assert.ok(!body.includes("<input"), "no paste-code input for a web-generated code");
   assert.ok(body.includes("Connect Telegram"), "keeps the connect title");
@@ -287,11 +287,11 @@ test("OnboardingPairingCard renders the Telegram pairing panel for web_generated
   assert.equal(dismissed, true);
 });
 
-test("OnboardingPairingCard never renders the Telegram panel for a non-Telegram web_generated_code channel", () => {
+test("OnboardingPairingCard renders the generic panel for any web_generated_code channel", () => {
   let stateIndex = 0;
   const context = {
     Button() {},
-    TelegramPairingPanel() {},
+    PairingWebCodePanel() {},
     channelConnectionDisplayName,
     globalThis: {},
     html: (strings, ...values) => ({ strings: Array.from(strings), values }),
@@ -305,17 +305,18 @@ test("OnboardingPairingCard never renders the Telegram panel for a non-Telegram 
   };
   vm.runInNewContext(onboardingPairingCardSourceForTest(), context);
 
-  // The strategy string is generic; only the telegram channel owns the
-  // Telegram-specific QR/deep-link panel.
+  // The strategy string routes; the panel itself is vendor-blind and drives
+  // the extension-scoped generic pairing endpoints.
   const rendered = context.globalThis.__testExports.OnboardingPairingCard({
-    onboarding: { extensionName: "signal", strategy: "web_generated_code" },
+    onboarding: { extensionName: "acme-messenger", strategy: "web_generated_code" },
     onSubmit: async () => ({ success: true }),
   });
 
+  const panel = findComponent(rendered, context.PairingWebCodePanel);
+  assert.ok(panel, "every web_generated_code channel gets the generic panel");
   assert.equal(
-    findComponent(rendered, context.TelegramPairingPanel),
-    null,
-    "a non-Telegram web_generated_code channel must not get the Telegram panel",
+    componentProps(panel, context.PairingWebCodePanel).extensionId,
+    "acme-messenger",
   );
   assert.ok(
     !JSON.stringify(rendered).includes("<input"),
@@ -327,7 +328,7 @@ test("OnboardingPairingCard keeps the paste box for inbound_proof_code", () => {
   let stateIndex = 0;
   const context = {
     Button() {},
-    TelegramPairingPanel() {},
+    PairingWebCodePanel() {},
     channelConnectionDisplayName,
     globalThis: {},
     html: (strings, ...values) => ({ strings: Array.from(strings), values }),
@@ -347,7 +348,7 @@ test("OnboardingPairingCard keeps the paste box for inbound_proof_code", () => {
   });
 
   assert.equal(
-    findComponent(rendered, context.TelegramPairingPanel),
+    findComponent(rendered, context.PairingWebCodePanel),
     null,
     "proof-code channels never render the Telegram panel",
   );

@@ -169,10 +169,14 @@ fn channel_connection_for_package(
         return None;
     }
     let strategy = super::extension_lifecycle::channel_connect_strategy(&package.package);
+    // Catalog projection: descriptor-owned connect copy applies at
+    // activation/status time; the pre-install listing renders the derived
+    // fallback.
     Some(super::extension_lifecycle::channel_connection_requirement(
         package_ref.id.as_str(),
         &package.package.manifest.name,
         strategy,
+        None,
     ))
 }
 

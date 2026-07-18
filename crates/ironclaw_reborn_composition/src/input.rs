@@ -214,6 +214,12 @@ pub struct RebornBuildInput {
     /// Concurrency limits applied to the in-memory turn-state store.
     /// Defaults to no limits (all caps `None` / unlimited).
     pub(crate) turn_state_store_limits: InMemoryTurnStateStoreLimits,
+    /// Binary-assembled account-setup declarations (extension-runtime §5.5):
+    /// per-extension activation gates and connect-strategy presentation.
+    /// `WebGeneratedCode` declarations additionally get a generic pairing
+    /// service composed over the durable identity/pairing stores.
+    pub(crate) account_setup_descriptors:
+        Vec<ironclaw_product_workflow::ExtensionAccountSetupDescriptor>,
 }
 
 /// One channel extension's binary-assembled vendor binding
@@ -690,6 +696,15 @@ impl RebornBuildInput {
         self
     }
 
+    /// Binary-assembled account-setup descriptors (see the field doc).
+    pub fn with_account_setup_descriptors(
+        mut self,
+        descriptors: Vec<ironclaw_product_workflow::ExtensionAccountSetupDescriptor>,
+    ) -> Self {
+        self.account_setup_descriptors = descriptors;
+        self
+    }
+
     pub fn with_nearai_mcp_bootstrap_config(
         mut self,
         config: crate::llm_admin::nearai_mcp::NearAiMcpBootstrapConfig,
@@ -819,6 +834,7 @@ impl RebornBuildInput {
             native_extension_factories: Vec::new(),
             channel_extension_bindings: Vec::new(),
             turn_state_store_limits: InMemoryTurnStateStoreLimits::default(),
+            account_setup_descriptors: Vec::new(),
         }
     }
 }

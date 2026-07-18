@@ -112,10 +112,16 @@ pub use input::{
 /// the composition-facade set, so adding `ironclaw_auth` there would fail that
 /// test — the type must travel through this facade instead.
 pub use ironclaw_auth::OAuthRedirectUri;
+pub use ironclaw_host_api::{
+    ExtensionId, RuntimeCredentialAccountSetup, RuntimeCredentialAuthRequirement, VendorId,
+};
 /// Channel-adapter and codec contracts re-exported for the assembling
 /// binary's [`ChannelExtensionBinding`] construction.
 pub use ironclaw_product_adapters::{ChannelAdapter, NormalizedInboundMessage};
 pub use ironclaw_product_workflow::PreferenceTargetCodec;
+pub use ironclaw_product_workflow::{
+    ChannelConnectionRequirement, ExtensionAccountSetupDescriptor, RebornChannelConnectStrategy,
+};
 pub use ironclaw_product_workflow::{
     LifecycleExtensionSource, LifecycleExtensionSummary, LifecycleProductPayload,
     LifecycleProductResponse, LifecycleSearchExtensionSummary,

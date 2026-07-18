@@ -48,6 +48,7 @@ function renderModal({
   oauthMutationState = {},
   runEffects = false,
   blockPopup = false,
+  webCodePairingProbe = { isSuccess: false },
 } = {}) {
   const calls = [];
   const invalidations = [];
@@ -71,6 +72,9 @@ function renderModal({
     useQueryClient: () => ({
       invalidateQueries: ({ queryKey }) => invalidations.push(queryKey),
     }),
+    useQuery: () => webCodePairingProbe,
+    getExtensionPairingStatus: async () => ({ connected: false, pending: null }),
+    PairingWebCodePanel() {},
     Button() {},
     Icon() {},
     console: { error() {} },
@@ -162,6 +166,7 @@ function renderModal({
   return {
     calls,
     context,
+    PairingWebCodePanel: context.PairingWebCodePanel,
     invalidations,
     mutationConfig,
     notifications,
@@ -235,6 +240,48 @@ test("ConfigureModal renders the code-entry panel for a channel extension that u
   const body = JSON.stringify(rendered);
   assert.match(body, /pairing\.placeholder/);
   assert.match(body, /pairing\.instructions/);
+});
+
+test("ConfigureModal hosts the web-code pairing panel instead of a paste box or no-config fallback", () => {
+  const view = renderModal({
+    surfaces: channelSurfaces,
+    packageRef: { kind: "extension", id: "acme-messenger" },
+    channel: "acme-messenger",
+    displayName: "Acme Messenger",
+    // Even a pairing_required lifecycle state must not fall into the
+    // proof-code paste box: WebGeneratedCode mints the code on this side.
+    onboardingState: "pairing_required",
+    webCodePairingProbe: { isSuccess: true },
+  });
+
+  assert.equal(
+    renderedContainsComponent(view.rendered, view.PairingWebCodePanel),
+    true,
+    "a probe-discovered WebGeneratedCode channel must render the minted-code pairing panel",
+  );
+  const body = JSON.stringify(view.rendered);
+  assert.ok(!body.includes("pairing.placeholder"), "no proof-code paste box");
+  assert.ok(
+    !body.includes("extensions.noConfigRequired"),
+    "web-code Configure must never claim no configuration is required",
+  );
+});
+
+test("ConfigureModal keeps the web-code panel for an installed (non-pairing) lifecycle state", () => {
+  const view = renderModal({
+    surfaces: channelSurfaces,
+    packageRef: { kind: "extension", id: "acme-messenger" },
+    channel: "acme-messenger",
+    displayName: "Acme Messenger",
+    onboardingState: "installed",
+    webCodePairingProbe: { isSuccess: true },
+  });
+
+  assert.equal(
+    renderedContainsComponent(view.rendered, view.PairingWebCodePanel),
+    true,
+    "the empty-secrets fallback must not swallow the web-code panel",
+  );
 });
 
 test("ConfigureModal renders Slack OAuth without opening the popup automatically", () => {

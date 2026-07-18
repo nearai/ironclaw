@@ -43,6 +43,11 @@ pub struct ExtensionAccountSetupDescriptor {
     pub auth_requirement: RuntimeCredentialAuthRequirement,
     pub connection_requirement: ChannelConnectionRequirement,
     pub activation_success_message: String,
+    /// `WebGeneratedCode` presentation: an optional deep-link template with
+    /// `{code}` plus non-secret `[channel.config]` field-handle placeholders
+    /// (e.g. `https://vendor.example/{bot_username}?start={code}`). `None`
+    /// presents the minted code alone.
+    pub pairing_deep_link_template: Option<String>,
 }
 
 /// Sanitized lifecycle classification for an unavailable setup host or status

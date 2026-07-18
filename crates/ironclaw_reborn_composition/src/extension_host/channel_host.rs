@@ -263,6 +263,11 @@ pub(crate) struct GenericChannelHostDeps {
     /// operator-actor policy.
     pub(crate) identity_lookup: Option<Arc<dyn crate::provider_identity::RebornUserIdentityLookup>>,
     pub(crate) delivery: Option<ChannelHostDeliveryDeps>,
+    /// Pairing services for `WebGeneratedCode` channel extensions: drives the
+    /// sink's pre-admission consume gate and identity-based actor resolution
+    /// for extensions that pair without an OAuth vendor.
+    pub(crate) channel_pairing:
+        Option<Arc<crate::extension_host::channel_pairing::ChannelPairingRegistry>>,
 }
 
 /// What the assembly last reconciled for one extension id.
@@ -620,6 +625,17 @@ impl GenericChannelHostAssembly {
             classifier: extras.classifier.clone(),
             workflow: Arc::new(workflow),
             observer: observer.clone(),
+            pairing: self
+                .deps
+                .channel_pairing
+                .as_ref()
+                .and_then(|registry| registry.get(&active.extension_id))
+                .map(|service| {
+                    service
+                        as Arc<
+                            dyn crate::extension_host::extension_ingress::ChannelPairingInterceptor,
+                        >
+                }),
         }));
         let registration = ChannelIngressRegistration {
             secrets,
@@ -665,6 +681,11 @@ impl GenericChannelHostAssembly {
         // an auth vendor keep the operator-actor policy: the ingress
         // verification secret gates who reaches the installation and no
         // binding can exist to resolve.
+        let pairing_extension = self
+            .deps
+            .channel_pairing
+            .as_ref()
+            .is_some_and(|registry| registry.get(&active.extension_id).is_some());
         let actor_user_resolver: Arc<dyn ProductActorUserResolver> = match (
             self.deps.identity_lookup.as_ref(),
             active.resolved.auth.first(),
@@ -672,6 +693,17 @@ impl GenericChannelHostAssembly {
             (Some(lookup), Some(auth)) => Arc::new(
                 crate::provider_identity::ProviderIdentityActorResolver::for_any_actor_kind(
                     auth.vendor.as_str(),
+                    active.extension_id.as_str(),
+                    Arc::clone(lookup),
+                ),
+            ),
+            // Pairing-strategy channels have no OAuth vendor; verified
+            // inbound actors resolve through the bindings the pairing
+            // consume wrote, keyed by the extension id as provider. Unbound
+            // actors fail closed instead of inheriting the operator.
+            (Some(lookup), None) if pairing_extension => Arc::new(
+                crate::provider_identity::ProviderIdentityActorResolver::for_any_actor_kind(
+                    active.extension_id.as_str(),
                     active.extension_id.as_str(),
                     Arc::clone(lookup),
                 ),

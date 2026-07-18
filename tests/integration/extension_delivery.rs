@@ -326,6 +326,7 @@ impl VendorIngress {
             classifier: None,
             workflow: harness.product_workflow_for_test(),
             observer: Some(observer as Arc<dyn PostAdmissionObserver>),
+            pairing: None,
         }));
         parts.registry.register(
             extension_id,
@@ -779,9 +780,14 @@ async fn telegram_update_becomes_a_turn_and_a_coordinated_reply(#[case] storage:
         .field_status(&telegram_id)
         .await
         .expect("field status");
-    assert_eq!(status.len(), 3, "{status:?}");
+    assert_eq!(status.len(), 4, "{status:?}");
+    // `bot_username` is optional pairing presentation (autofilled by the
+    // setup-provisioning hook); the three transport fields are configured.
     assert!(
-        status.iter().all(|field| field.provided),
+        status
+            .iter()
+            .filter(|field| field.name != "bot_username")
+            .all(|field| field.provided),
         "all configured fields must report provided: {status:?}"
     );
     assert!(

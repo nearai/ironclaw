@@ -129,6 +129,7 @@ pub fn build_channel_connection_for_test(
         credential_cleanup,
         account_status_reader,
         local_runtime.channel_dm_target_store.clone(),
+        None,
     ));
     if local_runtime
         .channel_disconnect_slot

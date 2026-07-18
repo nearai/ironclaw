@@ -183,9 +183,12 @@ fn assert_static_projection_parity(dir: &str) {
             a.prompt_doc_ref, b.prompt_doc_ref,
             "{dir}/{id}: prompt_doc_ref"
         );
+        // Most v3 manifests drop `output_schema_ref` (schemas remain package
+        // assets); the dialect regained the field with the redirect-egress
+        // tool port, and a v3 declaration must then match the v2 baseline.
         assert!(
-            b.output_schema_ref.is_none(),
-            "{dir}/{id}: v3 drops output_schema_ref"
+            b.output_schema_ref.is_none() || a.output_schema_ref == b.output_schema_ref,
+            "{dir}/{id}: a declared v3 output_schema_ref must match the v2 baseline"
         );
         assert_eq!(
             a.required_host_ports, b.required_host_ports,

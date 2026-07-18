@@ -39,6 +39,7 @@ fn descriptor(extension: &str) -> ExtensionAccountSetupDescriptor {
             error_message: "Connection failed.".to_string(),
         },
         activation_success_message: "Account setup is ready.".to_string(),
+        pairing_deep_link_template: None,
     }
 }
 

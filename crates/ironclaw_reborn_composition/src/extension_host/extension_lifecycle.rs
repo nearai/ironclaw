@@ -1440,6 +1440,7 @@ impl RebornLocalExtensionManagementPort {
                 package_ref.id.as_str(),
                 active_package.manifest.name.as_str(),
                 channel_connect_strategy(&active_package),
+                account_setup.as_ref(),
             ))
         } else {
             None
@@ -2582,6 +2583,7 @@ fn activation_success_response(
             package_ref.id.as_str(),
             package.manifest.name.as_str(),
             channel_connect_strategy(package),
+            account_setup.as_ref(),
         ))
     } else {
         None
@@ -2645,6 +2647,7 @@ fn activation_success_message(
             package_ref.id.as_str(),
             display_name,
             channel_connect_strategy(package),
+            None,
         );
         let connect_guidance = match connection.strategy {
             RebornChannelConnectStrategy::OAuth => format!(
@@ -2751,7 +2754,14 @@ pub(crate) fn channel_connection_requirement(
     channel_id: &str,
     display_name: &str,
     strategy: RebornChannelConnectStrategy,
+    account_setup: Option<&ExtensionAccountSetupDescriptor>,
 ) -> ChannelConnectionRequirement {
+    // An extension-owned account-setup declaration is the authority for its
+    // connect affordance; the generic derivation below is the fallback for
+    // extensions without one.
+    if let Some(setup) = account_setup {
+        return setup.connection_requirement.clone();
+    }
     let (instructions, input_placeholder, submit_label, error_message) = match strategy {
         RebornChannelConnectStrategy::OAuth => (
             format!(
@@ -3474,6 +3484,7 @@ mod tests {
             "slack",
             "Slack",
             channel_connect_strategy(&slack.package),
+            None,
         );
         assert_eq!(requirement.strategy, RebornChannelConnectStrategy::OAuth);
         assert_eq!(requirement.channel, "slack");
@@ -3526,7 +3537,7 @@ mod tests {
         assert_eq!(activate.phase, InstallationState::Active);
         let message = activate.message.as_deref().expect("activation message");
         assert!(
-            message.contains("Signal is installed as an external channel")
+            message.contains("Signal is installed as a channel surface")
                 && message.contains("app or bot")
                 && message.contains("pairing code")
                 && message.contains("connection panel")

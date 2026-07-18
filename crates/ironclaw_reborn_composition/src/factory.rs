@@ -556,6 +556,11 @@ pub struct RebornServices {
     /// extension host.
     pub(crate) extension_ingress:
         Option<crate::extension_host::extension_ingress::ExtensionIngressParts>,
+    /// Pairing services for `WebGeneratedCode` channel extensions, built
+    /// from the binary-assembled account-setup descriptors; the channel host
+    /// assembly consumes it for sink gates and actor resolution.
+    pub(crate) channel_pairing:
+        Option<Arc<crate::extension_host::channel_pairing::ChannelPairingRegistry>>,
     /// The generic delivery coordinator (extension-runtime §5.4): the sole
     /// writer of outbound delivery state, resolving channel adapters +
     /// policy egress from the active snapshot. `None` when the composition
@@ -737,6 +742,7 @@ impl RebornServices {
                     identity,
                     identity_lookup,
                     delivery,
+                    channel_pairing: self.channel_pairing.clone(),
                 },
             ),
         )
@@ -1548,6 +1554,7 @@ impl RebornServices {
             credential_refresh_worker: CredentialRefreshWorkerReady::Absent,
             channel_extension_bindings: Vec::new(),
             extension_ingress: None,
+            channel_pairing: None,
             delivery_coordinator: None,
             channel_delivery_resolver: None,
             channel_egress_credential_bridges: None,
@@ -1685,6 +1692,7 @@ async fn build_local_runtime(input: RebornBuildInput) -> Result<RebornServices, 
         owner_id,
         local_runtime_identity,
         turn_state_store_limits,
+        account_setup_descriptors,
         ..
     } = input;
     let local_runtime_identity_for_nearai_mcp = local_runtime_identity.clone();
@@ -2200,6 +2208,9 @@ async fn build_local_runtime(input: RebornBuildInput) -> Result<RebornServices, 
         )?,
     );
     let account_setups = ExtensionAccountSetupRegistry::default();
+    let channel_pairing_registry: Option<
+        Arc<crate::extension_host::channel_pairing::ChannelPairingRegistry>,
+    >;
     let extension_management = Arc::new(
         RebornLocalExtensionManagementPort::new(
             extension_filesystem,
@@ -2212,7 +2223,7 @@ async fn build_local_runtime(input: RebornBuildInput) -> Result<RebornServices, 
             // their installs are tenant-shared, everyone else's are private.
             nearai_mcp_owner_scope.user_id.clone(),
         )
-        .with_account_setup_registry(account_setups)
+        .with_account_setup_registry(account_setups.clone())
         .with_removal_cleanup_registry(removal_cleanup)
         // Removal of a channel+auth extension disconnects the caller through
         // the facade this late-bound slot carries once composition (runtime
@@ -2417,6 +2428,133 @@ async fn build_local_runtime(input: RebornBuildInput) -> Result<RebornServices, 
                 ),
             ),
         );
+        // Account-setup declarations + generic pairing services (§5.5): each
+        // binary-assembled descriptor is declared into the activation gate
+        // registry; `WebGeneratedCode` descriptors additionally get a
+        // pairing service over the durable pairing/identity stores, wired as
+        // the extension's connection-status source and handed to the channel
+        // host assembly for sink gates and actor resolution.
+        let channel_pairing_registry_built = {
+            let registry =
+                Arc::new(crate::extension_host::channel_pairing::ChannelPairingRegistry::default());
+            for descriptor in &account_setup_descriptors {
+                if !account_setups.declare(descriptor.clone()) {
+                    return Err(RebornBuildError::InvalidConfig {
+                        reason: format!(
+                            "duplicate account-setup descriptor for extension `{}`",
+                            descriptor.extension_id.as_str()
+                        ),
+                    });
+                }
+                if descriptor.connection_requirement.strategy
+                    != ironclaw_product_workflow::RebornChannelConnectStrategy::WebGeneratedCode
+                {
+                    continue;
+                }
+                let (Some(channel_config), Some(identity_store), Some(dm_targets)) = (
+                    store_graph.local_runtime.channel_config.clone(),
+                    store_graph.local_runtime.channel_identity_store.clone(),
+                    store_graph.local_runtime.channel_dm_target_store.clone(),
+                ) else {
+                    return Err(RebornBuildError::InvalidConfig {
+                        reason: format!(
+                            "extension `{}` declares WebGeneratedCode pairing but the composed \
+                             runtime lacks the channel config or identity store",
+                            descriptor.extension_id.as_str()
+                        ),
+                    });
+                };
+                let extension_id = descriptor.extension_id.clone();
+                let pairing_store = Arc::new(
+                    crate::extension_host::channel_pairing::FilesystemChannelPairingStore::new(
+                        Arc::clone(&fold_filesystem),
+                        channel_egress_scope.tenant_id.clone(),
+                        channel_egress_scope.user_id.clone(),
+                        extension_id.clone(),
+                    ),
+                );
+                let installation = Arc::new(
+                    crate::extension_host::channel_pairing::SnapshotPairingInstallationSource::new(
+                        generic.host.snapshot_watch(),
+                        extension_id.clone(),
+                    ),
+                );
+                let template_values = Arc::new(
+                    crate::extension_host::channel_pairing::ChannelConfigPairingTemplateValues::new(
+                        Arc::clone(&channel_config),
+                        extension_id.clone(),
+                        descriptor.pairing_deep_link_template.as_deref(),
+                    ),
+                );
+                let roots =
+                    crate::extension_host::channel_host::default_channel_workflow_storage_roots(
+                        &channel_egress_scope.tenant_id,
+                        extension_id.as_str(),
+                    )
+                    .map_err(|reason| RebornBuildError::InvalidConfig { reason })?;
+                let workflow_state_factory =
+                    crate::extension_host::channel_host::FilesystemChannelWorkflowStateFactory::new(
+                        Arc::clone(&filesystem),
+                    );
+                let workflow_state =
+                    crate::extension_host::channel_host::ChannelWorkflowStateFactory::build(
+                        &workflow_state_factory,
+                        &roots,
+                        channel_egress_scope.clone(),
+                    )
+                    .await
+                    .map_err(|reason| RebornBuildError::InvalidConfig { reason })?;
+                let continuation = auth_continuation_dispatcher(
+                    turn_coordinator.clone(),
+                    Some(Arc::clone(&store_graph.turn_state)
+                        as Arc<
+                            dyn crate::blocked_auth_resume::BlockedAuthSnapshotSource,
+                        >),
+                );
+                let service = Arc::new(
+                    crate::extension_host::channel_pairing::ChannelPairingService::new(
+                        crate::extension_host::channel_pairing::ChannelPairingServiceParts {
+                            tenant_id: channel_egress_scope.tenant_id.clone(),
+                            agent_id: channel_egress_scope
+                                .agent_id
+                                .clone()
+                                .unwrap_or_else(|| ironclaw_host_api::AgentId::new("reborn").expect("static agent id")),
+                            project_id: channel_egress_scope.project_id.clone(),
+                            extension_id: extension_id.clone(),
+                            deep_link_template: descriptor.pairing_deep_link_template.clone(),
+                            store: pairing_store,
+                            installation,
+                            template_values,
+                            identity_bind: Arc::clone(&identity_store)
+                                as Arc<dyn crate::provider_identity::RebornUserIdentityBindingStore>,
+                            identity_lookup: Arc::clone(&identity_store)
+                                as Arc<dyn crate::provider_identity::RebornUserIdentityLookup>,
+                            identity_delete: Arc::clone(&identity_store)
+                                as Arc<dyn crate::provider_identity::RebornUserIdentityBindingDeleteStore>,
+                            continuation,
+                            conversation_actor_pairings: Arc::clone(&workflow_state.conversations)
+                                as Arc<dyn ironclaw_conversations::ConversationActorPairingService>,
+                            dm_targets,
+                        },
+                    ),
+                );
+                if !account_setups.connect(
+                    &descriptor.extension_id,
+                    Arc::clone(&service)
+                        as Arc<dyn ironclaw_product_workflow::AccountConnectionStatusSource>,
+                ) {
+                    return Err(RebornBuildError::InvalidConfig {
+                        reason: format!(
+                            "account-setup status source for `{}` was already connected",
+                            descriptor.extension_id.as_str()
+                        ),
+                    });
+                }
+                registry.register(service);
+            }
+            registry
+        };
+        channel_pairing_registry = Some(channel_pairing_registry_built);
         // The delivery coordinator (§5.4): sole delivery-state writer over
         // the SAME transport the host's channel hooks egress through and the
         // SAME reply-context store the ingress router writes (ING-11).
@@ -2481,6 +2619,7 @@ async fn build_local_runtime(input: RebornBuildInput) -> Result<RebornServices, 
         credential_refresh_worker: CredentialRefreshWorkerReady::Absent,
         channel_extension_bindings,
         extension_ingress,
+        channel_pairing: channel_pairing_registry,
         delivery_coordinator,
         channel_delivery_resolver,
         channel_egress_credential_bridges,
@@ -4616,6 +4755,10 @@ async fn build_production_shaped(
         // production-shaped build now mints its own notifier internally so the
         // coordinator and scheduler always share the exact same channel.
         turn_run_wake_notifier: _,
+        // Account-setup declarations ride the local-dev channel host today;
+        // the production-shaped channel host assembly adopts them when its
+        // generic ingress lane lands.
+        account_setup_descriptors: _,
         runtime_process_binding,
         required_runtime_backends,
         require_runtime_http_egress,
@@ -5599,6 +5742,7 @@ where
         // extension host yet; the generic ingress mounts with it.
         channel_extension_bindings: Vec::new(),
         extension_ingress: None,
+        channel_pairing: None,
         delivery_coordinator: None,
         channel_delivery_resolver: None,
         channel_egress_credential_bridges: None,

@@ -6,18 +6,20 @@ import { Button } from "../design-system/button";
 import { useT } from "../lib/i18n";
 import { notifyChannelConnected } from "../lib/channel-connection-events";
 import {
-  disconnectTelegramPairing,
-  getTelegramPairing,
-  startTelegramPairing,
-  telegramSetupError,
-} from "../lib/telegram-setup-api";
+  extensionPairingError,
+  getExtensionPairingStatus,
+  mintExtensionPairingCode,
+  unpairExtension,
+} from "../lib/extension-pairing-api";
 
 const POLL_INTERVAL_MS = 2000;
 const COUNTDOWN_INTERVAL_MS = 1000;
 const COPIED_RESET_MS = 1500;
 
-// Deep links are `https://t.me/<bot_username>?start=<code>`.
-export function telegramBotUsernameFromDeepLink(deepLink) {
+// Messenger deep links commonly carry the bot handle as the first path
+// segment (`https://t.me/<bot_username>?start=<code>`); other vendors simply
+// get no copyable handle row.
+export function pairingBotUsernameFromDeepLink(deepLink) {
   const match = /^https:\/\/t\.me\/([^/?#]+)/i.exec(String(deepLink || "").trim());
   return match ? match[1] : "";
 }
@@ -36,14 +38,23 @@ function pendingExpiresAtMs(pending) {
 }
 
 function pendingIsLive(pending) {
-  return Boolean(pending?.code && pending?.deep_link) && pendingExpiresAtMs(pending) > Date.now();
+  // The deep link is presentation sugar (absent until the channel's config
+  // fills the template); a live CODE alone is fully pairable.
+  return Boolean(pending?.code) && pendingExpiresAtMs(pending) > Date.now();
 }
 
-// In-chat (`compact`) and Extensions-page pairing panel for the `telegram`
-// extension's `web_generated_code` connect strategy: mint a code, render it as
-// copyable text + deep link + QR, count down to expiry, and poll until the
-// backend reports the Telegram account connected.
-export function TelegramPairingPanel({ compact = false }) {
+// In-chat (`compact`) and Extensions-page pairing panel for any channel
+// extension with the `web_generated_code` connect strategy: mint a code,
+// render it as copyable text (+ deep link and QR when the backend supplies
+// one), count down to expiry, and poll until the backend reports the account
+// connected. Vendor copy rides the backend connection requirement
+// (`instructions`); the panel itself is vendor-blind.
+export function PairingWebCodePanel({
+  extensionId,
+  displayName = "",
+  instructions = "",
+  compact = false,
+}) {
   const t = useT();
   const queryClient = useQueryClient();
   const [connected, setConnected] = React.useState(false);
@@ -68,7 +79,7 @@ export function TelegramPairingPanel({ compact = false }) {
     setConnected(true);
     if (!sawDisconnectedRef.current || notifiedRef.current) return;
     notifiedRef.current = true;
-    notifyChannelConnected({ channel: "telegram", source: "telegram-pairing-panel" });
+    notifyChannelConnected({ channel: extensionId, source: "pairing-web-code-panel" });
     queryClient.invalidateQueries({ queryKey: ["extensions"] });
     queryClient.invalidateQueries({ queryKey: ["connectable-channels"] });
   };
@@ -86,7 +97,7 @@ export function TelegramPairingPanel({ compact = false }) {
   };
 
   const mintCode = async () => {
-    const minted = await startTelegramPairing();
+    const minted = await mintExtensionPairingCode(extensionId);
     adoptPending(minted);
   };
 
@@ -96,7 +107,7 @@ export function TelegramPairingPanel({ compact = false }) {
     let cancelled = false;
     const bootstrap = async () => {
       try {
-        const status = await getTelegramPairing();
+        const status = await getExtensionPairingStatus(extensionId);
         if (cancelled) return;
         if (status?.connected) {
           setConnected(true);
@@ -110,7 +121,7 @@ export function TelegramPairingPanel({ compact = false }) {
         await mintCode();
       } catch (bootstrapError) {
         if (!cancelled) {
-          setError(telegramSetupError(bootstrapError, t("telegramPairing.loadFailed")));
+          setError(extensionPairingError(bootstrapError, t("pairing.web.loadFailed", { name: displayName || extensionId })));
         }
       }
     };
@@ -118,7 +129,8 @@ export function TelegramPairingPanel({ compact = false }) {
     return () => {
       cancelled = true;
     };
-  }, []);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [extensionId]);
 
   // Render the deep link as a QR data URL; a rotated code re-renders it.
   const deepLink = pending?.deep_link || "";
@@ -158,7 +170,7 @@ export function TelegramPairingPanel({ compact = false }) {
     const timer = setInterval(async () => {
       const pairingEpoch = pairingEpochRef.current;
       try {
-        const status = await getTelegramPairing();
+        const status = await getExtensionPairingStatus(extensionId);
         if (pairingEpoch !== pairingEpochRef.current) return;
         if (status?.connected) {
           markConnected();
@@ -173,7 +185,7 @@ export function TelegramPairingPanel({ compact = false }) {
       }
     }, POLL_INTERVAL_MS);
     return () => clearInterval(timer);
-  }, [connected]);
+  }, [connected, extensionId]);
 
   React.useEffect(() => () => clearTimeout(copiedTimerRef.current), []);
 
@@ -184,7 +196,7 @@ export function TelegramPairingPanel({ compact = false }) {
     try {
       await mintCode();
     } catch (renewError) {
-      setError(telegramSetupError(renewError, t("telegramPairing.loadFailed")));
+      setError(extensionPairingError(renewError, t("pairing.web.loadFailed", { name: displayName || extensionId })));
     } finally {
       setIsRenewing(false);
     }
@@ -198,7 +210,7 @@ export function TelegramPairingPanel({ compact = false }) {
     // describes the old pairing and must not reconnect the local UI.
     pairingEpochRef.current += 1;
     try {
-      await disconnectTelegramPairing();
+      await unpairExtension(extensionId);
       notifiedRef.current = false;
       sawDisconnectedRef.current = true;
       setConnected(false);
@@ -207,7 +219,7 @@ export function TelegramPairingPanel({ compact = false }) {
       queryClient.invalidateQueries({ queryKey: ["extensions"] });
       queryClient.invalidateQueries({ queryKey: ["connectable-channels"] });
     } catch (disconnectError) {
-      setError(telegramSetupError(disconnectError, t("telegramPairing.disconnectFailed")));
+      setError(extensionPairingError(disconnectError, t("pairing.web.disconnectFailed", { name: displayName || extensionId })));
       setIsDisconnecting(false);
       return;
     }
@@ -216,7 +228,7 @@ export function TelegramPairingPanel({ compact = false }) {
       // code is a load problem, never a failed disconnect.
       await mintCode();
     } catch (mintError) {
-      setError(telegramSetupError(mintError, t("telegramPairing.loadFailed")));
+      setError(extensionPairingError(mintError, t("pairing.web.loadFailed", { name: displayName || extensionId })));
     } finally {
       setIsDisconnecting(false);
     }
@@ -241,18 +253,18 @@ export function TelegramPairingPanel({ compact = false }) {
 
   if (connected) {
     return (
-      <div data-testid="telegram-pairing-panel" className={containerClass}>
-        <p data-testid="telegram-paired" className="text-sm text-[var(--v2-positive-text)]">
-          ✅ {t("telegramPairing.paired")}
+      <div data-testid="pairing-web-code-panel" className={containerClass}>
+        <p data-testid="pairing-connected" className="text-sm text-[var(--v2-positive-text)]">
+          ✅ {t("pairing.web.paired", { name: displayName || extensionId })}
         </p>
         <button
           type="button"
           onClick={disconnect}
           disabled={isDisconnecting}
-          data-testid="telegram-disconnect"
+          data-testid="pairing-disconnect"
           className="mt-2 text-xs text-iron-400 underline underline-offset-2 hover:text-iron-200 disabled:cursor-not-allowed disabled:opacity-60"
         >
-          {t("telegramPairing.disconnect")}
+          {t("pairing.web.disconnect")}
         </button>
         {error &&
         (<p role="alert" className="mt-2 text-xs leading-5 text-red-300">{error}</p>)}
@@ -262,7 +274,7 @@ export function TelegramPairingPanel({ compact = false }) {
 
   if (!pending) {
     return (
-      <div data-testid="telegram-pairing-panel" className={containerClass}>
+      <div data-testid="pairing-web-code-panel" className={containerClass}>
         {error
           ? (
               <div className="space-y-2">
@@ -272,9 +284,9 @@ export function TelegramPairingPanel({ compact = false }) {
                   size="sm"
                   onClick={renew}
                   loading={isRenewing}
-                  data-testid="telegram-new-code"
+                  data-testid="pairing-new-code"
                 >
-                  {t("telegramPairing.getNewCode")}
+                  {t("pairing.web.getNewCode")}
                 </Button>
               </div>
             )
@@ -285,13 +297,13 @@ export function TelegramPairingPanel({ compact = false }) {
 
   if (expired) {
     return (
-      <div data-testid="telegram-pairing-panel" className={containerClass}>
+      <div data-testid="pairing-web-code-panel" className={containerClass}>
         {!compact &&
         (<h4 className="mb-2 font-mono text-[11px] uppercase tracking-[0.14em] text-signal">
-          {t("telegramPairing.title")}
+          {t("pairing.web.title", { name: displayName || extensionId })}
         </h4>)}
-        <p data-testid="telegram-pairing-expired" className="text-xs leading-5 text-iron-300">
-          {t("telegramPairing.expired")}
+        <p data-testid="pairing-expired" className="text-xs leading-5 text-iron-300">
+          {t("pairing.web.expired")}
         </p>
         <Button
           variant="secondary"
@@ -299,9 +311,9 @@ export function TelegramPairingPanel({ compact = false }) {
           className="mt-2"
           onClick={renew}
           loading={isRenewing}
-          data-testid="telegram-new-code"
+          data-testid="pairing-new-code"
         >
-          {t("telegramPairing.getNewCode")}
+          {t("pairing.web.getNewCode")}
         </Button>
         {error &&
         (<p role="alert" className="mt-2 text-xs leading-5 text-red-300">{error}</p>)}
@@ -309,29 +321,32 @@ export function TelegramPairingPanel({ compact = false }) {
     );
   }
 
-  const botUsername = telegramBotUsernameFromDeepLink(deepLink);
+  const botUsername = pairingBotUsernameFromDeepLink(deepLink);
 
   return (
-    <div data-testid="telegram-pairing-panel" className={containerClass}>
+    <div data-testid="pairing-web-code-panel" className={containerClass}>
       {!compact &&
       (<h4 className="mb-2 font-mono text-[11px] uppercase tracking-[0.14em] text-signal">
-        {t("telegramPairing.title")}
+        {t("pairing.web.title", { name: displayName || extensionId })}
       </h4>)}
-      <p className="mb-3 text-xs leading-5 text-iron-300">{t("telegramPairing.instructions")}</p>
+      <p className="mb-3 text-xs leading-5 text-iron-300">{instructions ||
+        (deepLink
+          ? t("pairing.web.instructions", { name: displayName || extensionId })
+          : t("pairing.web.instructionsNoLink", { name: displayName || extensionId }))}</p>
 
       <div className="flex flex-col gap-3 sm:flex-row sm:items-start">
         {qrDataUrl &&
         (
           <img
             src={qrDataUrl}
-            alt={t("telegramPairing.qrAlt")}
+            alt={t("pairing.web.qrAlt", { name: displayName || extensionId })}
             className="h-36 w-36 shrink-0 rounded-md border border-white/[0.06] bg-white p-1"
           />
         )}
         <div className="min-w-0 flex-1 space-y-2">
           <div className="flex flex-wrap items-center gap-2">
             <span
-              data-testid="telegram-pairing-code"
+              data-testid="pairing-code"
               className="font-mono text-xl tracking-[0.18em] text-iron-100"
             >
               {pending.code}
@@ -340,12 +355,13 @@ export function TelegramPairingPanel({ compact = false }) {
               variant="ghost"
               size="sm"
               onClick={() => copyText("code", pending.code)}
-              data-testid="telegram-copy-code"
+              data-testid="pairing-copy-code"
             >
-              {copiedTarget === "code" ? t("common.copiedToClipboard") : t("telegramPairing.copyCode")}
+              {copiedTarget === "code" ? t("common.copiedToClipboard") : t("pairing.web.copyCode")}
             </Button>
           </div>
-          <div>
+          {deepLink &&
+          (<div>
             <Button
               as="a"
               href={deepLink}
@@ -353,25 +369,25 @@ export function TelegramPairingPanel({ compact = false }) {
               rel="noreferrer"
               variant="secondary"
               size="sm"
-              data-testid="telegram-open-link"
+              data-testid="pairing-open-link"
             >
-              {t("telegramPairing.openInTelegram")}
+              {t("pairing.web.openIn", { name: displayName || extensionId })}
             </Button>
-          </div>
+          </div>)}
           {botUsername &&
           (
             <button
               type="button"
               onClick={() => copyText("username", `@${botUsername}`)}
-              title={t("telegramPairing.copyUsername")}
-              data-testid="telegram-bot-username"
+              title={t("pairing.web.copyUsername")}
+              data-testid="pairing-bot-username"
               className="font-mono text-xs text-iron-300 underline-offset-2 hover:text-iron-100 hover:underline"
             >
               {copiedTarget === "username" ? t("common.copiedToClipboard") : `@${botUsername}`}
             </button>
           )}
-          <p data-testid="telegram-pairing-countdown" className="text-[11px] text-iron-400">
-            {t("telegramPairing.expiresIn", {
+          <p data-testid="pairing-countdown" className="text-[11px] text-iron-400">
+            {t("pairing.web.expiresIn", {
               time: formatPairingCountdown(expiresAtMs - now),
             })}
           </p>

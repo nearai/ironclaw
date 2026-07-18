@@ -291,6 +291,23 @@ impl InboundSink for ExtensionIngressRegistry {
 
 // ── The generic inbound sink over the existing workflow ─────────────────────
 
+/// Pre-admission pairing interception for `WebGeneratedCode` channels: a
+/// direct message from an actor with no identity binding is offered to the
+/// pairing seam BEFORE workflow admission, so a pairing code is consumed
+/// instead of becoming (or failing as) a turn.
+#[async_trait]
+pub trait ChannelPairingInterceptor: Send + Sync {
+    /// Returns `true` when the message was serviced as a pairing
+    /// interaction and must not reach the workflow. The implementation owns
+    /// unbound-actor detection and code-shape parsing; a `false` lets the
+    /// message flow to normal admission.
+    async fn intercept(
+        &self,
+        installation_id: &AdapterInstallationId,
+        message: &NormalizedInboundMessage,
+    ) -> bool;
+}
+
 /// Configuration for [`GenericChannelInboundSink`].
 pub struct ChannelInboundSinkConfig {
     /// The adapter identity stamped on inbound envelopes.
@@ -304,6 +321,8 @@ pub struct ChannelInboundSinkConfig {
     pub workflow: Arc<dyn ProductWorkflow>,
     /// Optional post-admission follow-up (e.g. final-reply delivery).
     pub observer: Option<Arc<dyn PostAdmissionObserver>>,
+    /// Optional pre-admission pairing gate (`WebGeneratedCode` channels).
+    pub pairing: Option<Arc<dyn ChannelPairingInterceptor>>,
 }
 
 /// The generic [`InboundSink`]: builds the trusted inbound envelope from a
@@ -376,6 +395,14 @@ impl InboundSink for GenericChannelInboundSink {
             message,
         } = admission;
         let installation = AdapterInstallationId::new(&installation_id).map_err(Self::permanent)?;
+        // Pairing pre-admission gate: a serviced pairing interaction is
+        // durably reflected in the pairing/identity stores, not the turn
+        // ledger — the vendor still gets its 2xx.
+        if let Some(pairing) = &self.config.pairing
+            && pairing.intercept(&installation, &message).await
+        {
+            return Ok(InboundAdmissionAck::Accepted);
+        }
         let evidence = self.config.evidence.mint(&installation_id);
         let context = TrustedInboundContext::from_verified_evidence(
             self.config.adapter_id.clone(),
