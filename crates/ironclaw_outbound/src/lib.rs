@@ -28,7 +28,7 @@ pub use communication_preferences::{
 };
 pub use delivered_gate_routes::{
     DELIVERED_GATE_ROUTE_TTL, DeliveredGateRouteRecord, DeliveredGateRouteStore,
-    InMemoryDeliveredGateRouteStore,
+    NoopDeliveredGateRouteStore,
 };
 pub use delivery_resolution::{
     CommunicationDeliveryCandidate, CommunicationDeliveryIntent, CommunicationDeliveryKind,

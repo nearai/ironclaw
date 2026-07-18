@@ -143,7 +143,7 @@ mod tests {
         OutboundDeliveryTargetEntry, OutboundDeliveryTargetProvider,
     };
     use ironclaw_outbound::{
-        CommunicationPreferenceRecord, DeliveryDefaultScope, InMemoryDeliveredGateRouteStore,
+        CommunicationPreferenceRecord, DeliveryDefaultScope,
 
         WriteCommunicationPreferenceRequest,
     };
@@ -895,7 +895,7 @@ mod tests {
             thread_service,
             turn_coordinator: coordinator,
             outbound_store: outbound.clone(),
-            route_store: Arc::new(InMemoryDeliveredGateRouteStore::default()),
+            route_store: Arc::new(in_memory_backed_outbound_state_store()),
             communication_preferences: outbound,
             adapter: test_adapter(installation_id),
             egress,
@@ -1013,7 +1013,7 @@ mod tests {
         );
 
         let delivery_store = Arc::new(in_memory_backed_outbound_state_store());
-        let route_store = Arc::new(InMemoryDeliveredGateRouteStore::default());
+        let route_store = Arc::new(in_memory_backed_outbound_state_store());
         let services = make_services(
             coordinator,
             thread_service,
@@ -1131,7 +1131,7 @@ mod tests {
         egress.allow_credential_handle("slack_bot_token");
 
         let delivery_store = Arc::new(in_memory_backed_outbound_state_store());
-        let route_store = Arc::new(InMemoryDeliveredGateRouteStore::default());
+        let route_store = Arc::new(in_memory_backed_outbound_state_store());
         let services = make_services(
             coordinator,
             thread_service,
@@ -1269,7 +1269,7 @@ mod tests {
         );
 
         let delivery_store = Arc::new(in_memory_backed_outbound_state_store());
-        let route_store = Arc::new(InMemoryDeliveredGateRouteStore::default());
+        let route_store = Arc::new(in_memory_backed_outbound_state_store());
         let services = make_services(
             coordinator,
             thread_service,
@@ -1348,7 +1348,7 @@ mod tests {
         );
 
         let delivery_store = Arc::new(in_memory_backed_outbound_state_store());
-        let route_store = Arc::new(InMemoryDeliveredGateRouteStore::default());
+        let route_store = Arc::new(in_memory_backed_outbound_state_store());
         let services = make_services(
             coordinator,
             thread_service,
@@ -1409,7 +1409,7 @@ mod tests {
         egress.allow_credential_handle("slack_bot_token");
 
         let delivery_store = Arc::new(in_memory_backed_outbound_state_store());
-        let route_store = Arc::new(InMemoryDeliveredGateRouteStore::default());
+        let route_store = Arc::new(in_memory_backed_outbound_state_store());
         let services = make_services(
             coordinator,
             thread_service,
@@ -1526,7 +1526,7 @@ mod tests {
         let egress = Arc::new(FakeProtocolHttpEgress::new(vec!["slack.com".to_string()]));
         egress.allow_credential_handle("slack_bot_token");
         let delivery_store = Arc::new(in_memory_backed_outbound_state_store());
-        let route_store = Arc::new(InMemoryDeliveredGateRouteStore::default());
+        let route_store = Arc::new(in_memory_backed_outbound_state_store());
         let mut services = make_services(
             coordinator,
             thread_service,
@@ -1610,7 +1610,7 @@ mod tests {
         );
 
         let delivery_store = Arc::new(in_memory_backed_outbound_state_store());
-        let route_store = Arc::new(InMemoryDeliveredGateRouteStore::default());
+        let route_store = Arc::new(in_memory_backed_outbound_state_store());
         let services = make_services(
             coordinator,
             thread_service,
@@ -1692,7 +1692,7 @@ mod tests {
         egress.allow_credential_handle("slack_bot_token");
 
         let delivery_store = Arc::new(in_memory_backed_outbound_state_store());
-        let route_store = Arc::new(InMemoryDeliveredGateRouteStore::default());
+        let route_store = Arc::new(in_memory_backed_outbound_state_store());
         let services = make_services(
             coordinator,
             thread_service,
@@ -1766,7 +1766,7 @@ mod tests {
         let driver = TriggeredRunDeliveryDriver::new(
             services,
             Arc::new(FailingOutcomeStore),
-            Arc::new(InMemoryDeliveredGateRouteStore::default()),
+            Arc::new(in_memory_backed_outbound_state_store()),
             scope.agent_id.clone().expect("test scope has agent"),
         );
         let fire = minimal_trigger_fire(Some(
@@ -1799,7 +1799,7 @@ mod tests {
         let outbound = Arc::new(in_memory_backed_outbound_state_store());
         let egress = Arc::new(FakeProtocolHttpEgress::new(vec!["slack.com".to_string()]));
         let delivery_store = Arc::new(in_memory_backed_outbound_state_store());
-        let route_store = Arc::new(InMemoryDeliveredGateRouteStore::default());
+        let route_store = Arc::new(in_memory_backed_outbound_state_store());
         let services = make_services(coordinator, thread_service, egress, outbound, install);
 
         let driver = TriggeredRunDeliveryDriver::new(
@@ -1866,7 +1866,7 @@ mod tests {
         );
 
         let delivery_store = Arc::new(in_memory_backed_outbound_state_store());
-        let route_store = Arc::new(InMemoryDeliveredGateRouteStore::default());
+        let route_store = Arc::new(in_memory_backed_outbound_state_store());
         let services = make_services(
             coordinator,
             thread_service,
@@ -1936,7 +1936,7 @@ mod tests {
         egress.allow_credential_handle("slack_bot_token");
 
         let delivery_store = Arc::new(in_memory_backed_outbound_state_store());
-        let route_store = Arc::new(InMemoryDeliveredGateRouteStore::default());
+        let route_store = Arc::new(in_memory_backed_outbound_state_store());
         let services = make_services(
             coordinator,
             thread_service,
@@ -1996,7 +1996,7 @@ mod tests {
         egress.allow_credential_handle("slack_bot_token");
 
         let delivery_store = Arc::new(in_memory_backed_outbound_state_store());
-        let route_store = Arc::new(InMemoryDeliveredGateRouteStore::default());
+        let route_store = Arc::new(in_memory_backed_outbound_state_store());
         let services = make_services(
             coordinator,
             thread_service,
@@ -2059,7 +2059,7 @@ mod tests {
         egress.allow_credential_handle("slack_bot_token");
 
         let delivery_store = Arc::new(in_memory_backed_outbound_state_store());
-        let route_store = Arc::new(InMemoryDeliveredGateRouteStore::default());
+        let route_store = Arc::new(in_memory_backed_outbound_state_store());
         let services = make_services(coordinator, thread_service, egress, outbound, install);
         let settings = FinalReplyDeliverySettings {
             poll_interval: std::time::Duration::ZERO,
@@ -2138,7 +2138,7 @@ mod tests {
             thread_service,
             turn_coordinator: coordinator,
             outbound_store: outbound.clone(),
-            route_store: Arc::new(InMemoryDeliveredGateRouteStore::default()),
+            route_store: Arc::new(in_memory_backed_outbound_state_store()),
             communication_preferences: outbound,
             adapter: test_adapter(installation_id),
             egress,
@@ -2580,7 +2580,7 @@ mod tests {
             thread_service: Arc::new(InMemorySessionThreadService::default()),
             turn_coordinator: coordinator,
             outbound_store: outbound.clone(),
-            route_store: Arc::new(InMemoryDeliveredGateRouteStore::default()),
+            route_store: Arc::new(in_memory_backed_outbound_state_store()),
             communication_preferences: outbound,
             adapter,
             egress: telegram_egress.clone(),
@@ -3351,7 +3351,7 @@ mod tests {
             thread_service,
             turn_coordinator: coordinator,
             outbound_store: outbound.clone(),
-            route_store: Arc::new(InMemoryDeliveredGateRouteStore::default()),
+            route_store: Arc::new(in_memory_backed_outbound_state_store()),
             communication_preferences: outbound,
             adapter: test_adapter(install),
             egress: egress.clone(),
@@ -3814,7 +3814,7 @@ mod tests {
             thread_service,
             turn_coordinator: coordinator,
             outbound_store: outbound.clone(),
-            route_store: Arc::new(InMemoryDeliveredGateRouteStore::default()),
+            route_store: Arc::new(in_memory_backed_outbound_state_store()),
             communication_preferences: outbound,
             adapter: test_adapter(install),
             egress: egress.clone(),
@@ -3894,7 +3894,7 @@ mod tests {
             thread_service: Arc::new(InMemorySessionThreadService::default()),
             turn_coordinator: coordinator,
             outbound_store: outbound.clone(),
-            route_store: Arc::new(InMemoryDeliveredGateRouteStore::default()),
+            route_store: Arc::new(in_memory_backed_outbound_state_store()),
             communication_preferences: outbound,
             adapter: test_adapter(install),
             egress: egress.clone(),
@@ -4174,7 +4174,7 @@ mod tests {
             thread_service,
             turn_coordinator: coordinator,
             outbound_store: outbound.clone(),
-            route_store: Arc::new(InMemoryDeliveredGateRouteStore::default()),
+            route_store: Arc::new(in_memory_backed_outbound_state_store()),
             communication_preferences: outbound,
             adapter: test_adapter(install),
             egress: egress.clone(),
@@ -4399,7 +4399,7 @@ mod tests {
         );
 
         let delivery_store = Arc::new(in_memory_backed_outbound_state_store());
-        let route_store = Arc::new(InMemoryDeliveredGateRouteStore::default());
+        let route_store = Arc::new(in_memory_backed_outbound_state_store());
         let services = make_services(
             coordinator,
             thread_service,
@@ -4537,7 +4537,7 @@ mod tests {
         );
 
         let delivery_store = Arc::new(in_memory_backed_outbound_state_store());
-        let route_store = Arc::new(InMemoryDeliveredGateRouteStore::default());
+        let route_store = Arc::new(in_memory_backed_outbound_state_store());
         let services = make_services(
             coordinator,
             thread_service,
@@ -4647,7 +4647,7 @@ mod tests {
         );
 
         let delivery_store = Arc::new(in_memory_backed_outbound_state_store());
-        let route_store = Arc::new(InMemoryDeliveredGateRouteStore::default());
+        let route_store = Arc::new(in_memory_backed_outbound_state_store());
         let services = make_services(
             coordinator.clone(),
             Arc::new(InMemorySessionThreadService::default()),
@@ -4745,7 +4745,7 @@ mod tests {
 
         let recorder = Arc::new(RecordingBlockedAuthFlowCanceller::default());
         let delivery_store = Arc::new(in_memory_backed_outbound_state_store());
-        let route_store = Arc::new(InMemoryDeliveredGateRouteStore::default());
+        let route_store = Arc::new(in_memory_backed_outbound_state_store());
         let services = make_services_with_canceller(
             coordinator.clone(),
             Arc::new(InMemorySessionThreadService::default()),
@@ -4856,7 +4856,7 @@ mod tests {
         // returns `OAuthTargetNotDm` without posting.)
 
         let delivery_store = Arc::new(in_memory_backed_outbound_state_store());
-        let route_store = Arc::new(InMemoryDeliveredGateRouteStore::default());
+        let route_store = Arc::new(in_memory_backed_outbound_state_store());
         let mut services = make_services(
             coordinator.clone(),
             Arc::new(InMemorySessionThreadService::default()),
@@ -4964,7 +4964,7 @@ mod tests {
 
         let recorder = Arc::new(RecordingBlockedAuthFlowCanceller::default());
         let delivery_store = Arc::new(in_memory_backed_outbound_state_store());
-        let route_store = Arc::new(InMemoryDeliveredGateRouteStore::default());
+        let route_store = Arc::new(in_memory_backed_outbound_state_store());
         let mut services = make_services_with_canceller(
             coordinator.clone(),
             Arc::new(InMemorySessionThreadService::default()),
@@ -5136,7 +5136,7 @@ mod tests {
         );
 
         let delivery_store = Arc::new(in_memory_backed_outbound_state_store());
-        let route_store = Arc::new(InMemoryDeliveredGateRouteStore::default());
+        let route_store = Arc::new(in_memory_backed_outbound_state_store());
         let mut services = make_services(
             coordinator,
             thread_service,
@@ -5263,7 +5263,7 @@ mod tests {
         );
 
         let delivery_store = Arc::new(in_memory_backed_outbound_state_store());
-        let route_store = Arc::new(InMemoryDeliveredGateRouteStore::default());
+        let route_store = Arc::new(in_memory_backed_outbound_state_store());
         let mut services = make_services(
             coordinator,
             thread_service,
@@ -5369,7 +5369,7 @@ mod tests {
         );
 
         let delivery_store = Arc::new(in_memory_backed_outbound_state_store());
-        let route_store = Arc::new(InMemoryDeliveredGateRouteStore::default());
+        let route_store = Arc::new(in_memory_backed_outbound_state_store());
         let mut services = make_services(
             coordinator,
             thread_service,
@@ -5450,7 +5450,7 @@ mod tests {
             ExternalConversationRef::new(Some("T999"), "D789", Some("5555.6666"), None)
                 .expect("envelope conv ref");
 
-        let route_store = Arc::new(InMemoryDeliveredGateRouteStore::default());
+        let route_store = Arc::new(in_memory_backed_outbound_state_store());
 
         // Derive space_id from the envelope ref — mirrors the observer call site.
         let envelope_space_id = conversations_ref_from_product_ref(&envelope_conv_ref)
@@ -5673,7 +5673,7 @@ mod tests {
             thread_service,
             turn_coordinator: coordinator,
             outbound_store: outbound.clone(),
-            route_store: Arc::new(InMemoryDeliveredGateRouteStore::default()),
+            route_store: Arc::new(in_memory_backed_outbound_state_store()),
             communication_preferences: outbound,
             adapter: test_adapter(install),
             egress: egress.clone(),
@@ -5741,7 +5741,7 @@ mod tests {
             // ErroringTurnCoordinator: get_run_state always returns Err.
             turn_coordinator: Arc::new(ErroringTurnCoordinator),
             outbound_store: outbound.clone(),
-            route_store: Arc::new(InMemoryDeliveredGateRouteStore::default()),
+            route_store: Arc::new(in_memory_backed_outbound_state_store()),
             communication_preferences: outbound,
             adapter: test_adapter(install),
             egress: egress.clone(),
@@ -6089,7 +6089,7 @@ mod tests {
             thread_service,
             turn_coordinator: coordinator.clone(),
             outbound_store: outbound.clone(),
-            route_store: Arc::new(InMemoryDeliveredGateRouteStore::default()),
+            route_store: Arc::new(in_memory_backed_outbound_state_store()),
             communication_preferences: outbound,
             adapter: test_adapter(install),
             egress: egress.clone(),
@@ -6175,7 +6175,7 @@ mod tests {
             thread_service,
             turn_coordinator: coordinator.clone(),
             outbound_store: outbound.clone(),
-            route_store: Arc::new(InMemoryDeliveredGateRouteStore::default()),
+            route_store: Arc::new(in_memory_backed_outbound_state_store()),
             communication_preferences: outbound,
             adapter: test_adapter(install),
             egress: egress.clone(),
@@ -6462,7 +6462,7 @@ mod tests {
         );
 
         let delivery_store = Arc::new(in_memory_backed_outbound_state_store());
-        let route_store = Arc::new(InMemoryDeliveredGateRouteStore::default());
+        let route_store = Arc::new(in_memory_backed_outbound_state_store());
         let mut services = make_services(
             coordinator,
             thread_service,
@@ -6647,7 +6647,7 @@ mod tests {
         }
 
         let delivery_store = Arc::new(in_memory_backed_outbound_state_store());
-        let route_store = Arc::new(InMemoryDeliveredGateRouteStore::default());
+        let route_store = Arc::new(in_memory_backed_outbound_state_store());
         let services = make_services(
             coordinator,
             thread_service,
@@ -6747,7 +6747,7 @@ mod tests {
         }
 
         let delivery_store = Arc::new(in_memory_backed_outbound_state_store());
-        let route_store = Arc::new(InMemoryDeliveredGateRouteStore::default());
+        let route_store = Arc::new(in_memory_backed_outbound_state_store());
         let services = make_services(
             coordinator,
             thread_service,
@@ -6834,7 +6834,7 @@ mod tests {
         egress.allow_credential_handle("slack_bot_token");
 
         let delivery_store = Arc::new(in_memory_backed_outbound_state_store());
-        let route_store = Arc::new(InMemoryDeliveredGateRouteStore::default());
+        let route_store = Arc::new(in_memory_backed_outbound_state_store());
         let services = make_services(
             coordinator,
             thread_service,
@@ -6929,7 +6929,7 @@ mod tests {
         }
 
         let delivery_store = Arc::new(in_memory_backed_outbound_state_store());
-        let route_store = Arc::new(InMemoryDeliveredGateRouteStore::default());
+        let route_store = Arc::new(in_memory_backed_outbound_state_store());
         let mut services = make_services(
             coordinator,
             thread_service,
