@@ -221,50 +221,73 @@ where
         }
     }
 
-    async fn dispatch_json(
-        &self,
+    // Hand-desugared (no `async fn`): the router RETURNS the lane adapter's
+    // already-boxed `#[async_trait]` future instead of wrapping it in a future
+    // of its own. The former `dyn RuntimeAdapter` registry contributed exactly
+    // one boxed future here; an `async fn` router would stack a second one on
+    // top of it, and the Reborn trace suite runs close enough to the 2 MiB
+    // test-thread stack limit that the extra layer overflowed it in CI
+    // (`reborn_trace_skill_management_first_party_tools_parity`). Zero-depth
+    // forwarding restores exact structural parity with the dyn registry while
+    // keeping the closed lane set.
+    #[allow(clippy::type_complexity)]
+    fn dispatch_json<'life0, 'life1, 'async_trait>(
+        &'life0 self,
         lane: RuntimeLane,
-        request: RuntimeAdapterRequest<'_, F, G>,
-    ) -> Result<RuntimeAdapterResult, DispatchError> {
+        request: RuntimeAdapterRequest<'life1, F, G>,
+    ) -> core::pin::Pin<
+        Box<
+            dyn core::future::Future<Output = Result<RuntimeAdapterResult, DispatchError>>
+                + Send
+                + 'async_trait,
+        >,
+    >
+    where
+        'life0: 'async_trait,
+        'life1: 'async_trait,
+        Self: 'async_trait,
+    {
         match lane {
-            RuntimeLane::FirstParty => {
-                dispatch_configured_lane(self.first_party.as_ref(), request).await
-            }
-            RuntimeLane::Wasm => dispatch_configured_lane(self.wasm.as_ref(), request).await,
-            RuntimeLane::Mcp => dispatch_configured_lane(self.mcp.as_ref(), request).await,
-            RuntimeLane::Process => dispatch_configured_lane(self.process.as_ref(), request).await,
+            RuntimeLane::FirstParty => match self.first_party.as_ref() {
+                Some(adapter) => adapter.dispatch_json(request),
+                None => Box::pin(fail_unconfigured_lane(request)),
+            },
+            RuntimeLane::Wasm => match self.wasm.as_ref() {
+                Some(adapter) => adapter.dispatch_json(request),
+                None => Box::pin(fail_unconfigured_lane(request)),
+            },
+            RuntimeLane::Mcp => match self.mcp.as_ref() {
+                Some(adapter) => adapter.dispatch_json(request),
+                None => Box::pin(fail_unconfigured_lane(request)),
+            },
+            RuntimeLane::Process => match self.process.as_ref() {
+                Some(adapter) => adapter.dispatch_json(request),
+                None => Box::pin(fail_unconfigured_lane(request)),
+            },
         }
     }
 }
 
-/// Delegate to a lane's concrete adapter, or fail closed if the lane is
-/// unconfigured. The dispatcher gates this with `supports_lane`, so the `None`
-/// arm is defensive; it still releases any prepared reservation rather than
-/// leaking it.
-async fn dispatch_configured_lane<F, G, A>(
-    adapter: Option<&A>,
+/// Fail closed for an unconfigured lane. The dispatcher gates dispatch with
+/// `supports_lane`, so this arm is defensive; it still releases any prepared
+/// reservation rather than leaking it.
+async fn fail_unconfigured_lane<F, G>(
     request: RuntimeAdapterRequest<'_, F, G>,
 ) -> Result<RuntimeAdapterResult, DispatchError>
 where
     F: RootFilesystem,
     G: ResourceGovernor,
-    A: RuntimeAdapter<F, G> + ?Sized,
 {
-    match adapter {
-        Some(adapter) => adapter.dispatch_json(request).await,
-        None => {
-            release_adapter_reservation(
-                request.governor,
-                request
-                    .resource_reservation
-                    .as_ref()
-                    .map(|reservation| reservation.id),
-            );
-            Err(DispatchError::MissingRuntimeBackend {
-                runtime: request.descriptor.runtime,
-            })
-        }
-    }
+    release_adapter_reservation(
+        request.governor,
+        request
+            .resource_reservation
+            .as_ref()
+            .map(|reservation| reservation.id),
+    );
+    Err(DispatchError::MissingRuntimeBackend {
+        runtime: request.descriptor.runtime,
+    })
 }
 
 #[derive(Clone)]
