@@ -36,7 +36,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::{DenyRef, GateRef, ProcessRef, ResultRef, SafeSummary};
+use crate::{DenyRef, GateRef, ProcessRef, ResultRef, RunId, SafeSummary};
 
 /// A re-entrant gate: the invocation did not run and is waiting on a decision.
 /// Resolving the gate re-enters `authorize()` (§5.3.3: a resolved gate reserves
@@ -182,6 +182,15 @@ pub struct OutcomeRefs {
     /// Size of the staged output in bytes — pure metadata, no PII. Used by the
     /// per-capability byte-cap strategy.
     pub byte_len: u64,
+    /// Bounded, model-visible result preview (was `model_observation`). Redacted
+    /// by construction; the full bytes stay host-owned behind `result`. `None`
+    /// when no preview is staged.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub preview: Option<SafeSummary>,
+    /// The child run this outcome spawned (was `SpawnedChildRun.child_run_id`).
+    /// Set only for the `ToolVerdict::ChildSpawned` outcome; `None` otherwise.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub child_run: Option<RunId>,
 }
 
 /// A dispatched capability's result — tool success OR recoverable failure (§3).
@@ -345,6 +354,8 @@ mod tests {
             refs: OutcomeRefs {
                 result: ResultRef::parse("018f6a00-0000-7000-8000-000000000001").unwrap(),
                 byte_len: 4096,
+                preview: None,
+                child_run: None,
             },
             verdict: ToolVerdict::RecoverableFailure,
             summary: SafeSummary::new("tool input rejected").unwrap(),
@@ -355,6 +366,44 @@ mod tests {
         // The verdict is read from the type, never inferred from the summary text.
         assert!(!back.verdict.is_success());
         assert_eq!(back.refs.byte_len, 4096);
+    }
+
+    #[test]
+    fn outcome_refs_roundtrip_with_optional_preview_and_child_run() {
+        let result = ResultRef::parse("018f6a00-0000-7000-8000-000000000001").unwrap();
+        let run = RunId::parse("018f6a00-0000-7000-8000-0000000000aa").unwrap();
+        // Populated: preview and child_run both carried.
+        let full = OutcomeRefs {
+            result,
+            byte_len: 128,
+            preview: Some(SafeSummary::new("staged 3 rows").unwrap()),
+            child_run: Some(run),
+        };
+        let back: OutcomeRefs =
+            serde_json::from_value(serde_json::to_value(&full).unwrap()).unwrap();
+        assert_eq!(back, full);
+        assert_eq!(back.preview.as_ref().map(SafeSummary::as_str), Some("staged 3 rows"));
+        assert_eq!(back.child_run, Some(run));
+
+        // Absent: both None omitted from the wire (skip_serializing_if), and a
+        // legacy payload without the fields rehydrates to None.
+        let bare = OutcomeRefs {
+            result,
+            byte_len: 128,
+            preview: None,
+            child_run: None,
+        };
+        let wire = serde_json::to_value(&bare).unwrap();
+        assert_eq!(
+            wire,
+            serde_json::json!({
+                "result": "018f6a00-0000-7000-8000-000000000001",
+                "byte_len": 128
+            }),
+            "None fields must not appear on the wire"
+        );
+        let back: OutcomeRefs = serde_json::from_value(wire).unwrap();
+        assert_eq!(back, bare);
     }
 
     #[test]
@@ -379,6 +428,8 @@ mod tests {
             refs: OutcomeRefs {
                 result: ResultRef::parse("018f6a00-0000-7000-8000-000000000001").unwrap(),
                 byte_len: 1,
+                preview: None,
+                child_run: None,
             },
             verdict,
             summary: SafeSummary::new("ok").unwrap(),
