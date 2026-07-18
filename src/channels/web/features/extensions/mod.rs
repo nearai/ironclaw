@@ -2268,6 +2268,49 @@ mod tests {
             "Bearer replaced",
             "PATCH must overwrite the stored credential value"
         );
+        let secret_name = secret_name.to_string();
+
+        // A caller-supplied {{secret:...}} marker naming a FOREIGN secret is
+        // rejected — accepting it would let the API exfiltrate any secret in
+        // the user's store to a caller-chosen MCP URL (confused deputy).
+        let err = ext_mgr
+            .update_mcp_server_partial(
+                "sec_server",
+                None,
+                Some(std::collections::HashMap::from([(
+                    "Authorization".to_string(),
+                    "{{secret:mcp_other_server_header_authorization}}".to_string(),
+                )])),
+                None,
+                "test",
+            )
+            .await
+            .expect_err("foreign secret reference must be rejected");
+        assert!(
+            matches!(err, crate::extensions::ExtensionError::Config(_)),
+            "foreign reference rejection maps to a validation error, got: {err:?}"
+        );
+
+        // Replacing headers WITHOUT the previously-secretized one
+        // garbage-collects the superseded secret.
+        ext_mgr
+            .update_mcp_server_partial(
+                "sec_server",
+                None,
+                Some(std::collections::HashMap::new()),
+                None,
+                "test",
+            )
+            .await
+            .expect("clear headers");
+        assert!(
+            ext_mgr
+                .secrets()
+                .get_decrypted("test", &secret_name)
+                .await
+                .is_err(),
+            "superseded header secret must be deleted after replacement"
+        );
     }
 
     /// PATCH by user A must not affect user B's server with the same name.

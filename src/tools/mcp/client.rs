@@ -617,6 +617,20 @@ impl McpClient {
             else {
                 continue;
             };
+            // Defense in depth against confused-deputy references: resolve
+            // ONLY this server/header's own deterministic secret name. A
+            // reference to any other secret (another server's credential, an
+            // OAuth token) fails closed even if it somehow reached the
+            // persisted config past the write-side validation.
+            let expected = crate::tools::mcp::config::mcp_header_secret_name(
+                self.server_name.as_str(),
+                header_name,
+            );
+            if secret_name != expected {
+                return Err(ToolError::ExecutionFailed(format!(
+                    "header '{header_name}' references a secret that does not belong to this server"
+                )));
+            }
             let Some(ref secrets) = self.secrets else {
                 return Err(ToolError::ExecutionFailed(format!(
                     "header '{header_name}' references a stored credential but no secrets store is wired"

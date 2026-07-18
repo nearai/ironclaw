@@ -3806,9 +3806,28 @@ impl ExtensionManager {
         // redundant call here. The error variant from `add_mcp_server` is
         // `Config`, which is a reasonable mapping for validation failures
         // on the install path (url/name validation already ran above).
-        self.add_mcp_server(config, user_id)
-            .await
-            .map_err(|e| ExtensionError::Config(e.to_string()))?;
+        // On failure, delete the header secrets secretize just created —
+        // a failed install must not leave orphaned credentials behind.
+        let created_header_refs: Vec<String> = config
+            .headers
+            .values()
+            .filter_map(|v| {
+                crate::tools::mcp::config::parse_header_secret_reference(v).map(str::to_string)
+            })
+            .collect();
+        if let Err(e) = self.add_mcp_server(config, user_id).await {
+            for secret_name in created_header_refs {
+                if let Err(del_err) = self.secrets.delete(user_id, &secret_name).await {
+                    tracing::warn!(
+                        extension = %name,
+                        secret = %secret_name,
+                        error = %del_err,
+                        "failed to delete header secret after failed install"
+                    );
+                }
+            }
+            return Err(ExtensionError::Config(e.to_string()));
+        }
 
         tracing::info!(extension = %name, url = %sanitize_url_for_logging(url), "Installed MCP server");
 
@@ -3834,6 +3853,36 @@ impl ExtensionManager {
     /// Values that are ALREADY references (config round-trips, retried
     /// installs) are left untouched. Resolution back to the raw value happens
     /// at request time in `McpClient::build_request_headers`.
+    /// Restore a pre-PATCH snapshot of header secret VALUES (see
+    /// `update_mcp_server_partial`). Best-effort per entry; failures are
+    /// logged with the secret NAME only.
+    async fn restore_header_secrets(
+        &self,
+        user_id: &str,
+        snapshot: Vec<(String, secrecy::SecretString)>,
+        extension: &str,
+    ) {
+        use secrecy::ExposeSecret;
+        for (secret_name, old_value) in snapshot {
+            if let Err(secret_err) = self
+                .secrets
+                .create(
+                    user_id,
+                    CreateSecretParams::new(&secret_name, old_value.expose_secret()),
+                )
+                .await
+            {
+                tracing::error!(
+                    extension = %extension,
+                    user_id = %user_id,
+                    secret = %secret_name,
+                    error = %secret_err,
+                    "failed to restore header secret snapshot"
+                );
+            }
+        }
+    }
+
     async fn secretize_sensitive_headers(
         &self,
         config: &mut McpServerConfig,
@@ -3845,12 +3894,26 @@ impl ExtensionManager {
         };
         let server_name = config.name.clone();
         for (header_name, value) in config.headers.iter_mut() {
-            if !is_sensitive_header_name(header_name)
-                || parse_header_secret_reference(value).is_some()
-            {
+            let expected_secret_name = mcp_header_secret_name(&server_name, header_name);
+            // Reject foreign {{secret:...}} markers outright — on ANY header.
+            // Accepting them would let an install/PATCH caller point a header
+            // at an arbitrary secret in the user's store (another server's
+            // credential, an OAuth token, ...) and have
+            // `build_request_headers` decrypt it and ship it to a
+            // caller-chosen URL. Only this server/header's own deterministic
+            // reference is accepted verbatim (idempotent config round-trips).
+            if let Some(referenced) = parse_header_secret_reference(value) {
+                if referenced == expected_secret_name {
+                    continue;
+                }
+                return Err(ExtensionError::Config(format!(
+                    "header '{header_name}' must carry a raw value; secret references                      are assigned by the server, not accepted from the API"
+                )));
+            }
+            if !is_sensitive_header_name(header_name) {
                 continue;
             }
-            let secret_name = mcp_header_secret_name(&server_name, header_name);
+            let secret_name = expected_secret_name;
             self.secrets
                 .create(
                     user_id,
@@ -3975,6 +4038,7 @@ impl ExtensionManager {
                 }
             }
         }
+        let headers_replaced = headers.is_some();
         if let Some(h) = headers {
             config.headers = h;
             // Same treatment as install: replacement header credentials go to
@@ -3982,6 +4046,24 @@ impl ExtensionManager {
             self.secretize_sensitive_headers(&mut config, user_id)
                 .await?;
         }
+        // Reference sets for post-success garbage collection: a replacement
+        // that drops a previously-secretized header must not leave its secret
+        // orphaned in the store.
+        let current_header_refs: std::collections::HashSet<String> = config
+            .headers
+            .values()
+            .filter_map(|v| {
+                crate::tools::mcp::config::parse_header_secret_reference(v).map(str::to_string)
+            })
+            .collect();
+        let superseded_header_refs: Vec<String> = previous_config
+            .headers
+            .values()
+            .filter_map(|v| {
+                crate::tools::mcp::config::parse_header_secret_reference(v).map(str::to_string)
+            })
+            .filter(|name| !current_header_refs.contains(name))
+            .collect();
         // Tri-state: None → unchanged, Some(None) → clear, Some(Some(_)) → replace.
         match oauth {
             None => {}
@@ -3994,9 +4076,14 @@ impl ExtensionManager {
         // ("server inactive") until a manual re-activation.
         let was_active = self.mcp_clients.contains(user_id, name).await;
 
-        self.update_mcp_server(config, user_id)
-            .await
-            .map_err(|e| ExtensionError::Config(e.to_string()))?;
+        // Validation/persist failure AFTER secretize has upserted header
+        // secrets would leave the OLD config resolving to NEW credential
+        // material — restore the snapshot on this error path too.
+        if let Err(e) = self.update_mcp_server(config, user_id).await {
+            self.restore_header_secrets(user_id, previous_header_secrets, name)
+                .await;
+            return Err(ExtensionError::Config(e.to_string()));
+        }
 
         // Evict the cached McpClient so the next activation re-connects
         // with the new config (updated headers, oauth, or URL).
@@ -4015,25 +4102,8 @@ impl ExtensionManager {
                 // Restore overwritten header secrets FIRST — the restored
                 // config references them by name, so the material must be
                 // back before the config row (or any re-activation) reads it.
-                for (secret_name, old_value) in previous_header_secrets {
-                    use secrecy::ExposeSecret;
-                    if let Err(secret_err) = self
-                        .secrets
-                        .create(
-                            user_id,
-                            CreateSecretParams::new(&secret_name, old_value.expose_secret()),
-                        )
-                        .await
-                    {
-                        tracing::error!(
-                            extension = %name,
-                            user_id = %user_id,
-                            secret = %secret_name,
-                            error = %secret_err,
-                            "PATCH rollback failed to restore header secret"
-                        );
-                    }
-                }
+                self.restore_header_secrets(user_id, previous_header_secrets, name)
+                    .await;
                 // A failed rollback WRITE must not be reported as "restored" —
                 // that is exactly the split-brain (new config persisted, no
                 // client) this rollback exists to prevent.
@@ -4074,6 +4144,21 @@ impl ExtensionManager {
                 user_id = %user_id,
                 "MCP server config updated; cached client evicted"
             );
+        }
+
+        // Success: garbage-collect header secrets the replacement dropped.
+        if headers_replaced {
+            for secret_name in superseded_header_refs {
+                if let Err(e) = self.secrets.delete(user_id, &secret_name).await {
+                    tracing::warn!(
+                        extension = %name,
+                        user_id = %user_id,
+                        secret = %secret_name,
+                        error = %e,
+                        "failed to delete superseded header secret"
+                    );
+                }
+            }
         }
 
         Ok(())
@@ -5396,6 +5481,16 @@ impl ExtensionManager {
                 plan.add_base_secret(&token_secret_name);
                 plan.add_base_secret(server.client_id_secret_name());
                 plan.add_base_secret(server.client_secret_secret_name());
+                // Header credentials secretized by the programmatic
+                // install/PATCH surface (persisted as {{secret:...}}
+                // references) die with the extension.
+                for value in server.headers.values() {
+                    if let Some(secret_name) =
+                        crate::tools::mcp::config::parse_header_secret_reference(value)
+                    {
+                        plan.add_base_secret(secret_name);
+                    }
+                }
                 // MCP OAuth can persist companion secrets through two paths:
                 // the MCP auth helper uses `mcp_<name>_refresh_token`, while the
                 // hosted gateway callback stores companions alongside the access
