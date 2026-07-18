@@ -4155,6 +4155,7 @@ dependencies = [
  "ironclaw_auth",
  "ironclaw_channel_host",
  "ironclaw_conversations",
+ "ironclaw_filesystem",
  "ironclaw_host_api",
  "ironclaw_outbound",
  "ironclaw_product_adapters",

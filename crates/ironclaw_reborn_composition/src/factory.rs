@@ -80,17 +80,13 @@ use ironclaw_host_runtime::{
 #[cfg(any(feature = "libsql", feature = "postgres"))]
 use ironclaw_loop_host::FilesystemCheckpointStateStore;
 use ironclaw_outbound::CommunicationPreferenceRepository;
-#[cfg(any(feature = "libsql", feature = "postgres"))]
+// §4.3: the deleted `InMemoryOutboundStateStore` is gone — both durable and
+// no-durable outbound wiring now share the one `FilesystemOutboundStateStore`
+// (over a libsql/postgres or in-memory backend), so this import is
+// unconditional, not gated behind the durable-backend features.
 use ironclaw_outbound::FilesystemOutboundStateStore;
-#[cfg(not(any(feature = "libsql", feature = "postgres")))]
-use ironclaw_outbound::InMemoryOutboundStateStore;
 #[cfg(any(feature = "slack-v2-host-beta", feature = "telegram-v2-host-beta"))]
 use ironclaw_outbound::{DeliveredGateRouteStore, OutboundStateStore, TriggeredRunDeliveryStore};
-#[cfg(all(
-    not(any(feature = "libsql", feature = "postgres")),
-    any(feature = "slack-v2-host-beta", feature = "telegram-v2-host-beta")
-))]
-use ironclaw_outbound::{InMemoryDeliveredGateRouteStore, InMemoryTriggeredRunDeliveryStore};
 use ironclaw_processes::ProcessServices;
 #[cfg(any(
     feature = "slack-v2-host-beta",
@@ -3826,7 +3822,6 @@ fn local_dev_mount_descriptor(
     })
 }
 
-#[cfg(any(feature = "libsql", feature = "postgres"))]
 fn local_dev_scoped_filesystem(
     filesystem: Arc<LocalDevRootFilesystem>,
 ) -> Arc<ScopedFilesystem<LocalDevRootFilesystem>> {
@@ -3836,15 +3831,15 @@ fn local_dev_scoped_filesystem(
 /// Unified bundle of outbound store handles returned by both cfg variants of
 /// [`local_dev_outbound_store`].
 ///
-/// All four trait roles must be satisfied on construction.  In the durable
-/// build (libsql or postgres) every role is an `Arc` clone of a single
-/// `FilesystemOutboundStateStore`, so the WebUI delivery-defaults facade and
-/// the Slack delivery path share one backing tree.  In the non-durable build
-/// `InMemoryOutboundStateStore` covers the preference and state roles;
-/// `DeliveredGateRouteStore` and `TriggeredRunDeliveryStore` use separate
-/// in-memory instances — the cross-store invariant that matters (WebUI-written
-/// preferences visible to the Slack triggered-delivery hook) only involves the
-/// preference role.
+/// All four trait roles must be satisfied on construction.  Every role is an
+/// `Arc` clone of a single `FilesystemOutboundStateStore` — which implements all
+/// four outbound-store traits — so the WebUI delivery-defaults facade and the
+/// Slack delivery path share one backing tree.  The durable build (libsql or
+/// postgres) and the non-durable build (in-memory backend) use the SAME wiring;
+/// the arch-simplification §4.3 store consolidation deleted the parallel
+/// `InMemoryOutboundStateStore`, closing the former non-durable cross-store gap
+/// (where `DeliveredGateRouteStore`/`TriggeredRunDeliveryStore` used separate
+/// in-memory instances not visible to the shared preference tree).
 /// See docs/plans/2026-05-29-trigger-loop-delivery-resolution-implementation.md.
 pub(crate) struct LocalDevOutboundStores {
     pub(crate) outbound_preferences: Arc<dyn CommunicationPreferenceRepository>,
@@ -3856,13 +3851,14 @@ pub(crate) struct LocalDevOutboundStores {
     pub(crate) triggered_run_delivery: Arc<dyn TriggeredRunDeliveryStore>,
 }
 
-#[cfg(any(feature = "libsql", feature = "postgres"))]
 fn local_dev_outbound_store(filesystem: Arc<LocalDevRootFilesystem>) -> LocalDevOutboundStores {
     // One store instance over the composition-owned per-user scoped filesystem
     // (`/outbound` → `/tenants/<t>/users/<u>/outbound`). All four outbound
     // roles — preferences, state, delivered-gate routes, triggered-run delivery
     // — are Arc-cloned from this single instance so the WebUI delivery-defaults
-    // facade and the Slack delivery path share the same backing tree.
+    // facade and the Slack delivery path share the same backing tree. Works in
+    // both durable (libsql/postgres) and no-durable (in-memory backend) builds
+    // because `LocalDevRootFilesystem` is `CompositeRootFilesystem` in both.
     // composition-owned construction site, the only one allowed.
     #[allow(clippy::disallowed_methods)]
     let store: Arc<FilesystemOutboundStateStore<LocalDevRootFilesystem>> = Arc::new(
@@ -3876,29 +3872,6 @@ fn local_dev_outbound_store(filesystem: Arc<LocalDevRootFilesystem>) -> LocalDev
         delivered_gate_routes: Arc::clone(&store) as Arc<dyn DeliveredGateRouteStore>,
         #[cfg(any(feature = "slack-v2-host-beta", feature = "telegram-v2-host-beta"))]
         triggered_run_delivery: store as Arc<dyn TriggeredRunDeliveryStore>,
-    }
-}
-
-#[cfg(not(any(feature = "libsql", feature = "postgres")))]
-fn local_dev_outbound_store(_filesystem: Arc<LocalDevRootFilesystem>) -> LocalDevOutboundStores {
-    // In the non-filesystem (no libsql/postgres) profile, InMemoryOutboundStateStore
-    // implements both CommunicationPreferenceRepository and OutboundStateStore, so a
-    // single Arc covers both roles.  The other two roles (DeliveredGateRouteStore and
-    // TriggeredRunDeliveryStore) are not implemented by InMemoryOutboundStateStore and
-    // therefore use separate in-memory instances; this is acceptable because the
-    // cross-store invariant that matters — WebUI-written preferences being visible to
-    // the Slack triggered-delivery hook — only involves the preference role.  The durable
-    // build (libsql or postgres) avoids this gap entirely by sharing one
-    // FilesystemOutboundStateStore across all four roles.
-    let outbound = Arc::new(InMemoryOutboundStateStore::default());
-    LocalDevOutboundStores {
-        outbound_preferences: Arc::clone(&outbound) as Arc<dyn CommunicationPreferenceRepository>,
-        #[cfg(any(feature = "slack-v2-host-beta", feature = "telegram-v2-host-beta"))]
-        outbound_state: outbound as Arc<dyn OutboundStateStore>,
-        #[cfg(any(feature = "slack-v2-host-beta", feature = "telegram-v2-host-beta"))]
-        delivered_gate_routes: Arc::new(InMemoryDeliveredGateRouteStore::default()),
-        #[cfg(any(feature = "slack-v2-host-beta", feature = "telegram-v2-host-beta"))]
-        triggered_run_delivery: Arc::new(InMemoryTriggeredRunDeliveryStore::default()),
     }
 }
 

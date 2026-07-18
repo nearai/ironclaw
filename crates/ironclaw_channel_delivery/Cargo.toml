@@ -35,6 +35,8 @@ tokio = { version = "1", features = ["rt", "sync", "time"] }
 tracing = "0.1"
 
 [dev-dependencies]
+ironclaw_outbound = { path = "../ironclaw_outbound", features = ["test-support"] }
+ironclaw_filesystem = { path = "../ironclaw_filesystem" }
 ironclaw_auth = { path = "../ironclaw_auth" }
 ironclaw_product_adapters = { path = "../ironclaw_product_adapters", features = ["test-support"] }
 ironclaw_product_workflow = { path = "../ironclaw_product_workflow", features = ["test-support"] }

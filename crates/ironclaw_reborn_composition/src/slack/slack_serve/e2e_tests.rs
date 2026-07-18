@@ -1,3 +1,4 @@
+// arch-exempt: large_file, mechanical InMemoryOutboundStateStore -> FilesystemOutboundStateStore<InMemoryBackend> §4.3 store consolidation, no logic change, plan #6168
 //! Minimal Slack Reborn E2E routing tests.
 //!
 //! These drive the real Slack route, native adapter runner, ProductWorkflow,
@@ -19,10 +20,11 @@ use hmac::{Hmac, KeyInit, Mac};
 use http_body_util::BodyExt;
 use ironclaw_conversations::InMemoryConversationServices;
 use ironclaw_host_api::{AgentId, ApprovalRequestId, ProjectId, TenantId, ThreadId, UserId};
+use ironclaw_outbound::test_support::in_memory_backed_outbound_state_store;
 use ironclaw_outbound::{
     CommunicationPreferenceRecord, CommunicationPreferenceRepository, DeliveredGateRouteStore,
-    DeliveryDefaultScope, InMemoryOutboundStateStore, InMemoryTriggeredRunDeliveryStore,
-    OutboundStateStore, WriteCommunicationPreferenceRequest,
+    DeliveryDefaultScope, InMemoryTriggeredRunDeliveryStore, OutboundStateStore,
+    WriteCommunicationPreferenceRequest,
 };
 use ironclaw_product_adapters::{
     AdapterInstallationId, AuthRequirement, AuthResolutionPayload, AuthResolutionResult,
@@ -321,7 +323,7 @@ async fn build_harness_with_full_settings(
         ),
     ));
 
-    let outbound = Arc::new(InMemoryOutboundStateStore::default());
+    let outbound = Arc::new(in_memory_backed_outbound_state_store());
     let outbound_store: Arc<dyn OutboundStateStore> = outbound.clone();
     let preferences: Arc<dyn CommunicationPreferenceRepository> = outbound;
     let egress = RecordingEgress::default();
@@ -538,7 +540,7 @@ async fn build_harness_for_delivered_route_tests_with_store_mode(
         ),
     ));
 
-    let outbound = Arc::new(InMemoryOutboundStateStore::default());
+    let outbound = Arc::new(in_memory_backed_outbound_state_store());
     let outbound_store: Arc<dyn OutboundStateStore> = outbound.clone();
     let preferences: Arc<dyn CommunicationPreferenceRepository> = outbound;
     let egress = RecordingEgress::default();
@@ -987,7 +989,7 @@ async fn triggered_approval_prompt_route_resolves_dm_approve_on_foreign_scope() 
 
     // Seed the creator's personal DM preference so the triggered approval prompt
     // resolves to team T-A / channel D123 — the same DM the inbound approve uses.
-    let outbound = Arc::new(InMemoryOutboundStateStore::default());
+    let outbound = Arc::new(in_memory_backed_outbound_state_store());
     let dm_target = dm_reply_target_binding_ref();
     outbound
         .write_communication_preference(WriteCommunicationPreferenceRequest {
@@ -1246,7 +1248,7 @@ async fn triggered_auth_prompt_route_delivers_dm_setup_link_on_foreign_scope() {
 
     // Seed the creator's personal auth-prompt preference so the triggered auth
     // prompt resolves to team T-A / channel D123 — a personal DM.
-    let outbound = Arc::new(InMemoryOutboundStateStore::default());
+    let outbound = Arc::new(in_memory_backed_outbound_state_store());
     let dm_target = dm_reply_target_binding_ref();
     outbound
         .write_communication_preference(WriteCommunicationPreferenceRequest {
@@ -1408,7 +1410,7 @@ async fn triggered_auth_prompt_oauth_target_not_dm_suppresses_setup_link_and_can
 
     // auth_prompt_target resolves to a shared channel (not a DM); final_reply_target
     // stays the DM so the follow-up deny notice can still be delivered and inspected.
-    let outbound = Arc::new(InMemoryOutboundStateStore::default());
+    let outbound = Arc::new(in_memory_backed_outbound_state_store());
     let dm_target = dm_reply_target_binding_ref();
     let channel_target = non_dm_channel_reply_target_binding_ref();
     outbound
@@ -3337,7 +3339,7 @@ async fn build_harness_for_auth_fanout_test(
         ),
     ));
 
-    let outbound = Arc::new(InMemoryOutboundStateStore::default());
+    let outbound = Arc::new(in_memory_backed_outbound_state_store());
     let outbound_store: Arc<dyn OutboundStateStore> = outbound.clone();
     let preferences: Arc<dyn CommunicationPreferenceRepository> = outbound;
     let egress = RecordingEgress::default();

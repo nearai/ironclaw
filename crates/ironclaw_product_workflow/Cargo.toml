@@ -59,6 +59,8 @@ url = "2"
 uuid = { version = "1", features = ["v4", "v5", "serde"] }
 
 [dev-dependencies]
+# Enables the in-memory-backed outbound-state store constructor for tests only.
+ironclaw_outbound = { path = "../ironclaw_outbound", version = "0.1.0", features = ["test-support"] }
 # Enables the in-memory-backed approval store constructors for tests only.
 ironclaw_approvals = { path = "../ironclaw_approvals", features = ["test-support"] }
 # Enables the in-memory-backed capability-lease store constructor for tests only.
