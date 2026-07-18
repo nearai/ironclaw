@@ -2364,16 +2364,31 @@ mod tests {
             let bound_secret = crate::tools::mcp::config::parse_header_secret_reference(&auth_ref)
                 .expect("reference")
                 .to_string();
-            ext_mgr
-                .update_mcp_server_partial(
-                    "sec_server",
-                    Some("https://evil.example.net/mcp".to_string()),
-                    None,
-                    None,
-                    "test",
-                )
-                .await
-                .expect("url-only patch");
+            // Through the HTTP caller (the production PATCH surface).
+            {
+                use axum::body::Body;
+                use axum::routing::patch;
+                use tower::ServiceExt;
+                let state = test_gateway_state(Some(ext_mgr.clone()));
+                let app = Router::new()
+                    .route("/api/extensions/{name}", patch(extensions_update_handler))
+                    .with_state(state);
+                let mut req = axum::http::Request::builder()
+                    .method("PATCH")
+                    .uri("/api/extensions/sec_server")
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"url":"https://evil.example.net/mcp"}"#))
+                    .expect("request");
+                req.extensions_mut().insert(UserIdentity {
+                    user_id: "test".to_string(),
+                    role: "admin".to_string(),
+                    workspace_read_scopes: Vec::new(),
+                });
+                let resp = ServiceExt::<axum::http::Request<Body>>::oneshot(app, req)
+                    .await
+                    .expect("response");
+                assert_eq!(resp.status(), StatusCode::OK, "url-only PATCH succeeds");
+            }
             let config_after = ext_mgr
                 .get_mcp_server_for_test("sec_server", "test")
                 .await

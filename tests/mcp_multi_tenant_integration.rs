@@ -680,4 +680,105 @@ mod tests {
         mock_server_a.shutdown().await;
         mock_server_b.shutdown().await;
     }
+
+    /// PATCHing a LIVE server to a backend with a different tool surface must
+    /// reconcile the global ToolRegistry: tools the new backend exposes are
+    /// registered, and stale wrappers for tools it no longer exposes are
+    /// unregistered (they would otherwise stay routed to the new client).
+    #[tokio::test]
+    async fn patch_reactivation_reconciles_tool_registry_surface() {
+        let mock_server_a = start_mock_mcp_server(vec![MockToolResponse {
+            name: "old_only_tool".to_string(),
+            content: serde_json::json!({"ok": true}),
+        }])
+        .await;
+        let mock_server_b = start_mock_mcp_server(vec![MockToolResponse {
+            name: "new_only_tool".to_string(),
+            content: serde_json::json!({"ok": true}),
+        }])
+        .await;
+        let (db, _db_dir) = test_db().await;
+        let ext_dirs = tempfile::tempdir().expect("extension tempdir");
+        let secrets = test_secrets_store();
+        let tool_registry = Arc::new(ToolRegistry::new());
+        let manager = ExtensionManager::new(
+            Arc::new(McpSessionManager::new()),
+            Arc::new(McpProcessManager::new()),
+            Arc::clone(&secrets),
+            Arc::clone(&tool_registry),
+            None,
+            None,
+            ext_dirs.path().join("tools"),
+            ext_dirs.path().join("channels"),
+            None,
+            "owner".to_string(),
+            Some(db),
+            Vec::new(),
+        );
+        let server = McpServerConfig::new(SERVER_NAME, mock_server_a.mcp_url());
+        let old_tool =
+            activate_for_user_with_tool(&manager, &secrets, &server, USER_A, "old_only_tool").await;
+        assert!(tool_registry.get(&old_tool).await.is_some());
+
+        // PATCH the live server to backend B (different surface).
+        manager
+            .update_mcp_server_partial(
+                SERVER_NAME,
+                Some(mock_server_b.mcp_url()),
+                None,
+                None,
+                USER_A,
+            )
+            .await
+            .expect("PATCH to backend B reactivates successfully");
+
+        let registered: Vec<String> = tool_registry.list().await;
+        assert!(
+            registered.iter().any(|t| t.contains("new_only_tool")),
+            "new backend's tools must be registered after reactivation: {registered:?}"
+        );
+        assert!(
+            tool_registry.get(&old_tool).await.is_none(),
+            "stale wrapper for a tool absent from the new surface must be unregistered"
+        );
+
+        mock_server_a.shutdown().await;
+        mock_server_b.shutdown().await;
+    }
+
+    /// Like `activate_for_user` but keyed to an arbitrary expected tool name.
+    async fn activate_for_user_with_tool(
+        manager: &ExtensionManager,
+        secrets: &Arc<dyn SecretsStore + Send + Sync>,
+        server: &McpServerConfig,
+        user_id: &str,
+        expected_tool: &str,
+    ) -> String {
+        manager
+            .install(
+                SERVER_NAME,
+                Some(&server.url),
+                Some(ExtensionKind::McpServer),
+                user_id,
+            )
+            .await
+            .expect("install MCP server");
+        secrets
+            .create(
+                user_id,
+                CreateSecretParams::new(server.token_secret_name(), "token")
+                    .with_provider(SERVER_NAME.to_string()),
+            )
+            .await
+            .expect("store MCP token");
+        let activated = manager
+            .activate(SERVER_NAME, user_id)
+            .await
+            .expect("activate MCP server");
+        activated
+            .tools_loaded
+            .into_iter()
+            .find(|tool| tool.contains(expected_tool))
+            .expect("expected tool should be registered")
+    }
 }

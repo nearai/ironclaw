@@ -4100,7 +4100,7 @@ impl ExtensionManager {
             });
             if config.headers.len() != before {
                 credential_headers_unbound = true;
-                tracing::info!(
+                tracing::debug!(
                     extension = %name,
                     user_id = %user_id,
                     "cross-origin URL change: unbound secretized header credentials"
@@ -4237,43 +4237,79 @@ impl ExtensionManager {
             // and re-activate it, so the PATCH is atomic from the caller's
             // point of view — either the server runs the new config, or the
             // old config is back and the error says why.
-            if let Err(activate_err) = self.activate_mcp_locked(name, user_id).await {
-                // Delete this PATCH's fresh secrets, then restore overwritten
-                // ones FIRST — the restored config references them by name, so
-                // the material must be back before the config row (or any
-                // re-activation) reads it.
-                self.delete_header_secrets(user_id, &created_new, name)
-                    .await;
-                self.restore_header_secrets(user_id, previous_header_secrets, name)
-                    .await;
-                // A failed rollback WRITE must not be reported as "restored" —
-                // that is exactly the split-brain (new config persisted, no
-                // client) this rollback exists to prevent.
-                if let Err(rollback_err) = self.update_mcp_server(previous_config, user_id).await {
-                    tracing::error!(
-                        extension = %name,
-                        user_id = %user_id,
-                        error = %rollback_err,
-                        "PATCH rollback failed to restore previous MCP config"
-                    );
-                    return Err(ExtensionError::ActivationFailed(format!(
-                        "reactivating '{name}' under the updated config failed AND rolling back \
+            // Tool names registered for this server BEFORE reactivation —
+            // used to reconcile the registry against the new surface below.
+            let wrapper_prefix = crate::tools::mcp::mcp_tool_id(name, "");
+            let previously_registered: Vec<String> = self
+                .tool_registry
+                .list()
+                .await
+                .into_iter()
+                .filter(|t| t.starts_with(&wrapper_prefix))
+                .collect();
+            let activate_result = match self.activate_mcp_locked(name, user_id).await {
+                Ok(r) => r,
+                Err(activate_err) => {
+                    // Delete this PATCH's fresh secrets, then restore overwritten
+                    // ones FIRST — the restored config references them by name, so
+                    // the material must be back before the config row (or any
+                    // re-activation) reads it.
+                    self.delete_header_secrets(user_id, &created_new, name)
+                        .await;
+                    self.restore_header_secrets(user_id, previous_header_secrets, name)
+                        .await;
+                    // A failed rollback WRITE must not be reported as "restored" —
+                    // that is exactly the split-brain (new config persisted, no
+                    // client) this rollback exists to prevent.
+                    if let Err(rollback_err) =
+                        self.update_mcp_server(previous_config, user_id).await
+                    {
+                        tracing::error!(
+                            extension = %name,
+                            user_id = %user_id,
+                            error = %rollback_err,
+                            "PATCH rollback failed to restore previous MCP config"
+                        );
+                        return Err(ExtensionError::ActivationFailed(format!(
+                            "reactivating '{name}' under the updated config failed AND rolling back \
                          to the previous config also failed — the updated config remains \
                          persisted with no live client; re-PATCH or re-activate to recover. \
                          activation error: {activate_err}; rollback error: {rollback_err}"
+                        )));
+                    }
+                    if let Err(rollback_err) = self.activate_mcp_locked(name, user_id).await {
+                        tracing::warn!(
+                            extension = %name,
+                            user_id = %user_id,
+                            error = %rollback_err,
+                            "PATCH rollback restored previous MCP config but re-activation failed"
+                        );
+                    }
+                    return Err(ExtensionError::ActivationFailed(format!(
+                        "reactivating '{name}' under the updated config failed (previous config restored): {activate_err}"
                     )));
                 }
-                if let Err(rollback_err) = self.activate_mcp_locked(name, user_id).await {
-                    tracing::warn!(
-                        extension = %name,
-                        user_id = %user_id,
-                        error = %rollback_err,
-                        "PATCH rollback restored previous MCP config but re-activation failed"
-                    );
-                }
-                return Err(ExtensionError::ActivationFailed(format!(
-                    "reactivating '{name}' under the updated config failed (previous config restored): {activate_err}"
-                )));
+            };
+            // Reconcile the global ToolRegistry with the NEW surface: names
+            // the replacement backend no longer exposes must not stay routed
+            // to it. The new surface is what activation just reported
+            // (`tools_loaded`) — the registry itself still carries the stale
+            // names at this point. Safe: `check_surface_conflict` inside
+            // activation guarantees every other active user of this server
+            // shares the surface we just registered, so a stale name belongs
+            // to no one. (Names are server-prefixed, so no cross-server hits.)
+            let reactivated: std::collections::HashSet<String> =
+                activate_result.tools_loaded.iter().cloned().collect();
+            for stale in previously_registered
+                .iter()
+                .filter(|t| !reactivated.contains(*t))
+            {
+                self.tool_registry.unregister(stale).await;
+                tracing::debug!(
+                    extension = %name,
+                    tool = %stale,
+                    "unregistered tool absent from the reactivated MCP surface"
+                );
             }
             tracing::info!(
                 extension = %name,
