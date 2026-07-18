@@ -2,6 +2,14 @@
 //! API key, then persist both — the secret store write lands before the
 //! `config.toml` selection (see [`provision_llm_credentials`]'s doc).
 
+// Feature-off stubs preserve the unconditional onboarding call shape when the
+// provider-admin surface is unavailable; their full variants are intentionally
+// unreachable in slim builds.
+#![cfg_attr(
+    not(all(feature = "libsql", feature = "root-llm-provider")),
+    allow(dead_code)
+)]
+
 use std::path::Path;
 
 use ironclaw_reborn_config::RebornHome;

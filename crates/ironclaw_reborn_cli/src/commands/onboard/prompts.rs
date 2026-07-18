@@ -10,6 +10,14 @@
 //! return [`LlmCredentialPromptError::NonInteractive`] rather than calling
 //! `process::exit`.
 
+// The terminal prompt surface is consumed by LLM provisioning only when the
+// provider-admin feature is present. Keep the shared feature-off onboarding
+// shape without emitting dead-code warnings in slim builds.
+#![cfg_attr(
+    not(all(feature = "libsql", feature = "root-llm-provider")),
+    allow(dead_code)
+)]
+
 use std::io::{IsTerminal, Write as _};
 
 /// Where onboarding's LLM-credential prompts (provider menu, API key,
