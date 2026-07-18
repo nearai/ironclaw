@@ -85,6 +85,8 @@ pub use factory::LOCAL_DEV_SECRETS_MASTER_KEY_PATH;
 pub use factory::RebornLocalDevApprovalTestParts;
 #[cfg(feature = "migration-support")]
 pub use factory::extension_installation_store_for_migration;
+#[cfg(any(feature = "libsql", feature = "test-support"))]
+pub use factory::local_dev_db_path;
 #[cfg(feature = "libsql")]
 pub use factory::open_local_dev_secret_store;
 #[cfg(any(feature = "libsql", feature = "postgres"))]

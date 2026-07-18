@@ -386,8 +386,9 @@ impl ServeCommand {
         // canonical identity itself lives on the runtime's scoped filesystem,
         // not in this file.
         let profile = crate::runtime::effective_profile(boot_config, config_file.as_ref())?;
-        let user_store_path = crate::runtime::local_runtime_storage_root(boot_config, profile)
-            .join("reborn-local-dev.db");
+        let user_store_path = ironclaw_reborn_composition::local_dev_db_path(
+            &crate::runtime::local_runtime_storage_root(boot_config, profile),
+        );
         // CORS allow-origin list. Empty = fail-closed on every
         // cross-origin preflight; operators MUST opt in to the
         // specific origins the host installation actually serves.

@@ -3180,6 +3180,14 @@ async fn build_local_dev_root_filesystem(
 #[cfg(any(feature = "libsql", feature = "test-support"))]
 pub(crate) const LOCAL_DEV_DB_FILENAME: &str = "reborn-local-dev.db";
 
+/// Full path to the local-dev libSQL database file within `root`. The single
+/// public accessor for [`LOCAL_DEV_DB_FILENAME`]; callers outside this crate
+/// (`ironclaw_reborn_cli`) must use this instead of hardcoding the filename.
+#[cfg(any(feature = "libsql", feature = "test-support"))]
+pub fn local_dev_db_path(root: &Path) -> PathBuf {
+    root.join(LOCAL_DEV_DB_FILENAME)
+}
+
 /// Open (or create) the local-dev libSQL database file at `root` — just the
 /// connection, no migrations/mount. One owner for the `libsql::Builder::new_local`
 /// sequence: [`build_default_local_dev_database_roots`] (production) and the
@@ -3190,7 +3198,7 @@ pub(crate) const LOCAL_DEV_DB_FILENAME: &str = "reborn-local-dev.db";
 async fn open_local_dev_libsql_database(
     root: &Path,
 ) -> Result<Arc<libsql::Database>, RebornBuildError> {
-    let db_path = root.join(LOCAL_DEV_DB_FILENAME);
+    let db_path = local_dev_db_path(root);
     Ok(Arc::new(
         libsql::Builder::new_local(&db_path)
             .build()

@@ -251,8 +251,9 @@ async fn with_run_local_trigger_fire_access_checker(
             )
         })?;
         let profile = effective_profile(config, config_file.as_ref())?;
-        let user_store_path =
-            local_runtime_storage_root(config, profile).join("reborn-local-dev.db");
+        let user_store_path = ironclaw_reborn_composition::local_dev_db_path(
+            &local_runtime_storage_root(config, profile),
+        );
         let access_store =
             open_trigger_access_store_for_profile(&runtime_input, profile, &user_store_path)
                 .await?;
@@ -928,7 +929,7 @@ fn google_oauth_client_secret_from_store(
     // opening anything. (A *non-pristine* headless host with a real store
     // may still block resolving the master key via the OS keychain — that
     // is pre-existing platform behavior outside this fix.)
-    if !home_path.join("reborn-local-dev.db").exists() {
+    if !ironclaw_reborn_composition::local_dev_db_path(&home_path).exists() {
         return Ok(None);
     }
     block_on_cli(async move {
