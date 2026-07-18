@@ -1711,6 +1711,17 @@ where
         // infallible in practice; it only re-borrows the descriptor that was
         // released when the fold returned. Fail closed on the unreachable `None`.
         let Some(descriptor) = self.registry.get_capability(&request.capability_id) else {
+            // Obligations were already prepared by the fold — abort them so the
+            // unreachable arm cannot leak a prepared reservation/mount grant.
+            self.abort_obligations(
+                CapabilityObligationPhase::Spawn,
+                &request.context,
+                &request.capability_id,
+                &request.estimate,
+                obligations.as_slice(),
+                &obligation_outcome,
+            )
+            .await;
             fail_run_if_configured(self.run_state, &scope, invocation_id, "UnknownCapability")
                 .await;
             return Err(CapabilityInvocationError::UnknownCapability {
