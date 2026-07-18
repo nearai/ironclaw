@@ -3,7 +3,7 @@ use ironclaw_authorization::{
 };
 use ironclaw_extensions::ExtensionRegistry;
 use ironclaw_host_api::{
-    CapabilityDescriptor, CapabilityDispatchRequest, CapabilityDispatchResult,
+    CapabilityAuthorizer, CapabilityDescriptor, CapabilityDispatchRequest, CapabilityDispatchResult,
     CapabilityDispatcher, CapabilityGrantId, CapabilityId, Decision, DenyReason, DispatchError,
     ExecutionContext, InvocationFingerprint, InvocationId, Obligation, ProcessId, ResourceEstimate,
     ResourceScope,
@@ -49,6 +49,15 @@ where
     process_manager: Option<&'a dyn ProcessManager>,
     obligation_handler: Option<&'a dyn CapabilityObligationHandler>,
 }
+
+// `CapabilityHost` IS the kernel authorizer (Slice-C wiring, arch-simplification
+// §3/§5.3.2). Implementing `CapabilityAuthorizer` here — and NOWHERE else, per
+// the `reborn_authorized_seal_ratchet` — is the "test-seal" half of the
+// `Authorized` witness: only this crate can mint an `AuthorizationGrant`, so only
+// the code that runs the authorize fold can seal an `Authorized`. The
+// `authorize()` method that consumes the grant lands in a following wiring slice;
+// this activates the seal so that ratchet becomes load-bearing.
+impl<'a, D> CapabilityAuthorizer for CapabilityHost<'a, D> where D: CapabilityDispatcher + ?Sized {}
 
 /// Specification for a lease that must be claimed AFTER authorization succeeds.
 ///

@@ -80,6 +80,32 @@ runtime_lanes! {
     Process => "process",
 }
 
+impl RuntimeLane {
+    /// Resolve the execution lane for a descriptor's [`crate::RuntimeKind`]
+    /// (the loading taxonomy, §5.10). This is the one place the two axes meet:
+    /// `authorize()` reads the descriptor's kind and binds the resolved lane into
+    /// the `Authorized` witness so `dispatch()` routes without re-deriving it.
+    ///
+    /// - `Wasm`/`Mcp`/`FirstParty` map to their same-named lanes.
+    /// - `Script` runs **on** the [`RuntimeLane::Process`] lane (§4.2: "today's
+    ///   script/process adapter executes on the `Process` lane").
+    /// - `System` is host-internal (master-key ops, migrations, admin tooling)
+    ///   and is **not** an untrusted execution lane, so it maps to `None` — a
+    ///   `System` capability is not dispatched to a `RuntimeLane` at all. Callers
+    ///   must treat `None` as "host-internal, no untrusted lane", never as a
+    ///   default.
+    pub fn from_runtime_kind(kind: crate::RuntimeKind) -> Option<RuntimeLane> {
+        use crate::RuntimeKind;
+        match kind {
+            RuntimeKind::Wasm => Some(RuntimeLane::Wasm),
+            RuntimeKind::Mcp => Some(RuntimeLane::Mcp),
+            RuntimeKind::Script => Some(RuntimeLane::Process),
+            RuntimeKind::FirstParty => Some(RuntimeLane::FirstParty),
+            RuntimeKind::System => None,
+        }
+    }
+}
+
 impl std::fmt::Display for RuntimeLane {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(self.as_str())
@@ -130,5 +156,29 @@ mod tests {
         assert_eq!(RuntimeLane::Wasm.as_str(), "wasm");
         assert_eq!(RuntimeLane::Mcp.as_str(), "mcp");
         assert_eq!(RuntimeLane::Process.as_str(), "process");
+    }
+
+    #[test]
+    fn from_runtime_kind_maps_the_loading_taxonomy_to_lanes() {
+        use crate::RuntimeKind;
+        assert_eq!(
+            RuntimeLane::from_runtime_kind(RuntimeKind::Wasm),
+            Some(RuntimeLane::Wasm)
+        );
+        assert_eq!(
+            RuntimeLane::from_runtime_kind(RuntimeKind::Mcp),
+            Some(RuntimeLane::Mcp)
+        );
+        assert_eq!(
+            RuntimeLane::from_runtime_kind(RuntimeKind::FirstParty),
+            Some(RuntimeLane::FirstParty)
+        );
+        // Script executes on the Process lane (§4.2).
+        assert_eq!(
+            RuntimeLane::from_runtime_kind(RuntimeKind::Script),
+            Some(RuntimeLane::Process)
+        );
+        // System is host-internal — no untrusted execution lane.
+        assert_eq!(RuntimeLane::from_runtime_kind(RuntimeKind::System), None);
     }
 }
