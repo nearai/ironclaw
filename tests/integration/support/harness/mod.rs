@@ -579,6 +579,7 @@ impl HostRuntimeCapabilityHarness {
             activate_bundled_extensions_for_test,
             fixture_extension_dirs,
             native_extension_factories,
+            account_setup_descriptors,
             recording_network_egress,
             project_service_fault_injection,
             durable_capability_io,
@@ -619,6 +620,9 @@ impl HostRuntimeCapabilityHarness {
         }
         if !native_extension_factories.is_empty() {
             input = input.with_native_extension_factories(native_extension_factories);
+        }
+        if !account_setup_descriptors.is_empty() {
+            input = input.with_account_setup_descriptors(account_setup_descriptors);
         }
         // Fixture extensions are filesystem-discovered, not host-bundled, so
         // the InstalledLocal trust stamp would (correctly) reject their

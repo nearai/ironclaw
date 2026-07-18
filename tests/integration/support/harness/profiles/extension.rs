@@ -673,8 +673,40 @@ pub(crate) fn extension_delivery_tools_profile() -> HarnessResult<ToolsProfile> 
     profile.options = profile
         .options
         .with_native_extension_factory(Arc::new(TelegramFixtureFactory))
+        .with_account_setup_descriptor(telegram_account_setup_descriptor())
         .with_recording_network_egress(network_egress);
     Ok(profile)
+}
+
+/// Telegram's account-setup declaration, mirrored from the binary assembly
+/// (`ironclaw_reborn_cli::runtime::account_setups`) the same way
+/// [`TelegramFixtureFactory`] mirrors the native factory: the harness
+/// composes its own runtime and cannot depend on the CLI crate.
+fn telegram_account_setup_descriptor() -> ironclaw_product_workflow::ExtensionAccountSetupDescriptor
+{
+    let extension_id = ironclaw_host_api::ExtensionId::new("telegram").expect("extension id");
+    ironclaw_product_workflow::ExtensionAccountSetupDescriptor {
+        extension_id: extension_id.clone(),
+        auth_requirement: ironclaw_host_api::RuntimeCredentialAuthRequirement {
+            provider: ironclaw_host_api::VendorId::new("telegram").expect("provider id"),
+            setup: ironclaw_host_api::RuntimeCredentialAccountSetup::Pairing,
+            requester_extension: extension_id,
+            provider_scopes: Vec::new(),
+        },
+        connection_requirement: ironclaw_product_workflow::ChannelConnectionRequirement {
+            channel: "telegram".to_string(),
+            display_name: "Telegram".to_string(),
+            strategy: ironclaw_product_workflow::RebornChannelConnectStrategy::WebGeneratedCode,
+            instructions: "Pair your Telegram account from the pairing panel.".to_string(),
+            input_placeholder: String::new(),
+            submit_label: "Open pairing".to_string(),
+            error_message: "Telegram pairing failed. Get a fresh code and try again.".to_string(),
+        },
+        activation_success_message:
+            "Telegram is installed as an inbound entrypoint; pair via the pairing panel."
+                .to_string(),
+        pairing_deep_link_template: Some("https://t.me/{bot_username}?start={code}".to_string()),
+    }
 }
 
 pub(crate) async fn extension_delivery_tools() -> HarnessResult<HostRuntimeCapabilityHarness> {

@@ -842,6 +842,47 @@ async fn telegram_update_becomes_a_turn_and_a_coordinated_reply(#[case] storage:
             .expect("composition built the generic ingress"),
     );
 
+    // Pair the sending actor first (§5.5): with telegram's account-setup
+    // descriptor declared, verified inbound actors resolve through the
+    // generic identity bindings and an unbound sender cannot open a turn.
+    // The pairing journey itself is proven end-to-end by
+    // `unbound_telegram_actor_pairs_via_web_minted_code_then_turns_attribute_to_the_paired_user`.
+    let paired_user = inbound
+        .binding
+        .subject_user_id
+        .clone()
+        .expect("binding subject user id");
+    let pairing_code = services
+        .pairing_mint_for_test("telegram", &paired_user)
+        .await
+        .expect("telegram pairing service composes from the declared descriptor");
+    let pair_status = ingress
+        .post(
+            TELEGRAM_ROUTE,
+            &json!({
+                "update_id": 500,
+                "message": {
+                    "message_id": 10,
+                    "date": 1709999999,
+                    "text": format!("/start {pairing_code}"),
+                    "from": {"id": 9911, "is_bot": false, "first_name": "Ada"},
+                    "chat": {"id": 8675309, "type": "private"}
+                }
+            })
+            .to_string(),
+            vec![(
+                "X-Telegram-Bot-Api-Secret-Token",
+                TELEGRAM_WEBHOOK_SECRET.to_string(),
+            )],
+        )
+        .await;
+    assert_eq!(
+        pair_status,
+        StatusCode::OK,
+        "pairing consume must be admitted"
+    );
+    ingress.drain().await;
+
     let body = json!({
         "update_id": 501,
         "message": {
@@ -962,4 +1003,256 @@ async fn telegram_update_becomes_a_turn_and_a_coordinated_reply(#[case] storage:
         String::from_utf8_lossy(&last_set_webhook.body).contains(updated_url),
         "the re-run activation must register the NEW webhook URL"
     );
+}
+
+/// §5.5 WebGeneratedCode pairing on the generic route (the P2 seam, DEL-10
+/// shape): with telegram's binary-parity account-setup descriptor declared,
+/// verified inbound actors resolve through the generic identity bindings and
+/// an unbound DM fails closed into the connect nudge instead of inheriting
+/// the operator. A code minted web-side (production pairing service — the
+/// same instance the pairing routes and the connection facade hold) is
+/// consumed from the verified webhook (`/start <code>`), binding the sender:
+/// the durable pairing state flips to connected and the next plain DM admits
+/// a turn whose scope subject IS the paired user, with the reply coordinated
+/// back over `sendMessage`. Storage-mode-invariant semantics ride the
+/// libsql case; the sibling delivery proof covers the backend matrix.
+#[rstest]
+#[case::libsql(StorageMode::LibSql)]
+#[tokio::test]
+async fn unbound_telegram_actor_pairs_via_web_minted_code_then_turns_attribute_to_the_paired_user(
+    #[case] storage: StorageMode,
+) {
+    let group = RebornIntegrationGroup::builder()
+        .storage(storage)
+        .extension_delivery()
+        .await
+        .expect("delivery group builds on this backend");
+    let services = reborn_services(&group);
+
+    let inbound = group
+        .thread("conv-telegram-pairing-inbound")
+        .script([RebornScriptedReply::text("unused")])
+        .build()
+        .await
+        .expect("inbound thread builds");
+
+    let assembly = services
+        .start_channel_host_assembly_for_test(ChannelHostAssemblyTestWiring {
+            thread_service: inbound
+                .thread_service_for_test()
+                .expect("group thread service"),
+            turn_coordinator: inbound.turn_coordinator_for_test(),
+            identity: ChannelHostIdentity {
+                tenant_id: inbound.binding.tenant_id.clone(),
+                agent_id: inbound.binding.agent_id.clone().expect("binding agent id"),
+                project_id: inbound.binding.project_id.clone(),
+                operator_user_id: inbound
+                    .binding
+                    .subject_user_id
+                    .clone()
+                    .expect("binding subject user id"),
+            },
+            run_delivery_settings: fast_delivery_settings(),
+        })
+        .expect("the production channel host assembly starts over the composed runtime");
+
+    let lifecycle = group
+        .thread("conv-telegram-pairing-lifecycle")
+        .script([
+            RebornScriptedReply::tool_call(
+                "builtin.extension_install",
+                json!({"extension_id": "telegram"}),
+            ),
+            RebornScriptedReply::text("installed"),
+            RebornScriptedReply::tool_call(
+                "builtin.extension_activate",
+                json!({"extension_id": "telegram"}),
+            ),
+            RebornScriptedReply::text("activated"),
+        ])
+        .build()
+        .await
+        .expect("telegram lifecycle thread builds");
+    lifecycle
+        .submit_turn("install telegram")
+        .await
+        .expect("telegram install completes");
+
+    let channel_config = services
+        .channel_config_facade()
+        .expect("the composed runtime exposes the channel-config configure port");
+    let telegram_id = ironclaw_host_api::ExtensionId::new("telegram").expect("extension id");
+    channel_config
+        .save_values(
+            &telegram_id,
+            vec![
+                (
+                    "telegram_webhook_url".to_string(),
+                    "https://hooks.example.test/webhooks/extensions/telegram/updates".to_string(),
+                ),
+                (
+                    "telegram_bot_token".to_string(),
+                    TELEGRAM_BOT_TOKEN.to_string(),
+                ),
+                (
+                    "telegram_webhook_secret".to_string(),
+                    TELEGRAM_WEBHOOK_SECRET.to_string(),
+                ),
+                ("bot_username".to_string(), "itest_pairing_bot".to_string()),
+            ],
+        )
+        .await
+        .expect("telegram configures through the production port");
+    lifecycle
+        .submit_turn("activate telegram")
+        .await
+        .expect("telegram activate completes");
+
+    let telegram_binding_service =
+        wait_for_production_registration(&assembly, services, "telegram").await;
+    let ingress = VendorIngress::production(
+        services
+            .extension_ingress_parts()
+            .expect("composition built the generic ingress"),
+    );
+    let evidence = ironclaw_product_adapters::auth::mark_shared_secret_header_verified(
+        "X-Telegram-Bot-Api-Secret-Token".to_string(),
+        TELEGRAM_INSTALLATION,
+    );
+
+    let dm_body = |update_id: u64, text: &str| {
+        json!({
+            "update_id": update_id,
+            "message": {
+                "message_id": update_id + 10,
+                "date": 1710000000,
+                "text": text,
+                "from": {"id": 424242, "is_bot": false, "first_name": "Pat"},
+                "chat": {"id": 515151, "type": "private"}
+            }
+        })
+        .to_string()
+    };
+
+    // 1. Unbound plain DM: fail-closed actor resolution — no turn, no
+    //    reply; the generic driver greets the 1:1 with the connect nudge.
+    let status = ingress
+        .post(
+            TELEGRAM_ROUTE,
+            &dm_body(601, "hello, are you there?"),
+            vec![(
+                "X-Telegram-Bot-Api-Secret-Token",
+                TELEGRAM_WEBHOOK_SECRET.to_string(),
+            )],
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "vendor still gets its 2xx");
+    ingress.drain().await;
+    let requests = inbound.captured_network_requests_for_test();
+    let nudge = requests
+        .iter()
+        .find(|request| {
+            request.url.ends_with("/sendMessage")
+                && String::from_utf8_lossy(&request.body).contains("connect your account")
+        })
+        .unwrap_or_else(|| {
+            panic!(
+                "an unbound 1:1 DM must get the connect nudge; got {:?}",
+                requests.iter().map(|r| r.url.clone()).collect::<Vec<_>>()
+            )
+        });
+    assert!(
+        String::from_utf8_lossy(&nudge.body).contains("515151"),
+        "the nudge must land in the sender's own chat"
+    );
+
+    // 2. Web-side mint for the paired user (the production pairing service —
+    //    the exact instance the pairing routes and connection facade hold).
+    let paired_user = inbound
+        .binding
+        .subject_user_id
+        .clone()
+        .expect("binding subject user id");
+    let code = services
+        .pairing_mint_for_test("telegram", &paired_user)
+        .await
+        .expect("telegram's descriptor composes a pairing service; the channel is active");
+    assert_eq!(
+        services
+            .pairing_connected_for_test("telegram", &paired_user)
+            .await,
+        Some(false),
+        "minting alone must not connect"
+    );
+
+    // 3. The verified webhook consumes the deep-link payload: the
+    //    pre-admission gate services it (no turn) and binds the sender.
+    let status = ingress
+        .post(
+            TELEGRAM_ROUTE,
+            &dm_body(602, &format!("/start {code}")),
+            vec![(
+                "X-Telegram-Bot-Api-Secret-Token",
+                TELEGRAM_WEBHOOK_SECRET.to_string(),
+            )],
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK);
+    ingress.drain().await;
+    assert_eq!(
+        services
+            .pairing_connected_for_test("telegram", &paired_user)
+            .await,
+        Some(true),
+        "consuming the minted code must durably connect the caller"
+    );
+
+    // 4. The SAME actor's next plain DM now resolves through the pairing
+    //    binding: a real turn admits under the paired user's scope and the
+    //    reply coordinates back over sendMessage.
+    let chat_body = dm_body(603, "what can you do now that we're paired?");
+    let vendor_scope = preresolve_vendor_turn_scope(
+        &telegram_binding_service,
+        &ironclaw_telegram_extension::TelegramChannelAdapter::default(),
+        "telegram",
+        TELEGRAM_INSTALLATION,
+        &evidence,
+        &chat_body,
+    )
+    .await;
+    assert_eq!(
+        vendor_scope.explicit_owner_user_id(),
+        Some(&paired_user),
+        "post-pairing inbound must attribute to the paired user, not the operator fallback"
+    );
+    inbound.register_scope_gateway_for_test(
+        vendor_scope.clone(),
+        Arc::new(StaticReplyGateway(TELEGRAM_REPLY)),
+    );
+    let status = ingress
+        .post(
+            TELEGRAM_ROUTE,
+            &chat_body,
+            vec![(
+                "X-Telegram-Bot-Api-Secret-Token",
+                TELEGRAM_WEBHOOK_SECRET.to_string(),
+            )],
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK);
+    ingress.drain().await;
+    let requests = inbound.captured_network_requests_for_test();
+    requests
+        .iter()
+        .find(|request| {
+            request.url.ends_with("/sendMessage")
+                && String::from_utf8_lossy(&request.body).contains(TELEGRAM_REPLY)
+        })
+        .unwrap_or_else(|| {
+            panic!(
+                "sendMessage with the paired reply must land on the wire; got {:?}",
+                requests.iter().map(|r| r.url.clone()).collect::<Vec<_>>()
+            )
+        });
+    assert_delivered_attempt(services, &vendor_scope).await;
 }

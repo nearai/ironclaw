@@ -654,6 +654,40 @@ impl RebornServices {
         self.extension_ingress.clone()
     }
 
+    /// Mint (or rotate) a pairing code through the composed generic pairing
+    /// service — tests only. Mirrors the production `pairing/mint` route
+    /// handler in `channel_pairing_serve`; returns the code text.
+    #[cfg(any(test, feature = "test-support"))]
+    pub async fn pairing_mint_for_test(
+        &self,
+        extension_id: &str,
+        user_id: &ironclaw_host_api::UserId,
+    ) -> Option<String> {
+        let service = self.channel_pairing.as_ref()?.get(extension_id)?;
+        service
+            .issue_or_rotate(user_id)
+            .await
+            .ok()
+            .map(|issue| issue.code.as_str().to_string())
+    }
+
+    /// The caller's pairing connection state through the composed generic
+    /// pairing service — tests only. Mirrors the production `pairing/status`
+    /// route handler and the channel-connection facade read.
+    #[cfg(any(test, feature = "test-support"))]
+    pub async fn pairing_connected_for_test(
+        &self,
+        extension_id: &str,
+        user_id: &ironclaw_host_api::UserId,
+    ) -> Option<bool> {
+        let service = self.channel_pairing.as_ref()?.get(extension_id)?;
+        service
+            .status_for(user_id)
+            .await
+            .ok()
+            .map(|status| status.connected)
+    }
+
     /// The generic delivery coordinator (extension-runtime §5.4), when this
     /// composition path built the channel egress transport.
     pub fn delivery_coordinator(

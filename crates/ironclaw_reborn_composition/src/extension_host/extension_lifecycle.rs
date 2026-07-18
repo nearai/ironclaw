@@ -808,7 +808,17 @@ impl RebornLocalExtensionManagementPort {
             .await
             .map_err(map_account_setup_error)?
         {
-            requirements.push(requirement);
+            // Pairing-setup requirements never gate ACTIVATION: activation is
+            // what performs the vendor wiring (webhook registration) that
+            // makes pairing consumable in the first place — blocking here
+            // would deadlock the flow. Pairing satisfaction is per-user and
+            // bites at conversation time (fail-closed inbound actor
+            // resolution, the connection panel, and runs parked on the
+            // provider-keyed requirement), all resumed by the standard
+            // auth-continuation fan-out once the caller pairs.
+            if requirement.setup != RuntimeCredentialAccountSetup::Pairing {
+                requirements.push(requirement);
+            }
         }
         Ok(requirements)
     }

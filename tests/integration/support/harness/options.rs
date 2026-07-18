@@ -65,6 +65,10 @@ pub(crate) struct HostRuntimeHarnessOptions {
     /// — the same seam the binary uses).
     pub(crate) native_extension_factories:
         Vec<Arc<dyn ironclaw_extension_host::NativeExtensionFactory>>,
+    /// Binary-parity account-setup declarations (extension-runtime §5.5),
+    /// the `RebornBuildInput::with_account_setup_descriptors` seam.
+    pub(crate) account_setup_descriptors:
+        Vec<ironclaw_product_workflow::ExtensionAccountSetupDescriptor>,
     /// Typed handle for the recording network egress when the profile wants
     /// `captured_network_requests` assertions (the dyn seam alone loses the
     /// recorder type).
@@ -113,6 +117,7 @@ impl HostRuntimeHarnessOptions {
             activate_bundled_extensions_for_test: Vec::new(),
             fixture_extension_dirs: Vec::new(),
             native_extension_factories: Vec::new(),
+            account_setup_descriptors: Vec::new(),
             recording_network_egress: None,
             project_service_fault_injection: false,
             durable_capability_io: false,
@@ -181,6 +186,17 @@ impl HostRuntimeHarnessOptions {
         factory: Arc<dyn ironclaw_extension_host::NativeExtensionFactory>,
     ) -> Self {
         self.native_extension_factories.push(factory);
+        self
+    }
+
+    /// Binary-parity account-setup declaration (extension-runtime §5.5):
+    /// mirrors `RebornBuildInput::with_account_setup_descriptors` the same
+    /// way the native factories mirror the CLI assembly.
+    pub(crate) fn with_account_setup_descriptor(
+        mut self,
+        descriptor: ironclaw_product_workflow::ExtensionAccountSetupDescriptor,
+    ) -> Self {
+        self.account_setup_descriptors.push(descriptor);
         self
     }
 
