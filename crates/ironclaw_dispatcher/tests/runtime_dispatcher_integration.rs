@@ -60,6 +60,7 @@ async fn runtime_dispatcher_routes_already_authorized_request_through_public_tra
 
     let result = dispatch_port
         .dispatch_json(CapabilityDispatchRequest {
+            run_id: None,
             capability_id: CapabilityId::new("echo.say").unwrap(),
             scope: scope.clone(),
             authenticated_actor_user_id: Some(authenticated_actor_user_id.clone()),
@@ -129,6 +130,7 @@ async fn runtime_dispatcher_forwards_configured_runtime_policy_to_adapter() {
 
     dispatcher
         .dispatch_json(CapabilityDispatchRequest {
+            run_id: None,
             capability_id: CapabilityId::new("echo.say").unwrap(),
             scope: sample_scope(),
             authenticated_actor_user_id: None,
@@ -160,6 +162,7 @@ async fn runtime_dispatcher_fails_closed_for_missing_backend_before_reservation_
 
     let err = dispatch_port
         .dispatch_json(CapabilityDispatchRequest {
+            run_id: None,
             capability_id: CapabilityId::new("script.echo").unwrap(),
             scope,
             authenticated_actor_user_id: None,
@@ -243,10 +246,10 @@ struct RecordedAdapterRequest {
 }
 
 #[async_trait]
-impl RuntimeAdapter<LocalFilesystem, InMemoryResourceGovernor> for RecordingAdapter {
+impl RuntimeAdapter<DiskFilesystem, InMemoryResourceGovernor> for RecordingAdapter {
     async fn dispatch_json(
         &self,
-        request: RuntimeAdapterRequest<'_, LocalFilesystem, InMemoryResourceGovernor>,
+        request: RuntimeAdapterRequest<'_, DiskFilesystem, InMemoryResourceGovernor>,
     ) -> Result<RuntimeAdapterResult, DispatchError> {
         self.requests.lock().unwrap().push(RecordedAdapterRequest {
             provider: request.package.id.clone(),
@@ -329,9 +332,9 @@ fn parse_manifest(manifest: &str) -> ExtensionManifest {
     .unwrap()
 }
 
-fn mounted_empty_extension_root() -> LocalFilesystem {
+fn mounted_empty_extension_root() -> DiskFilesystem {
     let storage = tempfile::tempdir().unwrap().keep();
-    let mut fs = LocalFilesystem::new();
+    let mut fs = DiskFilesystem::new();
     fs.mount_local(
         VirtualPath::new("/system/extensions").unwrap(),
         HostPath::from_path_buf(storage),

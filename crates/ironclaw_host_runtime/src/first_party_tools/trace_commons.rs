@@ -1,3 +1,4 @@
+// arch-exempt: large_file, trace-commons capability family shares one dispatch surface, plan #4539
 //! First-party Trace Commons capabilities: onboard, status, credits, profile token, profile set,
 //! and account login link.
 //!
@@ -1328,7 +1329,7 @@ mod tests {
 
     use async_trait::async_trait;
     use chrono::{DateTime, Utc};
-    use ironclaw_filesystem::LocalFilesystem;
+    use ironclaw_filesystem::DiskFilesystem;
     use ironclaw_host_api::{CapabilityId, ResourceEstimate, ResourceScope};
     use ironclaw_reborn_traces::contribution::{
         StandingTraceContributionPolicy, TraceCreditReport,
@@ -1358,13 +1359,14 @@ mod tests {
     /// Uses the system scope so no validated user/tenant id is needed.
     fn test_request(input: Value) -> FirstPartyCapabilityRequest {
         FirstPartyCapabilityRequest {
+            run_id: None,
             capability_id: CapabilityId::new(TRACE_COMMONS_ONBOARD_CAPABILITY_ID).unwrap(),
             scope: ResourceScope::system(),
             authenticated_actor_user_id: None,
             estimate: ResourceEstimate::default(),
             mounts: None,
             services: InvocationServices {
-                filesystem: Arc::new(LocalFilesystem::new()),
+                filesystem: Arc::new(DiskFilesystem::new()),
                 runtime_http_egress: None,
                 tool_call_http_egress: None,
                 runtime_secret_material_stager: None,
@@ -1372,6 +1374,7 @@ mod tests {
                 secret_store: None,
                 audit_sink: None,
                 unsafe_raw_diagnostics_allowed: false,
+                post_edit_check: None,
             },
             input,
         }

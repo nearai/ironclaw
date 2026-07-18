@@ -314,7 +314,10 @@ mod tests {
 
     #[test]
     fn guest_error_kind_does_not_classify_generic_422_as_input() {
-        assert_eq!(guest_error_kind("github_api_error_status_422"), "operation_failed");
+        assert_eq!(
+            guest_error_kind("github_api_error_status_422"),
+            "operation_failed"
+        );
     }
 
     #[test]
@@ -1173,6 +1176,37 @@ mod tests {
         let body: serde_json::Value =
             serde_json::from_str(requests[0].body.as_deref().unwrap()).unwrap();
         assert_eq!(body, json!({}));
+    }
+
+    #[test]
+    fn get_job_logs_json_encodes_plain_text_body() {
+        // GitHub's job-logs endpoint returns raw plain-text log content, not
+        // JSON. The WASM tool ABI requires `output` to be a JSON document — the
+        // host decodes it with `serde_json::from_str` and rejects non-JSON with
+        // `OutputDecode` — so the guest must JSON-encode the body into a string
+        // value. Encoding is unconditional: log text that happens to look like a
+        // JSON token (`true`, `123`, `{...}`) must still arrive as a string, not
+        // be reinterpreted as a bool/number/object. (Regression for the #6140 /
+        // #6161 output-decode review.)
+        let raw_log = "2026-07-12T06:19:02Z build failed\n{not json} true 123";
+        test_support::set_response(Ok(raw_log.to_string()));
+        let output = execute_inner(
+            r#"{"owner":"nearai","repo":"ironclaw","job_id":456}"#,
+            Some(r#"{"capability_id":"github.get_job_logs"}"#),
+        )
+        .expect("get_job_logs should dispatch");
+
+        let requests = test_support::requests();
+        assert_eq!(
+            requests[0].path,
+            "/repos/nearai/ironclaw/actions/jobs/456/logs"
+        );
+
+        // The output is a JSON document (parses) that decodes to the exact raw
+        // log text as a string value — never a coerced bool/number/object.
+        let decoded: serde_json::Value =
+            serde_json::from_str(&output).expect("guest output must be valid JSON");
+        assert_eq!(decoded, serde_json::Value::String(raw_log.to_string()));
     }
 
     #[test]

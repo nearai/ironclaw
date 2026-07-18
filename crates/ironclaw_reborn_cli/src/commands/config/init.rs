@@ -30,6 +30,13 @@ impl ConfigInitCommand {
         println!("{}", outcome.config.display_line());
         println!("{}", outcome.providers.display_line());
         println!();
+        println!(
+            "hint: config.toml ships with `[llm.default]` commented out, so `run`/`serve` fall \
+             back to LLM environment variables until you configure a slot — run `ironclaw-reborn \
+             onboard` interactively, `ironclaw-reborn models set-provider <provider>`, or edit \
+             config.toml and uncomment `[llm.default]` with a `provider_id` (and usually a \
+             `model`) to pin an explicit provider."
+        );
         println!("edit them, then run `ironclaw-reborn run`.");
         Ok(())
     }
@@ -58,6 +65,27 @@ impl ConfigFileWrite {
         format!("{}: {}", self.action, self.path.display())
     }
 }
+
+/// Canonical zero-friction LLM default: the provider named in the
+/// `config.toml` stub's commented-out `[llm.default]` example, and the
+/// numbered `onboard` menu's preferred entry.
+/// - `config.toml` is the single source of truth for `[llm.default]`:
+///   written ONLY by an explicit act (`onboard` seeding, `config set` /
+///   `models set-provider`, or WebUI settings) — never seeded implicitly by
+///   `config init`/`onboard`'s stub write. See `onboard::llm_credentials`
+///   for seeding paths and `resolve_reborn_runtime_llm` for the env fallback
+///   a commented-out `[llm.default]` falls through to.
+/// - `nearai` is preferred for a fresh install because it's the intended
+///   session-token-auth provider (a NEAR account, no third-party API key),
+///   but that flow is not wired in reborn yet — no `SessionRenewer` attaches
+///   at `serve` boot — so `effective_api_key_required` overrides it to
+///   `true` and onboarding still asks for a `cloud-api.near.ai` API key like
+///   every other provider. See `effective_api_key_required`'s doc.
+const DEFAULT_LLM_PROVIDER_ID: &str = "nearai";
+/// Mirrors `providers.json`'s `nearai` entry's `default_model`.
+const DEFAULT_LLM_MODEL: &str = "deepseek-ai/DeepSeek-V4-Flash";
+/// Mirrors `providers.json`'s `nearai` entry's `api_key_env`.
+const DEFAULT_LLM_API_KEY_ENV: &str = "NEARAI_API_KEY";
 
 pub(crate) fn write_default_config_files(
     home: &RebornHome,
@@ -204,13 +232,25 @@ regex_activation_enabled = true
 # # session-pool cap after reserving capacity for restarts/operator sessions.
 # pool_max_size = 2
 
-[llm.default]
-# LLM slot selection. `provider_id` references an entry in
-# providers.json (built-in or user-overlay). `model` / `base_url` /
-# `api_key_env` override the catalog defaults for this deployment.
-provider_id = "openai"
-model       = "gpt-4o-mini"
-api_key_env = "OPENAI_API_KEY"
+# [llm.default]
+# # LLM slot selection. `provider_id` references an entry in
+# # providers.json (built-in or user-overlay). `model` / `base_url` /
+# # `api_key_env` override the catalog defaults for this deployment.
+# # No slot is seeded by default: leaving this section commented means the
+# # runtime falls back to LLM environment variables (`LLM_BACKEND`, or a
+# # provider whose own env vars are set — see `ironclaw-reborn onboard` and
+# # `.env.example`). Run `ironclaw-reborn onboard` interactively, `ironclaw-
+# # reborn config set` / `models set-provider`, or the WebUI settings page to
+# # write an explicit slot here.
+# #
+# # CAUTION: uncommenting only the `[llm.default]` header with no fields
+# # below it does NOT fall through to the environment — an empty slot is
+# # still "present" and resolution fails closed with a missing-provider-id
+# # error. Always set `provider_id` (and usually `model`) together with the
+# # header, or leave the whole section commented.
+# provider_id = "{default_llm_provider_id}"
+# model       = "{default_llm_model}"
+# api_key_env = "{default_llm_api_key_env}"
 
 # [llm.mission]
 # # Reserved for the future planned-driver "mission" slot.
@@ -227,6 +267,9 @@ api_key_env = "OPENAI_API_KEY"
 # # from WebUI channel setup after the server starts.
 "#,
         api_version = REBORN_CONFIG_API_VERSION,
+        default_llm_provider_id = DEFAULT_LLM_PROVIDER_ID,
+        default_llm_model = DEFAULT_LLM_MODEL,
+        default_llm_api_key_env = DEFAULT_LLM_API_KEY_ENV,
     )
 }
 
@@ -256,3 +299,85 @@ const PROVIDERS_STUB: &str = r#"[
   }
 ]
 "#;
+
+#[cfg(all(test, feature = "root-llm-provider"))]
+mod tests {
+    use super::*;
+    use crate::context::RebornCliContext;
+
+    /// `DEFAULT_LLM_*` are hand-maintained mirrors of `providers.json`'s
+    /// `nearai` entry (see each const's doc) rather than derived from it —
+    /// `ironclaw_reborn_cli` is excluded from depending on `ironclaw_llm`
+    /// directly (per `reborn_dependency_boundaries`), so there's no shared
+    /// type to read the catalog through here. Parses the real
+    /// `providers.json` as raw JSON instead, so a future catalog edit that
+    /// forgets to update these consts fails this test rather than silently
+    /// drifting.
+    #[test]
+    fn default_llm_consts_match_the_real_providers_json_nearai_entry() {
+        const PROVIDERS_JSON: &str = include_str!("../../../../../providers.json");
+        let providers: serde_json::Value =
+            serde_json::from_str(PROVIDERS_JSON).expect("providers.json must parse as JSON");
+        let nearai = providers
+            .as_array()
+            .expect("providers.json is a JSON array")
+            .iter()
+            .find(|entry| {
+                entry.get("id").and_then(|id| id.as_str()) == Some(DEFAULT_LLM_PROVIDER_ID)
+            })
+            .unwrap_or_else(|| panic!("providers.json has no `{DEFAULT_LLM_PROVIDER_ID}` entry"));
+        assert_eq!(
+            nearai.get("default_model").and_then(|v| v.as_str()),
+            Some(DEFAULT_LLM_MODEL),
+            "DEFAULT_LLM_MODEL has drifted from providers.json's `{DEFAULT_LLM_PROVIDER_ID}` \
+             entry's default_model"
+        );
+        assert_eq!(
+            nearai.get("api_key_env").and_then(|v| v.as_str()),
+            Some(DEFAULT_LLM_API_KEY_ENV),
+            "DEFAULT_LLM_API_KEY_ENV has drifted from providers.json's `{DEFAULT_LLM_PROVIDER_ID}` \
+             entry's api_key_env"
+        );
+    }
+
+    /// The config stub written by `onboard`/`config init` must carry NO
+    /// `[llm.default]` selection at all — `default_llm_slot()` must return
+    /// `None` (not `Some` with empty fields — a bare header still fails
+    /// closed with `MissingProviderId`, see `DEFAULT_LLM_PROVIDER_ID`'s doc)
+    /// — so `resolve_reborn_runtime_llm` reaches the env fallback.
+    #[test]
+    fn deseeded_stub_has_no_default_llm_slot_and_reaches_env_fallback() {
+        let (_tmp, context) = RebornCliContext::test_context();
+        let home = context.boot_config().home();
+        let outcome = write_default_config_files(home, false, ExistingConfigPolicy::FailIfPresent)
+            .expect("write stub config files");
+        assert_eq!(outcome.config.action, FileWriteAction::Wrote);
+
+        let config_text =
+            fs::read_to_string(home.config_file_path()).expect("read stub config.toml");
+        let config_file = ironclaw_reborn_config::RebornConfigFile::parse_text(
+            &config_text,
+            &home.config_file_path(),
+        )
+        .expect("stub config.toml must parse");
+        assert!(
+            config_file.default_llm_slot().is_none(),
+            "de-seeded stub must carry no `[llm.default]` slot at all: {config_text}"
+        );
+
+        // A pre-existing LLM env var in the ambient test environment would make
+        // an exact outcome assertion environment-dependent, so this only pins
+        // the *shape*: env fallback reached, not a stub-seeded slot short-circuit.
+        let resolved = ironclaw_reborn_composition::resolve_reborn_runtime_llm(
+            context.boot_config(),
+            Some(&config_file),
+        );
+        assert!(
+            !matches!(
+                &resolved,
+                Err(ironclaw_reborn_composition::RebornLlmCatalogError::MissingProviderId)
+            ),
+            "a de-seeded stub must reach env fallback, not MissingProviderId; got: {resolved:?}"
+        );
+    }
+}

@@ -1,7 +1,7 @@
 use ironclaw_extensions::{
     CAPABILITY_PROVIDER_HOST_API_ID, CAPABILITY_PROVIDER_SECTION, ExtensionError, ManifestV2Error,
 };
-use ironclaw_filesystem::LocalFilesystem;
+use ironclaw_filesystem::DiskFilesystem;
 use ironclaw_host_api::{
     CapabilityId, ExtensionId, HOST_RUNTIME_HTTP_EGRESS_PORT_ID, HostPath, HostPortId, VirtualPath,
 };
@@ -90,12 +90,12 @@ async fn default_host_port_catalog_rejects_unknown_required_port() {
     );
 }
 
-fn mounted_extension_fs(id: &str, manifest: &str) -> (tempfile::TempDir, LocalFilesystem) {
+fn mounted_extension_fs(id: &str, manifest: &str) -> (tempfile::TempDir, DiskFilesystem) {
     let storage = tempdir().unwrap();
     std::fs::create_dir_all(storage.path().join(id)).unwrap();
     std::fs::write(storage.path().join(id).join("manifest.toml"), manifest).unwrap();
 
-    let mut fs = LocalFilesystem::new();
+    let mut fs = DiskFilesystem::new();
     fs.mount_local(
         VirtualPath::new("/system/extensions").unwrap(),
         HostPath::from_path_buf(storage.path().to_path_buf()),

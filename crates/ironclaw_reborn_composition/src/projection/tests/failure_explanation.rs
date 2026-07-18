@@ -172,7 +172,8 @@ fn failure_summary_covers_every_loop_failure_kind_category() {
     );
 
     for (category, expected_summary) in expected {
-        let summary = crate::failure_summary::reborn_failure_summary_for_category(Some(category));
+        let summary =
+            ironclaw_runner::failure_summary::reborn_failure_summary_for_category(Some(category));
         assert_eq!(summary, expected_summary, "category {category}");
         assert_ne!(summary, GENERIC_FAILURE_SUMMARY, "category {category}");
         assert!(
@@ -238,7 +239,7 @@ fn failure_summary_covers_reborn_failure_category_constants() {
 
     for (category, expected_summary) in expected {
         assert_eq!(
-            crate::failure_summary::reborn_failure_summary_for_category(Some(category)),
+            ironclaw_runner::failure_summary::reborn_failure_summary_for_category(Some(category)),
             expected_summary,
             "category {category}"
         );
@@ -280,7 +281,7 @@ fn failure_summary_covers_host_stage_unavailable_categories() {
 
     for (category, expected_summary) in expected {
         assert_eq!(
-            crate::failure_summary::reborn_failure_summary_for_category(Some(category)),
+            ironclaw_runner::failure_summary::reborn_failure_summary_for_category(Some(category)),
             expected_summary,
             "category {category}"
         );
@@ -364,7 +365,8 @@ fn failure_summary_covers_agent_loop_safe_summary_categories() {
     );
 
     for (category, expected_summary) in expected {
-        let summary = crate::failure_summary::reborn_failure_summary_for_category(Some(category));
+        let summary =
+            ironclaw_runner::failure_summary::reborn_failure_summary_for_category(Some(category));
         assert_eq!(summary, expected_summary, "category {category}");
         assert_ne!(summary, GENERIC_FAILURE_SUMMARY, "category {category}");
     }
@@ -372,8 +374,9 @@ fn failure_summary_covers_agent_loop_safe_summary_categories() {
 
 #[test]
 fn failure_summary_uses_safe_generic_fallback_for_unknown_categories() {
-    let summary =
-        crate::failure_summary::reborn_failure_summary_for_category(Some("new_snake_case_code"));
+    let summary = ironclaw_runner::failure_summary::reborn_failure_summary_for_category(Some(
+        "new_snake_case_code",
+    ));
 
     assert_eq!(summary, GENERIC_FAILURE_SUMMARY);
     assert_ne!(summary, "new_snake_case_code");

@@ -278,12 +278,12 @@ jobs:
         with:
           node-version: "22"
           cache: "pnpm"
-          cache-dependency-path: crates/ironclaw_webui_v2/frontend/pnpm-lock.yaml
+          cache-dependency-path: crates/ironclaw_webui/frontend/pnpm-lock.yaml
       - name: Enable pnpm
         run: corepack enable pnpm
       - name: Install WebUI frontend dependencies
         run: |
-          cd crates/ironclaw_webui_v2/frontend
+          cd crates/ironclaw_webui/frontend
           pnpm install --frozen-lockfile
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
@@ -324,12 +324,12 @@ jobs:
         with:
           node-version: "22"
           cache: "pnpm"
-          cache-dependency-path: crates/ironclaw_webui_v2/frontend/pnpm-lock.yaml
+          cache-dependency-path: crates/ironclaw_webui/frontend/pnpm-lock.yaml
       - name: Enable pnpm
         run: corepack enable pnpm
       - name: Install WebUI frontend dependencies
         run: |
-          cd crates/ironclaw_webui_v2/frontend
+          cd crates/ironclaw_webui/frontend
           pnpm install --frozen-lockfile
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:

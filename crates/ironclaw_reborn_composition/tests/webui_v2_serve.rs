@@ -14,6 +14,7 @@
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+// arch-exempt: large_file, root WebUI caller regressions stay with the shared composed-router fixture, plan #5905
 use async_trait::async_trait;
 use axum::body::{Body, to_bytes};
 use axum::http::{HeaderValue, Method, Request, StatusCode, header};
@@ -35,18 +36,80 @@ use ironclaw_product_workflow::{
     WebUiResolveGateRequest, WebUiRetryRunRequest, WebUiSendMessageRequest,
     WebUiSetupExtensionRequest,
 };
-use ironclaw_reborn_composition::{
-    PublicRouteMount, RebornReadiness, RebornWebuiBundle, WebuiAuthentication, WebuiAuthenticator,
-    WebuiServeConfig, webui_v2_app,
-};
+use ironclaw_reborn_composition::{PublicRouteMount, RebornReadiness, RebornWebuiBundle};
 use ironclaw_threads::{SessionThreadRecord, ThreadScope};
 use ironclaw_turns::{EventCursor, RunProfileId, RunProfileVersion, TurnRunId, TurnStatus};
+use ironclaw_webui::{
+    WebuiAuthentication, WebuiAuthenticator, WebuiServeConfig, WebuiServeError, webui_v2_app,
+};
 use serde_json::json;
 use tower::ServiceExt;
 
 const TENANT: &str = "tenant-alpha";
 const USER: &str = "user-alpha";
 const VALID_TOKEN: &str = "valid-bearer-token";
+
+fn public_test_descriptor(
+    route_id: &str,
+    route_pattern: &str,
+) -> ironclaw_host_api::ingress::IngressRouteDescriptor {
+    use ironclaw_host_api::IngressScopeSource;
+    use ironclaw_host_api::ingress::{
+        AllowedEffectPath, AuditTraceClass, BodyLimitPolicy, CorsPolicy, IngressAuthPolicy,
+        IngressJustification, IngressPolicy, IngressPolicyParts, IngressRouteDescriptor,
+        ListenerClass, RateLimitPolicy, RateLimitScope, StreamingMode, WebSocketOriginPolicy,
+    };
+    use std::num::NonZeroU32;
+
+    IngressRouteDescriptor::new(
+        route_id,
+        NetworkMethod::Get,
+        route_pattern,
+        IngressPolicy::new(IngressPolicyParts {
+            listener_class: ListenerClass::LocalGateway,
+            auth: IngressAuthPolicy::Public {
+                justification: IngressJustification::new("test public", "regression test")
+                    .expect("justification"),
+            },
+            scope_source: IngressScopeSource::PublicRoute,
+            body_limit: BodyLimitPolicy::NoBody,
+            rate_limit: RateLimitPolicy::Limited {
+                scope: RateLimitScope::PerIp,
+                max_requests: NonZeroU32::new(120).expect("120 != 0"),
+                window_seconds: NonZeroU32::new(60).expect("60 != 0"),
+            },
+            cors: CorsPolicy::SameOriginOnly,
+            websocket_origin: WebSocketOriginPolicy::NotApplicable,
+            streaming: StreamingMode::None,
+            audit: AuditTraceClass::PublicCallback,
+            effect_path: AllowedEffectPath::NoEffect,
+        })
+        .expect("policy"),
+    )
+    .expect("descriptor")
+}
+
+fn compose_with_public_descriptor(
+    route_id: &str,
+    route_pattern: &str,
+) -> Result<axum::Router, WebuiServeError> {
+    let bundle = RebornWebuiBundle {
+        api: Arc::new(StubServices::default()),
+        product_auth: None,
+        readiness: RebornReadiness::disabled(),
+    };
+    let descriptor = public_test_descriptor(route_id, route_pattern);
+    let config = WebuiServeConfig::new(
+        TenantId::new(TENANT).expect("tenant"),
+        Arc::new(OnlyValidToken),
+        vec![HeaderValue::from_static("http://localhost:1234")],
+    )
+    .with_default_agent_id(AgentId::new(AGENT).expect("agent"))
+    .with_default_project_id(ProjectId::new(PROJECT).expect("project"))
+    .with_public_route_mount(PublicRouteMount::new(axum::Router::new(), vec![descriptor]));
+
+    webui_v2_app(bundle, config)
+}
 
 fn service_unavailable_error(retryable: bool) -> RebornServicesError {
     RebornServicesError {
@@ -1064,7 +1127,7 @@ async fn served_app_stylesheet() -> String {
 }
 
 async fn served_app_vite_asset(suffix: &str) -> String {
-    let shell = served_static_text("/v2/").await;
+    let shell = served_static_text("/").await;
     let asset_path = shell_vite_asset_path(&shell, suffix);
     served_static_text(&asset_path).await
 }
@@ -1072,7 +1135,7 @@ async fn served_app_vite_asset(suffix: &str) -> String {
 fn shell_vite_asset_path(shell: &str, suffix: &str) -> String {
     shell
         .split(['"', '\''])
-        .find(|part| part.starts_with("/v2/assets/app-") && part.ends_with(suffix))
+        .find(|part| part.starts_with("/assets/app-") && part.ends_with(suffix))
         .expect("shell should reference requested Vite asset")
         .to_string()
 }
@@ -1799,7 +1862,7 @@ async fn ws_upgrade_uses_canonical_host_over_client_host_when_configured() {
     //      Host, NOT canonical_host) must be rejected.
     //   2. A WS upgrade with `Origin: http://app.example.com` (matching
     //      canonical_host) must succeed.
-    use ironclaw_reborn_composition::WebuiServeConfig;
+    use ironclaw_webui::WebuiServeConfig;
 
     let services = Arc::new(StubServices::default());
     let bundle = RebornWebuiBundle {
@@ -1813,7 +1876,7 @@ async fn ws_upgrade_uses_canonical_host_over_client_host_when_configured() {
         vec![HeaderValue::from_static("http://localhost:1234")],
     )
     .with_canonical_host("app.example.com");
-    let app = ironclaw_reborn_composition::webui_v2_app(bundle, config).expect("app");
+    let app = ironclaw_webui::webui_v2_app(bundle, config).expect("app");
     let (addr, handle) = spawn_serve(app).await;
 
     // (1) Origin matches Host but NOT canonical_host — fail.
@@ -1983,7 +2046,7 @@ async fn setup_extension_returns_lifecycle_projection_via_facade() {
 async fn rate_limit_is_independent_per_caller() {
     // Two distinct authenticators / users — alice exhausts her budget
     // but bob's requests still get through.
-    use ironclaw_reborn_composition::WebuiServeConfig;
+    use ironclaw_webui::WebuiServeConfig;
 
     struct UserSwitch;
     #[async_trait]
@@ -2066,7 +2129,7 @@ async fn rate_limit_is_independent_per_caller() {
 async fn every_webui_v2_descriptor_is_mounted_on_composed_app() {
     let (app, _services) = build_app();
 
-    for descriptor in ironclaw_webui_v2::webui_v2_routes() {
+    for descriptor in ironclaw_webui::webui_v2::webui_v2_routes() {
         let method = match descriptor.method() {
             NetworkMethod::Get => Method::GET,
             NetworkMethod::Post => Method::POST,
@@ -2166,14 +2229,14 @@ fn expand_route_pattern(pattern: &str) -> String {
         .replace("{package_id}", "ext-fake")
 }
 
-// ─── static SPA mount (`ironclaw_webui_v2`) ────────────────────
+// ─── static SPA mount (`ironclaw_webui`) ────────────────────
 //
-// The composition mounts the embedded SPA bundle under `/v2`. These
-// tests drive that mount through the same composed router production
-// uses, so a regression that drops the `.nest("/v2", ...)` call (or
-// that accidentally routes the SPA through the bearer-auth middleware)
-// fails here. Per `.claude/rules/testing.md` ("Test Through the
-// Caller") — the standalone router test in `ironclaw_webui_v2`
+// The composition mounts the embedded SPA bundle at the gateway root. These
+// tests drive that mount through the same composed router production uses, so
+// a regression that drops the static router (or accidentally routes the SPA
+// through the bearer-auth middleware) fails here. Per
+// `.claude/rules/testing.md` ("Test Through the
+// Caller") — the standalone router test in `ironclaw_webui`
 // does not exercise the composition seam, so this layer needs its
 // own coverage.
 
@@ -2184,7 +2247,7 @@ async fn static_root_serves_index_with_substituted_csp_nonce() {
         .oneshot(
             Request::builder()
                 .method(Method::GET)
-                .uri("/v2/")
+                .uri("/")
                 .body(Body::empty())
                 .expect("request"),
         )
@@ -2214,19 +2277,172 @@ async fn static_root_does_not_require_bearer_auth() {
     let (app, _) = build_app();
     // No Authorization header at all — anonymous fetch of the SPA shell
     // must succeed. The bearer-auth middleware is only attached to the
-    // v2 JSON routes via `route_layer`, so the static `.nest("/v2", …)`
-    // mount escapes it by design.
+    // v2 JSON routes via `route_layer`, so the root static router escapes it
+    // by design.
     let response = app
         .oneshot(
             Request::builder()
                 .method(Method::GET)
-                .uri("/v2/")
+                .uri("/")
                 .body(Body::empty())
                 .expect("request"),
         )
         .await
         .expect("oneshot");
     assert_eq!(response.status(), StatusCode::OK);
+}
+
+#[tokio::test]
+async fn legacy_v2_urls_redirect_to_root_without_losing_query_data() {
+    let (app, _) = build_app();
+    for (source, target) in [
+        ("/v2", "/"),
+        ("/v2/", "/"),
+        (
+            "/v2/settings/skills?token=old%2Btoken&tab=installed",
+            "/settings/skills?token=old%2Btoken&tab=installed",
+        ),
+        ("/v2?login_ticket=ticket%2B1", "/?login_ticket=ticket%2B1"),
+        ("/v2//evil.example?keep=1", "/evil.example?keep=1"),
+        (r"/v2/\evil.example", "/evil.example"),
+    ] {
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::GET)
+                    .uri(source)
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("oneshot");
+        assert_eq!(
+            response.status(),
+            StatusCode::TEMPORARY_REDIRECT,
+            "GET {source}",
+        );
+        assert_eq!(
+            response
+                .headers()
+                .get(header::LOCATION)
+                .and_then(|value| value.to_str().ok()),
+            Some(target),
+            "GET {source}",
+        );
+    }
+}
+
+#[tokio::test]
+async fn root_static_mount_keeps_server_namespaces_fail_closed() {
+    let (app, _) = build_app();
+    for (method, path) in [
+        (Method::GET, "/api/not-a-route"),
+        (Method::POST, "/api/not-a-route"),
+        (Method::GET, "/auth/not-a-route"),
+        (Method::POST, "/auth/not-a-route"),
+        (Method::GET, "/v1/not-a-route"),
+        (Method::POST, "/v1/not-a-route"),
+        (Method::GET, "/webhooks/not-a-route"),
+        (Method::POST, "/webhooks/not-a-route"),
+    ] {
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(method.clone())
+                    .uri(path)
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("oneshot");
+        assert_eq!(response.status(), StatusCode::NOT_FOUND, "{method} {path}");
+    }
+}
+
+#[tokio::test]
+async fn root_static_mount_rejects_noncanonical_path_separators() {
+    let (app, _) = build_app();
+    for path in [
+        "//api/not-a-route",
+        "///auth/not-a-route",
+        "//v1/not-a-route",
+        "//webhooks/not-a-route",
+        "/%2Fapi/not-a-route",
+        r"/\api/not-a-route",
+        "/%5Capi/not-a-route",
+        r"/api\not-a-route",
+        "/api%5Cnot-a-route",
+        "//chat",
+    ] {
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::GET)
+                    .uri(path)
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("oneshot");
+        assert_eq!(
+            response.status(),
+            StatusCode::BAD_REQUEST,
+            "malformed path `{path}` must be rejected before SPA fallback",
+        );
+    }
+}
+
+#[tokio::test]
+async fn root_manifest_and_wallet_popup_are_served_with_owned_contracts() {
+    let (app, _) = build_app();
+    let manifest_response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::GET)
+                .uri("/assets/site.webmanifest")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("oneshot");
+    assert_eq!(manifest_response.status(), StatusCode::OK);
+    assert_eq!(
+        manifest_response
+            .headers()
+            .get(header::CONTENT_TYPE)
+            .and_then(|value| value.to_str().ok()),
+        Some("application/manifest+json"),
+    );
+    let manifest = read_body_string(manifest_response).await;
+    let manifest: serde_json::Value =
+        serde_json::from_str(&manifest).expect("embedded manifest must be valid JSON");
+    assert_eq!(manifest["id"], "/v2/");
+    assert_eq!(manifest["start_url"], "/");
+    assert_eq!(manifest["scope"], "/");
+
+    let wallet_response = app
+        .oneshot(
+            Request::builder()
+                .method(Method::GET)
+                .uri("/wallet/connect")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("oneshot");
+    assert_eq!(wallet_response.status(), StatusCode::OK);
+    let wallet_csp = wallet_response
+        .headers()
+        .get(header::CONTENT_SECURITY_POLICY)
+        .and_then(|value| value.to_str().ok())
+        .expect("wallet popup CSP");
+    assert!(wallet_csp.contains("script-src 'self' 'unsafe-inline' https:"));
+    let wallet_body = read_body_string(wallet_response).await;
+    assert!(wallet_body.contains("src=\"/wallet-connect.js\""));
 }
 
 #[tokio::test]
@@ -2237,7 +2453,7 @@ async fn static_js_asset_returns_javascript_content_type() {
             .oneshot(
                 Request::builder()
                     .method(Method::GET)
-                    .uri("/v2/")
+                    .uri("/")
                     .body(Body::empty())
                     .expect("request"),
             )
@@ -2362,7 +2578,7 @@ async fn static_css_asset_returns_text_css_content_type() {
             .oneshot(
                 Request::builder()
                     .method(Method::GET)
-                    .uri("/v2/")
+                    .uri("/")
                     .body(Body::empty())
                     .expect("request"),
             )
@@ -2469,7 +2685,7 @@ async fn static_unknown_extension_path_returns_404() {
         .oneshot(
             Request::builder()
                 .method(Method::GET)
-                .uri("/v2/missing-asset.bin")
+                .uri("/missing-asset.bin")
                 .body(Body::empty())
                 .expect("request"),
         )
@@ -2480,16 +2696,16 @@ async fn static_unknown_extension_path_returns_404() {
 
 #[tokio::test]
 async fn static_client_side_route_falls_back_to_spa_shell() {
-    // Any `/v2/<no-dot-segment>` path that does not match an asset
+    // Any root-level no-dot path that does not match an asset
     // returns the SPA shell so react-router can render the right
-    // view. Without this, a hard refresh on `/v2/chat/<id>` would
+    // view. Without this, a hard refresh on `/chat/<id>` would
     // 404 instead of resuming the chat view.
     let (app, _) = build_app();
     let response = app
         .oneshot(
             Request::builder()
                 .method(Method::GET)
-                .uri("/v2/chat/some-thread-id")
+                .uri("/chat/some-thread-id")
                 .body(Body::empty())
                 .expect("request"),
         )
@@ -2516,7 +2732,7 @@ async fn static_root_emits_a_fresh_nonce_per_request() {
             .oneshot(
                 Request::builder()
                     .method(Method::GET)
-                    .uri("/v2/")
+                    .uri("/")
                     .body(Body::empty())
                     .expect("request"),
             )
@@ -2528,7 +2744,7 @@ async fn static_root_emits_a_fresh_nonce_per_request() {
         app.oneshot(
             Request::builder()
                 .method(Method::GET)
-                .uri("/v2/")
+                .uri("/")
                 .body(Body::empty())
                 .expect("request"),
         )
@@ -2705,7 +2921,7 @@ async fn js_client_resolve_gate_path_decodes_percent_encoded_gate_ref() {
 
 /// Locks the [`WebuiServeConfig::with_public_router`] seam: a
 /// host-supplied router (today wired by
-/// `ironclaw_reborn_webui_ingress::webui_v2_auth_router`) must
+/// `ironclaw_webui::webui_v2_auth_router`) must
 /// reach its handler WITHOUT going through the bearer-auth
 /// middleware, and must still pick up the outer security headers
 /// applied to every other response. Regression guard for issue
@@ -2715,14 +2931,7 @@ async fn js_client_resolve_gate_path_decodes_percent_encoded_gate_ref() {
 #[tokio::test]
 async fn public_route_mount_is_merged_without_bearer_auth_and_keeps_descriptor_policy() {
     use axum::extract::ConnectInfo;
-    use ironclaw_host_api::ingress::{
-        AllowedEffectPath, AuditTraceClass, BodyLimitPolicy, CorsPolicy, IngressAuthPolicy,
-        IngressJustification, IngressPolicy, IngressPolicyParts, IngressRouteDescriptor,
-        ListenerClass, RateLimitPolicy, RateLimitScope, StreamingMode, WebSocketOriginPolicy,
-    };
-    use ironclaw_host_api::{IngressScopeSource, NetworkMethod};
     use std::net::SocketAddr;
-    use std::num::NonZeroU32;
 
     let services = Arc::new(StubServices::default());
     let bundle = RebornWebuiBundle {
@@ -2734,32 +2943,7 @@ async fn public_route_mount_is_merged_without_bearer_auth_and_keeps_descriptor_p
         "/auth/providers",
         axum::routing::get(|| async { axum::Json(serde_json::json!({ "providers": [] })) }),
     );
-    let descriptor = IngressRouteDescriptor::new(
-        "webui.sso.providers.test".to_string(),
-        NetworkMethod::Get,
-        "/auth/providers".to_string(),
-        IngressPolicy::new(IngressPolicyParts {
-            listener_class: ListenerClass::LocalGateway,
-            auth: IngressAuthPolicy::Public {
-                justification: IngressJustification::new("test public", "regression test")
-                    .expect("justification"),
-            },
-            scope_source: IngressScopeSource::PublicRoute,
-            body_limit: BodyLimitPolicy::NoBody,
-            rate_limit: RateLimitPolicy::Limited {
-                scope: RateLimitScope::PerIp,
-                max_requests: NonZeroU32::new(120).expect("120 != 0"),
-                window_seconds: NonZeroU32::new(60).expect("60 != 0"),
-            },
-            cors: CorsPolicy::SameOriginOnly,
-            websocket_origin: WebSocketOriginPolicy::NotApplicable,
-            streaming: StreamingMode::None,
-            audit: AuditTraceClass::PublicCallback,
-            effect_path: AllowedEffectPath::NoEffect,
-        })
-        .expect("policy"),
-    )
-    .expect("descriptor");
+    let descriptor = public_test_descriptor("webui.sso.providers.test", "/auth/providers");
 
     let config = WebuiServeConfig::new(
         TenantId::new(TENANT).expect("tenant"),
@@ -2813,6 +2997,138 @@ async fn public_route_mount_is_merged_without_bearer_auth_and_keeps_descriptor_p
         .await
         .expect("oneshot");
     assert_eq!(protected.status(), StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn public_route_mount_reserves_its_root_namespace_from_spa_fallback() {
+    use axum::extract::ConnectInfo;
+    use std::net::SocketAddr;
+
+    let services = Arc::new(StubServices::default());
+    let bundle = RebornWebuiBundle {
+        api: services,
+        product_auth: None,
+        readiness: RebornReadiness::disabled(),
+    };
+    let public = axum::Router::new().route(
+        "/future-host/ping",
+        axum::routing::get(|| async { StatusCode::NO_CONTENT }),
+    );
+    let descriptor = public_test_descriptor("webui.future_host.ping.test", "/future-host/ping");
+    let config = WebuiServeConfig::new(
+        TenantId::new(TENANT).expect("tenant"),
+        Arc::new(OnlyValidToken),
+        vec![HeaderValue::from_static("http://localhost:1234")],
+    )
+    .with_default_agent_id(AgentId::new(AGENT).expect("agent"))
+    .with_default_project_id(ProjectId::new(PROJECT).expect("project"))
+    .with_public_route_mount(PublicRouteMount::new(public, vec![descriptor]));
+    let app = webui_v2_app(bundle, config).expect("webui v2 app");
+
+    let mut exact_request = Request::builder()
+        .method(Method::GET)
+        .uri("/future-host/ping")
+        .body(Body::empty())
+        .expect("request");
+    exact_request
+        .extensions_mut()
+        .insert(ConnectInfo(SocketAddr::from(([127, 0, 0, 1], 1234))));
+    let exact = app.clone().oneshot(exact_request).await.expect("oneshot");
+    assert_eq!(exact.status(), StatusCode::NO_CONTENT);
+
+    let unknown = app
+        .oneshot(
+            Request::builder()
+                .method(Method::GET)
+                .uri("/future-host/not-a-route")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("oneshot");
+    assert_eq!(
+        unknown.status(),
+        StatusCode::NOT_FOUND,
+        "unknown paths in a host-owned root namespace must not render the SPA shell",
+    );
+    assert_ne!(
+        unknown
+            .headers()
+            .get(header::CONTENT_TYPE)
+            .and_then(|value| value.to_str().ok()),
+        Some("text/html; charset=utf-8"),
+    );
+}
+
+#[test]
+fn public_route_mount_with_dynamic_root_namespace_fails_composition() {
+    let error = match compose_with_public_descriptor(
+        "webui.dynamic_namespace.ping.test",
+        "/{namespace}/ping",
+    ) {
+        Ok(_) => panic!("dynamic root namespace must fail composition"),
+        Err(error) => error,
+    };
+    assert!(matches!(
+        error,
+        WebuiServeError::NonCanonicalRootNamespace {
+            route_id,
+            route_pattern,
+            root_namespace,
+        } if route_id == "webui.dynamic_namespace.ping.test"
+            && route_pattern == "/{namespace}/ping"
+            && root_namespace == "{namespace}"
+    ));
+}
+
+#[test]
+fn public_route_mount_with_encoded_root_namespace_fails_composition() {
+    let error = match compose_with_public_descriptor(
+        "webui.encoded_namespace.ping.test",
+        "/%66uture-host/ping",
+    ) {
+        Ok(_) => panic!("encoded root namespace must fail composition"),
+        Err(error) => error,
+    };
+    assert!(matches!(
+        error,
+        WebuiServeError::NonCanonicalRootNamespace {
+            route_id,
+            route_pattern,
+            root_namespace,
+        } if route_id == "webui.encoded_namespace.ping.test"
+            && route_pattern == "/%66uture-host/ping"
+            && root_namespace == "%66uture-host"
+    ));
+}
+
+#[test]
+fn public_route_mount_with_static_owned_root_namespace_fails_composition() {
+    for (root_namespace, route_pattern) in [
+        ("v2", "/v2/ping"),
+        ("wallet", "/wallet/ping"),
+        ("assets", "/assets/ping"),
+        ("vendor", "/vendor/ping"),
+        ("wallet-connect.js", "/wallet-connect.js/ping"),
+    ] {
+        let error = match compose_with_public_descriptor(
+            "webui.static_namespace_conflict.ping.test",
+            route_pattern,
+        ) {
+            Ok(_) => panic!("static-owned root namespace must fail composition"),
+            Err(error) => error,
+        };
+        assert!(matches!(
+            error,
+            WebuiServeError::StaticRootNamespaceConflict {
+                route_id,
+                route_pattern: actual_pattern,
+                root_namespace: actual_namespace,
+            } if route_id == "webui.static_namespace_conflict.ping.test"
+                && actual_pattern == route_pattern
+                && actual_namespace == root_namespace
+        ));
+    }
 }
 
 // ─── Automations panel UI (fix/reborn-automations-ux) ─────────────────
@@ -2902,4 +3218,124 @@ async fn static_automations_delivery_surfaces_save_error_and_gates_slack_hint() 
         body.contains("finalReplyTargets.length>0"),
         "the Slack approval footnote must be gated on an external target existing"
     );
+}
+
+/// The Telegram public webhook mounted through the COMPOSED listener
+/// (`with_public_route_mount` → `webui_v2_app`) inherits the
+/// descriptor-driven middleware exactly like every other route — no side
+/// door. Drives the REAL runtime + telegram host mounts, not a stub router.
+///
+/// Manual-QA rows automated here (docs/qa/telegram-coverage-map.md):
+/// qa-telegram:S4 (bodies over the manifest-declared 1 MiB limit are refused
+/// as 413 BEFORE verification/parse ever runs) and qa-telegram:S6 (path
+/// probes under the webhook prefix 404 at the router without reaching the
+/// installation resolver — an unmounted path cannot consult any store).
+#[cfg(feature = "telegram-v2-host-beta")]
+#[tokio::test]
+async fn telegram_public_mount_enforces_descriptor_body_limit_and_404s_path_probes() {
+    use ironclaw_host_api::{AgentId, UserId};
+    use ironclaw_reborn_composition::{
+        RebornBuildInput, RebornRuntimeIdentity, RebornRuntimeInput, TelegramHostRuntimeConfig,
+        build_reborn_runtime, build_telegram_host_runtime_mounts,
+        build_webui_services_with_telegram_host_mounts, local_dev_runtime_policy,
+    };
+
+    let root = tempfile::tempdir().expect("tempdir");
+    let input = RebornRuntimeInput::from_services(
+        RebornBuildInput::local_dev("tg-serve-owner", root.path().join("local-dev"))
+            .with_runtime_policy(local_dev_runtime_policy().expect("local policy")),
+    )
+    .with_identity(RebornRuntimeIdentity {
+        tenant_id: TENANT.to_string(),
+        agent_id: "tg-serve-agent".to_string(),
+        source_binding_id: "tg-serve-source".to_string(),
+        reply_target_binding_id: "tg-serve-reply".to_string(),
+    });
+    let runtime = build_reborn_runtime(input).await.expect("runtime builds");
+    let mounts = build_telegram_host_runtime_mounts(
+        &runtime,
+        TelegramHostRuntimeConfig::new(
+            TenantId::new(TENANT).expect("tenant"),
+            AgentId::new("tg-serve-agent").expect("agent"),
+            None,
+            UserId::new("tg-serve-operator").expect("operator"),
+            Some("https://tg-serve.example".to_string()),
+        ),
+    )
+    .await
+    .expect("telegram mounts build");
+    let bundle = build_webui_services_with_telegram_host_mounts(&runtime, None, Some(&mounts))
+        .expect("webui bundle");
+    let config = WebuiServeConfig::new(
+        TenantId::new(TENANT).expect("tenant"),
+        Arc::new(OnlyValidToken),
+        vec![],
+    )
+    .with_public_route_mount(mounts.events);
+    let app = webui_v2_app(bundle, config).expect("webui v2 app");
+
+    // S4: one byte past the manifest-declared 1 MiB limit → 413 from the
+    // descriptor-driven middleware, before verification (no secret header
+    // supplied — an in-budget request without it 401s below).
+    let oversized = vec![b'x'; 1024 * 1024 + 1];
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/webhooks/extensions/telegram/updates")
+                .header("content-type", "application/json")
+                .body(Body::from(oversized))
+                .expect("request"),
+        )
+        .await
+        .expect("oneshot");
+    assert_eq!(
+        response.status(),
+        StatusCode::PAYLOAD_TOO_LARGE,
+        "oversized webhook bodies are refused before parse/verify"
+    );
+
+    // Control: the same route with an in-budget body reaches the verifier and
+    // fails closed on the missing secret header — proving the 413 above came
+    // from the body limit, not some upstream rejection of the route itself.
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/webhooks/extensions/telegram/updates")
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"update_id":1}"#))
+                .expect("request"),
+        )
+        .await
+        .expect("oneshot");
+    assert_eq!(
+        response.status(),
+        StatusCode::UNAUTHORIZED,
+        "in-budget unverified requests reach the fail-closed verifier"
+    );
+
+    // S6: a path probe under the webhook prefix has no route — the axum
+    // router 404s it before any installation resolver or store could run.
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/webhooks/extensions/telegram/bogus")
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"update_id":1}"#))
+                .expect("request"),
+        )
+        .await
+        .expect("oneshot");
+    assert_eq!(
+        response.status(),
+        StatusCode::NOT_FOUND,
+        "unmounted webhook paths 404 at the router, never reaching resolution"
+    );
+
+    runtime.shutdown().await.expect("runtime shuts down");
 }

@@ -6,7 +6,7 @@ use std::{
 use async_trait::async_trait;
 use ironclaw_authorization::GrantAuthorizer;
 use ironclaw_extensions::ExtensionRegistry;
-use ironclaw_filesystem::LocalFilesystem;
+use ironclaw_filesystem::DiskFilesystem;
 use ironclaw_host_api::{
     CapabilityGrant, CapabilityGrantId, CapabilityId, CapabilitySet, EffectKind, ExecutionContext,
     ExtensionId, GrantConstraints, MountView, NetworkPolicy, PackageId, PackageSource, Principal,
@@ -67,7 +67,7 @@ async fn loop_run_dispatch_preserves_authenticated_actor_distinct_from_shared_su
     let runtime = Arc::new(
         HostRuntimeServices::new(
             Arc::new(registry),
-            Arc::new(LocalFilesystem::new()),
+            Arc::new(DiskFilesystem::new()),
             Arc::new(InMemoryResourceGovernor::new()),
             Arc::new(GrantAuthorizer::new()),
             ProcessServices::in_memory(),

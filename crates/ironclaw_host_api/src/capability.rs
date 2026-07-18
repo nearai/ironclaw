@@ -132,6 +132,14 @@ pub enum RuntimeCredentialAccountSetup {
     ManualToken,
     #[serde(rename = "oauth")]
     OAuth { scopes: Vec<String> },
+    /// Channel pairing: the user links an external account by consuming a
+    /// host-issued code on the external side (e.g. Telegram deep-link
+    /// `/start <code>`). No credential account is minted — satisfaction is
+    /// re-derived from the channel's binding store when the parked run
+    /// re-checks its requirements. Unlike the retired Slack `channel_pairing`
+    /// connect gate, this variant is host-issued-code, provider-keyed, and
+    /// serviced by the standard auth-continuation fan-out.
+    Pairing,
     /// Setup kinds this enum no longer models but persisted records may still
     /// carry — e.g. the pre-OAuth `channel_pairing` Slack connect gate removed
     /// by #5604, which was serialized inside `TurnRunRecord.credential_requirements`
@@ -197,6 +205,15 @@ mod credential_setup_wire_tests {
             RuntimeCredentialAccountSetup::OAuth {
                 scopes: vec!["users:read".to_string()]
             }
+        );
+
+        let parsed: RuntimeCredentialAccountSetup =
+            serde_json::from_str(r#"{"kind":"pairing"}"#).expect("pairing");
+        assert_eq!(parsed, RuntimeCredentialAccountSetup::Pairing);
+        assert_eq!(
+            serde_json::to_value(RuntimeCredentialAccountSetup::Pairing).expect("serializes"),
+            serde_json::json!({"kind": "pairing"}),
+            "the pairing gate's persisted wire shape is locked"
         );
     }
 }

@@ -1,3 +1,4 @@
+// arch-exempt: large_file, mechanical LocalFilesystem->DiskFilesystem Bucket-2 rename (arch-simplification §4.4), no logic change, plan #6168
 use std::{
     collections::{BTreeMap, HashMap, VecDeque},
     sync::{
@@ -10,7 +11,7 @@ use async_trait::async_trait;
 use chrono::Utc;
 use ironclaw_authorization::GrantAuthorizer;
 use ironclaw_extensions::{ExtensionManifest, ExtensionPackage, ExtensionRegistry, ManifestSource};
-use ironclaw_filesystem::{InMemoryBackend, LocalFilesystem, RootFilesystem, ScopedFilesystem};
+use ironclaw_filesystem::{DiskFilesystem, InMemoryBackend, RootFilesystem, ScopedFilesystem};
 use ironclaw_hooks::{
     HookId, HookLocalId, HookRegistrar, HookRegistry, HookVersion,
     dispatch::HookDispatcherBuilder,
@@ -8150,9 +8151,9 @@ fn host_runtime_visible_request_with_dispatch_grant(
     request
 }
 
-async fn e2e_script_filesystem() -> LocalFilesystem {
+async fn e2e_script_filesystem() -> DiskFilesystem {
     let storage = tempfile::tempdir().unwrap().keep();
-    let mut filesystem = LocalFilesystem::new();
+    let mut filesystem = DiskFilesystem::new();
     filesystem
         .mount_local(
             VirtualPath::new("/system/extensions").unwrap(),

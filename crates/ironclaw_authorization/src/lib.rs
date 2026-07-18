@@ -1,3 +1,4 @@
+// arch-exempt: large_file, mechanical lease-store migration only — InMemoryCapabilityLeaseStore deleted (net −187 LOC), test-support helper added over FilesystemCapabilityLeaseStore<InMemoryBackend> (arch-simplification §4.3), plan #6168
 //! Capability authorization contracts for IronClaw Reborn.
 //!
 //! `ironclaw_authorization` evaluates authority-bearing host API contracts. It
@@ -7,7 +8,7 @@
 
 use std::{
     collections::HashMap,
-    sync::{Arc, Mutex, MutexGuard},
+    sync::{Arc, Mutex},
 };
 
 use async_trait::async_trait;
@@ -25,14 +26,21 @@ use ironclaw_filesystem::{
 const CAS_RETRY_ATTEMPTS: usize = 3;
 use ironclaw_host_api::{
     AgentId, CapabilityDescriptor, CapabilityGrant, CapabilityGrantId, Decision, DenyReason,
-    EffectKind, ExecutionContext, HostApiError, InvocationFingerprint, InvocationId, MissionId,
-    NetworkPolicy, Obligation, Obligations, Principal, ProjectId, ResourceCeiling,
-    ResourceEstimate, ResourceScope, RuntimeCredentialRequirementSource, RuntimeKind, SandboxQuota,
-    ScopedPath, TenantId, ThreadId, UserId,
+    EffectKind, ExecutionContext, HostApiError, InvocationFingerprint, MissionId, NetworkPolicy,
+    Obligation, Obligations, Principal, ProjectId, ResourceCeiling, ResourceEstimate,
+    ResourceScope, RuntimeCredentialRequirementSource, RuntimeKind, SandboxQuota, ScopedPath,
+    TenantId, ThreadId, UserId,
 };
 use ironclaw_trust::{AuthorityCeiling, TrustDecision};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
+
+#[cfg(any(test, feature = "test-support"))]
+mod test_support;
+#[cfg(any(test, feature = "test-support"))]
+pub use test_support::{
+    in_memory_backed_authorization_filesystem, in_memory_backed_capability_lease_store,
+};
 
 /// Authorizes a capability dispatch request against an execution context.
 #[async_trait]
@@ -301,153 +309,6 @@ pub trait CapabilityLeaseStore: Send + Sync {
     }
 }
 
-/// In-memory lease store for early Reborn flows and tests.
-#[derive(Debug, Default)]
-pub struct InMemoryCapabilityLeaseStore {
-    leases: Mutex<HashMap<CapabilityLeaseKey, CapabilityLease>>,
-}
-
-impl InMemoryCapabilityLeaseStore {
-    pub fn new() -> Self {
-        Self::default()
-    }
-
-    fn leases_guard(&self) -> MutexGuard<'_, HashMap<CapabilityLeaseKey, CapabilityLease>> {
-        self.leases
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-    }
-}
-
-#[async_trait]
-impl CapabilityLeaseStore for InMemoryCapabilityLeaseStore {
-    async fn issue(&self, lease: CapabilityLease) -> Result<CapabilityLease, CapabilityLeaseError> {
-        self.leases_guard().insert(
-            CapabilityLeaseKey::new(&lease.scope, lease.grant.id),
-            lease.clone(),
-        );
-        Ok(lease)
-    }
-
-    async fn revoke(
-        &self,
-        scope: &ResourceScope,
-        lease_id: CapabilityGrantId,
-    ) -> Result<CapabilityLease, CapabilityLeaseError> {
-        let mut leases = self.leases_guard();
-        let lease = leases
-            .get_mut(&CapabilityLeaseKey::new(scope, lease_id))
-            .ok_or(CapabilityLeaseError::UnknownLease { lease_id })?;
-        lease.status = CapabilityLeaseStatus::Revoked;
-        Ok(lease.clone())
-    }
-
-    async fn get(
-        &self,
-        scope: &ResourceScope,
-        lease_id: CapabilityGrantId,
-    ) -> Option<CapabilityLease> {
-        self.leases_guard()
-            .get(&CapabilityLeaseKey::new(scope, lease_id))
-            .cloned()
-    }
-
-    async fn claim(
-        &self,
-        scope: &ResourceScope,
-        lease_id: CapabilityGrantId,
-        invocation_fingerprint: &InvocationFingerprint,
-    ) -> Result<CapabilityLease, CapabilityLeaseError> {
-        let mut leases = self.leases_guard();
-        let lease = leases
-            .get_mut(&CapabilityLeaseKey::new(scope, lease_id))
-            .ok_or(CapabilityLeaseError::UnknownLease { lease_id })?;
-
-        ensure_claimable(lease, invocation_fingerprint)?;
-        lease.status = CapabilityLeaseStatus::Claimed;
-        Ok(lease.clone())
-    }
-
-    async fn consume(
-        &self,
-        scope: &ResourceScope,
-        lease_id: CapabilityGrantId,
-    ) -> Result<CapabilityLease, CapabilityLeaseError> {
-        let mut leases = self.leases_guard();
-        let lease = leases
-            .get_mut(&CapabilityLeaseKey::new(scope, lease_id))
-            .ok_or(CapabilityLeaseError::UnknownLease { lease_id })?;
-
-        let was_claimed = matches!(
-            lease.status,
-            CapabilityLeaseStatus::Claimed | CapabilityLeaseStatus::Dispatching
-        );
-        ensure_consumable(lease)?;
-        if lease.invocation_fingerprint.is_some() {
-            if let Some(remaining) = lease.grant.constraints.max_invocations.as_mut() {
-                *remaining = 0;
-            }
-            lease.status = CapabilityLeaseStatus::Consumed;
-        } else if let Some(remaining) = lease.grant.constraints.max_invocations.as_mut() {
-            *remaining -= 1;
-            if *remaining == 0 {
-                lease.status = CapabilityLeaseStatus::Consumed;
-            } else if was_claimed {
-                lease.status = CapabilityLeaseStatus::Active;
-            }
-        } else if was_claimed {
-            lease.status = CapabilityLeaseStatus::Active;
-        }
-        Ok(lease.clone())
-    }
-
-    async fn begin_dispatch_claimed(
-        &self,
-        scope: &ResourceScope,
-        lease_id: CapabilityGrantId,
-        invocation_fingerprint: &InvocationFingerprint,
-    ) -> Result<CapabilityLease, CapabilityLeaseError> {
-        let mut leases = self.leases_guard();
-        let lease = leases
-            .get_mut(&CapabilityLeaseKey::new(scope, lease_id))
-            .ok_or(CapabilityLeaseError::UnknownLease { lease_id })?;
-        apply_begin_dispatch_claimed_transition(lease, invocation_fingerprint)?;
-        Ok(lease.clone())
-    }
-
-    async fn abort_dispatch_claimed(
-        &self,
-        scope: &ResourceScope,
-        lease_id: CapabilityGrantId,
-    ) -> Result<CapabilityLease, CapabilityLeaseError> {
-        let mut leases = self.leases_guard();
-        let lease = leases
-            .get_mut(&CapabilityLeaseKey::new(scope, lease_id))
-            .ok_or(CapabilityLeaseError::UnknownLease { lease_id })?;
-        apply_abort_dispatch_claimed_transition(lease)?;
-        Ok(lease.clone())
-    }
-
-    async fn leases_for_scope(&self, scope: &ResourceScope) -> Vec<CapabilityLease> {
-        let mut leases = self
-            .leases_guard()
-            .values()
-            .filter(|lease| same_scope_owner(&lease.scope, scope))
-            .cloned()
-            .collect::<Vec<_>>();
-        leases.sort_by_key(|lease| lease.grant.id.as_uuid());
-        leases
-    }
-
-    async fn active_leases_for_context(&self, context: &ExecutionContext) -> Vec<CapabilityLease> {
-        self.leases_for_scope(&context.resource_scope)
-            .await
-            .into_iter()
-            .filter(|lease| lease_is_authorizing(lease, context))
-            .collect()
-    }
-}
-
 /// Filesystem-backed capability lease store under the `/authorization` mount
 /// alias.
 ///
@@ -542,7 +403,7 @@ where
     /// other writer can collide with.
     /// Write the lease through the backend with the given CAS expectation.
     ///
-    /// Backends that don't track per-row versions (e.g. `LocalFilesystem`)
+    /// Backends that don't track per-row versions (e.g. `DiskFilesystem`)
     /// reject `CasExpectation::Version(_)` with `Unsupported`. For those,
     /// fall back to `CasExpectation::Any` and carry the safety invariant
     /// via the per-owner `mutation_lock` — same trade-off documented on
@@ -571,7 +432,7 @@ where
             &lease_owner_prefix(&lease.scope)?,
         )
         .await?;
-        // Byte-only backends (LocalFilesystem) reject BOTH non-`Any` CAS
+        // Byte-only backends (DiskFilesystem) reject BOTH non-`Any` CAS
         // AND entries with a populated `indexed` projection in a single
         // `Unsupported` response. Strip the projection and downgrade CAS
         // to `Any` so byte-only mounts stay writeable — the per-owner
@@ -682,7 +543,7 @@ where
                 IndexValue::Text(scope.tenant_id.as_str().to_string()),
             );
         ensure_tenant_id_index(&self.filesystem, scope, &lease_owner_prefix(scope)?).await?;
-        // Byte-only backends (LocalFilesystem) reject entries with a
+        // Byte-only backends (DiskFilesystem) reject entries with a
         // populated `indexed` projection. Fall back to the plain-bytes
         // shape for those — the tenant projection is best-effort defense
         // in depth, and dropping it on byte-only mounts is acceptable
@@ -952,33 +813,6 @@ where
             .into_iter()
             .filter(|lease| lease_is_authorizing(lease, context))
             .collect()
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-struct CapabilityLeaseKey {
-    tenant_id: TenantId,
-    user_id: UserId,
-    agent_id: Option<AgentId>,
-    project_id: Option<ProjectId>,
-    mission_id: Option<MissionId>,
-    thread_id: Option<ThreadId>,
-    invocation_id: InvocationId,
-    lease_id: CapabilityGrantId,
-}
-
-impl CapabilityLeaseKey {
-    fn new(scope: &ResourceScope, lease_id: CapabilityGrantId) -> Self {
-        Self {
-            tenant_id: scope.tenant_id.clone(),
-            user_id: scope.user_id.clone(),
-            agent_id: scope.agent_id.clone(),
-            project_id: scope.project_id.clone(),
-            mission_id: scope.mission_id.clone(),
-            thread_id: scope.thread_id.clone(),
-            invocation_id: scope.invocation_id,
-            lease_id,
-        }
     }
 }
 
@@ -1582,10 +1416,9 @@ pub(crate) fn ensure_consumable(lease: &CapabilityLease) -> Result<(), Capabilit
 /// lease is neither expired nor exhausted; on success sets status to
 /// `Dispatching`.
 ///
-/// Both [`InMemoryCapabilityLeaseStore`] and [`FilesystemCapabilityLeaseStore`]
-/// delegate to this function so the transition predicate has a single source of
-/// truth. Each store handles its own persistence / compare-and-swap mechanics
-/// around the call.
+/// [`FilesystemCapabilityLeaseStore`] delegates to this function so the
+/// transition predicate has a single source of truth; the store handles its own
+/// persistence / compare-and-swap mechanics around the call.
 pub(crate) fn apply_begin_dispatch_claimed_transition(
     lease: &mut CapabilityLease,
     invocation_fingerprint: &InvocationFingerprint,
@@ -1611,10 +1444,9 @@ pub(crate) fn apply_begin_dispatch_claimed_transition(
 /// `Dispatching → Claimed`; no-op if already `Claimed`; returns
 /// `InactiveLease` for any other status.
 ///
-/// Both [`InMemoryCapabilityLeaseStore`] and [`FilesystemCapabilityLeaseStore`]
-/// delegate to this function so the transition predicate has a single source of
-/// truth. Each store handles its own persistence / compare-and-swap mechanics
-/// around the call.
+/// [`FilesystemCapabilityLeaseStore`] delegates to this function so the
+/// transition predicate has a single source of truth; the store handles its own
+/// persistence / compare-and-swap mechanics around the call.
 pub(crate) fn apply_abort_dispatch_claimed_transition(
     lease: &mut CapabilityLease,
 ) -> Result<(), CapabilityLeaseError> {
@@ -1816,7 +1648,7 @@ fn index_name_authorization_tenant() -> IndexName {
 }
 
 /// Declare the `tenant_id` exact-equality index on `prefix`, tolerating
-/// backends that don't materialize indexes (LocalFilesystem). Idempotent
+/// backends that don't materialize indexes (DiskFilesystem). Idempotent
 /// across the mount lifetime; mirrors the engine/processes stores'
 /// `ensure_*_index` shape so byte-only backends degrade gracefully
 /// instead of failing closed.

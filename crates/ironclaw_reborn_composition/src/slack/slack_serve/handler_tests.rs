@@ -204,7 +204,7 @@ async fn slack_events_handler_rate_limit_refills_after_window() {
         SlackInstallationSelector::team("T-A"),
         dispatcher.clone(),
     )]);
-    let rate_limit = SlackInstallationRateLimitConfig::new(
+    let rate_limit = ironclaw_channel_host::host_ingress::InstallationRateLimitConfig::new(
         NonZeroU32::new(1).expect("nonzero"),
         Duration::from_millis(50),
     );

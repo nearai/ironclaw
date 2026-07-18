@@ -21,6 +21,29 @@ use serde::{Deserialize, Serialize};
 use super::error::{RebornServicesError, RebornServicesErrorCode, RebornServicesErrorKind};
 use crate::WebUiAuthenticatedCaller;
 
+/// Read-only port exposing the runtime's current active/default model id.
+///
+/// A WebChat v2 run submitted without an explicit `model` carries no
+/// `resolved_model_route`, so its captured `model_usage` has no model id to
+/// price against and [`RebornGetRunStateResponse::cost`] would be `None` even
+/// though a real model ran. This port lets the facade price such a
+/// default-model run against the live provider's active model — which, for a
+/// default (unrouted) run, is exactly the model that ran.
+///
+/// The read must be cheap and synchronous: it is consulted on every run-state
+/// poll while a run is in flight. It should reflect operator model hot-swaps
+/// (the composition impl reads the live swappable provider handle, not a
+/// boot-time snapshot). Returning `None` means "no concrete model to price
+/// against" — the run's cost is then omitted rather than mispriced.
+///
+/// [`RebornGetRunStateResponse::cost`]: crate::RebornGetRunStateResponse::cost
+pub trait ActiveModelReader: Send + Sync {
+    /// The concrete model id currently backing default (unrouted) runs, or
+    /// `None` when no concrete model is configured (cold boot / placeholder) or
+    /// the active model is a non-concrete alias.
+    fn active_model_id(&self) -> Option<String>;
+}
+
 /// Operator-wide LLM configuration management.
 #[async_trait]
 pub trait LlmConfigService: Send + Sync {

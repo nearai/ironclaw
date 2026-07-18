@@ -1,3 +1,4 @@
+// arch-exempt: large_file, mechanical LocalTraceSubmission*->NodeTraceSubmission* Bucket-3 rename (arch-simplification §4.4), no logic change, plan #6168
 //! Multi-tenant isolation tests for the web gateway.
 //!
 //! Tests cover workspace pool scoping, job handler isolation, and auth
@@ -1405,7 +1406,7 @@ mod trace_contribution_isolation {
         traces_submissions_handler, traces_submit_handler,
     };
     use crate::trace_contribution::{
-        LocalTraceSubmissionStatus, StandingTraceContributionPolicy, TraceSubmissionReceipt,
+        NodeTraceSubmissionStatus, StandingTraceContributionPolicy, TraceSubmissionReceipt,
         queue_trace_envelope_for_scope, record_submitted_trace_envelope_for_scope,
         write_trace_policy_for_scope,
     };
@@ -2504,7 +2505,7 @@ mod trace_contribution_isolation {
             crate::trace_contribution::read_local_trace_records_for_scope(Some(&alice_user_id))
                 .expect("read alice records");
         assert_eq!(alice_records.len(), 1);
-        assert_eq!(alice_records[0].status, LocalTraceSubmissionStatus::Revoked);
+        assert_eq!(alice_records[0].status, NodeTraceSubmissionStatus::Revoked);
 
         remove_trace_state(&alice_user_id);
         remove_trace_state(&bob_user_id);

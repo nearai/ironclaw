@@ -9,7 +9,7 @@ paths:
   - "crates/ironclaw_wasm/**"
   - "crates/ironclaw_mcp/**"
   - "crates/ironclaw_product_adapters/**"
-  - "crates/ironclaw_reborn_webui_ingress/**"
+  - "crates/ironclaw_webui/**"
   - "crates/ironclaw_prompt_envelope/**"
 ---
 # Reborn safety and sandbox rules
@@ -99,3 +99,37 @@ cancellation, and cleanup through the production caller.
 Sandbox-policy changes also test mount containment, network allow/deny,
 environment scrubbing, output limits, process-tree cancellation, install/run
 phase separation, and malicious worker metadata.
+
+## Process and shell execution: real OS isolation, per tenant
+
+Motivated by issue #6170 (a shipped cross-tenant file-disclosure via `shell`).
+Case study and target design: `docs/reborn/2026-07-17-architecture-simplification-dto-dyn-local.md` §6.
+
+- **The virtual filesystem does not contain a subprocess.** `ScopedFilesystem` /
+  `MountView` bound the *filesystem capability* (`filesystem.read`), a virtual-path
+  abstraction. A spawned OS process (`builtin.shell`, script lanes) sees the **real
+  kernel filesystem** and ignores those mounts. Never treat the scoped/virtual
+  filesystem as containment for a subprocess.
+- **The only real containment for an OS process is the sandbox it runs in.** Any
+  deployment that authenticates more than one user MUST route process spawns through
+  the sandboxed port (`TenantSandboxProcessPort`, backed by `ironclaw_process_sandbox`)
+  whose mount is derived from the turn scope — never through the unsandboxed
+  `HostProcessPort` (renamed from `LocalHostProcessPort`, §4.4 Bucket 2 — `Host`
+  names the boundary: a process run directly on the host). `HostProcessPort` /
+  `ProcessBackendKind::LocalHost` is for genuinely single-user-local deployments only.
+- **Deployment mode must reflect the fact of multi-user serving.** A served instance
+  (SSO on, >1 admitted `UserId`, non-loopback bind) must not resolve to
+  `LocalSingleUser` / host-shell semantics. The #6170 root cause was a composition
+  profile (`HostedSingleTenant`) declaring `LocalSingleUser`, which the sound resolver
+  faithfully mapped to an unsandboxed host shell. Do not add or preserve a
+  profile→mode mapping that gives a served profile a host process backend.
+- **Fail closed.** No verified tenant sandbox ⇒ the process/shell capability is hidden
+  by the visibility filter and rejected by the planner (`ProcessBackendKind::None`),
+  never silently downgraded to a host process. Missing Docker/sandbox degrades to "no
+  shell," never "host shell."
+
+Any change touching process ports, the planner's process/filesystem backend rules,
+or the composition-profile → `(DeploymentMode, RuntimeProfile)` mapping requires a
+**two-user cross-tenant escape test** driven through the caller: user B runs a shell
+command and the test asserts it cannot read user A's files. Re-verify the current
+wiring with `rg -n "HostProcessPort|TenantSandboxProcessPort|ProcessBackendKind::LocalHost|DeploymentMode::LocalSingleUser" crates/ironclaw_host_runtime crates/ironclaw_reborn_composition crates/ironclaw_runtime_policy`.

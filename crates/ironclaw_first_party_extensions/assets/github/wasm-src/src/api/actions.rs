@@ -139,6 +139,27 @@ pub(crate) fn get_workflow_run_jobs(
     github_request("GET", &path, None)
 }
 
+pub(crate) fn get_job_logs(owner: &str, repo: &str, job_id: u64) -> Result<String, String> {
+    if !validate_path_segment(owner) || !validate_path_segment(repo) {
+        return Err("Invalid owner or repo name".into());
+    }
+    let encoded_owner = url_encode_path(owner);
+    let encoded_repo = url_encode_path(repo);
+    // GitHub 302-redirects this endpoint to a short-lived blob-storage download
+    // URL; the host egress follows that redirect (re-authorized, credential
+    // stripped) and returns the plain-text log body.
+    //
+    // The WASM tool ABI requires `output` to be a JSON document — the host
+    // decodes it with `serde_json::from_str` and rejects non-JSON with
+    // `OutputDecode`. Raw log text is not JSON, so JSON-encode it into a string
+    // value here (this capability's `output_schema`, `raw_output` =
+    // object|array|string|null, admits a bare string). Every other endpoint
+    // already returns a JSON body and must not be re-encoded.
+    let path = format!("/repos/{encoded_owner}/{encoded_repo}/actions/jobs/{job_id}/logs");
+    let body = github_request("GET", &path, None)?;
+    serde_json::to_string(&body).map_err(|err| format!("github_job_logs_encode_failed_{err}"))
+}
+
 pub(crate) fn get_workflow_run_artifacts(
     owner: &str,
     repo: &str,
