@@ -720,8 +720,12 @@ mod tests {
             activate_for_user_with_tool(&manager, &secrets, &server, USER_A, "old_only_tool").await;
         assert!(tool_registry.get(&old_tool).await.is_some());
 
-        // PATCH the live server to backend B (different surface).
-        manager
+        // PATCH the live server to backend B (different origin). The URL
+        // change deletes the old backend's OAuth tokens BEFORE reactivation,
+        // so reactivation against B (which advertises OAuth) requires
+        // re-auth; the new config persists and the server awaits the auth
+        // flow instead of rolling back.
+        let err = manager
             .update_mcp_server_partial(
                 SERVER_NAME,
                 Some(mock_server_b.mcp_url()),
@@ -730,7 +734,29 @@ mod tests {
                 USER_A,
             )
             .await
-            .expect("PATCH to backend B reactivates successfully");
+            .expect_err("URL change to an OAuth backend requires re-auth");
+        assert!(
+            matches!(err, ironclaw::extensions::ExtensionError::AuthRequired),
+            "expected AuthRequired, got: {err:?}"
+        );
+
+        // Complete the re-auth (store a token for backend B) and activate —
+        // the activation-level reconciliation unregisters A-only wrappers.
+        secrets
+            .create(
+                USER_A,
+                CreateSecretParams::new(
+                    McpServerConfig::new(SERVER_NAME, mock_server_b.mcp_url()).token_secret_name(),
+                    "token-for-b",
+                )
+                .with_provider(SERVER_NAME.to_string()),
+            )
+            .await
+            .expect("store re-auth token");
+        manager
+            .activate(SERVER_NAME, USER_A)
+            .await
+            .expect("activation under backend B succeeds after re-auth");
 
         let registered: Vec<String> = tool_registry.list().await;
         assert!(

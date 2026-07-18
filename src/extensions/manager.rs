@@ -4253,11 +4253,77 @@ impl ExtensionManager {
             None => Vec::new(),
         };
 
+        // A changed URL or a cleared OAuth block invalidates the stored
+        // OAuth/DCR tokens: they were issued by (and for) the PREVIOUS
+        // backend. They must be deleted BEFORE reactivation — the client
+        // factory treats an existing extension token as authentication and
+        // would replay it against the new URL during the very reactivation
+        // below. Values are snapshotted first so a reactivation rollback can
+        // restore them alongside the previous config.
+        let mut oauth_secret_snapshot: Vec<(String, secrecy::SecretString)> = Vec::new();
+        if url_changed || oauth_cleared {
+            let token_secret = previous_config.token_secret_name();
+            let stale_oauth_secrets = [
+                token_secret.clone(),
+                previous_config.refresh_token_secret_name(),
+                oauth_refresh_secret_name(&token_secret),
+                oauth_scopes_secret_name(&token_secret),
+            ];
+            for secret_name in &stale_oauth_secrets {
+                match self.secrets.get_decrypted(user_id, secret_name).await {
+                    Ok(decrypted) => oauth_secret_snapshot.push((
+                        secret_name.clone(),
+                        secrecy::SecretString::from(decrypted.expose().to_string()),
+                    )),
+                    Err(crate::secrets::SecretError::NotFound(_)) => {}
+                    Err(e) => {
+                        tracing::error!(
+                            extension = %name,
+                            user_id = %user_id,
+                            secret = %secret_name,
+                            error = %e,
+                            "failed to snapshot OAuth secret before URL change"
+                        );
+                        return Err(ExtensionError::Config(
+                            "failed to snapshot existing OAuth credential for rollback; \
+                             PATCH aborted"
+                                .to_string(),
+                        ));
+                    }
+                }
+            }
+            self.delete_header_secrets(user_id, &stale_oauth_secrets, name)
+                .await;
+        }
+
         // Evict the cached McpClient so the next activation re-connects
         // with the new config (updated headers, oauth, or URL).
         // Without this, in-memory clients would continue using stale
         // credentials until server restart.
         self.mcp_clients.remove(user_id, name).await;
+
+        // A URL change abandons the previous backend outright: its wrappers
+        // are invalid regardless of whether reactivation succeeds now or
+        // waits on re-auth. Unregister the previous surface (persisted
+        // catalog ∪ live discovery cache) — unless another user still holds
+        // this server active (their config may still point at the old
+        // backend; the registry is global per server name).
+        if url_changed && !self.mcp_clients.any_active_for_server(name).await {
+            for raw in previous_config
+                .cached_tools
+                .iter()
+                .map(|t| t.name.as_str())
+                .chain(live_tool_names.iter().map(String::as_str))
+            {
+                let old_id = crate::tools::mcp::mcp_tool_id(name, raw);
+                self.tool_registry.unregister(&old_id).await;
+                tracing::debug!(
+                    extension = %name,
+                    tool = %old_id,
+                    "unregistered previous backend's wrapper after URL change"
+                );
+            }
+        }
 
         if was_active {
             // A live server must come back up under the new config before we
@@ -4280,14 +4346,32 @@ impl ExtensionManager {
                 .collect();
             let activate_result = match self.activate_mcp_locked(name, user_id).await {
                 Ok(r) => r,
+                // Re-auth required under the new config (e.g. a URL change
+                // deleted the old backend's OAuth tokens above) is NOT rolled
+                // back: the new config is persisted and the server stays
+                // inactive until the caller completes the auth flow — rolling
+                // back here would make changing an OAuth server's URL
+                // impossible.
+                Err(ExtensionError::AuthRequired) => {
+                    tracing::info!(
+                        extension = %name,
+                        user_id = %user_id,
+                        "MCP config updated; re-authentication required before activation"
+                    );
+                    return Err(ExtensionError::AuthRequired);
+                }
                 Err(activate_err) => {
                     // Delete this PATCH's fresh secrets, then restore overwritten
                     // ones FIRST — the restored config references them by name, so
                     // the material must be back before the config row (or any
-                    // re-activation) reads it.
+                    // re-activation) reads it. The OAuth token snapshot is
+                    // restored too: rollback returns to the previous URL, for
+                    // which those tokens were issued.
                     self.delete_header_secrets(user_id, &created_new, name)
                         .await;
                     self.restore_header_secrets(user_id, previous_header_secrets, name)
+                        .await;
+                    self.restore_header_secrets(user_id, oauth_secret_snapshot, name)
                         .await;
                     // A failed rollback WRITE must not be reported as "restored" —
                     // that is exactly the split-brain (new config persisted, no
@@ -4367,32 +4451,6 @@ impl ExtensionManager {
                         error = %e,
                         "failed to delete superseded header secret"
                     );
-                }
-            }
-        }
-        // A changed URL or a cleared OAuth block invalidates the stored
-        // OAuth/DCR tokens: they were issued by (and for) the PREVIOUS
-        // backend, and the token secret names derive solely from the
-        // extension name — left in place they would be replayed against the
-        // new URL on the next authenticated call.
-        if url_changed || oauth_cleared {
-            let token_secret = previous_config.token_secret_name();
-            let stale_oauth_secrets = [
-                token_secret.clone(),
-                previous_config.refresh_token_secret_name(),
-                oauth_refresh_secret_name(&token_secret),
-                oauth_scopes_secret_name(&token_secret),
-            ];
-            for secret_name in stale_oauth_secrets {
-                match self.secrets.delete(user_id, &secret_name).await {
-                    Ok(_) => {}
-                    Err(e) => tracing::warn!(
-                        extension = %name,
-                        user_id = %user_id,
-                        secret = %secret_name,
-                        error = %e,
-                        "failed to delete stale OAuth secret after URL change/oauth clear"
-                    ),
                 }
             }
         }
@@ -6844,6 +6902,31 @@ impl ExtensionManager {
                  shadow the existing user's wrappers. Either use a distinct server name (the user-facing identifier) per backend/account, \
                  or coordinate so both users connect to a backend that returns an identical tool surface."
             )));
+        }
+
+        // Reconcile the global ToolRegistry with the fresh surface BEFORE the
+        // previous catalog is overwritten: tools the backend no longer exposes
+        // must not stay registered (they would route to the new client or
+        // dangle inactive). Names map through `mcp_tool_id`, so this cannot
+        // touch another server's wrappers. Safe cross-user: the surface
+        // conflict check above guarantees all active users share the fresh
+        // surface.
+        {
+            let fresh: std::collections::HashSet<String> = mcp_tools
+                .iter()
+                .map(|t| crate::tools::mcp::mcp_tool_id(name, &t.name))
+                .collect();
+            for old_tool in &server.cached_tools {
+                let old_id = crate::tools::mcp::mcp_tool_id(name, &old_tool.name);
+                if !fresh.contains(&old_id) {
+                    self.tool_registry.unregister(&old_id).await;
+                    tracing::debug!(
+                        extension = %name,
+                        tool = %old_id,
+                        "unregistered tool absent from the fresh MCP surface"
+                    );
+                }
+            }
         }
 
         let mut updated_server = server.clone();
