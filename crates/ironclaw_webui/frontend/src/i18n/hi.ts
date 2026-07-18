@@ -75,6 +75,7 @@ registerPack("hi", {
   "login.connect": "कनेक्ट",
   "login.oauthDivider": "या जारी रखें",
   "login.oauthProvider": "{provider} के साथ जारी रखें",
+  "login.localDevHint": "IronClaw को लोकल पर चला रहे हैं? अपना साइन-इन लिंक पाएं:",
 
   // Chat — empty state
   "chat.heroTitle": "नमस्ते, आपको किसमें मदद चाहिए?",

@@ -75,6 +75,7 @@ registerPack("ko", {
   "login.connect": "연결",
   "login.oauthDivider": "또는 계속",
   "login.oauthProvider": "{provider} 계속",
+  "login.localDevHint": "IronClaw를 로컬에서 실행 중인가요? 로그인 링크를 받으세요:",
 
   // Chat — empty state
   "chat.heroTitle": "안녕하세요, 무엇을 도와드릴까요?",

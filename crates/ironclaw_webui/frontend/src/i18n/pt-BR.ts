@@ -75,6 +75,7 @@ registerPack("pt-BR", {
   "login.connect": "Conectar",
   "login.oauthDivider": "ou continue com",
   "login.oauthProvider": "Continue com {provider}",
+  "login.localDevHint": "Executando o IronClaw localmente? Obtenha seu link de login:",
 
   // Chat — empty state
   "chat.heroTitle": "Ola, em que voce precisa de ajuda?",
