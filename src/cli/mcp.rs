@@ -523,12 +523,14 @@ async fn test_server(name: String, user_id: String) -> anyhow::Result<()> {
             None,
         )
     } else if server.has_custom_auth_header() {
+        // The header may be a {{secret:...}} reference (programmatic
+        // install/PATCH) — the client needs the secrets store to resolve it.
         let process_manager = Arc::new(McpProcessManager::new());
         create_client_from_config(
             server.clone(),
             &session_manager,
             &process_manager,
-            None,
+            Some(secrets),
             &owner_id,
         )
         .await

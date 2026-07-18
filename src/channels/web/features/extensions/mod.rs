@@ -401,6 +401,9 @@ pub(crate) async fn extensions_update_handler(
             StatusCode::BAD_REQUEST,
             format!("{reason} (got kind: {kind})"),
         )),
+        Err(e @ crate::extensions::ExtensionError::InvalidRequest(_)) => {
+            Err((StatusCode::BAD_REQUEST, e.to_string()))
+        }
         Err(e) => {
             // `ExtensionError::Config` and friends can wrap persistence or
             // backend failures — never surface their text to the client.
@@ -2287,9 +2290,41 @@ mod tests {
             .await
             .expect_err("foreign secret reference must be rejected");
         assert!(
-            matches!(err, crate::extensions::ExtensionError::Config(_)),
-            "foreign reference rejection maps to a validation error, got: {err:?}"
+            matches!(err, crate::extensions::ExtensionError::InvalidRequest(_)),
+            "foreign reference rejection is caller-correctable input, got: {err:?}"
         );
+
+        // Through the HTTP caller: the handler maps it to 400, not 500.
+        {
+            use axum::body::Body;
+            use axum::routing::patch;
+            use tower::ServiceExt;
+            let state = test_gateway_state(Some(ext_mgr.clone()));
+            let app = Router::new()
+                .route("/api/extensions/{name}", patch(extensions_update_handler))
+                .with_state(state);
+            let mut req = axum::http::Request::builder()
+                .method("PATCH")
+                .uri("/api/extensions/sec_server")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    r#"{"headers":{"Authorization":"{{secret:mcp_other_server_header_authorization}}"}}"#,
+                ))
+                .expect("request");
+            req.extensions_mut().insert(UserIdentity {
+                user_id: "test".to_string(),
+                role: "admin".to_string(),
+                workspace_read_scopes: Vec::new(),
+            });
+            let resp = ServiceExt::<axum::http::Request<Body>>::oneshot(app, req)
+                .await
+                .expect("response");
+            assert_eq!(
+                resp.status(),
+                StatusCode::BAD_REQUEST,
+                "foreign secret reference must surface as 400 (caller-correctable)"
+            );
+        }
 
         // Replacing headers WITHOUT the previously-secretized one
         // garbage-collects the superseded secret.

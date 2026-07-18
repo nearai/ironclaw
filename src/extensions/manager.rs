@@ -3794,6 +3794,12 @@ impl ExtensionManager {
         }
 
         let mut config = McpServerConfig::new(name, url).with_headers(headers);
+        // Validate the RAW header values (RFC 9110 token/CRLF checks) BEFORE
+        // secretize replaces them with well-formed references — otherwise an
+        // invalid credential value would sail through the later validation.
+        config
+            .validate()
+            .map_err(|e| ExtensionError::Config(e.to_string()))?;
         // Move credential-bearing header values into SecretsStore before the
         // config is persisted: `mcp_servers` is an ordinary (unencrypted)
         // settings value, so the row must only ever carry secret REFERENCES.
@@ -3889,7 +3895,7 @@ impl ExtensionManager {
         user_id: &str,
     ) -> Result<(), ExtensionError> {
         use crate::tools::mcp::config::{
-            header_secret_reference, is_sensitive_header_name, mcp_header_secret_name,
+            header_secret_reference, is_public_metadata_header, mcp_header_secret_name,
             parse_header_secret_reference,
         };
         let server_name = config.name.clone();
@@ -3906,11 +3912,12 @@ impl ExtensionManager {
                 if referenced == expected_secret_name {
                     continue;
                 }
-                return Err(ExtensionError::Config(format!(
-                    "header '{header_name}' must carry a raw value; secret references                      are assigned by the server, not accepted from the API"
+                return Err(ExtensionError::InvalidRequest(format!(
+                    "header '{header_name}' must carry a raw value; secret references \
+                     are assigned by the server, not accepted from the API"
                 )));
             }
-            if !is_sensitive_header_name(header_name) {
+            if is_public_metadata_header(header_name) {
                 continue;
             }
             let secret_name = expected_secret_name;
@@ -4027,24 +4034,56 @@ impl ExtensionManager {
         let mut previous_header_secrets: Vec<(String, secrecy::SecretString)> = Vec::new();
         if headers.is_some() {
             for value in previous_config.headers.values() {
-                if let Some(secret_name) =
+                let Some(secret_name) =
                     crate::tools::mcp::config::parse_header_secret_reference(value)
-                    && let Ok(decrypted) = self.secrets.get_decrypted(user_id, secret_name).await
-                {
-                    previous_header_secrets.push((
+                else {
+                    continue;
+                };
+                // Fail loud: an unreadable snapshot means rollback could not
+                // restore this credential — abort BEFORE anything is
+                // overwritten. Only a definitively-absent secret (broken
+                // reference, nothing to restore) is skippable.
+                match self.secrets.get_decrypted(user_id, secret_name).await {
+                    Ok(decrypted) => previous_header_secrets.push((
                         secret_name.to_string(),
                         secrecy::SecretString::from(decrypted.expose().to_string()),
-                    ));
+                    )),
+                    Err(crate::secrets::SecretError::NotFound(_)) => {}
+                    Err(e) => {
+                        tracing::error!(
+                            extension = %name,
+                            user_id = %user_id,
+                            secret = %secret_name,
+                            error = %e,
+                            "failed to snapshot header secret before PATCH"
+                        );
+                        return Err(ExtensionError::Config(
+                            "failed to snapshot existing credential for rollback; \
+                             PATCH aborted before any change"
+                                .to_string(),
+                        ));
+                    }
                 }
             }
         }
         let headers_replaced = headers.is_some();
         if let Some(h) = headers {
             config.headers = h;
+            // Pre-validate the assembled config BEFORE any secret upsert so a
+            // validation failure cannot leave overwritten secret material
+            // behind a config row that was never going to persist.
+            config
+                .validate()
+                .map_err(|e| ExtensionError::Config(e.to_string()))?;
             // Same treatment as install: replacement header credentials go to
-            // SecretsStore; the persisted row carries references only.
-            self.secretize_sensitive_headers(&mut config, user_id)
-                .await?;
+            // SecretsStore; the persisted row carries references only. A
+            // mid-loop failure restores the snapshot — partial upserts must
+            // not survive an errored PATCH.
+            if let Err(e) = self.secretize_sensitive_headers(&mut config, user_id).await {
+                self.restore_header_secrets(user_id, previous_header_secrets, name)
+                    .await;
+                return Err(e);
+            }
         }
         // Reference sets for post-success garbage collection: a replacement
         // that drops a previously-secretized header must not leave its secret
@@ -5683,12 +5722,23 @@ impl ExtensionManager {
     }
 
     fn mcp_server_secret_names(server: &McpServerConfig) -> HashSet<String> {
-        [
+        let mut names: HashSet<String> = [
             server.token_secret_name().to_lowercase(),
             server.client_id_secret_name().to_lowercase(),
         ]
         .into_iter()
-        .collect()
+        .collect();
+        // Secretized header credentials are referenced by this server too —
+        // without these, another extension's cleanup pass would see them as
+        // unreferenced and delete a live credential.
+        for value in server.headers.values() {
+            if let Some(secret_name) =
+                crate::tools::mcp::config::parse_header_secret_reference(value)
+            {
+                names.insert(secret_name.to_lowercase());
+            }
+        }
+        names
     }
 
     /// Collect merged OAuth scopes from all installed tools sharing the same secret_name.

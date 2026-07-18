@@ -728,6 +728,11 @@ pub enum ExtensionError {
     #[error("Operation not supported for extension kind '{kind}': {reason}")]
     WrongKind { kind: ExtensionKind, reason: String },
 
+    /// Caller-correctable invalid request input (maps to HTTP 400, not a
+    /// host failure).
+    #[error("Invalid request: {0}")]
+    InvalidRequest(String),
+
     #[error("{0}")]
     Other(String),
 }

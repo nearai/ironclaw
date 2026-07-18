@@ -550,11 +550,32 @@ const HEADER_SECRET_REF_SUFFIX: &str = "}}";
 
 /// Free-fn form of [`McpServerConfig::header_secret_name`] for callers that
 /// hold a mutable borrow of the config while iterating its headers.
+///
+/// The name carries a readable slug plus an 8-hex SHA-256 digest of the exact
+/// `(server_name, lowercase header name)` pair. The slug alone is ambiguous —
+/// `X-Api-Key` and `X_Api_Key` are distinct valid header names that both slug
+/// to `x_api_key`, and server names may themselves contain `_`/`-` — so the
+/// digest is what guarantees two distinct (server, header) pairs can never
+/// collide on one stored credential.
 pub fn mcp_header_secret_name(server_name: &str, header_name: &str) -> String {
+    use sha2::{Digest, Sha256};
+    // Normalize the server name exactly like the client factory does
+    // (`factory.rs` rewrites '-' to '_' before constructing the client), so
+    // the name computed at WRITE time (raw config name, possibly hyphenated
+    // legacy) and at RESOLVE time (normalized `McpServerName`) agree.
+    let server_normalized = server_name.to_ascii_lowercase().replace('-', "_");
+    let header_lower = header_name.to_ascii_lowercase();
+    let mut hasher = Sha256::new();
+    hasher.update(server_normalized.as_bytes());
+    hasher.update(b"\0");
+    hasher.update(header_lower.as_bytes());
+    let digest_bytes = hasher.finalize();
+    let digest = hex::encode(&digest_bytes[..4]); // safety: fixed-length SHA-256 digest bytes, not user text
     format!(
-        "mcp_{}_header_{}",
-        server_name,
-        header_name.to_ascii_lowercase().replace('-', "_")
+        "mcp_{}_header_{}_{}",
+        server_normalized,
+        header_lower.replace('-', "_"),
+        digest
     )
 }
 
@@ -571,23 +592,29 @@ pub fn parse_header_secret_reference(value: &str) -> Option<&str> {
         .strip_suffix(HEADER_SECRET_REF_SUFFIX)
 }
 
-/// Whether a header NAME conventionally carries credential material.
+/// Whether a header NAME is demonstrably non-sensitive transport metadata.
 ///
-/// The programmatic install/PATCH surface secretizes the values of these
-/// headers (persisting a [`header_secret_reference`] instead); other headers
-/// (content negotiation, tracing, etc.) stay inline. Matching is
-/// case-insensitive on the boundary-normalized name.
-pub fn is_sensitive_header_name(name: &str) -> bool {
-    let lower = name.to_ascii_lowercase();
-    lower == "authorization"
-        || lower == "proxy-authorization"
-        || lower == "cookie"
-        || lower.contains("api-key")
-        || lower.contains("api_key")
-        || lower.contains("apikey")
-        || lower.contains("token")
-        || lower.contains("secret")
-        || lower.starts_with("x-auth")
+/// The programmatic install/PATCH surface secretizes header values BY
+/// DEFAULT — any name not on this narrow allowlist is treated as
+/// credential-bearing (persisting a [`header_secret_reference`] instead of
+/// the value). A denylist of "known credential headers" is the wrong shape:
+/// `Ocp-Apim-Subscription-Key`-style vendor headers and arbitrary custom
+/// names carry secrets without matching any pattern. Matching is
+/// case-insensitive.
+pub fn is_public_metadata_header(name: &str) -> bool {
+    matches!(
+        name.to_ascii_lowercase().as_str(),
+        "accept"
+            | "accept-language"
+            | "accept-encoding"
+            | "cache-control"
+            | "content-type"
+            | "user-agent"
+            | "x-request-id"
+            | "x-correlation-id"
+            | "x-trace"
+            | "x-trace-id"
+    )
 }
 
 /// Get the default MCP servers configuration path.

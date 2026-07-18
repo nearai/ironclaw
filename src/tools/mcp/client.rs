@@ -1401,10 +1401,12 @@ mod tests {
         );
         let secrets: Arc<dyn SecretsStore + Send + Sync> =
             Arc::new(InMemorySecretsStore::new(crypto));
+        let auth_secret_name =
+            crate::tools::mcp::config::mcp_header_secret_name("svc", "Authorization");
         secrets
             .create(
                 "user_a",
-                CreateSecretParams::new("mcp_svc_header_authorization", "Bearer resolved-cred"),
+                CreateSecretParams::new(&auth_secret_name, "Bearer resolved-cred"),
             )
             .await
             .expect("seed secret");
@@ -1412,7 +1414,7 @@ mod tests {
         let mut config = McpServerConfig::new("svc", "http://a.invalid");
         config.headers.insert(
             "Authorization".to_string(),
-            crate::tools::mcp::config::header_secret_reference("mcp_svc_header_authorization"),
+            crate::tools::mcp::config::header_secret_reference(&auth_secret_name),
         );
         config
             .headers
@@ -1441,11 +1443,35 @@ mod tests {
             "ordinary headers pass through untouched"
         );
 
-        // Unresolvable reference → fail closed, marker never reaches the wire.
+        // A FOREIGN reference (another server's deterministic name) fails the
+        // ownership check — resolving it would be an exfiltration primitive.
         let mut config = McpServerConfig::new("svc", "http://a.invalid");
         config.headers.insert(
             "Authorization".to_string(),
-            crate::tools::mcp::config::header_secret_reference("mcp_svc_header_missing"),
+            crate::tools::mcp::config::header_secret_reference(
+                &crate::tools::mcp::config::mcp_header_secret_name("othersvc", "Authorization"),
+            ),
+        );
+        let client = McpClient::new_authenticated(
+            config,
+            Arc::new(McpSessionManager::new()),
+            Arc::clone(&secrets),
+            "user_a",
+            None,
+        );
+        assert!(
+            client.build_request_headers().await.is_err(),
+            "foreign secret reference must fail closed, not resolve"
+        );
+
+        // An own-name reference whose secret is MISSING also fails closed —
+        // the literal marker must never reach the wire.
+        let mut config = McpServerConfig::new("svc", "http://a.invalid");
+        config.headers.insert(
+            "X-Auth-Missing".to_string(),
+            crate::tools::mcp::config::header_secret_reference(
+                &crate::tools::mcp::config::mcp_header_secret_name("svc", "X-Auth-Missing"),
+            ),
         );
         let client = McpClient::new_authenticated(
             config,
