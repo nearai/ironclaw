@@ -352,34 +352,12 @@ pub(super) fn restart_with_runner(runner: &mut dyn ServiceCommandRunner) -> Resu
     )
 }
 
-/// `(installed, running)` without printing anything — factored out of
-/// [`restart_with_runner`]'s own detection, which is its one caller today.
-/// `status_with_runner` (below) does NOT call this — it still runs the same
-/// detection inline, pre-dating this extraction. Sharing it there is a
-/// straightforward follow-up, not done here to keep this change scoped.
-pub(super) fn installed_and_running(runner: &mut dyn ServiceCommandRunner) -> Result<(bool, bool)> {
-    let plist = plist_path()?;
-    let installed = plist.exists();
-    let running = if installed {
-        let list =
-            runner.run_capture_checked("launchctl list", Command::new("launchctl").arg("list"))?;
-        service_running(&list)
-    } else {
-        false
-    };
-    Ok((installed, running))
-}
-
 /// Installed/running state shared by [`status_with_runner`] and
 /// [`current_state_with_runner`] so the two don't drift on how "installed"
 /// and "running" are derived from `launchctl list`.
 struct LaunchdStatusInfo {
     installed: bool,
     running: bool,
-}
-
-pub(super) fn status() -> Result<()> {
-    status_with_runner(&mut OsServiceCommandRunner)
 }
 
 fn resolve_status_info(runner: &mut dyn ServiceCommandRunner) -> Result<LaunchdStatusInfo> {
@@ -1230,81 +1208,6 @@ mod tests {
             runner.labels,
             ["launchctl list", "launchctl load", "launchctl start"],
             "a not-loaded label must still be loaded before starting"
-        );
-    }
-
-    // ── installed_and_running ───────────────────────────────────
-
-    #[test]
-    fn installed_and_running_reports_both_true_for_a_loaded_running_job() {
-        let _lock = crate::runtime::test_env::lock_runtime_env();
-        let tmp = tempfile::tempdir().expect("tempdir");
-        let prior = std::env::var_os("HOME");
-        // SAFETY: serialized by `lock_runtime_env`; restored below.
-        unsafe { std::env::set_var("HOME", tmp.path()) };
-        let file = plist_path().expect("plist path");
-        std::fs::create_dir_all(file.parent().expect("plist parent")).expect("create parent");
-        std::fs::write(&file, "plist").expect("write plist");
-        let mut runner = RecordingRunner {
-            launchctl_list: format!("123\t0\t{SERVICE_LABEL}\n"),
-            ..RecordingRunner::default()
-        };
-        let result = installed_and_running(&mut runner);
-        // SAFETY: serialized by `lock_runtime_env`.
-        unsafe {
-            match prior {
-                Some(value) => std::env::set_var("HOME", value),
-                None => std::env::remove_var("HOME"),
-            }
-        }
-
-        assert_eq!(result.expect("query must succeed"), (true, true));
-    }
-
-    #[test]
-    fn installed_and_running_reports_installed_not_running_for_a_stopped_job() {
-        let _lock = crate::runtime::test_env::lock_runtime_env();
-        let tmp = tempfile::tempdir().expect("tempdir");
-        let prior = std::env::var_os("HOME");
-        // SAFETY: serialized by `lock_runtime_env`; restored below.
-        unsafe { std::env::set_var("HOME", tmp.path()) };
-        let file = plist_path().expect("plist path");
-        std::fs::create_dir_all(file.parent().expect("plist parent")).expect("create parent");
-        std::fs::write(&file, "plist").expect("write plist");
-        let mut runner = RecordingRunner::default();
-        let result = installed_and_running(&mut runner);
-        // SAFETY: serialized by `lock_runtime_env`.
-        unsafe {
-            match prior {
-                Some(value) => std::env::set_var("HOME", value),
-                None => std::env::remove_var("HOME"),
-            }
-        }
-
-        assert_eq!(result.expect("query must succeed"), (true, false));
-    }
-
-    #[test]
-    fn installed_and_running_reports_both_false_when_plist_is_absent() {
-        let _lock = crate::runtime::test_env::lock_runtime_env();
-        let tmp = tempfile::tempdir().expect("tempdir");
-        let prior = std::env::var_os("HOME");
-        // SAFETY: serialized by `lock_runtime_env`; restored below.
-        unsafe { std::env::set_var("HOME", tmp.path()) };
-        let mut runner = RecordingRunner::default();
-        let result = installed_and_running(&mut runner);
-        // SAFETY: serialized by `lock_runtime_env`.
-        unsafe {
-            match prior {
-                Some(value) => std::env::set_var("HOME", value),
-                None => std::env::remove_var("HOME"),
-            }
-        }
-
-        assert_eq!(result.expect("query must succeed"), (false, false));
-        assert!(
-            runner.labels.is_empty(),
-            "must not query launchctl when the plist is absent"
         );
     }
 

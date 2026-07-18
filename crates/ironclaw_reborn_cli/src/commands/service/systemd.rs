@@ -335,22 +335,7 @@ fn stop_with_runner_impl(runner: &mut dyn ServiceCommandRunner, verbose: bool) -
 /// Detects install/running state, then delegates the stop/start decision
 /// tree to [`super::restart_generic`], which both platforms share.
 pub(super) fn restart_with_runner(runner: &mut dyn ServiceCommandRunner) -> Result<()> {
-    let installed = unit_path()?.exists();
-    let was_running = if installed {
-        let active_state = runner.run_capture_checked(
-            "systemctl show ActiveState",
-            Command::new("systemctl").args([
-                "--user",
-                "show",
-                "--property=ActiveState",
-                "--value",
-                SYSTEMD_UNIT,
-            ]),
-        )?;
-        active_state.trim() == "active"
-    } else {
-        false
-    };
+    let (installed, was_running) = installed_and_running(runner)?;
     super::restart_generic(
         runner,
         installed,
@@ -365,8 +350,7 @@ pub(super) fn restart_with_runner(runner: &mut dyn ServiceCommandRunner) -> Resu
 /// `status_with_runner` (below) does NOT call this: it needs the raw
 /// `ActiveState` string (not just the derived bool) for
 /// [`systemd_status_detail`]'s secondary line, so it keeps its own
-/// `systemctl show` query rather than sharing this bool-only helper. A
-/// future caller that only needs the bool pair can share it as-is.
+/// `systemctl show` query rather than sharing this bool-only helper.
 pub(super) fn installed_and_running(runner: &mut dyn ServiceCommandRunner) -> Result<(bool, bool)> {
     let installed = unit_path()?.exists();
     let running = if installed {

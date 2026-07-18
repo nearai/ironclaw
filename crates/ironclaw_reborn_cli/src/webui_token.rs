@@ -628,11 +628,11 @@ mod tests {
     #[test]
     fn rotate_webui_token_file_creates_a_token_when_none_exists() {
         let dir = tempfile::tempdir().expect("tempdir");
-        assert!(!webui_token_file_is_valid(dir.path()));
+        assert!(!webui_token_file_is_valid(dir.path()).expect("query must succeed"));
 
         rotate_webui_token_file(dir.path()).expect("rotate must succeed");
 
-        assert!(webui_token_file_is_valid(dir.path()));
+        assert!(webui_token_file_is_valid(dir.path()).expect("query must succeed"));
     }
 
     #[cfg(feature = "webui-v2-beta")]

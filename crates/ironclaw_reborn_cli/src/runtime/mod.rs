@@ -910,13 +910,23 @@ pub(crate) fn resolve_google_oauth_config_state_from_env(
 ///
 /// `libsql`-gated because that is the only Cargo feature under which
 /// `config set google.client_secret` can ever have written anything here —
-/// a binary built without it can't have populated the store, so there is
-/// nothing to read.
+/// a binary without it can't have populated the store, so there is nothing
+/// to read.
 #[cfg(feature = "libsql")]
 fn google_oauth_client_secret_from_store(
     config: &RebornBootConfig,
 ) -> anyhow::Result<Option<SecretString>> {
     let home_path = config.home().path().to_path_buf();
+    // `open_local_dev_secret_store` opens a libSQL file directly under
+    // `home_path` and does not create that directory itself — the other
+    // callers that reach it (`onboard`, `config set`) already
+    // `create_dir_all` the reborn home before calling in. This resolver
+    // also runs on the `status` path, which must stay a read-only
+    // diagnostic that works before `onboard` has ever run (directory not
+    // yet created), so create the (possibly still-empty) directory here
+    // rather than surface a raw SQLITE_CANTOPEN.
+    std::fs::create_dir_all(&home_path)
+        .with_context(|| format!("creating reborn home directory {}", home_path.display()))?;
     block_on_cli(async move {
         let store = ironclaw_reborn_composition::open_local_dev_secret_store(&home_path)
             .await
@@ -3869,8 +3879,8 @@ poll_interval_secs = 15
 
     #[test]
     fn merged_resolver_no_config_no_env_no_store_is_unconfigured() {
-        let resolution = resolve_google_oauth_config_state_merged(|_| None, None, None)
-            .expect("must resolve");
+        let resolution =
+            resolve_google_oauth_config_state_merged(|_| None, None, None).expect("must resolve");
         assert_eq!(
             resolution_state(resolution),
             GoogleOAuthConfigState::Unconfigured

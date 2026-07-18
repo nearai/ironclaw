@@ -131,7 +131,6 @@ fn resolve_google_oauth_degraded(
 /// broken `launchctl`/`systemctl` query) folds to `Unknown` rather than
 /// failing `status`: this is diagnostic best-effort, not a hard
 /// requirement.
-
 #[cfg(feature = "webui-v2-beta")]
 fn resolve_service_state() -> ServiceStateDto {
     let state = crate::commands::service::ServicePlatform::detect()

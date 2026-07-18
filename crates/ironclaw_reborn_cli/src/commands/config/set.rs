@@ -6,7 +6,6 @@
 
 use std::io::{IsTerminal, Write as _};
 use std::path::Path;
-use std::sync::Arc;
 
 use anyhow::Context as _;
 use clap::Args;
@@ -214,14 +213,11 @@ fn write_llm_api_key(
     let canonical_provider_id = admin
         .resolve_provider_id(provider_id)
         .map_err(anyhow::Error::from)?;
-    let store = store_opener.open(context.boot_config().home().path())?;
+    let store = store_opener.open_llm_key_store(context.boot_config().home().path())?;
     let value_owned = value.to_string();
     crate::runtime::block_on_cli(async move {
-        ironclaw_reborn_composition::LlmKeyStore::new(store)
-            .put(
-                &canonical_provider_id,
-                ironclaw_secrets::SecretMaterial::from(value_owned),
-            )
+        store
+            .put_plaintext(&canonical_provider_id, value_owned)
             .await
             .map_err(anyhow::Error::from)
     })
@@ -246,11 +242,11 @@ fn write_google_client_secret(
     value: &str,
     store_opener: &dyn SecretStoreOpener,
 ) -> anyhow::Result<()> {
-    let store = store_opener.open(home.path())?;
+    let store = store_opener.open_google_oauth_secret_store(home.path())?;
     let value_owned = value.to_string();
     crate::runtime::block_on_cli(async move {
-        ironclaw_reborn_composition::GoogleOauthSecretStore::new(store)
-            .put(ironclaw_secrets::SecretMaterial::from(value_owned))
+        store
+            .put_plaintext(value_owned)
             .await
             .map_err(anyhow::Error::from)
     })
@@ -320,7 +316,7 @@ fn execute_webui_token(
     // login link below (already built from the new token) only becomes
     // valid once `ironclaw-reborn service restart` (printed above) runs.
     #[cfg(feature = "webui-v2-beta")]
-    if let Some(link) = crate::webui_token::login_link(home) {
+    if let Some(link) = crate::webui_token::login_link(home)? {
         println!("login_link: {link} (valid after restart)");
     }
     Ok(())
@@ -380,38 +376,66 @@ impl SecretValueSource for StdinSecretValueSource {
 }
 
 /// Where `set_value_key` gets its (already-open) encrypted secret store
-/// from. Mirrors `onboard::LlmKeyStoreOpener` — kept as a distinct trait
-/// (not reused from `onboard`) since that one is private to the `onboard`
-/// module; both production impls open the same physical local-dev store.
-#[cfg_attr(not(feature = "libsql"), allow(dead_code))]
+/// wrappers from — one method per composition-owned store type, mirroring
+/// `onboard::LlmKeyStoreOpener`'s shape (not reused from `onboard` since
+/// that one is private to the `onboard` module). Returns composition
+/// wrapper types, never `ironclaw_secrets` directly: `ironclaw_reborn_cli`
+/// production code must not depend on `ironclaw_secrets` (see
+/// `crates/ironclaw_architecture/tests/reborn_dependency_boundaries.rs::reborn_cli_binary_crate_stays_separate_from_v1_root`,
+/// which pins this crate's allowed workspace dependency set — `ironclaw_secrets`
+/// is a dev-only dependency here, used only by this module's own test fakes).
 trait SecretStoreOpener {
-    fn open(&self, home_path: &Path) -> anyhow::Result<Arc<dyn ironclaw_secrets::SecretStore>>;
+    #[cfg(all(feature = "libsql", feature = "root-llm-provider"))]
+    fn open_llm_key_store(
+        &self,
+        home_path: &Path,
+    ) -> anyhow::Result<ironclaw_reborn_composition::LlmKeyStore>;
+
+    #[cfg(feature = "libsql")]
+    fn open_google_oauth_secret_store(
+        &self,
+        home_path: &Path,
+    ) -> anyhow::Result<ironclaw_reborn_composition::GoogleOauthSecretStore>;
 }
 
-#[cfg_attr(not(feature = "libsql"), allow(dead_code))]
 struct LocalDevSecretStoreOpener;
 
 impl SecretStoreOpener for LocalDevSecretStoreOpener {
-    #[cfg(feature = "libsql")]
-    fn open(&self, home_path: &Path) -> anyhow::Result<Arc<dyn ironclaw_secrets::SecretStore>> {
+    #[cfg(all(feature = "libsql", feature = "root-llm-provider"))]
+    fn open_llm_key_store(
+        &self,
+        home_path: &Path,
+    ) -> anyhow::Result<ironclaw_reborn_composition::LlmKeyStore> {
         let home_path = home_path.to_path_buf();
         crate::runtime::block_on_cli(async move {
-            ironclaw_reborn_composition::open_local_dev_secret_store(&home_path)
+            let store = ironclaw_reborn_composition::open_local_dev_secret_store(&home_path)
                 .await
-                .map_err(anyhow::Error::from)
+                .map_err(anyhow::Error::from)?;
+            Ok::<_, anyhow::Error>(ironclaw_reborn_composition::LlmKeyStore::new(store))
         })
     }
 
-    #[cfg(not(feature = "libsql"))]
-    fn open(&self, _home_path: &Path) -> anyhow::Result<Arc<dyn ironclaw_secrets::SecretStore>> {
-        anyhow::bail!("secret-store-backed `config set` keys require the `libsql` Cargo feature")
+    #[cfg(feature = "libsql")]
+    fn open_google_oauth_secret_store(
+        &self,
+        home_path: &Path,
+    ) -> anyhow::Result<ironclaw_reborn_composition::GoogleOauthSecretStore> {
+        let home_path = home_path.to_path_buf();
+        crate::runtime::block_on_cli(async move {
+            let store = ironclaw_reborn_composition::open_local_dev_secret_store(&home_path)
+                .await
+                .map_err(anyhow::Error::from)?;
+            Ok::<_, anyhow::Error>(ironclaw_reborn_composition::GoogleOauthSecretStore::new(
+                store,
+            ))
+        })
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::Mutex;
+    use std::sync::{Arc, Mutex};
 
     struct FixedPromptSource {
         answers: Mutex<Vec<String>>,
@@ -458,11 +482,23 @@ mod tests {
 
     #[cfg(feature = "libsql")]
     impl SecretStoreOpener for FakeSecretStoreOpener {
-        fn open(
+        #[cfg(feature = "root-llm-provider")]
+        fn open_llm_key_store(
             &self,
             _home_path: &Path,
-        ) -> anyhow::Result<Arc<dyn ironclaw_secrets::SecretStore>> {
-            Ok(self.store.clone())
+        ) -> anyhow::Result<ironclaw_reborn_composition::LlmKeyStore> {
+            Ok(ironclaw_reborn_composition::LlmKeyStore::new(
+                self.store.clone(),
+            ))
+        }
+
+        fn open_google_oauth_secret_store(
+            &self,
+            _home_path: &Path,
+        ) -> anyhow::Result<ironclaw_reborn_composition::GoogleOauthSecretStore> {
+            Ok(ironclaw_reborn_composition::GoogleOauthSecretStore::new(
+                self.store.clone(),
+            ))
         }
     }
 
@@ -480,10 +516,19 @@ mod tests {
 
     struct FailingStoreOpener;
     impl SecretStoreOpener for FailingStoreOpener {
-        fn open(
+        #[cfg(all(feature = "libsql", feature = "root-llm-provider"))]
+        fn open_llm_key_store(
             &self,
             _home_path: &Path,
-        ) -> anyhow::Result<Arc<dyn ironclaw_secrets::SecretStore>> {
+        ) -> anyhow::Result<ironclaw_reborn_composition::LlmKeyStore> {
+            anyhow::bail!("store opener should not be called")
+        }
+
+        #[cfg(feature = "libsql")]
+        fn open_google_oauth_secret_store(
+            &self,
+            _home_path: &Path,
+        ) -> anyhow::Result<ironclaw_reborn_composition::GoogleOauthSecretStore> {
             anyhow::bail!("store opener should not be called")
         }
     }
@@ -734,7 +779,9 @@ mod tests {
 
         execute_webui_token(&context, None, true).expect("rotate must succeed");
 
-        assert!(crate::webui_token::webui_token_file_is_valid(home.path()));
+        assert!(
+            crate::webui_token::webui_token_file_is_valid(home.path()).expect("query must succeed")
+        );
     }
 
     /// Thermo MUST (rotate env-guard): rotating the token FILE while the
@@ -758,7 +805,10 @@ mod tests {
         // pattern for the same reason: this var is not restorable across a
         // developer's local shell, only safe to force absent afterward).
         unsafe {
-            std::env::set_var("IRONCLAW_REBORN_WEBUI_TOKEN", "operator-set-env-token-value");
+            std::env::set_var(
+                "IRONCLAW_REBORN_WEBUI_TOKEN",
+                "operator-set-env-token-value",
+            );
         }
 
         let result = execute_webui_token(&context, None, true);
