@@ -1694,28 +1694,29 @@ mod tests {
 
     #[cfg(feature = "root-llm-provider")]
     #[test]
-    fn run_runtime_input_carries_boot_config_for_initial_llm_reload() {
+    fn runtime_inputs_carry_boot_config_for_initial_llm_reload() {
         let _lock = lock_runtime_env();
         let _guards = clear_runner_env();
         let (_enabled, _interval) = clear_trigger_poller_env();
-        let temp = tempfile::tempdir().expect("tempdir");
-        let reborn_home = temp.path().join("reborn-home");
-        std::fs::create_dir_all(&reborn_home).expect("mkdir");
-        let config = RebornBootConfig::resolve_from_env_parts(
-            Some(reborn_home.into_os_string()),
-            None,
-            None,
-            None,
-        )
-        .expect("boot config");
+        for caller in [RuntimeInputCaller::Run, RuntimeInputCaller::Serve] {
+            let temp = tempfile::tempdir().expect("tempdir");
+            let reborn_home = temp.path().join("reborn-home");
+            std::fs::create_dir_all(&reborn_home).expect("mkdir");
+            let config = RebornBootConfig::resolve_from_env_parts(
+                Some(reborn_home.into_os_string()),
+                None,
+                None,
+                None,
+            )
+            .expect("boot config");
 
-        let runtime_input =
-            build_runtime_input(&config, RuntimeInputCaller::Run).expect("runtime input");
+            let runtime_input = build_runtime_input(&config, caller).expect("runtime input");
 
-        let boot = runtime_input
-            .boot
-            .expect("run must carry boot config for the initial LLM reload");
-        assert_eq!(boot.home().path(), config.home().path());
+            let boot = runtime_input.boot.unwrap_or_else(|| {
+                panic!("{caller:?} must carry boot config for the initial LLM reload")
+            });
+            assert_eq!(boot.home().path(), config.home().path());
+        }
     }
 
     #[test]
