@@ -1,12 +1,15 @@
+// arch-exempt: large_file, Slice-C `authorize()` extraction is a behavior-preserving step in the capability-path collapse (doc §9); net additions are transitional and shrink as later slices route dispatch through the sealed `Authorized` witness and retire the mirror request DTOs, plan #6175
 use ironclaw_authorization::{
     CapabilityLease, CapabilityLeaseStore, TrustAwareCapabilityDispatchAuthorizer,
 };
 use ironclaw_extensions::ExtensionRegistry;
 use ironclaw_host_api::{
-    CapabilityAuthorizer, CapabilityDescriptor, CapabilityDispatchRequest,
-    CapabilityDispatchResult, CapabilityDispatcher, CapabilityGrantId, CapabilityId, Decision,
-    DenyReason, DispatchError, ExecutionContext, InvocationFingerprint, InvocationId, Obligation,
-    ProcessId, ResourceEstimate, ResourceScope,
+    ActivityId, AuthorizeResult, Authorized, Blocked, CapabilityAuthorizer, CapabilityDescriptor,
+    CapabilityDispatchRequest, CapabilityDispatchResult, CapabilityDispatcher, CapabilityGrantId,
+    CapabilityId, Decision, DenyReason, DenyRef, DispatchError, ExecutionContext, GateRef,
+    Invocation, InvocationFingerprint, InvocationId, InvocationOrigin, Obligation, ProcessId,
+    ProductKind, ResourceEstimate, ResourceReservation, ResourceReservationId, ResourceScope,
+    RuntimeLane,
 };
 use ironclaw_processes::{ProcessManager, ProcessStart};
 use ironclaw_run_state::{
@@ -103,6 +106,58 @@ struct ResumedDispatchParams<'r> {
     descriptor: &'r CapabilityDescriptor,
     /// Approval-lease state for this resume.  See [`ResumedLeaseState`].
     lease_state: ResumedLeaseState<'r>,
+}
+
+/// Outcome of the extracted `authorize()` fold (arch-simplification §5.3.2,
+/// §9 step 2): the sealed [`AuthorizeResult`] trichotomy (§3) *plus* the
+/// behavior-preserving side-band `invoke_json` still needs to reproduce today's
+/// exact dispatch and error mapping while the capability path is mid-migration.
+///
+/// Why this wraps `AuthorizeResult` rather than being one:
+/// - `Denied` — `AuthorizeResult::Denied(DenyRef)` collapses the policy
+///   [`DenyReason`] to an opaque correlation UUID; today's caller returns
+///   `AuthorizationDenied { reason }`, so the reason rides here until denial
+///   folds into `Resolution` (a later slice).
+/// - `Authorized` — today's `invoke_json` still owns `dispatch_json` and the
+///   post-dispatch obligation lifecycle, so it needs the raw `obligations` and
+///   the prepared `obligation_outcome`. Those `Option`-shaped mounts/reservation
+///   are the *exact* values dispatch receives; the sealed witness's provisional,
+///   forward-looking `mounts`/`reservation` deliberately do NOT drive today's
+///   dispatch (§5.3.2/§5.3.3 — the dispatcher still reserves against the
+///   governor when `resource_reservation` is `None`).
+enum AuthorizeFold {
+    /// Authorization allowed dispatch. Boxed because its payload (obligations +
+    /// prepared outcome + the boxed witness) dwarfs the ref-sized deny/block
+    /// variants (`clippy::large_enum_variant`).
+    Authorized(Box<AuthorizedFold>),
+    /// Terminal policy denial (`AuthorizeResult::Denied`). `reason` is the
+    /// model-visible policy verdict the caller resurfaces as
+    /// `AuthorizationDenied { reason }`.
+    Denied {
+        result: AuthorizeResult,
+        reason: DenyReason,
+    },
+    /// A re-entrant approval gate (`AuthorizeResult::Blocked(Blocked::Approval)`).
+    /// The pending approval was persisted and the run transitioned to
+    /// `BlockedApproval` inside `authorize`; the caller returns
+    /// `AuthorizationRequiresApproval`.
+    Blocked { result: AuthorizeResult },
+}
+
+/// Payload of [`AuthorizeFold::Authorized`] — the allowed-dispatch side-band.
+///
+/// `result` is `Some(AuthorizeResult::Authorized(..))` when the invocation is
+/// *seal-able* — it carries a membrane-sealed actor AND resolves to an untrusted
+/// [`RuntimeLane`] — and `None` otherwise. A `None` witness does not regress
+/// dispatch: this slice mints the witness as a forward-looking seal artifact but
+/// still builds dispatch from `obligation_outcome`, so an actor-less or
+/// host-internal invocation dispatches exactly as it does today. The hard
+/// actor/lane requirement lands when the membrane guarantees them and dispatch
+/// routes through the witness (§9, later slice).
+struct AuthorizedFold {
+    result: Option<AuthorizeResult>,
+    obligations: Vec<Obligation>,
+    obligation_outcome: CapabilityObligationOutcome,
 }
 
 impl<'a, D> CapabilityHost<'a, D>
@@ -212,300 +267,47 @@ where
         let invocation_id = request.context.invocation_id;
         let capability_id = request.capability_id.clone();
         let scope = request.context.resource_scope.clone();
-        if request.context.validate().is_err() {
-            debug!("capability invocation rejected invalid execution context");
-            return Err(CapabilityInvocationError::AuthorizationDenied {
-                capability: request.capability_id,
-                reason: DenyReason::InternalInvariantViolation,
-            });
-        }
-        debug!("capability invocation started");
 
-        let invocation_fingerprint = invocation_fingerprint_for_kind(
-            CapabilityActionKind::Dispatch,
-            &scope,
-            &request.capability_id,
-            &request.estimate,
-            &request.input,
-        )
-        .map_err(|source| CapabilityInvocationError::InvocationFingerprint {
-            capability: request.capability_id.clone(),
-            source,
-        })?;
-
-        if let Some(run_state) = self.run_state {
-            run_state
-                .start(RunStart {
-                    invocation_id,
-                    capability_id: capability_id.clone(),
-                    scope: scope.clone(),
-                    authenticated_actor_user_id: request
-                        .context
-                        .authenticated_actor_user_id
-                        .clone(),
-                })
-                .await?;
-            debug!("capability run state started");
-        }
-
-        let Some(descriptor) = self.registry.get_capability(&request.capability_id) else {
-            debug!("capability invocation failed before authorization: unknown capability");
-            fail_run_if_configured(self.run_state, &scope, invocation_id, "UnknownCapability")
-                .await;
-            return Err(CapabilityInvocationError::UnknownCapability {
-                capability: request.capability_id,
-            });
-        };
-
-        let obligations;
-        let obligation_outcome;
-        match self
-            .authorizer
-            .authorize_dispatch_with_trust(
-                &request.context,
-                descriptor,
-                &request.estimate,
-                &request.trust_decision,
-            )
-            .await
-        {
-            Decision::Allow {
-                obligations: allowed_obligations,
-            } => {
-                let allowed_obligations = allowed_obligations.into_vec();
+        // The whole pre-dispatch authority fold — context validation,
+        // fingerprint, run-state start, capability lookup, trust-aware
+        // authorization, obligation preparation, and (Slice C) minting the
+        // sealed `Authorized` witness — is one method. `invoke_json` maps its
+        // `AuthorizeResult` back to today's exact dispatch and error behavior.
+        let (obligations, obligation_outcome) = match self.authorize(&request).await? {
+            AuthorizeFold::Authorized(fold) => {
+                let AuthorizedFold {
+                    result,
+                    obligations,
+                    obligation_outcome,
+                } = *fold;
                 debug!(
-                    obligation_count = allowed_obligations.len(),
+                    authorize_result = ?result.as_ref().map(AuthorizeResult::kind),
+                    obligation_count = obligations.len(),
                     "capability authorization allowed dispatch"
                 );
-                match self
-                    .prepare_obligations(
-                        CapabilityObligationPhase::Invoke,
-                        &request.context,
-                        &request.capability_id,
-                        &request.estimate,
-                        allowed_obligations.clone(),
-                    )
-                    .await
-                {
-                    Ok(outcome) => {
-                        obligations = allowed_obligations;
-                        obligation_outcome = outcome;
-                        debug!("capability invoke obligations prepared");
-                    }
-                    Err(error) => {
-                        debug!(
-                            error_kind = obligation_invocation_error_kind(&error),
-                            "capability invoke obligation preparation failed"
-                        );
-                        apply_run_state_transition_if_configured(
-                            self.run_state,
-                            &scope,
-                            invocation_id,
-                            &error,
-                        )
-                        .await;
-                        return Err(error);
-                    }
-                }
+                (obligations, obligation_outcome)
             }
-            Decision::Deny { reason } => {
+            AuthorizeFold::Denied { result, reason } => {
                 debug!(
+                    authorize_result = %result.kind(),
                     reason = ?reason,
                     "capability authorization denied dispatch"
                 );
-                fail_run_if_configured(
-                    self.run_state,
-                    &scope,
-                    invocation_id,
-                    "AuthorizationDenied",
-                )
-                .await;
                 return Err(CapabilityInvocationError::AuthorizationDenied {
                     capability: request.capability_id,
                     reason,
                 });
             }
-            Decision::RequireApproval {
-                request: mut approval,
-            } => {
-                let approval_request_id = approval.id;
-                add_capability_input_display_hint(
-                    &mut approval.reason,
-                    &request.capability_id,
-                    &request.input,
-                );
+            AuthorizeFold::Blocked { result } => {
                 debug!(
-                    approval_request_id = %approval_request_id,
+                    authorize_result = %result.kind(),
                     "capability authorization requires approval"
                 );
-                if let Err(error) = validate_approval_request_matches_invocation(
-                    &approval,
-                    &request.context,
-                    &request.capability_id,
-                    &request.estimate,
-                    CapabilityActionKind::Dispatch,
-                ) {
-                    debug!(
-                        approval_request_id = %approval_request_id,
-                        "capability approval request did not match invocation"
-                    );
-                    fail_run_if_configured(
-                        self.run_state,
-                        &scope,
-                        invocation_id,
-                        "ApprovalRequestMismatch",
-                    )
-                    .await;
-                    return Err(error);
-                }
-
-                if let Some(existing) = &approval.invocation_fingerprint {
-                    if existing != &invocation_fingerprint {
-                        debug!(
-                            approval_request_id = %approval_request_id,
-                            "capability approval fingerprint mismatch"
-                        );
-                        fail_run_if_configured(
-                            self.run_state,
-                            &scope,
-                            invocation_id,
-                            "InvocationFingerprintMismatch",
-                        )
-                        .await;
-                        return Err(CapabilityInvocationError::ApprovalFingerprintMismatch {
-                            capability: request.capability_id,
-                        });
-                    }
-                } else {
-                    approval.invocation_fingerprint = Some(invocation_fingerprint);
-                }
-
-                match (self.run_state, self.approval_requests) {
-                    (Some(run_state), Some(approval_requests)) => {
-                        if let Some(combined_store) = self.run_state_approval_store {
-                            if let Err(error) = combined_store
-                                .save_pending_and_block_approval(
-                                    scope.clone(),
-                                    invocation_id,
-                                    approval,
-                                )
-                                .await
-                            {
-                                debug!(
-                                    approval_request_id = %approval_request_id,
-                                    "capability approval block failed in combined store"
-                                );
-                                fail_run_if_configured(
-                                    Some(run_state),
-                                    &scope,
-                                    invocation_id,
-                                    "ApprovalBlock",
-                                )
-                                .await;
-                                return Err(CapabilityInvocationError::from(error));
-                            }
-                            debug!(
-                                approval_request_id = %approval_request_id,
-                                "capability approval persisted and run state blocked"
-                            );
-                        } else {
-                            let approval_id = approval.id;
-                            if let Err(error) = approval_requests
-                                .save_pending(scope.clone(), approval.clone())
-                                .await
-                            {
-                                debug!(
-                                    approval_request_id = %approval_id,
-                                    "capability approval request persistence failed"
-                                );
-                                fail_run_if_configured(
-                                    Some(run_state),
-                                    &scope,
-                                    invocation_id,
-                                    "ApprovalStore",
-                                )
-                                .await;
-                                return Err(CapabilityInvocationError::from(error));
-                            }
-                            if let Err(error) = run_state
-                                .block_approval(&scope, invocation_id, approval)
-                                .await
-                            {
-                                debug!(
-                                    approval_request_id = %approval_id,
-                                    "capability run state approval block failed"
-                                );
-                                if let Err(discard_error) =
-                                    approval_requests.discard_pending(&scope, approval_id).await
-                                {
-                                    warn!(
-                                        approval_request_id = %approval_id,
-                                        invocation_id = %invocation_id,
-                                        transition_error_kind = run_state_error_kind(&discard_error),
-                                        "approval rollback failed after run-state block transition failed",
-                                    );
-                                }
-                                fail_run_if_configured(
-                                    Some(run_state),
-                                    &scope,
-                                    invocation_id,
-                                    "ApprovalBlock",
-                                )
-                                .await;
-                                return Err(CapabilityInvocationError::from(error));
-                            }
-                            debug!(
-                                approval_request_id = %approval_id,
-                                "capability approval persisted and run state blocked"
-                            );
-                        }
-                    }
-                    (Some(run_state), None) => {
-                        debug!(
-                            approval_request_id = %approval_request_id,
-                            store = "approval_requests",
-                            "capability approval cannot block because store is missing"
-                        );
-                        fail_run_if_configured(
-                            Some(run_state),
-                            &scope,
-                            invocation_id,
-                            "ApprovalStoreMissing",
-                        )
-                        .await;
-                        return Err(CapabilityInvocationError::ApprovalStoreMissing {
-                            capability: request.capability_id,
-                            store: "approval_requests",
-                        });
-                    }
-                    (None, Some(_)) => {
-                        debug!(
-                            approval_request_id = %approval_request_id,
-                            store = "run_state",
-                            "capability approval cannot block because store is missing"
-                        );
-                        return Err(CapabilityInvocationError::ApprovalStoreMissing {
-                            capability: request.capability_id,
-                            store: "run_state",
-                        });
-                    }
-                    (None, None) => {
-                        debug!(
-                            approval_request_id = %approval_request_id,
-                            store = "run_state and approval_requests",
-                            "capability approval cannot block because stores are missing"
-                        );
-                        return Err(CapabilityInvocationError::ApprovalStoreMissing {
-                            capability: request.capability_id,
-                            store: "run_state and approval_requests",
-                        });
-                    }
-                }
                 return Err(CapabilityInvocationError::AuthorizationRequiresApproval {
                     capability: request.capability_id,
                 });
             }
-        }
+        };
 
         debug!("capability dispatch starting");
         let dispatch = match self
@@ -610,6 +412,397 @@ where
 
         debug!("capability invocation completed");
         Ok(CapabilityInvocationResult { dispatch })
+    }
+
+    /// The pre-dispatch authority fold for `invoke_json`, extracted per
+    /// arch-simplification §9 step 2 / §5.3.2: validate the context, fingerprint
+    /// the invocation, start the run record, resolve the descriptor, run
+    /// trust-aware authorization, and on `Allow` prepare obligations and mint
+    /// the sealed [`Authorized`] witness. Every side effect that today's inline
+    /// fold performed — run-state `start`/`fail`/`block`, approval
+    /// persist-and-rollback, obligation `prepare`, and each early error return —
+    /// stays here, verbatim; `invoke_json` only maps the returned
+    /// [`AuthorizeFold`] back to today's outcome.
+    async fn authorize(
+        &self,
+        request: &CapabilityInvocationRequest,
+    ) -> Result<AuthorizeFold, CapabilityInvocationError> {
+        let invocation_id = request.context.invocation_id;
+        let scope = request.context.resource_scope.clone();
+        if request.context.validate().is_err() {
+            debug!("capability invocation rejected invalid execution context");
+            return Err(CapabilityInvocationError::AuthorizationDenied {
+                capability: request.capability_id.clone(),
+                reason: DenyReason::InternalInvariantViolation,
+            });
+        }
+        debug!("capability invocation started");
+
+        let invocation_fingerprint = invocation_fingerprint_for_kind(
+            CapabilityActionKind::Dispatch,
+            &scope,
+            &request.capability_id,
+            &request.estimate,
+            &request.input,
+        )
+        .map_err(|source| CapabilityInvocationError::InvocationFingerprint {
+            capability: request.capability_id.clone(),
+            source,
+        })?;
+
+        if let Some(run_state) = self.run_state {
+            run_state
+                .start(RunStart {
+                    invocation_id,
+                    capability_id: request.capability_id.clone(),
+                    scope: scope.clone(),
+                    authenticated_actor_user_id: request
+                        .context
+                        .authenticated_actor_user_id
+                        .clone(),
+                })
+                .await?;
+            debug!("capability run state started");
+        }
+
+        let Some(descriptor) = self.registry.get_capability(&request.capability_id) else {
+            debug!("capability invocation failed before authorization: unknown capability");
+            fail_run_if_configured(self.run_state, &scope, invocation_id, "UnknownCapability")
+                .await;
+            return Err(CapabilityInvocationError::UnknownCapability {
+                capability: request.capability_id.clone(),
+            });
+        };
+
+        match self
+            .authorizer
+            .authorize_dispatch_with_trust(
+                &request.context,
+                descriptor,
+                &request.estimate,
+                &request.trust_decision,
+            )
+            .await
+        {
+            Decision::Allow {
+                obligations: allowed_obligations,
+            } => {
+                let allowed_obligations = allowed_obligations.into_vec();
+                debug!(
+                    obligation_count = allowed_obligations.len(),
+                    "capability authorization allowed dispatch"
+                );
+                let obligation_outcome = match self
+                    .prepare_obligations(
+                        CapabilityObligationPhase::Invoke,
+                        &request.context,
+                        &request.capability_id,
+                        &request.estimate,
+                        allowed_obligations.clone(),
+                    )
+                    .await
+                {
+                    Ok(outcome) => {
+                        debug!("capability invoke obligations prepared");
+                        outcome
+                    }
+                    Err(error) => {
+                        debug!(
+                            error_kind = obligation_invocation_error_kind(&error),
+                            "capability invoke obligation preparation failed"
+                        );
+                        apply_run_state_transition_if_configured(
+                            self.run_state,
+                            &scope,
+                            invocation_id,
+                            &error,
+                        )
+                        .await;
+                        return Err(error);
+                    }
+                };
+                let result = self.seal_invoke_authorization(
+                    request,
+                    descriptor,
+                    &scope,
+                    &obligation_outcome,
+                );
+                Ok(AuthorizeFold::Authorized(Box::new(AuthorizedFold {
+                    result,
+                    obligations: allowed_obligations,
+                    obligation_outcome,
+                })))
+            }
+            Decision::Deny { reason } => {
+                debug!(
+                    reason = ?reason,
+                    "capability authorization denied dispatch"
+                );
+                fail_run_if_configured(
+                    self.run_state,
+                    &scope,
+                    invocation_id,
+                    "AuthorizationDenied",
+                )
+                .await;
+                Ok(AuthorizeFold::Denied {
+                    result: AuthorizeResult::Denied(DenyRef::new()),
+                    reason,
+                })
+            }
+            Decision::RequireApproval {
+                request: mut approval,
+            } => {
+                let approval_request_id = approval.id;
+                add_capability_input_display_hint(
+                    &mut approval.reason,
+                    &request.capability_id,
+                    &request.input,
+                );
+                debug!(
+                    approval_request_id = %approval_request_id,
+                    "capability authorization requires approval"
+                );
+                if let Err(error) = validate_approval_request_matches_invocation(
+                    &approval,
+                    &request.context,
+                    &request.capability_id,
+                    &request.estimate,
+                    CapabilityActionKind::Dispatch,
+                ) {
+                    debug!(
+                        approval_request_id = %approval_request_id,
+                        "capability approval request did not match invocation"
+                    );
+                    fail_run_if_configured(
+                        self.run_state,
+                        &scope,
+                        invocation_id,
+                        "ApprovalRequestMismatch",
+                    )
+                    .await;
+                    return Err(error);
+                }
+
+                if let Some(existing) = &approval.invocation_fingerprint {
+                    if existing != &invocation_fingerprint {
+                        debug!(
+                            approval_request_id = %approval_request_id,
+                            "capability approval fingerprint mismatch"
+                        );
+                        fail_run_if_configured(
+                            self.run_state,
+                            &scope,
+                            invocation_id,
+                            "InvocationFingerprintMismatch",
+                        )
+                        .await;
+                        return Err(CapabilityInvocationError::ApprovalFingerprintMismatch {
+                            capability: request.capability_id.clone(),
+                        });
+                    }
+                } else {
+                    approval.invocation_fingerprint = Some(invocation_fingerprint);
+                }
+
+                match (self.run_state, self.approval_requests) {
+                    (Some(run_state), Some(approval_requests)) => {
+                        if let Some(combined_store) = self.run_state_approval_store {
+                            if let Err(error) = combined_store
+                                .save_pending_and_block_approval(
+                                    scope.clone(),
+                                    invocation_id,
+                                    approval,
+                                )
+                                .await
+                            {
+                                debug!(
+                                    approval_request_id = %approval_request_id,
+                                    "capability approval block failed in combined store"
+                                );
+                                fail_run_if_configured(
+                                    Some(run_state),
+                                    &scope,
+                                    invocation_id,
+                                    "ApprovalBlock",
+                                )
+                                .await;
+                                return Err(CapabilityInvocationError::from(error));
+                            }
+                            debug!(
+                                approval_request_id = %approval_request_id,
+                                "capability approval persisted and run state blocked"
+                            );
+                        } else {
+                            let approval_id = approval.id;
+                            if let Err(error) = approval_requests
+                                .save_pending(scope.clone(), approval.clone())
+                                .await
+                            {
+                                debug!(
+                                    approval_request_id = %approval_id,
+                                    "capability approval request persistence failed"
+                                );
+                                fail_run_if_configured(
+                                    Some(run_state),
+                                    &scope,
+                                    invocation_id,
+                                    "ApprovalStore",
+                                )
+                                .await;
+                                return Err(CapabilityInvocationError::from(error));
+                            }
+                            if let Err(error) = run_state
+                                .block_approval(&scope, invocation_id, approval)
+                                .await
+                            {
+                                debug!(
+                                    approval_request_id = %approval_id,
+                                    "capability run state approval block failed"
+                                );
+                                if let Err(discard_error) =
+                                    approval_requests.discard_pending(&scope, approval_id).await
+                                {
+                                    warn!(
+                                        approval_request_id = %approval_id,
+                                        invocation_id = %invocation_id,
+                                        transition_error_kind = run_state_error_kind(&discard_error),
+                                        "approval rollback failed after run-state block transition failed",
+                                    );
+                                }
+                                fail_run_if_configured(
+                                    Some(run_state),
+                                    &scope,
+                                    invocation_id,
+                                    "ApprovalBlock",
+                                )
+                                .await;
+                                return Err(CapabilityInvocationError::from(error));
+                            }
+                            debug!(
+                                approval_request_id = %approval_id,
+                                "capability approval persisted and run state blocked"
+                            );
+                        }
+                    }
+                    (Some(run_state), None) => {
+                        debug!(
+                            approval_request_id = %approval_request_id,
+                            store = "approval_requests",
+                            "capability approval cannot block because store is missing"
+                        );
+                        fail_run_if_configured(
+                            Some(run_state),
+                            &scope,
+                            invocation_id,
+                            "ApprovalStoreMissing",
+                        )
+                        .await;
+                        return Err(CapabilityInvocationError::ApprovalStoreMissing {
+                            capability: request.capability_id.clone(),
+                            store: "approval_requests",
+                        });
+                    }
+                    (None, Some(_)) => {
+                        debug!(
+                            approval_request_id = %approval_request_id,
+                            store = "run_state",
+                            "capability approval cannot block because store is missing"
+                        );
+                        return Err(CapabilityInvocationError::ApprovalStoreMissing {
+                            capability: request.capability_id.clone(),
+                            store: "run_state",
+                        });
+                    }
+                    (None, None) => {
+                        debug!(
+                            approval_request_id = %approval_request_id,
+                            store = "run_state and approval_requests",
+                            "capability approval cannot block because stores are missing"
+                        );
+                        return Err(CapabilityInvocationError::ApprovalStoreMissing {
+                            capability: request.capability_id.clone(),
+                            store: "run_state and approval_requests",
+                        });
+                    }
+                }
+                Ok(AuthorizeFold::Blocked {
+                    result: AuthorizeResult::Blocked(Blocked::Approval(GateRef::from_uuid(
+                        approval_request_id.as_uuid(),
+                    ))),
+                })
+            }
+        }
+    }
+
+    /// Mint the sealed [`Authorized`] witness for an allowed invoke, or `None`
+    /// when the invocation is not yet seal-able (arch-simplification §5.3.2).
+    ///
+    /// Returns `None` — leaving today's dispatch path unchanged — when a fact
+    /// the seal requires is absent: no membrane-sealed `actor`, or a
+    /// host-internal `System` runtime that maps to no untrusted [`RuntimeLane`].
+    /// This slice mints the witness as a forward-looking seal artifact (it does
+    /// not yet gate dispatch), so an un-seal-able invocation must not regress.
+    /// Every field marked `PROVISIONAL (Slice C)` is a placeholder a later slice
+    /// makes authoritative once the loop membrane seals it and `dispatch()`
+    /// consumes the witness.
+    fn seal_invoke_authorization(
+        &self,
+        request: &CapabilityInvocationRequest,
+        descriptor: &CapabilityDescriptor,
+        scope: &ResourceScope,
+        obligation_outcome: &CapabilityObligationOutcome,
+    ) -> Option<AuthorizeResult> {
+        // Actor is sealed at the membrane; NO fallback to `user_id`. Absent on
+        // untrusted/system contexts, where the witness is simply not minted.
+        let actor = request.context.authenticated_actor_user_id.clone()?;
+        // Lane resolved from the descriptor's runtime kind; `System` runtimes
+        // have no untrusted execution lane (`None`) and are not sealed here.
+        let lane = RuntimeLane::from_runtime_kind(descriptor.runtime)?;
+        let origin = match request.context.run_id {
+            Some(run_id) => InvocationOrigin::LoopRun(run_id),
+            // PROVISIONAL (Slice C): a non-loop invocation's true origin
+            // (Product vs Automation, §5.2.1) is not yet threaded to the kernel.
+            // Only a non-`LoopRun` origin is needed so `run_id` reconstructs to
+            // `None`; the concrete origin lands with the origin→gate matrix.
+            None => InvocationOrigin::Product(ProductKind::new("provisional").ok()?),
+        };
+        let invocation = Invocation {
+            activity_id: ActivityId::from_uuid(request.context.invocation_id.as_uuid()),
+            capability: request.capability_id.clone(),
+            // PROVISIONAL (Slice C): the loop expresses input by reference; the
+            // membrane will resolve it. Cloned here so today's dispatch keeps
+            // ownership of `request.input`.
+            input: request.input.clone(),
+            scope: scope.clone(),
+            actor,
+            origin,
+            estimate: request.estimate.clone(),
+        };
+        let mounts = obligation_outcome.mounts.clone().unwrap_or_default();
+        let reservation = obligation_outcome
+            .resource_reservation
+            .clone()
+            // PROVISIONAL (Slice C): `authorize()` will reserve the estimate
+            // itself; until then the dispatcher still reserves when the request
+            // carries `None`, so this synthesized reservation lives only on the
+            // (not-yet-dispatch-routed) witness.
+            .unwrap_or_else(|| ResourceReservation {
+                id: ResourceReservationId::new(),
+                scope: scope.clone(),
+                estimate: request.estimate.clone(),
+            });
+        // PROVISIONAL (Slice C): a fixed 5-minute validity window until the
+        // deadline is derived from the shortest-lived frozen fact (§5.3.2).
+        let deadline = chrono::Utc::now() + chrono::Duration::minutes(5);
+        Some(AuthorizeResult::Authorized(Box::new(Authorized::seal(
+            self.authorization_grant(),
+            invocation,
+            lane,
+            mounts,
+            reservation,
+            deadline,
+        ))))
     }
 
     pub async fn resume_json(
@@ -2539,5 +2732,144 @@ mod tests {
             matches!(result, DispatchError::UnknownCapability { .. }),
             "non-AuthRequired variants must be returned unchanged"
         );
+    }
+
+    // --- Slice-C `authorize()` fold ---
+
+    // Unconditionally allows with no obligations, so the fold reaches the seal.
+    struct AllowAuthorizer;
+
+    #[async_trait::async_trait]
+    impl ironclaw_authorization::TrustAwareCapabilityDispatchAuthorizer for AllowAuthorizer {
+        async fn authorize_dispatch_with_trust(
+            &self,
+            _context: &ExecutionContext,
+            _descriptor: &CapabilityDescriptor,
+            _estimate: &ResourceEstimate,
+            _trust_decision: &TrustDecision,
+        ) -> Decision {
+            Decision::Allow {
+                obligations: ironclaw_host_api::Obligations::empty(),
+            }
+        }
+    }
+
+    // `authorize()` never dispatches; this satisfies the `CapabilityHost` type
+    // parameter without pulling in the integration-tier recording dispatcher.
+    struct UnusedDispatcher;
+
+    #[async_trait::async_trait]
+    impl CapabilityDispatcher for UnusedDispatcher {
+        async fn dispatch_json(
+            &self,
+            request: CapabilityDispatchRequest,
+        ) -> Result<CapabilityDispatchResult, DispatchError> {
+            Err(DispatchError::UnknownCapability {
+                capability: request.capability_id,
+            })
+        }
+    }
+
+    const ECHO_MANIFEST_FIXTURE: &str = r#"
+schema_version = "reborn.extension_manifest.v2"
+id = "echo"
+name = "Echo"
+version = "0.1.0"
+description = "Echo test extension"
+trust = "third_party"
+
+[runtime]
+kind = "wasm"
+module = "echo.wasm"
+
+[[capabilities]]
+id = "echo.say"
+description = "Echoes input"
+effects = ["dispatch_capability"]
+default_permission = "allow"
+visibility = "host_internal"
+input_schema_ref = "schemas/echo/say.input.v1.json"
+output_schema_ref = "schemas/echo/say.output.v1.json"
+"#;
+
+    fn echo_registry() -> ExtensionRegistry {
+        use ironclaw_extensions::{ExtensionManifest, ExtensionPackage, ManifestSource};
+        use ironclaw_host_api::{HostPortCatalog, VirtualPath};
+        let manifest = ExtensionManifest::parse(
+            ECHO_MANIFEST_FIXTURE,
+            ManifestSource::InstalledLocal,
+            &HostPortCatalog::empty(),
+        )
+        .unwrap();
+        let package = ExtensionPackage::from_manifest(
+            manifest,
+            VirtualPath::new("/system/extensions/echo").unwrap(),
+        )
+        .unwrap();
+        let mut registry = ExtensionRegistry::new();
+        registry.insert(package).unwrap();
+        registry
+    }
+
+    fn allow_request() -> CapabilityInvocationRequest {
+        use ironclaw_host_api::{CapabilitySet, MountView, RuntimeKind, TrustClass, UserId};
+        use ironclaw_trust::{AuthorityCeiling, EffectiveTrustClass, TrustProvenance};
+        let mut context = ExecutionContext::local_default(
+            UserId::new("user").unwrap(),
+            ExtensionId::new("caller").unwrap(),
+            RuntimeKind::Wasm,
+            TrustClass::UserTrusted,
+            CapabilitySet::default(),
+            MountView::default(),
+        )
+        .unwrap();
+        // A membrane-sealed actor is what makes the invocation seal-able.
+        context.authenticated_actor_user_id = Some(UserId::new("actor").unwrap());
+        CapabilityInvocationRequest {
+            context,
+            capability_id: CapabilityId::new("echo.say").unwrap(),
+            estimate: ResourceEstimate::default(),
+            input: serde_json::json!({"message": "hi"}),
+            trust_decision: TrustDecision {
+                effective_trust: EffectiveTrustClass::user_trusted(),
+                authority_ceiling: AuthorityCeiling {
+                    allowed_effects: Vec::new(),
+                    max_resource_ceiling: None,
+                },
+                provenance: TrustProvenance::Default,
+                evaluated_at: chrono::Utc::now(),
+            },
+        }
+    }
+
+    // The Allow decision seals an `Authorized` whose lane is resolved from the
+    // descriptor (echo is a WASM extension) and whose invocation carries the
+    // exact capability/actor/input the request named.
+    #[tokio::test]
+    async fn authorize_allow_path_seals_authorized_with_lane_and_invocation() {
+        use ironclaw_host_api::UserId;
+
+        let registry = echo_registry();
+        let dispatcher = UnusedDispatcher;
+        let authorizer = AllowAuthorizer;
+        let host = CapabilityHost::new(&registry, &dispatcher, &authorizer);
+
+        let request = allow_request();
+        let fold = host.authorize(&request).await.unwrap();
+
+        let AuthorizeFold::Authorized(fold) = fold else {
+            panic!("expected an allowed authorization");
+        };
+        let Some(AuthorizeResult::Authorized(authorized)) = &fold.result else {
+            panic!("allow path with a sealed actor must mint an Authorized witness");
+        };
+        assert_eq!(authorized.lane(), RuntimeLane::Wasm);
+        let invocation = authorized.invocation();
+        assert_eq!(
+            invocation.capability,
+            CapabilityId::new("echo.say").unwrap()
+        );
+        assert_eq!(invocation.actor, UserId::new("actor").unwrap());
+        assert_eq!(invocation.input, serde_json::json!({"message": "hi"}));
     }
 }
