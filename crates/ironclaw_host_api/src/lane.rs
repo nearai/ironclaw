@@ -31,43 +31,53 @@
 
 use serde::{Deserialize, Serialize};
 
-/// The closed set of runtime execution lanes — the untrusted surfaces a
-/// capability can be dispatched to (§4.2/§5.5). `dispatch()` matches on this
-/// exhaustively; adding a variant is a deliberate, security-reviewed change that
-/// forces every match to confront it.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum RuntimeLane {
-    /// Host-coupled built-in capability code.
-    FirstParty,
-    /// Sandboxed WASM extension code (the default extension lane; individual
-    /// extensions are data behind this lane, not new lanes).
-    Wasm,
-    /// An external MCP server integration.
-    Mcp,
-    /// An OS process under the sandbox — the lane today's script/process adapter
-    /// executes on. The host-only lane; §5.9 makes it structural.
-    Process,
+/// Single source of truth for the lane set: the enum, [`RuntimeLane::ALL`],
+/// and [`RuntimeLane::as_str`] are all generated from this one list, so a new
+/// lane cannot be added to one surface while silently missing from another
+/// (review findings on the C.6 slice — a hand-maintained `ALL` could drift).
+macro_rules! runtime_lanes {
+    ($( $(#[$meta:meta])* $variant:ident => $tag:literal ),+ $(,)?) => {
+        /// The closed set of runtime execution lanes — the untrusted surfaces a
+        /// capability can be dispatched to (§4.2/§5.5). `dispatch()` matches on
+        /// this exhaustively; adding a variant is a deliberate, security-reviewed
+        /// change that forces every match to confront it.
+        #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+        #[serde(rename_all = "snake_case")]
+        pub enum RuntimeLane {
+            $( $(#[$meta])* $variant, )+
+        }
+
+        impl RuntimeLane {
+            /// Every lane, exactly once, in declaration order. Generated from the
+            /// same list as the enum itself — completeness is structural, not
+            /// hand-maintained.
+            pub const ALL: [RuntimeLane; [$(runtime_lanes!(@unit $variant)),+].len()] =
+                [$(RuntimeLane::$variant),+];
+
+            /// Stable discriminant (matches the serde tag) for logs/routing.
+            pub fn as_str(&self) -> &'static str {
+                match self {
+                    $( RuntimeLane::$variant => $tag, )+
+                }
+            }
+        }
+    };
+    (@unit $variant:ident) => {
+        ()
+    };
 }
 
-impl RuntimeLane {
-    /// Stable discriminant (matches the serde tag) for logs/routing.
-    pub fn as_str(&self) -> &'static str {
-        match self {
-            RuntimeLane::FirstParty => "first_party",
-            RuntimeLane::Wasm => "wasm",
-            RuntimeLane::Mcp => "mcp",
-            RuntimeLane::Process => "process",
-        }
-    }
-
-    /// Every lane, for exhaustiveness-style iteration in tests and registries.
-    pub const ALL: [RuntimeLane; 4] = [
-        RuntimeLane::FirstParty,
-        RuntimeLane::Wasm,
-        RuntimeLane::Mcp,
-        RuntimeLane::Process,
-    ];
+runtime_lanes! {
+    /// Host-coupled built-in capability code.
+    FirstParty => "first_party",
+    /// Sandboxed WASM extension code (the default extension lane; individual
+    /// extensions are data behind this lane, not new lanes).
+    Wasm => "wasm",
+    /// An external MCP server integration.
+    Mcp => "mcp",
+    /// An OS process under the sandbox — the lane today's script/process adapter
+    /// executes on. The host-only lane; §5.9 makes it structural.
+    Process => "process",
 }
 
 impl std::fmt::Display for RuntimeLane {
@@ -91,38 +101,27 @@ mod tests {
     }
 
     #[test]
-    fn all_covers_every_variant_exactly_once() {
-        // Review findings on the C.6 slice: the previous shape passed vacuously —
-        // a new variant could be added to the enum, the match, and as_str() while
-        // ALL kept the old four values, silently dropping the lane from every
-        // registry that iterates ALL. This version is drift-proof in both
-        // directions:
-        //
-        // - Adding a variant fails to COMPILE here (exhaustive match) until an
-        //   ordinal is assigned;
-        // - assigning an ordinal fails the `ordinal == index in ALL` assertion
-        //   until ALL is extended with the new variant in position;
-        // - the bijection check (every ordinal < len, each hit exactly once)
-        //   rejects duplicates and omissions.
-        fn ordinal(lane: RuntimeLane) -> usize {
-            match lane {
-                RuntimeLane::FirstParty => 0,
-                RuntimeLane::Wasm => 1,
-                RuntimeLane::Mcp => 2,
-                RuntimeLane::Process => 3,
-            }
-        }
-        let mut seen = [false; RuntimeLane::ALL.len()];
-        for (index, lane) in RuntimeLane::ALL.into_iter().enumerate() {
+    fn all_and_as_str_are_generated_from_one_source() {
+        // Completeness is structural now (review findings on the C.6 slice):
+        // the enum, ALL, and as_str() are all generated from the single
+        // `runtime_lanes!` list, so a new lane cannot exist without appearing
+        // in ALL — no hand-maintained inventory to drift. What remains testable
+        // is the wire agreement: each macro-supplied tag must match the
+        // serde(rename_all) output, and ALL must be duplicate-free.
+        let mut seen = std::collections::BTreeSet::new();
+        for lane in RuntimeLane::ALL {
+            let wire = serde_json::to_value(lane).unwrap();
             assert_eq!(
-                ordinal(lane),
-                index,
-                "ALL must list every variant once, in ordinal order: {lane:?}"
+                wire,
+                serde_json::Value::String(lane.as_str().to_string()),
+                "macro tag must match the serde rename_all tag for {lane:?}"
             );
-            assert!(!seen[index], "duplicate lane in ALL: {lane:?}");
-            seen[index] = true;
+            assert!(
+                seen.insert(lane.as_str()),
+                "duplicate lane in ALL: {lane:?}"
+            );
         }
-        assert!(seen.iter().all(|hit| *hit), "ALL must cover every ordinal");
+        assert_eq!(seen.len(), RuntimeLane::ALL.len());
     }
 
     #[test]
