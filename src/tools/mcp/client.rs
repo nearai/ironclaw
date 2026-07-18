@@ -95,6 +95,13 @@ pub struct McpClient {
     /// `X-Ironclaw-Thread-Id` / `X-Ironclaw-User-Id` are forwarded.
     thread_id: Option<Uuid>,
 
+    /// Instance nonce for session-manager generation guarding: every client
+    /// instance (constructors, forks, clones) gets a fresh nonce, and session
+    /// WRITES are only honored from the instance that owns the session. An
+    /// LRU-evicted instance finishing an in-flight call cannot overwrite or
+    /// destroy a replacement instance's session.
+    session_owner: Uuid,
+
     /// Server configuration (for token secret name lookup).
     server_config: Option<McpServerConfig>,
 
@@ -162,6 +169,7 @@ impl McpClient {
             server_config: None,
             custom_headers: HashMap::new(),
             thread_id: None,
+            session_owner: Uuid::new_v4(),
             initialized: std::sync::Arc::new(tokio::sync::OnceCell::new()),
             #[cfg(test)]
             constructor_kind: McpClientConstructor::Plain,
@@ -205,6 +213,7 @@ impl McpClient {
             server_config: None,
             custom_headers: HashMap::new(),
             thread_id: None,
+            session_owner: Uuid::new_v4(),
             initialized: std::sync::Arc::new(tokio::sync::OnceCell::new()),
             #[cfg(test)]
             constructor_kind: McpClientConstructor::PlainNamed,
@@ -267,6 +276,7 @@ impl McpClient {
             user_id: "<unset>".to_string(),
             custom_headers: config.headers.clone(),
             thread_id: None,
+            session_owner: Uuid::new_v4(),
             initialized: std::sync::Arc::new(tokio::sync::OnceCell::new()),
             server_config: Some(config),
             #[cfg(test)]
@@ -303,9 +313,18 @@ impl McpClient {
                 .expect("'unknown' is a valid McpServerName (alnum allowlist)") // safety: hardcoded literal satisfies alnum-only validation; infallible
         });
         let user_id_str: String = user_id.into();
+        // One nonce for both the transport (session-id captures) and the
+        // client (session creates/terminates) — they must agree for the
+        // generation guard to accept this instance's writes.
+        let session_owner = Uuid::new_v4();
         let transport = Arc::new(
             HttpMcpTransport::new(config.url.clone(), validated_name.as_str())
-                .with_session_manager(session_manager.clone(), &user_id_str, thread_id),
+                .with_session_manager(
+                    session_manager.clone(),
+                    &user_id_str,
+                    thread_id,
+                    session_owner,
+                ),
         );
 
         let custom_headers = config.headers.clone();
@@ -322,6 +341,7 @@ impl McpClient {
             server_config: Some(config),
             custom_headers,
             thread_id,
+            session_owner,
             initialized: std::sync::Arc::new(tokio::sync::OnceCell::new()),
             #[cfg(test)]
             constructor_kind: McpClientConstructor::Authenticated,
@@ -331,6 +351,8 @@ impl McpClient {
     /// Create a new MCP client with a custom transport.
     ///
     /// Use this for stdio, UDS, or other non-HTTP transports.
+    // arch-exempt: too_many_args, session_owner joins an existing 7-arg constructor pending an McpClientParts bundle, plan #6247
+    #[allow(clippy::too_many_arguments)]
     pub fn new_with_transport(
         server_name: impl Into<String>,
         transport: Arc<dyn McpTransport>,
@@ -339,6 +361,9 @@ impl McpClient {
         user_id: impl Into<String>,
         server_config: Option<McpServerConfig>,
         thread_id: Option<Uuid>,
+        // Generation nonce shared with an HTTP transport's session wiring
+        // (when the caller built one) — see `session_owner` field docs.
+        session_owner: Uuid,
     ) -> Self {
         // The production caller (factory) hands us an already-validated
         // name, but the signature accepts `impl Into<String>` which means
@@ -381,6 +406,7 @@ impl McpClient {
             server_config,
             custom_headers,
             thread_id,
+            session_owner,
             initialized: std::sync::Arc::new(tokio::sync::OnceCell::new()),
             #[cfg(test)]
             constructor_kind: McpClientConstructor::WithTransport,
@@ -441,6 +467,13 @@ impl McpClient {
     }
 
     // arch-exempt: large_file, review-mandated session-lifecycle fix on the existing client surface, plan #6247
+    /// Test-only: this instance's session-generation nonce, for aligning
+    /// out-of-band session seeding with the guard.
+    #[cfg(test)]
+    pub(crate) fn session_owner(&self) -> Uuid {
+        self.session_owner
+    }
+
     /// Raw tool NAMES from the in-memory discovery cache, if a `list_tools`
     /// has populated it. Used by the PATCH reactivation flow to capture the
     /// live pre-eviction surface — `cached_tools` on the persisted config is
@@ -463,7 +496,12 @@ impl McpClient {
     pub(crate) async fn terminate_session(&self) {
         if let Some(ref session_manager) = self.session_manager {
             session_manager
-                .terminate(&self.user_id, &self.server_name, self.thread_id)
+                .terminate(
+                    &self.user_id,
+                    &self.server_name,
+                    self.thread_id,
+                    Some(self.session_owner),
+                )
                 .await;
         }
     }
@@ -498,6 +536,9 @@ impl McpClient {
         // `send` implementation (they operate over a shared process/socket
         // and session state is managed by McpSessionManager alone), so
         // sharing the Arc is correct and avoids spawning a duplicate process.
+        // The fork's generation nonce — shared by its transport and its
+        // session-manager calls so the guard accepts this instance's writes.
+        let fork_owner = Uuid::new_v4();
         let (forked_transport, initialized, next_id): (
             Arc<dyn McpTransport>,
             std::sync::Arc<tokio::sync::OnceCell<InitializeResult>>,
@@ -505,7 +546,12 @@ impl McpClient {
         ) = if self.transport.supports_http_features() {
             let mut t = HttpMcpTransport::new(self.server_url.clone(), self.server_name.as_str());
             if let Some(ref sm) = self.session_manager {
-                t = t.with_session_manager(Arc::clone(sm), &self.user_id, Some(thread_id));
+                t = t.with_session_manager(
+                    Arc::clone(sm),
+                    &self.user_id,
+                    Some(thread_id),
+                    fork_owner,
+                );
             }
             (
                 Arc::new(t),
@@ -542,6 +588,7 @@ impl McpClient {
             server_config: self.server_config.clone(),
             custom_headers: self.custom_headers.clone(),
             thread_id: Some(thread_id),
+            session_owner: fork_owner,
             initialized,
             #[cfg(test)]
             constructor_kind: self.constructor_kind,
@@ -703,7 +750,12 @@ impl McpClient {
     async fn reinitialize_session(&self) -> Result<InitializeResult, ToolError> {
         if let Some(ref session_manager) = self.session_manager {
             session_manager
-                .terminate(&self.user_id, &self.server_name, self.thread_id)
+                .terminate(
+                    &self.user_id,
+                    &self.server_name,
+                    self.thread_id,
+                    Some(self.session_owner),
+                )
                 .await;
             session_manager
                 .get_or_create(
@@ -711,6 +763,7 @@ impl McpClient {
                     &self.server_name,
                     &self.server_url,
                     self.thread_id,
+                    self.session_owner,
                 )
                 .await;
         }
@@ -742,7 +795,12 @@ impl McpClient {
 
         if let Some(ref session_manager) = self.session_manager {
             session_manager
-                .mark_initialized(&self.user_id, &self.server_name, self.thread_id)
+                .mark_initialized(
+                    &self.user_id,
+                    &self.server_name,
+                    self.thread_id,
+                    self.session_owner,
+                )
                 .await;
         }
 
@@ -1040,6 +1098,7 @@ impl Clone for McpClient {
             server_config: self.server_config.clone(),
             custom_headers: self.custom_headers.clone(),
             thread_id: self.thread_id,
+            session_owner: Uuid::new_v4(),
             initialized: std::sync::Arc::new(tokio::sync::OnceCell::new()),
             #[cfg(test)]
             constructor_kind: self.constructor_kind,
@@ -1566,6 +1625,7 @@ mod tests {
             "alice",
             None,
             Some(tid),
+            uuid::Uuid::new_v4(),
         );
         let req = McpRequest {
             jsonrpc: "2.0".to_string(),
@@ -1649,6 +1709,7 @@ mod tests {
             "alice",
             None,
             Some(tid_a),
+            uuid::Uuid::new_v4(),
         );
         let client_b = McpClient::new_with_transport(
             "svc",
@@ -1658,6 +1719,7 @@ mod tests {
             "alice",
             None,
             Some(tid_b),
+            uuid::Uuid::new_v4(),
         );
 
         client_a
@@ -1973,6 +2035,7 @@ mod tests {
             "default",
             None,
             None,
+            uuid::Uuid::new_v4(),
         );
         let result = client.list_tools().await;
         assert!(result.is_ok());
@@ -2024,6 +2087,7 @@ mod tests {
             "default",
             None,
             None,
+            uuid::Uuid::new_v4(),
         );
 
         // First call should send initialize + notification
@@ -2099,6 +2163,7 @@ mod tests {
             "default",
             None,
             None,
+            uuid::Uuid::new_v4(),
         );
 
         client.initialize().await.expect("initial handshake");
@@ -2165,8 +2230,16 @@ mod tests {
         let transport = Arc::new(MockTransport::new(false, vec![]));
         // Slashes are outside the `McpServerName` allowlist, so the
         // fallback path must engage rather than storing the raw value.
-        let client =
-            McpClient::new_with_transport("bad/name", transport, None, None, "default", None, None);
+        let client = McpClient::new_with_transport(
+            "bad/name",
+            transport,
+            None,
+            None,
+            "default",
+            None,
+            None,
+            Uuid::new_v4(),
+        );
         let name = McpServerName::new(client.server_name())
             .expect("stored server_name must satisfy the allowlist after the fix");
         assert_eq!(
@@ -2187,6 +2260,7 @@ mod tests {
             "default",
             None,
             None,
+            uuid::Uuid::new_v4(),
         );
         assert_eq!(client.server_name(), "good_name123");
     }
@@ -2478,6 +2552,7 @@ mod tests {
             "default",
             None,
             None,
+            uuid::Uuid::new_v4(),
         );
 
         let store = Arc::new(crate::tools::mcp::McpClientStore::new());
@@ -2552,6 +2627,7 @@ mod tests {
             "default",
             None,
             None,
+            uuid::Uuid::new_v4(),
         );
 
         let store = Arc::new(crate::tools::mcp::McpClientStore::new());
@@ -2638,6 +2714,7 @@ mod tests {
             "default",
             None,
             None,
+            uuid::Uuid::new_v4(),
         );
 
         let registry = ToolRegistry::new();

@@ -92,6 +92,7 @@ pub async fn create_client_from_config(
                 user_id,
                 Some(server),
                 None,
+                uuid::Uuid::new_v4(),
             ))
         }
         #[cfg(unix)]
@@ -114,6 +115,7 @@ pub async fn create_client_from_config(
                 user_id,
                 Some(server),
                 None,
+                uuid::Uuid::new_v4(),
             ))
         }
         #[cfg(not(unix))]
@@ -141,9 +143,17 @@ pub async fn create_client_from_config(
             // it captures `Mcp-Session-Id` from responses. Passing it only to
             // the client (via `with_session_manager`) is not enough — the
             // transport must know about it to read/write the header.
+            // One generation nonce shared by transport and client (see the
+            // guard docs on `McpSessionManager::update_session_id`).
+            let session_owner = uuid::Uuid::new_v4();
             let transport = Arc::new(
                 HttpMcpTransport::new(server.url.clone(), validated_name.as_str())
-                    .with_session_manager(Arc::clone(session_manager), user_id, None),
+                    .with_session_manager(
+                        Arc::clone(session_manager),
+                        user_id,
+                        None,
+                        session_owner,
+                    ),
             );
             Ok(McpClient::new_with_transport(
                 validated_name.as_str(),
@@ -153,6 +163,7 @@ pub async fn create_client_from_config(
                 user_id,
                 Some(server),
                 None,
+                session_owner,
             ))
         }
     }
@@ -418,7 +429,16 @@ mod tests {
         // Use the normalised server name (hyphens → underscores) that the factory applies.
         let normalised_name = McpServerName::new("session_test").expect("valid");
         session_manager
-            .get_or_create("test-user", &normalised_name, &url, None)
+            .get_or_create(
+                "test-user",
+                &normalised_name,
+                &url,
+                None,
+                // Seed under the client's own generation nonce so the guarded
+                // transport update is accepted (production creates the
+                // session through the client's initialize path).
+                client.session_owner(),
+            )
             .await;
 
         // Send a request through the client's transport to trigger session capture.

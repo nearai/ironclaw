@@ -31,6 +31,8 @@ pub struct HttpMcpTransport {
     custom_headers: HashMap<String, String>,
     /// Thread ID passed through to `McpSessionManager` for thread-scoped keys.
     session_thread_id: Option<Uuid>,
+    /// Generation nonce of the owning client instance (see `with_session_manager`).
+    session_owner: Uuid,
 }
 
 impl HttpMcpTransport {
@@ -76,6 +78,7 @@ impl HttpMcpTransport {
             session_user_id: None,
             custom_headers: HashMap::new(),
             session_thread_id: None,
+            session_owner: Uuid::new_v4(),
         }
     }
 
@@ -83,15 +86,20 @@ impl HttpMcpTransport {
     ///
     /// `thread_id` partitions the session key by Thread so two concurrent
     /// Threads under the same user and server get distinct `Mcp-Session-Id` slots.
+    /// `owner` is the owning client instance's generation nonce — session-id
+    /// updates from this transport are only honored while that instance still
+    /// owns the session (see `McpSessionManager::update_session_id`).
     pub fn with_session_manager(
         mut self,
         session_manager: Arc<McpSessionManager>,
         user_id: impl Into<String>,
         thread_id: Option<Uuid>,
+        owner: Uuid,
     ) -> Self {
         self.session_manager = Some(session_manager);
         self.session_user_id = Some(user_id.into());
         self.session_thread_id = thread_id;
+        self.session_owner = owner;
         self
     }
 
@@ -187,6 +195,7 @@ impl McpTransport for HttpMcpTransport {
                     &self.server_name,
                     Some(session_id.to_string()),
                     self.session_thread_id,
+                    self.session_owner,
                 )
                 .await;
         }
@@ -492,7 +501,7 @@ mod tests {
     fn test_with_session_manager() {
         let session_manager = Arc::new(McpSessionManager::new());
         let transport = HttpMcpTransport::new("http://localhost:8080", "test")
-            .with_session_manager(session_manager.clone(), "user-a", None);
+            .with_session_manager(session_manager.clone(), "user-a", None, Uuid::new_v4());
         assert!(transport.session_manager().is_some());
     }
 
@@ -706,6 +715,7 @@ mod tests {
             Arc::clone(&session_manager),
             "user-a",
             None,
+            uuid::Uuid::nil(),
         );
         let request = McpRequest::initialize(1);
 
@@ -752,12 +762,13 @@ mod tests {
         let session_manager = Arc::new(McpSessionManager::new());
         let server_name = McpServerName::new("errorsession").unwrap();
         session_manager
-            .get_or_create("user-a", &server_name, &url, None)
+            .get_or_create("user-a", &server_name, &url, None, uuid::Uuid::nil())
             .await;
         let transport = HttpMcpTransport::new(&url, "errorsession").with_session_manager(
             Arc::clone(&session_manager),
             "user-a",
             None,
+            uuid::Uuid::nil(),
         );
         let request = McpRequest::initialize(1);
 

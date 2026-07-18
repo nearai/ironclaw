@@ -10061,6 +10061,7 @@ mod tests {
             "default",
             None,
             None,
+            uuid::Uuid::new_v4(),
         ));
         let client_b = Arc::new(McpClient::new_with_transport(
             "notion",
@@ -10073,6 +10074,7 @@ mod tests {
             "default",
             None,
             None,
+            uuid::Uuid::new_v4(),
         ));
 
         manager

@@ -77,6 +77,13 @@ pub struct McpSession {
     /// Session ID returned by the server (via Mcp-Session-Id header).
     pub session_id: Option<String>,
 
+    /// Generation guard: the client-instance nonce that created this session.
+    /// Writes (session-id updates, initialized marks, termination) are only
+    /// honored from the owning instance — an LRU-evicted fork whose `Arc` is
+    /// still held by an in-flight call must not overwrite or destroy the
+    /// session a replacement fork created under the same logical key.
+    pub owner: uuid::Uuid,
+
     /// Last activity timestamp for this session.
     pub last_activity: Instant,
 
@@ -88,10 +95,12 @@ pub struct McpSession {
 }
 
 impl McpSession {
-    /// Create a new session for a server.
-    pub fn new(server_url: impl Into<String>) -> Self {
+    /// Create a new session for a server, owned by `owner` (the creating
+    /// client instance's nonce — see the field docs).
+    pub fn new(server_url: impl Into<String>, owner: uuid::Uuid) -> Self {
         Self {
             session_id: None,
+            owner,
             last_activity: Instant::now(),
             server_url: server_url.into(),
             initialized: false,
@@ -164,12 +173,17 @@ impl McpSessionManager {
     }
 
     /// Get or create a session for `(user, server[, thread])`.
+    ///
+    /// A newly created (or stale-replaced) session is OWNED by `owner`; an
+    /// existing live session keeps its original owner — ownership only
+    /// transfers through terminate-then-recreate.
     pub async fn get_or_create(
         &self,
         user_id: &str,
         server_name: &McpServerName,
         server_url: &str,
         thread_id: Option<Uuid>,
+        owner: Uuid,
     ) -> McpSession {
         let key = Self::key(user_id, server_name, thread_id);
         let mut sessions = self.sessions.write().await;
@@ -178,7 +192,7 @@ impl McpSessionManager {
             // Check if session is stale
             if session.is_stale(self.max_idle_secs) {
                 // Create a fresh session
-                let new_session = McpSession::new(server_url);
+                let new_session = McpSession::new(server_url, owner);
                 sessions.insert(key, new_session.clone());
                 return new_session;
             }
@@ -186,7 +200,7 @@ impl McpSessionManager {
         }
 
         // Create new session
-        let session = McpSession::new(server_url);
+        let session = McpSession::new(server_url, owner);
         sessions.insert(key, session.clone());
         session
     }
@@ -205,28 +219,40 @@ impl McpSessionManager {
     }
 
     /// Update the session ID from a server response.
+    ///
+    /// Generation-guarded: honored only when `owner` matches the session's
+    /// owner — a late response processed by an evicted client instance must
+    /// not overwrite the session a replacement instance created under the
+    /// same key.
     pub async fn update_session_id(
         &self,
         user_id: &str,
         server_name: &McpServerName,
         session_id: Option<String>,
         thread_id: Option<Uuid>,
+        owner: Uuid,
     ) {
         let mut sessions = self.sessions.write().await;
-        if let Some(session) = sessions.get_mut(&Self::key(user_id, server_name, thread_id)) {
+        if let Some(session) = sessions.get_mut(&Self::key(user_id, server_name, thread_id))
+            && session.owner == owner
+        {
             session.update_session_id(session_id);
         }
     }
 
-    /// Mark a session as initialized.
+    /// Mark a session as initialized. Generation-guarded (see
+    /// [`Self::update_session_id`]).
     pub async fn mark_initialized(
         &self,
         user_id: &str,
         server_name: &McpServerName,
         thread_id: Option<Uuid>,
+        owner: Uuid,
     ) {
         let mut sessions = self.sessions.write().await;
-        if let Some(session) = sessions.get_mut(&Self::key(user_id, server_name, thread_id)) {
+        if let Some(session) = sessions.get_mut(&Self::key(user_id, server_name, thread_id))
+            && session.owner == owner
+        {
             session.mark_initialized();
         }
     }
@@ -254,14 +280,30 @@ impl McpSessionManager {
     }
 
     /// Terminate a session (e.g., on error or explicit disconnect).
+    ///
+    /// `owner: Some(nonce)` removes the session only if that instance still
+    /// owns it — the store's eviction cleanup passes the evicted client's
+    /// nonce so it can never destroy a replacement instance's session.
+    /// `owner: None` is unconditional (server removal, admin cleanup).
     pub async fn terminate(
         &self,
         user_id: &str,
         server_name: &McpServerName,
         thread_id: Option<Uuid>,
+        owner: Option<Uuid>,
     ) {
         let mut sessions = self.sessions.write().await;
-        sessions.remove(&Self::key(user_id, server_name, thread_id));
+        let key = Self::key(user_id, server_name, thread_id);
+        match owner {
+            None => {
+                sessions.remove(&key);
+            }
+            Some(nonce) => {
+                if sessions.get(&key).is_some_and(|s| s.owner == nonce) {
+                    sessions.remove(&key);
+                }
+            }
+        }
     }
 
     /// Snapshot the active `(user, server, thread_id)` triples.
@@ -305,7 +347,7 @@ mod tests {
 
     #[test]
     fn test_session_creation() {
-        let session = McpSession::new("https://mcp.example.com");
+        let session = McpSession::new("https://mcp.example.com", uuid::Uuid::nil());
         assert!(session.session_id.is_none());
         assert!(!session.initialized);
         assert_eq!(session.server_url, "https://mcp.example.com");
@@ -313,7 +355,7 @@ mod tests {
 
     #[test]
     fn test_session_update() {
-        let mut session = McpSession::new("https://mcp.example.com");
+        let mut session = McpSession::new("https://mcp.example.com", uuid::Uuid::nil());
 
         session.update_session_id(Some("session-123".to_string()));
         assert_eq!(session.session_id, Some("session-123".to_string()));
@@ -324,7 +366,7 @@ mod tests {
 
     #[test]
     fn test_session_staleness() {
-        let mut session = McpSession::new("https://mcp.example.com");
+        let mut session = McpSession::new("https://mcp.example.com", uuid::Uuid::nil());
 
         // Fresh session should not be stale with reasonable timeout
         assert!(!session.is_stale(1800));
@@ -344,18 +386,36 @@ mod tests {
 
         // First call creates a new session
         let session1 = manager
-            .get_or_create(USER_A, &notion, "https://mcp.notion.com", None)
+            .get_or_create(
+                USER_A,
+                &notion,
+                "https://mcp.notion.com",
+                None,
+                uuid::Uuid::nil(),
+            )
             .await;
         assert!(session1.session_id.is_none());
 
         // Update the session ID
         manager
-            .update_session_id(USER_A, &notion, Some("session-abc".to_string()), None)
+            .update_session_id(
+                USER_A,
+                &notion,
+                Some("session-abc".to_string()),
+                None,
+                uuid::Uuid::nil(),
+            )
             .await;
 
         // Second call returns existing session with the ID
         let session2 = manager
-            .get_or_create(USER_A, &notion, "https://mcp.notion.com", None)
+            .get_or_create(
+                USER_A,
+                &notion,
+                "https://mcp.notion.com",
+                None,
+                uuid::Uuid::nil(),
+            )
             .await;
         assert_eq!(session2.session_id, Some("session-abc".to_string()));
     }
@@ -366,18 +426,36 @@ mod tests {
         let notion = sn("notion");
 
         manager
-            .get_or_create(USER_A, &notion, "https://mcp.notion.com", None)
+            .get_or_create(
+                USER_A,
+                &notion,
+                "https://mcp.notion.com",
+                None,
+                uuid::Uuid::nil(),
+            )
             .await;
         manager
-            .update_session_id(USER_A, &notion, Some("session-123".to_string()), None)
+            .update_session_id(
+                USER_A,
+                &notion,
+                Some("session-123".to_string()),
+                None,
+                uuid::Uuid::nil(),
+            )
             .await;
 
         // Terminate the session
-        manager.terminate(USER_A, &notion, None).await;
+        manager.terminate(USER_A, &notion, None, None).await;
 
         // Should create a fresh session now
         let session = manager
-            .get_or_create(USER_A, &notion, "https://mcp.notion.com", None)
+            .get_or_create(
+                USER_A,
+                &notion,
+                "https://mcp.notion.com",
+                None,
+                uuid::Uuid::nil(),
+            )
             .await;
         assert!(session.session_id.is_none());
     }
@@ -388,12 +466,20 @@ mod tests {
         let notion = sn("notion");
 
         manager
-            .get_or_create(USER_A, &notion, "https://mcp.notion.com", None)
+            .get_or_create(
+                USER_A,
+                &notion,
+                "https://mcp.notion.com",
+                None,
+                uuid::Uuid::nil(),
+            )
             .await;
 
         assert!(!manager.is_initialized(USER_A, &notion, None).await);
 
-        manager.mark_initialized(USER_A, &notion, None).await;
+        manager
+            .mark_initialized(USER_A, &notion, None, uuid::Uuid::nil())
+            .await;
 
         assert!(manager.is_initialized(USER_A, &notion, None).await);
     }
@@ -405,13 +491,31 @@ mod tests {
         let github = sn("github");
 
         manager
-            .get_or_create(USER_A, &notion, "https://mcp.notion.com", None)
+            .get_or_create(
+                USER_A,
+                &notion,
+                "https://mcp.notion.com",
+                None,
+                uuid::Uuid::nil(),
+            )
             .await;
         manager
-            .get_or_create(USER_A, &github, "https://mcp.github.com", None)
+            .get_or_create(
+                USER_A,
+                &github,
+                "https://mcp.github.com",
+                None,
+                uuid::Uuid::nil(),
+            )
             .await;
         manager
-            .get_or_create(USER_B, &notion, "https://mcp.notion.com", None)
+            .get_or_create(
+                USER_B,
+                &notion,
+                "https://mcp.notion.com",
+                None,
+                uuid::Uuid::nil(),
+            )
             .await;
 
         let pairs = manager.active_sessions().await;
@@ -434,17 +538,41 @@ mod tests {
         let notion = sn("notion");
 
         manager
-            .get_or_create(USER_A, &notion, "https://mcp.notion.com", None)
+            .get_or_create(
+                USER_A,
+                &notion,
+                "https://mcp.notion.com",
+                None,
+                uuid::Uuid::nil(),
+            )
             .await;
         manager
-            .get_or_create(USER_B, &notion, "https://mcp.notion.com", None)
+            .get_or_create(
+                USER_B,
+                &notion,
+                "https://mcp.notion.com",
+                None,
+                uuid::Uuid::nil(),
+            )
             .await;
 
         manager
-            .update_session_id(USER_A, &notion, Some("session-a".to_string()), None)
+            .update_session_id(
+                USER_A,
+                &notion,
+                Some("session-a".to_string()),
+                None,
+                uuid::Uuid::nil(),
+            )
             .await;
         manager
-            .update_session_id(USER_B, &notion, Some("session-b".to_string()), None)
+            .update_session_id(
+                USER_B,
+                &notion,
+                Some("session-b".to_string()),
+                None,
+                uuid::Uuid::nil(),
+            )
             .await;
 
         assert_eq!(
@@ -456,7 +584,7 @@ mod tests {
             Some("session-b".to_string())
         );
 
-        manager.terminate(USER_A, &notion, None).await;
+        manager.terminate(USER_A, &notion, None, None).await;
         assert!(
             manager
                 .get_session_id(USER_A, &notion, None)
@@ -472,7 +600,7 @@ mod tests {
 
     #[test]
     fn test_update_session_id_none_leaves_id_unchanged() {
-        let mut session = McpSession::new("https://mcp.example.com");
+        let mut session = McpSession::new("https://mcp.example.com", uuid::Uuid::nil());
         session.session_id = Some("existing-id".to_string());
 
         session.update_session_id(None);
@@ -482,7 +610,7 @@ mod tests {
 
     #[test]
     fn test_touch_updates_last_activity() {
-        let mut session = McpSession::new("https://mcp.example.com");
+        let mut session = McpSession::new("https://mcp.example.com", uuid::Uuid::nil());
         // Push last_activity into the past so we can observe the change.
         session.last_activity = std::time::Instant::now() - std::time::Duration::from_secs(60);
         let before = session.last_activity;
@@ -514,7 +642,13 @@ mod tests {
         let manager = McpSessionManager::new();
         // Should not panic or create a session.
         manager
-            .update_session_id(USER_A, &sn("ghost"), Some("id".to_string()), None)
+            .update_session_id(
+                USER_A,
+                &sn("ghost"),
+                Some("id".to_string()),
+                None,
+                uuid::Uuid::nil(),
+            )
             .await;
         assert!(manager.active_sessions().await.is_empty());
     }
@@ -522,7 +656,9 @@ mod tests {
     #[tokio::test]
     async fn test_mark_initialized_nonexistent_is_noop() {
         let manager = McpSessionManager::new();
-        manager.mark_initialized(USER_A, &sn("ghost"), None).await;
+        manager
+            .mark_initialized(USER_A, &sn("ghost"), None, uuid::Uuid::nil())
+            .await;
         assert!(manager.active_sessions().await.is_empty());
     }
 
@@ -542,13 +678,31 @@ mod tests {
         let stale2 = sn("stale2");
 
         manager
-            .get_or_create(USER_A, &fresh, "https://fresh.example.com", None)
+            .get_or_create(
+                USER_A,
+                &fresh,
+                "https://fresh.example.com",
+                None,
+                uuid::Uuid::nil(),
+            )
             .await;
         manager
-            .get_or_create(USER_A, &stale1, "https://stale1.example.com", None)
+            .get_or_create(
+                USER_A,
+                &stale1,
+                "https://stale1.example.com",
+                None,
+                uuid::Uuid::nil(),
+            )
             .await;
         manager
-            .get_or_create(USER_A, &stale2, "https://stale2.example.com", None)
+            .get_or_create(
+                USER_A,
+                &stale2,
+                "https://stale2.example.com",
+                None,
+                uuid::Uuid::nil(),
+            )
             .await;
 
         // Push the two stale sessions into the past.
@@ -577,7 +731,7 @@ mod tests {
     async fn test_terminate_nonexistent_is_noop() {
         let manager = McpSessionManager::new();
         // Should not panic.
-        manager.terminate(USER_A, &sn("ghost"), None).await;
+        manager.terminate(USER_A, &sn("ghost"), None, None).await;
         assert!(manager.active_sessions().await.is_empty());
     }
 
@@ -601,10 +755,22 @@ mod tests {
         let thread_b = tid(2);
 
         manager
-            .get_or_create(USER_A, &notion, "https://mcp.notion.com", Some(thread_a))
+            .get_or_create(
+                USER_A,
+                &notion,
+                "https://mcp.notion.com",
+                Some(thread_a),
+                uuid::Uuid::nil(),
+            )
             .await;
         manager
-            .get_or_create(USER_A, &notion, "https://mcp.notion.com", Some(thread_b))
+            .get_or_create(
+                USER_A,
+                &notion,
+                "https://mcp.notion.com",
+                Some(thread_b),
+                uuid::Uuid::nil(),
+            )
             .await;
 
         manager
@@ -613,6 +779,7 @@ mod tests {
                 &notion,
                 Some("sess-thread-a".to_string()),
                 Some(thread_a),
+                uuid::Uuid::nil(),
             )
             .await;
         manager
@@ -621,6 +788,7 @@ mod tests {
                 &notion,
                 Some("sess-thread-b".to_string()),
                 Some(thread_b),
+                uuid::Uuid::nil(),
             )
             .await;
 
@@ -649,14 +817,32 @@ mod tests {
         let thread_a = tid(42);
 
         manager
-            .get_or_create(USER_A, &notion, "https://mcp.notion.com", None)
+            .get_or_create(
+                USER_A,
+                &notion,
+                "https://mcp.notion.com",
+                None,
+                uuid::Uuid::nil(),
+            )
             .await;
         manager
-            .get_or_create(USER_A, &notion, "https://mcp.notion.com", Some(thread_a))
+            .get_or_create(
+                USER_A,
+                &notion,
+                "https://mcp.notion.com",
+                Some(thread_a),
+                uuid::Uuid::nil(),
+            )
             .await;
 
         manager
-            .update_session_id(USER_A, &notion, Some("sess-user-scoped".to_string()), None)
+            .update_session_id(
+                USER_A,
+                &notion,
+                Some("sess-user-scoped".to_string()),
+                None,
+                uuid::Uuid::nil(),
+            )
             .await;
         manager
             .update_session_id(
@@ -664,6 +850,7 @@ mod tests {
                 &notion,
                 Some("sess-thread-scoped".to_string()),
                 Some(thread_a),
+                uuid::Uuid::nil(),
             )
             .await;
 
@@ -692,15 +879,33 @@ mod tests {
         let thread_a = tid(7);
 
         manager
-            .get_or_create(USER_A, &notion, "https://mcp.notion.com", Some(thread_a))
+            .get_or_create(
+                USER_A,
+                &notion,
+                "https://mcp.notion.com",
+                Some(thread_a),
+                uuid::Uuid::nil(),
+            )
             .await;
         manager
-            .update_session_id(USER_A, &notion, Some("sess-v1".to_string()), Some(thread_a))
+            .update_session_id(
+                USER_A,
+                &notion,
+                Some("sess-v1".to_string()),
+                Some(thread_a),
+                uuid::Uuid::nil(),
+            )
             .await;
 
         // Second get_or_create with the same triple must return the existing session.
         let sess = manager
-            .get_or_create(USER_A, &notion, "https://mcp.notion.com", Some(thread_a))
+            .get_or_create(
+                USER_A,
+                &notion,
+                "https://mcp.notion.com",
+                Some(thread_a),
+                uuid::Uuid::nil(),
+            )
             .await;
         assert_eq!(
             sess.session_id,
@@ -719,13 +924,31 @@ mod tests {
         let thread_a = tid(99);
 
         manager
-            .get_or_create(USER_A, &notion, "https://mcp.notion.com", None)
+            .get_or_create(
+                USER_A,
+                &notion,
+                "https://mcp.notion.com",
+                None,
+                uuid::Uuid::nil(),
+            )
             .await;
         manager
-            .get_or_create(USER_A, &notion, "https://mcp.notion.com", Some(thread_a))
+            .get_or_create(
+                USER_A,
+                &notion,
+                "https://mcp.notion.com",
+                Some(thread_a),
+                uuid::Uuid::nil(),
+            )
             .await;
         manager
-            .update_session_id(USER_A, &notion, Some("sess-user".to_string()), None)
+            .update_session_id(
+                USER_A,
+                &notion,
+                Some("sess-user".to_string()),
+                None,
+                uuid::Uuid::nil(),
+            )
             .await;
         manager
             .update_session_id(
@@ -733,10 +956,13 @@ mod tests {
                 &notion,
                 Some("sess-thread".to_string()),
                 Some(thread_a),
+                uuid::Uuid::nil(),
             )
             .await;
 
-        manager.terminate(USER_A, &notion, Some(thread_a)).await;
+        manager
+            .terminate(USER_A, &notion, Some(thread_a), None)
+            .await;
 
         assert!(
             manager

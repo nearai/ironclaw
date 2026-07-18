@@ -1234,20 +1234,34 @@ mod tests {
 
         // Materialise forks up to the cap, each with a live session.
         let first_tid = Uuid::new_v4();
-        store
+        let first_fork = store
             .resolve_for_thread("alice", "svc", Some(first_tid))
             .await
             .expect("first fork");
-        sm.get_or_create("alice", &server, "http://a.invalid", Some(first_tid))
-            .await;
+        sm.get_or_create(
+            "alice",
+            &server,
+            "http://a.invalid",
+            Some(first_tid),
+            // Sessions are owned by the fork that created them — seed under
+            // each fork's nonce so guarded termination matches production.
+            first_fork.session_owner(),
+        )
+        .await;
         for _ in 1..MAX_THREAD_FORKS_PER_USER_SERVER {
             let tid = Uuid::new_v4();
-            store
+            let fork = store
                 .resolve_for_thread("alice", "svc", Some(tid))
                 .await
                 .expect("fork under cap");
-            sm.get_or_create("alice", &server, "http://a.invalid", Some(tid))
-                .await;
+            sm.get_or_create(
+                "alice",
+                &server,
+                "http://a.invalid",
+                Some(tid),
+                fork.session_owner(),
+            )
+            .await;
         }
         let session_count_before = sm.active_sessions().await.len();
 
