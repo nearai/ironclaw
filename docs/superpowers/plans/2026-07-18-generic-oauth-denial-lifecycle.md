@@ -322,7 +322,8 @@
 - [ ] **Step 5: Commit and publish a draft pull request**
 
   ```bash
-  git add CHANGELOG.md docs/superpowers/specs/2026-07-18-generic-oauth-denial-lifecycle-design.md docs/superpowers/plans/2026-07-18-generic-oauth-denial-lifecycle.md crates/ironclaw_product_workflow/tests/auth_interaction_contract.rs crates/ironclaw_product_workflow/src/auth_interaction/service.rs crates/ironclaw_channel_host/src/auth_continuation.rs crates/ironclaw_reborn_composition/src/product_auth/api/auth.rs crates/ironclaw_reborn_composition/src/slack/slack_setup.rs crates/ironclaw_reborn_composition/src/product_auth/serve/mod.rs crates/ironclaw_reborn_composition/src/slack/slack_personal_oauth.rs crates/ironclaw_reborn_composition/src/product_auth/serve/oauth.rs crates/ironclaw_reborn_composition/tests/webui_v2_product_auth.rs tests/integration/telegram_journeys/scenario_decline_in_chat.rs
+  git add -A
+  git diff --cached --name-only
   git commit -m "fix(auth): separate explicit and provider denial"
   git push -u origin codex/fix-slack-oauth-cancel-gates
   gh pr create --draft --base main --head codex/fix-slack-oauth-cancel-gates

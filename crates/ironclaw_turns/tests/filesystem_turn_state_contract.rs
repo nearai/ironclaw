@@ -26,16 +26,16 @@ use ironclaw_host_api::{
 };
 use ironclaw_turns::{
     AcceptedMessageRef, AdmissionRejection, AllowAllTurnAdmissionPolicy, BlockedReason,
-    CheckpointSchemaId, FilesystemTurnStateRowStore, FilesystemTurnStateStore, GateRef,
-    GetLoopCheckpointRequest, GetRunStateRequest, IdempotencyKey, InMemoryRunProfileResolver,
-    InMemoryTurnStateStoreLimits, LoopCheckpointStore, LoopExitMapping, ProductTurnContext,
-    PutLoopCheckpointRequest, ReplyTargetBindingRef, ResumeTurnPrecondition, ResumeTurnRequest,
-    RunOriginAdapter, RunProfileRequest, RunProfileVersion, SanitizedCancelReason,
-    SanitizedFailure, SourceBindingRef, SubmitChildRunRequest, SubmitTurnRequest,
-    SubmitTurnResponse, TurnActor, TurnAdmissionPolicy, TurnCheckpointId, TurnError, TurnEventKind,
-    TurnEventProjectionSource, TurnId, TurnLeaseToken, TurnOriginKind, TurnOwner,
-    TurnPersistenceSnapshot, TurnRunId, TurnRunnerId, TurnScope, TurnSpawnTreeStateStore,
-    TurnStateStore, TurnStatus,
+    CancelRunPrecondition, CancelRunRequest, CheckpointSchemaId, FilesystemTurnStateRowStore,
+    FilesystemTurnStateStore, GateRef, GetLoopCheckpointRequest, GetRunStateRequest,
+    IdempotencyKey, InMemoryRunProfileResolver, InMemoryTurnStateStoreLimits, LoopCheckpointStore,
+    LoopExitMapping, ProductTurnContext, PutLoopCheckpointRequest, ReplyTargetBindingRef,
+    ResumeTurnPrecondition, ResumeTurnRequest, RunOriginAdapter, RunProfileRequest,
+    RunProfileVersion, SanitizedCancelReason, SanitizedFailure, SourceBindingRef,
+    SubmitChildRunRequest, SubmitTurnRequest, SubmitTurnResponse, TurnActor, TurnAdmissionPolicy,
+    TurnCheckpointId, TurnError, TurnEventKind, TurnEventProjectionSource, TurnId, TurnLeaseToken,
+    TurnOriginKind, TurnOwner, TurnPersistenceSnapshot, TurnRunId, TurnRunnerId, TurnScope,
+    TurnSpawnTreeStateStore, TurnStateStore, TurnStatus,
     run_profile::{LoopCheckpointKind, LoopCheckpointStateRef},
     runner::{
         ApplyValidatedLoopExitRequest, BlockRunRequest, ClaimRunRequest, CompleteRunRequest,
@@ -3375,6 +3375,78 @@ async fn filesystem_turn_state_store_persists_submit_and_reopens() {
         .unwrap();
     assert_eq!(state.run_id, run_id);
     assert_eq!(state.status, TurnStatus::Queued);
+}
+
+#[tokio::test]
+async fn filesystem_turn_state_store_replays_conditional_auth_cancel_after_reopen() {
+    let backend = Arc::new(engine_filesystem());
+    let scoped = scoped_turns_fs(Arc::clone(&backend));
+    let store = FilesystemTurnStateStore::new(Arc::clone(&scoped));
+    let resolver = InMemoryRunProfileResolver::default();
+    let request = submit_request_for(
+        turn_scope("thread-fs-auth-cancel-replay"),
+        "idem-fs-auth-cancel-replay-submit",
+    );
+    let response = store
+        .submit_turn(request.clone(), &AllowAllTurnAdmissionPolicy, &resolver)
+        .await
+        .unwrap();
+    let run_id = accepted_run_id(&response);
+    let runner_id = TurnRunnerId::new();
+    let lease_token = TurnLeaseToken::new();
+    store
+        .claim_next_run(ClaimRunRequest {
+            runner_id,
+            lease_token,
+            scope_filter: Some(request.scope.clone()),
+        })
+        .await
+        .unwrap()
+        .unwrap();
+    let gate_ref = GateRef::new("gate:fs-auth-cancel-replay").unwrap();
+    store
+        .block_run(BlockRunRequest {
+            run_id,
+            runner_id,
+            lease_token,
+            checkpoint_id: TurnCheckpointId::new(),
+            state_ref: LoopCheckpointStateRef::new("checkpoint:fs-auth-cancel-replay").unwrap(),
+            reason: BlockedReason::Auth {
+                gate_ref: gate_ref.clone(),
+                credential_requirements: Vec::new(),
+            },
+        })
+        .await
+        .unwrap();
+    store
+        .request_cancel(CancelRunRequest {
+            scope: request.scope.clone(),
+            actor: turn_actor(),
+            run_id,
+            precondition: Some(CancelRunPrecondition::BlockedAuthGate {
+                gate_ref: gate_ref.clone(),
+            }),
+            reason: SanitizedCancelReason::UserRequested,
+            idempotency_key: IdempotencyKey::new("idem-fs-auth-cancel-replay-first").unwrap(),
+        })
+        .await
+        .unwrap();
+
+    let reopened = FilesystemTurnStateStore::new(scoped);
+    let replay = reopened
+        .request_cancel(CancelRunRequest {
+            scope: request.scope,
+            actor: turn_actor(),
+            run_id,
+            precondition: Some(CancelRunPrecondition::BlockedAuthGate { gate_ref }),
+            reason: SanitizedCancelReason::UserRequested,
+            idempotency_key: IdempotencyKey::new("idem-fs-auth-cancel-replay-fresh").unwrap(),
+        })
+        .await
+        .expect("a fresh key after restart must converge on the cancelled auth gate");
+
+    assert_eq!(replay.status, TurnStatus::Cancelled);
+    assert!(replay.already_terminal);
 }
 
 #[tokio::test]

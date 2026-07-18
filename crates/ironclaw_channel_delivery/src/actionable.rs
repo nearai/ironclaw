@@ -132,9 +132,8 @@ pub(crate) async fn cancel_auth_blocked_run(
 ) -> Result<(), FinalReplyDeliveryError> {
     // Resolve the flow-cancel target BEFORE `cancel_run` consumes `actor`. Owner
     // Resolution mirrors `enrich_auth_prompt_view`: an explicit turn owner
-    // (shared/team subject) wins, else the acting user. When `gate_ref` is absent
-    // there is no flow to resolve, so the flow cancel is skipped entirely (not
-    // encoded as an empty ref).
+    // (shared/team subject) wins, else the acting user. A missing typed gate ref
+    // is rejected before either the run or its auth flow can be mutated.
     let gate_ref = gate_ref.ok_or_else(|| FinalReplyDeliveryError::StatusMessage {
         reason: "blocked auth cancellation is missing its typed gate ref".to_string(),
     })?;

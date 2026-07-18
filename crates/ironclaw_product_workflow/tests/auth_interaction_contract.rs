@@ -967,7 +967,10 @@ async fn denied_auth_does_not_cancel_run_that_left_the_gate_before_store_transit
             kind: AuthInteractionRejectionKind::StaleAuth
         }
     ));
-    assert_eq!(flow_manager.cancellations().len(), 1);
+    assert!(
+        flow_manager.cancellations().is_empty(),
+        "a run that already left the gate must keep its auth flow usable"
+    );
     assert_eq!(coordinator.status(), TurnStatus::Queued);
     assert_eq!(coordinator.cancellations().len(), 1);
 }

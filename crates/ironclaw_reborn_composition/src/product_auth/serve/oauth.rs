@@ -722,17 +722,18 @@ async fn oauth_provider_callback_attempt(
         ));
     }
 
-    if query
-        .error
-        .as_deref()
-        .is_some_and(|value| !value.is_empty())
-    {
+    if let Some(provider_error) = query.error.as_deref().filter(|value| !value.is_empty()) {
+        let outcome = if is_explicit_oauth_denial(provider_error) {
+            RebornOAuthCallbackOutcome::ProviderDenied
+        } else {
+            RebornOAuthCallbackOutcome::Malformed
+        };
         let response = run_with_backend_timeout(state.product_auth.handle_oauth_callback(
             RebornOAuthCallbackRequest {
                 scope: callback_scope.clone(),
                 flow_id,
                 opaque_state_hash: state_hash.clone(),
-                outcome: RebornOAuthCallbackOutcome::ProviderDenied,
+                outcome,
             },
         ))
         .await;
@@ -1128,12 +1129,12 @@ pub(super) async fn callback_outcome_from_query(
     callback_state: Option<&DcrOAuthCallbackState>,
     query: &OAuthCallbackQuery,
 ) -> Result<RebornOAuthCallbackOutcome, ProductAuthRouteFailure> {
-    if query
-        .error
-        .as_deref()
-        .is_some_and(|value| !value.is_empty())
-    {
-        return Ok(RebornOAuthCallbackOutcome::ProviderDenied);
+    if let Some(provider_error) = query.error.as_deref().filter(|value| !value.is_empty()) {
+        return Ok(if is_explicit_oauth_denial(provider_error) {
+            RebornOAuthCallbackOutcome::ProviderDenied
+        } else {
+            RebornOAuthCallbackOutcome::Malformed
+        });
     }
 
     let provider = match query.provider.as_deref() {
@@ -1186,6 +1187,10 @@ pub(super) async fn callback_outcome_from_query(
             scopes,
         },
     })
+}
+
+fn is_explicit_oauth_denial(provider_error: &str) -> bool {
+    provider_error == "access_denied"
 }
 
 async fn pkce_verifier_for_known_callback_flow(

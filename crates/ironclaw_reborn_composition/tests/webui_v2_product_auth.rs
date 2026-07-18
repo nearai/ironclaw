@@ -1785,6 +1785,29 @@ async fn product_auth_google_oauth_callback_provider_denial_is_sanitized() {
 }
 
 #[tokio::test]
+async fn product_auth_google_oauth_callback_non_denial_error_is_malformed() {
+    let (app, dispatcher) = build_app_with_google_oauth();
+    let (_, state) = start_google_oauth_flow(&app).await;
+
+    let response = app
+        .oneshot(callback_request(format!(
+            "/api/reborn/product-auth/oauth/google/callback?state={state}&error=temporarily_unavailable"
+        )))
+        .await
+        .expect("oneshot");
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let body = read_body_string(response).await;
+    assert!(body.contains("\"code\":\"malformed_callback\""));
+    assert!(!body.contains(&state));
+    assert!(!body.contains("temporarily_unavailable"));
+    assert!(
+        dispatcher.events().is_empty(),
+        "provider failures must not dispatch a denial continuation"
+    );
+}
+
+#[tokio::test]
 async fn product_auth_google_oauth_callback_unknown_state_is_sanitized() {
     let (app, dispatcher) = build_app_with_google_oauth();
 
@@ -1865,6 +1888,39 @@ async fn product_auth_callback_provider_denial_is_sanitized() {
     assert!(!body.contains("provider-denied-state"));
     assert!(!body.contains("access_denied"));
     assert!(dispatcher.events().is_empty());
+}
+
+#[tokio::test]
+async fn product_auth_callback_non_denial_error_is_malformed() {
+    let (app, dispatcher) = build_app_with_product_auth();
+    let started = start_oauth_flow(
+        &app,
+        "provider-failure-state",
+        "provider-failure-pkce",
+        json!({}),
+    )
+    .await;
+
+    let response = app
+        .oneshot(callback_request(callback_uri(
+            &started.flow_id,
+            &started.invocation_id,
+            USER,
+            "provider-failure-state",
+            "&error=temporarily_unavailable",
+        )))
+        .await
+        .expect("oneshot");
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let body = read_body_string(response).await;
+    assert!(body.contains("\"code\":\"malformed_callback\""));
+    assert!(!body.contains("provider-failure-state"));
+    assert!(!body.contains("temporarily_unavailable"));
+    assert!(
+        dispatcher.events().is_empty(),
+        "provider failures must not dispatch a denial continuation"
+    );
 }
 
 #[tokio::test]

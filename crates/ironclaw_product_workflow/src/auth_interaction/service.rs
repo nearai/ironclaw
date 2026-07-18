@@ -264,12 +264,30 @@ impl DefaultAuthInteractionService {
         gate: AuthGateRecord,
         run_id: TurnRunId,
     ) -> Result<ResolveAuthInteractionResponse, ProductWorkflowError> {
-        self.cancel_auth_flow_if_active(&gate).await?;
+        if gate.status() == AuthFlowStatus::Completed {
+            return Err(auth_rejected(AuthInteractionRejectionKind::StaleAuth));
+        }
+        match self.turn_gate_state(&request, run_id).await? {
+            BlockedGateState::ParkedOnGate => {}
+            BlockedGateState::NotParkedOnGate => {
+                return Err(auth_rejected(AuthInteractionRejectionKind::StaleAuth));
+            }
+        }
         let precondition = CancelRunPrecondition::BlockedAuthGate {
             gate_ref: gate.gate_ref().clone(),
         };
-        self.cancel_auth_run(request, run_id, Some(precondition))
-            .await
+        let response = self
+            .cancel_auth_run(request, run_id, Some(precondition))
+            .await?;
+        if let Err(error) = self.cancel_auth_flow_if_active(&gate).await {
+            tracing::warn!(
+                flow_id = %gate.flow().id,
+                run_id = %run_id,
+                ?error,
+                "auth run was canceled but auth-flow cleanup remains pending"
+            );
+        }
+        Ok(response)
     }
 
     async fn cancel_auth_run(

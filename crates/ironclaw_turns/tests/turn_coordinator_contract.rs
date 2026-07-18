@@ -8442,6 +8442,92 @@ async fn conditional_cancel_accepts_each_generic_cancellable_gate_kind() {
     }
 }
 
+#[tokio::test]
+async fn conditional_auth_cancel_with_fresh_key_replays_only_for_the_same_gate() {
+    let (coordinator, store) = coordinator();
+    let thread = "thread-conditional-auth-cancel-replay";
+    let run_id = accepted_run_id(
+        &coordinator
+            .submit_turn(submit_request(
+                thread,
+                "idem-conditional-auth-replay-submit",
+            ))
+            .await
+            .unwrap(),
+    );
+    let runner_id = TurnRunnerId::new();
+    let lease_token = TurnLeaseToken::new();
+    store
+        .claim_next_run(ClaimRunRequest {
+            runner_id,
+            lease_token,
+            scope_filter: Some(scope(thread)),
+        })
+        .await
+        .unwrap()
+        .unwrap();
+    let gate_ref = GateRef::new("gate:conditional-auth-cancel-replay").unwrap();
+    store
+        .block_run(BlockRunRequest {
+            run_id,
+            runner_id,
+            lease_token,
+            checkpoint_id: TurnCheckpointId::new(),
+            state_ref: block_state_ref(),
+            reason: BlockedReason::Auth {
+                gate_ref: gate_ref.clone(),
+                credential_requirements: Vec::new(),
+            },
+        })
+        .await
+        .unwrap();
+
+    coordinator
+        .cancel_run(CancelRunRequest {
+            scope: scope(thread),
+            actor: actor(),
+            run_id,
+            precondition: Some(CancelRunPrecondition::BlockedAuthGate {
+                gate_ref: gate_ref.clone(),
+            }),
+            reason: SanitizedCancelReason::UserRequested,
+            idempotency_key: IdempotencyKey::new("idem-conditional-auth-replay-first").unwrap(),
+        })
+        .await
+        .unwrap();
+
+    let replay = coordinator
+        .cancel_run(CancelRunRequest {
+            scope: scope(thread),
+            actor: actor(),
+            run_id,
+            precondition: Some(CancelRunPrecondition::BlockedAuthGate {
+                gate_ref: gate_ref.clone(),
+            }),
+            reason: SanitizedCancelReason::UserRequested,
+            idempotency_key: IdempotencyKey::new("idem-conditional-auth-replay-fresh").unwrap(),
+        })
+        .await
+        .expect("fresh idempotency key must converge on the matching cancelled gate");
+    assert_eq!(replay.status, TurnStatus::Cancelled);
+    assert!(replay.already_terminal);
+
+    let mismatch = coordinator
+        .cancel_run(CancelRunRequest {
+            scope: scope(thread),
+            actor: actor(),
+            run_id,
+            precondition: Some(CancelRunPrecondition::BlockedAuthGate {
+                gate_ref: GateRef::new("gate:different-auth-cancel-replay").unwrap(),
+            }),
+            reason: SanitizedCancelReason::UserRequested,
+            idempotency_key: IdempotencyKey::new("idem-conditional-auth-replay-mismatch").unwrap(),
+        })
+        .await
+        .expect_err("a fresh key for a different gate must not replay cancellation");
+    assert!(matches!(mismatch, TurnError::InvalidRequest { .. }));
+}
+
 // Persistence path: resume_turn with resume_disposition writes the field onto the run
 // record, and claim_next_run returns a TurnRunState that carries the same value.
 #[tokio::test]

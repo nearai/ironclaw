@@ -2989,6 +2989,28 @@ impl Inner {
             if record.actor != request.actor {
                 return Err(TurnError::Unauthorized);
             }
+            if record.status.get().is_terminal() {
+                if let Some(precondition) = request.precondition.as_ref() {
+                    if record.status.get() != TurnStatus::Cancelled {
+                        return Err(TurnError::InvalidTransition {
+                            from: record.status.get(),
+                            to: TurnStatus::Cancelled,
+                        });
+                    }
+                    if record.gate_ref.as_ref() != Some(precondition.gate_ref()) {
+                        return Err(TurnError::InvalidRequest {
+                            reason: "gate cancellation reference mismatch".to_string(),
+                        });
+                    }
+                }
+                return Ok(CancelRunResponse {
+                    run_id: record.run_id,
+                    status: record.status.get(),
+                    event_cursor: record.event_cursor,
+                    already_terminal: true,
+                    actor: Some(record.actor.clone()),
+                });
+            }
             if let Some(precondition) = request.precondition.as_ref() {
                 if record.status.get() != precondition.required_status() {
                     return Err(TurnError::InvalidTransition {
@@ -3001,15 +3023,6 @@ impl Inner {
                         reason: "gate cancellation reference mismatch".to_string(),
                     });
                 }
-            }
-            if record.status.get().is_terminal() {
-                return Ok(CancelRunResponse {
-                    run_id: record.run_id,
-                    status: record.status.get(),
-                    event_cursor: record.event_cursor,
-                    already_terminal: true,
-                    actor: Some(record.actor.clone()),
-                });
             }
             let (next_status, event_kind) = match record.status.get() {
                 TurnStatus::Queued
