@@ -85,7 +85,7 @@ mod tests {
     use super::*;
 
     fn err_ref() -> ErrRef {
-        ErrRef::new("inv-01HZ0000000000000000000000").unwrap()
+        ErrRef::parse("01890a5d-ac96-774b-bcce-b302099a8057").unwrap()
     }
 
     #[test]
@@ -94,7 +94,7 @@ mod tests {
         let json = serde_json::to_value(&failure).unwrap();
         assert_eq!(
             json,
-            serde_json::json!({ "uncertain": "inv-01HZ0000000000000000000000" })
+            serde_json::json!({ "uncertain": "01890a5d-ac96-774b-bcce-b302099a8057" })
         );
         let back: HostFailure = serde_json::from_value(json).unwrap();
         assert_eq!(back, failure);
@@ -126,9 +126,9 @@ mod tests {
     #[test]
     fn err_ref_is_reachable_from_every_class() {
         let r = err_ref();
-        assert_eq!(HostFailure::Transient(r.clone()).err_ref(), &r);
-        assert_eq!(HostFailure::Permanent(r.clone()).err_ref(), &r);
-        assert_eq!(HostFailure::Uncertain(r.clone()).err_ref(), &r);
+        assert_eq!(HostFailure::Transient(r).err_ref(), &r);
+        assert_eq!(HostFailure::Permanent(r).err_ref(), &r);
+        assert_eq!(HostFailure::Uncertain(r).err_ref(), &r);
     }
 
     #[test]
@@ -136,6 +136,31 @@ mod tests {
         // The Display is a sanitized boundary string: class + opaque ref only.
         let shown = HostFailure::Permanent(err_ref()).to_string();
         assert!(shown.contains("permanent"));
-        assert!(shown.contains("inv-01HZ0000000000000000000000"));
+        assert!(shown.contains("01890a5d-ac96-774b-bcce-b302099a8057"));
+    }
+
+    #[test]
+    fn err_ref_structurally_rejects_raw_error_text() {
+        // Regression (review finding on the C.2 slice): `HostFailure` serializes
+        // and Displays the ref across the sanitized error boundary, so `ErrRef`
+        // must be constructible only as a UUID — a call site cannot smuggle a
+        // raw backend error string (or a secret) through it.
+        for raw in [
+            "connection refused: postgres://user:hunter2@db:5432",
+            "thread 'main' panicked at src/lib.rs:42",
+            "inv-01HZ0000000000000000000000",
+            "",
+        ] {
+            assert!(
+                ErrRef::parse(raw).is_err(),
+                "raw text must not become an ErrRef: {raw:?}"
+            );
+        }
+        // The sanctioned constructions: host-minted, or carrying an existing
+        // host id's UUID verbatim.
+        let minted = ErrRef::new();
+        assert_eq!(ErrRef::parse(&minted.to_string()).unwrap(), minted);
+        let inv = crate::InvocationId::new();
+        assert_eq!(ErrRef::from_uuid(inv.as_uuid()).as_uuid(), inv.as_uuid());
     }
 }

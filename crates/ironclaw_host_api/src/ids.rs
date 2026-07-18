@@ -232,10 +232,12 @@ string_id!(RoutineId, "routine", validate_name_segment);
 // handle to a durably-stored host-error record. The recoverability *class* rides
 // the `HostFailure` variant (transient/permanent/uncertain); the raw cause stays
 // host-owned and is retrieved only through this ref — the "sanitized category
-// plus opaque invocation ID for correlation" contract (error-handling.md). Uses
-// scope-id validation (bounded, no path separators / control chars) so it can
-// carry an existing id (invocation/correlation) verbatim.
-string_id!(ErrRef, "err_ref", validate_scope_id);
+// plus opaque invocation ID for correlation" contract (error-handling.md).
+// Deliberately a UUID id, NOT a validated string: `HostFailure` serializes and
+// Displays this value across the sanitized error boundary, so construction must
+// be structurally incapable of smuggling raw backend/error text (an existing
+// invocation/correlation id is carried via `ErrRef::from_uuid(id.as_uuid())`).
+uuid_id!(ErrRef);
 
 /// Provider-facing tool/function name.
 ///
