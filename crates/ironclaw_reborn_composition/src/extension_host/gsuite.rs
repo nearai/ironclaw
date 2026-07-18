@@ -164,9 +164,9 @@ impl FirstPartyCapabilityHandler for GsuiteFirstPartyHandler {
 /// survives intact to the model.
 fn google_oauth_not_configured_error() -> FirstPartyCapabilityError {
     let text = format!(
-        "Google Workspace access is not configured on this ironclaw-reborn instance.\n\n{}\n\n\
-         The service restarts automatically after `config set`; once configured, ask again.",
-        ironclaw_reborn_config::google_remediation_text()
+        "Google Workspace access is not configured on this ironclaw-reborn instance.\n\n{}\n\n{}",
+        ironclaw_reborn_config::google_remediation_text(),
+        ironclaw_reborn_config::apply_step_text()
     );
     FirstPartyCapabilityError::dispatch_with_diagnostic(
         RuntimeDispatchErrorKind::OperationFailed,
@@ -296,12 +296,14 @@ fn gsuite_error(
                         "Google OAuth is configured but the provider rejected the credentials"
                             .to_string(),
                     ),
-                    "Google OAuth is configured but the provider rejected the request while \
-                     exchanging or refreshing the token (e.g. invalid_client). Re-run \
-                     `ironclaw-reborn config set google.client_secret` to update the client \
-                     secret, and confirm the client id/secret at \
-                     https://console.cloud.google.com/apis/credentials — the service restarts \
-                     automatically after `config set`.",
+                    format!(
+                        "Google OAuth is configured but the provider rejected the request \
+                         while exchanging or refreshing the token (e.g. invalid_client). \
+                         Re-run `ironclaw-reborn config set google.client_secret` to update \
+                         the client secret, and confirm the client id/secret at \
+                         https://console.cloud.google.com/apis/credentials. {}",
+                        ironclaw_reborn_config::apply_step_text()
+                    ),
                 )
             }
             _ => FirstPartyCapabilityError::new(error.kind()),

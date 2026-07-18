@@ -29,9 +29,25 @@ pub fn google_remediation_text() -> String {
         .to_string()
 }
 
+/// Canonical "apply the change" follow-up sentence: `config set` never
+/// restarts the service itself (see the module-level design note in
+/// `google_remediation_text` and `ironclaw_reborn_cli::commands::config::set`),
+/// so every surface that tells a caller "go configure this" must also tell
+/// them the explicit next step rather than implying it happens automatically.
+pub fn apply_step_text() -> &'static str {
+    "Run `ironclaw-reborn service restart` to apply the change, then ask again."
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn apply_step_text_names_the_explicit_restart_command() {
+        let text = apply_step_text();
+        assert!(text.contains("ironclaw-reborn service restart"));
+        assert!(!text.contains("automatically"));
+    }
 
     #[test]
     fn remediation_text_points_at_the_right_surfaces() {
