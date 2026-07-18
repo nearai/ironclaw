@@ -12,7 +12,7 @@ use ironclaw_extensions::{
     CapabilityManifest, CapabilityVisibility, ExtensionManifest, ExtensionPackage,
     ExtensionRegistry, ExtensionRuntime, MANIFEST_SCHEMA_VERSION, ManifestSource,
 };
-use ironclaw_filesystem::LocalFilesystem;
+use ironclaw_filesystem::DiskFilesystem;
 use ironclaw_host_api::*;
 use ironclaw_host_runtime::{
     CapabilitySurfaceVersion, FirstPartyCapabilityError, FirstPartyCapabilityHandler,
@@ -25,7 +25,7 @@ use ironclaw_network::{
     NetworkHttpEgress, NetworkHttpError, NetworkHttpRequest, NetworkHttpResponse, NetworkUsage,
 };
 use ironclaw_resources::{InMemoryResourceGovernor, ResourceAccount, ResourceTally};
-use ironclaw_run_state::{InMemoryRunStateStore, RunStateStore, RunStatus};
+use ironclaw_run_state::{RunStateStore, RunStatus};
 use ironclaw_secrets::{InMemorySecretStore, SecretMaterial, SecretStore};
 use ironclaw_trust::{
     AdminConfig, AdminEntry, AuthorityCeiling, EffectiveTrustClass, HostTrustAssignment,
@@ -43,14 +43,14 @@ async fn host_runtime_invokes_first_party_handler_through_capability_host() {
     let first_party =
         FirstPartyCapabilityRegistry::new().with_handler(capability_id(), Arc::clone(&handler));
     let events = InMemoryEventSink::new();
-    let run_state = Arc::new(InMemoryRunStateStore::new());
+    let run_state = Arc::new(ironclaw_run_state::in_memory_backed_run_state_store());
     let governor = Arc::new(InMemoryResourceGovernor::new());
     let runtime = HostRuntimeServices::new(
         Arc::new(first_party_registry()),
-        Arc::new(LocalFilesystem::new()),
+        Arc::new(DiskFilesystem::new()),
         Arc::clone(&governor),
         Arc::new(GrantAuthorizer::new()),
-        ironclaw_processes::ProcessServices::in_memory(),
+        ironclaw_processes::in_memory_backed_process_services(),
         CapabilitySurfaceVersion::new("surface-v1").unwrap(),
     )
     .with_first_party_capabilities(Arc::new(first_party))
@@ -63,10 +63,7 @@ async fn host_runtime_invokes_first_party_handler_through_capability_host() {
     });
     let scope = context.resource_scope.clone();
     let invocation_id = context.invocation_id;
-    let estimate = ResourceEstimate {
-        output_bytes: Some(1024),
-        ..ResourceEstimate::default()
-    };
+    let estimate = ResourceEstimate::default().set_output_bytes(1024);
     let input = json!({"message":"status"});
 
     let outcome = runtime
@@ -129,10 +126,10 @@ async fn first_party_handler_uses_staged_secret_through_production_host_egress()
             EffectKind::Network,
             EffectKind::UseSecret,
         ])),
-        Arc::new(LocalFilesystem::new()),
+        Arc::new(DiskFilesystem::new()),
         Arc::new(InMemoryResourceGovernor::new()),
         Arc::new(GrantAuthorizer::new()),
-        ironclaw_processes::ProcessServices::in_memory(),
+        ironclaw_processes::in_memory_backed_process_services(),
         CapabilitySurfaceVersion::new("surface-v1").unwrap(),
     )
     .with_secret_store(Arc::clone(&secret_store))
@@ -151,11 +148,9 @@ async fn first_party_handler_uses_staged_secret_through_production_host_egress()
         .invoke_capability(RuntimeCapabilityRequest::new(
             context,
             capability_id(),
-            ResourceEstimate {
-                network_egress_bytes: Some(100),
-                output_bytes: Some(1024),
-                ..ResourceEstimate::default()
-            },
+            ResourceEstimate::default()
+                .set_network_egress_bytes(100)
+                .set_output_bytes(1024),
             json!({"url":"https://api.example.test/v1/native"}),
             trust_decision(),
         ))
@@ -364,10 +359,10 @@ async fn http_error_kind_maps_all_reason_codes() {
 async fn production_wiring_rejects_first_party_registry_without_declared_handler() {
     let services = HostRuntimeServices::new(
         Arc::new(first_party_registry()),
-        Arc::new(LocalFilesystem::new()),
+        Arc::new(DiskFilesystem::new()),
         Arc::new(InMemoryResourceGovernor::new()),
         Arc::new(GrantAuthorizer::new()),
-        ironclaw_processes::ProcessServices::in_memory(),
+        ironclaw_processes::in_memory_backed_process_services(),
         CapabilitySurfaceVersion::new("surface-v1").unwrap(),
     )
     .with_first_party_capabilities(Arc::new(FirstPartyCapabilityRegistry::new()));
@@ -389,10 +384,10 @@ async fn production_wiring_rejects_first_party_registry_without_declared_handler
 async fn host_runtime_health_reports_missing_first_party_backend_for_empty_registry() {
     let runtime = HostRuntimeServices::new(
         Arc::new(first_party_registry()),
-        Arc::new(LocalFilesystem::new()),
+        Arc::new(DiskFilesystem::new()),
         Arc::new(InMemoryResourceGovernor::new()),
         Arc::new(GrantAuthorizer::new()),
-        ironclaw_processes::ProcessServices::in_memory(),
+        ironclaw_processes::in_memory_backed_process_services(),
         CapabilitySurfaceVersion::new("surface-v1").unwrap(),
     )
     .with_first_party_capabilities(Arc::new(FirstPartyCapabilityRegistry::new()))
@@ -412,19 +407,18 @@ async fn host_runtime_health_reports_missing_first_party_backend_for_empty_regis
 
 #[tokio::test]
 async fn first_party_handler_error_reconciles_reported_usage_after_side_effect() {
-    let handler = Arc::new(FailingFirstPartyHandler::new(ResourceUsage {
-        network_egress_bytes: 77,
-        ..ResourceUsage::default()
-    }));
+    let handler = Arc::new(FailingFirstPartyHandler::new(
+        ResourceUsage::default().set_network_egress_bytes(77),
+    ));
     let first_party =
         FirstPartyCapabilityRegistry::new().with_handler(capability_id(), Arc::clone(&handler));
     let governor = Arc::new(InMemoryResourceGovernor::new());
     let runtime = HostRuntimeServices::new(
         Arc::new(first_party_registry()),
-        Arc::new(LocalFilesystem::new()),
+        Arc::new(DiskFilesystem::new()),
         Arc::clone(&governor),
         Arc::new(GrantAuthorizer::new()),
-        ironclaw_processes::ProcessServices::in_memory(),
+        ironclaw_processes::in_memory_backed_process_services(),
         CapabilitySurfaceVersion::new("surface-v1").unwrap(),
     )
     .with_first_party_capabilities(Arc::new(first_party))
@@ -439,10 +433,7 @@ async fn first_party_handler_error_reconciles_reported_usage_after_side_effect()
         .invoke_capability(RuntimeCapabilityRequest::new(
             context,
             capability_id(),
-            ResourceEstimate {
-                network_egress_bytes: Some(100),
-                ..ResourceEstimate::default()
-            },
+            ResourceEstimate::default().set_network_egress_bytes(100),
             json!({"message":"status"}),
             trust_decision(),
         ))
@@ -463,14 +454,14 @@ async fn first_party_handler_panic_fails_closed_and_releases_reservation() {
     let first_party =
         FirstPartyCapabilityRegistry::new().with_handler(capability_id(), Arc::clone(&handler));
     let events = InMemoryEventSink::new();
-    let run_state = Arc::new(InMemoryRunStateStore::new());
+    let run_state = Arc::new(ironclaw_run_state::in_memory_backed_run_state_store());
     let governor = Arc::new(InMemoryResourceGovernor::new());
     let runtime = HostRuntimeServices::new(
         Arc::new(first_party_registry()),
-        Arc::new(LocalFilesystem::new()),
+        Arc::new(DiskFilesystem::new()),
         Arc::clone(&governor),
         Arc::new(GrantAuthorizer::new()),
-        ironclaw_processes::ProcessServices::in_memory(),
+        ironclaw_processes::in_memory_backed_process_services(),
         CapabilitySurfaceVersion::new("surface-v1").unwrap(),
     )
     .with_first_party_capabilities(Arc::new(first_party))
@@ -488,10 +479,7 @@ async fn first_party_handler_panic_fails_closed_and_releases_reservation() {
     let outcome = AssertUnwindSafe(runtime.invoke_capability(RuntimeCapabilityRequest::new(
         context,
         capability_id(),
-        ResourceEstimate {
-            network_egress_bytes: Some(100),
-            ..ResourceEstimate::default()
-        },
+        ResourceEstimate::default().set_network_egress_bytes(100),
         json!({"message":"status"}),
         trust_decision(),
     )))
@@ -523,10 +511,10 @@ async fn first_party_missing_handler_fails_closed_without_side_effect_handler() 
     let events = InMemoryEventSink::new();
     let runtime = HostRuntimeServices::new(
         Arc::new(first_party_registry()),
-        Arc::new(LocalFilesystem::new()),
+        Arc::new(DiskFilesystem::new()),
         Arc::new(InMemoryResourceGovernor::new()),
         Arc::new(GrantAuthorizer::new()),
-        ironclaw_processes::ProcessServices::in_memory(),
+        ironclaw_processes::in_memory_backed_process_services(),
         CapabilitySurfaceVersion::new("surface-v1").unwrap(),
     )
     .with_first_party_capabilities(Arc::new(first_party))
@@ -708,6 +696,7 @@ fn first_party_registry_with_effects(effects: Vec<EffectKind>) -> ExtensionRegis
                 ),
                 required_host_ports: Vec::new(),
                 runtime_credentials: Vec::new(),
+                network_targets: Vec::new(),
                 resource_profile: None,
             }],
             hooks: Vec::new(),
@@ -771,11 +760,9 @@ impl FirstPartyCapabilityHandler for HttpFirstPartyHandler {
             })?;
         Ok(FirstPartyCapabilityResult::new(
             json!({"status": response.status}),
-            ResourceUsage {
-                network_egress_bytes: response.request_bytes,
-                output_bytes: 14,
-                ..ResourceUsage::default()
-            },
+            ResourceUsage::default()
+                .set_network_egress_bytes(response.request_bytes)
+                .set_output_bytes(14),
         ))
     }
 }
@@ -797,10 +784,10 @@ fn http_error_kind(reason: RuntimeHttpEgressReasonCode) -> RuntimeDispatchErrorK
 fn http_first_party_services(
     handle: &SecretHandle,
 ) -> HostRuntimeServices<
-    LocalFilesystem,
+    DiskFilesystem,
     InMemoryResourceGovernor,
-    ironclaw_processes::InMemoryProcessStore,
-    ironclaw_processes::InMemoryProcessResultStore,
+    ironclaw_processes::FilesystemProcessStore<ironclaw_filesystem::InMemoryBackend>,
+    ironclaw_processes::FilesystemProcessResultStore<ironclaw_filesystem::InMemoryBackend>,
 > {
     let handler = Arc::new(HttpFirstPartyHandler {
         handle: handle.clone(),
@@ -810,10 +797,10 @@ fn http_first_party_services(
 
     HostRuntimeServices::new(
         Arc::new(first_party_http_registry()),
-        Arc::new(LocalFilesystem::new()),
+        Arc::new(DiskFilesystem::new()),
         Arc::new(InMemoryResourceGovernor::new()),
         Arc::new(GrantAuthorizer::new()),
-        ironclaw_processes::ProcessServices::in_memory(),
+        ironclaw_processes::in_memory_backed_process_services(),
         CapabilitySurfaceVersion::new("surface-v1").unwrap(),
     )
     .with_first_party_capabilities(Arc::new(first_party))
@@ -828,11 +815,9 @@ async fn invoke_http_fixture(
         .invoke_capability(RuntimeCapabilityRequest::new(
             context,
             capability_id(),
-            ResourceEstimate {
-                network_egress_bytes: Some(100),
-                output_bytes: Some(1024),
-                ..ResourceEstimate::default()
-            },
+            ResourceEstimate::default()
+                .set_network_egress_bytes(100)
+                .set_output_bytes(1024),
             input,
             trust_decision(),
         ))

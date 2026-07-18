@@ -20,12 +20,10 @@ async fn mcp_runtime_reserves_calls_adapter_and_reconciles_success() {
     governor
         .set_limit(
             account.clone(),
-            ResourceLimits {
-                max_concurrency_slots: Some(1),
-                max_process_count: Some(1),
-                max_output_bytes: Some(10_000),
-                ..ResourceLimits::default()
-            },
+            ResourceLimits::default()
+                .set_max_concurrency_slots(1)
+                .set_max_process_count(1)
+                .set_max_output_bytes(10_000),
         )
         .unwrap();
 
@@ -36,12 +34,10 @@ async fn mcp_runtime_reserves_calls_adapter_and_reconciles_success() {
                 package: &package,
                 capability_id: &CapabilityId::new("github-mcp.search").unwrap(),
                 scope,
-                estimate: ResourceEstimate {
-                    concurrency_slots: Some(1),
-                    process_count: Some(1),
-                    output_bytes: Some(10_000),
-                    ..ResourceEstimate::default()
-                },
+                estimate: ResourceEstimate::default()
+                    .set_concurrency_slots(1)
+                    .set_process_count(1)
+                    .set_output_bytes(10_000),
                 resource_reservation: None,
                 invocation: McpInvocation {
                     input: json!({"query": "ironclaw"}),
@@ -1071,10 +1067,7 @@ async fn mcp_runtime_denies_budget_before_adapter_call() {
     governor
         .set_limit(
             account.clone(),
-            ResourceLimits {
-                max_output_bytes: Some(1),
-                ..ResourceLimits::default()
-            },
+            ResourceLimits::default().set_max_output_bytes(1),
         )
         .unwrap();
 
@@ -1085,10 +1078,7 @@ async fn mcp_runtime_denies_budget_before_adapter_call() {
                 package: &package,
                 capability_id: &CapabilityId::new("github-mcp.search").unwrap(),
                 scope,
-                estimate: ResourceEstimate {
-                    output_bytes: Some(10_000),
-                    ..ResourceEstimate::default()
-                },
+                estimate: ResourceEstimate::default().set_output_bytes(10_000),
                 resource_reservation: None,
                 invocation: McpInvocation { input: json!({}) },
             },
@@ -1117,10 +1107,7 @@ async fn mcp_runtime_releases_reservation_when_adapter_fails() {
                 package: &package,
                 capability_id: &CapabilityId::new("github-mcp.search").unwrap(),
                 scope,
-                estimate: ResourceEstimate {
-                    concurrency_slots: Some(1),
-                    ..ResourceEstimate::default()
-                },
+                estimate: ResourceEstimate::default().set_concurrency_slots(1),
                 resource_reservation: None,
                 invocation: McpInvocation { input: json!({}) },
             },
@@ -1148,10 +1135,7 @@ async fn mcp_runtime_preserves_adapter_error_when_release_cleanup_fails() {
                 package: &package,
                 capability_id: &CapabilityId::new("github-mcp.search").unwrap(),
                 scope: sample_scope(),
-                estimate: ResourceEstimate {
-                    concurrency_slots: Some(1),
-                    ..ResourceEstimate::default()
-                },
+                estimate: ResourceEstimate::default().set_concurrency_slots(1),
                 resource_reservation: None,
                 invocation: McpInvocation { input: json!({}) },
             },
@@ -1174,10 +1158,7 @@ async fn mcp_runtime_rejects_non_mcp_or_undeclared_capability_before_reserving()
     governor
         .set_limit(
             account.clone(),
-            ResourceLimits {
-                max_concurrency_slots: Some(0),
-                ..ResourceLimits::default()
-            },
+            ResourceLimits::default().set_max_concurrency_slots(0),
         )
         .unwrap();
 
@@ -1188,10 +1169,7 @@ async fn mcp_runtime_rejects_non_mcp_or_undeclared_capability_before_reserving()
                 package: &non_mcp,
                 capability_id: &CapabilityId::new("script.echo").unwrap(),
                 scope: scope.clone(),
-                estimate: ResourceEstimate {
-                    concurrency_slots: Some(1),
-                    ..ResourceEstimate::default()
-                },
+                estimate: ResourceEstimate::default().set_concurrency_slots(1),
                 resource_reservation: None,
                 invocation: McpInvocation { input: json!({}) },
             },
@@ -1213,10 +1191,7 @@ async fn mcp_runtime_rejects_non_mcp_or_undeclared_capability_before_reserving()
                 package: &mcp,
                 capability_id: &CapabilityId::new("github-mcp.missing").unwrap(),
                 scope,
-                estimate: ResourceEstimate {
-                    concurrency_slots: Some(1),
-                    ..ResourceEstimate::default()
-                },
+                estimate: ResourceEstimate::default().set_concurrency_slots(1),
                 resource_reservation: None,
                 invocation: McpInvocation { input: json!({}) },
             },
@@ -1254,11 +1229,9 @@ async fn mcp_runtime_enforces_output_limit_and_releases_reservation() {
                 package: &package,
                 capability_id: &CapabilityId::new("github-mcp.search").unwrap(),
                 scope,
-                estimate: ResourceEstimate {
-                    concurrency_slots: Some(1),
-                    output_bytes: Some(10_000),
-                    ..ResourceEstimate::default()
-                },
+                estimate: ResourceEstimate::default()
+                    .set_concurrency_slots(1)
+                    .set_output_bytes(10_000),
                 resource_reservation: None,
                 invocation: McpInvocation { input: json!({}) },
             },
@@ -1296,11 +1269,9 @@ async fn mcp_runtime_can_enforce_client_reported_output_size_without_serializing
                 package: &package,
                 capability_id: &CapabilityId::new("github-mcp.search").unwrap(),
                 scope,
-                estimate: ResourceEstimate {
-                    concurrency_slots: Some(1),
-                    output_bytes: Some(10_000),
-                    ..ResourceEstimate::default()
-                },
+                estimate: ResourceEstimate::default()
+                    .set_concurrency_slots(1)
+                    .set_output_bytes(10_000),
                 resource_reservation: None,
                 invocation: McpInvocation { input: json!({}) },
             },
@@ -1341,11 +1312,9 @@ async fn mcp_runtime_rejects_output_when_adapter_under_reports_size() {
                 package: &package,
                 capability_id: &CapabilityId::new("github-mcp.search").unwrap(),
                 scope,
-                estimate: ResourceEstimate {
-                    concurrency_slots: Some(1),
-                    output_bytes: Some(10_000),
-                    ..ResourceEstimate::default()
-                },
+                estimate: ResourceEstimate::default()
+                    .set_concurrency_slots(1)
+                    .set_output_bytes(10_000),
                 resource_reservation: None,
                 invocation: McpInvocation { input: json!({}) },
             },

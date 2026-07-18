@@ -26,11 +26,9 @@ async fn dispatcher_routes_wasm_capability_through_registered_adapter() {
     governor
         .set_limit(
             account.clone(),
-            ResourceLimits {
-                max_concurrency_slots: Some(1),
-                max_output_bytes: Some(10_000),
-                ..ResourceLimits::default()
-            },
+            ResourceLimits::default()
+                .set_max_concurrency_slots(1)
+                .set_max_output_bytes(10_000),
         )
         .unwrap();
 
@@ -38,13 +36,13 @@ async fn dispatcher_routes_wasm_capability_through_registered_adapter() {
         .with_runtime_adapter(RuntimeKind::Wasm, &adapter);
     let result = dispatcher
         .dispatch_json(CapabilityDispatchRequest {
+            run_id: None,
             capability_id: CapabilityId::new("echo.say").unwrap(),
             scope,
-            estimate: ResourceEstimate {
-                concurrency_slots: Some(1),
-                output_bytes: Some(10_000),
-                ..ResourceEstimate::default()
-            },
+            authenticated_actor_user_id: None,
+            estimate: ResourceEstimate::default()
+                .set_concurrency_slots(1)
+                .set_output_bytes(10_000),
             mounts: None,
             resource_reservation: None,
             input: json!({"message": "hello dispatcher"}),
@@ -90,12 +88,10 @@ async fn dispatcher_routes_script_capability_through_registered_adapter() {
     governor
         .set_limit(
             account.clone(),
-            ResourceLimits {
-                max_concurrency_slots: Some(1),
-                max_process_count: Some(10),
-                max_output_bytes: Some(10_000),
-                ..ResourceLimits::default()
-            },
+            ResourceLimits::default()
+                .set_max_concurrency_slots(1)
+                .set_max_process_count(10)
+                .set_max_output_bytes(10_000),
         )
         .unwrap();
 
@@ -103,14 +99,14 @@ async fn dispatcher_routes_script_capability_through_registered_adapter() {
         .with_runtime_adapter(RuntimeKind::Script, &adapter);
     let result = dispatcher
         .dispatch_json(CapabilityDispatchRequest {
+            run_id: None,
             capability_id: CapabilityId::new("script.echo").unwrap(),
             scope,
-            estimate: ResourceEstimate {
-                concurrency_slots: Some(1),
-                process_count: Some(1),
-                output_bytes: Some(10_000),
-                ..ResourceEstimate::default()
-            },
+            authenticated_actor_user_id: None,
+            estimate: ResourceEstimate::default()
+                .set_concurrency_slots(1)
+                .set_process_count(1)
+                .set_output_bytes(10_000),
             mounts: None,
             resource_reservation: None,
             input: json!({"message": "hello script dispatcher"}),
@@ -144,12 +140,10 @@ async fn dispatcher_redacts_runtime_adapter_failure_details() {
     governor
         .set_limit(
             ResourceAccount::tenant(scope.tenant_id.clone()),
-            ResourceLimits {
-                max_concurrency_slots: Some(1),
-                max_process_count: Some(10),
-                max_output_bytes: Some(10_000),
-                ..ResourceLimits::default()
-            },
+            ResourceLimits::default()
+                .set_max_concurrency_slots(1)
+                .set_max_process_count(10)
+                .set_max_output_bytes(10_000),
         )
         .unwrap();
 
@@ -157,14 +151,14 @@ async fn dispatcher_redacts_runtime_adapter_failure_details() {
         .with_runtime_adapter(RuntimeKind::Script, &adapter);
     let err = dispatcher
         .dispatch_json(CapabilityDispatchRequest {
+            run_id: None,
             capability_id: CapabilityId::new("script.echo").unwrap(),
             scope,
-            estimate: ResourceEstimate {
-                concurrency_slots: Some(1),
-                process_count: Some(1),
-                output_bytes: Some(10_000),
-                ..ResourceEstimate::default()
-            },
+            authenticated_actor_user_id: None,
+            estimate: ResourceEstimate::default()
+                .set_concurrency_slots(1)
+                .set_process_count(1)
+                .set_output_bytes(10_000),
             mounts: None,
             resource_reservation: None,
             input: json!({"message": "redact stderr"}),
@@ -202,12 +196,10 @@ async fn dispatcher_routes_mcp_capability_through_registered_adapter() {
     governor
         .set_limit(
             account.clone(),
-            ResourceLimits {
-                max_concurrency_slots: Some(1),
-                max_process_count: Some(1),
-                max_output_bytes: Some(10_000),
-                ..ResourceLimits::default()
-            },
+            ResourceLimits::default()
+                .set_max_concurrency_slots(1)
+                .set_max_process_count(1)
+                .set_max_output_bytes(10_000),
         )
         .unwrap();
 
@@ -215,14 +207,14 @@ async fn dispatcher_routes_mcp_capability_through_registered_adapter() {
         .with_runtime_adapter(RuntimeKind::Mcp, &adapter);
     let result = dispatcher
         .dispatch_json(CapabilityDispatchRequest {
+            run_id: None,
             capability_id: CapabilityId::new("github-mcp.search").unwrap(),
             scope,
-            estimate: ResourceEstimate {
-                concurrency_slots: Some(1),
-                process_count: Some(1),
-                output_bytes: Some(10_000),
-                ..ResourceEstimate::default()
-            },
+            authenticated_actor_user_id: None,
+            estimate: ResourceEstimate::default()
+                .set_concurrency_slots(1)
+                .set_process_count(1)
+                .set_output_bytes(10_000),
             mounts: None,
             resource_reservation: None,
             input: json!({"query": "ironclaw"}),
@@ -255,12 +247,11 @@ async fn dispatcher_fails_unknown_capability_without_reserving_resources() {
         .with_runtime_adapter(RuntimeKind::Wasm, &adapter);
     let err = dispatcher
         .dispatch_json(CapabilityDispatchRequest {
+            run_id: None,
             capability_id: CapabilityId::new("missing.say").unwrap(),
             scope,
-            estimate: ResourceEstimate {
-                concurrency_slots: Some(1),
-                ..ResourceEstimate::default()
-            },
+            authenticated_actor_user_id: None,
+            estimate: ResourceEstimate::default().set_concurrency_slots(1),
             mounts: None,
             resource_reservation: None,
             input: json!({"message": "nope"}),
@@ -281,18 +272,17 @@ async fn dispatcher_releases_prepared_reservation_when_validation_fails_before_a
     let governor = InMemoryResourceGovernor::new();
     let scope = sample_scope();
     let account = ResourceAccount::tenant(scope.tenant_id.clone());
-    let estimate = ResourceEstimate {
-        concurrency_slots: Some(1),
-        ..ResourceEstimate::default()
-    };
+    let estimate = ResourceEstimate::default().set_concurrency_slots(1);
     let reservation = governor.reserve(scope.clone(), estimate.clone()).unwrap();
     assert_eq!(governor.reserved_for(&account).concurrency_slots, 1);
 
     let dispatcher = RuntimeDispatcher::new(&registry, &fs, &governor);
     let err = dispatcher
         .dispatch_json(CapabilityDispatchRequest {
+            run_id: None,
             capability_id: CapabilityId::new("missing.say").unwrap(),
             scope,
+            authenticated_actor_user_id: None,
             estimate,
             mounts: None,
             resource_reservation: Some(reservation),
@@ -320,13 +310,13 @@ async fn dispatcher_requires_mcp_backend_before_reserving_resources() {
     let dispatcher = RuntimeDispatcher::new(&registry, &fs, &governor);
     let err = dispatcher
         .dispatch_json(CapabilityDispatchRequest {
+            run_id: None,
             capability_id: CapabilityId::new("github-mcp.search").unwrap(),
             scope,
-            estimate: ResourceEstimate {
-                concurrency_slots: Some(1),
-                process_count: Some(1),
-                ..ResourceEstimate::default()
-            },
+            authenticated_actor_user_id: None,
+            estimate: ResourceEstimate::default()
+                .set_concurrency_slots(1)
+                .set_process_count(1),
             mounts: None,
             resource_reservation: None,
             input: json!({"query": "blocked"}),
@@ -358,13 +348,13 @@ async fn dispatcher_requires_script_backend_before_reserving_resources() {
     let dispatcher = RuntimeDispatcher::new(&registry, &fs, &governor);
     let err = dispatcher
         .dispatch_json(CapabilityDispatchRequest {
+            run_id: None,
             capability_id: CapabilityId::new("script.echo").unwrap(),
             scope,
-            estimate: ResourceEstimate {
-                concurrency_slots: Some(1),
-                process_count: Some(1),
-                ..ResourceEstimate::default()
-            },
+            authenticated_actor_user_id: None,
+            estimate: ResourceEstimate::default()
+                .set_concurrency_slots(1)
+                .set_process_count(1),
             mounts: None,
             resource_reservation: None,
             input: json!({"message": "blocked"}),
@@ -396,12 +386,11 @@ async fn dispatcher_requires_wasm_backend_before_reserving_resources() {
     let dispatcher = RuntimeDispatcher::new(&registry, &fs, &governor);
     let err = dispatcher
         .dispatch_json(CapabilityDispatchRequest {
+            run_id: None,
             capability_id: CapabilityId::new("echo.say").unwrap(),
             scope,
-            estimate: ResourceEstimate {
-                concurrency_slots: Some(1),
-                ..ResourceEstimate::default()
-            },
+            authenticated_actor_user_id: None,
+            estimate: ResourceEstimate::default().set_concurrency_slots(1),
             mounts: None,
             resource_reservation: None,
             input: json!({"message": "blocked"}),
@@ -460,10 +449,10 @@ struct RecordedAdapterRequest {
 }
 
 #[async_trait]
-impl RuntimeAdapter<LocalFilesystem, InMemoryResourceGovernor> for RecordingAdapter {
+impl RuntimeAdapter<DiskFilesystem, InMemoryResourceGovernor> for RecordingAdapter {
     async fn dispatch_json(
         &self,
-        request: RuntimeAdapterRequest<'_, LocalFilesystem, InMemoryResourceGovernor>,
+        request: RuntimeAdapterRequest<'_, DiskFilesystem, InMemoryResourceGovernor>,
     ) -> Result<RuntimeAdapterResult, DispatchError> {
         self.requests.lock().unwrap().push(RecordedAdapterRequest {
             provider: request.package.id.clone(),
@@ -475,14 +464,12 @@ impl RuntimeAdapter<LocalFilesystem, InMemoryResourceGovernor> for RecordingAdap
             return Err(dispatch_error_for_runtime(self.runtime, kind));
         }
 
-        let usage = ResourceUsage {
-            output_bytes: serde_json::to_vec(&self.output).unwrap().len() as u64,
-            process_count: u32::from(matches!(
+        let usage = ResourceUsage::default()
+            .set_output_bytes(serde_json::to_vec(&self.output).unwrap().len() as u64)
+            .set_process_count(u32::from(matches!(
                 self.runtime,
                 RuntimeKind::Script | RuntimeKind::Mcp
-            )),
-            ..ResourceUsage::default()
-        };
+            )));
         let reservation = request
             .governor
             .reserve(request.scope.clone(), request.estimate.clone())
@@ -510,7 +497,10 @@ fn dispatch_error_for_runtime(
     kind: RuntimeDispatchErrorKind,
 ) -> DispatchError {
     match runtime {
-        RuntimeKind::Wasm => DispatchError::Wasm { kind },
+        RuntimeKind::Wasm => DispatchError::Wasm {
+            kind,
+            safe_summary: None,
+        },
         RuntimeKind::Script => DispatchError::Script { kind },
         RuntimeKind::Mcp => DispatchError::Mcp { kind },
         RuntimeKind::FirstParty | RuntimeKind::System => DispatchError::UnsupportedRuntime {
@@ -520,9 +510,9 @@ fn dispatch_error_for_runtime(
     }
 }
 
-fn mounted_empty_extension_root() -> LocalFilesystem {
+fn mounted_empty_extension_root() -> DiskFilesystem {
     let storage = tempfile::tempdir().unwrap().keep();
-    let mut fs = LocalFilesystem::new();
+    let mut fs = DiskFilesystem::new();
     fs.mount_local(
         VirtualPath::new("/system/extensions").unwrap(),
         HostPath::from_path_buf(storage),

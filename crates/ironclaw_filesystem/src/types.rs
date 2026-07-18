@@ -103,6 +103,16 @@ pub enum FilesystemError {
         operation: FilesystemOperation,
         reason: String,
     },
+    /// The backend reported a retryable database contention outcome that did
+    /// not commit the attempted operation (for example SQLite BUSY/LOCKED or a
+    /// PostgreSQL transaction conflict). Unlike [`Self::Backend`], callers may
+    /// retry when the operation's interface also guarantees an error did not
+    /// commit a partial side effect (for example [`RootFilesystem::append_batch`](crate::RootFilesystem::append_batch)).
+    #[error("filesystem backend is busy during {operation} at {path}")]
+    BackendBusy {
+        path: VirtualPath,
+        operation: FilesystemOperation,
+    },
     /// Compare-and-swap precondition failed: the existing record's version did
     /// not match the caller's expectation. Stores typically retry by reading
     /// the current version and re-applying the transformation.
@@ -257,7 +267,7 @@ impl BackendId {
 /// Coarse class of backend implementation behind a virtual mount.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum BackendKind {
-    LocalFilesystem,
+    DiskFilesystem,
     DatabaseFilesystem,
     MemoryDocuments,
     ObjectStore,

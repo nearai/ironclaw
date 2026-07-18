@@ -30,13 +30,13 @@ async fn vertical_slice_discovers_and_dispatches_registered_runtime_adapters() {
     let wasm_account = ResourceAccount::tenant(wasm_scope.tenant_id.clone());
     let wasm = dispatcher
         .dispatch_json(CapabilityDispatchRequest {
+            run_id: None,
             capability_id: CapabilityId::new("echo-wasm.say").unwrap(),
             scope: wasm_scope,
-            estimate: ResourceEstimate {
-                concurrency_slots: Some(1),
-                output_bytes: Some(10_000),
-                ..ResourceEstimate::default()
-            },
+            authenticated_actor_user_id: None,
+            estimate: ResourceEstimate::default()
+                .set_concurrency_slots(1)
+                .set_output_bytes(10_000),
             mounts: None,
             resource_reservation: None,
             input: json!({"message": "hello wasm"}),
@@ -57,14 +57,14 @@ async fn vertical_slice_discovers_and_dispatches_registered_runtime_adapters() {
     let script_account = ResourceAccount::tenant(script_scope.tenant_id.clone());
     let script = dispatcher
         .dispatch_json(CapabilityDispatchRequest {
+            run_id: None,
             capability_id: CapabilityId::new("echo-script.say").unwrap(),
             scope: script_scope,
-            estimate: ResourceEstimate {
-                concurrency_slots: Some(1),
-                process_count: Some(1),
-                output_bytes: Some(10_000),
-                ..ResourceEstimate::default()
-            },
+            authenticated_actor_user_id: None,
+            estimate: ResourceEstimate::default()
+                .set_concurrency_slots(1)
+                .set_process_count(1)
+                .set_output_bytes(10_000),
             mounts: None,
             resource_reservation: None,
             input: json!({"message": "hello script"}),
@@ -87,14 +87,14 @@ async fn vertical_slice_discovers_and_dispatches_registered_runtime_adapters() {
     let mcp_account = ResourceAccount::tenant(mcp_scope.tenant_id.clone());
     let mcp = dispatcher
         .dispatch_json(CapabilityDispatchRequest {
+            run_id: None,
             capability_id: CapabilityId::new("echo-mcp.say").unwrap(),
             scope: mcp_scope,
-            estimate: ResourceEstimate {
-                concurrency_slots: Some(1),
-                process_count: Some(1),
-                output_bytes: Some(10_000),
-                ..ResourceEstimate::default()
-            },
+            authenticated_actor_user_id: None,
+            estimate: ResourceEstimate::default()
+                .set_concurrency_slots(1)
+                .set_process_count(1)
+                .set_output_bytes(10_000),
             mounts: None,
             resource_reservation: None,
             input: json!({"message": "hello mcp"}),
@@ -125,20 +125,18 @@ impl EchoAdapter {
 }
 
 #[async_trait]
-impl RuntimeAdapter<LocalFilesystem, InMemoryResourceGovernor> for EchoAdapter {
+impl RuntimeAdapter<DiskFilesystem, InMemoryResourceGovernor> for EchoAdapter {
     async fn dispatch_json(
         &self,
-        request: RuntimeAdapterRequest<'_, LocalFilesystem, InMemoryResourceGovernor>,
+        request: RuntimeAdapterRequest<'_, DiskFilesystem, InMemoryResourceGovernor>,
     ) -> Result<RuntimeAdapterResult, DispatchError> {
         let output = request.input;
-        let usage = ResourceUsage {
-            output_bytes: serde_json::to_vec(&output).unwrap().len() as u64,
-            process_count: u32::from(matches!(
+        let usage = ResourceUsage::default()
+            .set_output_bytes(serde_json::to_vec(&output).unwrap().len() as u64)
+            .set_process_count(u32::from(matches!(
                 self.runtime,
                 RuntimeKind::Script | RuntimeKind::Mcp
-            )),
-            ..ResourceUsage::default()
-        };
+            )));
         let reservation = request
             .governor
             .reserve(request.scope, request.estimate)
@@ -166,7 +164,10 @@ fn dispatch_error_for_runtime(
     kind: RuntimeDispatchErrorKind,
 ) -> DispatchError {
     match runtime {
-        RuntimeKind::Wasm => DispatchError::Wasm { kind },
+        RuntimeKind::Wasm => DispatchError::Wasm {
+            kind,
+            safe_summary: None,
+        },
         RuntimeKind::Script => DispatchError::Script { kind },
         RuntimeKind::Mcp => DispatchError::Mcp { kind },
         RuntimeKind::FirstParty | RuntimeKind::System => DispatchError::UnsupportedRuntime {
@@ -176,7 +177,7 @@ fn dispatch_error_for_runtime(
     }
 }
 
-fn filesystem_with_echo_extensions() -> LocalFilesystem {
+fn filesystem_with_echo_extensions() -> DiskFilesystem {
     let storage = tempfile::tempdir().unwrap().keep();
     let wasm_root = storage.join("echo-wasm");
     std::fs::create_dir_all(&wasm_root).unwrap();
@@ -202,7 +203,7 @@ fn filesystem_with_echo_extensions() -> LocalFilesystem {
     )
     .unwrap();
 
-    let mut fs = LocalFilesystem::new();
+    let mut fs = DiskFilesystem::new();
     fs.mount_local(
         VirtualPath::new("/system/extensions").unwrap(),
         HostPath::from_path_buf(storage),
@@ -211,7 +212,7 @@ fn filesystem_with_echo_extensions() -> LocalFilesystem {
     fs
 }
 
-async fn discover_legacy_fixture_registry(fs: &LocalFilesystem) -> ExtensionRegistry {
+async fn discover_legacy_fixture_registry(fs: &DiskFilesystem) -> ExtensionRegistry {
     ExtensionDiscovery::discover_with_manifest_contracts(
         fs,
         &VirtualPath::new("/system/extensions").unwrap(),

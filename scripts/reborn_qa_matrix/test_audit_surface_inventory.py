@@ -54,17 +54,17 @@ def _write_workbook(path: Path, feature_rows: list[list[str]]) -> None:
 
 
 def _write_repo(root: Path) -> None:
-    app_dir = root / "crates/ironclaw_webui_v2/frontend/src/app"
+    app_dir = root / "crates/ironclaw_webui/frontend/src/app"
     app_dir.mkdir(parents=True)
-    (app_dir / "app.ts").write_text(
+    (app_dir / "app.tsx").write_text(
         """
-        <${Route} path="chat" element=${html`<${ChatPage} />`} />
-        <${Route} path="jobs" element=${html`<${JobsPage} />`} />
-        <${Route} path="settings/:tab" element=${html`<${SettingsPage} />`} />
+        <Route path="chat" element={<ChatPage />} />
+        <Route path="jobs" element={<JobsPage />} />
+        <Route path="settings/:tab" element={<SettingsPage />} />
         """,
         encoding="utf-8",
     )
-    webui_dir = root / "crates/ironclaw_webui_v2/src"
+    webui_dir = root / "crates/ironclaw_webui/src"
     webui_dir.mkdir(parents=True)
     (webui_dir / "descriptors.rs").write_text(
         'pub const WEBUI_V2_PATTERN_LIST_THREADS: &str = "/api/webchat/v2/threads";\n'
@@ -81,6 +81,16 @@ def _write_repo(root: Path) -> None:
 
 
 class AuditSurfaceInventoryTests(unittest.TestCase):
+    def test_real_repository_react_routes_are_extractable(self):
+        routes = audit_surface_inventory.browser_routes(audit_surface_inventory.ROOT)
+        identifiers = {route.identifier for route in routes}
+
+        self.assertIn("/chat", identifiers)
+        self.assertIn("/settings/:tab", identifiers)
+        self.assertTrue(
+            all(route.source.endswith("frontend/src/app/app.tsx") for route in routes)
+        )
+
     def test_build_audit_flags_only_surfaces_missing_from_feature_inventory(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
@@ -103,9 +113,9 @@ class AuditSurfaceInventoryTests(unittest.TestCase):
             uncovered = {
                 surface["identifier"] for surface in report["uncovered_surfaces"]
             }
-            self.assertIn("/v2/jobs", uncovered)
-            self.assertNotIn("/v2/chat", uncovered)
-            self.assertNotIn("/v2/settings/:tab", uncovered)
+            self.assertIn("/jobs", uncovered)
+            self.assertNotIn("/chat", uncovered)
+            self.assertNotIn("/settings/:tab", uncovered)
             self.assertNotIn("/api/v1/responses", uncovered)
             self.assertNotIn("/v1/models", uncovered)
             self.assertNotIn("/api/webchat/v2/projects", uncovered)

@@ -1,4 +1,4 @@
-use std::{sync::Arc, time::Instant};
+use std::{collections::HashMap, sync::Arc, time::Instant};
 
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
@@ -8,9 +8,10 @@ use ironclaw_host_api::{
     PermissionMode, ResourceScope, ResourceUsage, RuntimeDispatchErrorKind,
 };
 use ironclaw_triggers::{
-    TriggerError, TriggerId, TriggerRecord, TriggerRecordValidationKind, TriggerRepository,
-    TriggerRunRecord, TriggerSchedule, TriggerScheduleValidationKind, TriggerSourceKind,
-    TriggerState,
+    ACTIVE_HOLD_LOOKUP_TIMEOUT, ActiveHoldProjection, ActiveHoldReason,
+    MissingTriggerActiveRunLookup, TriggerActiveRunLookup, TriggerError, TriggerId, TriggerRecord,
+    TriggerRecordValidationKind, TriggerRepository, TriggerRunRecord, TriggerSchedule,
+    TriggerScheduleValidationKind, TriggerSourceKind, TriggerState, active_holds_for_records,
 };
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -35,7 +36,7 @@ pub const TRIGGER_REMOVE_CAPABILITY_ID: &str = "builtin.trigger_remove";
 pub const TRIGGER_PAUSE_CAPABILITY_ID: &str = "builtin.trigger_pause";
 pub const TRIGGER_RESUME_CAPABILITY_ID: &str = "builtin.trigger_resume";
 
-const TRIGGER_CREATE_DESCRIPTION: &str = "Create a caller-scoped scheduled trigger (one-time or recurring). If the user asks for routine or trigger results to be sent through an outbound product or channel, use the visible outbound delivery target capabilities to select that delivery target before creating the trigger; delivery routing is not encoded in this input.";
+const TRIGGER_CREATE_DESCRIPTION: &str = "Create a caller-scoped scheduled trigger (one-time or recurring). The prompt is the full task each fire performs. If delivery_target_id is set, never put a send, post, or deliver-results step for that result in the prompt; each fire's final reply is delivered automatically to that target. Do not tell the prompt to send results back to the requesting user. Asks like 'send me the result' are delivery routing, not a task step: pass delivery_target_id with an id from builtin__outbound_delivery_targets_list and keep every send-to-requester step, even one with a pinned conversation id, out of the prompt. Put messaging in the prompt only when messaging someone else is itself the task; pin that third-party recipient, resolved while the user is present. Without delivery_target_id, the user's default outbound target applies at fire time; builtin__outbound_delivery_target_set changes that user-wide default.";
 
 pub(super) fn manifests() -> Result<Vec<CapabilityManifest>, ExtensionError> {
     Ok(vec![
@@ -81,13 +82,22 @@ pub(super) fn insert_handlers(
     registry: &mut FirstPartyCapabilityRegistry,
     repository: Arc<dyn TriggerRepository>,
 ) -> Result<(), HostApiError> {
-    insert_handlers_with_create_hook(registry, repository, Arc::new(NoopTriggerCreateHook))
+    // Compatibility wrapper: supplies `MissingTriggerActiveRunLookup`, so
+    // callers through this path never project an `active_hold`, mirroring
+    // `NoopTriggerCreateHook` below (#5886).
+    insert_handlers_with_create_hook(
+        registry,
+        repository,
+        Arc::new(NoopTriggerCreateHook),
+        Arc::new(MissingTriggerActiveRunLookup),
+    )
 }
 
 pub(super) fn insert_handlers_with_create_hook(
     registry: &mut FirstPartyCapabilityRegistry,
     repository: Arc<dyn TriggerRepository>,
     create_hook: Arc<dyn TriggerCreateHook>,
+    active_run_lookup: Arc<dyn TriggerActiveRunLookup>,
 ) -> Result<(), HostApiError> {
     insert_trigger_handlers(
         registry,
@@ -95,6 +105,7 @@ pub(super) fn insert_handlers_with_create_hook(
             repository,
             create_hook,
             clock: Arc::new(SystemTriggerManagementClock),
+            active_run_lookup,
         }),
     )
 }
@@ -111,6 +122,7 @@ pub(super) fn insert_handlers_with_clock(
             repository,
             create_hook: Arc::new(NoopTriggerCreateHook),
             clock,
+            active_run_lookup: Arc::new(MissingTriggerActiveRunLookup),
         }),
     )
 }
@@ -152,6 +164,25 @@ trait TriggerManagementClock: Send + Sync {
 
 #[async_trait]
 pub trait TriggerCreateHook: Send + Sync {
+    /// Validate a model-supplied per-trigger delivery target id before the
+    /// record is persisted (ownership, existence, product availability).
+    ///
+    /// The default fails closed: hosts that can resolve outbound delivery
+    /// targets override this to accept caller-owned targets. Rejections must
+    /// use `TriggerRecordValidationKind::DeliveryTargetInvalid` so the tool
+    /// layer maps them to a `delivery_target_id` input issue.
+    async fn validate_delivery_target(
+        &self,
+        scope: &ResourceScope,
+        target: &ironclaw_triggers::TriggerDeliveryTargetId,
+    ) -> Result<(), TriggerError> {
+        let _ = (scope, target);
+        Err(TriggerError::InvalidRecord {
+            kind: TriggerRecordValidationKind::DeliveryTargetInvalid,
+            reason: "per-trigger delivery targets are not supported by this host".to_string(),
+        })
+    }
+
     async fn after_trigger_persisted(&self, record: &TriggerRecord) -> Result<(), TriggerError>;
 }
 
@@ -178,6 +209,7 @@ struct TriggerManagementToolHandler {
     repository: Arc<dyn TriggerRepository>,
     create_hook: Arc<dyn TriggerCreateHook>,
     clock: Arc<dyn TriggerManagementClock>,
+    active_run_lookup: Arc<dyn TriggerActiveRunLookup>,
 }
 
 #[async_trait]
@@ -200,7 +232,14 @@ impl FirstPartyCapabilityHandler for TriggerManagementToolHandler {
                 .await?
             }
             TRIGGER_LIST_CAPABILITY_ID => {
-                list_triggers(&*self.repository, &request.scope, request.input).await?
+                list_triggers(
+                    &*self.repository,
+                    &*self.active_run_lookup,
+                    &request.scope,
+                    request.input,
+                    self.clock.now(),
+                )
+                .await?
             }
             TRIGGER_REMOVE_CAPABILITY_ID => {
                 remove_trigger(&*self.repository, &request.scope, request.input).await?
@@ -281,6 +320,10 @@ struct TriggerCreateInput {
     name: String,
     prompt: String,
     schedule: TriggerScheduleInput,
+    /// Optional per-trigger outbound delivery target id (from the outbound
+    /// delivery target capabilities). Host-validated before persistence.
+    #[serde(default)]
+    delivery_target_id: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -315,6 +358,18 @@ async fn create_trigger(
         .map_err(|error| trigger_schedule_error(schedule_kind, error))?;
     let next_run_at = next_run_at_for_schedule(&schedule, now)
         .map_err(|error| trigger_next_run_error(schedule_kind, error))?;
+    let delivery_target = match input.delivery_target_id {
+        Some(raw) => {
+            let target = ironclaw_triggers::TriggerDeliveryTargetId::new(raw)
+                .map_err(trigger_record_error)?;
+            create_hook
+                .validate_delivery_target(scope, &target)
+                .await
+                .map_err(trigger_record_error)?;
+            Some(target)
+        }
+        None => None,
+    };
     let record = TriggerRecord {
         trigger_id: TriggerId::new(),
         tenant_id: scope.tenant_id.clone(),
@@ -325,6 +380,7 @@ async fn create_trigger(
         source: TriggerSourceKind::Schedule,
         schedule,
         prompt: input.prompt,
+        delivery_target,
         state: TriggerState::Scheduled,
         next_run_at,
         last_run_at: None,
@@ -353,14 +409,16 @@ async fn create_trigger(
         return Err(hook_error);
     }
     Ok(json!({
-        "trigger": trigger_output(&record, &[]),
+        "trigger": trigger_output(&record, &[], None),
     }))
 }
 
 async fn list_triggers(
     repository: &dyn TriggerRepository,
+    active_run_lookup: &dyn TriggerActiveRunLookup,
     scope: &ResourceScope,
     input: Value,
+    now: DateTime<Utc>,
 ) -> Result<Value, FirstPartyCapabilityError> {
     let input: TriggerListInput = serde_json::from_value(input).map_err(|_| input_error())?;
     let limit = input
@@ -390,16 +448,45 @@ async fn list_triggers(
         .list_trigger_run_history_batch(scope.tenant_id.clone(), &trigger_ids, run_limit)
         .await
         .map_err(|error| trigger_repository_error("list_trigger_run_history_batch", error))?;
+    // Reason/elapsed-occurrence derivation and lookup batching live in
+    // `ironclaw_triggers::active_holds_for_records`, shared with the
+    // automations facade so both read surfaces stay in lockstep (#5886).
+    let mut holds: HashMap<TriggerId, Value> =
+        active_holds_for_records(active_run_lookup, &records, now, ACTIVE_HOLD_LOOKUP_TIMEOUT)
+            .await
+            .into_iter()
+            .map(|(trigger_id, hold)| (trigger_id, active_hold_json(hold)))
+            .collect();
     let output = records
         .into_iter()
         .map(|record| {
             let runs = runs_by_trigger
                 .remove(&record.trigger_id)
                 .unwrap_or_default();
-            trigger_output(&record, &runs)
+            let hold = holds.remove(&record.trigger_id);
+            trigger_output(&record, &runs, hold)
         })
         .collect::<Vec<_>>();
     Ok(json!({ "triggers": output }))
+}
+
+/// Maps the crate-neutral hold projection (`ironclaw_triggers`) to this
+/// capability's `active_hold` wire object — same shape the automations facade
+/// maps to `RebornAutomationActiveHold`, just JSON instead of a typed DTO
+/// (#5886).
+fn active_hold_json(hold: ActiveHoldProjection) -> Value {
+    let reason = match hold.reason {
+        ActiveHoldReason::Approval => "approval",
+        ActiveHoldReason::Auth => "auth",
+        ActiveHoldReason::InProgress => "in_progress",
+        ActiveHoldReason::Other => "other",
+    };
+    json!({
+        "reason": reason,
+        "since": hold.since,
+        "elapsed_occurrences": hold.elapsed_occurrences,
+        "elapsed_occurrences_capped": hold.elapsed_occurrences_capped,
+    })
 }
 
 async fn remove_trigger(
@@ -449,20 +536,25 @@ async fn set_trigger_state(
         .map_err(|error| trigger_repository_error("set_scoped_trigger_state", error))?;
     Ok(json!({
         "updated": updated.is_some(),
-        "trigger": updated.as_ref().map(|record| trigger_output(record, &[])),
+        "trigger": updated.as_ref().map(|record| trigger_output(record, &[], None)),
     }))
 }
 
-fn trigger_output(record: &TriggerRecord, recent_runs: &[TriggerRunRecord]) -> Value {
+fn trigger_output(
+    record: &TriggerRecord,
+    recent_runs: &[TriggerRunRecord],
+    active_hold: Option<Value>,
+) -> Value {
     let is_enabled = record.state == TriggerState::Scheduled;
     let has_active_fire = record.has_active_fire();
-    json!({
+    let mut output = json!({
         "trigger_id": record.trigger_id.to_string(),
         "agent_id": record.agent_id.as_ref().map(|id| id.as_str()),
         "project_id": record.project_id.as_ref().map(|id| id.as_str()),
         "name": record.name,
         "source": record.source,
         "schedule": record.schedule,
+        "delivery_target_id": record.delivery_target.as_ref().map(|target| target.as_str()),
         "state": record.state,
         "next_run_at": record.next_run_at,
         "last_run_at": record.last_run_at,
@@ -474,7 +566,14 @@ fn trigger_output(record: &TriggerRecord, recent_runs: &[TriggerRunRecord]) -> V
         "is_active": is_enabled,
         "has_active_fire": has_active_fire,
         "created_at": record.created_at,
-    })
+    });
+    // `active_hold` is omitted entirely (not null) when there is no live hold
+    // to report — Missing/Terminal active-run states and lookup failures both
+    // resolve to `None` upstream (#5886).
+    if let Some(hold) = active_hold {
+        output["active_hold"] = hold;
+    }
+    output
 }
 
 fn trigger_run_output(run: &TriggerRunRecord) -> Value {
@@ -522,9 +621,15 @@ fn classify_trigger_create_shape(input: &Value) -> Vec<DispatchInputIssue> {
     let mut issues = Vec::new();
     required_string(root, "name", "name", "string", &mut issues);
     required_string(root, "prompt", "prompt", "string", &mut issues);
+    if let Some(value) = root.get("delivery_target_id")
+        && !value.is_null()
+        && !value.is_string()
+    {
+        issues.push(type_mismatch("delivery_target_id", "string"));
+    }
     unexpected_fields(
         root,
-        &["name", "prompt", "schedule"],
+        &["name", "prompt", "schedule", "delivery_target_id"],
         "unexpected_field",
         &mut issues,
     );
@@ -699,6 +804,13 @@ fn trigger_record_error(error: TriggerError) -> FirstPartyCapabilityError {
         } => invalid_trigger_input(vec![
             invalid_value("prompt").expected("trigger prompt within the allowed byte limit"),
         ]),
+        TriggerError::InvalidRecord {
+            kind: TriggerRecordValidationKind::DeliveryTargetInvalid,
+            ..
+        } => invalid_trigger_input(vec![invalid_value("delivery_target_id").expected(
+            "an outbound delivery target id available to this caller (from \
+             builtin__outbound_delivery_targets_list)",
+        )]),
         other => invalid_trigger_input(vec![
             invalid_value("trigger").expected(trigger_error_kind(&other)),
         ]),
@@ -786,152 +898,10 @@ fn trigger_error_kind(error: &TriggerError) -> &'static str {
 }
 
 fn elapsed_usage_with_bytes(started: Instant, output_bytes: u64) -> ResourceUsage {
-    ResourceUsage {
-        wall_clock_ms: started.elapsed().as_millis().try_into().unwrap_or(u64::MAX),
-        output_bytes,
-        ..ResourceUsage::default()
-    }
+    ResourceUsage::default()
+        .set_wall_clock_ms(started.elapsed().as_millis().try_into().unwrap_or(u64::MAX))
+        .set_output_bytes(output_bytes)
 }
 
 #[cfg(test)]
-mod tests {
-    use chrono::{Datelike, TimeZone};
-
-    use super::*;
-
-    #[test]
-    fn next_run_at_for_schedule_rejects_schedule_with_no_future_slot() {
-        let future_year = Utc::now().year() + 1;
-        let schedule = TriggerSchedule::cron(format!("0 0 8 * * * {future_year}"))
-            .expect("future finite schedule is valid");
-        let after_schedule_expires = Utc
-            .with_ymd_and_hms(future_year + 1, 1, 1, 0, 0, 0)
-            .unwrap();
-
-        let error = next_run_at_for_schedule(&schedule, after_schedule_expires)
-            .expect_err("exhausted schedule rejected");
-
-        assert!(matches!(
-            error,
-            TriggerError::InvalidSchedule {
-                kind: TriggerScheduleValidationKind::NoFutureFireTime,
-                ..
-            }
-        ));
-    }
-
-    #[test]
-    fn trigger_create_input_rejects_missing_timezone() {
-        let input = serde_json::json!({
-            "name": "daily",
-            "prompt": "check mail",
-            "schedule": { "kind": "cron", "expression": "0 9 * * *" }  // missing timezone
-        });
-        let result: Result<TriggerCreateInput, _> = serde_json::from_value(input);
-        assert!(
-            result.is_err(),
-            "missing timezone must fail deserialization"
-        );
-    }
-
-    #[test]
-    fn trigger_create_input_rejects_invalid_timezone() {
-        let input = serde_json::json!({
-            "name": "daily",
-            "prompt": "check mail",
-            "schedule": { "kind": "cron", "expression": "0 9 * * *", "timezone": "Not/A/Timezone" }
-        });
-        let parsed: TriggerCreateInput = serde_json::from_value(input).expect("deserialize");
-        let result = parsed.schedule.into_schedule();
-        assert!(result.is_err(), "invalid timezone must be rejected");
-    }
-
-    #[test]
-    fn trigger_create_input_accepts_cron_schedule() {
-        let input = serde_json::json!({
-            "name": "daily",
-            "prompt": "check mail",
-            "schedule": { "kind": "cron", "expression": "0 9 * * *", "timezone": "America/Los_Angeles" }
-        });
-        let parsed: TriggerCreateInput = serde_json::from_value(input).expect("deserialize");
-        let schedule = parsed
-            .schedule
-            .into_schedule()
-            .expect("valid cron schedule accepted");
-        match &schedule {
-            TriggerSchedule::Cron { timezone, .. } => {
-                assert_eq!(timezone, "America/Los_Angeles");
-            }
-            TriggerSchedule::Once { .. } => panic!("expected Cron"),
-        }
-    }
-
-    #[test]
-    fn trigger_create_input_rejects_missing_schedule() {
-        let input = serde_json::json!({
-            "name": "daily",
-            "prompt": "check mail"
-        });
-        let result: Result<TriggerCreateInput, _> = serde_json::from_value(input);
-        assert!(
-            result.is_err(),
-            "omitting schedule must fail deserialization"
-        );
-    }
-
-    #[test]
-    fn trigger_create_input_accepts_once_schedule_and_persists_as_utc() {
-        // 2099-06-24T17:00:00 UTC is unambiguous and in the future
-        let input = serde_json::json!({
-            "name": "one-off reminder",
-            "prompt": "remind me about the meeting",
-            "schedule": { "kind": "once", "at": "2099-06-24T17:00:00", "timezone": "UTC" }
-        });
-        let parsed: TriggerCreateInput =
-            serde_json::from_value(input).expect("deserialize one-shot input");
-        let schedule = parsed
-            .schedule
-            .into_schedule()
-            .expect("valid once schedule accepted");
-        match &schedule {
-            TriggerSchedule::Once { at, timezone } => {
-                assert_eq!(timezone, "UTC");
-                // Wall-clock 17:00:00 UTC → stored UTC timestamp must match
-                assert_eq!(at.to_rfc3339(), "2099-06-24T17:00:00+00:00");
-            }
-            TriggerSchedule::Cron { .. } => panic!("expected Once"),
-        }
-    }
-
-    #[test]
-    fn trigger_create_input_rejects_dst_ambiguous_time() {
-        // 2026-11-01T01:30:00 in America/New_York occurs twice (DST fall-back overlap)
-        let input = serde_json::json!({
-            "name": "ambiguous",
-            "prompt": "test",
-            "schedule": { "kind": "once", "at": "2026-11-01T01:30:00", "timezone": "America/New_York" }
-        });
-        let parsed: TriggerCreateInput = serde_json::from_value(input).expect("deserialize");
-        let result = parsed.schedule.into_schedule();
-        assert!(
-            result.is_err(),
-            "DST-ambiguous time must be rejected as input error"
-        );
-    }
-
-    #[test]
-    fn trigger_create_input_rejects_dst_gap_time() {
-        // 2026-03-08T02:30:00 in America/New_York does not exist (DST spring-forward gap)
-        let input = serde_json::json!({
-            "name": "dst-gap",
-            "prompt": "test",
-            "schedule": { "kind": "once", "at": "2026-03-08T02:30:00", "timezone": "America/New_York" }
-        });
-        let parsed: TriggerCreateInput = serde_json::from_value(input).expect("deserialize");
-        let result = parsed.schedule.into_schedule();
-        assert!(
-            result.is_err(),
-            "DST-gap time must be rejected as input error"
-        );
-    }
-}
+mod tests;

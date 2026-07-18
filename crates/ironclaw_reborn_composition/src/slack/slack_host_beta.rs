@@ -4,13 +4,19 @@
 //! the CLI supplies explicit host config, and this module reuses the already
 //! assembled Reborn runtime services instead of creating a second agent loop.
 
+// arch-exempt: large_file, Slack host composition and lifecycle wiring tests, plan #5905
+
 use std::collections::HashSet;
 use std::num::NonZeroUsize;
 use std::sync::Arc;
 use std::time::Duration;
 
 use ironclaw_conversations::InMemoryConversationServices;
+#[cfg(feature = "test-support")]
+use ironclaw_filesystem::{InMemoryBackend, ScopedFilesystem};
 use ironclaw_host_api::{AgentId, ProjectId, ResourceScope, TenantId, UserId};
+#[cfg(feature = "test-support")]
+use ironclaw_host_api::{MountAlias, MountGrant, MountPermissions, MountView, VirtualPath};
 use ironclaw_outbound::{DeliveredGateRouteStore, OutboundStateStore, TriggeredRunDeliveryStore};
 use ironclaw_product_adapters::{
     AdapterInstallationId, DeclaredEgressHost, DeclaredEgressTarget, DeliveryStatus,
@@ -23,7 +29,7 @@ use ironclaw_product_workflow::{
     DefaultInboundTurnService, DefaultProductWorkflow, ProductActorUserResolutionRequest,
     ProductActorUserResolver, ProductConversationBindingService, ProductConversationRouteKey,
     ProductConversationSubjectRouteResolver, ProductInstallationKey, ProductInstallationScope,
-    ProductWorkflowError, ResolveBindingRequest, ResolvedBinding,
+    ProductWorkflowError, ResolveBindingRequest, ResolvedBinding, ResolvedProductActorUser,
     StaticProductInstallationResolver,
 };
 use ironclaw_slack_v2_adapter::{
@@ -45,15 +51,9 @@ mod runtime_setup;
 use crate::RebornRuntime;
 use crate::outbound::{OutboundDeliveryTargetProvider, OutboundDeliveryTargetRegistrationOutcome};
 use crate::product_auth::serve::SlackPersonalOAuthBindingConfig;
-use crate::slack::slack_actor_identity::{
-    RebornUserIdentityLookup, SlackUserIdentityActorResolver,
-};
+use crate::slack::slack_actor_identity::SlackUserIdentityActorResolver;
 use crate::slack::slack_channel_routes::{
     SlackChannelRouteAdminRouteConfig, SlackChannelRouteStore, SlackChannelRouteSubjectResolver,
-};
-use crate::slack::slack_delivery::{
-    SlackFinalReplyDeliveryObserver, SlackFinalReplyDeliveryServices,
-    SlackFinalReplyDeliverySettings, TriggeredRunDeliveryDriver,
 };
 use crate::slack::slack_egress::{SlackProtocolHttpEgress, StaticSlackEgressCredentialProvider};
 use crate::slack::slack_host_state::FilesystemSlackHostState;
@@ -63,17 +63,23 @@ use crate::slack::slack_outbound_targets::{
     SlackPersonalDmTargetProvisioner, SlackPersonalDmTargetStore,
 };
 use crate::slack::slack_personal_binding::{
-    RebornUserIdentityBinding, RebornUserIdentityBindingDeleteStore,
-    RebornUserIdentityBindingStore, SlackPersonalBindingInstallation,
-    SlackPersonalBindingPrincipal, SlackPersonalUserBinder, SlackPersonalUserBindingError,
+    RebornUserIdentityBindingDeleteStore, RebornUserIdentityBindingStore, SlackConnectionEpoch,
+    SlackPersonalBindingInstallation, SlackPersonalBindingPrincipal, SlackPersonalUserBinder,
+    SlackPersonalUserBindingError, SlackPersonalUserBindingOutcome,
     SlackPersonalUserBindingRequest, SlackPersonalUserBindingService,
+    SlackUserBindingLifecycleStore,
 };
 use crate::slack::slack_serve::{
     SlackEventsRouteState, SlackInstallationRecord, SlackInstallationResolver,
     SlackInstallationSelector, SlackTeamId, SlackUserId, StaticSlackInstallationResolver,
     slack_events_route_mount,
 };
-use crate::webui_serve::PublicRouteMount;
+use crate::webui::route_mounts::PublicRouteMount;
+use ironclaw_channel_delivery::{
+    FinalReplyDeliveryObserver, FinalReplyDeliveryServices, FinalReplyDeliverySettings,
+    TriggeredRunDeliveryDriver,
+};
+use ironclaw_channel_host::identity::RebornUserIdentityLookup;
 
 const SLACK_BOT_TOKEN_HANDLE: &str = "slack_bot_token";
 const SLACK_SIGNATURE_HEADER: &str = "X-Slack-Signature";
@@ -299,6 +305,7 @@ fn slack_outbound_delivery_target_provider_key(config: &SlackHostBetaConfig) -> 
     let mut suffix = String::with_capacity(64);
     for byte in digest {
         use std::fmt::Write as _;
+        #[allow(clippy::let_underscore_must_use)] // writing to a String is infallible
         let _ = write!(&mut suffix, "{byte:02x}");
     }
     format!("{SLACK_OUTBOUND_PROVIDER_KEY_PREFIX}:{suffix}")
@@ -392,6 +399,8 @@ pub enum SlackHostBetaBuildError {
     DurableHostStateUnavailable,
     #[error("Slack host-beta outbound delivery target registration failed: {reason}")]
     OutboundDeliveryTargetRegistration { reason: String },
+    #[error("Slack host-beta conversation store unavailable: {reason}")]
+    ConversationStoreUnavailable { reason: String },
     #[error("Slack host-beta personal OAuth binding requires [slack].api_app_id")]
     TenantAppSelectorRequired,
     #[error("invalid Slack host-beta config field {field}: {reason}")]
@@ -412,6 +421,11 @@ pub struct SlackHostBetaMounts {
     /// Personal identity delete handle used when a caller uninstalls the
     /// Slack channel extension from the WebUI.
     pub(crate) user_identity_delete_store: Arc<dyn RebornUserIdentityBindingDeleteStore>,
+    pub(crate) user_binding_lifecycle_store: Arc<dyn SlackUserBindingLifecycleStore>,
+    /// Actor-pairing handle for revoking personal Slack DM conversation state
+    /// when a caller removes the Slack channel extension.
+    pub(crate) conversation_actor_pairings:
+        Arc<dyn ironclaw_conversations::ConversationActorPairingService>,
     /// Personal Slack DM target store used by the same disconnect path, so
     /// outbound targets no longer show a stale Slack DM after uninstall.
     pub(crate) personal_dm_target_store: Arc<dyn SlackPersonalDmTargetStore>,
@@ -430,7 +444,61 @@ impl SlackHostBetaMounts {
     ) {
         if let Some(service) = &self.setup_service {
             slot.fill(Arc::clone(service));
+            slot.fill_gate_lifecycle(
+                crate::slack::slack_personal_oauth::SlackPersonalOAuthGateLifecycle::new(
+                    Arc::clone(&self.personal_connection_scope_resolver),
+                    Arc::clone(&self.user_binding_lifecycle_store),
+                ),
+            );
         }
+    }
+}
+
+#[cfg(feature = "test-support")]
+impl SlackPersonalOAuthBindingConfig {
+    /// Build the same binding/lifecycle ports used by production around an
+    /// in-memory host-state store for caller-level OAuth route tests.
+    pub fn in_memory_for_tests(
+        tenant_id: TenantId,
+        installation_id: AdapterInstallationId,
+    ) -> Result<Self, String> {
+        let view = MountView::new(vec![MountGrant::new(
+            MountAlias::new("/tenant-shared").map_err(|error| error.to_string())?,
+            VirtualPath::new("/tenants/test/shared").map_err(|error| error.to_string())?,
+            MountPermissions::read_write_list_delete(),
+        )])
+        .map_err(|error| error.to_string())?;
+        let filesystem = Arc::new(ScopedFilesystem::with_fixed_view(
+            Arc::new(InMemoryBackend::default()),
+            view,
+        ));
+        let state = Arc::new(FilesystemSlackHostState::new(
+            filesystem,
+            tenant_id.clone(),
+            UserId::new("user:test-host").map_err(|error| error.to_string())?,
+            AgentId::new("agent:test-host").map_err(|error| error.to_string())?,
+            None,
+        ));
+        let binding_store: Arc<dyn RebornUserIdentityBindingStore> = state.clone();
+        let binding_service: Arc<dyn SlackPersonalUserBinder> =
+            Arc::new(SlackPersonalUserBindingService::new(
+                [SlackPersonalBindingInstallation {
+                    tenant_id,
+                    installation_id: installation_id.clone(),
+                    selector: SlackInstallationSelector::app_team("A-test", "T-test"),
+                }],
+                binding_store,
+            ));
+        let connection_scope = SlackPersonalConnectionScope { installation_id };
+
+        Ok(Self::new(
+            binding_service,
+            Arc::new(StaticSlackPersonalConnectionScopeResolver::new(Some(
+                connection_scope,
+            ))),
+            state.clone(),
+            state,
+        ))
     }
 }
 
@@ -440,6 +508,7 @@ impl SlackHostBetaMounts {
             Arc::clone(&self.personal_oauth_binder),
             Arc::clone(&self.personal_connection_scope_resolver),
             Arc::clone(&self.user_identity_delete_store),
+            Arc::clone(&self.user_binding_lifecycle_store),
         )
     }
 }
@@ -447,7 +516,6 @@ impl SlackHostBetaMounts {
 #[derive(Clone)]
 pub(crate) struct SlackPersonalConnectionScope {
     pub(crate) installation_id: AdapterInstallationId,
-    pub(crate) team_id: SlackTeamId,
 }
 
 #[async_trait::async_trait]
@@ -478,21 +546,29 @@ impl SlackPersonalConnectionScopeResolver for StaticSlackPersonalConnectionScope
 
 #[async_trait::async_trait]
 pub(super) trait SlackPersonalDmTargetProvisioning: Send + Sync + std::fmt::Debug {
-    async fn provision_for_user(
+    async fn provision_for_user_for_epoch(
         &self,
         user_id: UserId,
         slack_user_id: SlackUserId,
+        epoch: SlackConnectionEpoch,
     ) -> Result<SlackPersonalDmTarget, SlackPersonalDmTargetError>;
 }
 
 #[async_trait::async_trait]
 impl SlackPersonalDmTargetProvisioning for SlackPersonalDmTargetProvisioner {
-    async fn provision_for_user(
+    async fn provision_for_user_for_epoch(
         &self,
         user_id: UserId,
         slack_user_id: SlackUserId,
+        epoch: SlackConnectionEpoch,
     ) -> Result<SlackPersonalDmTarget, SlackPersonalDmTargetError> {
-        SlackPersonalDmTargetProvisioner::provision_for_user(self, user_id, slack_user_id).await
+        SlackPersonalDmTargetProvisioner::provision_for_user_for_epoch(
+            self,
+            user_id,
+            slack_user_id,
+            epoch,
+        )
+        .await
     }
 }
 
@@ -513,10 +589,18 @@ impl ProvisioningSlackPersonalUserBinder {
         }
     }
 
-    fn spawn_dm_provisioning(&self, user_id: UserId, slack_user_id: SlackUserId) {
+    fn spawn_dm_provisioning(
+        &self,
+        user_id: UserId,
+        slack_user_id: SlackUserId,
+        epoch: SlackConnectionEpoch,
+    ) {
         let provisioner = Arc::clone(&self.dm_provisioner);
         tokio::spawn(async move {
-            match provisioner.provision_for_user(user_id, slack_user_id).await {
+            let result = provisioner
+                .provision_for_user_for_epoch(user_id, slack_user_id, epoch)
+                .await;
+            match result {
                 Ok(_) => {
                     tracing::debug!("Slack personal DM target provisioned after OAuth binding");
                 }
@@ -544,18 +628,19 @@ impl std::fmt::Debug for ProvisioningSlackPersonalUserBinder {
 
 #[async_trait::async_trait]
 impl SlackPersonalUserBinder for ProvisioningSlackPersonalUserBinder {
-    async fn bind_personal_user(
+    async fn bind_personal_user_for_epoch(
         &self,
         principal: SlackPersonalBindingPrincipal,
         request: SlackPersonalUserBindingRequest,
-    ) -> Result<RebornUserIdentityBinding, SlackPersonalUserBindingError> {
+        epoch: SlackConnectionEpoch,
+    ) -> Result<SlackPersonalUserBindingOutcome, SlackPersonalUserBindingError> {
         let slack_user_id = request.slack_user_id.clone();
-        let binding = self
+        let outcome = self
             .binding_service
-            .bind_personal_user(principal, request)
+            .bind_personal_user_for_epoch(principal, request, epoch)
             .await?;
-        self.spawn_dm_provisioning(binding.user_id.clone(), slack_user_id);
-        Ok(binding)
+        self.spawn_dm_provisioning(outcome.binding.user_id.clone(), slack_user_id, epoch);
+        Ok(outcome)
     }
 }
 
@@ -649,7 +734,8 @@ fn build_triggered_run_delivery_hook_from_parts(
     let delivery_sink: Arc<dyn OutboundDeliverySink> = Arc::new(NoopSlackDeliverySink);
     let binding_service: Arc<dyn ConversationBindingService> =
         Arc::new(NoopConversationBindingService);
-    let services = SlackFinalReplyDeliveryServices {
+    let services = FinalReplyDeliveryServices {
+        channel_protocol: Arc::new(crate::slack::slack_delivery::SlackDeliveryProtocol),
         binding_service,
         thread_service: Arc::clone(&parts.thread_service),
         turn_coordinator: Arc::clone(&parts.turn_coordinator),
@@ -664,6 +750,39 @@ fn build_triggered_run_delivery_hook_from_parts(
         approval_requests: Some(Arc::clone(&parts.local_runtime.approval_requests)
             as Arc<dyn ironclaw_run_state::ApprovalRequestStore>),
     };
+    // Per-trigger delivery target resolution runs over the same durable Slack
+    // host state (channel routes + personal DM targets) the outbound target
+    // surface publishes ids from, so an id selected at trigger_create time
+    // resolves at fire time or fails closed.
+    let host_state = Arc::new(FilesystemSlackHostState::new(
+        Arc::clone(&parts.local_runtime.host_state_filesystem),
+        config.tenant_id.clone(),
+        config.user_id.clone(),
+        config.agent_id.clone(),
+        config.project_id.clone(),
+    ));
+    let outbound_target_provider: Arc<dyn OutboundDeliveryTargetProvider> =
+        Arc::new(SlackHostBetaOutboundTargetProvider::new(
+            SlackOutboundTargetProviderConfig {
+                tenant_id: config.tenant_id.clone(),
+                agent_id: config.agent_id.clone(),
+                project_id: config.project_id.clone(),
+                installation_id: config.installation_id.clone(),
+                team_id: config.team_id.clone(),
+                configured_channel_routes: config
+                    .channel_routes
+                    .iter()
+                    .map(|route| {
+                        SlackConfiguredChannelRoute::new(
+                            route.channel_id.clone(),
+                            route.subject_user_id.clone(),
+                        )
+                    })
+                    .collect(),
+            },
+            host_state.clone(),
+            host_state,
+        ));
     // Pass config.agent_id as the fallback so the ThreadScope key matches the
     // value ConversationContentRefMaterializer uses (same runtime default_agent_id).
     let driver = TriggeredRunDeliveryDriver::new(
@@ -671,7 +790,8 @@ fn build_triggered_run_delivery_hook_from_parts(
         delivery_store,
         route_store,
         config.agent_id.clone(),
-    );
+    )
+    .with_outbound_target_provider(outbound_target_provider);
     Ok(Arc::new(driver))
 }
 
@@ -700,6 +820,7 @@ pub fn build_slack_host_beta_mounts(
     let binding_store: Arc<dyn RebornUserIdentityBindingStore> = state.clone();
     let user_identity_lookup: Arc<dyn RebornUserIdentityLookup> = state.clone();
     let user_identity_delete_store: Arc<dyn RebornUserIdentityBindingDeleteStore> = state.clone();
+    let user_binding_lifecycle_store: Arc<dyn SlackUserBindingLifecycleStore> = state.clone();
     let binding_service: Arc<dyn SlackPersonalUserBinder> =
         Arc::new(SlackPersonalUserBindingService::new(
             [SlackPersonalBindingInstallation {
@@ -732,15 +853,22 @@ pub fn build_slack_host_beta_mounts(
             config.installation_id.clone(),
             Arc::clone(&channel_route_store),
         ));
+    let conversations = Arc::new(InMemoryConversationServices::default());
+    let conversation_actor_pairings: Arc<
+        dyn ironclaw_conversations::ConversationActorPairingService,
+    > = conversations.clone();
+    let parts = SlackHostBetaRuntimeParts::from_runtime(runtime)?;
+    let record = build_slack_installation_record_with_resolvers(
+        &parts,
+        config.clone(),
+        actor_user_resolver,
+        Some(subject_route_resolver),
+        SlackConversationServices::from_shared(conversations),
+    )?;
     // Build the installation resolver once so the events route has a single
     // source of truth for the Slack signing identity.
     let resolver: Arc<dyn SlackInstallationResolver> =
-        build_slack_installation_resolver_with_resolvers(
-            runtime,
-            config.clone(),
-            actor_user_resolver,
-            Some(subject_route_resolver),
-        )?;
+        Arc::new(StaticSlackInstallationResolver::new([record]));
     let events =
         slack_events_route_mount(SlackEventsRouteState::from_resolver(Arc::clone(&resolver)));
     let allowed_route_subjects = std::iter::once(config.user_id.clone())
@@ -824,7 +952,6 @@ pub fn build_slack_host_beta_mounts(
     if outbound_delivery_provider_already_registered {
         let personal_connection_scope = SlackPersonalConnectionScope {
             installation_id: config.installation_id.clone(),
-            team_id: config.team_id.clone(),
         };
         return Ok(SlackHostBetaMounts {
             events,
@@ -837,6 +964,8 @@ pub fn build_slack_host_beta_mounts(
             personal_oauth_binder,
             user_identity_lookup: user_identity_lookup.clone(),
             user_identity_delete_store: user_identity_delete_store.clone(),
+            user_binding_lifecycle_store: user_binding_lifecycle_store.clone(),
+            conversation_actor_pairings: conversation_actor_pairings.clone(),
             personal_dm_target_store: personal_dm_target_store.clone(),
             outbound_delivery_target_provider,
             outbound_delivery_target_provider_registered: true,
@@ -862,7 +991,6 @@ pub fn build_slack_host_beta_mounts(
     }
     let personal_connection_scope = SlackPersonalConnectionScope {
         installation_id: config.installation_id.clone(),
-        team_id: config.team_id.clone(),
     };
     Ok(SlackHostBetaMounts {
         events,
@@ -875,6 +1003,8 @@ pub fn build_slack_host_beta_mounts(
         personal_oauth_binder,
         user_identity_lookup: user_identity_lookup.clone(),
         user_identity_delete_store,
+        user_binding_lifecycle_store,
+        conversation_actor_pairings,
         personal_dm_target_store,
         outbound_delivery_target_provider,
         outbound_delivery_target_provider_registered: true,
@@ -1064,8 +1194,9 @@ fn build_slack_installation_record_with_resolvers(
     let preferences: Arc<dyn ironclaw_outbound::CommunicationPreferenceRepository> =
         Arc::clone(&parts.local_runtime.outbound_preferences);
     let delivery_sink: Arc<dyn OutboundDeliverySink> = Arc::new(NoopSlackDeliverySink);
-    let observer = Arc::new(SlackFinalReplyDeliveryObserver::with_settings(
-        SlackFinalReplyDeliveryServices {
+    let observer = Arc::new(FinalReplyDeliveryObserver::with_settings(
+        FinalReplyDeliveryServices {
+            channel_protocol: Arc::new(crate::slack::slack_delivery::SlackDeliveryProtocol),
             binding_service: Arc::new(binding),
             thread_service: Arc::clone(&parts.thread_service),
             turn_coordinator: Arc::clone(&parts.turn_coordinator),
@@ -1080,7 +1211,7 @@ fn build_slack_installation_record_with_resolvers(
             approval_requests: Some(Arc::clone(&parts.local_runtime.approval_requests)
                 as Arc<dyn ironclaw_run_state::ApprovalRequestStore>),
         },
-        SlackFinalReplyDeliverySettings::default(),
+        FinalReplyDeliverySettings::default(),
     ));
 
     Ok(SlackInstallationRecord::new(
@@ -1177,15 +1308,25 @@ impl ProductActorUserResolver for SlackHostBetaActorUserResolver {
     async fn resolve_product_actor_user(
         &self,
         request: ProductActorUserResolutionRequest,
-    ) -> Result<Option<UserId>, ProductWorkflowError> {
-        if let Some(user_id) = self
+    ) -> Result<Option<ResolvedProductActorUser>, ProductWorkflowError> {
+        if let Some(resolved_actor) = self
             .cached_identity
             .resolve_product_actor_user(request.clone())
             .await?
         {
-            return Ok(Some(user_id));
+            return Ok(Some(resolved_actor));
         }
         Ok(None)
+    }
+
+    async fn resolved_product_actor_user_is_current(
+        &self,
+        request: &ProductActorUserResolutionRequest,
+        expected: &ResolvedProductActorUser,
+    ) -> Result<bool, ProductWorkflowError> {
+        self.cached_identity
+            .resolved_product_actor_user_is_current(request, expected)
+            .await
     }
 }
 
@@ -1205,29 +1346,29 @@ mod tests {
     use http_body_util::BodyExt;
     use ironclaw_authorization::GrantAuthorizer;
     use ironclaw_extensions::ExtensionRegistry;
-    use ironclaw_filesystem::LocalFilesystem;
+    use ironclaw_filesystem::{DiskFilesystem, InMemoryBackend};
     use ironclaw_host_runtime::{
         CapabilitySurfaceVersion, HostRuntimeHttpEgressPort, HostRuntimeServices,
     };
-    use ironclaw_loop_support::{
+    use ironclaw_loop_host::{
         HostManagedModelError, HostManagedModelGateway, HostManagedModelRequest,
         HostManagedModelResponse,
     };
     use ironclaw_network::{
         NetworkHttpEgress, NetworkHttpError, NetworkHttpRequest, NetworkHttpResponse, NetworkUsage,
     };
-    use ironclaw_processes::{InMemoryProcessResultStore, InMemoryProcessStore, ProcessServices};
+    use ironclaw_processes::{FilesystemProcessResultStore, FilesystemProcessStore};
     use ironclaw_product_workflow::{
         LifecyclePackageKind, LifecyclePackageRef, ProductActorUserResolutionRequest,
-        ProductWorkflowError, RebornChannelConnectStrategy, RebornExtensionOnboardingState,
-        RebornOutboundDeliveryTargetId, RebornOutboundDeliveryTargetStatus,
-        RebornServicesErrorCode, RebornServicesErrorKind, RebornSetOutboundPreferencesRequest,
-        WebUiAuthenticatedCaller,
+        ProductWorkflowError, RebornExtensionOnboardingState, RebornOutboundDeliveryTargetId,
+        RebornOutboundDeliveryTargetStatus, RebornServicesErrorCode, RebornServicesErrorKind,
+        RebornSetOutboundPreferencesRequest, WebUiAuthenticatedCaller,
     };
     use ironclaw_resources::InMemoryResourceGovernor;
     use ironclaw_secrets::InMemorySecretStore;
     use ironclaw_slack_v2_adapter::SLACK_USER_ACTOR_KIND;
     use ironclaw_threads::{ListThreadsForScopeRequest, ThreadHistoryRequest, ThreadScope};
+    use ironclaw_triggers::TriggerRunHistoryStatus;
     use ironclaw_turns::{
         GetRunStateRequest, ReplyTargetBindingRef, TurnCoordinator, TurnRunId, TurnScope,
         TurnStatus, run_profile::LoopCapabilityPort,
@@ -1239,8 +1380,7 @@ mod tests {
     use crate::slack::slack_channel_routes::{
         InMemorySlackChannelRouteStore, SlackChannelRoute, SlackChannelRouteAdminRouteMount,
         SlackChannelRouteError, SlackChannelRouteKey, SlackChannelRouteListPage,
-        WEBUI_V2_CHANNELS_SLACK_ALLOWED_PATH, WEBUI_V2_CHANNELS_SLACK_ROUTES_PATH,
-        slack_channel_route_admin_route_mount,
+        WEBUI_V2_CHANNELS_SLACK_ROUTES_PATH, slack_channel_route_admin_route_mount,
     };
     use crate::slack::slack_connectable_channel::{
         SlackOperatorRouteVisibility, build_webui_services_with_slack_host_beta_mounts,
@@ -1254,8 +1394,7 @@ mod tests {
     use crate::slack::slack_serve::{SlackApiAppId, SlackUserId};
     use crate::{
         RebornBuildError, RebornBuildInput, RebornRuntimeIdentity, RebornRuntimeInput,
-        SLACK_EVENTS_PATH, WebuiAuthentication, WebuiAuthenticator, WebuiServeConfig,
-        build_reborn_runtime, local_dev_runtime_policy, webui_v2_app,
+        SLACK_EVENTS_PATH, build_reborn_runtime, local_dev_runtime_policy,
     };
 
     const TENANT: &str = "tenant:slack-host";
@@ -1271,59 +1410,39 @@ mod tests {
 
     type HmacSha256 = Hmac<sha2::Sha256>;
 
-    struct OperatorTokenAuthenticator;
-
-    #[async_trait]
-    impl WebuiAuthenticator for OperatorTokenAuthenticator {
-        async fn authenticate(&self, token: &str) -> Option<WebuiAuthentication> {
-            if token == "operator-token" {
-                Some(WebuiAuthentication::operator(
-                    UserId::new(USER).expect("user"),
-                ))
-            } else {
-                None
+    /// A persisted run id proves acceptance even if that run later failed;
+    /// `Error` without a run id means submission failed before acceptance.
+    fn accepted_trigger_run_id(
+        run_id: Option<TurnRunId>,
+        status: Option<TriggerRunHistoryStatus>,
+    ) -> Option<TurnRunId> {
+        match (run_id, status) {
+            (Some(run_id), _) => Some(run_id),
+            (None, Some(TriggerRunHistoryStatus::Error)) => {
+                panic!("trigger run failed before acceptance")
             }
-        }
-
-        fn mounts_operator_webui_config_routes(&self) -> bool {
-            true
+            (None, _) => None,
         }
     }
 
-    struct MixedSessionAndOperatorAuthenticator;
-
-    #[async_trait]
-    impl WebuiAuthenticator for MixedSessionAndOperatorAuthenticator {
-        async fn authenticate(&self, token: &str) -> Option<WebuiAuthentication> {
-            match token {
-                "session-token" => {
-                    Some(WebuiAuthentication::user(UserId::new(USER).expect("user")))
-                }
-                "operator-token" => Some(WebuiAuthentication::operator(
-                    UserId::new(USER).expect("user"),
-                )),
-                _ => None,
-            }
-        }
-
-        fn mounts_operator_webui_config_routes(&self) -> bool {
-            true
-        }
+    #[test]
+    fn accepted_trigger_run_id_classifies_persisted_states() {
+        let run_id = TurnRunId::new();
+        assert_eq!(
+            accepted_trigger_run_id(Some(run_id), Some(TriggerRunHistoryStatus::Error)),
+            Some(run_id)
+        );
+        assert_eq!(
+            accepted_trigger_run_id(None, Some(TriggerRunHistoryStatus::Running)),
+            None
+        );
+        assert_eq!(accepted_trigger_run_id(None, None), None);
     }
 
-    struct HiddenOperatorRouteAuthenticator;
-
-    #[async_trait]
-    impl WebuiAuthenticator for HiddenOperatorRouteAuthenticator {
-        async fn authenticate(&self, token: &str) -> Option<WebuiAuthentication> {
-            if token == "operator-token" {
-                Some(WebuiAuthentication::operator(
-                    UserId::new(USER).expect("user"),
-                ))
-            } else {
-                None
-            }
-        }
+    #[test]
+    #[should_panic(expected = "trigger run failed before acceptance")]
+    fn accepted_trigger_run_id_rejects_pre_acceptance_error() {
+        accepted_trigger_run_id(None, Some(TriggerRunHistoryStatus::Error));
     }
 
     #[derive(Debug)]
@@ -1931,446 +2050,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn slack_allowed_channels_are_reachable_through_webui_v2_app() {
-        let (runtime, _root) = runtime().await;
-        let mounts = build_slack_host_beta_mounts(&runtime, config_without_channel_routes())
-            .expect("mounts");
-        let bundle = build_webui_services_with_slack_host_beta_mounts(
-            &runtime,
-            None,
-            Some(&mounts),
-            SlackOperatorRouteVisibility::Visible,
-        )
-        .expect("webui bundle");
-        let app = webui_v2_app(
-            bundle,
-            WebuiServeConfig::new(
-                TenantId::new(TENANT).expect("tenant"),
-                Arc::new(OperatorTokenAuthenticator),
-                Vec::new(),
-            )
-            .with_default_agent_id(AgentId::new(AGENT).expect("agent"))
-            .with_default_project_id(ProjectId::new(PROJECT).expect("project"))
-            .with_slack_channel_routes(mounts.channel_routes),
-        )
-        .expect("webui app");
-
-        let save = app
-            .clone()
-            .oneshot(
-                Request::builder()
-                    .method("PUT")
-                    .uri(WEBUI_V2_CHANNELS_SLACK_ALLOWED_PATH)
-                    .header("authorization", "Bearer operator-token")
-                    .header("content-type", "application/json")
-                    .body(Body::from(r#"{"channel_ids":["C0HOST","C0OPS"]}"#))
-                    .expect("save request builds"),
-            )
-            .await
-            .expect("save route responds");
-        assert_eq!(save.status(), StatusCode::OK);
-        let save_body = axum::body::to_bytes(save.into_body(), 64 * 1024)
-            .await
-            .expect("save body");
-        let save_body: serde_json::Value = serde_json::from_slice(&save_body).expect("save json");
-        assert_eq!(save_body["channels"].as_array().expect("channels").len(), 2);
-        assert_ne!(
-            save_body["channels"][0]["subject_user_id"],
-            save_body["channels"][1]["subject_user_id"],
-            "allowed API should assign one tenant-scoped subject per channel"
-        );
-
-        let list = app
-            .oneshot(
-                Request::builder()
-                    .method("GET")
-                    .uri(WEBUI_V2_CHANNELS_SLACK_ALLOWED_PATH)
-                    .header("authorization", "Bearer operator-token")
-                    .body(Body::empty())
-                    .expect("list request builds"),
-            )
-            .await
-            .expect("list route responds");
-        assert_eq!(list.status(), StatusCode::OK);
-        let body = axum::body::to_bytes(list.into_body(), 64 * 1024)
-            .await
-            .expect("list body");
-        let body: serde_json::Value = serde_json::from_slice(&body).expect("list json");
-        assert_eq!(
-            body["channels"],
-            serde_json::json!([
-                {
-                    "channel_id":"C0HOST",
-                    "subject_user_id": save_body["channels"][0]["subject_user_id"].clone(),
-                    "subject_display_name": save_body["channels"][0]["subject_display_name"].clone()
-                },
-                {
-                    "channel_id":"C0OPS",
-                    "subject_user_id": save_body["channels"][1]["subject_user_id"].clone(),
-                    "subject_display_name": save_body["channels"][1]["subject_display_name"].clone()
-                }
-            ])
-        );
-
-        runtime.shutdown().await.expect("runtime shuts down");
-    }
-
-    #[tokio::test]
-    async fn slack_connectable_channels_advertise_admin_action_to_operator_token() {
-        let (runtime, _root) = runtime().await;
-        let mounts = build_slack_host_beta_mounts(&runtime, config_without_channel_routes())
-            .expect("mounts");
-        let bundle = build_webui_services_with_slack_host_beta_mounts(
-            &runtime,
-            None,
-            Some(&mounts),
-            SlackOperatorRouteVisibility::Visible,
-        )
-        .expect("webui bundle");
-        let app = webui_v2_app(
-            bundle,
-            WebuiServeConfig::new(
-                TenantId::new(TENANT).expect("tenant"),
-                Arc::new(OperatorTokenAuthenticator),
-                Vec::new(),
-            )
-            .with_default_agent_id(AgentId::new(AGENT).expect("agent"))
-            .with_default_project_id(ProjectId::new(PROJECT).expect("project"))
-            .with_slack_channel_routes(mounts.channel_routes),
-        )
-        .expect("webui app");
-
-        let response = app
-            .oneshot(
-                Request::builder()
-                    .method("GET")
-                    .uri("/api/webchat/v2/channels/connectable")
-                    .header("authorization", "Bearer operator-token")
-                    .body(Body::empty())
-                    .expect("request builds"),
-            )
-            .await
-            .expect("route responds");
-
-        assert_eq!(response.status(), StatusCode::OK);
-        let body = axum::body::to_bytes(response.into_body(), 64 * 1024)
-            .await
-            .expect("response body");
-        let body: serde_json::Value = serde_json::from_slice(&body).expect("response json");
-        let strategies: Vec<_> = body["channels"]
-            .as_array()
-            .expect("channels")
-            .iter()
-            .map(|channel| channel["strategy"].as_str().expect("strategy"))
-            .collect();
-        assert!(
-            strategies.contains(&"admin_managed_channels"),
-            "operator token should see Slack admin channel setup: {body}"
-        );
-        assert!(
-            strategies.contains(&"oauth"),
-            "operator token should see personal Slack OAuth connection: {body}"
-        );
-
-        runtime.shutdown().await.expect("runtime shuts down");
-    }
-
-    #[tokio::test]
-    async fn slack_connectable_channels_hide_admin_action_from_sso_session_token() {
-        let (runtime, _root) = runtime().await;
-        let mounts = build_slack_host_beta_mounts(&runtime, config_without_channel_routes())
-            .expect("mounts");
-        let bundle = build_webui_services_with_slack_host_beta_mounts(
-            &runtime,
-            None,
-            Some(&mounts),
-            SlackOperatorRouteVisibility::Visible,
-        )
-        .expect("webui bundle");
-        let app = webui_v2_app(
-            bundle,
-            WebuiServeConfig::new(
-                TenantId::new(TENANT).expect("tenant"),
-                Arc::new(MixedSessionAndOperatorAuthenticator),
-                Vec::new(),
-            )
-            .with_default_agent_id(AgentId::new(AGENT).expect("agent"))
-            .with_default_project_id(ProjectId::new(PROJECT).expect("project"))
-            .with_slack_channel_routes(mounts.channel_routes),
-        )
-        .expect("webui app");
-
-        let response = app
-            .clone()
-            .oneshot(
-                Request::builder()
-                    .method("GET")
-                    .uri("/api/webchat/v2/channels/connectable")
-                    .header("authorization", "Bearer session-token")
-                    .body(Body::empty())
-                    .expect("request builds"),
-            )
-            .await
-            .expect("route responds");
-
-        assert_eq!(response.status(), StatusCode::OK);
-        let body = axum::body::to_bytes(response.into_body(), 64 * 1024)
-            .await
-            .expect("response body");
-        let body: serde_json::Value = serde_json::from_slice(&body).expect("response json");
-        let session_strategies: Vec<_> = body["channels"]
-            .as_array()
-            .expect("channels")
-            .iter()
-            .map(|channel| channel["strategy"].as_str().expect("strategy"))
-            .collect();
-        assert!(
-            !session_strategies.contains(&"admin_managed_channels"),
-            "SSO session token should not see Slack admin setup: {body}"
-        );
-        assert!(
-            session_strategies.contains(&"oauth"),
-            "SSO session token should see personal Slack OAuth connection: {body}"
-        );
-
-        let response = app
-            .oneshot(
-                Request::builder()
-                    .method("GET")
-                    .uri("/api/webchat/v2/channels/connectable")
-                    .header("authorization", "Bearer operator-token")
-                    .body(Body::empty())
-                    .expect("request builds"),
-            )
-            .await
-            .expect("route responds");
-
-        assert_eq!(response.status(), StatusCode::OK);
-        let body = axum::body::to_bytes(response.into_body(), 64 * 1024)
-            .await
-            .expect("response body");
-        let body: serde_json::Value = serde_json::from_slice(&body).expect("response json");
-        let operator_strategies: Vec<_> = body["channels"]
-            .as_array()
-            .expect("channels")
-            .iter()
-            .map(|channel| channel["strategy"].as_str().expect("strategy"))
-            .collect();
-        assert!(
-            operator_strategies.contains(&"admin_managed_channels"),
-            "operator token should see Slack admin setup: {body}"
-        );
-
-        runtime.shutdown().await.expect("runtime shuts down");
-    }
-
-    #[tokio::test]
-    async fn slack_channel_route_admin_is_reachable_through_webui_v2_app() {
-        let (runtime, _root) = runtime().await;
-        let mounts = build_slack_host_beta_mounts(&runtime, config_without_channel_routes())
-            .expect("mounts");
-        let bundle = build_webui_services_with_slack_host_beta_mounts(
-            &runtime,
-            None,
-            Some(&mounts),
-            SlackOperatorRouteVisibility::Visible,
-        )
-        .expect("webui bundle");
-        let app = webui_v2_app(
-            bundle,
-            WebuiServeConfig::new(
-                TenantId::new(TENANT).expect("tenant"),
-                Arc::new(OperatorTokenAuthenticator),
-                Vec::new(),
-            )
-            .with_default_agent_id(AgentId::new(AGENT).expect("agent"))
-            .with_default_project_id(ProjectId::new(PROJECT).expect("project"))
-            .with_slack_channel_routes(mounts.channel_routes),
-        )
-        .expect("webui app");
-
-        let unauthenticated = app
-            .clone()
-            .oneshot(
-                Request::builder()
-                    .method("PUT")
-                    .uri(WEBUI_V2_CHANNELS_SLACK_ROUTES_PATH)
-                    .header("content-type", "application/json")
-                    .body(Body::from(format!(
-                        r#"{{"channel_id":"C0HOST","subject_user_id":"{SHARED_SUBJECT}"}}"#
-                    )))
-                    .expect("unauthenticated request builds"),
-            )
-            .await
-            .expect("unauthenticated route responds");
-        assert_eq!(unauthenticated.status(), StatusCode::UNAUTHORIZED);
-
-        let empty_list = app
-            .clone()
-            .oneshot(
-                Request::builder()
-                    .method("GET")
-                    .uri(WEBUI_V2_CHANNELS_SLACK_ROUTES_PATH)
-                    .header("authorization", "Bearer operator-token")
-                    .body(Body::empty())
-                    .expect("empty list request builds"),
-            )
-            .await
-            .expect("empty list route responds");
-        assert_eq!(empty_list.status(), StatusCode::OK);
-        let body = axum::body::to_bytes(empty_list.into_body(), 64 * 1024)
-            .await
-            .expect("empty list body");
-        let body: serde_json::Value = serde_json::from_slice(&body).expect("empty list json");
-        assert_eq!(body["routes"], serde_json::json!([]));
-        assert_eq!(body["next_cursor"], serde_json::Value::Null);
-
-        let upsert = app
-            .clone()
-            .oneshot(
-                Request::builder()
-                    .method("PUT")
-                    .uri(WEBUI_V2_CHANNELS_SLACK_ROUTES_PATH)
-                    .header("authorization", "Bearer operator-token")
-                    .header("content-type", "application/json")
-                    .body(Body::from(format!(
-                        r#"{{"channel_id":"C0HOST","subject_user_id":"{SHARED_SUBJECT}"}}"#
-                    )))
-                    .expect("upsert request builds"),
-            )
-            .await
-            .expect("upsert route responds");
-        assert_eq!(upsert.status(), StatusCode::OK);
-
-        let list = app
-            .clone()
-            .oneshot(
-                Request::builder()
-                    .method("GET")
-                    .uri(WEBUI_V2_CHANNELS_SLACK_ROUTES_PATH)
-                    .header("authorization", "Bearer operator-token")
-                    .body(Body::empty())
-                    .expect("list request builds"),
-            )
-            .await
-            .expect("list route responds");
-        assert_eq!(list.status(), StatusCode::OK);
-        let body = axum::body::to_bytes(list.into_body(), 64 * 1024)
-            .await
-            .expect("list body");
-        let body: serde_json::Value = serde_json::from_slice(&body).expect("list json");
-        assert_eq!(body["routes"][0]["channel_id"], "C0HOST");
-        assert_eq!(body["routes"][0]["subject_user_id"], SHARED_SUBJECT);
-
-        let delete = app
-            .clone()
-            .oneshot(
-                Request::builder()
-                    .method("DELETE")
-                    .uri(WEBUI_V2_CHANNELS_SLACK_ROUTES_PATH)
-                    .header("authorization", "Bearer operator-token")
-                    .header("content-type", "application/json")
-                    .body(Body::from(r#"{"channel_id":"C0HOST"}"#))
-                    .expect("delete request builds"),
-            )
-            .await
-            .expect("delete route responds");
-        assert_eq!(delete.status(), StatusCode::OK);
-        let body = axum::body::to_bytes(delete.into_body(), 64 * 1024)
-            .await
-            .expect("delete body");
-        let body: serde_json::Value = serde_json::from_slice(&body).expect("delete json");
-        assert_eq!(body["deleted"], true);
-
-        let list_after_delete = app
-            .oneshot(
-                Request::builder()
-                    .method("GET")
-                    .uri(WEBUI_V2_CHANNELS_SLACK_ROUTES_PATH)
-                    .header("authorization", "Bearer operator-token")
-                    .body(Body::empty())
-                    .expect("list request builds"),
-            )
-            .await
-            .expect("list route responds");
-        assert_eq!(list_after_delete.status(), StatusCode::OK);
-        let body = axum::body::to_bytes(list_after_delete.into_body(), 64 * 1024)
-            .await
-            .expect("list body");
-        let body: serde_json::Value = serde_json::from_slice(&body).expect("list json");
-        assert_eq!(body["routes"], serde_json::json!([]));
-
-        runtime.shutdown().await.expect("runtime shuts down");
-    }
-
-    #[tokio::test]
-    async fn slack_channel_routes_mount_for_sso_operator_authenticator() {
-        let (runtime, _root) = runtime().await;
-        let mounts = build_slack_host_beta_mounts(&runtime, config_without_channel_routes())
-            .expect("mounts");
-        let bundle = build_webui_services_with_slack_host_beta_mounts(
-            &runtime,
-            None,
-            Some(&mounts),
-            SlackOperatorRouteVisibility::Hidden,
-        )
-        .expect("webui bundle");
-        let caller = WebUiAuthenticatedCaller::new(
-            TenantId::new(TENANT).expect("tenant"),
-            UserId::new(USER).expect("user"),
-            Some(AgentId::new(AGENT).expect("agent")),
-            Some(ProjectId::new(PROJECT).expect("project")),
-        );
-        let connectable = bundle
-            .api
-            .list_connectable_channels(caller)
-            .await
-            .expect("connectable channels");
-        assert!(
-            connectable
-                .channels
-                .iter()
-                .any(|channel| channel.strategy == RebornChannelConnectStrategy::OAuth),
-            "non-operator WebUI should still advertise personal Slack OAuth"
-        );
-        assert!(
-            connectable
-                .channels
-                .iter()
-                .all(|channel| channel.strategy
-                    != RebornChannelConnectStrategy::AdminManagedChannels),
-            "non-operator WebUI must not advertise Slack admin channel management"
-        );
-        let app = webui_v2_app(
-            bundle,
-            WebuiServeConfig::new(
-                TenantId::new(TENANT).expect("tenant"),
-                Arc::new(OperatorTokenAuthenticator),
-                Vec::new(),
-            )
-            .with_default_agent_id(AgentId::new(AGENT).expect("agent"))
-            .with_default_project_id(ProjectId::new(PROJECT).expect("project"))
-            .with_slack_channel_routes(mounts.channel_routes),
-        )
-        .expect("webui app");
-
-        let response = app
-            .oneshot(
-                Request::builder()
-                    .method("GET")
-                    .uri(WEBUI_V2_CHANNELS_SLACK_ROUTES_PATH)
-                    .header("authorization", "Bearer operator-token")
-                    .body(Body::empty())
-                    .expect("request builds"),
-            )
-            .await
-            .expect("route responds");
-        assert_eq!(response.status(), StatusCode::OK);
-
-        runtime.shutdown().await.expect("runtime shuts down");
-    }
-
-    #[tokio::test]
     async fn slack_tools_extension_lists_as_auth_required_until_personal_oauth_connected() {
         let (runtime, _root) = runtime().await;
         let mounts =
@@ -2488,48 +2167,6 @@ mod tests {
                 .all(|extension| extension.package_ref.id.as_str() != "slack_bot"),
             "the operator-provisioned Slack bot channel must stay hidden from the user extension catalog"
         );
-
-        runtime.shutdown().await.expect("runtime shuts down");
-    }
-
-    #[tokio::test]
-    async fn slack_channel_routes_not_mounted_when_operator_route_visibility_is_hidden() {
-        let (runtime, _root) = runtime().await;
-        let mounts = build_slack_host_beta_mounts(&runtime, config_without_channel_routes())
-            .expect("mounts");
-        let bundle = build_webui_services_with_slack_host_beta_mounts(
-            &runtime,
-            None,
-            Some(&mounts),
-            SlackOperatorRouteVisibility::Hidden,
-        )
-        .expect("webui bundle");
-        let app = webui_v2_app(
-            bundle,
-            WebuiServeConfig::new(
-                TenantId::new(TENANT).expect("tenant"),
-                Arc::new(HiddenOperatorRouteAuthenticator),
-                Vec::new(),
-            )
-            .with_default_agent_id(AgentId::new(AGENT).expect("agent"))
-            .with_default_project_id(ProjectId::new(PROJECT).expect("project"))
-            .with_slack_channel_routes(mounts.channel_routes),
-        )
-        .expect("webui app");
-
-        let response = app
-            .oneshot(
-                Request::builder()
-                    .method("GET")
-                    .uri(WEBUI_V2_CHANNELS_SLACK_ROUTES_PATH)
-                    .header("authorization", "Bearer operator-token")
-                    .body(Body::empty())
-                    .expect("request builds"),
-            )
-            .await
-            .expect("route responds");
-
-        assert_eq!(response.status(), StatusCode::NOT_FOUND);
 
         runtime.shutdown().await.expect("runtime shuts down");
     }
@@ -3605,77 +3242,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn slack_host_beta_admin_routes_feed_outbound_target_provider() {
-        let (runtime, _root) = runtime().await;
-        let mounts = build_slack_host_beta_mounts(&runtime, config_without_channel_routes())
-            .expect("mounts");
-        let bundle = build_webui_services_with_slack_host_beta_mounts(
-            &runtime,
-            None,
-            Some(&mounts),
-            SlackOperatorRouteVisibility::Visible,
-        )
-        .expect("webui bundle");
-        let app = webui_v2_app(
-            bundle.clone(),
-            WebuiServeConfig::new(
-                TenantId::new(TENANT).expect("tenant"),
-                Arc::new(OperatorTokenAuthenticator),
-                Vec::new(),
-            )
-            .with_default_agent_id(AgentId::new(AGENT).expect("agent"))
-            .with_default_project_id(ProjectId::new(PROJECT).expect("project"))
-            .with_slack_channel_routes(mounts.channel_routes),
-        )
-        .expect("webui app");
-
-        let save = app
-            .oneshot(
-                Request::builder()
-                    .method("PUT")
-                    .uri(WEBUI_V2_CHANNELS_SLACK_ALLOWED_PATH)
-                    .header("authorization", "Bearer operator-token")
-                    .header("content-type", "application/json")
-                    .body(Body::from(r#"{"channel_ids":["C0DYNAMIC"]}"#))
-                    .expect("save request builds"),
-            )
-            .await
-            .expect("save route responds");
-        assert_eq!(save.status(), StatusCode::OK);
-        let body = axum::body::to_bytes(save.into_body(), 64 * 1024)
-            .await
-            .expect("save body");
-        let body: serde_json::Value = serde_json::from_slice(&body).expect("save json");
-        let subject_user_id = body["channels"][0]["subject_user_id"]
-            .as_str()
-            .expect("assigned subject");
-        let caller = WebUiAuthenticatedCaller::new(
-            TenantId::new(TENANT).expect("tenant"),
-            UserId::new(subject_user_id).expect("subject user"),
-            Some(AgentId::new(AGENT).expect("agent")),
-            Some(ProjectId::new(PROJECT).expect("project")),
-        );
-
-        let targets = bundle
-            .api
-            .list_outbound_delivery_targets(caller)
-            .await
-            .expect("dynamic route target list");
-
-        assert_eq!(targets.targets.len(), 1);
-        assert_eq!(
-            targets.targets[0].target.target_id.as_str(),
-            "slack:shared-channel:T0HOST:C0DYNAMIC"
-        );
-        assert_eq!(
-            targets.targets[0].target.display_name.as_str(),
-            "Slack channel C0DYNAMIC"
-        );
-
-        runtime.shutdown().await.expect("runtime shuts down");
-    }
-
-    #[tokio::test]
     async fn build_slack_host_beta_mounts_rejects_team_only_selector_for_oauth_binding() {
         let root = tempfile::tempdir().expect("tempdir");
         let runtime = build_reborn_runtime(
@@ -4262,10 +3828,24 @@ mod tests {
     }
 
     async fn bind_slack_oauth_user(mounts: &SlackHostBetaMounts) {
-        mounts
-            .personal_oauth_binding_config()
+        let config = mounts.personal_oauth_binding_config();
+        let epoch = SlackConnectionEpoch::new(ironclaw_auth::AuthFlowId::new());
+        config
+            .lifecycle_store
+            .begin_connection(
+                &crate::slack::slack_personal_binding::SlackConnectionOwner::new(
+                    TenantId::new(TENANT).expect("tenant"),
+                    UserId::new(USER).expect("user"),
+                    AdapterInstallationId::new(INSTALLATION).expect("installation"),
+                ),
+                epoch,
+                chrono::Utc::now() + chrono::Duration::minutes(5),
+            )
+            .await
+            .expect("Slack OAuth lifecycle begins");
+        config
             .binding_service
-            .bind_personal_user(
+            .bind_personal_user_for_epoch(
                 SlackPersonalBindingPrincipal {
                     tenant_id: TenantId::new(TENANT).expect("tenant"),
                     user_id: UserId::new(USER).expect("user"),
@@ -4278,6 +3858,7 @@ mod tests {
                     enterprise_id: None,
                     api_app_id: SlackApiAppId::new(API_APP),
                 },
+                epoch,
             )
             .await
             .expect("Slack OAuth binding succeeds");
@@ -4366,12 +3947,12 @@ mod tests {
         async fn resolve_product_actor_user(
             &self,
             request: ProductActorUserResolutionRequest,
-        ) -> Result<Option<UserId>, ProductWorkflowError> {
+        ) -> Result<Option<ResolvedProductActorUser>, ProductWorkflowError> {
             self.calls
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner())
                 .push(request);
-            Ok(Some(self.user_id.clone()))
+            Ok(Some(ResolvedProductActorUser::new(self.user_id.clone())))
         }
     }
 
@@ -4462,17 +4043,17 @@ mod tests {
     }
 
     fn test_host_runtime_services() -> HostRuntimeServices<
-        LocalFilesystem,
+        DiskFilesystem,
         InMemoryResourceGovernor,
-        InMemoryProcessStore,
-        InMemoryProcessResultStore,
+        FilesystemProcessStore<InMemoryBackend>,
+        FilesystemProcessResultStore<InMemoryBackend>,
     > {
         HostRuntimeServices::new(
             Arc::new(ExtensionRegistry::new()),
-            Arc::new(LocalFilesystem::new()),
+            Arc::new(DiskFilesystem::new()),
             Arc::new(InMemoryResourceGovernor::new()),
             Arc::new(GrantAuthorizer::new()),
-            ProcessServices::in_memory(),
+            ironclaw_processes::in_memory_backed_process_services(),
             CapabilitySurfaceVersion::new("surface-v1").expect("surface version"),
         )
     }
@@ -4504,29 +4085,23 @@ mod tests {
             Err(SlackPersonalDmTargetError::StoreUnavailable)
         }
 
-        async fn upsert_personal_dm_target(
+        async fn upsert_personal_dm_target_for_epoch(
             &self,
-            target: crate::slack::slack_outbound_targets::SlackPersonalDmTarget,
+            _target: crate::slack::slack_outbound_targets::SlackPersonalDmTarget,
+            _epoch: SlackConnectionEpoch,
         ) -> Result<
             crate::slack::slack_outbound_targets::SlackPersonalDmTarget,
             SlackPersonalDmTargetError,
         > {
-            Ok(target)
-        }
-
-        async fn delete_personal_dm_target(
-            &self,
-            _key: &crate::slack::slack_outbound_targets::SlackPersonalDmTargetKey,
-        ) -> Result<bool, SlackPersonalDmTargetError> {
             Err(SlackPersonalDmTargetError::StoreUnavailable)
         }
 
-        async fn delete_personal_dm_targets_for_user(
+        async fn delete_personal_dm_targets_for_owner(
             &self,
             _tenant_id: &TenantId,
             _user_id: &UserId,
             _installation_id: &AdapterInstallationId,
-            _team_id: &crate::slack::slack_serve::SlackTeamId,
+            _expected_epoch: Option<SlackConnectionEpoch>,
         ) -> Result<usize, SlackPersonalDmTargetError> {
             Err(SlackPersonalDmTargetError::StoreUnavailable)
         }
@@ -4589,6 +4164,10 @@ mod tests {
     // then assert that a `TriggeredRunDeliveryRecord` was written to the
     // host-state filesystem via the production hook → driver path.
 
+    const TRIGGER_HOOK_E2E_FIRE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
+    const TRIGGER_HOOK_E2E_DELIVERY_TIMEOUT: std::time::Duration =
+        std::time::Duration::from_secs(30);
+
     async fn runtime_with_trigger_poller() -> (RebornRuntime, tempfile::TempDir) {
         use ironclaw_triggers::TriggerPollerWorkerConfig;
         let root = tempfile::tempdir().expect("tempdir");
@@ -4605,10 +4184,10 @@ mod tests {
                 .with_model_gateway_override(Arc::new(StaticGateway))
                 .with_trigger_poller_settings(
                     crate::TriggerPollerSettings::enabled_with_tenant_scoped_authorizer_for_test()
-                        .with_worker_config(TriggerPollerWorkerConfig {
-                            poll_interval: std::time::Duration::from_millis(20),
-                            ..TriggerPollerWorkerConfig::default()
-                        }),
+                        .with_worker_config(
+                            TriggerPollerWorkerConfig::default()
+                                .set_poll_interval(std::time::Duration::from_millis(20)),
+                        ),
                 ),
         )
         .await
@@ -4718,6 +4297,7 @@ mod tests {
             source: TriggerSourceKind::Schedule,
             schedule: TriggerSchedule::cron("* * * * *").expect("valid cron"),
             prompt: format!("{trigger_name}-prompt-marker"),
+            delivery_target: None,
             state: TriggerState::Scheduled,
             next_run_at: Utc::now() - chrono::Duration::seconds(120),
             last_run_at: None,
@@ -4730,20 +4310,28 @@ mod tests {
         .await
         .expect("upsert trigger record");
 
-        // Wait for the poller to fire the trigger.  `mark_fire_accepted` sets
-        // both `last_fired_slot` and `active_run_ref` atomically, so if we see
-        // `last_fired_slot` we can also safely read the run_id.
-        let deadline = Instant::now() + std::time::Duration::from_secs(15);
+        // Wait for the poller to persist an accepted run. `active_run_ref` is
+        // cleared when a fast run completes, so read the durable run-history
+        // row instead of racing that transient field.
+        // Keep this budget generous: under `cargo llvm-cov --all-targets`, this
+        // E2E runs alongside many instrumented async tests, so the background
+        // trigger poller can be scheduled much later than in a focused test.
+        let deadline = Instant::now() + TRIGGER_HOOK_E2E_FIRE_TIMEOUT;
         let mut fired_run_id = None;
+        let mut last_run_history = None;
         while Instant::now() < deadline {
             tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-            let current = repo
-                .get_trigger(tenant_id.clone(), trigger_id)
+            let run_history = repo
+                .list_trigger_run_history(tenant_id.clone(), trigger_id, 1)
                 .await
-                .expect("get_trigger")
-                .expect("record present");
-            if current.last_fired_slot.is_some() {
-                fired_run_id = current.active_run_ref;
+                .expect("list trigger run history");
+            last_run_history = Some(run_history);
+            let latest_run = last_run_history.as_ref().and_then(|runs| runs.first());
+            if let Some(run_id) = accepted_trigger_run_id(
+                latest_run.and_then(|run| run.run_id),
+                latest_run.map(|run| run.status),
+            ) {
+                fired_run_id = Some(run_id);
                 break;
             }
         }
@@ -4758,12 +4346,13 @@ mod tests {
             .expect("local-dev runtime has local_runtime services");
         let delivery_store = Arc::clone(&local_runtime.triggered_run_delivery);
 
-        // Poll briefly for the delivery record.  The driver spawns a background
-        // task; for the `NoDefaultConfigured` fast-path it should complete well
-        // within 2 s.
+        // Poll for the delivery record.  The driver spawns a background task;
+        // the `NoDefaultConfigured` fast-path normally completes well within
+        // 2 s, but shared CI runners need the same load headroom as the fire
+        // wait above.
         let mut delivery_record = None;
         if let Some(run_id) = fired_run_id {
-            let delivery_deadline = Instant::now() + std::time::Duration::from_secs(5);
+            let delivery_deadline = Instant::now() + TRIGGER_HOOK_E2E_DELIVERY_TIMEOUT;
             while Instant::now() < delivery_deadline {
                 if let Ok(Some(rec)) = delivery_store.load_triggered_run_delivery(run_id).await {
                     delivery_record = Some(rec);
@@ -4775,7 +4364,8 @@ mod tests {
 
         assert!(
             fired_run_id.is_some(),
-            "trigger did not fire within 15 s — hook wiring e2e stalled"
+            "trigger did not fire within {:?} — hook wiring e2e stalled; last_run_history={last_run_history:?}",
+            TRIGGER_HOOK_E2E_FIRE_TIMEOUT
         );
         assert!(
             delivery_record.is_some(),
@@ -4788,7 +4378,7 @@ mod tests {
     /// `CommunicationPreferenceRepository` Arc that the WebUI
     /// `RebornOutboundPreferencesFacade` writes through
     /// (`local_runtime.outbound_preferences`) into
-    /// `SlackFinalReplyDeliveryServices.communication_preferences`.
+    /// `FinalReplyDeliveryServices.communication_preferences`.
     ///
     /// Pre-fix bug: `build_triggered_run_delivery_hook` constructed a fresh
     /// `FilesystemOutboundStateStore::new(Arc::clone(&local_runtime.host_state_filesystem))`

@@ -1,5 +1,7 @@
 //! Caller-level tests for Reborn WebUI v2 product-auth OAuth routes.
 
+// arch-exempt: large_file, caller-level product-auth route regression coverage, plan #5905
+
 #![cfg(feature = "webui-v2-beta")]
 
 use std::net::SocketAddr;
@@ -25,25 +27,26 @@ use ironclaw_host_api::{
     AgentId, InvocationId, ProjectId, ResourceScope, SecretHandle, TenantId, UserId,
 };
 use ironclaw_product_workflow::{
-    LifecyclePackageRef, RebornCancelRunResponse, RebornCreateThreadResponse,
+    LifecyclePackageKind, LifecyclePackageRef, RebornCancelRunResponse, RebornCreateThreadResponse,
     RebornDeleteThreadRequest, RebornDeleteThreadResponse, RebornExtensionActionResponse,
-    RebornExtensionListResponse, RebornExtensionRegistryResponse, RebornGetRunStateRequest,
-    RebornGetRunStateResponse, RebornListAutomationsResponse, RebornListThreadsResponse,
-    RebornOutboundDeliveryTargetListResponse, RebornOutboundPreferencesResponse,
-    RebornResolveGateResponse, RebornRetryRunResponse, RebornServicesApi, RebornServicesError,
-    RebornSetOutboundPreferencesRequest, RebornSetupExtensionResponse, RebornSkillActionResponse,
-    RebornSkillContentResponse, RebornSkillListResponse, RebornSkillSearchResponse,
-    RebornStreamEventsRequest, RebornStreamEventsResponse, RebornSubmitTurnResponse,
-    RebornTimelineRequest, RebornTimelineResponse, WebUiAuthenticatedCaller, WebUiCancelRunRequest,
+    RebornExtensionInfo, RebornExtensionListResponse, RebornExtensionRegistryResponse,
+    RebornGetRunStateRequest, RebornGetRunStateResponse, RebornListAutomationsResponse,
+    RebornListThreadsResponse, RebornOutboundDeliveryTargetListResponse,
+    RebornOutboundPreferencesResponse, RebornResolveGateResponse, RebornRetryRunResponse,
+    RebornServicesApi, RebornServicesError, RebornSetOutboundPreferencesRequest,
+    RebornSetupExtensionResponse, RebornSkillActionResponse, RebornSkillContentResponse,
+    RebornSkillListResponse, RebornSkillSearchResponse, RebornStreamEventsRequest,
+    RebornStreamEventsResponse, RebornSubmitTurnResponse, RebornTimelineRequest,
+    RebornTimelineResponse, WebUiAuthenticatedCaller, WebUiCancelRunRequest,
     WebUiCreateThreadRequest, WebUiListAutomationsRequest, WebUiListThreadsRequest,
     WebUiResolveGateRequest, WebUiRetryRunRequest, WebUiSendMessageRequest,
     WebUiSetupExtensionRequest, rejecting_reborn_services_error,
 };
 use ironclaw_reborn_composition::{
     GoogleOAuthRouteConfig, RebornAuthContinuationDispatcher, RebornProductAuthServices,
-    RebornReadiness, RebornWebuiBundle, WebuiAuthentication, WebuiAuthenticator, WebuiServeConfig,
-    webui_v2_app,
+    RebornReadiness, RebornWebuiBundle,
 };
+use ironclaw_webui::{WebuiAuthentication, WebuiAuthenticator, WebuiServeConfig, webui_v2_app};
 use serde_json::json;
 use tower::ServiceExt;
 use uuid::Uuid;
@@ -241,7 +244,41 @@ impl AuthInteractionService for SetupFailingManualTokenInteractions {
     }
 }
 
-struct UnusedServices;
+#[derive(Default)]
+struct UnusedServices {
+    installed_extensions: Vec<RebornExtensionInfo>,
+}
+
+impl UnusedServices {
+    fn with_installed_extensions(package_ids: &[&str]) -> Self {
+        Self {
+            installed_extensions: package_ids
+                .iter()
+                .map(|package_id| RebornExtensionInfo {
+                    package_ref: LifecyclePackageRef::new(
+                        LifecyclePackageKind::Extension,
+                        *package_id,
+                    )
+                    .expect("installed extension package ref"),
+                    display_name: (*package_id).to_string(),
+                    kind: "wasm_tool".to_string(),
+                    description: "test installed extension".to_string(),
+                    authenticated: false,
+                    active: false,
+                    tools: Vec::new(),
+                    needs_setup: true,
+                    has_auth: true,
+                    activation_status: None,
+                    activation_error: None,
+                    version: None,
+                    install_scope: None,
+                    onboarding_state: None,
+                    onboarding: None,
+                })
+                .collect(),
+        }
+    }
+}
 
 #[async_trait]
 impl RebornServicesApi for UnusedServices {
@@ -359,7 +396,9 @@ impl RebornServicesApi for UnusedServices {
         &self,
         _caller: WebUiAuthenticatedCaller,
     ) -> Result<RebornExtensionListResponse, RebornServicesError> {
-        Err(rejecting_reborn_services_error())
+        Ok(RebornExtensionListResponse {
+            extensions: self.installed_extensions.clone(),
+        })
     }
 
     async fn list_skills(
@@ -453,13 +492,23 @@ impl RebornServicesApi for UnusedServices {
 }
 
 fn build_app_with_product_auth() -> (axum::Router, Arc<RecordingAuthDispatcher>) {
+    build_app_with_product_auth_and_installed_extensions(&[])
+}
+
+fn build_app_with_product_auth_and_installed_extensions(
+    installed_package_ids: &[&str],
+) -> (axum::Router, Arc<RecordingAuthDispatcher>) {
     let dispatcher = Arc::new(RecordingAuthDispatcher::default());
     let product_auth = Arc::new(RebornProductAuthServices::from_shared(
         Arc::new(InMemoryAuthProductServices::new()),
         dispatcher.clone(),
     ));
     (
-        build_app_with_product_auth_service(product_auth),
+        build_app_with_product_auth_service_config_and_extensions(
+            product_auth,
+            None,
+            installed_package_ids,
+        ),
         dispatcher,
     )
 }
@@ -474,8 +523,18 @@ fn build_app_with_product_auth_service_and_config(
     product_auth: Arc<RebornProductAuthServices>,
     google_oauth: Option<GoogleOAuthRouteConfig>,
 ) -> axum::Router {
+    build_app_with_product_auth_service_config_and_extensions(product_auth, google_oauth, &[])
+}
+
+fn build_app_with_product_auth_service_config_and_extensions(
+    product_auth: Arc<RebornProductAuthServices>,
+    google_oauth: Option<GoogleOAuthRouteConfig>,
+    installed_package_ids: &[&str],
+) -> axum::Router {
     let bundle = RebornWebuiBundle {
-        api: Arc::new(UnusedServices),
+        api: Arc::new(UnusedServices::with_installed_extensions(
+            installed_package_ids,
+        )),
         product_auth: Some(product_auth),
         readiness: RebornReadiness::disabled(),
     };
@@ -1466,7 +1525,7 @@ async fn product_auth_google_oauth_start_builds_provider_authorization_url() {
 }
 
 #[tokio::test]
-async fn extension_oauth_start_attaches_update_binding_for_package_extension() {
+async fn extension_oauth_start_rejects_package_missing_from_installed_inventory() {
     let shared = Arc::new(InMemoryAuthProductServices::new());
     let product_auth = Arc::new(RebornProductAuthServices::from_shared(
         shared.clone(),
@@ -1475,6 +1534,41 @@ async fn extension_oauth_start_attaches_update_binding_for_package_extension() {
     let app = build_app_with_product_auth_service_and_config(
         product_auth,
         Some(google_oauth_route_config()),
+    );
+
+    let response = post_extension_oauth_start(
+        &app,
+        "google-calendar",
+        json!({
+            "provider": "google",
+            "account_label": "work google",
+            "invocation_id": InvocationId::new().to_string(),
+            "scopes": [GOOGLE_CALENDAR_READONLY_SCOPE],
+            "expires_at": (Utc::now() + ChronoDuration::minutes(5)).to_rfc3339(),
+        }),
+    )
+    .await;
+
+    assert_eq!(response.status(), StatusCode::CONFLICT);
+    let body = read_body_string(response).await;
+    assert!(body.contains("\"code\":\"invalid_request\""));
+    assert!(
+        shared.flow_records_snapshot().is_empty(),
+        "an absent extension must be rejected before an OAuth flow is created"
+    );
+}
+
+#[tokio::test]
+async fn extension_oauth_start_for_installed_package_attaches_update_binding() {
+    let shared = Arc::new(InMemoryAuthProductServices::new());
+    let product_auth = Arc::new(RebornProductAuthServices::from_shared(
+        shared.clone(),
+        Arc::new(RecordingAuthDispatcher::default()),
+    ));
+    let app = build_app_with_product_auth_service_config_and_extensions(
+        product_auth,
+        Some(google_oauth_route_config()),
+        &["google-calendar"],
     );
     let invocation_id = InvocationId::new();
     let scope = AuthProductScope::new(
@@ -1536,6 +1630,13 @@ async fn extension_oauth_start_attaches_update_binding_for_package_extension() {
             .as_ref()
             .map(|binding| binding.account_id),
         Some(account.id)
+    );
+    assert_eq!(
+        flow.continuation,
+        AuthContinuationRef::LifecycleActivation {
+            package_ref: ironclaw_auth::LifecyclePackageRef::new("google-calendar")
+                .expect("lifecycle package ref"),
+        }
     );
 }
 
@@ -1655,7 +1756,12 @@ async fn product_auth_google_oauth_callback_rejects_disallowed_scopes() {
         )))
         .await
         .expect("oneshot");
-    assert_eq!(replay_response.status(), StatusCode::NOT_FOUND);
+    assert_eq!(replay_response.status(), StatusCode::CONFLICT);
+    assert!(
+        read_body_string(replay_response)
+            .await
+            .contains("\"code\":\"flow_already_terminal\"")
+    );
 }
 
 #[tokio::test]
@@ -1724,7 +1830,12 @@ async fn product_auth_google_oauth_callback_rejects_empty_parsed_scopes() {
         )))
         .await
         .expect("oneshot");
-    assert_eq!(replay_response.status(), StatusCode::NOT_FOUND);
+    assert_eq!(replay_response.status(), StatusCode::CONFLICT);
+    assert!(
+        read_body_string(replay_response)
+            .await
+            .contains("\"code\":\"flow_already_terminal\"")
+    );
 }
 
 #[tokio::test]
@@ -2061,7 +2172,10 @@ async fn product_auth_callback_malformed_flow_id_uses_sanitized_error() {
 #[cfg(feature = "slack-v2-host-beta")]
 mod slack_personal_oauth_serve {
     use super::*;
-    use ironclaw_reborn_composition::{OAuthRedirectUri, SlackPersonalSetupServiceSlot};
+    use ironclaw_product_adapters::AdapterInstallationId;
+    use ironclaw_reborn_composition::{
+        OAuthRedirectUri, SlackPersonalOAuthBindingConfig, SlackPersonalSetupServiceSlot,
+    };
 
     const SLACK_PERSONAL_CALLBACK_PATH: &str =
         "/api/reborn/product-auth/oauth/slack_personal/callback";
@@ -2086,10 +2200,15 @@ mod slack_personal_oauth_serve {
             dispatcher,
         ));
         let bundle = RebornWebuiBundle {
-            api: Arc::new(UnusedServices),
+            api: Arc::new(UnusedServices::with_installed_extensions(&["slack"])),
             product_auth: Some(product_auth),
             readiness: RebornReadiness::disabled(),
         };
+        let binding = SlackPersonalOAuthBindingConfig::in_memory_for_tests(
+            TenantId::new(TENANT).expect("tenant"),
+            AdapterInstallationId::new("install-test").expect("installation"),
+        )
+        .expect("in-memory Slack OAuth binding config");
         let config = WebuiServeConfig::new(
             TenantId::new(TENANT).expect("tenant"),
             Arc::new(OnlyValidToken),
@@ -2097,7 +2216,8 @@ mod slack_personal_oauth_serve {
         )
         .with_default_agent_id(AgentId::new(AGENT).expect("agent"))
         .with_default_project_id(ProjectId::new(PROJECT).expect("project"))
-        .with_slack_personal_oauth(slack_personal_slot().await);
+        .with_slack_personal_oauth(slack_personal_slot().await)
+        .with_slack_personal_oauth_binding(binding);
         webui_v2_app(bundle, config).expect("webui v2 app")
     }
 
@@ -2136,8 +2256,13 @@ mod slack_personal_oauth_serve {
 
         let response = post_extension_oauth_start(&app, "slack", slack_oauth_start_body()).await;
 
-        assert_eq!(response.status(), StatusCode::OK);
+        let status = response.status();
         let body = read_body_string(response).await;
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "unexpected OAuth start body: {body}"
+        );
         let json: serde_json::Value = serde_json::from_str(&body).expect("start json");
         let authorization_url = json["authorization_url"]
             .as_str()
@@ -2159,7 +2284,7 @@ mod slack_personal_oauth_serve {
         // Product auth is mounted but the Slack slot was never carried into
         // the serve config — the exact state a dropped webui_serve wiring
         // block would produce.
-        let (app, _) = build_app_with_product_auth();
+        let (app, _) = build_app_with_product_auth_and_installed_extensions(&["slack"]);
 
         let response = post_extension_oauth_start(&app, "slack", slack_oauth_start_body()).await;
 

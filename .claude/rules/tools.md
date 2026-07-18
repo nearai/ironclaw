@@ -1,140 +1,94 @@
 ---
 paths:
-  - "src/tools/**"
+  - "crates/ironclaw_capabilities/**"
+  - "crates/ironclaw_host_api/**"
+  - "crates/ironclaw_host_runtime/**"
+  - "crates/ironclaw_dispatcher/**"
+  - "crates/ironclaw_extensions/**"
+  - "crates/ironclaw_first_party_extensions/**"
+  - "crates/ironclaw_mcp/**"
+  - "crates/ironclaw_wasm/**"
   - "tools-src/**"
+  - "src/tools/**"
   - "src/channels/**"
   - "src/cli/**"
 ---
-# Tool Architecture
+# Reborn capability architecture
 
-**Keep tool-specific logic out of the main agent codebase.** The main agent provides generic infrastructure; tools are self-contained units that declare requirements through `<name>.capabilities.json` sidecar files (in dev mode: `tools-src/<name>/<name>-tool.capabilities.json`).
+Capabilities are typed contracts executed through the mediated Reborn host
+path. Product callers do not invoke runtime lanes, storage backends, provider
+clients, or secret stores directly to perform an action.
 
-Tools can be WASM (sandboxed, credential-injected, single binary) or MCP servers (ecosystem, any language, no sandbox). Both are first-class via `ironclaw tool install`.
+The stable ownership split is:
 
-See `src/tools/README.md` for full architecture, adding new tools, auth JSON examples, and WASM vs MCP decision guide.
+- `ironclaw_host_api`: neutral request, authority, resource, and result types.
+- `ironclaw_capabilities`: caller-facing invoke/resume/spawn workflow.
+- authorization/approvals/runtime-policy: decisions and leases.
+- `ironclaw_host_runtime`: obligations and host-mediated services.
+- `ironclaw_dispatcher`: already-authorized routing to runtime adapters.
+- WASM/MCP/scripts/first-party adapters: concrete execution lanes.
+- `ironclaw_extensions`: declarative manifests and installation records only.
 
-## Tool Implementation Pattern
+Verify the current call path with targeted symbol search before editing it:
 
-```rust
-#[async_trait]
-impl Tool for MyTool {
-    fn name(&self) -> &str { "my_tool" }
-    fn description(&self) -> &str { "Does something useful" }
-    fn parameters_schema(&self) -> serde_json::Value {
-        serde_json::json!({
-            "type": "object",
-            "properties": {
-                "param": { "type": "string", "description": "A parameter" }
-            },
-            "required": ["param"]
-        })
-    }
-    async fn execute(&self, params: serde_json::Value, ctx: &JobContext)
-        -> Result<ToolOutput, ToolError>
-    {
-        let start = std::time::Instant::now();
-        // ... do work ...
-        Ok(ToolOutput::text("result", start.elapsed()))
-    }
-    fn requires_sanitization(&self) -> bool { true } // External data
-}
+```bash
+rg -n "CapabilityHost|RuntimeAdapter|dispatch|invoke|resume|Obligation" \
+  crates
 ```
 
-## Everything Goes Through Tools
+## Rules
 
-**All actions originating from any non-agent caller — gateway handlers, CLI
-commands, routine engine, WASM channels, future channel extensions — MUST
-go through `ToolDispatcher::dispatch()`, never directly through the
-database, workspace, or domain managers.**
+- Actions cross authorization, approvals, resource accounting, obligations,
+  dispatch, and runtime execution in their defined order.
+- Runtime adapters accept already-authorized typed requests; they do not repeat
+  or bypass policy.
+- Product workflow and UI handlers call product/capability facades rather than
+  reaching into runtime lanes.
+- Extension manifests declare surfaces; registries do not execute them.
+- Credentials and HTTP remain host-mediated.
+- Model/user-correctable failures return model-visible `Failed` or `Denied`
+  outcomes. Reserve host errors for faults that make the run unable to continue.
+- Results are bounded and redacted. External effects require authoritative
+  evidence plus read-back verification; claim-only results are explicitly
+  marked unverified as defined in `tool-evidence.md`.
 
-This is the core design principle behind #2049. The reasons are concrete:
+Built-in capabilities are appropriate for host-coupled product behavior. WASM
+is the default for sandboxed extension code. MCP is appropriate for external
+server integrations. New lanes must implement existing host contracts rather
+than creating a parallel execution pipeline.
 
-1. **Audit trail.** Every dispatched call creates an `ActionRecord` linked
-   to a system job, so UI-initiated mutations are visible in job history
-   alongside agent-initiated ones. Direct DB calls bypass this entirely.
-2. **Safety pipeline parity.** The dispatcher runs the same pipeline as
-   `Worker::execute_tool`: parameter normalization, schema validation,
-   `sensitive_params()` redaction, per-tool timeout, output sanitization.
-   Direct calls skip all of it and risk leaking secrets into logs or
-   persisting unsafe content.
-3. **Channel-agnostic.** Channels are interchangeable extensions (gateway,
-   CLI, telegram, WASM, future custom channels). Routing through a single
-   dispatch function means new channels inherit the full pipeline for free.
-4. **Agent parity.** The agent can do anything channels can do (and vice
-   versa), because both call the same tools. No more "the UI can install
-   extensions but the agent can only list them" gaps.
+## Adding a capability
 
-### Required pattern
+1. Decide whether the behavior is a host-coupled built-in, WASM extension, MCP
+   integration, or another existing runtime lane.
+2. Define the typed request/result, scope, authority, resource, and redaction
+   contract with the lowest stable owner.
+3. Register a declarative descriptor/surface; do not make discovery execute it.
+4. Route invocation through `CapabilityHost`, including approval/resume when the
+   policy requires it.
+5. Implement the effect behind host-runtime services or a `RuntimeAdapter`.
+6. Return bounded, redacted output plus authoritative effect evidence and
+   read-back verification, or explicitly mark a claim-only result unverified.
+7. Add caller-path tests for allow, deny, approval/resume, invalid input,
+   unavailable runtime, cancellation, and redaction.
 
-```rust
-// In any gateway handler, CLI command, or routine engine callback:
-use crate::tools::dispatch::{DispatchSource, ToolDispatcher};
+Do not use a raw JSON/string dispatch convention when the shape is known. Do not
+pass ambient database, filesystem, HTTP client, or secret handles into product
+handlers or extension code.
 
-let dispatcher: &ToolDispatcher = state
-    .tool_dispatcher
-    .as_ref()
-    .ok_or((StatusCode::SERVICE_UNAVAILABLE, "dispatcher unavailable"))?;
+## Direct access exceptions
 
-let output = dispatcher
-    .dispatch(
-        "memory_write",
-        serde_json::json!({ "target": path, "content": content }),
-        &user.user_id,
-        DispatchSource::Channel("gateway".into()),
-    )
-    .await
-    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+Direct domain access is allowed inside the implementation that owns the domain,
+for pure product reads through typed query/facade contracts, and for composition
+startup/reconciliation. It is not an exception for a user-triggered mutation to
+skip capability authorization or host mediation. If a call bypasses the normal
+path, its code comment and PR description must name the owning contract and why
+no authorization, approval, resource, audit, or runtime obligation is lost.
+
+Review for parallel pipelines with:
+
+```bash
+rg -n "\.dispatch\(|\.invoke\(|\.resume\(" crates/ironclaw_product_workflow \
+  crates/ironclaw_reborn_composition crates/ironclaw_webui
+rg -n "RuntimeAdapter|CapabilityHost" crates
 ```
-
-### Forbidden pattern
-
-```rust
-// DO NOT do this in a gateway handler, CLI command, or routine callback:
-let store = state.store.as_ref().ok_or(...)?;
-store.set_setting(&user.user_id, &key, &value).await?;  // BYPASSES dispatch
-
-let workspace = resolve_workspace(&state, &user).await?;
-workspace.write(path, content).await?;  // BYPASSES dispatch + safety pipeline
-
-let ext_mgr = state.extension_manager.as_ref().ok_or(...)?;
-ext_mgr.install(name, url, kind, &user.user_id).await?;  // BYPASSES audit trail
-```
-
-### When direct access IS allowed
-
-The dispatch principle applies to **non-agent callers** acting on behalf of
-a user. These are exempt:
-
-| Layer | Why exempt |
-|---|---|
-| `Worker::execute_tool()` (agent loop) | Has its own atomic sequence-numbered audit trail; the dispatcher would conflict |
-| `EffectBridgeAdapter::execute_action()` (v2 engine) | Same — its own audit via `ThreadEvent` event sourcing |
-| The tool implementations themselves | Tools are the leaves; they need direct `Workspace`, `Database`, etc. handles to do their work |
-| Background jobs (scheduler, hygiene, mission runner) inside the engine | These ARE the engine; they emit their own events |
-| Pure read endpoints that need to JOIN/aggregate from multiple sources | A single tool call cannot express "list all jobs across users with filters X, Y, Z" — these are queries, not actions, and the audit value is low |
-
-### Annotating intentional exceptions
-
-If a handler legitimately needs direct access (rare — usually only for
-read aggregation), suppress the pre-commit check with a trailing comment
-on the offending line:
-
-```rust
-let rows = state.store.list_agent_jobs().await?; // dispatch-exempt: read-only aggregation
-```
-
-The pre-commit hook (`scripts/pre-commit-safety.sh`) flags any newly
-added line in `src/channels/web/handlers/*.rs` or `src/cli/*.rs` that
-touches `state.{store,workspace,workspace_pool,extension_manager,
-skill_registry,session_manager}.*` without a trailing
-`// dispatch-exempt: <reason>` comment on the same line. The check only
-looks at added lines (`+` lines in the diff), so existing untouched code
-doesn't trip it during incremental migration.
-
-### Migration status
-
-As of #2049, `ToolDispatcher` is wired into `GatewayState` but per-handler
-migration is incomplete. New handlers MUST use the dispatcher. Existing
-handlers should be migrated incrementally; each handler family
-(settings, memory, extensions, skills, routines, jobs, threads) is its
-own follow-up PR.

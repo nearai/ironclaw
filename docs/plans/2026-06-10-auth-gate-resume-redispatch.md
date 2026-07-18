@@ -8,7 +8,7 @@
 
 **Tech Stack:** Rust, `crates/ironclaw_agent_loop` (canonical executor), `crates/ironclaw_turns` (neutral contracts — likely untouched).
 
-**Bug context (diagnosed 2026-06-10):** Auth gates block with `approval_resume: None` (`executor/capabilities.rs:464`), store no resume record, append no tool result (`executor/gates.rs:61-101`). `LoopInput::GateResolved` is never consumed or rendered (`executor/input.rs:186`). After OAuth → `dispatch_turn_gate_resume` (`ironclaw_product_workflow/src/auth_continuation.rs:64`) → `PlannedDriver::resume` (`ironclaw_reborn/src/planned_driver.rs:123`) reloads the checkpoint and re-prompts the model cold. Model answers from stale context (memory) instead of retrying the calendar call.
+**Bug context (diagnosed 2026-06-10):** Auth gates block with `approval_resume: None` (`executor/capabilities.rs:464`), store no resume record, append no tool result (`executor/gates.rs:61-101`). `LoopInput::GateResolved` is never consumed or rendered (`executor/input.rs:186`). After OAuth → `dispatch_turn_gate_resume` (`ironclaw_product_workflow/src/auth_continuation.rs:64`) → `PlannedDriver::resume` (`ironclaw_runner/src/planned_driver.rs:123`) reloads the checkpoint and re-prompts the model cold. Model answers from stale context (memory) instead of retrying the calendar call.
 
 **Key existing machinery to mirror (read these first):**
 
@@ -25,7 +25,7 @@
 | `PromptStep::ResumeApproval` routing | `crates/ironclaw_agent_loop/src/executor/canonical.rs` (grep `ResumeApproval`) |
 | Test scaffolding | `crates/ironclaw_agent_loop/src/test_support/mod.rs:449,1063` (`ScriptedCapabilityOutcome::AuthRequired`) |
 
-**Scope guard:** No changes to `ironclaw_reborn`, `ironclaw_product_workflow`, `ironclaw_loop_support`, or host-runtime crates. The candidate already carries everything needed for re-dispatch — this is purely executor/state work in `ironclaw_agent_loop` (plus, only if Task 1 proves it necessary, a serialization shim in `state/slots.rs`).
+**Scope guard:** No changes to `ironclaw_runner`, `ironclaw_product_workflow`, `ironclaw_loop_host`, or host-runtime crates. The candidate already carries everything needed for re-dispatch — this is purely executor/state work in `ironclaw_agent_loop` (plus, only if Task 1 proves it necessary, a serialization shim in `state/slots.rs`).
 
 ---
 
@@ -43,7 +43,7 @@ Run: `grep -n "pending_approval_resume\|checkpoint_payload\|serde" crates/ironcl
 
 Two possible outcomes:
 - **Serde-based:** adding a new `#[serde(default)] Option<…>` field is backward compatible (old checkpoints deserialize with `None`). No schema version bump needed — confirm by finding an existing `#[serde(default)]` field that was added after v1.
-- **Manual codec:** mirror exactly how `PendingApprovalResume` is encoded/decoded in `slots.rs`, with a length/presence guard so old payloads (missing the slot) decode to `None`. If the codec is strictly positional with no presence guard, bump `CHECKPOINT_SCHEMA_VERSION` in `crates/ironclaw_reborn/src/planned_driver.rs` (grep `CHECKPOINT_SCHEMA_VERSION`) — note this invalidates in-flight blocked runs across deploy, which is acceptable for local-dev but call it out in the PR description.
+- **Manual codec:** mirror exactly how `PendingApprovalResume` is encoded/decoded in `slots.rs`, with a length/presence guard so old payloads (missing the slot) decode to `None`. If the codec is strictly positional with no presence guard, bump `CHECKPOINT_SCHEMA_VERSION` in `crates/ironclaw_runner/src/planned_driver.rs` (grep `CHECKPOINT_SCHEMA_VERSION`) — note this invalidates in-flight blocked runs across deploy, which is acceptable for local-dev but call it out in the PR description.
 
 - [ ] **Step 2: Record the finding as a comment in your working notes and pick the corresponding branch in Task 1 Step 3**
 
@@ -315,7 +315,7 @@ git commit -m "feat(agent_loop): re-dispatch auth-gated capability call on resum
 
 **Files:**
 - Test: `crates/ironclaw_agent_loop/src/executor/tests.rs`
-- Verify only (no edits): `crates/ironclaw_reborn/tests/loop_driver_host.rs`, `crates/ironclaw_turns/tests/agent_loop_host_contract.rs`
+- Verify only (no edits): `crates/ironclaw_runner/tests/loop_driver_host.rs`, `crates/ironclaw_turns/tests/agent_loop_host_contract.rs`
 
 - [ ] **Step 1: Write the still-blocked test** — resume where the capability STILL returns `AuthRequired` (credentials not actually stored). Assert: loop exits `Blocked` again with a (possibly new) auth gate_ref, `pending_auth_resume` re-populated, no model turn consumed, no infinite loop.
 
@@ -335,8 +335,8 @@ Expected: PASS already if Tasks 2-3 are correct (Block arm re-stores). If it fai
 
 - [ ] **Step 3: Full quality gate**
 
-Run: `cargo fmt && cargo clippy --all --benches --tests --examples --all-features && cargo test -p ironclaw_agent_loop -p ironclaw_reborn -p ironclaw_turns`
-Expected: zero clippy warnings, all green. (`ironclaw_reborn`/`ironclaw_turns` consume `LoopExecutionState` and the driver contract — they must compile and pass untouched.)
+Run: `cargo fmt && cargo clippy --all --benches --tests --examples --all-features && cargo test -p ironclaw_agent_loop -p ironclaw_runner -p ironclaw_turns`
+Expected: zero clippy warnings, all green. (`ironclaw_runner`/`ironclaw_turns` consume `LoopExecutionState` and the driver contract — they must compile and pass untouched.)
 
 - [ ] **Step 4: Commit**
 

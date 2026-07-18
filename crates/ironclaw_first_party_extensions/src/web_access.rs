@@ -162,10 +162,7 @@ impl WebAccessDispatchError {
 
     /// Override the `network_egress_bytes` in the usage, preserving the error kind.
     fn with_accumulated_bytes(self, bytes: u64) -> Self {
-        self.with_usage(ResourceUsage {
-            network_egress_bytes: bytes,
-            ..ResourceUsage::default()
-        })
+        self.with_usage(ResourceUsage::default().set_network_egress_bytes(bytes))
     }
 
     pub fn kind(&self) -> RuntimeDispatchErrorKind {
@@ -349,11 +346,9 @@ impl WebAccessExecutor {
         let output_bytes = json_bytes(&output);
         Ok(WebAccessDispatchResult {
             output,
-            usage: ResourceUsage {
-                output_bytes,
-                network_egress_bytes: response_text.request_bytes,
-                ..ResourceUsage::default()
-            },
+            usage: ResourceUsage::default()
+                .set_output_bytes(output_bytes)
+                .set_network_egress_bytes(response_text.request_bytes),
         })
     }
 
@@ -431,11 +426,9 @@ impl WebAccessExecutor {
         let output_bytes = json_bytes(&output);
         Ok(WebAccessDispatchResult {
             output,
-            usage: ResourceUsage {
-                output_bytes,
-                network_egress_bytes: total_request_bytes,
-                ..ResourceUsage::default()
-            },
+            usage: ResourceUsage::default()
+                .set_output_bytes(output_bytes)
+                .set_network_egress_bytes(total_request_bytes),
         })
     }
 }
@@ -1260,10 +1253,8 @@ fn map_egress_error(error: RuntimeHttpEgressError) -> WebAccessDispatchError {
             RuntimeDispatchErrorKind::OutputTooLarge
         }
     };
-    WebAccessDispatchError::new(kind).with_usage(ResourceUsage {
-        network_egress_bytes: error.request_bytes(),
-        ..ResourceUsage::default()
-    })
+    WebAccessDispatchError::new(kind)
+        .with_usage(ResourceUsage::default().set_network_egress_bytes(error.request_bytes()))
 }
 
 fn input_error() -> WebAccessDispatchError {

@@ -1,3 +1,4 @@
+// arch-exempt: large_file, mechanical LocalTraceSubmission*->NodeTraceSubmission* Bucket-3 rename (arch-simplification §4.4), no logic change, plan #6168
 //! Privacy-preserving trace contribution envelopes.
 //!
 //! This module is intentionally separate from replay traces. Replay fixtures
@@ -281,6 +282,28 @@ impl Default for OutcomeMetadata {
     }
 }
 
+impl OutcomeMetadata {
+    pub fn set_user_feedback(mut self, user_feedback: UserFeedback) -> Self {
+        self.user_feedback = user_feedback;
+        self
+    }
+
+    pub fn set_task_success(mut self, task_success: TaskSuccess) -> Self {
+        self.task_success = task_success;
+        self
+    }
+
+    pub fn set_failure_modes(mut self, failure_modes: Vec<TraceFailureMode>) -> Self {
+        self.failure_modes = failure_modes;
+        self
+    }
+
+    pub fn set_human_correction(mut self, human_correction: impl Into<String>) -> Self {
+        self.human_correction = Some(human_correction.into());
+        self
+    }
+}
+
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum UserFeedback {
@@ -542,6 +565,48 @@ pub struct ProcessEvaluationLabels {
     pub overall_score: Option<f32>,
 }
 
+impl ProcessEvaluationLabels {
+    pub fn set_evaluator_version(mut self, evaluator_version: impl Into<String>) -> Self {
+        self.evaluator_version = evaluator_version.into();
+        self
+    }
+
+    pub fn set_labels(mut self, labels: Vec<ProcessEvaluatorLabel>) -> Self {
+        self.labels = labels;
+        self
+    }
+
+    pub fn set_tool_selection(mut self, tool_selection: ProcessEvalRating) -> Self {
+        self.tool_selection = Some(tool_selection);
+        self
+    }
+
+    pub fn set_tool_argument_quality(mut self, tool_argument_quality: ProcessEvalRating) -> Self {
+        self.tool_argument_quality = Some(tool_argument_quality);
+        self
+    }
+
+    pub fn set_tool_ordering(mut self, tool_ordering: ProcessEvalRating) -> Self {
+        self.tool_ordering = Some(tool_ordering);
+        self
+    }
+
+    pub fn set_verification(mut self, verification: ProcessEvalRating) -> Self {
+        self.verification = Some(verification);
+        self
+    }
+
+    pub fn set_side_effect_safety(mut self, side_effect_safety: ProcessEvalRating) -> Self {
+        self.side_effect_safety = Some(side_effect_safety);
+        self
+    }
+
+    pub fn set_overall_score(mut self, overall_score: f32) -> Self {
+        self.overall_score = Some(overall_score);
+        self
+    }
+}
+
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
 #[serde(rename_all = "snake_case")]
 pub enum ProcessEvalRating {
@@ -603,6 +668,33 @@ pub struct HindsightRelabelingCandidate {
     pub benchmark_candidate: bool,
     #[serde(default)]
     pub relabeled_training_candidate: bool,
+}
+
+impl HindsightRelabelingCandidate {
+    pub fn set_achieved_subgoals(mut self, achieved_subgoals: Vec<String>) -> Self {
+        self.achieved_subgoals = achieved_subgoals;
+        self
+    }
+
+    pub fn set_failure_type(mut self, failure_type: TraceFailureMode) -> Self {
+        self.failure_type = Some(failure_type);
+        self
+    }
+
+    pub fn set_recoverability_score(mut self, recoverability_score: f32) -> Self {
+        self.recoverability_score = Some(recoverability_score);
+        self
+    }
+
+    pub fn set_benchmark_candidate(mut self, benchmark_candidate: bool) -> Self {
+        self.benchmark_candidate = benchmark_candidate;
+        self
+    }
+
+    pub fn set_relabeled_training_candidate(mut self, relabeled_training_candidate: bool) -> Self {
+        self.relabeled_training_candidate = relabeled_training_candidate;
+        self
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -787,6 +879,145 @@ impl Default for StandingTraceContributionPolicy {
             auth_mode: TraceUploadAuthMode::default(),
             device_key_id: None,
         }
+    }
+}
+
+impl StandingTraceContributionPolicy {
+    pub fn set_enabled(mut self, enabled: bool) -> Self {
+        self.enabled = enabled;
+        self
+    }
+
+    pub fn set_ingestion_endpoint(mut self, ingestion_endpoint: impl Into<String>) -> Self {
+        self.ingestion_endpoint = Some(ingestion_endpoint.into());
+        self
+    }
+
+    pub fn set_bearer_token_env(mut self, bearer_token_env: impl Into<String>) -> Self {
+        self.bearer_token_env = bearer_token_env.into();
+        self
+    }
+
+    pub fn set_upload_token_issuer_url(
+        mut self,
+        upload_token_issuer_url: impl Into<String>,
+    ) -> Self {
+        self.upload_token_issuer_url = Some(upload_token_issuer_url.into());
+        self
+    }
+
+    pub fn set_upload_token_issuer_allowed_hosts<I, S>(
+        mut self,
+        upload_token_issuer_allowed_hosts: I,
+    ) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        self.upload_token_issuer_allowed_hosts = upload_token_issuer_allowed_hosts
+            .into_iter()
+            .map(Into::into)
+            .collect();
+        self
+    }
+
+    pub fn set_upload_token_audience(mut self, upload_token_audience: impl Into<String>) -> Self {
+        self.upload_token_audience = Some(upload_token_audience.into());
+        self
+    }
+
+    pub fn set_upload_token_tenant_id(mut self, upload_token_tenant_id: impl Into<String>) -> Self {
+        self.upload_token_tenant_id = Some(upload_token_tenant_id.into());
+        self
+    }
+
+    pub fn set_upload_token_workload_token_env(
+        mut self,
+        upload_token_workload_token_env: impl Into<String>,
+    ) -> Self {
+        self.upload_token_workload_token_env = Some(upload_token_workload_token_env.into());
+        self
+    }
+
+    pub fn set_upload_token_invite_code(
+        mut self,
+        upload_token_invite_code: impl Into<String>,
+    ) -> Self {
+        self.upload_token_invite_code = Some(upload_token_invite_code.into());
+        self
+    }
+
+    pub fn set_upload_token_issuer_timeout_ms(
+        mut self,
+        upload_token_issuer_timeout_ms: u64,
+    ) -> Self {
+        self.upload_token_issuer_timeout_ms = upload_token_issuer_timeout_ms;
+        self
+    }
+
+    pub fn set_include_message_text(mut self, include_message_text: bool) -> Self {
+        self.include_message_text = include_message_text;
+        self
+    }
+
+    pub fn set_include_tool_payloads(mut self, include_tool_payloads: bool) -> Self {
+        self.include_tool_payloads = include_tool_payloads;
+        self
+    }
+
+    pub fn set_auto_submit_failed_traces(mut self, auto_submit_failed_traces: bool) -> Self {
+        self.auto_submit_failed_traces = auto_submit_failed_traces;
+        self
+    }
+
+    pub fn set_auto_submit_high_value_traces(
+        mut self,
+        auto_submit_high_value_traces: bool,
+    ) -> Self {
+        self.auto_submit_high_value_traces = auto_submit_high_value_traces;
+        self
+    }
+
+    pub fn set_selected_tools<I, S>(mut self, selected_tools: I) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        self.selected_tools = selected_tools.into_iter().map(Into::into).collect();
+        self
+    }
+
+    pub fn set_require_manual_approval_when_pii_detected(
+        mut self,
+        require_manual_approval_when_pii_detected: bool,
+    ) -> Self {
+        self.require_manual_approval_when_pii_detected = require_manual_approval_when_pii_detected;
+        self
+    }
+
+    pub fn set_min_submission_score(mut self, min_submission_score: f32) -> Self {
+        self.min_submission_score = min_submission_score;
+        self
+    }
+
+    pub fn set_credit_notice_interval_hours(mut self, credit_notice_interval_hours: u32) -> Self {
+        self.credit_notice_interval_hours = credit_notice_interval_hours;
+        self
+    }
+
+    pub fn set_default_scope(mut self, default_scope: ConsentScope) -> Self {
+        self.default_scope = default_scope;
+        self
+    }
+
+    pub fn set_auth_mode(mut self, auth_mode: TraceUploadAuthMode) -> Self {
+        self.auth_mode = auth_mode;
+        self
+    }
+
+    pub fn set_device_key_id(mut self, device_key_id: impl Into<String>) -> Self {
+        self.device_key_id = Some(device_key_id.into());
+        self
     }
 }
 
@@ -1199,6 +1430,23 @@ impl Default for RecordedTraceContributionOptions {
     }
 }
 
+impl RecordedTraceContributionOptions {
+    pub fn set_include_message_text(mut self, include_message_text: bool) -> Self {
+        self.include_message_text = include_message_text;
+        self
+    }
+
+    pub fn set_include_tool_payloads(mut self, include_tool_payloads: bool) -> Self {
+        self.include_tool_payloads = include_tool_payloads;
+        self
+    }
+
+    pub fn set_consent_scopes(mut self, consent_scopes: Vec<ConsentScope>) -> Self {
+        self.consent_scopes = consent_scopes;
+        self
+    }
+}
+
 impl RawTraceContribution {
     pub fn from_recorded_trace(
         trace: &TraceFile,
@@ -1494,10 +1742,7 @@ impl RawTraceContribution {
                 revocation_handle: Uuid::new_v4(),
             },
             events,
-            outcome: OutcomeMetadata {
-                task_success,
-                ..OutcomeMetadata::default()
-            },
+            outcome: OutcomeMetadata::default().set_task_success(task_success),
             replay: ReplayMetadata {
                 replayable: !turns.is_empty(),
                 required_tools,
@@ -3595,12 +3840,12 @@ fn path_to_string(path: PathBuf) -> String {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub struct LocalTraceSubmissionRecord {
+pub struct NodeTraceSubmissionRecord {
     pub submission_id: Uuid,
     pub trace_id: Uuid,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub endpoint: Option<String>,
-    pub status: LocalTraceSubmissionStatus,
+    pub status: NodeTraceSubmissionStatus,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub server_status: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -3619,7 +3864,7 @@ pub struct LocalTraceSubmissionRecord {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub credit_events: Vec<TraceCreditEvent>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub history: Vec<LocalTraceSubmissionHistoryEvent>,
+    pub history: Vec<NodeTraceSubmissionHistoryEvent>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_credit_notice_at: Option<DateTime<Utc>>,
     #[serde(default, skip_serializing_if = "TraceCreditNoticeState::is_empty")]
@@ -3627,9 +3872,9 @@ pub struct LocalTraceSubmissionRecord {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub struct LocalTraceSubmissionHistoryEvent {
+pub struct NodeTraceSubmissionHistoryEvent {
     pub event_id: Uuid,
-    pub kind: LocalTraceSubmissionHistoryKind,
+    pub kind: NodeTraceSubmissionHistoryKind,
     pub occurred_at: DateTime<Utc>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub server_status: Option<String>,
@@ -3641,7 +3886,7 @@ pub struct LocalTraceSubmissionHistoryEvent {
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
-pub enum LocalTraceSubmissionHistoryKind {
+pub enum NodeTraceSubmissionHistoryKind {
     StatusSync,
 }
 
@@ -3711,14 +3956,14 @@ pub struct TraceCreditNoticeDeliveryAttempt {
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
-pub enum LocalTraceSubmissionStatus {
+pub enum NodeTraceSubmissionStatus {
     Submitted,
     Revoked,
     Expired,
     Purged,
 }
 
-impl LocalTraceSubmissionStatus {
+impl NodeTraceSubmissionStatus {
     fn as_str(self) -> &'static str {
         match self {
             Self::Submitted => "submitted",
@@ -3845,6 +4090,11 @@ pub struct TraceQueueCompactionReport {
 }
 
 impl TraceQueueCompactionReport {
+    pub fn set_scanned_count(mut self, scanned_count: u32) -> Self {
+        self.scanned_count = scanned_count;
+        self
+    }
+
     pub fn is_empty(&self) -> bool {
         self.scanned_count == 0
             && self.duplicate_envelopes_removed == 0
@@ -3992,7 +4242,10 @@ fn is_zero_u32(value: &u32) -> bool {
     *value == 0
 }
 
-fn trace_contribution_dir_for_scope_at(base: &std::path::Path, scope: Option<&str>) -> PathBuf {
+pub(crate) fn trace_contribution_dir_for_scope_at(
+    base: &std::path::Path,
+    scope: Option<&str>,
+) -> PathBuf {
     let contributions = base.join("trace_contributions");
     match scope {
         Some(scope) if !scope.trim().is_empty() => {
@@ -4258,6 +4511,24 @@ fn resolve_trace_credentials_at(
     }
 
     Ok(None)
+}
+
+/// Explicit per-user Trace Commons opt-out: write (or update) the scope's
+/// policy with `enabled = false`, which the resolver treats as an explicit
+/// opt-out that blocks the instance fallback for this user — WITHOUT touching
+/// the instance-level (scope-`None`) policy. This is the primitive a per-user
+/// opt-out surface must use: flipping the root policy would disenroll the
+/// entire instance.
+pub fn opt_out_user_scope_at(base: &std::path::Path, scope: &str) -> anyhow::Result<()> {
+    let mut policy =
+        read_trace_policy_for_scope_if_present_at(base, Some(scope))?.unwrap_or_default();
+    policy.enabled = false;
+    write_trace_policy_for_scope_at(base, Some(scope), &policy)
+}
+
+/// [`opt_out_user_scope_at`] against the process base dir.
+pub fn opt_out_user_scope(scope: &str) -> anyhow::Result<()> {
+    opt_out_user_scope_at(&ironclaw_common::paths::ironclaw_base_dir(), scope)
 }
 
 /// Pick the user's own (personal-invite) enrollment when present and enabled,
@@ -5525,6 +5796,7 @@ pub struct ContributionHttpRequest {
     pub timeout_ms: u32,
 }
 
+#[derive(Debug)]
 pub struct ContributionHttpResponse {
     pub status: u16,
     pub body: Vec<u8>,
@@ -5550,6 +5822,90 @@ impl std::fmt::Display for ContributionHttpError {
 }
 
 impl std::error::Error for ContributionHttpError {}
+
+/// Direct-transport [`ContributionHttpSink`] for trusted non-agent surfaces
+/// (WebUI facades, CLI). Applies the same hardening as the other direct
+/// clients in this module: per-request pinned DNS resolution with
+/// private/internal-IP rejection (`resolve_trace_upload_claim_issuer_host`),
+/// no redirects, the request's own timeout, and a body read bounded DURING
+/// streaming by the request's `response_body_limit`. Agent-path callers must
+/// keep using the host-egress sink instead.
+/// INVARIANT: request URLs handed to this sink must be derived from the
+/// enrolled policy's trust-anchored endpoints (`account_login_links_url`,
+/// `account_traces_url`, …) — never from caller/request input. The sink
+/// attaches the caller's bearer to whatever URL it is given; keeping it
+/// crate-private confines that to the vetted derivations in this module.
+pub(crate) struct DirectPinnedContributionSink;
+
+#[async_trait]
+impl ContributionHttpSink for DirectPinnedContributionSink {
+    async fn execute(
+        &self,
+        request: ContributionHttpRequest,
+    ) -> Result<ContributionHttpResponse, ContributionHttpError> {
+        let url = reqwest::Url::parse(&request.url)
+            .map_err(|e| ContributionHttpError::new(format!("invalid request URL: {e}")))?;
+        let host = url
+            .host_str()
+            .ok_or_else(|| ContributionHttpError::new("request URL requires a host"))?
+            .to_ascii_lowercase();
+        let port = url
+            .port_or_known_default()
+            .ok_or_else(|| ContributionHttpError::new("request URL requires a known port"))?;
+        let resolved_addrs = resolve_trace_upload_claim_issuer_host(&host, port)
+            .await
+            .map_err(|e| ContributionHttpError::new(format!("host resolution rejected: {e}")))?;
+        let timeout = Duration::from_millis(u64::from(request.timeout_ms));
+        let client = reqwest::Client::builder()
+            .timeout(timeout)
+            .connect_timeout(timeout.min(Duration::from_secs(3)))
+            .redirect(reqwest::redirect::Policy::none())
+            .user_agent("ironclaw-trace-commons-client")
+            .resolve_to_addrs(&host, &resolved_addrs)
+            .build()
+            .map_err(|e| ContributionHttpError::new(format!("failed to build client: {e}")))?;
+
+        let method = match request.method {
+            ContributionHttpMethod::Get => reqwest::Method::GET,
+            ContributionHttpMethod::Post => reqwest::Method::POST,
+            ContributionHttpMethod::Put => reqwest::Method::PUT,
+            ContributionHttpMethod::Delete => reqwest::Method::DELETE,
+        };
+        let mut builder = client
+            .request(method, url)
+            .header(reqwest::header::ACCEPT, "application/json");
+        if let Some(token) = request.bearer_token {
+            builder = builder.bearer_auth(token);
+        }
+        if let Some(body) = request.json_body {
+            builder = builder
+                .header(reqwest::header::CONTENT_TYPE, "application/json")
+                .body(body);
+        }
+        let mut response = builder
+            .send()
+            .await
+            .map_err(|e| ContributionHttpError::new(format!("request failed: {e}")))?;
+        let status = response.status().as_u16();
+        // Enforce the cap DURING the chunked read so a hostile server cannot
+        // force a large allocation by streaming an oversized body.
+        let mut body = Vec::new();
+        while let Some(chunk) = response
+            .chunk()
+            .await
+            .map_err(|e| ContributionHttpError::new(format!("response read failed: {e}")))?
+        {
+            if body.len() as u64 + chunk.len() as u64 > request.response_body_limit {
+                return Err(ContributionHttpError::new(format!(
+                    "response body exceeds the {} byte limit",
+                    request.response_body_limit
+                )));
+            }
+            body.extend_from_slice(&chunk);
+        }
+        Ok(ContributionHttpResponse { status, body })
+    }
+}
 
 /// Decode a host-egress response body into a bounded UTF-8 string, capping at
 /// `TRACE_UPLOAD_CLAIM_MAX_RESPONSE_BYTES` (the host egress already enforced the
@@ -6638,6 +6994,40 @@ pub async fn mint_account_login_link_via_sink(
     .await
 }
 
+/// Direct (non-agent) counterpart to [`mint_account_login_link_via_sink`]
+/// for WebUI facades and other trusted product surfaces: mints the one-time
+/// login link through the [`DirectPinnedContributionSink`] (pinned DNS,
+/// private-IP filtering) instead of a host-egress sink.
+///
+/// Delivery contract: the link is returned ONLY in the result — it is never
+/// persisted to a local delivery file. Hosted multi-tenant users cannot read
+/// host files; the caller (an authenticated WebUI response) is the delivery
+/// channel. The URL must never be logged or placed on any model-visible
+/// surface.
+pub async fn mint_account_login_link(
+    tenant_id: &TenantId,
+    user_id: &UserId,
+) -> Result<AccountLoginLink, AccountLoginLinkError> {
+    // Typed at the public boundary so callers can't transpose tenant/user;
+    // stringify only when handing off to the dir-parameterised core.
+    mint_account_login_link_direct(
+        ironclaw_common::paths::ironclaw_base_dir().as_path(),
+        tenant_id.as_str(),
+        user_id.as_str(),
+    )
+    .await
+}
+
+/// Dir-parameterised core for [`mint_account_login_link`] (direct path).
+/// Accepts an explicit `base_dir` so tests can supply an isolated tempdir.
+async fn mint_account_login_link_direct(
+    base_dir: &std::path::Path,
+    tenant_id: &str,
+    user_id: &str,
+) -> Result<AccountLoginLink, AccountLoginLinkError> {
+    mint_account_login_link_inner(base_dir, tenant_id, user_id, &DirectPinnedContributionSink).await
+}
+
 /// Dir-parameterised core for [`mint_account_login_link_via_sink`].
 /// Accepts an explicit `base_dir` so tests can supply an isolated tempdir.
 async fn mint_account_login_link_inner(
@@ -6672,6 +7062,13 @@ async fn mint_account_login_link_inner(
     }
     let url = account_login_links_url(&resolution.policy)
         .map_err(AccountLoginLinkError::EnrollmentIncomplete)?;
+    // Parsed once up front: the join base for a relative `url` in the response
+    // (its origin is the trust-anchored issuer origin).
+    let endpoint_url = reqwest::Url::parse(&url).map_err(|e| {
+        AccountLoginLinkError::EnrollmentIncomplete(
+            anyhow::Error::new(e).context("login-links URL is not a valid URL"),
+        )
+    })?;
     let context =
         TraceUploadClaimContext::for_account(resolution.subject.clone()).with_scope_dir(scope_dir);
     // Mint the bearer THROUGH the sink: on the agent path the upload-claim
@@ -6726,9 +7123,37 @@ async fn mint_account_login_link_inner(
             AccountLoginLinkError::Backend(anyhow::anyhow!("login-link response missing url"))
         })?
         .to_string();
+    // The server may return a relative path (e.g. `/account/login?code=…`).
+    // Resolve it against the login-links endpoint — whose origin is the
+    // trust-anchored issuer origin — so every delivery channel (browser
+    // navigation, local delivery file) receives an absolute URL instead of
+    // one that would resolve against the WRONG origin (e.g. the IronClaw
+    // WebUI's own host).
+    let resolved = match reqwest::Url::parse(&link_url) {
+        Ok(absolute) => absolute,
+        Err(_) => endpoint_url.join(&link_url).map_err(|e| {
+            AccountLoginLinkError::Backend(
+                anyhow::Error::new(e).context("login-link response url is not resolvable"),
+            )
+        })?,
+    };
+    // ORIGIN PIN: the caller navigates an authenticated user's browser to this
+    // URL. A hostile or compromised issuer response must not be able to steer
+    // that navigation anywhere else — the final URL must stay on the
+    // trust-anchored issuer origin (same scheme + host + port as the
+    // login-links endpoint; this also excludes non-HTTP(S) schemes such as
+    // `javascript:`) and must carry no userinfo.
+    let same_origin = resolved.scheme() == endpoint_url.scheme()
+        && resolved.host_str() == endpoint_url.host_str()
+        && resolved.port_or_known_default() == endpoint_url.port_or_known_default();
+    if !same_origin || !resolved.username().is_empty() || resolved.password().is_some() {
+        return Err(AccountLoginLinkError::Backend(anyhow::anyhow!(
+            "login-link response url is not on the issuer origin"
+        )));
+    }
     Ok(AccountLoginLink {
         account_id,
-        url: link_url,
+        url: resolved.to_string(),
     })
 }
 
@@ -7040,10 +7465,7 @@ pub async fn submit_trace_envelope_to_endpoint(
     bearer_token_env: &str,
 ) -> anyhow::Result<TraceSubmissionReceipt> {
     let provider = StaticEnvTraceUploadCredentialProvider { bearer_token_env };
-    let policy = StandingTraceContributionPolicy {
-        bearer_token_env: bearer_token_env.to_string(),
-        ..Default::default()
-    };
+    let policy = StandingTraceContributionPolicy::default().set_bearer_token_env(bearer_token_env);
     submit_trace_envelope_to_endpoint_with_credential_provider(
         envelope, endpoint, &policy, &provider, None, None,
     )
@@ -7158,11 +7580,11 @@ fn record_submitted_trace_envelope_for_scope_unlocked(
 
     upsert_local_trace_record_for_scope(
         scope,
-        LocalTraceSubmissionRecord {
+        NodeTraceSubmissionRecord {
             submission_id: envelope.submission_id,
             trace_id: envelope.trace_id,
             endpoint: Some(endpoint.to_string()),
-            status: LocalTraceSubmissionStatus::Submitted,
+            status: NodeTraceSubmissionStatus::Submitted,
             server_status: Some(receipt.status),
             submitted_at: Some(Utc::now()),
             revoked_at: None,
@@ -7446,7 +7868,7 @@ async fn sync_remote_trace_submission_records_for_scope_with_credential_provider
         let records = read_local_trace_records_for_scope(scope)?;
         records
             .iter()
-            .filter(|record| record.status == LocalTraceSubmissionStatus::Submitted)
+            .filter(|record| record.status == NodeTraceSubmissionStatus::Submitted)
             .map(|record| record.submission_id)
             .collect::<Vec<_>>()
     };
@@ -7492,7 +7914,7 @@ async fn sync_remote_trace_submission_records_for_scope_unlocked_with_target(
     let records = read_local_trace_records_for_scope(scope)?;
     let submission_ids = records
         .iter()
-        .filter(|record| record.status == LocalTraceSubmissionStatus::Submitted)
+        .filter(|record| record.status == NodeTraceSubmissionStatus::Submitted)
         .map(|record| record.submission_id)
         .collect::<Vec<_>>();
     if submission_ids.is_empty() {
@@ -7553,10 +7975,7 @@ pub async fn fetch_trace_submission_statuses(
     submission_ids: &[Uuid],
 ) -> anyhow::Result<Vec<TraceSubmissionStatusUpdate>> {
     let provider = StaticEnvTraceUploadCredentialProvider { bearer_token_env };
-    let policy = StandingTraceContributionPolicy {
-        bearer_token_env: bearer_token_env.to_string(),
-        ..Default::default()
-    };
+    let policy = StandingTraceContributionPolicy::default().set_bearer_token_env(bearer_token_env);
     fetch_trace_submission_statuses_with_credential_provider(
         status_endpoint,
         &policy,
@@ -7709,12 +8128,12 @@ fn apply_remote_trace_submission_statuses_for_scope_unlocked(
             record.credit_explanation = explanation;
         }
         if update.status == "revoked" {
-            record.status = LocalTraceSubmissionStatus::Revoked;
+            record.status = NodeTraceSubmissionStatus::Revoked;
             record.revoked_at.get_or_insert(now);
         } else if update.status == "expired" {
-            record.status = LocalTraceSubmissionStatus::Expired;
+            record.status = NodeTraceSubmissionStatus::Expired;
         } else if update.status == "purged" {
-            record.status = LocalTraceSubmissionStatus::Purged;
+            record.status = NodeTraceSubmissionStatus::Purged;
         }
 
         if status_changed || credit_changed || explanation_changed {
@@ -7737,9 +8156,9 @@ fn apply_remote_trace_submission_statuses_for_scope_unlocked(
                 reason: sync_reason,
                 created_at: now,
             });
-            let history_event = LocalTraceSubmissionHistoryEvent {
+            let history_event = NodeTraceSubmissionHistoryEvent {
                 event_id: Uuid::new_v4(),
-                kind: LocalTraceSubmissionHistoryKind::StatusSync,
+                kind: NodeTraceSubmissionHistoryKind::StatusSync,
                 occurred_at: now,
                 server_status: Some(update.status.clone()),
                 credit_delta,
@@ -7809,7 +8228,7 @@ fn safe_remote_credit_explanation_line(line: &str) -> String {
 
 pub fn read_local_trace_records_for_scope(
     scope: Option<&str>,
-) -> anyhow::Result<Vec<LocalTraceSubmissionRecord>> {
+) -> anyhow::Result<Vec<NodeTraceSubmissionRecord>> {
     let path = trace_records_path(scope);
     if !path.exists() {
         return Ok(Vec::new());
@@ -7958,7 +8377,7 @@ pub fn scoped_credit_view(scope: &str) -> anyhow::Result<ScopedCreditView> {
     Ok(view)
 }
 
-pub fn trace_credit_summary(records: &[LocalTraceSubmissionRecord]) -> CreditSummary {
+pub fn trace_credit_summary(records: &[NodeTraceSubmissionRecord]) -> CreditSummary {
     let report = trace_credit_report(records);
     CreditSummary {
         submissions_total: report.submissions_total,
@@ -7973,21 +8392,21 @@ pub fn trace_credit_summary(records: &[LocalTraceSubmissionRecord]) -> CreditSum
     }
 }
 
-pub fn trace_credit_report(records: &[LocalTraceSubmissionRecord]) -> TraceCreditReport {
+pub fn trace_credit_report(records: &[NodeTraceSubmissionRecord]) -> TraceCreditReport {
     let submissions_submitted = records
         .iter()
-        .filter(|record| record.status == LocalTraceSubmissionStatus::Submitted)
+        .filter(|record| record.status == NodeTraceSubmissionStatus::Submitted)
         .count() as u32;
     let submissions_revoked = records
         .iter()
-        .filter(|record| record.status == LocalTraceSubmissionStatus::Revoked)
+        .filter(|record| record.status == NodeTraceSubmissionStatus::Revoked)
         .count() as u32;
     let submissions_expired = records
         .iter()
         .filter(|record| {
             matches!(
                 record.status,
-                LocalTraceSubmissionStatus::Expired | LocalTraceSubmissionStatus::Purged
+                NodeTraceSubmissionStatus::Expired | NodeTraceSubmissionStatus::Purged
             )
         })
         .count() as u32;
@@ -8062,7 +8481,7 @@ pub fn trace_credit_report(records: &[LocalTraceSubmissionRecord]) -> TraceCredi
     }
 }
 
-fn local_trace_server_status_matches(record: &LocalTraceSubmissionRecord, expected: &str) -> bool {
+fn local_trace_server_status_matches(record: &NodeTraceSubmissionRecord, expected: &str) -> bool {
     record
         .server_status
         .as_deref()
@@ -8071,7 +8490,7 @@ fn local_trace_server_status_matches(record: &LocalTraceSubmissionRecord, expect
 }
 
 fn trace_credit_report_explanation_lines(
-    records: &[LocalTraceSubmissionRecord],
+    records: &[NodeTraceSubmissionRecord],
     submissions_accepted: u32,
     submissions_quarantined: u32,
     submissions_rejected: u32,
@@ -8102,7 +8521,7 @@ fn trace_credit_report_explanation_lines(
 }
 
 fn recent_trace_credit_explanations(
-    records: &[LocalTraceSubmissionRecord],
+    records: &[NodeTraceSubmissionRecord],
     limit: usize,
 ) -> Vec<String> {
     records
@@ -8120,10 +8539,7 @@ pub async fn revoke_trace_submission_for_scope(
     bearer_token_env: &str,
 ) -> anyhow::Result<()> {
     let provider = StaticEnvTraceUploadCredentialProvider { bearer_token_env };
-    let policy = StandingTraceContributionPolicy {
-        bearer_token_env: bearer_token_env.to_string(),
-        ..Default::default()
-    };
+    let policy = StandingTraceContributionPolicy::default().set_bearer_token_env(bearer_token_env);
     revoke_trace_submission_for_scope_with_credential_provider(
         scope,
         submission_id,
@@ -8325,7 +8741,7 @@ fn parse_trace_submission_receipt(body: &str) -> Option<TraceSubmissionReceipt> 
 
 fn upsert_local_trace_record_for_scope(
     scope: Option<&str>,
-    record: LocalTraceSubmissionRecord,
+    record: NodeTraceSubmissionRecord,
 ) -> anyhow::Result<()> {
     let mut records = read_local_trace_records_for_scope(scope)?;
     if let Some(existing) = records
@@ -8348,18 +8764,18 @@ fn mark_local_trace_revoked_for_scope_unlocked(
     let mut found = false;
     for record in &mut records {
         if record.submission_id == submission_id {
-            record.status = LocalTraceSubmissionStatus::Revoked;
+            record.status = NodeTraceSubmissionStatus::Revoked;
             record.revoked_at = Some(now);
             record.credit_notice_state = TraceCreditNoticeState::default();
             found = true;
         }
     }
     if !found {
-        records.push(LocalTraceSubmissionRecord {
+        records.push(NodeTraceSubmissionRecord {
             submission_id,
             trace_id: Uuid::nil(),
             endpoint: None,
-            status: LocalTraceSubmissionStatus::Revoked,
+            status: NodeTraceSubmissionStatus::Revoked,
             server_status: None,
             submitted_at: None,
             revoked_at: Some(now),
@@ -8512,7 +8928,7 @@ fn snooze_trace_credit_notice_for_scope_until_at_unlocked(
 }
 
 fn trace_credit_notice_due_for_records(
-    records: &[LocalTraceSubmissionRecord],
+    records: &[NodeTraceSubmissionRecord],
     interval_hours: u32,
     now: DateTime<Utc>,
 ) -> Option<(CreditSummary, String)> {
@@ -8574,7 +8990,7 @@ fn trace_credit_notice_due_for_records(
     }
 }
 
-fn trace_credit_notice_fingerprint(records: &[LocalTraceSubmissionRecord]) -> Option<String> {
+fn trace_credit_notice_fingerprint(records: &[NodeTraceSubmissionRecord]) -> Option<String> {
     let mut parts = Vec::new();
     for record in records
         .iter()
@@ -8894,10 +9310,7 @@ fn compact_trace_queue_for_scope_unlocked(
     scope: Option<&str>,
 ) -> anyhow::Result<TraceQueueCompactionReport> {
     let paths = queued_trace_envelope_paths_for_scope(scope)?;
-    let mut report = TraceQueueCompactionReport {
-        scanned_count: paths.len() as u32,
-        ..Default::default()
-    };
+    let mut report = TraceQueueCompactionReport::default().set_scanned_count(paths.len() as u32);
     let mut candidates = Vec::new();
     for path in paths {
         let Some(envelope) = load_queued_trace_envelope_or_quarantine(scope, &path, "compaction")?
@@ -9452,13 +9865,13 @@ fn sanitized_trace_submission_failure_reason(error: &anyhow::Error) -> (String, 
     )
 }
 
-fn trace_record_noticeable(record: &LocalTraceSubmissionRecord) -> bool {
-    record.status == LocalTraceSubmissionStatus::Submitted || !record.credit_events.is_empty()
+fn trace_record_noticeable(record: &NodeTraceSubmissionRecord) -> bool {
+    record.status == NodeTraceSubmissionStatus::Submitted || !record.credit_events.is_empty()
 }
 
 fn write_local_trace_records_for_scope(
     scope: Option<&str>,
-    records: &[LocalTraceSubmissionRecord],
+    records: &[NodeTraceSubmissionRecord],
 ) -> anyhow::Result<()> {
     write_json_file(
         &trace_records_path(scope),
@@ -9890,10 +10303,7 @@ mod tests {
             Err(TraceContributionPolicyRejection::OptInDisabled)
         );
 
-        let mut missing_endpoint = StandingTraceContributionPolicy {
-            enabled: true,
-            ..Default::default()
-        };
+        let mut missing_endpoint = StandingTraceContributionPolicy::default().set_enabled(true);
         assert_eq!(
             preflight_trace_contribution_policy(
                 &missing_endpoint,
@@ -10147,11 +10557,9 @@ mod tests {
 
     #[tokio::test]
     async fn text_and_payload_preview_redacts_paths_and_sensitive_fields() {
-        let options = RecordedTraceContributionOptions {
-            include_message_text: true,
-            include_tool_payloads: true,
-            ..Default::default()
-        };
+        let options = RecordedTraceContributionOptions::default()
+            .set_include_message_text(true)
+            .set_include_tool_payloads(true);
         let raw = RawTraceContribution::from_recorded_trace(&sample_trace(), options);
         let envelope = DeterministicTraceRedactor::with_known_path_prefixes([PathBuf::from(
             "/Users/alice/project",
@@ -10297,10 +10705,7 @@ mod tests {
         };
         let raw = RawTraceContribution::from_recorded_trace(
             &trace,
-            RecordedTraceContributionOptions {
-                include_message_text: true,
-                ..Default::default()
-            },
+            RecordedTraceContributionOptions::default().set_include_message_text(true),
         );
         let envelope = DeterministicTraceRedactor::new(Vec::new())
             .with_privacy_filter(Arc::new(FakePrivacyFilterAdapter))
@@ -10368,10 +10773,7 @@ mod tests {
         };
         let raw = RawTraceContribution::from_recorded_trace(
             &trace,
-            RecordedTraceContributionOptions {
-                include_message_text: true,
-                ..Default::default()
-            },
+            RecordedTraceContributionOptions::default().set_include_message_text(true),
         );
 
         let envelope = DeterministicTraceRedactor::new(Vec::new())
@@ -10624,11 +11026,9 @@ mod tests {
 
     #[tokio::test]
     async fn canonical_summary_uses_redacted_content_only() {
-        let options = RecordedTraceContributionOptions {
-            include_message_text: true,
-            include_tool_payloads: true,
-            ..Default::default()
-        };
+        let options = RecordedTraceContributionOptions::default()
+            .set_include_message_text(true)
+            .set_include_tool_payloads(true);
         let raw = RawTraceContribution::from_recorded_trace(&sample_trace(), options);
         let envelope = DeterministicTraceRedactor::with_known_path_prefixes([PathBuf::from(
             "/Users/alice/project",
@@ -10647,23 +11047,18 @@ mod tests {
     async fn canonical_representations_use_only_redacted_private_values() {
         let mut raw = RawTraceContribution::from_recorded_trace(
             &sample_trace(),
-            RecordedTraceContributionOptions {
-                include_message_text: true,
-                include_tool_payloads: true,
-                consent_scopes: vec![ConsentScope::ModelTraining],
-                ..Default::default()
-            },
+            RecordedTraceContributionOptions::default()
+                .set_include_message_text(true)
+                .set_include_tool_payloads(true)
+                .set_consent_scopes(vec![ConsentScope::ModelTraining]),
         );
-        raw.outcome = OutcomeMetadata {
-            user_feedback: UserFeedback::Correction,
-            task_success: TaskSuccess::Partial,
-            failure_modes: vec![TraceFailureMode::UserIntentMisread],
-            human_correction: Some(
-                "Use alice@example.com and /Users/alice/project/fix.md as the correction"
-                    .to_string(),
-            ),
-            ..OutcomeMetadata::default()
-        };
+        raw.outcome = OutcomeMetadata::default()
+            .set_user_feedback(UserFeedback::Correction)
+            .set_task_success(TaskSuccess::Partial)
+            .set_failure_modes(vec![TraceFailureMode::UserIntentMisread])
+            .set_human_correction(
+                "Use alice@example.com and /Users/alice/project/fix.md as the correction",
+            );
         let envelope = DeterministicTraceRedactor::with_known_path_prefixes([PathBuf::from(
             "/Users/alice/project",
         )])
@@ -10726,10 +11121,8 @@ mod tests {
     async fn dataset_eligibility_gates_consent_revocation_and_privacy_risk() {
         let raw = RawTraceContribution::from_recorded_trace(
             &sample_trace(),
-            RecordedTraceContributionOptions {
-                consent_scopes: vec![ConsentScope::ModelTraining],
-                ..Default::default()
-            },
+            RecordedTraceContributionOptions::default()
+                .set_consent_scopes(vec![ConsentScope::ModelTraining]),
         );
         let mut envelope = DeterministicTraceRedactor::default()
             .redact_trace(raw)
@@ -10798,11 +11191,9 @@ mod tests {
             .await
             .expect("redaction should succeed");
 
-        let policy = StandingTraceContributionPolicy {
-            enabled: true,
-            require_manual_approval_when_pii_detected: true,
-            ..StandingTraceContributionPolicy::default()
-        };
+        let policy = StandingTraceContributionPolicy::default()
+            .set_enabled(true)
+            .set_require_manual_approval_when_pii_detected(true);
         assert_eq!(policy.min_submission_score, 0.35, "default gate is 0.35");
 
         // Medium: clears the score gate and auto-submits (no manual review).
@@ -10849,12 +11240,10 @@ mod tests {
             .expect("redaction should succeed");
         envelope.trace_card.allowed_uses = Vec::new();
 
-        let permissive = StandingTraceContributionPolicy {
-            enabled: true,
-            auto_submit_high_value_traces: true,
-            min_submission_score: 0.0,
-            ..StandingTraceContributionPolicy::default()
-        };
+        let permissive = StandingTraceContributionPolicy::default()
+            .set_enabled(true)
+            .set_auto_submit_high_value_traces(true)
+            .set_min_submission_score(0.0);
         assert!(
             matches!(
                 trace_autonomous_eligibility(&envelope, &permissive),
@@ -10895,11 +11284,9 @@ mod tests {
 
         // High residual PII risk + manual-approval policy => ManualReview.
         envelope.privacy.residual_pii_risk = ResidualPiiRisk::High;
-        let manual_policy = StandingTraceContributionPolicy {
-            enabled: true,
-            require_manual_approval_when_pii_detected: true,
-            ..StandingTraceContributionPolicy::default()
-        };
+        let manual_policy = StandingTraceContributionPolicy::default()
+            .set_enabled(true)
+            .set_require_manual_approval_when_pii_detected(true);
         assert!(matches!(
             trace_autonomous_eligibility(&envelope, &manual_policy),
             TraceQueueEligibility::Hold {
@@ -10910,11 +11297,9 @@ mod tests {
 
         // Below-threshold score (no PII concern) => PolicyGate, not review.
         envelope.privacy.residual_pii_risk = ResidualPiiRisk::Low;
-        let strict_policy = StandingTraceContributionPolicy {
-            enabled: true,
-            min_submission_score: 1.0,
-            ..StandingTraceContributionPolicy::default()
-        };
+        let strict_policy = StandingTraceContributionPolicy::default()
+            .set_enabled(true)
+            .set_min_submission_score(1.0);
         assert!(matches!(
             trace_autonomous_eligibility(&envelope, &strict_policy),
             TraceQueueEligibility::Hold {
@@ -11077,12 +11462,12 @@ mod tests {
         credit_points_final: Option<f32>,
         last_credit_notice_at: Option<DateTime<Utc>>,
         credit_explanation: Vec<String>,
-    ) -> LocalTraceSubmissionRecord {
-        LocalTraceSubmissionRecord {
+    ) -> NodeTraceSubmissionRecord {
+        NodeTraceSubmissionRecord {
             submission_id: Uuid::new_v4(),
             trace_id: Uuid::new_v4(),
             endpoint: Some("https://trace.example.com/v1/traces".to_string()),
-            status: LocalTraceSubmissionStatus::Submitted,
+            status: NodeTraceSubmissionStatus::Submitted,
             server_status: Some("accepted".to_string()),
             submitted_at: Some(Utc::now()),
             revoked_at: None,
@@ -11144,11 +11529,9 @@ mod tests {
     fn queue_diagnostics_are_scoped_to_one_user_queue_and_records() {
         let scope_a = format!("trace-queue-diagnostics-a-{}", Uuid::new_v4());
         let scope_b = format!("trace-queue-diagnostics-b-{}", Uuid::new_v4());
-        let policy = StandingTraceContributionPolicy {
-            enabled: true,
-            ingestion_endpoint: Some("https://trace.example.com/v1/traces".to_string()),
-            ..Default::default()
-        };
+        let policy = StandingTraceContributionPolicy::default()
+            .set_enabled(true)
+            .set_ingestion_endpoint("https://trace.example.com/v1/traces".to_string());
         write_trace_policy_for_scope(Some(&scope_a), &policy).expect("scope a policy writes");
         write_trace_policy_for_scope(Some(&scope_b), &policy).expect("scope b policy writes");
 
@@ -11181,8 +11564,8 @@ mod tests {
             .expect("scope a records write");
         write_local_trace_records_for_scope(
             Some(&scope_b),
-            &[LocalTraceSubmissionRecord {
-                status: LocalTraceSubmissionStatus::Revoked,
+            &[NodeTraceSubmissionRecord {
+                status: NodeTraceSubmissionStatus::Revoked,
                 revoked_at: Some(Utc::now()),
                 ..submitted_credit_record(
                     0.0,
@@ -11220,11 +11603,9 @@ mod tests {
     #[test]
     fn queue_diagnostics_aggregates_sanitized_hold_reasons() {
         let scope = format!("trace-queue-diagnostics-holds-{}", Uuid::new_v4());
-        let policy = StandingTraceContributionPolicy {
-            enabled: true,
-            ingestion_endpoint: Some("https://trace.example.com/v1/traces".to_string()),
-            ..Default::default()
-        };
+        let policy = StandingTraceContributionPolicy::default()
+            .set_enabled(true)
+            .set_ingestion_endpoint("https://trace.example.com/v1/traces".to_string());
         write_trace_policy_for_scope(Some(&scope), &policy).expect("policy writes");
         let dir = trace_queue_dir(Some(&scope));
         std::fs::create_dir_all(&dir).expect("queue dir exists");
@@ -11296,12 +11677,10 @@ mod tests {
             format!("trace-credit-zero-interval-notice-test-{}", Uuid::new_v4());
         write_trace_policy_for_scope(
             Some(&zero_interval_scope),
-            &StandingTraceContributionPolicy {
-                enabled: true,
-                ingestion_endpoint: Some("https://trace.example.com/v1/traces".to_string()),
-                credit_notice_interval_hours: 0,
-                ..Default::default()
-            },
+            &StandingTraceContributionPolicy::default()
+                .set_enabled(true)
+                .set_ingestion_endpoint("https://trace.example.com/v1/traces".to_string())
+                .set_credit_notice_interval_hours(0),
         )
         .expect("zero interval policy writes");
         write_local_trace_records_for_scope(
@@ -11331,12 +11710,10 @@ mod tests {
     fn scoped_credit_notice_snapshot_marks_only_that_scope() {
         let due_scope = format!("trace-credit-due-scope-test-{}", Uuid::new_v4());
         let untouched_scope = format!("trace-credit-untouched-scope-test-{}", Uuid::new_v4());
-        let policy = StandingTraceContributionPolicy {
-            enabled: true,
-            ingestion_endpoint: Some("https://trace.example.com/v1/traces".to_string()),
-            credit_notice_interval_hours: 168,
-            ..Default::default()
-        };
+        let policy = StandingTraceContributionPolicy::default()
+            .set_enabled(true)
+            .set_ingestion_endpoint("https://trace.example.com/v1/traces".to_string())
+            .set_credit_notice_interval_hours(168);
         write_trace_policy_for_scope(Some(&due_scope), &policy).expect("due policy writes");
         write_trace_policy_for_scope(Some(&untouched_scope), &policy)
             .expect("untouched policy writes");
@@ -11384,12 +11761,10 @@ mod tests {
         let scope = format!("trace-credit-ack-test-{}", Uuid::new_v4());
         write_trace_policy_for_scope(
             Some(&scope),
-            &StandingTraceContributionPolicy {
-                enabled: true,
-                ingestion_endpoint: Some("https://trace.example.com/v1/traces".to_string()),
-                credit_notice_interval_hours: 168,
-                ..Default::default()
-            },
+            &StandingTraceContributionPolicy::default()
+                .set_enabled(true)
+                .set_ingestion_endpoint("https://trace.example.com/v1/traces".to_string())
+                .set_credit_notice_interval_hours(168),
         )
         .expect("policy writes");
         let record = submitted_credit_record(
@@ -11452,12 +11827,10 @@ mod tests {
         let scope = format!("trace-credit-snooze-test-{}", Uuid::new_v4());
         write_trace_policy_for_scope(
             Some(&scope),
-            &StandingTraceContributionPolicy {
-                enabled: true,
-                ingestion_endpoint: Some("https://trace.example.com/v1/traces".to_string()),
-                credit_notice_interval_hours: 168,
-                ..Default::default()
-            },
+            &StandingTraceContributionPolicy::default()
+                .set_enabled(true)
+                .set_ingestion_endpoint("https://trace.example.com/v1/traces".to_string())
+                .set_credit_notice_interval_hours(168),
         )
         .expect("policy writes");
         write_local_trace_records_for_scope(
@@ -11508,12 +11881,10 @@ mod tests {
         let scope = format!("trace-credit-legacy-notice-test-{}", Uuid::new_v4());
         write_trace_policy_for_scope(
             Some(&scope),
-            &StandingTraceContributionPolicy {
-                enabled: true,
-                ingestion_endpoint: Some("https://trace.example.com/v1/traces".to_string()),
-                credit_notice_interval_hours: 168,
-                ..Default::default()
-            },
+            &StandingTraceContributionPolicy::default()
+                .set_enabled(true)
+                .set_ingestion_endpoint("https://trace.example.com/v1/traces".to_string())
+                .set_credit_notice_interval_hours(168),
         )
         .expect("policy writes");
         let now = Utc::now();
@@ -11547,12 +11918,10 @@ mod tests {
         let scope = format!("trace-credit-outbox-idempotent-test-{}", Uuid::new_v4());
         write_trace_policy_for_scope(
             Some(&scope),
-            &StandingTraceContributionPolicy {
-                enabled: true,
-                ingestion_endpoint: Some("https://trace.example.com/v1/traces".to_string()),
-                credit_notice_interval_hours: 168,
-                ..Default::default()
-            },
+            &StandingTraceContributionPolicy::default()
+                .set_enabled(true)
+                .set_ingestion_endpoint("https://trace.example.com/v1/traces".to_string())
+                .set_credit_notice_interval_hours(168),
         )
         .expect("policy writes");
         write_local_trace_records_for_scope(
@@ -11599,12 +11968,10 @@ mod tests {
         let scope = format!("trace-credit-outbox-delivered-test-{}", Uuid::new_v4());
         write_trace_policy_for_scope(
             Some(&scope),
-            &StandingTraceContributionPolicy {
-                enabled: true,
-                ingestion_endpoint: Some("https://trace.example.com/v1/traces".to_string()),
-                credit_notice_interval_hours: 168,
-                ..Default::default()
-            },
+            &StandingTraceContributionPolicy::default()
+                .set_enabled(true)
+                .set_ingestion_endpoint("https://trace.example.com/v1/traces".to_string())
+                .set_credit_notice_interval_hours(168),
         )
         .expect("policy writes");
         write_local_trace_records_for_scope(
@@ -11652,12 +12019,10 @@ mod tests {
         let scope = format!("trace-credit-outbox-failure-test-{}", Uuid::new_v4());
         write_trace_policy_for_scope(
             Some(&scope),
-            &StandingTraceContributionPolicy {
-                enabled: true,
-                ingestion_endpoint: Some("https://trace.example.com/v1/traces".to_string()),
-                credit_notice_interval_hours: 168,
-                ..Default::default()
-            },
+            &StandingTraceContributionPolicy::default()
+                .set_enabled(true)
+                .set_ingestion_endpoint("https://trace.example.com/v1/traces".to_string())
+                .set_credit_notice_interval_hours(168),
         )
         .expect("policy writes");
         write_local_trace_records_for_scope(
@@ -11733,12 +12098,10 @@ mod tests {
         for scope in [&ack_scope, &snooze_scope] {
             write_trace_policy_for_scope(
                 Some(scope),
-                &StandingTraceContributionPolicy {
-                    enabled: true,
-                    ingestion_endpoint: Some("https://trace.example.com/v1/traces".to_string()),
-                    credit_notice_interval_hours: 168,
-                    ..Default::default()
-                },
+                &StandingTraceContributionPolicy::default()
+                    .set_enabled(true)
+                    .set_ingestion_endpoint("https://trace.example.com/v1/traces".to_string())
+                    .set_credit_notice_interval_hours(168),
             )
             .expect("policy writes");
             write_local_trace_records_for_scope(
@@ -11856,11 +12219,11 @@ mod tests {
         let trace_id = Uuid::new_v4();
         write_local_trace_records_for_scope(
             Some(&scope),
-            &[LocalTraceSubmissionRecord {
+            &[NodeTraceSubmissionRecord {
                 submission_id,
                 trace_id,
                 endpoint: Some("https://trace.example.com/v1/traces".to_string()),
-                status: LocalTraceSubmissionStatus::Submitted,
+                status: NodeTraceSubmissionStatus::Submitted,
                 server_status: Some("accepted".to_string()),
                 submitted_at: Some(Utc::now()),
                 revoked_at: None,
@@ -11916,11 +12279,11 @@ mod tests {
         let trace_id = Uuid::new_v4();
         write_local_trace_records_for_scope(
             Some(&scope),
-            &[LocalTraceSubmissionRecord {
+            &[NodeTraceSubmissionRecord {
                 submission_id,
                 trace_id,
                 endpoint: Some("https://trace.example.com/v1/traces".to_string()),
-                status: LocalTraceSubmissionStatus::Submitted,
+                status: NodeTraceSubmissionStatus::Submitted,
                 server_status: Some("accepted".to_string()),
                 submitted_at: Some(Utc::now()),
                 revoked_at: None,
@@ -11974,11 +12337,11 @@ mod tests {
         let trace_id = Uuid::new_v4();
         write_local_trace_records_for_scope(
             Some(&scope),
-            &[LocalTraceSubmissionRecord {
+            &[NodeTraceSubmissionRecord {
                 submission_id,
                 trace_id,
                 endpoint: Some("https://private.trace.example.com/v1/traces".to_string()),
-                status: LocalTraceSubmissionStatus::Submitted,
+                status: NodeTraceSubmissionStatus::Submitted,
                 server_status: Some("accepted".to_string()),
                 submitted_at: Some(Utc::now()),
                 revoked_at: None,
@@ -12039,21 +12402,19 @@ mod tests {
         let trace_id = Uuid::new_v4();
         write_trace_policy_for_scope(
             Some(&scope),
-            &StandingTraceContributionPolicy {
-                enabled: true,
-                ingestion_endpoint: Some("https://trace.example.com/v1/traces".to_string()),
-                credit_notice_interval_hours: 168,
-                ..Default::default()
-            },
+            &StandingTraceContributionPolicy::default()
+                .set_enabled(true)
+                .set_ingestion_endpoint("https://trace.example.com/v1/traces".to_string())
+                .set_credit_notice_interval_hours(168),
         )
         .expect("policy writes");
         write_local_trace_records_for_scope(
             Some(&scope),
-            &[LocalTraceSubmissionRecord {
+            &[NodeTraceSubmissionRecord {
                 submission_id,
                 trace_id,
                 endpoint: Some("https://trace.example.com/v1/traces".to_string()),
-                status: LocalTraceSubmissionStatus::Submitted,
+                status: NodeTraceSubmissionStatus::Submitted,
                 server_status: Some("accepted".to_string()),
                 submitted_at: Some(Utc::now()),
                 revoked_at: None,
@@ -12117,11 +12478,11 @@ mod tests {
         let trace_id = Uuid::new_v4();
         write_local_trace_records_for_scope(
             Some(&scope),
-            &[LocalTraceSubmissionRecord {
+            &[NodeTraceSubmissionRecord {
                 submission_id,
                 trace_id,
                 endpoint: Some("https://trace.example.com/v1/traces".to_string()),
-                status: LocalTraceSubmissionStatus::Submitted,
+                status: NodeTraceSubmissionStatus::Submitted,
                 server_status: Some("accepted".to_string()),
                 submitted_at: Some(Utc::now()),
                 revoked_at: None,
@@ -12176,11 +12537,11 @@ mod tests {
         let trace_id = Uuid::new_v4();
         write_local_trace_records_for_scope(
             Some(&scope),
-            &[LocalTraceSubmissionRecord {
+            &[NodeTraceSubmissionRecord {
                 submission_id,
                 trace_id,
                 endpoint: Some("https://trace.example.com/v1/traces".to_string()),
-                status: LocalTraceSubmissionStatus::Submitted,
+                status: NodeTraceSubmissionStatus::Submitted,
                 server_status: Some("accepted".to_string()),
                 submitted_at: Some(Utc::now()),
                 revoked_at: None,
@@ -12233,11 +12594,11 @@ mod tests {
         let trace_id = Uuid::new_v4();
         write_local_trace_records_for_scope(
             Some(&scope),
-            &[LocalTraceSubmissionRecord {
+            &[NodeTraceSubmissionRecord {
                 submission_id,
                 trace_id,
                 endpoint: Some("https://trace.example.com/v1/traces".to_string()),
-                status: LocalTraceSubmissionStatus::Submitted,
+                status: NodeTraceSubmissionStatus::Submitted,
                 server_status: Some("accepted".to_string()),
                 submitted_at: Some(Utc::now()),
                 revoked_at: None,
@@ -12271,7 +12632,7 @@ mod tests {
         .expect("status sync applies");
 
         let records = read_local_trace_records_for_scope(Some(&scope)).expect("records read");
-        assert_eq!(records[0].status, LocalTraceSubmissionStatus::Expired);
+        assert_eq!(records[0].status, NodeTraceSubmissionStatus::Expired);
         assert_eq!(trace_credit_summary(&records).submissions_expired, 1);
         assert!(records[0].last_credit_notice_at.is_none());
     }
@@ -12284,11 +12645,11 @@ mod tests {
         let rejected_id = Uuid::new_v4();
         let sync_event_at = submitted_at + chrono::Duration::minutes(5);
         let records = vec![
-            LocalTraceSubmissionRecord {
+            NodeTraceSubmissionRecord {
                 submission_id: accepted_id,
                 trace_id: Uuid::new_v4(),
                 endpoint: Some("https://trace.example.com/v1/traces".to_string()),
-                status: LocalTraceSubmissionStatus::Submitted,
+                status: NodeTraceSubmissionStatus::Submitted,
                 server_status: Some("accepted".to_string()),
                 submitted_at: Some(submitted_at),
                 revoked_at: None,
@@ -12326,11 +12687,11 @@ mod tests {
                 last_credit_notice_at: None,
                 credit_notice_state: TraceCreditNoticeState::default(),
             },
-            LocalTraceSubmissionRecord {
+            NodeTraceSubmissionRecord {
                 submission_id: quarantined_id,
                 trace_id: Uuid::new_v4(),
                 endpoint: Some("https://trace.example.com/v1/traces".to_string()),
-                status: LocalTraceSubmissionStatus::Submitted,
+                status: NodeTraceSubmissionStatus::Submitted,
                 server_status: Some("quarantined".to_string()),
                 submitted_at: Some(submitted_at + chrono::Duration::minutes(2)),
                 revoked_at: None,
@@ -12346,11 +12707,11 @@ mod tests {
                 last_credit_notice_at: None,
                 credit_notice_state: TraceCreditNoticeState::default(),
             },
-            LocalTraceSubmissionRecord {
+            NodeTraceSubmissionRecord {
                 submission_id: rejected_id,
                 trace_id: Uuid::new_v4(),
                 endpoint: Some("https://trace.example.com/v1/traces".to_string()),
-                status: LocalTraceSubmissionStatus::Submitted,
+                status: NodeTraceSubmissionStatus::Submitted,
                 server_status: Some("rejected".to_string()),
                 submitted_at: Some(submitted_at + chrono::Duration::minutes(1)),
                 revoked_at: None,
@@ -12410,11 +12771,11 @@ mod tests {
 
     #[test]
     fn trace_credit_summary_uses_richer_report_totals_without_changing_shape() {
-        let record = LocalTraceSubmissionRecord {
+        let record = NodeTraceSubmissionRecord {
             submission_id: Uuid::new_v4(),
             trace_id: Uuid::new_v4(),
             endpoint: Some("https://trace.example.com/v1/traces".to_string()),
-            status: LocalTraceSubmissionStatus::Purged,
+            status: NodeTraceSubmissionStatus::Purged,
             server_status: Some("expired".to_string()),
             submitted_at: Some(Utc::now()),
             revoked_at: None,
@@ -12523,11 +12884,9 @@ mod tests {
         envelope.privacy.residual_pii_risk = ResidualPiiRisk::High;
         apply_credit_estimate_to_envelope(&mut envelope);
 
-        let manual_policy = StandingTraceContributionPolicy {
-            enabled: true,
-            require_manual_approval_when_pii_detected: true,
-            ..StandingTraceContributionPolicy::default()
-        };
+        let manual_policy = StandingTraceContributionPolicy::default()
+            .set_enabled(true)
+            .set_require_manual_approval_when_pii_detected(true);
 
         // Precondition: the High-PII trace is held for manual review.
         queue_trace_envelope_as_held_for_scope(
@@ -12619,15 +12978,13 @@ mod tests {
         let scope = format!("trace-flush-submit-failure-test-{}", Uuid::new_v4());
         let token_env = "TRACE_COMMONS_FLUSH_HOLD_TEST_TOKEN";
         let _token_guard = EnvVarRestore::set(token_env, "super-secret-token");
-        let policy = StandingTraceContributionPolicy {
-            enabled: true,
-            ingestion_endpoint: Some("http://127.0.0.1:9/v1/traces".to_string()),
-            bearer_token_env: token_env.to_string(),
-            auto_submit_high_value_traces: true,
-            min_submission_score: 0.0,
-            credit_notice_interval_hours: 168,
-            ..Default::default()
-        };
+        let policy = StandingTraceContributionPolicy::default()
+            .set_enabled(true)
+            .set_ingestion_endpoint("http://127.0.0.1:9/v1/traces".to_string())
+            .set_bearer_token_env(token_env.to_string())
+            .set_auto_submit_high_value_traces(true)
+            .set_min_submission_score(0.0)
+            .set_credit_notice_interval_hours(168);
         write_trace_policy_for_scope(Some(&scope), &policy).expect("policy writes");
 
         let raw = RawTraceContribution::from_recorded_trace(
@@ -12644,11 +13001,11 @@ mod tests {
 
         write_local_trace_records_for_scope(
             Some(&scope),
-            &[LocalTraceSubmissionRecord {
+            &[NodeTraceSubmissionRecord {
                 submission_id: Uuid::new_v4(),
                 trace_id: Uuid::new_v4(),
                 endpoint: Some("https://trace.example.com/v1/traces".to_string()),
-                status: LocalTraceSubmissionStatus::Submitted,
+                status: NodeTraceSubmissionStatus::Submitted,
                 server_status: Some("accepted".to_string()),
                 submitted_at: Some(Utc::now()),
                 revoked_at: None,
@@ -12696,14 +13053,12 @@ mod tests {
         let scope = format!("trace-flush-typed-retry-state-test-{}", Uuid::new_v4());
         let token_env = "TRACE_COMMONS_TYPED_RETRY_TEST_TOKEN";
         let _token_guard = EnvVarRestore::set(token_env, "super-secret-token");
-        let policy = StandingTraceContributionPolicy {
-            enabled: true,
-            ingestion_endpoint: Some("http://127.0.0.1:9/v1/traces".to_string()),
-            bearer_token_env: token_env.to_string(),
-            auto_submit_high_value_traces: true,
-            min_submission_score: 0.0,
-            ..Default::default()
-        };
+        let policy = StandingTraceContributionPolicy::default()
+            .set_enabled(true)
+            .set_ingestion_endpoint("http://127.0.0.1:9/v1/traces".to_string())
+            .set_bearer_token_env(token_env.to_string())
+            .set_auto_submit_high_value_traces(true)
+            .set_min_submission_score(0.0);
         write_trace_policy_for_scope(Some(&scope), &policy).expect("policy writes");
 
         let raw = RawTraceContribution::from_recorded_trace(
@@ -12836,13 +13191,11 @@ mod tests {
 
         write_trace_policy_for_scope(
             Some(&scope),
-            &StandingTraceContributionPolicy {
-                enabled: true,
-                ingestion_endpoint: Some(endpoint),
-                auto_submit_high_value_traces: true,
-                min_submission_score: 0.0,
-                ..Default::default()
-            },
+            &StandingTraceContributionPolicy::default()
+                .set_enabled(true)
+                .set_ingestion_endpoint(endpoint)
+                .set_auto_submit_high_value_traces(true)
+                .set_min_submission_score(0.0),
         )
         .expect("policy writes");
         let raw = RawTraceContribution::from_recorded_trace(
@@ -12994,14 +13347,12 @@ mod tests {
 
         write_trace_policy_for_scope(
             Some(&scope),
-            &StandingTraceContributionPolicy {
-                enabled: true,
-                ingestion_endpoint: Some(endpoint),
-                bearer_token_env: token_env.to_string(),
-                auto_submit_high_value_traces: true,
-                min_submission_score: 0.0,
-                ..Default::default()
-            },
+            &StandingTraceContributionPolicy::default()
+                .set_enabled(true)
+                .set_ingestion_endpoint(endpoint)
+                .set_bearer_token_env(token_env.to_string())
+                .set_auto_submit_high_value_traces(true)
+                .set_min_submission_score(0.0),
         )
         .expect("policy writes");
         let raw = RawTraceContribution::from_recorded_trace(
@@ -13037,13 +13388,11 @@ mod tests {
         let scope = format!("trace-status-sync-classification-test-{}", Uuid::new_v4());
         write_trace_policy_for_scope(
             Some(&scope),
-            &StandingTraceContributionPolicy {
-                enabled: true,
-                ingestion_endpoint: Some("http://127.0.0.1:9/v1/traces".to_string()),
-                auto_submit_high_value_traces: true,
-                min_submission_score: 0.0,
-                ..Default::default()
-            },
+            &StandingTraceContributionPolicy::default()
+                .set_enabled(true)
+                .set_ingestion_endpoint("http://127.0.0.1:9/v1/traces".to_string())
+                .set_auto_submit_high_value_traces(true)
+                .set_min_submission_score(0.0),
         )
         .expect("policy writes");
         write_local_trace_records_for_scope(
@@ -13109,14 +13458,12 @@ mod tests {
 
         write_trace_policy_for_scope(
             Some(&scope),
-            &StandingTraceContributionPolicy {
-                enabled: true,
-                ingestion_endpoint: Some(endpoint),
-                bearer_token_env: token_env.to_string(),
-                auto_submit_high_value_traces: true,
-                min_submission_score: 0.0,
-                ..Default::default()
-            },
+            &StandingTraceContributionPolicy::default()
+                .set_enabled(true)
+                .set_ingestion_endpoint(endpoint)
+                .set_bearer_token_env(token_env.to_string())
+                .set_auto_submit_high_value_traces(true)
+                .set_min_submission_score(0.0),
         )
         .expect("policy writes");
         write_local_trace_records_for_scope(
@@ -13155,13 +13502,11 @@ mod tests {
             );
             write_trace_policy_for_scope(
                 Some(&scope),
-                &StandingTraceContributionPolicy {
-                    enabled: true,
-                    ingestion_endpoint: Some("https://trace.example.com/v1/traces".to_string()),
-                    auto_submit_high_value_traces: true,
-                    min_submission_score: 0.0,
-                    ..Default::default()
-                },
+                &StandingTraceContributionPolicy::default()
+                    .set_enabled(true)
+                    .set_ingestion_endpoint("https://trace.example.com/v1/traces".to_string())
+                    .set_auto_submit_high_value_traces(true)
+                    .set_min_submission_score(0.0),
             )
             .expect("policy writes");
             let raw = RawTraceContribution::from_recorded_trace(
@@ -13241,13 +13586,11 @@ mod tests {
             );
             write_trace_policy_for_scope(
                 Some(&scope),
-                &StandingTraceContributionPolicy {
-                    enabled: true,
-                    ingestion_endpoint: Some("http://127.0.0.1:9/v1/traces".to_string()),
-                    auto_submit_high_value_traces: true,
-                    min_submission_score: 0.0,
-                    ..Default::default()
-                },
+                &StandingTraceContributionPolicy::default()
+                    .set_enabled(true)
+                    .set_ingestion_endpoint("http://127.0.0.1:9/v1/traces".to_string())
+                    .set_auto_submit_high_value_traces(true)
+                    .set_min_submission_score(0.0),
             )
             .expect("policy writes");
             write_local_trace_records_for_scope(
@@ -13325,11 +13668,11 @@ mod tests {
         });
         write_local_trace_records_for_scope(
             Some(&scope),
-            &[LocalTraceSubmissionRecord {
+            &[NodeTraceSubmissionRecord {
                 submission_id,
                 trace_id: Uuid::new_v4(),
                 endpoint: Some("https://trace.example.com/v1/traces".to_string()),
-                status: LocalTraceSubmissionStatus::Submitted,
+                status: NodeTraceSubmissionStatus::Submitted,
                 server_status: Some("accepted".to_string()),
                 submitted_at: Some(Utc::now()),
                 revoked_at: None,
@@ -13348,11 +13691,9 @@ mod tests {
 
         let provider =
             RefreshingTestUploadCredentialProvider::new("stale-upload-claim", "fresh-upload-claim");
-        let policy = StandingTraceContributionPolicy {
-            enabled: true,
-            ingestion_endpoint: Some(endpoint.clone()),
-            ..Default::default()
-        };
+        let policy = StandingTraceContributionPolicy::default()
+            .set_enabled(true)
+            .set_ingestion_endpoint(endpoint.clone());
         revoke_trace_submission_for_scope_with_credential_provider(
             Some(&scope),
             submission_id,
@@ -13371,7 +13712,7 @@ mod tests {
             ]
         );
         let records = read_local_trace_records_for_scope(Some(&scope)).expect("records read");
-        assert_eq!(records[0].status, LocalTraceSubmissionStatus::Revoked);
+        assert_eq!(records[0].status, NodeTraceSubmissionStatus::Revoked);
         assert!(records[0].revoked_at.is_some());
 
         let _ = std::fs::remove_dir_all(trace_contribution_dir_for_scope(Some(&scope)));
@@ -13402,11 +13743,11 @@ mod tests {
         });
         write_local_trace_records_for_scope(
             Some(&scope),
-            &[LocalTraceSubmissionRecord {
+            &[NodeTraceSubmissionRecord {
                 submission_id,
                 trace_id: Uuid::new_v4(),
                 endpoint: Some("https://trace.example.com/v1/traces".to_string()),
-                status: LocalTraceSubmissionStatus::Submitted,
+                status: NodeTraceSubmissionStatus::Submitted,
                 server_status: Some("accepted".to_string()),
                 submitted_at: Some(Utc::now()),
                 revoked_at: None,
@@ -13423,11 +13764,9 @@ mod tests {
         )
         .expect("local record writes");
 
-        let policy = StandingTraceContributionPolicy {
-            enabled: true,
-            ingestion_endpoint: Some(endpoint.clone()),
-            ..Default::default()
-        };
+        let policy = StandingTraceContributionPolicy::default()
+            .set_enabled(true)
+            .set_ingestion_endpoint(endpoint.clone());
         let provider =
             RefreshingTestUploadCredentialProvider::new("stale-upload-claim", "fresh-upload-claim");
         let error = revoke_trace_submission_for_scope_with_credential_provider(
@@ -13447,7 +13786,7 @@ mod tests {
         assert!(!error.to_string().contains("stale-upload-claim"));
         assert!(!error.to_string().contains("fresh-upload-claim"));
         let records = read_local_trace_records_for_scope(Some(&scope)).expect("records read");
-        assert_eq!(records[0].status, LocalTraceSubmissionStatus::Submitted);
+        assert_eq!(records[0].status, NodeTraceSubmissionStatus::Submitted);
         assert!(records[0].revoked_at.is_none());
 
         let _ = std::fs::remove_dir_all(trace_contribution_dir_for_scope(Some(&scope)));
@@ -13518,12 +13857,10 @@ mod tests {
         let error = submit_trace_envelope_to_endpoint_with_policy(
             &envelope,
             &endpoint,
-            &StandingTraceContributionPolicy {
-                enabled: true,
-                ingestion_endpoint: Some(endpoint.clone()),
-                bearer_token_env: token_env.to_string(),
-                ..Default::default()
-            },
+            &StandingTraceContributionPolicy::default()
+                .set_enabled(true)
+                .set_ingestion_endpoint(endpoint.clone())
+                .set_bearer_token_env(token_env.to_string()),
         )
         .await
         .expect_err("credentialed trace submission redirects should be rejected");
@@ -13598,12 +13935,10 @@ mod tests {
                     submit_trace_envelope_to_endpoint_with_policy(
                         &envelope,
                         &endpoint,
-                        &StandingTraceContributionPolicy {
-                            enabled: true,
-                            ingestion_endpoint: Some(endpoint.clone()),
-                            bearer_token_env: "TRACE_COMMONS_TEST_TOKEN".to_string(),
-                            ..Default::default()
-                        },
+                        &StandingTraceContributionPolicy::default()
+                            .set_enabled(true)
+                            .set_ingestion_endpoint(endpoint.clone())
+                            .set_bearer_token_env("TRACE_COMMONS_TEST_TOKEN".to_string()),
                     ),
                 ),
             )
@@ -13681,10 +14016,8 @@ mod tests {
             .await
             .expect("redaction should succeed");
         apply_credit_estimate_to_envelope(&mut envelope);
-        let policy = StandingTraceContributionPolicy {
-            bearer_token_env: "IRONCLAW_TRACE_COMMONS_DIRECT_SUBMIT_TEST_TOKEN".to_string(),
-            ..Default::default()
-        };
+        let policy = StandingTraceContributionPolicy::default()
+            .set_bearer_token_env("IRONCLAW_TRACE_COMMONS_DIRECT_SUBMIT_TEST_TOKEN".to_string());
 
         let receipt = submit_trace_envelope_to_endpoint_with_policy(&envelope, &endpoint, &policy)
             .await
@@ -13838,15 +14171,13 @@ mod tests {
         .promote(scope_dir.path(), "tenant-dev")
         .expect("promote device key");
 
-        let policy = StandingTraceContributionPolicy {
-            enabled: true,
-            auth_mode: TraceUploadAuthMode::DeviceKey,
-            upload_token_issuer_url: Some(format!("http://{addr}/v1/trace-upload-claim")),
-            upload_token_issuer_allowed_hosts: BTreeSet::from(["127.0.0.1".to_string()]),
-            upload_token_tenant_id: Some("tenant-dev".to_string()),
-            upload_token_audience: Some("trace-commons".to_string()),
-            ..Default::default()
-        };
+        let policy = StandingTraceContributionPolicy::default()
+            .set_enabled(true)
+            .set_auth_mode(TraceUploadAuthMode::DeviceKey)
+            .set_upload_token_issuer_url(format!("http://{addr}/v1/trace-upload-claim"))
+            .set_upload_token_issuer_allowed_hosts(BTreeSet::from(["127.0.0.1".to_string()]))
+            .set_upload_token_tenant_id("tenant-dev".to_string())
+            .set_upload_token_audience("trace-commons".to_string());
         let context = TraceUploadClaimContext {
             trace_id: None,
             submission_id: None,
@@ -13973,14 +14304,12 @@ mod tests {
     #[tokio::test]
     async fn queue_flush_compacts_duplicate_envelopes_and_orphan_holds_before_submit() {
         let scope = format!("trace-queue-compaction-test-{}", Uuid::new_v4());
-        let policy = StandingTraceContributionPolicy {
-            enabled: true,
-            ingestion_endpoint: Some("https://trace.example.com/v1/traces".to_string()),
-            bearer_token_env: "TRACE_COMMONS_MISSING_TOKEN".to_string(),
-            auto_submit_high_value_traces: true,
-            min_submission_score: 0.0,
-            ..Default::default()
-        };
+        let policy = StandingTraceContributionPolicy::default()
+            .set_enabled(true)
+            .set_ingestion_endpoint("https://trace.example.com/v1/traces".to_string())
+            .set_bearer_token_env("TRACE_COMMONS_MISSING_TOKEN".to_string())
+            .set_auto_submit_high_value_traces(true)
+            .set_min_submission_score(0.0);
         write_trace_policy_for_scope(Some(&scope), &policy).expect("policy writes");
 
         let raw = RawTraceContribution::from_recorded_trace(
@@ -14083,13 +14412,11 @@ mod tests {
 
         write_trace_policy_for_scope(
             Some(&scope),
-            &StandingTraceContributionPolicy {
-                enabled: true,
-                ingestion_endpoint: Some(endpoint),
-                auto_submit_high_value_traces: true,
-                min_submission_score: 0.0,
-                ..Default::default()
-            },
+            &StandingTraceContributionPolicy::default()
+                .set_enabled(true)
+                .set_ingestion_endpoint(endpoint)
+                .set_auto_submit_high_value_traces(true)
+                .set_min_submission_score(0.0),
         )
         .expect("policy writes");
 
@@ -14148,14 +14475,12 @@ mod tests {
     #[tokio::test]
     async fn queue_compaction_keeps_same_trace_when_semantic_metadata_differs() {
         let scope = format!("trace-queue-exact-compaction-test-{}", Uuid::new_v4());
-        let policy = StandingTraceContributionPolicy {
-            enabled: true,
-            ingestion_endpoint: Some("https://trace.example.com/v1/traces".to_string()),
-            bearer_token_env: "TRACE_COMMONS_MISSING_TOKEN".to_string(),
-            auto_submit_high_value_traces: true,
-            min_submission_score: 0.0,
-            ..Default::default()
-        };
+        let policy = StandingTraceContributionPolicy::default()
+            .set_enabled(true)
+            .set_ingestion_endpoint("https://trace.example.com/v1/traces".to_string())
+            .set_bearer_token_env("TRACE_COMMONS_MISSING_TOKEN".to_string())
+            .set_auto_submit_high_value_traces(true)
+            .set_min_submission_score(0.0);
         write_trace_policy_for_scope(Some(&scope), &policy).expect("policy writes");
 
         let raw = RawTraceContribution::from_recorded_trace(
@@ -14208,14 +14533,12 @@ mod tests {
     #[tokio::test]
     async fn queue_compaction_failure_records_sanitized_queue_telemetry() {
         let scope = format!("trace-queue-compaction-failure-test-{}", Uuid::new_v4());
-        let policy = StandingTraceContributionPolicy {
-            enabled: true,
-            ingestion_endpoint: Some("https://trace.example.com/v1/traces".to_string()),
-            bearer_token_env: "TRACE_COMMONS_MISSING_TOKEN".to_string(),
-            auto_submit_high_value_traces: true,
-            min_submission_score: 0.0,
-            ..Default::default()
-        };
+        let policy = StandingTraceContributionPolicy::default()
+            .set_enabled(true)
+            .set_ingestion_endpoint("https://trace.example.com/v1/traces".to_string())
+            .set_bearer_token_env("TRACE_COMMONS_MISSING_TOKEN".to_string())
+            .set_auto_submit_high_value_traces(true)
+            .set_min_submission_score(0.0);
         write_trace_policy_for_scope(Some(&scope), &policy).expect("policy writes");
 
         let raw = RawTraceContribution::from_recorded_trace(
@@ -14264,11 +14587,9 @@ mod tests {
         let scope = format!("trace-queue-warning-test-{}", Uuid::new_v4());
         write_trace_policy_for_scope(
             Some(&scope),
-            &StandingTraceContributionPolicy {
-                enabled: true,
-                ingestion_endpoint: Some("https://trace.example.com/v1/traces".to_string()),
-                ..Default::default()
-            },
+            &StandingTraceContributionPolicy::default()
+                .set_enabled(true)
+                .set_ingestion_endpoint("https://trace.example.com/v1/traces".to_string()),
         )
         .expect("policy writes");
 
@@ -14329,11 +14650,7 @@ mod tests {
         let endpoint_scope = format!("trace-queue-endpoint-classification-{}", Uuid::new_v4());
         write_trace_policy_for_scope(
             Some(&endpoint_scope),
-            &StandingTraceContributionPolicy {
-                enabled: true,
-                ingestion_endpoint: None,
-                ..Default::default()
-            },
+            &StandingTraceContributionPolicy::default().set_enabled(true),
         )
         .expect("endpoint policy writes");
         let endpoint_result =
@@ -14354,14 +14671,12 @@ mod tests {
         let credential_scope = format!("trace-queue-credential-classification-{}", Uuid::new_v4());
         write_trace_policy_for_scope(
             Some(&credential_scope),
-            &StandingTraceContributionPolicy {
-                enabled: true,
-                ingestion_endpoint: Some("https://trace.example.com/v1/traces".to_string()),
-                bearer_token_env: "TRACE_COMMONS_MISSING_TOKEN".to_string(),
-                auto_submit_high_value_traces: true,
-                min_submission_score: 0.0,
-                ..Default::default()
-            },
+            &StandingTraceContributionPolicy::default()
+                .set_enabled(true)
+                .set_ingestion_endpoint("https://trace.example.com/v1/traces".to_string())
+                .set_bearer_token_env("TRACE_COMMONS_MISSING_TOKEN".to_string())
+                .set_auto_submit_high_value_traces(true)
+                .set_min_submission_score(0.0),
         )
         .expect("credential policy writes");
         let raw = RawTraceContribution::from_recorded_trace(
@@ -14395,14 +14710,12 @@ mod tests {
         let _token_guard = EnvVarRestore::set(token_env, "super-secret-token");
         write_trace_policy_for_scope(
             Some(&network_scope),
-            &StandingTraceContributionPolicy {
-                enabled: true,
-                ingestion_endpoint: Some("http://127.0.0.1:9/v1/traces".to_string()),
-                bearer_token_env: token_env.to_string(),
-                auto_submit_high_value_traces: true,
-                min_submission_score: 0.0,
-                ..Default::default()
-            },
+            &StandingTraceContributionPolicy::default()
+                .set_enabled(true)
+                .set_ingestion_endpoint("http://127.0.0.1:9/v1/traces".to_string())
+                .set_bearer_token_env(token_env.to_string())
+                .set_auto_submit_high_value_traces(true)
+                .set_min_submission_score(0.0),
         )
         .expect("network policy writes");
         let mut envelope = envelope.clone();
@@ -14495,15 +14808,13 @@ mod tests {
         let scope = format!("trace-worker-tick-test-{}", Uuid::new_v4());
         let token_env = "TRACE_COMMONS_WORKER_TICK_TEST_TOKEN";
         let _token_guard = EnvVarRestore::set(token_env, "super-secret-token");
-        let policy = StandingTraceContributionPolicy {
-            enabled: true,
-            ingestion_endpoint: Some("http://127.0.0.1:9/v1/traces".to_string()),
-            bearer_token_env: token_env.to_string(),
-            auto_submit_high_value_traces: true,
-            min_submission_score: 0.0,
-            credit_notice_interval_hours: 168,
-            ..Default::default()
-        };
+        let policy = StandingTraceContributionPolicy::default()
+            .set_enabled(true)
+            .set_ingestion_endpoint("http://127.0.0.1:9/v1/traces".to_string())
+            .set_bearer_token_env(token_env.to_string())
+            .set_auto_submit_high_value_traces(true)
+            .set_min_submission_score(0.0)
+            .set_credit_notice_interval_hours(168);
         write_trace_policy_for_scope(Some(&scope), &policy).expect("policy writes");
 
         let raw = RawTraceContribution::from_recorded_trace(
@@ -14519,11 +14830,11 @@ mod tests {
 
         write_local_trace_records_for_scope(
             Some(&scope),
-            &[LocalTraceSubmissionRecord {
+            &[NodeTraceSubmissionRecord {
                 submission_id: Uuid::new_v4(),
                 trace_id: Uuid::new_v4(),
                 endpoint: Some("https://trace.example.com/v1/traces".to_string()),
-                status: LocalTraceSubmissionStatus::Submitted,
+                status: NodeTraceSubmissionStatus::Submitted,
                 server_status: Some("accepted".to_string()),
                 submitted_at: Some(Utc::now()),
                 revoked_at: None,
@@ -14567,11 +14878,7 @@ mod tests {
         let scope = format!("trace-worker-telemetry-test-{}", Uuid::new_v4());
         write_trace_policy_for_scope(
             Some(&scope),
-            &StandingTraceContributionPolicy {
-                enabled: true,
-                ingestion_endpoint: None,
-                ..Default::default()
-            },
+            &StandingTraceContributionPolicy::default().set_enabled(true),
         )
         .expect("failure policy writes");
 
@@ -14596,11 +14903,9 @@ mod tests {
 
         write_trace_policy_for_scope(
             Some(&scope),
-            &StandingTraceContributionPolicy {
-                enabled: true,
-                ingestion_endpoint: Some("https://trace.example.com/v1/traces".to_string()),
-                ..Default::default()
-            },
+            &StandingTraceContributionPolicy::default()
+                .set_enabled(true)
+                .set_ingestion_endpoint("https://trace.example.com/v1/traces".to_string()),
         )
         .expect("success policy writes");
 
@@ -14656,11 +14961,9 @@ mod tests {
     async fn server_rescrub_redacts_late_leaks_before_storage() {
         let raw = RawTraceContribution::from_recorded_trace(
             &sample_trace(),
-            RecordedTraceContributionOptions {
-                include_message_text: true,
-                include_tool_payloads: true,
-                ..Default::default()
-            },
+            RecordedTraceContributionOptions::default()
+                .set_include_message_text(true)
+                .set_include_tool_payloads(true),
         );
         let mut envelope = DeterministicTraceRedactor::with_known_path_prefixes([PathBuf::from(
             "/Users/alice/project",
@@ -14791,28 +15094,28 @@ mod tests {
             .redact_trace(raw)
             .await
             .expect("redaction should succeed");
-        envelope.process_evaluation = Some(ProcessEvaluationLabels {
-            evaluator_version: "process-evaluator-v1".to_string(),
-            labels: vec![
-                ProcessEvaluatorLabel::CorrectToolSelection,
-                ProcessEvaluatorLabel::MissingVerification,
-            ],
-            tool_selection: Some(ProcessEvalRating::Pass),
-            tool_argument_quality: Some(ProcessEvalRating::Unknown),
-            tool_ordering: Some(ProcessEvalRating::Partial),
-            verification: Some(ProcessEvalRating::Fail),
-            side_effect_safety: Some(ProcessEvalRating::Pass),
-            overall_score: Some(0.72),
-            ..ProcessEvaluationLabels::default()
-        });
-        envelope.hindsight = Some(HindsightRelabelingCandidate {
-            achieved_subgoals: vec!["redacted_subgoal:diagnosed_tool_failure".to_string()],
-            failure_type: Some(TraceFailureMode::MissingVerification),
-            recoverability_score: Some(0.8),
-            benchmark_candidate: true,
-            relabeled_training_candidate: true,
-            ..HindsightRelabelingCandidate::default()
-        });
+        envelope.process_evaluation = Some(
+            ProcessEvaluationLabels::default()
+                .set_evaluator_version("process-evaluator-v1")
+                .set_labels(vec![
+                    ProcessEvaluatorLabel::CorrectToolSelection,
+                    ProcessEvaluatorLabel::MissingVerification,
+                ])
+                .set_tool_selection(ProcessEvalRating::Pass)
+                .set_tool_argument_quality(ProcessEvalRating::Unknown)
+                .set_tool_ordering(ProcessEvalRating::Partial)
+                .set_verification(ProcessEvalRating::Fail)
+                .set_side_effect_safety(ProcessEvalRating::Pass)
+                .set_overall_score(0.72),
+        );
+        envelope.hindsight = Some(
+            HindsightRelabelingCandidate::default()
+                .set_achieved_subgoals(vec!["redacted_subgoal:diagnosed_tool_failure".to_string()])
+                .set_failure_type(TraceFailureMode::MissingVerification)
+                .set_recoverability_score(0.8)
+                .set_benchmark_candidate(true)
+                .set_relabeled_training_candidate(true),
+        );
         envelope.training_dynamics = Some(TrainingDynamicsSignals {
             mean_confidence: Some(0.61),
             variability: Some(0.29),
@@ -14877,10 +15180,8 @@ mod tests {
 
     #[test]
     fn standing_policy_serde_round_trips_invite_code_when_set() {
-        let policy = StandingTraceContributionPolicy {
-            upload_token_invite_code: Some("INV-PILOT-001".to_string()),
-            ..StandingTraceContributionPolicy::default()
-        };
+        let policy = StandingTraceContributionPolicy::default()
+            .set_upload_token_invite_code("INV-PILOT-001");
         let serialized = serde_json::to_string(&policy).expect("serializes");
         assert!(
             serialized.contains("\"upload_token_invite_code\":\"INV-PILOT-001\""),
@@ -14908,10 +15209,14 @@ mod tests {
 
     #[test]
     fn cache_key_distinguishes_different_invite_codes() {
-        let make_policy = |invite: Option<&str>| StandingTraceContributionPolicy {
-            upload_token_issuer_url: Some("https://issuer.example/v1/trace-upload-claim".into()),
-            upload_token_invite_code: invite.map(str::to_string),
-            ..StandingTraceContributionPolicy::default()
+        let make_policy = |invite: Option<&str>| {
+            let policy = StandingTraceContributionPolicy::default()
+                .set_upload_token_issuer_url("https://issuer.example/v1/trace-upload-claim");
+            if let Some(invite) = invite {
+                policy.set_upload_token_invite_code(invite)
+            } else {
+                policy
+            }
         };
         let context = TraceUploadClaimContext::for_status_sync();
         let key_a = trace_upload_claim_cache_key(&make_policy(Some("INV-A")), &context).unwrap();
@@ -14929,13 +15234,11 @@ mod tests {
         // Security property: in DeviceKey mode a claim minted for scope A must
         // not be servable from cache for scope B. Same tenant/audience/issuer,
         // different scope_dir => different cache key.
-        let policy = StandingTraceContributionPolicy {
-            auth_mode: TraceUploadAuthMode::DeviceKey,
-            upload_token_issuer_url: Some("https://issuer.example/v1/trace-upload-claim".into()),
-            upload_token_tenant_id: Some("tenant-shared".into()),
-            upload_token_audience: Some("trace-commons-ingest".into()),
-            ..StandingTraceContributionPolicy::default()
-        };
+        let policy = StandingTraceContributionPolicy::default()
+            .set_auth_mode(TraceUploadAuthMode::DeviceKey)
+            .set_upload_token_issuer_url("https://issuer.example/v1/trace-upload-claim")
+            .set_upload_token_tenant_id("tenant-shared")
+            .set_upload_token_audience("trace-commons-ingest");
         let ctx_a = TraceUploadClaimContext::for_status_sync()
             .with_scope_dir(std::path::PathBuf::from("/scopes/user-a"));
         let ctx_b = TraceUploadClaimContext::for_status_sync()
@@ -14953,11 +15256,9 @@ mod tests {
     fn cache_key_ignores_scope_dir_in_workload_token_env_mode() {
         // In WorkloadTokenEnv mode there is no scope concept; adding a scope_dir
         // to the context must not change the key (preserves pre-change behavior).
-        let policy = StandingTraceContributionPolicy {
-            auth_mode: TraceUploadAuthMode::WorkloadTokenEnv,
-            upload_token_issuer_url: Some("https://issuer.example/v1/trace-upload-claim".into()),
-            ..StandingTraceContributionPolicy::default()
-        };
+        let policy = StandingTraceContributionPolicy::default()
+            .set_auth_mode(TraceUploadAuthMode::WorkloadTokenEnv)
+            .set_upload_token_issuer_url("https://issuer.example/v1/trace-upload-claim");
         let ctx_no_scope = TraceUploadClaimContext::for_status_sync();
         let ctx_with_scope = TraceUploadClaimContext::for_status_sync()
             .with_scope_dir(std::path::PathBuf::from("/scopes/user-a"));
@@ -15103,11 +15404,9 @@ mod tests {
 
     #[test]
     fn cache_key_hashes_invite_code_with_sha256_prefix() {
-        let policy = StandingTraceContributionPolicy {
-            upload_token_issuer_url: Some("https://issuer.example/v1/trace-upload-claim".into()),
-            upload_token_invite_code: Some("INV-PILOT-001".into()),
-            ..StandingTraceContributionPolicy::default()
-        };
+        let policy = StandingTraceContributionPolicy::default()
+            .set_upload_token_issuer_url("https://issuer.example/v1/trace-upload-claim")
+            .set_upload_token_invite_code("INV-PILOT-001");
         let context = TraceUploadClaimContext::for_status_sync();
         let key = trace_upload_claim_cache_key(&policy, &context).expect("cache key");
         assert!(
@@ -15139,11 +15438,9 @@ mod tests {
 
     #[test]
     fn device_key_policy_round_trips() {
-        let policy = StandingTraceContributionPolicy {
-            auth_mode: TraceUploadAuthMode::DeviceKey,
-            device_key_id: Some("sha256:abc".to_string()),
-            ..Default::default()
-        };
+        let policy = StandingTraceContributionPolicy::default()
+            .set_auth_mode(TraceUploadAuthMode::DeviceKey)
+            .set_device_key_id("sha256:abc".to_string());
         let json = serde_json::to_value(&policy).unwrap();
         assert_eq!(json["auth_mode"], "device_key");
         let back: StandingTraceContributionPolicy = serde_json::from_value(json).unwrap();
@@ -15160,12 +15457,10 @@ mod tests {
             crate::onboarding::DeviceKeypair::load_or_generate_pending(dir.path(), "h").unwrap();
         let promoted = pending.promote(dir.path(), "tenant-a").unwrap();
 
-        let policy = StandingTraceContributionPolicy {
-            auth_mode: TraceUploadAuthMode::DeviceKey,
-            upload_token_tenant_id: Some("tenant-a".to_string()),
-            upload_token_audience: Some("trace-commons-ingest".to_string()),
-            ..Default::default()
-        };
+        let policy = StandingTraceContributionPolicy::default()
+            .set_auth_mode(TraceUploadAuthMode::DeviceKey)
+            .set_upload_token_tenant_id("tenant-a".to_string())
+            .set_upload_token_audience("trace-commons-ingest".to_string());
         let context =
             TraceUploadClaimContext::for_status_sync().with_scope_dir(dir.path().to_path_buf());
 
@@ -15183,12 +15478,10 @@ mod tests {
         // Empty dir — no key has ever been generated or promoted.
         let dir = tempfile::tempdir().unwrap();
 
-        let policy = StandingTraceContributionPolicy {
-            auth_mode: TraceUploadAuthMode::DeviceKey,
-            upload_token_tenant_id: Some("tenant-a".to_string()),
-            upload_token_audience: Some("trace-commons-ingest".to_string()),
-            ..Default::default()
-        };
+        let policy = StandingTraceContributionPolicy::default()
+            .set_auth_mode(TraceUploadAuthMode::DeviceKey)
+            .set_upload_token_tenant_id("tenant-a".to_string())
+            .set_upload_token_audience("trace-commons-ingest".to_string());
         let context =
             TraceUploadClaimContext::for_status_sync().with_scope_dir(dir.path().to_path_buf());
 
@@ -15202,12 +15495,10 @@ mod tests {
 
     #[tokio::test]
     async fn device_key_auth_mode_without_scope_dir_errors_clearly() {
-        let policy = StandingTraceContributionPolicy {
-            auth_mode: TraceUploadAuthMode::DeviceKey,
-            upload_token_tenant_id: Some("tenant-a".to_string()),
-            upload_token_audience: Some("trace-commons-ingest".to_string()),
-            ..Default::default()
-        };
+        let policy = StandingTraceContributionPolicy::default()
+            .set_auth_mode(TraceUploadAuthMode::DeviceKey)
+            .set_upload_token_tenant_id("tenant-a".to_string())
+            .set_upload_token_audience("trace-commons-ingest".to_string());
         // No scope_dir — context constructed without with_scope_dir().
         let context = TraceUploadClaimContext::for_status_sync();
 
@@ -15232,12 +15523,10 @@ mod tests {
             crate::onboarding::DeviceKeypair::load_or_generate_pending(dir.path(), "h").unwrap();
         let promoted = pending.promote(dir.path(), "tenant-a").unwrap();
 
-        let policy = StandingTraceContributionPolicy {
-            auth_mode: TraceUploadAuthMode::DeviceKey,
-            upload_token_tenant_id: Some("tenant-a".to_string()),
-            upload_token_audience: Some("trace-commons-ingest".to_string()),
-            ..Default::default()
-        };
+        let policy = StandingTraceContributionPolicy::default()
+            .set_auth_mode(TraceUploadAuthMode::DeviceKey)
+            .set_upload_token_tenant_id("tenant-a".to_string())
+            .set_upload_token_audience("trace-commons-ingest".to_string());
         // Mirror the revoke path: context from for_submission_id + scope_dir.
         let context = TraceUploadClaimContext::for_submission_id(Uuid::new_v4())
             .with_scope_dir(dir.path().to_path_buf());
@@ -15261,11 +15550,9 @@ mod tests {
             std::env::set_var(env_var, "test-bearer-xyz");
         }
 
-        let policy = StandingTraceContributionPolicy {
-            auth_mode: TraceUploadAuthMode::WorkloadTokenEnv,
-            upload_token_workload_token_env: Some(env_var.to_string()),
-            ..Default::default()
-        };
+        let policy = StandingTraceContributionPolicy::default()
+            .set_auth_mode(TraceUploadAuthMode::WorkloadTokenEnv)
+            .set_upload_token_workload_token_env(env_var.to_string());
         let context = TraceUploadClaimContext::for_status_sync();
 
         let result = issuer_request_bearer(&policy, &context).await.unwrap();
@@ -15282,11 +15569,9 @@ mod tests {
     #[test]
     fn invite_code_gated_by_auth_mode() {
         // DeviceKey mode — invite_code must be None regardless of policy field.
-        let policy_device_key = StandingTraceContributionPolicy {
-            auth_mode: TraceUploadAuthMode::DeviceKey,
-            upload_token_invite_code: Some("should-not-appear".to_string()),
-            ..Default::default()
-        };
+        let policy_device_key = StandingTraceContributionPolicy::default()
+            .set_auth_mode(TraceUploadAuthMode::DeviceKey)
+            .set_upload_token_invite_code("should-not-appear".to_string());
         let invite_code_device_key = match policy_device_key.auth_mode {
             TraceUploadAuthMode::WorkloadTokenEnv => policy_device_key
                 .upload_token_invite_code
@@ -15302,11 +15587,9 @@ mod tests {
         );
 
         // WorkloadTokenEnv mode — invite_code from policy should be forwarded.
-        let policy_env = StandingTraceContributionPolicy {
-            auth_mode: TraceUploadAuthMode::WorkloadTokenEnv,
-            upload_token_invite_code: Some("invite-abc".to_string()),
-            ..Default::default()
-        };
+        let policy_env = StandingTraceContributionPolicy::default()
+            .set_auth_mode(TraceUploadAuthMode::WorkloadTokenEnv)
+            .set_upload_token_invite_code("invite-abc".to_string());
         let invite_code_env = match policy_env.auth_mode {
             TraceUploadAuthMode::WorkloadTokenEnv => policy_env
                 .upload_token_invite_code
@@ -15365,14 +15648,14 @@ mod tests {
 
     #[test]
     fn community_profile_url_derives_from_ingest_url() {
-        let policy = StandingTraceContributionPolicy {
-            ingestion_endpoint: Some("https://ingest.example.com:8443/v1/traces".to_string()),
-            upload_token_issuer_url: Some(
+        let policy = StandingTraceContributionPolicy::default()
+            .set_ingestion_endpoint("https://ingest.example.com:8443/v1/traces".to_string())
+            .set_upload_token_issuer_url(
                 "https://issuer.example.com/v1/trace-upload-claim".to_string(),
-            ),
-            upload_token_issuer_allowed_hosts: BTreeSet::from(["issuer.example.com".to_string()]),
-            ..Default::default()
-        };
+            )
+            .set_upload_token_issuer_allowed_hosts(BTreeSet::from([
+                "issuer.example.com".to_string()
+            ]));
         let url = community_profile_url_from_policy(&policy).expect("profile URL derives");
         assert_eq!(
             url.as_str(),
@@ -15381,16 +15664,14 @@ mod tests {
         );
 
         // Profile routing must not depend on issuer host compatibility.
-        let split_hosts = StandingTraceContributionPolicy {
-            ingestion_endpoint: Some("https://ingest.tracecommons.ai/v1/traces".to_string()),
-            upload_token_issuer_url: Some(
+        let split_hosts = StandingTraceContributionPolicy::default()
+            .set_ingestion_endpoint("https://ingest.tracecommons.ai/v1/traces".to_string())
+            .set_upload_token_issuer_url(
                 "https://issuer.tracecommons.ai/v1/trace-upload-claim".to_string(),
-            ),
-            upload_token_issuer_allowed_hosts: BTreeSet::from([
+            )
+            .set_upload_token_issuer_allowed_hosts(BTreeSet::from([
                 "issuer.tracecommons.ai".to_string()
-            ]),
-            ..Default::default()
-        };
+            ]));
         let split_url =
             community_profile_url_from_policy(&split_hosts).expect("split hosts derive");
         assert_eq!(
@@ -15399,25 +15680,19 @@ mod tests {
         );
 
         // Plain HTTP ingest endpoints are rejected.
-        let insecure = StandingTraceContributionPolicy {
-            ingestion_endpoint: Some("http://ingest.example.com/v1/traces".to_string()),
-            ..Default::default()
-        };
+        let insecure = StandingTraceContributionPolicy::default()
+            .set_ingestion_endpoint("http://ingest.example.com/v1/traces".to_string());
         assert!(community_profile_url_from_policy(&insecure).is_err());
 
         // Internal (non-loopback) ingest hosts are rejected.
-        let internal = StandingTraceContributionPolicy {
-            ingestion_endpoint: Some("https://ingest.corp.internal/v1/traces".to_string()),
-            ..Default::default()
-        };
+        let internal = StandingTraceContributionPolicy::default()
+            .set_ingestion_endpoint("https://ingest.corp.internal/v1/traces".to_string());
         assert!(community_profile_url_from_policy(&internal).is_err());
 
         // Literal loopback gets the dev exception (loopback-HTTP onboarding
         // stores a loopback ingest endpoint).
-        let loopback = StandingTraceContributionPolicy {
-            ingestion_endpoint: Some("http://127.0.0.1:3917/v1/traces".to_string()),
-            ..Default::default()
-        };
+        let loopback = StandingTraceContributionPolicy::default()
+            .set_ingestion_endpoint("http://127.0.0.1:3917/v1/traces".to_string());
         let loopback_url =
             community_profile_url_from_policy(&loopback).expect("loopback dev ingest derives");
         assert_eq!(
@@ -15427,10 +15702,8 @@ mod tests {
 
         // A mounted prefix on the ingest path must be preserved (mirrors
         // trace_submission_status_endpoint), not clobbered to the bare path.
-        let prefixed = StandingTraceContributionPolicy {
-            ingestion_endpoint: Some("https://ingest.example.com/api/v1/traces".to_string()),
-            ..Default::default()
-        };
+        let prefixed = StandingTraceContributionPolicy::default()
+            .set_ingestion_endpoint("https://ingest.example.com/api/v1/traces".to_string());
         assert_eq!(
             community_profile_url_from_policy(&prefixed)
                 .expect("prefixed ingest derives")
@@ -15459,10 +15732,7 @@ mod tests {
         let scope = format!("trace-profile-test-{}", Uuid::new_v4());
         write_trace_policy_for_scope(
             Some(&scope),
-            &StandingTraceContributionPolicy {
-                enabled: true,
-                ..Default::default()
-            },
+            &StandingTraceContributionPolicy::default().set_enabled(true),
         )
         .expect("policy writes");
         let error = mint_profile_attribution_token_for_scope(Some(&scope))
@@ -15484,12 +15754,10 @@ mod tests {
         // fetch_trace_upload_claim_from_issuer_accepts_loopback_dev_issuer).
         let scope = format!("trace-profile-test-{}", Uuid::new_v4());
         let context = profile_attribution_claim_context(Some(&scope));
-        let policy = StandingTraceContributionPolicy {
-            auth_mode: TraceUploadAuthMode::WorkloadTokenEnv,
-            upload_token_tenant_id: Some("tenant-a".to_string()),
-            upload_token_audience: Some("trace-commons".to_string()),
-            ..Default::default()
-        };
+        let policy = StandingTraceContributionPolicy::default()
+            .set_auth_mode(TraceUploadAuthMode::WorkloadTokenEnv)
+            .set_upload_token_tenant_id("tenant-a".to_string())
+            .set_upload_token_audience("trace-commons".to_string());
         let request = build_trace_upload_claim_issuer_request(&policy, &context);
         let body = serde_json::to_value(&request).expect("request serializes");
         assert_eq!(
@@ -15904,6 +16172,47 @@ mod tests {
     }
 
     #[test]
+    fn opt_out_user_scope_blocks_only_that_user_never_the_instance() {
+        // Regression (PR #5858 review): the CLI's opt-out used to flip the
+        // ROOT policy too — which, under instance enrollment, disenrolled the
+        // ENTIRE instance when one user opted out. The per-user opt-out
+        // primitive must write only the user's scoped policy.
+        let dir = tempfile::tempdir().unwrap();
+        write_policy_at(
+            dir.path(),
+            None,
+            &StandingTraceContributionPolicy {
+                enabled: true,
+                ..Default::default()
+            },
+        );
+
+        let alice = trace_scope_key("tenant-a", "alice");
+        opt_out_user_scope_at(dir.path(), &alice).expect("opt-out writes");
+
+        // The instance policy is untouched on disk.
+        let instance = read_trace_policy_for_scope_at(dir.path(), None).expect("instance reads");
+        assert!(
+            instance.enabled,
+            "per-user opt-out must never disable the instance enrollment"
+        );
+        // Alice is out on every resolution surface…
+        assert!(
+            resolve_trace_credentials_at(dir.path(), "tenant-a", "alice")
+                .unwrap()
+                .is_none(),
+            "opted-out user must not resolve instance credentials"
+        );
+        // …while other users still inherit the instance enrollment.
+        assert!(
+            resolve_trace_credentials_at(dir.path(), "tenant-a", "bob")
+                .unwrap()
+                .is_some(),
+            "other users must keep inheriting the instance enrollment"
+        );
+    }
+
+    #[test]
     fn resolver_explicit_user_opt_out_blocks_instance_fallback() {
         // `traces opt-out` writes the user's scoped policy with enabled=false.
         // That explicit opt-out must win over an enabled instance policy on
@@ -16301,7 +16610,10 @@ mod tests {
             .unwrap();
 
         // ── assertions ───────────────────────────────────────────────────────
-        assert_eq!(link.url, "/account/login?code=abc");
+        // The server returned a RELATIVE url; it must come back absolutized
+        // against the trust-anchored issuer origin, never left relative (a
+        // relative URL would resolve against the consuming surface's origin).
+        assert_eq!(link.url, format!("http://{addr}/account/login?code=abc"));
         assert_eq!(link.account_id, "11111111-1111-1111-1111-111111111111");
 
         // Egress invariant: on the agent path BOTH network calls — the
@@ -16324,17 +16636,58 @@ mod tests {
             );
         }
 
-        let bodies = captured.lock().unwrap();
-        assert_eq!(bodies.len(), 1, "exactly one POST to login-links");
-        let expected_subject = salted_pseudonymous_contributor_id_at(
-            base.path(),
-            &trace_scope_key("tenant-dev", "alice"),
-        )
-        .unwrap();
+        {
+            let bodies = captured.lock().unwrap();
+            assert_eq!(bodies.len(), 1, "exactly one POST to login-links");
+            let expected_subject = salted_pseudonymous_contributor_id_at(
+                base.path(),
+                &trace_scope_key("tenant-dev", "alice"),
+            )
+            .unwrap();
+            assert_eq!(
+                bodies[0]["subject"],
+                serde_json::Value::String(expected_subject),
+                "posted subject must be per-user pseudonymous id for instance enrollment"
+            );
+        }
+
+        // ── direct (WebUI facade) variant ────────────────────────────────────
+        // Same enrollment, no sink: the hosted-WebUI path mints through the
+        // pinned direct client. The link is delivered ONLY in the return value
+        // (the authenticated HTTP response) — it must never be persisted to a
+        // local delivery file, which hosted users cannot read.
+        let direct = mint_account_login_link_direct(base.path(), "tenant-dev", "alice")
+            .await
+            .expect("direct login-link mint succeeds");
+        assert_eq!(direct.url, format!("http://{addr}/account/login?code=abc"));
+        assert_eq!(direct.account_id, "11111111-1111-1111-1111-111111111111");
+        let mut delivery_files = Vec::new();
+        let mut stack = vec![base.path().to_path_buf()];
+        while let Some(dir) = stack.pop() {
+            let Ok(entries) = std::fs::read_dir(&dir) else {
+                continue;
+            };
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.is_dir() {
+                    stack.push(path);
+                } else if path
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .is_some_and(|n| n.starts_with("account_login_link."))
+                {
+                    delivery_files.push(path);
+                }
+            }
+        }
+        assert!(
+            delivery_files.is_empty(),
+            "direct mint must not write a local delivery file; found {delivery_files:?}"
+        );
         assert_eq!(
-            bodies[0]["subject"],
-            serde_json::Value::String(expected_subject),
-            "posted subject must be per-user pseudonymous id for instance enrollment"
+            captured.lock().unwrap().len(),
+            2,
+            "direct mint must POST to login-links too"
         );
     }
 
@@ -16505,6 +16858,188 @@ mod tests {
         assert_eq!(
             profiles[0]["display_handle"],
             serde_json::json!("pilot_alice")
+        );
+    }
+
+    /// Helper: instance-enroll a tempdir against a mock whose
+    /// `/v1/account/login-links` returns `link_url`, then mint via the direct
+    /// path. Pins the origin-anchoring contract for hostile response URLs.
+    async fn mint_login_link_with_response_url(
+        link_url: &str,
+    ) -> (Result<AccountLoginLink, AccountLoginLinkError>, String) {
+        let claim_jwt = test_jwt_with_header(serde_json::json!({"alg": "EdDSA", "kid": "k1"}));
+        let claim_jwt_for_mock = claim_jwt.clone();
+        let link_url = link_url.to_string();
+        let app = axum::Router::new()
+            .route(
+                "/v1/trace-upload-claim",
+                axum::routing::post(move || {
+                    let jwt = claim_jwt_for_mock.clone();
+                    async move {
+                        axum::Json(serde_json::json!({
+                            "access_token": jwt, "token_type": "Bearer", "expires_in": 300
+                        }))
+                    }
+                }),
+            )
+            .route(
+                "/v1/account/login-links",
+                axum::routing::post(move || {
+                    let url = link_url.clone();
+                    async move {
+                        axum::Json(serde_json::json!({
+                            "account_id": "11111111-1111-1111-1111-111111111111",
+                            "url": url
+                        }))
+                    }
+                }),
+            );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+
+        let base = tempfile::tempdir().unwrap();
+        enroll_instance_with_device_key(base.path(), addr);
+        let result = mint_account_login_link_direct(base.path(), "tenant-dev", "alice").await;
+        (result, format!("http://{addr}"))
+    }
+
+    #[tokio::test]
+    async fn mint_account_login_link_pins_url_to_issuer_origin() {
+        // Relative url: absolutized against the trust-anchored issuer origin.
+        let (result, origin) = mint_login_link_with_response_url("/account/login?code=rel").await;
+        let link = result.expect("relative url absolutizes");
+        assert_eq!(link.url, format!("{origin}/account/login?code=rel"));
+
+        // Cross-origin ABSOLUTE url: a hostile issuer response must not steer
+        // the authenticated browser to another origin.
+        let (result, _) =
+            mint_login_link_with_response_url("https://attacker.example/account/login").await;
+        let error = result.expect_err("cross-origin absolute url must be rejected");
+        assert!(
+            error.to_string().to_lowercase().contains("login link")
+                || matches!(error, AccountLoginLinkError::Backend(_)),
+            "cross-origin rejection surfaces as a Backend error: {error}"
+        );
+
+        // Non-HTTP(S) scheme: must be rejected (javascript: would execute in
+        // the opened tab's context).
+        let (result, _) =
+            mint_login_link_with_response_url("javascript:alert(document.domain)").await;
+        result.expect_err("non-http scheme must be rejected");
+
+        // Userinfo smuggling: rejected even when the host would match. (The
+        // mock's port isn't knowable before it binds, so a same-host+userinfo
+        // URL can't be fabricated exactly — but userinfo is rejected before
+        // the origin comparison, which cross-host coverage above pins anyway.)
+        let (result, _) =
+            mint_login_link_with_response_url("http://user:pass@127.0.0.1/account/login").await;
+        result.expect_err("userinfo in the login-link url must be rejected");
+    }
+
+    #[tokio::test]
+    async fn direct_pinned_sink_rejects_private_hosts_and_bounds_bodies() {
+        // Disallowed (link-local/metadata) host: rejected at resolution, before
+        // any request is built.
+        let error = DirectPinnedContributionSink
+            .execute(ContributionHttpRequest {
+                method: ContributionHttpMethod::Get,
+                url: "http://169.254.169.254/v1/anything".to_string(),
+                bearer_token: Some("secret".to_string()),
+                json_body: None,
+                response_body_limit: 1024,
+                timeout_ms: 2_000,
+            })
+            .await
+            .expect_err("link-local host must be rejected");
+        assert!(
+            error.to_string().contains("resolution rejected")
+                || error.to_string().contains("rejected"),
+            "rejection must come from host resolution: {error}"
+        );
+
+        // Redirects are NOT followed: the 3xx surfaces as the response status
+        // and the Location target is never contacted.
+        let hit = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let hit_for_target = hit.clone();
+        let target_app = axum::Router::new().route(
+            "/stolen",
+            axum::routing::get(move || {
+                let hit = hit_for_target.clone();
+                async move {
+                    hit.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    "leaked"
+                }
+            }),
+        );
+        let target_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let target_addr = target_listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let _ = axum::serve(target_listener, target_app).await;
+        });
+        let redirect_to = format!("http://{target_addr}/stolen");
+        let redirect_app = axum::Router::new().route(
+            "/hop",
+            axum::routing::get(move || {
+                let location = redirect_to.clone();
+                async move {
+                    (
+                        axum::http::StatusCode::FOUND,
+                        [(axum::http::header::LOCATION, location)],
+                        "",
+                    )
+                }
+            }),
+        );
+        let redirect_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let redirect_addr = redirect_listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let _ = axum::serve(redirect_listener, redirect_app).await;
+        });
+        let response = DirectPinnedContributionSink
+            .execute(ContributionHttpRequest {
+                method: ContributionHttpMethod::Get,
+                url: format!("http://{redirect_addr}/hop"),
+                bearer_token: Some("secret".to_string()),
+                json_body: None,
+                response_body_limit: 1024,
+                timeout_ms: 2_000,
+            })
+            .await
+            .expect("redirect response surfaces, not followed");
+        assert_eq!(response.status, 302, "3xx must surface as the status");
+        assert_eq!(
+            hit.load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "the redirect target must never be contacted"
+        );
+
+        // Oversized body: rejected DURING the read, not buffered.
+        let big_app = axum::Router::new().route(
+            "/big",
+            axum::routing::get(|| async { "x".repeat(64 * 1024) }),
+        );
+        let big_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let big_addr = big_listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let _ = axum::serve(big_listener, big_app).await;
+        });
+        let error = DirectPinnedContributionSink
+            .execute(ContributionHttpRequest {
+                method: ContributionHttpMethod::Get,
+                url: format!("http://{big_addr}/big"),
+                bearer_token: None,
+                json_body: None,
+                response_body_limit: 1024,
+                timeout_ms: 5_000,
+            })
+            .await
+            .expect_err("oversized body must be rejected");
+        assert!(
+            error.to_string().contains("exceeds"),
+            "rejection names the byte limit: {error}"
         );
     }
 

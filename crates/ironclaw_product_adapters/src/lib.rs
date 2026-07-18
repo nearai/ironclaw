@@ -12,6 +12,7 @@ pub mod external;
 pub mod fakes;
 pub mod identity;
 pub mod inbound;
+pub mod interaction_commands;
 mod outbound;
 mod projection;
 pub mod redaction;
@@ -53,6 +54,7 @@ pub use inbound::{
     ScopedApprovalResolutionPayload, TrustedInboundContext, UserMessagePayload,
     parse_product_slash_command,
 };
+pub use interaction_commands::{parse_interaction_resolution_text, strip_wrapping_inline_code};
 pub use outbound::{
     ApprovalPromptActionView, ApprovalPromptContextView, ApprovalPromptDestinationView,
     ApprovalPromptDetailView, ApprovalPromptScopeView, AuthPromptChallengeKind,
@@ -61,14 +63,16 @@ pub use outbound::{
     CAPABILITY_DISPLAY_SUMMARY_MAX_BYTES, CapabilityActivityStatusView, CapabilityActivityView,
     CapabilityActivityViewInput, CapabilityDisplayPreviewView, CapabilityDisplayPreviewViewInput,
     ConnectionPromptContext, FinalReplyView, GatePromptView, PROJECTION_SKILL_ACTIVATION_MAX_ITEMS,
-    PROJECTION_SKILL_FEEDBACK_MAX_BYTES, PROJECTION_SKILL_NAME_MAX_BYTES, ProductGateKind,
-    ProductOutboundEnvelope, ProductOutboundPayload, ProductOutboundTarget, ProductProjectionItem,
-    ProductProjectionState, ProductRenderOutcome, ProductSynchronousResponse,
-    ProductWorkSummaryPhase, ProgressKind, ProgressUpdateView, ProjectionCursor,
+    PROJECTION_SKILL_FEEDBACK_MAX_BYTES, PROJECTION_SKILL_NAME_MAX_BYTES,
+    PROJECTION_TEXT_MAX_BYTES, ProductGateKind, ProductOutboundEnvelope, ProductOutboundPayload,
+    ProductOutboundTarget, ProductProjectionItem, ProductProjectionState, ProductRenderOutcome,
+    ProductSynchronousResponse, ProductWorkSummaryPhase, ProgressKind, ProgressUpdateView,
+    ProjectionCursor,
 };
 pub use projection::{
     ProductProjectionReadInput, ProductProjectionSubject, ProductProjectionSubscribeInput,
-    ProjectionReadRequest, ProjectionStream, ProjectionSubscriptionRequest,
+    ProjectionReadRequest, ProjectionStream, ProjectionStreamSubscription,
+    ProjectionSubscriptionRequest,
 };
 pub use redaction::{REDACTED_PLACEHOLDER, RedactedDebug, RedactedString};
 pub use workflow::ProductWorkflow;

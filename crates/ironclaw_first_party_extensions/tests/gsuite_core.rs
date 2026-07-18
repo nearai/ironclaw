@@ -28,8 +28,9 @@ use ironclaw_first_party_extensions::{
     gsuite_resource_profile,
 };
 use ironclaw_host_api::{
-    ExtensionId, NetworkMethod, NetworkScheme, RUNTIME_HTTP_REASON_RESPONSE_BODY_LIMIT_EXCEEDED,
-    RuntimeDispatchErrorKind, RuntimeHttpEgressError, SecretHandle,
+    ExtensionId, InvocationId, NetworkMethod, NetworkScheme,
+    RUNTIME_HTTP_REASON_RESPONSE_BODY_LIMIT_EXCEEDED, ResourceScope, RuntimeDispatchErrorKind,
+    RuntimeHttpEgressError, SecretHandle, UserId,
 };
 use serde_json::json;
 use support::*;
@@ -1079,6 +1080,78 @@ async fn gsuite_handler_uses_selected_credential_handle_for_runtime_egress() {
     assert_eq!(
         requests[0].credential_injections[0].handle,
         SecretHandle::new("google-access-token").unwrap()
+    );
+}
+
+#[tokio::test]
+async fn gsuite_handler_uses_trigger_owner_account_not_other_active_user() {
+    let owner_scope =
+        ResourceScope::local_default(UserId::new("routine-owner").unwrap(), InvocationId::new())
+            .unwrap();
+    let other_scope = ResourceScope::local_default(
+        UserId::new("interactive-user").unwrap(),
+        InvocationId::new(),
+    )
+    .unwrap();
+    let auth = Arc::new(InMemoryAuthProductServices::new());
+
+    for (scope, label, handle) in [
+        (
+            &owner_scope,
+            "routine owner Google",
+            "routine-owner-google-token",
+        ),
+        (
+            &other_scope,
+            "interactive user Google",
+            "interactive-user-google-token",
+        ),
+    ] {
+        ironclaw_auth::CredentialAccountService::create_account(
+            auth.as_ref(),
+            NewCredentialAccount {
+                scope: auth_scope(scope),
+                provider: google_provider_id().unwrap(),
+                label: CredentialAccountLabel::new(label).unwrap(),
+                status: CredentialAccountStatus::Configured,
+                ownership: CredentialOwnership::UserReusable,
+                owner_extension: None,
+                granted_extensions: Vec::new(),
+                access_secret: Some(SecretHandle::new(handle).unwrap()),
+                refresh_secret: None,
+                scopes: vec![provider_scope(GOOGLE_GMAIL_READONLY_SCOPE)],
+            },
+        )
+        .await
+        .unwrap();
+    }
+
+    let executor = GsuiteExecutor::new(auth.clone(), auth, noop_credential_stager());
+    let capability_id = capability_id(GMAIL_LIST_MESSAGES_CAPABILITY_ID);
+    let egress = Arc::new(RecordingEgress::permissive_success());
+    let result = executor
+        .dispatch(GsuiteDispatchRequest {
+            capability_id: &capability_id,
+            scope: &owner_scope,
+            input: &json!({"query": "is:unread"}),
+            runtime_http_egress: egress.clone(),
+        })
+        .await
+        .unwrap();
+
+    assert_eq!(result.output["status"], 200);
+    let requests = egress.requests();
+    assert_eq!(requests.len(), 1);
+    assert_eq!(requests[0].credential_injections.len(), 1);
+    assert_eq!(
+        requests[0].credential_injections[0].handle,
+        SecretHandle::new("routine-owner-google-token").unwrap(),
+        "a scheduled run must use its owner's Google account"
+    );
+    assert_ne!(
+        requests[0].credential_injections[0].handle,
+        SecretHandle::new("interactive-user-google-token").unwrap(),
+        "the other active user's account must remain isolated"
     );
 }
 

@@ -5,7 +5,7 @@
 //!
 //! - **LLM configuration** (optional, behind the `root-llm-provider` feature).
 //!   Used by the composition root to construct an `LlmProviderModelGateway`
-//!   that satisfies the loop-support `HostManagedModelGateway` contract.
+//!   that satisfies the loop-host `HostManagedModelGateway` contract.
 //! - **Turn-runner configuration** — poll/heartbeat intervals for the worker
 //!   loop.
 //! - **Completion polling configuration** — interval/timeout policy for
@@ -18,7 +18,7 @@
 //!   roots.
 //!
 //! The CLI builds this struct from env vars / config; it does not call into
-//! `ironclaw_reborn` or `ironclaw_llm` directly.
+//! `ironclaw_runner` or `ironclaw_llm` directly.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -26,15 +26,15 @@ use std::time::Duration;
 use async_trait::async_trait;
 use ironclaw_host_api::{AgentId, ProjectId, TenantId, Timestamp, UserId};
 #[cfg(any(test, feature = "test-support"))]
-use ironclaw_loop_support::HostManagedModelGateway;
-use ironclaw_loop_support::HostSkillContextSource;
-use ironclaw_reborn::runtime::{
-    DEFAULT_MAX_CONCURRENT_RUNS_PER_USER, DEFAULT_MAX_CONCURRENT_TRIGGER_RUNS,
-    DEFAULT_TURN_RUNNER_WORKER_COUNT, ToolDisclosureMode,
-};
+use ironclaw_loop_host::HostManagedModelGateway;
+use ironclaw_loop_host::HostSkillContextSource;
 use ironclaw_reborn_config::BudgetDefaults;
 #[cfg(feature = "root-llm-provider")]
 use ironclaw_reborn_config::RebornBootConfig;
+use ironclaw_runner::runtime::{
+    DEFAULT_MAX_CONCURRENT_RUNS_PER_USER, DEFAULT_MAX_CONCURRENT_TRIGGER_RUNS,
+    DEFAULT_TURN_RUNNER_WORKER_COUNT, ToolDisclosureMode,
+};
 use ironclaw_triggers::{TriggerId, TriggerPollerWorkerConfig};
 
 use crate::input::RebornBuildInput;
@@ -170,6 +170,12 @@ impl ResolvedRebornLlm {
         &self.model
     }
 
+    /// Base URL of the backend `serve` actually boots with, when the
+    /// backend has one. See [`ironclaw_llm::LlmConfig::active_base_url`].
+    pub fn base_url(&self) -> Option<String> {
+        self.config.active_base_url()
+    }
+
     pub fn from_llm_config(config: ironclaw_llm::LlmConfig) -> Self {
         Self {
             provider_id: config.active_provider_id(),
@@ -228,6 +234,31 @@ impl Default for TurnRunnerSettings {
             // `None` = conversations may use every slot not held by triggers.
             max_concurrent_conversation_runs: None,
         }
+    }
+}
+
+impl TurnRunnerSettings {
+    pub fn set_heartbeat_interval(mut self, heartbeat_interval: Duration) -> Self {
+        self.heartbeat_interval = heartbeat_interval;
+        self
+    }
+
+    pub fn set_poll_interval(mut self, poll_interval: Duration) -> Self {
+        self.poll_interval = poll_interval;
+        self
+    }
+
+    pub fn set_worker_count(mut self, worker_count: std::num::NonZeroUsize) -> Self {
+        self.worker_count = Some(worker_count);
+        self
+    }
+
+    pub fn set_max_concurrent_runs_per_user(
+        mut self,
+        max_concurrent_runs_per_user: std::num::NonZeroU32,
+    ) -> Self {
+        self.max_concurrent_runs_per_user = Some(max_concurrent_runs_per_user);
+        self
     }
 }
 
@@ -435,7 +466,14 @@ pub struct RebornRuntimeInput {
     /// `LlmModelProfilePolicy::build_cost_table()` which the test
     /// override skips).
     #[cfg(any(test, feature = "test-support"))]
-    pub(crate) model_cost_table_override: Option<Arc<dyn ironclaw_loop_support::ModelCostTable>>,
+    pub(crate) model_cost_table_override: Option<Arc<dyn ironclaw_loop_host::ModelCostTable>>,
+    /// Caps availability-class model retries for this runtime. Tests that
+    /// script deliberate provider outages set a small value so a failed run
+    /// reaches `Failed` in seconds instead of riding the production backoff
+    /// budget for minutes. Wins over the
+    /// `IRONCLAW_REBORN_MODEL_AVAILABILITY_RETRY_ATTEMPTS` env override.
+    #[cfg(any(test, feature = "test-support"))]
+    pub(crate) model_availability_retry_attempts_override: Option<std::num::NonZeroU32>,
 }
 
 impl RebornRuntimeInput {
@@ -470,6 +508,8 @@ impl RebornRuntimeInput {
             model_gateway_override: None,
             #[cfg(any(test, feature = "test-support"))]
             model_cost_table_override: None,
+            #[cfg(any(test, feature = "test-support"))]
+            model_availability_retry_attempts_override: None,
         }
     }
 
@@ -664,6 +704,17 @@ impl RebornRuntimeInput {
         self
     }
 
+    /// Test-only hook: cap availability-class model retries so scripted
+    /// provider outages reach `Failed` quickly (see the field doc).
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn with_model_availability_retry_attempts(
+        mut self,
+        attempts: std::num::NonZeroU32,
+    ) -> Self {
+        self.model_availability_retry_attempts_override = Some(attempts);
+        self
+    }
+
     /// Test-only hook: pair the model gateway override with a custom
     /// cost table. Without this, gateway overrides produce no
     /// accountant and budget tests cannot assert ledger state — the
@@ -673,7 +724,7 @@ impl RebornRuntimeInput {
     #[cfg(any(test, feature = "test-support"))]
     pub fn with_model_cost_table_override(
         mut self,
-        cost_table: Arc<dyn ironclaw_loop_support::ModelCostTable>,
+        cost_table: Arc<dyn ironclaw_loop_host::ModelCostTable>,
     ) -> Self {
         self.model_cost_table_override = Some(cost_table);
         self

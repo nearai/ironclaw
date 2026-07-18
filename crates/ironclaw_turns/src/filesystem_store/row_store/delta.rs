@@ -65,6 +65,43 @@ impl RowSnapshotState {
         self.latest_event_cursor
     }
 
+    pub(super) fn run_record(&self, scope: &TurnScope, run_id: TurnRunId) -> Option<TurnRunRecord> {
+        let key = run_id.to_string();
+        let index = self.indexes.runs.get(&key).copied()?;
+        let record = self.snapshot.runs.get(index)?.clone();
+        (record.scope == *scope).then_some(record)
+    }
+
+    pub(super) fn run_record_by_id(&self, run_id: TurnRunId) -> Option<TurnRunRecord> {
+        let key = run_id.to_string();
+        let index = self.indexes.runs.get(&key).copied()?;
+        self.snapshot.runs.get(index).cloned()
+    }
+
+    pub(super) fn turn_record_for_run(
+        &self,
+        scope: &TurnScope,
+        run: &TurnRunRecord,
+    ) -> Result<TurnRecord, TurnError> {
+        let key = run.turn_id.to_string();
+        let Some(index) = self.indexes.turns.get(&key).copied() else {
+            return Err(TurnError::Unavailable {
+                reason: "turn run references missing cached turn row".to_string(),
+            });
+        };
+        let Some(record) = self.snapshot.turns.get(index).cloned() else {
+            return Err(TurnError::Unavailable {
+                reason: "row-store snapshot turn index is out of bounds".to_string(),
+            });
+        };
+        if record.scope != *scope {
+            return Err(TurnError::Unavailable {
+                reason: "turn run references turn row outside requested scope".to_string(),
+            });
+        }
+        Ok(record)
+    }
+
     pub(super) fn apply_delta(
         &mut self,
         delta: SnapshotDelta,
@@ -143,6 +180,24 @@ pub(super) struct SnapshotDelta {
 }
 
 impl SnapshotDelta {
+    pub(super) fn set_turns_upsert(mut self, turns_upsert: Vec<TurnRecord>) -> Self {
+        self.turns_upsert = turns_upsert;
+        self
+    }
+
+    pub(super) fn set_runs_upsert(mut self, runs_upsert: Vec<TurnRunRecord>) -> Self {
+        self.runs_upsert = runs_upsert;
+        self
+    }
+
+    pub(super) fn set_loop_checkpoints_upsert(
+        mut self,
+        loop_checkpoints_upsert: Vec<LoopCheckpointRecord>,
+    ) -> Self {
+        self.loop_checkpoints_upsert = loop_checkpoints_upsert;
+        self
+    }
+
     pub(super) fn is_empty(&self) -> bool {
         self.turns_upsert.is_empty()
             && self.turns_delete.is_empty()
@@ -507,11 +562,9 @@ pub(super) fn submit_turn_targeted_delta(
         .ok_or_else(|| TurnError::Unavailable {
             reason: "accepted run missing from row-store hot state".to_string(),
         })?;
-    let mut delta = SnapshotDelta {
-        turns_upsert: vec![turn.clone()],
-        runs_upsert: vec![run],
-        ..SnapshotDelta::default()
-    };
+    let mut delta = SnapshotDelta::default()
+        .set_turns_upsert(vec![turn.clone()])
+        .set_runs_upsert(vec![run]);
     if let Some(lock) = store.active_lock_record(&turn.scope) {
         delta.active_locks_upsert.push(lock);
     }

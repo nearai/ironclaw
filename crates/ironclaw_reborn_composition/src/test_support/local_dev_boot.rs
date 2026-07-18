@@ -76,7 +76,7 @@ where
 /// secret written by the first. For tests only — zero bytes shipped in
 /// production builds.
 #[cfg(any(feature = "libsql", feature = "postgres"))]
-pub fn build_local_dev_secret_store_for_test<F>(
+pub async fn build_local_dev_secret_store_for_test<F>(
     root: &std::path::Path,
     scoped: std::sync::Arc<ironclaw_filesystem::ScopedFilesystem<F>>,
 ) -> Result<std::sync::Arc<ironclaw_secrets::FilesystemSecretStore<F>>, crate::RebornBuildError>
@@ -85,7 +85,7 @@ where
 {
     // `build_local_dev_secret_store` also returns the crypto (for the admin
     // secret provisioner); this test helper only needs the store.
-    let (store, _crypto) = crate::factory::build_local_dev_secret_store(root, scoped, None)?;
+    let (store, _crypto) = crate::factory::build_local_dev_secret_store(root, scoped, None).await?;
     Ok(store)
 }
 
@@ -104,6 +104,6 @@ where
 #[cfg(feature = "test-support")]
 pub fn build_local_dev_approval_gate_evidence_for_test(
     approval_requests: std::sync::Arc<dyn ironclaw_run_state::ApprovalRequestStore>,
-) -> std::sync::Arc<dyn ironclaw_reborn::loop_exit_applier::ApprovalGateEvidenceStore> {
+) -> std::sync::Arc<dyn ironclaw_runner::loop_exit_applier::ApprovalGateEvidenceStore> {
     crate::runtime::build_local_dev_approval_gate_evidence_for_test(approval_requests)
 }

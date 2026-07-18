@@ -1,5 +1,7 @@
 //! Contract tests for WebUI-facing RebornServices facade.
 
+// arch-exempt: large_file, contract suite tracks the RebornServicesApi facade one seam per test; splits with the domain-port decomposition, plan #5985
+
 use std::{
     collections::{HashMap, HashSet},
     sync::{
@@ -30,33 +32,35 @@ use ironclaw_product_adapters::{
 use ironclaw_product_workflow::{
     AUTOMATION_LIST_DEFAULT_PAGE_SIZE, AUTOMATION_LIST_MAX_PAGE_SIZE,
     AUTOMATION_RUN_HISTORY_DEFAULT_PAGE_SIZE, AUTOMATION_RUN_HISTORY_MAX_PAGE_SIZE,
-    AUTOMATION_TRIGGER_THREAD_SOURCE_TAG, ApprovalInteractionActionView,
+    AUTOMATION_TRIGGER_THREAD_SOURCE_TAG, ActiveModelReader, ApprovalInteractionActionView,
     ApprovalInteractionDecision, ApprovalInteractionScope, ApprovalInteractionService,
     AuthInteractionDecision, AuthInteractionService, AutomationListRequest, AutomationName,
     AutomationProductFacade, CodexLoginStart, ExtensionCredentialSetupService,
-    ExtensionCredentialStatusRequest, ExtensionCredentialSubmitRequest, InboundAttachmentLander,
-    InboundAttachmentReader, LifecycleExtensionCredentialRequirement,
-    LifecycleExtensionCredentialSetup, LifecycleExtensionOnboarding, LifecycleExtensionRuntimeKind,
-    LifecycleExtensionSource, LifecycleExtensionSummary, LifecycleInstalledExtensionSummary,
-    LifecyclePackageKind, LifecyclePackageRef, LifecyclePhase, LifecycleProductAction,
-    LifecycleProductContext, LifecycleProductFacade, LifecycleProductPayload,
-    LifecycleProductResponse, LifecycleReadinessBlocker, ListPendingApprovalsRequest,
-    ListPendingApprovalsResponse, ListPendingAuthInteractionsRequest,
-    ListPendingAuthInteractionsResponse, LlmActiveSelection, LlmConfigService,
-    LlmConfigServiceError, LlmConfigSnapshot, LlmModelsResult, LlmProbeRequest, LlmProbeResult,
-    LlmProviderView, NearAiLoginRequest, NearAiLoginStart, NearAiWalletLoginRequest,
-    NearAiWalletLoginResult, OperatorLogsService, OperatorServiceLifecycleService,
-    OperatorStatusService, OutboundPreferencesProductFacade, PendingApprovalInteractionView,
-    ProductAgentBoundCaller, ProductWorkflowError, ProjectCaller, ProjectService,
+    ExtensionCredentialStatusRequest, ExtensionCredentialSubmitRequest, FilesystemBrowseReader,
+    FsMount, InboundAttachmentLander, InboundAttachmentReader,
+    LifecycleExtensionCredentialRequirement, LifecycleExtensionCredentialSetup,
+    LifecycleExtensionOnboarding, LifecycleExtensionRuntimeKind, LifecycleExtensionSource,
+    LifecycleExtensionSummary, LifecycleInstalledExtensionSummary, LifecyclePackageKind,
+    LifecyclePackageRef, LifecyclePhase, LifecycleProductAction, LifecycleProductContext,
+    LifecycleProductFacade, LifecycleProductPayload, LifecycleProductResponse,
+    LifecycleReadinessBlocker, ListPendingApprovalsRequest, ListPendingApprovalsResponse,
+    ListPendingAuthInteractionsRequest, ListPendingAuthInteractionsResponse, LlmActiveSelection,
+    LlmConfigService, LlmConfigServiceError, LlmConfigSnapshot, LlmModelsResult, LlmProbeRequest,
+    LlmProbeResult, LlmProviderView, NearAiLoginRequest, NearAiLoginStart,
+    NearAiWalletLoginRequest, NearAiWalletLoginResult, OperatorLogsService,
+    OperatorServiceLifecycleService, OperatorStatusService, OutboundPreferencesProductFacade,
+    PendingApprovalInteractionView, ProductAgentBoundCaller, ProductWorkflowError, ProjectCaller,
+    ProjectFsEntry, ProjectFsError, ProjectFsFile, ProjectFsStat, ProjectService,
     ProjectServiceError, RebornAddMemberRequest, RebornAttachmentRequest, RebornAutomationInfo,
     RebornAutomationMutationResponse, RebornAutomationRecentRunInfo,
     RebornAutomationRecentRunStatus, RebornAutomationRunStatus, RebornAutomationSource,
     RebornAutomationState, RebornChannelConnectAction, RebornChannelConnectStrategy,
     RebornConnectableChannelInfo, RebornCreateProjectRequest, RebornDeleteProjectRequest,
-    RebornDeleteThreadRequest, RebornExtensionOnboardingState, RebornGetProjectRequest,
-    RebornGetRunStateRequest, RebornListMembersRequest, RebornListMembersResponse,
-    RebornListProjectsRequest, RebornListProjectsResponse, RebornLogLevel, RebornLogQueryRequest,
-    RebornLogQueryResponse, RebornOperatorConfigDiagnosticSeverity, RebornOperatorConfigSetRequest,
+    RebornDeleteThreadRequest, RebornExtensionOnboardingState, RebornFsListRequest,
+    RebornGetProjectRequest, RebornGetRunStateRequest, RebornListMembersRequest,
+    RebornListMembersResponse, RebornListProjectsRequest, RebornListProjectsResponse,
+    RebornLogLevel, RebornLogQueryRequest, RebornLogQueryResponse,
+    RebornOperatorConfigDiagnosticSeverity, RebornOperatorConfigSetRequest,
     RebornOperatorLogsQuery, RebornOperatorSetupRequest, RebornOperatorSetupStatus,
     RebornOperatorStatusCheck, RebornOperatorStatusResponse, RebornOperatorStatusSeverity,
     RebornOperatorStatusState, RebornOperatorSurfaceStatus, RebornOperatorToolCatalog,
@@ -99,6 +103,7 @@ use ironclaw_threads::{
     ThreadMessageRecord, ThreadScope, UpdateAssistantDraftRequest,
     UpdateToolResultReferenceRequest,
 };
+use ironclaw_turns::run_profile::{LoopModelRouteSnapshot, LoopModelUsage};
 use ironclaw_turns::{
     AcceptedMessageRef, AdmissionRejection, AdmissionRejectionReason, CancelRunRequest,
     CancelRunResponse, DefaultTurnCoordinator, EventCursor, GateRef, GetRunStateRequest,
@@ -267,6 +272,8 @@ struct FakeTurnCoordinator {
     parked_auth_gate: Mutex<bool>,
     parked_approval_gate: Mutex<bool>,
     run_state_failure: Mutex<Option<SanitizedFailure>>,
+    run_state_usage: Mutex<Option<LoopModelUsage>>,
+    run_state_model_route: Mutex<Option<LoopModelRouteSnapshot>>,
 }
 
 impl Default for FakeTurnCoordinator {
@@ -287,6 +294,8 @@ impl Default for FakeTurnCoordinator {
             parked_auth_gate: Mutex::default(),
             parked_approval_gate: Mutex::default(),
             run_state_failure: Mutex::default(),
+            run_state_usage: Mutex::default(),
+            run_state_model_route: Mutex::default(),
         }
     }
 }
@@ -345,6 +354,18 @@ impl FakeTurnCoordinator {
 
     fn set_run_state_failure(&self, failure: SanitizedFailure) {
         *self.run_state_failure.lock().expect("lock") = Some(failure);
+    }
+
+    fn set_run_state_usage(&self, usage: LoopModelUsage, model_route: LoopModelRouteSnapshot) {
+        *self.run_state_usage.lock().expect("lock") = Some(usage);
+        *self.run_state_model_route.lock().expect("lock") = Some(model_route);
+    }
+
+    /// Report usage for a default-model run: token usage is captured but no
+    /// `resolved_model_route` is set (the caller did not pick a model).
+    fn set_run_state_usage_default_model(&self, usage: LoopModelUsage) {
+        *self.run_state_usage.lock().expect("lock") = Some(usage);
+        *self.run_state_model_route.lock().expect("lock") = None;
     }
 
     fn submission_count(&self) -> usize {
@@ -536,7 +557,8 @@ impl TurnCoordinator for FakeTurnCoordinator {
                 .expect("valid ref"),
             resolved_run_profile_id: RunProfileId::default_profile(),
             resolved_run_profile_version: RunProfileVersion::new(1),
-            resolved_model_route: None,
+            resolved_model_route: self.run_state_model_route.lock().expect("lock").clone(),
+            model_usage: *self.run_state_usage.lock().expect("lock"),
             received_at: Utc::now(),
             checkpoint_id: None,
             gate_ref,
@@ -641,6 +663,7 @@ impl TurnCoordinator for BlockingSubmitCoordinator {
             resolved_run_profile_id: RunProfileId::default_profile(),
             resolved_run_profile_version: RunProfileVersion::new(1),
             resolved_model_route: None,
+            model_usage: None,
             received_at: Utc::now(),
             checkpoint_id: None,
             gate_ref: None,
@@ -908,6 +931,7 @@ impl RecordingLifecycleFacade {
             extensions: vec![LifecycleInstalledExtensionSummary {
                 summary,
                 phase: LifecyclePhase::Configured,
+                install_scope: None,
             }],
             count: 1,
         })
@@ -1442,6 +1466,7 @@ fn automation_info(
         }],
         is_active: true,
         created_at: Some("2026-06-02T18:00:00Z".parse().expect("created at")),
+        active_hold: None,
     }
 }
 
@@ -2281,6 +2306,79 @@ impl ProjectService for AuthorizingProjectService {
     }
 }
 
+struct EmptyFilesystemBrowser;
+
+#[async_trait]
+impl FilesystemBrowseReader for EmptyFilesystemBrowser {
+    fn available_mounts(&self) -> Vec<FsMount> {
+        vec![FsMount::Memory]
+    }
+
+    async fn list_dir(
+        &self,
+        _scope: &ResourceScope,
+        _mount: FsMount,
+        _path: &str,
+    ) -> Result<Vec<ProjectFsEntry>, ProjectFsError> {
+        Ok(Vec::new())
+    }
+
+    async fn read_file(
+        &self,
+        _scope: &ResourceScope,
+        _mount: FsMount,
+        _path: &str,
+    ) -> Result<ProjectFsFile, ProjectFsError> {
+        Err(ProjectFsError::NotFound)
+    }
+
+    async fn stat(
+        &self,
+        _scope: &ResourceScope,
+        _mount: FsMount,
+        _path: &str,
+    ) -> Result<ProjectFsStat, ProjectFsError> {
+        Err(ProjectFsError::NotFound)
+    }
+}
+
+#[tokio::test]
+async fn browse_fs_authorizes_project_selector_and_fails_closed() {
+    let services = RebornServices::new(
+        Arc::new(InMemorySessionThreadService::default()),
+        Arc::new(FakeTurnCoordinator::default()),
+    )
+    .with_filesystem_browser(Arc::new(EmptyFilesystemBrowser))
+    .with_project_service(Arc::new(AuthorizingProjectService {
+        allowed_project_id: "project-scoped".to_string(),
+    }));
+
+    let response = services
+        .browse_fs_dir(
+            caller_with_project(Some("project-alpha")),
+            RebornFsListRequest {
+                mount: FsMount::Memory,
+                path: String::new(),
+                project_id: Some(ProjectId::new("project-scoped").expect("project id")),
+            },
+        )
+        .await;
+    assert!(response.is_ok(), "authorized project selector must browse");
+
+    let error = services
+        .browse_fs_dir(
+            caller_with_project(Some("project-alpha")),
+            RebornFsListRequest {
+                mount: FsMount::Memory,
+                path: String::new(),
+                project_id: Some(ProjectId::new("project-denied").expect("project id")),
+            },
+        )
+        .await
+        .expect_err("unauthorized project selector must fail closed");
+    assert_eq!(error.code, RebornServicesErrorCode::NotFound);
+}
+
 #[tokio::test]
 async fn create_thread_scopes_to_authorized_project() {
     let thread_service = Arc::new(InMemorySessionThreadService::default());
@@ -2473,13 +2571,7 @@ async fn submit_turn_uses_facade_and_thread_history_without_route_store_access()
     assert_eq!(coordinator.submission_count(), 1);
 
     let timeline = services
-        .get_timeline(
-            caller(),
-            RebornTimelineRequest {
-                thread_id: "thread-alpha".to_string(),
-                ..Default::default()
-            },
-        )
+        .get_timeline(caller(), RebornTimelineRequest::new("thread-alpha"))
         .await
         .expect("timeline");
     assert_eq!(timeline.messages.len(), 1);
@@ -2654,13 +2746,7 @@ async fn submit_turn_returns_internal_when_skill_activation_recorder_fails() {
     assert_eq!(err.code, RebornServicesErrorCode::Internal);
     assert_eq!(coordinator.submission_count(), 0);
     let timeline = services
-        .get_timeline(
-            caller(),
-            RebornTimelineRequest {
-                thread_id: "thread-alpha".to_string(),
-                ..Default::default()
-            },
-        )
+        .get_timeline(caller(), RebornTimelineRequest::new("thread-alpha"))
         .await
         .expect("timeline");
     assert_eq!(timeline.messages.len(), 1);
@@ -2686,10 +2772,7 @@ async fn m2_facade_timeline_contract_uses_fake_thread_port_with_authenticated_sc
     let timeline = services
         .get_timeline(
             web_caller.clone(),
-            RebornTimelineRequest {
-                thread_id: "thread-alpha".to_string(),
-                ..Default::default()
-            },
+            RebornTimelineRequest::new("thread-alpha"),
         )
         .await
         .expect("timeline is served by fake M2 thread port");
@@ -3013,10 +3096,7 @@ async fn same_thread_retry_reuses_legacy_accepted_message_without_creating_dupli
     let timeline = services
         .get_timeline(
             caller,
-            RebornTimelineRequest {
-                thread_id: thread_id.as_str().to_string(),
-                ..Default::default()
-            },
+            RebornTimelineRequest::new(thread_id.as_str().to_string()),
         )
         .await
         .expect("timeline");
@@ -3067,10 +3147,7 @@ async fn duplicate_submit_rejects_cross_thread_reuse_maps_to_duplicate_kind() {
     let alpha_timeline = services
         .get_timeline(
             caller(),
-            RebornTimelineRequest {
-                thread_id: "thread-alpha".to_string(),
-                ..Default::default()
-            },
+            RebornTimelineRequest::new("thread-alpha".to_string()),
         )
         .await
         .expect("alpha timeline");
@@ -3079,10 +3156,7 @@ async fn duplicate_submit_rejects_cross_thread_reuse_maps_to_duplicate_kind() {
     let beta_timeline = services
         .get_timeline(
             caller(),
-            RebornTimelineRequest {
-                thread_id: "thread-beta".to_string(),
-                ..Default::default()
-            },
+            RebornTimelineRequest::new("thread-beta".to_string()),
         )
         .await
         .expect("beta timeline");
@@ -3142,10 +3216,7 @@ async fn concurrent_duplicate_submit_creates_one_message_and_replays_outcome() {
     let timeline = services
         .get_timeline(
             caller(),
-            RebornTimelineRequest {
-                thread_id: "thread-alpha".to_string(),
-                ..Default::default()
-            },
+            RebornTimelineRequest::new("thread-alpha".to_string()),
         )
         .await
         .expect("timeline");
@@ -3164,20 +3235,14 @@ async fn refresh_reresolves_thread_to_same_canonical_scope() {
     let first = services
         .get_timeline(
             caller(),
-            RebornTimelineRequest {
-                thread_id: "thread-alpha".to_string(),
-                ..Default::default()
-            },
+            RebornTimelineRequest::new("thread-alpha".to_string()),
         )
         .await
         .expect("first resolve");
     let refreshed = services
         .get_timeline(
             caller(),
-            RebornTimelineRequest {
-                thread_id: "thread-alpha".to_string(),
-                ..Default::default()
-            },
+            RebornTimelineRequest::new("thread-alpha".to_string()),
         )
         .await
         .expect("refresh resolve");
@@ -3208,10 +3273,7 @@ async fn get_timeline_rejects_cross_user_access() {
     let err = services
         .get_timeline(
             caller_for_user("user-beta"),
-            RebornTimelineRequest {
-                thread_id: "thread-alpha".to_string(),
-                ..Default::default()
-            },
+            RebornTimelineRequest::new("thread-alpha".to_string()),
         )
         .await
         .expect_err("cross-user timeline read must be rejected");
@@ -3244,10 +3306,7 @@ async fn delete_thread_removes_owned_thread() {
     let err = services
         .get_timeline(
             caller(),
-            RebornTimelineRequest {
-                thread_id: "thread-alpha".to_string(),
-                ..Default::default()
-            },
+            RebornTimelineRequest::new("thread-alpha".to_string()),
         )
         .await
         .expect_err("deleted thread must no longer be readable");
@@ -3280,10 +3339,7 @@ async fn delete_thread_rejects_cross_user_access_without_deleting_owner_thread()
     services
         .get_timeline(
             alice,
-            RebornTimelineRequest {
-                thread_id: "thread-alpha".to_string(),
-                ..Default::default()
-            },
+            RebornTimelineRequest::new("thread-alpha".to_string()),
         )
         .await
         .expect("owner thread must remain after rejected cross-user delete");
@@ -3325,10 +3381,7 @@ async fn delete_thread_rejects_thread_with_active_run() {
     services
         .get_timeline(
             caller(),
-            RebornTimelineRequest {
-                thread_id: "thread-alpha".to_string(),
-                ..Default::default()
-            },
+            RebornTimelineRequest::new("thread-alpha".to_string()),
         )
         .await
         .expect("rejected delete must leave thread readable");
@@ -3392,10 +3445,7 @@ async fn delete_thread_waits_for_in_flight_submit_before_active_run_check() {
     services
         .get_timeline(
             caller(),
-            RebornTimelineRequest {
-                thread_id: "thread-alpha".to_string(),
-                ..Default::default()
-            },
+            RebornTimelineRequest::new("thread-alpha".to_string()),
         )
         .await
         .expect("rejected delete must leave thread readable");
@@ -3892,10 +3942,7 @@ async fn timeline_backend_failure_maps_to_timeline_unavailable_taxonomy() {
     let err = services
         .get_timeline(
             caller(),
-            RebornTimelineRequest {
-                thread_id: "thread-alpha".to_string(),
-                ..Default::default()
-            },
+            RebornTimelineRequest::new("thread-alpha".to_string()),
         )
         .await
         .expect_err("timeline backend failure is stable unavailable taxonomy");
@@ -5114,6 +5161,7 @@ async fn list_extensions_projects_onboarding_payload_through_reborn_services() {
                 Some(onboarding_fixture()),
             ),
             phase: LifecyclePhase::Installed,
+            install_scope: None,
         },
     }));
 
@@ -5151,11 +5199,7 @@ async fn list_automation_dispatches_through_product_facade() {
     let listed = services
         .list_automations(
             caller(),
-            WebUiListAutomationsRequest {
-                limit: Some(10),
-                run_limit: None,
-                ..Default::default()
-            },
+            WebUiListAutomationsRequest::default().set_limit(10),
         )
         .await
         .expect("list automations");
@@ -5887,11 +5931,7 @@ async fn list_automations_rejects_missing_agent_id() {
     let err = services
         .list_automations(
             caller_without_agent(),
-            WebUiListAutomationsRequest {
-                limit: Some(10),
-                run_limit: None,
-                ..Default::default()
-            },
+            WebUiListAutomationsRequest::default().set_limit(10),
         )
         .await
         .expect_err("missing agent id should fail closed");
@@ -5913,11 +5953,7 @@ async fn list_automations_clamps_oversize_limit_before_product_facade() {
     services
         .list_automations(
             caller(),
-            WebUiListAutomationsRequest {
-                limit: Some(u32::MAX),
-                run_limit: None,
-                ..Default::default()
-            },
+            WebUiListAutomationsRequest::default().set_limit(u32::MAX),
         )
         .await
         .expect("list automations");
@@ -5943,11 +5979,7 @@ async fn list_automations_clamps_zero_limit_before_product_facade() {
     services
         .list_automations(
             caller(),
-            WebUiListAutomationsRequest {
-                limit: Some(0),
-                run_limit: None,
-                ..Default::default()
-            },
+            WebUiListAutomationsRequest::default().set_limit(0),
         )
         .await
         .expect("list automations");
@@ -5970,14 +6002,7 @@ async fn list_automations_uses_default_limit_when_omitted() {
     .with_automation_product_facade(automation_facade.clone());
 
     services
-        .list_automations(
-            caller(),
-            WebUiListAutomationsRequest {
-                limit: None,
-                run_limit: None,
-                ..Default::default()
-            },
-        )
+        .list_automations(caller(), WebUiListAutomationsRequest::default())
         .await
         .expect("list automations");
 
@@ -6002,11 +6027,7 @@ async fn list_automations_clamps_oversize_run_limit_before_product_facade() {
     services
         .list_automations(
             caller(),
-            WebUiListAutomationsRequest {
-                limit: None,
-                run_limit: Some(u32::MAX),
-                ..Default::default()
-            },
+            WebUiListAutomationsRequest::default().set_run_limit(u32::MAX),
         )
         .await
         .expect("list automations");
@@ -6032,11 +6053,7 @@ async fn list_automations_allows_zero_run_limit_before_product_facade() {
     services
         .list_automations(
             caller(),
-            WebUiListAutomationsRequest {
-                limit: None,
-                run_limit: Some(0),
-                ..Default::default()
-            },
+            WebUiListAutomationsRequest::default().set_run_limit(0),
         )
         .await
         .expect("list automations");
@@ -6061,10 +6078,7 @@ async fn list_automations_forwards_include_completed_true_to_product_facade() {
     services
         .list_automations(
             caller(),
-            WebUiListAutomationsRequest {
-                include_completed: true,
-                ..Default::default()
-            },
+            WebUiListAutomationsRequest::default().set_include_completed(true),
         )
         .await
         .expect("list automations");
@@ -6087,13 +6101,7 @@ async fn list_automations_forwards_include_completed_false_to_product_facade() {
     .with_automation_product_facade(automation_facade.clone());
 
     services
-        .list_automations(
-            caller(),
-            WebUiListAutomationsRequest {
-                include_completed: false,
-                ..Default::default()
-            },
-        )
+        .list_automations(caller(), WebUiListAutomationsRequest::default())
         .await
         .expect("list automations");
 
@@ -6595,23 +6603,7 @@ async fn query_logs_requires_thread_scope() {
     .with_operator_logs_service(operator_logs.clone());
 
     let err = services
-        .query_logs(
-            caller(),
-            RebornLogQueryRequest {
-                limit: None,
-                cursor: None,
-                level: None,
-                target: None,
-                thread_id: None,
-                run_id: None,
-                turn_id: None,
-                tool_call_id: None,
-                tool_name: None,
-                source: None,
-                tail: false,
-                follow: false,
-            },
-        )
+        .query_logs(caller(), RebornLogQueryRequest::default())
         .await
         .expect_err("public logs require a thread scope");
 
@@ -6637,20 +6629,10 @@ async fn query_logs_rejects_ambiguous_tail_follow_modes() {
     let err = services
         .query_logs(
             caller(),
-            RebornLogQueryRequest {
-                limit: None,
-                cursor: None,
-                level: None,
-                target: None,
-                thread_id: Some("thread-alpha".to_string()),
-                run_id: None,
-                turn_id: None,
-                tool_call_id: None,
-                tool_name: None,
-                source: None,
-                tail: true,
-                follow: true,
-            },
+            RebornLogQueryRequest::default()
+                .set_thread_id("thread-alpha")
+                .set_tail(true)
+                .set_follow(true),
         )
         .await
         .expect_err("tail and follow cannot be combined");
@@ -6679,20 +6661,13 @@ async fn query_logs_forwards_owned_thread_scope_to_logs_service() {
     services
         .query_logs(
             caller(),
-            RebornLogQueryRequest {
-                limit: Some(25),
-                cursor: Some("after:7".to_string()),
-                level: Some(RebornLogLevel::Info),
-                target: Some("ironclaw".to_string()),
-                thread_id: Some("thread-alpha".to_string()),
-                run_id: None,
-                turn_id: None,
-                tool_call_id: None,
-                tool_name: None,
-                source: None,
-                tail: false,
-                follow: true,
-            },
+            RebornLogQueryRequest::default()
+                .set_limit(25)
+                .set_cursor("after:7")
+                .set_level(RebornLogLevel::Info)
+                .set_target("ironclaw")
+                .set_thread_id("thread-alpha")
+                .set_follow(true),
         )
         .await
         .expect("owned thread logs query");
@@ -6722,20 +6697,9 @@ async fn query_logs_rejects_thread_owned_by_another_caller() {
     let err = services
         .query_logs(
             caller(),
-            RebornLogQueryRequest {
-                limit: Some(25),
-                cursor: None,
-                level: None,
-                target: None,
-                thread_id: Some("thread-bob".to_string()),
-                run_id: None,
-                turn_id: None,
-                tool_call_id: None,
-                tool_name: None,
-                source: None,
-                tail: false,
-                follow: false,
-            },
+            RebornLogQueryRequest::default()
+                .set_limit(25)
+                .set_thread_id("thread-bob"),
         )
         .await
         .expect_err("foreign thread logs are not caller-visible");
@@ -6851,6 +6815,7 @@ async fn get_timeline_succeeds_for_own_automation_trigger_thread() {
             }],
             is_active: true,
             created_at: None,
+            active_hold: None,
         }])
         .with_resolve_scope_for_thread(
             trigger_thread_id.clone(),
@@ -6864,10 +6829,7 @@ async fn get_timeline_succeeds_for_own_automation_trigger_thread() {
     let response = services
         .get_timeline(
             caller,
-            RebornTimelineRequest {
-                thread_id: trigger_thread_id.as_str().to_string(),
-                ..Default::default()
-            },
+            RebornTimelineRequest::new(trigger_thread_id.as_str().to_string()),
         )
         .await
         .expect("owner should be able to read their automation trigger thread timeline");
@@ -6968,6 +6930,7 @@ async fn read_attachment_reads_trigger_thread_bytes_under_creator_scope() {
             }],
             is_active: true,
             created_at: None,
+            active_hold: None,
         }])
         .with_resolve_scope_for_thread(
             trigger_thread_id.clone(),
@@ -7042,10 +7005,7 @@ async fn get_timeline_rejects_other_users_automation_trigger_thread() {
     let err = services
         .get_timeline(
             bob,
-            RebornTimelineRequest {
-                thread_id: trigger_thread_id.as_str().to_string(),
-                ..Default::default()
-            },
+            RebornTimelineRequest::new(trigger_thread_id.as_str().to_string()),
         )
         .await
         .expect_err("non-owner must not read another user's trigger thread");
@@ -7092,10 +7052,7 @@ async fn get_timeline_surfaces_trigger_scope_lookup_backend_error() {
     let err = services
         .get_timeline(
             caller,
-            RebornTimelineRequest {
-                thread_id: trigger_thread_id.as_str().to_string(),
-                ..Default::default()
-            },
+            RebornTimelineRequest::new(trigger_thread_id.as_str().to_string()),
         )
         .await
         .expect_err("backend error from facade must propagate, not become 404");
@@ -7309,10 +7266,7 @@ async fn get_timeline_surfaces_backend_error_from_unscoped_trigger_history_reloa
     let err = services
         .get_timeline(
             caller,
-            RebornTimelineRequest {
-                thread_id: trigger_thread_id.as_str().to_string(),
-                ..Default::default()
-            },
+            RebornTimelineRequest::new(trigger_thread_id.as_str().to_string()),
         )
         .await
         .expect_err("backend error on trigger-owned reload must surface as 503, not 404");
@@ -7388,10 +7342,7 @@ async fn get_timeline_uses_caller_agent_when_trigger_scope_omits_agent_id() {
     let response = services
         .get_timeline(
             caller,
-            RebornTimelineRequest {
-                thread_id: trigger_thread_id.as_str().to_string(),
-                ..Default::default()
-            },
+            RebornTimelineRequest::new(trigger_thread_id.as_str().to_string()),
         )
         .await
         .expect("timeline must resolve when agent_id is None via caller fallback");
@@ -7436,6 +7387,7 @@ fn automation_facade_with_trigger_thread(
             }],
             is_active: true,
             created_at: None,
+            active_hold: None,
         }])
         .with_resolve_scope_for_thread(
             trigger_thread_id.clone(),
@@ -7918,6 +7870,7 @@ async fn get_timeline_rejects_thread_id_absent_from_callers_automations() {
             }],
             is_active: true,
             created_at: None,
+            active_hold: None,
         }]), // resolve_scope is None — the facade does not recognise the requested thread.
     );
 
@@ -7927,10 +7880,7 @@ async fn get_timeline_rejects_thread_id_absent_from_callers_automations() {
     let err = services
         .get_timeline(
             caller,
-            RebornTimelineRequest {
-                thread_id: "thread-absent-from-automations".to_string(),
-                ..Default::default()
-            },
+            RebornTimelineRequest::new("thread-absent-from-automations".to_string()),
         )
         .await
         .expect_err("unknown thread_id must return 404");
@@ -8400,8 +8350,14 @@ struct StaticOperatorToolCatalogForTest {
     tools: Vec<RebornOperatorToolInfo>,
 }
 
+#[async_trait]
 impl RebornOperatorToolCatalog for StaticOperatorToolCatalogForTest {
-    fn list_operator_tools(&self) -> Vec<RebornOperatorToolInfo> {
+    async fn list_operator_tools(
+        &self,
+        _caller: &ironclaw_host_api::UserId,
+    ) -> Vec<RebornOperatorToolInfo> {
+        // Ownership filtering is exercised by the composition-tier catalog
+        // test; this static catalog is caller-agnostic on purpose.
         self.tools.clone()
     }
 }
@@ -8485,10 +8441,15 @@ fn services_with_operator_approval_config() -> RebornServices {
 
 fn services_with_operator_approval_config_parts() -> (
     RebornServices,
-    Arc<ironclaw_approvals::InMemoryPersistentApprovalPolicyStore>,
+    Arc<
+        ironclaw_approvals::FilesystemPersistentApprovalPolicyStore<
+            ironclaw_filesystem::InMemoryBackend,
+        >,
+    >,
 ) {
-    let persistent_policies =
-        Arc::new(ironclaw_approvals::InMemoryPersistentApprovalPolicyStore::new());
+    let persistent_policies = Arc::new(
+        ironclaw_approvals::test_support::in_memory_backed_persistent_approval_policy_store(),
+    );
     let policy_store: Arc<dyn PersistentApprovalPolicyStore> = persistent_policies.clone();
     let services = services_with_operator_approval_config_policy_store(policy_store);
     (services, persistent_policies)
@@ -8498,7 +8459,7 @@ fn services_with_operator_approval_config_policy_store(
     persistent_policies: Arc<dyn PersistentApprovalPolicyStore>,
 ) -> RebornServices {
     services_with_operator_approval_config_stores(
-        Arc::new(ironclaw_approvals::InMemoryAutoApproveSettingStore::new()),
+        Arc::new(ironclaw_approvals::test_support::in_memory_backed_auto_approve_setting_store()),
         persistent_policies,
     )
 }
@@ -8512,7 +8473,10 @@ fn services_with_operator_approval_config_stores(
         Arc::new(FakeTurnCoordinator::default()),
     )
     .with_operator_approval_config(
-        Arc::new(ironclaw_approvals::InMemoryToolPermissionOverrideStore::new()),
+        Arc::new(
+            ironclaw_approvals::test_support::in_memory_backed_capability_permission_override_store(
+            ),
+        ),
         auto_approve,
         persistent_policies.clone(),
         Arc::new(StaticOperatorToolCatalogForTest {
@@ -8648,7 +8612,9 @@ async fn global_auto_approve_enabled_scopes_read_by_caller_tenant_and_user() {
     let auto_approve = Arc::new(RecordingAutoApproveSettingStore::default());
     let services = services_with_operator_approval_config_stores(
         auto_approve.clone(),
-        Arc::new(ironclaw_approvals::InMemoryPersistentApprovalPolicyStore::new()),
+        Arc::new(
+            ironclaw_approvals::test_support::in_memory_backed_persistent_approval_policy_store(),
+        ),
     );
     let caller = WebUiAuthenticatedCaller::new(
         TenantId::new("tenant-scope").expect("tenant"),
@@ -9261,11 +9227,9 @@ async fn run_operator_setup_requires_provider_id_for_provider_changes() {
     let err = services
         .run_operator_setup(
             caller(),
-            RebornOperatorSetupRequest {
-                adapter: Some("open_ai_completions".to_string()),
-                api_key: Some(SecretString::from("sk-secret".to_string())),
-                ..Default::default()
-            },
+            RebornOperatorSetupRequest::default()
+                .set_adapter("open_ai_completions")
+                .set_api_key(SecretString::from("sk-secret".to_string())),
         )
         .await
         .expect_err("provider changes require provider_id");
@@ -9285,10 +9249,7 @@ async fn run_operator_setup_rejects_model_without_provider_id() {
     let err = services
         .run_operator_setup(
             caller(),
-            RebornOperatorSetupRequest {
-                model: Some("gpt-5-mini".to_string()),
-                ..Default::default()
-            },
+            RebornOperatorSetupRequest::default().set_model("gpt-5-mini"),
         )
         .await
         .expect_err("model requires provider_id");
@@ -9305,11 +9266,9 @@ async fn run_operator_setup_rejects_base_url_without_adapter() {
     let err = services
         .run_operator_setup(
             caller(),
-            RebornOperatorSetupRequest {
-                provider_id: Some("openai".to_string()),
-                base_url: Some("https://api.example.test/v1".to_string()),
-                ..Default::default()
-            },
+            RebornOperatorSetupRequest::default()
+                .set_provider_id("openai")
+                .set_base_url("https://api.example.test/v1"),
         )
         .await
         .expect_err("base_url requires adapter");
@@ -9328,11 +9287,9 @@ async fn run_operator_setup_rejects_api_key_without_adapter() {
     let err = services
         .run_operator_setup(
             caller(),
-            RebornOperatorSetupRequest {
-                provider_id: Some("openai".to_string()),
-                api_key: Some(SecretString::from("sk-secret".to_string())),
-                ..Default::default()
-            },
+            RebornOperatorSetupRequest::default()
+                .set_provider_id("openai")
+                .set_api_key(SecretString::from("sk-secret".to_string())),
         )
         .await
         .expect_err("api_key requires adapter");
@@ -9351,12 +9308,10 @@ async fn run_operator_setup_rejects_internal_base_url_before_upsert() {
     let err = services
         .run_operator_setup(
             caller(),
-            RebornOperatorSetupRequest {
-                provider_id: Some("openai".to_string()),
-                adapter: Some("open_ai_completions".to_string()),
-                base_url: Some("http://169.254.169.254/latest/meta-data/".to_string()),
-                ..Default::default()
-            },
+            RebornOperatorSetupRequest::default()
+                .set_provider_id("openai")
+                .set_adapter("open_ai_completions")
+                .set_base_url("http://169.254.169.254/latest/meta-data/"),
         )
         .await
         .expect_err("metadata endpoint is rejected");
@@ -9373,12 +9328,10 @@ async fn run_operator_setup_rejects_blank_profile_before_provider_write() {
     let err = services
         .run_operator_setup(
             caller(),
-            RebornOperatorSetupRequest {
-                provider_id: Some("openai".to_string()),
-                adapter: Some("open_ai_completions".to_string()),
-                profile_id: Some("   ".to_string()),
-                ..Default::default()
-            },
+            RebornOperatorSetupRequest::default()
+                .set_provider_id("openai")
+                .set_adapter("open_ai_completions")
+                .set_profile_id("   "),
         )
         .await
         .expect_err("blank profile id is rejected");
@@ -9396,12 +9349,10 @@ async fn run_operator_setup_rejects_oversized_profile_before_provider_write() {
     let err = services
         .run_operator_setup(
             caller(),
-            RebornOperatorSetupRequest {
-                provider_id: Some("openai".to_string()),
-                adapter: Some("open_ai_completions".to_string()),
-                profile_id: Some("x".repeat(129)),
-                ..Default::default()
-            },
+            RebornOperatorSetupRequest::default()
+                .set_provider_id("openai")
+                .set_adapter("open_ai_completions")
+                .set_profile_id("x".repeat(129)),
         )
         .await
         .expect_err("oversized profile id is rejected");
@@ -9419,12 +9370,10 @@ async fn run_operator_setup_rejects_short_webui_access_token_before_provider_wri
     let err = services
         .run_operator_setup(
             caller(),
-            RebornOperatorSetupRequest {
-                provider_id: Some("openai".to_string()),
-                adapter: Some("open_ai_completions".to_string()),
-                webui_access_token: Some(SecretString::from("too-short".to_string())),
-                ..Default::default()
-            },
+            RebornOperatorSetupRequest::default()
+                .set_provider_id("openai")
+                .set_adapter("open_ai_completions")
+                .set_webui_access_token(SecretString::from("too-short".to_string())),
         )
         .await
         .expect_err("short WebUI token is rejected");
@@ -9446,12 +9395,10 @@ async fn run_operator_setup_rejects_serve_weak_webui_access_token_before_provide
     let err = services
         .run_operator_setup(
             caller(),
-            RebornOperatorSetupRequest {
-                provider_id: Some("openai".to_string()),
-                adapter: Some("open_ai_completions".to_string()),
-                webui_access_token: Some(SecretString::from("x".repeat(16))),
-                ..Default::default()
-            },
+            RebornOperatorSetupRequest::default()
+                .set_provider_id("openai")
+                .set_adapter("open_ai_completions")
+                .set_webui_access_token(SecretString::from("x".repeat(16))),
         )
         .await
         .expect_err("16-byte WebUI token is rejected");
@@ -9473,12 +9420,10 @@ async fn run_operator_setup_rejects_oversized_webui_access_token_before_provider
     let err = services
         .run_operator_setup(
             caller(),
-            RebornOperatorSetupRequest {
-                provider_id: Some("openai".to_string()),
-                adapter: Some("open_ai_completions".to_string()),
-                webui_access_token: Some(SecretString::from("x".repeat(4097))),
-                ..Default::default()
-            },
+            RebornOperatorSetupRequest::default()
+                .set_provider_id("openai")
+                .set_adapter("open_ai_completions")
+                .set_webui_access_token(SecretString::from("x".repeat(4097))),
         )
         .await
         .expect_err("oversized WebUI token is rejected");
@@ -9600,14 +9545,12 @@ async fn run_operator_setup_upserts_and_activates_provider_config() {
     let response = services
         .run_operator_setup(
             caller(),
-            RebornOperatorSetupRequest {
-                provider_id: Some("openai".to_string()),
-                adapter: Some("open_ai_completions".to_string()),
-                base_url: Some("https://api.example.test/v1".to_string()),
-                model: Some("gpt-5-mini".to_string()),
-                api_key: Some(SecretString::from("sk-secret".to_string())),
-                ..Default::default()
-            },
+            RebornOperatorSetupRequest::default()
+                .set_provider_id("openai")
+                .set_adapter("open_ai_completions")
+                .set_base_url("https://api.example.test/v1")
+                .set_model("gpt-5-mini")
+                .set_api_key(SecretString::from("sk-secret".to_string())),
         )
         .await
         .expect("setup response");
@@ -9642,12 +9585,10 @@ async fn run_operator_setup_ignores_redacted_webui_access_token_sentinel() {
     let response = services
         .run_operator_setup(
             caller(),
-            RebornOperatorSetupRequest {
-                provider_id: Some("openai".to_string()),
-                model: Some("gpt-5-mini".to_string()),
-                webui_access_token: Some(SecretString::from("••••••••".to_string())),
-                ..Default::default()
-            },
+            RebornOperatorSetupRequest::default()
+                .set_provider_id("openai")
+                .set_model("gpt-5-mini")
+                .set_webui_access_token(SecretString::from("••••••••".to_string())),
         )
         .await
         .expect("setup response");
@@ -9681,15 +9622,13 @@ async fn run_operator_setup_rejects_unwired_host_mutations_before_provider_write
     let err = services
         .run_operator_setup(
             caller(),
-            RebornOperatorSetupRequest {
-                provider_id: Some("openai".to_string()),
-                adapter: Some("open_ai_completions".to_string()),
-                profile_id: Some("production".to_string()),
-                webui_access_token: Some(SecretString::from(
+            RebornOperatorSetupRequest::default()
+                .set_provider_id("openai")
+                .set_adapter("open_ai_completions")
+                .set_profile_id("production")
+                .set_webui_access_token(SecretString::from(
                     "webui-secret-token-value-32-bytes".to_string(),
                 )),
-                ..Default::default()
-            },
         )
         .await
         .expect_err("unwired host mutations fail closed");
@@ -9709,12 +9648,10 @@ async fn run_operator_setup_rejects_profile_only_host_mutation_before_provider_w
     let err = services
         .run_operator_setup(
             caller(),
-            RebornOperatorSetupRequest {
-                provider_id: Some("openai".to_string()),
-                adapter: Some("open_ai_completions".to_string()),
-                profile_id: Some("production".to_string()),
-                ..Default::default()
-            },
+            RebornOperatorSetupRequest::default()
+                .set_provider_id("openai")
+                .set_adapter("open_ai_completions")
+                .set_profile_id("production"),
         )
         .await
         .expect_err("unwired profile mutation fails closed");
@@ -9734,14 +9671,12 @@ async fn run_operator_setup_rejects_token_only_host_mutation_before_provider_wri
     let err = services
         .run_operator_setup(
             caller(),
-            RebornOperatorSetupRequest {
-                provider_id: Some("openai".to_string()),
-                adapter: Some("open_ai_completions".to_string()),
-                webui_access_token: Some(SecretString::from(
+            RebornOperatorSetupRequest::default()
+                .set_provider_id("openai")
+                .set_adapter("open_ai_completions")
+                .set_webui_access_token(SecretString::from(
                     "webui-secret-token-value-32-bytes".to_string(),
                 )),
-                ..Default::default()
-            },
         )
         .await
         .expect_err("unwired WebUI token mutation fails closed");
@@ -9761,11 +9696,9 @@ async fn run_operator_setup_selects_existing_provider_without_adapter() {
     services
         .run_operator_setup(
             caller(),
-            RebornOperatorSetupRequest {
-                provider_id: Some("openai".to_string()),
-                model: Some("gpt-5-mini".to_string()),
-                ..Default::default()
-            },
+            RebornOperatorSetupRequest::default()
+                .set_provider_id("openai")
+                .set_model("gpt-5-mini"),
         )
         .await
         .expect("setup response");
@@ -9806,11 +9739,9 @@ async fn run_operator_setup_propagates_llm_config_service_error() {
     let upsert_err = upsert_services
         .run_operator_setup(
             caller(),
-            RebornOperatorSetupRequest {
-                provider_id: Some("openai".to_string()),
-                adapter: Some("open_ai_completions".to_string()),
-                ..Default::default()
-            },
+            RebornOperatorSetupRequest::default()
+                .set_provider_id("openai")
+                .set_adapter("open_ai_completions"),
         )
         .await
         .expect_err("upsert error propagates");
@@ -9823,10 +9754,7 @@ async fn run_operator_setup_propagates_llm_config_service_error() {
     let set_active_err = set_active_services
         .run_operator_setup(
             caller(),
-            RebornOperatorSetupRequest {
-                provider_id: Some("openai".to_string()),
-                ..Default::default()
-            },
+            RebornOperatorSetupRequest::default().set_provider_id("openai"),
         )
         .await
         .expect_err("set_active error propagates");
@@ -9979,6 +9907,162 @@ async fn get_run_state_returns_stable_dto_without_m3_internal_fields() {
     assert!(!rendered.contains("\"scope\""));
     assert!(!rendered.contains("\"detail\""));
     assert!(!rendered.contains("/internal/models/route-xyz"));
+    // With no reported usage, the token/cost fields are omitted entirely.
+    assert!(!rendered.contains("\"usage\""));
+    assert!(!rendered.contains("\"cost\""));
+}
+
+#[tokio::test]
+async fn get_run_state_surfaces_token_usage_and_priced_cost() {
+    let coordinator = Arc::new(FakeTurnCoordinator::default());
+    // A run that reported usage against a concrete (gpt-4o) model surfaces both
+    // the token counts and a USD cost priced from the shared cost table.
+    coordinator.set_run_state_usage(
+        LoopModelUsage {
+            input_tokens: 1_000,
+            output_tokens: 500,
+            cache_read_input_tokens: 0,
+            cache_creation_input_tokens: 0,
+        },
+        LoopModelRouteSnapshot::new("openai", "gpt-4o", "config:v1", "auth:v1"),
+    );
+    let services = RebornServices::new(
+        Arc::new(InMemorySessionThreadService::default()),
+        coordinator.clone(),
+    );
+    setup_owned_thread(&services, caller(), "thread-alpha").await;
+
+    let response = services
+        .get_run_state(
+            caller(),
+            RebornGetRunStateRequest {
+                thread_id: "thread-alpha".to_string(),
+                run_id: run_id_string(),
+            },
+        )
+        .await
+        .expect("get_run_state succeeds");
+
+    let usage = response.usage.expect("token usage surfaced");
+    assert_eq!(usage.input_tokens, 1_000);
+    assert_eq!(usage.output_tokens, 500);
+
+    let cost = response
+        .cost
+        .as_ref()
+        .expect("cost priced from resolved model");
+    // gpt-4o: input 0.0000025/tok → 1000 * 0.0000025 = 0.0025; output 0.00001/tok
+    // → 500 * 0.00001 = 0.005; total 0.0075.
+    assert_eq!(cost.input_cost_usd, "0.0025");
+    assert_eq!(cost.output_cost_usd, "0.005");
+    assert_eq!(cost.total_cost_usd, "0.0075");
+    assert_eq!(cost.currency, "USD");
+
+    // The resolved route stays internal even though its model id fed pricing.
+    let rendered = serde_json::to_string(&response).expect("json");
+    assert!(!rendered.contains("resolved_model_route"));
+    assert!(rendered.contains("\"usage\""));
+    assert!(rendered.contains("\"cost\""));
+}
+
+/// Stub [`ActiveModelReader`] returning a fixed active/default model id.
+struct FixedActiveModelReader(Option<String>);
+
+impl ActiveModelReader for FixedActiveModelReader {
+    fn active_model_id(&self) -> Option<String> {
+        self.0.clone()
+    }
+}
+
+#[tokio::test]
+async fn get_run_state_prices_default_model_run_against_active_model() {
+    let coordinator = Arc::new(FakeTurnCoordinator::default());
+    // A default-model run: usage is reported but no route was resolved (the
+    // caller sent no `model`). Pricing falls back to the runtime's live active
+    // model so the run is still priced instead of reporting `usage` with no
+    // `cost`.
+    coordinator.set_run_state_usage_default_model(LoopModelUsage {
+        input_tokens: 1_000,
+        output_tokens: 500,
+        cache_read_input_tokens: 0,
+        cache_creation_input_tokens: 0,
+    });
+    let services = RebornServices::new(
+        Arc::new(InMemorySessionThreadService::default()),
+        coordinator.clone(),
+    )
+    .with_active_model_reader(Arc::new(FixedActiveModelReader(Some("gpt-4o".to_string()))));
+    setup_owned_thread(&services, caller(), "thread-alpha").await;
+
+    let response = services
+        .get_run_state(
+            caller(),
+            RebornGetRunStateRequest {
+                thread_id: "thread-alpha".to_string(),
+                run_id: run_id_string(),
+            },
+        )
+        .await
+        .expect("get_run_state succeeds");
+
+    let usage = response.usage.expect("token usage surfaced");
+    assert_eq!(usage.input_tokens, 1_000);
+    assert_eq!(usage.output_tokens, 500);
+
+    // gpt-4o pricing, identical to the explicit-route case: input 1000 *
+    // 0.0000025 = 0.0025; output 500 * 0.00001 = 0.005; total 0.0075.
+    let cost = response
+        .cost
+        .as_ref()
+        .expect("default-model run priced against the active model");
+    assert_eq!(cost.input_cost_usd, "0.0025");
+    assert_eq!(cost.output_cost_usd, "0.005");
+    assert_eq!(cost.total_cost_usd, "0.0075");
+
+    // The active model was only used to price; it is not leaked as a route.
+    let rendered = serde_json::to_string(&response).expect("json");
+    assert!(!rendered.contains("resolved_model_route"));
+    assert!(!rendered.contains("gpt-4o"));
+}
+
+#[tokio::test]
+async fn get_run_state_default_model_run_omits_cost_without_active_model() {
+    let coordinator = Arc::new(FakeTurnCoordinator::default());
+    coordinator.set_run_state_usage_default_model(LoopModelUsage {
+        input_tokens: 1_000,
+        output_tokens: 500,
+        cache_read_input_tokens: 0,
+        cache_creation_input_tokens: 0,
+    });
+    // No active-model reader wired (and a reader that reports no concrete model
+    // behaves the same): the run reports token usage but omits cost rather than
+    // mispricing against a sentinel.
+    let services = RebornServices::new(
+        Arc::new(InMemorySessionThreadService::default()),
+        coordinator.clone(),
+    )
+    .with_active_model_reader(Arc::new(FixedActiveModelReader(None)));
+    setup_owned_thread(&services, caller(), "thread-alpha").await;
+
+    let response = services
+        .get_run_state(
+            caller(),
+            RebornGetRunStateRequest {
+                thread_id: "thread-alpha".to_string(),
+                run_id: run_id_string(),
+            },
+        )
+        .await
+        .expect("get_run_state succeeds");
+
+    assert!(response.usage.is_some(), "token usage still surfaced");
+    assert!(
+        response.cost.is_none(),
+        "cost omitted when no concrete model is available"
+    );
+    let rendered = serde_json::to_string(&response).expect("json");
+    assert!(rendered.contains("\"usage\""));
+    assert!(!rendered.contains("\"cost\""));
 }
 
 #[tokio::test]
@@ -10160,11 +10244,7 @@ async fn get_timeline_pages_messages_with_cursor() {
     let first = services
         .get_timeline(
             alice.clone(),
-            RebornTimelineRequest {
-                thread_id: "thread-paginate".to_string(),
-                limit: Some(10),
-                ..Default::default()
-            },
+            RebornTimelineRequest::new("thread-paginate".to_string()).set_limit(10),
         )
         .await
         .expect("first page");
@@ -10249,11 +10329,7 @@ async fn get_timeline_clamps_oversize_limit_to_hard_ceiling() {
     let response = services
         .get_timeline(
             alice,
-            RebornTimelineRequest {
-                thread_id: "thread-cap".to_string(),
-                limit: Some(u32::MAX),
-                ..Default::default()
-            },
+            RebornTimelineRequest::new("thread-cap".to_string()).set_limit(u32::MAX),
         )
         .await
         .expect("clamped timeline");
@@ -10479,10 +10555,7 @@ async fn list_threads_needs_approval_returns_only_automation_threads_with_pendin
     let response = services
         .list_threads(
             caller,
-            WebUiListThreadsRequest {
-                needs_approval: true,
-                ..WebUiListThreadsRequest::default()
-            },
+            WebUiListThreadsRequest::default().set_needs_approval(true),
         )
         .await
         .expect("list approval threads");
@@ -10526,10 +10599,7 @@ async fn list_threads_needs_approval_queries_pending_with_run_scope_shape() {
     let response = services
         .list_threads(
             caller,
-            WebUiListThreadsRequest {
-                needs_approval: true,
-                ..WebUiListThreadsRequest::default()
-            },
+            WebUiListThreadsRequest::default().set_needs_approval(true),
         )
         .await
         .expect("list approval threads");
@@ -10572,10 +10642,7 @@ async fn list_threads_needs_approval_uses_bounded_run_candidates() {
     let response = services
         .list_threads(
             caller,
-            WebUiListThreadsRequest {
-                needs_approval: true,
-                ..WebUiListThreadsRequest::default()
-            },
+            WebUiListThreadsRequest::default().set_needs_approval(true),
         )
         .await
         .expect("list approval threads");
@@ -10621,10 +10688,7 @@ async fn list_threads_needs_approval_finds_legacy_ownerless_automation_thread() 
     let response = services
         .list_threads(
             caller,
-            WebUiListThreadsRequest {
-                needs_approval: true,
-                ..WebUiListThreadsRequest::default()
-            },
+            WebUiListThreadsRequest::default().set_needs_approval(true),
         )
         .await
         .expect("list approval threads");
@@ -10680,10 +10744,7 @@ async fn list_threads_needs_approval_uses_automation_name_when_thread_title_miss
     let response = services
         .list_threads(
             caller,
-            WebUiListThreadsRequest {
-                needs_approval: true,
-                ..WebUiListThreadsRequest::default()
-            },
+            WebUiListThreadsRequest::default().set_needs_approval(true),
         )
         .await
         .expect("list approval threads");
@@ -10720,11 +10781,9 @@ async fn list_threads_needs_approval_checks_candidate_automation_thread() {
     let response = services
         .list_threads(
             caller,
-            WebUiListThreadsRequest {
-                needs_approval: true,
-                candidate_thread_id: Some(automation_pending_thread_id.as_str().to_string()),
-                ..WebUiListThreadsRequest::default()
-            },
+            WebUiListThreadsRequest::default()
+                .set_needs_approval(true)
+                .set_candidate_thread_id(automation_pending_thread_id.as_str()),
         )
         .await
         .expect("list approval threads");
@@ -10775,14 +10834,7 @@ async fn list_threads_breaks_out_when_cursor_does_not_advance_for_automation_thr
 
     let response = tokio::time::timeout(
         Duration::from_secs(1),
-        services.list_threads(
-            caller,
-            WebUiListThreadsRequest {
-                limit: Some(2),
-                cursor: None,
-                ..WebUiListThreadsRequest::default()
-            },
-        ),
+        services.list_threads(caller, WebUiListThreadsRequest::default().set_limit(2)),
     )
     .await
     .expect("list_threads should terminate when backend cursor stalls")
@@ -10836,14 +10888,7 @@ async fn list_threads_caps_filtered_pages_when_automation_threads_dominate() {
     );
 
     let response = services
-        .list_threads(
-            caller,
-            WebUiListThreadsRequest {
-                limit: Some(1),
-                cursor: None,
-                ..WebUiListThreadsRequest::default()
-            },
-        )
+        .list_threads(caller, WebUiListThreadsRequest::default().set_limit(1))
         .await
         .expect("list threads");
 
@@ -10927,11 +10972,7 @@ async fn list_threads_skips_hidden_automation_threads_when_filling_page() {
     let first_page = services
         .list_threads(
             caller.clone(),
-            WebUiListThreadsRequest {
-                limit: Some(1),
-                cursor: None,
-                ..WebUiListThreadsRequest::default()
-            },
+            WebUiListThreadsRequest::default().set_limit(1),
         )
         .await
         .expect("list first visible page");
@@ -10948,11 +10989,9 @@ async fn list_threads_skips_hidden_automation_threads_when_filling_page() {
     let second_page = services
         .list_threads(
             caller,
-            WebUiListThreadsRequest {
-                limit: Some(1),
-                cursor: first_page.next_cursor,
-                ..WebUiListThreadsRequest::default()
-            },
+            WebUiListThreadsRequest::default()
+                .set_limit(1)
+                .set_cursor(first_page.next_cursor.expect("first visible page cursor")),
         )
         .await
         .expect("list second visible page");
@@ -11541,10 +11580,7 @@ async fn get_timeline_returns_attachment_refs_on_the_user_message() {
     let timeline = services
         .get_timeline(
             caller(),
-            RebornTimelineRequest {
-                thread_id: "thread-alpha".to_string(),
-                ..Default::default()
-            },
+            RebornTimelineRequest::new("thread-alpha".to_string()),
         )
         .await
         .expect("timeline");

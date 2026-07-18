@@ -373,7 +373,7 @@ mod reborn_support_tests {
         ThreadId, UserId, VirtualPath,
     };
     use ironclaw_llm::{LlmProvider, ToolCompletionRequest};
-    use ironclaw_loop_support::{
+    use ironclaw_loop_host::{
         HostManagedModelErrorKind, HostManagedModelGateway, HostManagedModelMessage,
         HostManagedModelMessageRole, HostManagedModelRequest, HostManagedModelResponse,
         HostManagedToolResultContent,
@@ -2421,6 +2421,7 @@ mod reborn_support_tests {
                     thread_id,
                     vec![ProductProjectionItem::Text {
                         id: format!("item:{thread_id}"),
+                        run_id: None,
                         body: body.to_string(),
                     }],
                 )

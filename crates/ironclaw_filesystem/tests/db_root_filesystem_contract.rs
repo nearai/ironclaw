@@ -1915,30 +1915,18 @@ mod postgres_tests {
         );
     }
 
-    /// Round-C review (PR #5749): the deterministic
-    /// `delete_if_version_statements_are_single_round_trip_and_single_key`
-    /// test (postgres.rs) only inspects the SQL string's substrings/statement
-    /// count — it cannot distinguish a genuinely atomic query from a
-    /// similar-looking one that isn't (e.g. `FOR UPDATE SKIP LOCKED` still
-    /// contains the substring `FOR UPDATE`). This test drives the real race
-    /// the atomicity fix targets against a live Postgres session: a
-    /// concurrent transaction that deletes-then-recreates the same path
-    /// while `delete_if_version` is mid-flight (blocked on the `FOR UPDATE`
-    /// row lock the uncommitted DELETE holds), and asserts the only
-    /// semantically correct outcome — `NotFound`, because at the row-lock
-    /// serialization point the row was gone — rather than the misclassified
-    /// `VersionMismatch` a non-atomic (separate DELETE, then separate
-    /// diagnosis SELECT) implementation would produce against the racer's
-    /// freshly-recreated row.
     #[tokio::test]
-    async fn postgres_delete_if_version_stays_notfound_under_concurrent_delete_recreate_race() {
+    async fn postgres_delete_if_version_reports_mismatch_under_concurrent_update_race() {
         let Some((fs, prefix)) = postgres_root().await else {
             return;
         };
-        let Some(racer_pool) = postgres_pool().await else {
-            return;
+        let racer_pool = match postgres_pool().await {
+            Some(pool) => pool,
+            None => {
+                return;
+            }
         };
-        let path = vpath(&prefix, "cas_delete_race");
+        let path = vpath(&prefix, "cas_delete_update_race");
         let v1 = fs
             .put(&path, Entry::bytes(vec![1]), CasExpectation::Absent)
             .await
@@ -1949,55 +1937,48 @@ mod postgres_tests {
             .await
             .expect("racer connection must be available on the same reachable Postgres");
         let path_str = path.as_str().to_string();
-        let (deleted_tx, deleted_rx) = tokio::sync::oneshot::channel::<()>();
+        let (updated_tx, updated_rx) = tokio::sync::oneshot::channel::<()>();
 
         let racer = tokio::spawn(async move {
             racer_client.batch_execute("BEGIN").await.unwrap();
             racer_client
                 .execute(
-                    "DELETE FROM root_filesystem_entries WHERE path = $1 AND is_dir = FALSE",
+                    "UPDATE root_filesystem_entries \
+                     SET version = 999, updated_at = NOW() \
+                     WHERE path = $1 AND is_dir = FALSE",
                     &[&path_str],
                 )
                 .await
                 .unwrap();
-            // Our DELETE now holds a tuple lock on the row; a concurrent
-            // `delete_if_version`'s `FOR UPDATE` on this path will block on
-            // it until we commit. Signal so the test doesn't call
-            // `delete_if_version` before this DELETE has actually run.
-            let _ = deleted_tx.send(());
-            // Give `delete_if_version` time to reach `FOR UPDATE` and start
-            // waiting on our uncommitted DELETE's row lock before we
-            // recreate + commit.
+            // The uncommitted UPDATE holds the tuple lock. A concurrent
+            // `delete_if_version` must wait, then report the updated row as
+            // stale rather than collapsing every waited-on version change to
+            // NotFound.
+            let _ = updated_tx.send(());
             tokio::time::sleep(std::time::Duration::from_millis(250)).await;
-            racer_client
-                .execute(
-                    "INSERT INTO root_filesystem_entries (path, version) VALUES ($1, 999)",
-                    &[&path_str],
-                )
-                .await
-                .unwrap();
             racer_client.batch_execute("COMMIT").await.unwrap();
         });
 
-        deleted_rx
+        updated_rx
             .await
-            .expect("racer must signal after its DELETE runs");
-        // Head start so `delete_if_version`'s `FOR UPDATE` actually reaches
-        // and blocks on the racer's uncommitted DELETE before it recreates.
+            .expect("racer must signal after its UPDATE runs");
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
         let result = fs.delete_if_version(&path, v1).await;
 
         racer.await.expect("racer task must not panic");
 
-        assert!(
-            matches!(result, Err(FilesystemError::NotFound { .. })),
-            "expected NotFound (delete_if_version's row-lock wait serializes \
-             it before the racer's recreate, so the correct diagnosis is \
-             'already gone', never a VersionMismatch against the racer's new \
-             row) — got: {result:?}. A non-atomic (separate DELETE + \
-             diagnosis SELECT) implementation would misclassify this as \
-             VersionMismatch{{found: Some(999)}}."
-        );
+        match result {
+            Err(FilesystemError::VersionMismatch {
+                expected, found, ..
+            }) => {
+                assert_eq!(expected, Some(v1));
+                assert_eq!(
+                    found,
+                    Some(ironclaw_filesystem::RecordVersion::from_backend(999))
+                );
+            }
+            other => panic!("expected VersionMismatch against updated row, got: {other:?}"),
+        }
     }
 
     #[tokio::test]

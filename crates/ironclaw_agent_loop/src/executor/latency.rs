@@ -1,10 +1,17 @@
 use std::time::Instant;
 
-use ironclaw_observability::live_latency_started_at;
 use ironclaw_turns::run_profile::LoopRunContext;
 
 pub(super) fn started_at() -> Option<Instant> {
-    live_latency_started_at()
+    tracing::enabled!(target: "ironclaw_latency", tracing::Level::TRACE).then(Instant::now)
+}
+
+fn elapsed_ms(started_at: Instant) -> u64 {
+    started_at
+        .elapsed()
+        .as_millis()
+        .try_into()
+        .unwrap_or(u64::MAX)
 }
 
 pub(super) fn operation_ok(
@@ -17,10 +24,13 @@ pub(super) fn operation_ok(
         return;
     };
 
-    ironclaw_observability::live_latency_trace_ok!(
-        "agent_loop_executor",
+    let elapsed_ms = elapsed_ms(started_at);
+    tracing::trace!(
+        target: "ironclaw_latency",
+        component = "agent_loop_executor",
         operation,
-        Some(started_at),
+        elapsed_ms,
+        outcome = "ok",
         tenant_id = %context.scope.tenant_id,
         agent_id = context.scope.agent_id.as_ref().map(|id| id.as_str()).unwrap_or(""),
         project_id = context.scope.project_id.as_ref().map(|id| id.as_str()).unwrap_or(""),
@@ -44,11 +54,14 @@ pub(super) fn operation_error<E: ?Sized>(
         return;
     };
 
-    ironclaw_observability::live_latency_trace_error!(
-        "agent_loop_executor",
+    let elapsed_ms = elapsed_ms(started_at);
+    tracing::trace!(
+        target: "ironclaw_latency",
+        component = "agent_loop_executor",
         operation,
-        Some(started_at),
-        "executor_error",
+        elapsed_ms,
+        outcome = "error",
+        error_kind = "executor_error",
         tenant_id = %context.scope.tenant_id,
         agent_id = context.scope.agent_id.as_ref().map(|id| id.as_str()).unwrap_or(""),
         project_id = context.scope.project_id.as_ref().map(|id| id.as_str()).unwrap_or(""),

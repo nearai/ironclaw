@@ -795,7 +795,13 @@ fn chat_user_message_and_attachments(
             bytes: image.bytes,
         })
         .collect();
-    let payload = UserMessagePayload::new(text, vec![], ProductTriggerReason::DirectChat)?;
+    let payload = UserMessagePayload::new(text, vec![], ProductTriggerReason::DirectChat)?
+        .with_requested_model(ironclaw_common::model_selection::requested_model_hint(
+            &request.model,
+        ));
+    // The builder attaches the model hint after `new`'s validation, so bound the
+    // assembled payload before it is submitted.
+    payload.validate()?;
     Ok((payload, attachments))
 }
 

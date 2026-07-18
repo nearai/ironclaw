@@ -137,7 +137,7 @@ jobs:
         with:
           node-version: "22"
           cache: "pnpm"
-          cache-dependency-path: crates/ironclaw_webui_v2/frontend/pnpm-lock.yaml
+          cache-dependency-path: crates/ironclaw_webui/frontend/pnpm-lock.yaml
 
       - name: Enable pnpm
         if: contains(matrix.flags, '--all-features')
@@ -146,7 +146,7 @@ jobs:
       - name: Install WebUI frontend dependencies
         if: contains(matrix.flags, '--all-features')
         run: |
-          cd crates/ironclaw_webui_v2/frontend
+          cd crates/ironclaw_webui/frontend
           pnpm install --frozen-lockfile
 
       - name: Generate coverage
@@ -210,14 +210,14 @@ jobs:
         with:
           node-version: "22"
           cache: "pnpm"
-          cache-dependency-path: crates/ironclaw_webui_v2/frontend/pnpm-lock.yaml
+          cache-dependency-path: crates/ironclaw_webui/frontend/pnpm-lock.yaml
 
       - name: Enable pnpm
         run: corepack enable pnpm
 
       - name: Install WebUI frontend dependencies
         run: |
-          cd crates/ironclaw_webui_v2/frontend
+          cd crates/ironclaw_webui/frontend
           pnpm install --frozen-lockfile
 
       # Pre-build the reborn binary under the same llvm-cov env so the E2E
@@ -227,6 +227,9 @@ jobs:
       # OpenAI-compatible Responses API scenarios selected below.
       - name: Build instrumented ironclaw-reborn
         run: cargo build -p ironclaw_reborn_cli --features openai-compat-beta
+
+      - name: Mark OpenAI-compatible binary feature set
+        run: touch target/debug/.ironclaw-reborn-openai-compat-beta.stamp
 
       - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
         with:
@@ -249,10 +252,16 @@ jobs:
           pip install -e .
           playwright install --with-deps chromium
 
+      - name: Check Reborn Responses API E2E inventory
+        run: python3 scripts/ci/check-reborn-responses-e2e-manifest.py
+
       - name: Run Reborn E2E coverage tests
         run: |
           mapfile -t reborn_e2e_tests < <(
-            sed -e 's/#.*//' -e '/^[[:space:]]*$/d' tests/e2e/reborn_coverage_tests.txt
+            {
+              sed -e 's/#.*//' -e '/^[[:space:]]*$/d' tests/e2e/reborn_coverage_tests.txt
+              sed -e 's/#.*//' -e '/^[[:space:]]*$/d' tests/e2e/reborn_responses_e2e_tests.txt
+            } | sort -u
           )
           if ((${#reborn_e2e_tests[@]} == 0)); then
             echo "No Reborn coverage tests selected"
@@ -305,8 +314,29 @@ jobs:
     if: always()
     needs: [coverage, e2e-coverage]
     steps:
+      - name: Checkout repository
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          persist-credentials: false
       - run: |
-          if [[ "${{ needs.coverage.result }}" != "success" || "${{ needs.e2e-coverage.result }}" != "success" ]]; then
+          # shellcheck disable=SC1091
+          if ! source .github/scripts/ci-job-result-ok.sh; then
+            echo "Unable to source .github/scripts/ci-job-result-ok.sh"
+            exit 1
+          fi
+
+          failures=0
+
+          if ! job_result_ok "coverage" "${{ needs.coverage.result }}" false "superseded_only"; then
+            echo "Coverage job failed: ${{ needs.coverage.result }}"
+            failures=$((failures + 1))
+          fi
+          if ! job_result_ok "e2e-coverage" "${{ needs.e2e-coverage.result }}" false "superseded_only"; then
+            echo "E2E coverage job failed: ${{ needs.e2e-coverage.result }}"
+            failures=$((failures + 1))
+          fi
+
+          if [[ "${failures}" -gt 0 ]]; then
             echo "One or more coverage jobs failed"
             exit 1
           fi

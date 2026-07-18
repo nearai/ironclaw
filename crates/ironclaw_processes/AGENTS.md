@@ -13,7 +13,7 @@
 
 - Process lifecycle, stores, cancellation, and the background process manager, currently:
 - Lifecycle types (`types`): `ProcessRecord`/`ProcessStatus`/`ProcessStart`/`ProcessExit`, `ProcessManager`, the `ProcessExecutor` trait and `ProcessExecutionRequest`/`ProcessExecutionResult`, `ProcessResultRecord`, and `ProcessError`/`ProcessExecutionError`.
-- Stores: the `ProcessStore`/`ProcessResultStore` traits with in-memory (`memory_store`) and filesystem (`filesystem_store`) backends, plus the `EventingProcessStore` / `ResourceManagedProcessStore` wrappers (`wrappers`).
+- Stores: the `ProcessStore`/`ProcessResultStore` traits with one production implementation pair, `FilesystemProcessStore<F>` / `FilesystemProcessResultStore<F>` (`filesystem_store`) — exercised over `InMemoryBackend` in tests via the `test-support` helpers (`test_support`: `in_memory_backed_process_store` / `_result_store` / `_process_services`, arch-simplification §4.3) and over durable backends in production — plus the `EventingProcessStore` / `ResourceManagedProcessStore` wrappers (`wrappers`).
 - Cancellation (`cancellation`): `ProcessCancellationRegistry`, `ProcessCancellationToken`.
 - Host + background management: `ProcessHost`/`ProcessSubscription` (`host`); `BackgroundProcessManager`, `ProcessServices`, and `BackgroundErrorHandler`/`BackgroundFailure`/`BackgroundFailureStage` (`services`).
 - Crate-local public API, tests, and fixtures needed to prove that ownership.

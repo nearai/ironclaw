@@ -18,6 +18,12 @@ on `push` to main, the merge queue must run it in the same shape first
 instead). External/live checks (canaries, deploys, releases, benchmark
 thresholds) are exempt: they stay out of the queue by design.
 
+The WASM WIT compatibility lane uses two risk scopes. Pull requests run it only
+for direct WIT, WASM host, extension, compatibility-test, or lane-workflow
+changes. Root `Cargo.toml` and `Cargo.lock` changes are broader workspace risk:
+they run the lane in the merge queue, before landing, without adding the full
+WASM build to ordinary PR feedback. Push and deep-CI runs remain exhaustive.
+
 History: the slim-vs-full clippy matrix violated this — the queue linted only
 `--all-features` while push linted `all-features`/`default`/`libsql-only`, so
 feature-gated dead code (e.g. a `#[cfg(feature = "postgres")]`-constructed enum
@@ -90,6 +96,23 @@ the failure record. Successes post nothing, and there is no GitHub-issue
 trail: the former in-run alert jobs and `nightly-alert-issue.sh` were removed
 in favor of this single external check, because an in-run alert dies with its
 own run on a startup_failure and can never see a cron that didn't fire.
+
+### Main branch alerting
+
+`main-ci-slack-alerts.yml` watches completed `workflow_run` events for the
+current `push` to `main` workflows: Code Style, Tests (Reborn), Reborn E2E,
+Platform & Compat, Replay Snapshot Gate, Code Coverage,
+nearai-bench dispatcher tests, and Release-plz. Any watched run that concludes
+`failure`, `timed_out`, `action_required`, or `startup_failure` posts a Slack
+message with the workflow, conclusion, failed job names, commit, actor, and run
+link.
+
+Alerts go to `secrets.MAIN_CI_SLACK_WEBHOOK_URLS`; the value may be a single
+webhook URL or multiple URLs separated by newlines or commas. This is
+intentionally separate from the canary/nightly `SLACK_WEBHOOK_URL` so main CI
+alerts can target dedicated channels.
+When adding a new workflow that runs on `push` to `main`, add its workflow
+`name:` to the watched list in `main-ci-slack-alerts.yml`.
 
 ## Known accepted gaps (deliberate, revisit as needed)
 

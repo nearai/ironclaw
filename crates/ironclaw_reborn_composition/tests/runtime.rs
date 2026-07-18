@@ -10,7 +10,7 @@ use ironclaw_host_api::runtime_policy::{
 use ironclaw_host_api::{
     AgentId, CapabilityId, InvocationId, Principal, ResourceScope, TenantId, ThreadId, UserId,
 };
-use ironclaw_loop_support::{
+use ironclaw_loop_host::{
     HostManagedModelError, HostManagedModelErrorKind, HostManagedModelGateway,
     HostManagedModelRequest, HostManagedModelResponse,
 };
@@ -19,10 +19,13 @@ use ironclaw_product_workflow::{
     ResolveApprovalInteractionRequest,
 };
 use ironclaw_reborn_composition::{
-    HooksActivationConfig, PollSettings, RebornBuildInput, RebornCompositionProfile,
-    RebornRuntimeError, RebornRuntimeIdentity, RebornRuntimeInput, RebornSkillSourceKind,
-    RebornTurnDriveOutcome, TurnRunnerSettings, build_reborn_runtime,
-    local_runtime_build_input_with_options,
+    HooksActivationConfig, PollSettings, RebornBuildInput, RebornRuntimeError,
+    RebornRuntimeIdentity, RebornRuntimeInput, RebornSkillSourceKind, RebornTurnDriveOutcome,
+    TurnRunnerSettings, build_reborn_runtime,
+};
+#[cfg(feature = "libsql")]
+use ironclaw_reborn_composition::{
+    RebornCompositionProfile, local_runtime_build_input_with_options,
 };
 use ironclaw_turns::run_profile::{
     LoopCapabilityPort, ProviderToolCall, RegisterProviderToolCallRequest,
@@ -140,11 +143,11 @@ async fn hosted_single_tenant_volume_builds_live_runtime() {
         source_binding_id: "runtime-hosted-volume-source".to_string(),
         reply_target_binding_id: "runtime-hosted-volume-reply".to_string(),
     })
-    .with_runner_settings(TurnRunnerSettings {
-        heartbeat_interval: Duration::from_secs(60),
-        poll_interval: Duration::from_secs(60),
-        ..TurnRunnerSettings::default()
-    });
+    .with_runner_settings(
+        TurnRunnerSettings::default()
+            .set_heartbeat_interval(Duration::from_secs(60))
+            .set_poll_interval(Duration::from_secs(60)),
+    );
 
     let runtime = build_reborn_runtime(input).await.unwrap();
     assert_eq!(runtime.default_run_profile_id(), "reborn-planned-default");
@@ -166,11 +169,11 @@ async fn stub_gateway_send_cancels_recovery_required_and_releases_conversation()
         source_binding_id: "runtime-test-source".to_string(),
         reply_target_binding_id: "runtime-test-reply".to_string(),
     })
-    .with_runner_settings(TurnRunnerSettings {
-        heartbeat_interval: Duration::from_secs(60),
-        poll_interval: Duration::from_secs(60),
-        ..TurnRunnerSettings::default()
-    });
+    .with_runner_settings(
+        TurnRunnerSettings::default()
+            .set_heartbeat_interval(Duration::from_secs(60))
+            .set_poll_interval(Duration::from_secs(60)),
+    );
 
     let runtime = build_reborn_runtime(input).await.unwrap();
     assert_eq!(runtime.default_run_profile_id(), "reborn-planned-default");
@@ -184,12 +187,17 @@ async fn stub_gateway_send_cancels_recovery_required_and_releases_conversation()
     .unwrap()
     .unwrap();
 
-    // With no LLM gateway configured the stubbed driver path exhausts the
-    // model retry budget and verifies the final checkpoint evidence, which
-    // maps to a terminal model_unavailable failure instead of the pre-PR
+    // With no LLM gateway compiled in, the stub gateway reports a
+    // configuration fault (CredentialUnavailable) that fails the run on
+    // first sight — no availability retries — and verifies the final
+    // checkpoint evidence, mapping to a terminal
+    // model_credentials_unavailable failure instead of the pre-PR
     // RecoveryRequired path that cancelled via the standalone-runtime guard.
     assert_eq!(reply.status, TurnStatus::Failed);
-    assert_eq!(reply.failure_category.as_deref(), Some("model_unavailable"));
+    assert_eq!(
+        reply.failure_category.as_deref(),
+        Some("model_credentials_unavailable")
+    );
     assert_eq!(reply.text, None);
 
     let second_reply = tokio::time::timeout(
@@ -203,7 +211,7 @@ async fn stub_gateway_send_cancels_recovery_required_and_releases_conversation()
     assert_eq!(second_reply.status, TurnStatus::Failed);
     assert_eq!(
         second_reply.failure_category.as_deref(),
-        Some("model_unavailable")
+        Some("model_credentials_unavailable")
     );
     assert_eq!(second_reply.text, None);
 
@@ -224,11 +232,11 @@ async fn send_user_message_with_cancellation_cancels_submitted_run() {
         source_binding_id: "runtime-cancel-source".to_string(),
         reply_target_binding_id: "runtime-cancel-reply".to_string(),
     })
-    .with_runner_settings(TurnRunnerSettings {
-        heartbeat_interval: Duration::from_secs(60),
-        poll_interval: Duration::from_secs(60),
-        ..TurnRunnerSettings::default()
-    })
+    .with_runner_settings(
+        TurnRunnerSettings::default()
+            .set_heartbeat_interval(Duration::from_secs(60))
+            .set_poll_interval(Duration::from_secs(60)),
+    )
     .with_poll_settings(PollSettings {
         interval: Duration::from_secs(60),
         max_total: Duration::from_secs(180),
@@ -381,11 +389,11 @@ async fn build_reborn_runtime_wires_third_party_hooks_when_enabled() {
         reply_target_binding_id: "runtime-hooks-reply".to_string(),
     })
     .with_hooks_config(HooksActivationConfig::enabled().with_third_party_enabled(true))
-    .with_runner_settings(TurnRunnerSettings {
-        heartbeat_interval: Duration::from_millis(25),
-        poll_interval: Duration::from_secs(60),
-        ..TurnRunnerSettings::default()
-    });
+    .with_runner_settings(
+        TurnRunnerSettings::default()
+            .set_heartbeat_interval(Duration::from_millis(25))
+            .set_poll_interval(Duration::from_secs(60)),
+    );
 
     // Build succeeds: the third-party discovery + projection + dispatcher factory
     // composed into the planned runtime without error.
@@ -501,18 +509,18 @@ async fn build_reborn_runtime_wires_per_user_cap_from_turn_runner_settings() {
         source_binding_id: "cap-wiring-source".to_string(),
         reply_target_binding_id: "cap-wiring-reply".to_string(),
     })
-    .with_runner_settings(TurnRunnerSettings {
-        // Cap = 1 per user. Verifies this value flows from settings → store limits.
-        max_concurrent_runs_per_user: NonZeroU32::new(1),
-        heartbeat_interval: Duration::from_millis(25),
-        poll_interval: Duration::from_millis(10),
-        ..TurnRunnerSettings::default()
-    });
+    .with_runner_settings(
+        TurnRunnerSettings::default()
+            // Cap = 1 per user. Verifies this value flows from settings → store limits.
+            .set_max_concurrent_runs_per_user(NonZeroU32::new(1).expect("nonzero cap"))
+            .set_heartbeat_interval(Duration::from_millis(25))
+            .set_poll_interval(Duration::from_millis(10)),
+    );
 
     let runtime = build_reborn_runtime(input).await.unwrap();
 
     // Submit two sequential turns on two conversations. With the stub gateway
-    // each turn completes (as Failed / model_unavailable) before the
+    // each turn completes (as Failed / model_credentials_unavailable) before the
     // next is submitted, so the per-user slot is always free and neither
     // submission should be rejected. If the cap was accidentally set to 0 (a
     // misconfiguration the wiring layer could introduce) the store would block
@@ -575,14 +583,14 @@ async fn multi_worker_runtime_does_not_raise_worker_stopped_while_workers_are_al
         source_binding_id: "multi-worker-guard-source".to_string(),
         reply_target_binding_id: "multi-worker-guard-reply".to_string(),
     })
-    .with_runner_settings(TurnRunnerSettings {
-        // Explicitly set 2 workers — ensures the guard uses .all() semantics
-        // and does not fire when only a subset of workers have finished.
-        worker_count: Some(NonZeroUsize::new(2).unwrap()),
-        heartbeat_interval: Duration::from_millis(25),
-        poll_interval: Duration::from_secs(60),
-        ..TurnRunnerSettings::default()
-    });
+    .with_runner_settings(
+        TurnRunnerSettings::default()
+            // Explicitly set 2 workers — ensures the guard uses .all() semantics
+            // and does not fire when only a subset of workers have finished.
+            .set_worker_count(NonZeroUsize::new(2).expect("nonzero worker count"))
+            .set_heartbeat_interval(Duration::from_millis(25))
+            .set_poll_interval(Duration::from_secs(60)),
+    );
 
     let runtime = build_reborn_runtime(input).await.unwrap();
     let conversation = runtime.new_conversation().await.unwrap();
@@ -623,11 +631,11 @@ async fn local_dev_test_support_interaction_service_accessors_build_real_service
         source_binding_id: "test-support-accessors-source".to_string(),
         reply_target_binding_id: "test-support-accessors-reply".to_string(),
     })
-    .with_runner_settings(TurnRunnerSettings {
-        heartbeat_interval: Duration::from_secs(60),
-        poll_interval: Duration::from_secs(60),
-        ..TurnRunnerSettings::default()
-    });
+    .with_runner_settings(
+        TurnRunnerSettings::default()
+            .set_heartbeat_interval(Duration::from_secs(60))
+            .set_poll_interval(Duration::from_secs(60)),
+    );
 
     let runtime = build_reborn_runtime(input).await.unwrap();
     let turn_coordinator = runtime

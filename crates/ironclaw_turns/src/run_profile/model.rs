@@ -1,4 +1,7 @@
-use std::sync::Arc;
+use std::sync::{
+    Arc,
+    atomic::{AtomicBool, Ordering},
+};
 use std::time::Duration;
 
 use async_trait::async_trait;
@@ -31,6 +34,7 @@ use super::model_work::{ModelWorkOutcome, ModelWorkRequest};
 /// provider error surfaces; this wrapper catches gateway-layer stalls the inner
 /// bound misses.
 const PRIMARY_MODEL_CALL_TIMEOUT: Duration = Duration::from_secs(75);
+const FALLBACK_TEXT_DELTA_MILESTONE_STEP: usize = 15;
 
 /// Outcome passed to [`LoopModelBudgetAccountant::post_model_call`] so the
 /// accountant can record usage on success or note the failure kind.
@@ -95,10 +99,12 @@ pub trait LoopModelBudgetAccountant: Send + Sync {
         .await
     }
 
-    /// Best-effort synchronous release of any in-flight reservation for this
-    /// run. Invoked from cancellation paths (parent task drop, timeout)
-    /// where awaiting [`Self::post_model_call`] is impossible. Default impl
-    /// is a no-op for accountants that do not hold per-run state.
+    /// Best-effort synchronous finalization of any in-flight reservation for
+    /// this run. Invoked from cancellation and failed post-accounting paths
+    /// where awaiting [`Self::post_model_call`] is impossible. Implementations
+    /// may release a cancelled reservation or retry reconciliation when actual
+    /// provider usage is already known. Default impl is a no-op for
+    /// accountants that do not hold per-run state.
     ///
     /// This is *the* cancellation-safety hook: when the model future is
     /// dropped mid-await, the surrounding port's [`Drop`] runs synchronously
@@ -120,8 +126,9 @@ pub struct LoopModelGatewayRequest {
 /// `AgentLoopHostErrorKind::CredentialUnavailable` means the host could not
 /// provide a scoped, non-reusable credential for the selected provider/model;
 /// callers must treat it as a host-owned credential acquisition failure, not as
-/// provider output. `AgentLoopHostErrorKind::BudgetExceeded` can also surface
-/// after a provider failure when post-call accounting/release fails closed.
+/// provider output. `AgentLoopHostErrorKind::BudgetAccountingFailed` can
+/// surface after a provider failure when post-call accounting/release fails
+/// closed; it is distinct from a provider or configured-budget exhaustion.
 pub struct LoopModelGatewayError {
     pub kind: AgentLoopHostErrorKind,
     pub safe_summary: LoopSafeSummary,
@@ -198,6 +205,19 @@ pub trait LoopModelGateway: Send + Sync {
         &self,
         request: LoopModelGatewayRequest,
     ) -> Result<LoopModelResponse, LoopModelGatewayError>;
+
+    async fn stream_model_with_progress(
+        &self,
+        request: LoopModelGatewayRequest,
+        _progress_sink: Arc<dyn LoopModelProgressSink>,
+    ) -> Result<LoopModelResponse, LoopModelGatewayError> {
+        self.stream_model(request).await
+    }
+}
+
+#[async_trait]
+pub trait LoopModelProgressSink: Send + Sync {
+    async fn model_text_update(&self, safe_text: String);
 }
 
 /// Provider/model policy guard consulted before dispatching a model call.
@@ -335,7 +355,7 @@ where
 impl<G, S> LoopModelPort for HostManagedLoopModelPort<G, S>
 where
     G: LoopModelGateway + ?Sized,
-    S: LoopHostMilestoneSink + ?Sized,
+    S: LoopHostMilestoneSink + ?Sized + 'static,
 {
     async fn stream_model(
         &self,
@@ -383,10 +403,17 @@ where
         // Bound the primary model call so a hung provider/gateway surfaces as a
         // retryable error before the runner lease reclaims this run mid-flight.
         // See `PRIMARY_MODEL_CALL_TIMEOUT`.
-        let gateway_call = self.gateway.stream_model(LoopModelGatewayRequest {
-            context: self.context.clone(),
-            request: request.clone(),
+        let progress_sink = Arc::new(MilestoneModelProgressSink {
+            milestones: self.milestones.clone(),
+            emitted_text: AtomicBool::new(false),
         });
+        let gateway_call = self.gateway.stream_model_with_progress(
+            LoopModelGatewayRequest {
+                context: self.context.clone(),
+                request: request.clone(),
+            },
+            progress_sink.clone(),
+        );
         let gateway_result =
             match tokio::time::timeout(PRIMARY_MODEL_CALL_TIMEOUT, gateway_call).await {
                 Ok(result) => result.map(sanitize_model_response),
@@ -409,12 +436,11 @@ where
             .accountant
             .post_model_call(&self.context, &request, outcome)
             .await;
-        // Disarm only AFTER post_model_call returns. If we're past this
-        // line the in-flight entry is either reconciled, released, or
-        // retained on a storage error — in any of those cases the
-        // guard's Drop call would be a no-op against the same entry.
-        release_guard.disarm();
         if let Err(post_error) = post_result {
+            // Keep the guard armed when post-call accounting fails. Its Drop
+            // retries the exact retained terminal action (reconcile with known
+            // usage or release), rather than abandoning the reservation.
+            drop(release_guard);
             let host_error = post_error.into_host_error();
             if let Err(milestone_error) = self.milestones.model_failed(host_error.kind).await {
                 tracing::debug!(
@@ -425,6 +451,7 @@ where
             }
             return Err(host_error);
         }
+        release_guard.disarm();
 
         let response = match gateway_result {
             Ok(response) => response,
@@ -454,6 +481,38 @@ where
                 );
             }
         }
+        if matches!(response.output, ParentLoopOutput::AssistantReply(_))
+            && !progress_sink.emitted_text()
+        {
+            let text_chunk_count = response
+                .chunks
+                .iter()
+                .filter(|chunk| !chunk.safe_text_delta.is_empty())
+                .count();
+            let mut text_chunk_index = 0;
+            let mut accumulated_text = String::new();
+            for chunk in &response.chunks {
+                if chunk.safe_text_delta.is_empty() {
+                    continue;
+                }
+                accumulated_text.push_str(&chunk.safe_text_delta);
+                text_chunk_index += 1;
+                if !should_emit_fallback_text_delta(text_chunk_index, text_chunk_count) {
+                    continue;
+                }
+                if let Err(error) = self
+                    .milestones
+                    .model_text_delta(accumulated_text.clone())
+                    .await
+                {
+                    tracing::debug!(
+                        kind = ?error.kind,
+                        diagnostic_ref = ?error.diagnostic_ref,
+                        "loop model text milestone failed after successful model response"
+                    );
+                }
+            }
+        }
         if let Err(error) = self
             .milestones
             .model_completed(response.effective_model_profile_id.clone())
@@ -469,15 +528,48 @@ where
     }
 }
 
+struct MilestoneModelProgressSink<S>
+where
+    S: LoopHostMilestoneSink + ?Sized,
+{
+    milestones: LoopHostMilestoneEmitter<S>,
+    emitted_text: AtomicBool,
+}
+
+impl<S> MilestoneModelProgressSink<S>
+where
+    S: LoopHostMilestoneSink + ?Sized,
+{
+    fn emitted_text(&self) -> bool {
+        self.emitted_text.load(Ordering::SeqCst)
+    }
+}
+
+#[async_trait]
+impl<S> LoopModelProgressSink for MilestoneModelProgressSink<S>
+where
+    S: LoopHostMilestoneSink + ?Sized,
+{
+    async fn model_text_update(&self, safe_text: String) {
+        self.emitted_text.store(true, Ordering::SeqCst);
+        if let Err(error) = self.milestones.model_text_delta(safe_text).await {
+            tracing::debug!(
+                kind = ?error.kind,
+                diagnostic_ref = ?error.diagnostic_ref,
+                "loop model text progress milestone failed during model stream"
+            );
+        }
+    }
+}
+
 /// RAII guard that releases the in-flight reservation if the surrounding
 /// future is cancelled before `post_model_call` runs.
 ///
 /// On Drop, when still armed, the guard calls
 /// [`LoopModelBudgetAccountant::release_in_flight`] — a synchronous
-/// best-effort path that the accountant uses to drop the per-run reservation
-/// id and call `governor.release` without awaiting. Callers MUST `disarm()`
-/// the guard before delegating cleanup to the async `post_model_call` path,
-/// otherwise the release would fire twice.
+/// best-effort path that the accountant uses to finalize the retained action
+/// without awaiting. Callers disarm the guard only after the async
+/// `post_model_call` path succeeds.
 struct ReservationReleaseGuard<'a> {
     accountant: &'a dyn LoopModelBudgetAccountant,
     context: &'a LoopRunContext,
@@ -523,6 +615,10 @@ fn sanitize_model_response(mut response: LoopModelResponse) -> LoopModelResponse
     response
 }
 
+fn should_emit_fallback_text_delta(chunk_index: usize, chunk_count: usize) -> bool {
+    chunk_index == chunk_count || chunk_index.is_multiple_of(FALLBACK_TEXT_DELTA_MILESTONE_STEP)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -541,5 +637,16 @@ mod tests {
             PRIMARY_MODEL_CALL_TIMEOUT.as_secs(),
             lease_secs,
         );
+    }
+
+    #[test]
+    fn fallback_model_text_delta_emission_is_throttled_and_final() {
+        let emitted = (1..=32)
+            .filter(|chunk_index| should_emit_fallback_text_delta(*chunk_index, 32))
+            .collect::<Vec<_>>();
+
+        assert_eq!(emitted, vec![15, 30, 32]);
+        assert!(should_emit_fallback_text_delta(14, 14));
+        assert!(!should_emit_fallback_text_delta(1, 14));
     }
 }

@@ -15,7 +15,7 @@ use crate::identity::{AdapterInstallationId, ProductAdapterId};
 const PROJECTION_CURSOR_MAX_BYTES: usize = 1024;
 const PROJECTION_THREAD_ID_MAX_BYTES: usize = 512;
 const PROJECTION_ITEM_ID_MAX_BYTES: usize = 512;
-const PROJECTION_TEXT_MAX_BYTES: usize = 128 * 1024;
+pub const PROJECTION_TEXT_MAX_BYTES: usize = 128 * 1024;
 const PROJECTION_WORK_SUMMARY_MAX_BYTES: usize = 1024;
 /// Maximum byte length for a projected skill activation name.
 pub const PROJECTION_SKILL_NAME_MAX_BYTES: usize = 128;
@@ -975,6 +975,12 @@ pub enum AuthPromptChallengeKind {
     /// the resolve route, which rides in `connection` context (present for
     /// channel pairing, absent for a stored-credential secret).
     ManualToken,
+    /// Host-issued channel pairing (WebGeneratedCode direction): the UI shows
+    /// a code/deep-link panel and completion happens on the EXTERNAL side
+    /// (e.g. Telegram `/start <code>`), then the run resumes server-side.
+    /// Nothing is pasted into IronClaw — the inverse of `ManualToken`'s
+    /// paste-a-code modality. Wire value is `pairing`.
+    Pairing,
     /// Other challenge kind (account selection, setup required, reauthorize).
     /// The UI should fall back to a generic "authentication required" card.
     Other,
@@ -1208,6 +1214,8 @@ pub enum ProductGateKind {
 pub enum ProductProjectionItem {
     Text {
         id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        run_id: Option<TurnRunId>,
         body: String,
     },
     Thinking {
@@ -1272,7 +1280,7 @@ pub enum ProductProjectionItem {
 impl ProductProjectionItem {
     fn validate(&self) -> Result<(), ProductAdapterError> {
         match self {
-            Self::Text { id, body } | Self::Thinking { id, body, .. } => {
+            Self::Text { id, body, .. } | Self::Thinking { id, body, .. } => {
                 validate_bounded_text("projection_item_id", id, PROJECTION_ITEM_ID_MAX_BYTES)?;
                 validate_bounded_text("projection_text", body, PROJECTION_TEXT_MAX_BYTES)
             }
@@ -1386,6 +1394,8 @@ impl<'de> Deserialize<'de> for ProductProjectionItem {
         enum Wire {
             Text {
                 id: String,
+                #[serde(default)]
+                run_id: Option<TurnRunId>,
                 body: String,
             },
             Thinking {
@@ -1433,7 +1443,7 @@ impl<'de> Deserialize<'de> for ProductProjectionItem {
             },
         }
         let value = match Wire::deserialize(deserializer)? {
-            Wire::Text { id, body } => ProductProjectionItem::Text { id, body },
+            Wire::Text { id, run_id, body } => ProductProjectionItem::Text { id, run_id, body },
             Wire::Thinking { id, run_id, body } => {
                 ProductProjectionItem::Thinking { id, run_id, body }
             }

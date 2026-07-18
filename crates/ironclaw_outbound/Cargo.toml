@@ -6,10 +6,16 @@ rust-version.workspace = true
 description = "Outbound egress and projection subscription policy storage for IronClaw Reborn"
 publish = false
 
+[package.metadata.ironclaw]
+layer = "substrates"
+
 [features]
 default = []
 libsql = ["dep:libsql"]
 postgres = ["dep:deadpool-postgres", "dep:tokio-postgres"]
+# Exposes `test_support` in-memory-backed store constructors for downstream
+# crates' tests. Ships zero bytes in production binaries.
+test-support = []
 
 [dependencies]
 async-trait = "0.1"

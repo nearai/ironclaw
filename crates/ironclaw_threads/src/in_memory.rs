@@ -12,19 +12,24 @@ use uuid::Uuid;
 use crate::identifiers::SummaryArtifactId;
 use crate::summary_artifacts::find_overlapping_summary;
 use crate::title::derive_thread_title;
+use crate::tool_result_records::{
+    tool_result_record_chunk, validate_tool_result_record_content,
+    validate_tool_result_record_read, validate_tool_result_record_ref,
+};
 use crate::{
     AcceptInboundMessageRequest, AcceptedInboundMessage, AcceptedInboundMessageReplay,
     AppendAssistantDraftRequest, AppendCapabilityDisplayPreviewRequest,
     AppendFinalizedAssistantMessageRequest, AppendToolResultReferenceRequest,
     CapabilityDisplayPreviewEnvelope, ContextMessage, ContextMessages, ContextWindow,
-    CreateSummaryArtifactRequest, EnsureThreadRequest, LatestThreadMessageRequest,
-    ListThreadsForScopeRequest, ListThreadsForScopeResponse, LoadContextMessagesRequest,
-    LoadContextWindowRequest, MessageContent, MessageKind, MessageStatus, RedactMessageRequest,
+    CreateSummaryArtifactRequest, DeleteToolResultRecordRequest, EnsureThreadRequest,
+    LatestThreadMessageRequest, ListThreadsForScopeRequest, ListThreadsForScopeResponse,
+    LoadContextMessagesRequest, LoadContextWindowRequest, MessageContent, MessageKind,
+    MessageStatus, PutToolResultRecordRequest, ReadToolResultRecordRequest, RedactMessageRequest,
     ReplayAcceptedInboundMessageRequest, SessionThreadError, SessionThreadRecord,
     SessionThreadService, SummaryArtifact, SummaryModelContextPolicy, ThreadHistory,
     ThreadHistoryRequest, ThreadMessageId, ThreadMessageRange, ThreadMessageRangeRequest,
-    ThreadMessageRecord, ThreadScope, ToolResultReferenceEnvelope, UpdateAssistantDraftRequest,
-    UpdateToolResultReferenceRequest,
+    ThreadMessageRecord, ThreadScope, ToolResultRecordChunk, ToolResultReferenceEnvelope,
+    UpdateAssistantDraftRequest, UpdateToolResultRecordRequest, UpdateToolResultReferenceRequest,
 };
 
 #[derive(Debug, Clone, Default)]
@@ -43,6 +48,7 @@ struct StoredThread {
     record: SessionThreadRecord,
     messages: Vec<ThreadMessageRecord>,
     summary_artifacts: Vec<SummaryArtifact>,
+    tool_result_records: HashMap<String, Vec<u8>>,
     next_sequence: u64,
 }
 
@@ -104,6 +110,7 @@ impl SessionThreadService for InMemorySessionThreadService {
                 record: record.clone(),
                 messages: Vec::new(),
                 summary_artifacts: Vec::new(),
+                tool_result_records: HashMap::new(),
                 next_sequence: 1,
             },
         );
@@ -606,6 +613,70 @@ impl SessionThreadService for InMemorySessionThreadService {
         };
         thread.record.updated_at = Some(now);
         Ok(updated)
+    }
+
+    async fn put_tool_result_record(
+        &self,
+        request: PutToolResultRecordRequest,
+    ) -> Result<(), SessionThreadError> {
+        validate_tool_result_record_ref(&request.result_ref)?;
+        validate_tool_result_record_content(&request.content)?;
+        let mut state = self.state.lock().await;
+        let thread = get_thread_mut(&mut state, &request.scope, &request.thread_id)?;
+        match thread.tool_result_records.get(&request.result_ref) {
+            Some(existing) if existing == &request.content => Ok(()),
+            Some(_) => Err(SessionThreadError::Backend(
+                "tool result record conflicts with existing content".to_string(),
+            )),
+            None => {
+                thread
+                    .tool_result_records
+                    .insert(request.result_ref, request.content);
+                Ok(())
+            }
+        }
+    }
+
+    async fn read_tool_result_record(
+        &self,
+        request: ReadToolResultRecordRequest,
+    ) -> Result<Option<ToolResultRecordChunk>, SessionThreadError> {
+        validate_tool_result_record_ref(&request.result_ref)?;
+        validate_tool_result_record_read(request.max_bytes)?;
+        let state = self.state.lock().await;
+        let thread = get_thread(&state, &request.scope, &request.thread_id)?;
+        Ok(thread
+            .tool_result_records
+            .get(&request.result_ref)
+            .map(|content| tool_result_record_chunk(content, request.offset, request.max_bytes)))
+    }
+
+    async fn update_tool_result_record(
+        &self,
+        request: UpdateToolResultRecordRequest,
+    ) -> Result<(), SessionThreadError> {
+        validate_tool_result_record_ref(&request.result_ref)?;
+        validate_tool_result_record_content(&request.content)?;
+        let mut state = self.state.lock().await;
+        let thread = get_thread_mut(&mut state, &request.scope, &request.thread_id)?;
+        let Some(existing) = thread.tool_result_records.get_mut(&request.result_ref) else {
+            return Err(SessionThreadError::Backend(
+                "tool result record was not found in thread".to_string(),
+            ));
+        };
+        *existing = request.content;
+        Ok(())
+    }
+
+    async fn delete_tool_result_record(
+        &self,
+        request: DeleteToolResultRecordRequest,
+    ) -> Result<(), SessionThreadError> {
+        validate_tool_result_record_ref(&request.result_ref)?;
+        let mut state = self.state.lock().await;
+        let thread = get_thread_mut(&mut state, &request.scope, &request.thread_id)?;
+        thread.tool_result_records.remove(&request.result_ref);
+        Ok(())
     }
 
     async fn update_assistant_draft(

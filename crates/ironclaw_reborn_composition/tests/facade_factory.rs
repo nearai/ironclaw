@@ -1,3 +1,7 @@
+#[cfg(feature = "postgres")]
+#[path = "support/postgres.rs"]
+mod postgres_support;
+
 #[cfg(any(feature = "libsql", feature = "postgres"))]
 use std::{collections::BTreeMap, sync::Arc};
 
@@ -27,11 +31,6 @@ use ironclaw_host_runtime::{
     VisibleCapabilityRequest,
 };
 #[cfg(any(feature = "libsql", feature = "postgres"))]
-use ironclaw_host_runtime::{
-    SchedulerTurnRunWakeNotifier, TurnRunExecutor, TurnRunExecutorError, TurnRunScheduler,
-    TurnRunSchedulerConfig, TurnRunSchedulerHandle,
-};
-#[cfg(any(feature = "libsql", feature = "postgres"))]
 use ironclaw_reborn_composition::RebornRuntimeProcessBinding;
 #[cfg(all(feature = "postgres", feature = "webui-v2-beta"))]
 use ironclaw_reborn_composition::{
@@ -51,6 +50,11 @@ use ironclaw_reborn_composition::{
 #[cfg(all(feature = "postgres", feature = "webui-v2-beta"))]
 use ironclaw_reborn_config::{RebornConfigFile, StorageBackend, StorageSection};
 #[cfg(any(feature = "libsql", feature = "postgres"))]
+use ironclaw_runner::turn_scheduler::{
+    SchedulerTurnRunWakeNotifier, TurnRunExecutor, TurnRunExecutorError, TurnRunScheduler,
+    TurnRunSchedulerConfig, TurnRunSchedulerHandle,
+};
+#[cfg(any(feature = "libsql", feature = "postgres"))]
 use ironclaw_secrets::SecretMaterial;
 #[cfg(any(feature = "libsql", feature = "postgres"))]
 use ironclaw_trust::{AdminConfig, AdminEntry, HostTrustAssignment, HostTrustPolicy};
@@ -61,6 +65,8 @@ use ironclaw_turns::{
     InMemoryTurnStateStore,
     runner::{ClaimedTurnRun, TurnRunTransitionPort},
 };
+#[cfg(feature = "postgres")]
+use postgres_support::assert_postgres_accepts_connections;
 use secrecy::SecretString;
 #[cfg(feature = "libsql")]
 use serde_json::Value;
@@ -618,6 +624,7 @@ async fn postgres_pool_or_skip() -> Option<(
     String,
 )> {
     let (container, database_url) = start_postgres_container().await?;
+    assert_postgres_accepts_connections(&database_url).await;
     let config: tokio_postgres::Config = database_url
         .parse()
         .expect("testcontainer database URL must parse");
@@ -626,10 +633,6 @@ async fn postgres_pool_or_skip() -> Option<(
         .max_size(4)
         .build()
         .expect("Postgres pool must build");
-    let _connection = pool
-        .get()
-        .await
-        .expect("Postgres testcontainer must accept connections");
     Some((container, pool, database_url))
 }
 
@@ -1284,6 +1287,66 @@ async fn production_libsql_resolved_secret_master_key_rejects_invalid_env_key() 
             ironclaw_secrets::SecretError::InvalidMasterKey
         ))
     ));
+}
+
+/// With no cached dotfile and no `SECRETS_MASTER_KEY` env var,
+/// `resolve_local_dev_secret_master_key` (`src/factory.rs`) tries the OS
+/// keychain before generating a fresh key.
+///
+/// - Under `IRONCLAW_DISABLE_OS_KEYCHAIN` the keychain lookup returns
+///   `NotFound`, so the resolver must fall through to "generate + persist a
+///   dotfile"; a second open over the same root must read that cached
+///   dotfile rather than re-generating.
+/// - Lives here, not as a `factory.rs` inline unit test: proving the
+///   fallthrough needs the real process env var `IRONCLAW_DISABLE_OS_KEYCHAIN`
+///   set (`keychain` reads raw `std::env`), and `set_var` is `unsafe` under
+///   edition 2024 — `ironclaw_reborn_composition` is `#![forbid(unsafe_code)]`,
+///   which even `#[cfg(test)]` can't locally downgrade. This `tests/*.rs`
+///   binary is a separate crate the `forbid` doesn't reach, and already uses
+///   the `EnvVarGuard`/`SECRETS_MASTER_KEY_ENV_LOCK` convention for this.
+#[cfg(feature = "libsql")]
+#[tokio::test]
+async fn local_dev_secret_store_falls_through_suppressed_keychain_to_dotfile() {
+    let _guard = SECRETS_MASTER_KEY_ENV_LOCK.lock().await;
+    let _env = EnvVarGuard::set("IRONCLAW_DISABLE_OS_KEYCHAIN", "1");
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    let key_path = root.join(".reborn-local-dev-secrets-master-key");
+    assert!(
+        !key_path.exists(),
+        "precondition: no cached dotfile before the first open"
+    );
+
+    let mut composite = ironclaw_filesystem::CompositeRootFilesystem::new();
+    ironclaw_reborn_composition::test_support::build_default_local_dev_database_roots_for_test(
+        root,
+        &mut composite,
+    )
+    .await
+    .expect("build default local-dev db roots");
+    let composite = std::sync::Arc::new(composite);
+    let scoped = ironclaw_reborn_composition::wrap_scoped(std::sync::Arc::clone(&composite));
+
+    ironclaw_reborn_composition::test_support::build_local_dev_secret_store_for_test(
+        root,
+        std::sync::Arc::clone(&scoped),
+    )
+    .await
+    .expect("first store build must fall through the suppressed keychain to a dotfile");
+    assert!(
+        key_path.exists(),
+        "the fallthrough must persist a dotfile so subsequent boots don't hit the keychain again"
+    );
+    let cached = std::fs::read_to_string(&key_path).expect("read generated dotfile");
+
+    ironclaw_reborn_composition::test_support::build_local_dev_secret_store_for_test(root, scoped)
+        .await
+        .expect("second store build must read the now-cached dotfile idempotently");
+    assert_eq!(
+        std::fs::read_to_string(&key_path).expect("read dotfile again"),
+        cached,
+        "the cached dotfile must not be rewritten on the idempotent second open"
+    );
 }
 
 #[cfg(feature = "libsql")]

@@ -45,6 +45,18 @@ pub trait TurnStateStore: Send + Sync {
     /// [`TurnError::ScopeNotFound`]. This keeps scoped lookups non-enumerating
     /// and gives higher-level helpers one canonical missing-run shape.
     async fn get_run_state(&self, request: GetRunStateRequest) -> Result<TurnRunState, TurnError>;
+
+    /// Return run state for live cancellation-handle seeding.
+    ///
+    /// The default path is the canonical scoped lookup. Stores with an
+    /// authoritative hot cache may override this to avoid forcing durable row
+    /// materialization on the turn execution hot path.
+    async fn get_run_state_for_cancellation(
+        &self,
+        request: GetRunStateRequest,
+    ) -> Result<TurnRunState, TurnError> {
+        self.get_run_state(request).await
+    }
 }
 
 /// Classify an active run reference through the shared turn-state lookup.
@@ -203,6 +215,11 @@ pub struct TurnRunRecord {
     pub profile: TurnRunProfile,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub resolved_model_route: Option<LoopModelRouteSnapshot>,
+    /// Cumulative provider-reported token usage for this run's model calls,
+    /// captured at loop exit. Rides the JSON-blob snapshot like
+    /// `resolved_model_route`; `None` when no usage was reported.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model_usage: Option<crate::run_profile::LoopModelUsage>,
     pub checkpoint_id: Option<TurnCheckpointId>,
     pub gate_ref: Option<GateRef>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -522,6 +539,23 @@ pub struct TurnPersistenceSnapshot {
     pub spawn_tree_reservations: Vec<SpawnTreeReservation>,
 }
 
+impl TurnPersistenceSnapshot {
+    pub fn set_runs(mut self, runs: Vec<TurnRunRecord>) -> Self {
+        self.runs = runs;
+        self
+    }
+
+    pub fn set_checkpoints(mut self, checkpoints: Vec<TurnCheckpointRecord>) -> Self {
+        self.checkpoints = checkpoints;
+        self
+    }
+
+    pub fn set_events(mut self, events: Vec<TurnLifecycleEvent>) -> Self {
+        self.events = events;
+        self
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use crate::{
@@ -558,6 +592,7 @@ mod tests {
             status: TurnStatus::Completed,
             profile,
             resolved_model_route: None,
+            model_usage: None,
             checkpoint_id: None,
             gate_ref: None,
             blocked_activity_id: None,

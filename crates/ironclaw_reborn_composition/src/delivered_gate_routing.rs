@@ -190,7 +190,8 @@ mod tests {
 
     use async_trait::async_trait;
     use ironclaw_host_api::{AgentId, TenantId, ThreadId, UserId};
-    use ironclaw_outbound::{DeliveredGateRouteRecord, InMemoryDeliveredGateRouteStore};
+    use ironclaw_outbound::DeliveredGateRouteRecord;
+    use ironclaw_outbound::test_support::in_memory_backed_outbound_state_store;
     use ironclaw_product_workflow::{
         ApprovalInteractionDecision, ListPendingApprovalsRequest, ListPendingApprovalsResponse,
         ProductWorkflowError, ResolveApprovalInteractionRequest,
@@ -301,7 +302,7 @@ mod tests {
             delivered_conversation_fingerprints: Vec::new(),
         };
 
-        let route_store = Arc::new(InMemoryDeliveredGateRouteStore::default());
+        let route_store = Arc::new(in_memory_backed_outbound_state_store());
         route_store
             .record_delivered_gate_route(route_record)
             .await
@@ -313,6 +314,8 @@ mod tests {
 
         // Request arrives on DM scope, not the run's original scope.
         let request = resolve_request(dm_scope(), gate_ref_str);
+        #[allow(clippy::let_underscore_must_use)]
+        // resolve result intentionally unused; assertions check the recorded inner calls
         let _ = service.resolve(request).await;
 
         let calls = inner.resolve_calls();
@@ -330,7 +333,7 @@ mod tests {
 
     #[tokio::test]
     async fn miss_forwards_request_unchanged() {
-        let route_store = Arc::new(InMemoryDeliveredGateRouteStore::default());
+        let route_store = Arc::new(in_memory_backed_outbound_state_store());
         // No record stored — simulates a normal same-thread live run.
 
         let inner = Arc::new(RecordingApprovalService::default());
@@ -339,6 +342,8 @@ mod tests {
 
         let request = resolve_request(dm_scope(), "gate:routing-miss-001");
         let original_thread_id = request.scope.thread_id.clone();
+        #[allow(clippy::let_underscore_must_use)]
+        // resolve result intentionally unused; assertions check the recorded inner calls
         let _ = service.resolve(request).await;
 
         let calls = inner.resolve_calls();
@@ -368,7 +373,7 @@ mod tests {
             delivered_conversation_fingerprints: Vec::new(),
         };
 
-        let route_store = Arc::new(InMemoryDeliveredGateRouteStore::default());
+        let route_store = Arc::new(in_memory_backed_outbound_state_store());
         // The lookup key encodes the other user — the requesting user won't
         // find this record at all (different key). This tests the user_id
         // guard when the key happens to be present but for a different user.
@@ -395,6 +400,8 @@ mod tests {
 
         let request = resolve_request(dm_scope(), gate_ref_str);
         let original_thread_id = request.scope.thread_id.clone();
+        #[allow(clippy::let_underscore_must_use)]
+        // resolve result intentionally unused; assertions check the recorded inner calls
         let _ = service.resolve(request).await;
 
         let calls = inner.resolve_calls();
@@ -408,7 +415,7 @@ mod tests {
 
     #[tokio::test]
     async fn list_pending_forwards_unchanged() {
-        let route_store = Arc::new(InMemoryDeliveredGateRouteStore::default());
+        let route_store = Arc::new(in_memory_backed_outbound_state_store());
         let inner = Arc::new(RecordingApprovalService::default());
         let service =
             DeliveredGateRoutingApprovalService::new(Arc::clone(&inner) as _, route_store);
@@ -558,7 +565,7 @@ mod tests {
             run_thread.clone(),
             Some(route_user.clone()),
         );
-        let route_store = Arc::new(InMemoryDeliveredGateRouteStore::default());
+        let route_store = Arc::new(in_memory_backed_outbound_state_store());
         route_store
             .record_delivered_gate_route(DeliveredGateRouteRecord {
                 tenant_id: route_tenant.clone(),
@@ -655,6 +662,8 @@ mod tests {
             Arc::clone(&inner) as _,
             Arc::clone(&route_store) as _,
         );
+        #[allow(clippy::let_underscore_must_use)]
+        // resolve result intentionally unused; assertions check the recorded inner calls
         let _ = routed_approval_direct.resolve(retry_request).await;
 
         let calls2 = inner.resolve_calls();
@@ -750,7 +759,7 @@ mod tests {
             delivered_conversation_fingerprints: Vec::new(),
         };
 
-        let route_store = Arc::new(InMemoryDeliveredGateRouteStore::default());
+        let route_store = Arc::new(in_memory_backed_outbound_state_store());
         route_store
             .record_delivered_gate_route(route_record)
             .await
@@ -763,6 +772,8 @@ mod tests {
         // Request arrives on DM scope — would be rewritten if record were fresh.
         let request = resolve_request(dm_scope(), gate_ref_str);
         let original_thread_id = request.scope.thread_id.clone();
+        #[allow(clippy::let_underscore_must_use)]
+        // resolve result intentionally unused; assertions check the recorded inner calls
         let _ = service.resolve(request).await;
 
         let calls = inner.resolve_calls();
@@ -793,6 +804,8 @@ mod tests {
         let request = resolve_request(original_scope, "gate:store-fail-001");
         // The original request has run_id_hint = None (as constructed by
         // resolve_request).
+        #[allow(clippy::let_underscore_must_use)]
+        // resolve result intentionally unused; assertions check the recorded inner calls
         let _ = service.resolve(request).await;
 
         let calls = inner.resolve_calls();

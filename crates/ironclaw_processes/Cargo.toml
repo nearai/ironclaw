@@ -4,6 +4,16 @@ version = "0.1.0"
 edition = "2024"
 publish = false
 
+[package.metadata.ironclaw]
+layer = "runtimes"
+
+[features]
+default = []
+# In-memory-backed process store constructors for this crate's own tests and
+# downstream tiers. The stores are the production `FilesystemProcess*Store<InMemoryBackend>`;
+# the helpers just wire the in-memory backend seam (arch-simplification §4.3).
+test-support = []
+
 [dependencies]
 async-trait = "0.1"
 futures = "0.3"

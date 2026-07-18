@@ -13,7 +13,8 @@ use thiserror::Error;
 
 use crate::{
     CapabilityId, ExtensionId, MountView, ResourceEstimate, ResourceReceipt, ResourceReservation,
-    ResourceScope, ResourceUsage, RuntimeCredentialAuthRequirement, RuntimeKind, SecretHandle,
+    ResourceScope, ResourceUsage, RunId, RuntimeCredentialAuthRequirement, RuntimeKind,
+    SecretHandle, UserId,
 };
 
 /// Request for one already-authorized declared capability dispatch.
@@ -21,6 +22,10 @@ use crate::{
 pub struct CapabilityDispatchRequest {
     pub capability_id: CapabilityId,
     pub scope: ResourceScope,
+    pub authenticated_actor_user_id: Option<UserId>,
+    /// Loop turn-run identity forwarded from `ExecutionContext::run_id`.
+    /// `None` for non-loop callers.
+    pub run_id: Option<RunId>,
     pub estimate: ResourceEstimate,
     pub mounts: Option<MountView>,
     pub resource_reservation: Option<ResourceReservation>,
@@ -134,7 +139,20 @@ impl DispatchInputIssue {
 /// Stable structured dispatch failure details for dispatch validation failures.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DispatchFailureDetail {
-    InvalidInput { issues: Vec<DispatchInputIssue> },
+    InvalidInput {
+        issues: Vec<DispatchInputIssue>,
+    },
+    /// Free-text raw failure cause preserved when the host-authored
+    /// `safe_summary` cannot pass the strict loop safe-summary validator
+    /// (e.g. it names a concrete path such as `/testbed/replacer.go`, or
+    /// carries newlines from a shell error). The summary shown to the model
+    /// degrades to the fixed category sentence; this text rides the
+    /// model-visible diagnostic detail channel, where secret VALUES are
+    /// scrubbed and disallowed control characters are normalized at the loop
+    /// boundary before the model observes it.
+    Diagnostic {
+        text: String,
+    },
 }
 
 /// Stable, redacted runtime failure categories surfaced through the dispatch port.
@@ -353,8 +371,15 @@ pub enum DispatchError {
     Mcp { kind: RuntimeDispatchErrorKind },
     #[error("script dispatch failed: {kind}")]
     Script { kind: RuntimeDispatchErrorKind },
+    /// WASM guest dispatch failure. `safe_summary` carries the stable,
+    /// host-sanitized error code a structured guest error declared (e.g. a
+    /// Slack `channel_not_found`), so the model-visible failure keeps its
+    /// actionable cause instead of collapsing to the kind's generic sentence.
     #[error("WASM dispatch failed: {kind}")]
-    Wasm { kind: RuntimeDispatchErrorKind },
+    Wasm {
+        kind: RuntimeDispatchErrorKind,
+        safe_summary: Option<String>,
+    },
     #[error("first-party dispatch failed: {kind}")]
     FirstParty {
         kind: RuntimeDispatchErrorKind,
@@ -423,7 +448,7 @@ impl fmt::Debug for DispatchError {
                 .finish(),
             Self::Mcp { kind } => f.debug_struct("Mcp").field("kind", kind).finish(),
             Self::Script { kind } => f.debug_struct("Script").field("kind", kind).finish(),
-            Self::Wasm { kind } => f.debug_struct("Wasm").field("kind", kind).finish(),
+            Self::Wasm { kind, .. } => f.debug_struct("Wasm").field("kind", kind).finish(),
             Self::FirstParty { kind, .. } => {
                 f.debug_struct("FirstParty").field("kind", kind).finish()
             }
@@ -455,7 +480,7 @@ impl DispatchError {
             Self::AuthRequired { .. } => DispatchFailureKind::AuthRequired,
             Self::Mcp { kind }
             | Self::Script { kind }
-            | Self::Wasm { kind }
+            | Self::Wasm { kind, .. }
             | Self::FirstParty { kind, .. } => DispatchFailureKind::Runtime(*kind),
         }
     }
@@ -474,7 +499,7 @@ impl DispatchError {
             Self::AuthRequired { .. } => "auth_required",
             Self::Mcp { kind }
             | Self::Script { kind }
-            | Self::Wasm { kind }
+            | Self::Wasm { kind, .. }
             | Self::FirstParty { kind, .. } => kind.event_kind(),
         }
     }

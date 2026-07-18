@@ -41,11 +41,9 @@ async fn runtime_dispatcher_routes_already_authorized_request_through_public_tra
     governor
         .set_limit(
             account.clone(),
-            ResourceLimits {
-                max_concurrency_slots: Some(1),
-                max_output_bytes: Some(10_000),
-                ..ResourceLimits::default()
-            },
+            ResourceLimits::default()
+                .set_max_concurrency_slots(1)
+                .set_max_output_bytes(10_000),
         )
         .unwrap();
 
@@ -57,16 +55,18 @@ async fn runtime_dispatcher_routes_already_authorized_request_through_public_tra
     .with_runtime_adapter_arc(RuntimeKind::Wasm, Arc::clone(&adapter))
     .with_event_sink_arc(Arc::new(events.clone()));
     let dispatch_port: &dyn CapabilityDispatcher = &dispatcher;
+    let authenticated_actor_user_id =
+        UserId::new("slack-alice").expect("valid authenticated actor user id");
 
     let result = dispatch_port
         .dispatch_json(CapabilityDispatchRequest {
+            run_id: None,
             capability_id: CapabilityId::new("echo.say").unwrap(),
             scope: scope.clone(),
-            estimate: ResourceEstimate {
-                concurrency_slots: Some(1),
-                output_bytes: Some(10_000),
-                ..ResourceEstimate::default()
-            },
+            authenticated_actor_user_id: Some(authenticated_actor_user_id.clone()),
+            estimate: ResourceEstimate::default()
+                .set_concurrency_slots(1)
+                .set_output_bytes(10_000),
             mounts: Some(mounts.clone()),
             resource_reservation: None,
             input: json!({"message": "hello through public seam"}),
@@ -92,6 +92,10 @@ async fn runtime_dispatcher_routes_already_authorized_request_through_public_tra
     assert_eq!(requests[0].runtime, RuntimeKind::Wasm);
     assert_eq!(requests[0].network_mode, NetworkMode::Deny);
     assert_eq!(requests[0].scope, scope);
+    assert_eq!(
+        requests[0].authenticated_actor_user_id,
+        Some(authenticated_actor_user_id)
+    );
     assert_eq!(requests[0].mounts, Some(mounts));
     assert_eq!(
         requests[0].input,
@@ -126,8 +130,10 @@ async fn runtime_dispatcher_forwards_configured_runtime_policy_to_adapter() {
 
     dispatcher
         .dispatch_json(CapabilityDispatchRequest {
+            run_id: None,
             capability_id: CapabilityId::new("echo.say").unwrap(),
             scope: sample_scope(),
+            authenticated_actor_user_id: None,
             estimate: ResourceEstimate::default(),
             mounts: None,
             resource_reservation: None,
@@ -156,13 +162,13 @@ async fn runtime_dispatcher_fails_closed_for_missing_backend_before_reservation_
 
     let err = dispatch_port
         .dispatch_json(CapabilityDispatchRequest {
+            run_id: None,
             capability_id: CapabilityId::new("script.echo").unwrap(),
             scope,
-            estimate: ResourceEstimate {
-                concurrency_slots: Some(1),
-                process_count: Some(1),
-                ..ResourceEstimate::default()
-            },
+            authenticated_actor_user_id: None,
+            estimate: ResourceEstimate::default()
+                .set_concurrency_slots(1)
+                .set_process_count(1),
             mounts: None,
             resource_reservation: None,
             input: json!({"message": "blocked"}),
@@ -234,15 +240,16 @@ struct RecordedAdapterRequest {
     runtime: RuntimeKind,
     network_mode: NetworkMode,
     scope: ResourceScope,
+    authenticated_actor_user_id: Option<UserId>,
     mounts: Option<MountView>,
     input: Value,
 }
 
 #[async_trait]
-impl RuntimeAdapter<LocalFilesystem, InMemoryResourceGovernor> for RecordingAdapter {
+impl RuntimeAdapter<DiskFilesystem, InMemoryResourceGovernor> for RecordingAdapter {
     async fn dispatch_json(
         &self,
-        request: RuntimeAdapterRequest<'_, LocalFilesystem, InMemoryResourceGovernor>,
+        request: RuntimeAdapterRequest<'_, DiskFilesystem, InMemoryResourceGovernor>,
     ) -> Result<RuntimeAdapterResult, DispatchError> {
         self.requests.lock().unwrap().push(RecordedAdapterRequest {
             provider: request.package.id.clone(),
@@ -250,19 +257,18 @@ impl RuntimeAdapter<LocalFilesystem, InMemoryResourceGovernor> for RecordingAdap
             runtime: request.descriptor.runtime,
             network_mode: request.runtime_policy.network_mode,
             scope: request.scope.clone(),
+            authenticated_actor_user_id: request.authenticated_actor_user_id.clone(),
             mounts: request.mounts.clone(),
             input: request.input.clone(),
         });
 
         let output_bytes = serde_json::to_vec(&self.output).unwrap().len() as u64;
-        let usage = ResourceUsage {
-            output_bytes,
-            process_count: u32::from(matches!(
+        let usage = ResourceUsage::default()
+            .set_output_bytes(output_bytes)
+            .set_process_count(u32::from(matches!(
                 self.runtime,
                 RuntimeKind::Script | RuntimeKind::Mcp
-            )),
-            ..ResourceUsage::default()
-        };
+            )));
         let reservation = request
             .governor
             .reserve(request.scope, request.estimate)
@@ -291,7 +297,10 @@ fn dispatch_error_for_runtime(
     kind: RuntimeDispatchErrorKind,
 ) -> DispatchError {
     match runtime {
-        RuntimeKind::Wasm => DispatchError::Wasm { kind },
+        RuntimeKind::Wasm => DispatchError::Wasm {
+            kind,
+            safe_summary: None,
+        },
         RuntimeKind::Script => DispatchError::Script { kind },
         RuntimeKind::Mcp => DispatchError::Mcp { kind },
         RuntimeKind::FirstParty | RuntimeKind::System => DispatchError::UnsupportedRuntime {
@@ -323,9 +332,9 @@ fn parse_manifest(manifest: &str) -> ExtensionManifest {
     .unwrap()
 }
 
-fn mounted_empty_extension_root() -> LocalFilesystem {
+fn mounted_empty_extension_root() -> DiskFilesystem {
     let storage = tempfile::tempdir().unwrap().keep();
-    let mut fs = LocalFilesystem::new();
+    let mut fs = DiskFilesystem::new();
     fs.mount_local(
         VirtualPath::new("/system/extensions").unwrap(),
         HostPath::from_path_buf(storage),

@@ -1004,12 +1004,14 @@ fn oauth_execution_context(
     resource_scope: ResourceScope,
 ) -> Result<ironclaw_host_api::ExecutionContext, AuthProductError> {
     let context = ironclaw_host_api::ExecutionContext {
+        run_id: None,
         invocation_id: resource_scope.invocation_id,
         correlation_id: CorrelationId::new(),
         process_id: None,
         parent_process_id: None,
         tenant_id: resource_scope.tenant_id.clone(),
         user_id: resource_scope.user_id.clone(),
+        authenticated_actor_user_id: None,
         agent_id: resource_scope.agent_id.clone(),
         project_id: resource_scope.project_id.clone(),
         mission_id: resource_scope.mission_id.clone(),

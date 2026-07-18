@@ -1,68 +1,135 @@
 ---
 paths:
-  - "src/safety/**"
-  - "src/sandbox/**"
-  - "src/secrets/**"
-  - "src/tools/wasm/**"
-  - "src/bridge/**"
-  - "src/channels/**"
-  - "src/workspace/**"
-  - "src/agent/**"
-  - "crates/ironclaw_engine/**"
+  - "crates/ironclaw_network/**"
+  - "crates/ironclaw_secrets/**"
+  - "crates/ironclaw_safety/**"
+  - "crates/ironclaw_host_runtime/**"
+  - "crates/ironclaw_processes/**"
+  - "crates/ironclaw_process_sandbox/**"
+  - "crates/ironclaw_wasm/**"
+  - "crates/ironclaw_mcp/**"
+  - "crates/ironclaw_product_adapters/**"
+  - "crates/ironclaw_webui/**"
+  - "crates/ironclaw_prompt_envelope/**"
 ---
-# Safety Layer & Sandbox Rules
+# Reborn safety and sandbox rules
 
-## Safety Layer
+## Mediation is the boundary
 
-All external tool output passes through `SafetyLayer`:
-1. **Sanitizer** - Detects injection patterns, escapes dangerous content
-2. **Validator** - Checks length, encoding, forbidden patterns
-3. **Policy** - Rules with severity (Critical/High/Medium/Low) and actions (Block/Warn/Review/Sanitize)
-4. **Leak Detector** - Scans for 15+ secret patterns at two points: tool output before LLM, and LLM responses before user
+Untrusted inputs never receive ambient filesystem, network, process, secret, or
+credential authority. Execution crosses typed host APIs, authorization,
+obligations, resource reservation, and the owning runtime adapter.
 
-Tool outputs are wrapped in `<tool_output>` XML before reaching the LLM.
+External HTTP goes through `ironclaw_network`. Secrets remain encrypted and
+host-side; runtime code receives references or mediated effects, not raw values.
+Do not manually inject credentials or construct a second outbound HTTP path.
 
-## Shell Environment Scrubbing
+## Zero-exposure credentials
 
-The shell tool scrubs sensitive env vars before executing commands. The sanitizer detects command injection patterns (chained commands, subshells, path traversal).
+Persist encrypted secret material only in the secrets subsystem. Capabilities,
+runtime lanes, containers, events, logs, and model context carry credential
+references or redacted metadata. The host resolves and injects credentials at
+the narrowest egress boundary and removes them from returned errors, URLs,
+headers, bodies, and saved process output.
 
-## Sandbox Policies
+Process launch uses an allowlisted/scrubbed environment. Never inherit the full
+host environment into a runtime lane or extension process.
 
-| Policy | Filesystem | Network |
-|--------|-----------|---------|
-| ReadOnly | Read-only workspace | Allowlisted domains |
-| WorkspaceWrite | Read-write workspace | Allowlisted domains |
-| FullAccess | Full filesystem | Unrestricted |
+## Validate before transformation
 
-## Zero-Exposure Credential Model
+Every ingress validates and bounds the original payload before storage, prompt
+construction, URL resolution, credential injection, or dispatch. Preserve the
+trust class through prompt envelopes and result handling. Sanitize model-visible
+output and user-visible errors without discarding server-side causes.
 
-Secrets are stored encrypted on the host and injected into HTTP requests by the proxy at transit time. Container processes never see raw credential values.
+For URL fetches, validate and authorize the original URL, then repeat
+validation, authorization, and leak scanning after resolution and on every
+redirect destination. Never inject credentials until the resolved destination
+passes those checks.
 
-## Every New Ingress Scans Before Storage or LLM
+Attachments use the single landing routine. Memory writes use their owning
+write-safety contract. Product adapters may normalize transport data but may not
+upgrade its trust.
 
-Mirror of CLAUDE.md's "Everything Goes Through Tools" rule: every new surface that accepts external data into the system — user messages, webhook payloads, memory writes, URL fetches, file ingestion — must run the matching safety scan on the **pre-transform, pre-injection** payload before the data reaches the LLM or the database.
+Capability parameters, outputs, provider errors, and process results are
+sensitive by default. Apply the owning Reborn redaction obligation before
+logging, durable event append, projection, SSE/WebSocket delivery, model-visible
+results, or user-visible errors. Never add an unredacted observability path in
+parallel with the mediated host result. Re-verify the active redaction boundary
+with `rg -n "redact_output|redaction|sanitize" crates/ironclaw_host_runtime crates/ironclaw_events crates/ironclaw_event_streams`.
 
-Recurring bug shape: a new code path is added, and the safety scan is skipped, applied post-injection (too late), or applied to the wrong stage. References: #2491 Engine v2 inbound, #2676 WASM URL post-injection, #2470 memory write layer.
+Ingress review checklist:
 
-Rules:
+- authenticate and bind actor/tenant scope;
+- cap body/file/count/depth before allocation or parsing fan-out;
+- validate the original data before normalization hides dangerous content;
+- land attachments through the shared attachment boundary;
+- classify trust before prompt construction;
+- reject client attempts to mint trusted inbound requests;
+- persist only the validated representation and retain a sanitized error cause.
 
-- **Inbound user text** → `safety_layer.scan_inbound_for_secrets()` before engine dispatch.
-- **Tool output** (existing) → sanitize + leak detector before LLM, wrapped in `<tool_output>` XML.
-- **LLM response** → leak detector before user delivery.
-- **Memory / workspace writes** → injection scan on the pre-storage value. Never on the transformed/rendered value.
-- **URL fetches** → leak-pattern scan on the resolved URL **before** credential injection; not on the post-injection URL.
+## Bounded resources
 
-A newly added ingress handler (HTTP route, webhook receiver, `Channel::send_message` impl) that reaches an LLM call or DB write without calling a `safety_layer.*` function on the payload is a review-blocker.
+User-controlled files, bodies, strings, collections, fan-out, queues, caches,
+process output, and concurrent tasks require explicit limits. Stream large
+content. Use bounded queues/semaphores and documented eviction. Cache keys must
+include every input that affects authorization, visibility, or stored value.
 
-## Bounded Resources
+For caches, ask whether actor, tenant, scope, credential account, trust class,
+runtime profile, or policy input changes the value. If so, it belongs in the key
+or the cache must sit below that decision. Add a cross-user/scope regression
+test for any authorization-sensitive cache.
 
-User-controlled inputs must not grow unbounded. Apply caps at the boundary:
+## Sandbox invariants
 
-- **Interners, caches, accumulators** — hard size limit (entries + total bytes), eviction policy documented. PR #2673 model-name interner: 256-byte value cap, 1024-entry cap.
-- **File reads in HTTP handlers** — stream with `tokio::fs::File::open` + `ReaderStream`; never `tokio::fs::read`, which buffers the whole file. Reference: #2633 item 3.
-- **Fan-out scans (portfolio addresses, batch tool calls)** — position cap + O(n) algorithm required, not O(n²). Tool-specific fuel limits, not global raises. Reference: #2710 portfolio tool.
-- **Tokio task fan-out** — in-flight dedup or bounded semaphore on spawns driven by user input (PR #2702).
+Sandbox plans use typed policies and minimal mounts. Containers and external
+services remain untrusted. Install and credentialed execution are separate
+phases. Runtime lanes cannot bypass host-mediated filesystem, network, secret,
+event, process, or resource services.
 
-## Cache Keys Must Be Complete
+Data returned from worker processes is untrusted. The host validates the
+capability identity and domain, binds it to the authorized invocation, enforces
+server-side nesting/depth and resource limits, and re-applies sensitivity and
+redaction obligations. Worker-provided metadata cannot grant authority or
+declare itself safe.
 
-A cache whose stored value depends on input X must include a stable representation of X in its key. `WorkspacePool` keyed on `user_id` but applying token-specific `workspace_read_scopes` before caching (#2633 item 1) froze the first token's scopes for every subsequent request — canonical example. Rule: if `get_or_create(a, b)` inserts using only `a` but `b` affects the stored value, that is a bug.
+Changes require tests for denial, limit exhaustion, redaction, scope isolation,
+cancellation, and cleanup through the production caller.
+
+Sandbox-policy changes also test mount containment, network allow/deny,
+environment scrubbing, output limits, process-tree cancellation, install/run
+phase separation, and malicious worker metadata.
+
+## Process and shell execution: real OS isolation, per tenant
+
+Motivated by issue #6170 (a shipped cross-tenant file-disclosure via `shell`).
+Case study and target design: `docs/reborn/2026-07-17-architecture-simplification-dto-dyn-local.md` §6.
+
+- **The virtual filesystem does not contain a subprocess.** `ScopedFilesystem` /
+  `MountView` bound the *filesystem capability* (`filesystem.read`), a virtual-path
+  abstraction. A spawned OS process (`builtin.shell`, script lanes) sees the **real
+  kernel filesystem** and ignores those mounts. Never treat the scoped/virtual
+  filesystem as containment for a subprocess.
+- **The only real containment for an OS process is the sandbox it runs in.** Any
+  deployment that authenticates more than one user MUST route process spawns through
+  the sandboxed port (`TenantSandboxProcessPort`, backed by `ironclaw_process_sandbox`)
+  whose mount is derived from the turn scope — never through the unsandboxed
+  `HostProcessPort` (renamed from `LocalHostProcessPort`, §4.4 Bucket 2 — `Host`
+  names the boundary: a process run directly on the host). `HostProcessPort` /
+  `ProcessBackendKind::LocalHost` is for genuinely single-user-local deployments only.
+- **Deployment mode must reflect the fact of multi-user serving.** A served instance
+  (SSO on, >1 admitted `UserId`, non-loopback bind) must not resolve to
+  `LocalSingleUser` / host-shell semantics. The #6170 root cause was a composition
+  profile (`HostedSingleTenant`) declaring `LocalSingleUser`, which the sound resolver
+  faithfully mapped to an unsandboxed host shell. Do not add or preserve a
+  profile→mode mapping that gives a served profile a host process backend.
+- **Fail closed.** No verified tenant sandbox ⇒ the process/shell capability is hidden
+  by the visibility filter and rejected by the planner (`ProcessBackendKind::None`),
+  never silently downgraded to a host process. Missing Docker/sandbox degrades to "no
+  shell," never "host shell."
+
+Any change touching process ports, the planner's process/filesystem backend rules,
+or the composition-profile → `(DeploymentMode, RuntimeProfile)` mapping requires a
+**two-user cross-tenant escape test** driven through the caller: user B runs a shell
+command and the test asserts it cannot read user A's files. Re-verify the current
+wiring with `rg -n "HostProcessPort|TenantSandboxProcessPort|ProcessBackendKind::LocalHost|DeploymentMode::LocalSingleUser" crates/ironclaw_host_runtime crates/ironclaw_reborn_composition crates/ironclaw_runtime_policy`.

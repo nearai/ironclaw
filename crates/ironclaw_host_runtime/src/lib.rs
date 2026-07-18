@@ -48,6 +48,7 @@ mod latency;
 pub mod memory_context;
 mod obligations;
 mod planner;
+mod post_edit_check;
 mod process_aliases;
 mod process_output;
 mod process_port;
@@ -55,7 +56,6 @@ mod production;
 mod sandbox_process;
 mod services;
 mod surface;
-mod turn_scheduler;
 mod user_profile_source;
 mod wasm_credentials;
 
@@ -71,7 +71,8 @@ pub use egress::{
 };
 pub use extension_contracts::{
     default_host_api_contract_registry, default_host_port_catalog,
-    discover_extensions_tolerant_bounded, discover_extensions_with_default_host_api_contracts,
+    discover_extensions_tolerant_bounded, discover_extensions_tolerant_bounded_with_contracts,
+    discover_extensions_with_default_host_api_contracts,
     discover_extensions_with_default_host_api_contracts_and_catalog,
 };
 pub use first_party::{
@@ -112,9 +113,13 @@ pub use obligations::{
     RuntimeCredentialAccountRequest, RuntimeCredentialAccountResolver,
 };
 pub use planner::{ExecutionPlan, PlannerError, plan_capability};
+pub use post_edit_check::{
+    POST_EDIT_CHECK_ENV, POST_EDIT_CHECK_TIMEOUT_ENV, PostEditCheckConfig,
+    PostEditCheckConfigError, PostEditCheckService,
+};
 pub use process_output::{SavedCommandOutput, SavedCommandOutputSanitization};
 pub use process_port::{
-    CommandExecutionOutput, CommandExecutionRequest, LocalHostProcessPort, RuntimeProcessError,
+    CommandExecutionOutput, CommandExecutionRequest, HostProcessPort, RuntimeProcessError,
     RuntimeProcessPort, SandboxCommandTransport, TenantSandboxProcessPort,
 };
 pub use production::DefaultHostRuntime;
@@ -130,11 +135,6 @@ pub use services::{
     RegisteredRuntimeHealth,
 };
 pub use surface::{CapabilitySurfacePolicy, VisibleCapability, VisibleCapabilityAccess};
-pub use turn_scheduler::{
-    SchedulerTurnRunWakeNotifier, TurnRunExecutor, TurnRunExecutorError, TurnRunScheduler,
-    TurnRunSchedulerConfig, TurnRunSchedulerHandle, TurnRunWakeChannel,
-};
-
 /// Stable, validated idempotency key supplied by upper turn/loop services.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct IdempotencyKey(String);

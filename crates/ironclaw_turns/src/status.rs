@@ -199,6 +199,96 @@ pub struct SanitizedFailure {
     detail: Option<String>,
 }
 
+const MODEL_INVALID_OUTPUT_DETAIL_MAX_BYTES: usize = 512;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum ModelInvalidOutputDetailReason {
+    EmptyAssistantResponse,
+    TextualToolCallSyntax,
+    OutsideCapabilitySurface,
+    ToolUseFinishWithoutToolCalls,
+    UnsupportedToolCallsForTextOnlyLoop,
+    InvalidReturnedToolName,
+    InvalidToolCallArguments,
+    MalformedToolCallArguments,
+}
+
+impl ModelInvalidOutputDetailReason {
+    pub const TOOL_CALL_ARGUMENTS_PARSE_ERROR_PREFIX: &'static str =
+        "failed to parse tool-call arguments JSON:";
+
+    pub fn safe_summary(self) -> &'static str {
+        match self {
+            Self::EmptyAssistantResponse => "model returned an empty assistant response",
+            Self::TextualToolCallSyntax => {
+                "model returned textual tool-call syntax instead of structured tool calls"
+            }
+            Self::OutsideCapabilitySurface => {
+                "model returned a tool call outside the advertised capability surface"
+            }
+            Self::ToolUseFinishWithoutToolCalls => {
+                "model returned tool-use finish without tool calls"
+            }
+            Self::UnsupportedToolCallsForTextOnlyLoop => {
+                "model returned unsupported tool calls for a text-only loop"
+            }
+            Self::InvalidReturnedToolName => "model returned an invalid provider tool name",
+            Self::InvalidToolCallArguments => "model returned invalid tool-call arguments",
+            Self::MalformedToolCallArguments => Self::TOOL_CALL_ARGUMENTS_PARSE_ERROR_PREFIX,
+        }
+    }
+
+    pub fn from_failure_category_and_safe_summary(
+        category: &str,
+        safe_summary: Option<&str>,
+    ) -> Option<Self> {
+        if !matches!(category, "model_invalid_output" | "invalid_model_output") {
+            return None;
+        }
+        Self::from_safe_summary(safe_summary?)
+    }
+
+    pub fn from_safe_summary(safe_summary: &str) -> Option<Self> {
+        if !is_model_invalid_output_detail_shape(safe_summary) {
+            return None;
+        }
+        match safe_summary {
+            "model returned an empty assistant response" => Some(Self::EmptyAssistantResponse),
+            "model returned textual tool-call syntax instead of structured tool calls" => {
+                Some(Self::TextualToolCallSyntax)
+            }
+            "model returned a tool call outside the advertised capability surface" => {
+                Some(Self::OutsideCapabilitySurface)
+            }
+            "model returned tool-use finish without tool calls" => {
+                Some(Self::ToolUseFinishWithoutToolCalls)
+            }
+            "model returned unsupported tool calls for a text-only loop" => {
+                Some(Self::UnsupportedToolCallsForTextOnlyLoop)
+            }
+            "model returned an invalid provider tool name" => Some(Self::InvalidReturnedToolName),
+            "model returned invalid tool-call arguments" => Some(Self::InvalidToolCallArguments),
+            _ if safe_summary.starts_with(Self::TOOL_CALL_ARGUMENTS_PARSE_ERROR_PREFIX) => {
+                Some(Self::MalformedToolCallArguments)
+            }
+            _ => None,
+        }
+    }
+}
+
+fn is_model_invalid_output_detail_shape(detail: &str) -> bool {
+    if detail.is_empty() || detail.len() > MODEL_INVALID_OUTPUT_DETAIL_MAX_BYTES {
+        return false;
+    }
+    if !detail.is_ascii() {
+        return false;
+    }
+    let bytes = detail.as_bytes();
+    !bytes[0].is_ascii_whitespace()
+        && !bytes[bytes.len() - 1].is_ascii_whitespace()
+        && !bytes.iter().any(u8::is_ascii_control)
+}
+
 impl SanitizedFailure {
     pub fn new(category: impl Into<String>) -> Result<Self, String> {
         let category = category.into();
@@ -397,6 +487,12 @@ pub struct TurnRunState {
     pub resolved_run_profile_version: RunProfileVersion,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub resolved_model_route: Option<LoopModelRouteSnapshot>,
+    /// Cumulative provider-reported token usage for this run's model calls,
+    /// captured at loop exit. `None` for runs that reported no usage (replay
+    /// stubs) or that pre-date usage capture. Read by the OpenAI-compatible
+    /// Responses/Chat surfaces to report `usage` and cost.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model_usage: Option<crate::run_profile::LoopModelUsage>,
     pub received_at: TurnTimestamp,
     pub checkpoint_id: Option<TurnCheckpointId>,
     pub gate_ref: Option<GateRef>,
@@ -564,6 +660,76 @@ mod tests {
         let json = serde_json::to_string(&reason).expect("serialize");
         let decoded: BlockedReason = serde_json::from_str(&json).expect("deserialize");
         assert_eq!(decoded, reason);
+    }
+
+    #[test]
+    fn model_invalid_output_detail_reason_round_trips_fixed_safe_summaries() {
+        use ModelInvalidOutputDetailReason as Reason;
+
+        for reason in [
+            Reason::EmptyAssistantResponse,
+            Reason::TextualToolCallSyntax,
+            Reason::OutsideCapabilitySurface,
+            Reason::ToolUseFinishWithoutToolCalls,
+            Reason::UnsupportedToolCallsForTextOnlyLoop,
+            Reason::InvalidReturnedToolName,
+            Reason::InvalidToolCallArguments,
+        ] {
+            assert_eq!(
+                Reason::from_failure_category_and_safe_summary(
+                    "model_invalid_output",
+                    Some(reason.safe_summary()),
+                ),
+                Some(reason),
+                "{reason:?} safe summary should parse back to the same reason"
+            );
+        }
+    }
+
+    #[test]
+    fn model_invalid_output_detail_reason_accepts_safe_parse_error_prefix() {
+        assert_eq!(
+            ModelInvalidOutputDetailReason::from_failure_category_and_safe_summary(
+                "model_invalid_output",
+                Some("failed to parse tool-call arguments JSON: expected value at line 1 column 1"),
+            ),
+            Some(ModelInvalidOutputDetailReason::MalformedToolCallArguments)
+        );
+    }
+
+    #[test]
+    fn model_invalid_output_detail_reason_is_category_gated() {
+        assert_eq!(
+            ModelInvalidOutputDetailReason::from_failure_category_and_safe_summary(
+                "model_unavailable",
+                Some(ModelInvalidOutputDetailReason::EmptyAssistantResponse.safe_summary()),
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn model_invalid_output_detail_reason_rejects_unvalidated_detail() {
+        let oversized = format!(
+            "failed to parse tool-call arguments JSON: {}",
+            "x".repeat(512)
+        );
+
+        for detail in [
+            " model returned an empty assistant response",
+            "model returned an empty assistant response\n",
+            "model returned an empty assistant response\0",
+            oversized.as_str(),
+        ] {
+            assert_eq!(
+                ModelInvalidOutputDetailReason::from_failure_category_and_safe_summary(
+                    "model_invalid_output",
+                    Some(detail),
+                ),
+                None,
+                "{detail:?} should not be accepted for projection matching"
+            );
+        }
     }
 
     #[test]

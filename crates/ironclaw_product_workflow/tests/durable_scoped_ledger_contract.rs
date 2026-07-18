@@ -1,5 +1,4 @@
-// The generic filesystem-backed ledger folded in from
-// `ironclaw_product_workflow_storage` lives behind the `storage` feature.
+// The generic filesystem-backed ledger lives behind the `storage` feature.
 #![cfg(feature = "storage")]
 
 use std::num::NonZeroUsize;

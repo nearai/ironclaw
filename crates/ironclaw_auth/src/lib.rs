@@ -17,13 +17,17 @@ mod fakes;
 mod flow;
 mod ids;
 mod interaction;
-mod oauth;
+mod loopback_oauth;
+pub mod oauth;
 mod provider;
 mod scope;
+#[cfg(any(test, feature = "test-support"))]
+pub mod test_support;
 
 pub use cleanup::{
-    SecretCleanupAction, SecretCleanupQuarantine, SecretCleanupQuarantineReason,
-    SecretCleanupReport, SecretCleanupRequest, SecretCleanupService,
+    OAuthCompletionCompensationOutcome, OAuthCompletionCompensationRequest,
+    OAuthExchangeCleanupRequest, SecretCleanupAction, SecretCleanupQuarantine,
+    SecretCleanupQuarantineReason, SecretCleanupReport, SecretCleanupRequest, SecretCleanupService,
 };
 pub use credential::{
     CredentialAccount, CredentialAccountChoiceRequest, CredentialAccountListPage,
@@ -33,19 +37,20 @@ pub use credential::{
     CredentialAccountUpdate, CredentialOwnership, CredentialRecoveryKind,
     CredentialRecoveryProjection, CredentialRecoveryReason, CredentialRecoveryRequest,
     CredentialRecoveryState, CredentialRefreshReport, CredentialRefreshRequest,
-    CredentialSetupService, NewCredentialAccount, ProviderBackedCredentialAccountService,
-    binding_scope_owns_account,
+    CredentialSecretFingerprint, CredentialSetupService, NewCredentialAccount,
+    ProviderBackedCredentialAccountService, binding_scope_owns_account,
 };
 pub use domain::select_latest_duplicate_user_reusable_account;
 pub use error::{AuthErrorCode, AuthProductError};
 pub use fakes::InMemoryAuthProductServices;
 pub use flow::{
-    AuthChallenge, AuthContinuationEvent, AuthContinuationRef, AuthFlowKind, AuthFlowManager,
-    AuthFlowOwnerScope, AuthFlowRecord, AuthFlowRecordSource, AuthFlowStatus,
-    CredentialAccountUpdateBinding, CredentialSelectionInput, ManualTokenCompletionInput,
-    NewAuthFlow, OAuthCallbackClaimRequest, OAuthCallbackFailureInput, OAuthCallbackInput,
-    ProviderCallbackOutcome, TurnGateAuthFlowQuery, credential_status_for_completed_flow,
-    flow_matches_turn_gate_query,
+    AUTH_CONTINUATION_DISPATCH_LEASE_SECONDS, AuthChallenge, AuthContinuationDispatchClaimInput,
+    AuthContinuationDispatchOutcome, AuthContinuationDispatchSettlementInput,
+    AuthContinuationEvent, AuthContinuationRef, AuthFlowKind, AuthFlowManager, AuthFlowOwnerScope,
+    AuthFlowRecord, AuthFlowRecordSource, AuthFlowStatus, CredentialAccountUpdateBinding,
+    CredentialSelectionInput, ManualTokenCompletionInput, NewAuthFlow, OAuthCallbackClaimRequest,
+    OAuthCallbackFailureInput, OAuthCallbackInput, ProviderCallbackOutcome, TurnGateAuthFlowQuery,
+    credential_status_for_completed_flow, flow_matches_durable_owner, flow_matches_turn_gate_query,
 };
 pub use ids::{
     AuthFlowId, AuthGateRef, AuthInteractionId, AuthProviderId, AuthSessionId,

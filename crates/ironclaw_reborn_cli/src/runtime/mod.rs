@@ -36,8 +36,13 @@ use tokio_util::sync::CancellationToken;
 
 use crate::context::RebornCliContext;
 
+// Crate-wide process-env lock lives here (see test_env.rs). `pub(crate)` so
+// non-runtime env-mutating tests (e.g. commands::serve_sso) serialize against
+// the same mutex — all unit tests link into one binary, so a second, separate
+// env lock would not serialize and races the shared process environment
+// (#6015).
 #[cfg(test)]
-mod test_env;
+pub(crate) mod test_env;
 mod trigger_poller;
 
 use trigger_poller::trigger_poller_settings;
@@ -52,7 +57,7 @@ pub(crate) fn init_tracing() {
     // guarded from third-party debug floods unless those targets are explicit.
     let stderr_filter = reborn_env_filter(
         "IRONCLAW_REBORN_LOG",
-        "info,ironclaw_reborn=info,ironclaw_reborn_composition=info",
+        "info,ironclaw_runner=info,ironclaw_reborn_composition=info",
     );
     // Operator Logs buffer: captures run diagnostics at `debug` for the
     // ironclaw run-path crates so the scoped (thread/run) Logs panel is
@@ -62,7 +67,7 @@ pub(crate) fn init_tracing() {
     // so the browser log buffer is not filled by low-level protocol crates.
     let operator_filter = reborn_env_filter(
         "IRONCLAW_REBORN_OPERATOR_LOG",
-        "info,ironclaw_reborn=debug,ironclaw_host_runtime=debug",
+        "info,ironclaw_runner=debug,ironclaw_host_runtime=debug",
     );
     let _ = tracing_subscriber::registry()
         .with(
@@ -538,6 +543,90 @@ fn apply_credential_refresh_override(
     Ok(settings)
 }
 
+/// Resolve the Reborn runtime's default LLM selection, tolerating a
+/// required-but-unset API key env var when a key is already durably stored
+/// for that provider in the local secret store.
+///
+/// - Without this, a key provisioned via `onboard` into the encrypted
+///   secret store (never written to config.toml/env) would boot `serve`
+///   into a fail-closed error, since `apply_startup_stored_llm_key` only
+///   runs later once the async runtime is up. Providers with
+///   `api_key_required = false` (e.g. `nearai`) never hit this path.
+/// - Only `ApiKeyEnvUnset` is treated specially; every other resolution
+///   failure surfaces unchanged, as does `ApiKeyEnvUnset` itself when no
+///   key is stored — this can only turn a real fix into a successful boot,
+///   never mask a misconfiguration.
+/// - Scoped to `RuntimeInputCaller::Serve` only: opening the secret store
+///   may fall through to the OS keychain (GUI prompt or indefinite block
+///   with no GUI session). `onboard` already pays that cost interactively;
+///   `serve` is the boot path this fix unblocks. `run` stays fail-fast so
+///   a forgotten env var doesn't hang instead of erroring clearly.
+#[cfg(all(feature = "libsql", feature = "root-llm-provider"))]
+fn resolve_reborn_runtime_llm_with_stored_key_fallback(
+    config: &RebornBootConfig,
+    config_file: Option<&ironclaw_reborn_config::RebornConfigFile>,
+    caller: RuntimeInputCaller,
+) -> anyhow::Result<Option<ironclaw_reborn_composition::ResolvedRebornLlm>> {
+    let error = match ironclaw_reborn_composition::resolve_reborn_runtime_llm(config, config_file) {
+        Ok(resolved) => return Ok(resolved),
+        Err(error) => error,
+    };
+    if caller != RuntimeInputCaller::Serve {
+        return Err(error.into());
+    }
+    let ironclaw_reborn_composition::RebornLlmCatalogError::ApiKeyEnvUnset { ref provider, .. } =
+        error
+    else {
+        return Err(error.into());
+    };
+    // `ApiKeyEnvUnset` only comes from the config-file-selection branch, so
+    // a selection should be present; defensive fallback to original error.
+    let Some(selection) = config_file.and_then(|file| file.default_llm_slot()) else {
+        return Err(error.into());
+    };
+    let provider_id = provider.clone();
+    let runtime_storage_root = local_runtime_storage_root(config, config.profile());
+    // The runtime storage root is only created lazily (onboarding writing a
+    // key, or a prior `serve` boot). If it was never created there is
+    // definitely no stored key — fail through to the original error instead
+    // of letting the secret-store opener fail on a missing directory.
+    if !runtime_storage_root.exists() {
+        return Err(error.into());
+    }
+    let has_stored_key = block_on_cli(async move {
+        let store = ironclaw_reborn_composition::open_local_dev_secret_store(&runtime_storage_root)
+            .await
+            .map_err(anyhow::Error::from)?;
+        ironclaw_reborn_composition::LlmKeyStore::new(store)
+            .exists(&provider_id)
+            .await
+            .map_err(anyhow::Error::from)
+    })?;
+    if !has_stored_key {
+        return Err(error.into());
+    }
+    ironclaw_reborn_composition::resolve_llm_selection_allow_missing_key(
+        selection,
+        Some(config.home().providers_file_path().as_path()),
+    )
+    .map(ironclaw_reborn_composition::ResolvedRebornLlm::from_llm_config)
+    .map(Some)
+    .map_err(Into::into)
+}
+
+/// Feature-off fallback: without `libsql` there is no local-dev secret store
+/// to check, so behavior here is byte-identical to calling
+/// `resolve_reborn_runtime_llm` directly — a required-but-unset API key
+/// still fails closed with `ApiKeyEnvUnset`.
+#[cfg(all(feature = "root-llm-provider", not(feature = "libsql")))]
+fn resolve_reborn_runtime_llm_with_stored_key_fallback(
+    config: &RebornBootConfig,
+    config_file: Option<&ironclaw_reborn_config::RebornConfigFile>,
+    _caller: RuntimeInputCaller,
+) -> anyhow::Result<Option<ironclaw_reborn_composition::ResolvedRebornLlm>> {
+    ironclaw_reborn_composition::resolve_reborn_runtime_llm(config, config_file).map_err(Into::into)
+}
+
 pub(crate) fn build_runtime_input_with_options(
     config: &RebornBootConfig,
     caller: RuntimeInputCaller,
@@ -566,14 +655,16 @@ pub(crate) fn build_runtime_input_with_options(
 
     #[cfg(feature = "root-llm-provider")]
     {
-        match ironclaw_reborn_composition::resolve_reborn_runtime_llm(
+        match resolve_reborn_runtime_llm_with_stored_key_fallback(
             config,
             runtime_services.config_file.as_ref(),
+            caller,
         )? {
             Some(llm) => {
                 tracing::debug!(
                     provider_id = %llm.provider_id(),
                     model = %llm.model(),
+                    base_url = %llm.base_url().unwrap_or_default(),
                     "resolved LLM selection for Reborn runtime"
                 );
                 runtime_input = runtime_input.with_resolved_llm(llm);
@@ -1104,7 +1195,7 @@ fn resolve_worker_count(
 /// path resolves to `None` (sized to exactly `MAX_PERMITS`, which tokio
 /// accepts), so the unlimited sentinel stays the way to ask for "no bound".
 ///
-/// `ironclaw_reborn`'s `scheduler_permit_count` additionally saturates at the
+/// `ironclaw_runner`'s `scheduler_permit_count` additionally saturates at the
 /// ceiling as an infallible backstop for direct composition callers; this gate
 /// is the operator-facing fail-loud half of that defense.
 fn ensure_worker_count_within_ceiling(
@@ -1224,7 +1315,7 @@ fn runner_settings(
 
 #[cfg(test)]
 mod tests {
-    use std::collections::HashMap;
+    use std::{collections::HashMap, sync::MutexGuard};
 
     use ironclaw_reborn_composition::{
         CredentialRefreshSettings, RebornCompositionProfile, TurnStatus,
@@ -1234,7 +1325,7 @@ mod tests {
     use ironclaw_reborn_composition::{LocalTriggerAccessRole, LocalTriggerAccessSource};
     use ironclaw_reborn_config::RebornBootConfig;
 
-    use super::test_env::{EnvGuard, lock_runtime_env};
+    use super::test_env::EnvGuard;
     #[cfg(feature = "webui-v2-beta")]
     use super::with_run_local_trigger_fire_access_checker;
     use super::{
@@ -1247,6 +1338,25 @@ mod tests {
     #[cfg(feature = "libsql")]
     use super::local_runtime_storage_root;
     use ironclaw_reborn_composition::DEFAULT_TURN_RUNNER_WORKER_COUNT;
+
+    struct RuntimeEnvGuard {
+        // Fields drop in declaration order: restore the env before releasing
+        // the process-wide lock.
+        _resource_governor_singleton: EnvGuard,
+        _lock: MutexGuard<'static, ()>,
+    }
+
+    fn lock_runtime_env() -> RuntimeEnvGuard {
+        let lock = super::test_env::lock_runtime_env();
+        let resource_governor_singleton = EnvGuard::set(
+            "IRONCLAW_REBORN_POSTGRES_RESOURCE_GOVERNOR_SINGLETON",
+            "true",
+        );
+        RuntimeEnvGuard {
+            _resource_governor_singleton: resource_governor_singleton,
+            _lock: lock,
+        }
+    }
 
     fn parse_runner_section(toml: &str) -> ironclaw_reborn_config::RebornConfigFile {
         ironclaw_reborn_config::RebornConfigFile::parse_text(

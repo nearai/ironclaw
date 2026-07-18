@@ -1,3 +1,4 @@
+// arch-exempt: large_file, mechanical lease-store test repoint to FilesystemCapabilityLeaseStore<InMemoryBackend> helper (arch-simplification §4.3), no new test logic, plan #6168
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -7,6 +8,7 @@ use ironclaw_approvals::*;
 use ironclaw_authorization::*;
 use ironclaw_capabilities::*;
 use ironclaw_extensions::{ExtensionManifest, ExtensionPackage, ExtensionRegistry, ManifestSource};
+use ironclaw_filesystem::InMemoryBackend;
 use ironclaw_host_api::*;
 use ironclaw_run_state::*;
 use serde_json::json;
@@ -18,8 +20,8 @@ use support::*;
 async fn capability_host_blocks_for_approval_without_dispatch() {
     let registry = registry_with_echo_capability();
     let dispatcher = RecordingDispatcher::default();
-    let run_state = InMemoryRunStateStore::new();
-    let approval_requests = InMemoryApprovalRequestStore::new();
+    let run_state = ironclaw_run_state::in_memory_backed_run_state_store();
+    let approval_requests = ironclaw_run_state::in_memory_backed_approval_request_store();
     let host = CapabilityHost::new(&registry, &dispatcher, &ApprovalAuthorizer)
         .with_run_state(&run_state)
         .with_approval_requests(&approval_requests);
@@ -100,8 +102,8 @@ output_schema_ref = "schemas/shell.output.v1.json"
     let mut registry = ExtensionRegistry::new();
     registry.insert(package).unwrap();
     let dispatcher = RecordingDispatcher::default();
-    let run_state = InMemoryRunStateStore::new();
-    let approval_requests = InMemoryApprovalRequestStore::new();
+    let run_state = ironclaw_run_state::in_memory_backed_run_state_store();
+    let approval_requests = ironclaw_run_state::in_memory_backed_approval_request_store();
     let host = CapabilityHost::new(&registry, &dispatcher, &ApprovalAuthorizer)
         .with_run_state(&run_state)
         .with_approval_requests(&approval_requests);
@@ -212,7 +214,7 @@ async fn capability_host_separate_store_setters_clear_combined_atomic_path() {
     let registry = registry_with_echo_capability();
     let dispatcher = RecordingDispatcher::default();
     let combined = RecordingCombinedRunStateApprovalStore::new();
-    let separate_run_state = InMemoryRunStateStore::new();
+    let separate_run_state = ironclaw_run_state::in_memory_backed_run_state_store();
     let host = CapabilityHost::new(&registry, &dispatcher, &ApprovalAuthorizer)
         .with_run_state_approval_store(&combined)
         .with_run_state(&separate_run_state);
@@ -254,9 +256,9 @@ async fn capability_host_separate_store_setters_clear_combined_atomic_path() {
 async fn capability_host_leaves_run_blocked_when_resume_is_attempted_before_approval_resolves() {
     let registry = registry_with_echo_capability();
     let dispatcher = RecordingDispatcher::default();
-    let run_state = InMemoryRunStateStore::new();
-    let approval_requests = InMemoryApprovalRequestStore::new();
-    let leases = InMemoryCapabilityLeaseStore::new();
+    let run_state = ironclaw_run_state::in_memory_backed_run_state_store();
+    let approval_requests = ironclaw_run_state::in_memory_backed_approval_request_store();
+    let leases = in_memory_backed_capability_lease_store();
     let block_host = CapabilityHost::new(&registry, &dispatcher, &ApprovalAuthorizer)
         .with_run_state(&run_state)
         .with_approval_requests(&approval_requests);
@@ -350,8 +352,8 @@ async fn assert_mismatched_approval_request_rejected(
 ) {
     let registry = registry_with_echo_capability();
     let dispatcher = RecordingDispatcher::default();
-    let run_state = InMemoryRunStateStore::new();
-    let approval_requests = InMemoryApprovalRequestStore::new();
+    let run_state = ironclaw_run_state::in_memory_backed_run_state_store();
+    let approval_requests = ironclaw_run_state::in_memory_backed_approval_request_store();
     let authorizer = MismatchedApprovalRequestAuthorizer { mismatch };
     let host = CapabilityHost::new(&registry, &dispatcher, &authorizer)
         .with_run_state(&run_state)
@@ -394,7 +396,7 @@ async fn assert_mismatched_approval_request_rejected(
 async fn capability_host_does_not_point_run_at_approval_before_approval_is_persisted() {
     let registry = registry_with_echo_capability();
     let dispatcher = RecordingDispatcher::default();
-    let run_state = InMemoryRunStateStore::new();
+    let run_state = ironclaw_run_state::in_memory_backed_run_state_store();
     let approval_requests = HangingSaveApprovalRequestStore::new();
     let host = CapabilityHost::new(&registry, &dispatcher, &ApprovalAuthorizer)
         .with_run_state(&run_state)
@@ -443,7 +445,7 @@ async fn capability_host_does_not_point_run_at_approval_before_approval_is_persi
 async fn capability_host_marks_run_failed_when_obligations_are_unsupported() {
     let registry = registry_with_echo_capability();
     let dispatcher = RecordingDispatcher::default();
-    let run_state = InMemoryRunStateStore::new();
+    let run_state = ironclaw_run_state::in_memory_backed_run_state_store();
     let host = CapabilityHost::new(&registry, &dispatcher, &ObligatingAuthorizer)
         .with_run_state(&run_state);
     let context = execution_context(CapabilitySet::default());
@@ -506,8 +508,8 @@ async fn capability_host_returns_resume_business_error_when_run_state_fail_trans
     let registry = registry_with_echo_capability();
     let dispatcher = RecordingDispatcher::default();
     let run_state = FailOnFailRunStateStore::new();
-    let approval_requests = InMemoryApprovalRequestStore::new();
-    let leases = InMemoryCapabilityLeaseStore::new();
+    let approval_requests = ironclaw_run_state::in_memory_backed_approval_request_store();
+    let leases = in_memory_backed_capability_lease_store();
     let block_host = CapabilityHost::new(&registry, &dispatcher, &ApprovalAuthorizer)
         .with_run_state(&run_state)
         .with_approval_requests(&approval_requests);
@@ -634,8 +636,8 @@ async fn capability_host_does_not_orphan_approval_when_run_block_fails() {
 async fn capability_host_returns_specific_error_for_authorizer_fingerprint_mismatch() {
     let registry = registry_with_echo_capability();
     let dispatcher = RecordingDispatcher::default();
-    let run_state = InMemoryRunStateStore::new();
-    let approval_requests = InMemoryApprovalRequestStore::new();
+    let run_state = ironclaw_run_state::in_memory_backed_run_state_store();
+    let approval_requests = ironclaw_run_state::in_memory_backed_approval_request_store();
     let host = CapabilityHost::new(&registry, &dispatcher, &MismatchedApprovalAuthorizer)
         .with_run_state(&run_state)
         .with_approval_requests(&approval_requests);
@@ -689,13 +691,14 @@ async fn capability_host_returns_dispatch_result_when_run_completion_fails_after
 async fn capability_host_resumes_approved_invocation_and_consumes_matching_lease() {
     let registry = registry_with_echo_capability();
     let dispatcher = RecordingDispatcher::default();
-    let run_state = InMemoryRunStateStore::new();
-    let approval_requests = InMemoryApprovalRequestStore::new();
-    let leases = InMemoryCapabilityLeaseStore::new();
+    let run_state = ironclaw_run_state::in_memory_backed_run_state_store();
+    let approval_requests = ironclaw_run_state::in_memory_backed_approval_request_store();
+    let leases = in_memory_backed_capability_lease_store();
     let block_host = CapabilityHost::new(&registry, &dispatcher, &ApprovalAuthorizer)
         .with_run_state(&run_state)
         .with_approval_requests(&approval_requests);
-    let context = execution_context(CapabilitySet::default());
+    let mut context = execution_context(CapabilitySet::default());
+    context.authenticated_actor_user_id = Some(UserId::new("slack-alice").unwrap());
     let scope = context.resource_scope.clone();
     let invocation_id = context.invocation_id;
     let estimate = ResourceEstimate::default();
@@ -743,6 +746,41 @@ async fn capability_host_resumes_approved_invocation_and_consumes_matching_lease
         .with_run_state(&run_state)
         .with_approval_requests(&approval_requests)
         .with_capability_leases(&leases);
+    let mut forged_context = context.clone();
+    forged_context.authenticated_actor_user_id = Some(UserId::new("slack-bob").unwrap());
+    let forged_error = resume_host
+        .resume_json(CapabilityResumeRequest {
+            context: forged_context,
+            approval_request_id: approval_id,
+            capability_id: capability_id(),
+            estimate: estimate.clone(),
+            input: input.clone(),
+            trust_decision: trust_decision(),
+        })
+        .await
+        .unwrap_err();
+    assert!(matches!(
+        forged_error,
+        CapabilityInvocationError::AuthorizationDenied {
+            reason: DenyReason::PolicyDenied,
+            ..
+        }
+    ));
+    assert!(!dispatcher.has_request());
+    assert_eq!(
+        run_state
+            .get(&scope, invocation_id)
+            .await
+            .unwrap()
+            .unwrap()
+            .status,
+        RunStatus::BlockedApproval
+    );
+    assert_eq!(
+        leases.get(&scope, lease.grant.id).await.unwrap().status,
+        CapabilityLeaseStatus::Active
+    );
+
     let result = resume_host
         .resume_json(CapabilityResumeRequest {
             context: context.clone(),
@@ -756,6 +794,14 @@ async fn capability_host_resumes_approved_invocation_and_consumes_matching_lease
         .unwrap();
 
     assert_eq!(result.dispatch.output, json!({"ok": true}));
+    assert_eq!(
+        dispatcher
+            .take_request()
+            .authenticated_actor_user_id
+            .as_ref()
+            .map(UserId::as_str),
+        Some("slack-alice")
+    );
     let run = run_state.get(&scope, invocation_id).await.unwrap().unwrap();
     assert_eq!(run.status, RunStatus::Completed);
     let consumed = leases.get(&scope, lease.grant.id).await.unwrap();
@@ -767,8 +813,8 @@ async fn capability_host_returns_dispatch_result_when_run_completion_fails_after
     let registry = registry_with_echo_capability();
     let dispatcher = RecordingDispatcher::default();
     let run_state = FailCompleteRunStateStore::new();
-    let approval_requests = InMemoryApprovalRequestStore::new();
-    let leases = InMemoryCapabilityLeaseStore::new();
+    let approval_requests = ironclaw_run_state::in_memory_backed_approval_request_store();
+    let leases = in_memory_backed_capability_lease_store();
     let block_host = CapabilityHost::new(&registry, &dispatcher, &ApprovalAuthorizer)
         .with_run_state(&run_state)
         .with_approval_requests(&approval_requests);
@@ -839,9 +885,9 @@ async fn capability_host_returns_dispatch_result_when_run_completion_fails_after
 async fn capability_host_denies_resume_when_trust_ceiling_omits_capability_effect() {
     let registry = registry_with_echo_capability();
     let dispatcher = RecordingDispatcher::default();
-    let run_state = InMemoryRunStateStore::new();
-    let approval_requests = InMemoryApprovalRequestStore::new();
-    let leases = InMemoryCapabilityLeaseStore::new();
+    let run_state = ironclaw_run_state::in_memory_backed_run_state_store();
+    let approval_requests = ironclaw_run_state::in_memory_backed_approval_request_store();
+    let leases = in_memory_backed_capability_lease_store();
     let block_host = CapabilityHost::new(&registry, &dispatcher, &ApprovalAuthorizer)
         .with_run_state(&run_state)
         .with_approval_requests(&approval_requests);
@@ -921,9 +967,9 @@ async fn capability_host_denies_resume_when_trust_ceiling_omits_capability_effec
 async fn capability_host_revokes_claimed_lease_when_dispatch_fails_after_resume() {
     let registry = registry_with_echo_capability();
     let dispatcher = FailingDispatcher;
-    let run_state = InMemoryRunStateStore::new();
-    let approval_requests = InMemoryApprovalRequestStore::new();
-    let leases = InMemoryCapabilityLeaseStore::new();
+    let run_state = ironclaw_run_state::in_memory_backed_run_state_store();
+    let approval_requests = ironclaw_run_state::in_memory_backed_approval_request_store();
+    let leases = in_memory_backed_capability_lease_store();
     let block_dispatcher = RecordingDispatcher::default();
     let block_host = CapabilityHost::new(&registry, &block_dispatcher, &ApprovalAuthorizer)
         .with_run_state(&run_state)
@@ -1012,8 +1058,8 @@ async fn capability_host_revokes_claimed_lease_when_dispatch_fails_after_resume(
 async fn capability_host_returns_dispatch_result_when_lease_consume_fails_after_dispatch() {
     let registry = registry_with_echo_capability();
     let dispatcher = RecordingDispatcher::default();
-    let run_state = InMemoryRunStateStore::new();
-    let approval_requests = InMemoryApprovalRequestStore::new();
+    let run_state = ironclaw_run_state::in_memory_backed_run_state_store();
+    let approval_requests = ironclaw_run_state::in_memory_backed_approval_request_store();
     let leases = ConsumeFailingLeaseStore::new();
     let block_host = CapabilityHost::new(&registry, &dispatcher, &ApprovalAuthorizer)
         .with_run_state(&run_state)
@@ -1091,7 +1137,7 @@ async fn capability_host_does_not_overwrite_completed_run_when_concurrent_resume
     let dispatcher = RecordingDispatcher::default();
     let complete_notify = Arc::new(tokio::sync::Notify::new());
     let run_state = CompleteNotifyingRunStateStore::new(complete_notify.clone());
-    let approval_requests = InMemoryApprovalRequestStore::new();
+    let approval_requests = ironclaw_run_state::in_memory_backed_approval_request_store();
     let leases = CoordinatedClaimConflictLeaseStore::new(complete_notify);
     let block_host = CapabilityHost::new(&registry, &dispatcher, &ApprovalAuthorizer)
         .with_run_state(&run_state)
@@ -1176,9 +1222,9 @@ async fn capability_host_does_not_overwrite_completed_run_when_concurrent_resume
 async fn capability_host_rejects_resume_with_mismatched_capability_id() {
     let registry = registry_with_echo_capability();
     let dispatcher = RecordingDispatcher::default();
-    let run_state = InMemoryRunStateStore::new();
-    let approval_requests = InMemoryApprovalRequestStore::new();
-    let leases = InMemoryCapabilityLeaseStore::new();
+    let run_state = ironclaw_run_state::in_memory_backed_run_state_store();
+    let approval_requests = ironclaw_run_state::in_memory_backed_approval_request_store();
+    let leases = in_memory_backed_capability_lease_store();
     let block_host = CapabilityHost::new(&registry, &dispatcher, &ApprovalAuthorizer)
         .with_run_state(&run_state)
         .with_approval_requests(&approval_requests);
@@ -1243,9 +1289,9 @@ async fn capability_host_rejects_resume_with_mismatched_capability_id() {
 async fn capability_host_rejects_resume_with_mismatched_approval_request_id() {
     let registry = registry_with_echo_capability();
     let dispatcher = RecordingDispatcher::default();
-    let run_state = InMemoryRunStateStore::new();
-    let approval_requests = InMemoryApprovalRequestStore::new();
-    let leases = InMemoryCapabilityLeaseStore::new();
+    let run_state = ironclaw_run_state::in_memory_backed_run_state_store();
+    let approval_requests = ironclaw_run_state::in_memory_backed_approval_request_store();
+    let leases = in_memory_backed_capability_lease_store();
     let block_host = CapabilityHost::new(&registry, &dispatcher, &ApprovalAuthorizer)
         .with_run_state(&run_state)
         .with_approval_requests(&approval_requests);
@@ -1309,9 +1355,9 @@ async fn capability_host_rejects_resume_with_mismatched_approval_request_id() {
 async fn capability_host_rejects_resume_with_mutated_input_before_lease_claim_or_dispatch() {
     let registry = registry_with_echo_capability();
     let dispatcher = RecordingDispatcher::default();
-    let run_state = InMemoryRunStateStore::new();
-    let approval_requests = InMemoryApprovalRequestStore::new();
-    let leases = InMemoryCapabilityLeaseStore::new();
+    let run_state = ironclaw_run_state::in_memory_backed_run_state_store();
+    let approval_requests = ironclaw_run_state::in_memory_backed_approval_request_store();
+    let leases = in_memory_backed_capability_lease_store();
     let block_host = CapabilityHost::new(&registry, &dispatcher, &ApprovalAuthorizer)
         .with_run_state(&run_state)
         .with_approval_requests(&approval_requests);
@@ -1401,6 +1447,7 @@ impl CapabilityDispatcher for FailingDispatcher {
     ) -> Result<CapabilityDispatchResult, DispatchError> {
         Err(DispatchError::Wasm {
             kind: RuntimeDispatchErrorKind::Backend,
+            safe_summary: None,
         })
     }
 }
@@ -1455,7 +1502,7 @@ impl TrustAwareCapabilityDispatchAuthorizer for MismatchedApprovalRequestAuthori
 }
 
 struct HangingSaveApprovalRequestStore {
-    inner: InMemoryApprovalRequestStore,
+    inner: ironclaw_run_state::FilesystemApprovalRequestStore<ironclaw_filesystem::InMemoryBackend>,
     save_started: std::sync::atomic::AtomicBool,
     save_started_notify: tokio::sync::Notify,
     release_save: tokio::sync::Notify,
@@ -1464,7 +1511,7 @@ struct HangingSaveApprovalRequestStore {
 impl HangingSaveApprovalRequestStore {
     fn new() -> Self {
         Self {
-            inner: InMemoryApprovalRequestStore::new(),
+            inner: ironclaw_run_state::in_memory_backed_approval_request_store(),
             save_started: std::sync::atomic::AtomicBool::new(false),
             save_started_notify: tokio::sync::Notify::new(),
             release_save: tokio::sync::Notify::new(),
@@ -1528,8 +1575,9 @@ impl ApprovalRequestStore for HangingSaveApprovalRequestStore {
 }
 
 struct RecordingCombinedRunStateApprovalStore {
-    runs: InMemoryRunStateStore,
-    approvals: InMemoryApprovalRequestStore,
+    runs: ironclaw_run_state::FilesystemRunStateStore<ironclaw_filesystem::InMemoryBackend>,
+    approvals:
+        ironclaw_run_state::FilesystemApprovalRequestStore<ironclaw_filesystem::InMemoryBackend>,
     combined_calls: AtomicUsize,
     separate_save_calls: AtomicUsize,
 }
@@ -1537,8 +1585,8 @@ struct RecordingCombinedRunStateApprovalStore {
 impl RecordingCombinedRunStateApprovalStore {
     fn new() -> Self {
         Self {
-            runs: InMemoryRunStateStore::new(),
-            approvals: InMemoryApprovalRequestStore::new(),
+            runs: ironclaw_run_state::in_memory_backed_run_state_store(),
+            approvals: ironclaw_run_state::in_memory_backed_approval_request_store(),
             combined_calls: AtomicUsize::new(0),
             separate_save_calls: AtomicUsize::new(0),
         }
@@ -1682,13 +1730,13 @@ impl RunStateApprovalStore for RecordingCombinedRunStateApprovalStore {
 }
 
 struct FailCompleteRunStateStore {
-    inner: InMemoryRunStateStore,
+    inner: ironclaw_run_state::FilesystemRunStateStore<ironclaw_filesystem::InMemoryBackend>,
 }
 
 impl FailCompleteRunStateStore {
     fn new() -> Self {
         Self {
-            inner: InMemoryRunStateStore::new(),
+            inner: ironclaw_run_state::in_memory_backed_run_state_store(),
         }
     }
 }
@@ -1757,13 +1805,13 @@ impl RunStateStore for FailCompleteRunStateStore {
 }
 
 struct FailBlockApprovalRunStateStore {
-    inner: InMemoryRunStateStore,
+    inner: ironclaw_run_state::FilesystemRunStateStore<ironclaw_filesystem::InMemoryBackend>,
 }
 
 impl FailBlockApprovalRunStateStore {
     fn new() -> Self {
         Self {
-            inner: InMemoryRunStateStore::new(),
+            inner: ironclaw_run_state::in_memory_backed_run_state_store(),
         }
     }
 }
@@ -1829,17 +1877,17 @@ impl RunStateStore for FailBlockApprovalRunStateStore {
     }
 }
 
-/// Spy over `InMemoryApprovalRequestStore`: records the `save_pending` id,
+/// Spy over `ironclaw_run_state::FilesystemApprovalRequestStore<ironclaw_filesystem::InMemoryBackend>`: records the `save_pending` id,
 /// since `run_state.fail()` clears `RunRecord.approval_request_id` (#5467).
 struct RecordingApprovalStore {
-    inner: InMemoryApprovalRequestStore,
+    inner: ironclaw_run_state::FilesystemApprovalRequestStore<ironclaw_filesystem::InMemoryBackend>,
     last_saved_id: Mutex<Option<ApprovalRequestId>>,
 }
 
 impl RecordingApprovalStore {
     fn new() -> Self {
         Self {
-            inner: InMemoryApprovalRequestStore::new(),
+            inner: ironclaw_run_state::in_memory_backed_approval_request_store(),
             last_saved_id: Mutex::new(None),
         }
     }
@@ -1907,14 +1955,14 @@ impl ApprovalRequestStore for RecordingApprovalStore {
 }
 
 struct CompleteNotifyingRunStateStore {
-    inner: InMemoryRunStateStore,
+    inner: ironclaw_run_state::FilesystemRunStateStore<ironclaw_filesystem::InMemoryBackend>,
     complete_notify: Arc<tokio::sync::Notify>,
 }
 
 impl CompleteNotifyingRunStateStore {
     fn new(complete_notify: Arc<tokio::sync::Notify>) -> Self {
         Self {
-            inner: InMemoryRunStateStore::new(),
+            inner: ironclaw_run_state::in_memory_backed_run_state_store(),
             complete_notify,
         }
     }
@@ -1984,13 +2032,13 @@ impl RunStateStore for CompleteNotifyingRunStateStore {
 }
 
 struct FailOnFailRunStateStore {
-    inner: InMemoryRunStateStore,
+    inner: ironclaw_run_state::FilesystemRunStateStore<ironclaw_filesystem::InMemoryBackend>,
 }
 
 impl FailOnFailRunStateStore {
     fn new() -> Self {
         Self {
-            inner: InMemoryRunStateStore::new(),
+            inner: ironclaw_run_state::in_memory_backed_run_state_store(),
         }
     }
 }
@@ -2059,7 +2107,7 @@ impl RunStateStore for FailOnFailRunStateStore {
 }
 
 struct CoordinatedClaimConflictLeaseStore {
-    inner: InMemoryCapabilityLeaseStore,
+    inner: FilesystemCapabilityLeaseStore<InMemoryBackend>,
     claim_calls: AtomicUsize,
     second_claim_started: tokio::sync::Notify,
     run_completed: Arc<tokio::sync::Notify>,
@@ -2068,7 +2116,7 @@ struct CoordinatedClaimConflictLeaseStore {
 impl CoordinatedClaimConflictLeaseStore {
     fn new(run_completed: Arc<tokio::sync::Notify>) -> Self {
         Self {
-            inner: InMemoryCapabilityLeaseStore::new(),
+            inner: in_memory_backed_capability_lease_store(),
             claim_calls: AtomicUsize::new(0),
             second_claim_started: tokio::sync::Notify::new(),
             run_completed,
@@ -2157,13 +2205,13 @@ impl CapabilityLeaseStore for CoordinatedClaimConflictLeaseStore {
 }
 
 struct ConsumeFailingLeaseStore {
-    inner: InMemoryCapabilityLeaseStore,
+    inner: FilesystemCapabilityLeaseStore<InMemoryBackend>,
 }
 
 impl ConsumeFailingLeaseStore {
     fn new() -> Self {
         Self {
-            inner: InMemoryCapabilityLeaseStore::new(),
+            inner: in_memory_backed_capability_lease_store(),
         }
     }
 }

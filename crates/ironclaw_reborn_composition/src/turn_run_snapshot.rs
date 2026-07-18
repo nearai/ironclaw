@@ -33,7 +33,7 @@ pub(crate) trait TurnRunSnapshotSource: Send + Sync {
 
 // Durable filesystem store: async fallible snapshot. Generic over any
 // `RootFilesystem` backend so both `LocalDevTurnStateStore` (production/
-// local-dev, when it resolves to `FilesystemTurnStateStore<LocalDevRootFilesystem>`)
+// local-dev, when it resolves to `FilesystemTurnStateStore<CompositeRootFilesystem>`)
 // and a caller's own store (e.g. `RebornIntegrationGroup`'s
 // `FilesystemTurnStateStore<HarnessTurnBackend>`) implement this identically.
 // Unconditional (not cfg-gated on which backend `LocalDevTurnStateStore`

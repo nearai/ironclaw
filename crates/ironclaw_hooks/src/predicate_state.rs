@@ -271,6 +271,8 @@ impl PredicateEventId {
             // std::fmt::Write for String is infallible; discard the
             // Result rather than `.expect()` so this stays out of the
             // "no panics in production code" CI check.
+            #[allow(clippy::let_underscore_must_use)]
+            // writing to an in-memory String is infallible
             let _ = write!(s, "{byte:02x}");
         }
         // Synth output is always a 64-char hex digest — no NUL, never

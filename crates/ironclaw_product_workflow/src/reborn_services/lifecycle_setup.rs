@@ -137,7 +137,12 @@ pub(super) fn map_lifecycle_error(error: ProductWorkflowError) -> RebornServices
         ProductWorkflowError::BindingAccessDenied => {
             RebornServicesError::from_status(RebornServicesErrorCode::Forbidden, 403, false)
         }
-        ProductWorkflowError::Transient { .. } => RebornServicesError::service_unavailable(true),
+        ProductWorkflowError::Transient { ref reason } => {
+            // The 503 body is sanitized; without this line the cause is
+            // dropped entirely and the failure is undiagnosable from logs.
+            tracing::warn!(reason = %reason, "lifecycle action failed with a transient error");
+            RebornServicesError::service_unavailable(true)
+        }
         ProductWorkflowError::BindingResolutionFailed { .. }
         | ProductWorkflowError::BindingRequired { .. }
         | ProductWorkflowError::TurnSubmissionRejected { .. }

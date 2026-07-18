@@ -1,0 +1,100 @@
+{
+  "model_name": "synthetic-q10f-slack-mention-encoding",
+  "steps": [
+    {
+      "response": {
+        "type": "user_input",
+        "content": "Using my connected Slack account, post one message in the Slack conversation with ID D0CANARY that @-mentions Canary User so they actually get notified. The message text must include the exact marker MENTION_CANARY."
+      }
+    },
+    {
+      "response": {
+        "type": "tool_calls",
+        "tool_calls": [
+          {
+            "id": "call_mention_extension_search",
+            "name": "builtin__extension_search",
+            "arguments": {
+              "query": "Slack"
+            }
+          }
+        ],
+        "input_tokens": 0,
+        "output_tokens": 0
+      }
+    },
+    {
+      "response": {
+        "type": "tool_calls",
+        "tool_calls": [
+          {
+            "id": "call_mention_extension_install",
+            "name": "builtin__extension_install",
+            "arguments": {
+              "extension_id": "slack"
+            }
+          }
+        ],
+        "input_tokens": 0,
+        "output_tokens": 0
+      }
+    },
+    {
+      "response": {
+        "type": "tool_calls",
+        "tool_calls": [
+          {
+            "id": "call_mention_extension_activate",
+            "name": "builtin__extension_activate",
+            "arguments": {
+              "extension_id": "slack"
+            }
+          }
+        ],
+        "input_tokens": 0,
+        "output_tokens": 0
+      }
+    },
+    {
+      "response": {
+        "type": "tool_calls",
+        "tool_calls": [
+          {
+            "id": "call_mention_get_conversation_info",
+            "name": "slack.get_conversation_info",
+            "arguments": {
+              "channel": "D0CANARY"
+            }
+          }
+        ],
+        "input_tokens": 0,
+        "output_tokens": 0
+      }
+    },
+    {
+      "response": {
+        "type": "tool_calls",
+        "tool_calls": [
+          {
+            "id": "call_mention_send_message",
+            "name": "slack.send_message",
+            "arguments": {
+              "channel": "D0CANARY",
+              "text": "<@U0CANARY> MENTION_CANARY"
+            }
+          }
+        ],
+        "input_tokens": 0,
+        "output_tokens": 0
+      }
+    },
+    {
+      "response": {
+        "type": "text",
+        "content": "Posted the mention message with marker MENTION_CANARY.",
+        "input_tokens": 0,
+        "output_tokens": 0
+      }
+    }
+  ]
+}

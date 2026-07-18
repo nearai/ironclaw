@@ -5,7 +5,17 @@ Reborn stack. Plan: `docs/plans/2026-06-17-reborn-projects.md`.
 
 > Not to be confused with `ironclaw_engine`'s legacy `Project` type. This crate
 > serves the Reborn stack (`ironclaw_product_workflow` → composition →
-> `ironclaw_webui_v2`).
+> `ironclaw_webui`).
+
+## W2 crate-count decision
+
+Keep `ironclaw_projects` as a standalone substrate crate for W2. It owns the
+durable project entity, live membership ACL, and repository contract over
+`ScopedFilesystem`; folding that into composition would put domain persistence
+behind the wiring layer. If this boundary is revisited later, the only plausible
+consumer-side target is `ironclaw_product_workflow` (which owns the
+`ProjectService` facade), and only if the project repository/domain contract can
+move there without forcing lower substrate crates to depend upward.
 
 ## What this crate owns
 

@@ -85,6 +85,7 @@ fn actor() -> TurnActor {
 
 fn submit_request(thread: &str, idempotency_key: &str) -> SubmitTurnRequest {
     SubmitTurnRequest {
+        requested_model: None,
         scope: scope(thread),
         actor: actor(),
         accepted_message_ref: AcceptedMessageRef::new(format!("message-{thread}")).unwrap(),
@@ -177,6 +178,7 @@ where
 {
     store
         .apply_validated_loop_exit(ApplyValidatedLoopExitRequest {
+            model_usage: None,
             run_id: claimed.state.run_id,
             runner_id: claimed.runner_id,
             lease_token: claimed.lease_token,
@@ -197,6 +199,7 @@ where
 {
     store
         .apply_validated_loop_exit(ApplyValidatedLoopExitRequest {
+            model_usage: None,
             run_id: claimed.state.run_id,
             runner_id: claimed.runner_id,
             lease_token: claimed.lease_token,

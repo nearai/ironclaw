@@ -2,6 +2,7 @@ use async_trait::async_trait;
 use ironclaw_approvals::*;
 use ironclaw_authorization::*;
 use ironclaw_capabilities::*;
+use ironclaw_filesystem::InMemoryBackend;
 use ironclaw_host_api::*;
 use ironclaw_run_state::*;
 use serde_json::json;
@@ -139,9 +140,10 @@ async fn capability_host_rejects_mutated_github_comment_issue_replay_before_disp
 struct GitHubCommentApprovalFixture {
     registry: ironclaw_extensions::ExtensionRegistry,
     dispatcher: RecordingDispatcher,
-    run_state: InMemoryRunStateStore,
-    approval_requests: InMemoryApprovalRequestStore,
-    leases: InMemoryCapabilityLeaseStore,
+    run_state: ironclaw_run_state::FilesystemRunStateStore<ironclaw_filesystem::InMemoryBackend>,
+    approval_requests:
+        ironclaw_run_state::FilesystemApprovalRequestStore<ironclaw_filesystem::InMemoryBackend>,
+    leases: FilesystemCapabilityLeaseStore<InMemoryBackend>,
     context: ExecutionContext,
     scope: ResourceScope,
     invocation_id: InvocationId,
@@ -154,9 +156,9 @@ struct GitHubCommentApprovalFixture {
 async fn blocked_github_comment_fixture() -> GitHubCommentApprovalFixture {
     let registry = registry_with_github_comment_capability();
     let dispatcher = RecordingDispatcher::default();
-    let run_state = InMemoryRunStateStore::new();
-    let approval_requests = InMemoryApprovalRequestStore::new();
-    let leases = InMemoryCapabilityLeaseStore::new();
+    let run_state = ironclaw_run_state::in_memory_backed_run_state_store();
+    let approval_requests = ironclaw_run_state::in_memory_backed_approval_request_store();
+    let leases = in_memory_backed_capability_lease_store();
     let block_host = CapabilityHost::new(&registry, &dispatcher, &ApprovalAuthorizer)
         .with_run_state(&run_state)
         .with_approval_requests(&approval_requests);

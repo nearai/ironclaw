@@ -1,6 +1,6 @@
 use std::collections::BTreeSet;
 
-use ironclaw_extensions::ExtensionPackage;
+use ironclaw_extensions::{ExtensionManifest, ExtensionPackage};
 use ironclaw_host_api::{
     RuntimeCredentialAccountProviderId, RuntimeCredentialAccountSetup,
     RuntimeCredentialAuthRequirement, RuntimeCredentialRequirementSource,
@@ -10,14 +10,19 @@ use ironclaw_product_workflow::LifecycleExtensionCredentialSetup;
 pub(crate) fn package_runtime_credential_auth_requirements(
     package: &ExtensionPackage,
 ) -> Vec<RuntimeCredentialAuthRequirement> {
+    manifest_runtime_credential_auth_requirements(&package.manifest)
+}
+
+pub(crate) fn manifest_runtime_credential_auth_requirements(
+    manifest: &ExtensionManifest,
+) -> Vec<RuntimeCredentialAuthRequirement> {
     let mut requirements: Vec<RuntimeCredentialAuthRequirement> = Vec::new();
-    for capability in &package.manifest.capabilities {
+    for capability in &manifest.capabilities {
         for credential in &capability.runtime_credentials {
             if !credential.required {
                 continue;
             }
-            let Some(requirement) =
-                credential.product_auth_requirement_for(package.manifest.id.clone())
+            let Some(requirement) = credential.product_auth_requirement_for(manifest.id.clone())
             else {
                 continue;
             };
@@ -51,6 +56,7 @@ pub(crate) fn lifecycle_credential_setup(
                 scopes: normalized_provider_scopes(scopes),
             }
         }
+        RuntimeCredentialAccountSetup::Pairing => LifecycleExtensionCredentialSetup::Pairing,
         // Retired kinds exist only in legacy persisted records, never in live
         // manifests, so this arm is unreachable from the manifest-projection
         // path; fold to the default manual shape rather than inventing a
@@ -162,6 +168,7 @@ fn normalized_runtime_credential_setup(
             scopes: normalized_provider_scopes(&scopes),
         },
         RuntimeCredentialAccountSetup::ManualToken => RuntimeCredentialAccountSetup::ManualToken,
+        RuntimeCredentialAccountSetup::Pairing => RuntimeCredentialAccountSetup::Pairing,
         RuntimeCredentialAccountSetup::Retired => RuntimeCredentialAccountSetup::Retired,
     }
 }

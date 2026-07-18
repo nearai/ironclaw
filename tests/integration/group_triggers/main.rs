@@ -23,10 +23,12 @@ mod reborn_support;
 #[path = "../../support/mod.rs"]
 mod support;
 
+mod scenario_delivery_target_fail_closed;
 mod scenario_trigger_persists_after_reopen;
 mod scenario_trigger_self_create_denied;
 mod scenario_triggered_chained_gate;
 mod scenario_triggered_gate;
+mod scenario_triggered_gate_hold_visible;
 mod scenario_verbs_lifecycle;
 mod scenario_webui_automations_list;
 mod scenario_webui_automations_rename;
@@ -87,6 +89,14 @@ async fn triggers_group_e2e() {
         scenario_trigger_self_create_denied::run(&g).await,
     );
 
+    // Per-trigger delivery routing fails closed on a host with no outbound
+    // delivery target providers: routed create rejected, nothing persisted.
+    // Accept path is dispatch-tier + composition-tier (see scenario doc).
+    report.record(
+        "delivery_target_fail_closed",
+        scenario_delivery_target_fail_closed::run(&g).await,
+    );
+
     report.assert_all_passed();
 }
 
@@ -137,6 +147,18 @@ async fn triggered_gate_group() {
     report.record(
         "triggered_gate_chained_approve",
         scenario_triggered_chained_gate::run_chained_approve(&g_chained).await,
+    );
+
+    // #5886 RED: a gate-parked triggered fire must surface a derived
+    // active_hold on both read surfaces. Own combined group: trigger verbs
+    // need auto-approve ON while write_file gates via an AskEachTime override
+    // — neither `triggers()` nor `live_approvals()` offers both.
+    let g_hold = RebornIntegrationGroup::triggers_with_gated_write()
+        .await
+        .expect("hold-visibility group builds");
+    report.record(
+        "triggered_gate_hold_visible",
+        scenario_triggered_gate_hold_visible::run(&g_hold).await,
     );
 
     report.assert_all_passed();

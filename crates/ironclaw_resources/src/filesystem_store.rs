@@ -437,20 +437,15 @@ mod tests {
         governor
             .try_set_limit(
                 account.clone(),
-                ResourceLimits {
-                    max_usd: Some(dec!(1.00)),
-                    max_concurrency_slots: Some(1),
-                    ..ResourceLimits::default()
-                },
+                ResourceLimits::default()
+                    .set_max_usd(dec!(1.00))
+                    .set_max_concurrency_slots(1),
             )
             .unwrap();
         let reservation = governor
             .reserve(
                 scope.clone(),
-                ResourceEstimate {
-                    concurrency_slots: Some(1),
-                    ..ResourceEstimate::default()
-                },
+                ResourceEstimate::default().set_concurrency_slots(1),
             )
             .unwrap();
 
@@ -467,13 +462,7 @@ mod tests {
         // must be denied even though it goes through a fresh store
         // handle.
         let denied = reloaded
-            .reserve(
-                scope,
-                ResourceEstimate {
-                    concurrency_slots: Some(1),
-                    ..ResourceEstimate::default()
-                },
-            )
+            .reserve(scope, ResourceEstimate::default().set_concurrency_slots(1))
             .unwrap_err();
         assert!(matches!(denied, ResourceError::LimitExceeded { .. }));
 
@@ -504,19 +493,13 @@ mod tests {
         governor_a
             .try_set_limit(
                 account_a.clone(),
-                ResourceLimits {
-                    max_concurrency_slots: Some(1),
-                    ..ResourceLimits::default()
-                },
+                ResourceLimits::default().set_max_concurrency_slots(1),
             )
             .unwrap();
         governor_a
             .reserve(
                 scope_a,
-                ResourceEstimate {
-                    concurrency_slots: Some(1),
-                    ..ResourceEstimate::default()
-                },
+                ResourceEstimate::default().set_concurrency_slots(1),
             )
             .unwrap();
         assert_eq!(
@@ -537,19 +520,13 @@ mod tests {
         governor_b
             .try_set_limit(
                 account_b.clone(),
-                ResourceLimits {
-                    max_concurrency_slots: Some(1),
-                    ..ResourceLimits::default()
-                },
+                ResourceLimits::default().set_max_concurrency_slots(1),
             )
             .unwrap();
         let reservation = governor_b
             .reserve(
                 scope_b,
-                ResourceEstimate {
-                    concurrency_slots: Some(1),
-                    ..ResourceEstimate::default()
-                },
+                ResourceEstimate::default().set_concurrency_slots(1),
             )
             .unwrap();
         assert_eq!(
@@ -689,10 +666,7 @@ mod tests {
         let store = FilesystemBudgetGateStore::new(scoped);
         let gate = sample_gate();
         let id = gate.id;
-        let increased_limit = ResourceLimits {
-            max_usd: Some(dec!(1000.00)),
-            ..ResourceLimits::default()
-        };
+        let increased_limit = ResourceLimits::default().set_max_usd(dec!(1000.00));
 
         store.open(&scope, gate).unwrap();
         store

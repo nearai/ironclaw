@@ -10,6 +10,9 @@ homepage = "https://github.com/nearai/ironclaw"
 repository = "https://github.com/nearai/ironclaw"
 publish = false
 
+[package.metadata.ironclaw]
+layer = "app"
+
 [features]
 default = []
 # Use the single-process in-memory turn-state authority for the local-dev /
@@ -27,14 +30,14 @@ default = []
 # contention measurements that motivated it.
 inmemory-turn-state = []
 # Wire a host-managed LLM model gateway into the assembled runtime via
-# ironclaw_reborn's `LlmProviderModelGateway`. Off by default so this crate
+# ironclaw_runner's `LlmProviderModelGateway`. Off by default so this crate
 # stays substrate-only when callers don't want a model gateway in the
-# composed runtime. Mirrors `ironclaw_reborn`'s own `root-llm-provider`
+# composed runtime. Mirrors `ironclaw_runner`'s own `root-llm-provider`
 # feature shape (optional dep, `default-features = false`).
 root-llm-provider = [
     "dep:ironclaw_llm",
     "ironclaw_llm/registry-provider-factory",
-    "ironclaw_reborn/root-llm-provider",
+    "ironclaw_runner/root-llm-provider",
 ]
 # Expose test-only helpers (mock LLM gateway, budget runtime accessors)
 # so integration tests in this crate's `tests/` directory and downstream
@@ -43,7 +46,10 @@ root-llm-provider = [
 # budget pipeline end-to-end. Enable with `cargo test --features
 # test-support` (plus whatever feature surface the test crate also
 # requires, e.g. `webui-v2-beta`).
-test-support = ["ironclaw_host_runtime/test-support"]
+test-support = [
+    "ironclaw_channel_delivery/test-support",
+    "ironclaw_host_runtime/test-support",
+]
 # Expose the narrow `extension_installation_store_for_migration` accessor for
 # the v1→Reborn migration tool (`ironclaw_reborn_migration`). Ships zero bytes in
 # a default production binary; mirrors the `test-support` substrate seams.
@@ -55,10 +61,12 @@ migration-support = []
 # from its `serve` subcommand. Substrate-only callers (v1 `AppBuilder`,
 # diagnostic harnesses) stay off the feature and carry no WebUI code.
 webui-v2-beta = [
-    "dep:ironclaw_webui_v2",
-    "ironclaw_webui_v2/webui-v2-beta",
+    # The WebChat v2 route surface + serve loop merged up into `ironclaw_webui`
+    # (as its `webui_v2` module + `webui_serve`); this crate no longer depends on
+    # that route crate. Composition keeps this feature to gate the WebUI facade,
+    # identity, admin, and route-mount vocabulary it still owns.
     "dep:ironclaw_reborn_identity",
-    "ironclaw_reborn/webui-user-store",
+    "ironclaw_runner/webui-user-store",
     "libsql",
     "dep:axum",
     "dep:tower",
@@ -72,6 +80,17 @@ slack-v2-host-beta = [
     "webui-v2-beta",
     "dep:ironclaw_slack_v2_adapter",
     "dep:ironclaw_wasm_product_adapters",
+    "ironclaw_channel_host/webhook-serve",
+    "ironclaw_product_workflow/storage",
+]
+# Host-mounted Telegram Bot API webhook ingress + pairing for the single
+# user-visible `telegram` channel extension. Off by default; host binaries
+# opt in and mount it behind their Telegram enablement/config checks.
+telegram-v2-host-beta = [
+    "webui-v2-beta",
+    "dep:ironclaw_telegram_extension",
+    "dep:ironclaw_wasm_product_adapters",
+    "ironclaw_channel_host/webhook-serve",
     "ironclaw_product_workflow/storage",
 ]
 openai-compat-beta = [
@@ -86,7 +105,7 @@ libsql = [
     "dep:libsql",
     "ironclaw_filesystem/libsql",
     "ironclaw_host_runtime/libsql",
-    "ironclaw_reborn/filesystem-goal-store",
+    "ironclaw_runner/filesystem-goal-store",
     "ironclaw_reborn_event_store/libsql",
     "ironclaw_resources/libsql",
     "ironclaw_run_state/libsql",
@@ -96,8 +115,8 @@ postgres = [
     "dep:deadpool-postgres",
     "ironclaw_filesystem/postgres",
     "ironclaw_host_runtime/postgres",
-    "ironclaw_reborn/filesystem-goal-store",
-    "ironclaw_reborn/filesystem-local-trigger-access",
+    "ironclaw_runner/filesystem-goal-store",
+    "ironclaw_runner/filesystem-local-trigger-access",
     "ironclaw_reborn_event_store/postgres",
     "ironclaw_resources/postgres",
     "ironclaw_run_state/postgres",
@@ -110,6 +129,8 @@ chrono = "0.4"
 deadpool-postgres = { version = "0.14", optional = true }
 futures = "0.3"
 ironclaw_auth = { path = "../ironclaw_auth" }
+ironclaw_channel_host = { path = "../ironclaw_channel_host" }
+ironclaw_channel_delivery = { path = "../ironclaw_channel_delivery" }
 ironclaw_common = { path = "../ironclaw_common" }
 ironclaw_capabilities = { path = "../ironclaw_capabilities" }
 ironclaw_approvals = { path = "../ironclaw_approvals" }
@@ -126,7 +147,8 @@ ironclaw_hooks = { path = "../ironclaw_hooks" }
 ironclaw_host_api = { path = "../ironclaw_host_api" }
 ironclaw_host_runtime = { path = "../ironclaw_host_runtime" }
 ironclaw_llm = { path = "../ironclaw_llm", optional = true, default-features = false }
-ironclaw_loop_support = { path = "../ironclaw_loop_support" }
+ironclaw_loop_host = { path = "../ironclaw_loop_host" }
+ironclaw_memory = { path = "../ironclaw_memory" }
 ironclaw_mcp = { path = "../ironclaw_mcp" }
 ironclaw_network = { path = "../ironclaw_network" }
 ironclaw_observability = { path = "../ironclaw_observability" }
@@ -135,7 +157,7 @@ ironclaw_processes = { path = "../ironclaw_processes" }
 ironclaw_product_adapters = { path = "../ironclaw_product_adapters" }
 ironclaw_product_adapter_registry = { path = "../ironclaw_product_adapter_registry" }
 ironclaw_product_workflow = { path = "../ironclaw_product_workflow" }
-ironclaw_reborn = { path = "../ironclaw_reborn" }
+ironclaw_runner = { path = "../ironclaw_runner" }
 ironclaw_reborn_config = { path = "../ironclaw_reborn_config" }
 ironclaw_reborn_identity = { path = "../ironclaw_reborn_identity", optional = true }
 ironclaw_reborn_event_store = { path = "../ironclaw_reborn_event_store" }
@@ -147,9 +169,9 @@ ironclaw_run_state = { path = "../ironclaw_run_state" }
 ironclaw_runtime_policy = { path = "../ironclaw_runtime_policy" }
 ironclaw_safety = { path = "../ironclaw_safety" }
 ironclaw_secrets = { path = "../ironclaw_secrets" }
-ironclaw_skill_learning = { path = "../ironclaw_skill_learning" }
 ironclaw_skills = { path = "../ironclaw_skills" }
 ironclaw_slack_v2_adapter = { path = "../ironclaw_slack_v2_adapter", optional = true }
+ironclaw_telegram_extension = { path = "../ironclaw_telegram_extension", optional = true }
 ironclaw_threads = { path = "../ironclaw_threads" }
 ironclaw_triggers = { path = "../ironclaw_triggers" }
 ironclaw_projects = { path = "../ironclaw_projects" }
@@ -157,9 +179,10 @@ ironclaw_trust = { path = "../ironclaw_trust" }
 ironclaw_turns = { path = "../ironclaw_turns" }
 ironclaw_product_context = { path = "../ironclaw_product_context", version = "0.1.0" }
 nix = { version = "0.30", default-features = false, features = ["process"] }
-# WebUI v2 route surface — feature-gated; only used by `webui_serve`.
-ironclaw_webui_v2 = { path = "../ironclaw_webui_v2", optional = true }
-# WebUI v2 static SPA bundle — feature-gated; mounted under `/v2`.
+# Unpacking uploaded WASM-tool bundles for the WebUI "Install Tool" import flow.
+zip = { version = "8", default-features = false, features = ["deflate"] }
+# WebUI v2 route surface + static SPA bundle merged up into
+# `ironclaw_webui`; no longer a composition dependency.
 ironclaw_wasm_product_adapters = { path = "../ironclaw_wasm_product_adapters", optional = true }
 libsql = { version = "0.9", optional = true, default-features = false, features = ["core", "replication", "remote", "tls"] }
 libc = "0.2"
@@ -191,11 +214,29 @@ uuid = { version = "1", features = ["v4"] }
 async-trait = "0.1"
 chrono = "0.4"
 hmac = "0.13"
+# Enables the in-memory-backed outbound-state store constructor for tests only.
+ironclaw_outbound = { path = "../ironclaw_outbound", features = ["test-support"] }
+# Enables the in-memory-backed approval store constructors for tests only.
+ironclaw_approvals = { path = "../ironclaw_approvals", features = ["test-support"] }
+# Enables the in-memory-backed capability-lease store constructor for tests only.
+ironclaw_authorization = { path = "../ironclaw_authorization", features = ["test-support"] }
+# Enables the in-memory-backed process store constructors for tests only.
+ironclaw_processes = { path = "../ironclaw_processes", features = ["test-support"] }
+# Enables the in-memory-backed run-state/approval store constructors for tests only.
+ironclaw_run_state = { path = "../ironclaw_run_state", features = ["test-support"] }
+# Enables the in-memory-backed budget-gate store constructor for tests only.
+ironclaw_resources = { path = "../ironclaw_resources", features = ["test-support"] }
 http = "1"
 http-body-util = "0.1"
 # Admin-user-management e2e test drives the composed app with a real session
 # authenticator so a minted API token can be validated (login-with-token).
-ironclaw_reborn_webui_ingress = { path = "../ironclaw_reborn_webui_ingress" }
+# `slack-v2-host-beta` is enabled because composition's own WebUI integration
+# tests (`tests/webui_v2_product_auth*.rs`) exercise
+# `#[cfg(feature = "slack-v2-host-beta")]` blocks that call the
+# `WebuiServeConfig::with_slack_*` setters — which moved into this ingress crate
+# and are gated on the ingress slack feature. Cargo features cannot reach a
+# dev-dependency, so the dev-dep must request the feature directly.
+ironclaw_webui = { path = "../ironclaw_webui", features = ["slack-v2-host-beta"] }
 secrecy = { version = "0.10", features = ["serde"] }
 ironclaw_common = { path = "../ironclaw_common" }
 ironclaw_host_api = { path = "../ironclaw_host_api" }
@@ -223,6 +264,10 @@ tracing-test = "0.2"
 
 [[test]]
 name = "production_runtime_automations"
+required-features = ["libsql"]
+
+[[test]]
+name = "resource_governor_libsql_contract"
 required-features = ["libsql"]
 
 [build-dependencies]

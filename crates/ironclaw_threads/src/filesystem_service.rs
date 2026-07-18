@@ -59,19 +59,25 @@ use uuid::Uuid;
 use crate::identifiers::SummaryArtifactId;
 use crate::summary_artifacts::find_overlapping_summary;
 use crate::title::derive_title_from_message;
+use crate::tool_result_records::{
+    tool_result_record_chunk, validate_tool_result_record_content,
+    validate_tool_result_record_read, validate_tool_result_record_ref,
+};
 use crate::{
     AcceptInboundMessageRequest, AcceptedInboundMessage, AcceptedInboundMessageReplay,
     AppendAssistantDraftRequest, AppendCapabilityDisplayPreviewRequest,
     AppendFinalizedAssistantMessageRequest, AppendToolResultReferenceRequest,
     CapabilityDisplayPreviewEnvelope, ContextMessage, ContextMessages, ContextWindow,
-    CreateSummaryArtifactRequest, EnsureThreadRequest, LatestThreadMessageRequest,
-    ListThreadsForScopeRequest, ListThreadsForScopeResponse, LoadContextMessagesRequest,
-    LoadContextWindowRequest, MessageContent, MessageKind, MessageStatus,
-    ProviderToolCallReferenceEnvelope, RedactMessageRequest, ReplayAcceptedInboundMessageRequest,
+    CreateSummaryArtifactRequest, DeleteToolResultRecordRequest, EnsureThreadRequest,
+    LatestThreadMessageRequest, ListThreadsForScopeRequest, ListThreadsForScopeResponse,
+    LoadContextMessagesRequest, LoadContextWindowRequest, MessageContent, MessageKind,
+    MessageStatus, ProviderToolCallReferenceEnvelope, PutToolResultRecordRequest,
+    ReadToolResultRecordRequest, RedactMessageRequest, ReplayAcceptedInboundMessageRequest,
     SessionThreadError, SessionThreadRecord, SessionThreadService, SummaryArtifact,
     SummaryModelContextPolicy, ThreadHistory, ThreadHistoryRequest, ThreadMessageId,
     ThreadMessageRange, ThreadMessageRangeRequest, ThreadMessageRecord, ThreadScope,
-    ToolResultReferenceEnvelope, UpdateAssistantDraftRequest, UpdateToolResultReferenceRequest,
+    ToolResultRecordChunk, ToolResultReferenceEnvelope, UpdateAssistantDraftRequest,
+    UpdateToolResultRecordRequest, UpdateToolResultReferenceRequest,
 };
 use message_lookup_index::MessageLookupIndexStore;
 use message_sequence_index::{MessageSequenceIndexStore, message_sequence_index_entry_for_message};
@@ -84,7 +90,7 @@ const FILESYSTEM_CAS_RETRIES: usize = 8;
 
 /// [`RecordKind`] discriminants for the four record types persisted by this
 /// service. Setting `entry.kind` makes writes record-shaped so
-/// [`LocalFilesystem`] (which rejects record-shaped puts) triggers the
+/// [`DiskFilesystem`] (which rejects record-shaped puts) triggers the
 /// fail-closed path on the CAS gate instead of accepting a byte-only first
 /// write without CAS enforcement.
 const SESSION_THREAD_KIND: &str = "session_thread";
@@ -96,6 +102,9 @@ const THREAD_IDEMPOTENCY_KIND: &str = "thread_idempotency";
 const INDEXED_RANGE_MESSAGE_READ_CONCURRENCY: usize = 8;
 /// Conservative fan-out for per-thread title derivation during sidebar listing.
 const TITLE_DERIVATION_READ_CONCURRENCY: usize = 8;
+/// One-shot first-turn context windows are a hot-path handoff from inbound
+/// accept to prompt construction; keep the cache bounded if a turn never runs.
+const ONE_SHOT_CONTEXT_WINDOW_CACHE_MAX_ENTRIES: usize = 4096;
 
 #[derive(Debug, Clone, Copy)]
 enum MessageRangeFallbackPolicy {
@@ -186,6 +195,7 @@ where
     complete_thread_source_scopes: Mutex<HashSet<String>>,
     thread_index_force_validate_scopes: Mutex<HashSet<String>>,
     complete_thread_index_scopes: Mutex<HashSet<String>>,
+    one_shot_context_windows: Mutex<HashMap<String, ContextWindow>>,
 }
 
 impl<F> FilesystemSessionThreadService<F>
@@ -205,11 +215,55 @@ where
             complete_thread_source_scopes: Mutex::new(HashSet::new()),
             thread_index_force_validate_scopes: Mutex::new(HashSet::new()),
             complete_thread_index_scopes: Mutex::new(HashSet::new()),
+            one_shot_context_windows: Mutex::new(HashMap::new()),
         }
     }
 
     pub fn clear_thread_index_cache_for_scope(&self, scope: &ThreadScope) {
         self.clear_thread_index_cache_for_scope_once(scope);
+    }
+
+    fn seed_one_shot_context_window(
+        &self,
+        scope: &ThreadScope,
+        thread_id: &ThreadId,
+        message: &ThreadMessageRecord,
+    ) {
+        let messages = vec![message.clone()];
+        let context = ContextWindow {
+            thread_id: thread_id.clone(),
+            messages: context_messages_with_summary_replacements(&messages, &[]),
+        };
+        if let Ok(mut cache) = self.one_shot_context_windows.lock() {
+            let key = one_shot_context_window_cache_key(scope, thread_id);
+            cache.insert(key.clone(), context);
+            evict_hash_map_entry_over_limit(
+                &mut cache,
+                ONE_SHOT_CONTEXT_WINDOW_CACHE_MAX_ENTRIES,
+                &key,
+            );
+        }
+    }
+
+    fn take_one_shot_context_window(
+        &self,
+        scope: &ThreadScope,
+        thread_id: &ThreadId,
+        max_messages: usize,
+    ) -> Option<ContextWindow> {
+        let key = one_shot_context_window_cache_key(scope, thread_id);
+        let mut context = self.one_shot_context_windows.lock().ok()?.remove(&key)?;
+        if max_messages < context.messages.len() {
+            let start = context.messages.len() - max_messages;
+            context.messages = context.messages.split_off(start);
+        }
+        Some(context)
+    }
+
+    fn invalidate_one_shot_context_window(&self, scope: &ThreadScope, thread_id: &ThreadId) {
+        if let Ok(mut cache) = self.one_shot_context_windows.lock() {
+            cache.remove(&one_shot_context_window_cache_key(scope, thread_id));
+        }
     }
 
     fn thread_entry(record: &StoredThreadRecord) -> Result<Entry, SessionThreadError> {
@@ -377,6 +431,7 @@ where
                     "new message",
                 )
                 .await;
+                self.invalidate_one_shot_context_window(scope, thread_id);
                 Ok(())
             }
             Err(PutError::VersionMismatch) => Err(SessionThreadError::Backend(format!(
@@ -401,7 +456,10 @@ where
             .append(&scope.to_resource_scope(), &path, payload)
             .await
         {
-            Ok(_) => Ok(true),
+            Ok(_) => {
+                self.invalidate_one_shot_context_window(scope, thread_id);
+                Ok(true)
+            }
             Err(FilesystemError::Unsupported {
                 operation: FilesystemOperation::Append,
                 ..
@@ -941,6 +999,65 @@ where
         thread_id: &ThreadId,
     ) -> Result<Vec<SummaryArtifact>, SessionThreadError> {
         let root = summaries_root(scope, thread_id)?;
+        let mut summaries = Vec::new();
+        let mut offset = 0_u64;
+
+        loop {
+            let entries = match self
+                .filesystem
+                .query(
+                    &scope.to_resource_scope(),
+                    &root,
+                    &Filter::All,
+                    Page::new(offset, Page::MAX_LIMIT),
+                )
+                .await
+            {
+                Ok(entries) => entries,
+                Err(FilesystemError::Unsupported {
+                    operation: FilesystemOperation::Query,
+                    ..
+                }) => {
+                    return self
+                        .list_thread_summaries_by_directory(scope, thread_id)
+                        .await;
+                }
+                Err(error) => return Err(error.into()),
+            };
+            let entry_count = entries.len();
+
+            for versioned in entries {
+                if !versioned.path.as_str().ends_with(".json") {
+                    continue;
+                }
+                let record = deserialize::<SummaryArtifact>(&versioned.entry.body)?;
+                if &record.thread_id == thread_id {
+                    summaries.push(record);
+                }
+            }
+
+            if entry_count < Page::MAX_LIMIT as usize {
+                break;
+            }
+            offset = offset.saturating_add(entry_count as u64);
+        }
+
+        summaries.sort_by_key(|summary| {
+            (
+                summary.start_sequence,
+                summary.end_sequence,
+                summary.summary_id.to_string(),
+            )
+        });
+        Ok(summaries)
+    }
+
+    async fn list_thread_summaries_by_directory(
+        &self,
+        scope: &ThreadScope,
+        thread_id: &ThreadId,
+    ) -> Result<Vec<SummaryArtifact>, SessionThreadError> {
+        let root = summaries_root(scope, thread_id)?;
         let entries = match self
             .filesystem
             .list_dir(&scope.to_resource_scope(), &root)
@@ -1322,6 +1439,7 @@ where
                         "message update",
                     )
                     .await;
+                    self.invalidate_one_shot_context_window(scope, thread_id);
                     return Ok(message);
                 }
                 Err(PutError::VersionMismatch) => continue,
@@ -1583,6 +1701,12 @@ where
             }
         };
 
+        if sequence == 1 {
+            self.seed_one_shot_context_window(&scope, &thread_id, &message);
+        } else {
+            self.invalidate_one_shot_context_window(&scope, &thread_id);
+        }
+
         // Inbound user message is thread activity — stamp recency so the
         // sidebar surfaces this thread first. Best-effort: the message is
         // already durable, so a touch failure must not fail (and retry) the
@@ -1655,14 +1779,19 @@ where
             .ok_or_else(|| SessionThreadError::UnknownThread {
                 thread_id: thread_id.clone(),
             })?;
-        self.apply_message_update(scope, thread_id, message_id, |message| {
-            ensure_user_accepted(message, "mark_message_submitted")?;
-            message.status = MessageStatus::Submitted;
-            message.turn_id = Some(turn_id.clone());
-            message.turn_run_id = Some(turn_run_id.clone());
-            Ok(())
-        })
-        .await
+        let updated = self
+            .apply_message_update(scope, thread_id, message_id, |message| {
+                ensure_user_accepted(message, "mark_message_submitted")?;
+                message.status = MessageStatus::Submitted;
+                message.turn_id = Some(turn_id.clone());
+                message.turn_run_id = Some(turn_run_id.clone());
+                Ok(())
+            })
+            .await?;
+        if updated.sequence == 1 {
+            self.seed_one_shot_context_window(scope, thread_id, &updated);
+        }
+        Ok(updated)
     }
 
     async fn mark_message_rejected_busy(
@@ -2117,6 +2246,131 @@ where
         Ok(updated)
     }
 
+    async fn put_tool_result_record(
+        &self,
+        request: PutToolResultRecordRequest,
+    ) -> Result<(), SessionThreadError> {
+        validate_tool_result_record_ref(&request.result_ref)?;
+        validate_tool_result_record_content(&request.content)?;
+        self.read_thread(ThreadHistoryRequest {
+            scope: request.scope.clone(),
+            thread_id: request.thread_id.clone(),
+        })
+        .await?;
+        let path =
+            tool_result_record_path(&request.scope, &request.thread_id, &request.result_ref)?;
+        let content = request.content;
+        cas_update(
+            self.filesystem.as_ref(),
+            &request.scope.to_resource_scope(),
+            &path,
+            |body| Ok::<_, SessionThreadError>(body.to_vec()),
+            |body| {
+                Ok::<_, SessionThreadError>(
+                    Entry::bytes(body.clone()).with_content_type(ContentType::octet_stream()),
+                )
+            },
+            move |existing| {
+                let content = content.clone();
+                async move {
+                    match existing {
+                        Some(existing) if existing == content => Ok(CasApply::no_op(existing, ())),
+                        Some(_) => Err(SessionThreadError::Backend(
+                            "tool result record conflicts with existing content".to_string(),
+                        )),
+                        None => Ok(CasApply::new(content, ())),
+                    }
+                }
+            },
+        )
+        .await
+        .map_err(map_cas_error)
+    }
+
+    async fn read_tool_result_record(
+        &self,
+        request: ReadToolResultRecordRequest,
+    ) -> Result<Option<ToolResultRecordChunk>, SessionThreadError> {
+        validate_tool_result_record_ref(&request.result_ref)?;
+        validate_tool_result_record_read(request.max_bytes)?;
+        self.read_thread(ThreadHistoryRequest {
+            scope: request.scope.clone(),
+            thread_id: request.thread_id.clone(),
+        })
+        .await?;
+        let path =
+            tool_result_record_path(&request.scope, &request.thread_id, &request.result_ref)?;
+        let content = self
+            .filesystem
+            .get(&request.scope.to_resource_scope(), &path)
+            .await?
+            .map(|entry| entry.entry.body);
+        Ok(content
+            .map(|content| tool_result_record_chunk(&content, request.offset, request.max_bytes)))
+    }
+
+    async fn update_tool_result_record(
+        &self,
+        request: UpdateToolResultRecordRequest,
+    ) -> Result<(), SessionThreadError> {
+        validate_tool_result_record_ref(&request.result_ref)?;
+        validate_tool_result_record_content(&request.content)?;
+        self.read_thread(ThreadHistoryRequest {
+            scope: request.scope.clone(),
+            thread_id: request.thread_id.clone(),
+        })
+        .await?;
+        let path =
+            tool_result_record_path(&request.scope, &request.thread_id, &request.result_ref)?;
+        let content = request.content;
+        cas_update(
+            self.filesystem.as_ref(),
+            &request.scope.to_resource_scope(),
+            &path,
+            |body| Ok::<_, SessionThreadError>(body.to_vec()),
+            |body| {
+                Ok::<_, SessionThreadError>(
+                    Entry::bytes(body.clone()).with_content_type(ContentType::octet_stream()),
+                )
+            },
+            move |existing| {
+                let content = content.clone();
+                async move {
+                    if existing.is_none() {
+                        return Err(SessionThreadError::Backend(
+                            "tool result record was not found in thread".to_string(),
+                        ));
+                    }
+                    Ok(CasApply::new(content, ()))
+                }
+            },
+        )
+        .await
+        .map_err(map_cas_error)
+    }
+
+    async fn delete_tool_result_record(
+        &self,
+        request: DeleteToolResultRecordRequest,
+    ) -> Result<(), SessionThreadError> {
+        validate_tool_result_record_ref(&request.result_ref)?;
+        self.read_thread(ThreadHistoryRequest {
+            scope: request.scope.clone(),
+            thread_id: request.thread_id.clone(),
+        })
+        .await?;
+        let path =
+            tool_result_record_path(&request.scope, &request.thread_id, &request.result_ref)?;
+        match self
+            .filesystem
+            .delete(&request.scope.to_resource_scope(), &path)
+            .await
+        {
+            Ok(()) | Err(FilesystemError::NotFound { .. }) => Ok(()),
+            Err(error) => Err(error.into()),
+        }
+    }
+
     async fn update_assistant_draft(
         &self,
         request: UpdateAssistantDraftRequest,
@@ -2215,6 +2469,14 @@ where
         &self,
         request: LoadContextWindowRequest,
     ) -> Result<ContextWindow, SessionThreadError> {
+        if let Some(context) = self.take_one_shot_context_window(
+            &request.scope,
+            &request.thread_id,
+            request.max_messages,
+        ) {
+            return Ok(context);
+        }
+
         self.read_thread_versioned(&request.scope, &request.thread_id)
             .await?
             .ok_or_else(|| SessionThreadError::UnknownThread {
@@ -2387,7 +2649,10 @@ where
             .delete(&scope.to_resource_scope(), &thread_root(scope, thread_id)?)
             .await
         {
-            Ok(()) => self.delete_thread_index_record(scope, thread_id).await,
+            Ok(()) => {
+                self.invalidate_one_shot_context_window(scope, thread_id);
+                self.delete_thread_index_record(scope, thread_id).await
+            }
             Err(error) if is_not_found(&error) => Err(SessionThreadError::UnknownThread {
                 thread_id: thread_id.clone(),
             }),
@@ -2457,7 +2722,10 @@ where
         )
         .await
         {
-            Ok(()) => Ok(artifact),
+            Ok(()) => {
+                self.invalidate_one_shot_context_window(&request.scope, &request.thread_id);
+                Ok(artifact)
+            }
             Err(PutError::VersionMismatch) => Err(SessionThreadError::Backend(format!(
                 "filesystem CAS Absent rejected new summary artifact at {}",
                 path.as_str()
@@ -2642,6 +2910,29 @@ fn messages_root(
     ))
 }
 
+fn tool_result_record_path(
+    scope: &ThreadScope,
+    thread_id: &ThreadId,
+    result_ref: &str,
+) -> Result<ScopedPath, SessionThreadError> {
+    scoped_path(&format!(
+        "{}/tool_results/{}.bin",
+        thread_root_string(scope, thread_id),
+        tool_result_record_key(result_ref)
+    ))
+}
+
+fn tool_result_record_key(result_ref: &str) -> String {
+    let digest = Sha256::digest(result_ref.as_bytes());
+    let mut output = String::with_capacity("sha256-".len() + digest.len() * 2);
+    output.push_str("sha256-");
+    for byte in digest {
+        use std::fmt::Write as _;
+        let _ = write!(&mut output, "{byte:02x}");
+    }
+    output
+}
+
 fn message_record_path(
     scope: &ThreadScope,
     thread_id: &ThreadId,
@@ -2708,6 +2999,33 @@ fn thread_root_string(scope: &ThreadScope, thread_id: &ThreadId) -> String {
     base.push_str("/threads/");
     base.push_str(thread_id.as_str());
     base
+}
+
+fn one_shot_context_window_cache_key(scope: &ThreadScope, thread_id: &ThreadId) -> String {
+    format!(
+        "{}:{}",
+        scope.tenant_id.as_str(),
+        thread_root_string(scope, thread_id)
+    )
+}
+
+fn evict_hash_map_entry_over_limit<T>(
+    map: &mut HashMap<String, T>,
+    max_entries: usize,
+    keep: &str,
+) {
+    if map.len() <= max_entries {
+        return;
+    }
+    let mut keys = map.keys();
+    let victim = match keys.next() {
+        Some(first) if first.as_str() == keep => keys.next().cloned(),
+        Some(first) => Some(first.clone()),
+        None => None,
+    };
+    if let Some(victim) = victim {
+        map.remove(&victim);
+    }
 }
 
 /// Within-tenant sub-scope axes encoded into the path. Tenant + user
@@ -3059,7 +3377,7 @@ fn summary_covers_redacted_or_deleted_content(
 // `FilesystemError::VersionMismatch` — that's correct and matches
 // `cas_update`'s contract. The `Unsupported` → `CasExpectation::Any`
 // fallback below only triggers on byte-only backends (e.g.
-// `LocalFilesystem`), which production does not mount for these
+// `DiskFilesystem`), which production does not mount for these
 // stores; it is not protected by any lock map. Migrating these
 // single-record RMWs onto `cas_update` (fail-closed on a non-CAS
 // backend) is a tracked, deferred follow-up sibling to the

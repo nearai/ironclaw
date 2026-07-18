@@ -15,7 +15,7 @@ use ironclaw_dispatcher::{
 };
 use ironclaw_events::{InMemoryEventSink, RuntimeEventKind};
 use ironclaw_extensions::{ExtensionManifest, ExtensionPackage, ExtensionRegistry, ManifestSource};
-use ironclaw_filesystem::LocalFilesystem;
+use ironclaw_filesystem::DiskFilesystem;
 use ironclaw_host_api::*;
 use ironclaw_host_runtime::{
     CapabilitySurfaceVersion, DefaultHostRuntime, HostRuntime, RuntimeCapabilityOutcome,
@@ -24,7 +24,7 @@ use ironclaw_host_runtime::{
 use ironclaw_resources::{
     InMemoryResourceGovernor, ResourceAccount, ResourceGovernor, ResourceTally,
 };
-use ironclaw_run_state::{InMemoryRunStateStore, RunStateStore, RunStatus};
+use ironclaw_run_state::{RunStateStore, RunStatus};
 use ironclaw_trust::{
     AdminConfig, AdminEntry, AuthorityCeiling, EffectiveTrustClass, HostTrustAssignment,
     HostTrustPolicy, TrustDecision, TrustProvenance,
@@ -45,7 +45,7 @@ async fn default_host_runtime_invokes_through_runtime_dispatcher_with_resources_
     let (registry, dispatcher, governor, events) = runtime_dispatcher_stack(Arc::clone(&adapter));
     let dispatcher: Arc<dyn CapabilityDispatcher> = Arc::new(dispatcher);
     let authorizer = Arc::new(CountingGrantAuthorizer::default());
-    let run_state = Arc::new(InMemoryRunStateStore::new());
+    let run_state = Arc::new(ironclaw_run_state::in_memory_backed_run_state_store());
     let runtime = DefaultHostRuntime::new(
         Arc::clone(&registry),
         dispatcher,
@@ -60,10 +60,7 @@ async fn default_host_runtime_invokes_through_runtime_dispatcher_with_resources_
     });
     let scope = context.resource_scope.clone();
     let invocation_id = context.invocation_id;
-    let estimate = ResourceEstimate {
-        output_bytes: Some(4_096),
-        ..ResourceEstimate::default()
-    };
+    let estimate = ResourceEstimate::default().set_output_bytes(4_096);
     let input = json!({"message":"through host runtime"});
 
     let outcome = runtime
@@ -117,7 +114,7 @@ async fn default_host_runtime_fails_unsupported_obligations_before_runtime_dispa
     let adapter = Arc::new(RecordingRuntimeAdapter::new(json!({"must_not":"dispatch"})));
     let (registry, dispatcher, governor, events) = runtime_dispatcher_stack(Arc::clone(&adapter));
     let dispatcher: Arc<dyn CapabilityDispatcher> = Arc::new(dispatcher);
-    let run_state = Arc::new(InMemoryRunStateStore::new());
+    let run_state = Arc::new(ironclaw_run_state::in_memory_backed_run_state_store());
     let runtime = DefaultHostRuntime::new(
         Arc::clone(&registry),
         dispatcher,
@@ -203,10 +200,10 @@ impl RecordingRuntimeAdapter {
 }
 
 #[async_trait]
-impl RuntimeAdapter<LocalFilesystem, InMemoryResourceGovernor> for RecordingRuntimeAdapter {
+impl RuntimeAdapter<DiskFilesystem, InMemoryResourceGovernor> for RecordingRuntimeAdapter {
     async fn dispatch_json(
         &self,
-        request: RuntimeAdapterRequest<'_, LocalFilesystem, InMemoryResourceGovernor>,
+        request: RuntimeAdapterRequest<'_, DiskFilesystem, InMemoryResourceGovernor>,
     ) -> Result<RuntimeAdapterResult, DispatchError> {
         self.requests.lock().unwrap().push(RecordedRuntimeRequest {
             capability_id: request.capability_id.clone(),
@@ -217,10 +214,8 @@ impl RuntimeAdapter<LocalFilesystem, InMemoryResourceGovernor> for RecordingRunt
             input: request.input.clone(),
         });
         let output = self.output.clone();
-        let usage = ResourceUsage {
-            output_bytes: serde_json::to_vec(&output).unwrap().len() as u64,
-            ..ResourceUsage::default()
-        };
+        let usage = ResourceUsage::default()
+            .set_output_bytes(serde_json::to_vec(&output).unwrap().len() as u64);
         let reservation = match request.resource_reservation {
             Some(reservation) => reservation,
             None => request
@@ -228,6 +223,7 @@ impl RuntimeAdapter<LocalFilesystem, InMemoryResourceGovernor> for RecordingRunt
                 .reserve(request.scope, request.estimate)
                 .map_err(|_| DispatchError::Wasm {
                     kind: RuntimeDispatchErrorKind::Resource,
+                    safe_summary: None,
                 })?,
         };
         let output_bytes = usage.output_bytes;
@@ -236,6 +232,7 @@ impl RuntimeAdapter<LocalFilesystem, InMemoryResourceGovernor> for RecordingRunt
             .reconcile(reservation.id, usage.clone())
             .map_err(|_| DispatchError::Wasm {
                 kind: RuntimeDispatchErrorKind::Resource,
+                safe_summary: None,
             })?;
         Ok(RuntimeAdapterResult {
             output,
@@ -295,12 +292,12 @@ fn runtime_dispatcher_stack(
     adapter: Arc<RecordingRuntimeAdapter>,
 ) -> (
     Arc<ExtensionRegistry>,
-    RuntimeDispatcher<'static, LocalFilesystem, InMemoryResourceGovernor>,
+    RuntimeDispatcher<'static, DiskFilesystem, InMemoryResourceGovernor>,
     Arc<InMemoryResourceGovernor>,
     InMemoryEventSink,
 ) {
     let registry = Arc::new(registry_with_echo_capability());
-    let filesystem = Arc::new(LocalFilesystem::new());
+    let filesystem = Arc::new(DiskFilesystem::new());
     let governor = Arc::new(InMemoryResourceGovernor::new());
     let events = InMemoryEventSink::new();
     let dispatcher =

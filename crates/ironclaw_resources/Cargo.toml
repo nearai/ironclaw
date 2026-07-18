@@ -11,10 +11,16 @@ homepage = "https://github.com/nearai/ironclaw"
 repository = "https://github.com/nearai/ironclaw"
 publish = false
 
+[package.metadata.ironclaw]
+layer = "kernel"
+
 [features]
 default = []
 libsql = []
 postgres = []
+# Exposes `test_support` in-memory-backed store constructors for downstream
+# crates' tests. Disabled by default; enable only from [dev-dependencies].
+test-support = []
 
 [dependencies]
 chrono = { version = "0.4", features = ["serde"] }
@@ -26,7 +32,7 @@ rust_decimal = { version = "1", features = ["serde", "serde-with-str"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 thiserror = "2"
-tokio = { version = "1", features = ["macros", "rt", "sync", "time"] }
+tokio = { version = "1", features = ["macros", "rt", "rt-multi-thread", "sync", "time"] }
 tracing = "0.1"
 uuid = { version = "1", features = ["v4", "serde"] }
 

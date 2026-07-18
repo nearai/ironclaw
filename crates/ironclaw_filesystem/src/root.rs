@@ -53,7 +53,7 @@ pub trait RootFilesystem: Send + Sync {
     /// the unified surface must implement `put` natively. Byte-only backends
     /// can do this with a thin delegation to their own native `write_file`,
     /// gated on `kind = None`, empty `indexed`, and `CasExpectation::Any`;
-    /// see `LocalFilesystem::put` for the canonical pattern. We deliberately
+    /// see `DiskFilesystem::put` for the canonical pattern. We deliberately
     /// do **not** route the default `put` through `self.write_file`, because
     /// the default `write_file` routes through `self.put` — a backend that
     /// overrode neither would recurse to a stack overflow.
@@ -73,7 +73,7 @@ pub trait RootFilesystem: Send + Sync {
     /// other direction in the trait default. Byte-only backends implement
     /// `get` by wrapping their native `read_file` result in
     /// `Some(VersionedEntry { entry: Entry::bytes(body), version: 0 })`
-    /// directly. See `LocalFilesystem::get` for the canonical pattern.
+    /// directly. See `DiskFilesystem::get` for the canonical pattern.
     async fn get(&self, path: &VirtualPath) -> Result<Option<VersionedEntry>, FilesystemError> {
         unsupported(path, FilesystemOperation::ReadFile)
     }
