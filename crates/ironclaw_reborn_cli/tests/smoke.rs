@@ -4849,7 +4849,14 @@ fn onboard_openai_key_then_serve_boots_with_env_var_unset() {
         // No OPENAI_API_KEY: the stored key must be what makes this boot.
         // Target is `ironclaw_reborn` (the bin's normalized crate name, not
         // the `ironclaw_reborn_cli` package this test itself compiles as).
-        .env("IRONCLAW_REBORN_LOG", "info,ironclaw_reborn=debug")
+        // `ironclaw_reborn_composition=debug` is also needed to observe
+        // `RebornLlmReloadAdapter::reload`'s own `key_applied` trace below —
+        // that's the mechanism that actually swaps the placeholder gateway
+        // for the stored-key-backed openai provider (PR #6174 item A).
+        .env(
+            "IRONCLAW_REBORN_LOG",
+            "info,ironclaw_reborn=debug,ironclaw_reborn_composition=debug",
+        )
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
@@ -4862,6 +4869,19 @@ fn onboard_openai_key_then_serve_boots_with_env_var_unset() {
     assert!(
         pre_banner_stderr.contains("resolved LLM selection for Reborn runtime"),
         "serve must emit the resolved-LLM debug trace before binding; stderr: {pre_banner_stderr}"
+    );
+    // Regression pin for PR #6174 item A: `openai` has `api_key_required =
+    // true`, so unlike `nearai` it used to hit the STRICT
+    // `resolve_reborn_runtime_llm` inside `RebornLlmReloadAdapter::reload`
+    // (boot-time and Settings -> Inference save both go through it) and fail
+    // closed on `ApiKeyEnvUnset` before ever reaching the stored-key lookup
+    // — the placeholder gateway was silently never replaced. This asserts
+    // the live reload actually ran and applied the seeded key.
+    assert!(
+        pre_banner_stderr.contains("LLM reload applied to the live provider")
+            && pre_banner_stderr.contains("key_applied=true"),
+        "the seeded openai key must be found and applied to the live provider by the boot-time \
+         LLM reload, not left on the placeholder gateway; stderr: {pre_banner_stderr}"
     );
     assert!(
         pre_banner_stderr.contains("provider_id=openai"),
