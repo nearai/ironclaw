@@ -3839,7 +3839,7 @@ fn local_dev_scoped_filesystem(
 /// (where `DeliveredGateRouteStore`/`TriggeredRunDeliveryStore` used separate
 /// in-memory instances not visible to the shared preference tree).
 /// See docs/plans/2026-05-29-trigger-loop-delivery-resolution-implementation.md.
-pub(crate) struct LocalDevOutboundStores {
+pub(crate) struct OutboundStores {
     pub(crate) outbound_preferences: Arc<dyn CommunicationPreferenceRepository>,
     #[cfg(any(feature = "slack-v2-host-beta", feature = "telegram-v2-host-beta"))]
     pub(crate) outbound_state: Arc<dyn OutboundStateStore>,
@@ -3849,7 +3849,7 @@ pub(crate) struct LocalDevOutboundStores {
     pub(crate) triggered_run_delivery: Arc<dyn TriggeredRunDeliveryStore>,
 }
 
-fn local_dev_outbound_store(filesystem: Arc<CompositeRootFilesystem>) -> LocalDevOutboundStores {
+fn local_dev_outbound_store(filesystem: Arc<CompositeRootFilesystem>) -> OutboundStores {
     // One store instance over the composition-owned per-user scoped filesystem
     // (`/outbound` → `/tenants/<t>/users/<u>/outbound`). All four outbound
     // roles — preferences, state, delivered-gate routes, triggered-run delivery
@@ -3862,7 +3862,7 @@ fn local_dev_outbound_store(filesystem: Arc<CompositeRootFilesystem>) -> LocalDe
     let store: Arc<FilesystemOutboundStateStore<CompositeRootFilesystem>> = Arc::new(
         FilesystemOutboundStateStore::new(local_dev_scoped_filesystem(filesystem)),
     );
-    LocalDevOutboundStores {
+    OutboundStores {
         outbound_preferences: Arc::clone(&store) as Arc<dyn CommunicationPreferenceRepository>,
         #[cfg(any(feature = "slack-v2-host-beta", feature = "telegram-v2-host-beta"))]
         outbound_state: Arc::clone(&store) as Arc<dyn OutboundStateStore>,

@@ -75,7 +75,6 @@ const FROZEN_LOCALDEV_TYPES: &[&str] = &[
     "LocalDevExtensionSurfaceSource",
     "LocalDevMountProfile",
     "LocalDevNetworkProfile",
-    "LocalDevOutboundStores",
     "LocalDevOverride",
     "LocalDevPersistentApprovalPolicyStore",
     "LocalDevProviderPolicy",
