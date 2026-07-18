@@ -4319,9 +4319,13 @@ fn spawn_chat_completion_stub() -> (String, std::sync::mpsc::Receiver<Option<Str
             if content_length > 0 {
                 let _ = std::io::Read::read_exact(&mut reader, &mut body);
             }
-            let _ = auth_tx.send(auth_header);
-
             let is_chat_completion = request_line.starts_with("POST /v1/chat/completions");
+            // Only report auth for the chat-completions request itself — an
+            // authenticated non-chat probe (e.g. a models-list preflight)
+            // must not be able to satisfy an assertion meant for the chat call.
+            if is_chat_completion {
+                let _ = auth_tx.send(auth_header);
+            }
             // The reborn turn loop always drives the provider through its
             // streaming method when a progress sink is wired (which it is for
             // a real WebUI-driven turn, unlike an in-process `send_user_

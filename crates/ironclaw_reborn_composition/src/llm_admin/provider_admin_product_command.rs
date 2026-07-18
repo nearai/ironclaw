@@ -173,8 +173,14 @@ fn provider_admin_workflow_error(error: RebornProviderAdminError) -> ProductWork
             ),
         },
         RebornProviderAdminError::EnvDetection { source } => {
+            tracing::debug!(
+                error = %source,
+                "environment LLM detection failed while handling a product LLM-admin command"
+            );
             ProductWorkflowError::InvalidBindingRequest {
-                reason: format!("environment LLM configuration is incomplete: {source}"),
+                reason: "environment provider detection failed; check provider environment \
+                         variables"
+                    .to_string(),
             }
         }
     }

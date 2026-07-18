@@ -724,4 +724,107 @@ mod tests {
         assert_eq!(cfg.session_path, PathBuf::from("/tmp/sess.json"));
         assert_eq!(cfg.token_refresh_margin_secs, 60);
     }
+
+    /// Minimal `LlmConfig` with every optional backend-specific config left
+    /// `None` — the caller sets `backend` and populates whichever field the
+    /// case under test dispatches on.
+    fn base_llm_config(backend: &str) -> LlmConfig {
+        LlmConfig {
+            backend: backend.to_string(),
+            session: SessionConfig::default(),
+            nearai: NearAiConfig {
+                model: "test-model".to_string(),
+                cheap_model: None,
+                base_url: "https://cloud-api.near.ai".to_string(),
+                api_key: None,
+                fallback_model: None,
+                max_retries: 0,
+                circuit_breaker_threshold: None,
+                circuit_breaker_recovery_secs: 30,
+                response_cache_enabled: false,
+                response_cache_ttl_secs: 3600,
+                response_cache_max_entries: 1000,
+                failover_cooldown_secs: 300,
+                failover_cooldown_threshold: 3,
+                smart_routing_cascade: true,
+            },
+            provider: None,
+            bedrock: None,
+            gemini_oauth: None,
+            openai_codex: None,
+            request_timeout_secs: DEFAULT_REQUEST_TIMEOUT_SECS,
+            cheap_model: None,
+            smart_routing_cascade: true,
+            max_retries: 0,
+            circuit_breaker_threshold: None,
+            circuit_breaker_recovery_secs: 30,
+            response_cache_enabled: false,
+            response_cache_ttl_secs: 3600,
+            response_cache_max_entries: 1000,
+        }
+    }
+
+    /// `active_base_url` dispatches per-backend, mirroring `active_model_name`:
+    /// nearai aliases resolve to the nearai base URL, bedrock/gemini_oauth
+    /// have none (fixed credential chain / OAuth endpoint), openai_codex
+    /// reads its own config (or `None` when unset), a registry-backed
+    /// provider reads its config, and an unknown backend with no provider
+    /// config falls back to the nearai base URL.
+    #[test]
+    fn active_base_url_dispatches_backend_aliases_and_fallbacks() {
+        for alias in ["nearai", "near_ai", "near"] {
+            let cfg = base_llm_config(alias);
+            assert_eq!(
+                cfg.active_base_url().as_deref(),
+                Some("https://cloud-api.near.ai")
+            );
+        }
+
+        for backend in [
+            "bedrock",
+            "aws_bedrock",
+            "aws",
+            "gemini_oauth",
+            "gemini-oauth",
+        ] {
+            let cfg = base_llm_config(backend);
+            assert_eq!(cfg.active_base_url(), None);
+        }
+
+        let mut cfg = base_llm_config("openai_codex");
+        cfg.openai_codex = Some(OpenAiCodexConfig::build(
+            None,
+            None,
+            Some("https://codex.example".to_string()),
+            None,
+            None,
+            None,
+        ));
+        assert_eq!(
+            cfg.active_base_url().as_deref(),
+            Some("https://codex.example")
+        );
+
+        let cfg_no_codex_config = base_llm_config("codex");
+        assert_eq!(cfg_no_codex_config.active_base_url(), None);
+
+        let mut cfg = base_llm_config("openai");
+        cfg.provider = Some(RegistryProviderConfig::generic(
+            ProviderProtocol::OpenAiCompletions,
+            "openai",
+            None,
+            "https://api.openai.com/v1",
+            "gpt-test",
+        ));
+        assert_eq!(
+            cfg.active_base_url().as_deref(),
+            Some("https://api.openai.com/v1")
+        );
+
+        let cfg_unknown_no_provider = base_llm_config("some_unknown_backend");
+        assert_eq!(
+            cfg_unknown_no_provider.active_base_url().as_deref(),
+            Some("https://cloud-api.near.ai")
+        );
+    }
 }

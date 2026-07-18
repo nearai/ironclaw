@@ -245,13 +245,10 @@ pub(crate) fn provision_llm_credentials(
     // (`local_runtime_storage_root`, i.e. `<home>/<profile-subdir>`), NOT the
     // bare home — a key written to the bare-root db is invisible to the
     // runtime (live bug: onboarded key never reached chat turns).
+    // NOTE: the directory itself is only created lazily, right before a store
+    // is actually opened (see `open_llm_key_store`) — a headless/no-op
+    // onboard run must not touch the filesystem.
     let store_root = crate::runtime::local_runtime_storage_root(boot, boot.profile());
-    std::fs::create_dir_all(&store_root).map_err(|error| {
-        LlmCredentialPromptError::Other(anyhow::anyhow!(
-            "create secret-store root {}: {error}",
-            store_root.display()
-        ))
-    })?;
 
     if !force && let Some(outcome) = already_configured_outcome(&admin, &store_root, store_opener)?
     {
@@ -311,6 +308,21 @@ fn provision_headless_from_env(
             },
         ),
     }
+}
+
+/// Create `store_root` (if missing) then open the encrypted key store there.
+/// Deferred to just before a store is actually needed — see
+/// [`provision_llm_credentials`]'s doc — so a headless/no-op onboard run that
+/// never touches the store leaves the filesystem untouched.
+#[cfg(all(feature = "libsql", feature = "root-llm-provider"))]
+fn open_llm_key_store(
+    store_root: &Path,
+    store_opener: &dyn LlmKeyStoreOpener,
+) -> anyhow::Result<ironclaw_reborn_composition::LlmKeyStore> {
+    std::fs::create_dir_all(store_root).map_err(|error| {
+        anyhow::anyhow!("create secret-store root {}: {error}", store_root.display())
+    })?;
+    store_opener.open(store_root)
 }
 
 /// Drives the full numbered provider menu, factored out so the "declined
@@ -388,8 +400,7 @@ fn provision_via_menu(
     };
 
     if let Some(key) = key {
-        let store = store_opener
-            .open(store_root)
+        let store = open_llm_key_store(store_root, store_opener)
             .map_err(LlmCredentialPromptError::Other)?;
         let provider_id_for_store = canonical_provider_id.clone();
         crate::runtime::block_on_cli(async move {
@@ -525,7 +536,7 @@ fn already_configured_outcome(
         }));
     }
 
-    let store = match store_opener.open(store_root) {
+    let store = match open_llm_key_store(store_root, store_opener) {
         Ok(store) => store,
         Err(error) => {
             tracing::debug!(
@@ -1240,6 +1251,14 @@ mod tests {
         assert!(
             !home.config_file_path().exists(),
             "a non-interactive no-op must not write config.toml"
+        );
+        let store_root = crate::runtime::local_runtime_storage_root(
+            context.boot_config(),
+            context.boot_config().profile(),
+        );
+        assert!(
+            !store_root.exists(),
+            "a non-interactive no-op must not create the secret-store root either"
         );
     }
 

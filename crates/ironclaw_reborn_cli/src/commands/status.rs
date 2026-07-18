@@ -114,7 +114,10 @@ fn resolve_service_state() -> ServiceStateDto {
         Ok(crate::commands::service::ServiceState::Running) => ServiceStateDto::Running,
         Ok(crate::commands::service::ServiceState::Stopped) => ServiceStateDto::Stopped,
         Ok(crate::commands::service::ServiceState::NotInstalled) => ServiceStateDto::NotInstalled,
-        Err(_) => ServiceStateDto::Unknown,
+        Err(error) => {
+            tracing::debug!(error = %error, "service state detection failed");
+            ServiceStateDto::Unknown
+        }
     }
 }
 

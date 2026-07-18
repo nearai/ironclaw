@@ -16,7 +16,7 @@ use llm_credentials::{
     provision_llm_credentials,
 };
 use master_key::{MasterKeyProvisionOutcome, provision_master_key};
-use prompts::{LlmCredentialPromptError, PromptSource, StdinPromptSource};
+use prompts::{LlmCredentialPromptError, StdinPromptSource};
 
 const ONBOARDING_MARKER_FILE: &str = ".onboard-completed.json";
 
