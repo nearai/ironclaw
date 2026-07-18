@@ -426,7 +426,8 @@ impl ApprovalInteractionService for ForeignScopeApprovalService {
 /// fallback path. Returns the harness (with `route_store` accessible) and the
 /// underlying recording approval service for request assertions.
 ///
-/// By default, two separate `InMemoryDeliveredGateRouteStore` instances are used:
+/// By default, two separate in-memory-backed `FilesystemOutboundStateStore`
+/// instances serve the route-store role:
 ///
 /// - `workflow_route_store` (exposed via `harness.route_store`): the store the
 ///   workflow queries when resolving delivered-gate-route fallback paths.  Tests

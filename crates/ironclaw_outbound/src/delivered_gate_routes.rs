@@ -166,7 +166,7 @@ pub trait DeliveredGateRouteStore: Send + Sync {
 /// (arch-simplification §4.3: replaces the deleted
 /// `InMemoryDeliveredGateRouteStore`, a full HashMap store that was used merely
 /// as an empty default on the non-routing surface).
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone, Copy)]
 pub struct NoopDeliveredGateRouteStore;
 
 #[async_trait::async_trait]
