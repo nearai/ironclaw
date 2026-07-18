@@ -585,9 +585,16 @@ fn resolve_reborn_runtime_llm_with_stored_key_fallback(
         return Err(error.into());
     };
     let provider_id = provider.clone();
-    let home_path = config.home().path().to_path_buf();
+    let runtime_storage_root = local_runtime_storage_root(config, config.profile());
+    // The runtime storage root is only created lazily (onboarding writing a
+    // key, or a prior `serve` boot). If it was never created there is
+    // definitely no stored key — fail through to the original error instead
+    // of letting the secret-store opener fail on a missing directory.
+    if !runtime_storage_root.exists() {
+        return Err(error.into());
+    }
     let has_stored_key = block_on_cli(async move {
-        let store = ironclaw_reborn_composition::open_local_dev_secret_store(&home_path)
+        let store = ironclaw_reborn_composition::open_local_dev_secret_store(&runtime_storage_root)
             .await
             .map_err(anyhow::Error::from)?;
         ironclaw_reborn_composition::LlmKeyStore::new(store)

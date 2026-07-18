@@ -4835,7 +4835,7 @@ fn onboard_openai_key_then_serve_boots_with_env_var_unset() {
         String::from_utf8_lossy(&set_provider_output.stderr)
     );
 
-    seed_stored_llm_key(&reborn_home, "openai", "sk-smoke-test-stored-openai-key");
+    seed_stored_llm_key_at_runtime_root(&reborn_home, "openai", "sk-smoke-test-stored-openai-key");
 
     let _serve_port_guard = SERVE_PORT_LOCK
         .lock()
