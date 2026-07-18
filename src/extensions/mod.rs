@@ -724,8 +724,9 @@ pub enum ExtensionError {
     ValidationFailed(String),
 
     /// The requested operation is not supported for this extension kind.
+    /// Renders through `ExtensionKind`'s stable `Display`, never `Debug`.
     #[error("Operation not supported for extension kind '{kind}': {reason}")]
-    WrongKind { kind: String, reason: String },
+    WrongKind { kind: ExtensionKind, reason: String },
 
     #[error("{0}")]
     Other(String),

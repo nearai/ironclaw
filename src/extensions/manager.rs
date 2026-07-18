@@ -942,6 +942,26 @@ impl ExtensionManager {
     ) -> Result<McpServerConfig, crate::tools::mcp::config::ConfigError> {
         self.get_mcp_server(name, user_id).await
     }
+
+    /// Test-only seeding of `cached_tools` on a stored MCP server config.
+    ///
+    /// Production writes the tool catalog during activation (`list_tools`
+    /// result cached on the config); standing up a live MCP backend in a
+    /// handler test is not feasible, so this helper persists the seed through
+    /// the same `update_mcp_server` path production uses for config writes.
+    /// Lets cache-invalidation regressions start from a NON-empty catalog so
+    /// their "cleared" assertions cannot pass vacuously.
+    #[cfg(test)]
+    pub(crate) async fn seed_cached_tools_for_test(
+        &self,
+        name: &str,
+        user_id: &str,
+        tools: Vec<crate::tools::mcp::McpTool>,
+    ) -> Result<(), crate::tools::mcp::config::ConfigError> {
+        let mut config = self.get_mcp_server(name, user_id).await?;
+        config.cached_tools = tools;
+        self.update_mcp_server(config, user_id).await
+    }
     /// Enable gateway mode so OAuth flows return auth URLs to the frontend
     /// instead of calling `open::that()` on the server.
     ///
@@ -3785,7 +3805,7 @@ impl ExtensionManager {
             .await
             .map_err(|e| ExtensionError::Config(e.to_string()))?;
 
-        tracing::info!(extension = %name, url = %url, "Installed MCP server");
+        tracing::info!(extension = %name, url = %sanitize_url_for_logging(url), "Installed MCP server");
 
         Ok(InstallResult {
             name: name.to_string(),
@@ -3844,19 +3864,22 @@ impl ExtensionManager {
             Ok(c) => c,
             Err(_) => {
                 // Check whether a non-MCP extension with this name is installed.
+                // Only a definitive "not found" maps to NotFound — a store/DB
+                // failure here must propagate, not masquerade as a 404.
                 match self.determine_installed_kind(name, user_id).await {
                     Ok(kind) => {
                         return Err(ExtensionError::WrongKind {
-                            kind: format!("{:?}", kind),
+                            kind,
                             reason: "PATCH is only supported for mcp_server extensions".to_string(),
                         });
                     }
-                    Err(_) => {
+                    Err(ExtensionError::NotFound(_) | ExtensionError::NotInstalled(_)) => {
                         return Err(ExtensionError::NotFound(format!(
                             "No extension named '{}' found for this user.",
                             name
                         )));
                     }
+                    Err(e) => return Err(e),
                 }
             }
         };

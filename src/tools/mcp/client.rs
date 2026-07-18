@@ -100,7 +100,12 @@ pub struct McpClient {
     /// Ensures the MCP initialize handshake runs exactly once.
     /// Uses `OnceCell` to serialize concurrent callers so only one
     /// actually sends the request; subsequent calls return immediately.
-    initialized: tokio::sync::OnceCell<InitializeResult>,
+    ///
+    /// Behind an `Arc` so a non-HTTP `for_thread` fork can SHARE the parent's
+    /// handshake state: stdio/Unix forks reuse the parent connection, and a
+    /// fresh cell there would re-send `initialize` on an already-initialized
+    /// connection.
+    initialized: std::sync::Arc<tokio::sync::OnceCell<InitializeResult>>,
 
     /// Test-only marker recording which constructor produced this client.
     /// Used by caller-level tests to assert the factory chose the correct path.
@@ -153,7 +158,7 @@ impl McpClient {
             server_config: None,
             custom_headers: HashMap::new(),
             thread_id: None,
-            initialized: tokio::sync::OnceCell::new(),
+            initialized: std::sync::Arc::new(tokio::sync::OnceCell::new()),
             #[cfg(test)]
             constructor_kind: McpClientConstructor::Plain,
         }
@@ -196,7 +201,7 @@ impl McpClient {
             server_config: None,
             custom_headers: HashMap::new(),
             thread_id: None,
-            initialized: tokio::sync::OnceCell::new(),
+            initialized: std::sync::Arc::new(tokio::sync::OnceCell::new()),
             #[cfg(test)]
             constructor_kind: McpClientConstructor::PlainNamed,
         }
@@ -258,7 +263,7 @@ impl McpClient {
             user_id: "<unset>".to_string(),
             custom_headers: config.headers.clone(),
             thread_id: None,
-            initialized: tokio::sync::OnceCell::new(),
+            initialized: std::sync::Arc::new(tokio::sync::OnceCell::new()),
             server_config: Some(config),
             #[cfg(test)]
             constructor_kind: McpClientConstructor::FromConfig,
@@ -313,7 +318,7 @@ impl McpClient {
             server_config: Some(config),
             custom_headers,
             thread_id,
-            initialized: tokio::sync::OnceCell::new(),
+            initialized: std::sync::Arc::new(tokio::sync::OnceCell::new()),
             #[cfg(test)]
             constructor_kind: McpClientConstructor::Authenticated,
         }
@@ -372,7 +377,7 @@ impl McpClient {
             server_config,
             custom_headers,
             thread_id,
-            initialized: tokio::sync::OnceCell::new(),
+            initialized: std::sync::Arc::new(tokio::sync::OnceCell::new()),
             #[cfg(test)]
             constructor_kind: McpClientConstructor::WithTransport,
         }
@@ -429,13 +434,18 @@ impl McpClient {
     /// parent but receives:
     /// - its own `thread_id = Some(thread_id)` so `inject_meta_context` and
     ///   `McpSessionManager` use the correct thread-scoped key.
-    /// - a fresh `initialized` cell so the MCP server issues a new
-    ///   `Mcp-Session-Id` for this Thread's first call (required so any
-    ///   server-side state the upstream binds to the session id is
-    ///   partitioned per Thread, not shared across all of a user's Threads).
-    /// - a fresh transport (for HTTP transports) so response-header session-id
-    ///   captures are stored under the correct thread-scoped slot rather than
-    ///   the parent's user-scoped slot.
+    /// - for HTTP transports: a fresh `initialized` cell so the MCP server
+    ///   issues a new `Mcp-Session-Id` for this Thread's first call (required
+    ///   so any server-side state the upstream binds to the session id is
+    ///   partitioned per Thread, not shared across all of a user's Threads),
+    ///   and a fresh transport so response-header session-id captures are
+    ///   stored under the correct thread-scoped slot rather than the parent's
+    ///   user-scoped slot.
+    /// - for stdio/Unix transports: the parent's SHARED `initialized` cell.
+    ///   These transports reuse one process/socket connection and ignore
+    ///   session headers, so thread scoping only partitions `_meta` context
+    ///   (SEP-414) — re-running `initialize` on the shared connection would
+    ///   violate the MCP lifecycle.
     pub fn for_thread(&self, thread_id: Uuid) -> Self {
         // HTTP transports store `session_thread_id` at construction time and
         // use it to bucket `Mcp-Session-Id` response headers into the right
@@ -448,14 +458,26 @@ impl McpClient {
         // `send` implementation (they operate over a shared process/socket
         // and session state is managed by McpSessionManager alone), so
         // sharing the Arc is correct and avoids spawning a duplicate process.
-        let forked_transport: Arc<dyn McpTransport> = if self.transport.supports_http_features() {
+        let (forked_transport, initialized): (
+            Arc<dyn McpTransport>,
+            std::sync::Arc<tokio::sync::OnceCell<InitializeResult>>,
+        ) = if self.transport.supports_http_features() {
             let mut t = HttpMcpTransport::new(self.server_url.clone(), self.server_name.as_str());
             if let Some(ref sm) = self.session_manager {
                 t = t.with_session_manager(Arc::clone(sm), &self.user_id, Some(thread_id));
             }
-            Arc::new(t)
+            (
+                Arc::new(t),
+                std::sync::Arc::new(tokio::sync::OnceCell::new()),
+            )
         } else {
-            Arc::clone(&self.transport)
+            // Shared connection ⇒ shared handshake state. A fresh cell here
+            // would send a second `initialize` on an already-initialized
+            // stdio/Unix connection (MCP lifecycle violation).
+            (
+                Arc::clone(&self.transport),
+                std::sync::Arc::clone(&self.initialized),
+            )
         };
         tracing::debug!(
             server = %self.server_name,
@@ -475,7 +497,7 @@ impl McpClient {
             server_config: self.server_config.clone(),
             custom_headers: self.custom_headers.clone(),
             thread_id: Some(thread_id),
-            initialized: tokio::sync::OnceCell::new(),
+            initialized,
             #[cfg(test)]
             constructor_kind: self.constructor_kind,
         }
@@ -926,7 +948,7 @@ impl Clone for McpClient {
             server_config: self.server_config.clone(),
             custom_headers: self.custom_headers.clone(),
             thread_id: self.thread_id,
-            initialized: tokio::sync::OnceCell::new(),
+            initialized: std::sync::Arc::new(tokio::sync::OnceCell::new()),
             #[cfg(test)]
             constructor_kind: self.constructor_kind,
         }

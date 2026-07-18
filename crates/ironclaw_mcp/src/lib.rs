@@ -1229,9 +1229,13 @@ fn json_rpc_initialize_params() -> Value {
 /// `params._meta` of a `tools/call` so the MCP server can correlate the call
 /// with the thread it serves.
 ///
-/// Mirrors the legacy engine's `inject_meta_context` (same `io.ironclaw/*`
-/// keys, same skip-when-no-thread rule) so servers written against that
-/// contract — e.g. the agent.market broker — work unchanged against Reborn.
+/// Mirrors the legacy engine's `inject_meta_context` keys
+/// (`io.ironclaw/threadId` and `io.ironclaw/userId`) and its
+/// skip-when-no-thread rule, so servers written against that contract —
+/// e.g. the agent.market broker — work unchanged against Reborn. It also
+/// emits `io.ironclaw/invocationId`, which the legacy path does not send;
+/// servers keying strictly on the legacy pair are unaffected, but the key
+/// sets are not identical.
 /// `ResourceScope` is stamped host-side from verified identity (see the
 /// SECURITY note on the struct); the model only ever controls `arguments`,
 /// so a server may treat these keys as authenticated context. Calls outside

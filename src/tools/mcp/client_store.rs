@@ -181,6 +181,41 @@ impl McpClientKey {
 struct McpClientEntry {
     client: Arc<McpClient>,
     surface: String,
+    /// Milliseconds since `UNIX_EPOCH` of the last `resolve_for_thread` hit.
+    /// Only meaningful for thread-scoped entries; drives LRU eviction when a
+    /// user's fork count for one server exceeds [`MAX_THREAD_FORKS_PER_USER_SERVER`].
+    /// Behind an `Arc` so the read-path can bump it without taking the map's
+    /// write lock.
+    last_used_ms: Arc<std::sync::atomic::AtomicU64>,
+}
+
+/// Upper bound on lazily-materialised thread-scoped client forks kept per
+/// `(user, server)`. Threads have no termination event the store can subscribe
+/// to yet (see `evict_thread`'s wiring note), so without a cap a user creating
+/// threads indefinitely grows the store for the process lifetime. When the cap
+/// is reached the least-recently-used fork is evicted; a thread that comes back
+/// later simply re-materialises its fork from the base client.
+const MAX_THREAD_FORKS_PER_USER_SERVER: usize = 32;
+
+fn now_unix_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
+}
+
+/// Drop every thread-scoped fork the user materialised for `server_name`,
+/// leaving user-scoped entries intact. Called (under the caller's write lock)
+/// by every path that replaces or removes the user's base client — a fork
+/// descends from the base's config/credentials, so it must not outlive it.
+fn purge_thread_forks(
+    clients: &mut HashMap<McpClientKey, McpClientEntry>,
+    user_id: &str,
+    server_name: &str,
+) {
+    clients.retain(|key, _| {
+        key.thread_id.is_none() || key.user_id != user_id || key.server_name != server_name
+    });
 }
 
 /// Per-user MCP client registry. Typically held as `Arc<McpClientStore>`
@@ -200,6 +235,12 @@ impl McpClientStore {
     /// signature is the fingerprint of the tool surface this client
     /// reported at activation time (see `surface_signature`). Replacing
     /// is only intended for the same user re-activating the same server.
+    ///
+    /// Replacing the base also purges the user's thread-scoped forks for this
+    /// server: forks are materialised FROM the base (URL, credentials, session
+    /// manager), so forks descended from the replaced base would keep serving
+    /// the pre-update configuration — including saved header credentials —
+    /// after a PATCH/re-activation.
     pub async fn insert(
         &self,
         user_id: &str,
@@ -207,9 +248,15 @@ impl McpClientStore {
         client: Arc<McpClient>,
         surface: String,
     ) {
-        self.clients.write().await.insert(
+        let mut clients = self.clients.write().await;
+        purge_thread_forks(&mut clients, user_id, server_name);
+        clients.insert(
             McpClientKey::new(user_id, server_name),
-            McpClientEntry { client, surface },
+            McpClientEntry {
+                client,
+                surface,
+                last_used_ms: Arc::new(std::sync::atomic::AtomicU64::new(now_unix_ms())),
+            },
         );
     }
 
@@ -217,16 +264,26 @@ impl McpClientStore {
     ///
     /// Allows callers to provide a fully-constructed key (including optional
     /// `thread_id`) without going through the `(user_id, server_name)` string pair.
+    /// A user-scoped key (`thread_id == None`) purges the user's thread forks
+    /// for the server, same as [`McpClientStore::insert`].
     pub async fn insert_with_key(
         &self,
         key: McpClientKey,
         client: Arc<McpClient>,
         surface: String,
     ) {
-        self.clients
-            .write()
-            .await
-            .insert(key, McpClientEntry { client, surface });
+        let mut clients = self.clients.write().await;
+        if key.thread_id.is_none() {
+            purge_thread_forks(&mut clients, &key.user_id, &key.server_name);
+        }
+        clients.insert(
+            key,
+            McpClientEntry {
+                client,
+                surface,
+                last_used_ms: Arc::new(std::sync::atomic::AtomicU64::new(now_unix_ms())),
+            },
+        );
     }
 
     /// Look up the client for the given `McpClientKey`.
@@ -239,10 +296,14 @@ impl McpClientStore {
     }
 
     /// Remove and return the client for `(user_id, server_name)`, if any.
+    ///
+    /// Also purges every thread-scoped fork the user materialised for this
+    /// server — a fork surviving extension removal could keep using the
+    /// removed configuration's credentials from inside an old thread.
     pub async fn remove(&self, user_id: &str, server_name: &str) -> Option<Arc<McpClient>> {
-        self.clients
-            .write()
-            .await
+        let mut clients = self.clients.write().await;
+        purge_thread_forks(&mut clients, user_id, server_name);
+        clients
             .remove(&McpClientKey::new(user_id, server_name))
             .map(|entry| entry.client)
     }
@@ -261,6 +322,7 @@ impl McpClientStore {
     /// serialises activate and remove end-to-end.
     pub async fn remove_and_check_empty(&self, user_id: &str, server_name: &str) -> bool {
         let mut clients = self.clients.write().await;
+        purge_thread_forks(&mut clients, user_id, server_name);
         clients.remove(&McpClientKey::new(user_id, server_name));
         !clients.keys().any(|key| key.server_name == server_name)
     }
@@ -304,6 +366,9 @@ impl McpClientStore {
         {
             let guard = self.clients.read().await;
             if let Some(entry) = guard.get(&thread_key) {
+                entry
+                    .last_used_ms
+                    .store(now_unix_ms(), std::sync::atomic::Ordering::Relaxed);
                 return Some(entry.client.clone());
             }
         }
@@ -329,17 +394,46 @@ impl McpClientStore {
             thread_id = %tid,
             "Materialised thread-scoped client fork"
         );
+
+        // Bounded-resources guard: cap this user's fork count for the server,
+        // evicting the least-recently-used fork when full. Threads have no
+        // termination event to hook (yet), so the cap is what keeps a
+        // long-running multi-tenant gateway from accumulating forks forever.
+        let fork_count = guard
+            .keys()
+            .filter(|k| {
+                k.thread_id.is_some() && k.user_id == user_id && k.server_name == server_name
+            })
+            .count();
+        if fork_count >= MAX_THREAD_FORKS_PER_USER_SERVER
+            && let Some(lru_key) = guard
+                .iter()
+                .filter(|(k, _)| {
+                    k.thread_id.is_some() && k.user_id == user_id && k.server_name == server_name
+                })
+                .min_by_key(|(_, e)| e.last_used_ms.load(std::sync::atomic::Ordering::Relaxed))
+                .map(|(k, _)| k.clone())
+        {
+            tracing::debug!(
+                user_id = %user_id,
+                server = %server_name,
+                evicted_thread = ?lru_key.thread_id,
+                "Thread-fork cap reached; evicted LRU fork"
+            );
+            guard.remove(&lru_key);
+        }
+
         guard.insert(
             thread_key,
             McpClientEntry {
                 client: forked.clone(),
                 surface,
+                last_used_ms: Arc::new(std::sync::atomic::AtomicU64::new(now_unix_ms())),
             },
         );
         Some(forked)
     }
 
-    /// Whether `(user_id, server_name)` has an active client.
     /// Evict all thread-scoped client entries for the given thread UUID.
     ///
     /// Removes every `(user, server, thread_id)` entry that was lazily
@@ -348,10 +442,10 @@ impl McpClientStore {
     ///
     /// # Wiring note
     /// No production caller yet — the agent runtime does not currently emit
-    /// a "Thread terminated" event the store can subscribe to. The method
-    /// is provided so the memory-growth guard is in place once the
-    /// lifecycle hook exists; until then, thread-scoped entries
-    /// accumulate for the lifetime of the process.
+    /// a "Thread terminated" event the store can subscribe to. Until that
+    /// lifecycle hook exists, growth is bounded by the per-`(user, server)`
+    /// LRU cap ([`MAX_THREAD_FORKS_PER_USER_SERVER`]) in `resolve_for_thread`,
+    /// and forks are purged eagerly on base replace/remove.
     pub async fn evict_thread(&self, thread_id: Uuid) {
         self.clients
             .write()
@@ -359,6 +453,7 @@ impl McpClientStore {
             .retain(|key, _| key.thread_id != Some(thread_id));
     }
 
+    /// Whether `(user_id, server_name)` has an active client.
     pub async fn contains(&self, user_id: &str, server_name: &str) -> bool {
         self.clients
             .read()
@@ -890,6 +985,134 @@ mod tests {
         assert!(
             store.contains("alice", "svc").await,
             "user-scoped entry survives"
+        );
+    }
+
+    // Regression: forks must not outlive their base. `remove` used to delete
+    // only the user-scoped key, so a thread that had used a tool kept its fork
+    // — and the fork's saved header credentials — after extension removal.
+    #[tokio::test]
+    async fn remove_purges_thread_forks_for_user_server() {
+        let store = McpClientStore::new();
+        let base = Arc::new(McpClient::new_with_name("svc", "http://a.invalid"));
+        store.insert("alice", "svc", base, "sig".into()).await;
+
+        let tid = Uuid::new_v4();
+        let fork = store
+            .resolve_for_thread("alice", "svc", Some(tid))
+            .await
+            .expect("fork materialises");
+
+        store.remove("alice", "svc").await;
+
+        let after = store.resolve_for_thread("alice", "svc", Some(tid)).await;
+        assert!(
+            after.is_none(),
+            "fork must be purged with its base; got a surviving client"
+        );
+        drop(fork);
+    }
+
+    // Same shape through `remove_and_check_empty` (the extension-removal path).
+    #[tokio::test]
+    async fn remove_and_check_empty_purges_thread_forks() {
+        let store = McpClientStore::new();
+        let base = Arc::new(McpClient::new_with_name("svc", "http://a.invalid"));
+        store.insert("alice", "svc", base, "sig".into()).await;
+        let tid = Uuid::new_v4();
+        store
+            .resolve_for_thread("alice", "svc", Some(tid))
+            .await
+            .expect("fork materialises");
+
+        let empty = store.remove_and_check_empty("alice", "svc").await;
+
+        assert!(empty, "fork entries must not keep the server 'active'");
+        assert!(
+            store
+                .resolve_for_thread("alice", "svc", Some(tid))
+                .await
+                .is_none()
+        );
+    }
+
+    // Regression: PATCH/re-activation replaces the base via `insert`; forks
+    // descended from the old base must be dropped so the next resolve
+    // re-materialises from the updated configuration.
+    #[tokio::test]
+    async fn insert_replacing_base_purges_stale_thread_forks() {
+        let store = McpClientStore::new();
+        let old_base = Arc::new(McpClient::new_with_name("svc", "http://old.invalid"));
+        store
+            .insert("alice", "svc", old_base, "sig-old".into())
+            .await;
+        let tid = Uuid::new_v4();
+        let stale_fork = store
+            .resolve_for_thread("alice", "svc", Some(tid))
+            .await
+            .expect("fork materialises from old base");
+
+        let new_base = Arc::new(McpClient::new_with_name("svc", "http://new.invalid"));
+        store
+            .insert("alice", "svc", new_base, "sig-new".into())
+            .await;
+
+        let fresh_fork = store
+            .resolve_for_thread("alice", "svc", Some(tid))
+            .await
+            .expect("fork re-materialises from new base");
+        assert!(
+            !Arc::ptr_eq(&stale_fork, &fresh_fork),
+            "resolve after base replace must re-fork from the NEW base, not \
+             serve the fork built from the replaced configuration"
+        );
+        assert_eq!(fresh_fork.server_url(), "http://new.invalid");
+    }
+
+    // Bounded-resources guard: the per-(user, server) fork count stays at the
+    // cap, evicting least-recently-used forks; other users are unaffected.
+    #[tokio::test]
+    async fn thread_fork_cap_evicts_lru() {
+        let store = McpClientStore::new();
+        let base = Arc::new(McpClient::new_with_name("svc", "http://a.invalid"));
+        store.insert("alice", "svc", base, "sig".into()).await;
+
+        let first_tid = Uuid::new_v4();
+        store
+            .resolve_for_thread("alice", "svc", Some(first_tid))
+            .await
+            .expect("first fork");
+        // Fill to the cap; first_tid becomes the LRU entry.
+        for _ in 1..MAX_THREAD_FORKS_PER_USER_SERVER {
+            store
+                .resolve_for_thread("alice", "svc", Some(Uuid::new_v4()))
+                .await
+                .expect("fork under cap");
+        }
+        // One over the cap evicts exactly one (the LRU: first_tid).
+        store
+            .resolve_for_thread("alice", "svc", Some(Uuid::new_v4()))
+            .await
+            .expect("fork over cap");
+
+        let forks = store
+            .clients
+            .read()
+            .await
+            .keys()
+            .filter(|k| k.thread_id.is_some() && k.user_id == "alice")
+            .count();
+        assert_eq!(
+            forks, MAX_THREAD_FORKS_PER_USER_SERVER,
+            "fork count must stay at the cap"
+        );
+        // The evicted LRU thread re-materialises on demand (fresh Arc).
+        assert!(
+            store
+                .resolve_for_thread("alice", "svc", Some(first_tid))
+                .await
+                .is_some(),
+            "evicted thread must be able to re-materialise"
         );
     }
 }

@@ -251,7 +251,13 @@ resolve_env_placeholder_arg() {
 # manifest is valid. See kirikov/agents-market-v2 deploy/ironclaw/agent-market.
 for _am_manifest in "$IRONCLAW_REBORN_HOME"/*/system/extensions/agent-market/manifest.toml; do
   [ -f "$_am_manifest" ] || continue
-  sed -i 's/marketplace__MARKET_SUBMIT_DELIVERABLE/marketplace__submit_deliverable/g' "$_am_manifest" 2>/dev/null || true
+  # No fallback here: if the rewrite fails the invalid id is still on the
+  # volume and runtime assembly will brick anyway — fail the boot loudly at
+  # the step that names the cause instead of continuing into it.
+  if ! sed -i 's/marketplace__MARKET_SUBMIT_DELIVERABLE/marketplace__submit_deliverable/g' "$_am_manifest"; then
+    echo "failed to sanitize legacy agent-market manifest at $_am_manifest" >&2
+    exit 1
+  fi
 done
 
 if [ "$#" -gt 0 ]; then

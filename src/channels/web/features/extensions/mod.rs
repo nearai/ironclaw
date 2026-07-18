@@ -402,14 +402,20 @@ pub(crate) async fn extensions_update_handler(
             format!("{reason} (got kind: {kind})"),
         )),
         Err(e) => {
+            // `ExtensionError::Config` and friends can wrap persistence or
+            // backend failures — never surface their text to the client.
+            // Log the cause under an opaque reference id and return a stable
+            // sanitized message carrying only that id for correlation.
+            let error_ref = uuid::Uuid::new_v4();
             tracing::error!(
                 extension = %name_str,
                 error = %e,
+                error_ref = %error_ref,
                 "PATCH /api/extensions/{name_str} failed"
             );
             Err((
                 StatusCode::INTERNAL_SERVER_ERROR,
-                format!("Update failed: {e}"),
+                format!("Update failed (ref: {error_ref})"),
             ))
         }
     }
@@ -1903,6 +1909,46 @@ mod tests {
             config_after_clear.oauth.is_none(),
             "oauth must be None after PATCH with oauth:null (tri-state clear)"
         );
+
+        // 3. PATCH with a new oauth object → stored config must be REPLACED
+        //    (tri-state replace), not merged with or shadowed by the original.
+        let mut req = axum::http::Request::builder()
+            .method("PATCH")
+            .uri("/api/extensions/oauth_server")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                r#"{"oauth": {"client_id": "replacement-client"}}"#,
+            ))
+            .expect("request");
+        req.extensions_mut().insert(UserIdentity {
+            user_id: "test".to_string(),
+            role: "admin".to_string(),
+            workspace_read_scopes: Vec::new(),
+        });
+        let app_replace = Router::new()
+            .route("/api/extensions/{name}", patch(extensions_update_handler))
+            .with_state(state);
+        let resp = ServiceExt::<axum::http::Request<Body>>::oneshot(app_replace, req)
+            .await
+            .expect("response");
+        assert_eq!(
+            resp.status(),
+            StatusCode::OK,
+            "oauth object replace must succeed"
+        );
+        let config_after_replace = ext_mgr
+            .get_mcp_server_for_test("oauth_server", "test")
+            .await
+            .expect("config after replace");
+        assert_eq!(
+            config_after_replace
+                .oauth
+                .as_ref()
+                .map(|o| o.client_id.as_str()),
+            Some("replacement-client"),
+            "oauth must be replaced by the PATCHed object (tri-state replace), \
+             not keep the original client_id"
+        );
     }
 
     /// PATCH changing URL clears `cached_tools`; same URL leaves them intact.
@@ -1926,6 +1972,22 @@ mod tests {
             .await
             .expect("install");
 
+        // Seed a NON-empty cached catalog so the clear-assertions below cannot
+        // pass vacuously on a fresh (empty) install.
+        ext_mgr
+            .seed_cached_tools_for_test(
+                "tool_server",
+                "test",
+                vec![crate::tools::mcp::McpTool {
+                    name: "seeded_tool".to_string(),
+                    description: "seeded".to_string(),
+                    input_schema: serde_json::json!({"type": "object"}),
+                    annotations: None,
+                }],
+            )
+            .await
+            .expect("seed cached tools");
+
         // PATCH with the same URL → cached_tools must NOT be cleared
         // (preserving the "same URL, just updating headers" use case).
         ext_mgr
@@ -1938,12 +2000,16 @@ mod tests {
             )
             .await
             .expect("same-url PATCH");
-        // cached_tools starts empty (fresh install), so just verify the url is unchanged.
         let config = ext_mgr
             .get_mcp_server_for_test("tool_server", "test")
             .await
             .expect("config after same-url");
         assert_eq!(config.url, "https://mcp.old.example.com/mcp");
+        assert_eq!(
+            config.cached_tools.len(),
+            1,
+            "same-URL PATCH must keep the seeded tool catalog"
+        );
 
         // PATCH with a different URL → cached_tools must be cleared (they're stale).
         ext_mgr
@@ -1993,6 +2059,27 @@ mod tests {
             .await
             .expect("initial install");
 
+        // Seed a cached client (plus a thread-scoped fork, as dispatch-time
+        // resolution creates) so the eviction assertions below exercise the
+        // real invalidation behaviour instead of passing on an empty store.
+        let client_store = ext_mgr.mcp_client_store();
+        client_store
+            .insert(
+                "user_a",
+                "my_server",
+                std::sync::Arc::new(crate::tools::mcp::McpClient::new_with_name(
+                    "my_server",
+                    "https://mcp.example.com/mcp",
+                )),
+                "sig".to_string(),
+            )
+            .await;
+        let seeded_thread = uuid::Uuid::new_v4();
+        client_store
+            .resolve_for_thread("user_a", "my_server", Some(seeded_thread))
+            .await
+            .expect("thread fork materialises from the seeded base");
+
         let state = test_gateway_state(Some(ext_mgr.clone()));
         let app = Router::new()
             .route("/api/extensions/{name}", patch(extensions_update_handler))
@@ -2036,6 +2123,26 @@ mod tests {
             config.headers.get("Authorization").map(String::as_str),
             Some("Bearer new"),
             "stored header must be updated after PATCH"
+        );
+
+        // The seeded base client AND its thread fork must be evicted — a
+        // surviving entry would keep dispatching with the old credentials.
+        assert!(
+            client_store.get("user_a", "my_server").await.is_none(),
+            "cached base client must be evicted by PATCH"
+        );
+        assert!(
+            client_store
+                .get_with_key(
+                    &crate::tools::mcp::client_store::McpClientKey::new_for_thread(
+                        "user_a",
+                        "my_server",
+                        seeded_thread,
+                    )
+                )
+                .await
+                .is_none(),
+            "thread-scoped fork must be evicted with its base by PATCH"
         );
     }
 

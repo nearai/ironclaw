@@ -200,6 +200,26 @@ impl ResourceScope {
             invocation_id: self.invocation_id,
         }
     }
+
+    /// The owner (user-level) fallback for this scope, or `None` when the
+    /// scope is already owner-scoped.
+    ///
+    /// Strips only `agent_id`/`project_id` — the two sub-scope axes secret
+    /// aliasing keys on — while preserving tenant/user, so the fallback can
+    /// only ever reach the SAME user's owner-level resources. User-level
+    /// secrets (e.g. those written through the user-scoped admin secrets API,
+    /// whose write path hard-codes `agent_id: None`) live at this scope,
+    /// invisible to a strict agent/project-scoped lookup.
+    pub fn owner_fallback_scope(&self) -> Option<Self> {
+        if self.agent_id.is_none() && self.project_id.is_none() {
+            return None;
+        }
+        Some(Self {
+            agent_id: None,
+            project_id: None,
+            ..self.clone()
+        })
+    }
 }
 
 /// Origin of a background reservation. Distinguishes heartbeats, routines,
