@@ -52,6 +52,7 @@ pub mod resolution;
 pub mod resource;
 pub mod runtime;
 pub mod runtime_policy;
+pub mod safe_summary;
 pub mod scope;
 pub mod trust;
 
@@ -78,6 +79,7 @@ pub use resolution::*;
 pub use resource::*;
 pub use runtime::*;
 pub use runtime_policy::*;
+pub use safe_summary::*;
 pub use scope::*;
 pub use trust::*;
 

@@ -250,6 +250,10 @@ uuid_id!(ErrRef);
 uuid_id!(GateRef);
 uuid_id!(ProcessRef);
 uuid_id!(DenyRef);
+// Handle to the durably-stored full capability output. The full bytes stay
+// host-owned and are retrieved only through this ref (§3); model-visible metadata
+// rides `OutcomeRefs`/`SafeSummary` alongside it. UUID id like its siblings.
+uuid_id!(ResultRef);
 
 /// Provider-facing tool/function name.
 ///

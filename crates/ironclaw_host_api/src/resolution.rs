@@ -36,7 +36,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::{GateRef, ProcessRef};
+use crate::{GateRef, ProcessRef, ResultRef, SafeSummary};
 
 /// A re-entrant gate: the invocation did not run and is waiting on a decision.
 /// Resolving the gate re-enters `authorize()` (§5.3.3: a resolved gate reserves
@@ -135,6 +135,69 @@ impl Suspension {
     }
 }
 
+/// The typed verdict of a dispatched capability — success or a recoverable
+/// failure — carried by [`Outcome`]. This is the fix for §1.2/§3's
+/// "summary-sniffed" outcome: the loop reads a typed verdict, never inspects a
+/// prose summary string to guess whether the call succeeded.
+///
+/// Maps the §5.3 acceptance table: `Completed` → [`ToolVerdict::Success`],
+/// `Failed` → [`ToolVerdict::RecoverableFailure`] (model-visible, correctable),
+/// `SpawnedChildRun` → [`ToolVerdict::ChildSpawned`] (non-suspending — the
+/// executor appends the child result and continues).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ToolVerdict {
+    /// The capability ran and succeeded.
+    Success,
+    /// The capability ran and failed in a model-visible, correctable way — NOT a
+    /// `HostFailure` (that is infrastructure, §1.2). The model may retry or adapt.
+    RecoverableFailure,
+    /// The capability spawned a child run; non-suspending (§5.3 table).
+    ChildSpawned,
+}
+
+impl ToolVerdict {
+    /// Whether the capability completed successfully.
+    pub fn is_success(&self) -> bool {
+        matches!(self, ToolVerdict::Success)
+    }
+
+    /// Stable discriminant (matches the serde tag).
+    pub fn kind(&self) -> &'static str {
+        match self {
+            ToolVerdict::Success => "success",
+            ToolVerdict::RecoverableFailure => "recoverable_failure",
+            ToolVerdict::ChildSpawned => "child_spawned",
+        }
+    }
+}
+
+/// References to a completed capability's durably-stored output. The full bytes
+/// stay host-owned and are fetched only through [`ResultRef`]; only bounded
+/// metadata rides here (§3).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OutcomeRefs {
+    /// Handle to the full stored output.
+    pub result: ResultRef,
+    /// Size of the staged output in bytes — pure metadata, no PII. Used by the
+    /// per-capability byte-cap strategy.
+    pub byte_len: u64,
+}
+
+/// A dispatched capability's result — tool success OR recoverable failure (§3).
+///
+/// This is the `Resolution::Done` payload (a later slice adds the `Resolution`
+/// umbrella). It pairs with [`crate::Invocation`] as the two ends of a capability
+/// call: the request in, the outcome out. The typed [`ToolVerdict`] replaces
+/// variant-matching / summary-sniffing; the [`SafeSummary`] is model-visible and
+/// redacted; the full output is reached through [`OutcomeRefs`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Outcome {
+    pub refs: OutcomeRefs,
+    pub verdict: ToolVerdict,
+    pub summary: SafeSummary,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -206,5 +269,51 @@ mod tests {
             );
             assert_eq!(suspension.process_ref().is_some(), tag == "process");
         }
+    }
+
+    #[test]
+    fn tool_verdict_serde_tags_and_kinds_agree() {
+        for (verdict, tag) in [
+            (ToolVerdict::Success, "success"),
+            (ToolVerdict::RecoverableFailure, "recoverable_failure"),
+            (ToolVerdict::ChildSpawned, "child_spawned"),
+        ] {
+            assert_eq!(
+                serde_json::to_value(verdict).unwrap(),
+                serde_json::Value::String(tag.to_string())
+            );
+            assert_eq!(verdict.kind(), tag);
+        }
+        assert!(ToolVerdict::Success.is_success());
+        assert!(!ToolVerdict::RecoverableFailure.is_success());
+    }
+
+    #[test]
+    fn outcome_roundtrips_and_carries_typed_verdict_not_a_sniffed_summary() {
+        let outcome = Outcome {
+            refs: OutcomeRefs {
+                result: ResultRef::new("result-01HZ0000000000000000000000").unwrap(),
+                byte_len: 4096,
+            },
+            verdict: ToolVerdict::RecoverableFailure,
+            summary: SafeSummary::new("tool input rejected").unwrap(),
+        };
+        let json = serde_json::to_value(&outcome).unwrap();
+        let back: Outcome = serde_json::from_value(json).unwrap();
+        assert_eq!(back, outcome);
+        // The verdict is read from the type, never inferred from the summary text.
+        assert!(!back.verdict.is_success());
+        assert_eq!(back.refs.byte_len, 4096);
+    }
+
+    #[test]
+    fn outcome_rejects_an_unsafe_summary_on_the_wire() {
+        // A hostile persisted summary cannot rehydrate into an Outcome.
+        let json = serde_json::json!({
+            "refs": { "result": "result-1", "byte_len": 1 },
+            "verdict": "success",
+            "summary": "api key: sk-ant-leak"
+        });
+        assert!(serde_json::from_value::<Outcome>(json).is_err());
     }
 }
