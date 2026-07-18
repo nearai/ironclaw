@@ -147,19 +147,22 @@ fn reserve_codex_login_slot(
 }
 
 /// Finalizes a codex-login reservation with the minted device code, but only
-/// if the map entry for `key` still belongs to `attempt_id`. If this
-/// attempt's reservation TTL lapsed before its device-code initiation
-/// returned, a newer caller may have since reserved (or even finalized) the
-/// same key — in that case this is a no-op rather than clobbering it.
+/// if the map entry for `key` is still present and belongs to `attempt_id`.
+/// If this attempt's reservation TTL lapsed before its device-code
+/// initiation returned, a newer caller may have since reserved (or removed,
+/// e.g. after its own failure) the same key — in either case ownership is
+/// gone, so this fails rather than clobbering the newer state or reinserting
+/// a reservation nothing still owns. Returns `false` when the caller must
+/// abort (no polling, no insert).
 fn finalize_codex_login_slot(
     attempts: &mut HashMap<String, CodexLoginAttempt>,
     key: &str,
     attempt_id: uuid::Uuid,
     login: &CodexLoginStart,
     expires_at: Instant,
-) {
-    if matches!(attempts.get(key), Some(current) if current.id != attempt_id) {
-        return;
+) -> bool {
+    if !matches!(attempts.get(key), Some(current) if current.id == attempt_id) {
+        return false;
     }
     attempts.insert(
         key.to_string(),
@@ -170,6 +173,7 @@ fn finalize_codex_login_slot(
             expires_at,
         },
     );
+    true
 }
 
 fn prune_expired(states: &mut HashMap<String, Instant>, now: Instant) {
@@ -829,13 +833,21 @@ impl LlmConfigService for RebornLlmConfigService {
         };
         {
             let mut attempts = self.codex_login_attempts.lock().await;
-            finalize_codex_login_slot(
+            let finalized = finalize_codex_login_slot(
                 &mut attempts,
                 &attempt_key,
                 attempt_id,
                 &login,
                 Instant::now() + CODEX_LOGIN_ATTEMPT_TTL,
             );
+            if !finalized {
+                // A newer caller superseded this reservation (or removed it
+                // after its own failure) before our device-code request
+                // returned; we no longer own the slot, so abort rather than
+                // spawn a poller or hand back a code that isn't tracked.
+                tracing::debug!("codex login: reservation no longer owned at finalize; aborting");
+                return Err(LlmConfigServiceError::Internal);
+            }
         }
 
         // Poll for authorization off-thread: persist the tokens, make Codex the
@@ -1797,12 +1809,16 @@ mod tests {
             user_code: "STALE-CODE".to_string(),
             verification_uri: "https://example.test/stale".to_string(),
         };
-        finalize_codex_login_slot(
+        let finalized = finalize_codex_login_slot(
             &mut attempts,
             key,
             stale_attempt_id,
             &stale_login,
             newer_now + CODEX_LOGIN_ATTEMPT_TTL,
+        );
+        assert!(
+            !finalized,
+            "a stale finalize must report failure when a newer reservation owns the key"
         );
 
         let current = attempts
@@ -1815,6 +1831,47 @@ mod tests {
         assert!(
             current.user_code.is_none(),
             "the newer reservation must remain in-flight (not finalized with the stale device code)"
+        );
+    }
+
+    /// Regression pin (PR #6174 review thread 3607817325): the prior guard
+    /// only blocked finalize when the entry belonged to a *different*
+    /// attempt id — an absent entry (newer reservation superseded the stale
+    /// one, then failed and removed itself before the stale device-code
+    /// request returned) passed through and let the stale finalize reinsert
+    /// itself. Ownership must require the entry to still be present and
+    /// match this attempt id; absent-or-mismatched must abort.
+    #[test]
+    fn codex_login_finalize_does_not_reinsert_after_removal() {
+        let mut attempts = HashMap::new();
+        let key = "tenant:user";
+        let now = Instant::now();
+        let attempt_id = uuid::Uuid::new_v4();
+
+        reserve_codex_login_slot(&mut attempts, key, attempt_id, now);
+        // Simulate a newer reservation superseding this one, then failing
+        // and removing itself — the key is now absent entirely.
+        attempts.remove(key);
+
+        let stale_login = CodexLoginStart {
+            user_code: "STALE-CODE".to_string(),
+            verification_uri: "https://example.test/stale".to_string(),
+        };
+        let finalized = finalize_codex_login_slot(
+            &mut attempts,
+            key,
+            attempt_id,
+            &stale_login,
+            now + CODEX_LOGIN_ATTEMPT_TTL,
+        );
+
+        assert!(
+            !finalized,
+            "finalize must fail when the reservation is no longer owned"
+        );
+        assert!(
+            !attempts.contains_key(key),
+            "a stale finalize must not reinsert an entry after its reservation was removed"
         );
     }
 
