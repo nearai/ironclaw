@@ -16,7 +16,7 @@ use ironclaw_approvals::{
 #[cfg(any(feature = "libsql", feature = "postgres"))]
 use ironclaw_auth::AuthProviderClient;
 use ironclaw_auth::{AuthProductScope, AuthSurface};
-// Used by both the durable (`<LocalDevRootFilesystem>`) and no-durable
+// Used by both the durable (`<CompositeRootFilesystem>`) and no-durable
 // (`<InMemoryBackend>`) capability-lease aliases/builders, so the import is
 // unconditional (arch-simplification §4.3).
 use ironclaw_authorization::FilesystemCapabilityLeaseStore;
@@ -109,7 +109,7 @@ use ironclaw_resources::FilesystemBudgetGateStore;
 use ironclaw_resources::{
     BroadcastBudgetEventSink, BudgetGateStore, FilesystemResourceGovernor, ResourceGovernor,
 };
-// Used by both the durable (`<LocalDevRootFilesystem>`) and no-durable
+// Used by both the durable (`<CompositeRootFilesystem>`) and no-durable
 // (`<InMemoryBackend>`) run-state/approval aliases + builders, so the import is
 // unconditional (arch-simplification §4.3).
 use ironclaw_run_state::{FilesystemApprovalRequestStore, FilesystemRunStateStore};
@@ -206,8 +206,6 @@ use crate::{
     RebornFacadeReadiness, RebornProductAuthServices, RebornReadiness, RebornWorkerReadiness,
 };
 
-pub(crate) type LocalDevRootFilesystem = CompositeRootFilesystem;
-
 /// Output of [`build_local_dev_root_filesystem`]: the composed local-dev
 /// root filesystem and, when libSQL is the substrate, a clone of the raw
 /// libSQL handle. The handle backs both the local-dev trigger repository
@@ -215,7 +213,7 @@ pub(crate) type LocalDevRootFilesystem = CompositeRootFilesystem;
 /// `reborn-local-dev.db` rather than opening a second handle to the file
 /// (see `RebornRuntime::open_reborn_identity_resolver`).
 struct LocalDevRootFilesystemBundle {
-    filesystem: Arc<LocalDevRootFilesystem>,
+    filesystem: Arc<CompositeRootFilesystem>,
     durable_backend: LocalDevDurableBackend,
 }
 
@@ -238,8 +236,8 @@ enum LocalDevStorageBackendInput {
 }
 
 type LocalDevWorkspaceFilesystems = (
-    Arc<ScopedFilesystem<LocalDevRootFilesystem>>,
-    Arc<ScopedFilesystem<LocalDevRootFilesystem>>,
+    Arc<ScopedFilesystem<CompositeRootFilesystem>>,
+    Arc<ScopedFilesystem<CompositeRootFilesystem>>,
     MountView,
 );
 
@@ -271,7 +269,7 @@ impl ironclaw_network::NetworkHttpEgress for TestNetworkHttpEgress {
     not(feature = "inmemory-turn-state"),
     any(feature = "libsql", feature = "postgres")
 ))]
-pub(crate) type LocalDevTurnStateStore = FilesystemTurnStateStoreKind<LocalDevRootFilesystem>;
+pub(crate) type LocalDevTurnStateStore = FilesystemTurnStateStoreKind<CompositeRootFilesystem>;
 #[cfg(any(
     feature = "inmemory-turn-state",
     not(any(feature = "libsql", feature = "postgres"))
@@ -279,7 +277,7 @@ pub(crate) type LocalDevTurnStateStore = FilesystemTurnStateStoreKind<LocalDevRo
 pub(crate) type LocalDevTurnStateStore = InMemoryTurnStateStore;
 
 #[cfg(any(feature = "libsql", feature = "postgres"))]
-type LocalDevResourceGovernor = FilesystemResourceGovernor<LocalDevRootFilesystem>;
+type LocalDevResourceGovernor = FilesystemResourceGovernor<CompositeRootFilesystem>;
 #[cfg(not(any(feature = "libsql", feature = "postgres")))]
 type LocalDevResourceGovernor = InMemoryResourceGovernor;
 
@@ -289,19 +287,19 @@ type LocalDevResourceGovernor = InMemoryResourceGovernor;
 // `InMemoryBackend` directly, so the concrete type is `<InMemoryBackend>`, which
 // the host-runtime production-wiring guard classifies `LocalOnly`.
 #[cfg(any(feature = "libsql", feature = "postgres"))]
-type LocalDevRunStateStore = FilesystemRunStateStore<LocalDevRootFilesystem>;
+type LocalDevRunStateStore = FilesystemRunStateStore<CompositeRootFilesystem>;
 #[cfg(not(any(feature = "libsql", feature = "postgres")))]
 type LocalDevRunStateStore = FilesystemRunStateStore<InMemoryBackend>;
 
 #[cfg(any(feature = "libsql", feature = "postgres"))]
 pub(crate) type LocalDevApprovalRequestStore =
-    FilesystemApprovalRequestStore<LocalDevRootFilesystem>;
+    FilesystemApprovalRequestStore<CompositeRootFilesystem>;
 #[cfg(not(any(feature = "libsql", feature = "postgres")))]
 pub(crate) type LocalDevApprovalRequestStore = FilesystemApprovalRequestStore<InMemoryBackend>;
 
 #[cfg(any(feature = "libsql", feature = "postgres"))]
 pub(crate) type LocalDevCapabilityLeaseStore =
-    FilesystemCapabilityLeaseStore<LocalDevRootFilesystem>;
+    FilesystemCapabilityLeaseStore<CompositeRootFilesystem>;
 // One capability-lease store, backend-injected — the production
 // `FilesystemCapabilityLeaseStore<F>` every deployment uses, never a bespoke
 // `InMemory*Store` (arch-simplification §4.3). The no-durable-features build
@@ -322,29 +320,29 @@ pub(crate) type LocalDevCapabilityLeaseStore = FilesystemCapabilityLeaseStore<In
 // type is distinct and correctly classifies as a production candidate.
 #[cfg(any(feature = "libsql", feature = "postgres"))]
 pub(crate) type LocalDevPersistentApprovalPolicyStore =
-    FilesystemPersistentApprovalPolicyStore<LocalDevRootFilesystem>;
+    FilesystemPersistentApprovalPolicyStore<CompositeRootFilesystem>;
 #[cfg(not(any(feature = "libsql", feature = "postgres")))]
 pub(crate) type LocalDevPersistentApprovalPolicyStore =
     FilesystemPersistentApprovalPolicyStore<InMemoryBackend>;
 
 #[cfg(any(feature = "libsql", feature = "postgres"))]
 pub(crate) type LocalDevToolPermissionOverrideStore =
-    FilesystemToolPermissionOverrideStore<LocalDevRootFilesystem>;
+    FilesystemToolPermissionOverrideStore<CompositeRootFilesystem>;
 #[cfg(not(any(feature = "libsql", feature = "postgres")))]
 pub(crate) type LocalDevToolPermissionOverrideStore =
     FilesystemToolPermissionOverrideStore<InMemoryBackend>;
 
 #[cfg(any(feature = "libsql", feature = "postgres"))]
 pub(crate) type LocalDevAutoApproveSettingStore =
-    FilesystemAutoApproveSettingStore<LocalDevRootFilesystem>;
+    FilesystemAutoApproveSettingStore<CompositeRootFilesystem>;
 #[cfg(not(any(feature = "libsql", feature = "postgres")))]
 pub(crate) type LocalDevAutoApproveSettingStore =
     FilesystemAutoApproveSettingStore<InMemoryBackend>;
 
 #[cfg(any(feature = "libsql", feature = "postgres"))]
 type LocalDevProcessServices = ProcessServices<
-    ironclaw_processes::FilesystemProcessStore<LocalDevRootFilesystem>,
-    ironclaw_processes::FilesystemProcessResultStore<LocalDevRootFilesystem>,
+    ironclaw_processes::FilesystemProcessStore<CompositeRootFilesystem>,
+    ironclaw_processes::FilesystemProcessResultStore<CompositeRootFilesystem>,
 >;
 // One process store pair, backend-injected — the production
 // `FilesystemProcess*Store<F>` every deployment uses, never a bespoke
@@ -604,7 +602,7 @@ impl RebornServices {
     /// two can never drift apart.
     pub(crate) fn read_write_workspace_filesystem(
         &self,
-    ) -> Option<Arc<ScopedFilesystem<LocalDevRootFilesystem>>> {
+    ) -> Option<Arc<ScopedFilesystem<CompositeRootFilesystem>>> {
         let local_runtime = self.local_runtime.as_ref()?;
         Some(Arc::new(ScopedFilesystem::with_fixed_view(
             Arc::clone(&local_runtime.extension_filesystem),
@@ -727,7 +725,7 @@ impl RebornServices {
     #[cfg(feature = "test-support")]
     fn local_dev_workspace_attachment_reader_for_test(
         &self,
-    ) -> Option<Arc<crate::support::fs::ProjectScopedAttachmentReader<LocalDevRootFilesystem>>>
+    ) -> Option<Arc<crate::support::fs::ProjectScopedAttachmentReader<CompositeRootFilesystem>>>
     {
         let local_runtime = self.local_runtime.as_ref()?;
         Some(Arc::new(
@@ -1061,7 +1059,7 @@ pub(crate) struct RebornLocalRuntimeServices {
     /// reads it today, hence `dead_code` when that feature is off.
     #[cfg(any(feature = "libsql", feature = "postgres"))]
     #[allow(dead_code)]
-    pub(crate) identity_filesystem: Arc<ScopedFilesystem<LocalDevRootFilesystem>>,
+    pub(crate) identity_filesystem: Arc<ScopedFilesystem<CompositeRootFilesystem>>,
     /// Admin per-user secret provisioner (target-user-scoped secret store over
     /// the shared root + crypto). `None` when no filesystem secret store was
     /// built. Read only by the WebUI v2 admin surface.
@@ -1133,13 +1131,13 @@ pub(crate) struct RebornLocalRuntimeServices {
     pub(crate) skill_mounts: MountView,
     pub(crate) memory_mounts: MountView,
     pub(crate) system_extensions_lifecycle_mounts: MountView,
-    pub(crate) skill_filesystem: Arc<ScopedFilesystem<LocalDevRootFilesystem>>,
-    pub(crate) workspace_filesystem: Arc<ScopedFilesystem<LocalDevRootFilesystem>>,
+    pub(crate) skill_filesystem: Arc<ScopedFilesystem<CompositeRootFilesystem>>,
+    pub(crate) workspace_filesystem: Arc<ScopedFilesystem<CompositeRootFilesystem>>,
     #[cfg(all(
         any(feature = "libsql", feature = "postgres"),
         feature = "slack-v2-host-beta"
     ))]
-    pub(crate) host_state_filesystem: Arc<ScopedFilesystem<LocalDevRootFilesystem>>,
+    pub(crate) host_state_filesystem: Arc<ScopedFilesystem<CompositeRootFilesystem>>,
     /// Telegram analog of `host_state_filesystem`: a `ScopedFilesystem` whose
     /// fixed resolver is [`crate::telegram_host_state_mount_view`], backing the
     /// durable Telegram setup/pairing/binding/DM-target stores plus the
@@ -1150,12 +1148,12 @@ pub(crate) struct RebornLocalRuntimeServices {
     ))]
     pub(crate) telegram_host_state_filesystem: Arc<ScopedFilesystem<dyn RootFilesystem>>,
     #[cfg(any(feature = "libsql", feature = "postgres"))]
-    pub(crate) subagent_goal_filesystem: Arc<ScopedFilesystem<LocalDevRootFilesystem>>,
+    pub(crate) subagent_goal_filesystem: Arc<ScopedFilesystem<CompositeRootFilesystem>>,
     /// Tenant-scoped root filesystem used for third-party extension hook
     /// discovery (`/system/extensions/<tenant>`). The runtime derives the
     /// discovery root from the authenticated tenant id; this is the same
     /// backend the rest of local-dev composition uses.
-    pub(crate) extension_filesystem: Arc<LocalDevRootFilesystem>,
+    pub(crate) extension_filesystem: Arc<CompositeRootFilesystem>,
     pub(crate) workspace_mounts: MountView,
     pub(crate) local_dev_storage_root: PathBuf,
     pub(crate) default_system_prompt_path: PathBuf,
@@ -1252,12 +1250,12 @@ struct RebornLocalDevStoreGraph {
 }
 
 struct RebornLocalDevStoreGraphInput {
-    filesystem: Arc<LocalDevRootFilesystem>,
+    filesystem: Arc<CompositeRootFilesystem>,
     owner_user_id: UserId,
     local_runtime_identity: Option<RebornLocalRuntimeIdentity>,
     runtime_policy: Option<EffectiveRuntimePolicy>,
-    skill_filesystem: Arc<ScopedFilesystem<LocalDevRootFilesystem>>,
-    workspace_filesystem: Arc<ScopedFilesystem<LocalDevRootFilesystem>>,
+    skill_filesystem: Arc<ScopedFilesystem<CompositeRootFilesystem>>,
+    workspace_filesystem: Arc<ScopedFilesystem<CompositeRootFilesystem>>,
     workspace_mounts: MountView,
     local_dev_storage_root: PathBuf,
     default_system_prompt_path: PathBuf,
@@ -3284,7 +3282,7 @@ fn local_dev_project_filesystem(
 ))]
 pub(crate) async fn open_local_dev_slack_host_state_filesystem_for_test(
     storage_root: &Path,
-) -> Result<Arc<ScopedFilesystem<LocalDevRootFilesystem>>, RebornBuildError> {
+) -> Result<Arc<ScopedFilesystem<CompositeRootFilesystem>>, RebornBuildError> {
     let workspace_root = storage_root.join("workspace");
     let bundle = build_local_dev_root_filesystem(
         storage_root,
@@ -3823,8 +3821,8 @@ fn local_dev_mount_descriptor(
 }
 
 fn local_dev_scoped_filesystem(
-    filesystem: Arc<LocalDevRootFilesystem>,
-) -> Arc<ScopedFilesystem<LocalDevRootFilesystem>> {
+    filesystem: Arc<CompositeRootFilesystem>,
+) -> Arc<ScopedFilesystem<CompositeRootFilesystem>> {
     crate::wrap_scoped(filesystem)
 }
 
@@ -3851,17 +3849,17 @@ pub(crate) struct LocalDevOutboundStores {
     pub(crate) triggered_run_delivery: Arc<dyn TriggeredRunDeliveryStore>,
 }
 
-fn local_dev_outbound_store(filesystem: Arc<LocalDevRootFilesystem>) -> LocalDevOutboundStores {
+fn local_dev_outbound_store(filesystem: Arc<CompositeRootFilesystem>) -> LocalDevOutboundStores {
     // One store instance over the composition-owned per-user scoped filesystem
     // (`/outbound` → `/tenants/<t>/users/<u>/outbound`). All four outbound
     // roles — preferences, state, delivered-gate routes, triggered-run delivery
     // — are Arc-cloned from this single instance so the WebUI delivery-defaults
     // facade and the Slack delivery path share the same backing tree. Works in
     // both durable (libsql/postgres) and no-durable (in-memory backend) builds
-    // because `LocalDevRootFilesystem` is `CompositeRootFilesystem` in both.
+    // because `CompositeRootFilesystem` is `CompositeRootFilesystem` in both.
     // composition-owned construction site, the only one allowed.
     #[allow(clippy::disallowed_methods)]
-    let store: Arc<FilesystemOutboundStateStore<LocalDevRootFilesystem>> = Arc::new(
+    let store: Arc<FilesystemOutboundStateStore<CompositeRootFilesystem>> = Arc::new(
         FilesystemOutboundStateStore::new(local_dev_scoped_filesystem(filesystem)),
     );
     LocalDevOutboundStores {
@@ -3880,8 +3878,8 @@ fn local_dev_outbound_store(filesystem: Arc<LocalDevRootFilesystem>) -> LocalDev
     feature = "slack-v2-host-beta"
 ))]
 fn local_dev_slack_host_state_filesystem(
-    filesystem: Arc<LocalDevRootFilesystem>,
-) -> Arc<ScopedFilesystem<LocalDevRootFilesystem>> {
+    filesystem: Arc<CompositeRootFilesystem>,
+) -> Arc<ScopedFilesystem<CompositeRootFilesystem>> {
     Arc::new(ScopedFilesystem::new(
         filesystem,
         crate::slack_host_state_mount_view,
@@ -3893,7 +3891,7 @@ fn local_dev_slack_host_state_filesystem(
     feature = "telegram-v2-host-beta"
 ))]
 fn local_dev_telegram_host_state_filesystem(
-    filesystem: Arc<LocalDevRootFilesystem>,
+    filesystem: Arc<CompositeRootFilesystem>,
 ) -> Arc<ScopedFilesystem<dyn RootFilesystem>> {
     let filesystem: Arc<dyn RootFilesystem> = filesystem;
     Arc::new(ScopedFilesystem::new(
@@ -3904,7 +3902,7 @@ fn local_dev_telegram_host_state_filesystem(
 
 #[cfg(any(feature = "libsql", feature = "postgres"))]
 fn local_dev_event_log(
-    filesystem: Arc<LocalDevRootFilesystem>,
+    filesystem: Arc<CompositeRootFilesystem>,
 ) -> Result<Arc<dyn DurableEventLog>, RebornBuildError> {
     let scoped = Arc::new(ScopedFilesystem::with_fixed_view(
         filesystem,
@@ -3921,7 +3919,7 @@ fn local_dev_event_log(
 
 #[cfg(any(feature = "libsql", feature = "postgres"))]
 fn local_dev_audit_log(
-    filesystem: Arc<LocalDevRootFilesystem>,
+    filesystem: Arc<CompositeRootFilesystem>,
 ) -> Result<Arc<dyn DurableAuditLog>, RebornBuildError> {
     let scoped = Arc::new(ScopedFilesystem::with_fixed_view(
         filesystem,
@@ -3938,14 +3936,14 @@ fn local_dev_audit_log(
 
 #[cfg(not(any(feature = "libsql", feature = "postgres")))]
 fn local_dev_event_log(
-    _filesystem: Arc<LocalDevRootFilesystem>,
+    _filesystem: Arc<CompositeRootFilesystem>,
 ) -> Result<Arc<dyn DurableEventLog>, RebornBuildError> {
     Ok(Arc::new(InMemoryDurableEventLog::new()))
 }
 
 #[cfg(not(any(feature = "libsql", feature = "postgres")))]
 fn local_dev_audit_log(
-    _filesystem: Arc<LocalDevRootFilesystem>,
+    _filesystem: Arc<CompositeRootFilesystem>,
 ) -> Result<Arc<dyn DurableAuditLog>, RebornBuildError> {
     Ok(Arc::new(InMemoryDurableAuditLog::new()))
 }
@@ -3975,7 +3973,7 @@ impl LocalDevHostHomeRoot {
 /// real local paths resolve through the same virtual roots as `/workspace` and
 /// `/host`.
 fn build_workspace_filesystems(
-    filesystem: Arc<LocalDevRootFilesystem>,
+    filesystem: Arc<CompositeRootFilesystem>,
     workspace_root: &Path,
     host_home_root: Option<&LocalDevHostHomeRoot>,
 ) -> Result<LocalDevWorkspaceFilesystems, RebornBuildError> {

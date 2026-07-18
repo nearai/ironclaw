@@ -79,7 +79,6 @@ const FROZEN_LOCALDEV_TYPES: &[&str] = &[
     "LocalDevOverride",
     "LocalDevPersistentApprovalPolicyStore",
     "LocalDevProviderPolicy",
-    "LocalDevRootFilesystem",
     "LocalDevSelectableSkillContextSource",
     "LocalDevSyntheticCapability",
     "LocalDevSyntheticCapabilityDescriptor",
