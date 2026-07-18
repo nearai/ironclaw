@@ -3110,6 +3110,33 @@ mod tests {
             unreachable!("constructor tests do not call auth-flow methods")
         }
 
+        async fn reserve_cancellation(
+            &self,
+            _scope: &AuthProductScope,
+            _flow_id: AuthFlowId,
+            _observed_at: Timestamp,
+        ) -> Result<AuthFlowRecord, AuthProductError> {
+            unreachable!("constructor tests do not call auth-flow methods")
+        }
+
+        async fn finalize_cancellation(
+            &self,
+            _scope: &AuthProductScope,
+            _flow_id: AuthFlowId,
+            _expected_claimed_at: Timestamp,
+        ) -> Result<AuthFlowRecord, AuthProductError> {
+            unreachable!("constructor tests do not call auth-flow methods")
+        }
+
+        async fn rollback_cancellation(
+            &self,
+            _scope: &AuthProductScope,
+            _flow_id: AuthFlowId,
+            _expected_claimed_at: Timestamp,
+        ) -> Result<AuthFlowRecord, AuthProductError> {
+            unreachable!("constructor tests do not call auth-flow methods")
+        }
+
         async fn mark_continuation_dispatched(
             &self,
             _scope: &AuthProductScope,
@@ -3521,6 +3548,39 @@ mod tests {
                     .take()
                     .expect("cancel_flow called more than once on TerminalRaceFlowManager");
                 Err(err)
+            }
+
+            async fn reserve_cancellation(
+                &self,
+                scope: &AuthProductScope,
+                flow_id: AuthFlowId,
+                observed_at: Timestamp,
+            ) -> Result<AuthFlowRecord, AuthProductError> {
+                self.inner
+                    .reserve_cancellation(scope, flow_id, observed_at)
+                    .await
+            }
+
+            async fn finalize_cancellation(
+                &self,
+                scope: &AuthProductScope,
+                flow_id: AuthFlowId,
+                expected_claimed_at: Timestamp,
+            ) -> Result<AuthFlowRecord, AuthProductError> {
+                self.inner
+                    .finalize_cancellation(scope, flow_id, expected_claimed_at)
+                    .await
+            }
+
+            async fn rollback_cancellation(
+                &self,
+                scope: &AuthProductScope,
+                flow_id: AuthFlowId,
+                expected_claimed_at: Timestamp,
+            ) -> Result<AuthFlowRecord, AuthProductError> {
+                self.inner
+                    .rollback_cancellation(scope, flow_id, expected_claimed_at)
+                    .await
             }
 
             async fn claim_oauth_callback(

@@ -4438,6 +4438,39 @@ mod tests {
         ) -> Result<ironclaw_auth::AuthFlowRecord, AuthProductError> {
             self.inner.cancel_flow(scope, flow_id).await
         }
+
+        async fn reserve_cancellation(
+            &self,
+            scope: &AuthProductScope,
+            flow_id: ironclaw_auth::AuthFlowId,
+            observed_at: ironclaw_auth::Timestamp,
+        ) -> Result<ironclaw_auth::AuthFlowRecord, AuthProductError> {
+            self.inner
+                .reserve_cancellation(scope, flow_id, observed_at)
+                .await
+        }
+
+        async fn finalize_cancellation(
+            &self,
+            scope: &AuthProductScope,
+            flow_id: ironclaw_auth::AuthFlowId,
+            expected_claimed_at: ironclaw_auth::Timestamp,
+        ) -> Result<ironclaw_auth::AuthFlowRecord, AuthProductError> {
+            self.inner
+                .finalize_cancellation(scope, flow_id, expected_claimed_at)
+                .await
+        }
+
+        async fn rollback_cancellation(
+            &self,
+            scope: &AuthProductScope,
+            flow_id: ironclaw_auth::AuthFlowId,
+            expected_claimed_at: ironclaw_auth::Timestamp,
+        ) -> Result<ironclaw_auth::AuthFlowRecord, AuthProductError> {
+            self.inner
+                .rollback_cancellation(scope, flow_id, expected_claimed_at)
+                .await
+        }
     }
 
     #[cfg(feature = "slack-v2-host-beta")]
@@ -4547,6 +4580,39 @@ mod tests {
             flow_id: ironclaw_auth::AuthFlowId,
         ) -> Result<ironclaw_auth::AuthFlowRecord, AuthProductError> {
             self.inner.cancel_flow(scope, flow_id).await
+        }
+
+        async fn reserve_cancellation(
+            &self,
+            scope: &AuthProductScope,
+            flow_id: ironclaw_auth::AuthFlowId,
+            observed_at: ironclaw_auth::Timestamp,
+        ) -> Result<ironclaw_auth::AuthFlowRecord, AuthProductError> {
+            self.inner
+                .reserve_cancellation(scope, flow_id, observed_at)
+                .await
+        }
+
+        async fn finalize_cancellation(
+            &self,
+            scope: &AuthProductScope,
+            flow_id: ironclaw_auth::AuthFlowId,
+            expected_claimed_at: ironclaw_auth::Timestamp,
+        ) -> Result<ironclaw_auth::AuthFlowRecord, AuthProductError> {
+            self.inner
+                .finalize_cancellation(scope, flow_id, expected_claimed_at)
+                .await
+        }
+
+        async fn rollback_cancellation(
+            &self,
+            scope: &AuthProductScope,
+            flow_id: ironclaw_auth::AuthFlowId,
+            expected_claimed_at: ironclaw_auth::Timestamp,
+        ) -> Result<ironclaw_auth::AuthFlowRecord, AuthProductError> {
+            self.inner
+                .rollback_cancellation(scope, flow_id, expected_claimed_at)
+                .await
         }
     }
 

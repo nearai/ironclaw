@@ -425,13 +425,13 @@ where
         &self,
         scope: &ironclaw_auth::AuthProductScope,
         flow_id: AuthFlowId,
+        observed_at: ironclaw_auth::Timestamp,
     ) -> Result<AuthFlowRecord, AuthProductError> {
         self.update_flow_with_cas(scope, flow_id, |record| {
-            let now = Utc::now();
             match record.status {
                 AuthFlowStatus::AwaitingUser => {}
                 AuthFlowStatus::Canceling
-                    if now.signed_duration_since(record.updated_at)
+                    if observed_at.signed_duration_since(record.updated_at)
                         >= Duration::seconds(AUTH_FLOW_CANCELLATION_LEASE_SECONDS) => {}
                 AuthFlowStatus::Completed => return Ok(()),
                 AuthFlowStatus::Canceled => return Err(AuthProductError::Canceled),
@@ -443,7 +443,7 @@ where
             }
             record.status = AuthFlowStatus::Canceling;
             record.error = None;
-            record.updated_at = now;
+            record.updated_at = observed_at;
             Ok(())
         })
         .await

@@ -372,33 +372,29 @@ pub trait AuthFlowManager: Send + Sync {
 
     /// Reserve an awaiting flow for denial before canceling its blocked run.
     /// A completed flow is returned unchanged so completion wins the race.
+    /// `observed_at` is host-derived and makes lease recovery deterministic.
     async fn reserve_cancellation(
         &self,
-        _scope: &AuthProductScope,
-        _flow_id: AuthFlowId,
-    ) -> Result<AuthFlowRecord, AuthProductError> {
-        Err(AuthProductError::BackendUnavailable)
-    }
+        scope: &AuthProductScope,
+        flow_id: AuthFlowId,
+        observed_at: Timestamp,
+    ) -> Result<AuthFlowRecord, AuthProductError>;
 
     /// Finalize an exact cancellation reservation after run cancellation.
     async fn finalize_cancellation(
         &self,
-        _scope: &AuthProductScope,
-        _flow_id: AuthFlowId,
-        _expected_claimed_at: Timestamp,
-    ) -> Result<AuthFlowRecord, AuthProductError> {
-        Err(AuthProductError::BackendUnavailable)
-    }
+        scope: &AuthProductScope,
+        flow_id: AuthFlowId,
+        expected_claimed_at: Timestamp,
+    ) -> Result<AuthFlowRecord, AuthProductError>;
 
     /// Release an exact cancellation reservation when run cancellation fails.
     async fn rollback_cancellation(
         &self,
-        _scope: &AuthProductScope,
-        _flow_id: AuthFlowId,
-        _expected_claimed_at: Timestamp,
-    ) -> Result<AuthFlowRecord, AuthProductError> {
-        Err(AuthProductError::BackendUnavailable)
-    }
+        scope: &AuthProductScope,
+        flow_id: AuthFlowId,
+        expected_claimed_at: Timestamp,
+    ) -> Result<AuthFlowRecord, AuthProductError>;
 }
 
 /// Read-only auth-flow projection source for product interaction views.

@@ -1,6 +1,7 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use chrono::Utc;
 use ironclaw_auth::{
     AuthChallenge, AuthFlowId, AuthFlowManager, AuthFlowStatus, AuthProductError,
     CredentialAccountId, CredentialSelectionInput,
@@ -238,7 +239,7 @@ impl DefaultAuthInteractionService {
     ) -> Result<ResolveAuthInteractionResponse, ProductWorkflowError> {
         let reservation = self
             .flow_manager
-            .reserve_cancellation(&gate.flow().scope, gate.flow().id)
+            .reserve_cancellation(&gate.flow().scope, gate.flow().id, Utc::now())
             .await
             .map_err(map_auth_product_error)?;
         match reservation.status {

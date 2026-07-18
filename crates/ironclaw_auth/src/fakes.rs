@@ -524,8 +524,8 @@ impl AuthFlowManager for InMemoryAuthProductServices {
         &self,
         scope: &crate::AuthProductScope,
         flow_id: AuthFlowId,
+        observed_at: Timestamp,
     ) -> Result<AuthFlowRecord, AuthProductError> {
-        let now = Utc::now();
         let mut state = self.lock_state();
         let record = state
             .flows
@@ -537,7 +537,7 @@ impl AuthFlowManager for InMemoryAuthProductServices {
         match record.status {
             AuthFlowStatus::AwaitingUser => {}
             AuthFlowStatus::Canceling
-                if now.signed_duration_since(record.updated_at)
+                if observed_at.signed_duration_since(record.updated_at)
                     >= Duration::seconds(crate::AUTH_FLOW_CANCELLATION_LEASE_SECONDS) => {}
             AuthFlowStatus::Completed => return Ok(record.clone()),
             AuthFlowStatus::Canceled => return Err(AuthProductError::Canceled),
@@ -551,7 +551,7 @@ impl AuthFlowManager for InMemoryAuthProductServices {
         }
         record.status = AuthFlowStatus::Canceling;
         record.error = None;
-        record.updated_at = now;
+        record.updated_at = observed_at;
         Ok(record.clone())
     }
 

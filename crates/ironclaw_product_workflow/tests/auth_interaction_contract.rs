@@ -245,6 +245,7 @@ impl AuthFlowManager for RecordingFlowManager {
         &self,
         scope: &AuthProductScope,
         flow_id: AuthFlowId,
+        observed_at: Timestamp,
     ) -> Result<AuthFlowRecord, AuthProductError> {
         let mut flow = self.flow.lock().expect("lock");
         let Some(record) = flow.as_mut() else {
@@ -258,13 +259,13 @@ impl AuthFlowManager for RecordingFlowManager {
         }
         if std::mem::take(&mut *self.complete_before_cancel.lock().expect("lock")) {
             record.status = AuthFlowStatus::Completed;
-            record.updated_at = Utc::now();
+            record.updated_at = observed_at;
             return Ok(record.clone());
         }
         match record.status {
             AuthFlowStatus::AwaitingUser => {
                 record.status = AuthFlowStatus::Canceling;
-                record.updated_at = Utc::now();
+                record.updated_at = observed_at;
                 Ok(record.clone())
             }
             AuthFlowStatus::Completed

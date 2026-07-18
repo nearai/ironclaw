@@ -334,6 +334,33 @@ impl AuthFlowManager for FailingManualTokenFlowManager {
     ) -> Result<AuthFlowRecord, AuthProductError> {
         unreachable!("manual-token cleanup tests do not cancel generic flows")
     }
+
+    async fn reserve_cancellation(
+        &self,
+        _scope: &AuthProductScope,
+        _flow_id: AuthFlowId,
+        _observed_at: Timestamp,
+    ) -> Result<AuthFlowRecord, AuthProductError> {
+        unreachable!("manual-token cleanup tests do not reserve generic flow cancellation")
+    }
+
+    async fn finalize_cancellation(
+        &self,
+        _scope: &AuthProductScope,
+        _flow_id: AuthFlowId,
+        _expected_claimed_at: Timestamp,
+    ) -> Result<AuthFlowRecord, AuthProductError> {
+        unreachable!("manual-token cleanup tests do not finalize generic flow cancellation")
+    }
+
+    async fn rollback_cancellation(
+        &self,
+        _scope: &AuthProductScope,
+        _flow_id: AuthFlowId,
+        _expected_claimed_at: Timestamp,
+    ) -> Result<AuthFlowRecord, AuthProductError> {
+        unreachable!("manual-token cleanup tests do not roll back generic flow cancellation")
+    }
 }
 
 fn auth_services() -> RebornProductAuthServices {

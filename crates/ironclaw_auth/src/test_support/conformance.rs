@@ -27,10 +27,11 @@
 use chrono::{Duration, Utc};
 
 use crate::{
-    AuthChallenge, AuthContinuationRef, AuthFlowId, AuthFlowKind, AuthFlowManager, AuthFlowRecord,
-    AuthFlowStatus, AuthProductError, AuthProductScope, AuthProviderId, AuthorizationCodeHash,
-    CredentialAccountLabel, NewAuthFlow, OAuthAuthorizationUrl, OAuthCallbackInput,
-    OAuthProviderExchange, OpaqueStateHash, PkceVerifierHash, ProviderCallbackOutcome,
+    AUTH_FLOW_CANCELLATION_LEASE_SECONDS, AuthChallenge, AuthContinuationRef, AuthFlowId,
+    AuthFlowKind, AuthFlowManager, AuthFlowRecord, AuthFlowStatus, AuthProductError,
+    AuthProductScope, AuthProviderId, AuthorizationCodeHash, CredentialAccountLabel, NewAuthFlow,
+    OAuthAuthorizationUrl, OAuthCallbackInput, OAuthProviderExchange, OpaqueStateHash,
+    PkceVerifierHash, ProviderCallbackOutcome,
 };
 use ironclaw_host_api::SecretHandle;
 
@@ -244,7 +245,7 @@ async fn completed_flow_claim_idempotent_and_complete_rejects_replay(
         "[{CASE}] the original grant survives the rejected replay"
     );
     let cancellation = flows
-        .reserve_cancellation(scope, flow.id)
+        .reserve_cancellation(scope, flow.id, Utc::now())
         .await
         .unwrap_or_else(|error| {
             panic!("[{CASE}] completed flow must win a cancellation race: {error:?}")
@@ -269,8 +270,10 @@ async fn cancellation_reservation_is_fenced_and_reversible(
         .await
         .unwrap_or_else(|error| panic!("[{CASE}] create_flow: {error:?}"));
 
+    let initial_claimed_at =
+        Utc::now() - Duration::seconds(AUTH_FLOW_CANCELLATION_LEASE_SECONDS + 1);
     let reserved = flows
-        .reserve_cancellation(scope, flow.id)
+        .reserve_cancellation(scope, flow.id, initial_claimed_at)
         .await
         .unwrap_or_else(|error| panic!("[{CASE}] reserve: {error:?}"));
     assert_eq!(reserved.status, AuthFlowStatus::Canceling); // safety: test-support conformance assertion intentionally panics on mismatch.
@@ -290,14 +293,33 @@ async fn cancellation_reservation_is_fenced_and_reversible(
         .expect_err("a stale worker must not settle the reservation");
     assert_eq!(stale, AuthProductError::BackendConflict); // safety: test-support conformance assertion intentionally panics on mismatch.
 
-    let rolled_back = flows
+    let replacement_at = Utc::now();
+    let replacement = flows
+        .reserve_cancellation(scope, flow.id, replacement_at)
+        .await
+        .unwrap_or_else(|error| panic!("[{CASE}] reclaim expired reservation: {error:?}"));
+    assert_eq!(replacement.status, AuthFlowStatus::Canceling); // safety: test-support conformance assertion intentionally panics on mismatch.
+    assert_eq!(replacement.updated_at, replacement_at); // safety: test-support conformance assertion intentionally panics on mismatch.
+
+    let stale_finalize = flows
+        .finalize_cancellation(scope, flow.id, reserved.updated_at)
+        .await
+        .expect_err("the old lease owner must not finalize its replacement");
+    assert_eq!(stale_finalize, AuthProductError::BackendConflict); // safety: test-support conformance assertion intentionally panics on mismatch.
+    let stale_rollback = flows
         .rollback_cancellation(scope, flow.id, reserved.updated_at)
+        .await
+        .expect_err("the old lease owner must not roll back its replacement");
+    assert_eq!(stale_rollback, AuthProductError::BackendConflict); // safety: test-support conformance assertion intentionally panics on mismatch.
+
+    let rolled_back = flows
+        .rollback_cancellation(scope, flow.id, replacement.updated_at)
         .await
         .unwrap_or_else(|error| panic!("[{CASE}] rollback: {error:?}"));
     assert_eq!(rolled_back.status, AuthFlowStatus::AwaitingUser); // safety: test-support conformance assertion intentionally panics on mismatch.
 
     let reserved = flows
-        .reserve_cancellation(scope, flow.id)
+        .reserve_cancellation(scope, flow.id, Utc::now())
         .await
         .unwrap_or_else(|error| panic!("[{CASE}] re-reserve: {error:?}"));
     let canceled = flows

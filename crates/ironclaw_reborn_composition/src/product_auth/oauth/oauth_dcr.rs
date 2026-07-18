@@ -2113,6 +2113,33 @@ mod tests {
         ) -> Result<ironclaw_auth::AuthFlowRecord, AuthProductError> {
             unreachable!("create-flow failure test does not cancel flows")
         }
+
+        async fn reserve_cancellation(
+            &self,
+            _scope: &AuthProductScope,
+            _flow_id: AuthFlowId,
+            _observed_at: ironclaw_auth::Timestamp,
+        ) -> Result<ironclaw_auth::AuthFlowRecord, AuthProductError> {
+            unreachable!("create-flow failure test does not reserve flow cancellation")
+        }
+
+        async fn finalize_cancellation(
+            &self,
+            _scope: &AuthProductScope,
+            _flow_id: AuthFlowId,
+            _expected_claimed_at: ironclaw_auth::Timestamp,
+        ) -> Result<ironclaw_auth::AuthFlowRecord, AuthProductError> {
+            unreachable!("create-flow failure test does not finalize flow cancellation")
+        }
+
+        async fn rollback_cancellation(
+            &self,
+            _scope: &AuthProductScope,
+            _flow_id: AuthFlowId,
+            _expected_claimed_at: ironclaw_auth::Timestamp,
+        ) -> Result<ironclaw_auth::AuthFlowRecord, AuthProductError> {
+            unreachable!("create-flow failure test does not roll back flow cancellation")
+        }
     }
 
     #[derive(Debug)]
