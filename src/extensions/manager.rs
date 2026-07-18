@@ -641,6 +641,15 @@ pub struct ExtensionManager {
 
 /// Sanitize a URL for logging by removing query parameters and credentials.
 /// Prevents accidental logging of API keys, OAuth tokens, or other sensitive data in URLs.
+/// Whether two URLs share an origin (scheme, host, port). Unparseable URLs
+/// compare as NOT same-origin — fail safe toward unbinding credentials.
+fn same_url_origin(a: &str, b: &str) -> bool {
+    match (url::Url::parse(a), url::Url::parse(b)) {
+        (Ok(a), Ok(b)) => a.origin() == b.origin(),
+        _ => false,
+    }
+}
+
 /// Reject embedded credentials in every URL the config persists verbatim
 /// (server.url + OAuth authorization/token endpoints). Shared by the
 /// programmatic install and PATCH surfaces; runs BEFORE any secret write.
@@ -4076,6 +4085,28 @@ impl ExtensionManager {
         if let Some(h) = headers {
             config.headers = h;
         }
+        // A cross-origin URL change WITHOUT a simultaneous header replacement
+        // unbinds the secretized header credentials: they were supplied for
+        // the previous origin, and resolving them against a caller-chosen new
+        // host would let a PATCH redirect exfiltrate the stored API key. The
+        // caller re-supplies headers for the new origin in the same or a
+        // follow-up PATCH. (Same-origin path/query changes keep them; the GC
+        // below deletes the unbound secrets after commit.)
+        let mut credential_headers_unbound = false;
+        if url_changed && !headers_replaced && !same_url_origin(&previous_config.url, &config.url) {
+            let before = config.headers.len();
+            config.headers.retain(|_, v| {
+                crate::tools::mcp::config::parse_header_secret_reference(v).is_none()
+            });
+            if config.headers.len() != before {
+                credential_headers_unbound = true;
+                tracing::info!(
+                    extension = %name,
+                    user_id = %user_id,
+                    "cross-origin URL change: unbound secretized header credentials"
+                );
+            }
+        }
         // Tri-state: None → unchanged, Some(None) → clear, Some(Some(_)) → replace.
         let oauth_cleared = matches!(oauth, Some(None));
         match oauth {
@@ -4257,8 +4288,9 @@ impl ExtensionManager {
             );
         }
 
-        // Success: garbage-collect header secrets the replacement dropped.
-        if headers_replaced {
+        // Success: garbage-collect header secrets the replacement dropped
+        // (or that a cross-origin URL change unbound).
+        if headers_replaced || credential_headers_unbound {
             for secret_name in superseded_header_refs {
                 if let Err(e) = self.secrets.delete(user_id, &secret_name).await {
                     tracing::warn!(

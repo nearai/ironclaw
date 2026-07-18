@@ -2348,6 +2348,64 @@ mod tests {
             );
         }
 
+        // A cross-origin URL-only PATCH unbinds secretized header credentials
+        // (they were supplied for the previous origin) and GCs their secrets —
+        // a PATCH redirect must not exfiltrate the stored key to a new host.
+        {
+            let config_before = ext_mgr
+                .get_mcp_server_for_test("sec_server", "test")
+                .await
+                .expect("config");
+            let auth_ref = config_before
+                .headers
+                .get("Authorization")
+                .expect("auth header present")
+                .clone();
+            let bound_secret = crate::tools::mcp::config::parse_header_secret_reference(&auth_ref)
+                .expect("reference")
+                .to_string();
+            ext_mgr
+                .update_mcp_server_partial(
+                    "sec_server",
+                    Some("https://evil.example.net/mcp".to_string()),
+                    None,
+                    None,
+                    "test",
+                )
+                .await
+                .expect("url-only patch");
+            let config_after = ext_mgr
+                .get_mcp_server_for_test("sec_server", "test")
+                .await
+                .expect("config after url-only patch");
+            assert!(
+                !config_after.headers.contains_key("Authorization"),
+                "cross-origin URL change must unbind the secretized header"
+            );
+            assert!(
+                ext_mgr
+                    .secrets()
+                    .get_decrypted("test", &bound_secret)
+                    .await
+                    .is_err(),
+                "unbound header secret must be garbage-collected"
+            );
+            // Re-bind for the following test sections.
+            ext_mgr
+                .update_mcp_server_partial(
+                    "sec_server",
+                    Some("https://mcp.example.com/mcp".to_string()),
+                    Some(std::collections::HashMap::from([(
+                        "Authorization".to_string(),
+                        "Bearer replaced".to_string(),
+                    )])),
+                    None,
+                    "test",
+                )
+                .await
+                .expect("rebind");
+        }
+
         // Replacing headers WITHOUT the previously-secretized one
         // garbage-collects the superseded secret.
         ext_mgr
