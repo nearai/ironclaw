@@ -56,7 +56,7 @@ The `traces` command tree is a contributor-only trace client; see
 
 **`channels`, `hooks`, and `logs` are disabled.** They stay in `--help` and
 shell completions so the eventual real implementation has a stable command
-name, but every invocation returns an explicit
+name, but invoking `channels list`, `hooks list`, or `logs` returns an explicit
 `` `<command>` is not implemented yet `` error (non-zero exit) instead of the
 fake-success placeholder output ( `configured: 0` / `status: not-wired`) they
 used to print. Do not treat that old placeholder shape as the current
@@ -240,8 +240,8 @@ from a browser on the same host against `127.0.0.1`.
 ### `channels list` — disabled
 
 The Reborn channel registry is not wired yet. The command stays visible in
-`--help`/completions for a stable future name, but every invocation returns an
-error and a non-zero exit instead of resolving Reborn home, reading v1 channel
+`--help`/completions for a stable future name, but invoking `channels list`
+returns an error and a non-zero exit instead of resolving Reborn home, reading v1 channel
 config, or printing channel data:
 
 ```bash
@@ -331,7 +331,7 @@ Expected fields include:
 ### `hooks list` — disabled
 
 Same treatment as `channels list` above: the Reborn hook registry is not
-wired yet, so the command stays visible but every invocation errors instead
+wired yet, so the command stays visible but invoking `hooks list` errors instead
 of reporting hook data:
 
 ```bash
@@ -347,7 +347,7 @@ Error: `hooks list` is not implemented yet
 ### `logs` — disabled
 
 Same treatment: the Reborn log source is not wired yet, so `logs` stays
-visible but every invocation errors instead of reporting log data:
+visible but invoking it errors instead of reporting log data:
 
 ```bash
 cargo run -q -p ironclaw_reborn_cli --bin ironclaw-reborn -- logs

@@ -92,13 +92,11 @@ impl ModelsListCommand {
 #[cfg(not(feature = "root-llm-provider"))]
 impl ModelsListCommand {
     fn execute(self) -> anyhow::Result<()> {
-        Err(feature_not_available(&format!(
-            "list{}",
-            self.provider
-                .as_deref()
-                .map(|provider| format!(" {provider}"))
-                .unwrap_or_default()
-        )))
+        let command = match self.provider.as_deref() {
+            Some(provider) => format!("list {provider}"),
+            None => "list".to_string(),
+        };
+        Err(feature_not_available(&command))
     }
 }
 
