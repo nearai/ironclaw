@@ -571,7 +571,7 @@ async fn production_wiring_validation_classifies_in_memory_backed_run_state_and_
     // helper (the combined-store path hard-codes `LocalOnly` and bypasses it).
     let services = HostRuntimeServices::new(
         Arc::new(registry_with_manifest(SCRIPT_MANIFEST)),
-        Arc::new(LocalFilesystem::new()),
+        Arc::new(DiskFilesystem::new()),
         Arc::new(InMemoryResourceGovernor::new()),
         Arc::new(GrantAuthorizer::new()),
         ironclaw_processes::in_memory_backed_process_services(),
