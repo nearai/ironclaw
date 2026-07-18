@@ -91,19 +91,38 @@ mod tests {
     }
 
     #[test]
-    fn all_covers_every_variant() {
-        // If a lane is added, this exhaustiveness match fails to compile until the
-        // new variant is added to ALL — the ratchet the closed set buys (§4.2).
-        for lane in RuntimeLane::ALL {
-            let known = match lane {
-                RuntimeLane::FirstParty
-                | RuntimeLane::Wasm
-                | RuntimeLane::Mcp
-                | RuntimeLane::Process => true,
-            };
-            assert!(known);
+    fn all_covers_every_variant_exactly_once() {
+        // Review findings on the C.6 slice: the previous shape passed vacuously —
+        // a new variant could be added to the enum, the match, and as_str() while
+        // ALL kept the old four values, silently dropping the lane from every
+        // registry that iterates ALL. This version is drift-proof in both
+        // directions:
+        //
+        // - Adding a variant fails to COMPILE here (exhaustive match) until an
+        //   ordinal is assigned;
+        // - assigning an ordinal fails the `ordinal == index in ALL` assertion
+        //   until ALL is extended with the new variant in position;
+        // - the bijection check (every ordinal < len, each hit exactly once)
+        //   rejects duplicates and omissions.
+        fn ordinal(lane: RuntimeLane) -> usize {
+            match lane {
+                RuntimeLane::FirstParty => 0,
+                RuntimeLane::Wasm => 1,
+                RuntimeLane::Mcp => 2,
+                RuntimeLane::Process => 3,
+            }
         }
-        assert_eq!(RuntimeLane::ALL.len(), 4);
+        let mut seen = [false; RuntimeLane::ALL.len()];
+        for (index, lane) in RuntimeLane::ALL.into_iter().enumerate() {
+            assert_eq!(
+                ordinal(lane),
+                index,
+                "ALL must list every variant once, in ordinal order: {lane:?}"
+            );
+            assert!(!seen[index], "duplicate lane in ALL: {lane:?}");
+            seen[index] = true;
+        }
+        assert!(seen.iter().all(|hit| *hit), "ALL must cover every ordinal");
     }
 
     #[test]
