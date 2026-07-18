@@ -19,8 +19,9 @@ pub(super) struct ConfigSetCommand {
     /// Dot-separated config key (e.g. google.client_id, openai.api_key,
     /// slack.enabled, webui.token).
     key: String,
-    /// Value to set. Omit for a secret-destination key (`<provider>.api_key`,
-    /// `google.client_secret`) to be prompted for instead, with input hidden.
+    /// Value to set for non-secret keys. Secret-destination keys
+    /// (`<provider>.api_key`, `google.client_secret`) reject positional values
+    /// and always prompt with input hidden.
     value: Option<String>,
     /// `webui.token` only: rotate the WebChat v2 bearer token. Invalidates
     /// every existing browser session (the token doubles as the
@@ -88,11 +89,18 @@ fn set_value_key(
     store_opener: &dyn SecretStoreOpener,
 ) -> anyhow::Result<()> {
     let label = describe_key(&key);
+    if key.is_secret_prompted() && value_arg.is_some() {
+        anyhow::bail!(
+            "`config set {label}` does not accept a positional value because shell history and \
+             process listings can expose it; omit the value and use the hidden interactive prompt"
+        );
+    }
     let value = match value_arg {
         Some(value) => value,
         None if key.is_secret_prompted() => prompt.prompt(&label)?,
         None => anyhow::bail!("`config set {label}` requires a value"),
     };
+    let value = value.trim().to_string();
 
     // Secret-shape law FIRST, before shape validation: a value destined for
     // config.toml must not look like inline secret material. Must run before
@@ -111,6 +119,10 @@ fn set_value_key(
         ShapeVerdict::Ok => {}
     }
 
+    // This is a host-owned operator/bootstrap write plane, not an in-turn
+    // model capability. Sending API keys, OAuth secrets, or the WebUI token
+    // through ToolDispatcher would make secret ingress model-visible.
+    // dispatch-exempt: host-owned operator config/secret ingress, not in-turn tool dispatch
     let home = context.boot_config().home();
     match &key {
         ConfigKey::LlmApiKey { provider_id } => {
@@ -123,7 +135,7 @@ fn set_value_key(
             write_google_field(home, None, Some(GoogleFieldUpdate::Set(value.clone())))?;
         }
         ConfigKey::GoogleClientSecret => {
-            write_google_client_secret(home, &value, store_opener)?;
+            write_google_client_secret(context, &value, store_opener)?;
         }
         ConfigKey::SlackEnabled => {
             write_slack_enabled(home, &value)?;
@@ -205,7 +217,11 @@ fn write_llm_api_key(
     let canonical_provider_id = admin
         .resolve_provider_id(provider_id)
         .map_err(anyhow::Error::from)?;
-    let store = store_opener.open_llm_key_store(context.boot_config().home().path())?;
+    let storage_root = crate::runtime::local_runtime_storage_root(
+        context.boot_config(),
+        context.boot_config().profile(),
+    );
+    let store = store_opener.open_llm_key_store(&storage_root)?;
     let value_owned = value.to_string();
     crate::runtime::block_on_cli(async move {
         store
@@ -230,11 +246,15 @@ fn write_llm_api_key(
 
 #[cfg(feature = "libsql")]
 fn write_google_client_secret(
-    home: &RebornHome,
+    context: &RebornCliContext,
     value: &str,
     store_opener: &dyn SecretStoreOpener,
 ) -> anyhow::Result<()> {
-    let store = store_opener.open_google_oauth_secret_store(home.path())?;
+    let storage_root = crate::runtime::local_runtime_storage_root(
+        context.boot_config(),
+        context.boot_config().profile(),
+    );
+    let store = store_opener.open_google_oauth_secret_store(&storage_root)?;
     let value_owned = value.to_string();
     crate::runtime::block_on_cli(async move {
         store
@@ -246,7 +266,7 @@ fn write_google_client_secret(
 
 #[cfg(not(feature = "libsql"))]
 fn write_google_client_secret(
-    _home: &RebornHome,
+    _context: &RebornCliContext,
     _value: &str,
     _store_opener: &dyn SecretStoreOpener,
 ) -> anyhow::Result<()> {
@@ -308,6 +328,7 @@ fn execute_webui_token(
          (the token also signs sessions) — anyone signed in will need to sign in again"
     );
     let home = context.boot_config().home();
+    // dispatch-exempt: host-owned operator token rotation, not in-turn tool dispatch
     crate::webui_token::rotate_webui_token_file(home.path())?;
     println!("webui.token: rotated");
     print_apply_step();
@@ -339,8 +360,7 @@ fn configured_webui_token_env_override(
         .and_then(|section| section.env_token_var.as_deref())
         .unwrap_or(crate::webui_token::DEFAULT_ENV_TOKEN_VAR)
         .to_string();
-    Ok(std::env::var(&env_var_name)
-        .ok()
+    Ok(std::env::var_os(&env_var_name)
         .filter(|value| !value.is_empty())
         .map(|_| env_var_name))
 }
@@ -361,8 +381,8 @@ impl SecretValueSource for StdinSecretValueSource {
     fn prompt(&mut self, label: &str) -> anyhow::Result<String> {
         if !std::io::stdin().is_terminal() {
             anyhow::bail!(
-                "`config set {label}` needs a value; pass it as an argument, or run from an \
-                 interactive terminal to be prompted with input hidden"
+                "`config set {label}` requires an interactive terminal so the value can be \
+                 entered with input hidden"
             );
         }
         print!("{label} (input hidden): ");
@@ -478,6 +498,7 @@ mod tests {
     #[cfg(feature = "libsql")]
     struct FakeSecretStoreOpener {
         store: Arc<dyn ironclaw_secrets::SecretStore>,
+        opened_paths: Mutex<Vec<std::path::PathBuf>>,
     }
 
     #[cfg(feature = "libsql")]
@@ -485,6 +506,7 @@ mod tests {
         fn new() -> Self {
             Self {
                 store: Arc::new(ironclaw_secrets::InMemorySecretStore::new()),
+                opened_paths: Mutex::new(Vec::new()),
             }
         }
     }
@@ -494,8 +516,12 @@ mod tests {
         #[cfg(feature = "root-llm-provider")]
         fn open_llm_key_store(
             &self,
-            _home_path: &Path,
+            home_path: &Path,
         ) -> anyhow::Result<ironclaw_reborn_composition::LlmKeyStore> {
+            self.opened_paths
+                .lock()
+                .expect("opened paths lock")
+                .push(home_path.to_path_buf());
             Ok(ironclaw_reborn_composition::LlmKeyStore::new(
                 self.store.clone(),
             ))
@@ -503,8 +529,12 @@ mod tests {
 
         fn open_google_oauth_secret_store(
             &self,
-            _home_path: &Path,
+            home_path: &Path,
         ) -> anyhow::Result<ironclaw_reborn_composition::GoogleOauthSecretStore> {
+            self.opened_paths
+                .lock()
+                .expect("opened paths lock")
+                .push(home_path.to_path_buf());
             Ok(ironclaw_reborn_composition::GoogleOauthSecretStore::new(
                 self.store.clone(),
             ))
@@ -558,6 +588,46 @@ mod tests {
         assert!(
             toml.contains("client_id = \"abc123.apps.googleusercontent.com\""),
             "config: {toml}"
+        );
+    }
+
+    #[test]
+    fn config_toml_values_are_trimmed_before_validation_and_write() {
+        let (_tmp, context) = RebornCliContext::test_context();
+        set_value_key(
+            &context,
+            ConfigKey::GoogleClientId,
+            Some("  abc123.apps.googleusercontent.com\n".to_string()),
+            &mut NeverPromptSource,
+            &FailingStoreOpener,
+        )
+        .expect("surrounding whitespace must be ignored");
+
+        let toml = config_toml(&context);
+        assert!(
+            toml.contains("client_id = \"abc123.apps.googleusercontent.com\""),
+            "config: {toml}"
+        );
+        assert!(!toml.contains("  abc123"), "whitespace leaked: {toml}");
+    }
+
+    #[test]
+    fn secret_destination_rejects_positional_values_without_echoing_them() {
+        let (_tmp, context) = RebornCliContext::test_context();
+        let secret = "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cho";
+        let err = set_value_key(
+            &context,
+            ConfigKey::GoogleClientSecret,
+            Some(secret.to_string()),
+            &mut NeverPromptSource,
+            &FailingStoreOpener,
+        )
+        .expect_err("secret values must only enter through the hidden prompt");
+        let message = err.to_string();
+        assert!(message.contains("does not accept a positional value"));
+        assert!(
+            !message.contains(secret),
+            "secret leaked in error: {message}"
         );
     }
 
@@ -658,12 +728,13 @@ mod tests {
     fn google_client_secret_writes_secret_store_only() {
         let (_tmp, context) = RebornCliContext::test_context();
         let opener = FakeSecretStoreOpener::new();
+        let mut prompts = FixedPromptSource::new(vec!["GOCSPX-abc123"]);
 
         set_value_key(
             &context,
             ConfigKey::GoogleClientSecret,
-            Some("GOCSPX-abc123".to_string()),
-            &mut NeverPromptSource,
+            None,
+            &mut prompts,
             &opener,
         )
         .expect("must succeed");
@@ -684,6 +755,18 @@ mod tests {
             secrecy::ExposeSecret::expose_secret(&value),
             "GOCSPX-abc123"
         );
+        assert_eq!(
+            opener
+                .opened_paths
+                .lock()
+                .expect("opened paths lock")
+                .as_slice(),
+            &[crate::runtime::local_runtime_storage_root(
+                context.boot_config(),
+                context.boot_config().profile(),
+            )],
+            "Google secrets must use the active profile's runtime storage root"
+        );
     }
 
     /// `config set` on a secret-destination key may be the FIRST command a
@@ -702,11 +785,8 @@ mod tests {
         // command does), and unconditionally clearing it on the way out
         // would wipe that out for every test running after this one for the
         // rest of the process, sending them into the real OS keychain.
-        let prior_disable_keychain = std::env::var("IRONCLAW_DISABLE_OS_KEYCHAIN").ok();
-        // SAFETY: serialized by `lock_runtime_env()`; restored below.
-        unsafe {
-            std::env::set_var("IRONCLAW_DISABLE_OS_KEYCHAIN", "1");
-        }
+        let _disable_keychain =
+            crate::runtime::test_env::EnvGuard::set("IRONCLAW_DISABLE_OS_KEYCHAIN", "1");
 
         let (_tmp, context) = RebornCliContext::test_context();
         let home = context.boot_config().home();
@@ -719,18 +799,10 @@ mod tests {
         let result = set_value_key(
             &context,
             ConfigKey::GoogleClientSecret,
-            Some("GOCSPX-never-onboarded".to_string()),
-            &mut NeverPromptSource,
+            None,
+            &mut FixedPromptSource::new(vec!["GOCSPX-never-onboarded"]),
             &LocalDevSecretStoreOpener,
         );
-
-        // SAFETY: see above.
-        unsafe {
-            match &prior_disable_keychain {
-                Some(value) => std::env::set_var("IRONCLAW_DISABLE_OS_KEYCHAIN", value),
-                None => std::env::remove_var("IRONCLAW_DISABLE_OS_KEYCHAIN"),
-            }
-        }
 
         result.expect(
             "writing a secret-destination key must create the reborn home directory \
@@ -772,14 +844,15 @@ mod tests {
     fn llm_api_key_writes_to_secret_store_and_not_config_toml() {
         let (_tmp, context) = RebornCliContext::test_context();
         let opener = FakeSecretStoreOpener::new();
+        let mut prompts = FixedPromptSource::new(vec!["sk-test-value-1234567890"]);
 
         set_value_key(
             &context,
             ConfigKey::LlmApiKey {
                 provider_id: "openai".to_string(),
             },
-            Some("sk-test-value-1234567890".to_string()),
-            &mut NeverPromptSource,
+            None,
+            &mut prompts,
             &opener,
         )
         .expect("must succeed");
@@ -799,6 +872,18 @@ mod tests {
         assert_eq!(
             secrecy::ExposeSecret::expose_secret(&value),
             "sk-test-value-1234567890"
+        );
+        assert_eq!(
+            opener
+                .opened_paths
+                .lock()
+                .expect("opened paths lock")
+                .as_slice(),
+            &[crate::runtime::local_runtime_storage_root(
+                context.boot_config(),
+                context.boot_config().profile(),
+            )],
+            "LLM keys must use the active profile's runtime storage root"
         );
     }
 
@@ -834,6 +919,8 @@ mod tests {
 
     #[test]
     fn webui_token_rotate_writes_a_new_token_file() {
+        let _lock = crate::runtime::test_env::lock_runtime_env();
+        let _env = crate::runtime::test_env::EnvGuard::clear("IRONCLAW_REBORN_WEBUI_TOKEN");
         let (_tmp, context) = RebornCliContext::test_context();
         let home = context.boot_config().home();
         std::fs::create_dir_all(home.path()).expect("mkdir");
@@ -876,6 +963,8 @@ mod tests {
     #[test]
     fn webui_token_rotate_refuses_when_env_override_is_set() {
         let _lock = crate::runtime::test_env::lock_runtime_env();
+        let _original_env =
+            crate::runtime::test_env::EnvGuard::clear("IRONCLAW_REBORN_WEBUI_TOKEN");
         let (_tmp, context) = RebornCliContext::test_context();
         let home = context.boot_config().home();
         std::fs::create_dir_all(home.path()).expect("mkdir");
@@ -883,23 +972,13 @@ mod tests {
         let token_path = crate::webui_token::webui_token_file_path(home.path());
         let before = std::fs::read_to_string(&token_path).expect("read seeded token file");
 
-        // SAFETY: serialized by `lock_runtime_env()`; cleared before this
-        // test returns (mirrors `status::tests::clear_google_oauth_env`'s
-        // pattern for the same reason: this var is not restorable across a
-        // developer's local shell, only safe to force absent afterward).
-        unsafe {
-            std::env::set_var(
+        let result = {
+            let _env = crate::runtime::test_env::EnvGuard::set(
                 "IRONCLAW_REBORN_WEBUI_TOKEN",
                 "operator-set-env-token-value",
             );
-        }
-
-        let result = execute_webui_token(&context, None, true);
-
-        // SAFETY: see above.
-        unsafe {
-            std::env::remove_var("IRONCLAW_REBORN_WEBUI_TOKEN");
-        }
+            execute_webui_token(&context, None, true)
+        };
 
         let err = result.expect_err("rotate must refuse while the env var overrides the token");
         assert!(
@@ -913,15 +992,10 @@ mod tests {
         );
 
         // Edge: empty string == unset — rotate must be ALLOWED.
-        // SAFETY: see above.
-        unsafe {
-            std::env::set_var("IRONCLAW_REBORN_WEBUI_TOKEN", "");
-        }
-        let result = execute_webui_token(&context, None, true);
-        // SAFETY: see above.
-        unsafe {
-            std::env::remove_var("IRONCLAW_REBORN_WEBUI_TOKEN");
-        }
+        let result = {
+            let _env = crate::runtime::test_env::EnvGuard::set("IRONCLAW_REBORN_WEBUI_TOKEN", "");
+            execute_webui_token(&context, None, true)
+        };
         result.expect("empty env var must count as unset; rotate must be allowed");
         let after_empty = std::fs::read_to_string(&token_path).expect("read token file again");
         assert_ne!(
@@ -930,15 +1004,11 @@ mod tests {
         );
 
         // Edge: whitespace-only value is non-empty — rotate must be REFUSED.
-        // SAFETY: see above.
-        unsafe {
-            std::env::set_var("IRONCLAW_REBORN_WEBUI_TOKEN", "   ");
-        }
-        let result = execute_webui_token(&context, None, true);
-        // SAFETY: see above.
-        unsafe {
-            std::env::remove_var("IRONCLAW_REBORN_WEBUI_TOKEN");
-        }
+        let result = {
+            let _env =
+                crate::runtime::test_env::EnvGuard::set("IRONCLAW_REBORN_WEBUI_TOKEN", "   ");
+            execute_webui_token(&context, None, true)
+        };
         let err =
             result.expect_err("whitespace-only env var must still count as set; rotate refused");
         assert!(
@@ -950,5 +1020,28 @@ mod tests {
             after_empty, after_whitespace,
             "the token file must not be rotated while a whitespace-only env override is active"
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn webui_token_rotate_refuses_a_non_utf8_env_override() {
+        use std::os::unix::ffi::OsStringExt as _;
+
+        let _lock = crate::runtime::test_env::lock_runtime_env();
+        let _original_env =
+            crate::runtime::test_env::EnvGuard::clear("IRONCLAW_REBORN_WEBUI_TOKEN");
+        // SAFETY: serialized by the canonical env lock and restored by the
+        // guard above. The point of this regression is the non-UTF-8 value.
+        unsafe {
+            std::env::set_var(
+                "IRONCLAW_REBORN_WEBUI_TOKEN",
+                std::ffi::OsString::from_vec(vec![0xff, 0xfe]),
+            );
+        }
+
+        let (_tmp, context) = RebornCliContext::test_context();
+        let err = execute_webui_token(&context, None, true)
+            .expect_err("any non-empty OS env value must block file rotation");
+        assert!(err.to_string().contains("IRONCLAW_REBORN_WEBUI_TOKEN"));
     }
 }

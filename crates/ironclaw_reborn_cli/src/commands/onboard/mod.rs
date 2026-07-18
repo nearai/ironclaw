@@ -11,10 +11,9 @@ mod llm_credentials;
 mod master_key;
 pub(crate) mod prompts;
 
-use llm_credentials::{
-    EncryptedLlmKeyStoreOpener, LiveLlmProbe, LlmCredentialProvisionOutcome,
-    provision_llm_credentials,
-};
+#[cfg(all(feature = "libsql", feature = "root-llm-provider"))]
+use llm_credentials::LlmCredentialProvisionOutcome;
+use llm_credentials::{EncryptedLlmKeyStoreOpener, LiveLlmProbe, provision_llm_credentials};
 use master_key::{MasterKeyProvisionOutcome, provision_master_key};
 #[cfg(feature = "webui-v2-beta")]
 use prompts::PromptSource;
@@ -78,6 +77,7 @@ impl OnboardCommand {
             // Non-interactive session (headless CI, piped/scripted) is expected —
             // mirrors `MasterKeyProvisionOutcome::Suppressed`; `models set-provider`
             // remains the non-interactive path to configure a provider.
+            #[cfg(all(feature = "libsql", feature = "root-llm-provider"))]
             Err(LlmCredentialPromptError::NonInteractive) => {
                 LlmCredentialProvisionOutcome::SkippedNonInteractive
             }
@@ -85,12 +85,15 @@ impl OnboardCommand {
         };
         // Computed after `llm_outcome` so `steps_pending` reflects what actually
         // happened this run, not an unconditional `llm_credentials` pending.
+        #[cfg(all(feature = "libsql", feature = "root-llm-provider"))]
         let llm_configured = matches!(
             llm_outcome,
             LlmCredentialProvisionOutcome::Configured { .. }
                 | LlmCredentialProvisionOutcome::AlreadyConfigured { .. }
                 | LlmCredentialProvisionOutcome::ConfiguredFromEnv { .. }
         );
+        #[cfg(not(all(feature = "libsql", feature = "root-llm-provider")))]
+        let llm_configured = false;
         let marker_action = write_onboarding_marker(
             home,
             &marker_path,
@@ -130,11 +133,13 @@ impl OnboardCommand {
         println!("- config.toml and providers.json available");
         println!("- webui bearer token provisioned (used by `serve` when the env var is unset)");
         println!("- onboarding completion marker available");
+        #[cfg(all(feature = "libsql", feature = "root-llm-provider"))]
         if let LlmCredentialProvisionOutcome::Configured { provider_id, .. }
         | LlmCredentialProvisionOutcome::AlreadyConfigured { provider_id, .. } = &llm_outcome
         {
             println!("- LLM provider `{provider_id}` credentials stored");
         }
+        #[cfg(all(feature = "libsql", feature = "root-llm-provider"))]
         if let LlmCredentialProvisionOutcome::ConfiguredFromEnv { provider_id, .. } = &llm_outcome {
             println!(
                 "- LLM provider `{provider_id}` configured from environment (key also saved to \

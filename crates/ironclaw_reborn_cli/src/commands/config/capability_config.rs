@@ -174,7 +174,7 @@ pub(super) fn google_remediation_text() -> String {
 /// `set.rs::print_apply_step`), not embedded here — see the module doc.
 pub(super) fn slack_remediation_text(base_url: &str) -> String {
     format!(
-        "Slack setup is WebUI-only: finish connecting Slack at {base_url}/v2/extensions \
+        "Slack setup is WebUI-only: finish connecting Slack at {base_url}/extensions \
          (config set slack.enabled true|false only toggles whether the route mounts; it does \
          not configure Slack app identity or credentials)."
     )
@@ -406,7 +406,7 @@ mod tests {
         );
 
         let slack = slack_remediation_text("http://127.0.0.1:3000");
-        assert!(slack.contains("http://127.0.0.1:3000/v2/extensions"));
+        assert!(slack.contains("http://127.0.0.1:3000/extensions"));
         assert!(!slack.contains("config set slack.bot_token"));
         assert_eq!(
             slack.matches("service restart").count(),

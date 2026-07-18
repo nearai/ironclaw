@@ -1,3 +1,4 @@
+// arch-exempt: large_file, test-only environment isolation stays with the systemd contract tests, plan #4088
 //! Linux systemd user-unit generators, path resolution, and verb
 //! bodies for `ironclaw service`.
 
@@ -1471,9 +1472,7 @@ mod tests {
     fn installed_and_running_reports_both_true_for_an_active_unit() {
         let _lock = crate::runtime::test_env::lock_runtime_env();
         let tmp = tempfile::tempdir().expect("tempdir");
-        let prior = std::env::var_os("HOME");
-        // SAFETY: serialized by `lock_runtime_env`; restored below.
-        unsafe { std::env::set_var("HOME", tmp.path()) };
+        let _home = TempHomeGuard::set(tmp.path());
         let file = unit_path().expect("unit path");
         std::fs::create_dir_all(file.parent().expect("unit parent")).expect("create parent");
         std::fs::write(&file, "unit").expect("write unit");
@@ -1482,13 +1481,6 @@ mod tests {
             ..RecordingRunner::default()
         };
         let result = installed_and_running(&mut runner);
-        // SAFETY: serialized by `lock_runtime_env`.
-        unsafe {
-            match prior {
-                Some(value) => std::env::set_var("HOME", value),
-                None => std::env::remove_var("HOME"),
-            }
-        }
 
         assert_eq!(result.expect("query must succeed"), (true, true));
     }
@@ -1497,9 +1489,7 @@ mod tests {
     fn installed_and_running_reports_installed_not_running_for_an_inactive_unit() {
         let _lock = crate::runtime::test_env::lock_runtime_env();
         let tmp = tempfile::tempdir().expect("tempdir");
-        let prior = std::env::var_os("HOME");
-        // SAFETY: serialized by `lock_runtime_env`; restored below.
-        unsafe { std::env::set_var("HOME", tmp.path()) };
+        let _home = TempHomeGuard::set(tmp.path());
         let file = unit_path().expect("unit path");
         std::fs::create_dir_all(file.parent().expect("unit parent")).expect("create parent");
         std::fs::write(&file, "unit").expect("write unit");
@@ -1508,13 +1498,6 @@ mod tests {
             ..RecordingRunner::default()
         };
         let result = installed_and_running(&mut runner);
-        // SAFETY: serialized by `lock_runtime_env`.
-        unsafe {
-            match prior {
-                Some(value) => std::env::set_var("HOME", value),
-                None => std::env::remove_var("HOME"),
-            }
-        }
 
         assert_eq!(result.expect("query must succeed"), (true, false));
     }
@@ -1523,18 +1506,9 @@ mod tests {
     fn installed_and_running_reports_both_false_when_unit_is_absent() {
         let _lock = crate::runtime::test_env::lock_runtime_env();
         let tmp = tempfile::tempdir().expect("tempdir");
-        let prior = std::env::var_os("HOME");
-        // SAFETY: serialized by `lock_runtime_env`; restored below.
-        unsafe { std::env::set_var("HOME", tmp.path()) };
+        let _home = TempHomeGuard::set(tmp.path());
         let mut runner = RecordingRunner::default();
         let result = installed_and_running(&mut runner);
-        // SAFETY: serialized by `lock_runtime_env`.
-        unsafe {
-            match prior {
-                Some(value) => std::env::set_var("HOME", value),
-                None => std::env::remove_var("HOME"),
-            }
-        }
 
         assert_eq!(result.expect("query must succeed"), (false, false));
         assert!(

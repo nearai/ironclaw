@@ -124,6 +124,10 @@ fn status_json_round_trips() {
         !json.contains("sample-token"),
         "token leaked into JSON: {json}"
     );
+    assert!(
+        parsed.get("google_oauth_degraded").is_none(),
+        "unset Google OAuth diagnostics should be omitted from JSON: {json}"
+    );
 }
 
 #[test]
@@ -188,6 +192,11 @@ fn status_render_text_includes_google_oauth_line_when_degraded() {
     assert!(
         text.contains("config set google."),
         "status line must include the fix command: {text}"
+    );
+    let json = serde_json::to_value(&status).expect("serialize degraded status");
+    assert!(
+        json.get("google_oauth_degraded").is_some(),
+        "a present Google OAuth diagnostic must remain in JSON: {json}"
     );
 }
 

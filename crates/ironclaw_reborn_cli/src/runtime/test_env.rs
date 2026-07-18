@@ -38,14 +38,14 @@ pub(crate) fn lock_runtime_env() -> MutexGuard<'static, ()> {
 /// on drop. Restores on panic too (Drop runs during unwind), which the
 /// manual snapshot/restore pattern does not. Tests install this guard so
 /// other tests running in parallel cannot observe their mutations.
-pub(super) struct EnvGuard {
+pub(crate) struct EnvGuard {
     key: &'static str,
-    prior: Option<String>,
+    prior: Option<std::ffi::OsString>,
 }
 
 impl EnvGuard {
-    pub(super) fn set(key: &'static str, value: &str) -> Self {
-        let prior = std::env::var(key).ok();
+    pub(crate) fn set(key: &'static str, value: &str) -> Self {
+        let prior = std::env::var_os(key);
         // SAFETY: env mutation is process-global; restore on Drop covers
         // panic unwind. Callers must hold `lock_runtime_env()` for the
         // life of this guard to serialise against sibling test threads.
@@ -53,8 +53,8 @@ impl EnvGuard {
         Self { key, prior }
     }
 
-    pub(super) fn clear(key: &'static str) -> Self {
-        let prior = std::env::var(key).ok();
+    pub(crate) fn clear(key: &'static str) -> Self {
+        let prior = std::env::var_os(key);
         // SAFETY: see EnvGuard::set.
         unsafe { std::env::remove_var(key) };
         Self { key, prior }

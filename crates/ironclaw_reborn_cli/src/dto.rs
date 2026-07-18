@@ -37,6 +37,7 @@ pub(crate) struct StatusDto {
     /// degrade-to-disabled case from `resolve_google_oauth_config`. `None`
     /// both when Google OAuth is fully unconfigured (nothing to report) and
     /// when it is fully configured (no degradation to surface).
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub google_oauth_degraded: Option<String>,
 }
 
@@ -46,6 +47,9 @@ pub(crate) struct StatusDto {
 /// an `Unknown` fallback) on every build.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
+// Feature-reduced builds preserve the stable status schema but can only
+// construct `Unknown` because the service manager is not compiled in.
+#[cfg_attr(not(feature = "webui-v2-beta"), allow(dead_code))]
 pub(crate) enum ServiceStateDto {
     Running,
     Stopped,

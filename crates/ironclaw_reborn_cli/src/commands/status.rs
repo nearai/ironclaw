@@ -372,26 +372,28 @@ mod tests {
         );
     }
 
-    /// Test-only cleanup for the two Google OAuth env vars this test module
-    /// mutates. Mirrors `commands::serve_sso::clear_sso_env`'s
-    /// clear-before/after pattern for the same reason: these vars are not
-    /// meaningfully "restorable" across a developer's local shell, only
-    /// safe to force absent for the duration of the test.
-    fn clear_google_oauth_env() {
-        // SAFETY: serialized by the shared crate process-env lock (caller
-        // holds `lock_runtime_env()`); cleared before/after each test.
-        unsafe {
-            std::env::remove_var("IRONCLAW_REBORN_GOOGLE_CLIENT_ID");
-            std::env::remove_var("IRONCLAW_REBORN_GOOGLE_OAUTH_REDIRECT_URI");
-            std::env::remove_var("GOOGLE_CLIENT_ID");
-            std::env::remove_var("GOOGLE_OAUTH_REDIRECT_URI");
-        }
+    /// Clear every Google OAuth input for a test and restore the caller's
+    /// exact process environment (including non-UTF-8 values) on drop.
+    fn cleared_google_oauth_env() -> Vec<crate::runtime::test_env::EnvGuard> {
+        [
+            "IRONCLAW_REBORN_GOOGLE_CLIENT_ID",
+            "IRONCLAW_REBORN_GOOGLE_OAUTH_REDIRECT_URI",
+            "IRONCLAW_REBORN_GOOGLE_CLIENT_SECRET",
+            "IRONCLAW_REBORN_GOOGLE_HOSTED_DOMAIN_HINT",
+            "GOOGLE_CLIENT_ID",
+            "GOOGLE_OAUTH_REDIRECT_URI",
+            "GOOGLE_CLIENT_SECRET",
+            "GOOGLE_ALLOWED_HD",
+        ]
+        .into_iter()
+        .map(crate::runtime::test_env::EnvGuard::clear)
+        .collect()
     }
 
     #[test]
     fn status_dto_google_oauth_degraded_none_when_unconfigured() {
         let _guard = crate::runtime::test_env::lock_runtime_env();
-        clear_google_oauth_env();
+        let _env = cleared_google_oauth_env();
 
         let (_tmp, context) = RebornCliContext::test_context();
         let dto = build_status_dto(&context).expect("must build");
@@ -400,21 +402,16 @@ mod tests {
             "no Google OAuth vars set at all must not report a degraded state: {:?}",
             dto.google_oauth_degraded
         );
-
-        clear_google_oauth_env();
     }
 
     #[test]
     fn status_dto_reports_google_oauth_degraded_when_client_id_present_but_redirect_uri_missing() {
         let _guard = crate::runtime::test_env::lock_runtime_env();
-        clear_google_oauth_env();
-        // SAFETY: see clear_google_oauth_env.
-        unsafe {
-            std::env::set_var(
-                "IRONCLAW_REBORN_GOOGLE_CLIENT_ID",
-                "reborn-client.apps.googleusercontent.com",
-            );
-        }
+        let _env = cleared_google_oauth_env();
+        let _client_id = crate::runtime::test_env::EnvGuard::set(
+            "IRONCLAW_REBORN_GOOGLE_CLIENT_ID",
+            "reborn-client.apps.googleusercontent.com",
+        );
 
         let (_tmp, context) = RebornCliContext::test_context();
         let dto = build_status_dto(&context).expect("must build");
@@ -429,21 +426,16 @@ mod tests {
             degraded.contains("config set google.redirect_uri"),
             "status line must include the fix command: {degraded}"
         );
-
-        clear_google_oauth_env();
     }
 
     #[test]
     fn status_dto_reports_google_oauth_degraded_when_redirect_uri_present_but_client_id_missing() {
         let _guard = crate::runtime::test_env::lock_runtime_env();
-        clear_google_oauth_env();
-        // SAFETY: see clear_google_oauth_env.
-        unsafe {
-            std::env::set_var(
-                "IRONCLAW_REBORN_GOOGLE_OAUTH_REDIRECT_URI",
-                "http://127.0.0.1:3000/api/reborn/product-auth/oauth/google/callback",
-            );
-        }
+        let _env = cleared_google_oauth_env();
+        let _redirect_uri = crate::runtime::test_env::EnvGuard::set(
+            "IRONCLAW_REBORN_GOOGLE_OAUTH_REDIRECT_URI",
+            "http://127.0.0.1:3000/api/reborn/product-auth/oauth/google/callback",
+        );
 
         let (_tmp, context) = RebornCliContext::test_context();
         let dto = build_status_dto(&context).expect("must build");
@@ -458,8 +450,6 @@ mod tests {
             degraded.contains("config set google.client_id"),
             "status line must include the fix command: {degraded}"
         );
-
-        clear_google_oauth_env();
     }
 
     #[test]
