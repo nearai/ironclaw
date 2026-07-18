@@ -115,28 +115,47 @@ impl Suspension {
             Suspension::ExternalTool(_) => "external_tool",
         }
     }
+
+    /// The gate this suspension parks on, when it is gate-shaped
+    /// (`DependentRun`/`ExternalTool`). `Process` suspensions track a process
+    /// record instead — see [`Suspension::process_ref`].
+    pub fn gate_ref(&self) -> Option<&GateRef> {
+        match self {
+            Suspension::DependentRun(gate) | Suspension::ExternalTool(gate) => Some(gate),
+            Suspension::Process(_) => None,
+        }
+    }
+
+    /// The process record this suspension tracks, when it is process-shaped.
+    pub fn process_ref(&self) -> Option<&ProcessRef> {
+        match self {
+            Suspension::Process(process) => Some(process),
+            Suspension::DependentRun(_) | Suspension::ExternalTool(_) => None,
+        }
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    const GATE_UUID: &str = "01890a5d-ac96-774b-bcce-b302099a8057";
+    const PROC_UUID: &str = "0f0e0d0c-0b0a-4908-8706-050403020100";
+
     fn gate() -> GateRef {
-        GateRef::new("gate-01HZ0000000000000000000000").unwrap()
+        GateRef::parse(GATE_UUID).unwrap()
+    }
+
+    fn proc_ref() -> ProcessRef {
+        ProcessRef::parse(PROC_UUID).unwrap()
     }
 
     #[test]
     fn blocked_serde_is_snake_case_tagged_and_roundtrips() {
         let blocked = Blocked::Approval(gate());
         let json = serde_json::to_value(&blocked).unwrap();
-        assert_eq!(
-            json,
-            serde_json::json!({ "approval": "gate-01HZ0000000000000000000000" })
-        );
-        assert_eq!(
-            serde_json::from_value::<Blocked>(json).unwrap(),
-            blocked
-        );
+        assert_eq!(json, serde_json::json!({ "approval": GATE_UUID }));
+        assert_eq!(serde_json::from_value::<Blocked>(json).unwrap(), blocked);
     }
 
     #[test]
@@ -165,17 +184,13 @@ mod tests {
 
     #[test]
     fn suspension_serde_tags_and_kinds_agree() {
-        let process =
-            Suspension::Process(ProcessRef::new("proc-01HZ0000000000000000000000").unwrap());
+        let process = Suspension::Process(proc_ref());
         assert_eq!(
             serde_json::to_value(&process).unwrap(),
-            serde_json::json!({ "process": "proc-01HZ0000000000000000000000" })
+            serde_json::json!({ "process": PROC_UUID })
         );
         for (suspension, tag) in [
-            (
-                Suspension::Process(ProcessRef::new("proc-1").unwrap()),
-                "process",
-            ),
+            (Suspension::Process(proc_ref()), "process"),
             (Suspension::DependentRun(gate()), "dependent_run"),
             (Suspension::ExternalTool(gate()), "external_tool"),
         ] {
@@ -183,6 +198,13 @@ mod tests {
             let tag_on_wire = wire.as_object().unwrap().keys().next().unwrap().clone();
             assert_eq!(suspension.kind(), tag);
             assert_eq!(tag_on_wire, tag);
+            // Exactly one of the two accessors answers, matching the shape.
+            assert_eq!(
+                suspension.gate_ref().is_some(),
+                tag != "process",
+                "gate_ref answers iff gate-shaped: {tag}"
+            );
+            assert_eq!(suspension.process_ref().is_some(), tag == "process");
         }
     }
 }
