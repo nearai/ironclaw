@@ -1,6 +1,6 @@
 //! Onboarding's OS-keychain local-dev secrets master-key provisioning step.
 
-use ironclaw_reborn_config::RebornHome;
+use ironclaw_reborn_config::RebornBootConfig;
 
 /// Outcome of onboarding's OS-keychain master-key provisioning attempt.
 ///
@@ -52,9 +52,15 @@ impl MasterKeyProvisionOutcome {
 /// realistic worst case is a wrongly-regenerated key from running `onboard`
 /// twice at once by hand — recoverable by re-entering one API key.
 #[cfg(any(feature = "libsql", feature = "postgres"))]
-pub(crate) fn provision_master_key(home: &RebornHome) -> anyhow::Result<MasterKeyProvisionOutcome> {
-    let dotfile_path = home
-        .path()
+pub(crate) fn provision_master_key(
+    boot: &RebornBootConfig,
+) -> anyhow::Result<MasterKeyProvisionOutcome> {
+    // Must match the root `resolve_local_dev_secret_master_key_with_env`
+    // actually reads/writes (`<home>/local-dev/…`, not the bare home) — see
+    // `crate::runtime::local_runtime_storage_root`. Checking the bare home
+    // here always misses the cached dotfile, so onboarding would
+    // re-attempt keychain provisioning on every rerun (PR #6174 item D).
+    let dotfile_path = crate::runtime::local_runtime_storage_root(boot, boot.profile())
         .join(ironclaw_reborn_composition::LOCAL_DEV_SECRETS_MASTER_KEY_PATH);
     if dotfile_path.exists() {
         return Ok(MasterKeyProvisionOutcome::DotfileAlreadyPresent);
@@ -80,7 +86,7 @@ pub(crate) fn provision_master_key(home: &RebornHome) -> anyhow::Result<MasterKe
 /// `libsql`/`postgres` feature gate in `ironclaw_reborn_composition`.
 #[cfg(not(any(feature = "libsql", feature = "postgres")))]
 pub(crate) fn provision_master_key(
-    _home: &RebornHome,
+    _boot: &RebornBootConfig,
 ) -> anyhow::Result<MasterKeyProvisionOutcome> {
     Ok(MasterKeyProvisionOutcome::Suppressed)
 }

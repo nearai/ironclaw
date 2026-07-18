@@ -146,6 +146,32 @@ fn reserve_codex_login_slot(
     CodexLoginReserveOutcome::Reserved
 }
 
+/// Finalizes a codex-login reservation with the minted device code, but only
+/// if the map entry for `key` still belongs to `attempt_id`. If this
+/// attempt's reservation TTL lapsed before its device-code initiation
+/// returned, a newer caller may have since reserved (or even finalized) the
+/// same key — in that case this is a no-op rather than clobbering it.
+fn finalize_codex_login_slot(
+    attempts: &mut HashMap<String, CodexLoginAttempt>,
+    key: &str,
+    attempt_id: uuid::Uuid,
+    login: &CodexLoginStart,
+    expires_at: Instant,
+) {
+    if matches!(attempts.get(key), Some(current) if current.id != attempt_id) {
+        return;
+    }
+    attempts.insert(
+        key.to_string(),
+        CodexLoginAttempt {
+            id: attempt_id,
+            user_code: Some(login.user_code.clone()),
+            verification_uri: Some(login.verification_uri.clone()),
+            expires_at,
+        },
+    );
+}
+
 fn prune_expired(states: &mut HashMap<String, Instant>, now: Instant) {
     states.retain(|_, expires_at| *expires_at > now);
 }
@@ -803,14 +829,12 @@ impl LlmConfigService for RebornLlmConfigService {
         };
         {
             let mut attempts = self.codex_login_attempts.lock().await;
-            attempts.insert(
-                attempt_key.clone(),
-                CodexLoginAttempt {
-                    id: attempt_id,
-                    user_code: Some(login.user_code.clone()),
-                    verification_uri: Some(login.verification_uri.clone()),
-                    expires_at: Instant::now() + CODEX_LOGIN_ATTEMPT_TTL,
-                },
+            finalize_codex_login_slot(
+                &mut attempts,
+                &attempt_key,
+                attempt_id,
+                &login,
+                Instant::now() + CODEX_LOGIN_ATTEMPT_TTL,
             );
         }
 
@@ -1744,6 +1768,54 @@ mod tests {
             }
             _ => panic!("expected Ready after finalize, got a non-Ready outcome instead"),
         }
+    }
+
+    /// Regression pin (PR #6174 item C): if a device-code initiation
+    /// outlives the reservation TTL, a newer caller can reserve the same
+    /// key before the stale caller's finalize runs. The stale finalize must
+    /// not clobber the newer caller's reservation.
+    #[test]
+    fn codex_login_finalize_does_not_clobber_a_newer_reservation() {
+        let mut attempts = HashMap::new();
+        let key = "tenant:user";
+        let now = Instant::now();
+        let stale_attempt_id = uuid::Uuid::new_v4();
+
+        // Stale caller reserves the slot, but its TTL lapses before its
+        // device-code initiation returns.
+        reserve_codex_login_slot(&mut attempts, key, stale_attempt_id, now);
+
+        // A newer caller reserves the same key after the stale entry expired.
+        let newer_now = now + CODEX_LOGIN_ATTEMPT_TTL + Duration::from_secs(1);
+        let newer = reserve_codex_login_slot(&mut attempts, key, uuid::Uuid::new_v4(), newer_now);
+        assert!(matches!(newer, CodexLoginReserveOutcome::Reserved));
+        let newer_attempt_id = attempts.get(key).expect("newer reservation present").id;
+
+        // The stale caller's device-code initiation now finally returns and
+        // attempts to finalize under its own (now-abandoned) attempt id.
+        let stale_login = CodexLoginStart {
+            user_code: "STALE-CODE".to_string(),
+            verification_uri: "https://example.test/stale".to_string(),
+        };
+        finalize_codex_login_slot(
+            &mut attempts,
+            key,
+            stale_attempt_id,
+            &stale_login,
+            newer_now + CODEX_LOGIN_ATTEMPT_TTL,
+        );
+
+        let current = attempts
+            .get(key)
+            .expect("newer reservation must still be present");
+        assert_eq!(
+            current.id, newer_attempt_id,
+            "a stale finalize must not overwrite a newer caller's reservation"
+        );
+        assert!(
+            current.user_code.is_none(),
+            "the newer reservation must remain in-flight (not finalized with the stale device code)"
+        );
     }
 
     #[tokio::test]

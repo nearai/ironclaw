@@ -64,7 +64,7 @@ impl OnboardCommand {
         // (see `ensure_webui_token_file`), so repeated `onboard --force` can't
         // invalidate sessions or an operator-copied env var.
         let webui_token_action = crate::webui_token::ensure_webui_token_file(home.path())?;
-        let master_key_outcome = provision_master_key(home)?;
+        let master_key_outcome = provision_master_key(context.boot_config())?;
         let mut prompts = StdinPromptSource;
         let llm_outcome = match provision_llm_credentials(
             home,
@@ -137,8 +137,8 @@ impl OnboardCommand {
         }
         if let LlmCredentialProvisionOutcome::ConfiguredFromEnv { provider_id, .. } = &llm_outcome {
             println!(
-                "- LLM provider `{provider_id}` configured from environment (key stays in its \
-                 env var; nothing new stored)"
+                "- LLM provider `{provider_id}` configured from environment (key also saved to \
+                 the encrypted secret store so the background service can use it)"
             );
         }
         println!();

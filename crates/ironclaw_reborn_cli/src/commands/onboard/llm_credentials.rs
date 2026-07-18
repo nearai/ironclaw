@@ -27,9 +27,12 @@ pub(crate) enum LlmCredentialProvisionOutcome {
         model: String,
     },
     /// Complete LLM config detected in env (`RebornProviderAdmin::detect_env_llm`)
-    /// and `[llm.default]` seeded via `set_provider`, storing NO API key (stays
-    /// resolving from env var at runtime). Reached via interactive "use it?"
-    /// confirm or silently on a headless run.
+    /// and `[llm.default]` seeded via `set_provider`. The detected API key is
+    /// also persisted to the encrypted secret store (same path the menu flow
+    /// uses) so a background service — which only carries
+    /// `IRONCLAW_REBORN_HOME`, not the operator's shell env — can still
+    /// resolve it. Reached via interactive "use it?" confirm or silently on
+    /// a headless run.
     /// - Idempotency: once seeded, drift between slot and live env is accepted
     ///   (not re-synced) on later runs; `--force` re-seeds from env again.
     ConfiguredFromEnv {

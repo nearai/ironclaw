@@ -5646,13 +5646,23 @@ fn onboard_reports_suppressed_master_key_fallback_and_still_succeeds() {
 /// A second `onboard` run over the same Reborn home must not attempt the
 /// keychain again once a cached dotfile exists (from a prior `serve`/onboard
 /// boot) — it's a no-op that reports `cached dotfile already present`.
+///
+/// The dotfile is seeded at the RUNTIME storage root
+/// (`<reborn_home>/local-dev/…`, `local_runtime_storage_root`'s subdir for
+/// `RebornProfile::LocalDev`) — the same root the real resolver
+/// (`resolve_local_dev_secret_master_key_with_env`) reads/writes and
+/// `serve` actually boots against — not the bare `reborn_home` root (PR
+/// #6174 item D: `provision_master_key` used to check the bare root, so its
+/// `exists()` check was always false and it re-attempted keychain
+/// provisioning on every rerun).
 #[test]
 fn onboard_master_key_provisioning_is_a_noop_once_a_dotfile_is_cached() {
     let temp = tempfile::tempdir().expect("tempdir");
     let reborn_home = temp.path().join("reborn-home");
-    std::fs::create_dir_all(&reborn_home).expect("mkdir");
+    let runtime_root = reborn_home.join("local-dev");
+    std::fs::create_dir_all(&runtime_root).expect("mkdir");
     std::fs::write(
-        reborn_home.join(".reborn-local-dev-secrets-master-key"),
+        runtime_root.join(".reborn-local-dev-secrets-master-key"),
         "a".repeat(64),
     )
     .expect("seed cached master-key dotfile");
@@ -5674,7 +5684,7 @@ fn onboard_master_key_provisioning_is_a_noop_once_a_dotfile_is_cached() {
         "stdout must report the dotfile no-op: {stdout}"
     );
     let dotfile_text =
-        std::fs::read_to_string(reborn_home.join(".reborn-local-dev-secrets-master-key"))
+        std::fs::read_to_string(runtime_root.join(".reborn-local-dev-secrets-master-key"))
             .expect("read cached dotfile");
     assert_eq!(
         dotfile_text,
