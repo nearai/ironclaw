@@ -2552,7 +2552,7 @@ async fn build_local_runtime(input: RebornBuildInput) -> Result<RebornServices, 
                             agent_id: channel_egress_scope
                                 .agent_id
                                 .clone()
-                                .unwrap_or_else(|| ironclaw_host_api::AgentId::new("reborn").expect("static agent id")),
+                                .unwrap_or_else(|| ironclaw_host_api::AgentId::new("reborn").expect("static agent id")), // safety: static literal uses the validated agent id grammar.
                             project_id: channel_egress_scope.project_id.clone(),
                             extension_id: extension_id.clone(),
                             deep_link_template: descriptor.pairing_deep_link_template.clone(),

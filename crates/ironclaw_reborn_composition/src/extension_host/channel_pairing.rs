@@ -777,8 +777,9 @@ impl ChannelPairingService {
         &self,
         completion: PendingPairingCompletion,
     ) -> Result<(), ChannelPairingError> {
-        self.dispatch_pairing_completion(&completion.user_id)
-            .await?;
+        // Boxed: the continuation fan-out resumes parked runs through the
+        // turn coordinator — a deep async subtree relative to this caller.
+        Box::pin(self.dispatch_pairing_completion(&completion.user_id)).await?;
         self.dm_targets
             .upsert(
                 self.extension_id.as_str(),

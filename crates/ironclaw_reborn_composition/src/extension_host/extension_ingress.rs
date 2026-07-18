@@ -399,7 +399,10 @@ impl InboundSink for GenericChannelInboundSink {
         // durably reflected in the pairing/identity stores, not the turn
         // ledger — the vendor still gets its 2xx.
         if let Some(pairing) = &self.config.pairing
-            && pairing.intercept(&installation, &message).await
+            // Boxed: the consume path (CAS claim → identity bind → completion
+            // fan-out) is a deep async subtree nested inside the admission
+            // future; boxing keeps instrumented builds off the stack limit.
+            && Box::pin(pairing.intercept(&installation, &message)).await
         {
             return Ok(InboundAdmissionAck::Accepted);
         }

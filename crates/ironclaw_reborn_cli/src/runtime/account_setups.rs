@@ -23,11 +23,11 @@ pub(crate) fn bundled_account_setup_descriptors() -> Vec<ExtensionAccountSetupDe
 /// provider the pairing service binds under and the blocked-run fan-out
 /// resumes on.
 fn telegram_account_setup_descriptor() -> ExtensionAccountSetupDescriptor {
-    let extension_id = ExtensionId::new("telegram").expect("static extension id");
+    let extension_id = ExtensionId::new("telegram").expect("static extension id"); // safety: static literal uses the validated extension id grammar.
     ExtensionAccountSetupDescriptor {
         extension_id: extension_id.clone(),
         auth_requirement: RuntimeCredentialAuthRequirement {
-            provider: VendorId::new("telegram").expect("static provider id"),
+            provider: VendorId::new("telegram").expect("static provider id"), // safety: static literal uses the validated vendor id grammar.
             setup: RuntimeCredentialAccountSetup::Pairing,
             requester_extension: extension_id,
             provider_scopes: Vec::new(),
