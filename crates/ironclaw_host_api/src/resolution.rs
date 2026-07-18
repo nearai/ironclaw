@@ -377,7 +377,7 @@ mod tests {
     fn outcome(verdict: ToolVerdict) -> Outcome {
         Outcome {
             refs: OutcomeRefs {
-                result: ResultRef::new("result-1").unwrap(),
+                result: ResultRef::parse("018f6a00-0000-7000-8000-000000000001").unwrap(),
                 byte_len: 1,
             },
             verdict,
@@ -391,22 +391,34 @@ mod tests {
     /// enum, so this pins the mapping by (today's variant → channel + suspends?).
     #[test]
     fn resolution_covers_the_full_acceptance_table() {
-        let proc = || ProcessRef::new("proc-1").unwrap();
+        let proc = || ProcessRef::parse("0f0e0d0c-0b0a-4908-8706-050403020100").unwrap();
         // (today's CapabilityOutcome variant, the Resolution channel, is_suspension)
         let rows: [(&str, Resolution, bool); 10] = [
-            ("Completed", Resolution::Done(outcome(ToolVerdict::Success)), false),
+            (
+                "Completed",
+                Resolution::Done(outcome(ToolVerdict::Success)),
+                false,
+            ),
             (
                 "Failed",
                 Resolution::Done(outcome(ToolVerdict::RecoverableFailure)),
                 false,
             ),
-            ("Denied", Resolution::Denied(DenyRef::new("deny-1").unwrap()), false),
+            (
+                "Denied",
+                Resolution::Denied(DenyRef::parse("018f6a00-0000-7000-8000-000000000002").unwrap()),
+                false,
+            ),
             (
                 "ApprovalRequired",
                 Resolution::Blocked(Blocked::Approval(gate())),
                 false,
             ),
-            ("AuthRequired", Resolution::Blocked(Blocked::Auth(gate())), false),
+            (
+                "AuthRequired",
+                Resolution::Blocked(Blocked::Auth(gate())),
+                false,
+            ),
             (
                 "ResourceBlocked",
                 Resolution::Blocked(Blocked::Resource(gate())),
@@ -450,13 +462,69 @@ mod tests {
 
     #[test]
     fn resolution_channel_predicates() {
-        assert!(Resolution::Suspended(Suspension::Process(ProcessRef::new("p-1").unwrap())).is_suspension());
+        assert!(
+            Resolution::Suspended(Suspension::Process(
+                ProcessRef::parse("0f0e0d0c-0b0a-4908-8706-050403020100").unwrap()
+            ))
+            .is_suspension()
+        );
         assert!(Resolution::Blocked(Blocked::Approval(gate())).is_reentrant_gate());
         // Denied is terminal — not a re-entrant gate, not a suspension.
-        let denied = Resolution::Denied(DenyRef::new("deny-1").unwrap());
+        let denied =
+            Resolution::Denied(DenyRef::parse("018f6a00-0000-7000-8000-000000000002").unwrap());
         assert!(!denied.is_reentrant_gate());
         assert!(!denied.is_suspension());
         // A spawned child run completes; it does not suspend.
         assert!(!Resolution::Done(outcome(ToolVerdict::ChildSpawned)).is_suspension());
+    }
+
+    /// Table-driven wire contract: every `Resolution` channel paired with its
+    /// exact serialized shape, so a future serde-attribute change cannot
+    /// silently break the API contract for any variant.
+    #[test]
+    fn resolution_serialization_contract_covers_every_channel() {
+        let gate = GateRef::parse("01890a5d-ac96-774b-bcce-b302099a8057").unwrap();
+        let deny = DenyRef::parse("018f6a00-0000-7000-8000-000000000002").unwrap();
+        let proc = ProcessRef::parse("0f0e0d0c-0b0a-4908-8706-050403020100").unwrap();
+        let cases = [
+            (
+                Resolution::Done(outcome(ToolVerdict::Success)),
+                serde_json::json!({
+                    "done": {
+                        "refs": {
+                            "result": "018f6a00-0000-7000-8000-000000000001",
+                            "byte_len": 1
+                        },
+                        "verdict": "success",
+                        "summary": "ok"
+                    }
+                }),
+            ),
+            (
+                Resolution::Denied(deny),
+                serde_json::json!({ "denied": "018f6a00-0000-7000-8000-000000000002" }),
+            ),
+            (
+                Resolution::Blocked(Blocked::Approval(gate)),
+                serde_json::json!({
+                    "blocked": { "approval": "01890a5d-ac96-774b-bcce-b302099a8057" }
+                }),
+            ),
+            (
+                Resolution::Suspended(Suspension::Process(proc)),
+                serde_json::json!({
+                    "suspended": { "process": "0f0e0d0c-0b0a-4908-8706-050403020100" }
+                }),
+            ),
+        ];
+        for (resolution, expected_wire) in cases {
+            let wire = serde_json::to_value(&resolution).unwrap();
+            assert_eq!(wire, expected_wire, "wire drift for {resolution:?}");
+            assert_eq!(
+                serde_json::from_value::<Resolution>(wire).unwrap(),
+                resolution,
+                "round-trip must reconstruct the same channel"
+            );
+        }
     }
 }
