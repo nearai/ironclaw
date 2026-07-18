@@ -3797,9 +3797,10 @@ impl ExtensionManager {
         // Validate the RAW header values (RFC 9110 token/CRLF checks) BEFORE
         // secretize replaces them with well-formed references — otherwise an
         // invalid credential value would sail through the later validation.
+        // Malformed submitted values are caller-correctable → InvalidRequest.
         config
             .validate()
-            .map_err(|e| ExtensionError::Config(e.to_string()))?;
+            .map_err(|e| ExtensionError::InvalidRequest(e.to_string()))?;
         // Move credential-bearing header values into SecretsStore before the
         // config is persisted: `mcp_servers` is an ordinary (unencrypted)
         // settings value, so the row must only ever carry secret REFERENCES.
@@ -4071,10 +4072,12 @@ impl ExtensionManager {
             config.headers = h;
             // Pre-validate the assembled config BEFORE any secret upsert so a
             // validation failure cannot leave overwritten secret material
-            // behind a config row that was never going to persist.
+            // behind a config row that was never going to persist. Malformed
+            // submitted values are caller-correctable input → InvalidRequest
+            // (HTTP 400), not a host failure.
             config
                 .validate()
-                .map_err(|e| ExtensionError::Config(e.to_string()))?;
+                .map_err(|e| ExtensionError::InvalidRequest(e.to_string()))?;
             // Same treatment as install: replacement header credentials go to
             // SecretsStore; the persisted row carries references only. A
             // mid-loop failure restores the snapshot — partial upserts must
@@ -5725,6 +5728,7 @@ impl ExtensionManager {
         let mut names: HashSet<String> = [
             server.token_secret_name().to_lowercase(),
             server.client_id_secret_name().to_lowercase(),
+            server.client_secret_secret_name().to_lowercase(),
         ]
         .into_iter()
         .collect();
