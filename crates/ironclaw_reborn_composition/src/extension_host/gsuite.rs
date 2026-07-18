@@ -68,11 +68,9 @@ impl RuntimeCredentialAccountVisibilityPolicy for GsuiteRuntimeCredentialAccount
 ///
 /// `google_oauth_configured` is the cheap, build-time signal for whether a
 /// Google OAuth backend was registered on this composition's
-/// `RebornBuildInput` (i.e. `client_id`/`redirect_uri` were present at build
-/// time — see `RebornBuildInput::with_google_oauth_backend`). It is not a
-/// live credential check: it gates a pre-dispatch "not configured" tool
-/// result, distinct from the existing per-account `AuthRequired` gate that
-/// `GoogleCredentialResolver` still owns once dispatch proceeds.
+/// `RebornBuildInput`. It is not a live credential check: it gates a
+/// pre-dispatch "not configured" tool result, distinct from the per-account
+/// `AuthRequired` gate `GoogleCredentialResolver` still owns once dispatch proceeds.
 pub fn bundled_gsuite_first_party_handlers(
     accounts: Arc<dyn CredentialAccountService>,
     account_records: Arc<dyn CredentialAccountRecordSource>,
@@ -157,14 +155,11 @@ impl FirstPartyCapabilityHandler for GsuiteFirstPartyHandler {
 
 /// Tool-result error for a GSuite capability dispatched with no Google OAuth
 /// backend configured at all — distinct from `AuthRequired` (an account was
-/// expected but is missing/revoked/needs selection): here there is no Google
-/// OAuth client configuration for any account to exist against.
+/// expected but is missing/revoked/needs selection).
 ///
 /// Rides the diagnostic-detail channel (not `safe_summary`) because the
-/// remediation text names `config.toml` keys containing the substring
-/// "secret" and console URLs, both of which the strict `safe_summary`
-/// validator rejects outright (see
-/// `ironclaw_turns::run_profile::host::validate_loop_safe_summary`) — the
+/// remediation text names `config.toml` keys containing "secret" and console
+/// URLs, which the strict `safe_summary` validator rejects outright; the
 /// diagnostic channel scrubs secret *values*, not vocabulary, so this text
 /// survives intact to the model.
 fn google_oauth_not_configured_error() -> FirstPartyCapabilityError {
@@ -289,13 +284,11 @@ fn gsuite_error(
             Err(error) => error,
         },
         None => match error.reason() {
-            // `BackendAuth` means the Google account resolved but the
-            // provider itself rejected the request while exchanging/
-            // refreshing the token (e.g. `invalid_client` from a rotated or
-            // wrong client secret) — configured, but rejected. Distinct from
-            // both `AuthRequired` (no/expired account) and the
-            // not-configured pre-dispatch check above (no OAuth backend at
-            // all): here a backend exists and was tried.
+            // `BackendAuth` means the account resolved but the provider
+            // rejected the request while exchanging/refreshing the token
+            // (e.g. `invalid_client`) — configured, but rejected. Distinct
+            // from `AuthRequired` (no/expired account) and the
+            // not-configured pre-dispatch check above (no backend at all).
             Some(GsuiteCredentialDispatchReason::BackendAuth) => {
                 FirstPartyCapabilityError::dispatch_with_diagnostic(
                     error.kind(),

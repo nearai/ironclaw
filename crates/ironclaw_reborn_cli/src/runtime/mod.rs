@@ -51,20 +51,16 @@ pub(crate) fn init_tracing() {
     use tracing_subscriber::Layer;
     use tracing_subscriber::fmt;
     use tracing_subscriber::prelude::*;
-    // stderr/fmt layer: operator-facing console output. Stays at `info` by
+    // stderr/fmt layer: operator-facing console output, stays at `info` by
     // default so `debug!` diagnostics never reach (and corrupt) a REPL/TUI
-    // terminal — the repo's logging invariant. Broad env overrides are still
-    // guarded from third-party debug floods unless those targets are explicit.
+    // terminal — the repo's logging invariant.
     let stderr_filter = reborn_env_filter(
         "IRONCLAW_REBORN_LOG",
         "info,ironclaw_runner=info,ironclaw_reborn_composition=info",
     );
-    // Operator Logs buffer: captures run diagnostics at `debug` for the
-    // ironclaw run-path crates so the scoped (thread/run) Logs panel is
-    // populated, while those `debug!` events are NOT written to stderr. This is
-    // a *separate* per-layer filter, so terminal safety and Logs-panel
-    // visibility are decoupled. Broad env overrides are guarded the same way
-    // so the browser log buffer is not filled by low-level protocol crates.
+    // Operator Logs buffer: a *separate* per-layer filter capturing run
+    // diagnostics at `debug` for the Logs panel, without those events also
+    // going to stderr — keeps terminal safety and Logs-panel visibility decoupled.
     let operator_filter = reborn_env_filter(
         "IRONCLAW_REBORN_OPERATOR_LOG",
         "info,ironclaw_runner=debug,ironclaw_host_runtime=debug",

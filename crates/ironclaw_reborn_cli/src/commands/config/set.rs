@@ -94,16 +94,11 @@ fn set_value_key(
         None => anyhow::bail!("`config set {label}` requires a value"),
     };
 
-    // Secret-shape law FIRST, before shape validation: a value destined
-    // for config.toml must not look like inline secret material (the same
-    // rule `RebornConfigFile::validate` enforces on parse, applied here
-    // before any write so the refusal happens at the CLI layer, not
-    // buried in a toml_edit write-then-validate round trip). This must
-    // run before `validate_shape` — a secret pasted into the wrong key
-    // (e.g. an API key pasted into `google.redirect_uri`) is caught by
-    // this law, whose error message never echoes the raw value, before
-    // `validate_shape`'s Reject arms (which describe the expected shape,
-    // not the input) ever see it.
+    // Secret-shape law FIRST, before shape validation: a value destined for
+    // config.toml must not look like inline secret material. Must run before
+    // `validate_shape` so a secret pasted into the wrong key (e.g. an API key
+    // into `google.redirect_uri`) is caught here, whose error never echoes
+    // the raw value, before `validate_shape`'s Reject arms would see it.
     if key.destination() == ConfigDestination::ConfigToml
         && let Err(error) = ironclaw_reborn_config::reject_inline_secret(label.clone(), &value)
     {
@@ -143,11 +138,8 @@ fn set_value_key(
 }
 
 /// After a successful write, print the remaining BYO setup steps for the
-/// capability this key belongs to — the same
-/// `capability_config::google_remediation_text`/`slack_remediation_text`
-/// strings a later capability-requirements pass is expected to reuse for
-/// "not configured" tool-result errors (see `capability_config`'s module
-/// doc for that follow-up's cross-crate caveat).
+/// capability this key belongs to, via
+/// `capability_config::google_remediation_text`/`slack_remediation_text`.
 fn print_remaining_setup_guidance(key: &ConfigKey) {
     match key {
         ConfigKey::GoogleClientId
@@ -376,14 +368,10 @@ impl SecretValueSource for StdinSecretValueSource {
 }
 
 /// Where `set_value_key` gets its (already-open) encrypted secret store
-/// wrappers from — one method per composition-owned store type, mirroring
-/// `onboard::LlmKeyStoreOpener`'s shape (not reused from `onboard` since
-/// that one is private to the `onboard` module). Returns composition
-/// wrapper types, never `ironclaw_secrets` directly: `ironclaw_reborn_cli`
-/// production code must not depend on `ironclaw_secrets` (see
-/// `crates/ironclaw_architecture/tests/reborn_dependency_boundaries.rs::reborn_cli_binary_crate_stays_separate_from_v1_root`,
-/// which pins this crate's allowed workspace dependency set — `ironclaw_secrets`
-/// is a dev-only dependency here, used only by this module's own test fakes).
+/// wrappers from — one method per composition-owned store type. Returns
+/// composition wrapper types, never `ironclaw_secrets` directly: production
+/// code in this crate must not depend on `ironclaw_secrets` (enforced by
+/// `reborn_dependency_boundaries.rs::reborn_cli_binary_crate_stays_separate_from_v1_root`).
 trait SecretStoreOpener {
     #[cfg(all(feature = "libsql", feature = "root-llm-provider"))]
     fn open_llm_key_store(
@@ -690,17 +678,12 @@ mod tests {
         );
     }
 
-    /// `config set` on a secret-destination key (`google.client_secret`,
-    /// `<provider>.api_key`) is the FIRST command a never-onboarded home
-    /// might run — `onboard` may not have created the reborn home
-    /// directory yet. This drives the real `LocalDevSecretStoreOpener`
-    /// (not `FakeSecretStoreOpener`) so it actually reaches
-    /// `open_local_dev_secret_store`'s libSQL file-open, the same path
-    /// that raised a raw `SQLITE_CANTOPEN` before this fix's
-    /// `create_dir_all`. `IRONCLAW_DISABLE_OS_KEYCHAIN` is set because
-    /// master-key resolution would otherwise reach the real OS keychain —
-    /// that concern belongs to the `status` read-only-diagnostic fix, not
-    /// this write-path test.
+    /// `config set` on a secret-destination key may be the FIRST command a
+    /// never-onboarded home runs, before `onboard` creates the reborn home
+    /// directory. Drives the real `LocalDevSecretStoreOpener` (not
+    /// `FakeSecretStoreOpener`) so it actually reaches
+    /// `open_local_dev_secret_store`'s libSQL file-open and needs
+    /// `create_dir_all` to succeed.
     #[cfg(feature = "libsql")]
     #[test]
     fn google_client_secret_write_creates_the_reborn_home_directory_on_a_never_onboarded_host() {

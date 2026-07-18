@@ -119,7 +119,8 @@ fn resolve_google_oauth_degraded(
         GoogleOAuthResolution::Disabled(GoogleOAuthConfigState::PartiallyConfigured {
             missing,
         }) => Ok(Some(format!(
-            "partially configured (missing {missing}) — disabled"
+            "partially configured (missing google.{missing}) — disabled; fix with \
+             `ironclaw-reborn config set google.{missing} <value>`"
         ))),
         GoogleOAuthResolution::Disabled(GoogleOAuthConfigState::Unconfigured)
         | GoogleOAuthResolution::Configured(_) => Ok(None),
@@ -424,6 +425,10 @@ mod tests {
             degraded.contains("redirect_uri"),
             "status line must name the missing key: {degraded}"
         );
+        assert!(
+            degraded.contains("config set google.redirect_uri"),
+            "status line must include the fix command: {degraded}"
+        );
 
         clear_google_oauth_env();
     }
@@ -448,6 +453,10 @@ mod tests {
         assert!(
             degraded.contains("client_id"),
             "status line must name the missing key: {degraded}"
+        );
+        assert!(
+            degraded.contains("config set google.client_id"),
+            "status line must include the fix command: {degraded}"
         );
 
         clear_google_oauth_env();

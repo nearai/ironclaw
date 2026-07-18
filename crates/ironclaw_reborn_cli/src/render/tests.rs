@@ -177,11 +177,18 @@ fn status_render_text_omits_google_oauth_line_when_not_degraded() {
 #[test]
 fn status_render_text_includes_google_oauth_line_when_degraded() {
     let mut status = sample_status();
-    status.google_oauth_degraded =
-        Some("partially configured (missing redirect_uri) — disabled".to_string());
+    status.google_oauth_degraded = Some(
+        "partially configured (missing google.redirect_uri) — disabled; fix with \
+         `ironclaw-reborn config set google.redirect_uri <value>`"
+            .to_string(),
+    );
     let text = render_to_string(&status);
     assert!(text.contains("google_oauth:"));
-    assert!(text.contains("partially configured (missing redirect_uri) — disabled"));
+    assert!(text.contains("partially configured (missing google.redirect_uri) — disabled"));
+    assert!(
+        text.contains("config set google."),
+        "status line must include the fix command: {text}"
+    );
 }
 
 #[test]

@@ -1,19 +1,13 @@
 //! Operator-scoped storage for the Google OAuth client secret value.
 //!
 //! Google OAuth client identity (`client_id`, `redirect_uri`,
-//! `hosted_domain_hint`) is public and lives in `config.toml`'s
-//! `[google]` section (`ironclaw_reborn_config::GoogleSection`) —
-//! literal values, safe to round-trip through a declarative file. The
-//! client secret is different: it is secret material and must never
-//! appear in `config.toml` (the same law
-//! `ironclaw_reborn_config::reject_inline_secret` enforces for every
-//! other secret-shaped value in that file). This store is where
-//! `config set google.client_secret` puts it instead.
+//! `hosted_domain_hint`) is public and lives in `config.toml`'s `[google]`
+//! section; the client secret must never appear there (same law
+//! `ironclaw_reborn_config::reject_inline_secret` enforces file-wide), so
+//! `config set google.client_secret` puts it in this store instead.
 //!
-//! Mirrors [`crate::LlmKeyStore`]'s shape (fixed handle, system-scoped
-//! [`SecretStore`] wrapper) but with a single fixed handle rather than
-//! one derived per provider id, since there is exactly one Google OAuth
-//! client per instance today.
+//! Mirrors [`crate::LlmKeyStore`]'s shape but with a single fixed handle,
+//! since there is exactly one Google OAuth client per instance today.
 
 use std::sync::Arc;
 
