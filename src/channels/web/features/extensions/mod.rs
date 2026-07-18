@@ -2326,6 +2326,28 @@ mod tests {
             );
         }
 
+        // Credential-bearing URLs are rejected before persisting — the URL is
+        // stored verbatim and returned by GET /api/extensions.
+        for bad_url in [
+            "https://user:hunter2@mcp.example.com/mcp",
+            "https://mcp.example.com/mcp?access_token=sk-live-123",
+        ] {
+            let err = ext_mgr
+                .update_mcp_server_partial(
+                    "sec_server",
+                    Some(bad_url.to_string()),
+                    None,
+                    None,
+                    "test",
+                )
+                .await
+                .expect_err("credential-bearing URL must be rejected");
+            assert!(
+                matches!(err, crate::extensions::ExtensionError::InvalidRequest(_)),
+                "URL rejection is caller-correctable input, got: {err:?}"
+            );
+        }
+
         // Replacing headers WITHOUT the previously-secretized one
         // garbage-collects the superseded secret.
         ext_mgr

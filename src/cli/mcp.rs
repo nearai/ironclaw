@@ -531,7 +531,10 @@ async fn test_server(name: String, user_id: String) -> anyhow::Result<()> {
             &session_manager,
             &process_manager,
             Some(secrets),
-            &owner_id,
+            // The SAME identity the token check above used — `--user` must
+            // resolve {{secret:...}} references in the selected user's scope,
+            // not the owner's.
+            &user_id,
         )
         .await
         .map_err(|e| anyhow::anyhow!("{}", e))?

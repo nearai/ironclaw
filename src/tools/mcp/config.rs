@@ -592,6 +592,50 @@ pub fn parse_header_secret_reference(value: &str) -> Option<&str> {
         .strip_suffix(HEADER_SECRET_REF_SUFFIX)
 }
 
+/// Reject URLs that embed credential material — for the PROGRAMMATIC
+/// install/PATCH surface, which persists `server.url` verbatim in the
+/// unencrypted settings row and returns it from `GET /api/extensions`.
+///
+/// Two shapes are rejected: RFC 3986 userinfo (`https://user:pass@host/...`)
+/// and query parameters whose KEY names a credential (`?access_token=...`).
+/// Callers get an actionable message; credentials belong in headers (which
+/// this surface secretizes) — never in the URL.
+pub fn validate_url_free_of_credentials(url: &str) -> Result<(), String> {
+    let Ok(parsed) = url::Url::parse(url) else {
+        // Unparseable URLs are caught by `McpServerConfig::validate`.
+        return Ok(());
+    };
+    if !parsed.username().is_empty() || parsed.password().is_some() {
+        return Err(
+            "URL must not embed credentials (user:password@host); use headers instead".to_string(),
+        );
+    }
+    for (key, _) in parsed.query_pairs() {
+        let k = key.to_ascii_lowercase();
+        if k == "token"
+            || k == "key"
+            || k == "secret"
+            || k == "password"
+            || k == "signature"
+            || k == "sig"
+            || k.contains("token")
+            || k.contains("apikey")
+            || k.contains("api_key")
+            || k.contains("api-key")
+            || k.contains("secret")
+            || k.contains("password")
+            || k.contains("auth")
+        {
+            return Err(format!(
+                "URL query parameter '{key}' looks credential-bearing; \
+                 the URL is persisted and returned in API responses — \
+                 use headers for credentials instead"
+            ));
+        }
+    }
+    Ok(())
+}
+
 /// Whether a header NAME is demonstrably non-sensitive transport metadata.
 ///
 /// The programmatic install/PATCH surface secretizes header values BY

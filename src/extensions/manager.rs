@@ -3801,6 +3801,10 @@ impl ExtensionManager {
         config
             .validate()
             .map_err(|e| ExtensionError::InvalidRequest(e.to_string()))?;
+        // The URL is persisted verbatim and returned by GET /api/extensions —
+        // reject embedded credentials (userinfo, token-bearing query params).
+        crate::tools::mcp::config::validate_url_free_of_credentials(&config.url)
+            .map_err(ExtensionError::InvalidRequest)?;
         // Move credential-bearing header values into SecretsStore before the
         // config is persisted: `mcp_servers` is an ordinary (unencrypted)
         // settings value, so the row must only ever carry secret REFERENCES.
@@ -4019,6 +4023,10 @@ impl ExtensionManager {
         let previous_config = config.clone();
 
         if let Some(new_url) = url {
+            // Persisted verbatim + returned by GET /api/extensions — reject
+            // embedded credentials before anything is stored.
+            crate::tools::mcp::config::validate_url_free_of_credentials(&new_url)
+                .map_err(ExtensionError::InvalidRequest)?;
             // When the URL changes, the previous backend's tool catalog is
             // stale — clear it so `latent_actions_for_mcp_server` does not
             // advertise old tools for the new URL while the server is inactive.
