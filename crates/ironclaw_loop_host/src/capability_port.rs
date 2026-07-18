@@ -2032,7 +2032,7 @@ impl LoopCapabilityPort for HostRuntimeLoopCapabilityPort {
                     invocation_context,
                     request.capability_id,
                     estimate.clone(),
-                    input.clone()
+                    input.clone(),
                 )
                 .with_idempotency_key(idempotency_key.clone());
                 dispatch_runtime_capability(self.runtime.as_ref(), runtime_request).await

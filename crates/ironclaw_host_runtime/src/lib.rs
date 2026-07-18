@@ -350,9 +350,10 @@ pub struct RuntimeCapabilityRequest {
 }
 
 impl RuntimeCapabilityRequest {
-    // Note: no `trust_decision` parameter. The legacy caller-supplied trust
-    // decision was a provably-dead field — `DefaultHostRuntime` discarded it and
-    // evaluated host-owned trust itself (§1.1 mechanism 3, arch-simplification).
+    // Deliberately NO `trust_decision` parameter — do not re-add one. Trust is
+    // host-owned: `DefaultHostRuntime` evaluates it itself, and a caller-supplied
+    // decision would be unvalidated authority input the runtime must ignore
+    // (arch-simplification §1.1).
     // Removed so it is no longer carried across the capability hops.
     pub fn new(
         context: ExecutionContext,
