@@ -3808,8 +3808,16 @@ impl ExtensionManager {
         // Move credential-bearing header values into SecretsStore before the
         // config is persisted: `mcp_servers` is an ordinary (unencrypted)
         // settings value, so the row must only ever carry secret REFERENCES.
-        self.secretize_sensitive_headers(&mut config, user_id)
-            .await?;
+        // A mid-loop failure deletes the writes this call already made.
+        let mut secret_journal = Vec::new();
+        if let Err(e) = self
+            .secretize_sensitive_headers(&mut config, user_id, &mut secret_journal)
+            .await
+        {
+            self.delete_header_secrets(user_id, &secret_journal, name)
+                .await;
+            return Err(e);
+        }
         if let Some(o) = oauth {
             config = config.with_oauth(o);
         }
@@ -3819,24 +3827,9 @@ impl ExtensionManager {
         // on the install path (url/name validation already ran above).
         // On failure, delete the header secrets secretize just created —
         // a failed install must not leave orphaned credentials behind.
-        let created_header_refs: Vec<String> = config
-            .headers
-            .values()
-            .filter_map(|v| {
-                crate::tools::mcp::config::parse_header_secret_reference(v).map(str::to_string)
-            })
-            .collect();
         if let Err(e) = self.add_mcp_server(config, user_id).await {
-            for secret_name in created_header_refs {
-                if let Err(del_err) = self.secrets.delete(user_id, &secret_name).await {
-                    tracing::warn!(
-                        extension = %name,
-                        secret = %secret_name,
-                        error = %del_err,
-                        "failed to delete header secret after failed install"
-                    );
-                }
-            }
+            self.delete_header_secrets(user_id, &secret_journal, name)
+                .await;
             return Err(ExtensionError::Config(e.to_string()));
         }
 
@@ -3894,10 +3887,30 @@ impl ExtensionManager {
         }
     }
 
+    /// `journal` records the secret NAMES written so far — including by a
+    /// call that then fails mid-loop — so callers can delete or restore
+    /// exactly the writes this invocation performed.
+    /// Delete header secrets by name (failed install/PATCH cleanup).
+    /// Best-effort per entry; failures logged with the secret NAME only.
+    async fn delete_header_secrets(&self, user_id: &str, names: &[String], extension: &str) {
+        for secret_name in names {
+            if let Err(e) = self.secrets.delete(user_id, secret_name).await {
+                tracing::warn!(
+                    extension = %extension,
+                    user_id = %user_id,
+                    secret = %secret_name,
+                    error = %e,
+                    "failed to delete header secret during cleanup"
+                );
+            }
+        }
+    }
+
     async fn secretize_sensitive_headers(
         &self,
         config: &mut McpServerConfig,
         user_id: &str,
+        journal: &mut Vec<String>,
     ) -> Result<(), ExtensionError> {
         use crate::tools::mcp::config::{
             header_secret_reference, is_public_metadata_header, mcp_header_secret_name,
@@ -3945,6 +3958,7 @@ impl ExtensionManager {
                         "failed to store credential for header '{header_name}'"
                     ))
                 })?;
+            journal.push(secret_name.clone());
             *value = header_secret_reference(&secret_name);
         }
         Ok(())
@@ -4088,9 +4102,24 @@ impl ExtensionManager {
                 .map_err(|e| ExtensionError::InvalidRequest(e.to_string()))?;
             // Same treatment as install: replacement header credentials go to
             // SecretsStore; the persisted row carries references only. A
-            // mid-loop failure restores the snapshot — partial upserts must
-            // not survive an errored PATCH.
-            if let Err(e) = self.secretize_sensitive_headers(&mut config, user_id).await {
+            // mid-loop failure must unwind exactly this call's writes:
+            // brand-new names (no prior snapshot) are DELETED, overwritten
+            // ones are restored from the snapshot.
+            let mut secret_journal = Vec::new();
+            if let Err(e) = self
+                .secretize_sensitive_headers(&mut config, user_id, &mut secret_journal)
+                .await
+            {
+                let snapshot_names: std::collections::HashSet<&str> = previous_header_secrets
+                    .iter()
+                    .map(|(n, _)| n.as_str())
+                    .collect();
+                let created_new: Vec<String> = secret_journal
+                    .into_iter()
+                    .filter(|n| !snapshot_names.contains(n.as_str()))
+                    .collect();
+                self.delete_header_secrets(user_id, &created_new, name)
+                    .await;
                 self.restore_header_secrets(user_id, previous_header_secrets, name)
                     .await;
                 return Err(e);

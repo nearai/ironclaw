@@ -69,7 +69,11 @@ pub struct McpClient {
     server_name: McpServerName,
 
     /// Request ID counter.
-    next_id: AtomicU64,
+    /// JSON-RPC request-id counter. Behind an `Arc` so a non-HTTP
+    /// `for_thread` fork SHARES the parent's counter: stdio/Unix forks reuse
+    /// one connection, and independent counters would issue duplicate request
+    /// ids concurrently, cross-wiring pending-response senders.
+    next_id: Arc<AtomicU64>,
 
     /// Cached tools.
     tools_cache: RwLock<Option<Vec<McpTool>>>,
@@ -148,7 +152,7 @@ impl McpClient {
             transport,
             server_url: url,
             server_name: name,
-            next_id: AtomicU64::new(1),
+            next_id: Arc::new(AtomicU64::new(1)),
             tools_cache: RwLock::new(None),
             session_manager: None,
             secrets: None,
@@ -191,7 +195,7 @@ impl McpClient {
             transport,
             server_url: url,
             server_name: name,
-            next_id: AtomicU64::new(1),
+            next_id: Arc::new(AtomicU64::new(1)),
             tools_cache: RwLock::new(None),
             session_manager: None,
             secrets: None,
@@ -254,7 +258,7 @@ impl McpClient {
             transport,
             server_url: config.url.clone(),
             server_name: validated_name,
-            next_id: AtomicU64::new(1),
+            next_id: Arc::new(AtomicU64::new(1)),
             tools_cache: RwLock::new(None),
             session_manager: None,
             secrets: None,
@@ -310,7 +314,7 @@ impl McpClient {
             transport,
             server_url: config.url.clone(),
             server_name: validated_name,
-            next_id: AtomicU64::new(1),
+            next_id: Arc::new(AtomicU64::new(1)),
             tools_cache: RwLock::new(None),
             session_manager: Some(session_manager),
             secrets: Some(secrets),
@@ -369,7 +373,7 @@ impl McpClient {
             transport,
             server_url: url,
             server_name: name,
-            next_id: AtomicU64::new(1),
+            next_id: Arc::new(AtomicU64::new(1)),
             tools_cache: RwLock::new(None),
             session_manager,
             secrets,
@@ -481,9 +485,10 @@ impl McpClient {
         // `send` implementation (they operate over a shared process/socket
         // and session state is managed by McpSessionManager alone), so
         // sharing the Arc is correct and avoids spawning a duplicate process.
-        let (forked_transport, initialized): (
+        let (forked_transport, initialized, next_id): (
             Arc<dyn McpTransport>,
             std::sync::Arc<tokio::sync::OnceCell<InitializeResult>>,
+            Arc<AtomicU64>,
         ) = if self.transport.supports_http_features() {
             let mut t = HttpMcpTransport::new(self.server_url.clone(), self.server_name.as_str());
             if let Some(ref sm) = self.session_manager {
@@ -492,14 +497,18 @@ impl McpClient {
             (
                 Arc::new(t),
                 std::sync::Arc::new(tokio::sync::OnceCell::new()),
+                Arc::new(AtomicU64::new(1)),
             )
         } else {
-            // Shared connection ⇒ shared handshake state. A fresh cell here
-            // would send a second `initialize` on an already-initialized
-            // stdio/Unix connection (MCP lifecycle violation).
+            // Shared connection ⇒ shared handshake state AND shared request-id
+            // counter. A fresh cell here would send a second `initialize` on an
+            // already-initialized stdio/Unix connection, and an independent
+            // counter would issue duplicate JSON-RPC ids on the shared
+            // connection, cross-wiring concurrent threads' pending responses.
             (
                 Arc::clone(&self.transport),
                 std::sync::Arc::clone(&self.initialized),
+                Arc::clone(&self.next_id),
             )
         };
         tracing::debug!(
@@ -512,7 +521,7 @@ impl McpClient {
             transport: forked_transport,
             server_url: self.server_url.clone(),
             server_name: self.server_name.clone(),
-            next_id: AtomicU64::new(1),
+            next_id,
             tools_cache: RwLock::new(None),
             session_manager: self.session_manager.clone(),
             secrets: self.secrets.clone(),
@@ -1001,15 +1010,16 @@ impl McpClient {
 /// Clone the client, resetting the tools cache and initialization state.
 /// The cloned client shares the same transport and session manager, so
 /// re-initialization will short-circuit via the session manager check if
-/// the source was already initialized. The `next_id` counter is copied
-/// so that cloned clients continue with monotonically increasing IDs.
+/// the source was already initialized. The `next_id` counter is SHARED
+/// (same `Arc`) so clones on the shared transport keep issuing unique,
+/// monotonically increasing request ids.
 impl Clone for McpClient {
     fn clone(&self) -> Self {
         Self {
             transport: self.transport.clone(),
             server_url: self.server_url.clone(),
             server_name: self.server_name.clone(),
-            next_id: AtomicU64::new(self.next_id.load(Ordering::SeqCst)),
+            next_id: Arc::clone(&self.next_id),
             tools_cache: RwLock::new(None),
             session_manager: self.session_manager.clone(),
             secrets: self.secrets.clone(),
