@@ -179,10 +179,21 @@ mod tests {
 
     #[test]
     fn origin_id_newtypes_reject_invalid_and_accept_valid() {
-        assert!(ProductKind::new("").is_err());
-        assert!(RoutineId::new("").is_err());
+        // Assert the specific rejection (kind + reason), not just is_err(), so
+        // an infrastructure failure can't masquerade as a validation pass.
+        let empty = ProductKind::new("").unwrap_err().to_string();
+        assert!(
+            empty.contains("product") && empty.contains("must not be empty"),
+            "unexpected rejection: {empty}"
+        );
+        let empty_routine = RoutineId::new("").unwrap_err().to_string();
+        assert!(
+            empty_routine.contains("routine") && empty_routine.contains("must not be empty"),
+            "unexpected rejection: {empty_routine}"
+        );
         // Uppercase-leading is rejected by the name-segment validator.
-        assert!(ProductKind::new("Settings").is_err());
+        let upper = ProductKind::new("Settings").unwrap_err().to_string();
+        assert!(upper.contains("product"), "unexpected rejection: {upper}");
         assert!(ProductKind::new("settings").is_ok());
         assert!(RoutineId::new("heartbeat.30m").is_ok());
     }
