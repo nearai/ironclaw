@@ -61,8 +61,15 @@ impl HttpMcpTransport {
             // cannot initialize, which does not happen with the default rustls
             // feature set. Panic is acceptable here (same as reqwest's own
             // `Client::new()`).
+            // Redirects are DISABLED: MCP endpoints are direct JSON-RPC APIs,
+            // and reqwest's default policy forwards custom credential headers
+            // (X-Api-Key etc. — it only strips Authorization/Cookie-style
+            // ones) to cross-host 3xx targets. A redirecting server surfaces
+            // as an explicit error instead of silently re-sending credentials
+            // to wherever Location points.
             http_client: reqwest::Client::builder()
                 .timeout(std::time::Duration::from_secs(30))
+                .redirect(reqwest::redirect::Policy::none())
                 .build()
                 .expect("Failed to create HTTP client"), // safety: TLS init with default rustls cannot fail
             session_manager: None,
@@ -525,6 +532,84 @@ mod tests {
         });
 
         (url, handle)
+    }
+
+    /// A 3xx from the MCP endpoint must NOT be followed: reqwest's default
+    /// policy forwards custom credential headers (X-Api-Key et al. — only
+    /// Authorization/Cookie-style ones are stripped) to cross-host Location
+    /// targets. With redirects disabled the send fails and the credentialed
+    /// request is never re-sent to the redirect target.
+    #[tokio::test]
+    async fn test_redirect_is_not_followed_with_credential_headers() {
+        use axum::{Router, routing::post};
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use tokio::net::TcpListener;
+
+        // Target server records how many requests reach it.
+        let hits = Arc::new(AtomicUsize::new(0));
+        let hits_clone = Arc::clone(&hits);
+        let target_app = Router::new().route(
+            "/",
+            post(move || {
+                let hits = Arc::clone(&hits_clone);
+                async move {
+                    hits.fetch_add(1, Ordering::SeqCst);
+                    axum::response::Json(serde_json::json!({"jsonrpc":"2.0","id":1,"result":{}}))
+                }
+            }),
+        );
+        let target_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let target_url = format!(
+            "http://127.0.0.1:{}",
+            target_listener.local_addr().unwrap().port()
+        );
+        tokio::spawn(async move {
+            axum::serve(target_listener, target_app).await.unwrap();
+        });
+
+        // Redirecting server sends every POST to the target.
+        let redirect_to = target_url.clone();
+        let redirect_app = Router::new().route(
+            "/",
+            post(move || {
+                let location = redirect_to.clone();
+                async move {
+                    (
+                        axum::http::StatusCode::TEMPORARY_REDIRECT,
+                        [(axum::http::header::LOCATION, location)],
+                    )
+                }
+            }),
+        );
+        let redirect_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let redirect_url = format!(
+            "http://127.0.0.1:{}",
+            redirect_listener.local_addr().unwrap().port()
+        );
+        tokio::spawn(async move {
+            axum::serve(redirect_listener, redirect_app).await.unwrap();
+        });
+
+        let transport = HttpMcpTransport::new(&redirect_url, "redirect-test");
+        let request = McpRequest {
+            jsonrpc: "2.0".to_string(),
+            id: Some(1),
+            method: "initialize".to_string(),
+            params: Some(serde_json::json!({})),
+        };
+        let headers = HashMap::from([("X-Api-Key".to_string(), "secret-key".to_string())]);
+
+        let result = transport.send(&request, &headers).await;
+        assert!(
+            result.is_err(),
+            "a redirecting MCP endpoint must surface as an error, not be followed"
+        );
+        assert_eq!(
+            hits.load(Ordering::SeqCst),
+            0,
+            "the credentialed request must never reach the redirect target"
+        );
     }
 
     #[tokio::test]
