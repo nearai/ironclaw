@@ -47,19 +47,20 @@ use ironclaw_product_workflow::{
     ListPendingApprovalsResponse, ListPendingAuthInteractionsRequest,
     ListPendingAuthInteractionsResponse, LlmActiveSelection, LlmConfigService,
     LlmConfigServiceError, LlmConfigSnapshot, LlmModelsResult, LlmProbeRequest, LlmProbeResult,
-    LlmProviderView, NearAiLoginRequest, NearAiLoginStart, NearAiWalletLoginRequest,
-    NearAiWalletLoginResult, OperatorLogsService, OperatorServiceLifecycleService,
-    OperatorStatusService, OutboundPreferencesProductFacade, PendingApprovalInteractionView,
-    ProductAgentBoundCaller, ProductWorkflowError, ProjectCaller, ProjectFsEntry, ProjectFsError,
-    ProjectFsFile, ProjectFsStat, ProjectService, ProjectServiceError, RebornAddMemberRequest,
-    RebornAttachmentRequest, RebornAutomationInfo, RebornAutomationMutationResponse,
-    RebornAutomationRecentRunInfo, RebornAutomationRecentRunStatus, RebornAutomationRunStatus,
-    RebornAutomationSource, RebornAutomationState, RebornChannelConnectAction,
-    RebornChannelConnectStrategy, RebornConnectableChannelInfo, RebornCreateProjectRequest,
-    RebornDeleteProjectRequest, RebornDeleteThreadRequest, RebornExtensionOnboardingState,
-    RebornFsListRequest, RebornGetProjectRequest, RebornGetRunStateRequest,
-    RebornListMembersRequest, RebornListMembersResponse, RebornListProjectsRequest,
-    RebornListProjectsResponse, RebornLogLevel, RebornLogQueryRequest, RebornLogQueryResponse,
+    LlmProviderView, MAX_AUTOMATION_NAME_BYTES, NearAiLoginRequest, NearAiLoginStart,
+    NearAiWalletLoginRequest, NearAiWalletLoginResult, OperatorLogsService,
+    OperatorServiceLifecycleService, OperatorStatusService, OutboundPreferencesProductFacade,
+    PendingApprovalInteractionView, ProductAgentBoundCaller, ProductWorkflowError, ProjectCaller,
+    ProjectFsEntry, ProjectFsError, ProjectFsFile, ProjectFsStat, ProjectService,
+    ProjectServiceError, RebornAddMemberRequest, RebornAttachmentRequest, RebornAutomationInfo,
+    RebornAutomationMutationResponse, RebornAutomationRecentRunInfo,
+    RebornAutomationRecentRunStatus, RebornAutomationRunStatus, RebornAutomationSource,
+    RebornAutomationState, RebornChannelConnectAction, RebornChannelConnectStrategy,
+    RebornConnectableChannelInfo, RebornCreateProjectRequest, RebornDeleteProjectRequest,
+    RebornDeleteThreadRequest, RebornExtensionOnboardingState, RebornFsListRequest,
+    RebornGetProjectRequest, RebornGetRunStateRequest, RebornListMembersRequest,
+    RebornListMembersResponse, RebornListProjectsRequest, RebornListProjectsResponse,
+    RebornLogLevel, RebornLogQueryRequest, RebornLogQueryResponse,
     RebornOperatorConfigDiagnosticSeverity, RebornOperatorConfigSetRequest,
     RebornOperatorLogsQuery, RebornOperatorSetupRequest, RebornOperatorSetupStatus,
     RebornOperatorStatusCheck, RebornOperatorStatusResponse, RebornOperatorStatusSeverity,
@@ -103,6 +104,7 @@ use ironclaw_threads::{
     ThreadMessageRecord, ThreadScope, UpdateAssistantDraftRequest,
     UpdateToolResultReferenceRequest,
 };
+use ironclaw_triggers::MAX_TRIGGER_PROMPT_BYTES;
 use ironclaw_turns::run_profile::{LoopModelRouteSnapshot, LoopModelUsage};
 use ironclaw_turns::{
     AcceptedMessageRef, AdmissionRejection, AdmissionRejectionReason, CancelRunRequest,
@@ -6022,8 +6024,107 @@ async fn create_automation_forwards_caller_scope_and_typed_request() {
     assert_eq!(calls[0].caller.user_id, caller.user_id);
     assert_eq!(calls[0].caller.agent_id, caller.agent_id.expect("agent"));
     assert_eq!(calls[0].caller.project_id, caller.project_id);
-    assert_eq!(calls[0].request.name, "Daily status");
+    assert_eq!(calls[0].request.name.as_str(), "Daily status");
     assert_eq!(calls[0].request.prompt, "Generate a daily status");
+    assert_eq!(
+        calls[0].request.schedule,
+        AutomationCreateSchedule::Cron {
+            expression: "0 9 * * *".to_string(),
+            timezone: "UTC".to_string(),
+        }
+    );
+}
+
+#[tokio::test]
+async fn create_automation_validates_name_and_prompt_before_product_facade() {
+    let cases = [
+        (
+            "blank name",
+            "   ".to_string(),
+            "Generate a daily status".to_string(),
+            "name",
+            WebUiInboundValidationCode::Blank,
+        ),
+        (
+            "oversized name",
+            "界".repeat(MAX_AUTOMATION_NAME_BYTES / "界".len() + 1),
+            "Generate a daily status".to_string(),
+            "name",
+            WebUiInboundValidationCode::TooLong,
+        ),
+        (
+            "blank prompt",
+            "Daily status".to_string(),
+            " \t\r\n ".to_string(),
+            "prompt",
+            WebUiInboundValidationCode::Blank,
+        ),
+        (
+            "oversized prompt",
+            "Daily status".to_string(),
+            "界".repeat(MAX_TRIGGER_PROMPT_BYTES / "界".len() + 1),
+            "prompt",
+            WebUiInboundValidationCode::TooLong,
+        ),
+    ];
+
+    for (label, name, prompt, expected_field, expected_code) in cases {
+        let automation_facade = Arc::new(RecordingAutomationFacade::default());
+        let services = RebornServices::new(
+            Arc::new(InMemorySessionThreadService::default()),
+            Arc::new(FakeTurnCoordinator::default()),
+        )
+        .with_automation_product_facade(automation_facade.clone());
+        let mut request = cron_create_request();
+        request.name = name;
+        request.prompt = prompt;
+
+        let error = services
+            .create_automation(caller(), request)
+            .await
+            .expect_err(label);
+
+        assert_eq!(
+            error.code,
+            RebornServicesErrorCode::InvalidRequest,
+            "{label}"
+        );
+        assert_eq!(error.status_code, 400, "{label}");
+        assert!(!error.retryable, "{label}");
+        assert_eq!(error.field.as_deref(), Some(expected_field), "{label}");
+        assert_eq!(error.validation_code, Some(expected_code), "{label}");
+        assert!(automation_facade.create_calls().is_empty(), "{label}");
+    }
+}
+
+#[tokio::test]
+async fn create_automation_accepts_exact_utf8_byte_limits_and_preserves_prompt() {
+    let automation_facade = Arc::new(RecordingAutomationFacade::default());
+    let services = RebornServices::new(
+        Arc::new(InMemorySessionThreadService::default()),
+        Arc::new(FakeTurnCoordinator::default()),
+    )
+    .with_automation_product_facade(automation_facade.clone());
+    let name = "n".repeat(MAX_AUTOMATION_NAME_BYTES);
+    let prompt = format!(
+        "{}{}",
+        "界".repeat(MAX_TRIGGER_PROMPT_BYTES / "界".len()),
+        "x".repeat(MAX_TRIGGER_PROMPT_BYTES % "界".len())
+    );
+    assert_eq!(prompt.len(), MAX_TRIGGER_PROMPT_BYTES);
+    let mut request = cron_create_request();
+    request.name = name.clone();
+    request.prompt = prompt.clone();
+
+    services
+        .create_automation(caller(), request)
+        .await
+        .expect("exact byte limits should be accepted");
+
+    let calls = automation_facade.create_calls();
+    assert_eq!(calls.len(), 1);
+    assert_eq!(calls[0].request.name.as_str(), name);
+    assert_eq!(calls[0].request.prompt, prompt);
     assert_eq!(
         calls[0].request.schedule,
         AutomationCreateSchedule::Cron {

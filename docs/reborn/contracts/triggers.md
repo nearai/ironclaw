@@ -422,28 +422,42 @@ directly.
 The trigger system must expose `trigger_create`, `trigger_list`, `trigger_remove`,
 `trigger_pause`, and `trigger_resume` as first-party Reborn capabilities.
 
-Reborn 产品表面同时提供 caller-scoped 的直接创建操作。WebUI v2 通过
-`POST /api/webchat/v2/automations` 调用 typed `RebornServicesApi` /
-`AutomationProductFacade`，不得从 HTTP handler dispatch 模型可见的
-`builtin.trigger_create`。第一版产品请求只接受 `cron` 和 `once` schedule，
-并严格拒绝 legacy message/system/webhook trigger、execution、delivery 和
-post-create-disable 字段。tenant、creator、agent 与 project scope 只能来自已认证
-caller，不能来自请求体。
+The Reborn product surface also provides caller-scoped direct creation. WebUI v2
+calls the typed `RebornServicesApi` / `AutomationProductFacade` through
+`POST /api/webchat/v2/automations`; the HTTP handler must not dispatch the
+model-visible `builtin.trigger_create` capability. The initial product request
+accepts only `cron` and `once` schedules and strictly rejects legacy
+message/system/webhook triggers, execution settings, delivery settings, and
+post-create-disable fields. Tenant, creator, agent, and project scope must come
+from the authenticated caller, never from the request body.
 
-`once.at` 接受两种格式：无 offset 的 `YYYY-MM-DDTHH:MM:SS` 按请求中的
-IANA timezone 解释；带 `Z` 或显式 UTC offset 的 RFC3339 值以 offset 确定
-绝对 instant。RFC3339 offset 必须等于该 IANA timezone 在该 instant 的实际
-offset，否则创建在持久化前以非重试 `400 InvalidRequest` 拒绝。本地时间在
-DST overlap/gap 时继续 fail closed；显式且匹配 timezone 的 RFC3339 offset
-可以唯一选择 overlap occurrence。两种格式最终都持久化为现有 UTC instant
-+ IANA timezone，不需要 schema migration。
+Before invoking `AutomationProductFacade`, the product boundary must convert
+`name` into the shared `AutomationName` type and reject values that are empty
+after trimming or exceed `MAX_AUTOMATION_NAME_BYTES`. The same boundary must
+reject prompts that are blank or exceed `MAX_TRIGGER_PROMPT_BYTES`, while
+preserving the original contents of valid prompts. These failures return
+sanitized, non-retryable `400 InvalidRequest` responses with
+`field = name|prompt` and stable `blank` or `too_long` validation codes. Invalid
+requests must not enter the automation facade or persistence path.
 
-模型 capability 与产品 facade 必须共用 `ironclaw_triggers` 的 typed creation
-service。该 service 统一拥有 schedule 转换、未来 fire slot 验证、record 构造、
-repository upsert、creator pairing 与 pairing 失败后的补偿删除。逐操作 timeout
-必须保留补偿路径：pairing timeout 视为 lifecycle failure，并尝试删除刚写入的
-trigger；只有持久化和 pairing 均成功后，产品 API 才返回 `201 Created` 与
-`RebornAutomationInfo`。
+`once.at` accepts either a local `YYYY-MM-DDTHH:MM:SS` value interpreted in the
+required IANA timezone, or an RFC3339 value with `Z` or an explicit UTC offset
+that identifies the absolute instant. The RFC3339 offset must match the actual
+offset of the named IANA timezone at that instant; otherwise creation is
+rejected before persistence with a non-retryable `400 InvalidRequest`. Local
+times continue to fail closed during DST overlaps or gaps, while an explicit
+matching RFC3339 offset can select one overlap occurrence unambiguously. Both
+forms are ultimately stored as the existing UTC instant plus IANA timezone and
+require no schema migration.
+
+The model capability and product facade must share the typed creation service
+owned by `ironclaw_triggers`. That service owns schedule conversion, future fire
+slot validation, record construction, repository upsert, creator pairing, and
+compensating deletion after pairing failure. Per-operation timeouts must retain
+the compensation path: a pairing timeout is a lifecycle failure and triggers an
+attempt to delete the newly written trigger. The product API returns
+`201 Created` with `RebornAutomationInfo` only after persistence and pairing
+both succeed.
 
 - `trigger_create` validates the schedule and timezone, captures caller scope,
   pairs the caller as the host-trusted synthetic trigger actor used by the
@@ -557,7 +571,7 @@ V1 acceptance does not require external delivery. A valid V1 trigger fire is one
   once the fire reaches a terminal outcome — already covered by
   `tests/integration/group_triggers/scenario_triggered_gate_hold_visible.rs`.
 
-对应验证命令：
+Corresponding verification commands:
 
 ```bash
 cargo test -p ironclaw_triggers creation::tests

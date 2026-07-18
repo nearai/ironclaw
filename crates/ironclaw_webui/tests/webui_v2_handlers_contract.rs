@@ -1,3 +1,4 @@
+// arch-exempt: large_file, caller-level WebUI regressions stay with the shared router fixture, plan #5905
 //! Caller-level contract tests for the WebChat v2 axum handlers.
 //!
 //! Per `.claude/rules/testing.md` "Test Through the Caller", these tests
@@ -2470,6 +2471,60 @@ async fn create_automation_maps_semantic_rfc3339_error_to_sanitized_400() {
             1
         );
     }
+}
+
+#[tokio::test]
+async fn create_automation_preserves_bounded_field_error_on_wire() {
+    let services = Arc::new(StubServices::default());
+    services.fail_create_automation(RebornServicesError {
+        code: RebornServicesErrorCode::InvalidRequest,
+        kind: RebornServicesErrorKind::Validation,
+        status_code: 400,
+        retryable: false,
+        field: Some("prompt".to_string()),
+        validation_code: Some(WebUiInboundValidationCode::TooLong),
+    });
+    let router = router_with(services.clone());
+    let oversized_prompt = "x".repeat(40 * 1024);
+
+    let response = router
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/api/webchat/v2/automations")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::json!({
+                        "name": "Daily status",
+                        "prompt": oversized_prompt,
+                        "schedule": {
+                            "kind": "cron",
+                            "expression": "0 9 * * *",
+                            "timezone": "UTC"
+                        }
+                    })
+                    .to_string(),
+                ))
+                .expect("create request"),
+        )
+        .await
+        .expect("create oneshot");
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let body = read_json(response).await;
+    assert_eq!(body["error"], "invalid_request");
+    assert_eq!(body["kind"], "validation");
+    assert_eq!(body["retryable"], false);
+    assert_eq!(body["field"], "prompt");
+    assert_eq!(body["validation_code"], "too_long");
+    assert!(body.get("detail").is_none());
+    let calls = services
+        .create_automation_calls
+        .lock()
+        .expect("lock")
+        .clone();
+    assert_eq!(calls.len(), 1);
+    assert_eq!(calls[0].1.prompt.len(), 40 * 1024);
 }
 
 #[tokio::test]

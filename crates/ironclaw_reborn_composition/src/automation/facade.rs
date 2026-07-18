@@ -171,7 +171,7 @@ impl AutomationProductFacade for RebornAutomationProductFacade {
             .creation_service
             .create(TriggerCreateRequest {
                 scope,
-                name: request.name,
+                name: request.name.into_inner(),
                 prompt: request.prompt,
                 schedule,
                 delivery_target: None,

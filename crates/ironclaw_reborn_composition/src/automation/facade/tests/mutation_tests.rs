@@ -19,7 +19,7 @@ fn automation_name(value: &str) -> AutomationName {
 
 fn cron_create_request(expression: &str, timezone: &str) -> AutomationCreateRequest {
     AutomationCreateRequest {
-        name: "Daily status".to_string(),
+        name: automation_name("Daily status"),
         prompt: "Generate a daily status".to_string(),
         schedule: AutomationCreateSchedule::Cron {
             expression: expression.to_string(),
@@ -30,7 +30,7 @@ fn cron_create_request(expression: &str, timezone: &str) -> AutomationCreateRequ
 
 fn once_create_request(at: impl Into<String>, timezone: &str) -> AutomationCreateRequest {
     AutomationCreateRequest {
-        name: "Follow up".to_string(),
+        name: automation_name("Follow up"),
         prompt: "Check deployment".to_string(),
         schedule: AutomationCreateSchedule::Once {
             at: at.into(),

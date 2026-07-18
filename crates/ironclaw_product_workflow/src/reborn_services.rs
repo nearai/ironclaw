@@ -36,6 +36,7 @@ use ironclaw_threads::{
     SessionThreadRecord, SessionThreadService, ThreadHistory, ThreadHistoryRequest,
     ThreadMessageId, ThreadScope,
 };
+use ironclaw_triggers::MAX_TRIGGER_PROMPT_BYTES;
 use ironclaw_turns::{
     AcceptedMessageRef, GateRef, GetRunStateRequest, IdempotencyKey, ResumeTurnPrecondition,
     ResumeTurnRequest, RetryTurnRequest, SanitizedCancelReason, SubmitTurnRequest,
@@ -627,7 +628,7 @@ pub struct AutomationListRequest {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AutomationCreateRequest {
-    pub name: String,
+    pub name: AutomationName,
     pub prompt: String,
     pub schedule: AutomationCreateSchedule,
 }
@@ -644,9 +645,11 @@ pub enum AutomationCreateSchedule {
     },
 }
 
-impl From<WebUiCreateAutomationRequest> for AutomationCreateRequest {
-    fn from(request: WebUiCreateAutomationRequest) -> Self {
-        let schedule = match request.schedule {
+impl WebUiCreateAutomationRequest {
+    fn into_request(self) -> Result<AutomationCreateRequest, RebornServicesError> {
+        let name = AutomationName::new(self.name).map_err(automation_name_validation_error)?;
+        let prompt = validate_automation_prompt(self.prompt)?;
+        let schedule = match self.schedule {
             WebUiAutomationScheduleRequest::Cron {
                 expression,
                 timezone,
@@ -658,11 +661,11 @@ impl From<WebUiCreateAutomationRequest> for AutomationCreateRequest {
                 AutomationCreateSchedule::Once { at, timezone }
             }
         };
-        Self {
-            name: request.name,
-            prompt: request.prompt,
+        Ok(AutomationCreateRequest {
+            name,
+            prompt,
             schedule,
-        }
+        })
     }
 }
 
@@ -4673,8 +4676,9 @@ impl RebornServicesApi for RebornServices {
                 false,
             ));
         };
+        let request = request.into_request()?;
         self.automation_facade
-            .create_automation(caller, request.into())
+            .create_automation(caller, request)
             .await
     }
 
@@ -6823,6 +6827,22 @@ impl From<AutomationNameError> for WebUiInboundValidationCode {
 
 fn automation_name_validation_error(error: AutomationNameError) -> RebornServicesError {
     RebornServicesError::validation(WebUiInboundValidationError::new("name", error.into()))
+}
+
+fn validate_automation_prompt(prompt: String) -> Result<String, RebornServicesError> {
+    let validation_code = if prompt.trim().is_empty() {
+        Some(WebUiInboundValidationCode::Blank)
+    } else if prompt.len() > MAX_TRIGGER_PROMPT_BYTES {
+        Some(WebUiInboundValidationCode::TooLong)
+    } else {
+        None
+    };
+    match validation_code {
+        Some(code) => Err(RebornServicesError::validation(
+            WebUiInboundValidationError::new("prompt", code),
+        )),
+        None => Ok(prompt),
+    }
 }
 
 fn notification_approval_timeout_error() -> RebornServicesError {
