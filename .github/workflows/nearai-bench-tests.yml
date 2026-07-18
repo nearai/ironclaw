@@ -36,6 +36,35 @@ jobs:
         with:
           persist-credentials: false
 
+      - name: Assert forwarded job timeout clears the run step's internal guard
+        run: |
+          set -euo pipefail
+          # The reusable workflow (nearai/benchmarks) bounds the actual
+          # benchmark with an in-step `timeout --kill-after=120s 290m` so an
+          # overrun exits gracefully — snapshotting a partial run, uploading it,
+          # and posting the PR comment. That only works if GitHub's job-level
+          # cap sits ABOVE 290m; if the job cap fires first, GitHub CANCELS the
+          # job and the compound-`if` upload/comment steps are skipped (this is
+          # exactly what cancelled run 29606955146 at the old 240 default). So
+          # the `timeout-minutes` the dispatcher forwards must satisfy
+          # 290 < N <= 360 (the ubuntu-16core hard cap). Lock that invariant in.
+          GUARD_MIN=290   # keep in sync with the reusable workflow's 'timeout 290m'
+          HARD_CAP=360    # GitHub-hosted runner max job minutes
+          # Anchor to the 6-space with:-entry indentation so a future job-level
+          # (4-space) timeout-minutes on the parse job can't be misread here.
+          forwarded=$(sed -nE 's@^      timeout-minutes:[[:space:]]*([0-9]+).*@\1@p' \
+            .github/workflows/nearai-bench.yml | head -1)
+          echo "forwarded timeout-minutes=${forwarded:-<none>} (guard=${GUARD_MIN}, cap=${HARD_CAP})"
+          if [ -z "$forwarded" ]; then
+            echo "::error::no timeout-minutes forwarded in nearai-bench.yml — it would fall to the reusable 240 default, below the ${GUARD_MIN}m internal guard, and overruns would be hard-cancelled"
+            exit 1
+          fi
+          if [ "$forwarded" -le "$GUARD_MIN" ] || [ "$forwarded" -gt "$HARD_CAP" ]; then
+            echo "::error::forwarded timeout-minutes=$forwarded must satisfy ${GUARD_MIN} < N <= ${HARD_CAP} so overruns exit via the graceful in-step guard, not a job cancellation"
+            exit 1
+          fi
+          echo "PASS  forwarded job timeout clears the internal run guard"
+
       - name: Run dispatcher parser fixtures
         run: |
           set -euo pipefail
