@@ -1113,12 +1113,14 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
     def test_routine_creation_case_fails_when_no_trigger_is_created(self):
         captured_prompts: list[str] = []
         captured_follow_up_flags: list[bool] = []
+        captured_timeouts: list[float] = []
 
         async def fake_live_chat_case(_ctx, **kwargs):
             captured_prompts.append(kwargs["prompt"])
             captured_follow_up_flags.append(
                 kwargs.get("routine_confirmation_follow_up", False)
             )
+            captured_timeouts.append(kwargs["timeout"])
             extra_details = kwargs.get("extra_details") or {}
             return run_live_qa.ProbeResult(
                 provider="test",
@@ -1158,6 +1160,13 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
         self.assertFalse(result.success)
         self.assertEqual(captured_prompts, ["original sheet prompt"])
         self.assertEqual(captured_follow_up_flags, [True])
+        # Plain (non-extensions) routine-creation turn must also get the
+        # extended reply-wait headroom past the former 180.0 timeout.
+        self.assertEqual(
+            captured_timeouts,
+            [run_live_qa.ROUTINE_CREATION_REPLY_TIMEOUT_SECONDS],
+        )
+        self.assertGreater(captured_timeouts[0], 180.0)
         self.assertEqual(result.details["trigger_records_after"], 0)
         self.assertEqual(result.details["trigger_record_wait_ms"], 25)
         self.assertIn("did not add a trigger_record", result.details["error"])
@@ -1285,7 +1294,12 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
         self.assertIsNone(captured["marker"])
         self.assertEqual(captured["required_text"], ["routine"])
         self.assertEqual(captured["extensions"][0]["package_id"], "google-sheets")
-        self.assertEqual(captured["timeout"], 180.0)
+        # Heavy routine-creation turn must get the extended reply-wait headroom
+        # (regression: the former hardcoded 180.0 timed out mid-work).
+        self.assertEqual(
+            captured["timeout"], run_live_qa.ROUTINE_CREATION_REPLY_TIMEOUT_SECONDS
+        )
+        self.assertGreater(captured["timeout"], 180.0)
         self.assertTrue(result.details["fixture_ready"])
 
     def test_required_text_accepts_explicit_alternatives(self):

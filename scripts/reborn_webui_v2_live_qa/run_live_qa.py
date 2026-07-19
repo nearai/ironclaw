@@ -2034,6 +2034,13 @@ def _trigger_record_count(reborn_home: Path, routine_name: str | None = None) ->
 ROUTINE_TRIGGER_RECORD_WAIT_TIMEOUT_SECONDS = 120.0
 ROUTINE_TRIGGER_RECORD_POLL_SECONDS = 2.0
 
+# Routine creation is a heavy, multi-step assistant turn (list sheets ->
+# read -> compose -> create trigger). The former 180s per-turn reply wait
+# timed out mid-work on slower model runs, blocking qa_2e / qa_6d / qa_9b at
+# a near-uniform ~182-184s with latest_final_reply_state='false'. 300s gives
+# it the same headroom as the comparably heavy calendar-prep live-chat turn.
+ROUTINE_CREATION_REPLY_TIMEOUT_SECONDS = 300.0
+
 
 async def _wait_for_trigger_record_after_count(
     reborn_home: Path,
@@ -4484,7 +4491,7 @@ async def _routine_creation_case(
             marker=marker,
             required_text=required_text,
             extensions=extensions,
-            timeout=180.0,
+            timeout=ROUTINE_CREATION_REPLY_TIMEOUT_SECONDS,
             extra_details=details,
         )
     else:
@@ -4494,7 +4501,7 @@ async def _routine_creation_case(
             prompt=prompt,
             marker=marker,
             required_text=required_text,
-            timeout=180.0,
+            timeout=ROUTINE_CREATION_REPLY_TIMEOUT_SECONDS,
             extra_details=details,
             routine_confirmation_follow_up=True,
             routine_follow_up_timezone_instruction=follow_up_timezone_instruction,
