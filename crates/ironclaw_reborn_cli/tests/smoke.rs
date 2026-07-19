@@ -197,7 +197,8 @@ fn release_ci_compiles_reborn_for_all_supported_targets() {
         ("aarch64-apple-darwin", "macos-15"),
         ("x86_64-pc-windows-msvc", "windows-2022"),
     ];
-    let release_features = "webui-v2-beta,slack-v2-host-beta,libsql,postgres,inmemory-turn-state";
+    let release_features =
+        "root-llm-provider,webui-v2-beta,slack-v2-host-beta,libsql,postgres,inmemory-turn-state";
 
     assert_eq!(
         compile_workflow.matches("          - target: ").count(),
@@ -226,7 +227,7 @@ fn release_ci_compiles_reborn_for_all_supported_targets() {
     );
     assert!(
         compile_workflow.matches("musl: true").count() == 2
-            && compile_workflow.contains("sudo apt-get install --yes musl-tools binutils")
+            && compile_workflow.contains("sudo apt-get install --yes musl-tools binutils file")
             && compile_workflow.contains("CC_x86_64_unknown_linux_musl=musl-gcc")
             && compile_workflow.contains("CC_aarch64_unknown_linux_musl=musl-gcc")
             && !compile_workflow.contains("CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_LINKER")
@@ -237,6 +238,40 @@ fn release_ci_compiles_reborn_for_all_supported_targets() {
             && !compile_workflow.contains("binary: ironclaw-reborn")
             && compile_workflow.contains("core.longpaths true"),
         "release CI must use musl-gcc for C dependencies without overriding Rust's self-contained musl linker"
+    );
+    for matrix_entry in [
+        concat!(
+            "          - target: x86_64-unknown-linux-musl\n",
+            "            runner: ubuntu-22.04\n",
+            "            binary: ironclaw\n",
+            "            musl: true\n",
+            "            cc_env: CC_x86_64_unknown_linux_musl=musl-gcc\n",
+        ),
+        concat!(
+            "          - target: aarch64-unknown-linux-musl\n",
+            "            runner: ubuntu-24.04-arm\n",
+            "            binary: ironclaw\n",
+            "            musl: true\n",
+            "            cc_env: CC_aarch64_unknown_linux_musl=musl-gcc\n",
+        ),
+    ] {
+        assert!(
+            compile_workflow.contains(matrix_entry),
+            "musl matrix entry must bind its target to the matching compiler: {matrix_entry}"
+        );
+    }
+    let configure_musl_compiler = concat!(
+        "      - name: Configure musl C compiler\n",
+        "        if: matrix.musl\n",
+        "        shell: bash\n",
+        "        env:\n",
+        "          CC_ENV: ${{ matrix.cc_env }}\n",
+        "        run: |\n",
+        "          echo \"$CC_ENV\" >> \"$GITHUB_ENV\"\n",
+    );
+    assert!(
+        compile_workflow.contains(configure_musl_compiler),
+        "musl compiler variables must be applied only to musl matrix entries"
     );
     assert!(
         compile_workflow.contains("name: Verify musl portability\n        if: matrix.musl")
@@ -274,6 +309,20 @@ fn release_ci_compiles_reborn_for_all_supported_targets() {
             && compile_workflow.contains("if-no-files-found: error")
             && !compile_workflow.contains("name: artifacts-reborn"),
         "compile evidence must stay outside cargo-dist's artifacts-* release namespace"
+    );
+    let host_job = release_workflow
+        .split_once("\n  host:\n")
+        .and_then(|(_, jobs)| jobs.split_once("\n  docker-image:\n"))
+        .map(|(host, _)| host)
+        .expect("release workflow host job");
+    assert_eq!(
+        host_job.matches("pattern: artifacts-*").count(),
+        2,
+        "release host must download only cargo-dist artifacts for staging and upload"
+    );
+    assert!(
+        !host_job.contains("reborn-compile-"),
+        "release host must not publish Reborn compile evidence"
     );
 
     let release_tag_trigger = concat!(

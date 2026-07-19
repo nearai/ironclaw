@@ -81,7 +81,7 @@ seven-platform release matrix.
 Each matrix entry performs a final `cargo build --locked --profile dist` link
 for `ironclaw_reborn_cli` / `ironclaw` with an explicit compile feature
 contract owned by this workflow:
-`webui-v2-beta,slack-v2-host-beta,libsql,postgres,inmemory-turn-state`.
+`root-llm-provider,webui-v2-beta,slack-v2-host-beta,libsql,postgres,inmemory-turn-state`.
 Before upload, the workflow executes that exact native binary with `--version`,
 `--help`, and `profile list --json`. The musl entries also use `readelf` to
 reject a program interpreter or dynamic-library dependency, which prevents an
