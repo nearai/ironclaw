@@ -60,8 +60,9 @@ annotations and `.claude/rules/architecture.md` cite them; additions get
   added §14 (implementation status as of 2026-07-19 — Slice C.1 `Invocation`
   vocab, Slice A store deletions, Slice B renames + ratchets merged; the §5.3
   five-channel `Resolution` flip in flight on `integration/reborn-flip-base`).
-  No design changes to §1–§13; §14 and the status log are mutable, the
-  contract above them is frozen.
+  No design changes to §1–§13 other than the §5.3.4 addition and the §11.7
+  extension noted above; §14 and the status log are mutable, the contract
+  above them is frozen.
 
 This note proposes a **fundamental** simplification of the Reborn host/runtime
 internals. The goal is to remove three recurring costs without weakening any
@@ -1295,7 +1296,7 @@ channels above:
 
 **Enforcement is a conformance matrix, not a hope.** #6284 item 7 is adopted
 into the §11.7 authorize/dispatch suite: for every variant of every error enum
-(`CapabilityFailureKind`, `RuntimeFailureKind`, `AgentLoopHostErrorKind`,
+(`CapabilityFailureKind`, `RuntimeDispatchErrorKind`, `AgentLoopHostErrorKind`,
 `ModelErrorClass`, `LoopFailureKind`, provider categories), an exhaustive-match
 test proves it maps to retry, a model-visible observation, or a park — **never
 an unclassified bork** — and a new variant fails CI until classified. This is the
@@ -2000,7 +2001,7 @@ adapter/loop/backend inherits correctness instead of re-deriving it:
   follow-on gate; a gate flood past the per-run cap resolves as "gate quota exhausted",
   not an unbounded pending queue); and the **§5.3.4 recoverability matrix** (#6284
   item 7): every variant of every error enum (`CapabilityFailureKind`,
-  `RuntimeFailureKind`, `AgentLoopHostErrorKind`, `ModelErrorClass`,
+  `RuntimeDispatchErrorKind`, `AgentLoopHostErrorKind`, `ModelErrorClass`,
   `LoopFailureKind`, provider categories) maps to retry / a model-visible
   observation carrying a non-empty remediation hint / a park — never an
   unclassified terminal bork, and a new variant fails CI until classified (the
