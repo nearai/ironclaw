@@ -20,10 +20,8 @@
 
 use std::sync::Arc;
 
-#[cfg(feature = "webui-v2-beta")]
 mod admin_secrets;
 mod admin_token;
-#[cfg(feature = "webui-v2-beta")]
 mod admin_user_directory;
 #[cfg(test)]
 mod approval_test_support;
@@ -53,7 +51,6 @@ mod telegram;
 pub use ironclaw_product_workflow::{
     AuthChallengeProvider, AuthChallengeView, BlockedAuthFlowCanceller,
 };
-#[cfg(any(feature = "slack-v2-host-beta", feature = "telegram-v2-host-beta"))]
 mod delivered_gate_routing;
 mod readiness;
 mod root;
@@ -95,7 +92,6 @@ pub use factory::{KeychainMasterKeyOutcome, provision_local_dev_keychain_master_
 pub use factory::{RebornServices, build_reborn_services, builtin_first_party_trust_policy};
 pub use google_oauth_secret_store::{GoogleOauthSecretStore, GoogleOauthSecretStoreError};
 pub use input::{OAuthClientConfig, RebornBuildInput, RebornRuntimeProcessBinding};
-#[cfg(feature = "webui-v2-beta")]
 pub use ironclaw_auth::GoogleOAuthRouteConfig;
 /// OAuth redirect-URI newtype re-exported so the `ironclaw_reborn_cli` binary
 /// can name it without a direct `ironclaw_auth` dependency. Its
@@ -141,14 +137,12 @@ pub use llm_admin::llm_key_store::{LlmKeyStore, LlmKeyStoreError};
 pub use llm_admin::nearai_mcp::{
     NearAiMcpBootstrapConfig, NearAiMcpBootstrapConfigError, nearai_mcp_bootstrap_config_from_env,
 };
-#[cfg(feature = "openai-compat-beta")]
 pub use llm_admin::openai_compat_serve::build_openai_compat_route_mount;
 // Re-exported for the host-owned `ironclaw_webui::webui_v2_app`
 // (hoisted up from this crate): its bearer-auth middleware mints tenant-scoped
 // verified-bearer evidence for protected OpenAI-compatible mounts. Ingress must
 // not depend on `ironclaw_product_adapters` directly (architecture boundary), so
 // it reaches this helper through composition's facade.
-#[cfg(feature = "openai-compat-beta")]
 pub use ironclaw_product_adapters::mark_bearer_token_verified_for_tenant;
 #[cfg(feature = "root-llm-provider")]
 pub use llm_admin::provider_admin::{
@@ -185,7 +179,6 @@ pub use observability::trajectory_observer::RebornTrajectoryObserver;
 // facade re-exports it for its own downstream consumers (root test suites,
 // the CLI) alongside the product-auth service surface that produces it.
 pub use ironclaw_channel_host::auth_continuation::RebornAuthContinuationDispatcher;
-#[cfg(feature = "slack-v2-host-beta")]
 pub use ironclaw_channel_host::identity::{
     RebornUserIdentityLookup, RebornUserIdentityLookupError,
 };
@@ -196,12 +189,10 @@ pub use product_auth::api::auth::{
     RebornOAuthCallbackRequest, RebornOAuthCallbackResponse, RebornProductAuthServicePorts,
     RebornProductAuthServices,
 };
-#[cfg(feature = "slack-v2-host-beta")]
 pub use product_auth::serve::SlackPersonalOAuthBindingConfig;
 // Product-auth WebUI route-mount builders, exposed so the host-owned
 // `ironclaw_webui::webui_v2_app` (moved up from this crate) can
 // compose the Reborn-native product-auth surface into the WebChat v2 router.
-#[cfg(feature = "webui-v2-beta")]
 pub use product_auth::serve::{
     ProductAuthRouteMount, ProductAuthRouteState, product_auth_route_mount,
 };
@@ -234,44 +225,35 @@ pub use runtime_input::{
 };
 #[cfg(feature = "root-llm-provider")]
 pub use runtime_input::{RebornProviderFactory, ResolvedRebornLlm};
-#[cfg(feature = "slack-v2-host-beta")]
 pub use slack::slack_actor_identity::{
     SlackUserIdentityActorResolver, slack_user_identity_provider_user_id,
 };
-#[cfg(feature = "slack-v2-host-beta")]
 pub use slack::slack_channel_routes::{
     SlackChannelRouteAdminRouteConfig, SlackChannelRouteAdminRouteMount,
     WEBUI_V2_CHANNELS_SLACK_ALLOWED_PATH, WEBUI_V2_CHANNELS_SLACK_ROUTES_PATH,
     WEBUI_V2_CHANNELS_SLACK_SUBJECTS_PATH, slack_channel_route_admin_route_mount,
 };
-#[cfg(feature = "slack-v2-host-beta")]
 pub use slack::slack_connectable_channel::{
     SlackOperatorRouteVisibility, build_webui_services_with_slack_host_beta_mounts,
 };
-#[cfg(all(feature = "slack-v2-host-beta", feature = "telegram-v2-host-beta"))]
 pub use webui::facade::build_webui_services_with_slack_and_telegram_host_mounts;
 // Exported under either channel-host feature: the delivery observer and the
 // triggered-run driver are adapter-generic machinery in
 // `ironclaw_channel_delivery`; each channel host injects its own
 // adapter/egress/sink plus a `ChannelDeliveryProtocol`.
-#[cfg(any(feature = "slack-v2-host-beta", feature = "telegram-v2-host-beta"))]
 pub use ironclaw_channel_delivery::{
     FinalReplyDeliveryObserver, FinalReplyDeliveryServices, FinalReplyDeliverySettings,
 };
-#[cfg(any(feature = "slack-v2-host-beta", feature = "telegram-v2-host-beta"))]
 pub use ironclaw_channel_delivery::{
     NoopPostSubmitDeliveryHook, PostSubmitDeliveryHook, TriggeredRunDeliveryDriver,
 };
-#[cfg(feature = "telegram-v2-host-beta")]
 pub use ironclaw_telegram_extension::channel_routes::{
     WEBUI_V2_CHANNELS_TELEGRAM_PAIRING_PATH, WEBUI_V2_CHANNELS_TELEGRAM_SETUP_PATH,
 };
-#[cfg(feature = "slack-v2-host-beta")]
 pub use slack::slack_egress::{
     SlackEgressCredential, SlackEgressCredentialError, SlackEgressCredentialProvider,
     SlackProtocolHttpEgress, StaticSlackEgressCredentialProvider,
 };
-#[cfg(feature = "slack-v2-host-beta")]
 pub use slack::slack_host_beta::{
     SlackHostBetaBuildError, SlackHostBetaChannelRoute, SlackHostBetaConfig,
     SlackHostBetaConfigInput, SlackHostBetaLegacySetup, SlackHostBetaMounts,
@@ -279,30 +261,24 @@ pub use slack::slack_host_beta::{
     build_slack_events_route_mount_with_actor_user_resolver, build_slack_host_beta_mounts,
     build_slack_host_beta_runtime_mounts, build_triggered_run_delivery_hook,
 };
-#[cfg(feature = "slack-v2-host-beta")]
 pub use slack::slack_serve;
-#[cfg(feature = "slack-v2-host-beta")]
 pub use slack::slack_serve::{
     SLACK_EVENTS_PATH, SlackEventsRouteState, SlackEventsWebhookDispatcher,
     SlackInstallationSelector, SlackTeamId, slack_events_route_descriptors,
     slack_events_route_mount,
 };
-#[cfg(feature = "slack-v2-host-beta")]
 pub use slack::slack_setup::SlackPersonalSetupServiceSlot;
-#[cfg(feature = "telegram-v2-host-beta")]
 pub use telegram::telegram_host_beta::{
     TelegramHostBuildError, TelegramHostMounts, TelegramHostRuntimeConfig,
     build_telegram_host_runtime_mounts,
 };
 pub use web_access::register_bundled_web_access_first_party_handlers;
-#[cfg(feature = "telegram-v2-host-beta")]
 pub use webui::facade::build_webui_services_with_telegram_host_mounts;
 pub use webui::facade::{RebornWebuiBundle, build_webui_services};
 // Host-supplied route-mount vocabulary shared with composition's own route
 // builders (nearai login, OpenAI-compat) and the host-owned gateway assembly
 // in `ironclaw_webui`. The `WebuiServeConfig` / `webui_v2_app`
 // / `WebuiAuthenticator` surface moved up into that ingress crate.
-#[cfg(feature = "webui-v2-beta")]
 pub use webui::route_mounts::{
     ProtectedRouteMount, PublicRouteDrain, PublicRouteDrains, PublicRouteMount,
 };
@@ -318,7 +294,7 @@ pub mod host_api {
     };
 }
 
-#[cfg(all(feature = "webui-v2-beta", feature = "postgres"))]
+#[cfg(feature = "postgres")]
 pub use ironclaw_runner::local_trigger_access::RebornFilesystemLocalTriggerAccessStore;
 /// Reborn-owned local trigger-fire access store, re-exported so host
 /// binaries reach it through this composition facade instead of taking a
@@ -328,19 +304,16 @@ pub use ironclaw_runner::local_trigger_access::RebornFilesystemLocalTriggerAcces
 /// callers use [`open_local_trigger_access_store`]; hosted-single-tenant
 /// callers use the filesystem-backed store through the host filesystem
 /// abstraction.
-#[cfg(feature = "webui-v2-beta")]
 pub use ironclaw_runner::local_trigger_access::{
     LocalTriggerAccessReconciliation, LocalTriggerAccessRole, LocalTriggerAccessSeed,
     LocalTriggerAccessSource, LocalTriggerAccessStore, RebornLibSqlLocalTriggerAccessStore,
     RebornLocalTriggerAccessStoreError,
 };
 
-#[cfg(feature = "webui-v2-beta")]
 struct LocalTriggerAccessFireChecker {
     store: std::sync::Arc<dyn LocalTriggerAccessStore>,
 }
 
-#[cfg(feature = "webui-v2-beta")]
 impl LocalTriggerAccessFireChecker {
     fn new(store: std::sync::Arc<dyn LocalTriggerAccessStore>) -> Self {
         Self { store }
@@ -349,14 +322,12 @@ impl LocalTriggerAccessFireChecker {
 
 /// Wrap a backend-neutral local trigger access store as the runtime fire-time
 /// authorizer.
-#[cfg(feature = "webui-v2-beta")]
 pub fn local_trigger_access_fire_checker(
     store: std::sync::Arc<dyn LocalTriggerAccessStore>,
 ) -> std::sync::Arc<dyn runtime_input::TriggerFireAccessChecker> {
     std::sync::Arc::new(LocalTriggerAccessFireChecker::new(store))
 }
 
-#[cfg(feature = "webui-v2-beta")]
 #[async_trait::async_trait]
 impl runtime_input::TriggerFireAccessChecker for LocalTriggerAccessFireChecker {
     async fn check_trigger_fire_access(
@@ -397,7 +368,6 @@ impl runtime_input::TriggerFireAccessChecker for LocalTriggerAccessFireChecker {
 /// `ironclaw_reborn_identity` directly. The concrete filesystem-backed store
 /// stays private to this composition layer (composition CLAUDE.md: "keep
 /// lower substrate handles private").
-#[cfg(feature = "webui-v2-beta")]
 pub use ironclaw_reborn_identity::{
     ExternalSubjectId, IdentityKeyError, ProviderInstanceId, ProviderKind, RebornIdentityError,
     RebornIdentityResolver, ResolveExternalIdentity, SurfaceKind,
@@ -413,7 +383,7 @@ pub use ironclaw_reborn_identity::{
 /// function exists only so tests (and downstream integration crates via
 /// `test-support`) can build a resolver without standing up a full runtime.
 /// Gated so it ships zero bytes in production binaries.
-#[cfg(all(feature = "webui-v2-beta", any(test, feature = "test-support")))]
+#[cfg(any(test, feature = "test-support"))]
 pub fn open_reborn_identity_resolver(
     tenant_id: &ironclaw_host_api::TenantId,
 ) -> std::sync::Arc<dyn RebornIdentityResolver> {
@@ -445,7 +415,6 @@ pub fn open_reborn_identity_resolver(
 /// Open the reborn-owned local trigger access store on the substrate DB at
 /// `path`, creating the parent directory and running its idempotent
 /// migrations.
-#[cfg(feature = "webui-v2-beta")]
 pub async fn open_local_trigger_access_store(
     path: &std::path::Path,
 ) -> Result<std::sync::Arc<RebornLibSqlLocalTriggerAccessStore>, RebornLocalTriggerAccessStoreError>
@@ -465,7 +434,7 @@ pub async fn open_local_trigger_access_store(
     ))
 }
 
-#[cfg(all(test, feature = "webui-v2-beta"))]
+#[cfg(test)]
 mod webui_user_access_checker_tests {
     use super::*;
     use crate::runtime_input::{TriggerFireAccessCheck, TriggerFireAccessDecision};
@@ -750,7 +719,6 @@ fn invocation_mount_view_for_segments(
         VirtualPath::new(format!("/tenants/{tenant_id}/shared/reborn-identity"))?,
         MountPermissions::read_write_list_delete(),
     ));
-    #[cfg(feature = "slack-v2-host-beta")]
     grants.push(MountGrant::new(
         MountAlias::new("/tenant-shared/slack-channel-routes")?,
         VirtualPath::new(format!("/tenants/{tenant_id}/shared/slack-channel-routes"))?,
@@ -766,10 +734,7 @@ fn invocation_mount_view_for_segments(
     MountView::new(grants)
 }
 
-#[cfg(all(
-    any(feature = "libsql", feature = "postgres"),
-    feature = "slack-v2-host-beta"
-))]
+#[cfg(any(feature = "libsql", feature = "postgres"))]
 pub(crate) fn slack_host_state_mount_view(
     scope: &ResourceScope,
 ) -> Result<MountView, ironclaw_host_api::HostApiError> {
@@ -811,10 +776,7 @@ pub(crate) fn slack_host_state_mount_view(
     ])
 }
 
-#[cfg(all(
-    any(feature = "libsql", feature = "postgres"),
-    feature = "telegram-v2-host-beta"
-))]
+#[cfg(any(feature = "libsql", feature = "postgres"))]
 pub(crate) fn telegram_host_state_mount_view(
     scope: &ResourceScope,
 ) -> Result<MountView, ironclaw_host_api::HostApiError> {
@@ -1081,7 +1043,6 @@ mod mount_view_tests {
         );
     }
 
-    #[cfg(feature = "slack-v2-host-beta")]
     #[test]
     fn invocation_mount_view_exposes_slack_channel_routes_read_only() {
         let scope = sample_scope();
@@ -1103,7 +1064,6 @@ mod mount_view_tests {
         assert_eq!(grant.permissions, MountPermissions::read_only());
     }
 
-    #[cfg(feature = "slack-v2-host-beta")]
     #[test]
     fn slack_host_state_mount_view_grants_delete_only_to_slack_state_roots() {
         let scope = sample_scope();
@@ -1159,7 +1119,6 @@ mod mount_view_tests {
         );
     }
 
-    #[cfg(feature = "telegram-v2-host-beta")]
     #[test]
     fn telegram_host_state_mount_view_grants_delete_only_to_telegram_state_roots() {
         let scope = sample_scope();

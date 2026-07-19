@@ -64,8 +64,7 @@ Each middleware is its own module: `webui_ws_origin`, `webui_body_limit`,
 `webui_operator_auth`, `webui_rate_limit`, `webui_route_match`. This is where
 the descriptor-driven policy (from `webui_v2_routes()`) is turned into real
 tower layers, where product-auth and OAuth `PublicRouteMount`s are merged
-outside bearer auth, and where the Slack / OpenAI-compat host-beta route mounts
-attach under their feature flags.
+outside bearer auth, and where the Slack / OpenAI-compat route mounts attach.
 
 ### 3. Serve loop + host authentication (`src/lib.rs`, `src/auth/`, `src/session.rs`, `src/oidc.rs`)
 
@@ -101,8 +100,10 @@ attach under their feature flags.
 |---|---|
 | `default` | Route surface + SPA + serve loop + auth. |
 | `dev-in-memory-session` | Compile in `InMemorySessionStore` + `EmailUserDirectory` for local dev / tests. |
-| `slack-v2-host-beta` | Mount the Slack personal-OAuth setup + channel-route admin surface in `webui_v2_app` (forwards to composition). |
-| `openai-compat-beta` | Stamp an `OpenAiCompatActorScope` onto verified callers for protected OpenAI-compatible mounts (forwards to composition + `ironclaw_reborn_openai_compat`). |
+
+The Slack personal-OAuth setup + channel-route admin surface and the
+`OpenAiCompatActorScope` stamping for protected OpenAI-compatible mounts are
+unconditional parts of `webui_v2_app`; both forward to composition.
 
 ## Build & test
 
@@ -111,8 +112,7 @@ attach under their feature flags.
 cargo test  -p ironclaw_webui
 cargo clippy -p ironclaw_webui --all-targets -- -D warnings
 
-# Everything, incl. Slack / OpenAI-compat host-beta and the relocated
-# slack_host_beta_webui_v2 integration test
+# Everything, incl. the dev-only session store
 cargo test  -p ironclaw_webui --all-features
 cargo clippy -p ironclaw_webui --all-features --all-targets -- -D warnings
 

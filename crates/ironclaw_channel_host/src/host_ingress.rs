@@ -101,14 +101,12 @@ fn projection(error: impl std::fmt::Display) -> HostIngressProjectionError {
 /// keyed on `(tenant, adapter installation)`. Shared by every channel host;
 /// serve layers map [`InstallationRateExceeded`] onto their own sanitized
 /// ingress error shapes.
-#[cfg(feature = "webhook-serve")]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct InstallationRateLimitConfig {
     pub max_requests: std::num::NonZeroU32,
     pub window: std::time::Duration,
 }
 
-#[cfg(feature = "webhook-serve")]
 impl InstallationRateLimitConfig {
     pub fn new(max_requests: std::num::NonZeroU32, window: std::time::Duration) -> Self {
         Self {
@@ -118,7 +116,6 @@ impl InstallationRateLimitConfig {
     }
 }
 
-#[cfg(feature = "webhook-serve")]
 /// The limiter refused a request for this installation within the window.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct InstallationRateExceeded {
@@ -126,7 +123,6 @@ pub struct InstallationRateExceeded {
     pub adapter_installation_id: ironclaw_product_adapters::AdapterInstallationId,
 }
 
-#[cfg(feature = "webhook-serve")]
 #[derive(Clone)]
 pub struct InstallationRateLimiter {
     config: InstallationRateLimitConfig,
@@ -135,7 +131,6 @@ pub struct InstallationRateLimiter {
     >,
 }
 
-#[cfg(feature = "webhook-serve")]
 impl InstallationRateLimiter {
     pub fn new(config: InstallationRateLimitConfig) -> Self {
         Self {
@@ -188,7 +183,6 @@ impl InstallationRateLimiter {
     }
 }
 
-#[cfg(feature = "webhook-serve")]
 impl std::fmt::Debug for InstallationRateLimiter {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter
@@ -198,21 +192,18 @@ impl std::fmt::Debug for InstallationRateLimiter {
     }
 }
 
-#[cfg(feature = "webhook-serve")]
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 struct InstallationRateLimitKey {
     tenant_id: ironclaw_host_api::TenantId,
     adapter_installation_id: ironclaw_product_adapters::AdapterInstallationId,
 }
 
-#[cfg(feature = "webhook-serve")]
 #[derive(Debug, Clone)]
 struct RateLimitBucket {
     last_refilled_at: std::time::Instant,
     tokens: f64,
 }
 
-#[cfg(feature = "webhook-serve")]
 impl RateLimitBucket {
     fn full(now: std::time::Instant, config: &InstallationRateLimitConfig) -> Self {
         Self {
@@ -245,7 +236,6 @@ impl RateLimitBucket {
     }
 }
 
-#[cfg(feature = "webhook-serve")]
 /// Sanitized webhook error vocabulary shared by every channel host's public
 /// ingress route: the response body is `{"error": <category>}` and never
 /// carries provider or internal detail.
@@ -259,13 +249,11 @@ pub enum WebhookErrorCategory {
     TemporarilyUnavailable,
 }
 
-#[cfg(feature = "webhook-serve")]
 #[derive(Debug, serde::Serialize)]
 struct WebhookErrorBody {
     error: WebhookErrorCategory,
 }
 
-#[cfg(feature = "webhook-serve")]
 pub fn webhook_error_response(
     status: axum::http::StatusCode,
     category: WebhookErrorCategory,
@@ -274,7 +262,6 @@ pub fn webhook_error_response(
     (status, axum::Json(WebhookErrorBody { error: category })).into_response()
 }
 
-#[cfg(feature = "webhook-serve")]
 /// The shared `RunnerError` → HTTP mapping every channel webhook uses:
 /// authentication failures 401, capacity 429, retryable adapter/workflow
 /// faults 503, everything else a sanitized 400. Serve layers add their own
@@ -308,7 +295,7 @@ pub fn runner_error_status(
     }
 }
 
-#[cfg(all(test, feature = "webhook-serve"))]
+#[cfg(test)]
 mod installation_rate_limiter_tests {
     use super::*;
 

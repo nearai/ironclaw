@@ -5,16 +5,9 @@ use std::sync::Arc;
 
 use anyhow::{Context, anyhow};
 use clap::Args;
-#[cfg(feature = "openai-compat-beta")]
 use ironclaw_reborn_composition::build_openai_compat_route_mount;
-#[cfg(feature = "telegram-v2-host-beta")]
 use ironclaw_reborn_composition::build_telegram_host_runtime_mounts;
-#[cfg(not(any(feature = "slack-v2-host-beta", feature = "telegram-v2-host-beta")))]
-use ironclaw_reborn_composition::build_webui_services;
-#[cfg(all(feature = "slack-v2-host-beta", feature = "telegram-v2-host-beta"))]
 use ironclaw_reborn_composition::build_webui_services_with_slack_and_telegram_host_mounts;
-#[cfg(all(not(feature = "slack-v2-host-beta"), feature = "telegram-v2-host-beta"))]
-use ironclaw_reborn_composition::build_webui_services_with_telegram_host_mounts;
 use ironclaw_reborn_composition::host_api::{
     AgentId, InvocationId, ProjectId, ResourceScope, SecretHandle, TenantId, UserId,
 };
@@ -24,7 +17,6 @@ use ironclaw_reborn_composition::{
     RebornRuntimeIdentity, RebornRuntimeInput, RebornWebuiBundle, build_reborn_runtime,
     local_trigger_access_fire_checker,
 };
-#[cfg(feature = "slack-v2-host-beta")]
 use ironclaw_reborn_composition::{
     SlackOperatorRouteVisibility, build_slack_host_beta_runtime_mounts,
     build_webui_services_with_slack_host_beta_mounts,
@@ -148,7 +140,6 @@ impl ServeCommand {
                 confirm_host_access: self.confirm_host_access,
             },
         )?;
-        #[cfg(feature = "slack-v2-host-beta")]
         let slack_personal_lazy_slot = built.slack_personal_lazy_slot;
         let runtime_input = built.inner;
         let boot_config = context.boot_config();
@@ -268,8 +259,6 @@ impl ServeCommand {
             &user_id,
             &boot_config.home().config_file_path(),
         )?;
-        #[cfg(not(feature = "slack-v2-host-beta"))]
-        let _ = slack_host_beta_config;
         let telegram_host_config = resolve_telegram_host_config_for_serve_command(
             config_file.as_ref(),
             &tenant_id,
@@ -277,8 +266,6 @@ impl ServeCommand {
             default_project_id.as_ref(),
             &user_id,
         )?;
-        #[cfg(not(feature = "telegram-v2-host-beta"))]
-        let _ = telegram_host_config;
 
         // Resolve listen address with explicit precedence:
         //   CLI flag (Some(...)) > config file > compile-time default.
@@ -524,7 +511,6 @@ impl ServeCommand {
                 );
             }
 
-            #[cfg(feature = "slack-v2-host-beta")]
             let slack_mounts = if let Some(slack_config) = slack_host_beta_config {
                 match build_slack_host_beta_runtime_mounts(&runtime, slack_config)
                     .await
@@ -551,7 +537,6 @@ impl ServeCommand {
             };
             // Telegram host mounts, after Slack's: same fail-closed shutdown
             // path when route composition fails.
-            #[cfg(feature = "telegram-v2-host-beta")]
             let telegram_mounts = if let Some(telegram_config) = telegram_host_config {
                 match build_telegram_host_runtime_mounts(&runtime, telegram_config)
                     .await
@@ -571,10 +556,8 @@ impl ServeCommand {
             } else {
                 None
             };
-            #[cfg(feature = "slack-v2-host-beta")]
             let operator_route_visibility =
                 slack_operator_route_visibility_for_authenticator(env_authenticator.as_ref());
-            #[cfg(all(feature = "slack-v2-host-beta", feature = "telegram-v2-host-beta"))]
             let bundle: RebornWebuiBundle = match telegram_mounts.as_ref() {
                 Some(telegram_mounts) => build_webui_services_with_slack_and_telegram_host_mounts(
                     &runtime,
@@ -590,19 +573,6 @@ impl ServeCommand {
                     operator_route_visibility,
                 )?,
             };
-            #[cfg(all(feature = "slack-v2-host-beta", not(feature = "telegram-v2-host-beta")))]
-            let bundle: RebornWebuiBundle = build_webui_services_with_slack_host_beta_mounts(
-                &runtime,
-                None,
-                slack_mounts.as_ref(),
-                operator_route_visibility,
-            )?;
-            #[cfg(all(not(feature = "slack-v2-host-beta"), feature = "telegram-v2-host-beta"))]
-            let bundle: RebornWebuiBundle =
-                build_webui_services_with_telegram_host_mounts(&runtime, None, telegram_mounts.as_ref())?;
-            #[cfg(not(any(feature = "slack-v2-host-beta", feature = "telegram-v2-host-beta")))]
-            let bundle: RebornWebuiBundle = build_webui_services(&runtime, None)?;
-            #[cfg(feature = "openai-compat-beta")]
             let openai_compat_mount = build_openai_compat_route_mount(
                 &runtime,
                 tenant_id.clone(),
@@ -700,7 +670,6 @@ impl ServeCommand {
             if let Some(project_id) = default_project_id.clone() {
                 serve_config = serve_config.with_default_project_id(project_id);
             }
-            #[cfg(feature = "openai-compat-beta")]
             {
                 serve_config = serve_config.with_protected_route_mount(openai_compat_mount);
             }
@@ -717,7 +686,6 @@ impl ServeCommand {
                 }
                 serve_config = serve_config.with_google_oauth(route_config);
             }
-            #[cfg(feature = "slack-v2-host-beta")]
             {
                 if let Some(slot) = slack_personal_lazy_slot {
                     serve_config = serve_config.with_slack_personal_oauth(slot);
@@ -734,7 +702,6 @@ impl ServeCommand {
             if let Some(host) = canonical_host {
                 serve_config = serve_config.with_canonical_host(host);
             }
-            #[cfg(feature = "slack-v2-host-beta")]
             if let Some(slack_mounts) = slack_mounts {
                 let slack_personal_oauth_binding = slack_mounts.personal_oauth_binding_config();
                 serve_config = serve_config
@@ -742,7 +709,6 @@ impl ServeCommand {
                     .with_slack_personal_oauth_binding(slack_personal_oauth_binding)
                     .with_slack_channel_routes(slack_mounts.channel_routes);
             }
-            #[cfg(feature = "telegram-v2-host-beta")]
             if let Some(telegram_mounts) = telegram_mounts {
                 // Bearer-authed setup/pairing routes ride the generic
                 // protected-route seam; the updates webhook is public.
@@ -805,7 +771,6 @@ impl ServeCommand {
     }
 }
 
-#[cfg(feature = "slack-v2-host-beta")]
 fn resolve_slack_host_beta_config_for_serve_command(
     config_file: Option<&RebornConfigFile>,
     tenant_id: &TenantId,
@@ -824,26 +789,6 @@ fn resolve_slack_host_beta_config_for_serve_command(
     )
 }
 
-#[cfg(not(feature = "slack-v2-host-beta"))]
-fn resolve_slack_host_beta_config_for_serve_command(
-    config_file: Option<&RebornConfigFile>,
-    tenant_id: &TenantId,
-    default_agent_id: &AgentId,
-    default_project_id: Option<&ProjectId>,
-    default_user_id: &UserId,
-    config_path: &std::path::Path,
-) -> anyhow::Result<Option<()>> {
-    crate::commands::serve_slack::resolve_slack_config_for_serve(
-        config_file.and_then(|file| file.slack.as_ref()),
-        tenant_id,
-        default_agent_id,
-        default_project_id,
-        default_user_id,
-        config_path,
-    )
-}
-
-#[cfg(feature = "telegram-v2-host-beta")]
 fn resolve_telegram_host_config_for_serve_command(
     config_file: Option<&RebornConfigFile>,
     tenant_id: &TenantId,
@@ -865,24 +810,6 @@ fn resolve_telegram_host_config_for_serve_command(
         default_project_id,
         default_user_id,
         public_base_url,
-    )
-}
-
-#[cfg(not(feature = "telegram-v2-host-beta"))]
-fn resolve_telegram_host_config_for_serve_command(
-    config_file: Option<&RebornConfigFile>,
-    tenant_id: &TenantId,
-    default_agent_id: &AgentId,
-    default_project_id: Option<&ProjectId>,
-    default_user_id: &UserId,
-) -> anyhow::Result<Option<()>> {
-    crate::commands::serve_telegram::resolve_telegram_config_for_serve(
-        config_file.and_then(|file| file.telegram.as_ref()),
-        tenant_id,
-        default_agent_id,
-        default_project_id,
-        default_user_id,
-        None,
     )
 }
 
@@ -1179,7 +1106,6 @@ fn resolve_webui_runtime_owner(
     Ok(webui_user_id.to_string())
 }
 
-#[cfg(feature = "slack-v2-host-beta")]
 fn slack_operator_route_visibility_for_authenticator(
     authenticator: &dyn WebuiAuthenticator,
 ) -> SlackOperatorRouteVisibility {
@@ -1585,7 +1511,6 @@ mod tests {
         assert!(message.contains("local-user"), "message: {message}");
     }
 
-    #[cfg(feature = "slack-v2-host-beta")]
     #[test]
     fn serve_startup_rejects_loaded_config_with_legacy_slack_fields() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -1626,7 +1551,6 @@ slack_user_id = "U123"
         );
     }
 
-    #[cfg(feature = "slack-v2-host-beta")]
     #[test]
     fn slack_operator_route_visibility_follows_authenticator_route_mount_capability() {
         struct HiddenAuth;

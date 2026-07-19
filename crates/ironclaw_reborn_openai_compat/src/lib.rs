@@ -3,34 +3,25 @@
 //! Reborn-native OpenAI-compatible API contract surface.
 //!
 //! The crate owns DTOs, route descriptors, and a sanitized error envelope for
-//! the OpenAI-compatible Chat Completions and Responses surfaces. The optional
-//! `openai-compat-beta` feature exposes axum route fragments for host
-//! composition without routing through the v1 gateway. By default the router is
+//! the OpenAI-compatible Chat Completions and Responses surfaces. It exposes
+//! axum route fragments for host composition without routing through the v1
+//! gateway. By default the router is
 //! fail-closed; host composition can inject ProductWorkflow-backed Chat,
 //! Responses, and projection-streaming services for the wired Reborn slices.
 
-#[cfg(feature = "openai-compat-beta")]
 mod ack_helpers;
 mod chat;
-#[cfg(feature = "openai-compat-beta")]
 mod chat_workflow;
-#[cfg(feature = "openai-compat-beta")]
 mod content_parts;
 mod cost;
 mod descriptors;
 mod error;
-#[cfg(feature = "openai-compat-beta")]
 mod external_tools;
-#[cfg(feature = "openai-compat-beta")]
 mod handlers;
-#[cfg(feature = "openai-compat-beta")]
 mod identity;
-#[cfg(feature = "openai-compat-beta")]
 mod model_validation;
 mod models;
-#[cfg(feature = "openai-compat-beta")]
 mod models_catalog;
-#[cfg(feature = "openai-compat-beta")]
 mod projection_helpers;
 mod refs;
 // Durable filesystem-backed ref store. Gated behind `storage` so the
@@ -38,11 +29,8 @@ mod refs;
 #[cfg(feature = "storage")]
 mod refs_storage;
 mod responses;
-#[cfg(feature = "openai-compat-beta")]
 mod responses_workflow;
-#[cfg(feature = "openai-compat-beta")]
 mod router;
-#[cfg(feature = "openai-compat-beta")]
 mod streaming;
 
 pub use chat::{
@@ -52,7 +40,6 @@ pub use chat::{
     OpenAiChatToolCall, OpenAiChatToolCallDelta, OpenAiChatToolCallFunction,
     OpenAiChatToolCallFunctionDelta, OpenAiChatToolKind, OpenAiPromptTokensDetails, OpenAiUsage,
 };
-#[cfg(feature = "openai-compat-beta")]
 pub use chat_workflow::{
     OPENAI_COMPAT_CONVERSATION_PREFIX, OpenAiChatCompletionProjection,
     OpenAiChatCompletionProjectionReader, OpenAiChatCompletionProjectionRequest,
@@ -76,22 +63,18 @@ pub use error::{
     OpenAiCompatError, OpenAiCompatErrorCode, OpenAiCompatErrorKind, OpenAiCompatErrorResponse,
     OpenAiCompatErrorType, OpenAiCompatHttpError,
 };
-#[cfg(feature = "openai-compat-beta")]
 pub use external_tools::{
     OpenAiCompatExternalToolResume, OpenAiCompatExternalToolResumeRequest,
     OpenAiCompatExternalToolSpec, OpenAiCompatExternalToolStore,
 };
-#[cfg(feature = "openai-compat-beta")]
 pub use handlers::{
     chat_completions, models_list, responses_api_cancel, responses_api_create,
     responses_api_retrieve, responses_v1_cancel, responses_v1_create, responses_v1_retrieve,
 };
-#[cfg(feature = "openai-compat-beta")]
 pub use identity::{
     OPENAI_COMPAT_ACTOR_KIND, OPENAI_COMPAT_ADAPTER_ID, OPENAI_COMPAT_INSTALLATION_ID,
 };
 pub use models::{OpenAiModelListResponse, OpenAiModelObject};
-#[cfg(feature = "openai-compat-beta")]
 pub use models_catalog::{OpenAiCompatModelCatalog, OpenAiCompatModelEntry};
 pub use refs::{
     InMemoryOpenAiCompatRefStore, OpenAiChatCompletionId, OpenAiCompatActorScope,
@@ -116,14 +99,11 @@ pub use responses::{
     OpenAiResponseUsage, OpenAiResponsesCreateRequest, OpenAiResponsesInput,
     OpenAiResponsesInputItem, OpenAiResponsesMessageRole,
 };
-#[cfg(feature = "openai-compat-beta")]
 pub use responses_workflow::{
     OpenAiResponseProjection, OpenAiResponseReadRequest, OpenAiResponseWaitRequest,
     OpenAiResponsesProjectionReader, OpenAiResponsesWorkflow,
 };
-#[cfg(feature = "openai-compat-beta")]
 pub use router::{OpenAiCompatRouterState, openai_compat_router, openai_compat_router_with_state};
-#[cfg(feature = "openai-compat-beta")]
 pub use streaming::{
     OpenAiChatProjectionStreamRequest, OpenAiCompatProjectionStreamer,
     OpenAiResponseProjectionStreamRequest,

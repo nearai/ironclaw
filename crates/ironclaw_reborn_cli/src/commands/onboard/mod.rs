@@ -15,7 +15,6 @@ pub(crate) mod prompts;
 use llm_credentials::LlmCredentialProvisionOutcome;
 use llm_credentials::{EncryptedLlmKeyStoreOpener, LiveLlmProbe, provision_llm_credentials};
 use master_key::{MasterKeyProvisionOutcome, provision_master_key};
-#[cfg(feature = "webui-v2-beta")]
 use prompts::PromptSource;
 use prompts::{LlmCredentialPromptError, StdinPromptSource};
 
@@ -43,7 +42,6 @@ pub(crate) struct OnboardCommand {
     /// of onboarding. Always effectively on in a non-interactive session
     /// (headless CI, a piped/scripted invocation) regardless of this flag —
     /// see `execute()`'s service step.
-    #[cfg(feature = "webui-v2-beta")]
     #[arg(long = "no-service")]
     no_service: bool,
 }
@@ -171,14 +169,12 @@ impl OnboardCommand {
             println!("- history import not requested");
         }
 
-        #[cfg(feature = "webui-v2-beta")]
         self.finish_with_service_and_login_link(&context, home, prompts.is_interactive())?;
 
         Ok(())
     }
 
-    /// Onboarding's last two steps, gated behind `webui-v2-beta` (both depend
-    /// on `serve`/`service`):
+    /// Onboarding's last two steps (both depend on `serve`/`service`):
     /// - install-and-start the OS service (skippable, see [`Self::should_install_service`])
     /// - print the CLI-token login link, reusing the `webui-token` value
     ///   `ensure_webui_token_file` already provisioned above
@@ -186,7 +182,6 @@ impl OnboardCommand {
     /// `interactive` is passed down from the same [`PromptSource::is_interactive`]
     /// reading the LLM-credential prompt step made, so `should_install_service`
     /// doesn't need its own `IsTerminal` check.
-    #[cfg(feature = "webui-v2-beta")]
     fn finish_with_service_and_login_link(
         &self,
         context: &RebornCliContext,
@@ -248,7 +243,6 @@ impl OnboardCommand {
     /// `interactive` comes from the same [`PromptSource::is_interactive`]
     /// reading used to gate the LLM-credential prompts (`prompts::StdinPromptSource`
     /// is the sole `IsTerminal` check in this command) rather than re-deriving it here.
-    #[cfg(feature = "webui-v2-beta")]
     fn should_install_service(&self, interactive: bool) -> bool {
         !self.no_service && interactive
     }
@@ -257,7 +251,6 @@ impl OnboardCommand {
 /// Outcome of onboard's OS-service install/start finale. Even `Failed` is a
 /// successful `execute()` (exit 0) — reported via `service_note`, but a
 /// service-manager hiccup must not fail an otherwise-successful onboarding run.
-#[cfg(feature = "webui-v2-beta")]
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum ServiceStartOutcome {
     InstalledAndStarted,
@@ -266,7 +259,6 @@ enum ServiceStartOutcome {
     Failed(String),
 }
 
-#[cfg(feature = "webui-v2-beta")]
 impl ServiceStartOutcome {
     fn display_line(&self) -> String {
         match self {

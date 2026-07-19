@@ -12,7 +12,7 @@ use ironclaw_host_api::runtime_policy::{
     EffectiveRuntimePolicy, FilesystemBackendKind, NetworkMode, SecretMode,
 };
 use ironclaw_host_api::{AgentId, TenantId};
-#[cfg(all(test, feature = "slack-v2-host-beta"))]
+#[cfg(test)]
 use ironclaw_host_runtime::HostRuntimeHttpEgressPort;
 use ironclaw_host_runtime::TenantSandboxProcessPort;
 #[cfg(any(test, feature = "test-support"))]
@@ -33,7 +33,6 @@ use crate::product_auth::oauth::google_oauth::google_provider_spec;
 use crate::product_auth::oauth::notion_oauth::notion_provider_spec;
 use crate::product_auth::oauth::oauth_dcr::OAuthDcrProviderConfig;
 use crate::product_auth::oauth::oauth_provider_client::HostOAuthProviderSpec;
-#[cfg(feature = "slack-v2-host-beta")]
 use crate::slack::slack_setup::SlackPersonalSetupServiceSlot;
 use crate::{RebornCompositionProfile, RebornProductAuthServicePorts};
 
@@ -198,14 +197,13 @@ pub struct RebornBuildInput {
     pub(crate) required_runtime_backends: Vec<ironclaw_host_api::RuntimeKind>,
     pub(crate) require_runtime_http_egress: bool,
     pub(crate) require_wasm_credentials: bool,
-    #[cfg(all(test, feature = "slack-v2-host-beta"))]
+    #[cfg(test)]
     pub(crate) host_runtime_http_egress_for_test: Option<Option<HostRuntimeHttpEgressPort>>,
     #[cfg(any(test, feature = "test-support"))]
     pub(crate) network_http_egress_for_test: Option<Arc<dyn NetworkHttpEgress>>,
     pub(crate) product_auth_ports: Option<RebornProductAuthServicePorts>,
     pub(crate) oauth_provider_configs: Vec<OAuthProviderBackendConfig>,
     pub(crate) oauth_dcr_provider_configs: Vec<OAuthDcrProviderBackendConfig>,
-    #[cfg(feature = "slack-v2-host-beta")]
     pub(crate) slack_personal_oauth_lazy_slot: Option<SlackPersonalSetupServiceSlot>,
     pub(crate) nearai_mcp_bootstrap_config:
         Option<crate::llm_admin::nearai_mcp::NearAiMcpBootstrapConfig>,
@@ -435,7 +433,7 @@ impl RebornBuildInput {
 
     /// Open the hosted-single-tenant trigger access store from this build
     /// input's already-resolved PostgreSQL storage.
-    #[cfg(all(feature = "webui-v2-beta", feature = "postgres"))]
+    #[cfg(feature = "postgres")]
     pub async fn open_hosted_single_tenant_trigger_access_store(
         &self,
     ) -> Result<Arc<dyn crate::LocalTriggerAccessStore>, crate::RebornLocalTriggerAccessStoreError>
@@ -709,7 +707,7 @@ impl RebornBuildInput {
         self
     }
 
-    #[cfg(all(test, feature = "slack-v2-host-beta"))]
+    #[cfg(test)]
     pub(crate) fn with_host_runtime_http_egress_for_test(
         mut self,
         egress: Option<HostRuntimeHttpEgressPort>,
@@ -762,7 +760,6 @@ impl RebornBuildInput {
     /// Register the lazy Slack personal OAuth slot so the provider client
     /// fetches credentials from the setup service at request time rather than
     /// from env vars at startup.
-    #[cfg(feature = "slack-v2-host-beta")]
     pub fn with_slack_personal_oauth_lazy(mut self, slot: SlackPersonalSetupServiceSlot) -> Self {
         self.slack_personal_oauth_lazy_slot = Some(slot);
         self
@@ -849,14 +846,13 @@ impl RebornBuildInput {
             required_runtime_backends: Vec::new(),
             require_runtime_http_egress: false,
             require_wasm_credentials: false,
-            #[cfg(all(test, feature = "slack-v2-host-beta"))]
+            #[cfg(test)]
             host_runtime_http_egress_for_test: None,
             #[cfg(any(test, feature = "test-support"))]
             network_http_egress_for_test: None,
             product_auth_ports: None,
             oauth_provider_configs: Vec::new(),
             oauth_dcr_provider_configs: Vec::new(),
-            #[cfg(feature = "slack-v2-host-beta")]
             slack_personal_oauth_lazy_slot: None,
             nearai_mcp_bootstrap_config: None,
             turn_state_store_limits: InMemoryTurnStateStoreLimits::default(),

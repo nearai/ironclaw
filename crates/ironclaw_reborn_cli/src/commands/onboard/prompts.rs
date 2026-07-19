@@ -10,10 +10,6 @@
 //! return [`LlmCredentialPromptError::NonInteractive`] rather than calling
 //! `process::exit`.
 
-#[cfg(any(
-    feature = "webui-v2-beta",
-    all(feature = "libsql", feature = "root-llm-provider")
-))]
 use std::io::IsTerminal;
 use std::io::Write as _;
 
@@ -27,10 +23,6 @@ pub(crate) trait PromptSource {
     /// attached). Checked once up front so a non-interactive session skips
     /// both the LLM-credential prompts and the OS-service install without
     /// either one independently re-deriving "is this interactive".
-    #[cfg(any(
-        feature = "webui-v2-beta",
-        all(feature = "libsql", feature = "root-llm-provider")
-    ))]
     fn is_interactive(&self) -> bool;
 
     /// Prompt for the LLM provider via a numbered menu built from `entries`
@@ -102,10 +94,6 @@ pub(crate) enum LlmCredentialPromptError {
 pub(crate) struct StdinPromptSource;
 
 impl PromptSource for StdinPromptSource {
-    #[cfg(any(
-        feature = "webui-v2-beta",
-        all(feature = "libsql", feature = "root-llm-provider")
-    ))]
     fn is_interactive(&self) -> bool {
         // Both streams matter: a redirected/piped stdout must not receive
         // the masked `*` characters `api_key`'s raw-mode read writes as the

@@ -40,9 +40,6 @@ fallback_feature_flags() {
 }
 
 case "${package}" in
-  ironclaw_reborn_cli)
-    printf '%s\n' "--features webui-v2-beta,slack-v2-host-beta,telegram-v2-host-beta"
-    ;;
   ironclaw_product_adapters)
     printf '%s\n' "--features test-support,host-auth-mint"
     ;;
@@ -52,7 +49,7 @@ case "${package}" in
     printf '%s\n' "--features test-support,libsql"
     ;;
   ironclaw_reborn_composition)
-    printf '%s\n' "--features test-support,webui-v2-beta,slack-v2-host-beta,telegram-v2-host-beta,libsql"
+    printf '%s\n' "--features test-support,libsql"
     ;;
   ironclaw_runner)
     printf '%s\n' "--features root-llm-provider,libsql-secrets,libsql-restart-tests,webui-user-store"
@@ -79,17 +76,11 @@ case "${package}" in
     # DB paths without a Postgres server (which the crate-tests job has none of).
     printf '%s\n' "--features test-support,libsql"
     ;;
-  ironclaw_channel_host)
-    # `webhook-serve` compiles + runs the installation rate limiter and
-    # webhook error-mapping helpers the channel hosts consume; the base build
-    # alone would skip those tests.
-    printf '%s\n' "--features webhook-serve"
-    ;;
   ironclaw_reborn_openai_compat)
-    # `openai-compat-beta` activates the route/workflow/streaming contract
-    # suites; `libsql` also exercises the durable ref-store contract folded in
-    # from the former ironclaw_reborn_openai_compat_storage crate.
-    printf '%s\n' "--features openai-compat-beta,libsql"
+    # `libsql` exercises the durable ref-store contract folded in from the
+    # former ironclaw_reborn_openai_compat_storage crate. The route/workflow/
+    # streaming suites are unconditional.
+    printf '%s\n' "--features libsql"
     ;;
   ironclaw_architecture | \
   ironclaw_channel_delivery | \

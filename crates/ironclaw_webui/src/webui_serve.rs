@@ -23,10 +23,6 @@
 //! host-owned code. So the seam this PR provides is the `Router`; the
 //! consuming host binary writes the listener-binding line itself.
 //!
-//! Everything in this module is gated on the `webui-v2-beta` Cargo
-//! feature. Substrate-only callers (v1 `AppBuilder`, diagnostic
-//! harnesses) stay off the feature and carry no HTTP surface code.
-//!
 //! The composition is intentionally Reborn-owned and does **not** share
 //! middleware with the v1 gateway under `/src/channels/web/`. Path A in
 //! `docs/reborn/how-to-port-channel-to-reborn.md` requires native
@@ -63,12 +59,11 @@ use tower_http::cors::{AllowHeaders, CorsLayer};
 use tower_http::limit::RequestBodyLimitLayer;
 use tower_http::set_header::SetResponseHeaderLayer;
 
-// The Slack host-beta personal-OAuth + channel-route admin surface is gated on
-// `slack-v2-host-beta`, which this crate forwards to
-// `ironclaw_reborn_composition/slack-v2-host-beta` (see Cargo.toml). Because the
-// `webui_v2_app` gateway assembly was hoisted up here from composition, these
-// Slack setup/route types are consumed through composition's public surface,
-// not a `crate::slack::*` module (this crate has none).
+// The Slack host-beta personal-OAuth + channel-route admin surface is compiled
+// in unconditionally. Because the `webui_v2_app` gateway assembly was hoisted
+// up here from composition, these Slack setup/route types are consumed through
+// composition's public surface, not a `crate::slack::*` module (this crate has
+// none).
 use crate::webui_body_limit::{build_body_limit_state, enforce_body_limit};
 use crate::webui_operator_auth::{
     OperatorWebuiConfigRouteState, build_operator_webui_config_route_state,
@@ -76,7 +71,6 @@ use crate::webui_operator_auth::{
 use crate::webui_rate_limit::{build_rate_limit_state, enforce_rate_limit};
 use crate::webui_ws_origin::{build_websocket_origin_state, enforce_websocket_origin};
 use ironclaw_product_workflow::WebUiAuthenticatedCaller;
-#[cfg(feature = "slack-v2-host-beta")]
 use ironclaw_reborn_composition::{
     SlackChannelRouteAdminRouteConfig, SlackPersonalOAuthBindingConfig,
     slack_channel_route_admin_route_mount,
@@ -260,16 +254,13 @@ pub struct WebuiServeConfig {
     /// credential onboarding. When absent, the mounted Google setup
     /// route fails closed with a sanitized service-unavailable response.
     pub(crate) google_oauth: Option<GoogleOAuthRouteConfig>,
-    #[cfg(feature = "slack-v2-host-beta")]
     pub(crate) slack_personal_oauth:
         Option<ironclaw_reborn_composition::SlackPersonalSetupServiceSlot>,
     /// Optional host hook that binds a successful Slack personal OAuth identity
     /// to the authenticated Reborn user.
-    #[cfg(feature = "slack-v2-host-beta")]
     pub(crate) slack_personal_oauth_binding: Option<SlackPersonalOAuthBindingConfig>,
     /// Optional Slack channel route admin surface mounted under the WebUI
     /// channels settings path.
-    #[cfg(feature = "slack-v2-host-beta")]
     pub(crate) slack_channel_routes: Option<SlackChannelRouteAdminRouteConfig>,
 }
 
@@ -309,11 +300,8 @@ impl WebuiServeConfig {
             public_mounts: Vec::new(),
             protected_mounts: Vec::new(),
             google_oauth: None,
-            #[cfg(feature = "slack-v2-host-beta")]
             slack_personal_oauth: None,
-            #[cfg(feature = "slack-v2-host-beta")]
             slack_personal_oauth_binding: None,
-            #[cfg(feature = "slack-v2-host-beta")]
             slack_channel_routes: None,
         }
     }
@@ -324,7 +312,6 @@ impl WebuiServeConfig {
     }
 
     /// Slack personal (user-token) OAuth lazy slot for the WebUI setup flow.
-    #[cfg(feature = "slack-v2-host-beta")]
     pub fn with_slack_personal_oauth(
         mut self,
         slot: ironclaw_reborn_composition::SlackPersonalSetupServiceSlot,
@@ -333,7 +320,6 @@ impl WebuiServeConfig {
         self
     }
 
-    #[cfg(feature = "slack-v2-host-beta")]
     pub fn with_slack_personal_oauth_binding(
         mut self,
         config: SlackPersonalOAuthBindingConfig,
@@ -342,7 +328,6 @@ impl WebuiServeConfig {
         self
     }
 
-    #[cfg(feature = "slack-v2-host-beta")]
     pub fn with_slack_channel_routes(mut self, config: SlackChannelRouteAdminRouteConfig) -> Self {
         self.slack_channel_routes = Some(config);
         self
@@ -602,18 +587,15 @@ pub fn webui_v2_app_with_lifecycle(
         if let Some(google_oauth) = config.google_oauth.clone() {
             state = state.with_google_oauth(google_oauth);
         }
-        #[cfg(feature = "slack-v2-host-beta")]
         if let Some(slack_personal_oauth) = config.slack_personal_oauth.clone() {
             state = state.with_slack_personal_oauth(slack_personal_oauth);
         }
-        #[cfg(feature = "slack-v2-host-beta")]
         if let Some(slack_personal_oauth_binding) = config.slack_personal_oauth_binding.clone() {
             state = state.with_slack_personal_oauth_binding(slack_personal_oauth_binding);
         }
         product_auth_route_mount(state)
     });
     let mount_operator_routes = config.authenticator.mounts_operator_webui_config_routes();
-    #[cfg(feature = "slack-v2-host-beta")]
     let slack_channel_routes_mount = config
         .slack_channel_routes
         .clone()
@@ -643,7 +625,6 @@ pub fn webui_v2_app_with_lifecycle(
     if let Some(mount) = &product_auth_mount {
         descriptors.extend(mount.descriptors.iter().cloned());
     }
-    #[cfg(feature = "slack-v2-host-beta")]
     if let Some(mount) = &slack_channel_routes_mount
         && mount_operator_routes
     {
@@ -694,7 +675,6 @@ pub fn webui_v2_app_with_lifecycle(
         protected_inner = protected_inner.merge(mount.protected);
         public_inner = Some(mount.public);
     }
-    #[cfg(feature = "slack-v2-host-beta")]
     if let Some(mount) = slack_channel_routes_mount
         && mount_operator_routes
     {
@@ -871,7 +851,6 @@ async fn authenticate_request(
     // authenticate users only to reject every v2 mutation/read. The
     // browser body cannot influence either of these identifiers — by
     // contract `WebuiServeConfig` is host-owned.
-    #[cfg(feature = "openai-compat-beta")]
     let openai_user_id = auth.user_id.clone();
     let caller = WebUiAuthenticatedCaller::new(
         state.tenant_id.clone(),
@@ -882,7 +861,6 @@ async fn authenticate_request(
     .with_operator_webui_config(auth.capabilities.operator_webui_config);
     request.extensions_mut().insert(caller);
     request.extensions_mut().insert(auth.capabilities);
-    #[cfg(feature = "openai-compat-beta")]
     {
         let scope = ironclaw_reborn_openai_compat::OpenAiCompatActorScope::new(
             state.tenant_id.clone(),

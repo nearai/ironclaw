@@ -323,17 +323,15 @@ ironclaw_secrets = { path = "crates/ironclaw_secrets", version = "0.1.0" }
 ironclaw_product_adapters = { path = "crates/ironclaw_product_adapters", version = "0.1.0", features = ["test-support"] }
 ironclaw_product_workflow = { path = "crates/ironclaw_product_workflow", version = "0.1.0", features = ["test-support"] }
 ironclaw_runner = { path = "crates/ironclaw_runner", version = "0.1.0", features = ["root-llm-provider"] }
-# `webui-v2-beta` puts `ironclaw_webui` + `ironclaw_reborn_identity` on the
-# int-tier coverage lane (identity_resolution_smoke / webui_v2_router_smoke);
-# feature unification compiles them into every int-tier build, behaviorally
-# inert for suites that never call them.
-# W5-SLACK-PAIR: `slack-v2-host-beta` grows the lcov denominator by ~42k lines
-# of feature-gated slack_*.rs modules (previously invisible, not 0%) and
-# unlocks composing them in int-tier tests. Feature unification recompiles
-# all 17 gated modules into every int-tier test binary — real, one-time
-# build-time cost for the lane, behaviorally inert for suites that never
-# reference Slack types.
-ironclaw_reborn_composition = { path = "crates/ironclaw_reborn_composition", version = "0.1.0", features = ["test-support", "libsql", "webui-v2-beta", "slack-v2-host-beta", "telegram-v2-host-beta"] }
+# `ironclaw_webui` + `ironclaw_reborn_identity` sit on the int-tier coverage
+# lane (identity_resolution_smoke / webui_v2_router_smoke); they compile into
+# every int-tier build, behaviorally inert for suites that never call them.
+# W5-SLACK-PAIR: the Slack host surface grows the lcov denominator by ~42k
+# lines of slack_*.rs modules (previously invisible, not 0%) and unlocks
+# composing them in int-tier tests. All 17 of those modules are recompiled
+# into every int-tier test binary — a real, one-time build-time cost for the
+# lane, behaviorally inert for suites that never reference Slack types.
+ironclaw_reborn_composition = { path = "crates/ironclaw_reborn_composition", version = "0.1.0", features = ["test-support", "libsql"] }
 # Direct dev-dep: composition deliberately does NOT re-export the bare
 # `webui_v2_router`/`WebUiV2State` (facade-only rule), and the router smoke
 # drives the bare router, not the `webui_v2_app` wrapper. The v2 route surface
@@ -344,7 +342,7 @@ ironclaw_webui = { path = "crates/ironclaw_webui", version = "0.1.0" }
 # constants; Slack pairing/actor-resolution int-tier tests need them directly.
 ironclaw_slack_v2_adapter = { path = "crates/ironclaw_slack_v2_adapter", version = "0.1.0" }
 ironclaw_reborn_config = { path = "crates/ironclaw_reborn_config", version = "0.1.0" }
-ironclaw_reborn_openai_compat = { path = "crates/ironclaw_reborn_openai_compat", version = "0.1.0", features = ["openai-compat-beta"] }
+ironclaw_reborn_openai_compat = { path = "crates/ironclaw_reborn_openai_compat", version = "0.1.0"}
 ironclaw_run_state = { path = "crates/ironclaw_run_state", version = "0.1.0", features = ["test-support"] }
 ironclaw_threads = { path = "crates/ironclaw_threads", version = "0.1.0" }
 # `InMemoryDurableEventLog` for the W5-WEBUI-API-1 SSE scenario's test-local

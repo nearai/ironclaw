@@ -229,14 +229,13 @@ cargo run -q -p ironclaw_reborn_cli --bin ironclaw-reborn -- repl --confirm-host
 
 ### WebUI service
 
-The Reborn WebUI is compiled behind the `webui-v2-beta` Cargo feature. Builds
-with this feature require Node.js 22 with Corepack/pnpm so Cargo can generate
-and embed the SPA bundle. Build or run the binary with that feature to enable the `serve`
-command:
+The Reborn WebUI ships in the binary — the `serve` command is always available.
+Building from source requires Node.js 22 with Corepack/pnpm so Cargo can
+generate and embed the SPA bundle:
 
 ```bash
-cargo run -q -p ironclaw_reborn_cli --features webui-v2-beta --bin ironclaw-reborn -- serve --help
-cargo build -p ironclaw_reborn_cli --features webui-v2-beta --bin ironclaw-reborn
+cargo run -q -p ironclaw_reborn_cli --bin ironclaw-reborn -- serve --help
+cargo build -p ironclaw_reborn_cli --bin ironclaw-reborn
 ```
 
 The WebUI listener defaults to `127.0.0.1:3000`. The service requires an
@@ -249,7 +248,7 @@ export OPENAI_API_KEY="sk-..." # or the required env var for your configured pro
 export IRONCLAW_REBORN_WEBUI_TOKEN="$(openssl rand -hex 32)"
 export IRONCLAW_REBORN_WEBUI_USER_ID="reborn-cli"
 
-cargo run -q -p ironclaw_reborn_cli --features webui-v2-beta --bin ironclaw-reborn -- serve
+cargo run -q -p ironclaw_reborn_cli --bin ironclaw-reborn -- serve
 ```
 
 Equivalent `config.toml` listener configuration:
@@ -322,7 +321,7 @@ export IRONCLAW_REBORN_WEBUI_ALLOWED_EMAIL_DOMAINS="example.com,team.example.com
 export IRONCLAW_REBORN_WEBUI_GOOGLE_CLIENT_ID="..."
 export IRONCLAW_REBORN_WEBUI_GOOGLE_CLIENT_SECRET="..."
 
-cargo run -q -p ironclaw_reborn_cli --features webui-v2-beta --bin ironclaw-reborn -- serve --host 0.0.0.0 --port 3000
+cargo run -q -p ironclaw_reborn_cli --bin ironclaw-reborn -- serve --host 0.0.0.0 --port 3000
 ```
 
 `IRONCLAW_REBORN_WEBUI_ALLOWED_EMAIL_DOMAINS` is the actual admission
@@ -338,8 +337,7 @@ mode also requires `--confirm-host-access` and refuses non-loopback hosts.
 
 ### Slack service
 
-Slack support is compiled behind the `slack-v2-host-beta` Cargo feature. That
-feature includes `webui-v2-beta`, so Slack runs on the same `serve` command:
+Slack support ships in the binary and runs on the same `serve` command:
 
 ```bash
 export IRONCLAW_REBORN_HOME="$PWD/.reborn-home"
@@ -348,7 +346,7 @@ export IRONCLAW_REBORN_WEBUI_TOKEN="$(openssl rand -hex 32)"
 export IRONCLAW_REBORN_WEBUI_USER_ID="reborn-cli"
 export IRONCLAW_REBORN_SLACK_ENABLED="true"
 
-cargo run -q -p ironclaw_reborn_cli --features slack-v2-host-beta --bin ironclaw-reborn -- serve
+cargo run -q -p ironclaw_reborn_cli --bin ironclaw-reborn -- serve
 ```
 
 Enable Slack by setting `IRONCLAW_REBORN_SLACK_ENABLED=true`, or by adding a
@@ -424,7 +422,7 @@ IronClaw is the AI assistant you can actually trust with your personal and profe
 
 - Rust 1.96+
 - PostgreSQL 15+ with [pgvector](https://github.com/pgvector/pgvector) extension
-- Node.js 22+ with Corepack/pnpm for source builds that enable the `webui-v2-beta` feature
+- Node.js 22+ with Corepack/pnpm for source builds of the Reborn WebUI
 - NEAR AI account (authentication handled via setup wizard)
 - `libclang` and a working C toolchain if you build the WeChat voice/SILK path from source
 

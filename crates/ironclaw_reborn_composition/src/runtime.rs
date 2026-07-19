@@ -630,9 +630,7 @@ impl From<DefaultPlannedRuntimeBuildError> for RebornRuntimeError {
 
 /// Per-host keys for [`RebornRuntime::add_trigger_post_submit_hook`]: one
 /// triggered-run delivery hook per channel host, deduplicated by key.
-#[cfg(feature = "slack-v2-host-beta")]
 const SLACK_TRIGGER_POST_SUBMIT_HOOK_KEY: &str = "slack-host-beta";
-#[cfg(feature = "telegram-v2-host-beta")]
 pub(crate) const TELEGRAM_TRIGGER_POST_SUBMIT_HOOK_KEY: &str = "telegram-host-beta";
 
 /// Started, running Reborn agent runtime.
@@ -666,14 +664,12 @@ pub struct RebornRuntime {
     /// `add_trigger_post_submit_hook` (and the Slack-named `set_` wrapper)
     /// fills this after `build_reborn_runtime` returns.
     /// `None` when the trigger poller is not enabled.
-    #[cfg(any(feature = "slack-v2-host-beta", feature = "telegram-v2-host-beta"))]
     post_submit_hook_slot:
         Option<Arc<std::sync::OnceLock<Arc<dyn ironclaw_channel_delivery::PostSubmitDeliveryHook>>>>,
     /// Composite installed into `post_submit_hook_slot` on the first
     /// `add_trigger_post_submit_hook` call so multiple channel hosts (Slack +
     /// Telegram) can each register a triggered-run delivery hook while the
     /// poller keeps its single-`OnceLock` consumer. `None` iff the slot is.
-    #[cfg(any(feature = "slack-v2-host-beta", feature = "telegram-v2-host-beta"))]
     post_submit_hook_composite:
         Option<Arc<ironclaw_channel_delivery::CompositePostSubmitDeliveryHook>>,
     #[cfg(any(test, feature = "test-support"))]
@@ -685,7 +681,6 @@ pub struct RebornRuntime {
     /// Mints the one-time API bearer on admin user creation. Read by
     /// `build_webui_services` when wiring the admin surface. `None` leaves the
     /// admin create path reporting the token minter unavailable.
-    #[cfg(feature = "webui-v2-beta")]
     admin_api_token_minter: Option<Arc<dyn crate::AdminApiTokenMinter>>,
     actor_user_id: UserId,
     source_binding_ref: SourceBindingRef,
@@ -844,7 +839,6 @@ struct TriggerPollerServices {
     /// (`build_slack_host_beta_mounts`, `build_telegram_host_runtime_mounts` —
     /// called after runtime build) can wire their hooks without restarting the
     /// poller.
-    #[cfg(any(feature = "slack-v2-host-beta", feature = "telegram-v2-host-beta"))]
     post_submit_hook_slot:
         Arc<std::sync::OnceLock<Arc<dyn ironclaw_channel_delivery::PostSubmitDeliveryHook>>>,
     /// Test-support handle on the SAME conversation services instance the
@@ -894,7 +888,6 @@ async fn build_trigger_poller_services(
         Ok(TriggerPollerServices {
             materializer,
             trusted_submitter,
-            #[cfg(any(feature = "slack-v2-host-beta", feature = "telegram-v2-host-beta"))]
             post_submit_hook_slot: Arc::new(std::sync::OnceLock::new()),
             #[cfg(any(test, feature = "test-support"))]
             pairing_service,
@@ -921,7 +914,6 @@ async fn build_trigger_poller_services(
         Ok(TriggerPollerServices {
             materializer,
             trusted_submitter,
-            #[cfg(any(feature = "slack-v2-host-beta", feature = "telegram-v2-host-beta"))]
             post_submit_hook_slot: Arc::new(std::sync::OnceLock::new()),
             #[cfg(any(test, feature = "test-support"))]
             pairing_service,
@@ -1296,7 +1288,6 @@ fn approval_turn_locator_unavailable() -> ironclaw_product_workflow::ProductWork
 /// into the filesystem-backed store so an existing SSO user keeps their
 /// `UserId` across upgrade. Idempotent (bind re-points to the same user) and
 /// a no-op when the legacy table is absent (fresh installs).
-#[cfg(feature = "webui-v2-beta")]
 async fn fold_legacy_webui_identities<R>(
     db: &libsql::Database,
     tenant_id: &TenantId,
@@ -1475,7 +1466,7 @@ impl RebornRuntime {
     /// `ironclaw_webui::WebuiServeConfig::with_public_route_mount`. Built
     /// from the runtime's private session/reload/boot so those stay internal.
     /// `None` when no LLM seam or boot config was wired.
-    #[cfg(all(feature = "root-llm-provider", feature = "webui-v2-beta"))]
+    #[cfg(feature = "root-llm-provider")]
     pub fn nearai_login_callback_mount(
         &self,
     ) -> Option<crate::webui::route_mounts::PublicRouteMount> {
@@ -1574,7 +1565,6 @@ impl RebornRuntime {
     /// Returns `None` when the runtime was built without a local-runtime
     /// substrate, so callers fail closed instead of synthesizing a second
     /// identity store outside the host-owned substrate.
-    #[cfg(feature = "webui-v2-beta")]
     pub async fn open_reborn_identity_resolver(
         &self,
         tenant_id: &TenantId,
@@ -1620,7 +1610,6 @@ impl RebornRuntime {
     /// has no local-runtime substrate (fail closed). Synchronous and fold-free
     /// (the legacy fold seeds identity/index records, not `StoredUser` rows the
     /// directory reads), so `build_webui_services` can call it directly.
-    #[cfg(feature = "webui-v2-beta")]
     pub(crate) fn reborn_user_directory(
         &self,
     ) -> Option<Arc<dyn ironclaw_reborn_identity::RebornUserDirectory>> {
@@ -1638,7 +1627,6 @@ impl RebornRuntime {
     /// Admin per-user secret provisioner over the host-owned secret substrate,
     /// scoped to an arbitrary target user (not the runtime owner). `None` when
     /// no filesystem secret store was built. See `admin_secrets.rs`.
-    #[cfg(feature = "webui-v2-beta")]
     pub(crate) fn reborn_admin_secret_provisioner(
         &self,
     ) -> Option<Arc<dyn crate::admin_secrets::AdminSecretProvisioner>> {
@@ -1651,7 +1639,6 @@ impl RebornRuntime {
 
     /// The admin API-token minter supplied via
     /// [`RebornRuntimeInput::with_admin_api_token_minter`], if any.
-    #[cfg(feature = "webui-v2-beta")]
     pub(crate) fn reborn_admin_token_minter(&self) -> Option<Arc<dyn crate::AdminApiTokenMinter>> {
         self.admin_api_token_minter.clone()
     }
@@ -1686,7 +1673,6 @@ impl RebornRuntime {
         self.webui_turn_coordinator()
     }
 
-    #[cfg(any(feature = "slack-v2-host-beta", feature = "telegram-v2-host-beta"))]
     pub(crate) fn auth_challenge_provider(&self) -> Option<Arc<dyn crate::AuthChallengeProvider>> {
         self.services
             .product_auth
@@ -1694,7 +1680,6 @@ impl RebornRuntime {
             .and_then(|product_auth| product_auth.as_auth_challenge_provider())
     }
 
-    #[cfg(any(feature = "slack-v2-host-beta", feature = "telegram-v2-host-beta"))]
     pub(crate) fn blocked_auth_flow_canceller(
         &self,
     ) -> Option<Arc<dyn crate::BlockedAuthFlowCanceller>> {
@@ -1728,10 +1713,6 @@ impl RebornRuntime {
             })
     }
 
-    #[cfg_attr(
-        not(any(feature = "slack-v2-host-beta", feature = "telegram-v2-host-beta")),
-        allow(dead_code)
-    )]
     pub(crate) fn register_outbound_delivery_target_provider(
         &self,
         provider_key: impl Into<String>,
@@ -1786,10 +1767,6 @@ impl RebornRuntime {
         .map(|_| ())
     }
 
-    #[cfg_attr(
-        not(any(feature = "slack-v2-host-beta", feature = "telegram-v2-host-beta")),
-        allow(dead_code)
-    )]
     pub(crate) fn outbound_delivery_target_provider_key_registered(
         &self,
         provider_key: &str,
@@ -1815,7 +1792,6 @@ impl RebornRuntime {
     /// idempotent (a second call is silently ignored, never double-registers),
     /// `false` when the trigger poller is not enabled or the Slack hook is
     /// already wired, `true` on first successful set.
-    #[cfg(feature = "slack-v2-host-beta")]
     pub fn set_trigger_post_submit_hook(
         &self,
         hook: Arc<dyn ironclaw_channel_delivery::PostSubmitDeliveryHook>,
@@ -1835,7 +1811,6 @@ impl RebornRuntime {
     /// `false` is returned — so a host whose mounts are built twice never
     /// double-delivers. Returns `false` when the trigger poller is not enabled,
     /// `true` when the hook was appended.
-    #[cfg(any(feature = "slack-v2-host-beta", feature = "telegram-v2-host-beta"))]
     pub(crate) fn add_trigger_post_submit_hook(
         &self,
         hook_key: &str,
@@ -1866,14 +1841,13 @@ impl RebornRuntime {
         true
     }
 
-    #[cfg(any(feature = "slack-v2-host-beta", feature = "telegram-v2-host-beta"))]
     pub(crate) fn trigger_post_submit_hook_is_set(&self) -> bool {
         self.post_submit_hook_slot
             .as_ref()
             .is_some_and(|slot| slot.get().is_some())
     }
 
-    #[cfg(all(test, feature = "telegram-v2-host-beta"))]
+    #[cfg(test)]
     pub(crate) fn trigger_post_submit_hook_for_test(
         &self,
     ) -> Option<Arc<dyn ironclaw_channel_delivery::PostSubmitDeliveryHook>> {
@@ -1890,7 +1864,6 @@ impl RebornRuntime {
     /// unavailable or already occupied, `true` on first successful set. Shares
     /// the same `OnceLock` the handler reads
     /// (`RebornRuntimeSubstrate::channel_connection_facade_slot`).
-    #[cfg(any(feature = "slack-v2-host-beta", feature = "telegram-v2-host-beta"))]
     pub(crate) fn set_channel_connection_facade(
         &self,
         facade: Arc<dyn ironclaw_product_workflow::ChannelConnectionFacade>,
@@ -3116,7 +3089,6 @@ pub async fn build_reborn_runtime(
         budget_defaults,
         budget_event_observer,
         trajectory_observer,
-        #[cfg(feature = "webui-v2-beta")]
         admin_api_token_minter,
         #[cfg(any(test, feature = "test-support"))]
         model_gateway_override,
@@ -3998,11 +3970,9 @@ pub async fn build_reborn_runtime(
     // (review f-ptr-3): the `let X;` deferred-init form is single-assign
     // per branch and Rust's borrow checker prevents reads before init.
     let trigger_poller_handle: Option<TriggerPollerRuntimeHandle>;
-    #[cfg(any(feature = "slack-v2-host-beta", feature = "telegram-v2-host-beta"))]
     let runtime_post_submit_hook_slot: Option<
         Arc<std::sync::OnceLock<Arc<dyn ironclaw_channel_delivery::PostSubmitDeliveryHook>>>,
     >;
-    #[cfg(any(feature = "slack-v2-host-beta", feature = "telegram-v2-host-beta"))]
     let runtime_post_submit_hook_composite: Option<
         Arc<ironclaw_channel_delivery::CompositePostSubmitDeliveryHook>,
     >;
@@ -4035,9 +4005,7 @@ pub async fn build_reborn_runtime(
             trigger_conversation_pairing_value =
                 Some(Arc::clone(&trigger_poller_services.pairing_service));
         }
-        #[cfg(any(feature = "slack-v2-host-beta", feature = "telegram-v2-host-beta"))]
         let hook_slot = Arc::clone(&trigger_poller_services.post_submit_hook_slot);
-        #[cfg(any(feature = "slack-v2-host-beta", feature = "telegram-v2-host-beta"))]
         {
             runtime_post_submit_hook_slot = Some(Arc::clone(&hook_slot));
             runtime_post_submit_hook_composite = Some(Arc::new(
@@ -4051,7 +4019,6 @@ pub async fn build_reborn_runtime(
                 materializer: trigger_poller_services.materializer,
                 trusted_submitter: trigger_poller_services.trusted_submitter,
                 active_run_lookup,
-                #[cfg(any(feature = "slack-v2-host-beta", feature = "telegram-v2-host-beta"))]
                 post_submit_hook_slot: hook_slot,
             },
         )
@@ -4060,7 +4027,6 @@ pub async fn build_reborn_runtime(
         })?;
     } else {
         trigger_poller_handle = None;
-        #[cfg(any(feature = "slack-v2-host-beta", feature = "telegram-v2-host-beta"))]
         {
             runtime_post_submit_hook_slot = None;
             runtime_post_submit_hook_composite = None;
@@ -4169,16 +4135,13 @@ pub async fn build_reborn_runtime(
         trace_flush_worker,
         #[cfg(feature = "root-llm-provider")]
         skill_learning_extraction_tasks,
-        #[cfg(any(feature = "slack-v2-host-beta", feature = "telegram-v2-host-beta"))]
         post_submit_hook_slot: runtime_post_submit_hook_slot,
-        #[cfg(any(feature = "slack-v2-host-beta", feature = "telegram-v2-host-beta"))]
         post_submit_hook_composite: runtime_post_submit_hook_composite,
         #[cfg(any(test, feature = "test-support"))]
         trigger_conversation_pairing: trigger_conversation_pairing_value,
         outbound_delivery_target_registry,
         budget_event_projection,
         poll_settings: poll,
-        #[cfg(feature = "webui-v2-beta")]
         admin_api_token_minter,
         actor_user_id,
         source_binding_ref: validated_identity.source_binding_ref,

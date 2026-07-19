@@ -240,7 +240,6 @@ pub(crate) fn build_webui_services_with_connectable_channels(
     // the admin secret provisioner, and a token minter are all available.
     // Otherwise the fail-closed RejectingAdminUserService default stands and
     // admin routes report the service unavailable.
-    #[cfg(feature = "webui-v2-beta")]
     if let (Some(directory), Some(provisioner), Some(minter)) = (
         runtime.reborn_user_directory(),
         runtime.reborn_admin_secret_provisioner(),
@@ -1071,7 +1070,6 @@ fn status_check(
 /// [`build_webui_services_with_slack_and_telegram_host_mounts`] instead so
 /// the facade pairs compose. Lives here — not in the extension crate —
 /// because it assembles the runtime-owned WebUI bundle.
-#[cfg(feature = "telegram-v2-host-beta")]
 pub fn build_webui_services_with_telegram_host_mounts(
     runtime: &RebornRuntime,
     event_stream: Option<Arc<dyn ProjectionStream>>,
@@ -1105,7 +1103,6 @@ pub fn build_webui_services_with_telegram_host_mounts(
 /// [`crate::build_webui_services_with_slack_host_beta_mounts`], with the Telegram
 /// facade pair concatenated through the generic composite facades so Settings
 /// lists both channels and per-caller connection state merges.
-#[cfg(all(feature = "slack-v2-host-beta", feature = "telegram-v2-host-beta"))]
 pub fn build_webui_services_with_slack_and_telegram_host_mounts(
     runtime: &RebornRuntime,
     event_stream: Option<Arc<dyn ProjectionStream>>,

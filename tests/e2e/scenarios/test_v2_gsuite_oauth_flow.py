@@ -14,9 +14,9 @@ Tests the OAuth redirect authentication flow:
 Multi-user isolation assertion: a second user in a separate session gets its
 own independent ``auth_required`` event with a separate ``flow_id``.
 
-Browser tests are skeleton-only (``pytest.mark.skip``) until the binary
-includes the ``webui-v2-beta`` feature and the ``IRONCLAW_REBORN_WEBUI_TOKEN``
-env is wired in the E2E environment.
+Browser tests are skeleton-only (``pytest.mark.skip``) until the
+``IRONCLAW_REBORN_WEBUI_TOKEN`` env is wired in the E2E environment; the WebUI
+v2 routes themselves are compiled into every binary.
 """
 
 import asyncio
@@ -190,7 +190,7 @@ class TestGSuiteOAuthWireShape:
         if r.status_code == 404:
             pytest.skip(
                 "Reborn product-auth routes not mounted; "
-                "need webui-v2-beta feature or Reborn binary"
+                "need the Reborn binary"
             )
         # Route is mounted: 200, 400 (invalid body), or 422 are all acceptable.
         assert r.status_code != 405, "405 means the route is not mounted"
@@ -416,14 +416,14 @@ class TestGSuiteOAuthWireShape:
 
 
 # ---------------------------------------------------------------------------
-# Browser E2E stubs (skipped until webui-v2-beta E2E binary is available)
+# Browser E2E stubs (skipped until an E2E browser binary is available)
 # ---------------------------------------------------------------------------
 
 @pytest.mark.skip(
     reason=(
-        "Playwright browser test requires ironclaw binary compiled with "
-        "webui-v2-beta feature. Enable by building with: "
-        "cargo build --features libsql,webui-v2-beta"
+        "Playwright browser test requires the ironclaw binary; the WebUI v2 "
+        "routes are compiled in unconditionally. Build with: "
+        "cargo build --features libsql"
     )
 )
 async def test_gsuite_browser_oauth_card_renders(v2_gsuite_server, browser):
@@ -449,7 +449,7 @@ async def test_gsuite_browser_oauth_card_renders(v2_gsuite_server, browser):
     await context.close()
 
 
-@pytest.mark.skip(reason="See above — requires webui-v2-beta binary")
+@pytest.mark.skip(reason="See above — requires the WebUI v2 E2E binary")
 async def test_gsuite_browser_per_user_isolation(v2_gsuite_server, browser):
     """Second incognito context gets its own independent auth_required event."""
     context1 = await browser.new_context(viewport={"width": 1280, "height": 720})

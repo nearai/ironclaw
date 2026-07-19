@@ -7734,11 +7734,7 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
         self.assertIn("if ! (", prepare_body)
         self.assertIn("validate_reborn_binary_artifact.py", prepare_body)
         self.assertIn(
-            "--features webui-v2-beta,slack-v2-host-beta",
-            prepare_body,
-        )
-        self.assertIn(
-            "webui-v2-beta,slack-v2-host-beta",
+            "root-llm-provider,libsql",
             prepare_body,
         )
         self.assertIn("cp target/debug/ironclaw target/debug/ironclaw-reborn", prepare_body)
@@ -7759,11 +7755,7 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
             reborn_e2e,
         )
         self.assertIn(
-            "--features openai-compat-beta,slack-v2-host-beta",
-            reborn_e2e,
-        )
-        self.assertIn(
-            '["openai-compat-beta","slack-v2-host-beta","webui-v2-beta"]',
+            '["root-llm-provider","libsql"]',
             reborn_e2e,
         )
         self.assertIn("cp target/debug/ironclaw target/debug/ironclaw-reborn", reborn_e2e)

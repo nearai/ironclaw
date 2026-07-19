@@ -13,7 +13,7 @@ subsystems that used to live apart (see `README.md` for the fold-in map):
    from `ironclaw_reborn_composition::webui`) — `webui_v2_app(bundle, config)`
    composes the full `Router` and layers the fixed middleware stack; owns the
    `WebuiAuthenticator` / `WebuiAuthentication` host-auth vocabulary and the
-   feature-gated Slack / OpenAI-compat mounts.
+   Slack / OpenAI-compat mounts.
 3. **Serve loop + host authentication** (`src/lib.rs`, `src/auth/`,
    `src/session.rs`, `src/oidc.rs`) — `serve_webui_v2` binds the listener and
    runs `axum::serve`; the `Env`/`Session`/`Oidc` authenticators, the
@@ -41,7 +41,7 @@ composition's facade). Enforced by `ironclaw_architecture`
 | `WebUiV2State` | Handler state: the `RebornServicesApi` facade + `SseCapacity` + route options. |
 | `WebUiV2HttpError` / `WebUiV2HttpErrorBody` | The only path handlers return HTTP errors through — keeps the redacted-error vocabulary intact. |
 | `webui_v2_app(bundle, config) -> WebuiV2App` | Compose composition's `RebornWebuiBundle` + a host `WebuiServeConfig` into the full middleware-wrapped `Router` (also `webui_v2_app_with_lifecycle`). |
-| `WebuiServeConfig` | Host-owned serve config (tenant, authenticator, default agent/project, public/protected mounts, Google OAuth, and — under `slack-v2-host-beta` — the Slack setup/route slots). |
+| `WebuiServeConfig` | Host-owned serve config (tenant, authenticator, default agent/project, public/protected mounts, Google OAuth, and the Slack setup/route slots). |
 | `WebuiAuthenticator` trait / `WebuiAuthentication` | Host-auth vocabulary the bearer middleware resolves each token through. |
 
 Middleware modules (`src/webui_*.rs`) layer in a fixed order —
@@ -291,10 +291,9 @@ composition):
   `tests/auth_route_contract.rs` — middleware stack (security headers, body/rate
   limits, bearer auth) over the composed `webui_v2_app`.
 - `tests/serve_loop.rs` — listener bind + graceful shutdown.
-- `tests/slack_host_beta_webui_v2.rs` — Slack host-beta channel-route /
-  connectable surfaces composed into `webui_v2_app` (gated on
-  `slack-v2-host-beta`; relocated here because `webui_v2_app` lives in this
-  crate).
+- `tests/slack_host_beta_webui_v2.rs` — Slack channel-route /
+  connectable surfaces composed into `webui_v2_app` (relocated here because
+  `webui_v2_app` lives in this crate).
 
 **Host authentication:**
 

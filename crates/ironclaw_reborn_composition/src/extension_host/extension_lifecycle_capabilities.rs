@@ -354,14 +354,12 @@ fn lifecycle_error(error: ProductWorkflowError) -> FirstPartyCapabilityError {
 #[cfg(test)]
 mod tests {
     use std::collections::{BTreeMap, BTreeSet};
-    #[cfg(feature = "slack-v2-host-beta")]
     use std::{collections::HashMap, path::PathBuf, sync::Mutex};
 
     use ironclaw_auth::{
         AuthProductScope, AuthProviderId, AuthSurface, CredentialAccountLabel,
         CredentialAccountStatus, CredentialOwnership, NewCredentialAccount, ProviderScope,
     };
-    #[cfg(feature = "slack-v2-host-beta")]
     use ironclaw_extensions::ExtensionInstallationId;
     use ironclaw_host_api::{
         CapabilityDescriptor, CapabilityGrant, CapabilityGrantId, CapabilitySet, ExecutionContext,
@@ -376,7 +374,6 @@ mod tests {
 
     use super::*;
     use crate::{RebornBuildInput, RebornServices, build_reborn_services};
-    #[cfg(feature = "slack-v2-host-beta")]
     use ironclaw_product_workflow::{
         ChannelConnectionFacade, RebornServicesError, WebUiAuthenticatedCaller,
     };
@@ -663,7 +660,6 @@ mod tests {
         assert!(!storage_root.join("system/extensions/web-access").exists());
     }
 
-    #[cfg(feature = "slack-v2-host-beta")]
     #[derive(Debug, Default)]
     struct RecordingChannelConnectionFacade {
         connections: Mutex<HashMap<String, bool>>,
@@ -673,7 +669,6 @@ mod tests {
         package_present_during_disconnect: Mutex<Vec<bool>>,
     }
 
-    #[cfg(feature = "slack-v2-host-beta")]
     impl RecordingChannelConnectionFacade {
         fn with_connection(channel: &str, connected: bool) -> Self {
             Self {
@@ -709,7 +704,6 @@ mod tests {
         }
     }
 
-    #[cfg(feature = "slack-v2-host-beta")]
     #[async_trait]
     impl ChannelConnectionFacade for RecordingChannelConnectionFacade {
         async fn caller_channel_connections(
@@ -744,7 +738,6 @@ mod tests {
         }
     }
 
-    #[cfg(feature = "slack-v2-host-beta")]
     #[tokio::test]
     async fn webui_and_tool_extension_remove_share_ordered_actor_scoped_cleanup() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -872,7 +865,6 @@ mod tests {
         runtime.shutdown().await.expect("runtime shutdown");
     }
 
-    #[cfg(feature = "slack-v2-host-beta")]
     #[tokio::test]
     async fn webui_and_tool_extension_remove_generic_filesystem_channel_without_slack_cleanup() {
         const GENERIC_CHANNEL_MANIFEST: &str = r#"
@@ -1055,7 +1047,6 @@ credential_handle = "channel_ext_token"
         runtime.shutdown().await.expect("runtime shutdown");
     }
 
-    #[cfg(feature = "slack-v2-host-beta")]
     #[tokio::test]
     async fn extension_remove_fails_closed_without_authenticated_actor_for_personal_cleanup() {
         let dir = tempfile::tempdir().expect("tempdir");

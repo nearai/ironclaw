@@ -174,18 +174,12 @@ fn print_remaining_setup_guidance(key: &ConfigKey) {
     }
 }
 
-#[cfg(feature = "webui-v2-beta")]
 fn default_webui_base_url() -> String {
     format!(
         "http://{}:{}",
         crate::commands::serve::DEFAULT_SERVE_HOST,
         crate::commands::serve::DEFAULT_SERVE_PORT
     )
-}
-
-#[cfg(not(feature = "webui-v2-beta"))]
-fn default_webui_base_url() -> String {
-    "http://127.0.0.1:3000".to_string()
 }
 
 fn write_google_field(
@@ -339,7 +333,6 @@ fn execute_webui_token(
     // process keeps the old token in memory until it restarts — so the
     // login link below (already built from the new token) only becomes
     // valid once `ironclaw service restart` (printed above) runs.
-    #[cfg(feature = "webui-v2-beta")]
     if let Some(link) = crate::webui_token::login_link(home)? {
         println!("login_link: {link} (valid after restart)");
     }

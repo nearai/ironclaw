@@ -7,7 +7,7 @@
   - `identity.rs` — channel-agnostic external-identity lookup port (`RebornUserIdentityLookup`).
   - `delivery_protocol.rs` — the `ChannelDeliveryProtocol` seam (+ `PostedChannelMessage`, `FinalReplyDeliveryError`) the shared delivery observer/driver are generic over.
   - `outbound_targets.rs` — the outbound delivery-target provider port channel hosts implement.
-  - `host_ingress.rs` — manifest-projected ingress descriptors + host-API contract registry (base) and installation rate limiting + sanitized webhook error mapping (`webhook-serve` feature).
+  - `host_ingress.rs` — manifest-projected ingress descriptors + host-API contract registry, installation rate limiting, and sanitized webhook error mapping.
   - `host_state_records.rs` — JSON record read/write over `ScopedFilesystem` + per-key async locks for channel host states.
   - `auth_continuation.rs` — the continuation-dispatch port pairing/OAuth completions resume blocked turns through.
 - Regenerate the module map with `find crates/ironclaw_channel_host/src -maxdepth 1 -name '*.rs' -print` and verify owners with `rg -n "trait ChannelDeliveryProtocol|trait OutboundDeliveryTargetProvider|struct InstallationRateLimiter" crates/ironclaw_channel_host/src`.
@@ -26,5 +26,5 @@
 
 ## Validation
 
-- Fast local check: `cargo test -p ironclaw_channel_host --features webhook-serve`
+- Fast local check: `cargo test -p ironclaw_channel_host`
 - Boundary check after dependency/API changes: `cargo test -p ironclaw_architecture`

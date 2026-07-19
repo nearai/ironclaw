@@ -7,8 +7,8 @@
 //! (rendered as raw key strings), a Spanish string blanked to `""`, and
 //! dropped interpolation placeholders. This test stops them from regressing.
 //!
-//! Pure file parsing — does not depend on the crate's `webui-v2-beta` API, so
-//! it runs under the default feature set.
+//! Pure file parsing — does not depend on any of the crate's Rust APIs, so it
+//! runs under the default feature set.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;

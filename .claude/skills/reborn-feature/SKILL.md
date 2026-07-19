@@ -118,7 +118,7 @@ they trade with eyes open.
 ```bash
 cargo build -p ironclaw_product_workflow --all-features
 cargo build -p ironclaw_webui
-cargo build -p ironclaw_reborn_composition --features "root-llm-provider webui-v2-beta libsql"
+cargo build -p ironclaw_reborn_composition --features "root-llm-provider libsql"
 cargo build -p ironclaw_reborn_cli          # compiles the full serve graph
 cargo clippy -p <crate> ... --tests          # gate per crate, not at the end
 node --check path/to/changed.js              # frontend syntax (no build step)

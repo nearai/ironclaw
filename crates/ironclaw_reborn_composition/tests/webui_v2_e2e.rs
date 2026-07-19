@@ -13,7 +13,7 @@
 //! endpoints — works end-to-end without anything mocked above the LLM
 //! boundary.
 
-#![cfg(all(feature = "webui-v2-beta", feature = "test-support"))]
+#![cfg(feature = "test-support")]
 
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex as StdMutex};

@@ -10,5 +10,4 @@ pub(crate) mod api;
 pub(crate) mod credentials;
 pub(crate) mod durable;
 pub(crate) mod oauth;
-#[cfg(feature = "webui-v2-beta")]
 pub(crate) mod serve;

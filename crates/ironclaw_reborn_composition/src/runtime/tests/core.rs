@@ -5208,7 +5208,6 @@ async fn local_dev_webui_bundle_exposes_outbound_preferences_facade() {
     runtime.shutdown().await.expect("runtime shutdown");
 }
 
-#[cfg(feature = "webui-v2-beta")]
 #[tokio::test]
 async fn webui_route_rejects_list_automations_without_agent_binding() {
     use axum::body::Body;
@@ -5272,7 +5271,6 @@ async fn webui_route_rejects_list_automations_without_agent_binding() {
     runtime.shutdown().await.expect("runtime shutdown");
 }
 
-#[cfg(feature = "webui-v2-beta")]
 #[tokio::test]
 async fn open_reborn_identity_resolver_migrates_legacy_webui_identities_through_runtime() {
     use ironclaw_reborn_identity::{
@@ -5370,7 +5368,6 @@ async fn open_reborn_identity_resolver_migrates_legacy_webui_identities_through_
     runtime.shutdown().await.expect("runtime shutdown");
 }
 
-#[cfg(feature = "webui-v2-beta")]
 #[tokio::test]
 async fn webui_operator_diagnostics_route_exposes_composed_readiness_evidence() {
     use axum::body::{Body, to_bytes};
@@ -5463,7 +5460,6 @@ async fn webui_operator_diagnostics_route_exposes_composed_readiness_evidence() 
     runtime.shutdown().await.expect("runtime shutdown");
 }
 
-#[cfg(feature = "webui-v2-beta")]
 #[tokio::test]
 async fn open_reborn_identity_resolver_migrates_legacy_verified_email_linking() {
     use ironclaw_reborn_identity::{

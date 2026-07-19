@@ -8,10 +8,9 @@ pub(crate) mod llm_config_service;
 pub(crate) mod llm_key_store;
 #[cfg(feature = "root-llm-provider")]
 pub(crate) mod llm_reload;
-#[cfg(all(feature = "root-llm-provider", feature = "webui-v2-beta"))]
+#[cfg(feature = "root-llm-provider")]
 pub(crate) mod nearai_login_serve;
 pub(crate) mod nearai_mcp;
-#[cfg(feature = "openai-compat-beta")]
 pub(crate) mod openai_compat_serve;
 #[cfg(feature = "root-llm-provider")]
 pub(crate) mod provider_admin;
