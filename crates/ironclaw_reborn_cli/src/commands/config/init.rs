@@ -204,13 +204,15 @@ regex_activation_enabled = true
 # # session-pool cap after reserving capacity for restarts/operator sessions.
 # pool_max_size = 2
 
-[llm.default]
-# LLM slot selection. `provider_id` references an entry in
+# [llm.default]
+# LLM slot selection. Left commented so first run leads to model setup
+# (REPL prompt / Web UI welcome screen). Uncomment and edit to pin a
+# provider here instead. `provider_id` references an entry in
 # providers.json (built-in or user-overlay). `model` / `base_url` /
 # `api_key_env` override the catalog defaults for this deployment.
-provider_id = "openai"
-model       = "gpt-4o-mini"
-api_key_env = "OPENAI_API_KEY"
+# provider_id = "openai"
+# model       = "gpt-4o-mini"
+# api_key_env = "OPENAI_API_KEY"
 
 # [llm.mission]
 # # Reserved for the future planned-driver "mission" slot.

@@ -25,7 +25,7 @@ use ironclaw_reborn_composition::{
     build_webui_services_with_slack_host_beta_mounts,
 };
 use ironclaw_reborn_config::{
-    IdentitySection, RebornConfigFile, seed_default_config_file_if_missing,
+    IdentitySection, RebornConfigFile, RebornProfile, seed_default_config_file_if_missing,
 };
 use ironclaw_reborn_webui_ingress::{
     DeferredWebuiRouterHandle, EnvBearerAuthenticator, RebornWebuiServeError,
@@ -43,6 +43,113 @@ const DEFAULT_SERVE_HOST: &str = "127.0.0.1";
 const DEFAULT_SERVE_PORT: u16 = 3000;
 const DEFAULT_ENV_TOKEN_VAR: &str = "IRONCLAW_REBORN_WEBUI_TOKEN";
 const DEFAULT_ENV_USER_ID_VAR: &str = "IRONCLAW_REBORN_WEBUI_USER_ID";
+/// Default operator UserId used when a local-dev profile auto-provisions the
+/// WebUI credentials (no `IRONCLAW_REBORN_WEBUI_USER_ID` supplied).
+const DEFAULT_DEV_WEBUI_USER_ID: &str = "local-operator";
+/// Filename under the Reborn home holding the auto-generated local-dev WebUI
+/// bearer token, so restarts reuse the same token (existing browser sessions
+/// and admin-minted API tokens stay valid across restarts).
+const DEV_WEBUI_TOKEN_FILE: &str = "webui-dev-token";
+/// Minimum byte length for the session-signing bearer token, mirroring the
+/// floor enforced in `ironclaw_reborn_composition` (>= 32 bytes). A cached dev
+/// token shorter than this is treated as absent and regenerated.
+const DEV_WEBUI_TOKEN_MIN_BYTES: usize = 32;
+
+/// Resolve the WebUI bearer token and operator user id.
+///
+/// Operator-supplied env values always win. When both are absent and the boot
+/// profile is a trusted local-dev laptop, a stable local token is generated and
+/// the operator user id defaults to `dev_user_id_default` — the config's
+/// `[identity].default_owner` when set (so the WebUI user matches the runtime
+/// owner and threads stay visible to the turn runner), otherwise
+/// [`DEFAULT_DEV_WEBUI_USER_ID`]. So `ironclaw-reborn serve` boots with no manual
+/// env setup. Hosted and production profiles fail closed with the original
+/// guidance.
+/// Deployment context for [`resolve_webui_credentials`] — the env-var names,
+/// config path (for error guidance), home path (for the dev-token cache), and
+/// the local-dev default user id.
+struct WebuiCredentialConfig<'a> {
+    home_path: &'a std::path::Path,
+    config_path: &'a std::path::Path,
+    env_token_var: &'a str,
+    env_user_id_var: &'a str,
+    dev_user_id_default: &'a str,
+}
+
+fn resolve_webui_credentials(
+    profile: RebornProfile,
+    token_env: Option<String>,
+    user_id_env: Option<String>,
+    config: &WebuiCredentialConfig<'_>,
+) -> anyhow::Result<(String, String)> {
+    let token = match token_env {
+        Some(value) => value,
+        None if profile.allows_dev_credential_autoprovision() => {
+            load_or_create_dev_webui_token(config.home_path)?
+        }
+        None => {
+            return Err(anyhow!(
+                "{} must be set to the WebChat v2 bearer token. \
+                 Override the variable name via `[webui].env_token_var` in {}.",
+                config.env_token_var,
+                config.config_path.display(),
+            ));
+        }
+    };
+    let user_id_raw = match user_id_env {
+        Some(value) => value,
+        None if profile.allows_dev_credential_autoprovision() => {
+            config.dev_user_id_default.to_string()
+        }
+        None => {
+            return Err(anyhow!(
+                "{} must be set to the UserId an env-bearer-authenticated caller \
+                 maps to. Override the variable name via `[webui].env_user_id_var` in {}.",
+                config.env_user_id_var,
+                config.config_path.display(),
+            ));
+        }
+    };
+    Ok((token, user_id_raw))
+}
+
+/// Load the persisted local-dev WebUI token, or generate and persist a fresh
+/// one. The token is 64 hex chars (32 bytes of entropy), clearing the
+/// session-signing entropy floor.
+fn load_or_create_dev_webui_token(home_path: &std::path::Path) -> anyhow::Result<String> {
+    let path = home_path.join(DEV_WEBUI_TOKEN_FILE);
+    // silent-ok: dev-token cache — an absent or unreadable/short file just means
+    // "generate a fresh local token"; there is no authoritative source to lose.
+    if let Ok(existing) = std::fs::read_to_string(&path) {
+        let trimmed = existing.trim();
+        if trimmed.len() >= DEV_WEBUI_TOKEN_MIN_BYTES {
+            return Ok(trimmed.to_string());
+        }
+    }
+    let token = format!(
+        "{}{}",
+        uuid::Uuid::new_v4().simple(),
+        uuid::Uuid::new_v4().simple()
+    );
+    write_dev_webui_token(&path, &token)
+        .with_context(|| format!("failed to persist dev WebUI token to {}", path.display()))?;
+    Ok(token)
+}
+
+/// Write the dev token with owner-only permissions where the platform supports
+/// it (it doubles as the session-signing key).
+fn write_dev_webui_token(path: &std::path::Path, token: &str) -> std::io::Result<()> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    std::fs::write(path, token)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))?;
+    }
+    Ok(())
+}
 /// Lifetime of the one-time API bearer minted when an admin creates a user. A
 /// year: this is a long-lived programmatic credential, not a browser session.
 const ADMIN_API_TOKEN_LIFETIME_DAYS: i64 = 365;
@@ -93,6 +200,28 @@ pub(crate) struct ServeCommand {
     /// Confirm trusted-laptop host filesystem access for local-dev-yolo.
     #[arg(long = "confirm-host-access")]
     confirm_host_access: bool,
+
+    /// Do not auto-open the browser on local-dev startup.
+    #[arg(long = "no-browser")]
+    no_browser: bool,
+}
+
+/// Best-effort open a URL in the default browser (macOS `open`, Linux
+/// `xdg-open`, Windows `start`). Spawned after a short delay so the listener is
+/// bound first; failures are ignored — the URL is already printed.
+fn spawn_browser_open(url: String) {
+    std::thread::spawn(move || {
+        std::thread::sleep(std::time::Duration::from_millis(1200));
+        let opener: &[&str] = if cfg!(target_os = "macos") {
+            &["open"]
+        } else if cfg!(target_os = "windows") {
+            &["cmd", "/C", "start", ""]
+        } else {
+            &["xdg-open"]
+        };
+        let (cmd, pre) = opener.split_first().expect("opener is non-empty");
+        let _ = std::process::Command::new(cmd).args(pre).arg(&url).status();
+    });
 }
 
 impl ServeCommand {
@@ -141,20 +270,50 @@ impl ServeCommand {
             .and_then(|section| section.env_user_id_var.as_deref())
             .unwrap_or(DEFAULT_ENV_USER_ID_VAR);
 
-        let token_value = env::var(env_token_var).map_err(|_| {
-            anyhow!(
-                "{env_token_var} must be set to the WebChat v2 bearer token. \
-                 Override the variable name via `[webui].env_token_var` in {}.",
-                boot_config.home().config_file_path().display(),
-            )
-        })?;
-        let user_id_raw = env::var(env_user_id_var).map_err(|_| {
-            anyhow!(
-                "{env_user_id_var} must be set to the UserId an env-bearer-authenticated caller maps to. \
-                 Override the variable name via `[webui].env_user_id_var` in {}.",
-                boot_config.home().config_file_path().display(),
-            )
-        })?;
+        // Resolve the boot profile so local-dev laptops can boot the WebUI with
+        // zero env-var setup, while hosted/production profiles still fail closed
+        // and require an operator-supplied token + user id.
+        let profile = crate::runtime::effective_profile(boot_config, config_file.as_ref())?;
+        let token_env = env::var(env_token_var).ok();
+        let user_id_env = env::var(env_user_id_var).ok();
+        let token_autoprovisioned =
+            token_env.is_none() && profile.allows_dev_credential_autoprovision();
+        // Default the auto-provisioned WebUI user to the config's runtime owner
+        // so it matches `[identity].default_owner` (avoids the owner/WebUI-user
+        // mismatch that hides threads from the turn runner).
+        let dev_user_id_default = config_file
+            .as_ref()
+            .and_then(|file| file.identity.as_ref())
+            .and_then(|identity| identity.default_owner.as_deref())
+            .unwrap_or(DEFAULT_DEV_WEBUI_USER_ID);
+        let config_file_path = boot_config.home().config_file_path();
+        let (token_value, user_id_raw) = resolve_webui_credentials(
+            profile,
+            token_env,
+            user_id_env,
+            &WebuiCredentialConfig {
+                home_path: boot_config.home().path(),
+                config_path: &config_file_path,
+                env_token_var,
+                env_user_id_var,
+                dev_user_id_default,
+            },
+        )?;
+        // Kept for the sign-in URL printed after the listen address resolves —
+        // `token_value` itself is moved into the authenticator below.
+        let dev_token_for_url = token_autoprovisioned.then(|| token_value.clone());
+        if token_autoprovisioned {
+            eprintln!(
+                "ironclaw serve: no {env_token_var} set — using an auto-generated local dev \
+                 bearer token persisted under the Reborn home ({}). Set {env_token_var} to \
+                 override. This is enabled only for local-dev profiles.",
+                boot_config
+                    .home()
+                    .path()
+                    .join(DEV_WEBUI_TOKEN_FILE)
+                    .display(),
+            );
+        }
         let user_id = UserId::new(&user_id_raw)
             .map_err(|err| anyhow!("{env_user_id_var} value `{user_id_raw}` is invalid: {err}"))?;
 
@@ -289,6 +448,18 @@ impl ServeCommand {
             .transpose()?;
 
         let listen_addr = SocketAddr::new(host, port);
+        if let Some(dev_token) = dev_token_for_url.as_deref() {
+            // The SPA auto-signs-in from `?token=`, so a local-dev operator can
+            // click straight through without pasting the generated dev token.
+            let sign_in_url = format!("http://{listen_addr}/v2/?token={dev_token}");
+            eprintln!(
+                "ironclaw serve: open this URL to sign in automatically (dev token embedded):\n  \
+                 {sign_in_url}"
+            );
+            if !self.no_browser {
+                spawn_browser_open(sign_in_url);
+            }
+        }
         reject_non_loopback_privileged_local_runtime(host, &runtime_input)?;
         let callback_origin =
             webui_notion_dcr_callback_origin(listen_addr, canonical_host.as_deref())?;
@@ -342,7 +513,7 @@ impl ServeCommand {
         // access store used to seed default-user and SSO-user trigger access;
         // canonical identity itself lives on the runtime's scoped filesystem,
         // not in this file.
-        let profile = crate::runtime::effective_profile(boot_config, config_file.as_ref())?;
+        // `profile` was resolved above (WebUI credential auto-provision gate).
         let user_store_path = crate::runtime::local_runtime_storage_root(boot_config, profile)
             .join("reborn-local-dev.db");
         // CORS allow-origin list. Empty = fail-closed on every
@@ -1759,5 +1930,140 @@ slack_user_id = "U123"
         );
 
         clear_webui_env();
+    }
+
+    // The resolver is the seam that gates whether `serve` boots (auto-provision)
+    // or fails closed. It takes the env values as parameters, so these tests
+    // drive the caller logic without mutating process env.
+
+    #[test]
+    fn local_dev_autoprovisions_stable_token_and_default_user_when_env_absent() {
+        let home = tempfile::tempdir().expect("tempdir");
+        let config = home.path().join("config.toml");
+
+        let (token, user_id) = resolve_webui_credentials(
+            RebornProfile::LocalDev,
+            None,
+            None,
+            &WebuiCredentialConfig {
+                home_path: home.path(),
+                config_path: &config,
+                env_token_var: DEFAULT_ENV_TOKEN_VAR,
+                env_user_id_var: DEFAULT_ENV_USER_ID_VAR,
+                dev_user_id_default: DEFAULT_DEV_WEBUI_USER_ID,
+            },
+        )
+        .expect("local-dev must auto-provision credentials");
+
+        assert!(
+            token.len() >= DEV_WEBUI_TOKEN_MIN_BYTES,
+            "generated token must clear the session-signing floor, got {} bytes",
+            token.len()
+        );
+        assert!(
+            token
+                .as_bytes()
+                .iter()
+                .collect::<std::collections::HashSet<_>>()
+                .len()
+                >= 8,
+            "generated token must have >= 8 distinct byte values"
+        );
+        assert_eq!(user_id, DEFAULT_DEV_WEBUI_USER_ID);
+
+        // Second call reuses the persisted token so restarts keep sessions valid.
+        let (token_again, _) = resolve_webui_credentials(
+            RebornProfile::LocalDev,
+            None,
+            None,
+            &WebuiCredentialConfig {
+                home_path: home.path(),
+                config_path: &config,
+                env_token_var: DEFAULT_ENV_TOKEN_VAR,
+                env_user_id_var: DEFAULT_ENV_USER_ID_VAR,
+                dev_user_id_default: DEFAULT_DEV_WEBUI_USER_ID,
+            },
+        )
+        .expect("second resolve");
+        assert_eq!(token, token_again, "dev token must persist across calls");
+    }
+
+    #[test]
+    fn production_fails_closed_when_token_env_absent() {
+        let home = tempfile::tempdir().expect("tempdir");
+        let config = home.path().join("config.toml");
+
+        let error = resolve_webui_credentials(
+            RebornProfile::Production,
+            None,
+            Some("operator".to_string()),
+            &WebuiCredentialConfig {
+                home_path: home.path(),
+                config_path: &config,
+                env_token_var: DEFAULT_ENV_TOKEN_VAR,
+                env_user_id_var: DEFAULT_ENV_USER_ID_VAR,
+                dev_user_id_default: DEFAULT_DEV_WEBUI_USER_ID,
+            },
+        )
+        .expect_err("production must not auto-provision a token");
+        assert!(
+            error.to_string().contains(DEFAULT_ENV_TOKEN_VAR),
+            "error must name the required token env var, got: {error}"
+        );
+        assert!(
+            !home.path().join(DEV_WEBUI_TOKEN_FILE).exists(),
+            "production must not write a dev token file"
+        );
+    }
+
+    #[test]
+    fn production_fails_closed_when_user_id_env_absent() {
+        let home = tempfile::tempdir().expect("tempdir");
+        let config = home.path().join("config.toml");
+
+        let error = resolve_webui_credentials(
+            RebornProfile::Production,
+            Some("a".repeat(32)),
+            None,
+            &WebuiCredentialConfig {
+                home_path: home.path(),
+                config_path: &config,
+                env_token_var: DEFAULT_ENV_TOKEN_VAR,
+                env_user_id_var: DEFAULT_ENV_USER_ID_VAR,
+                dev_user_id_default: DEFAULT_DEV_WEBUI_USER_ID,
+            },
+        )
+        .expect_err("production must require an explicit user id");
+        assert!(
+            error.to_string().contains(DEFAULT_ENV_USER_ID_VAR),
+            "error must name the required user-id env var, got: {error}"
+        );
+    }
+
+    #[test]
+    fn operator_supplied_env_values_win_regardless_of_profile() {
+        let home = tempfile::tempdir().expect("tempdir");
+        let config = home.path().join("config.toml");
+
+        let (token, user_id) = resolve_webui_credentials(
+            RebornProfile::LocalDev,
+            Some("operator-supplied-token-value-0123456789".to_string()),
+            Some("real-operator".to_string()),
+            &WebuiCredentialConfig {
+                home_path: home.path(),
+                config_path: &config,
+                env_token_var: DEFAULT_ENV_TOKEN_VAR,
+                env_user_id_var: DEFAULT_ENV_USER_ID_VAR,
+                dev_user_id_default: DEFAULT_DEV_WEBUI_USER_ID,
+            },
+        )
+        .expect("explicit env values resolve");
+
+        assert_eq!(token, "operator-supplied-token-value-0123456789");
+        assert_eq!(user_id, "real-operator");
+        assert!(
+            !home.path().join(DEV_WEBUI_TOKEN_FILE).exists(),
+            "no dev token file when the operator supplied a token"
+        );
     }
 }

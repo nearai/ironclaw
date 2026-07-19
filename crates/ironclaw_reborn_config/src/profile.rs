@@ -96,6 +96,17 @@ impl RebornProfile {
                 | Self::HostedSingleTenantVolume
         )
     }
+
+    /// Whether the WebUI `serve` listener may auto-provision a local bearer
+    /// token + operator user id when the operator has not supplied them via
+    /// environment variables.
+    ///
+    /// True only for the trusted-laptop developer profiles. Hosted and
+    /// production profiles must fail closed: their session-signing secret and
+    /// operator identity are operator-owned and never generated for them.
+    pub fn allows_dev_credential_autoprovision(self) -> bool {
+        matches!(self, Self::LocalDev | Self::LocalDevYolo)
+    }
 }
 
 impl FromStr for RebornProfile {
@@ -120,5 +131,32 @@ impl FromStr for RebornProfile {
 impl std::fmt::Display for RebornProfile {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter.write_str(self.as_str())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn only_local_dev_profiles_allow_credential_autoprovision() {
+        for profile in RebornProfile::all() {
+            let allowed = profile.allows_dev_credential_autoprovision();
+            match profile {
+                RebornProfile::LocalDev | RebornProfile::LocalDevYolo => {
+                    assert!(
+                        allowed,
+                        "{profile} must allow dev credential auto-provision"
+                    )
+                }
+                RebornProfile::HostedSingleTenant
+                | RebornProfile::HostedSingleTenantVolume
+                | RebornProfile::Production
+                | RebornProfile::MigrationDryRun => assert!(
+                    !allowed,
+                    "{profile} must fail closed and require operator-supplied credentials"
+                ),
+            }
+        }
     }
 }

@@ -19,7 +19,7 @@ layer = "app"
 dist = false
 
 [features]
-default = ["root-llm-provider"]
+default = ["root-llm-provider", "webui-v2-beta"]
 # Wire a real LLM provider into the assembled runtime. Mirrors the same
 # `root-llm-provider` feature on `ironclaw_reborn_composition` /
 # `ironclaw_runner`, so building without it produces a CLI binary that

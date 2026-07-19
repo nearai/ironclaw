@@ -241,7 +241,9 @@ function OperatorOnboardingPage() {
           <h1 className="text-2xl font-semibold text-[var(--v2-text-strong)]">
             {t("onboarding.title")}
           </h1>
-          <p className="mt-2 text-sm text-[var(--v2-text-muted)]">{t("onboarding.subtitle")}</p>
+          <p className="mx-auto mt-3 max-w-md text-balance text-lg font-medium text-[var(--v2-accent)]">
+            {t("onboarding.subtitle")}
+          </p>
         </div>
 
         <div className="flex flex-col gap-3">
