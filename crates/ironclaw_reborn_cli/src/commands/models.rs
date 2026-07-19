@@ -92,11 +92,33 @@ impl ModelsListCommand {
 #[cfg(not(feature = "root-llm-provider"))]
 impl ModelsListCommand {
     fn execute(self) -> anyhow::Result<()> {
-        let command = match self.provider.as_deref() {
-            Some(provider) => format!("list {provider}"),
-            None => "list".to_string(),
-        };
-        Err(feature_not_available(&command))
+        // Reads stay informational without the provider feature (the libsql-only
+        // lane's smoke tests pin this); only writes error — see ModelsSetCommand.
+        let slots = ironclaw_reborn_composition::reborn_model_slot_names();
+
+        if self.json {
+            let slots = slots
+                .iter()
+                .map(|slot| serde_json::json!({ "slot": slot }))
+                .collect::<Vec<_>>();
+            println!(
+                "{}",
+                serde_json::json!({
+                    "slots": slots,
+                    "routes": "not-configured",
+                    "v1_state": "not-used",
+                })
+            );
+            return Ok(());
+        }
+
+        println!("IronClaw Reborn model slots");
+        for slot in slots {
+            println!("- {}", slot);
+        }
+        println!("routes: not-configured");
+        println!("v1_state: not-used");
+        Ok(())
     }
 }
 
@@ -166,7 +188,36 @@ fn feature_not_available(command: &str) -> anyhow::Error {
 #[cfg(not(feature = "root-llm-provider"))]
 impl ModelsStatusCommand {
     fn execute(self) -> anyhow::Result<()> {
-        Err(feature_not_available("status"))
+        let slots = ironclaw_reborn_composition::reborn_model_slot_names();
+
+        if self.json {
+            let slot_status: serde_json::Map<String, serde_json::Value> = slots
+                .iter()
+                .map(|slot| {
+                    (
+                        (*slot).to_string(),
+                        serde_json::Value::from("not-configured"),
+                    )
+                })
+                .collect();
+            println!(
+                "{}",
+                serde_json::json!({
+                    "routes": "not-configured",
+                    "slots": slot_status,
+                    "v1_state": "not-used",
+                })
+            );
+            return Ok(());
+        }
+
+        println!("IronClaw Reborn model status");
+        println!("routes: not-configured");
+        for slot in slots {
+            println!("{}: not-configured", slot);
+        }
+        println!("v1_state: not-used");
+        Ok(())
     }
 }
 

@@ -5383,6 +5383,11 @@ fn onboard_import_history_records_pending_step() {
 /// bytes, the marker, providers.json) are still correct on disk, since
 /// `write_default_config_files` and the marker/master-key steps all run
 /// ahead of the LLM-credential step that fails.
+// The pinned failure (the LLM-credential step parsing the malformed
+// config.toml) exists only when the provider feature compiles that step in;
+// without it onboard legitimately succeeds, so the test would fail the
+// libsql-only lane for behavior that build cannot have.
+#[cfg(feature = "root-llm-provider")]
 #[test]
 fn onboard_preserves_existing_config_without_force() {
     let temp = tempfile::tempdir().expect("tempdir");
