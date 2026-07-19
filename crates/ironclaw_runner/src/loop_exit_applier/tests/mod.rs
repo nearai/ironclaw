@@ -1,3 +1,4 @@
+// arch-exempt: large_file, mechanical §4.3 store swap only — InMemory{CheckpointState,LoopCheckpoint}Store deleted; test helper added over FilesystemCheckpointStateStore<InMemoryBackend> (arch-simplification §4.3), plan #6168
 use std::sync::Arc;
 
 use ironclaw_host_api::{AgentId, ApprovalRequestId, TenantId, ThreadId, UserId};
@@ -8,10 +9,10 @@ use ironclaw_threads::{
     ThreadMessageRecord, ThreadScope, ToolResultSafeSummary,
 };
 use ironclaw_turns::{
-    CheckpointStateStore, GateRef, InMemoryCheckpointStateStore, InMemoryLoopCheckpointStore,
-    LoopBlocked, LoopBlockedKind, LoopCheckpointKind, LoopCheckpointStateRef, LoopCheckpointStore,
-    LoopCompleted, LoopCompletionKind, LoopExit, LoopFailed, LoopFailureKind, LoopGateRef,
-    LoopMessageRef, LoopResultRef, PutCheckpointStateRequest, PutLoopCheckpointRequest, TurnActor,
+    CheckpointStateStore, GateRef, InMemoryTurnStateStore, LoopBlocked, LoopBlockedKind,
+    LoopCheckpointKind, LoopCheckpointStateRef, LoopCheckpointStore, LoopCompleted,
+    LoopCompletionKind, LoopExit, LoopFailed, LoopFailureKind, LoopGateRef, LoopMessageRef,
+    LoopResultRef, PutCheckpointStateRequest, PutLoopCheckpointRequest, TurnActor,
     TurnCheckpointId, TurnError, TurnId, TurnRunId, TurnScope, TurnStateStore, TurnStatus,
 };
 
@@ -25,6 +26,8 @@ use super::{
 mod support;
 
 use support::*;
+
+use ironclaw_loop_host::in_memory_backed_checkpoint_state_store as in_memory_checkpoint_state_store;
 
 #[tokio::test]
 async fn loop_exit_applier_rejects_driver_supplied_evidence_policy() {
@@ -1374,8 +1377,8 @@ async fn thread_checkpoint_evidence_fails_closed_for_failure_evidence() {
 #[tokio::test]
 async fn thread_checkpoint_evidence_verifies_failure_from_final_checkpoint_state() {
     let claimed = claimed_run();
-    let checkpoint_state_store = Arc::new(InMemoryCheckpointStateStore::default());
-    let loop_checkpoint_store = Arc::new(InMemoryLoopCheckpointStore::default());
+    let checkpoint_state_store = in_memory_checkpoint_state_store();
+    let loop_checkpoint_store = Arc::new(InMemoryTurnStateStore::default());
     let mut loop_state = ironclaw_agent_loop::state::LoopExecutionState::initial_for_run(
         &ironclaw_agent_loop::test_support::test_run_context("failure-evidence"),
     );
@@ -1460,8 +1463,8 @@ async fn thread_checkpoint_evidence_rejects_unverified_failure_explanation_ref()
         })
         .await
         .expect("thread");
-    let checkpoint_state_store = Arc::new(InMemoryCheckpointStateStore::default());
-    let loop_checkpoint_store = Arc::new(InMemoryLoopCheckpointStore::default());
+    let checkpoint_state_store = in_memory_checkpoint_state_store();
+    let loop_checkpoint_store = Arc::new(InMemoryTurnStateStore::default());
     let mut loop_state = ironclaw_agent_loop::state::LoopExecutionState::initial_for_run(
         &ironclaw_agent_loop::test_support::test_run_context("failure-explanation-evidence"),
     );
@@ -1530,8 +1533,8 @@ async fn thread_checkpoint_evidence_rejects_unverified_failure_explanation_ref()
 #[tokio::test]
 async fn loop_exit_applier_accepts_thread_checkpoint_failure_evidence() {
     let claimed = claimed_run();
-    let checkpoint_state_store = Arc::new(InMemoryCheckpointStateStore::default());
-    let loop_checkpoint_store = Arc::new(InMemoryLoopCheckpointStore::default());
+    let checkpoint_state_store = in_memory_checkpoint_state_store();
+    let loop_checkpoint_store = Arc::new(InMemoryTurnStateStore::default());
     let mut loop_state = ironclaw_agent_loop::state::LoopExecutionState::initial_for_run(
         &ironclaw_agent_loop::test_support::test_run_context("applier-failure-evidence"),
     );
@@ -1588,8 +1591,8 @@ async fn loop_exit_applier_accepts_thread_checkpoint_failure_evidence() {
 #[tokio::test]
 async fn loop_exit_applier_accepts_run_scoped_failure_checkpoint_ref_and_rejects_cross_run_reuse() {
     let claimed = claimed_run();
-    let checkpoint_state_store = Arc::new(InMemoryCheckpointStateStore::default());
-    let loop_checkpoint_store = Arc::new(InMemoryLoopCheckpointStore::default());
+    let checkpoint_state_store = in_memory_checkpoint_state_store();
+    let loop_checkpoint_store = Arc::new(InMemoryTurnStateStore::default());
     let mut loop_state = ironclaw_agent_loop::state::LoopExecutionState::initial_for_run(
         &ironclaw_agent_loop::test_support::test_run_context("applier-run-scoped-failure"),
     );
@@ -1700,8 +1703,8 @@ async fn loop_exit_applier_accepts_run_scoped_failure_checkpoint_ref_and_rejects
 #[tokio::test]
 async fn thread_checkpoint_evidence_rejects_mismatched_failure_checkpoint_state() {
     let claimed = claimed_run();
-    let checkpoint_state_store = Arc::new(InMemoryCheckpointStateStore::default());
-    let loop_checkpoint_store = Arc::new(InMemoryLoopCheckpointStore::default());
+    let checkpoint_state_store = in_memory_checkpoint_state_store();
+    let loop_checkpoint_store = Arc::new(InMemoryTurnStateStore::default());
     let mut loop_state = ironclaw_agent_loop::state::LoopExecutionState::initial_for_run(
         &ironclaw_agent_loop::test_support::test_run_context("failure-evidence-mismatch"),
     );

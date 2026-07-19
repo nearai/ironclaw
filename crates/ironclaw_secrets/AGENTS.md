@@ -12,7 +12,7 @@
 ## What This Crate Owns
 
 - Scoped secret storage and credential brokering, currently:
-- Secret metadata, leases, and one-shot consumption: `SecretMetadata`, `SecretLease`/`SecretLeaseId`/`SecretLeaseStatus`, the `SecretStore` trait + `ScopedSecretsStoreAdapter`/`InMemorySecretStore`, the legacy `SecretsStore` (`consume`, `CreateSecretParams`, `SecretConsumeResult`), and `SecretStoreError`/`SecretError`.
+- Secret metadata, leases, and one-shot consumption: `SecretMetadata`, `SecretLease`/`SecretLeaseId`/`SecretLeaseStatus`, the `SecretStore` trait, and `SecretStoreError`/`SecretError` (plus the crypto-facing `DecryptedSecret`). Volatile construction goes through `FilesystemSecretStore::ephemeral()` (§4.3 consolidation; the legacy `SecretsStore`/`InMemorySecretStore` adapter family was deleted).
 - Credential-broker subsystem: `CredentialAccount`/`CredentialSession` (+ IDs and `CredentialAccountStatus`), `CredentialTargetPolicy`/`CredentialPathPolicy`, `CredentialAccountStore`/`CredentialSessionStore` traits, `InMemoryCredentialBroker`, `CredentialSessionRequest`, `CredentialBrokerError`, `RedactedJson`.
 - Encryption helpers (`crypto`): `SecretsCrypto` and the AAD constructors (`secret_record_aad`, `filesystem_secret_aad`, `credential_account_aad`, `credential_session_aad`).
 - Filesystem-backed stores: `FilesystemSecretStore`, `FilesystemCredentialBroker`; and the `SecretMaterial` (`secrecy::SecretString`) re-export.

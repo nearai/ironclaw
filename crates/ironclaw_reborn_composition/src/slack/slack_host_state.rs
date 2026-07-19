@@ -3254,6 +3254,46 @@ fn is_unsupported_delete_error(error: &FilesystemError) -> bool {
     }
 }
 
+/// Shared test construction for the production Slack host state over an
+/// in-memory filesystem backend (arch-simplification §4.3: tests use the
+/// production `FilesystemSlackHostState` instead of hand-written
+/// `InMemory*Store` doubles). The returned store implements both
+/// `SlackChannelRouteStore` and `SlackPersonalDmTargetStore`, scoped to
+/// `tenant_id`.
+#[cfg(test)]
+pub(crate) mod test_support {
+    use std::sync::Arc;
+
+    use ironclaw_filesystem::{InMemoryBackend, ScopedFilesystem};
+    use ironclaw_host_api::{
+        AgentId, MountAlias, MountGrant, MountPermissions, MountView, ProjectId, TenantId, UserId,
+        VirtualPath,
+    };
+
+    use super::FilesystemSlackHostState;
+
+    pub(crate) fn in_memory_slack_host_state(
+        tenant_id: &str,
+    ) -> FilesystemSlackHostState<InMemoryBackend> {
+        let scoped = Arc::new(ScopedFilesystem::with_fixed_view(
+            Arc::new(InMemoryBackend::default()),
+            MountView::new(vec![MountGrant::new(
+                MountAlias::new("/tenant-shared").expect("mount alias"), // safety: test-only helper in #[cfg(test)] module.
+                VirtualPath::new("/tenants/test/shared").expect("mount path"), // safety: test-only helper in #[cfg(test)] module.
+                MountPermissions::read_write_list_delete(),
+            )])
+            .expect("mount view"), // safety: test-only helper in #[cfg(test)] module.
+        ));
+        FilesystemSlackHostState::new(
+            scoped,
+            TenantId::new(tenant_id).expect("tenant"), // safety: test-only helper in #[cfg(test)] module.
+            UserId::new("user:slack-host-state-test").expect("user"), // safety: test-only helper in #[cfg(test)] module.
+            AgentId::new("agent:slack-host-state-test").expect("agent"), // safety: test-only helper in #[cfg(test)] module.
+            Some(ProjectId::new("project:slack-host-state-test").expect("project")), // safety: test-only helper in #[cfg(test)] module.
+        )
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

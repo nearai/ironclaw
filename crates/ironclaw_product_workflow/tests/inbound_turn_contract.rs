@@ -1,3 +1,4 @@
+// arch-exempt: large_file, mechanical §4.3 store swap only — test seams repointed from deleted InMemory*Store doubles to the production stores over InMemoryBackend, plan #6168
 //! Contract tests for the InboundTurnService.
 
 use std::collections::{HashMap, VecDeque};
@@ -53,11 +54,10 @@ use ironclaw_threads::{
 };
 use ironclaw_turns::{
     CancelRunRequest, CancelRunResponse, DefaultTurnCoordinator, EventCursor, GetRunStateRequest,
-    IdempotencyKey, InMemoryCheckpointStateStore, InMemoryLoopCheckpointStore,
-    InMemoryTurnStateStore, ResumeTurnRequest, ResumeTurnResponse, RunProfileId, RunProfileVersion,
-    SanitizedCancelReason, SubmitTurnRequest, SubmitTurnResponse, ThreadBusy, TurnActor,
-    TurnCoordinator, TurnError, TurnId, TurnOriginKind, TurnRunId, TurnRunState, TurnRunWake,
-    TurnScope, TurnStateStore, TurnStatus,
+    IdempotencyKey, InMemoryTurnStateStore, ResumeTurnRequest, ResumeTurnResponse, RunProfileId,
+    RunProfileVersion, SanitizedCancelReason, SubmitTurnRequest, SubmitTurnResponse, ThreadBusy,
+    TurnActor, TurnCoordinator, TurnError, TurnId, TurnOriginKind, TurnRunId, TurnRunState,
+    TurnRunWake, TurnScope, TurnStateStore, TurnStatus,
     run_profile::{
         AgentLoopHostError, InMemoryLoopHostMilestoneSink, InstructionSafetyContext,
         LoopCancelReasonKind, LoopCapabilityPort, LoopInputAckToken, LoopInputCursorToken,
@@ -66,6 +66,8 @@ use ironclaw_turns::{
 };
 use tokio::time::{sleep, timeout};
 use tokio_util::sync::CancellationToken;
+
+use ironclaw_loop_host::in_memory_backed_checkpoint_state_store as in_memory_checkpoint_state_store;
 
 fn sample_user_message_envelope(event_suffix: &str) -> ProductInboundEnvelope {
     sample_user_message_envelope_with_install_and_text(event_suffix, "install_alpha", "hello world")
@@ -697,7 +699,7 @@ async fn user_message_no_profile_uses_product_live_runtime_and_persists_reply() 
 
     let thread_service = InMemorySessionThreadService::default();
     let turn_store = Arc::new(InMemoryTurnStateStore::default());
-    let checkpoint_store = Arc::new(InMemoryLoopCheckpointStore::default());
+    let checkpoint_store = Arc::clone(&turn_store);
     let model_requests = Arc::new(Mutex::new(Vec::new()));
     let model_gateway = Arc::new(ReplyModelGateway {
         reply: "planned product reply".to_string(),
@@ -739,7 +741,7 @@ async fn user_message_no_profile_uses_product_live_runtime_and_persists_reply() 
         thread_service: Arc::new(thread_service.clone()),
         thread_scope: thread_scope.clone(),
         model_gateway,
-        checkpoint_state_store: Arc::new(InMemoryCheckpointStateStore::default()),
+        checkpoint_state_store: in_memory_checkpoint_state_store(),
         loop_checkpoint_store: checkpoint_store.clone(),
         milestone_sink: Arc::new(InMemoryLoopHostMilestoneSink::default()),
         capability_factory: Arc::new(EmptyCapabilityFactory),
@@ -875,7 +877,7 @@ async fn user_message_no_profile_can_cancel_product_live_run_from_product_path()
 
     let thread_service = InMemorySessionThreadService::default();
     let turn_store = Arc::new(InMemoryTurnStateStore::default());
-    let checkpoint_store = Arc::new(InMemoryLoopCheckpointStore::default());
+    let checkpoint_store = Arc::clone(&turn_store);
     let model_requests = Arc::new(Mutex::new(Vec::new()));
     let model_release = CancellationToken::new();
     let model_gateway = Arc::new(PausingReplyModelGateway {
@@ -919,7 +921,7 @@ async fn user_message_no_profile_can_cancel_product_live_run_from_product_path()
         thread_service: Arc::new(thread_service.clone()),
         thread_scope: thread_scope.clone(),
         model_gateway,
-        checkpoint_state_store: Arc::new(InMemoryCheckpointStateStore::default()),
+        checkpoint_state_store: in_memory_checkpoint_state_store(),
         loop_checkpoint_store: checkpoint_store.clone(),
         milestone_sink: Arc::new(InMemoryLoopHostMilestoneSink::default()),
         capability_factory: Arc::new(EmptyCapabilityFactory),
@@ -1071,7 +1073,7 @@ async fn product_live_runtime_rejects_unretained_cancellation_factory() {
 
     let thread_service = InMemorySessionThreadService::default();
     let turn_store = Arc::new(InMemoryTurnStateStore::default());
-    let checkpoint_store = Arc::new(InMemoryLoopCheckpointStore::default());
+    let checkpoint_store = Arc::clone(&turn_store);
     let model_gateway = Arc::new(ReplyModelGateway {
         reply: "planned product reply".to_string(),
         requests: Arc::new(Mutex::new(Vec::new())),
@@ -1112,7 +1114,7 @@ async fn product_live_runtime_rejects_unretained_cancellation_factory() {
         thread_service: Arc::new(thread_service.clone()),
         thread_scope: thread_scope.clone(),
         model_gateway,
-        checkpoint_state_store: Arc::new(InMemoryCheckpointStateStore::default()),
+        checkpoint_state_store: in_memory_checkpoint_state_store(),
         loop_checkpoint_store: checkpoint_store.clone(),
         milestone_sink: Arc::new(InMemoryLoopHostMilestoneSink::default()),
         capability_factory: Arc::new(EmptyCapabilityFactory),

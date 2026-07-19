@@ -173,6 +173,186 @@ fn dockerfile_reborn_builds_with_production_features() {
 }
 
 #[test]
+fn release_ci_compiles_reborn_for_all_supported_targets() {
+    // This is a structural contract for release workflow wiring. Hosted Actions
+    // runs provide the behavioral cross-platform compile and startup validation.
+    let root = workspace_root();
+    let compile_workflow =
+        std::fs::read_to_string(root.join(".github/workflows/reborn-release-compile.yml"))
+            .expect("Reborn release compile workflow")
+            .replace("\r\n", "\n");
+    let release_workflow = std::fs::read_to_string(root.join(".github/workflows/release.yml"))
+        .expect("release workflow")
+        .replace("\r\n", "\n");
+    let cli_manifest = std::fs::read_to_string(root.join("crates/ironclaw_reborn_cli/Cargo.toml"))
+        .expect("Reborn CLI manifest")
+        .replace("\r\n", "\n");
+
+    let target_runners = [
+        ("x86_64-unknown-linux-gnu", "ubuntu-22.04"),
+        ("x86_64-unknown-linux-musl", "ubuntu-22.04"),
+        ("aarch64-unknown-linux-gnu", "ubuntu-24.04-arm"),
+        ("aarch64-unknown-linux-musl", "ubuntu-24.04-arm"),
+        ("x86_64-apple-darwin", "macos-15-intel"),
+        ("aarch64-apple-darwin", "macos-15"),
+        ("x86_64-pc-windows-msvc", "windows-2022"),
+    ];
+    let release_features =
+        "root-llm-provider,webui-v2-beta,slack-v2-host-beta,libsql,postgres,inmemory-turn-state";
+
+    assert_eq!(
+        compile_workflow.matches("          - target: ").count(),
+        target_runners.len(),
+        "Reborn release compile matrix must contain exactly seven targets"
+    );
+    for (target, runner) in target_runners {
+        let matrix_entry = format!("          - target: {target}\n            runner: {runner}\n");
+        assert!(
+            compile_workflow.contains(&matrix_entry),
+            "Reborn release compile matrix must map {target} to {runner}"
+        );
+    }
+
+    assert!(
+        compile_workflow.contains("fail-fast: false")
+            && compile_workflow.contains("cargo build --locked --profile dist")
+            && compile_workflow.contains("--package ironclaw_reborn_cli")
+            && compile_workflow.contains("            --bin ironclaw \\\n")
+            && !compile_workflow.contains("--bin ironclaw-reborn")
+            && compile_workflow.contains("--target \"$TARGET\"")
+            && compile_workflow
+                .contains(&format!("  REBORN_RELEASE_FEATURES: {release_features}\n"))
+            && compile_workflow.contains("            --features \"$REBORN_RELEASE_FEATURES\""),
+        "Reborn release CI must fully link the shipping binary and keep all target results"
+    );
+    assert!(
+        compile_workflow.matches("musl: true").count() == 2
+            && compile_workflow.contains("sudo apt-get install --yes musl-tools binutils file")
+            && compile_workflow.contains("CC_x86_64_unknown_linux_musl=musl-gcc")
+            && compile_workflow.contains("CC_aarch64_unknown_linux_musl=musl-gcc")
+            && !compile_workflow.contains("CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_LINKER")
+            && !compile_workflow.contains("CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_LINKER")
+            && compile_workflow.contains("node-version: \"22\"")
+            && compile_workflow.contains("corepack enable pnpm")
+            && compile_workflow.contains("binary: ironclaw.exe")
+            && !compile_workflow.contains("binary: ironclaw-reborn")
+            && compile_workflow.contains("core.longpaths true"),
+        "release CI must use musl-gcc for C dependencies without overriding Rust's self-contained musl linker"
+    );
+    for matrix_entry in [
+        concat!(
+            "          - target: x86_64-unknown-linux-musl\n",
+            "            runner: ubuntu-22.04\n",
+            "            binary: ironclaw\n",
+            "            musl: true\n",
+            "            cc_env: CC_x86_64_unknown_linux_musl=musl-gcc\n",
+        ),
+        concat!(
+            "          - target: aarch64-unknown-linux-musl\n",
+            "            runner: ubuntu-24.04-arm\n",
+            "            binary: ironclaw\n",
+            "            musl: true\n",
+            "            cc_env: CC_aarch64_unknown_linux_musl=musl-gcc\n",
+        ),
+    ] {
+        assert!(
+            compile_workflow.contains(matrix_entry),
+            "musl matrix entry must bind its target to the matching compiler: {matrix_entry}"
+        );
+    }
+    let configure_musl_compiler = concat!(
+        "      - name: Configure musl C compiler\n",
+        "        if: matrix.musl\n",
+        "        shell: bash\n",
+        "        env:\n",
+        "          CC_ENV: ${{ matrix.cc_env }}\n",
+        "        run: |\n",
+        "          echo \"$CC_ENV\" >> \"$GITHUB_ENV\"\n",
+    );
+    assert!(
+        compile_workflow.contains(configure_musl_compiler),
+        "musl compiler variables must be applied only to musl matrix entries"
+    );
+    assert!(
+        compile_workflow.contains("name: Verify musl portability\n        if: matrix.musl")
+            && compile_workflow.contains("readelf --program-headers --wide")
+            && compile_workflow.contains("readelf --dynamic --wide")
+            && compile_workflow.contains("INTERP")
+            && compile_workflow.contains("(NEEDED)")
+            && compile_workflow.contains("name: Smoke compiled binary")
+            && compile_workflow.contains("\"$binary_path\" --version")
+            && compile_workflow.contains("\"$binary_path\" --help > /dev/null")
+            && compile_workflow.contains("\"$binary_path\" profile list --json > /dev/null"),
+        "release CI must reject non-portable musl binaries and smoke the exact native artifacts"
+    );
+
+    let build_position = compile_workflow
+        .find("name: Compile ironclaw")
+        .expect("compile step");
+    let linkage_position = compile_workflow
+        .find("name: Verify musl portability")
+        .expect("musl linkage step");
+    let smoke_position = compile_workflow
+        .find("name: Smoke compiled binary")
+        .expect("binary smoke step");
+    let upload_position = compile_workflow
+        .find("name: Upload compile evidence")
+        .expect("compile evidence upload step");
+    assert!(
+        build_position < linkage_position
+            && linkage_position < smoke_position
+            && smoke_position < upload_position,
+        "linkage and runtime validation must gate artifact upload"
+    );
+    assert!(
+        compile_workflow.contains("name: reborn-compile-${{ matrix.target }}")
+            && compile_workflow.contains("if-no-files-found: error")
+            && !compile_workflow.contains("name: artifacts-reborn"),
+        "compile evidence must stay outside cargo-dist's artifacts-* release namespace"
+    );
+    let host_job = release_workflow
+        .split_once("\n  host:\n")
+        .and_then(|(_, jobs)| jobs.split_once("\n  docker-image:\n"))
+        .map(|(host, _)| host)
+        .expect("release workflow host job");
+    assert_eq!(
+        host_job.matches("pattern: artifacts-*").count(),
+        2,
+        "release host must download only cargo-dist artifacts for staging and upload"
+    );
+    assert!(
+        !host_job.contains("reborn-compile-"),
+        "release host must not publish Reborn compile evidence"
+    );
+
+    let release_tag_trigger = concat!(
+        "  push:\n",
+        "    tags:\n",
+        "      - 'ironclaw-v[0-9]+.[0-9]+.[0-9]+*'\n",
+    );
+    assert!(
+        release_workflow.contains(release_tag_trigger)
+            && release_workflow.contains("uses: ./.github/workflows/reborn-release-compile.yml")
+            && release_workflow.contains("needs.reborn-binary-compile.result == 'success'")
+            && compile_workflow.contains("  workflow_call:\n")
+            && compile_workflow.contains("  workflow_dispatch:\n")
+            && !release_workflow.contains("\n  pull_request:\n")
+            && !compile_workflow.contains("  pull_request:\n"),
+        "the tag-only release workflow must wait for the Reborn matrix while keeping an independent manual preflight"
+    );
+    assert!(
+        release_workflow.contains("needs.plan.outputs.publishing == 'true'")
+            && !release_workflow.contains("if: ${{ github.event_name != 'pull_request' }}")
+            && compile_workflow.contains("permissions:\n  contents: read"),
+        "release compilation must remain read-only without adding PR-only cargo-dist gates"
+    );
+    assert!(
+        cli_manifest.contains("[package.metadata.dist]\ndist = false"),
+        "#6160 must not opt Reborn into cargo-dist before #3483 is resolved"
+    );
+}
+
+#[test]
 fn dockerfile_reborn_ships_extension_ownership_migration() {
     let dockerfile = std::fs::read_to_string(workspace_root().join("Dockerfile.reborn"))
         .expect("Dockerfile.reborn");
