@@ -6416,6 +6416,7 @@ async def _slack_correctness_chat_reply(
     answer_marker: str,
     extra_details: dict[str, object],
     expected_capability: str | None = None,
+    accept_any_capability: tuple[str, ...] = (),
     expected_capability_statuses: tuple[str, ...] = ("completed",),
     expected_capability_sequence: tuple[str, ...] = (),
     expected_capability_arguments: dict[str, dict[str, str]] | None = None,
@@ -6429,6 +6430,14 @@ async def _slack_correctness_chat_reply(
     answer marker remains prompt context but is not a liveness condition. The
     full text is stripped from persisted details on both paths; a failed chat
     result is ready to return as-is with latency re-anchored to the case start.
+
+    `expected_capability` (and the sequence/argument variants) assert TOOL
+    IDENTITY — the model must terminally use that exact capability. Use
+    `accept_any_capability` instead when the case asserts an OUTCOME that any
+    of several capabilities can satisfy: the arm passes as long as at least
+    ONE of the accept-any set produced current-turn terminal evidence, rather
+    than pinning a single tool id. The two are composable — accept-any members
+    form an OR-group while every plain `expected_capability` stays required.
     """
     expected_capabilities = list(
         dict.fromkeys(
@@ -6440,6 +6449,7 @@ async def _slack_correctness_chat_reply(
                 ),
                 *expected_capability_sequence,
                 *(expected_capability_arguments or {}),
+                *accept_any_capability,
             ]
         )
     )
@@ -6492,15 +6502,26 @@ async def _slack_correctness_chat_reply(
             }
         )
         statuses = evidence.get("statuses")
-        missing_capabilities = (
-            [
+        accept_any_set = set(accept_any_capability)
+        if isinstance(statuses, dict):
+            # Plain expected capabilities stay individually required; the
+            # accept-any set is an OR-group that only counts as missing when
+            # NONE of its members produced current-turn terminal evidence.
+            missing_capabilities = [
                 capability_id
                 for capability_id in expected_capabilities
-                if not statuses.get(capability_id, [])
+                if capability_id not in accept_any_set
+                and not statuses.get(capability_id, [])
             ]
-            if isinstance(statuses, dict)
-            else expected_capabilities
-        )
+            if accept_any_capability and not any(
+                statuses.get(capability_id, [])
+                for capability_id in accept_any_capability
+            ):
+                missing_capabilities.append(
+                    "any-of:" + "|".join(accept_any_capability)
+                )
+        else:
+            missing_capabilities = list(expected_capabilities)
         evidence_read_error = evidence.get("read_error")
         observed_arguments = evidence.get("input_arguments")
         argument_mismatches = {
@@ -6814,12 +6835,15 @@ async def case_qa_10c_slack_thread_replies(ctx: LiveQaContext) -> ProbeResult:
     """Thread-visibility probe: listing a conversation "including thread
     replies" must surface the replies seeded under a thread root.
 
-    Pins the missing thread-replies capability: the host exposes only
-    top-level conversations.history, so bot replies posted with thread_ts
-    are invisible to the agent (red until a conversations.replies tool
-    ships). THREADROOT/TOPLEVEL presence is the control proving plain
-    history reads worked at all — without it a history outage would be
-    misread as the thread gap.
+    Asserts the OUTCOME — the seeded thread replies appear in the answer —
+    not the identity of the tool that fetched them. Thread visibility is
+    satisfied whether the model reaches the replies through a dedicated
+    `slack.get_thread_replies` capability or through a thread-scoped
+    `slack.get_conversation_history` read, so the capability arm accepts
+    either (accept-any). The real regression this guards is the agent being
+    UNABLE to see thread replies at all: THREADROOT/TOPLEVEL presence is the
+    control proving plain history reads worked, and the missing-REPLY_* check
+    stays red when the replies are not surfaced.
     """
     case_name = "qa_10c_slack_thread_replies"
     started = time.monotonic()
@@ -6877,7 +6901,15 @@ async def case_qa_10c_slack_thread_replies(ctx: LiveQaContext) -> ProbeResult:
             ),
             answer_marker=answer_marker,
             extra_details=details,
-            expected_capability="slack.get_thread_replies",
+            # Outcome, not tool identity: any capability that can retrieve the
+            # thread's replies satisfies the arm. The dedicated thread-replies
+            # tool and a thread-scoped conversation-history read both surface
+            # the seeded replies; the missing-REPLY_* assert below is what
+            # actually pins thread visibility.
+            accept_any_capability=(
+                "slack.get_thread_replies",
+                "slack.get_conversation_history",
+            ),
         )
         if not chat.success:
             return chat
