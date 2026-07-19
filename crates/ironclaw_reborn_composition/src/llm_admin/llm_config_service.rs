@@ -1639,9 +1639,14 @@ mod tests {
         for key in ["NEARAI_API_KEY", "NEARAI_BASE_URL"] {
             ironclaw_common::env_helpers::remove_runtime_env(key);
         }
+        // An EMPTY value is semantically unset to `env_or_override`, so only a
+        // non-empty real value can change the asserted base URL — treat empty
+        // as absent to keep the precondition environment-independent.
         assert!(
-            std::env::var_os("NEARAI_BASE_URL").is_none(),
-            "NEARAI_BASE_URL must be unset in the real environment for this snapshot test"
+            std::env::var_os("NEARAI_BASE_URL")
+                .map(|value| value.is_empty())
+                .unwrap_or(true),
+            "NEARAI_BASE_URL must be unset (or empty) in the real environment for this snapshot test"
         );
     }
 
