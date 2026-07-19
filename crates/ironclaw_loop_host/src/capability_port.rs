@@ -2391,12 +2391,18 @@ impl HostRuntimeLoopCapabilityPort {
                     .await;
             }
         };
-        guard.commit();
         // Persist the host-private replay payload BEFORE returning the gate to the
         // loop, so a later resume turn can reconstitute {input, estimate} host-side
         // without the loop carrying raw tool args (arch-simplification §5.3 Stage
         // 2a-i; charter: agent-loop state never stores raw tool args). No-op unless
         // this is a fresh dispatch that produced an approval/auth gate.
+        //
+        // The dispatch reservation is committed only AFTER this fallible store
+        // write succeeds (#6271 IronLoop): committing before it means a transient
+        // store error would `?`-return with the reservation still `InFlight` and
+        // the committed guard skipping its cleanup, stranding retries/duplicates
+        // waiting on the key forever. On error the uncommitted guard clears the
+        // reservation and wakes waiters so one re-dispatches.
         if is_fresh_dispatch {
             self.persist_replay_payload_for_fresh_gate(
                 invocation_id,
@@ -2408,6 +2414,7 @@ impl HostRuntimeLoopCapabilityPort {
             )
             .await?;
         }
+        guard.commit();
         self.finish_runtime_outcome(
             &idempotency_key,
             RuntimeOutcomeCompletion {
