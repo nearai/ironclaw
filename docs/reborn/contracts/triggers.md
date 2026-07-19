@@ -460,17 +460,15 @@ attempt to delete the newly written trigger. The product API returns
 both succeed.
 
 - `trigger_create` validates the schedule and timezone, captures caller scope,
-  pairs the caller as the host-trusted synthetic trigger actor used by the
-  poller, and persists the trigger. Schedule validation includes both cadence
+  persists the trigger, then pairs the caller as the host-trusted synthetic
+  trigger actor used by the poller. Schedule validation includes both cadence
   rejection (sub-minute and second-level fields) and IANA timezone validation;
-  both are enforced before persistence. This pairing is composition-owned
-  trigger management wiring; trigger repositories remain storage-only, and the
-  poller must still fail closed for records whose creator actor was not paired.
-- `trigger_create` pairs the creator before persisting the trigger record. This
-  intentionally fails closed before storage if the actor pairing cannot be
-  established, instead of storing a trigger that the poller cannot fire. A
-  pairing that remains after a later trigger-record write failure is reusable
-  creator-scoped authorization state, not a trigger-specific fire gate.
+  both are enforced before persistence. Pairing failure or timeout triggers a
+  compensating deletion of the newly persisted trigger, and creation succeeds
+  only after persistence and pairing both complete. This pairing is
+  composition-owned trigger management wiring; trigger repositories remain
+  storage-only, and the poller must still fail closed for records whose creator
+  actor was not paired.
 - Durable local-dev composition must share the same trigger conversation
   services between `trigger_create` pairing and trigger-poller fire submission.
   The shared service preserves the conversation store's mutation lock across
@@ -579,8 +577,8 @@ cargo test -p ironclaw_triggers --features libsql --test repository_contract cre
 cargo test -p ironclaw_triggers --features postgres --test repository_contract creation_service
 cargo test -p ironclaw_product_workflow --test reborn_services_contract create_automation
 cargo test -p ironclaw_reborn_composition automation::facade::tests::mutation_tests::create_automation --lib
-cargo test -p ironclaw_webui_v2 --features webui-v2-beta --test webui_v2_descriptors_contract
-cargo test -p ironclaw_webui_v2 --features webui-v2-beta --test webui_v2_handlers_contract create_automation
+cargo test -p ironclaw_webui --test webui_v2_descriptors_contract
+cargo test -p ironclaw_webui --test webui_v2_handlers_contract create_automation
 ```
 
 ---
