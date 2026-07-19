@@ -94,6 +94,23 @@ download pattern, so they are not attached to the GitHub Release. The canonical
 `ironclaw_reborn_cli` package remains independently enabled for cargo-dist with
 `dist = true` and `features = ["full"]`.
 
+## Retired v1 workflow coverage
+
+The v1 workflows and jobs were removed with the root runtime. Their replacement
+coverage is organized around supported Reborn behavior rather than preserving
+obsolete v1 implementation tests:
+
+| Retired workflow or job | Current coverage |
+|---|---|
+| `test.yml` | `reborn-tests.yml` runs the Reborn root, crate-group, integration, and recorded-fixture suites; `code_style.yml` owns formatting and clippy. |
+| `e2e.yml` and the old `gateway-smoke` job | `reborn-e2e.yml` runs deterministic architecture/runtime/substrate groups plus WebUI and black-box smoke; `reborn-playwright.yml` owns the broader browser matrix. |
+| `replay-gate.yml` | The `qa-recorded-fixtures` job in `reborn-tests.yml` scrubs fixtures and runs `reborn_qa_recorded_behavior`. |
+| The old `gateway-boundaries` job | `cargo test -p ironclaw_architecture reborn` runs from `code_style.yml`, and the architecture group in `reborn-e2e.yml` exercises the same active Reborn boundaries end to end. |
+
+This mapping is not a claim of one-for-one v1 feature equivalence. Tests for
+retired v1-only behavior were deleted; behavior that remains supported is
+covered through its Reborn owner and production entry path.
+
 ## Deep tier (nightly)
 
 `nightly-deep-ci.yml` (04:00 UTC) reuses `platform-and-compat.yml`,

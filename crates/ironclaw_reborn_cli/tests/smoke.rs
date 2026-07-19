@@ -125,6 +125,15 @@ fn write_sparse_reborn_config(reborn_home: &Path) {
 fn dockerfile_reborn_builds_with_production_features() {
     let dockerfile = std::fs::read_to_string(workspace_root().join("Dockerfile.reborn"))
         .expect("Dockerfile.reborn");
+    let deps_stage = dockerfile
+        .split_once("FROM chef AS deps")
+        .and_then(|(_, stages)| stages.split_once("FROM deps AS builder"))
+        .map(|(stage, _)| stage)
+        .expect("Dockerfile.reborn should define a deps stage");
+    let builder_stage = dockerfile
+        .split_once("FROM deps AS builder")
+        .map(|(_, stage)| stage)
+        .expect("Dockerfile.reborn should define a builder stage");
 
     assert!(
         dockerfile
@@ -141,9 +150,11 @@ fn dockerfile_reborn_builds_with_production_features() {
     );
     assert!(
         dockerfile.contains("corepack enable pnpm")
-            && dockerfile.matches("pnpm install --frozen-lockfile").count() >= 2
-            && dockerfile.contains("crates/ironclaw_webui/frontend"),
-        "Dockerfile.reborn must install WebUI frontend dependencies before cargo-chef and final webui-v2-beta builds: {dockerfile}"
+            && deps_stage.contains("SKIP_FRONTEND_BUILD=1 cargo chef cook")
+            && !builder_stage.contains("pnpm install --frozen-lockfile")
+            && !builder_stage.contains("SKIP_FRONTEND_BUILD=1")
+            && !dockerfile.contains("pnpm install --frozen-lockfile"),
+        "Dockerfile.reborn must skip frontend work during cargo-chef and let the final build script install and build it once: {dockerfile}"
     );
     assert!(
         dockerfile.contains("config.production.toml"),
@@ -153,10 +164,6 @@ fn dockerfile_reborn_builds_with_production_features() {
         dockerfile.contains("config.hosted-single-tenant-volume.toml"),
         "Dockerfile.reborn must ship the hosted volume seed config: {dockerfile}"
     );
-    let builder_stage = dockerfile
-        .split_once("FROM deps AS builder")
-        .map(|(_, stage)| stage)
-        .expect("Dockerfile.reborn should define a builder stage");
     assert!(
         builder_stage.contains("COPY migrations/ migrations/")
             && dockerfile.matches("COPY migrations/ migrations/").count() == 1,
@@ -188,6 +195,15 @@ fn default_dockerfile_targets_reborn_runtime() {
     assert!(
         !dockerfile.contains("ironclaw-legacy") && !dockerfile.contains("--package ironclaw "),
         "default Dockerfile must not reference the retired v1 package or binary: {dockerfile}"
+    );
+    assert_eq!(
+        dockerfile.matches("pnpm install --frozen-lockfile").count(),
+        0,
+        "default Dockerfile must leave frontend installation to the final Rust build script"
+    );
+    assert!(
+        dockerfile.contains("SKIP_FRONTEND_BUILD=1 cargo chef cook"),
+        "default Dockerfile must skip frontend work while caching cargo-chef dependencies"
     );
 }
 

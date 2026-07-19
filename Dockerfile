@@ -53,11 +53,9 @@ ENV CARGO_PROFILE_DIST_PANIC=abort \
     CARGO_PROFILE_DIST_CODEGEN_UNITS=1
 
 COPY --from=planner /app/recipe.json recipe.json
-COPY crates/ironclaw_webui/frontend/ crates/ironclaw_webui/frontend/
-WORKDIR /app/crates/ironclaw_webui/frontend
-RUN pnpm install --frozen-lockfile
-WORKDIR /app
-RUN cargo chef cook \
+# Cache Rust dependencies without running the WebUI build script against the
+# cargo-chef skeleton. The final source build installs and bundles the frontend.
+RUN SKIP_FRONTEND_BUILD=1 cargo chef cook \
     --profile dist \
     --package ironclaw_reborn_cli \
     --features webui-v2-beta,slack-v2-host-beta,telegram-v2-host-beta,openai-compat-beta,libsql,postgres,inmemory-turn-state \
@@ -82,10 +80,6 @@ COPY providers.json providers.json
 RUN mkdir -p src \
     && printf 'fn main() {}\n' > src/main.rs \
     && printf '\n' > src/lib.rs
-
-WORKDIR /app/crates/ironclaw_webui/frontend
-RUN pnpm install --frozen-lockfile
-WORKDIR /app
 
 RUN cargo build \
     --profile dist \
