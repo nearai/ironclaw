@@ -9017,5 +9017,136 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
             )
 
 
+class RunCaseWithRetriesTests(unittest.TestCase):
+    @staticmethod
+    def _probe(success: bool, details: dict[str, object] | None = None):
+        return run_live_qa.ProbeResult(
+            provider="test",
+            mode="live:case",
+            success=success,
+            latency_ms=1,
+            details=dict(details or {}),
+        )
+
+    def test_retries_transient_failure_then_returns_success(self):
+        calls = {"count": 0}
+
+        async def flaky_fn(_ctx):
+            calls["count"] += 1
+            if calls["count"] == 1:
+                return self._probe(False, {"error": "assertion mismatch"})
+            return self._probe(True, {"text_excerpt": "ok"})
+
+        result = asyncio.run(
+            run_live_qa._run_case_with_retries(
+                flaky_fn,
+                object(),
+                attempts=2,
+                is_retriable=run_live_qa._is_case_retriable,
+            )
+        )
+
+        self.assertTrue(result.success)
+        self.assertEqual(result.details["attempts"], 2)
+        self.assertEqual(calls["count"], 2)
+
+    def test_does_not_retry_blocked_failure(self):
+        calls = {"count": 0}
+
+        async def blocked_fn(_ctx):
+            calls["count"] += 1
+            return self._probe(False, {"blocked": True, "error": "precondition"})
+
+        result = asyncio.run(
+            run_live_qa._run_case_with_retries(
+                blocked_fn,
+                object(),
+                attempts=2,
+                is_retriable=run_live_qa._is_case_retriable,
+            )
+        )
+
+        self.assertFalse(result.success)
+        self.assertEqual(result.details["attempts"], 1)
+        self.assertEqual(calls["count"], 1)
+        self.assertTrue(result.details["blocked"])
+
+    def test_does_not_retry_infrastructure_failure(self):
+        calls = {"count": 0}
+
+        async def infra_fn(_ctx):
+            calls["count"] += 1
+            return self._probe(
+                False,
+                {"failure_class": "infrastructure", "inconclusive": True},
+            )
+
+        result = asyncio.run(
+            run_live_qa._run_case_with_retries(
+                infra_fn,
+                object(),
+                attempts=2,
+                is_retriable=run_live_qa._is_case_retriable,
+            )
+        )
+
+        self.assertFalse(result.success)
+        self.assertEqual(result.details["attempts"], 1)
+        self.assertEqual(calls["count"], 1)
+
+    def test_does_not_retry_provider_incident(self):
+        calls = {"count": 0}
+
+        async def incident_fn(_ctx):
+            calls["count"] += 1
+            return self._probe(
+                False,
+                {"failure_category": "model_unavailable", "error": "503"},
+            )
+
+        # _is_provider_incident must gate the retry.
+        self.assertTrue(
+            run_live_qa._is_provider_incident(
+                self._probe(False, {"failure_category": "model_unavailable"})
+            )
+        )
+        result = asyncio.run(
+            run_live_qa._run_case_with_retries(
+                incident_fn,
+                object(),
+                attempts=2,
+                is_retriable=run_live_qa._is_case_retriable,
+            )
+        )
+
+        self.assertFalse(result.success)
+        self.assertEqual(result.details["attempts"], 1)
+        self.assertEqual(calls["count"], 1)
+
+    def test_returns_last_failure_after_exhausting_attempts(self):
+        calls = {"count": 0}
+
+        async def always_fails_fn(_ctx):
+            calls["count"] += 1
+            return self._probe(False, {"error": f"attempt {calls['count']}"})
+
+        result = asyncio.run(
+            run_live_qa._run_case_with_retries(
+                always_fails_fn,
+                object(),
+                attempts=3,
+                is_retriable=run_live_qa._is_case_retriable,
+            )
+        )
+
+        self.assertFalse(result.success)
+        self.assertEqual(result.details["attempts"], 3)
+        self.assertEqual(calls["count"], 3)
+        self.assertEqual(result.details["error"], "attempt 3")
+
+    def test_default_attempts_constant_allows_one_retry(self):
+        self.assertGreaterEqual(run_live_qa.LIVE_QA_CASE_ATTEMPTS, 2)
+
+
 if __name__ == "__main__":
     unittest.main()
