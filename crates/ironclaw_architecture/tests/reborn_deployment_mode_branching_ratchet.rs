@@ -69,12 +69,6 @@ const ALLOWLIST: &[(&str, &str)] = &[
          label argument.",
     ),
     (
-        "input.rs",
-        "`RebornBuildInput` constructors take a profile and pass it through to \
-         `RebornServices::profile()`. Retires when the build input carries a \
-         `DeploymentConfig` instead of a profile.",
-    ),
-    (
         "local_runtime_profile.rs",
         "The composition edge itself: maps a profile to its config and rejects \
          deployments this local-runtime helper does not assemble. Retires into \

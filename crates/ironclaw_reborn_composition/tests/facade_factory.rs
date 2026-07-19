@@ -1,3 +1,7 @@
+// arch-exempt: large_file, pre-existing ~1.9K-line facade test suite; this change is a net-zero rename of build_local_dev_secret_store_for_test call sites with no cases added, plan #6168
+//
+// Decomposition of this suite travels with the composition god-crate shrink
+// (#6168); do not add unrelated cases here.
 #[cfg(feature = "postgres")]
 #[path = "support/postgres.rs"]
 mod postgres_support;
@@ -1311,7 +1315,7 @@ async fn local_dev_secret_store_falls_through_suppressed_keychain_to_dotfile() {
     let composite = std::sync::Arc::new(composite);
     let scoped = ironclaw_reborn_composition::wrap_scoped(std::sync::Arc::clone(&composite));
 
-    ironclaw_reborn_composition::test_support::build_local_dev_secret_store_for_test(
+    ironclaw_reborn_composition::test_support::build_secret_store_for_test(
         root,
         std::sync::Arc::clone(&scoped),
     )
@@ -1323,7 +1327,7 @@ async fn local_dev_secret_store_falls_through_suppressed_keychain_to_dotfile() {
     );
     let cached = std::fs::read_to_string(&key_path).expect("read generated dotfile");
 
-    ironclaw_reborn_composition::test_support::build_local_dev_secret_store_for_test(root, scoped)
+    ironclaw_reborn_composition::test_support::build_secret_store_for_test(root, scoped)
         .await
         .expect("second store build must read the now-cached dotfile idempotently");
     assert_eq!(

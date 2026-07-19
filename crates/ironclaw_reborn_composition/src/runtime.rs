@@ -747,16 +747,16 @@ impl RegistryPersistentApprovalGranteeResolver {
 /// test accessor: production wires one for audit-log observability only, not
 /// correctness the test needs. Propagates policy/resolver construction failures
 /// instead of collapsing them to `None`. Thin wrapper over
-/// `build_local_dev_approval_interaction_service_with_turn_run_source` using
+/// `build_approval_interaction_service_with_turn_run_source` using
 /// `local_runtime.turn_state` as the turn-run snapshot source — production
 /// behavior is unchanged by the seam below.
-pub(crate) fn build_local_dev_approval_interaction_service(
+pub(crate) fn build_approval_interaction_service(
     local_runtime: &crate::factory::RebornRuntimeSubstrate,
     builtin_capability_policy: Arc<BuiltinCapabilityPolicy>,
     turn_coordinator: Arc<dyn TurnCoordinator>,
     audit_sink: Option<Arc<dyn ironclaw_events::AuditSink>>,
 ) -> Result<Arc<dyn ApprovalInteractionService>, RebornRuntimeError> {
-    build_local_dev_approval_interaction_service_with_turn_run_source(
+    build_approval_interaction_service_with_turn_run_source(
         local_runtime,
         builtin_capability_policy,
         turn_coordinator,
@@ -765,17 +765,17 @@ pub(crate) fn build_local_dev_approval_interaction_service(
     )
 }
 
-/// Identical to [`build_local_dev_approval_interaction_service`]
+/// Identical to [`build_approval_interaction_service`]
 /// except the approval turn-run locator reads `turn_run_source` instead of
 /// always deriving it from `local_runtime.turn_state`. Lets a caller whose
 /// real runs live in a DIFFERENT `TurnStateStore` composition (e.g.
 /// `RebornIntegrationGroup`'s own `build_default_planned_runtime`, whose runs
 /// are invisible to this crate's `local_runtime.turn_state`) substitute its
-/// own store. `build_local_dev_approval_interaction_service` is the
+/// own store. `build_approval_interaction_service` is the
 /// production entry point and is a thin wrapper over this function with
 /// `local_runtime.turn_state` as the source, so production behavior is
 /// unchanged.
-pub(crate) fn build_local_dev_approval_interaction_service_with_turn_run_source(
+pub(crate) fn build_approval_interaction_service_with_turn_run_source(
     local_runtime: &crate::factory::RebornRuntimeSubstrate,
     builtin_capability_policy: Arc<BuiltinCapabilityPolicy>,
     turn_coordinator: Arc<dyn TurnCoordinator>,
@@ -1023,7 +1023,7 @@ struct SnapshotApprovalTurnRunLocator {
     /// A trait object (not the concrete `ComposedTurnStateStore`) so a
     /// caller can substitute a different turn-state store's snapshot view —
     /// see `turn_run_snapshot::TurnRunSnapshotSource` and
-    /// `build_local_dev_approval_interaction_service_with_turn_run_source`.
+    /// `build_approval_interaction_service_with_turn_run_source`.
     turn_state: Arc<dyn TurnRunSnapshotSource>,
 }
 
@@ -3134,8 +3134,7 @@ pub async fn build_reborn_runtime(
     // The deployment this build assembles, as data (§4.4/§5.6). Every axis
     // below — live-traffic admission, the cutover gate, substrate selection —
     // reads a field on this value instead of re-matching the profile.
-    let deployment =
-        DeploymentConfig::for_profile(profile, services_input.grants_trusted_laptop_access());
+    let deployment = services_input.deployment().clone();
     if let Some(reason) = deployment.traffic().live_traffic_refusal(profile) {
         return Err(RebornRuntimeError::InvalidArgument { reason });
     }
@@ -3953,7 +3952,7 @@ pub async fn build_reborn_runtime(
         if let (Some(local_runtime), Some(builtin_capability_policy)) =
             (local_runtime, builtin_capability_policy)
         {
-            build_local_dev_approval_interaction_service(
+            build_approval_interaction_service(
                 local_runtime,
                 builtin_capability_policy,
                 Arc::clone(&planned_turn_coordinator),
@@ -4221,7 +4220,7 @@ fn build_webui_auth_interaction_service(
 /// Identical to [`build_webui_auth_interaction_service`] except
 /// the auth read model reads `turn_run_source` instead of a hardcoded
 /// `ComposedTurnStateStore`. See
-/// `build_local_dev_approval_interaction_service_with_turn_run_source`'s doc
+/// `build_approval_interaction_service_with_turn_run_source`'s doc
 /// for why this seam exists.
 fn build_webui_auth_interaction_service_with_turn_run_source(
     product_auth: Option<&RebornProductAuthServices>,
