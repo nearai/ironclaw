@@ -1567,19 +1567,8 @@ impl TestRigBuilder {
         // the channel manager; without this every routine-path notification
         // dies with "channel closed" (the rx used to be dropped at engine
         // construction).
-        if let Some(mut notify_rx) = routine_notify_rx.take() {
-            let notify_channel = Arc::clone(&test_channel);
-            tokio::spawn(async move {
-                use ironclaw::channels::Channel as _;
-                while let Some(response) = notify_rx.recv().await {
-                    let msg = ironclaw::channels::IncomingMessage::new(
-                        notify_channel.channel_name(),
-                        notify_channel.user_id(),
-                        "",
-                    );
-                    let _ = notify_channel.as_ref().respond(&msg, response).await;
-                }
-            });
+        if let Some(notify_rx) = routine_notify_rx.take() {
+            spawn_routine_notify_forwarder(notify_rx, Arc::clone(&test_channel));
         }
 
         // 7b. Register message tool so routines can send messages to channels.
@@ -1721,4 +1710,33 @@ pub async fn run_recorded_trace_v2(filename: &str) {
     rig.run_and_verify_trace(&trace, Duration::from_secs(30))
         .await;
     rig.shutdown();
+}
+
+/// Forward routine-engine notifications into the given [`TestChannel`] so
+/// tests observe them like any other outbound response (production's
+/// `AgentLoop` equivalent routes its `notify_rx` through the channel
+/// manager). Extracted as the deterministic seam pinned by
+/// `support_unit_tests::routine_notify_forwarder_delivers_into_test_channel` —
+/// the regression it guards is the rig dropping the receiver at engine
+/// construction, which killed every routine-path notification with
+/// "channel closed".
+pub fn spawn_routine_notify_forwarder(
+    mut notify_rx: tokio::sync::mpsc::Receiver<OutgoingResponse>,
+    channel: std::sync::Arc<TestChannel>,
+) {
+    tokio::spawn(async move {
+        use ironclaw::channels::Channel as _;
+        while let Some(response) = notify_rx.recv().await {
+            let msg = ironclaw::channels::IncomingMessage::new(
+                channel.channel_name(),
+                channel.user_id(),
+                "",
+            );
+            channel
+                .as_ref()
+                .respond(&msg, response)
+                .await
+                .expect("routine notify forwarder: TestChannel rejected the response");
+        }
+    });
 }
