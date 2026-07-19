@@ -214,7 +214,8 @@ fn release_ci_compiles_reborn_for_all_supported_targets() {
         compile_workflow.contains("fail-fast: false")
             && compile_workflow.contains("cargo build --locked --profile dist")
             && compile_workflow.contains("--package ironclaw_reborn_cli")
-            && compile_workflow.contains("--bin ironclaw-reborn")
+            && compile_workflow.contains("            --bin ironclaw \\\n")
+            && !compile_workflow.contains("--bin ironclaw-reborn")
             && compile_workflow.contains("--target \"$TARGET\"")
             && compile_workflow
                 .contains(&format!("  REBORN_RELEASE_FEATURES: {release_features}\n"))
@@ -230,7 +231,8 @@ fn release_ci_compiles_reborn_for_all_supported_targets() {
             && !compile_workflow.contains("CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_LINKER")
             && compile_workflow.contains("node-version: \"22\"")
             && compile_workflow.contains("corepack enable pnpm")
-            && compile_workflow.contains("binary: ironclaw-reborn.exe")
+            && compile_workflow.contains("binary: ironclaw.exe")
+            && !compile_workflow.contains("binary: ironclaw-reborn")
             && compile_workflow.contains("core.longpaths true"),
         "release CI must use musl-gcc for C dependencies without overriding Rust's self-contained musl linker"
     );
@@ -248,7 +250,7 @@ fn release_ci_compiles_reborn_for_all_supported_targets() {
     );
 
     let build_position = compile_workflow
-        .find("name: Compile ironclaw-reborn")
+        .find("name: Compile ironclaw")
         .expect("compile step");
     let linkage_position = compile_workflow
         .find("name: Verify musl portability")

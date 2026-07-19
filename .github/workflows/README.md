@@ -62,7 +62,7 @@ Rules for a roll-up job that is (or may become) required:
 ## Reborn release binary compile matrix
 
 `reborn-release-compile.yml` is a compile-and-smoke preflight for the shipping
-`ironclaw-reborn` binary. The tag-only `release.yml` calls it for matching
+Reborn `ironclaw` binary. The tag-only `release.yml` calls it for matching
 release tags and will not run its `host` job unless every target succeeds. The
 preflight workflow can also run directly through `workflow_dispatch`; it is not
 triggered by pull requests, so ordinary CLI and WebUI changes do not start the
@@ -79,7 +79,7 @@ seven-platform release matrix.
 | `x86_64-pc-windows-msvc` | `windows-2022` |
 
 Each matrix entry performs a final `cargo build --locked --profile dist` link
-for `ironclaw_reborn_cli` / `ironclaw-reborn` with an explicit compile feature
+for `ironclaw_reborn_cli` / `ironclaw` with an explicit compile feature
 contract owned by this workflow:
 `webui-v2-beta,slack-v2-host-beta,libsql,postgres,inmemory-turn-state`.
 Before upload, the workflow executes that exact native binary with `--version`,
@@ -93,7 +93,7 @@ intentionally not inferred from Docker or #6122.
 The uploaded `reborn-compile-*` artifacts are short-lived preflight evidence.
 Their prefix deliberately does not match the release host's `artifacts-*`
 download pattern, so they are not attached to the GitHub Release. Until #3483
-defines the standalone Reborn tag/version/installer contract,
+defines the canonical Reborn package/tag/installer contract,
 `ironclaw_reborn_cli` remains `dist = false`.
 
 ## Deep tier (nightly)
