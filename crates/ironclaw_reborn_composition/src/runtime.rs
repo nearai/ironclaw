@@ -149,9 +149,15 @@ use crate::runtime_input::{
     TriggerPollerSettings,
 };
 use crate::{
-    RebornBuildError, RebornCompositionProfile, RebornProductAuthServices, RebornReadiness,
-    RebornServices, build_reborn_services,
+    RebornBuildError, RebornProductAuthServices, RebornReadiness, RebornServices,
+    build_reborn_services,
 };
+// Only `check_production_scheduler_wake_wiring` (cfg libsql/postgres) still
+// names the profile type directly now that live-traffic admission reads the
+// DeploymentConfig; gate the import to match so the default lane sees no unused
+// import.
+#[cfg(any(feature = "libsql", feature = "postgres"))]
+use crate::RebornCompositionProfile;
 use production::{
     EmptyCapabilitySurfaceResolver, EmptyIdentityContextSource,
     UnavailableApprovalInteractionService, UnavailableCapabilityIo,

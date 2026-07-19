@@ -1,3 +1,4 @@
+// arch-exempt: large_file, mechanical §4.3 secret-store swap only (InMemorySecretStore -> FilesystemSecretStore::ephemeral), plan #6168
 //! Composition-side implementation of the WebChat v2 LLM-config port.
 //!
 //! Ties together the read/set-active surface ([`RebornProviderAdmin`]), the
@@ -1335,11 +1336,12 @@ mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     use super::*;
+    use ironclaw_filesystem::InMemoryBackend;
     use ironclaw_host_api::{AgentId, ProjectId, ResourceScope, SecretHandle, TenantId, UserId};
     use ironclaw_llm::NEARAI_CLOUD_DEFAULT_BASE_URL;
     use ironclaw_reborn_config::{RebornHome, RebornProfile};
     use ironclaw_secrets::{
-        InMemorySecretStore, SecretLease, SecretLeaseId, SecretMaterial, SecretMetadata,
+        FilesystemSecretStore, SecretLease, SecretLeaseId, SecretMaterial, SecretMetadata,
         SecretStore, SecretStoreError,
     };
 
@@ -1354,11 +1356,11 @@ mod tests {
     }
 
     fn key_store() -> LlmKeyStore {
-        LlmKeyStore::new(Arc::new(InMemorySecretStore::new()))
+        LlmKeyStore::new(Arc::new(FilesystemSecretStore::ephemeral()))
     }
 
     struct CountingMetadataSecretStore {
-        inner: InMemorySecretStore,
+        inner: FilesystemSecretStore<InMemoryBackend>,
         metadata_calls: Arc<AtomicUsize>,
         metadata_for_scope_calls: Arc<AtomicUsize>,
     }
@@ -1366,7 +1368,7 @@ mod tests {
     impl CountingMetadataSecretStore {
         fn new() -> Self {
             Self {
-                inner: InMemorySecretStore::new(),
+                inner: FilesystemSecretStore::ephemeral(),
                 metadata_calls: Arc::new(AtomicUsize::new(0)),
                 metadata_for_scope_calls: Arc::new(AtomicUsize::new(0)),
             }
@@ -1443,13 +1445,13 @@ mod tests {
     }
 
     struct MetadataUnavailableSecretStore {
-        inner: InMemorySecretStore,
+        inner: FilesystemSecretStore<InMemoryBackend>,
     }
 
     impl MetadataUnavailableSecretStore {
         fn new() -> Self {
             Self {
-                inner: InMemorySecretStore::new(),
+                inner: FilesystemSecretStore::ephemeral(),
             }
         }
     }
@@ -1529,13 +1531,13 @@ mod tests {
     /// to an in-memory store. Used to prove provider deletion fails closed when
     /// the stored key cannot be removed.
     struct DeleteUnavailableSecretStore {
-        inner: InMemorySecretStore,
+        inner: FilesystemSecretStore<InMemoryBackend>,
     }
 
     impl DeleteUnavailableSecretStore {
         fn new() -> Self {
             Self {
-                inner: InMemorySecretStore::new(),
+                inner: FilesystemSecretStore::ephemeral(),
             }
         }
     }

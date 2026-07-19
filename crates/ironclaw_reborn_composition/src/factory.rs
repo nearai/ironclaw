@@ -77,7 +77,10 @@ use ironclaw_host_runtime::{
     builtin_first_party_handlers_with_trigger_create_hook_for_process_backend,
     builtin_first_party_package_for_process_backend,
 };
-#[cfg(any(feature = "libsql", feature = "postgres"))]
+// §4.3: the deleted `InMemoryCheckpointStateStore` is gone — both durable and
+// no-durable checkpoint-state wiring share the one
+// `FilesystemCheckpointStateStore` (over the composite root filesystem or a
+// volatile in-memory backend), so this import is unconditional.
 use ironclaw_loop_host::FilesystemCheckpointStateStore;
 use ironclaw_outbound::CommunicationPreferenceRepository;
 // §4.3: the deleted `InMemoryOutboundStateStore` is gone — both durable and
@@ -112,46 +115,6 @@ use ironclaw_resources::{
 // Used by both the durable (`<CompositeRootFilesystem>`) and no-durable
 // (`<InMemoryBackend>`) run-state/approval aliases + builders, so the import is
 // unconditional (arch-simplification §4.3).
-use ironclaw_run_state::{FilesystemApprovalRequestStore, FilesystemRunStateStore};
-#[cfg(any(feature = "libsql", feature = "postgres"))]
-use ironclaw_secrets::FilesystemCredentialBroker;
-#[cfg(any(feature = "libsql", feature = "postgres"))]
-use ironclaw_secrets::FilesystemSecretStore;
-use ironclaw_secrets::SecretStore;
-#[cfg(any(feature = "libsql", feature = "postgres"))]
-use ironclaw_threads::FilesystemSessionThreadService;
-#[cfg(not(any(feature = "libsql", feature = "postgres")))]
-use ironclaw_threads::InMemorySessionThreadService;
-use ironclaw_threads::SessionThreadService;
-use ironclaw_triggers::{
-    TRIGGER_TRUSTED_ADAPTER_INSTALLATION_ID, TRIGGER_TRUSTED_ADAPTER_KIND,
-    TRIGGER_TRUSTED_EXTERNAL_ACTOR_NAMESPACE, TriggerActiveRunLookup, TriggerError, TriggerRecord,
-    TriggerRepository,
-};
-use ironclaw_trust::{AdminConfig, AdminEntry, HostTrustAssignment, HostTrustPolicy};
-#[cfg(feature = "test-support")]
-use ironclaw_trust::{AuthorityCeiling, EffectiveTrustClass, TrustDecision, TrustProvenance};
-#[cfg(all(
-    feature = "inmemory-turn-state",
-    any(feature = "libsql", feature = "postgres")
-))]
-use ironclaw_turns::FilesystemTurnStateBlockPersistence;
-#[cfg(any(feature = "libsql", feature = "postgres"))]
-use ironclaw_turns::FilesystemTurnStateStoreKind;
-#[cfg(any(feature = "libsql", feature = "postgres"))]
-use ironclaw_turns::InMemoryRunProfileResolver;
-#[cfg(any(
-    feature = "inmemory-turn-state",
-    not(any(feature = "libsql", feature = "postgres"))
-))]
-use ironclaw_turns::InMemoryTurnStateStore;
-use ironclaw_turns::{
-    CheckpointStateStore, DefaultTurnCoordinator, ExternalToolCatalog, InMemoryExternalToolCatalog,
-    LoopCheckpointStore,
-};
-#[cfg(not(any(feature = "libsql", feature = "postgres")))]
-use ironclaw_turns::{InMemoryCheckpointStateStore, InMemoryLoopCheckpointStore};
-
 use crate::RebornProductAuthServicePorts;
 use crate::builtin_capability_policy::{BuiltinCapabilityPolicy, builtin_capability_policy};
 #[cfg(feature = "telegram-v2-host-beta")]
@@ -204,6 +167,43 @@ use crate::web_access::register_bundled_web_access_first_party_handlers;
 use crate::{
     RebornAuthContinuationDispatcher, RebornBuildError, RebornBuildInput, RebornCompositionProfile,
     RebornFacadeReadiness, RebornProductAuthServices, RebornReadiness, RebornWorkerReadiness,
+};
+use ironclaw_run_state::{FilesystemApprovalRequestStore, FilesystemRunStateStore};
+#[cfg(any(feature = "libsql", feature = "postgres"))]
+use ironclaw_secrets::FilesystemCredentialBroker;
+#[cfg(any(feature = "libsql", feature = "postgres"))]
+use ironclaw_secrets::FilesystemSecretStore;
+use ironclaw_secrets::SecretStore;
+#[cfg(any(feature = "libsql", feature = "postgres"))]
+use ironclaw_threads::FilesystemSessionThreadService;
+#[cfg(not(any(feature = "libsql", feature = "postgres")))]
+use ironclaw_threads::InMemorySessionThreadService;
+use ironclaw_threads::SessionThreadService;
+use ironclaw_triggers::{
+    TRIGGER_TRUSTED_ADAPTER_INSTALLATION_ID, TRIGGER_TRUSTED_ADAPTER_KIND,
+    TRIGGER_TRUSTED_EXTERNAL_ACTOR_NAMESPACE, TriggerActiveRunLookup, TriggerError, TriggerRecord,
+    TriggerRepository,
+};
+use ironclaw_trust::{AdminConfig, AdminEntry, HostTrustAssignment, HostTrustPolicy};
+#[cfg(feature = "test-support")]
+use ironclaw_trust::{AuthorityCeiling, EffectiveTrustClass, TrustDecision, TrustProvenance};
+#[cfg(all(
+    feature = "inmemory-turn-state",
+    any(feature = "libsql", feature = "postgres")
+))]
+use ironclaw_turns::FilesystemTurnStateBlockPersistence;
+#[cfg(any(feature = "libsql", feature = "postgres"))]
+use ironclaw_turns::FilesystemTurnStateStoreKind;
+#[cfg(any(feature = "libsql", feature = "postgres"))]
+use ironclaw_turns::InMemoryRunProfileResolver;
+#[cfg(any(
+    feature = "inmemory-turn-state",
+    not(any(feature = "libsql", feature = "postgres"))
+))]
+use ironclaw_turns::InMemoryTurnStateStore;
+use ironclaw_turns::{
+    CheckpointStateStore, DefaultTurnCoordinator, ExternalToolCatalog, InMemoryExternalToolCatalog,
+    LoopCheckpointStore,
 };
 
 /// Output of [`build_local_dev_root_filesystem`]: the composed local-dev
@@ -1302,7 +1302,10 @@ impl RebornServices {
             production_runtime: None,
             #[cfg(any(feature = "libsql", feature = "postgres"))]
             production_scheduler_wake: None,
-            secret_store: Arc::new(ironclaw_secrets::InMemorySecretStore::new()),
+            // §4.3: the deleted `FilesystemSecretStore::ephemeral()` is gone — the disabled
+            // bundle wires the one production encrypted secret store over an
+            // in-memory backend with an ephemeral master key.
+            secret_store: Arc::new(ironclaw_secrets::FilesystemSecretStore::ephemeral()),
             #[cfg(any(test, feature = "test-support"))]
             local_dev_wasm_runtime_credential_provider_captured: false,
             #[cfg(any(feature = "libsql", feature = "postgres"))]
@@ -1711,8 +1714,13 @@ async fn build_local_runtime(input: RebornBuildInput) -> Result<RebornServices, 
     .await?;
     #[cfg(any(feature = "libsql", feature = "postgres"))]
     let secret_store: Arc<dyn SecretStore> = local_dev_secret_bundle.0.clone();
+    // §4.3: the deleted `FilesystemSecretStore::ephemeral()` is gone — the no-durable build
+    // wires the one production encrypted `FilesystemSecretStore` over an
+    // `InMemoryBackend` with an ephemeral master key and the tenant-rewriting
+    // `/secrets` mount resolver.
     #[cfg(not(any(feature = "libsql", feature = "postgres")))]
-    let secret_store: Arc<dyn SecretStore> = Arc::new(ironclaw_secrets::InMemorySecretStore::new());
+    let secret_store: Arc<dyn SecretStore> =
+        Arc::new(ironclaw_secrets::FilesystemSecretStore::ephemeral());
     // Admin per-user secret provisioner over the shared root + the SAME crypto
     // as the runtime's own secret store (webui-v2-beta implies libsql, so the
     // bundle above always exists here).
@@ -2721,10 +2729,14 @@ async fn build_local_dev_store_graph(
         Arc::clone(&approvals_filesystem),
     ));
     let turn_state = Arc::new(InMemoryTurnStateStore::with_limits(turn_state_store_limits));
-    let checkpoint_state_store: Arc<dyn CheckpointStateStore> =
-        Arc::new(InMemoryCheckpointStateStore::default());
-    let loop_checkpoint_store: Arc<dyn LoopCheckpointStore> =
-        Arc::new(InMemoryLoopCheckpointStore::default());
+    // §4.3: checkpoint payloads run the production `FilesystemCheckpointStateStore`
+    // over a dedicated volatile `InMemoryBackend`, and checkpoint metadata lives in
+    // the turn-state store — the same `LoopCheckpointStore` wiring the durable
+    // build path uses (`turn_state.clone()`).
+    let checkpoint_state_store: Arc<dyn CheckpointStateStore> = Arc::new(
+        FilesystemCheckpointStateStore::new(crate::wrap_scoped(Arc::new(InMemoryBackend::new()))),
+    );
+    let loop_checkpoint_store: Arc<dyn LoopCheckpointStore> = turn_state.clone();
     let thread_service: Arc<dyn SessionThreadService> =
         Arc::new(InMemorySessionThreadService::default());
     let BudgetSinks {

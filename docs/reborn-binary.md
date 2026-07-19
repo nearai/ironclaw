@@ -662,11 +662,23 @@ Do not port the current `src/cli/*` command tree wholesale. Port commands one at
 
 ## Release packaging decision
 
-`ironclaw-reborn` is **not yet included in cargo-dist release artifacts**.
+The canonical Reborn `ironclaw` binary from `ironclaw_reborn_cli` is **not yet
+included in cargo-dist release artifacts**.
 
-Current `dist plan --output-format=json` with `crates/ironclaw_reborn_cli` marked `dist = false` emits only the root `ironclaw` package artifacts. Removing `dist = false` alone is not enough to ship `ironclaw-reborn` in the existing `ironclaw-v*` release workflow because that workflow is shaped around the root `ironclaw` package tag. Enabling a standalone `ironclaw_reborn_cli` release also requires cargo-dist WiX metadata/template work and an explicit tag/versioning decision.
+The tag-driven release pipeline preflights the shipping binary directly through
+`.github/workflows/reborn-release-compile.yml`. That matrix performs a final
+link on the two GNU Linux, two musl Linux, two macOS, and one Windows target
+configured for releases, then runs the exact native output through config-free
+CLI startup checks. The musl jobs additionally reject `PT_INTERP` and
+`DT_NEEDED` entries so their outputs remain portable to systems without a musl
+loader. Its short-lived `reborn-compile-*` workflow artifacts are preflight
+evidence only and are excluded from the `artifacts-*` set uploaded to the
+GitHub Release. It does not claim `serve`, external-service, installer, or
+canonical Reborn packaging coverage.
 
-Follow-up issue: #3483 tracks packaging `ironclaw-reborn` in release artifacts.
+Current `dist plan --output-format=json` with `crates/ironclaw_reborn_cli` marked `dist = false` emits only the root legacy package artifacts (`ironclaw` package, `ironclaw-legacy` executable). Removing `dist = false` alone is not enough to ship the canonical Reborn `ironclaw` executable in the existing `ironclaw-v*` release workflow because that workflow is shaped around the root `ironclaw` package tag. Enabling the `ironclaw_reborn_cli` release also requires cargo-dist WiX metadata/template work and an explicit package/tag/versioning decision.
+
+Follow-up issue: #3483 tracks packaging the canonical Reborn binary in release artifacts.
 
 Until #3483 is resolved, keep:
 
