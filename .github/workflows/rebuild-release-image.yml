@@ -33,9 +33,17 @@ jobs:
       - name: Extract version from Cargo.toml
         id: version
         run: |
+          # Reborn Dockerfiles carry an exact runtime identity label. Historical
+          # v1 tags do not, so they continue to use the root manifest. Remove
+          # this compatibility branch when #3483 transfers the package identity.
           MANIFEST=Cargo.toml
-          if grep -q -- '--package ironclaw_reborn_cli' Dockerfile; then
+          if grep -Fqx 'LABEL io.nearai.ironclaw.runtime="reborn"' Dockerfile; then
             MANIFEST=crates/ironclaw_reborn_cli/Cargo.toml
+          fi
+
+          if [[ ! -f "${MANIFEST}" ]]; then
+            echo "::error::Expected version manifest '${MANIFEST}' does not exist"
+            exit 1
           fi
           VERSION=$(sed -n 's/^version = "\(.*\)"/\1/p' "$MANIFEST" | head -1)
           if [[ ! "${VERSION}" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]]; then

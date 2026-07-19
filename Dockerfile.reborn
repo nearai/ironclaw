@@ -100,6 +100,8 @@ RUN cargo build \
 
 FROM debian:bookworm-slim@sha256:7b140f374b289a7c2befc338f42ebe6441b7ea838a042bbd5acbfca6ec875818 AS runtime
 
+LABEL io.nearai.ironclaw.runtime="reborn"
+
 RUN apt-get -o Acquire::Retries=3 update \
     && apt-get -o Acquire::Retries=3 install -y --no-install-recommends \
         ca-certificates \
@@ -125,12 +127,15 @@ RUN useradd -m -d /home/ironclaw -u 1000 ironclaw \
     && chown -R ironclaw:ironclaw /home/ironclaw /data/ironclaw-reborn /workspace \
     && chmod +x /usr/local/bin/ironclaw-reborn-entrypoint
 
+# Build stages use /app; runtime commands intentionally start in the user's workspace.
 WORKDIR /workspace
 
 EXPOSE 3000
 
 HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \
-    CMD curl --fail --silent --show-error --max-time 5 "http://127.0.0.1:${PORT:-3000}/api/health" >/dev/null || exit 1
+    CMD port="${PORT:-3000}"; \
+        case "$port" in ''|*[!0-9]*) exit 1 ;; esac; \
+        curl --fail --silent --show-error --max-time 4 "http://127.0.0.1:${port}/api/health" >/dev/null || exit 1
 
 USER ironclaw
 

@@ -206,8 +206,8 @@ fn default_dockerfile_targets_reborn_runtime() {
     assert!(
         dockerfile.contains(
             "FROM debian:bookworm-slim@sha256:7b140f374b289a7c2befc338f42ebe6441b7ea838a042bbd5acbfca6ec875818 AS runtime"
-        ),
-        "default Dockerfile must pin the shipped runtime base image: {dockerfile}"
+        ) && dockerfile.contains("LABEL io.nearai.ironclaw.runtime=\"reborn\""),
+        "default Dockerfile must pin and identify the shipped runtime image: {dockerfile}"
     );
     assert!(
         deps_stage.contains("crates/ironclaw_webui/frontend")
@@ -219,7 +219,10 @@ fn default_dockerfile_targets_reborn_runtime() {
     assert!(
         dockerfile.contains("curl \\")
             && dockerfile.contains("HEALTHCHECK --interval=30s")
-            && dockerfile.contains("http://127.0.0.1:${PORT:-3000}/api/health"),
+            && dockerfile.contains("port=\"${PORT:-3000}\"")
+            && dockerfile.contains("case \"$port\" in ''|*[!0-9]*) exit 1")
+            && dockerfile.contains("--max-time 4")
+            && dockerfile.contains("http://127.0.0.1:${port}/api/health"),
         "default Dockerfile must include a local HTTP healthcheck for the Reborn service: {dockerfile}"
     );
 }
@@ -242,6 +245,11 @@ fn release_workflows_keep_existing_ironclaw_tags() {
         !release.contains("ironclaw-reborn-v[0-9]+.[0-9]+.[0-9]+*")
             && !rebuild.contains("EXPECTED_REF=\"ironclaw-reborn-v${EXPECTED_TAG}\""),
         "release workflows must not introduce a second Reborn tag family"
+    );
+    assert!(
+        rebuild.contains("grep -Fqx 'LABEL io.nearai.ironclaw.runtime=\"reborn\"' Dockerfile")
+            && !rebuild.contains("grep -q -- '--package ironclaw_reborn_cli' Dockerfile"),
+        "historical rebuilds must select their manifest from an explicit runtime identity"
     );
 }
 
@@ -297,6 +305,11 @@ fn docker_workflow_publishes_reborn_process_sandbox() {
         !workflow.contains("file: Dockerfile.worker"),
         "the Docker publish workflow must not rebuild the legacy v1 worker: {workflow}"
     );
+    assert!(
+        workflow.contains("expected exactly one ironclaw_reborn_cli package")
+            && workflow.contains("Unable to resolve a unique ironclaw_reborn_cli package version"),
+        "Docker publishing must fail explicitly when the Reborn package version is unavailable"
+    );
 }
 
 #[test]
@@ -312,7 +325,9 @@ fn release_docker_publish_waits_for_reborn_package_identity() {
         "Reborn must remain outside cargo-dist until the Cargo package identity is transferred"
     );
     assert!(
-        release.contains("docker-image:") && release.contains("if: ${{ false }}"),
+        release.contains("docker-image:")
+            && release.contains("vars.ENABLE_REBORN_RELEASE_DOCKER == 'true'")
+            && !release.contains("if: ${{ false }}"),
         "tag-triggered Docker publishing must remain disabled while release tags use the legacy root version"
     );
 }

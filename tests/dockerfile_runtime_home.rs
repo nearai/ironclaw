@@ -160,6 +160,13 @@ fn reborn_dockerfile_uses_feature_matched_cache_and_published_port_default() {
         "container service must bind all interfaces so published Docker ports are reachable"
     );
     assert!(
+        dockerfile.contains("port=\"${PORT:-3000}\"")
+            && dockerfile.contains("case \"$port\" in ''|*[!0-9]*) exit 1")
+            && dockerfile.contains("--max-time 4")
+            && dockerfile.contains("http://127.0.0.1:${port}/api/health"),
+        "container healthcheck must validate and quote PORT while probing loopback"
+    );
+    assert!(
         dockerfile.contains("config.hosted-single-tenant.toml"),
         "image must include the hosted single-tenant seed config"
     );

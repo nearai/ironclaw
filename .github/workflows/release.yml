@@ -486,8 +486,9 @@ jobs:
     needs: host
     # The default image is Reborn, but release-plz/cargo-dist still version the
     # legacy root package. Keep tag-triggered Docker publishing disabled until
-    # #3483 transfers the `ironclaw` Cargo package identity to Reborn.
-    if: ${{ false }}
+    # #3483 transfers the `ironclaw` Cargo package identity to Reborn. The
+    # repository variable is absent/false by default and makes the gate visible.
+    if: ${{ vars.ENABLE_REBORN_RELEASE_DOCKER == 'true' && always() && needs.host.result == 'success' }}
     permissions:
       contents: read
       packages: read
