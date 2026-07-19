@@ -8,8 +8,8 @@ use chrono::Utc;
 use ironclaw_host_api::{
     AgentId, CapabilityGrant, CapabilityGrantId, CapabilityId, CapabilitySet, EffectKind,
     ExecutionContext, ExtensionId, GrantConstraints, InvocationId, MountAlias, MountGrant,
-    MountPermissions, MountView, NetworkPolicy, NetworkTargetPattern, Principal, RuntimeKind,
-    TenantId, ThreadId, TrustClass, UserId, VirtualPath,
+    MountPermissions, MountView, NetworkPolicy, NetworkTargetPattern, Principal, Resolution,
+    RuntimeKind, TenantId, ThreadId, TrustClass, UserId, VirtualPath,
 };
 use ironclaw_host_runtime::{
     CapabilitySurfacePolicy, ECHO_CAPABILITY_ID, READ_FILE_CAPABILITY_ID, SHELL_CAPABILITY_ID,
@@ -56,7 +56,7 @@ use ironclaw_turns::{
     InMemoryTurnStateStore, LoopCheckpointStore, LoopResultRef, RunProfileResolutionRequest,
     RunProfileResolver, TurnId, TurnRunId, TurnScope, TurnStateStore,
     run_profile::{
-        AgentLoopHostError, CapabilityInputRef, CapabilityInvocation, CapabilityOutcome,
+        AgentLoopHostError, CapabilityInputRef, CapabilityInvocation,
         InMemoryLoopHostMilestoneSink, InstructionSafetyContext, LoopCancelReasonKind,
         LoopModelBudgetAccountant, LoopModelPolicyGuard, LoopRunContext, NoOpBudgetAccountant,
         NoOpPolicyGuard, PromptMode, ProviderToolCall, RegisterProviderToolCallRequest,
@@ -490,18 +490,18 @@ async fn local_dev_adapter_gates_builtin_echo_when_global_auto_approve_is_off() 
         })
         .await
         .unwrap();
-    let CapabilityOutcome::ApprovalRequired {
-        approval_resume: Some(resume),
-        ..
-    } = outcome
-    else {
+    let Resolution::Blocked(blocked) = outcome else {
         panic!("expected builtin echo approval gate, got {outcome:?}");
     };
+    assert_eq!(blocked.kind(), "approval");
     // Raw input/estimate no longer ride the loop-facing approval resume (§5.3
     // Stage 2a-i); the host persists them in the replay-payload store at the gate
     // raise. The gate still carries the resume token that keys that payload.
+    let resume_token = blocked
+        .resume_token()
+        .expect("approval gate carries the resume token that keys the host-side replay payload");
     assert!(
-        !resume.resume_token.as_str().is_empty(),
+        !resume_token.as_str().is_empty(),
         "approval gate must carry the resume token that keys the host-side replay payload"
     );
 }
@@ -618,16 +618,20 @@ async fn local_dev_adapter_invokes_builtin_shell_through_product_live_surface() 
         })
         .await
         .unwrap();
-    let CapabilityOutcome::ApprovalRequired {
-        gate_ref,
-        safe_summary,
-        ..
-    } = outcome
-    else {
+    let Resolution::Blocked(blocked) = outcome else {
         panic!("expected approval gate for builtin shell outcome, got {outcome:?}");
     };
-    assert!(gate_ref.as_str().starts_with("gate:approval-"));
-    assert_eq!(safe_summary, "capability requires approval");
+    assert_eq!(blocked.kind(), "approval");
+    // The minted gate ref is an opaque uuid; the originating loop gate ref
+    // ("gate:approval-...") is preserved on `origin`.
+    let origin = blocked
+        .origin()
+        .expect("approval gate preserves the originating loop gate ref");
+    assert!(origin.as_str().starts_with("gate:approval-"));
+    // Flip consequence (§5.2.9 collapse, confirmed) — the gate-render `safe_summary`
+    // ("capability requires approval") now rides the durable GateRecord, not the
+    // Blocked resolution channel, so it can no longer be asserted from the
+    // returned Resolution here. Re-assert it against the gate record store.
 }
 
 #[tokio::test]
@@ -712,12 +716,22 @@ async fn local_dev_adapter_invokes_extension_scoped_grants_with_loop_driver_prin
         })
         .await
         .unwrap();
-    let CapabilityOutcome::Completed(completed) = outcome else {
+    let Resolution::Done(completed) = outcome else {
         panic!("expected completed extension-grant echo outcome, got {outcome:?}");
     };
+    // The minted `refs.result` is an opaque uuid; the loop result ref the io
+    // staged the output under is preserved on `refs.origin`.
+    let result_ref = LoopResultRef::new(
+        completed
+            .refs
+            .origin
+            .as_ref()
+            .expect("completed outcome preserves the originating loop result ref")
+            .as_str(),
+    )
+    .expect("valid loop result ref");
     assert_eq!(
-        io.result_for_ref(&run_context, &completed.result_ref)
-            .unwrap(),
+        io.result_for_ref(&run_context, &result_ref).unwrap(),
         serde_json::json!("hello extension grant")
     );
 }
@@ -852,12 +866,22 @@ async fn local_dev_adapter_registers_provider_tool_calls_as_run_scoped_inputs() 
         })
         .await
         .unwrap();
-    let CapabilityOutcome::Completed(completed) = outcome else {
+    let Resolution::Done(completed) = outcome else {
         panic!("expected completed provider echo outcome, got {outcome:?}");
     };
+    // The minted `refs.result` is an opaque uuid; the loop result ref the io
+    // staged the output under is preserved on `refs.origin`.
+    let result_ref = LoopResultRef::new(
+        completed
+            .refs
+            .origin
+            .as_ref()
+            .expect("completed outcome preserves the originating loop result ref")
+            .as_str(),
+    )
+    .expect("valid loop result ref");
     assert_eq!(
-        io.result_for_ref(&run_context, &completed.result_ref)
-            .unwrap(),
+        io.result_for_ref(&run_context, &result_ref).unwrap(),
         serde_json::json!("hello from provider tool")
     );
 }
@@ -1100,12 +1124,21 @@ async fn local_dev_adapter_invokes_read_file_with_configured_mounts() {
         })
         .await
         .unwrap();
-    let CapabilityOutcome::Completed(completed) = outcome else {
+    let Resolution::Done(completed) = outcome else {
         panic!("expected completed read_file outcome, got {outcome:?}");
     };
-    let output = io
-        .result_for_ref(&run_context, &completed.result_ref)
-        .unwrap();
+    // The minted `refs.result` is an opaque uuid; the loop result ref the io
+    // staged the output under is preserved on `refs.origin`.
+    let result_ref = LoopResultRef::new(
+        completed
+            .refs
+            .origin
+            .as_ref()
+            .expect("completed outcome preserves the originating loop result ref")
+            .as_str(),
+    )
+    .expect("valid loop result ref");
+    let output = io.result_for_ref(&run_context, &result_ref).unwrap();
     assert_eq!(output["path"], serde_json::json!("/workspace/readme.md"));
     assert_eq!(output["lines_shown"], serde_json::json!(1));
     assert!(
@@ -1348,6 +1381,7 @@ async fn adapter_bundle_satisfies_product_live_runtime_readiness_gate() {
     ));
     let composition = build_product_live_planned_runtime(DefaultPlannedRuntimeParts {
         attachment_read_port: None,
+        gate_record_store: None,
         turn_state,
         thread_service: Arc::clone(&thread_service) as Arc<dyn SessionThreadService>,
         thread_scope: thread_scope.clone(),

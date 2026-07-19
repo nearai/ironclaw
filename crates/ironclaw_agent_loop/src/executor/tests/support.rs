@@ -22,7 +22,7 @@ use ironclaw_turns::{
         RegisterProviderToolCallRequest, ResolvedRunProfile, ResourceBudgetPolicy,
         ResourceBudgetTier, RunClassId, RunProfileFingerprint, RuntimeProfileConstraints,
         SchedulingClass, StageCheckpointPayloadRequest, SteeringPolicy, VisibleCapabilityRequest,
-        VisibleCapabilitySurface,
+        VisibleCapabilitySurface, capability_outcome_to_resolution,
     },
 };
 
@@ -766,7 +766,7 @@ impl ironclaw_turns::run_profile::LoopCapabilityPort for MockHost {
     async fn invoke_capability(
         &self,
         request: CapabilityInvocation,
-    ) -> Result<CapabilityOutcome, AgentLoopHostError> {
+    ) -> Result<ironclaw_host_api::Resolution, AgentLoopHostError> {
         self.single_invocations.lock().expect("lock").push(request);
         self.single_outcomes
             .lock()
@@ -775,12 +775,13 @@ impl ironclaw_turns::run_profile::LoopCapabilityPort for MockHost {
             .ok_or_else(|| {
                 AgentLoopHostError::new(AgentLoopHostErrorKind::Internal, "single script exhausted")
             })
+            .map(|outcome| capability_outcome_to_resolution(outcome).resolution)
     }
 
     async fn invoke_capability_batch(
         &self,
         request: CapabilityBatchInvocation,
-    ) -> Result<ironclaw_turns::run_profile::CapabilityBatchOutcome, AgentLoopHostError> {
+    ) -> Result<ironclaw_host_api::ResolutionBatch, AgentLoopHostError> {
         self.batch_invocations.lock().expect("lock").push(request);
         if let Some(kind) = *self.fail_batch_with.lock().expect("lock") {
             return Err(AgentLoopHostError::new(kind, "scripted batch failure"));
@@ -796,7 +797,14 @@ impl ironclaw_turns::run_profile::LoopCapabilityPort for MockHost {
         if *self.cancel_after_batch_invocation.lock().expect("lock") {
             self.request_cancellation(LoopCancelReasonKind::UserRequested);
         }
-        Ok(outcome)
+        Ok(ironclaw_host_api::ResolutionBatch {
+            resolutions: outcome
+                .outcomes
+                .into_iter()
+                .map(|o| capability_outcome_to_resolution(o).resolution)
+                .collect(),
+            stopped_on_suspension: outcome.stopped_on_suspension,
+        })
     }
 }
 

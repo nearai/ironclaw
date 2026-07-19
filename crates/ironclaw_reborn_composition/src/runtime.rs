@@ -3812,6 +3812,20 @@ pub async fn build_reborn_runtime(
                 Arc::clone(&rt.workspace_filesystem),
             )) as Arc<dyn ironclaw_loop_host::LoopAttachmentReadPort>
         }),
+        // §5.2.9 render-from-record: a `FilesystemGateRecordStore` over the SAME
+        // shared `extension_filesystem` + per-user mount view the local-dev
+        // capability port persists `GateRecord::Auth` into (see
+        // `runtime/local_dev.rs`'s `wire_local_dev_capability_port`, which builds
+        // its store the same way and passes it via `with_gate_record_store`).
+        // Both are stateless views over one durable Arc, so the turn executor
+        // reads back exactly the record the capability port saved under the
+        // matching owner scope. The two constructions MUST stay over the same
+        // filesystem/scope.
+        gate_record_store: local_runtime.map(|rt| {
+            Arc::new(ironclaw_run_state::FilesystemGateRecordStore::new(
+                crate::wrap_scoped(Arc::clone(&rt.extension_filesystem)),
+            )) as Arc<dyn ironclaw_run_state::GateRecordStore>
+        }),
         model_gateway: Arc::clone(&model_gateway),
         checkpoint_state_store: Arc::clone(&checkpoint_state_store)
             as Arc<dyn ironclaw_turns::CheckpointStateStore>,

@@ -4,17 +4,17 @@ use std::{
 };
 
 use async_trait::async_trait;
-use ironclaw_host_api::{CapabilityId, ProviderToolName, RuntimeKind};
+use ironclaw_host_api::{CapabilityId, ProviderToolName, Resolution, ResolutionBatch, RuntimeKind};
 use ironclaw_loop_host::{LoopCapabilityInputResolver, LoopCapabilityResultWriter};
 use ironclaw_turns::{
     CapabilityActivityId,
     run_profile::{
         AgentLoopHostError, AgentLoopHostErrorKind, CapabilityBatchInvocation,
-        CapabilityBatchOutcome, CapabilityCallCandidate, CapabilityDescriptorView,
-        CapabilityInputRef, CapabilityInvocation, CapabilityOutcome, CapabilitySurfaceVersion,
-        ConcurrencyHint, LoopCapabilityPort, LoopRunContext, ProviderToolCall,
-        ProviderToolCallCapabilityIds, ProviderToolCallReplay, ProviderToolDefinition,
-        RegisterProviderToolCallRequest, VisibleCapabilityRequest, VisibleCapabilitySurface,
+        CapabilityCallCandidate, CapabilityDescriptorView, CapabilityInputRef,
+        CapabilityInvocation, CapabilityOutcome, CapabilitySurfaceVersion, ConcurrencyHint,
+        LoopCapabilityPort, LoopRunContext, ProviderToolCall, ProviderToolCallCapabilityIds,
+        ProviderToolCallReplay, ProviderToolDefinition, RegisterProviderToolCallRequest,
+        VisibleCapabilityRequest, VisibleCapabilitySurface, capability_outcome_to_resolution,
     },
 };
 
@@ -490,7 +490,7 @@ impl LoopCapabilityPort for SyntheticCapabilityPort {
     async fn invoke_capability(
         &self,
         request: CapabilityInvocation,
-    ) -> Result<CapabilityOutcome, AgentLoopHostError> {
+    ) -> Result<Resolution, AgentLoopHostError> {
         let Some(capability) = self.capabilities_by_id.get(&request.capability_id) else {
             return self.inner.invoke_capability(request).await;
         };
@@ -567,33 +567,39 @@ impl LoopCapabilityPort for SyntheticCapabilityPort {
                 );
             }
         }
-        handler
+        // Synthetic handlers still produce `CapabilityOutcome` (unchanged
+        // internal trait); collapse it to the host `Resolution` at this
+        // `LoopCapabilityPort` boundary.
+        let outcome = handler
             .invoke(SyntheticCapabilityInvocation {
                 run_context: self.run_context.clone(),
                 request,
                 input,
                 result_writer: Arc::clone(&self.result_writer),
             })
-            .await
+            .await?;
+        Ok(capability_outcome_to_resolution(outcome).resolution)
     }
 
     async fn invoke_capability_batch(
         &self,
         request: CapabilityBatchInvocation,
-    ) -> Result<CapabilityBatchOutcome, AgentLoopHostError> {
-        let mut outcomes = Vec::new();
+    ) -> Result<ResolutionBatch, AgentLoopHostError> {
+        let mut resolutions = Vec::new();
         let mut stopped_on_suspension = false;
         for invocation in request.invocations {
-            let outcome = self.invoke_capability(invocation).await?;
-            let is_suspension = outcome.is_suspension();
-            outcomes.push(outcome);
-            if request.stop_on_first_suspension && is_suspension {
+            let resolution = self.invoke_capability(invocation).await?;
+            // `parks()` is the batch-stop predicate (gates + suspensions), the
+            // Resolution-side successor to `CapabilityOutcome::is_suspension`.
+            let parks = resolution.parks();
+            resolutions.push(resolution);
+            if request.stop_on_first_suspension && parks {
                 stopped_on_suspension = true;
                 break;
             }
         }
-        Ok(CapabilityBatchOutcome {
-            outcomes,
+        Ok(ResolutionBatch {
+            resolutions,
             stopped_on_suspension,
         })
     }

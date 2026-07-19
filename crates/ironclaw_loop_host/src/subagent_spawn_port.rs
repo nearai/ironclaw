@@ -10,7 +10,10 @@ use std::{
 
 use async_trait::async_trait;
 use chrono::Utc;
-use ironclaw_host_api::{CapabilityId, InvocationId, ProviderToolName, RuntimeKind, ThreadId};
+use ironclaw_host_api::{
+    CapabilityId, InvocationId, ProviderToolName, Resolution, ResolutionBatch, RuntimeKind,
+    ThreadId,
+};
 use ironclaw_threads::{
     AcceptInboundMessageRequest, EnsureThreadRequest, MessageContent, SessionThreadService,
     ThreadMessageId, ThreadScope,
@@ -22,12 +25,12 @@ use ironclaw_turns::{
     TurnError, TurnErrorCategory, TurnRunId, TurnScope, TurnSpawnTreePort, TurnSpawnTreeStateStore,
     run_profile::{
         AgentLoopHostError, AgentLoopHostErrorKind, CapabilityBatchInvocation,
-        CapabilityBatchOutcome, CapabilityCallCandidate, CapabilityDenied,
-        CapabilityDeniedReasonKind, CapabilityDescriptorView, CapabilityFailure,
-        CapabilityFailureKind, CapabilityInputRef, CapabilityInvocation, CapabilityOutcome,
-        ConcurrencyHint, LoopCapabilityPort, LoopRunContext, LoopSafeSummary, ProviderToolCall,
-        ProviderToolCallCapabilityIds, ProviderToolCallReplay, ProviderToolDefinition,
-        RegisterProviderToolCallRequest, VisibleCapabilityRequest, VisibleCapabilitySurface,
+        CapabilityCallCandidate, CapabilityDenied, CapabilityDeniedReasonKind,
+        CapabilityDescriptorView, CapabilityFailure, CapabilityFailureKind, CapabilityInputRef,
+        CapabilityInvocation, CapabilityOutcome, ConcurrencyHint, LoopCapabilityPort,
+        LoopRunContext, LoopSafeSummary, ProviderToolCall, ProviderToolCallCapabilityIds,
+        ProviderToolCallReplay, ProviderToolDefinition, RegisterProviderToolCallRequest,
+        VisibleCapabilityRequest, VisibleCapabilitySurface, capability_outcome_to_resolution,
         sanitize_model_visible_text,
     },
 };
@@ -1161,7 +1164,7 @@ impl LoopCapabilityPort for SubagentSpawnCapabilityPort {
     async fn invoke_capability(
         &self,
         request: CapabilityInvocation,
-    ) -> Result<CapabilityOutcome, AgentLoopHostError> {
+    ) -> Result<Resolution, AgentLoopHostError> {
         if self.is_spawn(&request.capability_id) {
             let args = self
                 .deps
@@ -1169,9 +1172,10 @@ impl LoopCapabilityPort for SubagentSpawnCapabilityPort {
                 .decode(&self.run_context, &request.input_ref)
                 .await?;
             if let Some(outcome) = self.authorize_spawn(&request).await? {
-                return Ok(outcome);
+                return Ok(capability_outcome_to_resolution(outcome).resolution);
             }
-            return self.handle_spawn_with_gate(&request, args, None).await;
+            let outcome = self.handle_spawn_with_gate(&request, args, None).await?;
+            return Ok(capability_outcome_to_resolution(outcome).resolution);
         }
         self.inner.invoke_capability(request).await
     }
@@ -1179,8 +1183,8 @@ impl LoopCapabilityPort for SubagentSpawnCapabilityPort {
     async fn invoke_capability_batch(
         &self,
         request: CapabilityBatchInvocation,
-    ) -> Result<CapabilityBatchOutcome, AgentLoopHostError> {
-        let mut outcomes = Vec::with_capacity(request.invocations.len());
+    ) -> Result<ResolutionBatch, AgentLoopHostError> {
+        let mut resolutions: Vec<Resolution> = Vec::with_capacity(request.invocations.len());
         let mut batch_compensations = Vec::new();
         // Pre-decode every spawn invocation before allocating the shared batch
         // gate. Only batches with at least two valid blocking spawns benefit
@@ -1261,14 +1265,18 @@ impl LoopCapabilityPort for SubagentSpawnCapabilityPort {
                             .as_ref()
                             .is_some_and(|batch_gate| batch_gate == gate_ref)
                 );
-                let suspended = outcome.is_suspension();
-                outcomes.push(outcome);
-                if suspended && request.stop_on_first_suspension && !batch_await_dependent {
+                // `parks()`, not `is_suspension()` (H1): the batch stops on any
+                // parking resolution (gate or suspension), except a coalesced
+                // batch-await-dependent which continues to accrue siblings.
+                let resolution = capability_outcome_to_resolution(outcome).resolution;
+                let parks = resolution.parks();
+                resolutions.push(resolution);
+                if parks && request.stop_on_first_suspension && !batch_await_dependent {
                     // Suspension is a partial-success boundary, not a failed
                     // batch; prior successful spawns remain committed.
                     batch_compensations.clear();
-                    return Ok(CapabilityBatchOutcome {
-                        outcomes,
+                    return Ok(ResolutionBatch {
+                        resolutions,
                         stopped_on_suspension: true,
                     });
                 }
@@ -1298,20 +1306,20 @@ impl LoopCapabilityPort for SubagentSpawnCapabilityPort {
                 }
             };
             let stopped = inner.stopped_on_suspension;
-            outcomes.extend(inner.outcomes);
+            resolutions.extend(inner.resolutions);
             if stopped && request.stop_on_first_suspension {
                 // Propagate the inner partial-success stop without rolling back
                 // earlier successful spawns from this outer batch.
                 batch_compensations.clear();
-                return Ok(CapabilityBatchOutcome {
-                    outcomes,
+                return Ok(ResolutionBatch {
+                    resolutions,
                     stopped_on_suspension: true,
                 });
             }
         }
 
-        Ok(CapabilityBatchOutcome {
-            outcomes,
+        Ok(ResolutionBatch {
+            resolutions,
             stopped_on_suspension: false,
         })
     }

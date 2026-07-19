@@ -457,8 +457,10 @@ impl OutboundDeliveryTargetSetHandler {
         // fingerprint that MUST match the one saved at raise; the input the
         // decorator already reconstituted (`invocation.input`) is cross-checked
         // against the persisted payload here as anti-tamper.
-        let replay_scope =
-            super::local_dev_resource_scope_for_run(&invocation.run_context, &self.fallback_user_id);
+        let replay_scope = super::local_dev_resource_scope_for_run(
+            &invocation.run_context,
+            &self.fallback_user_id,
+        );
         let replay = self
             .replay_payload_store
             .load(&replay_scope, invocation_id)
@@ -503,7 +505,15 @@ impl OutboundDeliveryTargetSetHandler {
                 "outbound delivery target approval has not been granted; re-request approval",
             )?));
         }
-        if approval_record.request.correlation_id != resume.correlation_id {
+        // Correlation identity is reconstituted host-side from the replay payload
+        // persisted at the gate raise (§5.3 Stage 2a-i), NOT read from
+        // `resume.correlation_id`: post-flip the loop-facing gate channel no longer
+        // carries the original correlation id, so the executor mints a fresh
+        // advisory one when it reconstructs the resume from the gate ref. The
+        // authoritative value — the one this approval record was minted under — is
+        // the one persisted alongside {input, estimate} in the replay payload, the
+        // same source of truth the loop-host runtime path reconstitutes from.
+        if approval_record.request.correlation_id != replay.correlation_id {
             return Err(AgentLoopHostError::new(
                 AgentLoopHostErrorKind::InvalidInvocation,
                 "outbound delivery target approval correlation does not match",

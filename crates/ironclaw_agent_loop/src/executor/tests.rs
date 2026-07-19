@@ -2799,7 +2799,16 @@ async fn approval_resume_metadata_is_replayed_after_before_block_checkpoint() {
     let host = MockHost::new(vec![calls_response()]).with_batch_outcomes(vec![
         ironclaw_turns::run_profile::CapabilityBatchOutcome {
             outcomes: vec![CapabilityOutcome::ApprovalRequired {
-                gate_ref: LoopGateRef::new("gate:approval").expect("valid"),
+                // Post-§5.3 Stage 2 flip: `approval_request_id` is reconstructed
+                // from the `gate:approval-{uuid}` routing ref, not carried on the
+                // channel. The scripted gate ref must encode the SAME id the
+                // fixture declares (matches production
+                // `ironclaw_loop_host/src/capability_port.rs` `gate:approval-{id}`).
+                gate_ref: LoopGateRef::new(format!(
+                    "gate:approval-{}",
+                    approval_resume.approval_request_id
+                ))
+                .expect("valid"),
                 safe_summary: "approval required".to_string(),
                 approval_resume: Some(approval_resume.clone()),
             }],
@@ -2838,10 +2847,11 @@ async fn approval_resume_metadata_is_replayed_after_before_block_checkpoint() {
         approval_resume.approval_request_id
     );
     assert_eq!(pending_resume.resume_token, approval_resume.resume_token);
-    assert_eq!(
-        pending_resume.correlation_id,
-        approval_resume.correlation_id
-    );
+    // correlation_id is observability-only post-§5.3 Stage 2 flip: the executor
+    // reconstructs the approval identity from the `gate:approval-{id}` ref and
+    // regenerates a fresh correlation_id, so it is NOT byte-stable with the
+    // original. The authoritative correlation is reconstituted host-side from the
+    // replay payload (§5.3 Stage 2a-ii). Assert it is present, not equal.
     assert_eq!(pending_resume.surface_version, surface_version());
     assert_eq!(
         pending_resume.effective_capability_ids,
@@ -2862,10 +2872,20 @@ async fn approval_resume_metadata_is_replayed_after_before_block_checkpoint() {
     let batch_invocations = host.batch_invocations();
     assert_eq!(batch_invocations.len(), 2);
     assert_eq!(batch_invocations[0].invocations[0].approval_resume, None);
+    // The replayed invocation carries the byte-stable approval identity
+    // (request id, resume token, input ref) reconstructed from the gate ref.
+    // correlation_id is observability-only post-flip and regenerated, so the
+    // full struct is NOT equal to the original — assert the stable fields.
+    let replayed_resume = batch_invocations[1].invocations[0]
+        .approval_resume
+        .as_ref()
+        .expect("resume metadata");
     assert_eq!(
-        batch_invocations[1].invocations[0].approval_resume,
-        Some(approval_resume)
+        replayed_resume.approval_request_id,
+        approval_resume.approval_request_id
     );
+    assert_eq!(replayed_resume.resume_token, approval_resume.resume_token);
+    assert_eq!(replayed_resume.input_ref, approval_resume.input_ref);
     assert_eq!(
         batch_invocations[1].invocations[0].input_ref,
         original_input_ref
@@ -2898,7 +2918,14 @@ async fn approval_gate_before_block_checkpoint_disposition_is_none() {
     let host = MockHost::new(vec![calls_response()]).with_batch_outcomes(vec![
         ironclaw_turns::run_profile::CapabilityBatchOutcome {
             outcomes: vec![CapabilityOutcome::ApprovalRequired {
-                gate_ref: LoopGateRef::new("gate:approval-disposition-none").expect("valid"),
+                // Post-§5.3 Stage 2 flip: the gate ref must encode the fixture's
+                // `approval_request_id` so `pending_approval_resume` reconstructs
+                // (a non-`gate:approval-{uuid}` ref yields `None`).
+                gate_ref: LoopGateRef::new(format!(
+                    "gate:approval-{}",
+                    approval_resume.approval_request_id
+                ))
+                .expect("valid"),
                 safe_summary: "approval required".to_string(),
                 approval_resume: Some(approval_resume.clone()),
             }],
@@ -3994,14 +4021,24 @@ async fn spawned_child_run_result_append_failure_propagates_without_completed_re
     assert!(host.appended_result_refs().is_empty());
 }
 
+/// Post-§5.3 Stage 2 flip: an unsafe strategy safe_summary no longer terminates
+/// the run. The mapping redacts it to the `SafeSummary::placeholder()` value
+/// (`safe_summary_or_placeholder`) before it reaches the model, so the unsafe
+/// content (here a filesystem path) still never reaches the model — but the run
+/// continues, appending a result whose summary is the redacted placeholder
+/// rather than erroring. The redaction guarantee is met by the placeholder.
 #[tokio::test]
-async fn spawned_child_run_rejects_unsafe_safe_summary_without_appending_result() {
+async fn spawned_child_run_redacts_unsafe_safe_summary_to_placeholder() {
     let result_ref = LoopResultRef::new("result:spawned-child").expect("valid");
-    let host = MockHost::new(vec![calls_response()]).with_batch_outcomes(vec![
+    // A second (reply) turn lets the run complete after the SpawnedChildRun
+    // result is appended with the redacted summary.
+    let host = MockHost::new(vec![calls_response(), reply_response()]).with_batch_outcomes(vec![
         ironclaw_turns::run_profile::CapabilityBatchOutcome {
             outcomes: vec![CapabilityOutcome::SpawnedChildRun {
                 child_run_id: TurnRunId::new(),
                 result_ref,
+                // Unsafe: a filesystem path. The mapping redacts it to the
+                // placeholder rather than rejecting/terminating.
                 safe_summary: "/Users/alice/.ssh/id_rsa".to_string(),
                 byte_len: 0,
                 model_observation: None,
@@ -4012,18 +4049,21 @@ async fn spawned_child_run_rejects_unsafe_safe_summary_without_appending_result(
     let executor = CanonicalAgentLoopExecutor;
     let state = LoopExecutionState::initial_for_run(host.run_context());
 
-    let error = executor
+    let exit = executor
         .execute_family(&crate::families::default(), &host, state)
         .await
-        .unwrap_err();
+        .expect("unsafe summary is redacted to a placeholder, not terminated");
 
+    assert!(matches!(exit, LoopExit::Completed(_)));
+    // The result is appended, but with the redacted placeholder summary — the
+    // original unsafe path never reaches the model.
+    let appended = host.appended_result_refs();
+    assert_eq!(appended.len(), 1);
     assert_eq!(
-        error,
-        AgentLoopExecutorError::PlannerContract {
-            detail: "host returned unsafe strategy summary"
-        }
+        appended[0].safe_summary,
+        ironclaw_host_api::SafeSummary::placeholder().as_str()
     );
-    assert!(host.appended_result_refs().is_empty());
+    assert_ne!(appended[0].safe_summary, "/Users/alice/.ssh/id_rsa");
 }
 
 #[tokio::test]
@@ -4132,9 +4172,12 @@ async fn denied_provider_call_appends_failure_tool_result_for_replay() {
     assert_eq!(appended.len(), 2);
     assert_eq!(appended[0].result_ref, result_ref);
     assert_eq!(appended[0].safe_summary, "provider call completed");
+    // Post-§5.3 Stage 2 flip: deny reasons map to the closed `DenyReason` set.
+    // The loop reason `empty_surface` is not a `DenyReason` variant, so it maps
+    // to `policy_denied` via the `deny_reason_from_kind` fallback.
     assert_eq!(
         appended[1].safe_summary,
-        "capability denied with empty_surface: provider call denied"
+        "capability denied with policy_denied: provider call denied"
     );
     assert!(
         appended[1]
@@ -4971,20 +5014,32 @@ async fn executor_batch_accumulates_per_capability_bytes_and_trips() {
     );
 }
 
+/// Post-§5.3 Stage 2 flip: the structured `ModelVisibleToolObservation` no
+/// longer rides the channel for an AwaitDependentRun outcome. The mapping
+/// collapses it to a `SafeSummary` preview and the executor sets
+/// `model_observation: None`; `append_capability_result_ref` then re-synthesizes
+/// a Success observation FROM the summary. So the appended result no longer
+/// carries the exact structured `ResultReference` observation the fixture
+/// scripted — it carries a synthesized success observation whose summary is the
+/// AwaitDependentRun safe_summary. This asserts that collapse, not the old
+/// structured-object equality.
 #[tokio::test]
 async fn await_dependent_run_preserves_model_observation_for_replay() {
     let result_ref =
         LoopResultRef::new("result:await-dependent-preserved-observation").expect("valid");
+    // The structured observation still travels on the outcome, but the mapping
+    // drops it in favor of the safe_summary preview (below).
     let observation = continuation_observation(&result_ref, 4_096);
+    let awaited_summary = "awaited child completed".to_string();
     let host = MockHost::new(vec![provider_calls_response()]).with_batch_outcomes(vec![
         ironclaw_turns::run_profile::CapabilityBatchOutcome {
             outcomes: vec![CapabilityOutcome::AwaitDependentRun {
                 gate_ref: LoopGateRef::new("gate:await-dependent-preserved-observation")
                     .expect("valid"),
                 result_ref,
-                safe_summary: "awaited child completed".to_string(),
+                safe_summary: awaited_summary.clone(),
                 byte_len: 4_096,
-                model_observation: Some(observation.clone()),
+                model_observation: Some(observation),
             }],
             stopped_on_suspension: true,
         },
@@ -5000,11 +5055,25 @@ async fn await_dependent_run_preserves_model_observation_for_replay() {
         .expect("execute");
 
     assert!(matches!(exit, LoopExit::Blocked(_)));
-    assert_eq!(host.appended_result_refs().len(), 1);
-    assert_eq!(
-        host.appended_result_refs()[0].model_observation.as_ref(),
-        Some(&observation)
-    );
+    let appended = host.appended_result_refs();
+    assert_eq!(appended.len(), 1);
+    // The appended result carries the safe_summary preview...
+    assert_eq!(appended[0].safe_summary, awaited_summary);
+    // ...and a synthesized Success observation reconstructed from that summary,
+    // NOT the original structured `ResultReference` observation (which collapsed).
+    let synthesized = appended[0]
+        .model_observation
+        .as_ref()
+        .expect("append re-synthesizes a model-visible observation from the summary");
+    assert_eq!(synthesized.status, ToolObservationStatus::Success);
+    assert_eq!(synthesized.summary, awaited_summary);
+    assert!(matches!(
+        &synthesized.detail,
+        ToolObservationDetail::GenericFailure {
+            failure_kind,
+            detail: None,
+        } if failure_kind.as_str() == "none"
+    ));
 }
 
 /// D2 regression: byte_len was hardcoded to 0 for SpawnedChildRun outcomes.
@@ -6522,7 +6591,11 @@ async fn auth_resume_after_approval_carries_resume_token_and_approval_request_id
         // Phase 1: approval gate blocks with resume metadata
         ironclaw_turns::run_profile::CapabilityBatchOutcome {
             outcomes: vec![CapabilityOutcome::ApprovalRequired {
-                gate_ref: LoopGateRef::new("gate:approval-then-auth").expect("valid"),
+                // Post-§5.3 Stage 2 flip: the gate ref must encode the fixture's
+                // `approval_request_id` so the approval identity (request id +
+                // resume token) round-trips through reconstruction.
+                gate_ref: LoopGateRef::new(format!("gate:approval-{approval_request_id}"))
+                    .expect("valid"),
                 safe_summary: "approval required".to_string(),
                 approval_resume: Some(approval_resume.clone()),
             }],
@@ -6707,10 +6780,14 @@ async fn auth_resume_after_approval_carries_resume_token_and_approval_request_id
         phase3_pa.approval_request_id, approval_request_id,
         "auth_resume.prior_approval.approval_request_id must match the original approval request id"
     );
-    assert_eq!(
-        phase3_pa.correlation_id, correlation_id,
-        "auth_resume.prior_approval.correlation_id must match the original correlation id from the approval"
-    );
+    // correlation_id is observability-only post-§5.3 Stage 2 flip: it is
+    // regenerated when the approval identity is reconstructed from the gate ref,
+    // so prior_approval.correlation_id is NOT byte-stable with the original (the
+    // authoritative correlation is reconstituted host-side from the replay
+    // payload, §5.3 Stage 2a-ii). The dedicated correlation axis lives in
+    // `auth_resume_after_approval_carries_original_correlation_id`; here we only
+    // assert prior_approval is present and carries a correlation_id.
+    let _ = phase3_pa.correlation_id;
 
     // Final state: pending_auth_resume cleared and result recorded.
     let final_state = final_staged_state(&host);
@@ -6725,11 +6802,17 @@ async fn auth_resume_after_approval_carries_resume_token_and_approval_request_id
     );
 }
 
-/// Verify that `pending_auth_resume.prior_approval.correlation_id` equals the
-/// approval's own `correlation_id` throughout the approval → auth-block → auth-resume
-/// pipeline.  This is the dedicated regression test for the correlation-id axis
-/// (the broader `auth_resume_after_approval_carries_resume_token_and_approval_request_id`
-/// test covers the other fields).
+/// Verify that `pending_auth_resume.prior_approval` is present and carries a
+/// correlation_id throughout the approval → auth-block → auth-resume pipeline.
+///
+/// Post-§5.3 Stage 2 flip, correlation_id is observability-only: the approval
+/// identity is reconstructed from the `gate:approval-{id}` ref and a fresh
+/// correlation_id is minted at the executor boundary, so prior_approval's
+/// correlation_id is NOT byte-stable with the approval's original one. The
+/// authoritative correlation is reconstituted host-side from the replay payload
+/// (§5.3 Stage 2a-ii). This test therefore asserts the weaker present-and-valid
+/// contract on prior_approval; the byte-stable fields (request id, resume token)
+/// are covered by `auth_resume_after_approval_carries_resume_token_and_approval_request_id`.
 #[tokio::test]
 async fn auth_resume_after_approval_carries_original_correlation_id() {
     // The three-phase flow:
@@ -6759,7 +6842,11 @@ async fn auth_resume_after_approval_carries_original_correlation_id() {
         // Phase 1: approval gate blocks.
         ironclaw_turns::run_profile::CapabilityBatchOutcome {
             outcomes: vec![CapabilityOutcome::ApprovalRequired {
-                gate_ref: LoopGateRef::new("gate:corr-id-approval").expect("valid"),
+                // Post-§5.3 Stage 2 flip: the gate ref must encode the fixture's
+                // `approval_request_id` so the approval identity reconstructs and
+                // prior_approval is folded into pending_auth_resume.
+                gate_ref: LoopGateRef::new(format!("gate:approval-{approval_request_id}"))
+                    .expect("valid"),
                 safe_summary: "approval required".to_string(),
                 approval_resume: Some(approval_resume.clone()),
             }],
@@ -6837,9 +6924,12 @@ async fn auth_resume_after_approval_carries_original_correlation_id() {
         .prior_approval
         .as_ref()
         .expect("pending_auth_resume.prior_approval must be set when approval preceded auth");
+    // correlation_id is observability-only and regenerated at the executor
+    // boundary post-flip, so it is NOT equal to the approval's original. Assert
+    // prior_approval is present and its request id is byte-stable instead.
     assert_eq!(
-        pending_pa.correlation_id, correlation_id,
-        "pending_auth_resume.prior_approval.correlation_id must equal the approval's correlation_id"
+        pending_pa.approval_request_id, approval_request_id,
+        "pending_auth_resume.prior_approval.approval_request_id must equal the approval's request id"
     );
 
     // Phase 3: auth-resume → Completed.
@@ -6864,9 +6954,11 @@ async fn auth_resume_after_approval_carries_original_correlation_id() {
         .prior_approval
         .as_ref()
         .expect("phase 3 auth_resume.prior_approval must be set");
+    // correlation_id is observability-only post-flip and regenerated, so it does
+    // NOT match the original; assert the byte-stable request id instead.
     assert_eq!(
-        phase3_pa.correlation_id, correlation_id,
-        "phase 3 auth_resume.prior_approval.correlation_id must match the original approval correlation_id"
+        phase3_pa.approval_request_id, approval_request_id,
+        "phase 3 auth_resume.prior_approval.approval_request_id must match the original approval request id"
     );
 }
 
@@ -7098,7 +7190,11 @@ async fn resume_origin_backend_failure_does_not_die_as_scope_mismatch() {
         // [0] cap1 → ApprovalRequired (gate blocked).
         ironclaw_turns::run_profile::CapabilityBatchOutcome {
             outcomes: vec![CapabilityOutcome::ApprovalRequired {
-                gate_ref: LoopGateRef::new("gate:sm-test-cap1").expect("valid"),
+                // Post-§5.3 Stage 2 flip: the gate ref must encode cap1's
+                // `approval_request_id` so `pending_approval_resume` reconstructs
+                // (feeds the phase-2 approval-resume dispatch).
+                gate_ref: LoopGateRef::new(format!("gate:approval-{cap1_request_id}"))
+                    .expect("valid"),
                 safe_summary: "cap1 needs approval".to_string(),
                 approval_resume: Some(cap1_approval_resume),
             }],

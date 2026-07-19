@@ -18,22 +18,21 @@ use ironclaw_turns::{
     RunProfileId, RunProfileVersion, TurnCheckpointId, TurnId, TurnRunId, TurnScope,
     run_profile::{
         AgentLoopHostError, AgentLoopHostErrorKind, AppendCapabilityResultRef, AssistantReply,
-        CancellationPolicy, CapabilityBatchInvocation, CapabilityBatchOutcome,
-        CapabilityCallCandidate, CapabilityDescriptorView, CapabilityFailure,
-        CapabilityFailureKind, CapabilityInputRef, CapabilityInvocation, CapabilityOutcome,
-        CapabilityProgress, CapabilityResultMessage, CapabilitySurfaceProfileId,
-        CapabilitySurfaceVersion, CheckpointPolicy, CheckpointSchemaId, ConcurrencyClass,
-        ConcurrencyHint, ContentDigest, ContextProfileId, FinalizeAssistantMessage,
-        LoopCancellationPort, LoopCancellationSignal, LoopCheckpointKind, LoopCheckpointRequest,
-        LoopCheckpointStateRef, LoopCompactionError, LoopCompactionOutcome, LoopCompactionRequest,
-        LoopCompactionResponse, LoopContextBundle, LoopContextCompactionMetadata,
-        LoopContextRequest, LoopDriverId, LoopInput, LoopInputAck, LoopInputAckToken,
-        LoopInputBatch, LoopInputCursor, LoopInputCursorToken, LoopModelMessage, LoopModelRequest,
-        LoopModelResponse, LoopProgressEvent, LoopPromptBundle, LoopPromptBundleRef,
-        LoopPromptBundleRequest, LoopRunContext, LoopRunInfoPort, ModelProfileId, ModelStreamChunk,
-        ParentLoopOutput, ProviderToolCallReference, RedactedRunProfileProvenance,
-        ResolvedRunProfile, ResourceBudgetPolicy, ResourceBudgetTier, RunClassId,
-        RunProfileFingerprint, RuntimeProfileConstraints, SchedulingClass,
+        CancellationPolicy, CapabilityBatchInvocation, CapabilityCallCandidate,
+        CapabilityDescriptorView, CapabilityFailure, CapabilityFailureKind, CapabilityInputRef,
+        CapabilityInvocation, CapabilityOutcome, CapabilityProgress, CapabilityResultMessage,
+        CapabilitySurfaceProfileId, CapabilitySurfaceVersion, CheckpointPolicy, CheckpointSchemaId,
+        ConcurrencyClass, ConcurrencyHint, ContentDigest, ContextProfileId,
+        FinalizeAssistantMessage, LoopCancellationPort, LoopCancellationSignal, LoopCheckpointKind,
+        LoopCheckpointRequest, LoopCheckpointStateRef, LoopCompactionError, LoopCompactionOutcome,
+        LoopCompactionRequest, LoopCompactionResponse, LoopContextBundle,
+        LoopContextCompactionMetadata, LoopContextRequest, LoopDriverId, LoopInput, LoopInputAck,
+        LoopInputAckToken, LoopInputBatch, LoopInputCursor, LoopInputCursorToken, LoopModelMessage,
+        LoopModelRequest, LoopModelResponse, LoopProgressEvent, LoopPromptBundle,
+        LoopPromptBundleRef, LoopPromptBundleRequest, LoopRunContext, LoopRunInfoPort,
+        ModelProfileId, ModelStreamChunk, ParentLoopOutput, ProviderToolCallReference,
+        RedactedRunProfileProvenance, ResolvedRunProfile, ResourceBudgetPolicy, ResourceBudgetTier,
+        RunClassId, RunProfileFingerprint, RuntimeProfileConstraints, SchedulingClass,
         StageCheckpointPayloadRequest, SteeringPolicy, VisibleCapabilityRequest,
         VisibleCapabilitySurface, capability_outcome_to_resolution,
     },
@@ -853,7 +852,7 @@ impl ironclaw_turns::run_profile::LoopCapabilityPort for MockAgentLoopDriverHost
     async fn invoke_capability(
         &self,
         request: CapabilityInvocation,
-    ) -> Result<CapabilityOutcome, AgentLoopHostError> {
+    ) -> Result<Resolution, AgentLoopHostError> {
         self.record_call(MockHostCall::InvokeCapability {
             capability_id: request.capability_id,
         });
@@ -867,12 +866,13 @@ impl ironclaw_turns::run_profile::LoopCapabilityPort for MockAgentLoopDriverHost
                     "single-call retry script exhausted",
                 ))
             })
+            .map(|outcome| capability_outcome_to_resolution(outcome).resolution)
     }
 
     async fn invoke_capability_batch(
         &self,
         request: CapabilityBatchInvocation,
-    ) -> Result<CapabilityBatchOutcome, AgentLoopHostError> {
+    ) -> Result<ResolutionBatch, AgentLoopHostError> {
         self.record_call(MockHostCall::InvokeCapabilityBatch {
             call_count: request.invocations.len(),
             stop_on_first_suspension: request.stop_on_first_suspension,
@@ -884,13 +884,18 @@ impl ironclaw_turns::run_profile::LoopCapabilityPort for MockAgentLoopDriverHost
             .into_iter()
             .map(scripted_capability_outcome)
             .collect::<Result<Vec<_>, _>>()?;
-        let stopped_on_suspension = request.stop_on_first_suspension
-            && outcomes.iter().any(CapabilityOutcome::is_suspension);
+        let resolutions: Vec<Resolution> = outcomes
+            .into_iter()
+            .map(|outcome| capability_outcome_to_resolution(outcome).resolution)
+            .collect();
+        // `parks()`, not `is_suspension()` (H1): a re-entrant gate stops the batch too.
+        let stopped_on_suspension =
+            request.stop_on_first_suspension && resolutions.iter().any(Resolution::parks);
         if let Some(signal) = lock_or_panic(&self.cancel_after_capability_batch).take() {
             self.set_cancellation_signal(signal);
         }
-        Ok(CapabilityBatchOutcome {
-            outcomes,
+        Ok(ResolutionBatch {
+            resolutions,
             stopped_on_suspension,
         })
     }

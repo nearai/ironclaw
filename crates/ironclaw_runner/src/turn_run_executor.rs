@@ -10,17 +10,26 @@ use std::{
 };
 
 use async_trait::async_trait;
+use ironclaw_host_api::{GateRecord, GateRef, ResourceScope};
 use ironclaw_observability::live_latency_started_at;
+use ironclaw_run_state::GateRecordStore;
 use ironclaw_turns::{
-    AgentLoopDriverError, AgentLoopDriverResumeRequest, AgentLoopDriverRunRequest, LoopExit,
-    TurnStatus,
+    AgentLoopDriverError, AgentLoopDriverResumeRequest, AgentLoopDriverRunRequest, LoopBlocked,
+    LoopBlockedKind, LoopExit, TurnStatus,
     run_profile::AgentLoopDriverHost,
     runner::{
         ClaimedTurnRun, RecordModelRouteSnapshotRequest, RecordRunnerFailureRequest,
         TurnRunTransitionPort,
     },
 };
-use tracing::{debug, error};
+use tracing::{debug, error, warn};
+
+/// The loop-facing routing-ref prefix an auth gate carries
+/// (`gate:auth-{gate_id}`), minted by `loop_gate_ref("auth", …)` in
+/// `ironclaw_loop_host`. The durable `GateRecord::Auth` is keyed by the uuid
+/// `gate_id` alone (via [`GateRef::for_auth_gate`]), so the runner strips this
+/// prefix to recover the same key the loop-host persisted under.
+const AUTH_GATE_LOOP_REF_PREFIX: &str = "gate:auth-";
 
 use crate::{
     driver_registry::{DriverRegistry, LoopDriverRegistryKey},
@@ -114,6 +123,17 @@ pub struct RebornTurnRunExecutor {
     loop_exit_applier: Arc<LoopExitApplier>,
     driver_registry: Arc<DriverRegistry>,
     host_factory: Arc<dyn HostFactory>,
+    /// Durable store the loop-host persisted `GateRecord::Auth` into (§5.2.9).
+    ///
+    /// After an auth block the executor re-sources the auth gate's
+    /// `credential_requirements` from this store, because the flip moved them
+    /// off the loop-facing channel onto the host-persisted record — the
+    /// loop-facing `LoopBlocked.credential_requirements` arrives empty. `None`
+    /// only for helper/test compositions that never wire a run-state
+    /// filesystem (they never raise a durable auth gate to render); every
+    /// production composition wires the SAME `Arc` it wired into the capability
+    /// port's `with_gate_record_store`, so an unwired production path is a bug.
+    gate_record_store: Option<Arc<dyn GateRecordStore>>,
 }
 
 impl RebornTurnRunExecutor {
@@ -121,11 +141,13 @@ impl RebornTurnRunExecutor {
         loop_exit_applier: Arc<LoopExitApplier>,
         driver_registry: Arc<DriverRegistry>,
         host_factory: Arc<dyn HostFactory>,
+        gate_record_store: Option<Arc<dyn GateRecordStore>>,
     ) -> Self {
         Self {
             loop_exit_applier,
             driver_registry,
             host_factory,
+            gate_record_store,
         }
     }
 }
@@ -356,13 +378,24 @@ impl RebornTurnRunExecutor {
     async fn apply_exit(
         &self,
         claimed: &ClaimedTurnRun,
-        exit: LoopExit,
+        mut exit: LoopExit,
         transitions: &Arc<dyn TurnRunTransitionPort>,
     ) -> Result<(), ()> {
         let started_at = live_latency_started_at();
         let run_id = claimed.state.run_id;
         let runner_id = claimed.runner_id;
         let lease_token = claimed.lease_token;
+
+        // §5.2.9 render-from-record: an auth block arrives with empty
+        // `credential_requirements` (the flip moved them off the loop channel
+        // onto the host-persisted `GateRecord::Auth`). Re-source them here,
+        // BEFORE the trusted applier persists the `TurnRunRecord`, so the
+        // auth-prompt (`channel_delivery`) and resume (`blocked_auth_resume`)
+        // read a non-empty requirement set again.
+        if let LoopExit::Blocked(blocked) = &mut exit {
+            self.enrich_auth_block_credential_requirements(claimed, blocked)
+                .await;
+        }
 
         match self.loop_exit_applier.apply(claimed, exit).await {
             Ok(state) => {
@@ -415,6 +448,111 @@ impl RebornTurnRunExecutor {
             }
         }
     }
+
+    /// Re-source an auth block's `credential_requirements` from the durable
+    /// [`GateRecord::Auth`] the loop-host persisted (§5.2.9 render-from-record).
+    ///
+    /// The §5.3 Stage 2 flip moved `credential_requirements` off the loop-facing
+    /// channel onto the host record, so an auth `LoopBlocked` arrives with them
+    /// empty. Without this, `TurnRunRecord.credential_requirements` would be
+    /// empty after an auth block — a regression for the auth-prompt view and the
+    /// blocked-auth resume path that both read it. Only auth blocks that arrive
+    /// empty are touched; a block that already carries requirements (or any
+    /// non-auth block) is left as-is.
+    ///
+    /// Fail-safe: a missing store, a non-auth/non-uuid gate ref, or a
+    /// genuinely-absent record leaves `credential_requirements` empty (the same
+    /// pre-flip regression, no worse) and logs. A store read *fault* is a real
+    /// error and is logged with its cause; it is never silently swallowed
+    /// (`.claude/rules/error-handling.md`).
+    async fn enrich_auth_block_credential_requirements(
+        &self,
+        claimed: &ClaimedTurnRun,
+        blocked: &mut LoopBlocked,
+    ) {
+        if blocked.kind != LoopBlockedKind::Auth || !blocked.credential_requirements.is_empty() {
+            return;
+        }
+        let run_id = claimed.state.run_id;
+        let Some(store) = self.gate_record_store.as_ref() else {
+            warn!(
+                run_id = %run_id,
+                "auth block: no gate record store wired; credential_requirements left empty"
+            );
+            return;
+        };
+        // Recover the durable `GateRecord::Auth` key from the loop routing ref
+        // `gate:auth-{gate_id}` — the loop-host persisted under the deterministic
+        // (name-based v5) `GateRef::for_auth_gate(gate_id)`, so the same gate id
+        // reproduces the identical key here.
+        let Some(gate_id) = blocked
+            .gate_ref
+            .as_str()
+            .strip_prefix(AUTH_GATE_LOOP_REF_PREFIX)
+        else {
+            warn!(
+                run_id = %run_id,
+                gate_ref = blocked.gate_ref.as_str(),
+                "auth block: loop gate ref is not an auth ref; credential_requirements left empty"
+            );
+            return;
+        };
+        let gate_ref = GateRef::for_auth_gate(gate_id);
+        let scope = auth_gate_record_read_scope(claimed);
+        match store.load(&scope, gate_ref).await {
+            Ok(Some(GateRecord::Auth {
+                credential_requirements,
+                ..
+            })) => {
+                blocked.credential_requirements = credential_requirements;
+            }
+            Ok(Some(other)) => {
+                warn!(
+                    run_id = %run_id,
+                    gate_record_kind = other.kind(),
+                    "auth block: persisted gate record was not Auth; credential_requirements left empty"
+                );
+            }
+            Ok(None) => {
+                warn!(
+                    run_id = %run_id,
+                    "auth block: no persisted gate record found for auth gate; credential_requirements left empty"
+                );
+            }
+            Err(error) => {
+                error!(
+                    run_id = %run_id,
+                    error = %error,
+                    "auth block: gate record store read failed; credential_requirements left empty"
+                );
+            }
+        }
+    }
+}
+
+/// Rebuild the resource-owner scope the loop-host persisted the auth
+/// [`GateRecord`] under, from the claimed run.
+///
+/// Must equal the save scope (`visible_request.context.resource_scope` in
+/// `ironclaw_loop_host`) on every axis [`same_scope_owner`] compares —
+/// tenant/user/agent/project/mission/thread; `invocation_id` is deliberately
+/// NOT part of the gate-record key (neither the path nor the owner check use
+/// it), so the runner does not need to reproduce it. The save side sets
+/// `user_id = explicit thread owner, else the run actor` (its final fallback to
+/// a composition-level default user id is unreachable for a claimed run, which
+/// always carries an actor); `to_resource_scope` supplies tenant/agent/project/
+/// thread and `mission_id = None`.
+fn auth_gate_record_read_scope(claimed: &ClaimedTurnRun) -> ResourceScope {
+    let mut scope = claimed.state.scope.to_resource_scope();
+    if let Some(user_id) = claimed
+        .state
+        .scope
+        .explicit_owner_user_id()
+        .or_else(|| claimed.state.actor.as_ref().map(|actor| &actor.user_id))
+    {
+        scope.user_id = user_id.clone();
+    }
+    scope
 }
 
 #[cfg(test)]
@@ -683,7 +821,7 @@ mod tests {
         let loop_exit_applier = Arc::new(LoopExitApplier::new(transitions, evidence));
         let driver_registry = Arc::new(DriverRegistry::new()); // empty — no drivers registered
         let host_factory = Arc::new(FailingHostFactory);
-        RebornTurnRunExecutor::new(loop_exit_applier, driver_registry, host_factory)
+        RebornTurnRunExecutor::new(loop_exit_applier, driver_registry, host_factory, None)
     }
 
     /// When the driver registry has no registered driver, `execute_claimed_run`
@@ -890,15 +1028,14 @@ mod tests {
         async fn invoke_capability(
             &self,
             _request: ironclaw_turns::run_profile::CapabilityInvocation,
-        ) -> Result<ironclaw_turns::run_profile::CapabilityOutcome, AgentLoopHostError> {
+        ) -> Result<ironclaw_host_api::Resolution, AgentLoopHostError> {
             unimplemented!("stub: not called by executor")
         }
 
         async fn invoke_capability_batch(
             &self,
             _request: ironclaw_turns::run_profile::CapabilityBatchInvocation,
-        ) -> Result<ironclaw_turns::run_profile::CapabilityBatchOutcome, AgentLoopHostError>
-        {
+        ) -> Result<ironclaw_host_api::ResolutionBatch, AgentLoopHostError> {
             unimplemented!("stub: not called by executor")
         }
     }
@@ -1046,7 +1183,7 @@ mod tests {
             )
             .expect("driver registration must succeed");
         let driver_registry = Arc::new(registry);
-        RebornTurnRunExecutor::new(loop_exit_applier, driver_registry, host_factory)
+        RebornTurnRunExecutor::new(loop_exit_applier, driver_registry, host_factory, None)
     }
 
     /// Variant that wires the SAME shared `transitions` port into both the
@@ -1067,7 +1204,7 @@ mod tests {
             )
             .expect("driver registration must succeed");
         let driver_registry = Arc::new(registry);
-        RebornTurnRunExecutor::new(loop_exit_applier, driver_registry, host_factory)
+        RebornTurnRunExecutor::new(loop_exit_applier, driver_registry, host_factory, None)
     }
 
     /// A driver that always returns a caller-supplied `AgentLoopDriverError`.
@@ -1127,6 +1264,7 @@ mod tests {
             loop_exit_applier,
             driver_registry,
             Arc::new(SucceedingHostFactoryWithSnapshot),
+            None,
         )
     }
 

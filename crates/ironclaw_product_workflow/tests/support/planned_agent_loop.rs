@@ -10,8 +10,8 @@ use ironclaw_filesystem::{InMemoryBackend, ScopedFilesystem};
 use ironclaw_host_api::{
     AgentId, CapabilityGrant, CapabilityGrantId, CapabilityId, CapabilitySet, EffectKind,
     ExtensionId, GrantConstraints, InvocationId, MountAlias, MountGrant, MountPermissions,
-    MountView, NetworkPolicy, Principal, ResourceScope, RuntimeKind, TenantId, ThreadId,
-    TrustClass, UserId, VirtualPath,
+    MountView, NetworkPolicy, Principal, Resolution, ResolutionBatch, ResourceScope, RuntimeKind,
+    TenantId, ThreadId, TrustClass, UserId, VirtualPath,
 };
 use ironclaw_host_runtime::{CapabilitySurfacePolicy, SurfaceKind};
 use ironclaw_loop_host::{
@@ -64,13 +64,13 @@ use ironclaw_turns::{
     TurnActor, TurnCoordinator, TurnRunId, TurnRunState, TurnRunWake, TurnScope, TurnStateStore,
     TurnStatus,
     run_profile::{
-        AgentLoopHostError, CapabilityBatchInvocation, CapabilityBatchOutcome,
-        CapabilityCallCandidate, CapabilityDescriptorView, CapabilityInputRef,
-        CapabilityInvocation, CapabilityOutcome, CapabilityResultMessage, CapabilitySurfaceVersion,
-        ConcurrencyHint, InMemoryLoopHostMilestoneSink, InstructionSafetyContext,
-        LoopCancelReasonKind, LoopCapabilityPort, LoopInputAckToken, LoopInputCursorToken,
-        LoopRunContext, NoOpBudgetAccountant, NoOpPolicyGuard, ParentLoopOutput, PromptMode,
-        VisibleCapabilityRequest, VisibleCapabilitySurface,
+        AgentLoopHostError, CapabilityBatchInvocation, CapabilityCallCandidate,
+        CapabilityDescriptorView, CapabilityInputRef, CapabilityInvocation, CapabilityOutcome,
+        CapabilityResultMessage, CapabilitySurfaceVersion, ConcurrencyHint,
+        InMemoryLoopHostMilestoneSink, InstructionSafetyContext, LoopCancelReasonKind,
+        LoopCapabilityPort, LoopInputAckToken, LoopInputCursorToken, LoopRunContext,
+        NoOpBudgetAccountant, NoOpPolicyGuard, ParentLoopOutput, PromptMode,
+        VisibleCapabilityRequest, VisibleCapabilitySurface, capability_outcome_to_resolution,
     },
 };
 use tokio::time::{sleep, timeout};
@@ -357,6 +357,7 @@ impl ProductLiveAgentLoopHarness {
         ));
         let composition = build_product_live_planned_runtime(DefaultPlannedRuntimeParts {
             attachment_read_port: None,
+            gate_record_store: None,
             turn_state: turn_state_for_runtime,
             thread_service: Arc::new(thread_service.clone()),
             thread_scope: thread_scope.clone(),
@@ -795,43 +796,54 @@ impl LoopCapabilityPort for RecordingDelegatingCapabilityPort {
     async fn invoke_capability(
         &self,
         request: CapabilityInvocation,
-    ) -> Result<CapabilityOutcome, AgentLoopHostError> {
+    ) -> Result<Resolution, AgentLoopHostError> {
         self.invocations
             .lock()
             .expect("harness capability invocation lock poisoned")
             .push(request.clone());
-        let outcome = self.inner.invoke_capability(request).await?;
-        self.record_completed_result(&outcome)?;
-        Ok(outcome)
+        let resolution = self.inner.invoke_capability(request).await?;
+        self.record_completed_result(&resolution)?;
+        Ok(resolution)
     }
 
     async fn invoke_capability_batch(
         &self,
         request: CapabilityBatchInvocation,
-    ) -> Result<CapabilityBatchOutcome, AgentLoopHostError> {
+    ) -> Result<ResolutionBatch, AgentLoopHostError> {
         self.invocations
             .lock()
             .expect("harness capability invocation lock poisoned")
             .extend(request.invocations.iter().cloned());
-        let outcome = self.inner.invoke_capability_batch(request).await?;
-        for item in &outcome.outcomes {
+        let batch = self.inner.invoke_capability_batch(request).await?;
+        for item in &batch.resolutions {
             self.record_completed_result(item)?;
         }
-        Ok(outcome)
+        Ok(batch)
     }
 }
 
 impl RecordingDelegatingCapabilityPort {
-    fn record_completed_result(
-        &self,
-        outcome: &CapabilityOutcome,
-    ) -> Result<(), AgentLoopHostError> {
-        let CapabilityOutcome::Completed(completed) = outcome else {
+    fn record_completed_result(&self, resolution: &Resolution) -> Result<(), AgentLoopHostError> {
+        // Only a successful `Done` staged output to record (the flip's acceptance
+        // table maps the old `Completed` variant to `Done` + `ToolVerdict::Success`).
+        // The host mints an opaque `refs.result` uuid; the originating loop result
+        // ref the staged value is keyed by is preserved on `refs.origin`.
+        let Resolution::Done(outcome) = resolution else {
             return Ok(());
         };
-        let value = self
-            .io
-            .result_for_ref(&self.run_context, &completed.result_ref)?;
+        if !outcome.verdict.is_success() {
+            return Ok(());
+        }
+        let Some(origin) = outcome.refs.origin.as_ref() else {
+            return Ok(());
+        };
+        let result_ref = LoopResultRef::new(origin.as_str()).map_err(|error| {
+            AgentLoopHostError::new(
+                ironclaw_turns::run_profile::AgentLoopHostErrorKind::InvalidInvocation,
+                format!("invalid preserved loop result ref: {error}"),
+            )
+        })?;
+        let value = self.io.result_for_ref(&self.run_context, &result_ref)?;
         self.results
             .lock()
             .expect("harness capability results lock poisoned")
@@ -902,12 +914,12 @@ impl LoopCapabilityPort for RecordingCapabilityPort {
     async fn invoke_capability(
         &self,
         request: CapabilityInvocation,
-    ) -> Result<CapabilityOutcome, AgentLoopHostError> {
+    ) -> Result<Resolution, AgentLoopHostError> {
         self.invocations
             .lock()
             .expect("harness capability invocation lock poisoned")
             .push(request);
-        Ok(CapabilityOutcome::Completed(CapabilityResultMessage {
+        let outcome = CapabilityOutcome::Completed(CapabilityResultMessage {
             result_ref: LoopResultRef::new(self.capability.result_ref.clone())
                 .expect("valid harness result ref"),
             safe_summary: self.capability.safe_summary.clone(),
@@ -916,25 +928,28 @@ impl LoopCapabilityPort for RecordingCapabilityPort {
             byte_len: 0,
             output_digest: None,
             model_observation: None,
-        }))
+        });
+        Ok(capability_outcome_to_resolution(outcome).resolution)
     }
 
     async fn invoke_capability_batch(
         &self,
         request: CapabilityBatchInvocation,
-    ) -> Result<CapabilityBatchOutcome, AgentLoopHostError> {
-        let mut outcomes = Vec::new();
+    ) -> Result<ResolutionBatch, AgentLoopHostError> {
+        let mut resolutions = Vec::new();
         let mut stopped_on_suspension = false;
         for invocation in request.invocations {
-            let outcome = self.invoke_capability(invocation).await?;
-            stopped_on_suspension |= request.stop_on_first_suspension && outcome.is_suspension();
-            outcomes.push(outcome);
+            let resolution = self.invoke_capability(invocation).await?;
+            // `parks()` is the batch-stop predicate (true for gates and
+            // suspensions); this producer only ever completes, so it never parks.
+            stopped_on_suspension |= request.stop_on_first_suspension && resolution.parks();
+            resolutions.push(resolution);
             if stopped_on_suspension {
                 break;
             }
         }
-        Ok(CapabilityBatchOutcome {
-            outcomes,
+        Ok(ResolutionBatch {
+            resolutions,
             stopped_on_suspension,
         })
     }

@@ -37,8 +37,9 @@
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    DenyReason, DenyRef, FailureKind, GateRef, LoopRef, ModelFailureDiagnostic, OutputDigest,
-    ProcessRef, ResultProgress, ResultRef, ResumeToken, RunId, SafeSummary, TerminateHint,
+    DenyReason, DenyRef, FailureKind, GateRef, LoopRef, ModelFailureDiagnostic, ModelResultPreview,
+    OutputDigest, ProcessRef, ResultProgress, ResultRef, ResumeToken, RunId, SafeSummary,
+    TerminateHint,
 };
 
 /// A pending-gate handle plus the additive context needed to resume and correlate
@@ -432,11 +433,22 @@ pub struct OutcomeRefs {
     /// Size of the staged output in bytes — pure metadata, no PII. Used by the
     /// per-capability byte-cap strategy.
     pub byte_len: u64,
-    /// Bounded, model-visible result preview (was `model_observation`). Redacted
-    /// by construction; the full bytes stay host-owned behind `result`. `None`
-    /// when no preview is staged.
+    /// Bounded, model-visible result CONTENT preview — the #5838 first-look
+    /// inline preview (was the `ResultReference` observation's `detail.preview`).
+    /// A [`ModelResultPreview`], NOT a [`SafeSummary`]: it carries the tool's own
+    /// output (delimiters, JSON, newlines), credential-redacted at a word
+    /// boundary, up to 24 KiB — so the model sees the result inline without a
+    /// follow-up `result_read`. The full bytes stay host-owned behind `result`;
+    /// `None` when no preview is staged or the content failed the credential
+    /// redaction contract.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub preview: Option<SafeSummary>,
+    pub preview: Option<ModelResultPreview>,
+    /// Continuation metadata for a TRUNCATED first-look preview so the model can
+    /// read the full result (`result_read`, large results): the referenced ref,
+    /// full byte size, next offset, and JSON-array element count. Empty (all
+    /// `None`) for a complete inline preview or no preview.
+    #[serde(default, skip_serializing_if = "ResultPreviewMeta::is_empty")]
+    pub preview_meta: ResultPreviewMeta,
     /// The preserved originating loop result ref, so output the loop staged under
     /// its own ref stays reachable once `result` (a uuid handle) is minted. `None`
     /// when the outcome had no originating loop result ref (e.g. a recoverable
@@ -448,6 +460,56 @@ pub struct OutcomeRefs {
     /// content. `None` for synthetic results that stage no real output.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub output_digest: Option<OutputDigest>,
+}
+
+/// Continuation metadata for a truncated first-look result preview (§5838). All
+/// fields default to `None` — an empty value means the preview (if any) is the
+/// complete result and needs no `result_read` follow-up.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct ResultPreviewMeta {
+    /// The result ref the preview is OF. A `result_read` reading ANOTHER result
+    /// presents that original's ref (so the model continues reading the original,
+    /// not the read's own chunk output); for a normal completed result it equals
+    /// the outcome's own result ref. `None` => the outcome's own result
+    /// (`OutcomeRefs::origin`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub referenced_result_ref: Option<LoopRef>,
+    /// Full byte size of the referenced result when the preview is a truncated
+    /// chunk; `None` for a complete inline preview.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub total_bytes: Option<u64>,
+    /// Byte offset to continue reading from for a truncated preview; `None` when
+    /// the preview is the complete result.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub next_offset: Option<u64>,
+    /// Element count when the full result is a top-level JSON array (truncated
+    /// previews only), so the model does not misread a byte-sliced array.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub item_count: Option<u64>,
+    /// The observation's own model-visible summary caption — the host-authored
+    /// text describing the preview (e.g. "preview truncated, use result_read …").
+    /// It is DISTINCT from the completed [`Outcome::summary`] caption (the result
+    /// message's `safe_summary`, often a generic "capability completed"): the
+    /// producer authors a richer summary on the `ResultReference` observation, and
+    /// the collapse would otherwise drop it, so the reconstructed observation would
+    /// fall back to the generic caption and lose the truncation/continuation hint.
+    /// Carried here so the executor rebuilds the observation with the producer's
+    /// exact summary. `None` when the observation carried none or it failed the
+    /// caption redaction contract (best-effort; the outcome caption stands in).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub summary: Option<SafeSummary>,
+}
+
+impl ResultPreviewMeta {
+    /// True when no continuation metadata is present (the preview is complete or
+    /// absent) — the `skip_serializing_if` predicate keeping the wire clean.
+    pub fn is_empty(&self) -> bool {
+        self.referenced_result_ref.is_none()
+            && self.total_bytes.is_none()
+            && self.next_offset.is_none()
+            && self.item_count.is_none()
+            && self.summary.is_none()
+    }
 }
 
 /// A dispatched capability's result — tool success OR recoverable failure (§3).
@@ -890,6 +952,7 @@ mod tests {
                 result: ResultRef::parse("018f6a00-0000-7000-8000-000000000001").unwrap(),
                 byte_len: 4096,
                 preview: None,
+                preview_meta: ResultPreviewMeta::default(),
                 origin: None,
                 output_digest: None,
             },
@@ -914,6 +977,7 @@ mod tests {
                 result: ResultRef::parse("018f6a00-0000-7000-8000-000000000001").unwrap(),
                 byte_len: 10,
                 preview: None,
+                preview_meta: ResultPreviewMeta::default(),
                 origin: Some(LoopRef::new("result:child-1").unwrap()),
                 output_digest: Some(OutputDigest::new(0xABCD)),
             },
@@ -944,7 +1008,9 @@ mod tests {
         let full = OutcomeRefs {
             result,
             byte_len: 128,
-            preview: Some(SafeSummary::new("staged 3 rows").unwrap()),
+            // Content preview carries delimiters/structure (not a caption).
+            preview: Some(ModelResultPreview::new("{\"rows\": 3, \"ok\": true}").unwrap()),
+            preview_meta: ResultPreviewMeta::default(),
             origin: None,
             output_digest: None,
         };
@@ -952,8 +1018,8 @@ mod tests {
             serde_json::from_value(serde_json::to_value(&full).unwrap()).unwrap();
         assert_eq!(back, full);
         assert_eq!(
-            back.preview.as_ref().map(SafeSummary::as_str),
-            Some("staged 3 rows")
+            back.preview.as_ref().map(ModelResultPreview::as_str),
+            Some("{\"rows\": 3, \"ok\": true}")
         );
 
         // Absent: None omitted from the wire (skip_serializing_if), and a
@@ -962,6 +1028,7 @@ mod tests {
             result,
             byte_len: 128,
             preview: None,
+            preview_meta: ResultPreviewMeta::default(),
             origin: None,
             output_digest: None,
         };
@@ -1011,6 +1078,7 @@ mod tests {
                 result: ResultRef::parse("018f6a00-0000-7000-8000-000000000001").unwrap(),
                 byte_len: 1,
                 preview: None,
+                preview_meta: ResultPreviewMeta::default(),
                 origin: None,
                 output_digest: None,
             },
@@ -1298,9 +1366,10 @@ mod tests {
     /// dropped). Reached through the [`Suspension::dependent_result`] accessor.
     #[test]
     fn dependent_run_carries_the_staged_result_inline() {
-        let staged = DependentRunResult::new(2048, SafeSummary::new("child staged 7 rows").unwrap())
-            .with_observation(SafeSummary::new("child preview: 7 rows").unwrap())
-            .with_origin(LoopRef::new("result:child-9").unwrap());
+        let staged =
+            DependentRunResult::new(2048, SafeSummary::new("child staged 7 rows").unwrap())
+                .with_observation(SafeSummary::new("child preview: 7 rows").unwrap())
+                .with_origin(LoopRef::new("result:child-9").unwrap());
         let suspension = Suspension::DependentRun {
             waypoint: gate_wp(),
             result: staged.clone(),
@@ -1323,7 +1392,10 @@ mod tests {
             result.observation.as_ref().map(SafeSummary::as_str),
             Some("child preview: 7 rows")
         );
-        assert_eq!(result.origin.as_ref().map(LoopRef::as_str), Some("result:child-9"));
+        assert_eq!(
+            result.origin.as_ref().map(LoopRef::as_str),
+            Some("result:child-9")
+        );
     }
 
     /// A hostile persisted staged result cannot rehydrate: the redacted

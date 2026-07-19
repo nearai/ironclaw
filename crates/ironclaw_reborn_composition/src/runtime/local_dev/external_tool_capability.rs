@@ -23,18 +23,21 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex as StdMutex};
 
 use async_trait::async_trait;
-use ironclaw_host_api::{CapabilityId, InvocationId, ProviderToolName, RuntimeKind};
+use ironclaw_host_api::{
+    CapabilityId, InvocationId, ProviderToolName, Resolution, ResolutionBatch, RuntimeKind,
+    Suspension,
+};
 use ironclaw_loop_host::{
     CapabilityResultWrite, DurablePersistence, LoopCapabilityInputResolver,
     LoopCapabilityResultWriter,
 };
 use ironclaw_turns::run_profile::{
-    AgentLoopHostError, AgentLoopHostErrorKind, CapabilityBatchInvocation, CapabilityBatchOutcome,
-    CapabilityCallCandidate, CapabilityInvocation, CapabilityOutcome, CapabilityProgress,
-    CapabilityResultMessage, CapabilitySurfaceVersion, ConcurrencyHint, LoopCapabilityPort,
-    LoopRunContext, ProviderToolCall, ProviderToolCallCapabilityIds, ProviderToolCallReplay,
+    AgentLoopHostError, AgentLoopHostErrorKind, CapabilityBatchInvocation, CapabilityCallCandidate,
+    CapabilityInvocation, CapabilityOutcome, CapabilityProgress, CapabilityResultMessage,
+    CapabilitySurfaceVersion, ConcurrencyHint, LoopCapabilityPort, LoopRunContext,
+    ProviderToolCall, ProviderToolCallCapabilityIds, ProviderToolCallReplay,
     ProviderToolDefinition, RegisterProviderToolCallRequest, VisibleCapabilityRequest,
-    VisibleCapabilitySurface,
+    VisibleCapabilitySurface, capability_outcome_to_resolution,
 };
 use ironclaw_turns::{ExternalToolCatalog, PendingExternalCall};
 use ironclaw_turns::{LoopGateRef, TurnRunId};
@@ -413,32 +416,42 @@ impl LoopCapabilityPort for ExternalToolCapabilityPort {
     async fn invoke_capability(
         &self,
         request: CapabilityInvocation,
-    ) -> Result<CapabilityOutcome, AgentLoopHostError> {
+    ) -> Result<Resolution, AgentLoopHostError> {
         if !self.owns_capability(&request.capability_id) {
             return self.inner.invoke_capability(request).await;
         }
-        self.complete_or_park(request).await
+        // `complete_or_park` still constructs `CapabilityOutcome` (unchanged
+        // internal helper); collapse it to the host `Resolution` at this
+        // `LoopCapabilityPort` boundary.
+        let outcome = self.complete_or_park(request).await?;
+        Ok(capability_outcome_to_resolution(outcome).resolution)
     }
 
     async fn invoke_capability_batch(
         &self,
         request: CapabilityBatchInvocation,
-    ) -> Result<CapabilityBatchOutcome, AgentLoopHostError> {
-        let mut outcomes = Vec::new();
+    ) -> Result<ResolutionBatch, AgentLoopHostError> {
+        let mut resolutions = Vec::new();
         let mut stopped_on_suspension = false;
         for invocation in request.invocations {
-            let outcome = self.invoke_capability(invocation).await?;
-            let is_suspension = outcome.is_suspension();
-            let is_external_tool_pending =
-                matches!(&outcome, CapabilityOutcome::ExternalToolPending { .. });
-            outcomes.push(outcome);
-            if is_suspension && (request.stop_on_first_suspension || is_external_tool_pending) {
+            let resolution = self.invoke_capability(invocation).await?;
+            // `parks()` is the batch-stop predicate (gates + suspensions), the
+            // Resolution-side successor to `CapabilityOutcome::is_suspension`. An
+            // external-tool park still forces a stop even when the caller did not
+            // ask to stop on first suspension.
+            let parks = resolution.parks();
+            let is_external_tool_pending = matches!(
+                &resolution,
+                Resolution::Suspended(Suspension::ExternalTool(_))
+            );
+            resolutions.push(resolution);
+            if parks && (request.stop_on_first_suspension || is_external_tool_pending) {
                 stopped_on_suspension = true;
                 break;
             }
         }
-        Ok(CapabilityBatchOutcome {
-            outcomes,
+        Ok(ResolutionBatch {
+            resolutions,
             stopped_on_suspension,
         })
     }
@@ -522,7 +535,7 @@ mod tests {
         async fn invoke_capability(
             &self,
             _request: CapabilityInvocation,
-        ) -> Result<CapabilityOutcome, AgentLoopHostError> {
+        ) -> Result<Resolution, AgentLoopHostError> {
             Err(AgentLoopHostError::new(
                 AgentLoopHostErrorKind::InvalidInvocation,
                 "test inner port does not execute capabilities",
@@ -532,7 +545,7 @@ mod tests {
         async fn invoke_capability_batch(
             &self,
             _request: CapabilityBatchInvocation,
-        ) -> Result<CapabilityBatchOutcome, AgentLoopHostError> {
+        ) -> Result<ResolutionBatch, AgentLoopHostError> {
             Err(AgentLoopHostError::new(
                 AgentLoopHostErrorKind::InvalidInvocation,
                 "test inner port does not execute capability batches",

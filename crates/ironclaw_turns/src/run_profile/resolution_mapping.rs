@@ -65,8 +65,9 @@
 use ironclaw_host_api::{
     Blocked, Denial, DenyReason, DenyRecord, DenyRef, DependentRunResult, FailureKind, GateRecord,
     GateRef, GateWaypoint, LoopRef, ModelFailureDiagnostic, ModelInputIssue, ModelInputIssues,
-    Outcome, OutcomeRefs, OutputDigest, ProcessRef, ProcessWaypoint, Resolution, ResultProgress,
-    ResultRef, ResumeToken, RunId, SafeSummary, Suspension, TerminateHint, ToolVerdict,
+    ModelResultPreview, Outcome, OutcomeRefs, OutputDigest, ProcessRef, ProcessWaypoint,
+    Resolution, ResultPreviewMeta, ResultProgress, ResultRef, ResumeToken, RunId, SafeSummary,
+    Suspension, TerminateHint, ToolVerdict,
 };
 
 use super::content_digest::ContentDigest;
@@ -77,6 +78,7 @@ use super::host::{
 };
 use super::model_observation::{
     CapabilityFailureDetail, CapabilityInputIssue, ModelVisibleToolObservation,
+    ToolObservationDetail,
 };
 use crate::{LoopGateRef, LoopResultRef};
 
@@ -241,7 +243,15 @@ pub fn capability_outcome_to_resolution(outcome: CapabilityOutcome) -> MappedRes
             safe_summary,
             auth_resume,
         } => {
-            let minted = GateRef::new();
+            // Mint the host GateRecord key DETERMINISTICALLY from the auth gate id
+            // encoded in the loop `gate:auth-{gate_id}` ref (§5.2.9 / §5.3 Stage 2
+            // auth render-from-record), so the loop-host persist seam and the
+            // runner's blocked-exit read derive the same key. Approval already has
+            // this via `GateRef::for_approval_request`; this is its auth analogue.
+            // `credential_requirements` ride the record here (never the model-visible
+            // channel), and the runner re-reads them from the record to rebuild the
+            // blocked-exit `TurnRunRecord.credential_requirements` after the flip.
+            let minted = auth_gate_record_ref(&gate_ref);
             let waypoint = gate_waypoint(minted, &gate_ref, auth_resume_token(auth_resume));
             MappedResolution::with_gate(
                 Resolution::Blocked(Blocked::Auth(waypoint)),
@@ -290,11 +300,13 @@ pub fn capability_outcome_to_resolution(outcome: CapabilityOutcome) -> MappedRes
             model_observation,
         } => {
             let minted = ResultRef::new();
+            let (preview, preview_meta) = result_preview_parts(model_observation, &result_ref);
             MappedResolution::bare(Resolution::Done(Outcome {
                 refs: OutcomeRefs {
                     result: minted,
                     byte_len,
-                    preview: observation_preview(model_observation),
+                    preview,
+                    preview_meta,
                     origin: preserved_origin(result_ref.as_str()),
                     output_digest: None,
                 },
@@ -325,9 +337,14 @@ pub fn capability_outcome_to_resolution(outcome: CapabilityOutcome) -> MappedRes
             let minted_gate = GateRef::new();
             let minted_result = ResultRef::new();
             let waypoint = gate_waypoint(minted_gate, &gate_ref, None);
-            let mut staged =
-                DependentRunResult::new(byte_len, safe_summary_or_placeholder(safe_summary.clone()));
-            if let Some(observation) = observation_preview(model_observation) {
+            let mut staged = DependentRunResult::new(
+                byte_len,
+                safe_summary_or_placeholder(safe_summary.clone()),
+            );
+            // The dependent-child observation channel stays a bounded [`SafeSummary`]
+            // caption (Stage 1b): a child suspension carries the summary caption, not
+            // the inline first-look content (that is the completed-`Outcome` preview).
+            if let Some(observation) = observation_summary_caption(model_observation) {
                 staged = staged.with_observation(observation);
             }
             if let Some(origin) = preserved_origin(result_ref.as_str()) {
@@ -379,11 +396,13 @@ fn completed_outcome(message: CapabilityResultMessage) -> (Outcome, LoopResultRe
         terminate_hint,
         output_digest,
     } = message;
+    let (preview, preview_meta) = result_preview_parts(model_observation, &result_ref);
     let outcome = Outcome {
         refs: OutcomeRefs {
             result: ResultRef::new(),
             byte_len,
-            preview: observation_preview(model_observation),
+            preview,
+            preview_meta,
             origin: preserved_origin(result_ref.as_str()),
             output_digest: output_digest.map(output_digest_of),
         },
@@ -413,6 +432,7 @@ fn failed_outcome(failure: CapabilityFailure) -> Outcome {
             result: ResultRef::new(),
             byte_len: 0,
             preview: None,
+            preview_meta: ResultPreviewMeta::default(),
             origin: None,
             output_digest: None,
         },
@@ -483,6 +503,24 @@ fn model_input_issue(issue: CapabilityInputIssue) -> Option<ModelInputIssue> {
         model = model.with_schema_path(schema_path);
     }
     Some(model)
+}
+
+/// The canonical host [`GateRef`] key for an auth gate's [`GateRecord`], derived
+/// deterministically (name-based v5) from the auth gate id encoded in the loop
+/// `gate:auth-{gate_id}` ref. Mirrors [`GateRef::for_approval_request`] so the
+/// loop-host persist seam and the runner's blocked-exit render-from-record read
+/// agree on the key (§5.2.9 / §5.3 Stage 2). A loop ref that is not a
+/// `gate:auth-{gate_id}` (which the normal producer never emits) falls back to a
+/// fresh handle — the record is still persisted, only not re-derivable, which is
+/// no worse than the pre-flip random key.
+fn auth_gate_record_ref(loop_gate: &LoopGateRef) -> GateRef {
+    loop_gate
+        .as_str()
+        .strip_prefix("gate:auth-")
+        .map(GateRef::for_auth_gate)
+        // silent-ok: pure string reconstruction; a loop ref without the
+        // `gate:auth-` prefix is never emitted for an auth gate.
+        .unwrap_or_default()
 }
 
 /// A gate waypoint: the minted kernel handle plus the preserved originating loop
@@ -564,16 +602,83 @@ fn failure_kind_of(kind: CapabilityFailureKind) -> FailureKind {
     FailureKind::from_tag(kind.as_str())
 }
 
-/// Bounded model-visible preview from a loop tool observation, when present.
+/// The #5838 first-look inline CONTENT preview and its continuation metadata from
+/// a loop tool observation, when present.
 ///
-/// The observation's `summary` is model-visible text; it is re-validated through
-/// the [`SafeSummary`] redaction contract. If it fails validation, the preview is
-/// dropped to `None` — an optional preview is best-effort, never a placeholder
-/// that would misrepresent staged content.
-fn observation_preview(observation: Option<ModelVisibleToolObservation>) -> Option<SafeSummary> {
-    // `.ok()` intentionally converts a redaction-validation failure into an
-    // absent (None) preview: this is a pure text-to-safe-text conversion, not a
-    // swallowed I/O error, and preview is an optional best-effort field.
+/// The inline content the model reads without a follow-up `result_read` lives on
+/// the `ResultReference` detail's `preview` — NOT the generic `summary` caption
+/// (routing content through `SafeSummary` dropped every delimiter-bearing/JSON
+/// result and scrubbed `Secretary`, forcing a re-read amnesia loop). It is carried
+/// as a [`ModelResultPreview`]: delimiters/newlines retained, credential-redacted
+/// at a word boundary, up to 24 KiB. The paired [`ResultPreviewMeta`] carries the
+/// TRUNCATED-preview continuation info (`result_read` / large results): the
+/// referenced result ref, full byte size, next offset, and JSON-array element
+/// count, so the model reads the full result. Detail kinds other than
+/// `ResultReference` have no inline content.
+///
+/// `own_result_ref` is this outcome's own loop result ref: the referenced ref is
+/// carried only when it DIFFERS (a `result_read` presenting another result's ref);
+/// otherwise the reconstruction uses the outcome's own ref, keeping the wire clean.
+fn result_preview_parts(
+    observation: Option<ModelVisibleToolObservation>,
+    own_result_ref: &LoopResultRef,
+) -> (Option<ModelResultPreview>, ResultPreviewMeta) {
+    let empty = (None, ResultPreviewMeta::default());
+    let Some(observation) = observation else {
+        return empty;
+    };
+    // Capture the observation's own model-visible summary before destructuring
+    // `detail`; it is DISTINCT from the outcome caption and must survive the
+    // collapse so the reconstructed observation keeps the producer's exact
+    // truncation/continuation hint (best-effort caption via `.ok()`).
+    let ModelVisibleToolObservation {
+        summary, detail, ..
+    } = observation;
+    let summary = SafeSummary::new(summary).ok();
+    let ToolObservationDetail::ResultReference {
+        result_ref,
+        preview: Some(text),
+        total_bytes,
+        next_offset,
+        item_count,
+        ..
+    } = detail
+    else {
+        return empty;
+    };
+    // `.ok()` intentionally degrades content that fails the credential redaction
+    // contract to an absent preview (a pure text-to-redacted-content conversion);
+    // the full output stays reachable through the result ref, and without inline
+    // content the continuation metadata is useless, so drop both.
+    let Some(preview) = ModelResultPreview::new(text).ok() else {
+        return empty;
+    };
+    let referenced_result_ref = if result_ref == own_result_ref.as_str() {
+        None
+    } else {
+        LoopRef::new(result_ref).ok()
+    };
+    (
+        Some(preview),
+        ResultPreviewMeta {
+            referenced_result_ref,
+            total_bytes,
+            next_offset,
+            item_count,
+            summary,
+        },
+    )
+}
+
+/// The observation's generic `summary` as a bounded [`SafeSummary`] caption — the
+/// dependent-child observation channel (Stage 1b), which carries a caption rather
+/// than the inline first-look content the completed-`Outcome` preview does.
+///
+/// `.ok()` degrades a caption that fails the caption redaction contract to `None`;
+/// a pure text-to-safe-text conversion, and the caption is best-effort.
+fn observation_summary_caption(
+    observation: Option<ModelVisibleToolObservation>,
+) -> Option<SafeSummary> {
     observation.and_then(|observation| SafeSummary::new(observation.summary).ok())
 }
 
@@ -653,20 +758,22 @@ mod tests {
         })
     }
 
-    /// A model-visible tool observation whose `summary` is `summary` — the field
-    /// `observation_preview` reduces to the redacted preview `SafeSummary`.
-    fn observation(summary: &str) -> ModelVisibleToolObservation {
+    /// A model-visible `ResultReference` tool observation whose inline
+    /// `detail.preview` content is `content` — the field `observation_preview`
+    /// reduces to the [`ModelResultPreview`]. (The `summary` is a generic caption;
+    /// the model-visible CONTENT is on the detail preview, per #5838.)
+    fn observation(content: &str) -> ModelVisibleToolObservation {
         use super::super::model_observation::{
             ObservationTrust, ToolObservationDetail, ToolObservationStatus,
         };
         ModelVisibleToolObservation {
             schema_version: MODEL_VISIBLE_TOOL_OBSERVATION_SCHEMA_VERSION,
             status: ToolObservationStatus::Success,
-            summary: summary.to_string(),
+            summary: "tool completed".to_string(),
             detail: ToolObservationDetail::ResultReference {
                 result_ref: "result:staged".to_string(),
                 byte_len: 10,
-                preview: None,
+                preview: Some(content.to_string()),
                 total_bytes: None,
                 next_offset: None,
                 item_count: None,
@@ -1407,13 +1514,22 @@ mod tests {
             }
         }
 
+        // The dependent-child observation channel is the summary CAPTION (Stage
+        // 1b), so this test drives the observation `summary` (not its detail
+        // preview, which is the completed-`Outcome` content channel).
+        let observation_with_summary = |summary: &str| {
+            let mut o = observation("child content");
+            o.summary = summary.to_string();
+            o
+        };
+
         // Safe observation + summary → both cross verbatim onto the inline payload.
         let mapped = capability_outcome_to_resolution(CapabilityOutcome::AwaitDependentRun {
             gate_ref: gate_ref(),
             result_ref: result_ref(),
             safe_summary: "child produced 4 rows".to_string(),
             byte_len: 512,
-            model_observation: Some(observation("child preview: 4 rows")),
+            model_observation: Some(observation_with_summary("child preview: 4 rows")),
         });
         let staged = staged_of(&mapped);
         assert_eq!(
@@ -1430,7 +1546,7 @@ mod tests {
             result_ref: result_ref(),
             safe_summary: "leaked path /etc/passwd".to_string(),
             byte_len: 512,
-            model_observation: Some(observation("api key: sk-ant-leak")),
+            model_observation: Some(observation_with_summary("api key: sk-ant-leak")),
         });
         let staged = staged_of(&mapped);
         assert_eq!(
@@ -1500,10 +1616,7 @@ mod tests {
                 Resolution::Suspended(Suspension::DependentRun { waypoint, .. }),
                 Some(GateRecord::DependentRun { result, .. }),
             ) => {
-                assert_eq!(
-                    waypoint.gate, minted_gate,
-                    "gate binding matches channel"
-                );
+                assert_eq!(waypoint.gate, minted_gate, "gate binding matches channel");
                 assert_eq!(*result, minted_result, "result binding matches record");
             }
             other => panic!("expected DependentRun channel + record, got {other:?}"),
@@ -1552,45 +1665,37 @@ mod tests {
     }
 
     #[test]
-    fn observation_preview_is_carried_when_safe_and_dropped_when_unsafe() {
-        use super::super::model_observation::{
-            ModelVisibleToolObservation, ObservationTrust, ToolObservationDetail,
-            ToolObservationStatus,
+    fn observation_preview_carries_delimiter_content_and_drops_credentials() {
+        // The #5838 first-look preview is CONTENT on the ResultReference detail:
+        // delimiters/JSON and the ordinary word "Secretary" must survive (the
+        // #6129 substring-`secret` bug is fixed), while a genuine credential is
+        // dropped to `None` (the model reads the full output via the ref).
+        let refs_preview = |content: &str| {
+            let mapped = capability_outcome_to_resolution(CapabilityOutcome::Completed(
+                CapabilityResultMessage {
+                    result_ref: result_ref(),
+                    safe_summary: "ok".to_string(),
+                    progress: CapabilityProgress::Unknown,
+                    terminate_hint: false,
+                    byte_len: 10,
+                    output_digest: None,
+                    model_observation: Some(observation(content)),
+                },
+            ));
+            match mapped.resolution {
+                Resolution::Done(outcome) => outcome
+                    .refs
+                    .preview
+                    .as_ref()
+                    .map(|p| p.as_str().to_string()),
+                other => panic!("expected Done, got {other:?}"),
+            }
         };
 
-        let safe_observation = ModelVisibleToolObservation {
-            schema_version: MODEL_VISIBLE_TOOL_OBSERVATION_SCHEMA_VERSION,
-            status: ToolObservationStatus::Success,
-            summary: "staged 3 rows".to_string(),
-            detail: ToolObservationDetail::ResultReference {
-                result_ref: "result:staged".to_string(),
-                byte_len: 10,
-                preview: None,
-                total_bytes: None,
-                next_offset: None,
-                item_count: None,
-            },
-            artifacts: vec![],
-            recovery: None,
-            trust: ObservationTrust::UntrustedToolOutput,
-        };
-        let mapped = capability_outcome_to_resolution(CapabilityOutcome::Completed(
-            CapabilityResultMessage {
-                result_ref: result_ref(),
-                safe_summary: "ok".to_string(),
-                progress: CapabilityProgress::Unknown,
-                terminate_hint: false,
-                byte_len: 10,
-                output_digest: None,
-                model_observation: Some(safe_observation),
-            },
-        ));
-        match mapped.resolution {
-            Resolution::Done(outcome) => assert_eq!(
-                outcome.refs.preview.as_ref().map(SafeSummary::as_str),
-                Some("staged 3 rows")
-            ),
-            other => panic!("expected Done, got {other:?}"),
-        }
+        // Structured content with delimiters + "Secretary" is retained verbatim.
+        let content = "{\"office\": \"Secretary of the Treasury\", \"rows\": [1, 2, 3]}";
+        assert_eq!(refs_preview(content).as_deref(), Some(content));
+        // A genuine credential in the content drops the inline preview to None.
+        assert_eq!(refs_preview("token sk-ant-abc123def456").as_deref(), None);
     }
 }

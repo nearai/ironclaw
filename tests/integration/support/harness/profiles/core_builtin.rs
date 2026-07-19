@@ -256,6 +256,7 @@ fn core_builtin_tools_from_runtime(
     Ok(HostRuntimeCapabilityHarness {
         runtime: Mutex::new(runtime),
         approval_parts: None,
+        gate_record_store: super::super::fresh_in_memory_gate_record_store(),
         auto_approve_settings: None,
         pending_approval_scopes: Arc::new(Mutex::new(HashMap::new())),
         io: Mutex::new(io),
