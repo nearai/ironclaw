@@ -34,14 +34,6 @@ asyncio_mode = "auto"
 asyncio_default_fixture_loop_scope = "session"
 asyncio_default_test_loop_scope = "session"
 timeout = 360
-# Strict-by-default xfail: an XPASS (test starts passing despite the
-# xfail mark) is a real failure, forcing whoever fixed the underlying
-# contract to either un-xfail the test or update the reason. Two stale
-# xfail(strict=False) markers in test_v2_auth_oauth_matrix.py masked
-# the chat-driven tool_install regression shipped in #3366 for five
-# days — neither XFAIL nor XPASS would have alerted anyone with the
-# default (strict=False). Un-xfailed in #3589. Explicit
-# `strict=False` is still allowed for the rare genuinely-flaky case
-# but must be deliberate, not the default. See `.claude/rules/testing.md`
-# for the policy.
+# An XPASS is a real failure. Explicit `strict=False` remains available for a
+# deliberately non-blocking flaky case, but it must not be the default.
 xfail_strict = true

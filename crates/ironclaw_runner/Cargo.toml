@@ -81,6 +81,7 @@ tokio-util = { version = "0.7", features = ["rt"] }
 tracing = "0.1"
 
 [dev-dependencies]
+ironclaw_loop_host = { path = "../ironclaw_loop_host", features = ["test-support"] }
 chrono = "0.4"
 ironclaw_agent_loop = { path = "../ironclaw_agent_loop", version = "0.1.0", features = ["test-support"] }
 ironclaw_authorization = { path = "../ironclaw_authorization", version = "0.1.0" }

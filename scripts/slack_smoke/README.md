@@ -71,7 +71,8 @@ Flow per case:
 ## Recommended Release Workflow
 
 1. Run the Rust test suite: `cargo test --test slack_auth_integration`
-2. Run E2E tests: `cd tests/e2e && pytest scenarios/test_slack_e2e.py -v`
+2. Run the Reborn Slack adapter and live-QA checks selected by the owning
+   workflow; the retired v1 Slack E2E scenario no longer exists.
 3. Run this smoke test against a staging instance with real Slack
 
 ## Notes

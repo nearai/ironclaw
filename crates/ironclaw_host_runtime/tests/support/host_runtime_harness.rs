@@ -63,7 +63,7 @@ use ironclaw_scripts::{
     ScriptExecutionResult, ScriptExecutor, ScriptRuntime, ScriptRuntimeConfig,
 };
 use ironclaw_secrets::{
-    InMemorySecretStore, SecretLease, SecretLeaseId, SecretMaterial, SecretMetadata, SecretStore,
+    FilesystemSecretStore, SecretLease, SecretLeaseId, SecretMaterial, SecretMetadata, SecretStore,
     SecretStoreError,
 };
 use ironclaw_trust::{
@@ -1088,7 +1088,7 @@ where
     let registry = Arc::new(registry_with_manifest(SCRIPT_MANIFEST));
     let dispatcher = Arc::new(NoopDispatcher);
     let governor = Arc::new(InMemoryResourceGovernor::new());
-    let secret_store = Arc::new(InMemorySecretStore::new());
+    let secret_store = Arc::new(FilesystemSecretStore::ephemeral());
     let obligation_services = BuiltinObligationServices::new(
         Arc::new(InMemoryAuditSink::new()),
         secret_store.clone(),

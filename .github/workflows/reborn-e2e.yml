@@ -210,10 +210,7 @@ jobs:
           product_ref="$(git rev-parse HEAD)"
           artifact_dir="artifacts/reborn-webui-v2-binary"
           mkdir -p "${artifact_dir}"
-          # Temporary compatibility member for downstream QA consumers; remove
-          # after every consumer invokes the canonical ironclaw binary.
-          cp target/debug/ironclaw target/debug/ironclaw-reborn
-          tar -C target/debug -czf "${artifact_dir}/ironclaw-reborn.tar.gz" ironclaw ironclaw-reborn
+          tar -C target/debug -czf "${artifact_dir}/ironclaw-reborn.tar.gz" ironclaw
           (
             cd "${artifact_dir}"
             sha256sum ironclaw-reborn.tar.gz > ironclaw-reborn.tar.gz.sha256

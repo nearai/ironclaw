@@ -1,7 +1,7 @@
 """Served Reborn WebUI v2 product-auth API tests.
 
 These scenarios exercise `/api/reborn/product-auth/*` through a real
-`ironclaw-reborn serve` process. They cover caller-facing auth, validation,
+`ironclaw serve` process. They cover caller-facing auth, validation,
 redaction, and empty-state behavior without re-running Rust contract suites.
 """
 

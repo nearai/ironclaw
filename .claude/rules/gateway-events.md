@@ -6,7 +6,6 @@ paths:
   - "crates/ironclaw_reborn_event_store/**"
   - "crates/ironclaw_product_workflow/**"
   - "crates/ironclaw_webui/**"
-  - "src/channels/web/**"
 ---
 # Reborn events and transport projections
 

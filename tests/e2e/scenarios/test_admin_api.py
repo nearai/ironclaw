@@ -1,4 +1,4 @@
-"""Admin user-management E2E against the real ``ironclaw-reborn serve`` binary.
+"""Admin user-management E2E against the real ``ironclaw serve`` binary.
 
 Drives the WebChat v2 admin surface (`/api/webchat/v2/admin/*`, backed by
 `ironclaw_product_workflow::AdminUserService`) over HTTP against the standalone

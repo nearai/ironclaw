@@ -28,7 +28,7 @@
 //! harnesses) stay off the feature and carry no HTTP surface code.
 //!
 //! The composition is intentionally Reborn-owned and does **not** share
-//! middleware with the v1 gateway under `/src/channels/web/`. Path A in
+//! middleware with the retired v1 gateway. Path A in
 //! `docs/reborn/how-to-port-channel-to-reborn.md` requires native
 //! surfaces to keep host auth host-owned and route/body/CORS security
 //! in gateway-owned code; the Reborn binary owns this stack itself.
@@ -363,9 +363,8 @@ impl WebuiServeConfig {
     /// into; future host-owned public surfaces can reuse the same
     /// hook by returning a [`PublicRouteMount`].
     ///
-    /// **Do NOT pass a v1 gateway router through this hook.** v1's
-    /// `/auth/*` handlers in `src/channels/web/handlers/auth.rs`
-    /// share path names with the v2-native router from
+    /// **Do NOT pass a compatibility router through this hook.** The retired
+    /// gateway's `/auth/*` handlers shared path names with the native router from
     /// `webui_v2_auth_router` (`/auth/providers`,
     /// `/auth/login/{p}`, `/auth/callback/{p}`, `/auth/logout`) by
     /// design — they implement the same protocol on two

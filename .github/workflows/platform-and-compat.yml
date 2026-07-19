@@ -129,13 +129,13 @@ jobs:
             echo "has_wasm_abi_risk=false" >> "$GITHUB_OUTPUT"
           fi
 
-          if has_match '^(channels-src/telegram/|crates/ironclaw_telegram_v2_adapter/|tests/e2e/scenarios/test_telegram_.*|\.github/workflows/(platform-and-compat|reborn-e2e|nightly-deep-ci)\.yml$)'; then
+          if has_match '^(channels-src/telegram/|crates/ironclaw_(telegram_extension|telegram_v2_adapter)/|crates/ironclaw_reborn_composition/src/telegram/|\.github/workflows/(platform-and-compat|reborn-e2e|nightly-deep-ci)\.yml$)'; then
             echo "has_telegram_risk=true" >> "$GITHUB_OUTPUT"
           else
             echo "has_telegram_risk=false" >> "$GITHUB_OUTPUT"
           fi
 
-          if has_match '^(channels-src/slack/|crates/ironclaw_slack_v2_adapter/|tests/e2e/scenarios/test_slack_.*|\.github/workflows/(platform-and-compat|reborn-e2e|nightly-deep-ci)\.yml$)'; then
+          if has_match '^(channels-src/slack/|crates/ironclaw_slack_v2_adapter/|crates/ironclaw_reborn_composition/src/slack/|crates/ironclaw_webui/tests/slack_.*|\.github/workflows/(platform-and-compat|reborn-e2e|nightly-deep-ci)\.yml$)'; then
             echo "has_slack_risk=true" >> "$GITHUB_OUTPUT"
           else
             echo "has_slack_risk=false" >> "$GITHUB_OUTPUT"

@@ -222,6 +222,28 @@ fn retired_v1_runtime_stays_removed() {
         );
     }
 
+    for retired_migration_path in [
+        "crates/ironclaw_reborn_migration/src/main.rs",
+        "crates/ironclaw_reborn_migration/src/source.rs",
+        "crates/ironclaw_reborn_migration/src/v2_model.rs",
+        "crates/ironclaw_reborn_migration/src/convert",
+        "crates/ironclaw_reborn_migration/src/report.rs",
+    ] {
+        assert!(
+            !root.join(retired_migration_path).exists(),
+            "retired v1 importer path must stay removed: {retired_migration_path}"
+        );
+    }
+    let migration_manifest =
+        std::fs::read_to_string(root.join("crates/ironclaw_reborn_migration/Cargo.toml"))
+            .expect("migration manifest must be readable");
+    assert!(
+        !migration_manifest.contains("full-migration")
+            && !migration_manifest.contains("dep:ironclaw")
+            && !migration_manifest.contains("name = \"ironclaw-reborn-migration\""),
+        "the Reborn operator migration crate must not restore the retired v1 importer"
+    );
+
     let mut legacy_layers = Vec::new();
     let mut forbidden_deps = Vec::new();
     for package in packages {
@@ -289,6 +311,21 @@ fn retired_v1_runtime_stays_removed() {
         "active build, workflow, and packaging paths must not reference retired v1 artifacts:\n{}",
         retired_delivery_references.join("\n")
     );
+
+    for test_support_path in [
+        "tests/e2e/conftest.py",
+        "tests/e2e/helpers.py",
+        "scripts/live-canary/run.sh",
+    ] {
+        let contents = std::fs::read_to_string(root.join(test_support_path))
+            .unwrap_or_else(|error| panic!("failed to read {test_support_path}: {error}"));
+        assert!(
+            !contents.contains("ironclaw-legacy")
+                && !contents.contains("ironclaw_binary")
+                && !contents.contains("ironclaw_server"),
+            "active Reborn test support must not restore a retired v1 fixture: {test_support_path}"
+        );
+    }
 }
 
 #[test]

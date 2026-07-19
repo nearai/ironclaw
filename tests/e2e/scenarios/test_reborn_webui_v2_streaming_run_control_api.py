@@ -2,7 +2,7 @@
 
 These scenarios convert REBCLI-044 rows from Rust handler/support-substrate
 contract proxies to caller-facing coverage through a real
-`ironclaw-reborn serve` process. Browser approval-card UX remains covered by
+`ironclaw serve` process. Browser approval-card UX remains covered by
 the browser suites; this file focuses on served SSE and control routes.
 """
 

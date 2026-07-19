@@ -1023,7 +1023,7 @@ mod tests {
     use std::sync::Mutex as StdMutex;
 
     use ironclaw_host_api::{SecretHandle, UserId};
-    use ironclaw_secrets::InMemorySecretStore;
+    use ironclaw_secrets::FilesystemSecretStore;
 
     use tokio::sync::RwLock;
 
@@ -1036,7 +1036,7 @@ mod tests {
     #[tokio::test]
     async fn seed_legacy_slack_setup_fails_closed_without_identity_binding() {
         let setup_store = Arc::new(InMemorySetupStore::empty());
-        let secret_store = Arc::new(InMemorySecretStore::default());
+        let secret_store = Arc::new(FilesystemSecretStore::ephemeral());
         let setup_service = Arc::new(SlackSetupService::new(
             TenantId::new("tenant:slack").unwrap(),
             AgentId::new("agent:slack").unwrap(),
@@ -1093,7 +1093,7 @@ mod tests {
             None,
             UserId::new("user:operator").unwrap(),
             setup_store,
-            Arc::new(InMemorySecretStore::default()),
+            Arc::new(FilesystemSecretStore::ephemeral()),
         ));
         let binding_store = Arc::new(RecordingBindingStore::default());
         let route_store = Arc::new(RecordingRouteStore::default());
@@ -1137,7 +1137,7 @@ mod tests {
             None,
             UserId::new("user:operator").unwrap(),
             Arc::new(InMemorySetupStore::new(setup_record(7))),
-            Arc::new(InMemorySecretStore::default()),
+            Arc::new(FilesystemSecretStore::ephemeral()),
         ));
         let resolver = DynamicSlackPersonalConnectionScopeResolver { setup_service };
 
@@ -1158,7 +1158,7 @@ mod tests {
             None,
             UserId::new("user:operator").unwrap(),
             Arc::new(InMemorySetupStore::empty()),
-            Arc::new(InMemorySecretStore::default()),
+            Arc::new(FilesystemSecretStore::ephemeral()),
         ));
         let resolver = DynamicSlackPersonalConnectionScopeResolver { setup_service };
 

@@ -5,7 +5,7 @@ from urllib.parse import unquote, urlparse
 
 from playwright.async_api import expect
 
-from helpers import REBORN_V2_AUTH_TOKEN, SEL
+from helpers import REBORN_V2_AUTH_TOKEN, SEL_V2
 from reborn_webui_harness import (
     reborn_v2_browser,  # noqa: F401 - imported fixture dependency
     reborn_v2_page,  # noqa: F401 - imported fixture
@@ -170,7 +170,7 @@ async def test_skills_add_and_delete(reborn_v2_page):
         {"name": "markdown-helper", "content": MOCK_SKILL_CONTENT.strip()}
     ]
 
-    installed = page.locator(SEL["skill_installed"])
+    installed = page.locator(SEL_V2["skills_card"])
     await installed.first.wait_for(state="visible", timeout=5000)
     assert "markdown-helper" in await installed.first.inner_text()
 
@@ -185,7 +185,7 @@ async def test_skills_add_and_delete(reborn_v2_page):
 
     await page.wait_for_function(
         """(selector) => document.querySelectorAll(selector).length === 0""",
-        arg=SEL["skill_installed"],
+        arg=SEL_V2["skills_card"],
         timeout=5000,
     )
 
@@ -196,7 +196,7 @@ async def test_reborn_skills_delete_uses_native_confirm_dialog(reborn_v2_page):
     await mock_skills_api(page, initial_skills=[MOCK_INSTALLED_SKILL])
     await go_to_skills(page)
 
-    installed = page.locator(SEL["skill_installed"]).filter(has_text="markdown-helper")
+    installed = page.locator(SEL_V2["skills_card"]).filter(has_text="markdown-helper")
     await installed.first.wait_for(state="visible", timeout=5000)
 
     dialogs = []
@@ -219,7 +219,7 @@ async def test_reborn_skills_delete_uses_native_confirm_dialog(reborn_v2_page):
 
     await page.wait_for_function(
         """(selector) => document.querySelectorAll(selector).length === 0""",
-        arg=SEL["skill_installed"],
+        arg=SEL_V2["skills_card"],
         timeout=5000,
     )
 
@@ -231,7 +231,7 @@ async def test_skills_edit_user_managed_skill(reborn_v2_page):
     await go_to_skills(page)
     await add_mock_skill(page)
 
-    installed = page.locator(SEL["skill_installed"])
+    installed = page.locator(SEL_V2["skills_card"])
     await installed.first.wait_for(state="visible", timeout=5000)
 
     async with page.expect_response(
@@ -268,7 +268,7 @@ async def test_skills_read_only_sources_hide_edit_and_delete(reborn_v2_page):
     await mock_skills_api(page, initial_skills=[MOCK_SYSTEM_SKILL, MOCK_WORKSPACE_SKILL])
     await go_to_skills(page)
 
-    installed = page.locator(SEL["skill_installed"])
+    installed = page.locator(SEL_V2["skills_card"])
     await installed.first.wait_for(state="visible", timeout=5000)
 
     system_card = installed.filter(has_text="system-helper")

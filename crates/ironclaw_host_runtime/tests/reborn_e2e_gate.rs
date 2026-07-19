@@ -36,7 +36,7 @@ use ironclaw_run_state::{RunStateStore, RunStatus};
 use ironclaw_scripts::{
     ScriptBackend, ScriptBackendOutput, ScriptBackendRequest, ScriptRuntime, ScriptRuntimeConfig,
 };
-use ironclaw_secrets::{InMemorySecretStore, SecretMaterial, SecretStore};
+use ironclaw_secrets::{FilesystemSecretStore, SecretMaterial, SecretStore};
 use ironclaw_trust::{
     AdminConfig, AdminEntry, AuthorityCeiling, EffectiveTrustClass, HostTrustAssignment,
     HostTrustPolicy, TrustDecision, TrustProvenance,
@@ -528,7 +528,7 @@ async fn reborn_e2e_gate_host_http_consumes_staged_policy_and_secret_once() {
     let capability_id = script_capability_id();
     let handle = SecretHandle::new("api-token").unwrap();
     let staged_policy = sample_policy();
-    let secret_store = Arc::new(InMemorySecretStore::new());
+    let secret_store = Arc::new(FilesystemSecretStore::ephemeral());
     let obligation_services = BuiltinObligationServices::new(
         Arc::new(InMemoryAuditSink::new()),
         secret_store.clone(),

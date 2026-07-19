@@ -1,7 +1,6 @@
 //! Google OAuth (OIDC) provider for the WebChat v2 login surface.
 //!
-//! Mirrors the v1 behavior in
-//! `src/channels/web/oauth/providers.rs::GoogleProvider`:
+//! Preserves the retired gateway's Google OAuth interoperability behavior:
 //!
 //! - Authorization URL uses OIDC scopes `openid email profile`, PKCE
 //!   S256, and an optional `hd=` hosted-domain hint.

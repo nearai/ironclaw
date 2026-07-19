@@ -301,41 +301,7 @@ assert_flagged "PROJECTION: comma + whitespace-only detail still flagged" \
     "$PROJ_POS" \
     "$PROJ_NEG"
 
-# ── DISPATCH ──────────────────────────────────────────────────
-DISPATCH_POS='state\.(store|workspace|workspace_pool|extension_manager|skill_registry|session_manager)\.'
-DISPATCH_NEG='// dispatch-exempt:|// safety:|:\+\+\+ '
-
-assert_filtered "DISPATCH: diff header line is filtered" \
-    "+++ b/src/channels/web/handlers/foo.rs" \
-    "$DISPATCH_POS" \
-    "$DISPATCH_NEG"
-
-assert_flagged "DISPATCH: direct state.store touch is flagged" \
-    "+    state.store.create_project(...)" \
-    "$DISPATCH_POS" \
-    "$DISPATCH_NEG"
-
-# ── CREDNAME ──────────────────────────────────────────────────
-# Portable word boundary: `(^|[^[:alnum:]_])` / `([^[:alnum:]_]|$)` —
-# `grep -E`'s `\b` is a GNU extension and not recognised by BSD grep.
-CREDNAME_POS='(^|[^[:alnum:]_])CredentialName([^[:alnum:]_]|$)'
-CREDNAME_NEG='// web-identity-exempt:|// safety:|:\+\+\+ '
-
-assert_filtered "CREDNAME: diff header line is filtered" \
-    "+++ b/src/channels/web/features/settings.rs" \
-    "$CREDNAME_POS" \
-    "$CREDNAME_NEG"
-
-# A similarly-named but distinct identifier must not fire.
-assert_filtered "CREDNAME: CredentialNameExt (different type) is not flagged" \
-    "+    let ext: CredentialNameExt = ...;" \
-    "$CREDNAME_POS" \
-    "$CREDNAME_NEG"
-
-assert_flagged "CREDNAME: bare CredentialName reference is flagged" \
-    "+    let name: CredentialName = ...;" \
-    "$CREDNAME_POS" \
-    "$CREDNAME_NEG"
+# Retired v1 DISPATCH and CREDNAME matcher tests were removed with their checks.
 
 # ── MULTITENANT ───────────────────────────────────────────────
 # A new unscoped `sse.broadcast(...)` must either be transport-only or
@@ -388,8 +354,7 @@ assert_filtered "MULTITENANT: explicit multi-tenant-safe annotation is exempt" \
 # `projection-exempt:` and `multi-tenant-safe:` because Rust line
 # comments don't nest. The marker scanner must accept either marker
 # anywhere in the trailing comment, not only when the comment opens
-# with it. See `src/channels/web/mod.rs::dispatch_status_event` and
-# `src/main.rs` sandbox JobEvent dispatcher.
+# with it. # the Reborn event projection boundary.
 assert_filtered "MULTITENANT: compound projection-exempt + multi-tenant-safe annotation is exempt" \
     "+    sse.broadcast(event); // projection-exempt: bridge dispatcher, single-tenant unscoped status; multi-tenant-safe: only reached when multi_tenant_mode=false" \
     "$MT_POS" \

@@ -128,11 +128,11 @@ When adding a new workflow that runs on `push` to `main`, add its workflow
   non-shipping Reborn integration-test harness, and Reborn replay/trace
   evidence lives in the Reborn test and E2E workflows.
 - **Full-path extension↔provider coverage has no scheduler on any stack**:
-  the Emulate-backed full-path tests (`test_reborn_emulate_full_path.py`)
-  previously booted the retired v1 binary (see `tests/e2e/CLAUDE.md`, Reborn
+  the former Emulate-backed full-path suite booted the retired v1 binary (see
+  `tests/e2e/CLAUDE.md`, Reborn
   E2E coverage gate) and were frozen with it. A Reborn-native port — same
   install → OAuth → tool call → provider-mutation contract through
-  `ironclaw-reborn serve` — is the follow-up that restores this tier.
+  `ironclaw serve` — is the follow-up that restores this tier.
 - **Scope classifiers** (`scripts/ci/classify-test-scope.sh` and per-workflow
   `changes` jobs) are curated allowlists. Adding a new crate or test directory
   requires updating them, or the queue's scoped checks silently narrow. Keep

@@ -19,7 +19,7 @@ This document is the branch-local map for the dedicated Reborn E2E gate. Reborn 
 | Network policy and host HTTP egress | `crates/ironclaw_network/tests/*` plus host-runtime HTTP egress tests |
 | Secret storage/leases | `crates/ironclaw_secrets/tests/secret_store_contract.rs` plus host-runtime staged-secret tests |
 | Events/audit replay | `crates/ironclaw_events/tests/durable_log_contract.rs` and host-runtime durable-event tests |
-| Gateway product smoke | Existing Playwright scenarios under `tests/e2e/scenarios/`, especially `test_v2_*` |
+| Product WebUI smoke | Existing Playwright scenarios under `tests/e2e/scenarios/`, especially `test_reborn_*` |
 
 ## Dedicated Reborn E2E goal
 
@@ -129,7 +129,7 @@ The script expands to the dedicated `reborn_e2e_gate.rs` tests plus the current 
 Run the WebChat v2 smoke test:
 
 ```bash
-cargo build -p ironclaw_reborn_cli --features webui-v2-beta,openai-compat-beta,slack-v2-host-beta --bin ironclaw-reborn
+cargo build -p ironclaw_reborn_cli --features webui-v2-beta,openai-compat-beta,slack-v2-host-beta --bin ironclaw
 cd tests/e2e
 pip install -e .
 playwright install --with-deps chromium  # on Linux CI; local macOS can omit --with-deps

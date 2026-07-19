@@ -353,6 +353,8 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
                 raise AssertionError(f"unexpected assistant attribute: {name}")
 
             async def all_inner_texts(self):
+                if current().get("blocks_read_fails"):
+                    raise RuntimeError("blocks read failed")
                 return [
                     str(message.get("text") or "")
                     for message in current()["assistants"]
@@ -1805,11 +1807,17 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
         self.assertEqual(reply.full_text, "Current finalized reply.")
         self.assertEqual(reply.final_reply_reason, "final_reply_observed")
 
-    def test_wait_for_assistant_reply_fails_immediately_when_marker_is_enforced(self):
-        async def fail_if_waits(_seconds):
-            raise AssertionError("finalized reply should not continue the wait loop")
+    def test_wait_for_assistant_reply_fails_after_reconfirm_when_marker_is_enforced(
+        self,
+    ):
+        # The finalized bubble text never contains the marker, so even the
+        # bounded capture-race re-confirm cannot rescue it — it must still fail.
+        sleeps = {"count": 0}
 
-        with patch.object(run_live_qa.asyncio, "sleep", side_effect=fail_if_waits):
+        async def noop_sleep(_seconds):
+            sleeps["count"] += 1
+
+        with patch.object(run_live_qa.asyncio, "sleep", side_effect=noop_sleep):
             with self.assertRaisesRegex(
                 AssertionError,
                 "finalized assistant reply.*required marker",
@@ -1824,26 +1832,136 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
                     )
                 )
 
+        # It re-confirmed the bounded number of times before giving up.
+        self.assertEqual(
+            sleeps["count"],
+            run_live_qa.ASSISTANT_REPLY_MARKER_RECONFIRM_ATTEMPTS,
+        )
+
     def test_wait_for_assistant_reply_enforces_marker_on_finalized_bubble_only(self):
-        with self.assertRaisesRegex(
-            AssertionError,
-            "finalized assistant reply.*required marker",
-        ):
-            asyncio.run(
-                run_live_qa._wait_for_assistant_reply(
-                    self._fake_assistant_reply_page(
-                        "Routine created without the marker.",
-                        assistant_block_texts=[
-                            "Earlier reply REBORN_QA_DONE",
+        async def noop_sleep(_seconds):
+            return None
+
+        with patch.object(run_live_qa.asyncio, "sleep", side_effect=noop_sleep):
+            with self.assertRaisesRegex(
+                AssertionError,
+                "finalized assistant reply.*required marker",
+            ):
+                asyncio.run(
+                    run_live_qa._wait_for_assistant_reply(
+                        self._fake_assistant_reply_page(
                             "Routine created without the marker.",
-                        ],
-                    ),
-                    marker="REBORN_QA_DONE",
+                            assistant_block_texts=[
+                                "Earlier reply REBORN_QA_DONE",
+                                "Routine created without the marker.",
+                            ],
+                        ),
+                        marker="REBORN_QA_DONE",
+                        required_text=["routine"],
+                        timeout=30.0,
+                        enforce_marker=True,
+                    )
+                )
+
+    def test_wait_for_assistant_reply_reconfirms_marker_after_capture_race(self):
+        # Regression for qa_8d_hn_keyword_slack_delivery: the finalized bubble's
+        # first read returned mid-stream/truncated text (marker cut off) while
+        # `data-final-reply` had already flipped to "true". A subsequent read
+        # shows the complete reply with the marker. The waiter must re-confirm
+        # the finalized bubble and succeed rather than hard-fail on the stale
+        # truncated snapshot.
+        marker = "REBORN_QA_8D_HN_KEYWORD_ROUTINE_CREATED_0123"
+        truncated_reply = {
+            # Ends mid-marker, exactly like the captured trace.
+            "text": "Marker in final answer: `REBORN_QA_8D_HN_KEYWORD_R",
+            "final_reply_state": "true",
+        }
+        complete_reply = {
+            "text": f"Routine created. Marker in final answer: `{marker}`",
+            "final_reply_state": "true",
+        }
+        page, advance = self._fake_sequenced_terminal_page(
+            [
+                {"assistants": [truncated_reply], "errors": []},
+                {"assistants": [complete_reply], "errors": []},
+            ]
+        )
+
+        async def reveal_complete_reply(_seconds):
+            # The re-confirm sleep is what advances to the untruncated snapshot.
+            advance()
+
+        with patch.object(
+            run_live_qa.asyncio,
+            "sleep",
+            side_effect=reveal_complete_reply,
+        ):
+            reply = asyncio.run(
+                run_live_qa._wait_for_assistant_reply(
+                    page,
+                    marker=marker,
                     required_text=["routine"],
                     timeout=30.0,
+                    assistant_count_before=0,
+                    error_count_before=0,
                     enforce_marker=True,
                 )
             )
+
+        self.assertIn(marker, reply.full_text)
+        self.assertEqual(reply.final_reply_reason, "final_reply_observed")
+
+    def test_wait_for_assistant_reply_reconfirm_falls_back_to_bubble_text_when_blocks_fail(
+        self,
+    ):
+        # Companion regression to the capture-race reconfirm: if the per-block
+        # read fails on the reconfirm attempt while the whole-bubble
+        # `inner_text` succeeds with the complete reply, the waiter must
+        # evaluate BOTH the marker and required_text against that fresh bubble
+        # text — not leave `normalized` at the stale truncated snapshot (which
+        # would miss required_text and spin the wait to failure).
+        marker = "REBORN_QA_8D_HN_KEYWORD_ROUTINE_CREATED_0123"
+        truncated_reply = {
+            "text": "Marker in final answer: `REBORN_QA_8D_HN_KEYWORD_R",
+            "final_reply_state": "true",
+        }
+        complete_reply = {
+            "text": f"Routine created. Marker in final answer: `{marker}`",
+            "final_reply_state": "true",
+        }
+        page, advance = self._fake_sequenced_terminal_page(
+            [
+                {"assistants": [truncated_reply], "errors": []},
+                {
+                    "assistants": [complete_reply],
+                    "errors": [],
+                    "blocks_read_fails": True,
+                },
+            ]
+        )
+
+        async def reveal_complete_reply(_seconds):
+            advance()
+
+        with patch.object(
+            run_live_qa.asyncio,
+            "sleep",
+            side_effect=reveal_complete_reply,
+        ):
+            reply = asyncio.run(
+                run_live_qa._wait_for_assistant_reply(
+                    page,
+                    marker=marker,
+                    required_text=["routine"],
+                    timeout=30.0,
+                    assistant_count_before=0,
+                    error_count_before=0,
+                    enforce_marker=True,
+                )
+            )
+
+        self.assertIn(marker, reply.full_text)
+        self.assertIn("routine", reply.full_text.lower())
 
     def test_wait_for_assistant_reply_raises_terminal_model_failure_without_waiting(
         self,
@@ -7454,7 +7572,7 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
         )
         workflow = workflow_path.read_text(encoding="utf-8")
         match = re.search(
-            r"(?ms)^  reborn-webui-v2-live-qa:\n(?P<body>.*?)^  persona-rotating:",
+            r"(?ms)^  reborn-webui-v2-live-qa:\n(?P<body>.*?)^  canary-report:",
             workflow,
         )
         self.assertIsNotNone(match, "Reborn WebUI v2 live QA job missing")
@@ -7623,9 +7741,9 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
             "webui-v2-beta,slack-v2-host-beta",
             prepare_body,
         )
-        self.assertIn("cp target/debug/ironclaw target/debug/ironclaw-reborn", prepare_body)
+        self.assertNotIn("cp target/debug/ironclaw target/debug/ironclaw-reborn", prepare_body)
         self.assertIn(
-            "ironclaw-reborn.tar.gz ironclaw ironclaw-reborn",
+            "ironclaw-reborn.tar.gz ironclaw",
             prepare_body,
         )
         self.assertIn("using the canary fallback build", prepare_body)
@@ -7648,9 +7766,9 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
             '["openai-compat-beta","slack-v2-host-beta","webui-v2-beta"]',
             reborn_e2e,
         )
-        self.assertIn("cp target/debug/ironclaw target/debug/ironclaw-reborn", reborn_e2e)
+        self.assertNotIn("cp target/debug/ironclaw target/debug/ironclaw-reborn", reborn_e2e)
         self.assertIn(
-            "ironclaw-reborn.tar.gz\" ironclaw ironclaw-reborn",
+            "ironclaw-reborn.tar.gz\" ironclaw",
             reborn_e2e,
         )
         self.assertIn(

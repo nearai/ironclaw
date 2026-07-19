@@ -1,180 +1,43 @@
-# Live Canary Regression Lanes
+# Reborn Live Canary
 
-IronClaw now has two complementary regression systems:
-
-- deterministic CI, which replays committed tests and traces without depending
-  on real third-party providers for the main blocking path;
-- live canaries, which use real providers, real browser consent flows, or
-  selected real LLM lanes to catch provider drift, refresh failures, release
-  upgrade problems, and auth regressions that mocks will miss.
+The supported live regression path is the canonical Reborn WebUI QA lane. It
+runs `ironclaw serve` with the prepared PR or default-branch binary and covers
+the selected live provider and browser cases.
 
 The implementation lives in:
 
-- `.github/workflows/reborn-tests.yml` and `.github/workflows/reborn-e2e.yml`
-  for normal blocking/advisory deterministic lanes;
-- `.github/workflows/live-canary.yml` for scheduled and manual live lanes;
-- `scripts/live-canary/run.sh` for lane dispatch;
-- `scripts/live-canary/scrub-artifacts.sh` for artifact scanning;
-- `scripts/live-canary/upgrade-canary.sh` for previous-release upgrade checks.
+- `.github/workflows/live-canary.yml` for scheduling, approval, preparation,
+  execution, and reporting;
+- `scripts/reborn_webui_v2_live_qa/` for the QA harness;
+- `scripts/live-canary/run.sh` for local and CI dispatch;
+- `scripts/live-canary/scrub-artifacts.sh` for artifact scanning.
 
-The auth-specific executors used by the unified live-canary wrapper are:
+Legacy auth, workflow, public-smoke, persona, provider-matrix, and upgrade
+canaries depended on the retired v1 runtime. They were removed rather than left
+as unreachable jobs. Equivalent coverage must use the canonical Reborn harness
+before a new lane is introduced.
 
-- `scripts/auth_canary/run_canary.py`
-- `scripts/auth_live_canary/run_live_canary.py` (both seeded and browser-consent
-  flows; selected with `--mode {seeded,browser}`)
-
-Their shared auth-lane framework lives in:
-
-- `scripts/live_canary/common.py`
-- `scripts/live_canary/auth_registry.py`
-- `scripts/live_canary/auth_runtime.py`
-
-Future auth canaries should extend that shared framework and the canonical
-account guide rather than introducing another bespoke runner layout.
-
-## Lane Summary
-
-| Lane | Scope | Runner | Trigger | Blocking |
-| --- | --- | --- | --- | --- |
-| `deterministic-replay` | Replays committed trace fixtures without live LLM calls | GitHub-hosted | PR/staging via Reborn deterministic workflows; manual via `live-canary.yml` | Yes in Reborn deterministic workflows |
-| `public-smoke` | Real LLM plus public tools such as `zizmor_scan` and mission digest | GitHub-hosted | Daily and manual | Opens issue on scheduled failure |
-| `persona-rotating` | Real LLM multi-turn persona workflow, one persona per day | GitHub-hosted | Daily and manual | Opens issue on scheduled failure |
-| `private-oauth` | Google Drive auth gate and transparent refresh against a dedicated test account | Self-hosted `ironclaw-live` runner | Manual; scheduled only when enabled | Opens issue on scheduled failure |
-| `provider-matrix` | Same live behavior against multiple provider adapters | GitHub-hosted | Weekly and manual | Opens issue on scheduled failure |
-| `release-public-full` | Full public live suite for release candidates | GitHub-hosted | Manual | Release checklist gate |
-| `upgrade-canary` | Previous release DB opened by current checkout | GitHub-hosted | Manual | Release checklist gate |
-| `auth-smoke` | Fresh-machine mock-backed auth smoke: hosted OAuth, MCP OAuth, and multi-user MCP isolation | GitHub-hosted | Hourly and manual | No |
-| `auth-full` | Larger mock-backed auth matrix including failure and refresh cases | GitHub-hosted | Manual | No |
-| `auth-channels` | WASM channel auth diagnostic lane | GitHub-hosted | Manual | No |
-| `auth-live-seeded` | Real-provider runtime checks using seeded tokens against a clean DB | GitHub-hosted | Hourly and manual | No |
-| `auth-browser-consent` | Real browser-consent OAuth using Playwright against provider login UIs | GitHub-hosted | Nightly and manual | No |
-
-## Required Repository Configuration
-
-### Public live LLM lanes
-
-Secrets:
-
-- `LIVE_ANTHROPIC_API_KEY`
-- `LIVE_OPENAI_COMPATIBLE_API_KEY`
-- `LIVE_OPENAI_COMPATIBLE_BASE_URL`
-
-Variables:
-
-- `LIVE_ANTHROPIC_MODEL`
-- `LIVE_OPENAI_COMPATIBLE_MODEL`
-- `LIVE_CANARY_PRIVATE_OAUTH_ENABLED`
-
-### Auth live-seeded lane
-
-Secrets and dedicated account material are documented in
-[scripts/live-canary/ACCOUNTS.md](../../scripts/live-canary/ACCOUNTS.md).
-
-Current provider material includes:
-
-- Google OAuth client credentials and seeded access/refresh tokens
-- GitHub seeded token plus a stable issue fixture
-- Notion seeded access token and a stable query fixture
-
-### Auth browser-consent lane
-
-Secrets and browser session material are documented in
-[scripts/live-canary/ACCOUNTS.md](../../scripts/live-canary/ACCOUNTS.md).
-
-Current provider material includes:
-
-- Google OAuth app credentials plus browser storage state
-- GitHub OAuth app credentials plus browser storage state and issue fixture
-- Notion browser storage state
-
-### Reborn WebUI v2 Slack lane
-
-The Reborn WebUI v2 live QA runner must not write legacy `[slack]` setup fields
-into `config.toml`. The generated Reborn config only enables Slack:
-
-```toml
-[slack]
-enabled = true
-```
-
-Bot installation setup is applied headlessly after `ironclaw-reborn serve`
-boots by calling `PUT /api/webchat/v2/channels/slack/setup` with the WebUI
-operator bearer token. Required repository variables:
-
-- `REBORN_WEBUI_V2_LIVE_QA_SLACK_INSTALLATION_ID`
-- `REBORN_WEBUI_V2_LIVE_QA_SLACK_TEAM_ID`
-- `REBORN_WEBUI_V2_LIVE_QA_SLACK_API_APP_ID`
-- `REBORN_WEBUI_V2_LIVE_QA_SLACK_ROUTE_USER_ID`
-
-Required secrets:
-
-- `IRONCLAW_REBORN_SLACK_SIGNING_SECRET`
-- `IRONCLAW_REBORN_SLACK_BOT_TOKEN`
-
-Required for `qa_3a_slack_connect`, `qa_5a_slack_connect`, and
-`qa_8a_slack_connect`, which assert both sides of the personal OAuth path:
-the Slack OAuth start URL is generated from client credentials, and a real
-live Slack user account is already bound in Reborn product-auth state:
-
-- variable `REBORN_WEBUI_V2_LIVE_QA_SLACK_OAUTH_CLIENT_ID`
-- secret `REBORN_WEBUI_V2_LIVE_QA_SLACK_OAUTH_CLIENT_SECRET`
-- secret `AUTH_LIVE_SLACK_ACCESS_TOKEN`
-
-`AUTH_LIVE_SLACK_ACCESS_TOKEN` must be a real Slack user token for the live QA
-Slack user. The harness validates it with Slack `auth.test`, then seeds the
-generated Reborn home with an encrypted `slack_personal` product-auth account.
-
-## Commands
-
-Run public live smoke locally:
+## Run Locally
 
 ```bash
-IRONCLAW_LIVE_TEST=1 \
-LLM_BACKEND=anthropic \
-ANTHROPIC_API_KEY=... \
-LANE=public-smoke \
+LANE=reborn-webui-v2-live-qa \
+CASES=qa_3b_endpoint_status_live_chat \
 scripts/live-canary/run.sh
 ```
 
-Run a private OAuth lane on the dedicated runner:
+Use `CASES=all` for all non-Telegram QA cases. Artifacts are written under
+`artifacts/live-canary/` and must pass `scrub-artifacts.sh` before upload.
 
-```bash
-LANE=private-oauth scripts/live-canary/run.sh
-```
+## Repository Configuration
 
-Run the auth smoke lane:
+The workflow materializes live credentials into runner-local files and passes
+only their paths to the QA process. PR-targeted runs require the
+`reborn-live-canary-pr` environment gate and approval for the exact head SHA by
+a collaborator with write access.
 
-```bash
-LANE=auth-smoke scripts/live-canary/run.sh
-```
+Slack setup uses `PUT /api/webchat/v2/channels/slack/setup` after `ironclaw
+serve` starts. Google OAuth cases mint a short-lived access token during the
+run. Required secrets and variables are named in `.github/workflows/live-canary.yml`.
 
-Run the seeded auth live lane:
-
-```bash
-LANE=auth-live-seeded scripts/live-canary/run.sh
-```
-
-Run the browser-consent auth lane:
-
-```bash
-LANE=auth-browser-consent scripts/live-canary/run.sh
-```
-
-Run selected auth provider cases only:
-
-```bash
-LANE=auth-live-seeded CASES=gmail,github scripts/live-canary/run.sh
-LANE=auth-browser-consent CASES=google,github scripts/live-canary/run.sh
-```
-
-## Artifact Policy
-
-Artifacts are written under `artifacts/live-canary/`.
-
-Before upload, the workflow runs `scripts/live-canary/scrub-artifacts.sh`.
-That script is a guardrail against uploading obvious token-shaped strings from
-logs or result files.
-
-Private OAuth lanes should continue to avoid uploading raw OAuth logs. The
-auth-browser-consent and auth-live-seeded lanes may capture screenshots and JSON
-results, but should not upload long-lived credential material.
+Do not commit live secrets, tokens, storage state, screenshots containing PII,
+or unsanitized provider responses.

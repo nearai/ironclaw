@@ -135,7 +135,7 @@ is_runtime_heavy_path() {
     crates/ironclaw_reborn_*/*|crates/ironclaw_product_*/*|crates/ironclaw_webui/*)
       return 0
       ;;
-    channels-src/*|migrations/*|tests/reborn_*.rs|tests/integration/*|tests/e2e/reborn_*|tests/e2e/scenarios/test_reborn_*|tests/e2e/scenarios/test_v2_*)
+    channels-src/*|migrations/*|tests/reborn_*.rs|tests/integration/*|tests/e2e/reborn_*|tests/e2e/scenarios/test_reborn_*)
       return 0
       ;;
     .github/workflows/platform-and-compat.yml|.github/workflows/reborn-tests.yml|.github/workflows/reborn-e2e.yml|.github/workflows/nightly-deep-ci.yml)

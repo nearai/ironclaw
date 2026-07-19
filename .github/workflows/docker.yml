@@ -116,11 +116,13 @@ jobs:
           fi
           echo "tags=${TAGS}" >> "$GITHUB_OUTPUT"
 
-          # Staging builds get pre-bundled WASM extensions
+          # Staging is a tag policy, not a separate Docker stage. The canonical
+          # runtime image already contains the supported Reborn extensions.
+          echo "target=runtime" >> "$GITHUB_OUTPUT"
           if [[ "${EVENT_NAME}" == "schedule" || "${INPUT_TAG}" == "staging" ]]; then
-            echo "target=runtime-staging" >> "$GITHUB_OUTPUT"
+            echo "is_staging=true" >> "$GITHUB_OUTPUT"
           else
-            echo "target=runtime" >> "$GITHUB_OUTPUT"
+            echo "is_staging=false" >> "$GITHUB_OUTPUT"
           fi
 
       - name: Log in to Docker Hub
@@ -131,7 +133,7 @@ jobs:
 
       - name: Check if current git commit is already built
         id: check
-        if: steps.tags.outputs.target == 'runtime-staging'
+        if: steps.tags.outputs.is_staging == 'true'
         env:
           SOURCE_SHA: ${{ steps.source_sha.outputs.sha }}
         run: |

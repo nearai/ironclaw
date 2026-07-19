@@ -19,7 +19,7 @@
 ## Do Not Move In Here
 
 - Listener binding or `axum::serve`.
-- v1 gateway handlers, `src/channels/web`, or direct LLM proxy behavior.
+- Retired v1 gateway behavior or direct LLM proxy behavior.
 - Direct dispatcher, runtime, DB, secrets, network, or host-runtime access.
 - Execution of client-supplied OpenAI tools as Reborn capabilities.
 - v1 gateway fallbacks or direct `ironclaw_llm` proxy behavior.

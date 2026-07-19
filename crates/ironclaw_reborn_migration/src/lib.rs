@@ -6,7 +6,6 @@
 
 pub mod error;
 pub mod options;
-pub mod report;
 
 mod target;
 
@@ -19,4 +18,3 @@ pub use extension_ownership::{
 
 pub use error::MigrationError;
 pub use options::TargetStore;
-pub use report::{Domain, LossReason, LossyItem, MigrationReport, MigrationStats};

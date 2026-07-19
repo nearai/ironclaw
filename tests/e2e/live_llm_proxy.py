@@ -23,7 +23,7 @@ Usage in a test:
         async for url in live_proxy_for(request.node.name):
             yield url
 
-    # ironclaw_server fixture sets:
+    # The E2E harness sets:
     #   LLM_BASE_URL = url
     # The proxy auto-detects record vs replay based on
     # IRONCLAW_LIVE_TEST and the fixture file's existence.

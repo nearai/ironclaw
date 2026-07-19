@@ -134,18 +134,20 @@ classify_risk() {
     [[ -z "$file" ]] && continue
 
     case "$file" in
-      # High risk: safety, secrets, auth, crypto, setup, orchestrator auth
-      src/safety/*|src/secrets/*|src/llm/session.rs|src/orchestrator/auth.rs|\
-      src/channels/web/auth.rs|src/setup/*)
+      # High risk: safety, secrets, authorization, auth ingress, and host mediation.
+      crates/ironclaw_safety/*|crates/ironclaw_secrets/*|\
+      crates/ironclaw_auth/*|crates/ironclaw_authorization/*|\
+      crates/ironclaw_approvals/*|crates/ironclaw_trust/*|\
+      crates/ironclaw_host_runtime/*|crates/ironclaw_network/*|\
+      crates/ironclaw_webui/src/auth/*|\
+      crates/ironclaw_reborn_composition/src/product_auth/*)
         risk="high"
         break  # can't go higher
         ;;
 
-      # Medium risk: agent core, config, database, worker, tools, channels
-      src/agent/*|src/config.rs|src/settings.rs|src/db/*|src/worker/*|\
-      src/tools/*|src/channels/*|src/orchestrator/*|src/context/*|\
-      src/hooks/*|src/sandbox/*|src/extensions/*|Cargo.toml|\
-      .github/workflows/*)
+      # Medium risk: all other Reborn runtime/product code and delivery config.
+      crates/*|Cargo.toml|Cargo.lock|Dockerfile*|release-plz.toml|\
+      railway*.toml|scripts/*|.github/workflows/*)
         # Only upgrade, never downgrade
         [[ "$risk" != "high" ]] && risk="medium"
         ;;

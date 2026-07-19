@@ -1,6 +1,6 @@
 """Dedicated Reborn WebChat v2 smoke E2E.
 
-This proves the *new* Reborn surface end-to-end: the `ironclaw-reborn serve`
+This proves the *new* Reborn surface end-to-end: the `ironclaw serve`
 binary (built with the `webui-v2-beta` feature) boots, serves the React SPA
 at `/`, authenticates a bearer caller, and runs one text turn through the
 `/api/webchat/v2/*` endpoints against the deterministic mock LLM.

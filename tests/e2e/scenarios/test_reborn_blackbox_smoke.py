@@ -1,4 +1,4 @@
-"""True black-box smoke suite for `ironclaw-reborn serve`.
+"""True black-box smoke suite for `ironclaw serve`.
 
 The in-process Reborn integration harness (`tests/integration/`) is the
 coverage workhorse for Reborn behavior, but it cannot prove three things: real

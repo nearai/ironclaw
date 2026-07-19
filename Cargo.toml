@@ -138,7 +138,7 @@ ironclaw_outbound = { path = "crates/ironclaw_outbound", version = "0.1.0", feat
 # Recording hook doubles + `HookDispatcherBuilderFactory` builders for the
 # C-HOOKS / E-HOOK-INFRA int-tier coverage (tests/integration/support/hooks.rs).
 ironclaw_hooks = { path = "crates/ironclaw_hooks", version = "0.1.0" }
-ironclaw_loop_host = { path = "crates/ironclaw_loop_host", version = "0.1.0" }
+ironclaw_loop_host = { path = "crates/ironclaw_loop_host", version = "0.1.0", features = ["test-support"] }
 ironclaw_host_runtime = { path = "crates/ironclaw_host_runtime", version = "0.1.0" }
 ironclaw_network = { path = "crates/ironclaw_network", version = "0.1.0" }
 ironclaw_processes = { path = "crates/ironclaw_processes", version = "0.1.0", features = ["test-support"] }

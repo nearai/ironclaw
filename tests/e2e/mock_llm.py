@@ -105,7 +105,7 @@ CANNED_RESPONSES = [
     # After the orchestrator sends its nudge, recover with a final completion.
     # The exact nudge prefix is "You said you would perform an action..." —
     # see `signals_tool_intent` + the nudge append in
-    # `crates/ironclaw_engine/orchestrator/default.py`. Match either the new
+    # the retired engine orchestrator. Match either the new
     # phrasing or the legacy "You expressed intent" so older deployments
     # still work.
     (re.compile(r"You said you would perform an action|You expressed intent", re.IGNORECASE),
@@ -826,7 +826,7 @@ TOOL_CALL_PATTERNS = [
     # 1. Move the top tab bar into a left side panel by writing the
     #    ``.system/gateway/custom.css`` overlay file. The CSS targets the
     #    real DOM nodes (`#app`, `.tab-bar`) defined in
-    #    ``crates/ironclaw_gateway/static/index.html``.
+    #    the retired gateway frontend.
     (
         re.compile(r"customize:\s*move tab bar to left", re.IGNORECASE),
         "memory_write",

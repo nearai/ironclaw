@@ -99,7 +99,9 @@ async fn open_backend(target: &TargetStore) -> Result<Backend, MigrationError> {
         #[cfg(feature = "libsql")]
         TargetStore::LibSql { path } => {
             if let Some(parent) = path.parent() {
-                tokio::fs::create_dir_all(parent).await?;
+                tokio::fs::create_dir_all(parent)
+                    .await
+                    .map_err(|error| open_target_error("create libSQL parent directory", error))?;
             }
             let db = Arc::new(
                 libsql::Builder::new_local(path)

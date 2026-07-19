@@ -1,7 +1,6 @@
 //! GitHub OAuth provider for the WebChat v2 login surface.
 //!
-//! Mirrors the v1 behavior in
-//! `src/channels/web/oauth/providers.rs::GitHubProvider`:
+//! Preserves the retired gateway's GitHub OAuth interoperability behavior:
 //!
 //! - Authorization URL uses scopes `read:user user:email`. GitHub's
 //!   OAuth App flow does NOT support PKCE, so the `code_challenge`

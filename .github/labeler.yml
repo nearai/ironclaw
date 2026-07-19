@@ -1,150 +1,149 @@
-# Labels for actions/labeler@v6
-# Maps file path globs to labels. Multiple labels can apply per PR.
+# Labels for actions/labeler@v6.
+# Paths follow the current Reborn crate ownership map.
 
 "scope: agent":
   - changed-files:
       - any-glob-to-any-file:
-          - src/agent/**
+          - crates/ironclaw_agent_loop/**
+          - crates/ironclaw_loop_host/**
+          - crates/ironclaw_runner/**
+          - crates/ironclaw_turns/**
 
 "scope: channel":
   - changed-files:
       - any-glob-to-any-file:
-          - src/channels/channel.rs
-          - src/channels/manager.rs
-          - src/channels/mod.rs
+          - crates/ironclaw_channel_host/**
+          - crates/ironclaw_channel_delivery/**
+          - crates/ironclaw_product_adapters/**
+          - crates/ironclaw_slack_v2_adapter/**
+          - crates/ironclaw_telegram*/**
 
 "scope: channel/cli":
   - changed-files:
       - any-glob-to-any-file:
-          - src/channels/cli/**
-          - src/cli/**
+          - crates/ironclaw_reborn_cli/**
 
 "scope: channel/web":
   - changed-files:
       - any-glob-to-any-file:
-          - src/channels/web/**
+          - crates/ironclaw_webui/**
 
 "scope: channel/wasm":
   - changed-files:
       - any-glob-to-any-file:
-          - src/channels/wasm/**
+          - crates/ironclaw_wasm_product_adapters/**
+          - crates/ironclaw_telegram_extension/**
 
 "scope: tool":
   - changed-files:
       - any-glob-to-any-file:
-          - src/tools/tool.rs
-          - src/tools/registry.rs
-          - src/tools/mod.rs
-          - src/tools/sandbox.rs
+          - crates/ironclaw_capabilities/**
+          - crates/ironclaw_host_runtime/**
 
 "scope: tool/builtin":
   - changed-files:
       - any-glob-to-any-file:
-          - src/tools/builtin/**
+          - crates/ironclaw_first_party_extensions/**
 
 "scope: tool/wasm":
   - changed-files:
       - any-glob-to-any-file:
-          - src/tools/wasm/**
+          - crates/ironclaw_wasm/**
 
 "scope: tool/mcp":
   - changed-files:
       - any-glob-to-any-file:
-          - src/tools/mcp/**
+          - crates/ironclaw_mcp/**
 
 "scope: tool/builder":
   - changed-files:
       - any-glob-to-any-file:
-          - src/tools/builder/**
+          - crates/ironclaw_extensions/**
 
 "scope: db":
   - changed-files:
       - any-glob-to-any-file:
-          - src/db/mod.rs
+          - crates/ironclaw_filesystem/**
+          - crates/ironclaw_reborn_event_store/**
 
 "scope: db/postgres":
   - changed-files:
       - any-glob-to-any-file:
-          - src/db/postgres.rs
           - migrations/**
+          - "crates/**/postgres*.rs"
 
 "scope: db/libsql":
   - changed-files:
       - any-glob-to-any-file:
-          - src/db/libsql_backend.rs
-          - src/db/libsql_migrations.rs
+          - "crates/**/libsql*.rs"
 
 "scope: safety":
   - changed-files:
       - any-glob-to-any-file:
-          - src/safety/**
+          - crates/ironclaw_safety/**
+          - crates/ironclaw_authorization/**
+          - crates/ironclaw_approvals/**
 
 "scope: llm":
   - changed-files:
       - any-glob-to-any-file:
-          - src/llm/**
+          - crates/ironclaw_llm/**
 
 "scope: workspace":
   - changed-files:
       - any-glob-to-any-file:
-          - src/workspace/**
+          - crates/ironclaw_projects/**
+          - crates/ironclaw_filesystem/**
 
 "scope: orchestrator":
   - changed-files:
       - any-glob-to-any-file:
-          - src/orchestrator/**
+          - crates/ironclaw_reborn_composition/**
+          - crates/ironclaw_product_workflow/**
 
 "scope: worker":
   - changed-files:
       - any-glob-to-any-file:
-          - src/worker/**
+          - crates/ironclaw_processes/**
+          - crates/ironclaw_triggers/**
 
 "scope: secrets":
   - changed-files:
       - any-glob-to-any-file:
-          - src/secrets/**
+          - crates/ironclaw_secrets/**
 
 "scope: config":
   - changed-files:
       - any-glob-to-any-file:
-          - src/config.rs
-          - src/settings.rs
+          - crates/ironclaw_reborn_config/**
+          - crates/ironclaw_reborn_cli/src/commands/config/**
 
 "scope: extensions":
   - changed-files:
       - any-glob-to-any-file:
-          - src/extensions/**
+          - crates/ironclaw_extensions/**
+          - crates/ironclaw_first_party_extensions/**
 
 "scope: setup":
   - changed-files:
       - any-glob-to-any-file:
-          - src/setup/**
-
-"scope: evaluation":
-  - changed-files:
-      - any-glob-to-any-file:
-          - src/evaluation/**
-
-"scope: estimation":
-  - changed-files:
-      - any-glob-to-any-file:
-          - src/estimation/**
+          - crates/ironclaw_reborn_cli/src/commands/onboard/**
 
 "scope: sandbox":
   - changed-files:
       - any-glob-to-any-file:
-          - src/sandbox/**
+          - crates/ironclaw_process_sandbox/**
           - Dockerfile*
 
 "scope: hooks":
   - changed-files:
       - any-glob-to-any-file:
-          - src/hooks/**
+          - crates/ironclaw_hooks/**
 
 "scope: pairing":
   - changed-files:
       - any-glob-to-any-file:
-          - src/pairing/**
+          - "crates/**/pairing*.rs"
 
 "scope: ci":
   - changed-files:
@@ -169,4 +168,3 @@
   - changed-files:
       - any-glob-to-any-file:
           - migrations/**
-          - src/db/libsql_migrations.rs

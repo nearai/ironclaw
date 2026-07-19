@@ -93,7 +93,7 @@ mk "$T5" "src/hooks/summary.rs" 'const P: &str = include_str!("../../prompts/ses
 mk "$T5" "prompts/session_summary.md" "hello\n"
 mk "$T5" "crates/foo/src/lib.rs" 'const Q: &str = include_str!("../assets/x.md");\n'
 mk "$T5" "crates/foo/assets/x.md" "y\n"
-mk "$T5" "Dockerfile.reborn" 'FROM rust AS builder\nCOPY crates/ crates/\nRUN cargo build --bin ironclaw-reborn\n'
+mk "$T5" "Dockerfile.reborn" 'FROM rust AS builder\nCOPY crates/ crates/\nRUN cargo build --bin ironclaw\n'
 assert_allows "Dockerfile that omits src/ is not blamed for a src/ prompt" "$T5"
 
 # ── Case 6: crate-local prompt under crates/ is fine (top segment covered) ──

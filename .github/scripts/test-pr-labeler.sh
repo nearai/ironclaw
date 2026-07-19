@@ -164,7 +164,7 @@ editlog="${tmp}/editlog"; : > "${editlog}"
 rc=0
 out=$(PATH="${fakebin}:${PATH}" GH_RETRY_SLEEP=0 GH_RETRY_ATTEMPTS=2 \
       PR_NUMBER=1 REPO=o/r \
-      FAKE_GH_CHANGES=1089 FAKE_GH_FILES="src/agent/mod.rs" \
+      FAKE_GH_CHANGES=1089 FAKE_GH_FILES="crates/ironclaw_runner/src/lib.rs" \
       FAKE_GH_AUTHOR=ilblackdragon FAKE_GH_MERGED=369 \
       FAKE_GH_EDIT_LOG="${editlog}" \
       bash "${labeler}" 2>&1) || rc=$?
@@ -182,7 +182,7 @@ rc=0
 out=$(PATH="${fakebin}:${PATH}" GH_RETRY_SLEEP=0 GH_RETRY_ATTEMPTS=5 \
       PR_NUMBER=1 REPO=o/r \
       FAKE_GH_FAIL_UNTIL=2 FAKE_GH_COUNT_FILE="${tmp}/e2e_recover_count" \
-      FAKE_GH_CHANGES=1089 FAKE_GH_FILES="src/agent/mod.rs" \
+      FAKE_GH_CHANGES=1089 FAKE_GH_FILES="crates/ironclaw_runner/src/lib.rs" \
       FAKE_GH_AUTHOR=ilblackdragon FAKE_GH_MERGED=369 \
       FAKE_GH_EDIT_LOG="${editlog2}" \
       bash "${labeler}" 2>&1) || rc=$?

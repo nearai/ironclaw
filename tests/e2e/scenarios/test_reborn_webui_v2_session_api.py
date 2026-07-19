@@ -1,7 +1,7 @@
 """Served Reborn WebUI v2 session/thread/message API matrix tests.
 
 These scenarios exercise the browser-facing `/api/webchat/v2/*` API through a
-real `ironclaw-reborn serve` process. They intentionally live outside
+real `ironclaw serve` process. They intentionally live outside
 `test_reborn_webui_v2_smoke.py`, which is already owned by the normal Reborn
 WebUI v2 CI smoke lane; this file is the QA-matrix executable conversion for
 REBCLI-043 rows that were previously represented only by Rust contract

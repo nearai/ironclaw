@@ -826,9 +826,8 @@ mod tests {
 
     #[test]
     fn registry_is_a_superset_of_the_web_upload_allow_list() {
-        // Mirror of `is_allowed_attachment_mime` in
-        // `src/channels/web/util.rs` (excluding `application/octet-stream`,
-        // which is the deliberate generic-binary exclusion).
+        // Historical upload compatibility set (excluding
+        // `application/octet-stream`, the deliberate generic-binary exclusion).
         const ALLOWED_MIMES: &[&str] = &[
             "image/png",
             "image/jpeg",
@@ -871,9 +870,9 @@ mod tests {
 
     #[test]
     fn registry_canonical_ext_matches_web_extension_map() {
-        // Mirror of `web_attachment_ext` in `src/channels/web/util.rs`, minus
+        // Historical web extension compatibility set, minus
         // `application/octet-stream` (the deliberate generic-binary `bin`
-        // exclusion). `canonical_ext` is the registry field meant to replace
+        // exclusion). `canonical_ext` is the registry field that replaced
         // that map; this locks the two from drifting (e.g. registry `jpg` vs a
         // future map `jpeg`), the same guard the document-extractor and
         // upload-allow-list lists already have.

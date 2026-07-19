@@ -59,8 +59,8 @@
 The Reborn-side host composition for the WebChat v2 HTTP gateway lives
 in this crate. Implements Path A of
 `docs/reborn/how-to-port-channel-to-reborn.md` (native host-owned
-surface entering `ProductWorkflow` directly) without sharing any
-middleware with v1's `src/channels/web/`.
+surface entering `ProductWorkflow` directly) without sharing middleware with
+the retired v1 gateway.
 
 ### Surface
 
@@ -248,9 +248,7 @@ req/min/IP, 60s window) + tight body limits, so a sustained
 public OAuth callback uses.
 
 This seam must NOT be used to re-introduce v1 `/auth/*` handlers
-into the v2 listener; the only intended consumer is the
-Reborn-native auth router. v1 gateway code remains untouched —
-`src/channels/web/` keeps its own bearer/OAuth stack.
+into the listener; the only intended consumer is the Reborn-native auth router.
 
 ### Session transport decision (#4116)
 
@@ -364,9 +362,7 @@ Per Path A in `docs/reborn/how-to-port-channel-to-reborn.md`:
 - No `ProductAdapter` wrapper around browser sessions.
 - No fake `ExternalActorRef` / `ProtocolAuthEvidence` /
   `OutboundDeliverySink` / declared egress.
-- No shared middleware with v1's `src/channels/web/` —
-  `feat/webui-v2-gateway-composition-3580` deliberately keeps the v1
-  binary untouched.
+- No dependency on retired v1 middleware.
 
 ### How the standalone `ironclaw-reborn serve` consumes this
 

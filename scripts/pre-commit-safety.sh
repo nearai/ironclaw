@@ -334,82 +334,25 @@ if echo "$PROD_DIFF" | grep -nE '^\+' \
         | head -5 | sed 's/^/    /'
 fi
 
-# 7. Gateway/CLI handlers bypassing ToolDispatcher.
-#    Channel handlers and CLI commands must route mutations through
-#    `ToolDispatcher::dispatch()` so every UI/CLI-initiated action gets the
-#    same audit trail and safety pipeline as agent-initiated tool calls.
-#    See `.claude/rules/tools.md` "Everything Goes Through Tools".
-#
-#    The check looks at .rs files under src/channels/web/handlers/ and
-#    src/cli/ for newly-added lines that touch direct manager fields on the
-#    gateway state. Suppress with "// dispatch-exempt: <reason>".
-DISPATCH_DIFF=$(git diff --cached -U0 -- 'src/channels/web/handlers/*.rs' 'src/cli/*.rs' 2>/dev/null || true)
-if [ -z "$DISPATCH_DIFF" ]; then
-    DISPATCH_DIFF=$(git diff "$(resolve_base_ref)" -U0 -- 'src/channels/web/handlers/*.rs' 'src/cli/*.rs' 2>/dev/null || true)
-fi
-if [ -n "$DISPATCH_DIFF" ]; then
-    DISPATCH_HITS=$(echo "$DISPATCH_DIFF" | grep -nE '^\+' \
-        | grep -E 'state\.(store|workspace|workspace_pool|extension_manager|skill_registry|session_manager)\.' \
-        | grep -vE '// dispatch-exempt:|// safety:|:\+\+\+ ' \
-        | head -5 || true)
-    if [ -n "$DISPATCH_HITS" ]; then
-        warn "DISPATCH" "Handler directly touches state.{store,workspace,extension_manager,skill_registry,session_manager}. Route through ToolDispatcher::dispatch() instead. See .claude/rules/tools.md."
-        echo "$DISPATCH_HITS" | sed 's/^/    /'
-    fi
-fi
+# 7-8. Retired v1 gateway-specific checks were removed with the v1 runtime.
 
-# 8. CredentialName referenced in web-layer code.
-#    CredentialName is a backend/secrets-store identity. Web routes and
-#    web DTOs take ExtensionName; the dispatcher and auth_manager resolve
-#    credential identity from the extension name server-side. An explicit
-#    `CredentialName` reference in src/channels/web/** (except inside
-#    `#[cfg(test)] mod tests` blocks) means the wrong identity is reaching
-#    the web boundary. See src/channels/web/CLAUDE.md "Identity types at
-#    the web boundary" and .claude/rules/types.md.
-#
-#    Suppress with "// web-identity-exempt: <reason>" when the reference
-#    is genuinely reading an already-typed value off a backend struct
-#    (e.g., destructuring `ResumeKind::Authentication` to log the name).
-WEB_IDENTITY_DIFF=$(git diff --cached -U0 -- 'src/channels/web/*.rs' 'src/channels/web/**/*.rs' 2>/dev/null || true)
-if [ -z "$WEB_IDENTITY_DIFF" ]; then
-    WEB_IDENTITY_DIFF=$(git diff "$(resolve_base_ref)" -U0 -- 'src/channels/web/*.rs' 'src/channels/web/**/*.rs' 2>/dev/null || true)
-fi
-if [ -n "$WEB_IDENTITY_DIFF" ]; then
-    # Strip lines inside `#[cfg(test)] mod tests` blocks using the same
-    # precomputed boundaries used for other prod-only checks.
-    WEB_IDENTITY_PROD=$(printf '%s\n' "$WEB_IDENTITY_DIFF" | strip_test_mod_lines)
-    # `(^|[^[:alnum:]_])CredentialName([^[:alnum:]_]|$)` is a portable
-    # word boundary; `grep -E`'s `\b` is a GNU extension and is not
-    # recognised by BSD grep.
-    WEB_IDENTITY_HITS=$(echo "$WEB_IDENTITY_PROD" | grep -nE '^\+' \
-        | grep -E '(^|[^[:alnum:]_])CredentialName([^[:alnum:]_]|$)' \
-        | grep -vE '// web-identity-exempt:|// safety:|:\+\+\+ ' \
-        | head -5 || true)
-    if [ -n "$WEB_IDENTITY_HITS" ]; then
-        warn "CREDNAME" "\`CredentialName\` referenced in src/channels/web/** — web code takes \`ExtensionName\`; credential identity stays backend-side. Push the mapping into bridge::auth_manager or annotate with '// web-identity-exempt: <reason>'."
-        echo "$WEB_IDENTITY_HITS" | sed 's/^/    /'
-    fi
-fi
-
-# 9. SSE `AppEvent` broadcast outside the engine→AppEvent projection bridge.
-#    Every `AppEvent` that hits the SSE/WS stream should project from a typed
-#    source log (`ironclaw_engine::EventKind`, `JobEvent`, channel-lifecycle)
-#    or belong to the documented transport-only allowlist. Direct
+# 9. SSE broadcast outside the Reborn event/projection pipeline.
+#    Every durable-looking event that hits SSE/WS should project from a typed
+#    source log or belong to the documented transport-only allowlist. Direct
 #    `sse.broadcast(...)` / `sse.broadcast_for_user(...)` calls from tools,
 #    handlers, or extension managers drift the UI stream out of alignment
 #    with the replayable source, which is the root cause of the state
 #    desync class tracked by #2792. See `.claude/rules/gateway-events.md`.
 #
 #    Annotation format: `// projection-exempt: <category>, <detail>` — the
-#    category names the source log (`bridge dispatcher`, `channel-lifecycle`,
-#    `sandbox JobEvent`, `legacy v1 auth`) or the transport-only allowlist
+#    category names the source log (`runtime event`, `channel-lifecycle`,
+#    `sandbox JobEvent`) or the transport-only allowlist
 #    (`transport-only, heartbeat`). The comma is required — an unnamed
 #    `// projection-exempt: legacy` does not suppress the check.
 #
 #    Two match patterns:
-#    1. `*.broadcast_for_user(...)` on any receiver — `broadcast_for_user`
-#       is unique to `SseManager` (see `src/channels/web/platform/sse.rs`),
-#       so matching the method name alone catches both same-line
+#    1. `*.broadcast_for_user(...)` on any receiver. Matching the method name
+#       catches both same-line
 #       receivers (`state.sse.broadcast_for_user(...)`) and rustfmt
 #       wraps (`state\n    .sse\n    .broadcast_for_user(...)`) without
 #       risk of false positives from other types.
@@ -429,7 +372,7 @@ PROJECTION_HITS=$(echo "$DIFF_OUTPUT_NO_TESTS" | grep -nE '^\+' \
     | grep -vE '// projection-exempt: [^,]+,[[:space:]]*[^[:space:]]|// safety:|:\+\+\+ ' \
     | head -5 || true)
 if [ -n "$PROJECTION_HITS" ]; then
-    warn "PROJECTION" "Direct SSE broadcast outside the engine→AppEvent bridge. Route through \`thread_event_to_app_events\` in \`src/bridge/router.rs\` (project from a typed source log) or annotate with '// projection-exempt: <category>, <detail>'. See .claude/rules/gateway-events.md."
+    warn "PROJECTION" "Direct SSE broadcast outside the Reborn event/projection pipeline. Project from the owning typed event stream or annotate with '// projection-exempt: <category>, <detail>'. See .claude/rules/gateway-events.md."
     echo "$PROJECTION_HITS" | sed 's/^/    /'
 fi
 
@@ -661,7 +604,7 @@ MT_BROADCAST_HITS=$(echo "$DIFF_OUTPUT_NO_TESTS" | grep -nE '^\+' \
     | grep -vE '// safety:|:\+\+\+ ' \
     | head -5 || true)
 if [ -n "$MT_BROADCAST_HITS" ]; then
-    warn "MULTITENANT" "Unscoped \`sse.broadcast(...)\` in code reachable in multi-tenant mode. Switch to \`broadcast_for_user(&user_id, ...)\` or annotate with '// multi-tenant-safe: <reason>'. See \`dispatch_status_event\` in \`src/channels/web/mod.rs\` and the cross-tenant thread visibility incident."
+    warn "MULTITENANT" "Unscoped \`sse.broadcast(...)\` in code reachable in multi-tenant mode. Switch to a scoped projection/stream API or annotate with '// multi-tenant-safe: <reason>'."
     echo "$MT_BROADCAST_HITS" | sed 's/^/    /'
 fi
 

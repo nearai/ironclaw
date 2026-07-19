@@ -128,10 +128,10 @@ fn dockerfile_reborn_builds_with_production_features() {
 
     assert!(
         dockerfile
-            .matches("webui-v2-beta,slack-v2-host-beta,telegram-v2-host-beta,libsql,postgres",)
+            .matches("webui-v2-beta,slack-v2-host-beta,telegram-v2-host-beta,openai-compat-beta,libsql,postgres",)
             .count()
             >= 2,
-        "Dockerfile.reborn must compile both cargo-chef deps and final binary with Slack, Telegram, libsql, and postgres: {dockerfile}"
+        "Dockerfile.reborn must compile both cargo-chef deps and final binary with Slack, Telegram, OpenAI compatibility, libsql, and postgres: {dockerfile}"
     );
     assert!(
         dockerfile.contains("--bin ironclaw")
@@ -202,6 +202,8 @@ fn release_automation_targets_the_reborn_cli() {
         .expect("Docker workflow");
     let release_plz =
         std::fs::read_to_string(root.join("release-plz.toml")).expect("release-plz config");
+    let cli_manifest = std::fs::read_to_string(root.join("crates/ironclaw_reborn_cli/Cargo.toml"))
+        .expect("Reborn CLI manifest");
     assert!(
         release.contains("ironclaw/v[0-9]*.[0-9]*.[0-9]*")
             && rebuild.contains("EXPECTED_REF=\"ironclaw/v${EXPECTED_TAG}\""),
@@ -225,6 +227,10 @@ fn release_automation_targets_the_reborn_cli() {
         "release workflows must not read the non-dist root harness version"
     );
     assert!(
+        docker.contains("echo \"target=runtime\"") && !docker.contains("runtime-staging"),
+        "all Docker publications must build the canonical runtime stage"
+    );
+    assert!(
         release_plz.contains("name = \"ironclaw_reborn_cli\"")
             && release_plz.contains("git_only = true")
             && release_plz.contains("git_tag_name = \"ironclaw/v{{ version }}\""),
@@ -235,6 +241,15 @@ fn release_automation_targets_the_reborn_cli() {
             && !release_plz.contains("name = \"ironclaw_tui\"")
             && !release_plz.contains("name = \"ironclaw_gateway\""),
         "release-plz must not reference retired packages"
+    );
+    assert!(
+        cli_manifest.contains("[package.metadata.dist]\ndist = true\nfeatures = [\"full\"]"),
+        "cargo-dist must build the shipping binary with its production feature set"
+    );
+    assert!(
+        cli_manifest.contains("\"telegram-v2-host-beta\"")
+            && cli_manifest.contains("\"openai-compat-beta\""),
+        "the production feature set must include current Telegram and OpenAI-compatible surfaces"
     );
     semver::Version::parse(env!("CARGO_PKG_VERSION"))
         .expect("Reborn CLI package version should remain valid semver");
