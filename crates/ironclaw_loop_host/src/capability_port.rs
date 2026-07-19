@@ -1788,26 +1788,22 @@ impl LoopCapabilityPort for HostRuntimeLoopCapabilityPort {
         &self,
         request: CapabilityInvocation,
     ) -> Result<Resolution, AgentLoopHostError> {
-        // §5.3 Stage 2 (the atomic flip): the loop-facing result IS the host_api
-        // `Resolution` now. Dispatch produces the loop-facing `CapabilityOutcome`
-        // internally; `persist_gate_record_for_mapped` maps it to persist the
-        // durable gate record its channel renders from; and the boundary returns
-        // the mapped `Resolution` (its `origin`/refs carry every loop-side ref the
-        // executor reconstructs from). The idempotency key is derived INSIDE
-        // `persist_gate_record_for_mapped`, after dispatch and only for a
+        // §5.3 Stage 2b (collapse complete): dispatch produces the host_api
+        // `Resolution` directly, paired with the durable `GateRecord` its channel
+        // renders from (a `GatedResolution`) — mapped ONCE, by construction, so
+        // the returned resolution carries the SAME gate ref the record is
+        // persisted under. `persist_gate_record_for_mapped` persists that record
+        // and returns the resolution to hand back; on a concurrent duplicate it
+        // is the OWNER's resolution (whose gate ref the record is under), returned
+        // only AFTER its durable save completes (#6287). The idempotency key is
+        // derived INSIDE `persist_gate_record_for_mapped`, after dispatch and only
+        // for a
         // gate-bearing outcome — its `resume.input_ref` binding is the
         // STORE-derived one (same derivation the dispatch cache uses), so it stays
         // byte-stable and identical to dispatch's (§5.3 Stage 0). Deriving it there
         // (rather than up front) keeps dispatch's own resume identity/activity
         // validation the FIRST error a malformed resume surfaces — a missing/stale
         // resume payload must not pre-empt an `InvalidInvocation` activity mismatch.
-        // Stage 2b: dispatch produces the `GatedResolution` (resolution + the
-        // durable gate record its channel renders from) directly — mapped once,
-        // by construction, so the return value carries the SAME gate ref the
-        // record is persisted under. `persist_gate_record_for_mapped` persists
-        // that record and returns the resolution to actually hand back; on a
-        // concurrent duplicate it is the OWNER's resolution (whose gate ref the
-        // record is under), returned only AFTER its durable save completes (#6287).
         let gated = self.invoke_capability_dispatch(request.clone()).await?;
         self.persist_gate_record_for_mapped(&request, gated).await
     }
@@ -1840,12 +1836,8 @@ impl LoopCapabilityPort for HostRuntimeLoopCapabilityPort {
 }
 
 impl HostRuntimeLoopCapabilityPort {
-    // TODO(Slice C result-wiring): producer still emits `CapabilityOutcome`,
-    // converted at the loop_host seam; migrate to emit `Resolution` directly then
-    // delete `CapabilityOutcome`.
-    //
-    /// Derive the host_api [`Resolution`] for a loop-facing outcome and persist
-    /// the durable, model-visible [`GateRecord`] a later resume turn renders from
+    /// Persist the durable, model-visible [`GateRecord`] a later resume turn
+    /// renders from
     /// (§5.2.9), keyed by the freshly-minted [`GateRef`] on the resolution
     /// channel (#6242 mapping / #6243 store). `DenyRecord` is terminal and
     /// same-turn (per #6243) and is intentionally NOT persisted; `Done` and
