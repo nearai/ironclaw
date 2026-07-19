@@ -41,8 +41,12 @@
 //!   host reconstitutes it from storage keyed by the token).
 //!
 //! `SpawnedProcess`'s `safe_summary` still has no host channel (a process
-//! suspension carries a [`ProcessRef`], not a summary). `AwaitDependentRun`'s and
-//! `SpawnedChildRun`'s `model_observation` ride the result preview where present.
+//! suspension carries a [`ProcessRef`], not a summary). `SpawnedChildRun`'s
+//! `model_observation` rides the [`Outcome`] result preview; `AwaitDependentRun`'s
+//! rides the inline [`DependentRunResult`] observation on the
+//! [`Suspension::DependentRun`] channel (was dropped entirely — §5.3 Stage 1b),
+//! so the loop observes the child's `byte_len`, redacted summary, and observation
+//! on resume without reading the host-persisted `GateRecord::DependentRun`.
 //!
 //! ## Loop refs: minted kernel handle + preserved origin
 //!
@@ -57,11 +61,12 @@
 //! crosses directly is [`TurnRunId`](crate::TurnRunId) → [`RunId`]: both wrap a
 //! `Uuid`, preserved via `RunId::from_uuid`.
 
+// arch-exempt: large_file, transitional CapabilityOutcome→Resolution mapping artifact deleted at the atomic flip; the Stage-1b growth is non-lossy tests, plan #6175
 use ironclaw_host_api::{
-    Blocked, Denial, DenyReason, DenyRecord, DenyRef, FailureKind, GateRecord, GateRef,
-    GateWaypoint, LoopRef, ModelFailureDiagnostic, ModelInputIssue, ModelInputIssues, Outcome,
-    OutcomeRefs, OutputDigest, ProcessRef, ProcessWaypoint, Resolution, ResultProgress, ResultRef,
-    ResumeToken, RunId, SafeSummary, Suspension, TerminateHint, ToolVerdict,
+    Blocked, Denial, DenyReason, DenyRecord, DenyRef, DependentRunResult, FailureKind, GateRecord,
+    GateRef, GateWaypoint, LoopRef, ModelFailureDiagnostic, ModelInputIssue, ModelInputIssues,
+    Outcome, OutcomeRefs, OutputDigest, ProcessRef, ProcessWaypoint, Resolution, ResultProgress,
+    ResultRef, ResumeToken, RunId, SafeSummary, Suspension, TerminateHint, ToolVerdict,
 };
 
 use super::content_digest::ContentDigest;
@@ -302,22 +307,37 @@ pub fn capability_outcome_to_resolution(outcome: CapabilityOutcome) -> MappedRes
             }))
             .bind_result(result_ref, minted)
         }
-        // Parked work: awaits a dependent child run. Gate-shaped, so it carries a
-        // GateRecord holding the staged result handle + byte length (G2). Both the
-        // gate ref and the staged result ref are freshly minted and bound; the
-        // loop's model_observation has no home on DependentRun and is dropped.
+        // Parked work: awaits a dependent child run. Gate-shaped, so the durable
+        // GateRecord holds the staged result handle + byte length (G2). The
+        // channel ALSO carries the staged result inline (DependentRunResult) so
+        // the loop observes the child's output on resume without reading host
+        // storage — the same dual pattern as PR-B: the record is the durable
+        // copy, the inline payload the loop-visible one. model_observation now
+        // rides the inline observation preview (was dropped entirely). Both the
+        // gate ref and the staged result ref are freshly minted and bound.
         CapabilityOutcome::AwaitDependentRun {
             gate_ref,
             result_ref,
             safe_summary,
             byte_len,
-            ..
+            model_observation,
         } => {
             let minted_gate = GateRef::new();
             let minted_result = ResultRef::new();
             let waypoint = gate_waypoint(minted_gate, &gate_ref, None);
+            let mut staged =
+                DependentRunResult::new(byte_len, safe_summary_or_placeholder(safe_summary.clone()));
+            if let Some(observation) = observation_preview(model_observation) {
+                staged = staged.with_observation(observation);
+            }
+            if let Some(origin) = preserved_origin(result_ref.as_str()) {
+                staged = staged.with_origin(origin);
+            }
             MappedResolution::with_gate(
-                Resolution::Suspended(Suspension::DependentRun(waypoint)),
+                Resolution::Suspended(Suspension::DependentRun {
+                    waypoint,
+                    result: staged,
+                }),
                 GateRecord::DependentRun {
                     summary: safe_summary_or_placeholder(safe_summary),
                     result: minted_result,
@@ -592,6 +612,7 @@ fn deny_reason_from_kind(kind: &CapabilityDeniedReasonKind) -> DenyReason {
 #[cfg(test)]
 mod tests {
     use super::super::host::CapabilityInputRef;
+    use super::super::model_observation::ModelVisibleToolObservation;
     use super::super::{
         CapabilityFailureDetail, CapabilityFailureKind, CapabilityInputIssue, CapabilityProgress,
         LoopProcessRef, MODEL_VISIBLE_TOOL_OBSERVATION_SCHEMA_VERSION,
@@ -630,6 +651,30 @@ mod tests {
             output_digest: None,
             model_observation: None,
         })
+    }
+
+    /// A model-visible tool observation whose `summary` is `summary` — the field
+    /// `observation_preview` reduces to the redacted preview `SafeSummary`.
+    fn observation(summary: &str) -> ModelVisibleToolObservation {
+        use super::super::model_observation::{
+            ObservationTrust, ToolObservationDetail, ToolObservationStatus,
+        };
+        ModelVisibleToolObservation {
+            schema_version: MODEL_VISIBLE_TOOL_OBSERVATION_SCHEMA_VERSION,
+            status: ToolObservationStatus::Success,
+            summary: summary.to_string(),
+            detail: ToolObservationDetail::ResultReference {
+                result_ref: "result:staged".to_string(),
+                byte_len: 10,
+                preview: None,
+                total_bytes: None,
+                next_offset: None,
+                item_count: None,
+            },
+            artifacts: vec![],
+            recovery: None,
+            trust: ObservationTrust::UntrustedToolOutput,
+        }
     }
 
     /// The §5.3 acceptance table is the definition of done. Every one of the ten
@@ -1304,14 +1349,14 @@ mod tests {
             byte_len: 2048,
             model_observation: None,
         });
-        match mapped.gate_record {
+        match &mapped.gate_record {
             Some(GateRecord::DependentRun {
                 byte_len,
                 summary,
                 result_origin,
                 ..
             }) => {
-                assert_eq!(byte_len, 2048);
+                assert_eq!(*byte_len, 2048);
                 assert_eq!(summary.as_str(), "awaiting dependent");
                 // Stage-1 non-lossy: the staged result's originating loop ref
                 // is preserved ON THE DURABLE RECORD — the minted ResultRef is
@@ -1327,6 +1372,76 @@ mod tests {
             }
             other => panic!("expected GateRecord::DependentRun, got {other:?}"),
         }
+        // Stage-1b: the SAME staged content also rides the channel inline, so the
+        // loop observes it on resume without reading the durable record above.
+        match &mapped.resolution {
+            Resolution::Suspended(suspension @ Suspension::DependentRun { .. }) => {
+                let staged = suspension.dependent_result().expect("inline staged result");
+                assert_eq!(staged.byte_len, 2048);
+                assert_eq!(staged.summary.as_str(), "awaiting dependent");
+                assert_eq!(
+                    staged.origin.as_ref().map(LoopRef::as_str),
+                    Some(result_ref().as_str()),
+                    "the staged result's loop origin must also ride the inline channel"
+                );
+            }
+            other => panic!("expected Suspended(DependentRun), got {other:?}"),
+        }
+    }
+
+    /// Stage-1b non-lossy: `AwaitDependentRun`'s `model_observation` now rides the
+    /// inline [`DependentRunResult`] observation preview instead of being dropped
+    /// entirely — and it is redacted (a secret/path-shaped observation degrades to
+    /// absent, and a leaked summary degrades to the placeholder), so only plain
+    /// redacted host_api vocabulary crosses.
+    #[test]
+    fn dependent_run_carries_model_observation_inline_and_redacts() {
+        // The inline staged result reached through the channel accessor.
+        fn staged_of(mapped: &MappedResolution) -> DependentRunResult {
+            match &mapped.resolution {
+                Resolution::Suspended(suspension @ Suspension::DependentRun { .. }) => suspension
+                    .dependent_result()
+                    .expect("inline staged result")
+                    .clone(),
+                other => panic!("expected Suspended(DependentRun), got {other:?}"),
+            }
+        }
+
+        // Safe observation + summary → both cross verbatim onto the inline payload.
+        let mapped = capability_outcome_to_resolution(CapabilityOutcome::AwaitDependentRun {
+            gate_ref: gate_ref(),
+            result_ref: result_ref(),
+            safe_summary: "child produced 4 rows".to_string(),
+            byte_len: 512,
+            model_observation: Some(observation("child preview: 4 rows")),
+        });
+        let staged = staged_of(&mapped);
+        assert_eq!(
+            staged.observation.as_ref().map(SafeSummary::as_str),
+            Some("child preview: 4 rows"),
+            "model_observation must ride the inline observation (was dropped entirely)"
+        );
+        assert_eq!(staged.summary.as_str(), "child produced 4 rows");
+
+        // Hostile observation + summary → the observation drops to None and the
+        // summary degrades to the placeholder; no raw secret/path crosses.
+        let mapped = capability_outcome_to_resolution(CapabilityOutcome::AwaitDependentRun {
+            gate_ref: gate_ref(),
+            result_ref: result_ref(),
+            safe_summary: "leaked path /etc/passwd".to_string(),
+            byte_len: 512,
+            model_observation: Some(observation("api key: sk-ant-leak")),
+        });
+        let staged = staged_of(&mapped);
+        assert_eq!(
+            staged.observation, None,
+            "a secret-shaped observation must be dropped, never carried raw"
+        );
+        assert_eq!(
+            staged.summary,
+            SafeSummary::placeholder(),
+            "a path-shaped summary must degrade to the placeholder"
+        );
     }
 
     #[test]
@@ -1382,11 +1497,11 @@ mod tests {
         assert_eq!(loop_result, result_ref());
         match (&mapped.resolution, &mapped.gate_record) {
             (
-                Resolution::Suspended(Suspension::DependentRun(channel_gate)),
+                Resolution::Suspended(Suspension::DependentRun { waypoint, .. }),
                 Some(GateRecord::DependentRun { result, .. }),
             ) => {
                 assert_eq!(
-                    channel_gate.gate, minted_gate,
+                    waypoint.gate, minted_gate,
                     "gate binding matches channel"
                 );
                 assert_eq!(*result, minted_result, "result binding matches record");
