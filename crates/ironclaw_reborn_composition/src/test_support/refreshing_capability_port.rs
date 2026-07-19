@@ -39,7 +39,7 @@ pub struct RefreshingCapabilityPortTestParts {
     pub result_writer: std::sync::Arc<dyn ironclaw_loop_host::LoopCapabilityResultWriter>,
     pub milestone_sink: std::sync::Arc<dyn ironclaw_turns::run_profile::LoopHostMilestoneSink>,
     /// Opaque handle built by
-    /// `test_support::build_local_dev_skill_context_source_for_test`. Wraps
+    /// `test_support::build_skill_context_source_for_test`. Wraps
     /// the crate-private `ComposedSelectableSkillContextSource` so it never
     /// appears in this (public, `test-support`-gated) struct's field types;
     /// the private type is recovered internally via
@@ -53,7 +53,7 @@ pub struct RefreshingCapabilityPortTestParts {
     /// (`local_dev.rs` `create_capability_port`).
     pub thread_service: std::sync::Arc<dyn ironclaw_threads::SessionThreadService>,
     /// Opaque handle built by
-    /// [`build_local_dev_extension_management_for_test`]. Wraps the
+    /// [`build_extension_management_for_test`]. Wraps the
     /// crate-private (`pub(crate)`) `RebornLocalExtensionManagementPort` so it
     /// never appears in this (public, `test-support`-gated) struct's field
     /// types; mirrors `skill_activation_source` above. Active-extension
@@ -142,7 +142,7 @@ impl ExtensionManagementTestHandle {
 /// install/activate an extension can also just omit this call and leave the
 /// field `None` for the same no-op surface.
 #[cfg(feature = "test-support")]
-pub fn build_local_dev_extension_management_for_test(
+pub fn build_extension_management_for_test(
     services: &crate::RebornServices,
 ) -> Option<ExtensionManagementTestHandle> {
     let extension_management = services

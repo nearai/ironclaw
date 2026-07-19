@@ -206,7 +206,7 @@ use crate::{
     RebornFacadeReadiness, RebornProductAuthServices, RebornReadiness, RebornWorkerReadiness,
 };
 
-/// Output of [`build_local_dev_root_filesystem`]: the composed local-dev
+/// Output of [`build_local_runtime_root_filesystem`]: the composed local-dev
 /// root filesystem and, when libSQL is the substrate, a clone of the raw
 /// libSQL handle. The handle backs both the local-dev trigger repository
 /// and the canonical Reborn identity store, so each rides the same
@@ -235,7 +235,7 @@ enum StorageBackendInput {
     Postgres(deadpool_postgres::Pool),
 }
 
-type LocalDevWorkspaceFilesystems = (
+type WorkspaceFilesystems = (
     Arc<ScopedFilesystem<CompositeRootFilesystem>>,
     Arc<ScopedFilesystem<CompositeRootFilesystem>>,
     MountView,
@@ -695,7 +695,7 @@ impl RebornServices {
     }
 
     /// Test-support access to the local-dev communication-preference repository
-    /// (W6-COLD-SPOTS seam). This is the SAME `Arc` that `build_local_dev_store_graph`
+    /// (W6-COLD-SPOTS seam). This is the SAME `Arc` that `build_local_runtime_store_graph`
     /// wires into `RebornRuntimeSubstrate::outbound_preferences` via
     /// `local_dev_outbound_store`, for tests only. Returns `None` for
     /// production-profile compositions without a local-dev runtime.
@@ -709,7 +709,7 @@ impl RebornServices {
 
     /// Test-support access to the on-disk local-dev storage root (W6-COLD-SPOTS
     /// seam), for tests only — mirrors the same `local_runtime.local_dev_storage_root`
-    /// that `build_local_dev_store_graph` establishes in production. Used to reopen
+    /// that `build_local_runtime_store_graph` establishes in production. Used to reopen
     /// a fresh outbound-preferences store at the same root (see
     /// `open_local_dev_outbound_preferences_store_for_test`). Returns `None` for
     /// production-profile compositions without a local-dev runtime.
@@ -1593,7 +1593,7 @@ async fn build_local_runtime(input: RebornBuildInput) -> Result<RebornServices, 
         }
     })?;
     crate::extension_host::bundled_skills::ensure_bundled_reborn_skills_installed(&root).await?;
-    let filesystem_bundle = build_local_dev_root_filesystem(
+    let filesystem_bundle = build_local_runtime_root_filesystem(
         &root,
         &workspace_root,
         host_home_root.as_ref(),
@@ -1677,7 +1677,7 @@ async fn build_local_runtime(input: RebornBuildInput) -> Result<RebornServices, 
         owner_user_id.clone(),
         local_runtime_identity_for_nearai_mcp.as_ref(),
     )?;
-    let mut store_graph = build_local_dev_store_graph(RebornStoreGraphInput {
+    let mut store_graph = build_local_runtime_store_graph(RebornStoreGraphInput {
         filesystem: Arc::clone(&filesystem),
         owner_user_id,
         local_runtime_identity,
@@ -1703,7 +1703,7 @@ async fn build_local_runtime(input: RebornBuildInput) -> Result<RebornServices, 
     #[cfg(any(feature = "libsql", feature = "postgres"))]
     let local_dev_product_auth_filesystem = local_dev_scoped_filesystem(Arc::clone(&filesystem));
     #[cfg(any(feature = "libsql", feature = "postgres"))]
-    let local_dev_secret_bundle = build_local_dev_secret_store(
+    let local_dev_secret_bundle = build_secret_store(
         &root,
         Arc::clone(&local_dev_product_auth_filesystem),
         secret_master_key,
@@ -2448,7 +2448,7 @@ fn local_dev_extension_installation_state_path(
 }
 
 #[cfg(any(feature = "libsql", feature = "postgres"))]
-async fn build_local_dev_store_graph(
+async fn build_local_runtime_store_graph(
     input: RebornStoreGraphInput,
 ) -> Result<RebornStoreGraph, RebornBuildError> {
     let RebornStoreGraphInput {
@@ -2678,7 +2678,7 @@ async fn build_local_dev_store_graph(
 }
 
 #[cfg(not(any(feature = "libsql", feature = "postgres")))]
-async fn build_local_dev_store_graph(
+async fn build_local_runtime_store_graph(
     input: RebornStoreGraphInput,
 ) -> Result<RebornStoreGraph, RebornBuildError> {
     let RebornStoreGraphInput {
@@ -3157,7 +3157,7 @@ fn build_budget_sinks() -> BudgetSinks {
     }
 }
 
-async fn build_local_dev_root_filesystem(
+async fn build_local_runtime_root_filesystem(
     root: &Path,
     workspace_root: &Path,
     host_home_root: Option<&HostHomeRoot>,
@@ -3227,7 +3227,7 @@ async fn open_local_dev_libsql_database(
 // (`build_default_local_dev_database_roots_for_test`) can call this
 // without duplicating the 4-step libSQL setup sequence (Builder →
 // LibSqlRootFilesystem → run_migrations → mount). Production callers
-// stay inside this module (`build_local_dev_root_filesystem`).
+// stay inside this module (`build_local_runtime_root_filesystem`).
 pub(crate) async fn build_default_local_dev_database_roots(
     root: &Path,
     composite: &mut CompositeRootFilesystem,
@@ -3319,7 +3319,7 @@ pub(crate) async fn open_local_dev_slack_host_state_filesystem_for_test(
     storage_root: &Path,
 ) -> Result<Arc<ScopedFilesystem<CompositeRootFilesystem>>, RebornBuildError> {
     let workspace_root = storage_root.join("workspace");
-    let bundle = build_local_dev_root_filesystem(
+    let bundle = build_local_runtime_root_filesystem(
         storage_root,
         &workspace_root,
         None,
@@ -3426,7 +3426,7 @@ pub(crate) async fn open_local_dev_approval_request_store_for_test(
 /// W6-COLD-SPOTS: fresh `CommunicationPreferenceRepository` reopen, mirrors
 /// [`open_local_dev_approval_request_store_for_test`]. Reuses
 /// [`local_dev_outbound_store`] — the same composition-owned construction the
-/// production `build_local_dev_store_graph` path uses — so the reopen path
+/// production `build_local_runtime_store_graph` path uses — so the reopen path
 /// never drifts from production and needs no `disallowed_methods` exception.
 /// Tests only.
 #[cfg(all(feature = "test-support", feature = "libsql"))]
@@ -3446,7 +3446,7 @@ pub(crate) async fn open_local_dev_outbound_preferences_store_for_test(
 /// [`open_local_dev_approval_request_store_for_test`] (same on-disk root;
 /// sibling capability stores). Reuses [`mount_default_local_dev_database_roots`]
 /// plus the production [`crate::wrap_scoped`] so the reopen mounts and scopes
-/// the SAME way `build_local_dev_store_graph` does when it first builds
+/// the SAME way `build_local_runtime_store_graph` does when it first builds
 /// `tool_permission_overrides` / `auto_approve_settings` /
 /// `persistent_approval_policies` (above) — the reopen path never drifts from
 /// production. Tests only; zero bytes in production builds.
@@ -3522,7 +3522,7 @@ where
 // (`mount_local_dev_database_roots_for_test`) can forward to it across the
 // crate boundary for downstream integration tests without a second copy of the
 // mount truth. Production callers stay inside this module
-// (`build_local_dev_root_filesystem` / `build_default_local_dev_database_roots`).
+// (`build_local_runtime_root_filesystem` / `build_default_local_dev_database_roots`).
 pub(crate) fn mount_local_dev_database_roots<F>(
     root: &mut CompositeRootFilesystem,
     database: Arc<F>,
@@ -3590,7 +3590,7 @@ fn mount_local_dev_project_roots(
 }
 
 #[cfg(any(feature = "libsql", feature = "postgres"))]
-pub(crate) async fn build_local_dev_secret_store<F>(
+pub(crate) async fn build_secret_store<F>(
     root: &Path,
     scoped_filesystem: Arc<ScopedFilesystem<F>>,
     explicit_master_key: Option<ironclaw_secrets::SecretMaterial>,
@@ -3629,11 +3629,11 @@ where
 ///   and reconstructing the whole composite just to reach one mount is
 ///   heavy and risks silently diverging from `serve`'s copy.
 /// - `/secrets`'s physical backing is the same local-dev libSQL file
-///   `build_local_dev_root_filesystem` opens for `/tenants` in production —
+///   `build_local_runtime_root_filesystem` opens for `/tenants` in production —
 ///   a key written here is immediately visible to `serve`, no extra
 ///   coordination needed.
 /// - Uses the same resolver chain as production (env -> cached dotfile ->
-///   OS keychain -> generate-and-cache, via [`build_local_dev_secret_store`]).
+///   OS keychain -> generate-and-cache, via [`build_secret_store`]).
 /// - `run_migrations()` here and again on `serve`'s later open is safe —
 ///   already relied on as idempotent elsewhere in this module's tests.
 #[cfg(feature = "libsql")]
@@ -3644,7 +3644,7 @@ pub async fn open_local_dev_secret_store(
     let filesystem = Arc::new(LibSqlRootFilesystem::new(db));
     filesystem.run_migrations().await?;
     let scoped = crate::wrap_scoped(filesystem);
-    let (store, _crypto) = build_local_dev_secret_store(root, scoped, None).await?;
+    let (store, _crypto) = build_secret_store(root, scoped, None).await?;
     Ok(store as Arc<dyn SecretStore>)
 }
 
@@ -4139,7 +4139,7 @@ fn build_workspace_filesystems(
     filesystem: Arc<CompositeRootFilesystem>,
     workspace_root: &Path,
     host_home_root: Option<&HostHomeRoot>,
-) -> Result<LocalDevWorkspaceFilesystems, RebornBuildError> {
+) -> Result<WorkspaceFilesystems, RebornBuildError> {
     let read_only_workspace_mounts = workspace_mount_view(MountPermissions::read_only(), &[])
         .map_err(|error| RebornBuildError::InvalidConfig {
             reason: error.to_string(),
@@ -6410,7 +6410,7 @@ mod tests {
             .expect("manual-token account should survive local-dev rebuild");
         assert_eq!(rebuilt_account.access_secret.as_ref(), Some(&access_secret));
 
-        let rebuilt_filesystem = build_local_dev_root_filesystem(
+        let rebuilt_filesystem = build_local_runtime_root_filesystem(
             &local_dev_root,
             &local_dev_root.join("workspace"),
             None,
@@ -6419,7 +6419,7 @@ mod tests {
         .await
         .expect("local-dev filesystem rebuild")
         .filesystem;
-        let (rebuilt_secret_store, _rebuilt_secret_crypto) = build_local_dev_secret_store(
+        let (rebuilt_secret_store, _rebuilt_secret_crypto) = build_secret_store(
             &local_dev_root,
             local_dev_scoped_filesystem(rebuilt_filesystem),
             None,
@@ -6484,7 +6484,7 @@ mod tests {
         std::fs::create_dir_all(local_dev_root.join("system/extensions"))
             .expect("system extensions dir");
 
-        let root_filesystem = build_local_dev_root_filesystem(
+        let root_filesystem = build_local_runtime_root_filesystem(
             &local_dev_root,
             &local_dev_root.join("workspace"),
             None,

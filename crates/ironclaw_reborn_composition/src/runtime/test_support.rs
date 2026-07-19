@@ -13,7 +13,7 @@ use super::*;
 
 impl RebornServices {
     /// Real `DefaultApprovalInteractionService` wired like `build_reborn_runtime`, via the
-    /// shared `build_local_dev_approval_interaction_service` recipe so the two never drift.
+    /// shared `build_approval_interaction_service` recipe so the two never drift.
     /// `Ok(None)` without a local-dev runtime; `Err` surfaces a local-dev capability-policy
     /// or grantee-resolver construction failure instead of collapsing it into `None`. No
     /// audit sink threaded — production wires one for audit-log observability only, not
@@ -33,7 +33,7 @@ impl RebornServices {
                 reason: format!("local-dev capability policy is invalid: {error}"),
             }
         })?);
-        Ok(Some(build_local_dev_approval_interaction_service(
+        Ok(Some(build_approval_interaction_service(
             local_runtime,
             builtin_capability_policy,
             turn_coordinator,
@@ -92,7 +92,7 @@ impl RebornServices {
             }
         })?);
         Ok(Some(
-            build_local_dev_approval_interaction_service_with_turn_run_source(
+            build_approval_interaction_service_with_turn_run_source(
                 local_runtime,
                 builtin_capability_policy,
                 turn_coordinator,
