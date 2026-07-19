@@ -955,6 +955,37 @@ impl Drop for DispatchReservationGuard<'_> {
     }
 }
 
+/// RAII guard for an `InFlight` gate-resolution reservation: if the owning
+/// persist future drops without calling [`Self::commit`] (cancellation, a
+/// transient store fault, or any early error), the reservation is cleared and
+/// its waiters woken so a same-key replay re-owns and retries — never left
+/// waiting on an orphaned in-flight entry. Mirrors [`DispatchReservationGuard`].
+struct GateResolutionReservationGuard<'a> {
+    port: &'a HostRuntimeLoopCapabilityPort,
+    key: IdempotencyKey,
+    committed: bool,
+}
+
+impl GateResolutionReservationGuard<'_> {
+    fn commit(mut self) {
+        self.committed = true;
+    }
+}
+
+impl Drop for GateResolutionReservationGuard<'_> {
+    fn drop(&mut self) {
+        if self.committed {
+            return;
+        }
+        if let Err(error) = self.port.clear_gate_resolution_reservation(&self.key) {
+            tracing::warn!(
+                cleanup_error = %error,
+                "failed to clean up gate resolution reservation after early return"
+            );
+        }
+    }
+}
+
 #[derive(Default)]
 struct ProviderToolCallRegistrationStore {
     records: HashMap<String, ProviderToolCallRegistrationRecord>,
@@ -1898,34 +1929,31 @@ impl HostRuntimeLoopCapabilityPort {
             }
         };
 
+        // RAII cleanup: if this future is cancelled (dropped mid-`save`) or
+        // returns early before we commit, the guard clears the reservation and
+        // wakes its waiters so a same-key replay re-owns and retries — never left
+        // waiting on an orphaned in-flight entry (#6287 IronLoop). The success
+        // path commits the guard AFTER publishing the durable resolution.
+        let reservation_guard = GateResolutionReservationGuard {
+            port: self,
+            key: idempotency_key.clone(),
+            committed: false,
+        };
         let scope = self.visible_request.context.resource_scope.clone();
         let save_result = self
             .gate_record_store
             .save(scope, gate_ref, record.clone())
             .await;
-        // Publish to waiters: on success (or benign AlreadyExists) store the
-        // resolution; on a transient fault clear the reservation so a waiter
-        // re-owns and retries. Wake the waiters either way.
-        {
-            let mut reserved = lock_mut(
-                &self.persisted_gate_resolutions,
-                "gate resolution replay cache",
-            )?;
-            match &save_result {
-                Ok(()) | Err(RunStateError::GateRecordAlreadyExists { .. }) => {
-                    reserved.insert(
-                        idempotency_key.clone(),
-                        GateResolutionState::Persisted(Box::new(mapped.resolution.clone())),
-                    );
-                }
-                Err(_) => {
-                    reserved.remove(&idempotency_key);
-                }
-            }
-        }
-        owner_notify.notify_waiters();
         match save_result {
-            Ok(()) => Ok(mapped.resolution),
+            // Success: publish the resolution (so waiters receive the SAME gate
+            // ref the record is under), wake them, and commit the guard so its
+            // drop is a no-op.
+            Ok(()) => {
+                self.publish_gate_resolution(&idempotency_key, &mapped.resolution)?;
+                owner_notify.notify_waiters();
+                reservation_guard.commit();
+                Ok(mapped.resolution)
+            }
             // A deterministic gate-record key (the auth gate's `for_auth_gate`,
             // and the approval gate's `for_approval_request` on the authorize
             // path) means a re-raise of the SAME gate — a deny-then-retry, or a
@@ -1934,16 +1962,60 @@ impl HostRuntimeLoopCapabilityPort {
             // record. The write-once store reports `GateRecordAlreadyExists`;
             // that is benign (already persisted, byte-identical), never a fault.
             // Mirrors `persist_replay_payload_for_fresh_gate`'s tolerance of
-            // `ReplayPayloadAlreadyExists`.
+            // `ReplayPayloadAlreadyExists`. Publish + commit like the success path.
             Err(RunStateError::GateRecordAlreadyExists { .. }) => {
                 tracing::debug!(
                     %gate_ref,
                     "gate record already persisted for this deterministic key; keeping existing record"
                 );
+                self.publish_gate_resolution(&idempotency_key, &mapped.resolution)?;
+                owner_notify.notify_waiters();
+                reservation_guard.commit();
                 Ok(mapped.resolution)
             }
+            // Transient fault: do NOT commit. The guard's drop clears the
+            // reservation and wakes the waiters so one re-owns and retries the
+            // persist instead of hanging on an orphaned in-flight entry.
             Err(error) => Err(gate_record_store_error(error)),
         }
+    }
+
+    /// Publish the durable resolution for `key` so a waiting or later same-key
+    /// replay receives the SAME gate ref the record was persisted under.
+    fn publish_gate_resolution(
+        &self,
+        key: &IdempotencyKey,
+        resolution: &Resolution,
+    ) -> Result<(), AgentLoopHostError> {
+        lock_mut(
+            &self.persisted_gate_resolutions,
+            "gate resolution replay cache",
+        )?
+        .insert(
+            key.clone(),
+            GateResolutionState::Persisted(Box::new(resolution.clone())),
+        );
+        Ok(())
+    }
+
+    /// Clear an in-flight gate-resolution reservation for `key` and wake its
+    /// waiters so one re-owns and retries. Only clears an `InFlight` entry (never
+    /// a published resolution), so a committed owner's guard is a no-op here.
+    fn clear_gate_resolution_reservation(
+        &self,
+        key: &IdempotencyKey,
+    ) -> Result<(), AgentLoopHostError> {
+        let mut reserved = lock_mut(
+            &self.persisted_gate_resolutions,
+            "gate resolution replay cache",
+        )?;
+        if let Some(GateResolutionState::InFlight(notify)) = reserved.get(key) {
+            let notify = Arc::clone(notify);
+            reserved.remove(key);
+            drop(reserved);
+            notify.notify_waiters();
+        }
+        Ok(())
     }
 
     /// True iff `key`'s reservation is still the SAME in-flight entry `notify`
@@ -9156,6 +9228,132 @@ mod tests {
         ) -> Result<Option<GateRecord>, RunStateError> {
             self.inner.load(scope, gate_ref).await
         }
+    }
+
+    /// Blocks the FIRST `save` until released (announcing entry via a permit) so
+    /// a test can cancel the persist future while it is parked in `save`; later
+    /// saves delegate straight through. The cancellation test drops the future
+    /// instead of releasing, so `release` is never fired. For the
+    /// reservation-cleanup regression.
+    struct BlockingGateRecordStore {
+        inner: RecordingGateRecordStore,
+        entered: tokio::sync::Semaphore,
+        release: Notify,
+        blocked: std::sync::atomic::AtomicBool,
+    }
+
+    impl BlockingGateRecordStore {
+        fn new() -> Self {
+            Self {
+                inner: RecordingGateRecordStore::default(),
+                entered: tokio::sync::Semaphore::new(0),
+                release: Notify::new(),
+                blocked: std::sync::atomic::AtomicBool::new(false),
+            }
+        }
+
+        fn saved(&self) -> Vec<(ResourceScope, GateRef, GateRecord)> {
+            self.inner.saved()
+        }
+    }
+
+    #[async_trait]
+    impl GateRecordStore for BlockingGateRecordStore {
+        async fn save(
+            &self,
+            scope: ResourceScope,
+            gate_ref: GateRef,
+            record: GateRecord,
+        ) -> Result<(), RunStateError> {
+            if !self.blocked.swap(true, std::sync::atomic::Ordering::SeqCst) {
+                // First save: announce entry (reservation is now InFlight) and
+                // block until released — the cancellation test drops this future
+                // here instead of releasing.
+                self.entered.add_permits(1);
+                self.release.notified().await;
+            }
+            self.inner.save(scope, gate_ref, record).await
+        }
+
+        async fn load(
+            &self,
+            scope: &ResourceScope,
+            gate_ref: GateRef,
+        ) -> Result<Option<GateRecord>, RunStateError> {
+            self.inner.load(scope, gate_ref).await
+        }
+    }
+
+    /// #6287 IronLoop: when the owning persist future is cancelled (dropped) mid
+    /// `save`, the in-flight gate-resolution reservation must be cleared and its
+    /// waiters woken — else a same-key replay hangs forever on an orphaned
+    /// reservation. The RAII `GateResolutionReservationGuard` does that on drop.
+    /// This cancels the first invocation while it is parked in `save`, then
+    /// asserts a replay re-owns the reservation, completes without hanging, and
+    /// persists exactly one record.
+    #[tokio::test]
+    async fn cancelled_gate_persist_clears_reservation_so_replay_can_re_own() {
+        let capability_id = CapabilityId::new("demo.echo").expect("valid capability id");
+        let provider_id = ExtensionId::new("demo").expect("valid provider id");
+        let gate = ironclaw_host_runtime::RuntimeApprovalGate {
+            approval_request_id: ironclaw_host_api::ApprovalRequestId::new(),
+            capability_id: capability_id.clone(),
+            reason: RuntimeBlockedReason::ApprovalRequired,
+        };
+        let store = Arc::new(BlockingGateRecordStore::new());
+        let port = Arc::new(
+            runtime_capability_port_with_gate_store(
+                &capability_id,
+                &provider_id,
+                Arc::new(QueuedHostRuntime::new(
+                    vec![visible_capability(
+                        capability_id.clone(),
+                        provider_id.clone(),
+                    )],
+                    vec![Ok(RuntimeCapabilityOutcome::ApprovalRequired(gate))],
+                )),
+                Arc::new(RecordingResultWriter::default()),
+                dummy_milestone_sink(),
+                store.clone(),
+                "thread-cancelled-gate-persist",
+            )
+            .await,
+        );
+
+        let invocation = visible_runtime_invocation(&port).await;
+
+        // First invocation parks in the blocked `save`, then is cancelled.
+        let spawn_port = Arc::clone(&port);
+        let spawn_invocation = invocation.clone();
+        let handle =
+            tokio::spawn(async move { spawn_port.invoke_capability(spawn_invocation).await });
+        store
+            .entered
+            .acquire()
+            .await
+            .expect("save entered")
+            .forget();
+        handle.abort();
+        let _ = handle.await;
+
+        // Replay must NOT hang on the orphaned reservation: it re-owns, saves, and
+        // returns the gate resolution.
+        let replayed = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            port.invoke_capability(invocation),
+        )
+        .await
+        .expect("replay must not hang on an orphaned in-flight reservation")
+        .expect("replay gate outcome");
+        assert!(
+            matches!(&replayed, Resolution::Blocked(Blocked::Approval(_))),
+            "replay must surface the gate, got {replayed:?}"
+        );
+        assert_eq!(
+            store.saved().len(),
+            1,
+            "the replay must persist exactly one gate record after the cancelled attempt"
+        );
     }
 
     /// Deterministic in-memory [`ReplayPayloadStore`] fake for seam tests: the
