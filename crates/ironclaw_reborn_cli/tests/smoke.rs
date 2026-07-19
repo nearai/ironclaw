@@ -1390,54 +1390,6 @@ fn reborn_cli_skill_root(reborn_home: &std::path::Path) -> std::path::PathBuf {
     reborn_home.join("local-dev/tenants/default/users/reborn-cli/skills")
 }
 
-fn assert_verbose_detail(args: &[&str], expected_detail: &str) {
-    let output = reborn_command()
-        .args(args)
-        .output()
-        .expect("ironclaw-reborn verbose command should run");
-
-    assert!(
-        output.status.success(),
-        "stderr: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(stdout.contains(expected_detail), "stdout: {stdout}");
-}
-
-fn assert_json_verbose_detail(
-    args: &[&str],
-    collection_key: &str,
-    count_key: &str,
-    expected_detail: &str,
-) {
-    let output = reborn_command()
-        .args(args)
-        .output()
-        .expect("ironclaw-reborn JSON verbose command should run");
-
-    assert!(
-        output.status.success(),
-        "stderr: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let json: serde_json::Value = serde_json::from_str(stdout.trim()).expect("valid JSON");
-    assert_eq!(json[count_key], 0);
-    assert_eq!(
-        json[collection_key]
-            .as_array()
-            .expect("collection array")
-            .len(),
-        0
-    );
-    let details = json["details"].as_array().expect("details array");
-    assert!(
-        details.iter().any(|detail| detail == expected_detail),
-        "json: {json}"
-    );
-}
-
 #[test]
 fn config_path_reports_reborn_home_without_touching_v1_state() {
     let temp = tempfile::tempdir().expect("tempdir");
