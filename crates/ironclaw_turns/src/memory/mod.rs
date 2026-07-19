@@ -108,6 +108,12 @@ const MAX_IDEMPOTENCY_RECORDS: usize = 10_000;
 /// runner mid-flight.
 pub(crate) const DEFAULT_RUNNER_LEASE_TTL_SECONDS: i64 = 90;
 
+/// Default crash-retry bound for lease recovery of a checkpointless run (#6284).
+/// Small and consistent with the crate's other bounded-retry counters — a
+/// checkpointless run may be re-driven a handful of times across crashes before
+/// it is terminal-failed with `crash_retry_exhausted`.
+const DEFAULT_MAX_CRASH_RECOVERY_RECLAIMS: u32 = 5;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct InMemoryTurnStateStoreLimits {
     pub max_events: usize,
@@ -129,6 +135,17 @@ pub struct InMemoryTurnStateStoreLimits {
     /// Max runs in `TurnStatus::Running` for `Inbound` or `WebUi` origin.
     /// `None` = unlimited. Runs without `product_context` are never counted.
     pub max_concurrent_conversation_runs: Option<std::num::NonZeroU32>,
+    /// Crash-retry bound for lease recovery of a checkpointless run (#6284).
+    ///
+    /// A run whose lease expires while `Running` with NO resumable loop
+    /// checkpoint crashed BEFORE its first checkpoint (before BeforeModel, before
+    /// any side effect) and is safe to re-drive: `recover_expired_leases`
+    /// re-queues it to a claimable state instead of stranding it terminal
+    /// `Failed`. `claim_count` (incremented on every claim) bounds that loop —
+    /// once it reaches this value the run is instead terminal-failed with the
+    /// genuine-invariant reason `crash_retry_exhausted` (never `lease_expired`),
+    /// so a run that keeps crashing pre-checkpoint cannot re-drive forever.
+    pub max_crash_recovery_reclaims: u32,
 }
 
 impl Default for InMemoryTurnStateStoreLimits {
@@ -141,6 +158,7 @@ impl Default for InMemoryTurnStateStoreLimits {
             max_concurrent_runs_per_user: None,
             max_concurrent_trigger_runs: None,
             max_concurrent_conversation_runs: None,
+            max_crash_recovery_reclaims: DEFAULT_MAX_CRASH_RECOVERY_RECLAIMS,
         }
     }
 }
@@ -202,6 +220,11 @@ impl InMemoryTurnStateStoreLimits {
 
     pub fn clear_max_concurrent_conversation_runs(mut self) -> Self {
         self.max_concurrent_conversation_runs = None;
+        self
+    }
+
+    pub fn set_max_crash_recovery_reclaims(mut self, max_crash_recovery_reclaims: u32) -> Self {
+        self.max_crash_recovery_reclaims = max_crash_recovery_reclaims;
         self
     }
 }
@@ -2521,6 +2544,53 @@ impl Inner {
         }
     }
 
+    /// Decide how an expired-lease run is resolved (#6284).
+    ///
+    /// - `CancelRequested` → terminal `Cancelled`: cancellation IS a genuine
+    ///   invariant, unchanged.
+    /// - `Running` that recorded ANY loop checkpoint → terminal
+    ///   `Failed(lease_expired)` with the latest resumable checkpoint attached
+    ///   (today's behavior, unchanged). The checkpoint means the run already did
+    ///   work (a resumable one re-drives from the checkpoint; a non-resumable
+    ///   `Final`-only one has no re-drive path but must NOT be re-run from
+    ///   scratch — re-drive-from-checkpoint is a separate concern).
+    /// - `Running` that recorded NO loop checkpoint (crashed before BeforeModel =
+    ///   before any side effect, safe to re-drive) → re-queue to a claimable
+    ///   state, UNLESS `claim_count` has reached the crash-retry bound, in which
+    ///   case terminal `Failed(crash_retry_exhausted)` (a genuine invariant,
+    ///   model-visible — NOT `lease_expired`).
+    fn resolve_expired_lease(&self, record: &RunRecord) -> ExpiredLeaseResolution {
+        if record.status.get() == TurnStatus::CancelRequested {
+            return ExpiredLeaseResolution::Terminal {
+                outcome: LeaseExpiredOutcome {
+                    status: TurnStatus::Cancelled,
+                    failure: None,
+                    event_kind: TurnEventKind::Cancelled,
+                    event_detail: None,
+                },
+                attach_checkpoint: false,
+            };
+        }
+        // `Running` with an expired lease. A run that recorded any loop checkpoint
+        // already ran past its first checkpoint (did work); keep today's terminal
+        // `Failed(lease_expired)` (+ latest resumable checkpoint, if any).
+        if self.run_has_loop_checkpoint(&record.scope, record.turn_id, record.run_id) {
+            return ExpiredLeaseResolution::Terminal {
+                outcome: lease_expired_failed_outcome(),
+                attach_checkpoint: true,
+            };
+        }
+        // Checkpoint-less: crashed before any side effect — safe to re-drive,
+        // bounded by `claim_count`.
+        if record.claim_count >= u64::from(self.limits.max_crash_recovery_reclaims) {
+            return ExpiredLeaseResolution::Terminal {
+                outcome: crash_retry_exhausted_outcome(),
+                attach_checkpoint: false,
+            };
+        }
+        ExpiredLeaseResolution::Requeue
+    }
+
     fn recover_expired_leases(
         &mut self,
         request: RecoverExpiredLeasesRequest,
@@ -2557,34 +2627,68 @@ impl Inner {
             let Some(mut record) = self.records.remove(&run_id) else {
                 continue;
             };
-            // Running and CancelRequested both hold a runner-claimed lease (incremented at
-            // claim). Decrement for both since the lease expiry terminates the run.
-            let outcome = expired_lease_terminal_outcome(record.status.get());
-            let transition = record.status.set(outcome.status);
-            self.apply_status_transition(transition, &record);
-            if record.status.get() == TurnStatus::Failed {
-                record.checkpoint_id =
-                    self.latest_resumable_loop_checkpoint(&record.scope, record.turn_id, run_id);
+            match self.resolve_expired_lease(&record) {
+                ExpiredLeaseResolution::Requeue => {
+                    // #6284: a checkpointless `Running` run whose lease expired
+                    // crashed BEFORE its first loop checkpoint (before BeforeModel,
+                    // before any side effect) and is always safe to re-drive. Do
+                    // NOT strand it terminal `Failed(lease_expired)` — re-queue it
+                    // to a claimable `Queued` state so the scheduler re-drives it.
+                    // The same-thread active lock is KEPT (a `Queued` run holds its
+                    // lock for active-run exclusivity); `claim_count` is preserved
+                    // so the crash-retry bound still advances across cycles.
+                    let transition = record.status.set(TurnStatus::Queued);
+                    self.apply_status_transition(transition, &record);
+                    record.runner_id = None;
+                    record.lease_token = None;
+                    record.lease_expires_at = None;
+                    record.event_cursor = self.next_cursor();
+                    self.update_active_lock(&record, request.now);
+                    self.queued_runs.push_back(record.run_id);
+                    let state = record.state();
+                    // Running → Queued mirrors relinquish's lifecycle event
+                    // (`RunnerHeartbeat`); the `LifecyclePublishingTurnStateStore`
+                    // wrapper independently classifies the recovered `Queued`
+                    // state the same way (`event_kind_for_state`), so the internal
+                    // event log and the published stream agree.
+                    self.push_event(&record, TurnEventKind::RunnerHeartbeat, None, None);
+                    recovered.push(state);
+                    self.records.insert(run_id, record);
+                }
+                ExpiredLeaseResolution::Terminal {
+                    outcome,
+                    attach_checkpoint,
+                } => {
+                    let transition = record.status.set(outcome.status);
+                    self.apply_status_transition(transition, &record);
+                    if attach_checkpoint && record.status.get() == TurnStatus::Failed {
+                        record.checkpoint_id = self.latest_resumable_loop_checkpoint(
+                            &record.scope,
+                            record.turn_id,
+                            run_id,
+                        );
+                    }
+                    record.failure = outcome.failure;
+                    record.runner_id = None;
+                    record.lease_token = None;
+                    record.lease_expires_at = None;
+                    record.event_cursor = self.next_cursor();
+                    self.release_active_lock(&record);
+                    self.remove_queued_run(record.run_id);
+                    let state = record.state();
+                    let event_detail =
+                        failure_detail_for_event(&outcome.event_kind, record.failure.as_ref());
+                    self.push_event(
+                        &record,
+                        outcome.event_kind,
+                        outcome.event_detail,
+                        event_detail,
+                    );
+                    self.mark_terminal(record.run_id);
+                    recovered.push(state);
+                    self.records.insert(run_id, record);
+                }
             }
-            record.failure = outcome.failure;
-            record.runner_id = None;
-            record.lease_token = None;
-            record.lease_expires_at = None;
-            record.event_cursor = self.next_cursor();
-            self.release_active_lock(&record);
-            self.remove_queued_run(record.run_id);
-            let state = record.state();
-            let event_detail =
-                failure_detail_for_event(&outcome.event_kind, record.failure.as_ref());
-            self.push_event(
-                &record,
-                outcome.event_kind,
-                outcome.event_detail,
-                event_detail,
-            );
-            self.mark_terminal(record.run_id);
-            recovered.push(state);
-            self.records.insert(run_id, record);
         }
         self.prune_terminal_records();
         RecoverExpiredLeasesResponse { recovered }
@@ -3578,6 +3682,25 @@ impl Inner {
         checkpoint_id
     }
 
+    /// Whether the run recorded ANY loop checkpoint (of any kind). A run with no
+    /// loop checkpoint at all crashed BEFORE its first checkpoint — before
+    /// BeforeModel, before any side effect — which is the precise #6284
+    /// "safe to re-drive from scratch" condition. A run that recorded a
+    /// checkpoint (even a non-resumable `Final` one) already did work and must
+    /// NOT be re-driven from scratch.
+    fn run_has_loop_checkpoint(
+        &self,
+        scope: &TurnScope,
+        turn_id: crate::TurnId,
+        run_id: TurnRunId,
+    ) -> bool {
+        self.loop_checkpoints.values().any(|checkpoint| {
+            checkpoint.scope == *scope
+                && checkpoint.turn_id == turn_id
+                && checkpoint.run_id == run_id
+        })
+    }
+
     fn latest_resumable_loop_checkpoint(
         &self,
         scope: &TurnScope,
@@ -4031,23 +4154,40 @@ struct LeaseExpiredOutcome {
     event_detail: Option<String>,
 }
 
-fn expired_lease_terminal_outcome(status: TurnStatus) -> LeaseExpiredOutcome {
-    match status {
-        TurnStatus::CancelRequested => LeaseExpiredOutcome {
-            status: TurnStatus::Cancelled,
-            failure: None,
-            event_kind: TurnEventKind::Cancelled,
-            event_detail: None,
-        },
-        _ => {
-            let failure = SanitizedFailure::from_trusted_static("lease_expired");
-            LeaseExpiredOutcome {
-                status: TurnStatus::Failed,
-                failure: Some(failure.clone()),
-                event_kind: TurnEventKind::Failed,
-                event_detail: Some(failure.into_category()),
-            }
-        }
+/// Resolution of an expired-lease `Running`/`CancelRequested` run (#6284).
+enum ExpiredLeaseResolution {
+    /// Re-queue to a claimable `Queued` state (checkpointless, safe to re-drive).
+    Requeue,
+    /// Move to a terminal status. `attach_checkpoint` re-attaches the latest
+    /// resumable loop checkpoint when the resulting status is `Failed`.
+    Terminal {
+        outcome: LeaseExpiredOutcome,
+        attach_checkpoint: bool,
+    },
+}
+
+/// Terminal `Failed(lease_expired)` — used only for a checkpointed run whose
+/// re-drive path is the resumable checkpoint. A checkpointless run is never
+/// stranded with this reason (see `crash_retry_exhausted_outcome`).
+fn lease_expired_failed_outcome() -> LeaseExpiredOutcome {
+    let failure = SanitizedFailure::from_trusted_static("lease_expired");
+    LeaseExpiredOutcome {
+        status: TurnStatus::Failed,
+        failure: Some(failure.clone()),
+        event_kind: TurnEventKind::Failed,
+        event_detail: Some(failure.into_category()),
+    }
+}
+
+/// Terminal `Failed(crash_retry_exhausted)` — a genuine invariant for a
+/// checkpointless run that has exhausted its crash-retry budget (#6284).
+fn crash_retry_exhausted_outcome() -> LeaseExpiredOutcome {
+    let failure = SanitizedFailure::from_trusted_static("crash_retry_exhausted");
+    LeaseExpiredOutcome {
+        status: TurnStatus::Failed,
+        failure: Some(failure.clone()),
+        event_kind: TurnEventKind::Failed,
+        event_detail: Some(failure.into_category()),
     }
 }
 
