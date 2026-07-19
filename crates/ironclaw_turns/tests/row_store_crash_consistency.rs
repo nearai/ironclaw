@@ -467,6 +467,10 @@ fn gate_ref(tag: &str) -> GateRef {
 struct RunHandle {
     run_id: TurnRunId,
     scope_idx: usize,
+    /// The submit idempotency key this run was created under, so the generator
+    /// can emit an idempotent-replay submit (a duplicate key → `Ok` with an
+    /// empty targeted delta — one of the no-op input classes #6263 fixed).
+    idem: String,
     runner_id: Option<TurnRunnerId>,
     lease_token: Option<TurnLeaseToken>,
     gate: Option<GateRef>,
@@ -968,14 +972,26 @@ impl Harness {
         }
     }
 
+    /// A replay of an existing run's submit (same scope + run id + idempotency
+    /// key), so the store sees an idempotent-replay submit — `Ok` with an empty
+    /// targeted delta, one of the no-op input classes #6263 fixed.
+    fn replay_submit(&self, run_idx: usize) -> Plan {
+        let handle = &self.handles[run_idx];
+        Plan::Submit {
+            scope_idx: handle.scope_idx,
+            run_id: handle.run_id,
+            idem: handle.idem.clone(),
+        }
+    }
+
     /// Build the next operation from the seeded RNG.
     ///
-    /// Every submit uses a UNIQUE idempotency key. Idempotent-replay submits
-    /// (a duplicate key) are deliberately NOT generated here: like a no-op
-    /// claim/recover, an idempotent replay returns `Ok` with an empty targeted
-    /// delta, which trips the same journal-sequence desync bug (see
-    /// `ignored_repro_noop_claim_leaks_active_lock_across_crash`). Idempotency
-    /// across crashes is covered by `idempotency_key_replays_same_run_after_crash`.
+    /// Both fresh submits (unique key) and idempotent-replay submits (a duplicate
+    /// key) are generated. An idempotent replay returns `Ok` with an empty
+    /// targeted delta — a no-op input the store must handle without desyncing the
+    /// journal reservation sequence (#6263, pinned by
+    /// `noop_claim_does_not_leak_active_lock_across_crash`). Idempotency across
+    /// crashes is covered by `idempotency_key_replays_same_run_after_crash`.
     fn plan_next(&mut self) -> Plan {
         let scope_count = self.scope_list.len();
         // With no runs yet, the only meaningful op is a submit.
@@ -985,7 +1001,8 @@ impl Harness {
         let roll = self.rng.random_range(0..100u32);
         let run_idx = self.rng.random_range(0..self.handles.len());
         match roll {
-            0..=27 => self.fresh_submit(),
+            0..=24 => self.fresh_submit(),
+            25..=27 => self.replay_submit(run_idx),
             28..=47 => {
                 // Always claim WITH a scope filter. Active-run exclusivity keeps
                 // at most one Queued run per scope, so a scope-filtered claim
@@ -1152,54 +1169,6 @@ fn assert_recoverability_critical_survives(
     }
 }
 
-/// Index of a scope that currently has a claimable (Queued) run in the model,
-/// if any. Used to steer generated claims at a scope that will actually yield a
-/// run (see the no-op-claim durability bug note in `run_chaos`).
-fn model_claimable_scope_idx(
-    model: &InMemoryTurnStateStore,
-    scope_list: &[TurnScope],
-) -> Option<usize> {
-    let snapshot = model.persistence_snapshot();
-    // Iterate scope_list in fixed index order (NOT the snapshot's HashMap-order
-    // runs vec) so the chosen scope is deterministic for a given model state —
-    // otherwise the generated op sequence would vary run-to-run.
-    scope_list.iter().position(|scope| {
-        snapshot
-            .runs
-            .iter()
-            .any(|run| run.status == TurnStatus::Queued && run.scope == *scope)
-    })
-}
-
-/// Whether the model currently holds a runner-leased run (`Running` /
-/// `CancelRequested`) that a `recover_expired_leases` pass could act on.
-fn model_has_leased_run(model: &InMemoryTurnStateStore) -> bool {
-    model.persistence_snapshot().runs.iter().any(|run| {
-        matches!(
-            run.status,
-            TurnStatus::Running | TurnStatus::CancelRequested
-        )
-    })
-}
-
-/// The model's current status for `run_id`, if it exists.
-fn model_run_status(model: &InMemoryTurnStateStore, run_id: TurnRunId) -> Option<TurnStatus> {
-    model
-        .persistence_snapshot()
-        .runs
-        .iter()
-        .find(|run| run.run_id == run_id)
-        .map(|run| run.status)
-}
-
-/// A `request_cancel` changes durable state only from a non-terminal,
-/// not-already-cancel-requested status. Cancelling anything else is an
-/// idempotent no-op (empty targeted delta) — the same journal-desync trigger as
-/// a no-op claim.
-fn cancel_changes_state(status: TurnStatus) -> bool {
-    !status.is_terminal() && status != TurnStatus::CancelRequested
-}
-
 /// Drive `ops` operations against a fresh store, crashing+recovering every
 /// `crash_every` ops, optionally arming a write fault before some ops. Green iff
 /// the write-through store never loses an acked op and never violates an
@@ -1228,50 +1197,17 @@ async fn run_chaos(seed: u64, ops: usize, crash_every: usize, inject_faults: boo
             }
         }
 
-        // Generate the next op, then rewrite claim/recover so they always have
-        // a durable effect. A `claim_next_run` that matches nothing (Ok(None))
-        // and a `recover_expired_leases` that expires nothing both go through
-        // the targeted-delta commit path with an empty delta, which trips a
-        // real durability bug in the CURRENT row store (a subsequent terminal
-        // transition's active-lock DELETE is dropped, leaking the lock across a
-        // crash — pinned by `ignored_repro_noop_claim_leaks_active_lock_across_crash`).
-        // The oracle/invariants below stay strict; we only keep the generator
-        // from feeding the store the one known-broken input so this general
-        // suite is a green Step-3 gate for every OTHER transition.
-        let plan = match h.plan_next() {
-            Plan::Claim {
-                runner_id,
-                lease_token,
-                ..
-            } => match model_claimable_scope_idx(&model, &h.scope_list) {
-                Some(idx) => Plan::Claim {
-                    runner_id,
-                    lease_token,
-                    scope_idx: Some(idx),
-                },
-                None => h.fresh_submit(),
-            },
-            Plan::Recover { .. } => {
-                if model_has_leased_run(&model) {
-                    Plan::Recover { expire_all: true }
-                } else {
-                    h.fresh_submit()
-                }
-            }
-            Plan::Cancel { run_idx, idem } => {
-                let changes = h
-                    .handles
-                    .get(run_idx)
-                    .and_then(|handle| model_run_status(&model, handle.run_id))
-                    .is_some_and(cancel_changes_state);
-                if changes {
-                    Plan::Cancel { run_idx, idem }
-                } else {
-                    h.fresh_submit()
-                }
-            }
-            other => other,
-        };
+        // Generate the next op verbatim — including no-op inputs (a
+        // `claim_next_run` that matches nothing → Ok(None), a
+        // `recover_expired_leases` that expires nothing, an idempotent-replay
+        // submit, an idempotent `request_cancel`). Each of those goes through the
+        // commit path with an empty durable delta; #6263's fix makes that a true
+        // no-op that does not advance the reservation sequence, so the suite
+        // exercises them directly instead of steering the generator away (the
+        // former steering existed only to dodge the desync bug now fixed and
+        // pinned by `noop_claim_does_not_leak_active_lock_across_crash`). The
+        // oracle/invariants below stay strict.
+        let plan = h.plan_next();
         h.log.push(format!("#{op_index} {}", plan.describe()));
 
         let scope_list = h.scope_list.clone();
@@ -1333,7 +1269,9 @@ async fn apply_to_model_and_bookkeep(
     match (plan, rs_effect, &model_effect) {
         (
             Plan::Submit {
-                scope_idx, run_id, ..
+                scope_idx,
+                run_id,
+                idem,
             },
             Effect::Submitted,
             Effect::Submitted,
@@ -1345,6 +1283,7 @@ async fn apply_to_model_and_bookkeep(
             h.handles.push(RunHandle {
                 run_id: *run_id,
                 scope_idx: *scope_idx,
+                idem: idem.clone(),
                 runner_id: None,
                 lease_token: None,
                 gate: None,
@@ -1706,13 +1645,14 @@ async fn crash_after_acked_gate_park_survives_blocked() {
 
 /// No double-claim across a crash: a claimed, lease-valid run is never
 /// re-claimable by another runner after recovery. The only escape from the
-/// lease is a genuine expiry through `recover_expired_leases`, which — per the
-/// shared engine's lease semantics — terminates the abandoned run as
-/// `Failed(lease_expired)` (deterministic, cause-carrying) rather than silently
-/// handing the lease to a second runner. Either way, two runners never hold the
-/// same run.
+/// lease is a genuine expiry through `recover_expired_leases`. Per #6284 a
+/// checkpoint-less abandoned run (crashed before its first checkpoint = before
+/// any side effect) is RE-QUEUED to a claimable state so it re-drives, rather
+/// than stranded terminal `Failed`. That is not a double-claim: the prior lease
+/// genuinely expired before the re-queue, so two runners never hold the same run
+/// at once.
 #[tokio::test]
-async fn crash_preserves_single_claim_and_lease_expiry_terminates_abandoned_run() {
+async fn crash_preserves_single_claim_and_lease_expiry_requeues_abandoned_run() {
     let backend = Arc::new(FaultBackend::new(InMemoryBackend::new()));
     let scoped = fault_scoped(Arc::clone(&backend));
     let scope = only_scope();
@@ -1750,9 +1690,10 @@ async fn crash_preserves_single_claim_and_lease_expiry_terminates_abandoned_run(
         "a Running run must not be re-claimable after crash without lease expiry (got {stolen:?})"
     );
 
-    // Genuine lease expiry resolves the abandoned lease. The engine terminates
-    // it as Failed(lease_expired) with its cause recorded — it is NOT silently
-    // re-handed to another runner (no double-claim), and it is not left dangling.
+    // Genuine lease expiry resolves the abandoned lease. Per #6284 a
+    // checkpoint-less run (crashed before any side effect) is re-queued to a
+    // claimable state — re-drivable, NOT stranded terminal — and it is not
+    // silently re-handed to another runner while the lease was still valid.
     recovered
         .recover_expired_leases(RecoverExpiredLeasesRequest {
             now: Utc.with_ymd_and_hms(2100, 1, 1, 0, 0, 0).unwrap(),
@@ -1769,10 +1710,11 @@ async fn crash_preserves_single_claim_and_lease_expiry_terminates_abandoned_run(
         .expect("run still resolvable after lease expiry");
     assert_eq!(
         post_recover.status,
-        TurnStatus::Failed,
-        "an abandoned lease resolves to a deterministic lease_expired terminal"
+        TurnStatus::Queued,
+        "an abandoned checkpoint-less lease re-queues to a re-drivable state (#6284)"
     );
-    // And a fresh claim finds nothing — the run is terminal, never double-claimed.
+    // A fresh claim now re-drives the re-queued run — this is not a double-claim
+    // because the prior lease already expired.
     let after = recovered
         .claim_next_run(ClaimRunRequest {
             runner_id: TurnRunnerId::new(),
@@ -1781,9 +1723,10 @@ async fn crash_preserves_single_claim_and_lease_expiry_terminates_abandoned_run(
         })
         .await
         .unwrap();
-    assert!(
-        after.is_none(),
-        "a lease-expired terminal run must never be claimable (no double-claim), got {after:?}"
+    assert_eq!(
+        after.map(|claimed| claimed.state.run_id),
+        Some(run_id),
+        "a re-queued checkpoint-less run must be re-claimable so it re-drives (#6284)"
     );
 }
 
@@ -1955,27 +1898,20 @@ async fn crash_mid_run_recovers_identically_to_model_and_preserves_cause() {
     assert_recovered_matches_model(&recovered, &model, 0, &["crash mid-run".to_string()]).await;
 }
 
-/// DISCOVERED-BEHAVIOR REPRODUCER (ignored) — the #6284 lifecycle tension.
+/// #6284 — lease expiry of a checkpoint-less run is RE-DRIVABLE, not a terminal
+/// dead-end.
 ///
 /// #6284's error-recoverability contract states a crash / abandoned run must
 /// stay re-drivable and that terminal failure is reserved for *genuine*
-/// invariants (cancellation, budget, DriverBug) — never a crash. But the shared
-/// turn engine's `recover_expired_leases` terminates an expired lease as
-/// `Failed(lease_expired)`. For a run that reached a resumable loop checkpoint
-/// this is retryable; for a run that was only *claimed* (no checkpoint yet) it
-/// is a terminal dead-end with no re-drive path — exactly the "crashed runner
-/// strands the run terminal-Failed" outcome the contract forbids.
-///
-/// This is NOT a row-store crash-consistency defect (the row store faithfully
-/// reproduces the engine's decision, and it matches the direct authority). It
-/// is a turn-lifecycle policy question surfaced by the suite. Left `#[ignore]`d
-/// as an executable record of the exact scenario until #6284 decides whether
-/// lease expiry on a checkpoint-less run should re-queue instead of fail.
-/// Un-ignoring it (and flipping the final assertion to expect a re-drivable
-/// status) is the acceptance signal for that decision.
+/// invariants (cancellation, budget, DriverBug) — never a bare crash. A run that
+/// was only *claimed* (no loop checkpoint yet) crashed BEFORE its first
+/// checkpoint = before BeforeModel = before any side effect, so it is always
+/// safe to re-drive. `recover_expired_leases` therefore re-queues it to a
+/// claimable state instead of stranding it `Failed(lease_expired)`. (A run that
+/// DID reach a resumable checkpoint keeps today's `Failed(lease_expired)` +
+/// checkpoint behavior — asserted separately in `retry_failed_turn_store_contract`.)
 #[tokio::test]
-#[ignore = "documents the #6284 lease-expiry-vs-recoverability policy tension; not a row-store bug"]
-async fn ignored_repro_lease_expiry_strands_checkpointless_run_terminal_failed() {
+async fn lease_expiry_requeues_checkpointless_run_as_redrivable() {
     let backend = Arc::new(FaultBackend::new(InMemoryBackend::new()));
     let scoped = fault_scoped(Arc::clone(&backend));
     let scope = only_scope();
@@ -2005,17 +1941,124 @@ async fn ignored_repro_lease_expiry_strands_checkpointless_run_terminal_failed()
         .await
         .expect("lease recovery");
     let state = recovered
-        .get_run_state(GetRunStateRequest { scope, run_id })
+        .get_run_state(GetRunStateRequest {
+            scope: scope.clone(),
+            run_id,
+        })
         .await
         .expect("run resolvable");
-    // #6284 says this should be re-drivable; the current engine makes it a
-    // terminal dead-end. The assertion below encodes the CONTRACT expectation,
-    // so this test fails today (hence #[ignore]) and passes once #6284 lands.
+    // #6284: re-drivable, not a terminal dead-end.
     assert!(
         !state.status.is_terminal(),
-        "#6284: a crashed checkpoint-less run must remain re-drivable, but the engine \
-         stranded it as {:?} (lease_expired terminal)",
+        "#6284: a crashed checkpoint-less run must remain re-drivable, got {:?}",
         state.status
+    );
+    assert_eq!(
+        state.status,
+        TurnStatus::Queued,
+        "a re-drivable expired lease is re-queued to a claimable state"
+    );
+
+    // Re-claimable: the scheduler re-drives it. This is NOT a double-claim — the
+    // prior lease genuinely expired before the re-queue.
+    let reclaimed = recovered
+        .claim_next_run(ClaimRunRequest {
+            runner_id: TurnRunnerId::new(),
+            lease_token: TurnLeaseToken::new(),
+            scope_filter: Some(scope.clone()),
+        })
+        .await
+        .unwrap();
+    assert_eq!(
+        reclaimed.map(|claimed| claimed.state.run_id),
+        Some(run_id),
+        "a re-queued checkpoint-less run must be re-claimable so it re-drives"
+    );
+}
+
+/// #6284 — the checkpoint-less re-drive loop is BOUNDED by `claim_count`. A run
+/// that keeps crashing before its first checkpoint cannot re-drive forever: once
+/// `claim_count` reaches `max_crash_recovery_reclaims`, lease expiry terminal-
+/// fails it with the genuine-invariant reason `crash_retry_exhausted` (NOT
+/// `lease_expired`), so the failure is model-visible and honest.
+#[tokio::test]
+async fn lease_expiry_crash_retry_bound_fails_with_crash_retry_exhausted() {
+    let backend = Arc::new(FaultBackend::new(InMemoryBackend::new()));
+    let scoped = fault_scoped(Arc::clone(&backend));
+    let scope = only_scope();
+    // Bound of 1: the first claim (claim_count = 1) already reaches the bound, so
+    // the next lease expiry terminal-fails instead of re-queuing.
+    let open = |scoped: Arc<ScopedFilesystem<FaultBackend>>| {
+        FilesystemTurnStateRowStore::new(scoped)
+            .with_limits(limits().set_max_crash_recovery_reclaims(1))
+            .with_preappend_row_reservations()
+    };
+
+    let run_id = {
+        let store = open(Arc::clone(&scoped));
+        let run_id = submit_one(&store, &scope, "idem-crash-retry-bound").await;
+        store
+            .claim_next_run(ClaimRunRequest {
+                runner_id: TurnRunnerId::new(),
+                lease_token: TurnLeaseToken::new(),
+                scope_filter: None,
+            })
+            .await
+            .unwrap()
+            .expect("claim (no checkpoint reached)");
+        drop(store);
+        run_id
+    };
+
+    let recovered = open(Arc::clone(&scoped));
+    recovered
+        .recover_expired_leases(RecoverExpiredLeasesRequest {
+            now: Utc.with_ymd_and_hms(2100, 1, 1, 0, 0, 0).unwrap(),
+            scope_filter: None,
+        })
+        .await
+        .expect("lease recovery");
+    let state = recovered
+        .get_run_state(GetRunStateRequest {
+            scope: scope.clone(),
+            run_id,
+        })
+        .await
+        .expect("run resolvable");
+    assert_eq!(
+        state.status,
+        TurnStatus::Failed,
+        "at the crash-retry bound a checkpoint-less run terminal-fails"
+    );
+
+    let snapshot = recovered.persistence_snapshot().await.unwrap();
+    let run = snapshot
+        .runs
+        .iter()
+        .find(|record| record.run_id == run_id)
+        .expect("failed run present");
+    let failure = run
+        .failure
+        .as_ref()
+        .expect("crash-retry-exhausted run records its genuine-invariant failure");
+    assert_eq!(
+        failure.category(),
+        "crash_retry_exhausted",
+        "checkpoint-less crash-retry exhaustion is a genuine invariant, never lease_expired"
+    );
+
+    // Terminal → not re-claimable (the bound really did stop the re-drive loop).
+    let after = recovered
+        .claim_next_run(ClaimRunRequest {
+            runner_id: TurnRunnerId::new(),
+            lease_token: TurnLeaseToken::new(),
+            scope_filter: Some(scope.clone()),
+        })
+        .await
+        .unwrap();
+    assert!(
+        after.is_none(),
+        "a crash-retry-exhausted terminal run must not be claimable, got {after:?}"
     );
 }
 
@@ -2164,31 +2207,29 @@ async fn fail_before_durable_leaves_run_redrivable() {
     check_internal_invariants(&snapshot).unwrap();
 }
 
-/// DISCOVERED BUG (ignored reproducer) — a no-op `claim_next_run` leaks a
-/// completed run's active lock across a crash.
+/// REGRESSION (#6263) — a no-op `claim_next_run` must not leak a completed run's
+/// active lock across a crash.
 ///
 /// Minimal reduction (from chaos seed 101): a `claim_next_run` that matches no
-/// queued run — i.e. returns `Ok(None)` — still runs through the row store's
-/// targeted-delta commit path with an empty delta. That desyncs the durable
-/// journal sequence such that a subsequent `complete_run`'s active-lock DELETE
-/// is not durably persisted: the LIVE hot cache correctly shows the lock
-/// released (0 locks), but after a crash + recovery the terminal (`Completed`)
-/// run still holds an active lock (1 lock).
+/// queued run — i.e. returns `Ok(None)` — runs through the row store's
+/// targeted-delta commit path with an empty durable delta. Before the fix that
+/// still advanced the hot-cache journal reservation sequence without a matching
+/// backend append, desyncing it by +1: a subsequent `complete_run`'s active-lock
+/// DELETE (materialized at the real append seq) then collided with the run's
+/// active-lock row (reserved at the desynced, higher seq) and was skipped. The
+/// LIVE hot cache correctly showed the lock released (0 locks), but after a crash
+/// + recovery the terminal (`Completed`) run still held its active lock (1 lock).
 ///
 /// Impact: active-run exclusivity is keyed on the thread's active lock, so a
 /// leaked lock on a terminal run permanently blocks every new turn on that
-/// thread after a crash (submits return `ThreadBusy` forever). The row store's
-/// own live view and the durable view disagree — a durability defect, not a
-/// test artifact.
+/// thread after a crash (submits return `ThreadBusy` forever).
 ///
-/// This is TEST-ONLY infrastructure, so the fix (make an empty/no-op targeted
-/// delta a true no-op that does not advance the reservation sequence, or ensure
-/// the terminal active-lock delete is keyed by absolute sequence) belongs in
-/// `crates/ironclaw_turns/src/filesystem_store/row_store`. Un-ignore this once
-/// fixed. The assertion below is what SHOULD hold and fails today.
+/// The fix makes an empty durable delta a true no-op that does not advance the
+/// reservation sequence (`apply` / `apply_with_targeted_delta` in
+/// `crates/ironclaw_turns/src/filesystem_store/row_store`). The assertion below
+/// holds after the fix.
 #[tokio::test]
-#[ignore = "DISCOVERED BUG #6263: a no-op claim leaks a completed run's active lock across a crash"]
-async fn ignored_repro_noop_claim_leaks_active_lock_across_crash() {
+async fn noop_claim_does_not_leak_active_lock_across_crash() {
     let backend = Arc::new(FaultBackend::new(InMemoryBackend::new()));
     let scoped = fault_scoped(Arc::clone(&backend));
     let scope_with_run = scopes()[3].clone();
