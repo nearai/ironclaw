@@ -2594,10 +2594,25 @@ async def _wait_for_slack_search_marker(
     checked_any = False
     last_error: str | None = None
     while True:
+        # Deadline check BEFORE the sweep: each sweep carries its own HTTP
+        # timeout, so starting one at/past the deadline could stretch the
+        # advertised readiness bound by a full extra sweep.
+        if time.monotonic() >= deadline:
+            return {
+                "ready": False,
+                "checked": checked_any,
+                "permanent": False,
+                "attempts": attempts,
+                "waited_ms": int((time.monotonic() - started) * 1000),
+                "error": last_error,
+            }
         attempts += 1
         sweep = await _slack_search_marker_hits(ctx, marker=marker)
         if sweep.get("checked"):
             checked_any = True
+            # A sweep that ran cleanly supersedes any earlier transient error;
+            # a timeout after this point must not report a stale one.
+            last_error = None
             if sweep.get("hits"):
                 return {
                     "ready": True,
@@ -7354,6 +7369,30 @@ async def case_qa_10g_slack_last_message_sent_global(
         )
         details["search_index_readiness"] = readiness
         if not readiness.get("ready"):
+            if readiness.get("permanent"):
+                # Search can NEVER run here (missing scope / invalid or revoked
+                # token): this is an actionable env-repair failure, not index
+                # lag — report it as such rather than an inconclusive lag
+                # artifact that would hide the real cause.
+                reason = (
+                    "Slack search readiness check can never run in this "
+                    f"environment (error={readiness.get('error')!r}) — repair "
+                    "the personal token/scopes"
+                )
+                result = _result(
+                    case_name,
+                    False,
+                    started,
+                    {
+                        **details,
+                        "error": reason,
+                        "failure_class": "infrastructure",
+                        "failure_category": "slack_search_unavailable",
+                        "failure_status": "failed",
+                    },
+                )
+                result.details["blocking"] = False
+                return result
             reason = (
                 "Slack search did not index the workspace-global last-sent "
                 f"marker within {int(SLACK_SEARCH_INDEX_READINESS_TIMEOUT_SECONDS)}s "

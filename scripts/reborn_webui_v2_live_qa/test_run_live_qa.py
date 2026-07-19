@@ -1247,11 +1247,21 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
         async def fake_sleep(_seconds: float) -> None:
             return None
 
+        # Deterministic clock: each call advances 20ms past a 50ms deadline, so
+        # the loop exits after a bounded number of iterations instead of
+        # busy-spinning real CPU for the whole timeout window.
+        clock = {"now": 0.0}
+
+        def fake_monotonic() -> float:
+            clock["now"] += 0.02
+            return clock["now"]
+
         with (
             patch.object(
                 run_live_qa, "_slack_search_marker_hits", side_effect=fake_search
             ),
             patch.object(run_live_qa.asyncio, "sleep", new=fake_sleep),
+            patch.object(run_live_qa.time, "monotonic", new=fake_monotonic),
         ):
             readiness = asyncio.run(
                 run_live_qa._wait_for_slack_search_marker(
