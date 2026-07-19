@@ -361,8 +361,7 @@ fn release_ci_compiles_reborn_for_all_supported_targets() {
         ("aarch64-apple-darwin", "macos-15"),
         ("x86_64-pc-windows-msvc", "windows-2022"),
     ];
-    let release_features =
-        "root-llm-provider,webui-v2-beta,slack-v2-host-beta,libsql,postgres,inmemory-turn-state";
+    let release_features = "root-llm-provider,webui-v2-beta,slack-v2-host-beta,telegram-v2-host-beta,openai-compat-beta,libsql,postgres,inmemory-turn-state";
 
     assert_eq!(
         compile_workflow.matches("          - target: ").count(),

@@ -17,7 +17,7 @@ env:
   # Docker changes so this workflow does not depend on the #6122 migration.
   # Keep the production LLM provider explicit even though Cargo defaults also
   # enable it today, so a future default-feature change cannot weaken releases.
-  REBORN_RELEASE_FEATURES: root-llm-provider,webui-v2-beta,slack-v2-host-beta,libsql,postgres,inmemory-turn-state
+  REBORN_RELEASE_FEATURES: root-llm-provider,webui-v2-beta,slack-v2-host-beta,telegram-v2-host-beta,openai-compat-beta,libsql,postgres,inmemory-turn-state
 
 jobs:
   compile:
