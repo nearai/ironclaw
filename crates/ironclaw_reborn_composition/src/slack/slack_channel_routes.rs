@@ -1,7 +1,6 @@
+// arch-exempt: large_file, §4.3 test-double deletion — InMemorySlackChannelRouteStore removed, file NET SHRANK ~140 lines; added lines are the production-store test seam, plan #6168
 //! Host-owned Slack shared-channel route store and WebUI admin surface.
 
-#[cfg(test)]
-use std::collections::HashMap;
 use std::collections::HashSet;
 use std::num::{NonZeroU32, NonZeroU64};
 use std::sync::Arc;
@@ -250,128 +249,6 @@ pub(crate) trait SlackChannelRouteStore: Send + Sync + std::fmt::Debug {
             cursor = next_cursor;
         }
         Ok(result)
-    }
-}
-
-#[cfg(test)]
-#[derive(Debug, Default)]
-pub(crate) struct InMemorySlackChannelRouteStore {
-    routes: RwLock<HashMap<SlackChannelRouteKey, UserId>>,
-}
-
-#[cfg(test)]
-impl InMemorySlackChannelRouteStore {
-    pub(crate) fn new() -> Self {
-        Self::default()
-    }
-}
-
-#[cfg(test)]
-#[async_trait]
-impl SlackChannelRouteStore for InMemorySlackChannelRouteStore {
-    async fn list_routes(
-        &self,
-        tenant_id: &TenantId,
-        installation_id: &AdapterInstallationId,
-        team_id: &str,
-        cursor: usize,
-        limit: usize,
-    ) -> Result<SlackChannelRouteListPage, SlackChannelRouteError> {
-        let routes = self
-            .routes
-            .read()
-            .map_err(|_| SlackChannelRouteError::StoreUnavailable)?;
-        let mut result = routes
-            .iter()
-            .filter(|(key, _)| {
-                &key.tenant_id == tenant_id
-                    && &key.installation_id == installation_id
-                    && key.team_id == team_id
-            })
-            .map(|(key, subject_user_id)| {
-                SlackChannelRoute::new(key.clone(), subject_user_id.clone())
-            })
-            .collect::<Vec<_>>();
-        result.sort_by(|left, right| left.channel_id.cmp(&right.channel_id));
-        let start = cursor.min(result.len());
-        let end = cursor.saturating_add(limit).min(result.len());
-        let next_cursor = if end < result.len() { Some(end) } else { None };
-        Ok(SlackChannelRouteListPage {
-            routes: result.into_iter().skip(start).take(end - start).collect(),
-            next_cursor,
-        })
-    }
-
-    async fn upsert_route(
-        &self,
-        key: SlackChannelRouteKey,
-        subject_user_id: UserId,
-    ) -> Result<SlackChannelRoute, SlackChannelRouteError> {
-        self.routes
-            .write()
-            .map_err(|_| SlackChannelRouteError::StoreUnavailable)?
-            .insert(key.clone(), subject_user_id.clone());
-        Ok(SlackChannelRoute::new(key, subject_user_id))
-    }
-
-    async fn delete_route(
-        &self,
-        key: &SlackChannelRouteKey,
-    ) -> Result<bool, SlackChannelRouteError> {
-        Ok(self
-            .routes
-            .write()
-            .map_err(|_| SlackChannelRouteError::StoreUnavailable)?
-            .remove(key)
-            .is_some())
-    }
-
-    async fn replace_managed_routes(
-        &self,
-        tenant_id: &TenantId,
-        installation_id: &AdapterInstallationId,
-        team_id: &str,
-        assignments: Vec<SlackChannelRouteAssignment>,
-    ) -> Result<Vec<SlackChannelRoute>, SlackChannelRouteError> {
-        let mut routes = self
-            .routes
-            .write()
-            .map_err(|_| SlackChannelRouteError::StoreUnavailable)?;
-        let requested = assignments
-            .iter()
-            .map(|assignment| &assignment.channel_id)
-            .collect::<HashSet<_>>();
-        routes.retain(|key, _current_subject| {
-            &key.tenant_id != tenant_id
-                || &key.installation_id != installation_id
-                || key.team_id != team_id
-                || requested.contains(&key.channel_id)
-        });
-        let mut replaced = Vec::with_capacity(assignments.len());
-        for assignment in assignments {
-            let key = SlackChannelRouteKey::new(
-                tenant_id.clone(),
-                installation_id.clone(),
-                team_id.to_string(),
-                assignment.channel_id,
-            )?;
-            routes.insert(key.clone(), assignment.subject_user_id.clone());
-            replaced.push(SlackChannelRoute::new(key, assignment.subject_user_id));
-        }
-        replaced.sort_by(|left, right| left.channel_id.cmp(&right.channel_id));
-        Ok(replaced)
-    }
-
-    async fn resolve_subject_user_id(
-        &self,
-        key: &SlackChannelRouteKey,
-    ) -> Result<Option<UserId>, SlackChannelRouteError> {
-        Ok(self
-            .routes
-            .read()
-            .map_err(|_| SlackChannelRouteError::StoreUnavailable)?
-            .get(key)
-            .cloned())
     }
 }
 
@@ -1059,6 +936,7 @@ mod tests {
     use ironclaw_secrets::InMemorySecretStore;
     use tower::ServiceExt;
 
+    use crate::slack::slack_host_state::test_support::in_memory_slack_host_state;
     use crate::slack::slack_setup::SlackInstallationSetupStore;
 
     use super::*;
@@ -1069,7 +947,7 @@ mod tests {
 
     #[tokio::test]
     async fn route_admin_upserts_lists_and_deletes_server_scoped_channel_route() {
-        let store = Arc::new(InMemorySlackChannelRouteStore::new());
+        let store = Arc::new(in_memory_slack_host_state(TENANT));
         let mount = slack_channel_route_admin_route_mount(route_config(store.clone()));
 
         let upsert_response = mount
@@ -1130,8 +1008,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn in_memory_replace_managed_routes_removes_unrequested_subject_routes() {
-        let store = InMemorySlackChannelRouteStore::new();
+    async fn replace_managed_routes_removes_unrequested_subject_routes() {
+        let store = in_memory_slack_host_state(TENANT);
         let tenant_id = TenantId::new(TENANT).expect("tenant");
         let installation_id = AdapterInstallationId::new(INSTALLATION).expect("installation");
         let assigner = SlackChannelSubjectAssigner::new(
@@ -1214,7 +1092,7 @@ mod tests {
     #[tokio::test]
     async fn route_admin_rejects_cross_tenant_callers() {
         let mount = slack_channel_route_admin_route_mount(route_config(Arc::new(
-            InMemorySlackChannelRouteStore::new(),
+            in_memory_slack_host_state(TENANT),
         )));
 
         let response = mount
@@ -1233,7 +1111,7 @@ mod tests {
     #[tokio::test]
     async fn route_admin_rejects_same_tenant_non_operator_callers() {
         let mount = slack_channel_route_admin_route_mount(route_config(Arc::new(
-            InMemorySlackChannelRouteStore::new(),
+            in_memory_slack_host_state(TENANT),
         )));
 
         let response = mount
@@ -1253,7 +1131,7 @@ mod tests {
     #[tokio::test]
     async fn route_admin_rejects_operator_user_without_operator_capability() {
         let mount = slack_channel_route_admin_route_mount(route_config(Arc::new(
-            InMemorySlackChannelRouteStore::new(),
+            in_memory_slack_host_state(TENANT),
         )));
 
         let response = mount
@@ -1272,7 +1150,7 @@ mod tests {
 
     #[tokio::test]
     async fn route_admin_rejects_invalid_subject_without_mutating_store() {
-        let store = Arc::new(InMemorySlackChannelRouteStore::new());
+        let store = Arc::new(in_memory_slack_host_state(TENANT));
         let mount = slack_channel_route_admin_route_mount(route_config(store.clone()));
 
         let response = mount
@@ -1304,7 +1182,7 @@ mod tests {
 
     #[tokio::test]
     async fn route_admin_rejects_unknown_subject_without_mutating_store() {
-        let store = Arc::new(InMemorySlackChannelRouteStore::new());
+        let store = Arc::new(in_memory_slack_host_state(TENANT));
         let mount = slack_channel_route_admin_route_mount(route_config(store.clone()));
 
         let response = mount
@@ -1337,7 +1215,7 @@ mod tests {
     #[tokio::test]
     async fn route_admin_list_returns_empty_for_fresh_store() {
         let mount = slack_channel_route_admin_route_mount(route_config(Arc::new(
-            InMemorySlackChannelRouteStore::new(),
+            in_memory_slack_host_state(TENANT),
         )));
 
         let response = mount
@@ -1358,7 +1236,7 @@ mod tests {
 
     #[tokio::test]
     async fn route_admin_lists_routable_team_subjects_for_picker() {
-        let config = route_config(Arc::new(InMemorySlackChannelRouteStore::new()))
+        let config = route_config(Arc::new(in_memory_slack_host_state(TENANT)))
             .with_allowed_subject_user_ids([
                 UserId::new("user:product-team-agent").expect("product subject"),
                 UserId::new("user:hr-team-agent").expect("hr subject"),
@@ -1414,7 +1292,7 @@ mod tests {
     async fn setup_admin_saves_secrets_and_returns_redacted_status() {
         let setup_store = Arc::new(InMemorySlackSetupStore::default());
         let mount = slack_channel_route_admin_route_mount(dynamic_route_config(
-            Arc::new(InMemorySlackChannelRouteStore::new()),
+            Arc::new(in_memory_slack_host_state(TENANT)),
             setup_store.clone(),
         ));
 
@@ -1506,7 +1384,7 @@ mod tests {
     async fn setup_admin_requires_initial_secrets_without_writing_setup() {
         let setup_store = Arc::new(InMemorySlackSetupStore::default());
         let mount = slack_channel_route_admin_route_mount(dynamic_route_config(
-            Arc::new(InMemorySlackChannelRouteStore::new()),
+            Arc::new(in_memory_slack_host_state(TENANT)),
             setup_store.clone(),
         ));
 
@@ -1540,7 +1418,7 @@ mod tests {
     async fn setup_admin_rolls_back_saved_setup_when_activation_fails() {
         let setup_store = Arc::new(InMemorySlackSetupStore::default());
         let config = dynamic_route_config(
-            Arc::new(InMemorySlackChannelRouteStore::new()),
+            Arc::new(in_memory_slack_host_state(TENANT)),
             setup_store.clone(),
         )
         .with_setup_activation(Arc::new(FailingSlackSetupActivation));
@@ -1576,7 +1454,7 @@ mod tests {
 
     #[tokio::test]
     async fn route_admin_list_paginates_routes() {
-        let store = Arc::new(InMemorySlackChannelRouteStore::new());
+        let store = Arc::new(in_memory_slack_host_state(TENANT));
         let mount = slack_channel_route_admin_route_mount(route_config(store));
         for channel_id in ["C0A", "C0B"] {
             let response = mount
@@ -1620,7 +1498,7 @@ mod tests {
     #[tokio::test]
     async fn route_admin_list_rejects_invalid_cursor() {
         let mount = slack_channel_route_admin_route_mount(route_config(Arc::new(
-            InMemorySlackChannelRouteStore::new(),
+            in_memory_slack_host_state(TENANT),
         )));
 
         let response = mount
@@ -1644,7 +1522,7 @@ mod tests {
 
     #[tokio::test]
     async fn route_admin_list_handles_oversized_cursor_without_overflow() {
-        let store = Arc::new(InMemorySlackChannelRouteStore::new());
+        let store = Arc::new(in_memory_slack_host_state(TENANT));
         let mount = slack_channel_route_admin_route_mount(route_config(store));
 
         let response = mount
@@ -1676,7 +1554,7 @@ mod tests {
     #[tokio::test]
     async fn route_admin_delete_unknown_route_returns_deleted_false() {
         let mount = slack_channel_route_admin_route_mount(route_config(Arc::new(
-            InMemorySlackChannelRouteStore::new(),
+            in_memory_slack_host_state(TENANT),
         )));
 
         let response = mount
@@ -1695,7 +1573,7 @@ mod tests {
 
     #[tokio::test]
     async fn route_admin_rejects_injection_in_channel_id() {
-        let store = Arc::new(InMemorySlackChannelRouteStore::new());
+        let store = Arc::new(in_memory_slack_host_state(TENANT));
         let mount = slack_channel_route_admin_route_mount(route_config(store.clone()));
 
         let response = mount

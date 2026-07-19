@@ -1378,17 +1378,17 @@ mod tests {
 
     use super::*;
     use crate::slack::slack_channel_routes::{
-        InMemorySlackChannelRouteStore, SlackChannelRoute, SlackChannelRouteAdminRouteMount,
-        SlackChannelRouteError, SlackChannelRouteKey, SlackChannelRouteListPage,
-        WEBUI_V2_CHANNELS_SLACK_ROUTES_PATH, slack_channel_route_admin_route_mount,
+        SlackChannelRoute, SlackChannelRouteAdminRouteMount, SlackChannelRouteError,
+        SlackChannelRouteKey, SlackChannelRouteListPage, WEBUI_V2_CHANNELS_SLACK_ROUTES_PATH,
+        slack_channel_route_admin_route_mount,
     };
     use crate::slack::slack_connectable_channel::{
         SlackOperatorRouteVisibility, build_webui_services_with_slack_host_beta_mounts,
     };
+    use crate::slack::slack_host_state::test_support::in_memory_slack_host_state;
     use crate::slack::slack_outbound_targets::{
-        InMemorySlackPersonalDmTargetStore, SLACK_OUTBOUND_TARGET_LIST_PAGE_SIZE,
-        SlackPersonalDmTarget, SlackPersonalDmTargetError, SlackPersonalDmTargetKey,
-        SlackPersonalDmTargetProvisioner, SlackPersonalDmTargetStore,
+        SLACK_OUTBOUND_TARGET_LIST_PAGE_SIZE, SlackPersonalDmTarget, SlackPersonalDmTargetError,
+        SlackPersonalDmTargetKey, SlackPersonalDmTargetProvisioner, SlackPersonalDmTargetStore,
         slack_reply_target_binding_ref_from_raw, slack_shared_channel_reply_target_binding_ref,
     };
     use crate::slack::slack_serve::{SlackApiAppId, SlackUserId};
@@ -2350,7 +2350,7 @@ mod tests {
 
     #[tokio::test]
     async fn slack_host_beta_targets_page_multiple_route_store_pages() {
-        let store = Arc::new(InMemorySlackChannelRouteStore::new());
+        let store = Arc::new(in_memory_slack_host_state(TENANT));
         let tenant_id = TenantId::new(TENANT).expect("tenant");
         let installation_id = AdapterInstallationId::new(INSTALLATION).expect("installation");
         let subject_user_id = UserId::new(SHARED_SUBJECT).expect("shared subject");
@@ -2392,7 +2392,7 @@ mod tests {
     async fn slack_shared_channel_targets_survive_personal_dm_store_failure() {
         let provider = SlackHostBetaOutboundTargetProvider::new(
             outbound_target_provider_config(config()),
-            Arc::new(InMemorySlackChannelRouteStore::new()),
+            Arc::new(in_memory_slack_host_state(TENANT)),
             Arc::new(FailingSlackPersonalDmTargetStore),
         );
 
@@ -2548,7 +2548,7 @@ mod tests {
 
     #[tokio::test]
     async fn slack_personal_dm_reply_target_binding_ref_round_trips_authorized_dm() {
-        let store = Arc::new(InMemorySlackPersonalDmTargetStore::new());
+        let store = Arc::new(in_memory_slack_host_state(TENANT));
         let key = SlackPersonalDmTargetKey::new(
             TenantId::new(TENANT).expect("tenant"),
             AdapterInstallationId::new(INSTALLATION).expect("installation"),
@@ -2565,7 +2565,7 @@ mod tests {
             .expect("personal DM target stores");
         let provider = SlackHostBetaOutboundTargetProvider::new(
             outbound_target_provider_config(config_without_channel_routes()),
-            Arc::new(InMemorySlackChannelRouteStore::new()),
+            Arc::new(in_memory_slack_host_state(TENANT)),
             store,
         );
         let listed = provider
@@ -2589,7 +2589,7 @@ mod tests {
 
     #[tokio::test]
     async fn slack_personal_dm_resolve_binding_rejects_mismatched_dm_channel_id() {
-        let store = Arc::new(InMemorySlackPersonalDmTargetStore::new());
+        let store = Arc::new(in_memory_slack_host_state(TENANT));
         let key = SlackPersonalDmTargetKey::new(
             TenantId::new(TENANT).expect("tenant"),
             AdapterInstallationId::new(INSTALLATION).expect("installation"),
@@ -2606,7 +2606,7 @@ mod tests {
             .expect("personal DM target stores");
         let provider = SlackHostBetaOutboundTargetProvider::new(
             outbound_target_provider_config(config_without_channel_routes()),
-            Arc::new(InMemorySlackChannelRouteStore::new()),
+            Arc::new(in_memory_slack_host_state(TENANT)),
             store,
         );
         let listed = provider
@@ -3028,7 +3028,7 @@ mod tests {
     #[test]
     fn slack_shared_channel_reply_target_binding_ref_round_trips_channel_id() {
         let provider =
-            outbound_target_provider(config(), Arc::new(InMemorySlackChannelRouteStore::new()));
+            outbound_target_provider(config(), Arc::new(in_memory_slack_host_state(TENANT)));
         let binding_ref = slack_shared_channel_reply_target_binding_ref(
             &AdapterInstallationId::new(INSTALLATION).expect("installation"),
             &AgentId::new(AGENT).expect("agent"),
@@ -3047,7 +3047,7 @@ mod tests {
     #[test]
     fn slack_host_beta_target_id_parser_rejects_empty_channel_suffix() {
         let provider =
-            outbound_target_provider(config(), Arc::new(InMemorySlackChannelRouteStore::new()));
+            outbound_target_provider(config(), Arc::new(in_memory_slack_host_state(TENANT)));
         let target_id =
             RebornOutboundDeliveryTargetId::new("slack:shared-channel:T0HOST:").expect("target id");
 
@@ -3438,7 +3438,7 @@ mod tests {
         SlackHostBetaOutboundTargetProvider::new(
             outbound_target_provider_config(config),
             channel_route_store,
-            Arc::new(InMemorySlackPersonalDmTargetStore::new()),
+            Arc::new(in_memory_slack_host_state(TENANT)),
         )
     }
 

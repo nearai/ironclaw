@@ -105,12 +105,11 @@ const FROZEN_INMEMORY_STORES: &[&str] = &[
     //     durability from a `FilesystemSessionStore`, but that store must be BUILT
     //     (auth-adjacent — handle with care). ~63 usages. ---
     "InMemorySessionStore",
-    // --- pub(crate) stores the visibility-aware scanner also inventories
-    //     (crate-private; not yet individually triaged — assess build-vs-justified
-    //     when picked up, same as the peripheral set above). ---
+    // --- pub(crate) store the visibility-aware scanner also inventories
+    //     (crate-private; being handled with the secrets cluster — the rest of
+    //     the former pub(crate) trio migrated to the production
+    //     `FilesystemSlackHostState` over an in-memory backend). ---
     "InMemorySecretsStore",
-    "InMemorySlackChannelRouteStore",
-    "InMemorySlackPersonalDmTargetStore",
 ];
 
 #[test]

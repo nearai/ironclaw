@@ -10,10 +10,10 @@ use tower::ServiceExt;
 
 use super::*;
 use crate::slack::slack_channel_routes::{
-    DEFAULT_LIST_LIMIT, InMemorySlackChannelRouteStore, SlackChannelRouteError,
-    SlackChannelRouteKey, SlackChannelRouteListPage, SlackChannelRouteStore,
-    slack_channel_route_admin_route_mount,
+    DEFAULT_LIST_LIMIT, SlackChannelRouteError, SlackChannelRouteKey, SlackChannelRouteListPage,
+    SlackChannelRouteStore, slack_channel_route_admin_route_mount,
 };
+use crate::slack::slack_host_state::test_support::in_memory_slack_host_state;
 use crate::slack::slack_setup::{
     SlackInstallationSetup, SlackInstallationSetupStore, SlackSetupError, SlackSetupService,
 };
@@ -24,7 +24,7 @@ const TEAM: &str = "T0ROUTES";
 
 #[tokio::test]
 async fn allowed_channel_admin_saves_replaces_and_lists_channel_routes() {
-    let store = Arc::new(InMemorySlackChannelRouteStore::new());
+    let store = Arc::new(in_memory_slack_host_state(TENANT));
     let mount = slack_channel_route_admin_route_mount(route_config(store.clone()));
 
     let save_response = mount
@@ -105,7 +105,7 @@ async fn allowed_channel_admin_saves_replaces_and_lists_channel_routes() {
 
 #[tokio::test]
 async fn allowed_channel_admin_replaces_with_selected_team_subjects() {
-    let store = Arc::new(InMemorySlackChannelRouteStore::new());
+    let store = Arc::new(in_memory_slack_host_state(TENANT));
     let mount = slack_channel_route_admin_route_mount(route_config(store.clone()));
 
     let save_response = mount
@@ -149,7 +149,7 @@ async fn allowed_channel_admin_replaces_with_selected_team_subjects() {
 
 #[tokio::test]
 async fn allowed_channel_admin_rejects_unknown_selected_team_subject() {
-    let store = Arc::new(InMemorySlackChannelRouteStore::new());
+    let store = Arc::new(in_memory_slack_host_state(TENANT));
     let mount = slack_channel_route_admin_route_mount(route_config(store.clone()));
 
     let response = mount
@@ -181,7 +181,7 @@ async fn allowed_channel_admin_rejects_unknown_selected_team_subject() {
 
 #[tokio::test]
 async fn allowed_channel_admin_rejects_mixed_save_shapes_without_mutating_store() {
-    let store = Arc::new(InMemorySlackChannelRouteStore::new());
+    let store = Arc::new(in_memory_slack_host_state(TENANT));
     let mount = slack_channel_route_admin_route_mount(route_config(store.clone()));
 
     let response = mount
@@ -213,7 +213,7 @@ async fn allowed_channel_admin_rejects_mixed_save_shapes_without_mutating_store(
 
 #[tokio::test]
 async fn allowed_channel_admin_preserves_matching_generated_subjects() {
-    let store = Arc::new(InMemorySlackChannelRouteStore::new());
+    let store = Arc::new(in_memory_slack_host_state(TENANT));
     let mount = slack_channel_route_admin_route_mount(route_config(store.clone()));
 
     let initial_save = mount
@@ -260,7 +260,7 @@ async fn allowed_channel_admin_preserves_matching_generated_subjects() {
 
 #[tokio::test]
 async fn allowed_channel_admin_lists_and_replaces_existing_unmanaged_routes() {
-    let store = Arc::new(InMemorySlackChannelRouteStore::new());
+    let store = Arc::new(in_memory_slack_host_state(TENANT));
     let mount = slack_channel_route_admin_route_mount(route_config(store.clone()));
     let tenant_id = TenantId::new(TENANT).expect("tenant");
     let installation_id = AdapterInstallationId::new(INSTALLATION).expect("installation");
@@ -320,7 +320,7 @@ async fn allowed_channel_admin_lists_and_replaces_existing_unmanaged_routes() {
 
 #[tokio::test]
 async fn allowed_channel_admin_preserves_existing_unmanaged_subject_for_same_channel() {
-    let store = Arc::new(InMemorySlackChannelRouteStore::new());
+    let store = Arc::new(in_memory_slack_host_state(TENANT));
     let mount = slack_channel_route_admin_route_mount(route_config(store.clone()));
     let tenant_id = TenantId::new(TENANT).expect("tenant");
     let installation_id = AdapterInstallationId::new(INSTALLATION).expect("installation");
@@ -372,7 +372,7 @@ async fn allowed_channel_admin_preserves_existing_unmanaged_subject_for_same_cha
 
 #[tokio::test]
 async fn dynamic_allowed_channel_admin_rejects_stale_existing_subject_after_setup_change() {
-    let store = Arc::new(InMemorySlackChannelRouteStore::new());
+    let store = Arc::new(in_memory_slack_host_state(TENANT));
     let setup_store = Arc::new(MemorySetupStore::new(setup_record(
         "user:slack-operator",
         Some("user:current-shared-agent"),
@@ -418,7 +418,7 @@ async fn dynamic_allowed_channel_admin_rejects_stale_existing_subject_after_setu
 
 #[tokio::test]
 async fn allowed_channel_admin_generates_only_missing_explicit_subjects() {
-    let store = Arc::new(InMemorySlackChannelRouteStore::new());
+    let store = Arc::new(in_memory_slack_host_state(TENANT));
     let mount = slack_channel_route_admin_route_mount(route_config(store.clone()));
     let tenant_id = TenantId::new(TENANT).expect("tenant");
     let installation_id = AdapterInstallationId::new(INSTALLATION).expect("installation");
@@ -472,7 +472,7 @@ async fn allowed_channel_admin_generates_only_missing_explicit_subjects() {
 
 #[tokio::test]
 async fn allowed_channel_admin_rejects_existing_unmanaged_subject_for_other_channel() {
-    let store = Arc::new(InMemorySlackChannelRouteStore::new());
+    let store = Arc::new(in_memory_slack_host_state(TENANT));
     let mount = slack_channel_route_admin_route_mount(route_config(store.clone()));
     let tenant_id = TenantId::new(TENANT).expect("tenant");
     let installation_id = AdapterInstallationId::new(INSTALLATION).expect("installation");
@@ -513,10 +513,13 @@ async fn allowed_channel_admin_rejects_existing_unmanaged_subject_for_other_chan
 
 #[tokio::test]
 async fn allowed_channel_admin_assigns_distinct_subjects_for_same_channel_across_scopes() {
-    let store = Arc::new(InMemorySlackChannelRouteStore::new());
+    // The production store is tenant-scoped, so the cross-tenant mount gets its
+    // own store instance (matching production wiring); the same-tenant/other-team
+    // mount shares the base tenant's store.
+    let store = Arc::new(in_memory_slack_host_state(TENANT));
     let base = slack_channel_route_admin_route_mount(route_config(store.clone()));
     let other_tenant = slack_channel_route_admin_route_mount(route_config_for(
-        store.clone(),
+        Arc::new(in_memory_slack_host_state("tenant:other-slack-routes")),
         "tenant:other-slack-routes",
         TEAM,
     ));
@@ -535,7 +538,7 @@ async fn allowed_channel_admin_assigns_distinct_subjects_for_same_channel_across
 
 #[tokio::test]
 async fn allowed_channel_admin_rejects_invalid_channel_without_mutating_store() {
-    let store = Arc::new(InMemorySlackChannelRouteStore::new());
+    let store = Arc::new(in_memory_slack_host_state(TENANT));
     let mount = slack_channel_route_admin_route_mount(route_config(store.clone()));
 
     let response = mount
@@ -563,7 +566,7 @@ async fn allowed_channel_admin_rejects_invalid_channel_without_mutating_store() 
 
 #[tokio::test]
 async fn allowed_channel_admin_rejects_more_than_max_allowed_channels_without_mutating_store() {
-    let store = Arc::new(InMemorySlackChannelRouteStore::new());
+    let store = Arc::new(in_memory_slack_host_state(TENANT));
     let mount = slack_channel_route_admin_route_mount(route_config(store.clone()));
     let channel_ids = (0..=MAX_ALLOWED_CHANNELS)
         .map(|index| format!("C{index:08}"))
@@ -595,7 +598,7 @@ async fn allowed_channel_admin_rejects_more_than_max_allowed_channels_without_mu
 
 #[tokio::test]
 async fn allowed_channel_admin_rejects_cross_tenant_and_non_operator_callers() {
-    let store = Arc::new(InMemorySlackChannelRouteStore::new());
+    let store = Arc::new(in_memory_slack_host_state(TENANT));
     let mount = slack_channel_route_admin_route_mount(route_config(store));
 
     for (method, body, tenant_id, user_id, expected_status) in [
@@ -654,7 +657,7 @@ async fn allowed_channel_admin_returns_503_when_store_unavailable() {
 
 #[tokio::test]
 async fn allowed_channel_admin_empty_save_clears_all_channel_routes() {
-    let store = Arc::new(InMemorySlackChannelRouteStore::new());
+    let store = Arc::new(in_memory_slack_host_state(TENANT));
     let mount = slack_channel_route_admin_route_mount(route_config(store.clone()));
 
     let seed = mount
