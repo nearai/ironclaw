@@ -36,7 +36,83 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::{DenyRef, GateRef, ProcessRef, ResultRef, SafeSummary};
+use crate::{
+    DenyRef, FailureKind, GateRef, LoopRef, OutputDigest, ProcessRef, ResultProgress, ResultRef,
+    ResumeToken, RunId, SafeSummary, TerminateHint,
+};
+
+/// A pending-gate handle plus the additive context needed to resume and correlate
+/// it (§5.3 Stage 1). Three parts, each plain redacted vocabulary:
+///
+/// - `gate` — the opaque kernel [`GateRef`] the pending record is keyed by;
+/// - `origin` — the preserved *originating* loop gate ref, so loop/evidence state
+///   keyed under it stays reachable once the uuid handle is minted;
+/// - `resume` — the opaque [`ResumeToken`] the loop echoes back to re-enter
+///   `authorize()`. Populated only for approval/auth gates; a resource gate
+///   resumes against *then-current* budget (§5.3.3), not a token.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GateWaypoint {
+    /// The opaque kernel handle to the pending gate record.
+    pub gate: GateRef,
+    /// The preserved originating loop gate ref, when one was carried.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub origin: Option<LoopRef>,
+    /// The opaque gate-resume identity the loop echoes back (approval/auth only).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resume: Option<ResumeToken>,
+}
+
+impl GateWaypoint {
+    /// A bare waypoint carrying only the kernel handle. Use the `with_*` setters
+    /// to add the preserved origin and/or resume token (default-backed builder).
+    pub fn new(gate: GateRef) -> Self {
+        Self {
+            gate,
+            origin: None,
+            resume: None,
+        }
+    }
+
+    /// Preserve the originating loop gate ref.
+    pub fn with_origin(mut self, origin: LoopRef) -> Self {
+        self.origin = Some(origin);
+        self
+    }
+
+    /// Carry the gate-resume token the loop echoes back.
+    pub fn with_resume(mut self, resume: ResumeToken) -> Self {
+        self.resume = Some(resume);
+        self
+    }
+}
+
+/// A spawned-process handle plus the preserved originating loop process ref
+/// (§5.3 Stage 1). Parked-work suspensions resume when the awaited process
+/// completes, so — unlike [`GateWaypoint`] — there is no resume token.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProcessWaypoint {
+    /// The opaque kernel handle to the spawned-process record.
+    pub process: ProcessRef,
+    /// The preserved originating loop process ref, when one was carried.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub origin: Option<LoopRef>,
+}
+
+impl ProcessWaypoint {
+    /// A bare waypoint carrying only the kernel handle.
+    pub fn new(process: ProcessRef) -> Self {
+        Self {
+            process,
+            origin: None,
+        }
+    }
+
+    /// Preserve the originating loop process ref.
+    pub fn with_origin(mut self, origin: LoopRef) -> Self {
+        self.origin = Some(origin);
+        self
+    }
+}
 
 /// A re-entrant gate: the invocation did not run and is waiting on a decision.
 /// Resolving the gate re-enters `authorize()` (§5.3.3: a resolved gate reserves
@@ -52,20 +128,36 @@ use crate::{DenyRef, GateRef, ProcessRef, ResultRef, SafeSummary};
 #[serde(rename_all = "snake_case")]
 pub enum Blocked {
     /// Needs human approval before it may run.
-    Approval(GateRef),
+    Approval(GateWaypoint),
     /// Needs a credential the caller has not supplied (auth gate). The only kind
     /// `dispatch()` may surface (§5.3.1).
-    Auth(GateRef),
+    Auth(GateWaypoint),
     /// Needs resource budget currently unavailable.
-    Resource(GateRef),
+    Resource(GateWaypoint),
 }
 
 impl Blocked {
+    /// The gate waypoint (kernel handle + preserved origin + resume token),
+    /// regardless of kind.
+    pub fn waypoint(&self) -> &GateWaypoint {
+        match self {
+            Blocked::Approval(w) | Blocked::Auth(w) | Blocked::Resource(w) => w,
+        }
+    }
+
     /// The handle to the pending gate record, regardless of kind.
     pub fn gate_ref(&self) -> &GateRef {
-        match self {
-            Blocked::Approval(g) | Blocked::Auth(g) | Blocked::Resource(g) => g,
-        }
+        &self.waypoint().gate
+    }
+
+    /// The preserved originating loop gate ref, when one was carried.
+    pub fn origin(&self) -> Option<&LoopRef> {
+        self.waypoint().origin.as_ref()
+    }
+
+    /// The gate-resume token the loop echoes back (approval/auth only).
+    pub fn resume_token(&self) -> Option<&ResumeToken> {
+        self.waypoint().resume.as_ref()
     }
 
     /// Stable discriminant (matches the serde tag) for logs/routing.
@@ -98,12 +190,12 @@ impl Blocked {
 #[serde(rename_all = "snake_case")]
 pub enum Suspension {
     /// A spawned OS process the turn now waits on.
-    Process(ProcessRef),
+    Process(ProcessWaypoint),
     /// A dependent child run this invocation awaits.
-    DependentRun(GateRef),
+    DependentRun(GateWaypoint),
     /// A client-supplied tool the host does not execute; control returns to the
     /// API client until it submits the output.
-    ExternalTool(GateRef),
+    ExternalTool(GateWaypoint),
 }
 
 impl Suspension {
@@ -121,7 +213,7 @@ impl Suspension {
     /// record instead — see [`Suspension::process_ref`].
     pub fn gate_ref(&self) -> Option<&GateRef> {
         match self {
-            Suspension::DependentRun(gate) | Suspension::ExternalTool(gate) => Some(gate),
+            Suspension::DependentRun(w) | Suspension::ExternalTool(w) => Some(&w.gate),
             Suspension::Process(_) => None,
         }
     }
@@ -129,8 +221,16 @@ impl Suspension {
     /// The process record this suspension tracks, when it is process-shaped.
     pub fn process_ref(&self) -> Option<&ProcessRef> {
         match self {
-            Suspension::Process(process) => Some(process),
+            Suspension::Process(w) => Some(&w.process),
             Suspension::DependentRun(_) | Suspension::ExternalTool(_) => None,
+        }
+    }
+
+    /// The preserved originating loop ref (gate or process), regardless of kind.
+    pub fn origin(&self) -> Option<&LoopRef> {
+        match self {
+            Suspension::Process(w) => w.origin.as_ref(),
+            Suspension::DependentRun(w) | Suspension::ExternalTool(w) => w.origin.as_ref(),
         }
     }
 }
@@ -144,16 +244,31 @@ impl Suspension {
 /// `Failed` → [`ToolVerdict::RecoverableFailure`] (model-visible, correctable),
 /// `SpawnedChildRun` → [`ToolVerdict::ChildSpawned`] (non-suspending — the
 /// executor appends the child result and continues).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+///
+/// `ChildSpawned` carries the spawned [`RunId`] *on the variant* (was
+/// `SpawnedChildRun.child_run_id`) so the invariant "a child ref exists exactly
+/// when a child was spawned" is unrepresentable to violate — no optional field
+/// to validate at construction or deserialization.
+///
+/// `RecoverableFailure` carries the recovery classification ([`FailureKind`], was
+/// `CapabilityFailure::error_kind`) *on the variant* for the same reason: the
+/// class that drives retry-vs-terminal exists exactly when the verdict is a
+/// recoverable failure. `FailureKind` is a bounded taxonomy, never the raw backend
+/// cause — that stays host-side.
+///
+/// Not `Copy` (unlike the earlier slice): `FailureKind::Unknown` owns a `String`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ToolVerdict {
     /// The capability ran and succeeded.
     Success,
     /// The capability ran and failed in a model-visible, correctable way — NOT a
     /// `HostFailure` (that is infrastructure, §1.2). The model may retry or adapt.
-    RecoverableFailure,
-    /// The capability spawned a child run; non-suspending (§5.3 table).
-    ChildSpawned,
+    /// Carries the [`FailureKind`] recovery classification.
+    RecoverableFailure { error_kind: FailureKind },
+    /// The capability spawned a child run; non-suspending (§5.3 table). Carries
+    /// the child's [`RunId`] — a correlation ref, safe on the sanitized boundary.
+    ChildSpawned { child_run: RunId },
 }
 
 impl ToolVerdict {
@@ -162,12 +277,29 @@ impl ToolVerdict {
         matches!(self, ToolVerdict::Success)
     }
 
+    /// The recovery classification, present exactly on
+    /// [`ToolVerdict::RecoverableFailure`].
+    pub fn error_kind(&self) -> Option<&FailureKind> {
+        match self {
+            ToolVerdict::RecoverableFailure { error_kind } => Some(error_kind),
+            _ => None,
+        }
+    }
+
+    /// The spawned child run, present exactly on [`ToolVerdict::ChildSpawned`].
+    pub fn child_run(&self) -> Option<RunId> {
+        match self {
+            ToolVerdict::ChildSpawned { child_run } => Some(*child_run),
+            _ => None,
+        }
+    }
+
     /// Stable discriminant (matches the serde tag).
     pub fn kind(&self) -> &'static str {
         match self {
             ToolVerdict::Success => "success",
-            ToolVerdict::RecoverableFailure => "recoverable_failure",
-            ToolVerdict::ChildSpawned => "child_spawned",
+            ToolVerdict::RecoverableFailure { .. } => "recoverable_failure",
+            ToolVerdict::ChildSpawned { .. } => "child_spawned",
         }
     }
 }
@@ -182,6 +314,22 @@ pub struct OutcomeRefs {
     /// Size of the staged output in bytes — pure metadata, no PII. Used by the
     /// per-capability byte-cap strategy.
     pub byte_len: u64,
+    /// Bounded, model-visible result preview (was `model_observation`). Redacted
+    /// by construction; the full bytes stay host-owned behind `result`. `None`
+    /// when no preview is staged.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub preview: Option<SafeSummary>,
+    /// The preserved originating loop result ref, so output the loop staged under
+    /// its own ref stays reachable once `result` (a uuid handle) is minted. `None`
+    /// when the outcome had no originating loop result ref (e.g. a recoverable
+    /// failure stages nothing).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub origin: Option<LoopRef>,
+    /// Stable digest over the normalized output content (was
+    /// `CapabilityResultMessage::output_digest`) — a fixed-width hash, never the
+    /// content. `None` for synthetic results that stage no real output.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output_digest: Option<OutputDigest>,
 }
 
 /// A dispatched capability's result — tool success OR recoverable failure (§3).
@@ -196,6 +344,25 @@ pub struct Outcome {
     pub refs: OutcomeRefs,
     pub verdict: ToolVerdict,
     pub summary: SafeSummary,
+    /// Loop-derived signal describing whether this result advanced the loop's
+    /// evidence/state (was `CapabilityResultMessage::progress`). Defaults to
+    /// [`ResultProgress::Unknown`] for outcomes that carry no progress signal
+    /// (a recoverable failure, a spawned child).
+    #[serde(default, skip_serializing_if = "is_default_progress")]
+    pub progress: ResultProgress,
+    /// Host hint that the loop should end naturally after the current batch (was
+    /// `CapabilityResultMessage::terminate_hint`). Defaults to
+    /// [`TerminateHint::Continue`].
+    #[serde(default, skip_serializing_if = "is_default_terminate_hint")]
+    pub terminate_hint: TerminateHint,
+}
+
+fn is_default_progress(progress: &ResultProgress) -> bool {
+    *progress == ResultProgress::default()
+}
+
+fn is_default_terminate_hint(hint: &TerminateHint) -> bool {
+    *hint == TerminateHint::default()
 }
 
 /// The composed answer of one capability invocation — the single value
@@ -260,24 +427,36 @@ mod tests {
         GateRef::parse(GATE_UUID).unwrap()
     }
 
+    fn gate_wp() -> GateWaypoint {
+        GateWaypoint::new(gate())
+    }
+
     fn proc_ref() -> ProcessRef {
         ProcessRef::parse(PROC_UUID).unwrap()
     }
 
+    fn proc_wp() -> ProcessWaypoint {
+        ProcessWaypoint::new(proc_ref())
+    }
+
     #[test]
     fn blocked_serde_is_snake_case_tagged_and_roundtrips() {
-        let blocked = Blocked::Approval(gate());
+        let blocked = Blocked::Approval(gate_wp());
         let json = serde_json::to_value(&blocked).unwrap();
-        assert_eq!(json, serde_json::json!({ "approval": GATE_UUID }));
+        // A bare waypoint (no origin/resume) serializes as just the gate handle.
+        assert_eq!(
+            json,
+            serde_json::json!({ "approval": { "gate": GATE_UUID } })
+        );
         assert_eq!(serde_json::from_value::<Blocked>(json).unwrap(), blocked);
     }
 
     #[test]
     fn blocked_kind_matches_serde_tag_and_gate_ref_is_reachable() {
         for (blocked, tag) in [
-            (Blocked::Approval(gate()), "approval"),
-            (Blocked::Auth(gate()), "auth"),
-            (Blocked::Resource(gate()), "resource"),
+            (Blocked::Approval(gate_wp()), "approval"),
+            (Blocked::Auth(gate_wp()), "auth"),
+            (Blocked::Resource(gate_wp()), "resource"),
         ] {
             let wire = serde_json::to_value(&blocked).unwrap();
             let tag_on_wire = wire.as_object().unwrap().keys().next().unwrap().clone();
@@ -288,25 +467,45 @@ mod tests {
     }
 
     #[test]
+    fn blocked_waypoint_carries_preserved_origin_and_resume_token() {
+        let waypoint = GateWaypoint::new(gate())
+            .with_origin(LoopRef::new("gate:approval-1").unwrap())
+            .with_resume(ResumeToken::new("resume-1").unwrap());
+        let blocked = Blocked::Approval(waypoint);
+        assert_eq!(
+            blocked.origin().map(LoopRef::as_str),
+            Some("gate:approval-1")
+        );
+        assert_eq!(
+            blocked.resume_token().map(ResumeToken::as_str),
+            Some("resume-1")
+        );
+        // The preserved fields survive a wire round-trip.
+        let back: Blocked =
+            serde_json::from_value(serde_json::to_value(&blocked).unwrap()).unwrap();
+        assert_eq!(back, blocked);
+    }
+
+    #[test]
     fn only_auth_may_be_surfaced_at_dispatch_time() {
         // §5.3.1: dispatch() may raise only Blocked::Auth. This pins the contract
         // the conformance test (§11.7) will enforce against lanes.
-        assert!(Blocked::Auth(gate()).is_dispatch_time_permitted());
-        assert!(!Blocked::Approval(gate()).is_dispatch_time_permitted());
-        assert!(!Blocked::Resource(gate()).is_dispatch_time_permitted());
+        assert!(Blocked::Auth(gate_wp()).is_dispatch_time_permitted());
+        assert!(!Blocked::Approval(gate_wp()).is_dispatch_time_permitted());
+        assert!(!Blocked::Resource(gate_wp()).is_dispatch_time_permitted());
     }
 
     #[test]
     fn suspension_serde_tags_and_kinds_agree() {
-        let process = Suspension::Process(proc_ref());
+        let process = Suspension::Process(proc_wp());
         assert_eq!(
             serde_json::to_value(&process).unwrap(),
-            serde_json::json!({ "process": PROC_UUID })
+            serde_json::json!({ "process": { "process": PROC_UUID } })
         );
         for (suspension, tag) in [
-            (Suspension::Process(proc_ref()), "process"),
-            (Suspension::DependentRun(gate()), "dependent_run"),
-            (Suspension::ExternalTool(gate()), "external_tool"),
+            (Suspension::Process(proc_wp()), "process"),
+            (Suspension::DependentRun(gate_wp()), "dependent_run"),
+            (Suspension::ExternalTool(gate_wp()), "external_tool"),
         ] {
             let wire = serde_json::to_value(&suspension).unwrap();
             let tag_on_wire = wire.as_object().unwrap().keys().next().unwrap().clone();
@@ -324,19 +523,69 @@ mod tests {
 
     #[test]
     fn tool_verdict_serde_tags_and_kinds_agree() {
-        for (verdict, tag) in [
-            (ToolVerdict::Success, "success"),
-            (ToolVerdict::RecoverableFailure, "recoverable_failure"),
-            (ToolVerdict::ChildSpawned, "child_spawned"),
-        ] {
-            assert_eq!(
-                serde_json::to_value(verdict).unwrap(),
-                serde_json::Value::String(tag.to_string())
-            );
-            assert_eq!(verdict.kind(), tag);
-        }
+        // Success is a unit variant; the other two are struct variants (each
+        // carries its invariant field on the variant).
+        assert_eq!(
+            serde_json::to_value(ToolVerdict::Success).unwrap(),
+            serde_json::Value::String("success".to_string())
+        );
+        assert_eq!(ToolVerdict::Success.kind(), "success");
+        let failure = ToolVerdict::RecoverableFailure {
+            error_kind: FailureKind::InvalidInput,
+        };
+        assert_eq!(failure.kind(), "recoverable_failure");
+        assert_eq!(
+            serde_json::to_value(&failure).unwrap(),
+            serde_json::json!({ "recoverable_failure": { "error_kind": "invalid_input" } })
+        );
         assert!(ToolVerdict::Success.is_success());
-        assert!(!ToolVerdict::RecoverableFailure.is_success());
+        assert!(!failure.is_success());
+        assert_eq!(ToolVerdict::Success.child_run(), None);
+        assert_eq!(ToolVerdict::Success.error_kind(), None);
+        assert_eq!(failure.error_kind(), Some(&FailureKind::InvalidInput));
+    }
+
+    #[test]
+    fn recoverable_failure_carries_its_error_kind_across_the_wire() {
+        // The recovery classification (retry-vs-terminal) survives round-trip —
+        // the field the old mapping dropped as "G1".
+        for kind in [
+            FailureKind::Network,
+            FailureKind::unknown("quota_exceeded").unwrap(),
+        ] {
+            let verdict = ToolVerdict::RecoverableFailure {
+                error_kind: kind.clone(),
+            };
+            let back: ToolVerdict =
+                serde_json::from_value(serde_json::to_value(&verdict).unwrap()).unwrap();
+            assert_eq!(back.error_kind(), Some(&kind));
+        }
+    }
+
+    #[test]
+    fn child_spawned_verdict_carries_the_run_on_the_variant() {
+        let run = RunId::parse("018f6a00-0000-7000-8000-0000000000aa").unwrap();
+        let verdict = ToolVerdict::ChildSpawned { child_run: run };
+        assert_eq!(verdict.kind(), "child_spawned");
+        assert_eq!(verdict.child_run(), Some(run));
+        // Struct variant: externally tagged with the snake_case tag; the child
+        // ref exists exactly when a child was spawned — there is no optional
+        // field whose consistency needs validating.
+        let wire = serde_json::to_value(&verdict).unwrap();
+        assert_eq!(
+            wire,
+            serde_json::json!({
+                "child_spawned": { "child_run": "018f6a00-0000-7000-8000-0000000000aa" }
+            })
+        );
+        let back: ToolVerdict = serde_json::from_value(wire).unwrap();
+        assert_eq!(back, verdict);
+        // A child_spawned tag WITHOUT the run cannot deserialize at all.
+        assert!(
+            serde_json::from_value::<ToolVerdict>(serde_json::json!({ "child_spawned": {} }))
+                .is_err(),
+            "missing child_run must be structurally unrepresentable"
+        );
     }
 
     #[test]
@@ -345,9 +594,16 @@ mod tests {
             refs: OutcomeRefs {
                 result: ResultRef::parse("018f6a00-0000-7000-8000-000000000001").unwrap(),
                 byte_len: 4096,
+                preview: None,
+                origin: None,
+                output_digest: None,
             },
-            verdict: ToolVerdict::RecoverableFailure,
+            verdict: ToolVerdict::RecoverableFailure {
+                error_kind: FailureKind::InvalidInput,
+            },
             summary: SafeSummary::new("tool input rejected").unwrap(),
+            progress: ResultProgress::default(),
+            terminate_hint: TerminateHint::default(),
         };
         let json = serde_json::to_value(&outcome).unwrap();
         let back: Outcome = serde_json::from_value(json).unwrap();
@@ -355,6 +611,78 @@ mod tests {
         // The verdict is read from the type, never inferred from the summary text.
         assert!(!back.verdict.is_success());
         assert_eq!(back.refs.byte_len, 4096);
+    }
+
+    #[test]
+    fn outcome_carries_progress_terminate_hint_and_digest_when_populated() {
+        // The G4 completion signals survive a wire round-trip.
+        let outcome = Outcome {
+            refs: OutcomeRefs {
+                result: ResultRef::parse("018f6a00-0000-7000-8000-000000000001").unwrap(),
+                byte_len: 10,
+                preview: None,
+                origin: Some(LoopRef::new("result:child-1").unwrap()),
+                output_digest: Some(OutputDigest::new(0xABCD)),
+            },
+            verdict: ToolVerdict::Success,
+            summary: SafeSummary::new("read 3 files").unwrap(),
+            progress: ResultProgress::MadeProgress,
+            terminate_hint: TerminateHint::TerminateAfterBatch,
+        };
+        let back: Outcome =
+            serde_json::from_value(serde_json::to_value(&outcome).unwrap()).unwrap();
+        assert_eq!(back, outcome);
+        assert_eq!(back.progress, ResultProgress::MadeProgress);
+        assert!(back.terminate_hint.should_terminate());
+        assert_eq!(
+            back.refs.output_digest.map(OutputDigest::value),
+            Some(0xABCD)
+        );
+        assert_eq!(
+            back.refs.origin.as_ref().map(LoopRef::as_str),
+            Some("result:child-1")
+        );
+    }
+
+    #[test]
+    fn outcome_refs_roundtrip_with_optional_preview() {
+        let result = ResultRef::parse("018f6a00-0000-7000-8000-000000000001").unwrap();
+        // Populated: the preview is carried.
+        let full = OutcomeRefs {
+            result,
+            byte_len: 128,
+            preview: Some(SafeSummary::new("staged 3 rows").unwrap()),
+            origin: None,
+            output_digest: None,
+        };
+        let back: OutcomeRefs =
+            serde_json::from_value(serde_json::to_value(&full).unwrap()).unwrap();
+        assert_eq!(back, full);
+        assert_eq!(
+            back.preview.as_ref().map(SafeSummary::as_str),
+            Some("staged 3 rows")
+        );
+
+        // Absent: None omitted from the wire (skip_serializing_if), and a
+        // legacy payload without the field rehydrates to None.
+        let bare = OutcomeRefs {
+            result,
+            byte_len: 128,
+            preview: None,
+            origin: None,
+            output_digest: None,
+        };
+        let wire = serde_json::to_value(&bare).unwrap();
+        assert_eq!(
+            wire,
+            serde_json::json!({
+                "result": "018f6a00-0000-7000-8000-000000000001",
+                "byte_len": 128
+            }),
+            "None additive fields must not appear on the wire"
+        );
+        let back: OutcomeRefs = serde_json::from_value(wire).unwrap();
+        assert_eq!(back, bare);
     }
 
     #[test]
@@ -374,14 +702,31 @@ mod tests {
         );
     }
 
+    fn child_spawned() -> ToolVerdict {
+        ToolVerdict::ChildSpawned {
+            child_run: RunId::parse("018f6a00-0000-7000-8000-0000000000aa").unwrap(),
+        }
+    }
+
+    fn recoverable_failure() -> ToolVerdict {
+        ToolVerdict::RecoverableFailure {
+            error_kind: FailureKind::InvalidInput,
+        }
+    }
+
     fn outcome(verdict: ToolVerdict) -> Outcome {
         Outcome {
             refs: OutcomeRefs {
                 result: ResultRef::parse("018f6a00-0000-7000-8000-000000000001").unwrap(),
                 byte_len: 1,
+                preview: None,
+                origin: None,
+                output_digest: None,
             },
             verdict,
             summary: SafeSummary::new("ok").unwrap(),
+            progress: ResultProgress::default(),
+            terminate_hint: TerminateHint::default(),
         }
     }
 
@@ -401,7 +746,7 @@ mod tests {
             ),
             (
                 "Failed",
-                Resolution::Done(outcome(ToolVerdict::RecoverableFailure)),
+                Resolution::Done(outcome(recoverable_failure())),
                 false,
             ),
             (
@@ -411,38 +756,38 @@ mod tests {
             ),
             (
                 "ApprovalRequired",
-                Resolution::Blocked(Blocked::Approval(gate())),
+                Resolution::Blocked(Blocked::Approval(GateWaypoint::new(gate()))),
                 false,
             ),
             (
                 "AuthRequired",
-                Resolution::Blocked(Blocked::Auth(gate())),
+                Resolution::Blocked(Blocked::Auth(GateWaypoint::new(gate()))),
                 false,
             ),
             (
                 "ResourceBlocked",
-                Resolution::Blocked(Blocked::Resource(gate())),
+                Resolution::Blocked(Blocked::Resource(GateWaypoint::new(gate()))),
                 false,
             ),
             (
                 "SpawnedProcess",
-                Resolution::Suspended(Suspension::Process(proc())),
+                Resolution::Suspended(Suspension::Process(ProcessWaypoint::new(proc()))),
                 true,
             ),
             // Non-suspending — the one that has bitten before (#6137, §5.3 table).
             (
                 "SpawnedChildRun",
-                Resolution::Done(outcome(ToolVerdict::ChildSpawned)),
+                Resolution::Done(outcome(child_spawned())),
                 false,
             ),
             (
                 "AwaitDependentRun",
-                Resolution::Suspended(Suspension::DependentRun(gate())),
+                Resolution::Suspended(Suspension::DependentRun(GateWaypoint::new(gate()))),
                 true,
             ),
             (
                 "ExternalToolPending",
-                Resolution::Suspended(Suspension::ExternalTool(gate())),
+                Resolution::Suspended(Suspension::ExternalTool(GateWaypoint::new(gate()))),
                 true,
             ),
         ];
@@ -463,19 +808,19 @@ mod tests {
     #[test]
     fn resolution_channel_predicates() {
         assert!(
-            Resolution::Suspended(Suspension::Process(
+            Resolution::Suspended(Suspension::Process(ProcessWaypoint::new(
                 ProcessRef::parse("0f0e0d0c-0b0a-4908-8706-050403020100").unwrap()
-            ))
+            )))
             .is_suspension()
         );
-        assert!(Resolution::Blocked(Blocked::Approval(gate())).is_reentrant_gate());
+        assert!(Resolution::Blocked(Blocked::Approval(gate_wp())).is_reentrant_gate());
         // Denied is terminal — not a re-entrant gate, not a suspension.
         let denied =
             Resolution::Denied(DenyRef::parse("018f6a00-0000-7000-8000-000000000002").unwrap());
         assert!(!denied.is_reentrant_gate());
         assert!(!denied.is_suspension());
         // A spawned child run completes; it does not suspend.
-        assert!(!Resolution::Done(outcome(ToolVerdict::ChildSpawned)).is_suspension());
+        assert!(!Resolution::Done(outcome(child_spawned())).is_suspension());
     }
 
     /// Table-driven wire contract: every `Resolution` channel paired with its
@@ -505,15 +850,15 @@ mod tests {
                 serde_json::json!({ "denied": "018f6a00-0000-7000-8000-000000000002" }),
             ),
             (
-                Resolution::Blocked(Blocked::Approval(gate)),
+                Resolution::Blocked(Blocked::Approval(GateWaypoint::new(gate))),
                 serde_json::json!({
-                    "blocked": { "approval": "01890a5d-ac96-774b-bcce-b302099a8057" }
+                    "blocked": { "approval": { "gate": "01890a5d-ac96-774b-bcce-b302099a8057" } }
                 }),
             ),
             (
-                Resolution::Suspended(Suspension::Process(proc)),
+                Resolution::Suspended(Suspension::Process(ProcessWaypoint::new(proc))),
                 serde_json::json!({
-                    "suspended": { "process": "0f0e0d0c-0b0a-4908-8706-050403020100" }
+                    "suspended": { "process": { "process": "0f0e0d0c-0b0a-4908-8706-050403020100" } }
                 }),
             ),
         ];

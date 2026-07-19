@@ -168,5 +168,5 @@ ironclaw_host_api = { path = "../ironclaw_host_api", version = "0.1.0" }
 ironclaw_secrets = { path = "../ironclaw_secrets", version = "0.1.0" }
 
 [[bin]]
-name = "ironclaw-reborn"
+name = "ironclaw"
 path = "src/main.rs"

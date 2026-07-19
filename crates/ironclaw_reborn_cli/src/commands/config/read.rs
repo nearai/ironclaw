@@ -25,9 +25,7 @@ pub(super) fn build_config_get_dto(
         .find(|e| e.key == key)
         .map(|e| e.value)
         .ok_or_else(|| {
-            anyhow::anyhow!(
-                "unknown config key: {key}\nRun `ironclaw-reborn config list` to see all keys"
-            )
+            anyhow::anyhow!("unknown config key: {key}\nRun `ironclaw config list` to see all keys")
         })?;
     Ok(ConfigGetDto {
         key: key.to_string(),

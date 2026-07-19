@@ -127,17 +127,12 @@ const FROZEN_OTHER_MODE_TYPES: &[&str] = &[
     "RebornLocalExtensionManagementPort",
     "RebornLocalLifecycleFacade",
     "RebornLocalRuntimeIdentity",
-    "RebornLocalRuntimeProfileError",
-    "RebornLocalRuntimeProfileOptions",
-    "RebornLocalRuntimeServices",
     "RebornLocalServiceLifecycle",
     "RebornLocalSkillManagementError",
     "RebornLocalSkillManagementPort",
-    //   mid-name LocalDev (the sibling ratchet owns only the LocalDev prefix):
-    //     Slice-B family, shrinks with the LocalDev* collapse:
-    "RebornLocalDevApprovalTestParts",
-    "RefreshingLocalDevCapabilityPortConfig",
-    "RefreshingLocalDevCapabilityPortTestParts",
+    //   mid-name LocalDev entries: none — cleared by the DeploymentConfig
+    //     refactor (Slice B); the sibling ratchet's empty allowlist plus
+    //     `contains_mode_term` here keep new ones out.
 ];
 
 #[test]

@@ -7,15 +7,15 @@
 pub const SKILL_ACTIVATE_CAPABILITY_ID: &str = crate::runtime::SKILL_ACTIVATE_CAPABILITY_ID;
 
 /// Opaque handle (E-SKILL seam) carrying the built local-dev skill context
-/// source. Hides the crate-private `LocalDevSelectableSkillContextSource` from
+/// source. Hides the crate-private `ComposedSelectableSkillContextSource` from
 /// the integration-test crate, which cannot name it. Exposes the
 /// `HostSkillContextSource` for runtime wiring; the activation source travels
-/// inside for the harness's `RefreshingLocalDevCapabilityPortTestParts`. Tests
+/// inside for the harness's `RefreshingCapabilityPortTestParts`. Tests
 /// only.
 #[cfg(feature = "test-support")]
 pub struct SkillActivationTestSource {
     source: std::sync::Arc<dyn ironclaw_loop_host::HostSkillContextSource>,
-    activation_source: std::sync::Arc<crate::runtime::LocalDevSelectableSkillContextSource>,
+    activation_source: std::sync::Arc<crate::runtime::ComposedSelectableSkillContextSource>,
 }
 
 #[cfg(feature = "test-support")]
@@ -29,12 +29,12 @@ impl SkillActivationTestSource {
 
     /// Crate-internal accessor for the wrapped activation source. Kept
     /// `pub(crate)` (never `pub`) so the crate-private
-    /// `LocalDevSelectableSkillContextSource` type never appears in this
+    /// `ComposedSelectableSkillContextSource` type never appears in this
     /// crate's public API; only `runtime::local_dev`'s test-support
     /// constructor (which already names the type) may call this.
     pub(crate) fn activation_source(
         &self,
-    ) -> std::sync::Arc<crate::runtime::LocalDevSelectableSkillContextSource> {
+    ) -> std::sync::Arc<crate::runtime::ComposedSelectableSkillContextSource> {
         self.activation_source.clone()
     }
 }

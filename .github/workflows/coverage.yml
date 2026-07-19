@@ -226,7 +226,7 @@ jobs:
       # webui-v2-beta, so one binary covers both Reborn WebChat v2 and the
       # OpenAI-compatible Responses API scenarios selected below.
       - name: Build instrumented ironclaw-reborn
-        run: cargo build -p ironclaw_reborn_cli --features openai-compat-beta
+        run: cargo build -p ironclaw_reborn_cli --features openai-compat-beta --bin ironclaw
 
       - name: Mark OpenAI-compatible binary feature set
         run: touch target/debug/.ironclaw-reborn-openai-compat-beta.stamp

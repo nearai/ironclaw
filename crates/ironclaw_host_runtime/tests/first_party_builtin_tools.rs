@@ -2474,7 +2474,6 @@ async fn builtin_rejects_oversized_inputs_before_dispatch() {
             capability_id(JSON_CAPABILITY_ID),
             ResourceEstimate::default(),
             json!({"operation": "validate", "data": "x".repeat(1_048_577)}),
-            trust_decision(),
         ))
         .await
         .unwrap();
@@ -2493,7 +2492,6 @@ async fn builtin_rejects_oversized_outputs_before_return() {
             capability_id(JSON_CAPABILITY_ID),
             ResourceEstimate::default(),
             json!({"operation": "stringify", "data": {"items": vec!["xxxxxxxx"; 80_000]}}),
-            trust_decision(),
         ))
         .await
         .unwrap();
@@ -3333,7 +3331,6 @@ async fn builtin_shell_invokes_copied_shell_core_through_host_runtime() {
             capability_id(SHELL_CAPABILITY_ID),
             ResourceEstimate::default(),
             json!({"command": "echo hello reborn"}),
-            trust_decision(),
         ))
         .await
         .unwrap();
@@ -3922,7 +3919,6 @@ async fn builtin_json_rejects_v1_tool_output_stash_refs_without_leaking_input() 
                 "operation": "parse",
                 "source_tool_call_id": "call_RAW_SECRET_sk-provider-secret"
             }),
-            trust_decision(),
         ))
         .await
         .unwrap();
@@ -6082,8 +6078,7 @@ async fn builtin_skill_install_url_path_accounts_wall_clock_time() {
             ),
             capability_id(SKILL_INSTALL_CAPABILITY_ID),
             ResourceEstimate::default(),
-            json!({"url": "https://raw.githubusercontent.com/Pika-Labs/Pika-Skills/main/slow-helper/SKILL.md"}),
-            trust_decision(),
+            json!({"url": "https://raw.githubusercontent.com/Pika-Labs/Pika-Skills/main/slow-helper/SKILL.md"})
         ))
         .await
         .unwrap();
@@ -6129,7 +6124,6 @@ async fn builtin_http_runtime_policy_denial_stops_before_egress() {
             capability_id(HTTP_CAPABILITY_ID),
             ResourceEstimate::default(),
             json!({"url": "https://api.example.test/v1/items"}),
-            trust_decision(),
         ))
         .await
         .unwrap();
@@ -8093,7 +8087,6 @@ async fn builtin_missing_grant_denies_before_handler_dispatch() {
             capability_id(ECHO_CAPABILITY_ID),
             ResourceEstimate::default(),
             json!({"message":"must not run"}),
-            trust_decision(),
         ))
         .await
         .unwrap();
@@ -8132,7 +8125,6 @@ async fn invoke_with_context<R: HostRuntime + ?Sized>(
             capability_id(capability),
             ResourceEstimate::default(),
             input,
-            trust_decision(),
         ))
         .await
         .unwrap();
@@ -8155,7 +8147,6 @@ async fn invoke_failure_with_context<R: HostRuntime + ?Sized>(
             capability_id(capability),
             ResourceEstimate::default(),
             input,
-            trust_decision(),
         ))
         .await
         .unwrap();

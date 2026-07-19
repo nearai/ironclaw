@@ -13,8 +13,8 @@ use ironclaw_turns::run_profile::{
 };
 
 use crate::runtime::local_dev::synthetic_capability::{
-    LocalDevSyntheticCapability, LocalDevSyntheticCapabilityDescriptor,
-    LocalDevSyntheticCapabilityHandler, LocalDevSyntheticCapabilityInvocation,
+    SyntheticCapability, SyntheticCapabilityDescriptor, SyntheticCapabilityHandler,
+    SyntheticCapabilityInvocation,
 };
 
 pub(crate) const PROJECT_CREATE_CAPABILITY_ID: &str = "builtin.project_create";
@@ -29,9 +29,9 @@ const MAX_PROJECT_NAME_BYTES: usize = 200;
 pub(super) fn project_create_capability(
     project_service: Arc<dyn ProjectService>,
     fallback_user_id: UserId,
-) -> Result<LocalDevSyntheticCapability, AgentLoopHostError> {
-    Ok(LocalDevSyntheticCapability::new(
-        LocalDevSyntheticCapabilityDescriptor::new(
+) -> Result<SyntheticCapability, AgentLoopHostError> {
+    Ok(SyntheticCapability::new(
+        SyntheticCapabilityDescriptor::new(
             PROJECT_CREATE_CAPABILITY_ID,
             PROJECT_CREATE_PROVIDER_TOOL_NAME,
             PROJECT_CREATE_DESCRIPTION,
@@ -51,7 +51,7 @@ struct ProjectCreateHandler {
 }
 
 #[async_trait]
-impl LocalDevSyntheticCapabilityHandler for ProjectCreateHandler {
+impl SyntheticCapabilityHandler for ProjectCreateHandler {
     fn validate_provider_arguments(
         &self,
         arguments: &serde_json::Value,
@@ -61,7 +61,7 @@ impl LocalDevSyntheticCapabilityHandler for ProjectCreateHandler {
 
     async fn invoke(
         &self,
-        invocation: LocalDevSyntheticCapabilityInvocation,
+        invocation: SyntheticCapabilityInvocation,
     ) -> Result<CapabilityOutcome, AgentLoopHostError> {
         let input = parse_project_create_input(&invocation.input)?;
         // Identity is authority-bearing: the caller is derived from the trusted

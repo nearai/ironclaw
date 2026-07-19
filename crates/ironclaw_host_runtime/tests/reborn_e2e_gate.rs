@@ -116,7 +116,6 @@ async fn reborn_e2e_gate_invokes_script_through_host_runtime_with_status_events_
             script_capability_id(),
             ResourceEstimate::default().set_output_bytes(4096),
             input.clone(),
-            trust_decision_with_dispatch_authority(),
         ))
         .await
         .unwrap();
@@ -214,7 +213,6 @@ async fn reborn_e2e_gate_blocks_for_approval_resumes_once_and_rejects_replay() {
             script_capability_id(),
             ResourceEstimate::default(),
             input.clone(),
-            trust_decision_with_dispatch_authority(),
         ))
         .await
         .unwrap();
@@ -250,7 +248,6 @@ async fn reborn_e2e_gate_blocks_for_approval_resumes_once_and_rejects_replay() {
             script_capability_id(),
             ResourceEstimate::default(),
             json!({"message": "approval resume through Reborn E2E gate"}),
-            trust_decision_with_dispatch_authority(),
         ))
         .await
         .unwrap();
@@ -293,7 +290,6 @@ async fn reborn_e2e_gate_fails_unsupported_obligations_before_runtime_events_or_
             script_capability_id(),
             ResourceEstimate::default(),
             json!({"message": "unsupported obligation"}),
-            trust_decision_with_dispatch_authority(),
         ))
         .await
         .unwrap();
@@ -348,7 +344,6 @@ async fn reborn_e2e_gate_redacts_runtime_output_before_public_result() {
             script_capability_id(),
             ResourceEstimate::default(),
             json!({"authorization": leaked, "message": "redact before public result"}),
-            trust_decision_with_dispatch_authority(),
         ))
         .await
         .unwrap();
@@ -410,7 +405,6 @@ async fn reborn_e2e_gate_sanitizes_runtime_backend_failure_before_public_surface
             script_capability_id(),
             ResourceEstimate::default(),
             json!({"message": input_sentinel}),
-            trust_decision_with_dispatch_authority(),
         ))
         .await
         .unwrap();
@@ -490,7 +484,6 @@ async fn reborn_e2e_gate_blocks_oversized_runtime_output_before_publication() {
             script_capability_id(),
             ResourceEstimate::default(),
             json!({"message": forbidden}),
-            trust_decision_with_dispatch_authority(),
         ))
         .await
         .unwrap();
@@ -686,7 +679,6 @@ async fn block_for_approval(
             script_capability_id(),
             ResourceEstimate::default(),
             input,
-            trust_decision_with_dispatch_authority(),
         ))
         .await
         .unwrap();

@@ -147,9 +147,9 @@ impl OnboardCommand {
             println!("- none for LLM credentials (configured above)");
         } else {
             println!(
-                "- configure LLM credentials: rerun `ironclaw-reborn onboard` from an \
+                "- configure LLM credentials: rerun `ironclaw onboard` from an \
                  interactive terminal, run \
-                 `ironclaw-reborn models set-provider <provider> --model <model>` directly, or \
+                 `ironclaw models set-provider <provider> --model <model>` directly, or \
                  export a provider's LLM environment variables (e.g. `LLM_BACKEND` or \
                  `OPENAI_API_KEY`; see `.env.example`) before the next `onboard`/`serve`"
             );
@@ -195,8 +195,8 @@ impl OnboardCommand {
         println!("service: {}", service_outcome.display_line());
         if let ServiceStartOutcome::Failed(reason) = &service_outcome {
             println!(
-                "service_note: install/start failed ({reason}); run `ironclaw-reborn service \
-                 install` and `ironclaw-reborn service start` manually"
+                "service_note: install/start failed ({reason}); run `ironclaw service install` \
+                 and `ironclaw service start` manually"
             );
         }
 
@@ -224,7 +224,7 @@ impl OnboardCommand {
             }
             crate::webui_token::LoginLinkAnnouncement::Unavailable => {}
         }
-        println!("hint: add Gmail or Slack any time: ironclaw-reborn config set --help");
+        println!("hint: add Gmail or Slack any time: ironclaw config set --help");
         Ok(())
     }
 

@@ -1,7 +1,7 @@
 use std::{fs, path::Path, process::Command};
 
 fn reborn_bin() -> &'static str {
-    env!("CARGO_BIN_EXE_ironclaw-reborn")
+    env!("CARGO_BIN_EXE_ironclaw")
 }
 
 #[test]

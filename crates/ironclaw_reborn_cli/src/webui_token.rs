@@ -99,7 +99,7 @@ fn read_token_file_checked(path: &Path) -> anyhow::Result<Option<String>> {
             {
                 anyhow::bail!(
                     "{} is a symlink; refusing to read the WebChat v2 token file through it. \
-                     Remove it and re-run `ironclaw-reborn onboard` to provision a regular file.",
+                     Remove it and re-run `ironclaw onboard` to provision a regular file.",
                     path.display()
                 );
             }
@@ -113,7 +113,7 @@ fn read_token_file_checked(path: &Path) -> anyhow::Result<Option<String>> {
     if !metadata.is_file() {
         anyhow::bail!(
             "{} is not a regular file; refusing to read the WebChat v2 token file through it. \
-             Remove it and re-run `ironclaw-reborn onboard` to provision a regular file.",
+             Remove it and re-run `ironclaw onboard` to provision a regular file.",
             path.display()
         );
     }
@@ -154,7 +154,7 @@ fn read_token_file_checked(path: &Path) -> anyhow::Result<Option<String>> {
             if metadata.file_type().is_symlink() {
                 anyhow::bail!(
                     "{} is a symlink; refusing to read the WebChat v2 token file through it. \
-                     Remove it and re-run `ironclaw-reborn onboard` to provision a regular file.",
+                     Remove it and re-run `ironclaw onboard` to provision a regular file.",
                     path.display()
                 );
             }
@@ -399,7 +399,7 @@ pub(crate) fn resolve_webui_token(
         }
         None => Err(anyhow::anyhow!(
             "{env_var_name} must be set to the WebChat v2 bearer token, or a token file must \
-             exist at {} (written by `ironclaw-reborn onboard`). Neither was found.",
+             exist at {} (written by `ironclaw onboard`). Neither was found.",
             file_path.display()
         )),
     }
@@ -494,7 +494,7 @@ fn validate_token_entropy(
         "the WebChat v2 bearer token (from {env_var_name} or {}) is only {} bytes; it is also \
          the WebChat v2 session-signing key and must be at least {WEBUI_TOKEN_MIN_BYTES} bytes \
          of high-entropy random material. Generate one with e.g. `openssl rand -hex 32`, or run \
-         `ironclaw-reborn onboard` to provision a valid token file.",
+         `ironclaw onboard` to provision a valid token file.",
         webui_token_file_path(reborn_home).display(),
         value.len(),
     ))

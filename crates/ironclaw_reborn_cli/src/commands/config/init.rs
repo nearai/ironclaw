@@ -32,12 +32,12 @@ impl ConfigInitCommand {
         println!();
         println!(
             "hint: config.toml ships with `[llm.default]` commented out, so `run`/`serve` fall \
-             back to LLM environment variables until you configure a slot — run `ironclaw-reborn \
-             onboard` interactively, `ironclaw-reborn models set-provider <provider>`, or edit \
+             back to LLM environment variables until you configure a slot — run `ironclaw \
+             onboard` interactively, `ironclaw models set-provider <provider>`, or edit \
              config.toml and uncomment `[llm.default]` with a `provider_id` (and usually a \
              `model`) to pin an explicit provider."
         );
-        println!("edit them, then run `ironclaw-reborn run`.");
+        println!("edit them, then run `ironclaw run`.");
         Ok(())
     }
 }
@@ -169,7 +169,7 @@ fn config_stub() -> String {
 # Precedence on each field:
 #   compiled defaults < this file < env vars < CLI flags.
 #
-# Regenerate with `ironclaw-reborn config init --force`.
+# Regenerate with `ironclaw config init --force`.
 
 api_version = "{api_version}"
 
@@ -238,9 +238,9 @@ regex_activation_enabled = true
 # # `api_key_env` override the catalog defaults for this deployment.
 # # No slot is seeded by default: leaving this section commented means the
 # # runtime falls back to LLM environment variables (`LLM_BACKEND`, or a
-# # provider whose own env vars are set — see `ironclaw-reborn onboard` and
-# # `.env.example`). Run `ironclaw-reborn onboard` interactively, `ironclaw-
-# # reborn config set` / `models set-provider`, or the WebUI settings page to
+# # provider whose own env vars are set — see `ironclaw onboard` and
+# # `.env.example`). Run `ironclaw onboard` interactively, `ironclaw config
+# # set` / `models set-provider`, or the WebUI settings page to
 # # write an explicit slot here.
 # #
 # # CAUTION: uncommenting only the `[llm.default]` header with no fields
@@ -259,7 +259,7 @@ regex_activation_enabled = true
 # api_key_env = "ANTHROPIC_API_KEY"
 
 # [slack]
-# # Host-beta Slack Events API route for `ironclaw-reborn serve`.
+# # Host-beta Slack Events API route for `ironclaw serve`.
 # # Requires a binary built with `--features slack-v2-host-beta`.
 # # Can also be overridden by IRONCLAW_REBORN_SLACK_ENABLED.
 # enabled = false

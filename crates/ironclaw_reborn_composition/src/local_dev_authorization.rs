@@ -20,7 +20,7 @@ use ironclaw_host_api::{
 };
 use tokio::sync::Notify;
 
-use crate::local_dev_capability_policy::LocalDevCapabilityPolicy;
+use crate::builtin_capability_policy::BuiltinCapabilityPolicy;
 use crate::{
     profile_approval_authorization::{
         ApprovalSettingsProvider, ProfileApprovalGatePolicy, profile_approval_authorizer,
@@ -30,7 +30,7 @@ use crate::{
 
 pub(crate) fn local_dev_authorizer(
     runtime_policy: Option<&EffectiveRuntimePolicy>,
-    capability_policy: Arc<LocalDevCapabilityPolicy>,
+    capability_policy: Arc<BuiltinCapabilityPolicy>,
     settings: Arc<dyn ApprovalSettingsProvider>,
 ) -> Arc<dyn TrustAwareCapabilityDispatchAuthorizer> {
     let (approval_policy, resolved_profile) = local_dev_approval_policy(runtime_policy);
@@ -568,7 +568,7 @@ fn operator_tool_permission_scope(scope: &ResourceScope) -> ResourceScope {
 
 pub(crate) fn local_dev_effects_require_approval(
     runtime_policy: Option<&EffectiveRuntimePolicy>,
-    capability_policy: &LocalDevCapabilityPolicy,
+    capability_policy: &BuiltinCapabilityPolicy,
     effects: &[EffectKind],
 ) -> bool {
     let (approval_policy, resolved_profile) = local_dev_approval_policy(runtime_policy);

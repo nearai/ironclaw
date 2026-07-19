@@ -19,8 +19,8 @@ use ironclaw_reborn_composition::host_api::{AgentId, TenantId};
 use ironclaw_reborn_composition::hosted_single_tenant_runtime_policy;
 use ironclaw_reborn_composition::{
     CredentialRefreshSettings, OAuthClientConfig, OperatorLogLayer, PollSettings, RebornBuildInput,
-    RebornCompositionProfile, RebornLocalRuntimeProfileOptions, RebornRuntimeIdentity,
-    RebornRuntimeInput, TurnRunnerSettings, build_reborn_runtime,
+    RebornCompositionProfile, RebornRuntimeIdentity, RebornRuntimeInput,
+    RebornRuntimeProfileOptions, TurnRunnerSettings, build_reborn_runtime,
     local_runtime_build_input_with_options, nearai_mcp_bootstrap_config_from_env,
 };
 #[cfg(feature = "webui-v2-beta")]
@@ -314,7 +314,7 @@ pub(crate) async fn open_trigger_access_store_for_profile(
 }
 
 fn print_runtime_banner(config: &RebornBootConfig) {
-    eprintln!("ironclaw-reborn: runtime started");
+    eprintln!("ironclaw: runtime started");
     eprintln!("  profile     : {}", config.profile());
     eprintln!("  reborn_home : {}", config.home().path().display());
     eprintln!();
@@ -655,6 +655,11 @@ pub(crate) fn build_runtime_input_with_options(
 
     #[cfg(feature = "root-llm-provider")]
     {
+        // The composition runtime cold-boots with a placeholder gateway and
+        // needs the boot config to run its initial provider reload. This is
+        // required for both `run` and `serve`; without it `run` resolves the
+        // configured provider here but still dispatches through `unconfigured`.
+        runtime_input = runtime_input.with_boot_config(config.clone());
         match resolve_reborn_runtime_llm_with_stored_key_fallback(
             config,
             runtime_services.config_file.as_ref(),
@@ -712,7 +717,7 @@ pub(crate) fn build_services_input_with_options(
     options: RuntimeInputOptions,
 ) -> anyhow::Result<RuntimeServicesInput> {
     // Read the operator's boot TOML if present. Missing file is OK
-    // (operator may not have run `ironclaw-reborn config init` yet);
+    // (operator may not have run `ironclaw config init` yet);
     // sparse fields are OK (each absent field falls back to the
     // CLI-shaped default baked into composition).
     let config_file = read_config_file(config)?;
@@ -782,7 +787,7 @@ fn build_standalone_local_runtime_services_input(
         composition_profile(profile),
         owner_id,
         local_runtime_root,
-        RebornLocalRuntimeProfileOptions {
+        RebornRuntimeProfileOptions {
             confirm_host_access: options.confirm_host_access,
         },
     )
@@ -1685,6 +1690,33 @@ mod tests {
             build_runtime_input(&config, RuntimeInputCaller::Run).expect("runtime input");
 
         assert!(runtime_input.runner.worker_count.is_none());
+    }
+
+    #[cfg(feature = "root-llm-provider")]
+    #[test]
+    fn runtime_inputs_carry_boot_config_for_initial_llm_reload() {
+        let _lock = lock_runtime_env();
+        let _guards = clear_runner_env();
+        let (_enabled, _interval) = clear_trigger_poller_env();
+        for caller in [RuntimeInputCaller::Run, RuntimeInputCaller::Serve] {
+            let temp = tempfile::tempdir().expect("tempdir");
+            let reborn_home = temp.path().join("reborn-home");
+            std::fs::create_dir_all(&reborn_home).expect("mkdir");
+            let config = RebornBootConfig::resolve_from_env_parts(
+                Some(reborn_home.into_os_string()),
+                None,
+                None,
+                None,
+            )
+            .expect("boot config");
+
+            let runtime_input = build_runtime_input(&config, caller).expect("runtime input");
+
+            let boot = runtime_input.boot.unwrap_or_else(|| {
+                panic!("{caller:?} must carry boot config for the initial LLM reload")
+            });
+            assert_eq!(boot.home().path(), config.home().path());
+        }
     }
 
     #[test]

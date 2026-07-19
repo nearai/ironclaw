@@ -232,7 +232,7 @@ fn cli_enqueue_accepts_policy_matching_envelope_capture() {
 
 #[test]
 fn list_submissions_summary_flag_parses_through_cli() {
-    let cli = parse_cli(["ironclaw-reborn", "traces", "list-submissions", "--summary"]);
+    let cli = parse_cli(["ironclaw", "traces", "list-submissions", "--summary"]);
 
     let TracesSubcommand::ListSubmissions { json, summary } = unwrap_traces_command(cli) else {
         panic!("expected traces list-submissions command");
@@ -245,7 +245,7 @@ fn list_submissions_summary_flag_parses_through_cli() {
 #[test]
 fn credit_notice_flags_parse_through_cli() {
     let cli = parse_cli([
-        "ironclaw-reborn",
+        "ironclaw",
         "traces",
         "credit",
         "--notice",
@@ -273,7 +273,7 @@ fn credit_notice_flags_parse_through_cli() {
 
 #[test]
 fn credit_notice_action_flags_parse_through_cli() {
-    let ack_cli = parse_cli(["ironclaw-reborn", "traces", "credit", "--notice", "--ack"]);
+    let ack_cli = parse_cli(["ironclaw", "traces", "credit", "--notice", "--ack"]);
     let TracesSubcommand::Credit {
         notice: ack_notice,
         ack,
@@ -288,7 +288,7 @@ fn credit_notice_action_flags_parse_through_cli() {
     assert_eq!(snooze_hours, None);
 
     let snooze_cli = parse_cli([
-        "ironclaw-reborn",
+        "ironclaw",
         "traces",
         "credit",
         "--notice",
@@ -312,7 +312,7 @@ fn credit_notice_action_flags_parse_through_cli() {
 #[test]
 fn queue_status_flags_parse_through_cli() {
     let cli = parse_cli([
-        "ironclaw-reborn",
+        "ironclaw",
         "traces",
         "queue-status",
         "--json",
@@ -331,7 +331,7 @@ fn queue_status_flags_parse_through_cli() {
 #[test]
 fn opt_in_upload_claim_issuer_flags_parse_through_cli() {
     let cli = parse_cli([
-        "ironclaw-reborn",
+        "ironclaw",
         "traces",
         "opt-in",
         "--endpoint",
@@ -380,7 +380,7 @@ fn opt_in_upload_claim_issuer_flags_parse_through_cli() {
 #[test]
 fn opt_in_invite_code_flag_parses_through_cli() {
     let cli = parse_cli([
-        "ironclaw-reborn",
+        "ironclaw",
         "traces",
         "opt-in",
         "--endpoint",
@@ -407,7 +407,7 @@ fn opt_in_invite_code_flag_parses_through_cli() {
 #[test]
 fn opt_in_invite_code_defaults_to_none_when_absent() {
     let cli = parse_cli([
-        "ironclaw-reborn",
+        "ironclaw",
         "traces",
         "opt-in",
         "--endpoint",
@@ -428,7 +428,7 @@ fn opt_in_invite_code_defaults_to_none_when_absent() {
 #[test]
 fn profile_token_flags_parse_through_cli() {
     let cli = parse_cli([
-        "ironclaw-reborn",
+        "ironclaw",
         "traces",
         "profile",
         "token",
@@ -451,7 +451,7 @@ fn profile_token_flags_parse_through_cli() {
 #[test]
 fn profile_set_flags_parse_through_cli() {
     let cli = parse_cli([
-        "ironclaw-reborn",
+        "ironclaw",
         "traces",
         "profile",
         "set",
@@ -482,7 +482,7 @@ fn profile_set_flags_parse_through_cli() {
 
 #[test]
 fn profile_set_requires_handle_flag() {
-    let error = parse_cli_result(["ironclaw-reborn", "traces", "profile", "set"])
+    let error = parse_cli_result(["ironclaw", "traces", "profile", "set"])
         .expect_err("profile set without --handle must fail to parse");
     assert_eq!(
         error.kind(),
@@ -493,7 +493,7 @@ fn profile_set_requires_handle_flag() {
 #[test]
 fn profile_withdraw_flags_parse_through_cli() {
     let cli = parse_cli([
-        "ironclaw-reborn",
+        "ironclaw",
         "traces",
         "profile",
         "withdraw",
@@ -514,7 +514,7 @@ fn profile_withdraw_flags_parse_through_cli() {
 #[test]
 fn opt_in_user_scope_flag_parses_through_cli() {
     let cli = parse_cli([
-        "ironclaw-reborn",
+        "ironclaw",
         "traces",
         "opt-in",
         "--endpoint",
@@ -848,7 +848,7 @@ fn queue_status_diagnostics_reports_invite_code_configured() {
 #[test]
 fn enroll_instance_parses_invite_and_consent_flags() {
     let cli = parse_cli([
-        "ironclaw-reborn",
+        "ironclaw",
         "traces",
         "enroll-instance",
         "--invite",
@@ -878,6 +878,10 @@ fn enroll_instance_parses_invite_and_consent_flags() {
 
 #[test]
 fn enroll_instance_requires_invite() {
-    let result = parse_cli_result(["ironclaw-reborn", "traces", "enroll-instance"]);
-    assert!(result.is_err(), "--invite must be required");
+    let error = parse_cli_result(["ironclaw", "traces", "enroll-instance"])
+        .expect_err("--invite must be required");
+    assert_eq!(
+        error.kind(),
+        clap::error::ErrorKind::MissingRequiredArgument
+    );
 }

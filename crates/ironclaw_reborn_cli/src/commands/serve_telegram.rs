@@ -53,7 +53,7 @@ pub(crate) fn resolve_telegram_config_for_serve(
     if telegram_enabled(section)? {
         anyhow::bail!(
             "Telegram enablement ([telegram].enabled = true or {TELEGRAM_ENABLED_ENV}=true) \
-             requires an ironclaw-reborn binary built with the `telegram-v2-host-beta` Cargo \
+             requires an ironclaw binary built with the `telegram-v2-host-beta` Cargo \
              feature"
         );
     }
@@ -164,7 +164,7 @@ mod tests {
 
         assert!(
             err.to_string()
-                .contains("requires an ironclaw-reborn binary built with")
+                .contains("requires an ironclaw binary built with")
         );
     }
 

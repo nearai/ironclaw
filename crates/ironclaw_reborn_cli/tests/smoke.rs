@@ -10,7 +10,7 @@ use std::{
 const INVALID_PROFILE_MESSAGE: &str = "IRONCLAW_REBORN_PROFILE must be one of";
 
 fn reborn_bin() -> &'static str {
-    env!("CARGO_BIN_EXE_ironclaw-reborn")
+    env!("CARGO_BIN_EXE_ironclaw")
 }
 
 /// Shared builder for every real-binary spawn in this file: `Command::new(reborn_bin())`
@@ -75,7 +75,7 @@ fn fake_reborn_bin(bin_dir: &Path) {
     use std::os::unix::fs::PermissionsExt;
 
     std::fs::create_dir_all(bin_dir).expect("fake bin dir");
-    let bin = bin_dir.join("ironclaw-reborn");
+    let bin = bin_dir.join("ironclaw");
     std::fs::write(
         &bin,
         "#!/bin/sh\nprintf 'home=%s\\n' \"$IRONCLAW_REBORN_HOME\"\nprintf 'args=%s\\n' \"$*\"\n",
@@ -132,6 +132,12 @@ fn dockerfile_reborn_builds_with_production_features() {
             .count()
             >= 2,
         "Dockerfile.reborn must compile both cargo-chef deps and final binary with Slack, Telegram, libsql, and postgres: {dockerfile}"
+    );
+    assert!(
+        dockerfile.contains("--bin ironclaw")
+            && dockerfile
+                .contains("COPY --from=builder /app/target/dist/ironclaw /usr/local/bin/ironclaw"),
+        "Dockerfile.reborn must build and copy the canonical ironclaw binary: {dockerfile}"
     );
     assert!(
         dockerfile.contains("corepack enable pnpm")
@@ -637,9 +643,10 @@ fn help_mentions_reborn_commands() {
     );
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(
-        stdout.contains("Standalone IronClaw Reborn runtime"),
+        stdout.contains("IronClaw agent runtime"),
         "stdout: {stdout}"
     );
+    assert!(stdout.contains("Usage: ironclaw"), "stdout: {stdout}");
     assert!(stdout.contains("channels"), "stdout: {stdout}");
     assert!(stdout.contains("completion"), "stdout: {stdout}");
     assert!(stdout.contains("config"), "stdout: {stdout}");
@@ -865,58 +872,27 @@ fn profile_list_json_is_stable_and_does_not_resolve_reborn_home() {
 }
 
 #[test]
-fn channels_list_reports_unwired_empty_surface_without_reborn_home() {
-    assert_empty_not_wired_surface(
+fn channels_list_reports_not_implemented() {
+    assert_not_implemented(
         &["channels", "list"],
-        "IronClaw Reborn channels",
-        "channels",
-        "configured",
+        "`channels list` is not implemented yet",
     );
-}
-
-#[test]
-fn channels_list_verbose_explains_missing_reborn_registry() {
-    assert_verbose_detail(
+    assert_not_implemented(
         &["channels", "list", "--verbose"],
-        "Reborn channel registry is not wired yet",
+        "`channels list` is not implemented yet",
+    );
+    assert_not_implemented(
+        &["channels", "list", "--json"],
+        "`channels list` is not implemented yet",
     );
 }
 
 #[test]
-fn channels_list_json_verbose_includes_status_details() {
-    assert_json_verbose_detail(
-        &["channels", "list", "--json", "--verbose"],
-        "channels",
-        "configured",
-        "Reborn channel registry is not wired yet",
-    );
-}
-
-#[test]
-fn hooks_list_reports_unwired_empty_surface_without_reborn_home() {
-    assert_empty_not_wired_surface(
-        &["hooks", "list"],
-        "IronClaw Reborn hooks",
-        "hooks",
-        "configured",
-    );
-}
-
-#[test]
-fn hooks_list_verbose_explains_missing_reborn_registry() {
-    assert_verbose_detail(
+fn hooks_list_reports_not_implemented() {
+    assert_not_implemented(&["hooks", "list"], "`hooks list` is not implemented yet");
+    assert_not_implemented(
         &["hooks", "list", "--verbose"],
-        "Reborn hook registry is not wired yet",
-    );
-}
-
-#[test]
-fn hooks_list_json_verbose_includes_status_details() {
-    assert_json_verbose_detail(
-        &["hooks", "list", "--json", "--verbose"],
-        "hooks",
-        "configured",
-        "Reborn hook registry is not wired yet",
+        "`hooks list` is not implemented yet",
     );
 }
 
@@ -1072,7 +1048,7 @@ fn skills_list_rejects_unsupported_profiles() {
         );
         let stderr = String::from_utf8_lossy(&output.stderr);
         assert!(
-            stderr.contains("ironclaw-reborn skills currently supports profile=local-dev"),
+            stderr.contains("ironclaw skills currently supports profile=local-dev"),
             "stderr: {stderr}"
         );
         assert!(
@@ -1083,23 +1059,9 @@ fn skills_list_rejects_unsupported_profiles() {
 }
 
 #[test]
-fn logs_reports_unwired_surface_without_reborn_home() {
-    assert_empty_not_wired_surface(&["logs"], "IronClaw Reborn logs", "logs", "entries");
-}
-
-#[test]
-fn logs_verbose_explains_missing_reborn_log_source() {
-    assert_verbose_detail(&["logs", "--verbose"], "Reborn log source is not wired yet");
-}
-
-#[test]
-fn logs_json_verbose_includes_status_details() {
-    assert_json_verbose_detail(
-        &["logs", "--json", "--verbose"],
-        "logs",
-        "entries",
-        "Reborn log source is not wired yet",
-    );
+fn logs_reports_not_implemented() {
+    assert_not_implemented(&["logs"], "`logs` is not implemented yet");
+    assert_not_implemented(&["logs", "--verbose"], "`logs` is not implemented yet");
 }
 
 #[cfg(feature = "root-llm-provider")]
@@ -1330,6 +1292,33 @@ fn models_list_no_default_features_does_not_resolve_reborn_home() {
 
 #[cfg(not(feature = "root-llm-provider"))]
 #[test]
+fn models_list_with_provider_reports_root_llm_provider_required_without_default_features() {
+    // A provider-detail request needs real provider data; without the feature
+    // it must error like the write commands rather than succeed with the
+    // unrelated generic slot list (2026-07-19 ironloopai review finding).
+    for args in [
+        &["models", "list", "openai"][..],
+        &["models", "list", "--verbose"][..],
+    ] {
+        let output = reborn_command()
+            .args(args)
+            .output()
+            .expect("ironclaw-reborn models list should run");
+        assert!(!output.status.success(), "command should fail: {args:?}");
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            stderr.contains("requires the root-llm-provider feature"),
+            "stderr: {stderr}"
+        );
+        assert!(
+            !stderr.contains("HOME or USERPROFILE"),
+            "must not resolve Reborn home before feature error: {stderr}"
+        );
+    }
+}
+
+#[cfg(not(feature = "root-llm-provider"))]
+#[test]
 fn models_status_no_default_features_does_not_resolve_reborn_home() {
     let output = reborn_command()
         .arg("models")
@@ -1359,7 +1348,7 @@ fn models_write_commands_report_root_llm_provider_required_without_default_featu
         let output = reborn_command()
             .args(args)
             .output()
-            .expect("ironclaw-reborn models write command should run");
+            .expect("ironclaw-reborn models command should run");
 
         assert!(!output.status.success(), "command should fail: {args:?}");
         let stderr = String::from_utf8_lossy(&output.stderr);
@@ -1375,54 +1364,20 @@ fn models_write_commands_report_root_llm_provider_required_without_default_featu
     }
 }
 
-fn assert_empty_not_wired_surface(
-    args: &[&str],
-    title: &str,
-    collection_key: &str,
-    count_key: &str,
-) {
+fn assert_not_implemented(args: &[&str], expected_message: &str) {
     let output = reborn_command()
         .args(args)
         .output()
         .expect("ironclaw-reborn command should run");
 
     assert!(
-        output.status.success(),
-        "stderr: {}",
-        String::from_utf8_lossy(&output.stderr)
+        !output.status.success(),
+        "`{}` should fail while disabled",
+        args.join(" ")
     );
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(stdout.contains(title), "stdout: {stdout}");
-    assert!(
-        stdout.contains(&format!("{count_key}: 0")),
-        "stdout: {stdout}"
-    );
-    assert!(stdout.contains("status: not-wired"), "stdout: {stdout}");
-    assert!(stdout.contains("v1_state: not-used"), "stdout: {stdout}");
-
-    let mut json_args = args.to_vec();
-    json_args.push("--json");
-    let output = reborn_command()
-        .args(json_args)
-        .output()
-        .expect("ironclaw-reborn JSON command should run");
-    assert!(
-        output.status.success(),
-        "stderr: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let json: serde_json::Value = serde_json::from_str(stdout.trim()).expect("valid JSON");
-    assert_eq!(json[count_key], 0);
-    assert_eq!(
-        json[collection_key]
-            .as_array()
-            .expect("collection array")
-            .len(),
-        0
-    );
-    assert_eq!(json["status"], "not-wired");
-    assert_eq!(json["v1_state"], "not-used");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains(expected_message), "stderr: {stderr}");
+    assert!(!stderr.contains("panicked"), "stderr: {stderr}");
 }
 
 fn write_reborn_skill(reborn_home: &std::path::Path, name: &str, description: &str) {
@@ -1460,54 +1415,6 @@ Use {name}.
 
 fn reborn_cli_skill_root(reborn_home: &std::path::Path) -> std::path::PathBuf {
     reborn_home.join("local-dev/tenants/default/users/reborn-cli/skills")
-}
-
-fn assert_verbose_detail(args: &[&str], expected_detail: &str) {
-    let output = reborn_command()
-        .args(args)
-        .output()
-        .expect("ironclaw-reborn verbose command should run");
-
-    assert!(
-        output.status.success(),
-        "stderr: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(stdout.contains(expected_detail), "stdout: {stdout}");
-}
-
-fn assert_json_verbose_detail(
-    args: &[&str],
-    collection_key: &str,
-    count_key: &str,
-    expected_detail: &str,
-) {
-    let output = reborn_command()
-        .args(args)
-        .output()
-        .expect("ironclaw-reborn JSON verbose command should run");
-
-    assert!(
-        output.status.success(),
-        "stderr: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let json: serde_json::Value = serde_json::from_str(stdout.trim()).expect("valid JSON");
-    assert_eq!(json[count_key], 0);
-    assert_eq!(
-        json[collection_key]
-            .as_array()
-            .expect("collection array")
-            .len(),
-        0
-    );
-    let details = json["details"].as_array().expect("details array");
-    assert!(
-        details.iter().any(|detail| detail == expected_detail),
-        "json: {json}"
-    );
 }
 
 #[test]
@@ -1603,11 +1510,8 @@ fn completion_generates_zsh_script_without_reborn_home() {
         String::from_utf8_lossy(&output.stderr)
     );
     let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(
-        stdout.contains("#compdef ironclaw-reborn"),
-        "stdout: {stdout}"
-    );
-    assert!(stdout.contains("_ironclaw-reborn"), "stdout: {stdout}");
+    assert!(stdout.contains("#compdef ironclaw"), "stdout: {stdout}");
+    assert!(stdout.contains("_ironclaw"), "stdout: {stdout}");
     assert!(
         stdout.contains("$+functions[compdef]"),
         "zsh completion should guard compdef: {stdout}"
@@ -1629,7 +1533,7 @@ fn completion_generates_bash_script_without_reborn_home() {
         String::from_utf8_lossy(&output.stderr)
     );
     let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(stdout.contains("_ironclaw-reborn()"), "stdout: {stdout}");
+    assert!(stdout.contains("_ironclaw()"), "stdout: {stdout}");
     assert!(stdout.contains("COMPREPLY"), "stdout: {stdout}");
 }
 
@@ -1904,7 +1808,7 @@ fn serve_with_env_auth_seeds_reborn_config_before_binding() {
             Ok(Ok(line)) => {
                 stderr_text.push_str(&line);
                 stderr_text.push('\n');
-                if stderr_text.contains("ironclaw-reborn: WebChat v2 listener") {
+                if stderr_text.contains("ironclaw: WebChat v2 listener") {
                     break;
                 }
             }
@@ -2040,7 +1944,7 @@ fn serve_resolves_bearer_token_from_reborn_home_webui_token_file() {
             Ok(Ok(line)) => {
                 stderr_text.push_str(&line);
                 stderr_text.push('\n');
-                if stderr_text.contains("ironclaw-reborn: WebChat v2 listener") {
+                if stderr_text.contains("ironclaw: WebChat v2 listener") {
                     break;
                 }
             }
@@ -2111,7 +2015,7 @@ fn serve_env_slack_enabled_mounts_slack_events_route() {
             Ok(Ok(line)) => {
                 stderr_text.push_str(&line);
                 stderr_text.push('\n');
-                if stderr_text.contains("ironclaw-reborn: WebChat v2 listener") {
+                if stderr_text.contains("ironclaw: WebChat v2 listener") {
                     break;
                 }
             }
@@ -2299,7 +2203,7 @@ max_body_bytes_fallback = 0
             "stderr should contain {expected:?}; got: {stderr}"
         );
         assert!(
-            !stderr.contains("ironclaw-reborn: WebChat v2 listener"),
+            !stderr.contains("ironclaw: WebChat v2 listener"),
             "serve must not bind after invalid WebUI security config; got: {stderr}"
         );
     }
@@ -2338,7 +2242,7 @@ fn serve_fails_closed_when_sso_provider_has_no_allowed_domain_allowlist() {
         "stderr should explain the missing SSO admission allowlist; got: {stderr}"
     );
     assert!(
-        !stderr.contains("ironclaw-reborn: WebChat v2 listener"),
+        !stderr.contains("ironclaw: WebChat v2 listener"),
         "serve must not bind after SSO admission misconfiguration; got: {stderr}"
     );
 }
@@ -2372,7 +2276,7 @@ fn serve_fails_closed_when_session_token_lacks_entropy_without_sso() {
         "stderr should explain the session-signing entropy floor; got: {stderr}"
     );
     assert!(
-        !stderr.contains("ironclaw-reborn: WebChat v2 listener"),
+        !stderr.contains("ironclaw: WebChat v2 listener"),
         "serve must not bind with a low-entropy session-signing secret; got: {stderr}"
     );
 }
@@ -2748,7 +2652,7 @@ fn wait_for_serve_banner(child: &mut std::process::Child) -> String {
             Ok(Ok(line)) => {
                 stderr_text.push_str(&line);
                 stderr_text.push('\n');
-                if stderr_text.contains("ironclaw-reborn: WebChat v2 listener") {
+                if stderr_text.contains("ironclaw: WebChat v2 listener") {
                     break;
                 }
             }
@@ -2798,7 +2702,7 @@ fn wait_for_serve_banner_with_capture(
         if stderr_all
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .contains("ironclaw-reborn: WebChat v2 listener")
+            .contains("ironclaw: WebChat v2 listener")
         {
             return stderr_all;
         }
@@ -2989,7 +2893,7 @@ fn repl_exit_command_seeds_reborn_config() {
     assert!(stdout.is_empty(), "stdout should stay reply-only: {stdout}");
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
-        stderr.contains("ironclaw-reborn: runtime started"),
+        stderr.contains("ironclaw: runtime started"),
         "stderr: {stderr}"
     );
     assert!(
@@ -3070,7 +2974,7 @@ fn repl_resolves_codex_auth_env_without_openai_api_key() {
     );
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
-        stderr.contains("ironclaw-reborn: runtime started"),
+        stderr.contains("ironclaw: runtime started"),
         "stderr: {stderr}"
     );
     assert!(
@@ -3125,7 +3029,7 @@ fn repl_resolves_codex_api_key_auth_env_without_openai_api_key() {
     );
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
-        stderr.contains("ironclaw-reborn: runtime started"),
+        stderr.contains("ironclaw: runtime started"),
         "stderr: {stderr}"
     );
     assert!(
@@ -3683,7 +3587,7 @@ fn config_init_writes_both_files() {
         .env_remove("USERPROFILE")
         .env("IRONCLAW_REBORN_HOME", &reborn_home)
         .output()
-        .expect("ironclaw-reborn config init should run");
+        .expect("ironclaw config init should run");
     assert!(
         output.status.success(),
         "stderr: {}",
@@ -4052,7 +3956,7 @@ fn onboard_with_complete_llm_env_then_serve_boots_from_the_env_seeded_slot() {
         .env("HOME", &home)
         .env("IRONCLAW_REBORN_HOME", &reborn_home)
         .env("OPENAI_API_KEY", "sk-smoke-test-env-detected-openai-key")
-        .env("IRONCLAW_REBORN_LOG", "info,ironclaw_reborn=debug")
+        .env("IRONCLAW_REBORN_LOG", "info,ironclaw=debug")
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
@@ -4847,7 +4751,7 @@ fn onboard_openai_key_then_serve_boots_with_env_var_unset() {
         .env("HOME", &home)
         .env("IRONCLAW_REBORN_HOME", &reborn_home)
         // No OPENAI_API_KEY: the stored key must be what makes this boot.
-        // Target is `ironclaw_reborn` (the bin's normalized crate name, not
+        // Target is `ironclaw` (the bin's normalized crate name, not
         // the `ironclaw_reborn_cli` package this test itself compiles as).
         // `ironclaw_reborn_composition=debug` is also needed to observe
         // `RebornLlmReloadAdapter::reload`'s own `key_applied` trace below —
@@ -4855,7 +4759,7 @@ fn onboard_openai_key_then_serve_boots_with_env_var_unset() {
         // for the stored-key-backed openai provider (PR #6174 item A).
         .env(
             "IRONCLAW_REBORN_LOG",
-            "info,ironclaw_reborn=debug,ironclaw_reborn_composition=debug",
+            "info,ironclaw=debug,ironclaw_reborn_composition=debug",
         )
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -4957,7 +4861,7 @@ fn onboard_nearai_then_serve_boots_with_cloud_base_url() {
         // proving the coded default itself is cloud, not a key-presence race.
         .env_remove("NEARAI_API_KEY")
         .env_remove("NEARAI_BASE_URL")
-        .env("IRONCLAW_REBORN_LOG", "info,ironclaw_reborn=debug")
+        .env("IRONCLAW_REBORN_LOG", "info,ironclaw=debug")
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
@@ -5061,7 +4965,7 @@ fn onboard_nearai_stored_key_then_serve_boots_with_cloud_base_url() {
         // it must be named explicitly.
         .env(
             "IRONCLAW_REBORN_LOG",
-            "info,ironclaw_reborn=debug,ironclaw_reborn_composition=debug",
+            "info,ironclaw=debug,ironclaw_reborn_composition=debug",
         )
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -5506,6 +5410,11 @@ fn onboard_import_history_records_pending_step() {
 /// bytes, the marker, providers.json) are still correct on disk, since
 /// `write_default_config_files` and the marker/master-key steps all run
 /// ahead of the LLM-credential step that fails.
+// The pinned failure (the LLM-credential step parsing the malformed
+// config.toml) exists only when the provider feature compiles that step in;
+// without it onboard legitimately succeeds, so the test would fail the
+// libsql-only lane for behavior that build cannot have.
+#[cfg(feature = "root-llm-provider")]
 #[test]
 fn onboard_preserves_existing_config_without_force() {
     let temp = tempfile::tempdir().expect("tempdir");

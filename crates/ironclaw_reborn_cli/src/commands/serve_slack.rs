@@ -92,7 +92,7 @@ pub(crate) fn resolve_slack_config_for_serve(
     if slack_enabled(section)? {
         anyhow::bail!(
             "Slack enablement ([slack].enabled = true or {SLACK_ENABLED_ENV}=true) requires \
-             an ironclaw-reborn binary built with the `slack-v2-host-beta` Cargo feature"
+             an ironclaw binary built with the `slack-v2-host-beta` Cargo feature"
         );
     }
     Ok(None)
@@ -181,7 +181,7 @@ mod tests {
 
         assert!(
             err.to_string()
-                .contains("requires an ironclaw-reborn binary built with")
+                .contains("requires an ironclaw binary built with")
         );
     }
 

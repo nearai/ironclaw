@@ -4,7 +4,7 @@
 - Expose facade-shaped handles only: `HostRuntime`, `TurnCoordinator`, product-auth `RebornProductAuthServices`, WebUI `RebornServicesApi`, readiness.
 - Keep lower substrate handles private to factories and owning crates.
 - Substrate handles MAY be exposed via `#[cfg(any(test, feature = "test-support"))]` pub accessors on `RebornRuntime` when downstream integration tests need to drive production-shape state the facade doesn't yet surface (e.g. seeding `TriggerRecord` rows, `pair_external_actor` calls). These seams ship zero bytes in production binaries. New test-support accessors must carry a doc-comment naming the production call site they mirror and an explicit note that the handle is for tests only.
-- Outbound state stores are composition-owned via `RebornLocalRuntimeServices`; do not construct `FilesystemOutboundStateStore` in consumer modules (lint-enforced via `clippy::disallowed-methods`).
+- Outbound state stores are composition-owned via `RebornRuntimeSubstrate`; do not construct `FilesystemOutboundStateStore` in consumer modules (lint-enforced via `clippy::disallowed-methods`).
 - Do not depend on the root `ironclaw` crate or `src/` modules.
 - Do not add legacy bridge modes here until an accepted migration contract exists.
 - Do not route live v1/product traffic here; callers must opt in through explicit Reborn adapters.

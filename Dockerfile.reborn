@@ -89,7 +89,7 @@ RUN cargo build \
     --profile dist \
     --package ironclaw_reborn_cli \
     --features webui-v2-beta,slack-v2-host-beta,telegram-v2-host-beta,libsql,postgres,inmemory-turn-state \
-    --bin ironclaw-reborn
+    --bin ironclaw
 
 RUN cargo build \
     --profile dist \
@@ -107,7 +107,7 @@ RUN apt-get -o Acquire::Retries=3 update \
         sqlite3 \
     && rm -rf /var/lib/apt/lists/*
 
-COPY --from=builder /app/target/dist/ironclaw-reborn /usr/local/bin/ironclaw-reborn
+COPY --from=builder /app/target/dist/ironclaw /usr/local/bin/ironclaw
 COPY --from=builder /app/target/dist/ironclaw-reborn-extension-ownership-migration /usr/local/bin/ironclaw-reborn-extension-ownership-migration
 COPY docker/reborn/config.toml /opt/ironclaw/reborn/config.toml
 COPY docker/reborn/config.hosted-single-tenant.toml /opt/ironclaw/reborn/config.hosted-single-tenant.toml

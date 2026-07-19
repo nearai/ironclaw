@@ -1,5 +1,5 @@
 //! Linux systemd user-unit generators, path resolution, and verb
-//! bodies for `ironclaw-reborn service`.
+//! bodies for `ironclaw service`.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -263,7 +263,7 @@ pub(super) fn install_with_runner(
     if let Some(note) = super::replaced_existing_service_file_note(replaced_existing) {
         println!("{note}");
     }
-    println!("  Start with: ironclaw-reborn service start");
+    println!("  Start with: ironclaw service start");
     Ok(replaced_existing)
 }
 
@@ -281,7 +281,7 @@ fn start_with_runner_quiet(runner: &mut dyn ServiceCommandRunner) -> Result<()> 
 
 fn start_with_runner_impl(runner: &mut dyn ServiceCommandRunner, verbose: bool) -> Result<()> {
     if !unit_path()?.exists() {
-        bail!("Service not installed. Run `ironclaw-reborn service install` first.");
+        bail!("Service not installed. Run `ironclaw service install` first.");
     }
     runner.run_checked(
         "systemctl daemon-reload",
@@ -698,7 +698,7 @@ mod tests {
 
     fn sample_invocation() -> ServeInvocation {
         ServeInvocation {
-            exe: PathBuf::from("/usr/local/bin/ironclaw-reborn"),
+            exe: PathBuf::from("/usr/local/bin/ironclaw"),
             args: vec!["serve".to_string()],
             env: vec![(
                 "IRONCLAW_REBORN_HOME".to_string(),
@@ -752,8 +752,31 @@ mod tests {
     #[test]
     fn unit_content_includes_exec_start_tokens() {
         let unit = unit_content(&sample_invocation(), &sample_reborn_home()).expect("valid unit");
-        assert!(unit.contains(r#""/usr/local/bin/ironclaw-reborn""#));
+        assert!(unit.contains(r#""/usr/local/bin/ironclaw""#));
         assert!(unit.contains(r#""serve""#));
+    }
+
+    #[test]
+    fn reinstall_rewrites_legacy_executable_path() {
+        let _lock = crate::runtime::test_env::lock_runtime_env();
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let _home = TempHomeGuard::set(tmp.path());
+        let file = unit_path().expect("unit path");
+        std::fs::create_dir_all(file.parent().expect("unit parent")).expect("create parent");
+        std::fs::write(
+            &file,
+            "[Service]\nExecStart=\"/usr/local/bin/ironclaw-reborn\" serve\n",
+        )
+        .expect("write legacy unit");
+
+        let mut runner = RecordingRunner::default();
+        let replaced = install_with_runner(&sample_context(), &sample_invocation(), &mut runner)
+            .expect("install over legacy unit");
+        let contents = std::fs::read_to_string(&file).expect("read upgraded unit");
+
+        assert!(replaced);
+        assert!(contents.contains(r#""/usr/local/bin/ironclaw""#));
+        assert!(!contents.contains("/usr/local/bin/ironclaw-reborn"));
     }
 
     #[test]
@@ -787,7 +810,7 @@ mod tests {
     #[test]
     fn unit_content_escapes_quotes_in_env_value() {
         let invocation = ServeInvocation {
-            exe: PathBuf::from("/usr/local/bin/ironclaw-reborn"),
+            exe: PathBuf::from("/usr/local/bin/ironclaw"),
             args: vec!["serve".to_string()],
             env: vec![(
                 "IRONCLAW_REBORN_PROFILE".to_string(),

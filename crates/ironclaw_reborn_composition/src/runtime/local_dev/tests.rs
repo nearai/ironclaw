@@ -155,7 +155,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn local_dev_visible_capability_request_uses_run_actor_for_runtime_scope() {
+    async fn visible_capability_request_uses_run_actor_for_runtime_scope() {
         let run_context = run_context("actor-runtime-scope")
             .await
             .with_actor(TurnActor::new(
@@ -169,7 +169,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn local_dev_visible_capability_request_uses_explicit_subject_for_runtime_scope() {
+    async fn visible_capability_request_uses_explicit_subject_for_runtime_scope() {
         let subject_user_id = UserId::new("team-agent-user").expect("subject user id");
         let run_context = run_context_with_scope(TurnScope::new_with_owner(
             TenantId::new("tenant-subject").expect("tenant id"),
@@ -193,7 +193,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn local_dev_visible_capability_request_keeps_fallback_user_without_actor() {
+    async fn visible_capability_request_keeps_fallback_user_without_actor() {
         let run_context = run_context("fallback-runtime-scope").await;
         let fallback_user_id = UserId::new("env-operator").expect("fallback user id");
         let request = visible_request_for_runtime_scope(&run_context, &fallback_user_id);
@@ -244,20 +244,20 @@ mod tests {
         run_context: &LoopRunContext,
         fallback_user_id: &UserId,
     ) -> HostVisibleCapabilityRequest {
-        let policy = crate::local_dev_capability_policy::local_dev_capability_policy()
-            .expect("policy parses");
+        let policy =
+            crate::builtin_capability_policy::builtin_capability_policy().expect("policy parses");
         let empty_mounts = MountView::default();
 
-        local_dev_visible_capability_request(
+        visible_capability_request(
             run_context,
             fallback_user_id,
-            LocalDevVisibleCapabilityInputs {
+            VisibleCapabilityInputs {
                 workspace_mounts: &empty_mounts,
                 skill_mounts: &empty_mounts,
                 memory_mounts: &empty_mounts,
                 system_extensions_lifecycle_mounts: &empty_mounts,
                 policy: &policy,
-                extension_surface: &LocalDevExtensionSurface::default(),
+                extension_surface: &ExtensionCapabilitySurface::default(),
             },
         )
         .expect("visible request")
@@ -390,7 +390,7 @@ mod tests {
     }
 
     async fn assert_github_capabilities_visible(
-        wiring: &LocalDevCapabilityWiring,
+        wiring: &CapabilityPortWiring,
         run_context: &LoopRunContext,
     ) {
         let port = wiring
@@ -427,7 +427,7 @@ mod tests {
     }
 
     async fn assert_gsuite_capabilities_visibility(
-        wiring: &LocalDevCapabilityWiring,
+        wiring: &CapabilityPortWiring,
         run_context: &LoopRunContext,
         expected: GsuiteCapabilityVisibility,
     ) {
@@ -463,7 +463,7 @@ mod tests {
     }
 
     async fn visible_capability_ids(
-        wiring: &LocalDevCapabilityWiring,
+        wiring: &CapabilityPortWiring,
         run_context: &LoopRunContext,
     ) -> (Vec<String>, Vec<String>) {
         let port = wiring
@@ -509,7 +509,7 @@ mod tests {
             Arc::new(InMemorySessionThreadService::default()),
             user_id,
             Arc::new(
-                crate::local_dev_capability_policy::local_dev_capability_policy()
+                crate::builtin_capability_policy::builtin_capability_policy()
                     .expect("policy parses"),
             ),
             Arc::new(UnavailableModelGateway),
@@ -581,7 +581,7 @@ mod tests {
 
     struct GsuiteSurfaceHarness {
         _dir: tempfile::TempDir,
-        wiring: LocalDevCapabilityWiring,
+        wiring: CapabilityPortWiring,
         run_context: LoopRunContext,
     }
 
@@ -621,7 +621,7 @@ mod tests {
             Arc::new(InMemorySessionThreadService::default()),
             UserId::new(user).expect("user id"),
             Arc::new(
-                crate::local_dev_capability_policy::local_dev_capability_policy()
+                crate::builtin_capability_policy::builtin_capability_policy()
                     .expect("policy parses"),
             ),
             Arc::new(UnavailableModelGateway),
@@ -773,7 +773,7 @@ mod tests {
             .await
             .expect("thread exists");
         let display_previews = Arc::new(CapabilityDisplayPreviewStore::default());
-        let capability_io = LocalDevCapabilityIo::new_with_durable_previews(
+        let capability_io = StagedCapabilityIo::new_with_durable_previews(
             Arc::clone(&display_previews),
             thread_service.clone(),
             fallback_user_id.clone(),
@@ -869,7 +869,7 @@ mod tests {
         // would have appended under a mismatched scope and failed; the run-scope
         // derivation must ignore this fallback because the run carries an owner.
         let unrelated_fallback = UserId::new("env-operator-unrelated").expect("fallback user id");
-        let capability_io = LocalDevCapabilityIo::new_with_durable_previews(
+        let capability_io = StagedCapabilityIo::new_with_durable_previews(
             Arc::clone(&display_previews),
             thread_service.clone(),
             unrelated_fallback,
@@ -949,7 +949,7 @@ mod tests {
             .await
             .expect("actor-owned thread exists");
         let display_previews = Arc::new(CapabilityDisplayPreviewStore::default());
-        let capability_io = LocalDevCapabilityIo::new_with_durable_previews(
+        let capability_io = StagedCapabilityIo::new_with_durable_previews(
             Arc::clone(&display_previews),
             thread_service.clone(),
             runtime_owner_id,
@@ -1009,7 +1009,7 @@ mod tests {
         // No thread is registered, so the result cannot be made retrievable.
         let thread_service = Arc::new(InMemorySessionThreadService::default());
         let display_previews = Arc::new(CapabilityDisplayPreviewStore::default());
-        let capability_io = LocalDevCapabilityIo::new_with_durable_previews(
+        let capability_io = StagedCapabilityIo::new_with_durable_previews(
             Arc::clone(&display_previews),
             thread_service,
             fallback_user_id,
@@ -1062,7 +1062,7 @@ mod tests {
             .await
             .expect("thread exists");
         let display_previews = Arc::new(CapabilityDisplayPreviewStore::default());
-        let capability_io = LocalDevCapabilityIo::new_with_durable_previews(
+        let capability_io = StagedCapabilityIo::new_with_durable_previews(
             Arc::clone(&display_previews),
             thread_service.clone(),
             fallback_user_id,
@@ -1124,7 +1124,7 @@ mod tests {
     /// raw record (readable through `SessionThreadService`), and
     /// `delete_capability_result` must leave that durable record intact and
     /// only clear the transient staging copy — pinning the retention
-    /// invariant `37fe3ac04` fixed at the `LocalDevCapabilityIo` level
+    /// invariant `37fe3ac04` fixed at the `StagedCapabilityIo` level
     /// directly, rather than only through a rollback-path mock.
     #[tokio::test]
     async fn update_and_delete_capability_result_preserve_durable_record() {
@@ -1144,7 +1144,7 @@ mod tests {
             .await
             .expect("thread exists");
         let display_previews = Arc::new(CapabilityDisplayPreviewStore::default());
-        let capability_io = LocalDevCapabilityIo::new_with_durable_previews(
+        let capability_io = StagedCapabilityIo::new_with_durable_previews(
             Arc::clone(&display_previews),
             thread_service.clone(),
             fallback_user_id,
@@ -1246,7 +1246,7 @@ mod tests {
             .await
             .expect("thread exists");
         let display_previews = Arc::new(CapabilityDisplayPreviewStore::default());
-        let capability_io = LocalDevCapabilityIo::new_with_durable_previews(
+        let capability_io = StagedCapabilityIo::new_with_durable_previews(
             Arc::clone(&display_previews),
             thread_service,
             fallback_user_id,
@@ -1340,7 +1340,7 @@ mod tests {
             .expect("thread exists");
 
         let display_previews = Arc::new(CapabilityDisplayPreviewStore::default());
-        let capability_io = Arc::new(LocalDevCapabilityIo::new_with_durable_previews(
+        let capability_io = Arc::new(StagedCapabilityIo::new_with_durable_previews(
             Arc::clone(&display_previews),
             thread_service.clone(),
             fallback_user_id.clone(),
@@ -1436,7 +1436,7 @@ mod tests {
         // Continue reading from `next_offset` through the production
         // `result_read` capability and confirm the two chunks concatenate
         // with no gap or overlap.
-        let factory = LocalDevLoopCapabilityPortFactory {
+        let factory = RefreshingLoopCapabilityPortFactory {
             runtime,
             fallback_user_id: fallback_user_id.clone(),
             policy: Arc::clone(&local_runtime.capability_policy),
@@ -1445,7 +1445,7 @@ mod tests {
             system_extensions_lifecycle_mounts: local_runtime
                 .system_extensions_lifecycle_mounts
                 .clone(),
-            extension_surface_source: LocalDevExtensionSurfaceSource::default(),
+            extension_surface_source: ExtensionCapabilitySurfaceSource::default(),
             input_resolver,
             result_writer,
             milestone_sink: Arc::new(InMemoryLoopHostMilestoneSink::default()),
@@ -1531,7 +1531,7 @@ mod tests {
             .await
             .expect("thread exists");
         let display_previews = Arc::new(CapabilityDisplayPreviewStore::default());
-        let capability_io = LocalDevCapabilityIo::new_with_durable_previews(
+        let capability_io = StagedCapabilityIo::new_with_durable_previews(
             Arc::clone(&display_previews),
             thread_service,
             fallback_user_id,
@@ -1677,7 +1677,7 @@ mod tests {
             .expect("thread exists");
 
         let display_previews = Arc::new(CapabilityDisplayPreviewStore::default());
-        let capability_io = Arc::new(LocalDevCapabilityIo::new_with_durable_previews(
+        let capability_io = Arc::new(StagedCapabilityIo::new_with_durable_previews(
             Arc::clone(&display_previews),
             thread_service.clone(),
             fallback_user_id.clone(),
@@ -1740,7 +1740,7 @@ mod tests {
             .await
             .expect("finalized reference exists");
 
-        let factory = LocalDevLoopCapabilityPortFactory {
+        let factory = RefreshingLoopCapabilityPortFactory {
             runtime,
             fallback_user_id: fallback_user_id.clone(),
             policy: Arc::clone(&local_runtime.capability_policy),
@@ -1749,7 +1749,7 @@ mod tests {
             system_extensions_lifecycle_mounts: local_runtime
                 .system_extensions_lifecycle_mounts
                 .clone(),
-            extension_surface_source: LocalDevExtensionSurfaceSource::default(),
+            extension_surface_source: ExtensionCapabilitySurfaceSource::default(),
             input_resolver,
             result_writer,
             milestone_sink: Arc::new(InMemoryLoopHostMilestoneSink::default()),
@@ -1829,7 +1829,7 @@ mod tests {
 
     #[tokio::test]
     async fn capability_io_resolves_input_refs_repeatedly() {
-        let capability_io = LocalDevCapabilityIo::default();
+        let capability_io = StagedCapabilityIo::default();
         let run_context = run_context("repeat-input").await;
         let input_ref = capability_io
             .register_provider_tool_call_input(
@@ -1854,7 +1854,7 @@ mod tests {
 
     #[tokio::test]
     async fn capability_io_rejects_cross_run_and_unstaged_input_refs() {
-        let capability_io = LocalDevCapabilityIo::default();
+        let capability_io = StagedCapabilityIo::default();
         let current_context = run_context("input-scope-a").await;
         let other_context = run_context("input-scope-b").await;
         let input_ref = capability_io
@@ -1906,8 +1906,8 @@ mod tests {
 
     #[test]
     fn local_dev_builtin_surface_grants_capability_classes() {
-        let policy = crate::local_dev_capability_policy::local_dev_capability_policy()
-            .expect("policy parses");
+        let policy =
+            crate::builtin_capability_policy::builtin_capability_policy().expect("policy parses");
         let capability_ids = policy
             .capability_ids()
             .map(|capability| capability.as_str())
@@ -1917,7 +1917,7 @@ mod tests {
         assert!(capability_ids.contains(&APPLY_PATCH_CAPABILITY_ID));
         assert!(capability_ids.contains(&SKILL_LIST_CAPABILITY_ID));
         // SKILL_ACTIVATE_CAPABILITY_ID is a synthetic capability added by
-        // wrap_local_dev_synthetic_capabilities, not a policy capability.
+        // wrap_synthetic_capabilities, not a policy capability.
         assert!(!capability_ids.contains(&SKILL_ACTIVATE_CAPABILITY_ID));
         assert!(capability_ids.contains(&SKILL_INSTALL_CAPABILITY_ID));
         assert!(capability_ids.contains(&SKILL_REMOVE_CAPABILITY_ID));
@@ -1930,7 +1930,7 @@ mod tests {
             EffectKind::WriteFilesystem,
         ];
         let local_dev_shell_network_policy =
-            crate::local_dev_capability_policy::local_dev_wildcard_network_policy();
+            crate::builtin_capability_policy::dev_wildcard_network_policy();
         assert_eq!(
             local_dev_allowed_effects,
             vec![
@@ -2205,14 +2205,13 @@ mod tests {
         )
         .expect("skill context source");
         let activation_source = skill_context.activation_source;
-        let capability_io = Arc::new(LocalDevCapabilityIo::default());
+        let capability_io = Arc::new(StagedCapabilityIo::default());
         let input_resolver: Arc<dyn LoopCapabilityInputResolver> = capability_io.clone();
         let result_writer: Arc<dyn LoopCapabilityResultWriter> = capability_io.clone();
         let policy = Arc::new(
-            crate::local_dev_capability_policy::local_dev_capability_policy()
-                .expect("policy parses"),
+            crate::builtin_capability_policy::builtin_capability_policy().expect("policy parses"),
         );
-        let factory = LocalDevLoopCapabilityPortFactory {
+        let factory = RefreshingLoopCapabilityPortFactory {
             runtime,
             fallback_user_id: UserId::new("skill-activate-user").expect("user id"),
             policy,
@@ -2221,7 +2220,7 @@ mod tests {
             system_extensions_lifecycle_mounts: local_runtime
                 .system_extensions_lifecycle_mounts
                 .clone(),
-            extension_surface_source: LocalDevExtensionSurfaceSource::default(),
+            extension_surface_source: ExtensionCapabilitySurfaceSource::default(),
             input_resolver,
             result_writer,
             milestone_sink: Arc::new(InMemoryLoopHostMilestoneSink::default()),
@@ -2345,8 +2344,7 @@ mod tests {
         )
         .expect("skill context source");
         let policy = Arc::new(
-            crate::local_dev_capability_policy::local_dev_capability_policy()
-                .expect("policy parses"),
+            crate::builtin_capability_policy::builtin_capability_policy().expect("policy parses"),
         );
         let wiring = capability_wiring(
             &services,
@@ -2414,14 +2412,13 @@ mod tests {
             )
             .await
             .expect("external tool catalog registers");
-        let capability_io = Arc::new(LocalDevCapabilityIo::default());
+        let capability_io = Arc::new(StagedCapabilityIo::default());
         let input_resolver: Arc<dyn LoopCapabilityInputResolver> = capability_io.clone();
         let result_writer: Arc<dyn LoopCapabilityResultWriter> = capability_io.clone();
         let policy = Arc::new(
-            crate::local_dev_capability_policy::local_dev_capability_policy()
-                .expect("policy parses"),
+            crate::builtin_capability_policy::builtin_capability_policy().expect("policy parses"),
         );
-        let factory = LocalDevLoopCapabilityPortFactory {
+        let factory = RefreshingLoopCapabilityPortFactory {
             runtime,
             fallback_user_id: UserId::new("external-tool-provider-name-user").expect("user id"),
             policy,
@@ -2430,7 +2427,7 @@ mod tests {
             system_extensions_lifecycle_mounts: local_runtime
                 .system_extensions_lifecycle_mounts
                 .clone(),
-            extension_surface_source: LocalDevExtensionSurfaceSource::default(),
+            extension_surface_source: ExtensionCapabilitySurfaceSource::default(),
             input_resolver,
             result_writer,
             milestone_sink: Arc::new(InMemoryLoopHostMilestoneSink::default()),
@@ -2496,10 +2493,10 @@ mod tests {
             .local_runtime
             .as_ref()
             .expect("local runtime substrate");
-        let capability_io = Arc::new(LocalDevCapabilityIo::default());
+        let capability_io = Arc::new(StagedCapabilityIo::default());
         let input_resolver: Arc<dyn LoopCapabilityInputResolver> = capability_io.clone();
         let result_writer: Arc<dyn LoopCapabilityResultWriter> = capability_io.clone();
-        let factory = LocalDevLoopCapabilityPortFactory {
+        let factory = RefreshingLoopCapabilityPortFactory {
             runtime,
             fallback_user_id: UserId::new("project-create-fallback-user").expect("user id"),
             policy: Arc::clone(&local_runtime.capability_policy),
@@ -2508,7 +2505,7 @@ mod tests {
             system_extensions_lifecycle_mounts: local_runtime
                 .system_extensions_lifecycle_mounts
                 .clone(),
-            extension_surface_source: LocalDevExtensionSurfaceSource::default(),
+            extension_surface_source: ExtensionCapabilitySurfaceSource::default(),
             input_resolver,
             result_writer,
             milestone_sink: Arc::new(InMemoryLoopHostMilestoneSink::default()),
@@ -2688,14 +2685,14 @@ mod tests {
         );
 
         let display_previews = Arc::new(CapabilityDisplayPreviewStore::default());
-        let capability_io = Arc::new(LocalDevCapabilityIo::new_with_durable_previews(
+        let capability_io = Arc::new(StagedCapabilityIo::new_with_durable_previews(
             display_previews,
             thread_service.clone(),
             fallback_user_id.clone(),
         ));
         let input_resolver: Arc<dyn LoopCapabilityInputResolver> = capability_io.clone();
         let result_writer: Arc<dyn LoopCapabilityResultWriter> = capability_io.clone();
-        let factory = LocalDevLoopCapabilityPortFactory {
+        let factory = RefreshingLoopCapabilityPortFactory {
             runtime,
             fallback_user_id,
             policy: Arc::clone(&local_runtime.capability_policy),
@@ -2704,7 +2701,7 @@ mod tests {
             system_extensions_lifecycle_mounts: local_runtime
                 .system_extensions_lifecycle_mounts
                 .clone(),
-            extension_surface_source: LocalDevExtensionSurfaceSource::default(),
+            extension_surface_source: ExtensionCapabilitySurfaceSource::default(),
             input_resolver,
             result_writer,
             milestone_sink: Arc::new(InMemoryLoopHostMilestoneSink::default()),
@@ -3018,10 +3015,10 @@ mod tests {
             .expect("local runtime substrate");
         let fallback_user_id = UserId::new("result-read-validation-owner").expect("user id");
         let run_context = run_context("result-read-validation").await;
-        let capability_io = Arc::new(LocalDevCapabilityIo::default());
+        let capability_io = Arc::new(StagedCapabilityIo::default());
         let input_resolver: Arc<dyn LoopCapabilityInputResolver> = capability_io.clone();
         let result_writer: Arc<dyn LoopCapabilityResultWriter> = capability_io.clone();
-        let factory = LocalDevLoopCapabilityPortFactory {
+        let factory = RefreshingLoopCapabilityPortFactory {
             runtime,
             fallback_user_id,
             policy: Arc::clone(&local_runtime.capability_policy),
@@ -3030,7 +3027,7 @@ mod tests {
             system_extensions_lifecycle_mounts: local_runtime
                 .system_extensions_lifecycle_mounts
                 .clone(),
-            extension_surface_source: LocalDevExtensionSurfaceSource::default(),
+            extension_surface_source: ExtensionCapabilitySurfaceSource::default(),
             input_resolver,
             result_writer,
             milestone_sink: Arc::new(InMemoryLoopHostMilestoneSink::default()),
@@ -3434,14 +3431,14 @@ mod tests {
             FilesystemSessionThreadService::new(scoped_thread_filesystem(backend)),
         );
         let display_previews = Arc::new(CapabilityDisplayPreviewStore::default());
-        let capability_io = Arc::new(LocalDevCapabilityIo::new_with_durable_previews(
+        let capability_io = Arc::new(StagedCapabilityIo::new_with_durable_previews(
             display_previews,
             thread_service.clone(),
             fallback_user_id.clone(),
         ));
         let input_resolver: Arc<dyn LoopCapabilityInputResolver> = capability_io.clone();
         let result_writer: Arc<dyn LoopCapabilityResultWriter> = capability_io.clone();
-        let factory = LocalDevLoopCapabilityPortFactory {
+        let factory = RefreshingLoopCapabilityPortFactory {
             runtime,
             fallback_user_id,
             policy: Arc::clone(&local_runtime.capability_policy),
@@ -3450,7 +3447,7 @@ mod tests {
             system_extensions_lifecycle_mounts: local_runtime
                 .system_extensions_lifecycle_mounts
                 .clone(),
-            extension_surface_source: LocalDevExtensionSurfaceSource::default(),
+            extension_surface_source: ExtensionCapabilitySurfaceSource::default(),
             input_resolver,
             result_writer,
             milestone_sink: Arc::new(InMemoryLoopHostMilestoneSink::default()),
@@ -3552,7 +3549,7 @@ mod tests {
                 target_provider,
             ));
         let policy = Arc::clone(&local_runtime.capability_policy);
-        let capability_io = Arc::new(LocalDevCapabilityIo::default());
+        let capability_io = Arc::new(StagedCapabilityIo::default());
         let input_resolver: Arc<dyn LoopCapabilityInputResolver> = capability_io.clone();
         let result_writer: Arc<dyn LoopCapabilityResultWriter> = capability_io.clone();
         let fallback_user_id = UserId::new("outbound-delivery-fallback-user").expect("user id");
@@ -3567,7 +3564,7 @@ mod tests {
                 local_runtime.persistent_approval_policies.clone(),
             ),
         );
-        let factory = LocalDevLoopCapabilityPortFactory {
+        let factory = RefreshingLoopCapabilityPortFactory {
             runtime,
             fallback_user_id: fallback_user_id.clone(),
             policy,
@@ -3576,7 +3573,7 @@ mod tests {
             system_extensions_lifecycle_mounts: local_runtime
                 .system_extensions_lifecycle_mounts
                 .clone(),
-            extension_surface_source: LocalDevExtensionSurfaceSource::default(),
+            extension_surface_source: ExtensionCapabilitySurfaceSource::default(),
             input_resolver,
             result_writer,
             milestone_sink: Arc::new(InMemoryLoopHostMilestoneSink::default()),
@@ -3796,7 +3793,7 @@ mod tests {
         let missing_approval = local_runtime
             .capability_policy
             .lease_approval_for(
-                crate::local_dev_capability_policy::LocalDevApprovalPolicyAction::Dispatch {
+                crate::builtin_capability_policy::BuiltinApprovalPolicyAction::Dispatch {
                     capability: &set_capability_id,
                 },
                 &local_runtime.workspace_mounts,
@@ -3922,7 +3919,7 @@ mod tests {
         let approval = local_runtime
             .capability_policy
             .lease_approval_for(
-                crate::local_dev_capability_policy::LocalDevApprovalPolicyAction::Dispatch {
+                crate::builtin_capability_policy::BuiltinApprovalPolicyAction::Dispatch {
                     capability: &set_capability_id,
                 },
                 &local_runtime.workspace_mounts,
@@ -4280,13 +4277,12 @@ mod tests {
             .as_ref()
             .expect("local runtime substrate");
         let policy = Arc::new(
-            crate::local_dev_capability_policy::local_dev_capability_policy()
-                .expect("policy parses"),
+            crate::builtin_capability_policy::builtin_capability_policy().expect("policy parses"),
         );
-        let capability_io = Arc::new(LocalDevCapabilityIo::default());
+        let capability_io = Arc::new(StagedCapabilityIo::default());
         let input_resolver: Arc<dyn LoopCapabilityInputResolver> = capability_io.clone();
         let result_writer: Arc<dyn LoopCapabilityResultWriter> = capability_io;
-        let factory = LocalDevLoopCapabilityPortFactory {
+        let factory = RefreshingLoopCapabilityPortFactory {
             runtime,
             fallback_user_id: UserId::new("outbound-delivery-fallback-user").expect("user id"),
             policy,
@@ -4295,7 +4291,7 @@ mod tests {
             system_extensions_lifecycle_mounts: local_runtime
                 .system_extensions_lifecycle_mounts
                 .clone(),
-            extension_surface_source: LocalDevExtensionSurfaceSource::default(),
+            extension_surface_source: ExtensionCapabilitySurfaceSource::default(),
             input_resolver,
             result_writer,
             milestone_sink: Arc::new(InMemoryLoopHostMilestoneSink::default()),
@@ -4392,13 +4388,12 @@ mod tests {
             .expect("local runtime substrate"); // safety: test-only assertion in #[cfg(test)] module.
         let workspace_mounts = local_runtime.workspace_mounts.clone();
         let policy = Arc::new(
-            crate::local_dev_capability_policy::local_dev_capability_policy()
-                .expect("policy parses"),
+            crate::builtin_capability_policy::builtin_capability_policy().expect("policy parses"),
         );
-        let capability_io = Arc::new(LocalDevCapabilityIo::default());
+        let capability_io = Arc::new(StagedCapabilityIo::default());
         let input_resolver: Arc<dyn LoopCapabilityInputResolver> = capability_io.clone();
         let result_writer: Arc<dyn LoopCapabilityResultWriter> = capability_io.clone();
-        let factory = LocalDevLoopCapabilityPortFactory {
+        let factory = RefreshingLoopCapabilityPortFactory {
             runtime,
             fallback_user_id: UserId::new("local-yolo-host-user").expect("user id"), // safety: literal test id is valid.
             policy,
@@ -4407,7 +4402,7 @@ mod tests {
             system_extensions_lifecycle_mounts: local_runtime
                 .system_extensions_lifecycle_mounts
                 .clone(),
-            extension_surface_source: LocalDevExtensionSurfaceSource::default(),
+            extension_surface_source: ExtensionCapabilitySurfaceSource::default(),
             input_resolver,
             result_writer,
             milestone_sink: Arc::new(InMemoryLoopHostMilestoneSink::default()),
@@ -4638,13 +4633,12 @@ mod tests {
             .expect("local runtime substrate"); // safety: test-only assertion in #[cfg(test)] module.
         let workspace_mounts = local_runtime.workspace_mounts.clone();
         let policy = Arc::new(
-            crate::local_dev_capability_policy::local_dev_capability_policy()
-                .expect("policy parses"),
+            crate::builtin_capability_policy::builtin_capability_policy().expect("policy parses"),
         );
-        let capability_io = Arc::new(LocalDevCapabilityIo::default());
+        let capability_io = Arc::new(StagedCapabilityIo::default());
         let input_resolver: Arc<dyn LoopCapabilityInputResolver> = capability_io.clone();
         let result_writer: Arc<dyn LoopCapabilityResultWriter> = capability_io.clone();
-        let factory = LocalDevLoopCapabilityPortFactory {
+        let factory = RefreshingLoopCapabilityPortFactory {
             runtime,
             fallback_user_id: UserId::new("local-dev-skill-port-user").expect("user id"), // safety: literal test id is valid.
             policy,
@@ -4653,7 +4647,7 @@ mod tests {
             system_extensions_lifecycle_mounts: local_runtime
                 .system_extensions_lifecycle_mounts
                 .clone(),
-            extension_surface_source: LocalDevExtensionSurfaceSource::default(),
+            extension_surface_source: ExtensionCapabilitySurfaceSource::default(),
             input_resolver,
             result_writer,
             milestone_sink: Arc::new(InMemoryLoopHostMilestoneSink::default()),
@@ -4753,13 +4747,12 @@ mod tests {
             .expect("local runtime substrate"); // safety: test-only assertion in #[cfg(test)] module.
         let workspace_mounts = local_runtime.workspace_mounts.clone();
         let policy = Arc::new(
-            crate::local_dev_capability_policy::local_dev_capability_policy()
-                .expect("policy parses"),
+            crate::builtin_capability_policy::builtin_capability_policy().expect("policy parses"),
         );
-        let capability_io = Arc::new(LocalDevCapabilityIo::default());
+        let capability_io = Arc::new(StagedCapabilityIo::default());
         let input_resolver: Arc<dyn LoopCapabilityInputResolver> = capability_io.clone();
         let result_writer: Arc<dyn LoopCapabilityResultWriter> = capability_io.clone();
-        let factory = LocalDevLoopCapabilityPortFactory {
+        let factory = RefreshingLoopCapabilityPortFactory {
             runtime,
             fallback_user_id: UserId::new("local-dev-no-host-user").expect("user id"), // safety: literal test id is valid.
             policy,
@@ -4768,7 +4761,7 @@ mod tests {
             system_extensions_lifecycle_mounts: local_runtime
                 .system_extensions_lifecycle_mounts
                 .clone(),
-            extension_surface_source: LocalDevExtensionSurfaceSource::default(),
+            extension_surface_source: ExtensionCapabilitySurfaceSource::default(),
             input_resolver,
             result_writer,
             milestone_sink: Arc::new(InMemoryLoopHostMilestoneSink::default()),
@@ -4942,7 +4935,7 @@ mod tests {
             Arc::new(InMemorySessionThreadService::default()),
             UserId::new("local-dev-github-user").expect("user id"),
             Arc::new(
-                crate::local_dev_capability_policy::local_dev_capability_policy()
+                crate::builtin_capability_policy::builtin_capability_policy()
                     .expect("policy parses"),
             ),
             Arc::new(UnavailableModelGateway),
@@ -4971,7 +4964,7 @@ mod tests {
             Arc::new(InMemorySessionThreadService::default()),
             UserId::new("local-dev-live-github-user").expect("user id"),
             Arc::new(
-                crate::local_dev_capability_policy::local_dev_capability_policy()
+                crate::builtin_capability_policy::builtin_capability_policy()
                     .expect("policy parses"),
             ),
             Arc::new(UnavailableModelGateway),
@@ -5098,7 +5091,7 @@ mod tests {
             thread_service,
             fallback_user_id,
             Arc::new(
-                crate::local_dev_capability_policy::local_dev_capability_policy()
+                crate::builtin_capability_policy::builtin_capability_policy()
                     .expect("policy parses"),
             ),
             Arc::new(UnavailableModelGateway),
@@ -5168,7 +5161,7 @@ mod tests {
             Arc::new(InMemorySessionThreadService::default()),
             UserId::new("local-dev-mid-response-user").expect("user id"),
             Arc::new(
-                crate::local_dev_capability_policy::local_dev_capability_policy()
+                crate::builtin_capability_policy::builtin_capability_policy()
                     .expect("policy parses"),
             ),
             Arc::new(UnavailableModelGateway),

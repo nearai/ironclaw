@@ -970,7 +970,7 @@ fn reject_non_loopback_privileged_local_runtime(
     }
 
     anyhow::bail!(
-        "`ironclaw-reborn serve` refuses non-loopback listener {host} because the selected \
+        "`ironclaw serve` refuses non-loopback listener {host} because the selected \
          runtime policy grants trusted-laptop host access (host-home filesystem, local host \
          process, direct network, inherited environment). Bind to a loopback host such as \
          127.0.0.1 or ::1, or choose a less privileged profile."
@@ -1187,8 +1187,8 @@ fn print_serve_banner(
     allowed_origins: &[String],
     readiness: &RebornReadiness,
 ) {
-    eprintln!("ironclaw-reborn: WebChat v2 listener");
-    eprintln!("  binary    : ironclaw-reborn");
+    eprintln!("ironclaw: WebChat v2 listener");
+    eprintln!("  binary    : ironclaw");
     eprintln!("  version   : {}", env!("CARGO_PKG_VERSION"));
     eprintln!("  listen    : http://{listen_addr}");
     eprintln!("  auth      : env-bearer (token ${env_token_var}, user ${env_user_id_var})");

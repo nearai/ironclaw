@@ -251,7 +251,7 @@ if [ "$#" -gt 0 ]; then
     original_arg_count=$((original_arg_count - 1))
     set -- "$@" "$arg"
   done
-  exec ironclaw-reborn "$@"
+  exec ironclaw "$@"
 fi
 
 set -- serve --host "$host" --port "$port"
@@ -260,4 +260,4 @@ if is_truthy "${IRONCLAW_REBORN_CONFIRM_HOST_ACCESS:-}"; then
   set -- "$@" --confirm-host-access
 fi
 
-exec ironclaw-reborn "$@"
+exec ironclaw "$@"

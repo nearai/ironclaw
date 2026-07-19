@@ -2,6 +2,14 @@
 //! API key, then persist both — the secret store write lands before the
 //! `config.toml` selection (see [`provision_llm_credentials`]'s doc).
 
+// Feature-off stubs preserve the unconditional onboarding call shape when the
+// provider-admin surface is unavailable; their full variants are intentionally
+// unreachable in slim builds.
+#![cfg_attr(
+    not(all(feature = "libsql", feature = "root-llm-provider")),
+    allow(dead_code)
+)]
+
 use std::path::Path;
 
 use ironclaw_reborn_config::RebornHome;
@@ -517,7 +525,7 @@ fn probe_and_confirm_key(
         if attempt >= MAX_PROBE_ATTEMPTS {
             return Err(LlmCredentialPromptError::Other(anyhow::anyhow!(
                 "no working API key for `{provider_id}` after {MAX_PROBE_ATTEMPTS} attempts; \
-                 configure it later with `ironclaw-reborn models set-provider {provider_id}`"
+                 configure it later with `ironclaw models set-provider {provider_id}`"
             )));
         }
         attempt += 1;

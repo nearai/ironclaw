@@ -12,9 +12,9 @@ It currently supports:
 
 ```bash
 ironclaw-reborn --help
-ironclaw-reborn channels list
-ironclaw-reborn channels list --json
-ironclaw-reborn channels list --verbose
+ironclaw-reborn channels list              # disabled — errors, see below
+ironclaw-reborn channels list --json       # disabled — errors, see below
+ironclaw-reborn channels list --verbose    # disabled — errors, see below
 ironclaw-reborn completion --shell bash
 ironclaw-reborn completion --shell zsh
 ironclaw-reborn config path
@@ -24,12 +24,12 @@ ironclaw-reborn extension search github --json
 ironclaw-reborn extension install github-mcp
 ironclaw-reborn extension activate github-mcp
 ironclaw-reborn extension remove github-mcp
-ironclaw-reborn hooks list
-ironclaw-reborn hooks list --json
-ironclaw-reborn hooks list --verbose
-ironclaw-reborn logs
-ironclaw-reborn logs --json
-ironclaw-reborn logs --verbose
+ironclaw-reborn hooks list                 # disabled — errors, see below
+ironclaw-reborn hooks list --json          # disabled — errors, see below
+ironclaw-reborn hooks list --verbose       # disabled — errors, see below
+ironclaw-reborn logs                       # disabled — errors, see below
+ironclaw-reborn logs --json                # disabled — errors, see below
+ironclaw-reborn logs --verbose             # disabled — errors, see below
 ironclaw-reborn models list
 ironclaw-reborn models list --json
 ironclaw-reborn models status
@@ -54,8 +54,20 @@ ironclaw-reborn skills list --verbose
 The `traces` command tree is a contributor-only trace client; see
 `crates/ironclaw_reborn_cli/src/commands/traces/` for its subcommands.
 
+**`channels`, `hooks`, and `logs` are disabled.** They stay in `--help` and
+shell completions so the eventual real implementation has a stable command
+name, but invoking `channels list`, `hooks list`, or `logs` returns an explicit
+`` `<command>` is not implemented yet `` error (non-zero exit) instead of the
+fake-success placeholder output ( `configured: 0` / `status: not-wired`) they
+used to print. Do not treat that old placeholder shape as the current
+contract — see the per-command sections below. `skills` is the one CLI
+surface that looks similar (it also used to read a not-yet-real registry) but
+is a genuine working implementation reading real `SKILL.md` files; it is not
+part of this disable.
+
 It intentionally does not yet support:
 
+- real `channels`/`hooks`/`logs` backends (see above);
 - replacing `ironclaw` behavior;
 - daemon/service installation;
 - v1 config, DB, settings, or secrets migration;
@@ -225,11 +237,12 @@ from a browser on the same host against `127.0.0.1`.
 
 ## Commands
 
-### `channels list`
+### `channels list` — disabled
 
-Reports configured Reborn channels without resolving Reborn home, reading v1 channel config, or creating directories.
-
-The Reborn channel registry is not wired yet, so the command currently reports an explicit empty surface:
+The Reborn channel registry is not wired yet. The command stays visible in
+`--help`/completions for a stable future name, but invoking `channels list`
+returns an error and a non-zero exit instead of resolving Reborn home, reading v1 channel
+config, or printing channel data:
 
 ```bash
 cargo run -q -p ironclaw_reborn_cli --bin ironclaw-reborn -- channels list
@@ -237,11 +250,16 @@ cargo run -q -p ironclaw_reborn_cli --bin ironclaw-reborn -- channels list --jso
 cargo run -q -p ironclaw_reborn_cli --bin ironclaw-reborn -- channels list --verbose
 ```
 
-Expected fields include:
+All three forms (default/`--json`/`--verbose`) print the same message to
+stderr and exit non-zero:
 
-- `configured: 0`
-- `status: not-wired`
-- `v1_state: not-used`
+```
+Error: `channels list` is not implemented yet
+```
+
+Older revisions of this doc described a fake-success placeholder shape
+(`configured: 0`, `status: not-wired`, `v1_state: not-used`) — that output no
+longer exists; do not implement against it.
 
 ### `extension`
 
@@ -310,11 +328,11 @@ Expected fields include:
 - `v1_state: not-used`
 - `driver_registry: initialized`
 
-### `hooks list`
+### `hooks list` — disabled
 
-Reports configured Reborn hooks without resolving Reborn home, reading v1 hook config, or creating directories.
-
-The Reborn hook registry is not wired yet, so the command currently reports an explicit empty surface:
+Same treatment as `channels list` above: the Reborn hook registry is not
+wired yet, so the command stays visible but invoking `hooks list` errors instead
+of reporting hook data:
 
 ```bash
 cargo run -q -p ironclaw_reborn_cli --bin ironclaw-reborn -- hooks list
@@ -322,17 +340,14 @@ cargo run -q -p ironclaw_reborn_cli --bin ironclaw-reborn -- hooks list --json
 cargo run -q -p ironclaw_reborn_cli --bin ironclaw-reborn -- hooks list --verbose
 ```
 
-Expected fields include:
+```
+Error: `hooks list` is not implemented yet
+```
 
-- `configured: 0`
-- `status: not-wired`
-- `v1_state: not-used`
+### `logs` — disabled
 
-### `logs`
-
-Reports Reborn log availability without resolving Reborn home, reading v1 gateway logs, or creating directories.
-
-The Reborn log source is not wired yet, so the command currently reports an explicit empty surface:
+Same treatment: the Reborn log source is not wired yet, so `logs` stays
+visible but invoking it errors instead of reporting log data:
 
 ```bash
 cargo run -q -p ironclaw_reborn_cli --bin ironclaw-reborn -- logs
@@ -340,11 +355,9 @@ cargo run -q -p ironclaw_reborn_cli --bin ironclaw-reborn -- logs --json
 cargo run -q -p ironclaw_reborn_cli --bin ironclaw-reborn -- logs --verbose
 ```
 
-Expected fields include:
-
-- `entries: 0`
-- `status: not-wired`
-- `v1_state: not-used`
+```
+Error: `logs` is not implemented yet
+```
 
 ### `onboard`
 
@@ -415,6 +428,27 @@ The secret value still lives in the environment under the catalog's
 records the variable *name*, never the value. Once `[llm.default]` exists it
 selects the provider; `LLM_BACKEND` is only an env fallback when no default slot
 is configured.
+
+All of the above requires the `root-llm-provider` Cargo feature, which is
+**on by default** (`default = ["root-llm-provider", "libsql"]` in
+`crates/ironclaw_reborn_cli/Cargo.toml`). A binary built with
+`--no-default-features` (or any feature set that drops `root-llm-provider`)
+does not have `RebornProviderAdmin` linked in, so all four `models`
+subcommands error instead:
+
+```bash
+cargo run -q -p ironclaw_reborn_cli --no-default-features --features libsql --bin ironclaw-reborn -- models list
+```
+
+```
+Error: `models list` requires the root-llm-provider feature; v1_state: not-used
+```
+
+`set`/`set-provider` report the same `requires the root-llm-provider feature`
+error in that build; `list`/`status` used to instead print placeholder text
+(`routes: not-configured`, `v1_state: not-used`) as if the command had
+succeeded — that placeholder path was removed so all four subcommands fail
+the same way when the feature is off.
 
 ### `profile list`
 
@@ -592,12 +626,14 @@ cargo test -p ironclaw_runner model_slots_are_exposed_in_cli_display_order
 cargo test -p ironclaw_architecture reborn
 cargo clippy -p ironclaw_reborn_cli --all-targets -- -D warnings
 cargo run -q -p ironclaw_reborn_cli --bin ironclaw-reborn -- --help
-cargo run -q -p ironclaw_reborn_cli --bin ironclaw-reborn -- channels list
-cargo run -q -p ironclaw_reborn_cli --bin ironclaw-reborn -- completion --shell zsh >/tmp/ironclaw-reborn.zsh
+# channels/hooks/logs are disabled — these are expected to exit non-zero
+# with "is not implemented yet", not to succeed.
+cargo run -q -p ironclaw_reborn_cli --bin ironclaw-reborn -- channels list; echo "exit: $?"
+cargo run -q -p ironclaw_reborn_cli --bin ironclaw-reborn -- completion --shell zsh >"$(mktemp -d)/ironclaw-reborn.zsh"
 IRONCLAW_REBORN_HOME="$(mktemp -d)/reborn-home" \
   cargo run -q -p ironclaw_reborn_cli --bin ironclaw-reborn -- config path
-cargo run -q -p ironclaw_reborn_cli --bin ironclaw-reborn -- hooks list
-cargo run -q -p ironclaw_reborn_cli --bin ironclaw-reborn -- logs
+cargo run -q -p ironclaw_reborn_cli --bin ironclaw-reborn -- hooks list; echo "exit: $?"
+cargo run -q -p ironclaw_reborn_cli --bin ironclaw-reborn -- logs; echo "exit: $?"
 cargo run -q -p ironclaw_reborn_cli --bin ironclaw-reborn -- models status
 cargo run -q -p ironclaw_reborn_cli --bin ironclaw-reborn -- profile list
 IRONCLAW_REBORN_HOME="$(mktemp -d)/reborn-home" \

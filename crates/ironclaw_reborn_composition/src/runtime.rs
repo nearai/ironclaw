@@ -106,8 +106,8 @@ use ironclaw_turns::run_profile::UserProfileContext;
 
 use self::latency::{trace_runtime_latency_error, trace_runtime_latency_ok};
 use self::runtime_turn_scheduler::RuntimeTurnScheduler;
-use crate::factory::{LocalDevTurnStateStore, builtin_extension_registry};
-use crate::local_dev_capability_policy::{LocalDevCapabilityPolicy, local_dev_capability_policy};
+use crate::builtin_capability_policy::{BuiltinCapabilityPolicy, builtin_capability_policy};
+use crate::factory::{ComposedTurnStateStore, builtin_extension_registry};
 #[cfg(any(test, feature = "test-support"))]
 use crate::outbound::outbound_preferences::OutboundDeliveryTargetEntry;
 use crate::outbound::{
@@ -185,7 +185,7 @@ impl HostUserProfileSource for MemoryBackedUserProfileSourceAdapter {
 }
 
 struct RuntimeStoreParts<'a> {
-    local_runtime: Option<&'a crate::factory::RebornLocalRuntimeServices>,
+    local_runtime: Option<&'a crate::factory::RebornRuntimeSubstrate>,
     turn_state_store: Arc<dyn RuntimeTurnStateStore>,
     checkpoint_state_store: Arc<dyn ironclaw_turns::CheckpointStateStore>,
     loop_checkpoint_store: Arc<dyn ironclaw_turns::LoopCheckpointStore>,
@@ -300,7 +300,7 @@ impl AwaitDependentRunEvidenceStore for NonDurableAwaitDependentRunEvidence {
 }
 
 fn local_runtime_parts(
-    local_runtime: &crate::factory::RebornLocalRuntimeServices,
+    local_runtime: &crate::factory::RebornRuntimeSubstrate,
 ) -> RuntimeStoreParts<'_> {
     #[cfg(any(feature = "libsql", feature = "postgres"))]
     let subagent_goal_store = Arc::new(FilesystemSubagentGoalStore::new(Arc::clone(
@@ -660,7 +660,7 @@ pub struct RebornRuntime {
     /// wired (e.g. production-parts launches); the durable filesystem store
     /// already persists every transition, so it needs no shutdown flush.
     #[cfg(feature = "inmemory-turn-state")]
-    turn_state_flush: Option<Arc<LocalDevTurnStateStore>>,
+    turn_state_flush: Option<Arc<ComposedTurnStateStore>>,
     turn_tree_store: Arc<dyn TurnSpawnTreeStateStore>,
     thread_service: Arc<dyn SessionThreadService>,
     thread_scope: ThreadScope,
@@ -709,8 +709,8 @@ pub struct RebornRuntime {
     webui_event_log: Arc<dyn DurableEventLog>,
     default_run_profile_id: String,
     send_locks: Mutex<HashMap<ConversationId, Arc<Mutex<()>>>>,
-    skill_activation_source: Option<Arc<LocalDevSelectableSkillContextSource>>,
-    skill_execution_adapter: Option<Arc<LocalDevSkillExecutionAdapter>>,
+    skill_activation_source: Option<Arc<ComposedSelectableSkillContextSource>>,
+    skill_execution_adapter: Option<Arc<ComposedSkillExecutionAdapter>>,
     /// Operator boot config, carried so the WebUI facade can compose the
     /// LLM-config settings service over `providers.json` / `config.toml`.
     #[cfg(feature = "root-llm-provider")]
@@ -762,14 +762,14 @@ impl RegistryPersistentApprovalGranteeResolver {
 /// `local_runtime.turn_state` as the turn-run snapshot source — production
 /// behavior is unchanged by the seam below.
 pub(crate) fn build_local_dev_approval_interaction_service(
-    local_runtime: &crate::factory::RebornLocalRuntimeServices,
-    local_dev_capability_policy: Arc<LocalDevCapabilityPolicy>,
+    local_runtime: &crate::factory::RebornRuntimeSubstrate,
+    builtin_capability_policy: Arc<BuiltinCapabilityPolicy>,
     turn_coordinator: Arc<dyn TurnCoordinator>,
     audit_sink: Option<Arc<dyn ironclaw_events::AuditSink>>,
 ) -> Result<Arc<dyn ApprovalInteractionService>, RebornRuntimeError> {
     build_local_dev_approval_interaction_service_with_turn_run_source(
         local_runtime,
-        local_dev_capability_policy,
+        builtin_capability_policy,
         turn_coordinator,
         audit_sink,
         Arc::clone(&local_runtime.turn_state) as Arc<dyn TurnRunSnapshotSource>,
@@ -787,13 +787,13 @@ pub(crate) fn build_local_dev_approval_interaction_service(
 /// `local_runtime.turn_state` as the source, so production behavior is
 /// unchanged.
 pub(crate) fn build_local_dev_approval_interaction_service_with_turn_run_source(
-    local_runtime: &crate::factory::RebornLocalRuntimeServices,
-    local_dev_capability_policy: Arc<LocalDevCapabilityPolicy>,
+    local_runtime: &crate::factory::RebornRuntimeSubstrate,
+    builtin_capability_policy: Arc<BuiltinCapabilityPolicy>,
     turn_coordinator: Arc<dyn TurnCoordinator>,
     audit_sink: Option<Arc<dyn ironclaw_events::AuditSink>>,
     turn_run_source: Arc<dyn TurnRunSnapshotSource>,
 ) -> Result<Arc<dyn ApprovalInteractionService>, RebornRuntimeError> {
-    let approval_turn_runs = Arc::new(LocalDevApprovalTurnRunLocator::new(turn_run_source));
+    let approval_turn_runs = Arc::new(SnapshotApprovalTurnRunLocator::new(turn_run_source));
     let approval_read_model = Arc::new(RunStateApprovalInteractionReadModel::new(
         local_runtime.approval_requests.clone(),
         approval_turn_runs,
@@ -810,14 +810,14 @@ pub(crate) fn build_local_dev_approval_interaction_service_with_turn_run_source(
     Ok(Arc::new(
         DefaultApprovalInteractionService::new(
             approval_read_model,
-            Arc::new(approval::LocalDevApprovalLeaseTermsProvider::new(
-                local_dev_capability_policy,
+            Arc::new(approval::PolicyApprovalLeaseTermsProvider::new(
+                builtin_capability_policy,
                 Arc::clone(&local_runtime.extension_registry),
                 local_runtime.workspace_mounts.clone(),
                 local_runtime.skill_mounts.clone(),
                 local_runtime.memory_mounts.clone(),
                 local_runtime.system_extensions_lifecycle_mounts.clone(),
-                local_dev::extension_surface::LocalDevExtensionSurfaceSource::new(
+                local_dev::extension_surface::ExtensionCapabilitySurfaceSource::new(
                     local_runtime.extension_management.clone(),
                 ),
             )),
@@ -832,9 +832,9 @@ pub(crate) fn build_local_dev_approval_interaction_service_with_turn_run_source(
     ))
 }
 
-pub(crate) type LocalDevSelectableSkillContextSource =
+pub(crate) type ComposedSelectableSkillContextSource =
     SelectableSkillContextSource<FilesystemSkillBundleSource<CompositeRootFilesystem>>;
-type LocalDevSkillExecutionAdapter =
+type ComposedSkillExecutionAdapter =
     SkillExecutionAdapter<FilesystemSkillBundleSource<CompositeRootFilesystem>>;
 
 // TODO(#4416): when a second test-only handle is
@@ -870,7 +870,7 @@ struct TriggerPollerServices {
 }
 
 async fn build_trigger_poller_services(
-    local_runtime: &crate::factory::RebornLocalRuntimeServices,
+    local_runtime: &crate::factory::RebornRuntimeSubstrate,
     turn_coordinator: Arc<dyn TurnCoordinator>,
     thread_service: Arc<dyn SessionThreadService>,
     authorizer_config: TriggerPollerAuthorizerConfig,
@@ -1024,21 +1024,21 @@ where
 }
 
 fn build_trigger_active_run_lookup(
-    turn_state_store: Arc<LocalDevTurnStateStore>,
+    turn_state_store: Arc<ComposedTurnStateStore>,
 ) -> Arc<dyn ironclaw_triggers::TriggerActiveRunLookup> {
     let snapshot_source = turn_state_store as Arc<dyn TurnRunSnapshotSource>;
     Arc::new(SnapshotActiveRunLookup::new(snapshot_source))
 }
 
-struct LocalDevApprovalTurnRunLocator {
-    /// A trait object (not the concrete `LocalDevTurnStateStore`) so a
+struct SnapshotApprovalTurnRunLocator {
+    /// A trait object (not the concrete `ComposedTurnStateStore`) so a
     /// caller can substitute a different turn-state store's snapshot view —
     /// see `turn_run_snapshot::TurnRunSnapshotSource` and
     /// `build_local_dev_approval_interaction_service_with_turn_run_source`.
     turn_state: Arc<dyn TurnRunSnapshotSource>,
 }
 
-impl LocalDevApprovalTurnRunLocator {
+impl SnapshotApprovalTurnRunLocator {
     fn new(turn_state: Arc<dyn TurnRunSnapshotSource>) -> Self {
         Self { turn_state }
     }
@@ -1056,23 +1056,23 @@ impl LocalDevApprovalTurnRunLocator {
     }
 }
 
-struct LocalDevApprovalGateEvidence {
+struct ApprovalRequestGateEvidence {
     approval_requests: Arc<dyn ironclaw_run_state::ApprovalRequestStore>,
 }
 
-/// Test-only constructor for [`LocalDevApprovalGateEvidence`].
+/// Test-only constructor for [`ApprovalRequestGateEvidence`].
 ///
 /// Mirrors the production wiring in `build_local_runtime` (runtime.rs ~line 2799)
-/// where `LocalDevApprovalGateEvidence` is constructed inline and passed to
+/// where `ApprovalRequestGateEvidence` is constructed inline and passed to
 /// `loop_exit_evidence.with_approval_gate_evidence`. Exists so `test_support.rs`
 /// can build the real evidence type without needing the struct or its field to be
 /// `pub(crate)`. For tests only — gated behind `test-support`, ships zero bytes
 /// in production binaries.
 #[cfg(feature = "test-support")]
-pub(crate) fn build_local_dev_approval_gate_evidence_for_test(
+pub(crate) fn build_approval_gate_evidence_for_test(
     approval_requests: std::sync::Arc<dyn ironclaw_run_state::ApprovalRequestStore>,
 ) -> std::sync::Arc<dyn ironclaw_runner::loop_exit_applier::ApprovalGateEvidenceStore> {
-    std::sync::Arc::new(LocalDevApprovalGateEvidence { approval_requests })
+    std::sync::Arc::new(ApprovalRequestGateEvidence { approval_requests })
 }
 
 /// Test-support forwarder for the `result_read` synthetic-capability wrap
@@ -1107,18 +1107,18 @@ pub(crate) fn wrap_result_read_capability_for_test(
 /// `activation_source` (backing `skill_activate`) that `test_support.rs` needs.
 /// Reuses the private [`local_dev_filesystem_skill_context_source`] so the
 /// wiring never drifts, but deliberately does NOT return the internal
-/// [`LocalDevSkillContextSource`] struct — that type (and its
+/// [`ComposedSkillContextSource`] struct — that type (and its
 /// `execution_adapter` field) stays private to this module; only the two
 /// fields an external caller actually consumes cross the boundary. Tests only.
 #[cfg(feature = "test-support")]
 pub(crate) fn local_dev_filesystem_skill_context_source_for_test(
-    local_runtime: &crate::factory::RebornLocalRuntimeServices,
+    local_runtime: &crate::factory::RebornRuntimeSubstrate,
     tenant_id: &TenantId,
     regex_skill_activation_enabled: bool,
 ) -> Result<
     (
         Arc<dyn HostSkillContextSource>,
-        Arc<LocalDevSelectableSkillContextSource>,
+        Arc<ComposedSelectableSkillContextSource>,
     ),
     RebornRuntimeError,
 > {
@@ -1131,41 +1131,41 @@ pub(crate) fn local_dev_filesystem_skill_context_source_for_test(
 }
 
 /// Test-support forwarder (harness-port-seam P1 seam) for
-/// `create_refreshing_local_dev_capability_port`
+/// `create_refreshing_capability_port`
 /// (`refreshing_capability_port.rs:75`), production's sole capability-port
 /// factory. Bridges the private `local_dev` module to `test_support`; mirrors
 /// the `outbound_delivery` forwarder above. For tests only -- gated behind
 /// `test-support`, ships zero bytes in production builds.
 #[cfg(feature = "test-support")]
-pub(crate) async fn create_refreshing_local_dev_capability_port_for_test(
-    parts: crate::test_support::RefreshingLocalDevCapabilityPortTestParts,
+pub(crate) async fn create_refreshing_capability_port_for_test(
+    parts: crate::test_support::RefreshingCapabilityPortTestParts,
 ) -> Result<
     std::sync::Arc<dyn ironclaw_turns::run_profile::LoopCapabilityPort>,
     ironclaw_turns::run_profile::AgentLoopHostError,
 > {
-    local_dev::create_refreshing_local_dev_capability_port_for_test(parts).await
+    local_dev::create_refreshing_capability_port_for_test(parts).await
 }
 
-/// Test-support forwarder exposing production's real `LocalDevCapabilityIo`
-/// wiring (`local_dev.rs`'s `local_dev_capability_io_for_test`, which mirrors
+/// Test-support forwarder exposing production's real `StagedCapabilityIo`
+/// wiring (`local_dev.rs`'s `staged_capability_io_for_test`, which mirrors
 /// `capability_wiring`'s `new_with_durable_previews` call). Bridges the
 /// private `local_dev` module to `test_support`; mirrors the
-/// `create_refreshing_local_dev_capability_port_for_test` forwarder above.
+/// `create_refreshing_capability_port_for_test` forwarder above.
 /// For tests only -- gated behind `test-support`, ships zero bytes in
 /// production builds.
 #[cfg(feature = "test-support")]
-pub(crate) fn local_dev_capability_io_for_test(
+pub(crate) fn staged_capability_io_for_test(
     thread_service: std::sync::Arc<dyn ironclaw_threads::SessionThreadService>,
     fallback_user_id: ironclaw_host_api::UserId,
 ) -> (
     std::sync::Arc<dyn ironclaw_loop_host::LoopCapabilityInputResolver>,
     std::sync::Arc<dyn ironclaw_loop_host::LoopCapabilityResultWriter>,
 ) {
-    local_dev::local_dev_capability_io_for_test(thread_service, fallback_user_id)
+    local_dev::staged_capability_io_for_test(thread_service, fallback_user_id)
 }
 
 #[async_trait::async_trait]
-impl ApprovalGateEvidenceStore for LocalDevApprovalGateEvidence {
+impl ApprovalGateEvidenceStore for ApprovalRequestGateEvidence {
     async fn pending_approval_gate(
         &self,
         scope: &TurnScope,
@@ -1195,7 +1195,7 @@ fn approval_request_id_from_gate_ref(gate_ref: &LoopGateRef) -> Option<ApprovalR
 }
 
 #[async_trait::async_trait]
-impl ApprovalTurnRunLocator for LocalDevApprovalTurnRunLocator {
+impl ApprovalTurnRunLocator for SnapshotApprovalTurnRunLocator {
     async fn blocked_approval_runs(
         &self,
         scope: &ApprovalInteractionScope,
@@ -1900,7 +1900,7 @@ impl RebornRuntime {
     /// call is silently ignored. Returns `false` when the local-runtime slot is
     /// unavailable or already occupied, `true` on first successful set. Shares
     /// the same `OnceLock` the handler reads
-    /// (`RebornLocalRuntimeServices::channel_connection_facade_slot`).
+    /// (`RebornRuntimeSubstrate::channel_connection_facade_slot`).
     #[cfg(any(feature = "slack-v2-host-beta", feature = "telegram-v2-host-beta"))]
     pub(crate) fn set_channel_connection_facade(
         &self,
@@ -1922,7 +1922,7 @@ impl RebornRuntime {
 
     pub(crate) fn webui_skill_activation_source(
         &self,
-    ) -> Option<Arc<LocalDevSelectableSkillContextSource>> {
+    ) -> Option<Arc<ComposedSelectableSkillContextSource>> {
         self.skill_activation_source.clone()
     }
 
@@ -3497,14 +3497,13 @@ pub async fn build_reborn_runtime(
         Arc::clone(&checkpoint_state_store) as Arc<dyn ironclaw_turns::CheckpointStateStore>
     );
     if let Some(local_runtime) = local_runtime {
-        loop_exit_evidence = loop_exit_evidence.with_approval_gate_evidence(Arc::new(
-            LocalDevApprovalGateEvidence {
+        loop_exit_evidence =
+            loop_exit_evidence.with_approval_gate_evidence(Arc::new(ApprovalRequestGateEvidence {
                 approval_requests: Arc::clone(&local_runtime.approval_requests)
                     as Arc<dyn ironclaw_run_state::ApprovalRequestStore>,
-            },
-        ));
+            }));
         loop_exit_evidence = loop_exit_evidence.with_resource_gate_evidence(
-            crate::observability::budget_evidence::local_dev_resource_gate_evidence(Arc::clone(
+            crate::observability::budget_evidence::budget_gate_evidence(Arc::clone(
                 &local_runtime.budget_gate_store,
             )),
         );
@@ -3575,21 +3574,20 @@ pub async fn build_reborn_runtime(
         capability_result_writer,
         capability_surface_resolver,
         model_gateway,
-        local_dev_capability_policy,
+        builtin_capability_policy,
         display_previews,
     ) = if local_runtime.is_some() {
-        let local_dev_capability_policy =
-            Arc::new(local_dev_capability_policy().map_err(|error| {
-                tracing::error!(%error, "local-dev capability policy is invalid");
-                RebornRuntimeError::InvalidArgument {
-                    reason: format!("local-dev capability policy is invalid: {error}"),
-                }
-            })?);
+        let builtin_capability_policy = Arc::new(builtin_capability_policy().map_err(|error| {
+            tracing::error!(%error, "local-dev capability policy is invalid");
+            RebornRuntimeError::InvalidArgument {
+                reason: format!("local-dev capability policy is invalid: {error}"),
+            }
+        })?);
         let local_dev_capabilities = local_dev::capability_wiring(
             &services,
             Arc::clone(&thread_service) as Arc<dyn SessionThreadService>,
             actor_user_id.clone(),
-            Arc::clone(&local_dev_capability_policy),
+            Arc::clone(&builtin_capability_policy),
             model_gateway,
             milestone_sink.clone(),
             skill_activation_source.clone(),
@@ -3604,7 +3602,7 @@ pub async fn build_reborn_runtime(
             Arc::new(AllowAllCapabilitySurfaceResolver)
                 as Arc<dyn CapabilitySurfaceProfileResolver>,
             local_dev_capabilities.model_gateway,
-            Some(local_dev_capability_policy),
+            Some(builtin_capability_policy),
             Some(local_dev_capabilities.display_previews),
         )
     } else {
@@ -3953,12 +3951,12 @@ pub async fn build_reborn_runtime(
     let planned_turn_coordinator: Arc<dyn TurnCoordinator> = composition.coordinator.clone();
     let approval_audit_sink = Arc::new(InMemoryAuditSink::new());
     let approval_interaction_service: Arc<dyn ApprovalInteractionService> =
-        if let (Some(local_runtime), Some(local_dev_capability_policy)) =
-            (local_runtime, local_dev_capability_policy)
+        if let (Some(local_runtime), Some(builtin_capability_policy)) =
+            (local_runtime, builtin_capability_policy)
         {
             build_local_dev_approval_interaction_service(
                 local_runtime,
-                local_dev_capability_policy,
+                builtin_capability_policy,
                 Arc::clone(&planned_turn_coordinator),
                 Some(approval_audit_sink.clone()),
             )?
@@ -4211,7 +4209,7 @@ pub async fn build_reborn_runtime(
 /// seam below.
 fn build_webui_auth_interaction_service(
     product_auth: Option<&RebornProductAuthServices>,
-    turn_state_store: Arc<LocalDevTurnStateStore>,
+    turn_state_store: Arc<ComposedTurnStateStore>,
     turn_coordinator: Arc<dyn TurnCoordinator>,
 ) -> Arc<dyn AuthInteractionService> {
     build_webui_auth_interaction_service_with_turn_run_source(
@@ -4223,7 +4221,7 @@ fn build_webui_auth_interaction_service(
 
 /// Identical to [`build_webui_auth_interaction_service`] except
 /// the auth read model reads `turn_run_source` instead of a hardcoded
-/// `LocalDevTurnStateStore`. See
+/// `ComposedTurnStateStore`. See
 /// `build_local_dev_approval_interaction_service_with_turn_run_source`'s doc
 /// for why this seam exists.
 fn build_webui_auth_interaction_service_with_turn_run_source(
@@ -4243,7 +4241,7 @@ fn build_webui_auth_interaction_service_with_turn_run_source(
         return Arc::new(auth_interaction::UnavailableAuthInteractionService);
     };
     Arc::new(DefaultAuthInteractionService::new(
-        Arc::new(auth_interaction::LocalDevAuthInteractionReadModel::new(
+        Arc::new(auth_interaction::SnapshotAuthInteractionReadModel::new(
             turn_run_source,
             flow_records,
         )),
@@ -4308,11 +4306,11 @@ async fn append_trusted_laptop_access_audit(
         })
 }
 
-struct LocalDevSkillContextSource {
+struct ComposedSkillContextSource {
     bundle_source: Arc<FilesystemSkillBundleSource<CompositeRootFilesystem>>,
     source: Arc<dyn HostSkillContextSource>,
-    activation_source: Arc<LocalDevSelectableSkillContextSource>,
-    execution_adapter: Arc<LocalDevSkillExecutionAdapter>,
+    activation_source: Arc<ComposedSelectableSkillContextSource>,
+    execution_adapter: Arc<ComposedSkillExecutionAdapter>,
 }
 
 const LOCAL_DEV_MAX_SKILL_CONTEXT_TOKENS: usize = 6000;
@@ -4407,10 +4405,10 @@ fn skill_injection_mode_from(value: &str) -> Result<SkillInjectionMode, RebornRu
 }
 
 fn local_dev_filesystem_skill_context_source(
-    local_runtime: &crate::factory::RebornLocalRuntimeServices,
+    local_runtime: &crate::factory::RebornRuntimeSubstrate,
     tenant_id: &TenantId,
     regex_skill_activation_enabled: bool,
-) -> Result<LocalDevSkillContextSource, RebornRuntimeError> {
+) -> Result<ComposedSkillContextSource, RebornRuntimeError> {
     let extension = FirstPartySkillsExtension::new(
         Arc::clone(&local_runtime.skill_filesystem),
         FirstPartySkillsExtensionHandles::without_tenant_shared().map_err(|reason| {
@@ -4431,7 +4429,7 @@ fn local_dev_filesystem_skill_context_source(
         Arc::clone(&local_runtime.skill_auto_activate_learned),
     );
     let bundle_source = extension.bundle_source();
-    Ok(LocalDevSkillContextSource {
+    Ok(ComposedSkillContextSource {
         source: selectable_skills.host_skill_context_source(),
         activation_source: selectable_skills.activation_source(),
         execution_adapter: selectable_skills.execution_adapter(),

@@ -224,7 +224,7 @@ This document tracks feature parity between IronClaw (Rust implementation) and O
 | `tui` | ✅ | ✅ | - | Ratatui TUI |
 | `config` | ✅ | ✅ | - | Read/write config plus validate/path helpers |
 | `backup` | ✅ | ❌ | P3 | Create/verify local backup archives |
-| `channels` | ✅ | 🚧 | P2 | `list` implemented; `enable`/`disable`/`status` deferred pending config source unification |
+| `channels` | ✅ | 🚧 | P2 | Reborn `channels list` stays visible in `--help`/completions but exits nonzero as unimplemented (stub disabled); `enable`/`disable`/`status` deferred pending config source unification |
 | `models` | ✅ | 🚧 | P1 | Reborn now uses a shared composition provider-admin facade for CLI `models list [<provider>]` (`--verbose`, `--json`), `models status`, `models set <model>`, `models set-provider <provider> [--model model]`, plus Product Workflow typed `model set-provider ...` parsing without touching v1 state. Remaining: live model fetching, OAuth/API-key login flows, and wiring the provider-admin ProductCommandService into product surfaces. |
 | `status` | ✅ | ✅ | - | System status (enriched session details) |
 | `agents` | ✅ | ❌ | P3 | Multi-agent management |
@@ -234,14 +234,14 @@ This document tracks feature parity between IronClaw (Rust implementation) and O
 | `pairing` | ✅ | ✅ | - | list/approve, account selector |
 | `nodes` | ✅ | ❌ | P3 | Device management, remove/clear flows |
 | `plugins` | ✅ | ❌ | P3 | Plugin management |
-| `hooks` | ✅ | ✅ | P2 | `hooks list` (bundled + plugin discovery, `--verbose`, `--json`) |
+| `hooks` | ✅ | 🚧 | P2 | Reborn `hooks list` stays visible in `--help`/completions but exits nonzero as unimplemented (stub disabled); v1 `hooks list` supports bundled + plugin discovery, `--verbose`, `--json` |
 | `cron` | ✅ | 🚧 | P2 | list/create/edit/enable/disable/delete/history; TODO: `cron run`, model/thinking fields |
 | `webhooks` | ✅ | ❌ | P3 | Webhook config |
 | `message send` | ✅ | ❌ | P2 | Send to channels |
 | `browser` | ✅ | ❌ | P3 | Browser automation |
 | `sandbox` | ✅ | ✅ | - | WASM sandbox |
 | `doctor` | ✅ | 🚧 | P2 | 16 subsystem checks |
-| `logs` | ✅ | 🚧 | P3 | `logs` (gateway.log tail), `--follow` (SSE live stream), `--level` (get/set). WebUI v2 exposes bounded in-memory log projection at `/api/webchat/v2/logs` for non-operators and `/api/webchat/v2/operator/logs` for operators, both with level/target and run/thread/turn/tool/source scoped filters. No DB-persisted log history. |
+| `logs` | ✅ | 🚧 | P3 | Reborn CLI `logs` stays visible but exits nonzero as unimplemented (stub disabled). v1: `logs` (gateway.log tail), `--follow` (SSE live stream), `--level` (get/set). WebUI v2 exposes bounded in-memory log projection at `/api/webchat/v2/logs` for non-operators and `/api/webchat/v2/operator/logs` for operators, both with level/target and run/thread/turn/tool/source scoped filters. No DB-persisted log history. |
 | `traces` | ➖ | 🚧 | - | <ul><li>IronClaw-native Trace Commons client MVP, not an OpenClaw parity feature.</li><li>Local opt-in capture, redaction, queueing, queue-status diagnostics, scoped web APIs, revocation, and periodic credit notices.</li><li>CLI opt-in writes the runtime/web user-scope policy that autonomous capture reads, and credentialed submit/status/revoke calls use bounded no-redirect HTTP.</li><li>Authenticated web paths are user-scoped and keep ingestion endpoint/credential settings out of user-managed policy updates.</li><li>Private TraceDAO server ingest/review/export/audit/retention/vector/credit infrastructure now lives in the standalone `tracedao-server` repository, with IronClaw retaining CLI/client integration wrappers.</li></ul> |
 | `update` | ✅ | ❌ | P3 | Self-update; `OPENCLAW_NO_AUTO_UPDATE=1` kill-switch |
 | `completion` | ✅ | ✅ | - | Shell completion |

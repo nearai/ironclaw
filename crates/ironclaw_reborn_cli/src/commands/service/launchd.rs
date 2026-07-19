@@ -1,5 +1,5 @@
 //! macOS launchd generators, path resolution, status matching, and verb
-//! bodies for `ironclaw-reborn service`.
+//! bodies for `ironclaw service`.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -233,7 +233,7 @@ pub(super) fn install_with_runner(
     if let Some(note) = launchd_install_advisory(replaced_existing, was_loaded) {
         println!("{note}");
     }
-    println!("  Start with: ironclaw-reborn service start");
+    println!("  Start with: ironclaw service start");
     Ok(replaced_existing)
 }
 
@@ -252,7 +252,7 @@ fn start_with_runner_quiet(runner: &mut dyn ServiceCommandRunner) -> Result<()> 
 fn start_with_runner_impl(runner: &mut dyn ServiceCommandRunner, verbose: bool) -> Result<()> {
     let plist = plist_path()?;
     if !plist.exists() {
-        bail!("Service not installed. Run `ironclaw-reborn service install` first.");
+        bail!("Service not installed. Run `ironclaw service install` first.");
     }
     // A bare `launchctl load -w` fails when the label is already loaded
     // (loaded-but-stopped, i.e. a `-` PID) — the same condition `install`
@@ -502,7 +502,7 @@ mod tests {
 
     fn sample_invocation() -> ServeInvocation {
         ServeInvocation {
-            exe: PathBuf::from("/usr/local/bin/ironclaw-reborn"),
+            exe: PathBuf::from("/usr/local/bin/ironclaw"),
             args: vec!["serve".to_string()],
             env: vec![(
                 "IRONCLAW_REBORN_HOME".to_string(),
@@ -669,11 +669,13 @@ mod tests {
         let (_ctx_tmp, context) = RebornCliContext::test_context();
         let file = plist_path().expect("plist path");
         std::fs::create_dir_all(file.parent().expect("plist parent")).expect("create parent");
-        // Simulate a pre-existing unit — e.g. one written by the WebUI
-        // operator facade with a baked-in secret — that this install
-        // must atomically overwrite.
-        std::fs::write(&file, "pre-existing plist with a baked-in secret")
-            .expect("write pre-existing plist");
+        // Simulate a service definition written by the pre-rename CLI. The
+        // stable label/path lets `service install` upgrade it in place.
+        std::fs::write(
+            &file,
+            "<string>/usr/local/bin/ironclaw-reborn</string><string>baked-in secret</string>",
+        )
+        .expect("write pre-existing plist");
         let mut runner = RecordingRunner::default();
         let result = install_with_runner(&context, &sample_invocation(), &mut runner);
         // SAFETY: serialized by `lock_runtime_env`.
@@ -698,6 +700,8 @@ mod tests {
             !contents.contains("baked-in secret"),
             "the pre-existing file's contents must be fully replaced"
         );
+        assert!(contents.contains("/usr/local/bin/ironclaw</string>"));
+        assert!(!contents.contains("/usr/local/bin/ironclaw-reborn"));
     }
 
     #[test]
@@ -731,7 +735,7 @@ mod tests {
             Path::new("/tmp/o.log"),
             Path::new("/tmp/e.log"),
         );
-        assert!(plist.contains("<string>/usr/local/bin/ironclaw-reborn</string>"));
+        assert!(plist.contains("<string>/usr/local/bin/ironclaw</string>"));
         assert!(plist.contains("<string>serve</string>"));
     }
 
@@ -798,7 +802,7 @@ mod tests {
     #[test]
     fn plist_content_escapes_xml_reserved_chars_in_env_value() {
         let invocation = ServeInvocation {
-            exe: PathBuf::from("/usr/local/bin/ironclaw-reborn"),
+            exe: PathBuf::from("/usr/local/bin/ironclaw"),
             args: vec!["serve".to_string()],
             env: vec![(
                 "IRONCLAW_REBORN_PROFILE".to_string(),

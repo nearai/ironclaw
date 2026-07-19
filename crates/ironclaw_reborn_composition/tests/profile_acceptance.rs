@@ -1,13 +1,12 @@
 // Only the `#[cfg(not(feature = "libsql"))]` no-libsql regression test below
 // consumes this error type; `webui-v2-beta` (hence CI) pulls in `libsql`.
 #[cfg(not(feature = "libsql"))]
-use ironclaw_reborn_composition::RebornLocalRuntimeProfileError;
+use ironclaw_reborn_composition::RebornRuntimeProfileError;
 use ironclaw_reborn_composition::{
-    RebornBuildInput, RebornCompositionProfile, RebornFacadeReadiness,
-    RebornLocalRuntimeProfileOptions, RebornReadiness, RebornReadinessDiagnostic,
-    RebornReadinessDiagnosticComponent, RebornReadinessDiagnosticReason,
-    RebornReadinessDiagnosticStatus, RebornReadinessState, RebornWorkerReadiness,
-    build_reborn_services, hosted_single_tenant_volume_runtime_policy,
+    RebornBuildInput, RebornCompositionProfile, RebornFacadeReadiness, RebornReadiness,
+    RebornReadinessDiagnostic, RebornReadinessDiagnosticComponent, RebornReadinessDiagnosticReason,
+    RebornReadinessDiagnosticStatus, RebornReadinessState, RebornRuntimeProfileOptions,
+    RebornWorkerReadiness, build_reborn_services, hosted_single_tenant_volume_runtime_policy,
     local_dev_yolo_runtime_policy, local_runtime_build_input_with_options,
 };
 
@@ -483,7 +482,7 @@ fn hosted_single_tenant_volume_input_errors_without_libsql_feature() {
 
     assert!(matches!(
         result,
-        Err(RebornLocalRuntimeProfileError::MissingLibsqlFeature)
+        Err(RebornRuntimeProfileError::MissingLibsqlFeature)
     ));
 }
 
@@ -515,7 +514,7 @@ async fn local_dev_yolo_factory_readiness_includes_non_production_diagnostic() {
         RebornCompositionProfile::LocalDevYolo,
         "readiness-yolo-owner",
         dir.path().to_path_buf(),
-        RebornLocalRuntimeProfileOptions {
+        RebornRuntimeProfileOptions {
             confirm_host_access: true,
         },
     )
