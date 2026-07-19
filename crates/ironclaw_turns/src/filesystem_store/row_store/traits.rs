@@ -375,8 +375,16 @@ where
                     .map_err(|error| match error {
                         RowPersistError::Turn(error) => error,
                     })?;
-                if let Some(state) = guard.as_mut() {
-                    state.apply_delta(delta, state.journal_seq)?;
+                if let Some(state) = guard.as_mut()
+                    && let Err(error) = state.apply_delta(delta, state.journal_seq)
+                {
+                    // A failed in-memory apply may leave the cached snapshot
+                    // partially mutated; drop it so the next read rebuilds from
+                    // durable state, matching `apply` / `apply_with_targeted_delta`.
+                    // (The durable enqueue already succeeded, so recovery replays
+                    // it — the cache is the only thing to invalidate.)
+                    *guard = None;
+                    return Err(error);
                 }
                 ack
             };
