@@ -9,6 +9,9 @@ layer = "kernel"
 
 [dependencies]
 async-trait = "0.1"
+# Slice-C `authorize()` derives the provisional `Authorized` witness deadline
+# (`Timestamp = chrono::DateTime<Utc>`) via `Utc::now() + Duration::minutes(5)`.
+chrono = "0.4"
 ironclaw_authorization = { path = "../ironclaw_authorization" }
 ironclaw_extensions = { path = "../ironclaw_extensions" }
 ironclaw_host_api = { path = "../ironclaw_host_api" }
@@ -21,7 +24,6 @@ thiserror = "2"
 tracing = "0.1"
 
 [dev-dependencies]
-chrono = "0.4"
 ironclaw_approvals = { path = "../ironclaw_approvals" }
 # Enables the in-memory-backed capability-lease store constructor for tests only.
 ironclaw_authorization = { path = "../ironclaw_authorization", features = ["test-support"] }

@@ -347,24 +347,19 @@ pub struct RuntimeCapabilityRequest {
     /// The host runtime still validates and forwards the key into
     /// observability spans for audit/tracing.
     pub idempotency_key: Option<IdempotencyKey>,
-    /// Legacy caller-supplied trust decision kept for transitional request-shape
-    /// compatibility.
-    ///
-    /// [`DefaultHostRuntime`](crate::DefaultHostRuntime) ignores this value: it
-    /// resolves the capability provider's package identity, evaluates the
-    /// host-owned policy, stamps the resulting effective trust onto the
-    /// execution context, and passes that host-owned decision to the capability
-    /// host. Callers must not rely on this field to widen or narrow authority.
-    pub trust_decision: TrustDecision,
 }
 
 impl RuntimeCapabilityRequest {
+    // Deliberately NO `trust_decision` parameter — do not re-add one. Trust is
+    // host-owned: `DefaultHostRuntime` evaluates it itself, and a caller-supplied
+    // decision would be unvalidated authority input the runtime must ignore
+    // (arch-simplification §1.1).
+    // Removed so it is no longer carried across the capability hops.
     pub fn new(
         context: ExecutionContext,
         capability_id: CapabilityId,
         estimate: ResourceEstimate,
         input: Value,
-        trust_decision: TrustDecision,
     ) -> Self {
         Self {
             context,
@@ -372,7 +367,6 @@ impl RuntimeCapabilityRequest {
             estimate,
             input,
             idempotency_key: None,
-            trust_decision,
         }
     }
 
@@ -385,9 +379,8 @@ impl RuntimeCapabilityRequest {
 /// Request to resume one approval-blocked capability through the composed host runtime.
 ///
 /// The shape mirrors [`RuntimeCapabilityRequest`] but additionally carries the
-/// approval request selected by an upper approval workflow. Like invoke requests,
-/// `trust_decision` is transitional compatibility data: the default host runtime
-/// evaluates provider trust itself before delegating to `CapabilityHost`.
+/// approval request selected by an upper approval workflow. The default host
+/// runtime evaluates provider trust itself before delegating to `CapabilityHost`.
 #[derive(Debug, Clone, PartialEq)]
 #[non_exhaustive]
 pub struct RuntimeCapabilityResumeRequest {
@@ -397,7 +390,6 @@ pub struct RuntimeCapabilityResumeRequest {
     pub estimate: ResourceEstimate,
     pub input: Value,
     pub idempotency_key: Option<IdempotencyKey>,
-    pub trust_decision: TrustDecision,
 }
 
 impl RuntimeCapabilityResumeRequest {
@@ -407,7 +399,6 @@ impl RuntimeCapabilityResumeRequest {
         capability_id: CapabilityId,
         estimate: ResourceEstimate,
         input: Value,
-        trust_decision: TrustDecision,
     ) -> Self {
         Self {
             context,
@@ -416,7 +407,6 @@ impl RuntimeCapabilityResumeRequest {
             estimate,
             input,
             idempotency_key: None,
-            trust_decision,
         }
     }
 
@@ -440,7 +430,6 @@ pub struct RuntimeCapabilityAuthResumeRequest {
     pub estimate: ResourceEstimate,
     pub input: Value,
     pub idempotency_key: Option<IdempotencyKey>,
-    pub trust_decision: TrustDecision,
     /// Present when the invocation previously passed an approval gate.
     /// Used to locate and claim the matching fingerprinted approval lease
     /// so the re-dispatch does not require a second approval.
@@ -453,7 +442,6 @@ impl RuntimeCapabilityAuthResumeRequest {
         capability_id: CapabilityId,
         estimate: ResourceEstimate,
         input: Value,
-        trust_decision: TrustDecision,
         approval_request_id: Option<ApprovalRequestId>,
     ) -> Self {
         Self {
@@ -462,7 +450,6 @@ impl RuntimeCapabilityAuthResumeRequest {
             estimate,
             input,
             idempotency_key: None,
-            trust_decision,
             approval_request_id,
         }
     }

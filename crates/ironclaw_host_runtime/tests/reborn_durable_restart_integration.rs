@@ -5,7 +5,6 @@ use support::legacy_capability_fixture_to_v2;
 use std::{path::Path, sync::Arc, time::Duration};
 
 use async_trait::async_trait;
-use chrono::Utc;
 use ironclaw_approvals::LeaseApproval;
 use ironclaw_authorization::{
     CapabilityLeaseStatus, CapabilityLeaseStore, FilesystemCapabilityLeaseStore, GrantAuthorizer,
@@ -40,8 +39,7 @@ use ironclaw_scripts::{
     ScriptBackend, ScriptBackendOutput, ScriptBackendRequest, ScriptRuntime, ScriptRuntimeConfig,
 };
 use ironclaw_trust::{
-    AdminConfig, AdminEntry, AuthorityCeiling, EffectiveTrustClass, HostTrustAssignment,
-    HostTrustPolicy, TrustDecision, TrustProvenance,
+    AdminConfig, AdminEntry, HostTrustAssignment, HostTrustPolicy, TrustDecision,
 };
 use serde_json::{Value, json};
 
@@ -105,7 +103,6 @@ async fn approval_resume_survives_filesystem_service_restart_and_consumes_lease_
             script_capability_id(),
             estimate.clone(),
             input.clone(),
-            trust_decision_with_dispatch_authority(),
         ))
         .await
         .unwrap();
@@ -180,7 +177,6 @@ async fn approval_resume_survives_filesystem_service_restart_and_consumes_lease_
             script_capability_id(),
             estimate,
             json!({"message": "restart approval"}),
-            trust_decision_with_dispatch_authority(),
         ))
         .await
         .unwrap();
@@ -256,7 +252,6 @@ async fn approval_resume_survives_durable_libsql_reopen_and_consumes_lease_once(
             script_capability_id(),
             estimate.clone(),
             input.clone(),
-            trust_decision_with_dispatch_authority(),
         ))
         .await
         .unwrap();
@@ -331,7 +326,6 @@ async fn approval_resume_survives_durable_libsql_reopen_and_consumes_lease_once(
             script_capability_id(),
             estimate,
             json!({"message": "restart approval"}),
-            trust_decision_with_dispatch_authority(),
         ))
         .await
         .unwrap();
@@ -432,7 +426,6 @@ async fn jsonl_event_and_audit_replay_survive_reopen_without_raw_sentinels() {
             script_capability_id(),
             ResourceEstimate::default(),
             payload.clone(),
-            trust_decision_with_dispatch_authority(),
         ))
         .await
         .unwrap();
@@ -743,7 +736,6 @@ async fn block_for_approval(
             script_capability_id(),
             estimate,
             input,
-            trust_decision_with_dispatch_authority(),
         ))
         .await
         .unwrap();
@@ -1025,18 +1017,6 @@ fn local_manifest_trust_policy(
         ),
     ]))])
     .unwrap()
-}
-
-fn trust_decision_with_dispatch_authority() -> TrustDecision {
-    TrustDecision {
-        effective_trust: EffectiveTrustClass::user_trusted(),
-        authority_ceiling: AuthorityCeiling {
-            allowed_effects: vec![EffectKind::DispatchCapability],
-            max_resource_ceiling: None,
-        },
-        provenance: TrustProvenance::Default,
-        evaluated_at: Utc::now(),
-    }
 }
 
 fn sample_scope(invocation_id: InvocationId) -> ResourceScope {

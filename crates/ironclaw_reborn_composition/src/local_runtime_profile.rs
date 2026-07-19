@@ -1,13 +1,13 @@
 use std::path::PathBuf;
 
-use ironclaw_host_api::runtime_policy::{DeploymentMode, RuntimeProfile};
 use ironclaw_runtime_policy::{EffectiveRuntimePolicy as ResolvedRuntimePolicy, ResolveError};
 use thiserror::Error;
 
+use crate::deployment::DeploymentConfig;
 use crate::{RebornBuildInput, RebornCompositionProfile};
 
 #[derive(Debug, Error)]
-pub enum RebornLocalRuntimeProfileError {
+pub enum RebornRuntimeProfileError {
     #[error("profile={profile} is not a local Reborn runtime profile")]
     UnsupportedProfile { profile: RebornCompositionProfile },
     #[error(
@@ -19,8 +19,32 @@ pub enum RebornLocalRuntimeProfileError {
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub struct RebornLocalRuntimeProfileOptions {
+pub struct RebornRuntimeProfileOptions {
     pub confirm_host_access: bool,
+}
+
+/// Map a composition profile to its [`DeploymentConfig`] value — the one
+/// place a profile name becomes deployment policy data (§4.4). Everything
+/// past this edge consumes resolved policy values, never a mode.
+pub(crate) fn deployment_config_for_profile(
+    profile: RebornCompositionProfile,
+    options: RebornRuntimeProfileOptions,
+) -> Result<DeploymentConfig, RebornRuntimeProfileError> {
+    match profile {
+        RebornCompositionProfile::LocalDev => Ok(DeploymentConfig::local_dev()),
+        RebornCompositionProfile::LocalDevYolo => Ok(DeploymentConfig::local_dev_yolo(
+            options.confirm_host_access,
+        )),
+        RebornCompositionProfile::HostedSingleTenantVolume => {
+            Ok(DeploymentConfig::hosted_single_tenant_volume())
+        }
+        RebornCompositionProfile::Disabled
+        | RebornCompositionProfile::HostedSingleTenant
+        | RebornCompositionProfile::Production
+        | RebornCompositionProfile::MigrationDryRun => {
+            Err(RebornRuntimeProfileError::UnsupportedProfile { profile })
+        }
+    }
 }
 
 /// Build the local runtime substrate input and its matching runtime policy from
@@ -29,12 +53,12 @@ pub fn local_runtime_build_input(
     profile: RebornCompositionProfile,
     owner_id: impl Into<String>,
     root: PathBuf,
-) -> Result<RebornBuildInput, RebornLocalRuntimeProfileError> {
+) -> Result<RebornBuildInput, RebornRuntimeProfileError> {
     local_runtime_build_input_with_options(
         profile,
         owner_id,
         root,
-        RebornLocalRuntimeProfileOptions::default(),
+        RebornRuntimeProfileOptions::default(),
     )
 }
 
@@ -44,8 +68,8 @@ pub fn local_runtime_build_input_with_options(
     profile: RebornCompositionProfile,
     owner_id: impl Into<String>,
     root: PathBuf,
-    options: RebornLocalRuntimeProfileOptions,
-) -> Result<RebornBuildInput, RebornLocalRuntimeProfileError> {
+    options: RebornRuntimeProfileOptions,
+) -> Result<RebornBuildInput, RebornRuntimeProfileError> {
     if profile == RebornCompositionProfile::HostedSingleTenantVolume {
         return hosted_single_tenant_volume_build_input(owner_id, root);
     }
@@ -62,17 +86,17 @@ pub fn local_runtime_build_input_with_options(
 pub(crate) fn hosted_single_tenant_volume_build_input(
     owner_id: impl Into<String>,
     root: PathBuf,
-) -> Result<RebornBuildInput, RebornLocalRuntimeProfileError> {
+) -> Result<RebornBuildInput, RebornRuntimeProfileError> {
     #[cfg(not(feature = "libsql"))]
     {
         let _ = owner_id;
         let _ = root;
-        Err(RebornLocalRuntimeProfileError::MissingLibsqlFeature)
+        Err(RebornRuntimeProfileError::MissingLibsqlFeature)
     }
 
     #[cfg(feature = "libsql")]
-    let policy = hosted_single_tenant_volume_runtime_policy()
-        .map_err(RebornLocalRuntimeProfileError::Policy)?;
+    let policy =
+        hosted_single_tenant_volume_runtime_policy().map_err(RebornRuntimeProfileError::Policy)?;
     #[cfg(feature = "libsql")]
     Ok(RebornBuildInput::local_dev_with_profile(
         RebornCompositionProfile::HostedSingleTenantVolume,
@@ -97,11 +121,7 @@ pub fn hosted_single_tenant_runtime_policy() -> Result<ResolvedRuntimePolicy, Re
 /// scoped virtual filesystem, brokered network, brokered secret handles, and
 /// ask-always approval posture from the resolver-owned secure default.
 pub fn hosted_single_tenant_volume_runtime_policy() -> Result<ResolvedRuntimePolicy, ResolveError> {
-    let request = ironclaw_runtime_policy::ResolveRequest::new(
-        DeploymentMode::HostedMultiTenant,
-        RuntimeProfile::SecureDefault,
-    );
-    ironclaw_runtime_policy::resolve(request)
+    DeploymentConfig::hosted_single_tenant_volume().resolve()
 }
 
 /// Resolved policy for trusted single-user local development with inherited
@@ -111,16 +131,16 @@ pub fn local_dev_yolo_runtime_policy(
 ) -> Result<ResolvedRuntimePolicy, ResolveError> {
     local_runtime_policy(
         RebornCompositionProfile::LocalDevYolo,
-        RebornLocalRuntimeProfileOptions {
+        RebornRuntimeProfileOptions {
             confirm_host_access,
         },
     )
     .map_err(|error| match error {
-        RebornLocalRuntimeProfileError::Policy(error) => error,
-        RebornLocalRuntimeProfileError::MissingLibsqlFeature => {
+        RebornRuntimeProfileError::Policy(error) => error,
+        RebornRuntimeProfileError::MissingLibsqlFeature => {
             unreachable!("local-dev-yolo is not the hosted volume profile")
         }
-        RebornLocalRuntimeProfileError::UnsupportedProfile { .. } => {
+        RebornRuntimeProfileError::UnsupportedProfile { .. } => {
             unreachable!("local-dev-yolo is a local runtime profile")
         }
     })
@@ -128,30 +148,9 @@ pub fn local_dev_yolo_runtime_policy(
 
 fn local_runtime_policy(
     profile: RebornCompositionProfile,
-    options: RebornLocalRuntimeProfileOptions,
-) -> Result<ResolvedRuntimePolicy, RebornLocalRuntimeProfileError> {
-    let runtime_profile = match profile {
-        RebornCompositionProfile::LocalDev => RuntimeProfile::LocalDev,
-        RebornCompositionProfile::LocalDevYolo => RuntimeProfile::LocalYolo,
-        RebornCompositionProfile::HostedSingleTenantVolume => {
-            return hosted_single_tenant_volume_runtime_policy()
-                .map_err(RebornLocalRuntimeProfileError::Policy);
-        }
-        RebornCompositionProfile::Disabled
-        | RebornCompositionProfile::HostedSingleTenant
-        | RebornCompositionProfile::Production
-        | RebornCompositionProfile::MigrationDryRun => {
-            return Err(RebornLocalRuntimeProfileError::UnsupportedProfile { profile });
-        }
-    };
-    let request = ironclaw_runtime_policy::ResolveRequest {
-        yolo_disclosure_acknowledged: options.confirm_host_access,
-        ..ironclaw_runtime_policy::ResolveRequest::new(
-            DeploymentMode::LocalSingleUser,
-            runtime_profile,
-        )
-    };
-    Ok(ironclaw_runtime_policy::resolve(request)?)
+    options: RebornRuntimeProfileOptions,
+) -> Result<ResolvedRuntimePolicy, RebornRuntimeProfileError> {
+    Ok(deployment_config_for_profile(profile, options)?.resolve()?)
 }
 
 fn local_runtime_policy_for_local_dev_shape(
@@ -159,14 +158,14 @@ fn local_runtime_policy_for_local_dev_shape(
 ) -> Result<ResolvedRuntimePolicy, ResolveError> {
     local_runtime_policy(
         RebornCompositionProfile::LocalDev,
-        RebornLocalRuntimeProfileOptions::default(),
+        RebornRuntimeProfileOptions::default(),
     )
     .map_err(|error| match error {
-        RebornLocalRuntimeProfileError::Policy(error) => error,
-        RebornLocalRuntimeProfileError::MissingLibsqlFeature => {
+        RebornRuntimeProfileError::Policy(error) => error,
+        RebornRuntimeProfileError::MissingLibsqlFeature => {
             unreachable!("{profile_name} is not the hosted volume profile")
         }
-        RebornLocalRuntimeProfileError::UnsupportedProfile { .. } => {
+        RebornRuntimeProfileError::UnsupportedProfile { .. } => {
             unreachable!("{profile_name} uses the local-dev runtime policy shape")
         }
     })

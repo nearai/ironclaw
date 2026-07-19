@@ -6,7 +6,7 @@ use ironclaw_approvals::{ApprovalResolver, LeaseApproval};
 use ironclaw_authorization::*;
 use ironclaw_capabilities::*;
 use ironclaw_dispatcher::{
-    RuntimeAdapter, RuntimeAdapterRequest, RuntimeAdapterResult, RuntimeDispatcher,
+    RuntimeAdapterRequest, RuntimeAdapterResult, RuntimeDispatcher, RuntimeExecutor,
 };
 use ironclaw_events::{InMemoryEventSink, RuntimeEventKind};
 use ironclaw_filesystem::{DiskFilesystem, InMemoryBackend};
@@ -382,9 +382,14 @@ impl RecordingRuntimeAdapter {
 }
 
 #[async_trait]
-impl RuntimeAdapter<DiskFilesystem, InMemoryResourceGovernor> for RecordingRuntimeAdapter {
+impl RuntimeExecutor<DiskFilesystem, InMemoryResourceGovernor> for RecordingRuntimeAdapter {
+    fn supports_lane(&self, lane: RuntimeLane) -> bool {
+        lane == RuntimeLane::Wasm
+    }
+
     async fn dispatch_json(
         &self,
+        _lane: RuntimeLane,
         request: RuntimeAdapterRequest<'_, DiskFilesystem, InMemoryResourceGovernor>,
     ) -> Result<RuntimeAdapterResult, DispatchError> {
         self.requests.lock().unwrap().push(RecordedRuntimeRequest {
@@ -426,11 +431,18 @@ impl RuntimeAdapter<DiskFilesystem, InMemoryResourceGovernor> for RecordingRunti
     }
 }
 
+type RecordingDispatcher = RuntimeDispatcher<
+    'static,
+    DiskFilesystem,
+    InMemoryResourceGovernor,
+    Arc<RecordingRuntimeAdapter>,
+>;
+
 fn runtime_dispatcher_stack(
     adapter: Arc<RecordingRuntimeAdapter>,
 ) -> (
     Arc<ironclaw_extensions::ExtensionRegistry>,
-    RuntimeDispatcher<'static, DiskFilesystem, InMemoryResourceGovernor>,
+    RecordingDispatcher,
     Arc<InMemoryResourceGovernor>,
     InMemoryEventSink,
 ) {
@@ -438,10 +450,13 @@ fn runtime_dispatcher_stack(
     let filesystem = Arc::new(DiskFilesystem::new());
     let governor = Arc::new(InMemoryResourceGovernor::new());
     let events = InMemoryEventSink::new();
-    let dispatcher =
-        RuntimeDispatcher::from_arcs(Arc::clone(&registry), filesystem, Arc::clone(&governor))
-            .with_runtime_adapter_arc(RuntimeKind::Wasm, adapter)
-            .with_event_sink_arc(Arc::new(events.clone()));
+    let dispatcher = RuntimeDispatcher::from_arcs(
+        Arc::clone(&registry),
+        filesystem,
+        Arc::clone(&governor),
+        adapter,
+    )
+    .with_event_sink_arc(Arc::new(events.clone()));
     (registry, dispatcher, governor, events)
 }
 

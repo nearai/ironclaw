@@ -872,58 +872,27 @@ fn profile_list_json_is_stable_and_does_not_resolve_reborn_home() {
 }
 
 #[test]
-fn channels_list_reports_unwired_empty_surface_without_reborn_home() {
-    assert_empty_not_wired_surface(
+fn channels_list_reports_not_implemented() {
+    assert_not_implemented(
         &["channels", "list"],
-        "IronClaw Reborn channels",
-        "channels",
-        "configured",
+        "`channels list` is not implemented yet",
     );
-}
-
-#[test]
-fn channels_list_verbose_explains_missing_reborn_registry() {
-    assert_verbose_detail(
+    assert_not_implemented(
         &["channels", "list", "--verbose"],
-        "Reborn channel registry is not wired yet",
+        "`channels list` is not implemented yet",
+    );
+    assert_not_implemented(
+        &["channels", "list", "--json"],
+        "`channels list` is not implemented yet",
     );
 }
 
 #[test]
-fn channels_list_json_verbose_includes_status_details() {
-    assert_json_verbose_detail(
-        &["channels", "list", "--json", "--verbose"],
-        "channels",
-        "configured",
-        "Reborn channel registry is not wired yet",
-    );
-}
-
-#[test]
-fn hooks_list_reports_unwired_empty_surface_without_reborn_home() {
-    assert_empty_not_wired_surface(
-        &["hooks", "list"],
-        "IronClaw Reborn hooks",
-        "hooks",
-        "configured",
-    );
-}
-
-#[test]
-fn hooks_list_verbose_explains_missing_reborn_registry() {
-    assert_verbose_detail(
+fn hooks_list_reports_not_implemented() {
+    assert_not_implemented(&["hooks", "list"], "`hooks list` is not implemented yet");
+    assert_not_implemented(
         &["hooks", "list", "--verbose"],
-        "Reborn hook registry is not wired yet",
-    );
-}
-
-#[test]
-fn hooks_list_json_verbose_includes_status_details() {
-    assert_json_verbose_detail(
-        &["hooks", "list", "--json", "--verbose"],
-        "hooks",
-        "configured",
-        "Reborn hook registry is not wired yet",
+        "`hooks list` is not implemented yet",
     );
 }
 
@@ -1090,23 +1059,9 @@ fn skills_list_rejects_unsupported_profiles() {
 }
 
 #[test]
-fn logs_reports_unwired_surface_without_reborn_home() {
-    assert_empty_not_wired_surface(&["logs"], "IronClaw Reborn logs", "logs", "entries");
-}
-
-#[test]
-fn logs_verbose_explains_missing_reborn_log_source() {
-    assert_verbose_detail(&["logs", "--verbose"], "Reborn log source is not wired yet");
-}
-
-#[test]
-fn logs_json_verbose_includes_status_details() {
-    assert_json_verbose_detail(
-        &["logs", "--json", "--verbose"],
-        "logs",
-        "entries",
-        "Reborn log source is not wired yet",
-    );
+fn logs_reports_not_implemented() {
+    assert_not_implemented(&["logs"], "`logs` is not implemented yet");
+    assert_not_implemented(&["logs", "--verbose"], "`logs` is not implemented yet");
 }
 
 #[cfg(feature = "root-llm-provider")]
@@ -1366,7 +1321,7 @@ fn models_write_commands_report_root_llm_provider_required_without_default_featu
         let output = reborn_command()
             .args(args)
             .output()
-            .expect("ironclaw-reborn models write command should run");
+            .expect("ironclaw-reborn models command should run");
 
         assert!(!output.status.success(), "command should fail: {args:?}");
         let stderr = String::from_utf8_lossy(&output.stderr);
@@ -1382,54 +1337,20 @@ fn models_write_commands_report_root_llm_provider_required_without_default_featu
     }
 }
 
-fn assert_empty_not_wired_surface(
-    args: &[&str],
-    title: &str,
-    collection_key: &str,
-    count_key: &str,
-) {
+fn assert_not_implemented(args: &[&str], expected_message: &str) {
     let output = reborn_command()
         .args(args)
         .output()
         .expect("ironclaw-reborn command should run");
 
     assert!(
-        output.status.success(),
-        "stderr: {}",
-        String::from_utf8_lossy(&output.stderr)
+        !output.status.success(),
+        "`{}` should fail while disabled",
+        args.join(" ")
     );
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(stdout.contains(title), "stdout: {stdout}");
-    assert!(
-        stdout.contains(&format!("{count_key}: 0")),
-        "stdout: {stdout}"
-    );
-    assert!(stdout.contains("status: not-wired"), "stdout: {stdout}");
-    assert!(stdout.contains("v1_state: not-used"), "stdout: {stdout}");
-
-    let mut json_args = args.to_vec();
-    json_args.push("--json");
-    let output = reborn_command()
-        .args(json_args)
-        .output()
-        .expect("ironclaw-reborn JSON command should run");
-    assert!(
-        output.status.success(),
-        "stderr: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let json: serde_json::Value = serde_json::from_str(stdout.trim()).expect("valid JSON");
-    assert_eq!(json[count_key], 0);
-    assert_eq!(
-        json[collection_key]
-            .as_array()
-            .expect("collection array")
-            .len(),
-        0
-    );
-    assert_eq!(json["status"], "not-wired");
-    assert_eq!(json["v1_state"], "not-used");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains(expected_message), "stderr: {stderr}");
+    assert!(!stderr.contains("panicked"), "stderr: {stderr}");
 }
 
 fn write_reborn_skill(reborn_home: &std::path::Path, name: &str, description: &str) {
@@ -1467,54 +1388,6 @@ Use {name}.
 
 fn reborn_cli_skill_root(reborn_home: &std::path::Path) -> std::path::PathBuf {
     reborn_home.join("local-dev/tenants/default/users/reborn-cli/skills")
-}
-
-fn assert_verbose_detail(args: &[&str], expected_detail: &str) {
-    let output = reborn_command()
-        .args(args)
-        .output()
-        .expect("ironclaw-reborn verbose command should run");
-
-    assert!(
-        output.status.success(),
-        "stderr: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(stdout.contains(expected_detail), "stdout: {stdout}");
-}
-
-fn assert_json_verbose_detail(
-    args: &[&str],
-    collection_key: &str,
-    count_key: &str,
-    expected_detail: &str,
-) {
-    let output = reborn_command()
-        .args(args)
-        .output()
-        .expect("ironclaw-reborn JSON verbose command should run");
-
-    assert!(
-        output.status.success(),
-        "stderr: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let json: serde_json::Value = serde_json::from_str(stdout.trim()).expect("valid JSON");
-    assert_eq!(json[count_key], 0);
-    assert_eq!(
-        json[collection_key]
-            .as_array()
-            .expect("collection array")
-            .len(),
-        0
-    );
-    let details = json["details"].as_array().expect("details array");
-    assert!(
-        details.iter().any(|detail| detail == expected_detail),
-        "json: {json}"
-    );
 }
 
 #[test]
