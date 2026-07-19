@@ -1830,6 +1830,17 @@ async def _wait_for_assistant_reply(
                         last_text = text
                         last_observed_text = text
                         normalized = text.lower()
+                    elif reconfirm_final_assistant_text:
+                        # Block-texts read failed or came back empty this
+                        # attempt; fall back to the whole-bubble text so the
+                        # marker AND required-text checks evaluate against the
+                        # freshest snapshot — never a stale pre-reconfirm
+                        # truncation (which could otherwise fail required_text
+                        # or, worse, succeed with stale text on record).
+                        text = reconfirm_final_assistant_text
+                        last_text = text
+                        last_observed_text = text
+                        normalized = text.lower()
                     marker_matches = (
                         not enforce_marker
                         or not marker
