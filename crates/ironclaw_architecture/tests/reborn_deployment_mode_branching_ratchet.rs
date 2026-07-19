@@ -103,50 +103,77 @@ fn workspace_root() -> PathBuf {
 
 /// Remove line comments, block comments, and string literals so that prose and
 /// fixtures inside them cannot trip the scan.
+///
+/// Char literals are consumed too: a `"` (or `/`) inside a char literal such as
+/// `'"'` must not open a string/comment and swallow the rest of the file, which
+/// would silently hide a `DeploymentMode` branch from the scan. A char literal
+/// (`'x'` / `'\n'` / `'"'`) is dropped; a lifetime (`'a`) is emitted as-is.
+/// Uses char-indexed lookahead (a char literal needs to see two chars ahead),
+/// mirroring the shared `ratchet_support` stripper the other §10 ratchets use.
 fn strip_comments_and_strings(source: &str) -> String {
+    let chars: Vec<char> = source.chars().collect();
     let mut out = String::with_capacity(source.len());
-    let mut chars = source.chars().peekable();
-    let mut in_line_comment = false;
-    let mut in_block_comment = false;
-    let mut in_string = false;
-    let mut escaped = false;
-    while let Some(ch) = chars.next() {
-        if in_line_comment {
-            if ch == '\n' {
-                in_line_comment = false;
-                out.push('\n');
+    let mut i = 0;
+    while i < chars.len() {
+        let c = chars[i];
+        // Line comment — drop to (not including) the newline, which the next
+        // iteration preserves.
+        if c == '/' && chars.get(i + 1) == Some(&'/') {
+            i += 2;
+            while i < chars.len() && chars[i] != '\n' {
+                i += 1;
             }
             continue;
         }
-        if in_block_comment {
-            if ch == '*' && chars.peek() == Some(&'/') {
-                chars.next();
-                in_block_comment = false;
+        // Block comment — drop through the closing `*/`.
+        if c == '/' && chars.get(i + 1) == Some(&'*') {
+            i += 2;
+            while i < chars.len() && !(chars[i] == '*' && chars.get(i + 1) == Some(&'/')) {
+                i += 1;
+            }
+            i += 2;
+            continue;
+        }
+        // String literal — drop through the closing `"`, honoring escapes.
+        if c == '"' {
+            i += 1;
+            while i < chars.len() {
+                if chars[i] == '\\' {
+                    i += 2;
+                    continue;
+                }
+                if chars[i] == '"' {
+                    i += 1;
+                    break;
+                }
+                i += 1;
             }
             continue;
         }
-        if in_string {
-            if escaped {
-                escaped = false;
-            } else if ch == '\\' {
-                escaped = true;
-            } else if ch == '"' {
-                in_string = false;
+        // Char literal vs lifetime — only consume when it closes as a literal.
+        if c == '\'' {
+            // Escaped char literal `'\...'`: drop through the closing quote.
+            if chars.get(i + 1) == Some(&'\\') {
+                let mut k = i + 2;
+                while k < chars.len() && chars[k] != '\'' {
+                    k += 1;
+                }
+                i = k + 1;
+                continue;
             }
+            // Single-char literal `'x'` (incl. `'"'`): the quote two chars ahead
+            // proves it is a literal, not a lifetime — drop all three.
+            if chars.get(i + 2) == Some(&'\'') {
+                i += 3;
+                continue;
+            }
+            // A lifetime (`'a`) — emit and move on.
+            out.push(c);
+            i += 1;
             continue;
         }
-        match ch {
-            '/' if chars.peek() == Some(&'/') => {
-                chars.next();
-                in_line_comment = true;
-            }
-            '/' if chars.peek() == Some(&'*') => {
-                chars.next();
-                in_block_comment = true;
-            }
-            '"' => in_string = true,
-            _ => out.push(ch),
-        }
+        out.push(c);
+        i += 1;
     }
     out
 }
@@ -278,4 +305,21 @@ fn scanner_strips_comments_and_strings() {
         strip_comments_and_strings(real).contains("RebornCompositionProfile::"),
         "real branching must survive stripping"
     );
+
+    // Regression (2026-07-19 gemini review): a char literal containing `"` must
+    // not open a string and swallow a following branch. Before the char-literal
+    // handling, `'"'` flipped in_string and the DeploymentMode match after it
+    // was hidden from the scan — a silent ratchet false negative.
+    let with_char_literal = r#"
+        let quote = '"';
+        match profile { RebornCompositionProfile::LocalDev => 1, _ => 0 }
+    "#;
+    assert!(
+        strip_comments_and_strings(with_char_literal).contains("RebornCompositionProfile::"),
+        "a `'\"'` char literal must not hide the branch after it"
+    );
+    // The char literal itself is dropped (it is not a lifetime), and a real
+    // lifetime is preserved.
+    assert!(!strip_comments_and_strings("let c = '\"';").contains('"'));
+    assert!(strip_comments_and_strings("fn f<'a>(x: &'a str) {}").contains("'a"));
 }
