@@ -1051,13 +1051,17 @@ pub struct HostRuntimeLoopCapabilityPort {
     /// invocation id recovered from the resume token
     /// (`replay_payload_for_resume`). Never model-visible.
     replay_payload_store: Arc<dyn ReplayPayloadStore>,
-    /// Idempotency keys whose gate record was already persisted by this port.
-    /// A replayed invocation (same key) returns the CACHED gate outcome from
-    /// `dispatch_records`; without this guard the seam would mint a fresh
-    /// `GateRef` and persist another write-once record per retry — orphaning
-    /// records the store deliberately cannot remove. An entry is rolled back on
-    /// a failed save so the next replay retries the persist.
-    gate_records_persisted: Mutex<HashSet<IdempotencyKey>>,
+    /// The mapped [`Resolution`] persisted for each idempotency key, so a
+    /// replayed invocation (same key) returns the SAME resolution — and
+    /// therefore the SAME [`GateRef`] the record was persisted under — instead
+    /// of a freshly-minted one. The mapping mints a fresh random `GateRef` per
+    /// call for the approval/resource/dependent/external channels, so returning
+    /// the re-mapped resolution on a replay would hand back a gate ref no record
+    /// exists under (#6287). Doubling as the write-once replay guard: the first
+    /// invocation reserves the key with its resolution and persists exactly one
+    /// record; a repeat finds the reservation and returns it without a second
+    /// save. An entry is rolled back on a failed save so the next replay retries.
+    persisted_gate_resolutions: Mutex<HashMap<IdempotencyKey, Resolution>>,
 }
 
 /// Lock a poisoned-aware `Mutex` and wrap a poison error as the canonical
@@ -1111,7 +1115,7 @@ impl HostRuntimeLoopCapabilityPort {
             // store through the factory's `with_replay_payload_store`. See
             // `NoopReplayPayloadStore`.
             replay_payload_store: Arc::new(NoopReplayPayloadStore),
-            gate_records_persisted: Mutex::new(HashSet::new()),
+            persisted_gate_resolutions: Mutex::new(HashMap::new()),
         }
     }
 
@@ -1755,10 +1759,11 @@ impl LoopCapabilityPort for HostRuntimeLoopCapabilityPort {
         // `for_auth_gate`), so mapping a second time to build the return value
         // would hand the executor a gate ref that differs from the one the
         // record was just persisted under — the resume could never load it.
+        // `persist_gate_record_for_mapped` returns the resolution to actually
+        // hand back: on a replay it is the FIRST invocation's cached resolution
+        // (whose gate ref the record is under), not this call's fresh mint.
         let mapped = capability_outcome_to_resolution(outcome);
-        self.persist_gate_record_for_mapped(&request, &mapped)
-            .await?;
-        Ok(mapped.resolution)
+        self.persist_gate_record_for_mapped(&request, mapped).await
     }
 
     async fn invoke_capability_batch(
@@ -1814,12 +1819,12 @@ impl HostRuntimeLoopCapabilityPort {
     async fn persist_gate_record_for_mapped(
         &self,
         request: &CapabilityInvocation,
-        mapped: &MappedResolution,
-    ) -> Result<(), AgentLoopHostError> {
+        mapped: MappedResolution,
+    ) -> Result<Resolution, AgentLoopHostError> {
         let Some(record) = mapped.gate_record.as_ref() else {
-            // Done / Denied / Suspended(Process): nothing durable to persist, and
-            // no idempotency key needed.
-            return Ok(());
+            // Done / Denied / Suspended(Process): nothing durable to persist, no
+            // idempotency key needed, and no gate ref that must stay loadable.
+            return Ok(mapped.resolution);
         };
         let Some(gate_ref) = gate_ref_for_resolution(&mapped.resolution) else {
             // A gate record without a gate-ref-bearing channel is a mapping
@@ -1839,13 +1844,23 @@ impl HostRuntimeLoopCapabilityPort {
             .unwrap_or(&request.input_ref);
         let idempotency_key =
             invocation_idempotency_key(&self.run_context, request, effective_input_ref)?;
-        // Replay guard: the dispatch cache replays the same gate outcome for a
-        // repeated invocation (same idempotency key); persisting again would
-        // mint a fresh GateRef and orphan another write-once record per retry.
-        if !lock_mut(&self.gate_records_persisted, "gate record replay guard")?
-            .insert(idempotency_key.clone())
+        // Replay dedup: the dispatch cache replays the same gate outcome for a
+        // repeated invocation (same idempotency key), and the mapping mints a
+        // fresh random `GateRef` on every call. Reserve the key with THIS
+        // resolution and persist exactly one record under its gate ref; a repeat
+        // (or a concurrent duplicate) finds the reservation and returns the SAME
+        // resolution — the one whose gate ref the record is under — instead of
+        // re-minting a gate ref no record exists under (#6287). The check-and-
+        // reserve is atomic under one lock, so only the first caller saves.
         {
-            return Ok(());
+            let mut reserved = lock_mut(
+                &self.persisted_gate_resolutions,
+                "gate resolution replay cache",
+            )?;
+            if let Some(existing) = reserved.get(&idempotency_key) {
+                return Ok(existing.clone());
+            }
+            reserved.insert(idempotency_key.clone(), mapped.resolution.clone());
         }
         let scope = self.visible_request.context.resource_scope.clone();
         match self
@@ -1857,12 +1872,12 @@ impl HostRuntimeLoopCapabilityPort {
             // A deterministic gate-record key (the auth gate's `for_auth_gate`, and
             // the approval gate's `for_approval_request` on the authorize path)
             // means a re-raise of the SAME gate — a deny-then-retry, or a fresh
-            // port instance whose in-memory replay guard was reset across turns —
+            // port instance whose in-memory replay cache was reset across turns —
             // derives the SAME content-addressed key and an identical record. The
             // write-once store reports `GateRecordAlreadyExists`; that is benign
             // (the record is already persisted, byte-identical), never a fault.
             // Mirrors `persist_replay_payload_for_fresh_gate`'s tolerance of
-            // `ReplayPayloadAlreadyExists`. Keep the guard entry set.
+            // `ReplayPayloadAlreadyExists`. Keep the reservation.
             Err(RunStateError::GateRecordAlreadyExists { .. }) => {
                 tracing::debug!(
                     %gate_ref,
@@ -1870,14 +1885,18 @@ impl HostRuntimeLoopCapabilityPort {
                 );
             }
             Err(error) => {
-                // Roll the guard entry back so a later replay retries the persist
-                // instead of permanently skipping it after a transient store fault.
-                lock_mut(&self.gate_records_persisted, "gate record replay guard")?
-                    .remove(&idempotency_key);
+                // Roll the reservation back so a later replay retries the persist
+                // instead of permanently returning a resolution whose record was
+                // never saved after a transient store fault.
+                lock_mut(
+                    &self.persisted_gate_resolutions,
+                    "gate resolution replay cache",
+                )?
+                .remove(&idempotency_key);
                 return Err(gate_record_store_error(error));
             }
         }
-        Ok(())
+        Ok(mapped.resolution)
     }
 
     /// Persist the host-private [`ReplayPayload`] a later gate/auth resume
@@ -9367,10 +9386,37 @@ mod tests {
             "both invocations must surface the gate"
         );
 
+        let saved = store.saved();
         assert_eq!(
-            store.saved().len(),
+            saved.len(),
             1,
             "a replayed gate invocation must not persist a duplicate gate record"
+        );
+
+        // Regression (#6287 IronLoop): the replay must return the SAME gate ref
+        // the single record was persisted under — not a freshly-minted one. The
+        // mapping mints a random `GateRef` per call, so without the replay
+        // resolution cache the replayed `Resolution` would carry an unloadable
+        // ref while the one saved record sits under the first invocation's ref.
+        let first_ref = gate_ref_for_resolution(&first).expect("first resolution gate ref");
+        let replayed_ref =
+            gate_ref_for_resolution(&replayed).expect("replayed resolution gate ref");
+        assert_eq!(
+            first_ref, replayed_ref,
+            "the replay must return the first invocation's gate ref, not a fresh mint"
+        );
+        let (scope, saved_ref, record) = saved.into_iter().next().expect("one saved record");
+        assert_eq!(
+            replayed_ref, saved_ref,
+            "the replayed gate ref must equal the persisted record's key"
+        );
+        assert_eq!(
+            store
+                .load(&scope, replayed_ref)
+                .await
+                .expect("gate record load by replayed ref"),
+            Some(record),
+            "the record must be loadable by the gate ref the replayed Resolution carries"
         );
     }
 
