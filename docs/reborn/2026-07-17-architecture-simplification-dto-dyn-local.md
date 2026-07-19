@@ -2229,8 +2229,12 @@ open PR not yet on `main`.
   (#6222, `reborn_deployment_mode_typename_ratchet.rs`). **Remaining:** the
   Bucket-1 collapse of the `LocalDev*` shadow runtime to `DeploymentConfig` data
   (§4.4.1) — the bulk of the 53 identifiers.
-- **§10 ratchets live.** Three architecture-test ratchets frozen and enforcing:
-  InMemory-store, LocalDev-typename, deployment-mode-typename.
+- **§10 ratchets live.** Seven architecture-test ratchets frozen and enforcing:
+  InMemory-store, LocalDev-typename, deployment-mode-typename,
+  deployment-mode-branching, capability-DTO-collapse, `Authorized`-seal, and the
+  `RebornServicesApi` facade-method freeze (§5.2.5 step 1 — freezes the current
+  88-method surface; a new product operation must be a capability/view
+  descriptor, not a facade method).
 - **Recoverability groundwork (feeds §5.3.4 / #6284).** The collapsed
   no-run-borking recoverability stack (#5692) and loop resilience — deep
   availability retries, iteration backstop, model-visible tool-failure reasons
@@ -2266,8 +2270,11 @@ the integration branch:
   §11.9), the model-error observation channel, `read_diagnostic(diag_ref)`, and
   the per-kind remediation generalization. Gated on the flip stack landing
   #6273's `Resolution` vocabulary.
-- **§5.2 `ProductSurface`** facade collapse and the products-in-composition
-  ratchet (§5.8) — the 88-method `RebornServicesApi` freeze has not landed.
+- **§5.2 `ProductSurface`** facade collapse — the 88-method `RebornServicesApi`
+  freeze has landed (§10 ratchet, above), so the surface can only shrink; the
+  actual migration of mutations to capability descriptors and reads to view
+  descriptors (Slice 1 = the synthetic-capability promotion, §13.3) has not
+  started, nor has the products-in-composition ratchet (§5.8).
 
 ---
 
