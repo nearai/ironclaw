@@ -102,9 +102,8 @@ use ironclaw_turns::run_profile::{
     ModelProfileId,
 };
 use ironclaw_turns::{
-    FilesystemTurnStateStore, InMemoryCheckpointStateStore, InMemoryTurnEventSink,
-    InMemoryTurnStateStoreLimits, LoopCheckpointStore, TurnCoordinator, TurnEventSink, TurnScope,
-    TurnStateStore,
+    FilesystemTurnStateStore, InMemoryTurnEventSink, InMemoryTurnStateStoreLimits,
+    LoopCheckpointStore, TurnCoordinator, TurnEventSink, TurnScope, TurnStateStore,
 };
 
 use super::builder::{
@@ -152,6 +151,8 @@ mod group_options;
 
 /// Convenience alias matching `builder.rs` and `harness.rs`.
 pub type HarnessResult<T> = Result<T, Box<dyn std::error::Error + Send + Sync>>;
+
+use ironclaw_loop_host::in_memory_backed_checkpoint_state_store as in_memory_checkpoint_state_store;
 
 // ---------------------------------------------------------------------------
 // GroupSharedStorage
@@ -744,7 +745,7 @@ impl RebornIntegrationGroupBuilder {
                 .with_limits(turn_state_limits),
         );
         let loop_checkpoint_store: Arc<dyn LoopCheckpointStore> = turn_store.clone();
-        let checkpoint_state_store = Arc::new(InMemoryCheckpointStateStore::default());
+        let checkpoint_state_store = in_memory_checkpoint_state_store();
 
         let group_thread_scope = thread_scope_from_binding(&base.canonical_binding)?;
         let group_thread_harness = RebornThreadHarness::filesystem_shared_composite(

@@ -1,3 +1,4 @@
+// arch-exempt: large_file, mechanical §4.3 store swap only — InMemory{CheckpointState,LoopCheckpoint}Store deleted; test helper added over FilesystemCheckpointStateStore<InMemoryBackend> (arch-simplification §4.3), plan #6168
 //! End-to-end integration tests proving that `RebornLoopDriverHostFactory`
 //! wires the `HookDispatcher` into the capability port seam correctly.
 //!
@@ -40,6 +41,7 @@ use ironclaw_events::{
     EventStreamKey, InMemoryDurableEventLog, InMemorySecurityAuditSink, ReadScope, RuntimeEvent,
     RuntimeEventKind, SecurityAuditSink, SecurityBoundary, SecurityDecision,
 };
+use ironclaw_filesystem::InMemoryBackend;
 use ironclaw_hooks::HookRegistrar;
 use ironclaw_hooks::dispatch::{HookDispatcher, HookDispatcherBuilder};
 use ironclaw_hooks::error::HookError;
@@ -72,8 +74,8 @@ use ironclaw_host_api::{
     UserId,
 };
 use ironclaw_loop_host::{
-    HostManagedModelError, HostManagedModelGateway, HostManagedModelRequest,
-    HostManagedModelResponse, LoopCapabilityInputResolver,
+    FilesystemCheckpointStateStore, HostManagedModelError, HostManagedModelGateway,
+    HostManagedModelRequest, HostManagedModelResponse, LoopCapabilityInputResolver,
 };
 use ironclaw_runner::hook_gate_refs::{
     HookGateActorBinding, HookGateReservationContext, HookGateResolutionRequest, HookGateRouter,
@@ -89,12 +91,12 @@ use ironclaw_threads::{
 };
 use ironclaw_turns::{
     AcceptedMessageRef, CancelRunRequest, CancelRunResponse, CheckpointStateStore, EventCursor,
-    GetRunStateRequest, InMemoryCheckpointStateStore, InMemoryRunProfileResolver,
-    InMemoryTurnStateStore, LoopResultRef, PutCheckpointStateRequest, ReplyTargetBindingRef,
-    ResumeTurnRequest, ResumeTurnResponse, RunProfileId, RunProfileResolutionRequest,
-    RunProfileResolver, RunProfileVersion, SourceBindingRef, SubmitTurnRequest, SubmitTurnResponse,
-    TurnActor, TurnAdmissionPolicy, TurnError, TurnLeaseToken, TurnRunId, TurnRunState,
-    TurnRunnerId, TurnScope, TurnStateStore, TurnStatus,
+    GetRunStateRequest, InMemoryRunProfileResolver, InMemoryTurnStateStore, LoopResultRef,
+    PutCheckpointStateRequest, ReplyTargetBindingRef, ResumeTurnRequest, ResumeTurnResponse,
+    RunProfileId, RunProfileResolutionRequest, RunProfileResolver, RunProfileVersion,
+    SourceBindingRef, SubmitTurnRequest, SubmitTurnResponse, TurnActor, TurnAdmissionPolicy,
+    TurnError, TurnLeaseToken, TurnRunId, TurnRunState, TurnRunnerId, TurnScope, TurnStateStore,
+    TurnStatus,
     run_profile::{
         AgentLoopHostError, CapabilityBatchInvocation, CapabilityBatchOutcome,
         CapabilityDeniedReasonKind, CapabilityDescriptorView, CapabilityInputRef,
@@ -1001,9 +1003,11 @@ const WASM_CTX_READ_THEN_DENY: &str = r#"
 
 // ─── Fixture for building hosts with the factory ───────────────────────────
 
+use ironclaw_loop_host::in_memory_backed_checkpoint_state_store as in_memory_checkpoint_state_store;
+
 struct Fixture {
     thread_service: Arc<InMemorySessionThreadService>,
-    checkpoint_state_store: Arc<InMemoryCheckpointStateStore>,
+    checkpoint_state_store: Arc<FilesystemCheckpointStateStore<InMemoryBackend>>,
     loop_checkpoint_store: Arc<InMemoryTurnStateStore>,
     milestone_sink: Arc<InMemoryLoopHostMilestoneSink>,
     gateway: Arc<UnusedGateway>,
@@ -1017,7 +1021,7 @@ struct Fixture {
 impl Fixture {
     async fn new() -> Self {
         let thread_service = Arc::new(InMemorySessionThreadService::default());
-        let checkpoint_state_store = Arc::new(InMemoryCheckpointStateStore::default());
+        let checkpoint_state_store = in_memory_checkpoint_state_store();
         let loop_checkpoint_store = Arc::new(InMemoryTurnStateStore::default());
         let milestone_sink = Arc::new(InMemoryLoopHostMilestoneSink::default());
         let gateway = Arc::new(UnusedGateway);

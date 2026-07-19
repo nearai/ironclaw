@@ -10,8 +10,8 @@ use ironclaw_run_state::{FilesystemApprovalRequestStore, FilesystemRunStateStore
 
 use super::{
     DiskFilesystem, DurableAuditSink, DurableEventSink, EmptyWasmRuntimeCredentials,
-    HostProcessPort, InMemoryAuditSink, InMemoryCredentialBroker, InMemoryDurableAuditLog,
-    InMemoryDurableEventLog, InMemoryEventSink, InMemoryResourceGovernor, InMemorySecretStore,
+    FilesystemSecretStore, HostProcessPort, InMemoryAuditSink, InMemoryCredentialBroker,
+    InMemoryDurableAuditLog, InMemoryDurableEventLog, InMemoryEventSink, InMemoryResourceGovernor,
     InMemoryTurnStateStore, NoopTurnRunWakeNotifier, RebornEventStoreError, RuntimeKind,
 };
 
@@ -318,7 +318,13 @@ fn classify_component_type<T: ?Sized + 'static>() -> ProductionImplementationRea
             || type_id == TypeId::of::<InMemoryDurableEventLog>()
             || type_id == TypeId::of::<InMemoryAuditSink>()
             || type_id == TypeId::of::<InMemoryDurableAuditLog>()
-            || type_id == TypeId::of::<InMemorySecretStore>()
+            // The secret store no longer has a bespoke in-memory implementation;
+            // "in-memory" is the `InMemoryBackend` behind the one production
+            // encrypted `FilesystemSecretStore<F>` (arch-simplification §4.3).
+            // A store backed by `InMemoryBackend` is still local-only; the
+            // durable libSQL/Postgres monomorphizations are distinct types and
+            // correctly classify as production candidates.
+            || type_id == TypeId::of::<FilesystemSecretStore<InMemoryBackend>>()
             || type_id == TypeId::of::<InMemoryCredentialBroker>()
             || type_id == TypeId::of::<EmptyWasmRuntimeCredentials>()
             || type_id == TypeId::of::<InMemoryTurnStateStore>()

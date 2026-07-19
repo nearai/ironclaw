@@ -21,7 +21,7 @@ use ironclaw_network::{
     NetworkHttpEgress, NetworkHttpError, NetworkHttpRequest, NetworkHttpResponse, NetworkUsage,
 };
 use ironclaw_resources::InMemoryResourceGovernor;
-use ironclaw_secrets::InMemorySecretStore;
+use ironclaw_secrets::FilesystemSecretStore;
 
 use crate::bot_api::HostEgressTelegramBotApi;
 use crate::state::FilesystemTelegramHostState;
@@ -325,7 +325,7 @@ fn host_egress_port(network: impl NetworkHttpEgress + 'static) -> HostRuntimeHtt
         ironclaw_processes::in_memory_backed_process_services(),
         CapabilitySurfaceVersion::new("surface-v1").expect("surface version"),
     )
-    .with_secret_store(Arc::new(InMemorySecretStore::new()))
+    .with_secret_store(Arc::new(FilesystemSecretStore::ephemeral()))
     .try_with_host_http_egress(network)
     .expect("host HTTP egress should wire");
     services

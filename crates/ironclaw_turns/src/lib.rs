@@ -35,11 +35,9 @@ pub use admission::{
 pub use block_persistence::TurnStateBlockPersistence;
 pub use checkpoint_state::{
     CheckpointStateMatchMetadata, CheckpointStateRecord, CheckpointStateStore,
-    GetCheckpointStateRequest, GetLoopCheckpointRequest, InMemoryCheckpointStateStore,
-    InMemoryLoopCheckpointStore, LoopCheckpointRecord, LoopCheckpointStore,
+    GetCheckpointStateRequest, GetLoopCheckpointRequest, LoopCheckpointRecord, LoopCheckpointStore,
     MAX_CHECKPOINT_STATE_PAYLOAD_BYTES, PutCheckpointStateRequest, PutLoopCheckpointRequest,
-    RedactedCheckpointPayload, checkpoint_state_metadata_matches_request,
-    checkpoint_state_record_matches_request, new_checkpoint_state_ref,
+    RedactedCheckpointPayload, checkpoint_state_metadata_matches_request, new_checkpoint_state_ref,
 };
 pub use coordinator::{
     AllowAllTurnAdmissionPolicy, DefaultTurnCoordinator, NoopTurnRunWakeNotifier,

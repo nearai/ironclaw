@@ -5,14 +5,15 @@ use std::sync::{
 
 use super::port_adapters::HostManagedLoopCheckpointPort;
 
+use ironclaw_filesystem::InMemoryBackend;
 use ironclaw_host_api::{AgentId, ProjectId, TenantId, ThreadId, UserId};
+use ironclaw_loop_host::FilesystemCheckpointStateStore;
 use ironclaw_threads::ThreadScope;
 use ironclaw_turns::{
     CheckpointStateRecord, CheckpointStateStore, GetCheckpointStateRequest,
-    InMemoryCheckpointStateStore, InMemoryLoopCheckpointStore, InMemoryRunProfileResolver,
-    LoopCheckpointStateRef, LoopCheckpointStore, PutCheckpointStateRequest,
-    PutLoopCheckpointRequest, RunProfileResolver, TurnActor, TurnCheckpointId, TurnError, TurnId,
-    TurnRunId, TurnScope,
+    InMemoryRunProfileResolver, InMemoryTurnStateStore, LoopCheckpointStateRef,
+    LoopCheckpointStore, PutCheckpointStateRequest, PutLoopCheckpointRequest, RunProfileResolver,
+    TurnActor, TurnCheckpointId, TurnError, TurnId, TurnRunId, TurnScope,
     run_profile::{
         AgentLoopHostErrorKind, CheckpointSchemaId, InMemoryLoopHostMilestoneSink,
         LoadCheckpointPayloadRequest, LoopCheckpointKind, LoopCheckpointPort,
@@ -34,15 +35,17 @@ async fn test_run_context() -> LoopRunContext {
     LoopRunContext::new(turn_scope, TurnId::new(), TurnRunId::new(), resolved)
 }
 
+use ironclaw_loop_host::in_memory_backed_checkpoint_state_store as in_memory_checkpoint_state_store;
+
 fn test_checkpoint_port(
     context: LoopRunContext,
 ) -> (
     HostManagedLoopCheckpointPort,
-    Arc<InMemoryCheckpointStateStore>,
-    Arc<InMemoryLoopCheckpointStore>,
+    Arc<FilesystemCheckpointStateStore<InMemoryBackend>>,
+    Arc<InMemoryTurnStateStore>,
 ) {
-    let state_store = Arc::new(InMemoryCheckpointStateStore::default());
-    let checkpoint_store = Arc::new(InMemoryLoopCheckpointStore::default());
+    let state_store = in_memory_checkpoint_state_store();
+    let checkpoint_store = Arc::new(InMemoryTurnStateStore::default());
     let milestone_sink = Arc::new(InMemoryLoopHostMilestoneSink::default());
     let port = HostManagedLoopCheckpointPort::new(
         context,
@@ -53,10 +56,18 @@ fn test_checkpoint_port(
     (port, state_store, checkpoint_store)
 }
 
-#[derive(Default)]
 struct CountingCheckpointStateStore {
-    inner: InMemoryCheckpointStateStore,
+    inner: Arc<FilesystemCheckpointStateStore<InMemoryBackend>>,
     get_calls: AtomicUsize,
+}
+
+impl Default for CountingCheckpointStateStore {
+    fn default() -> Self {
+        Self {
+            inner: in_memory_checkpoint_state_store(),
+            get_calls: AtomicUsize::new(0),
+        }
+    }
 }
 
 impl CountingCheckpointStateStore {
@@ -127,7 +138,7 @@ async fn checkpoint_port_load_payload_roundtrips_staged_payload() {
 async fn checkpoint_port_skips_read_back_for_host_staged_ref() {
     let context = test_run_context().await;
     let state_store = Arc::new(CountingCheckpointStateStore::default());
-    let checkpoint_store = Arc::new(InMemoryLoopCheckpointStore::default());
+    let checkpoint_store = Arc::new(InMemoryTurnStateStore::default());
     let milestone_sink = Arc::new(InMemoryLoopHostMilestoneSink::default());
     let port = HostManagedLoopCheckpointPort::new(
         context.clone(),
