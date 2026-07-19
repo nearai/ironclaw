@@ -17,7 +17,7 @@ use ironclaw_network::{
     NetworkHttpEgress, NetworkHttpError, NetworkHttpRequest, NetworkHttpResponse, NetworkUsage,
 };
 use ironclaw_resources::{InMemoryResourceGovernor, ResourceGovernor};
-use ironclaw_secrets::{InMemorySecretStore, SecretMaterial, SecretStore};
+use ironclaw_secrets::{FilesystemSecretStore, SecretMaterial, SecretStore};
 use ironclaw_trust::TrustDecision;
 use serde_json::json;
 
@@ -33,7 +33,7 @@ fn local_test_runtime_policy() -> ironclaw_host_api::runtime_policy::EffectiveRu
 async fn default_runtime_installs_configured_builtin_obligation_services() {
     let registry = Arc::new(registry_with_echo_capability());
     let audit_sink = Arc::new(InMemoryAuditSink::new());
-    let secret_store = Arc::new(InMemorySecretStore::new());
+    let secret_store = Arc::new(FilesystemSecretStore::ephemeral());
     let resource_governor = Arc::new(InMemoryResourceGovernor::new());
     let services = BuiltinObligationServices::new(
         audit_sink.clone(),

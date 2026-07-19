@@ -10,7 +10,7 @@ use ironclaw_host_api::{
     RuntimeCredentialAuthRequirement, RuntimeHttpEgress, RuntimeHttpEgressRequest,
     RuntimeHttpEgressResponse, TenantId, ThreadId, UserId,
 };
-use ironclaw_secrets::InMemorySecretStore;
+use ironclaw_secrets::FilesystemSecretStore;
 use ironclaw_turns::{TurnRunId, TurnScope};
 
 use crate::product_auth::api::auth::RebornProductAuthServices;
@@ -32,7 +32,7 @@ async fn dcr_challenge_errors_propagate_through_product_auth_provider() {
                 scopes: Vec::new(),
             },
             Arc::new(FailingDcrEgress),
-            Arc::new(InMemorySecretStore::new()),
+            Arc::new(FilesystemSecretStore::ephemeral()),
             Arc::new(NoopObligationHandler),
         )
         .unwrap(),
@@ -87,7 +87,7 @@ async fn dcr_registry_returns_none_for_zero_and_multiple_requirements() {
                 scopes: Vec::new(),
             },
             Arc::new(PanickingDcrEgress),
-            Arc::new(InMemorySecretStore::new()),
+            Arc::new(FilesystemSecretStore::ephemeral()),
             Arc::new(NoopObligationHandler),
         )
         .unwrap(),
