@@ -91,8 +91,8 @@ tracing-subscriber = "0.3"
 tracing-test = { version = "0.2", features = ["no-env-filter"] }
 zeroize = "1"
 wat = "1.245.1"
-wit-component = "0.245.1"
-wit-parser = "0.245.1"
+wit-component = "0.253.0"
+wit-parser = "0.253.0"
 
 [lints]
 workspace = true

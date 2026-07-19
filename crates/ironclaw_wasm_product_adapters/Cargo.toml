@@ -32,5 +32,5 @@ wasmtime = { workspace = true }
 [dev-dependencies]
 tokio = { version = "1", features = ["macros", "rt", "sync"] }
 wat = "1.245.1"
-wit-component = "0.245.1"
-wit-parser = "0.245.1"
+wit-component = "0.253.0"
+wit-parser = "0.253.0"
