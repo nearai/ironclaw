@@ -100,11 +100,7 @@ async fn two_fake_drivers_use_the_same_per_run_agent_loop_host_contract() {
         effective_model_profile_id: host.context.resolved_run_profile.model_profile_id.clone(),
         usage: None,
     });
-    host.push_capability_outcome(CapabilityOutcome::ApprovalRequired {
-        gate_ref: LoopGateRef::new("gate:approval-needed").unwrap(),
-        safe_summary: "approval required".to_string(),
-        approval_resume: None,
-    });
+    host.push_capability_outcome(resolution::approval_required(LoopGateRef::new("gate:approval-needed").unwrap(), "approval required".to_string(), None).resolution);
 
     let reply_exit = ReplyDriver
         .run(driver_run_request(&host), host.as_ref())

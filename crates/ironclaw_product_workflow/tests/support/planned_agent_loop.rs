@@ -954,16 +954,8 @@ impl LoopCapabilityPort for RecordingCapabilityPort {
             .lock()
             .expect("harness capability invocation lock poisoned")
             .push(request);
-        let outcome = CapabilityOutcome::Completed(CapabilityResultMessage {
-            result_ref: LoopResultRef::new(self.capability.result_ref.clone())
-                .expect("valid harness result ref"),
-            safe_summary: self.capability.safe_summary.clone(),
-            progress: ironclaw_turns::run_profile::CapabilityProgress::MadeProgress,
-            terminate_hint: self.capability.terminate_hint,
-            byte_len: 0,
-            output_digest: None,
-            model_observation: None,
-        });
+        let outcome = resolution::completed(LoopResultRef::new(self.capability.result_ref.clone())
+                .expect("valid harness result ref"), self.capability.safe_summary.clone(), ironclaw_turns::run_profile::CapabilityProgress::MadeProgress, self.capability.terminate_hint, 0, None, None);
         Ok(capability_outcome_to_resolution(outcome).resolution)
     }
 

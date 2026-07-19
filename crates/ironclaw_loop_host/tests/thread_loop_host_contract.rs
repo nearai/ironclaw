@@ -4935,10 +4935,7 @@ impl LoopCapabilityPort for StaticToolDefinitionPort {
         &self,
         _request: CapabilityInvocation,
     ) -> Result<Resolution, AgentLoopHostError> {
-        let outcome = CapabilityOutcome::Denied(CapabilityDenied {
-            reason_kind: CapabilityDeniedReasonKind::EmptySurface,
-            safe_summary: "test capability port does not execute tools".to_string(),
-        });
+        let outcome = resolution::denied(CapabilityDeniedReasonKind::EmptySurface, "test capability port does not execute tools".to_string()).resolution;
         Ok(capability_outcome_to_resolution(outcome).resolution)
     }
 
@@ -4950,10 +4947,7 @@ impl LoopCapabilityPort for StaticToolDefinitionPort {
             .invocations
             .into_iter()
             .map(|_| {
-                let outcome = CapabilityOutcome::Denied(CapabilityDenied {
-                    reason_kind: CapabilityDeniedReasonKind::EmptySurface,
-                    safe_summary: "test capability port does not execute tools".to_string(),
-                });
+                let outcome = resolution::denied(CapabilityDeniedReasonKind::EmptySurface, "test capability port does not execute tools".to_string()).resolution;
                 capability_outcome_to_resolution(outcome).resolution
             })
             .collect();

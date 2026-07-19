@@ -222,16 +222,8 @@ impl LoopCapabilityPort for RecordingCapabilityPort {
             .lock()
             .expect("invocations mutex not poisoned")
             .push(request.capability_id.clone());
-        let outcome = CapabilityOutcome::Completed(CapabilityResultMessage {
-            result_ref: LoopResultRef::new(format!("result:{}", request.capability_id))
-                .expect("result ref literal is valid"),
-            safe_summary: "stub capability completed".to_string(),
-            progress: ironclaw_turns::run_profile::CapabilityProgress::MadeProgress,
-            terminate_hint: false,
-            byte_len: 0,
-            output_digest: None,
-            model_observation: None,
-        });
+        let outcome = resolution::completed(LoopResultRef::new(format!("result:{}", request.capability_id))
+                .expect("result ref literal is valid"), "stub capability completed".to_string(), ironclaw_turns::run_profile::CapabilityProgress::MadeProgress, false, 0, None, None);
         Ok(capability_outcome_to_resolution(outcome).resolution)
     }
 
@@ -298,16 +290,8 @@ impl LoopCapabilityPort for ProviderAwareCapabilityPort {
             .lock()
             .expect("invocations mutex not poisoned")
             .push(request.capability_id.clone());
-        let outcome = CapabilityOutcome::Completed(CapabilityResultMessage {
-            result_ref: LoopResultRef::new(format!("result:{}", request.capability_id))
-                .expect("result ref literal is valid"),
-            safe_summary: "stub capability completed".to_string(),
-            progress: ironclaw_turns::run_profile::CapabilityProgress::MadeProgress,
-            terminate_hint: false,
-            byte_len: 0,
-            output_digest: None,
-            model_observation: None,
-        });
+        let outcome = resolution::completed(LoopResultRef::new(format!("result:{}", request.capability_id))
+                .expect("result ref literal is valid"), "stub capability completed".to_string(), ironclaw_turns::run_profile::CapabilityProgress::MadeProgress, false, 0, None, None);
         Ok(capability_outcome_to_resolution(outcome).resolution)
     }
 
