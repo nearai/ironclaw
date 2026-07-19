@@ -249,7 +249,9 @@ impl<'de> Deserialize<'de> for FailureKind {
     where
         D: serde::Deserializer<'de>,
     {
-        let value = String::deserialize(deserializer)?;
+        // Borrow when the input allows it: the 18 named variants allocate
+        // nothing, and only an `Unknown` tag needs an owned copy.
+        let value = std::borrow::Cow::<str>::deserialize(deserializer)?;
         Ok(Self::from_tag(&value))
     }
 }
@@ -411,7 +413,11 @@ impl<'de> Deserialize<'de> for LoopRef {
 /// Shared validator for bounded safe-identifier tags (the `FailureKind::Unknown`
 /// tag): non-empty, bounded, and restricted to a safe identifier charset so no
 /// raw payload/path/secret can ride along.
-fn validate_safe_tag(kind: &'static str, value: &str, max_bytes: usize) -> Result<(), HostApiError> {
+fn validate_safe_tag(
+    kind: &'static str,
+    value: &str,
+    max_bytes: usize,
+) -> Result<(), HostApiError> {
     if value.is_empty() {
         return Err(HostApiError::invalid_id(kind, value, "must not be empty"));
     }
@@ -423,8 +429,8 @@ fn validate_safe_tag(kind: &'static str, value: &str, max_bytes: usize) -> Resul
         ));
     }
     if !value
-        .chars()
-        .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.' | ':'))
+        .bytes()
+        .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'-' | b'.' | b':'))
     {
         return Err(HostApiError::invalid_id(
             kind,
@@ -445,7 +451,9 @@ mod tests {
         let json = serde_json::to_value(digest).unwrap();
         assert_eq!(json, serde_json::json!(0x0102_0304_0506_0708u64));
         assert_eq!(
-            serde_json::from_value::<OutputDigest>(json).unwrap().value(),
+            serde_json::from_value::<OutputDigest>(json)
+                .unwrap()
+                .value(),
             0x0102_0304_0506_0708
         );
     }
@@ -474,7 +482,10 @@ mod tests {
 
     #[test]
     fn terminate_hint_bool_bridge_and_wire() {
-        assert_eq!(TerminateHint::from_bool(true), TerminateHint::TerminateAfterBatch);
+        assert_eq!(
+            TerminateHint::from_bool(true),
+            TerminateHint::TerminateAfterBatch
+        );
         assert_eq!(TerminateHint::from_bool(false), TerminateHint::Continue);
         assert!(TerminateHint::TerminateAfterBatch.should_terminate());
         assert!(!TerminateHint::Continue.should_terminate());
@@ -509,7 +520,11 @@ mod tests {
         ];
         for kind in named {
             let tag = kind.as_str();
-            assert_eq!(FailureKind::from_tag(tag), kind, "from_tag round-trip: {tag}");
+            assert_eq!(
+                FailureKind::from_tag(tag),
+                kind,
+                "from_tag round-trip: {tag}"
+            );
             let wire = serde_json::to_value(&kind).unwrap();
             assert_eq!(wire, serde_json::Value::String(tag.to_string()));
             assert_eq!(serde_json::from_value::<FailureKind>(wire).unwrap(), kind);

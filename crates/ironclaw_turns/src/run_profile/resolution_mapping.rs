@@ -306,6 +306,7 @@ pub fn capability_outcome_to_resolution(outcome: CapabilityOutcome) -> MappedRes
                     summary: safe_summary_or_placeholder(safe_summary),
                     result: minted_result,
                     byte_len,
+                    result_origin: preserved_origin(result_ref.as_str()),
                 },
             )
             .bind_gate(gate_ref, minted_gate)
@@ -1058,10 +1059,24 @@ mod tests {
         });
         match mapped.gate_record {
             Some(GateRecord::DependentRun {
-                byte_len, summary, ..
+                byte_len,
+                summary,
+                result_origin,
+                ..
             }) => {
                 assert_eq!(byte_len, 2048);
                 assert_eq!(summary.as_str(), "awaiting dependent");
+                // Stage-1 non-lossy: the staged result's originating loop ref
+                // is preserved ON THE DURABLE RECORD — the minted ResultRef is
+                // a fresh uuid, and the transient RefBindings side-table is not
+                // persisted, so without this the child output the loop staged
+                // under its own ref would be unreachable from the record a
+                // later resume turn renders from.
+                assert_eq!(
+                    result_origin.as_ref().map(LoopRef::as_str),
+                    Some(result_ref().as_str()),
+                    "the staged result's loop origin must ride the durable record"
+                );
             }
             other => panic!("expected GateRecord::DependentRun, got {other:?}"),
         }

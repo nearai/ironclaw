@@ -444,7 +444,10 @@ mod tests {
         let blocked = Blocked::Approval(gate_wp());
         let json = serde_json::to_value(&blocked).unwrap();
         // A bare waypoint (no origin/resume) serializes as just the gate handle.
-        assert_eq!(json, serde_json::json!({ "approval": { "gate": GATE_UUID } }));
+        assert_eq!(
+            json,
+            serde_json::json!({ "approval": { "gate": GATE_UUID } })
+        );
         assert_eq!(serde_json::from_value::<Blocked>(json).unwrap(), blocked);
     }
 
@@ -546,7 +549,10 @@ mod tests {
     fn recoverable_failure_carries_its_error_kind_across_the_wire() {
         // The recovery classification (retry-vs-terminal) survives round-trip —
         // the field the old mapping dropped as "G1".
-        for kind in [FailureKind::Network, FailureKind::unknown("quota_exceeded").unwrap()] {
+        for kind in [
+            FailureKind::Network,
+            FailureKind::unknown("quota_exceeded").unwrap(),
+        ] {
             let verdict = ToolVerdict::RecoverableFailure {
                 error_kind: kind.clone(),
             };
@@ -628,8 +634,14 @@ mod tests {
         assert_eq!(back, outcome);
         assert_eq!(back.progress, ResultProgress::MadeProgress);
         assert!(back.terminate_hint.should_terminate());
-        assert_eq!(back.refs.output_digest.map(OutputDigest::value), Some(0xABCD));
-        assert_eq!(back.refs.origin.as_ref().map(LoopRef::as_str), Some("result:child-1"));
+        assert_eq!(
+            back.refs.output_digest.map(OutputDigest::value),
+            Some(0xABCD)
+        );
+        assert_eq!(
+            back.refs.origin.as_ref().map(LoopRef::as_str),
+            Some("result:child-1")
+        );
     }
 
     #[test]
