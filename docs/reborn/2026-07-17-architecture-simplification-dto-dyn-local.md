@@ -50,6 +50,18 @@ annotations and `.claude/rules/architecture.md` cite them; additions get
   §7 row 1, and §12.4 deduplicated against the sections they restated; §6's
   fail-closed-default and mechanical-guarantee bullets rejoined the
   prevention list they belong to.
+- **r8** 2026-07-19 — folded in issue #6284 (error-recoverability endgame)
+  as a binding contract on the resolution channels: added §5.3.4 (the
+  recoverability contract — run survives, model sees, cause+remediation
+  carried, model gets a turn; `HostFailure` narrowed to genuine terminal
+  invariants; per-kind remediation, model-error observation channel,
+  addressable `diag_ref`), extended §11.7 with the recoverability
+  conformance matrix, and tied it to §11.9's compile-time exhaustiveness;
+  added §14 (implementation status as of 2026-07-19 — Slice C.1 `Invocation`
+  vocab, Slice A store deletions, Slice B renames + ratchets merged; the §5.3
+  five-channel `Resolution` flip in flight on `integration/reborn-flip-base`).
+  No design changes to §1–§13; §14 and the status log are mutable, the
+  contract above them is frozen.
 
 This note proposes a **fundamental** simplification of the Reborn host/runtime
 internals. The goal is to remove three recurring costs without weakening any
@@ -1219,6 +1231,88 @@ One payoff for free: every reservation and reconciled actual carries
 vs. direct admin) is just a §5.2.2 view descriptor over the accounting
 records — the spend dashboard costs nothing extra.
 
+### 5.3.4 The recoverability contract on the resolution channels (issue #6284)
+
+The five channels define the *shape* of every non-happy path; issue #6284
+("the model recovers from 100% of the errors it sees") pins the *obligation*
+on that shape. It is a binding invariant on §5.3, not a separate subsystem:
+
+**Every mid-run error must satisfy four conditions — (a) the run survives it,
+(b) the model sees it, (c) what the model sees carries the cause *and* the
+remediation (what would make the operation succeed), (d) the model gets a turn
+to act on it. Terminal failure is reserved for genuine invariants only:
+cancellation, budget exhaustion, `DriverBug`.**
+
+This maps onto the channels precisely, and *narrows* two of them:
+
+- **`Outcome` (recoverable failure) is the default landing zone.** A tool/lane
+  failure the model could fix by acting differently — bad input, a missing
+  field, a malformed `SandboxProcessPlan`, a stale surface, a wrong target id —
+  is `Resolution::Done(Outcome)` with a failure verdict, never a `HostFailure`.
+  The verdict carries a structured remediation hint: #6284 item 4 generalizes
+  the `InvalidInput` repair-hint pattern (`ProvideRequiredField`, `ChangeType`,
+  …) to *every* failure kind (rate-limit → retry-after, missing runtime →
+  install step, etc.), and **no recoverable outcome ships with an empty hint** —
+  enforced by the matrix test below.
+- **`Denied` carries what would unlock the call, not merely that it was
+  denied.** The terminal-policy channel is still model-visible, and its
+  `reason_kind` must distinguish "permanently forbidden by policy" from "an
+  approval gate is available" from "a credential is missing → this auth flow
+  exists" — so the model can tell whether to give up or offer the user a connect
+  flow (#6284 item 4; builds on #6273's `Denial{reason_kind, summary}`). A
+  hallucinated call to a disabled capability resolves as a `Denied` with a "not
+  available, pick another tool" hint, never a run-terminating `model_error`
+  (#5583).
+- **`Blocked` already satisfies (a)–(d) structurally** — it parks, resolves
+  through `resolve_gate`, and re-enters. The contract adds only that a
+  dispatch-time `Blocked::Auth` (§5.3.1) name the auth flow that unblocks it.
+- **`HostFailure` is the *narrow* terminal channel, and only genuinely so.** It
+  is infra the run cannot survive — storage/obligation-cleanup failure,
+  `Uncertain` (crash between dispatch start and outcome record, §11.3). It is
+  **not** a dumping ground for model-fixable conditions. Kinds that today bork
+  the run while being model-fixable — `StaleSurface`, `InvalidInvocation`,
+  credential/auth kinds mass-routed to "host unavailable", service-error codes
+  mass-mapped to `Err` — must be re-bucketed to a model-visible channel (#6284
+  items 1–2). `Transient` retries under a per-class budget; when the budget
+  exhausts, the model is told ("still unavailable after N tries — change
+  approach or wrap up") rather than dying silently (#6284 items 2, 5).
+
+Two obligations this places on the vocabulary, both symmetric with the capability
+channels above:
+
+1. **Model/provider errors need an observation channel too.** Context overflow,
+   content-filter refusal, and invalid output reach the model as a
+   `ModelVisibleToolObservation`-analogue when their per-class retry budget
+   exhausts, instead of `LoopExit::Failed` (#6284 item 2). Provider classifier
+   drift (401/403 → futile availability retries → "model unavailable" instead of
+   "fix your key") is a §5.3.4 violation at the provider seam and is pinned by
+   the same matrix (#6284 item 5).
+2. **Error detail must be addressable, not a dead end.** Condition (c) requires
+   the cause to survive to the model — either inlined into the failure-detail
+   channel or dereferenceable through a host `read_diagnostic(diag_ref)` port
+   (#6284 item 3), consistent with "LLM data is never deleted" (CLAUDE.md). A
+   bare category with no cause is not recoverable.
+
+**Enforcement is a conformance matrix, not a hope.** #6284 item 7 is adopted
+into the §11.7 authorize/dispatch suite: for every variant of every error enum
+(`CapabilityFailureKind`, `RuntimeFailureKind`, `AgentLoopHostErrorKind`,
+`ModelErrorClass`, `LoopFailureKind`, provider categories), an exhaustive-match
+test proves it maps to retry, a model-visible observation, or a park — **never
+an unclassified bork** — and a new variant fails CI until classified. This is the
+*behavioral* half of §11.9's guarantee: §11.9 makes the transition `match`
+exhaustive at compile time (no wildcard arm can silently swallow a new kind);
+§5.3.4 requires that each classified cell land the error in a channel that
+satisfies (a)–(d). §11.2 invariant 4 (a `LoopExit` is trusted only with
+evidence) and §11.6 (fail-closed) are the security half of the resolution
+contract; this matrix is the recoverability half.
+
+Why this belongs here and not as a separate effort: the five-channel split
+(§1.2) exists *precisely* so that "recoverable failure" and "run-terminating
+infra failure" stop being structurally identical (`Ok(Failed)` vs `Err`, the
+footgun the loop-capability docs record shipping three times). #6284 is the
+behavioral contract that split was built to make expressible — the flip stack
+(§14) lands the types; this contract is what those types must satisfy.
+
 ### 5.4 The loop interface — the loop's trust membrane (one of several)
 
 ```rust
@@ -1904,7 +1998,13 @@ adapter/loop/backend inherits correctness instead of re-deriving it:
   member (§11.1, #6137); the §5.3.3 reservation lifecycle (a `Blocked` result leaves
   zero reservation held; `abort()` releases; approve-then-resource-block surfaces the
   follow-on gate; a gate flood past the per-run cap resolves as "gate quota exhausted",
-  not an unbounded pending queue).
+  not an unbounded pending queue); and the **§5.3.4 recoverability matrix** (#6284
+  item 7): every variant of every error enum (`CapabilityFailureKind`,
+  `RuntimeFailureKind`, `AgentLoopHostErrorKind`, `ModelErrorClass`,
+  `LoopFailureKind`, provider categories) maps to retry / a model-visible
+  observation carrying a non-empty remediation hint / a park — never an
+  unclassified terminal bork, and a new variant fails CI until classified (the
+  behavioral counterpart to §11.9's compile-time exhaustiveness).
 - **store traits / `RootFilesystem`** — the §11.5 parity suite.
 
 ### 11.8 Tiering
@@ -2090,6 +2190,87 @@ knobs to calibrate against measured latency, not open architectural questions.
 
 ---
 
+## 14. Implementation status (as of 2026-07-19)
+
+This section tracks what has landed against the slices (§9) and axes (§10). It is
+the **mutable status log** — the design in §1–§13 is the frozen contract; this
+section is expected to churn. "Merged" = on `main`; "in flight" = on a branch or
+open PR not yet on `main`.
+
+### Merged
+
+- **Slice C.1 — the `Invocation` payload vocabulary (§3).** `Invocation` is
+  defined in `crates/ironclaw_host_api/src/invocation.rs` (#6223, under #6168) —
+  the canonical host-side payload the mid-flight request mirrors collapse onto.
+  The `Resolution` / `Blocked` / `Suspension` / `HostFailure` / `Outcome` channel
+  enums are **not** yet merged (see *In flight*).
+- **Slice A — delete in-memory stores (§4.3), most domains done.** Deleted and
+  repointed to `Filesystem*Store<InMemoryBackend>`: approval stores (#6195,
+  #6203), capability-lease (#6197), process stores (#6200, the §9 landed
+  exception), run-state (#6203), budget-gate (#6210), outbound-state (#6212),
+  triggered-run-delivery (#6213). The `InMemory*Store` allowlist ratchet is frozen
+  (#6204, `reborn_inmemory_store_ratchet.rs`) and annotated with per-entry
+  achievable-floor status (#6216). **Deferred, by the §9 caveat:** the turns
+  cluster (`InMemoryTurnStateStore` + checkpoint / loop-checkpoint /
+  instruction-materialization) — the trickiest case, gated behind Slice 0's
+  reference model. Still allowlisted besides turns: build-first stores with no
+  filesystem variant yet (e.g. `InMemorySessionStore`) and a few domain stores
+  (subagent-goal, openai-compat-ref, extension-installation, secret(s), Slack
+  route / DM).
+- **Slice B — `Local*` → config (§4.4), renames + ratchets done; config
+  collapse pending.** Bucket 2/3 renames landed: `LocalFilesystem`→`DiskFilesystem`
+  (#6209), `LocalHostProcessPort`→`HostProcessPort` (#6206),
+  `LocalTraceSubmission*`→`NodeTraceSubmission*` (#6207),
+  `LocalDevOutboundStores`→`OutboundStores` (#6220); the redundant
+  `LocalDevRootFilesystem` alias inlined to `CompositeRootFilesystem` (#6218). The
+  `LocalDev*` typename ratchet is frozen (#6205,
+  `reborn_localdev_typename_ratchet.rs`, ~53 identifiers remaining) and the
+  `Hosted*` / `Enterprise*` / `Local*` deployment-mode-typename ratchet added
+  (#6222, `reborn_deployment_mode_typename_ratchet.rs`). **Remaining:** the
+  Bucket-1 collapse of the `LocalDev*` shadow runtime to `DeploymentConfig` data
+  (§4.4.1) — the bulk of the 53 identifiers.
+- **§10 ratchets live.** Three architecture-test ratchets frozen and enforcing:
+  InMemory-store, LocalDev-typename, deployment-mode-typename.
+- **Recoverability groundwork (feeds §5.3.4 / #6284).** The collapsed
+  no-run-borking recoverability stack (#5692) and loop resilience — deep
+  availability retries, iteration backstop, model-visible tool-failure reasons
+  (#5959) — are the pre-existing base #6284's endgame builds on.
+
+### In flight — the §5.3 five-channel flip stack (`integration/reborn-flip-base`)
+
+The resolution model (§5.3) lands as a dependency-ordered stack, not yet merged;
+`Resolution` currently lives at `crates/ironclaw_host_api/src/resolution.rs` on
+the integration branch:
+
+- **#6271** — Stage 2a-i: resume replay payload moves host-side via
+  `ReplayPayloadStore` (base `main`).
+- **#6273** — PR-B: `Resolution` carries `ModelFailureDiagnostic` +
+  `Denial{reason_kind, summary}` — the model-visible failure/denial content
+  §5.3.4(c) and #6284 item 4 require.
+- **#6278** — Stage 0: host-side gate reconstitution (resume `input_ref`,
+  local-dev gate persistence, `GateRef` reconcile).
+- **#6275** — Stage 1: `ResolutionBatch` + `parks()` loop-suspension predicate
+  (the §11.1 batch fold).
+- **#6283** — Stage 1b: `Suspension::DependentRun` carries the staged child
+  result (merged into the integration branch).
+- **#6287** — Stage 2, the flip: `invoke_capability` returns
+  `host_api::Resolution`; ~49 impls migrated; the ten-variant `CapabilityOutcome`
+  collapses onto the five channels at the `LoopCapabilityPort` boundary (the §5.3
+  acceptance table). `CapabilityOutcome` is retained for Stage 2b to delete.
+
+### Not started
+
+- **Slice 0** — the reference-model property suite (§11.4), prerequisite for
+  consolidating the turns-cluster store (Slice A's deferred remainder).
+- **§5.3.4 / #6284 endgame** — the recoverability conformance matrix (§11.7 /
+  §11.9), the model-error observation channel, `read_diagnostic(diag_ref)`, and
+  the per-kind remediation generalization. Gated on the flip stack landing
+  #6273's `Resolution` vocabulary.
+- **§5.2 `ProductSurface`** facade collapse and the products-in-composition
+  ratchet (§5.8) — the 88-method `RebornServicesApi` freeze has not landed.
+
+---
+
 ## References
 
 - `crates/Architecture.md` — Reborn kernel-boundary / substrate architecture thesis.
@@ -2105,4 +2286,5 @@ knobs to calibrate against measured latency, not open architectural questions.
 - `.claude/rules/type-placement.md` — the standing type-location/trait-justification rule (2026-07 measurements: ~1% true duplicates, 97.7% of traits justified); §4.2 narrows its test-seam justification for hot-path mediators and must amend it in the Slice C PR.
 - Issue #6170 (shell cross-tenant escape — the §6 case study); `crates/ironclaw_reborn_composition/src/local_runtime_profile.rs` (the `HostedSingleTenant → LocalSingleUser` mapping), `crates/ironclaw_host_runtime/src/planner.rs` (process/filesystem fail-closed rules).
 - Issues: #6168 (composition god-crate), #6144 (unenforced budget), #6137 / #6138 (gate-resume / capability-path).
+- Issue #6284 (error-recoverability endgame — the recoverability contract on the resolution channels, §5.3.4); its prerequisites #6273 (`Resolution` model-visible diagnostic + denial) and #5965 (recoverable errors reach the model), and its acceptance instances #5583 / #4311 / #5522 / #5192. The §5.3 flip stack that lands the vocabulary: #6271 / #6273 / #6278 / #6275 / #6283 / #6287 (§14).
 - Unified Extension Runtime design note (in progress, BenKurrek) — the detailed extension / adapter / auth design this proposal aligns with (§5.9): https://gist.github.com/BenKurrek/1d0c9189a3b25f5933cb00d4ac188efe
