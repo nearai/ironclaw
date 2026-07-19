@@ -172,6 +172,17 @@ fn provider_admin_workflow_error(error: RebornProviderAdminError) -> ProductWork
                 config_update_error_reason(source.as_ref())
             ),
         },
+        RebornProviderAdminError::EnvDetection { source } => {
+            tracing::debug!(
+                error = %source,
+                "environment LLM detection failed while handling a product LLM-admin command"
+            );
+            ProductWorkflowError::InvalidBindingRequest {
+                reason: "environment provider detection failed; check provider environment \
+                         variables"
+                    .to_string(),
+            }
+        }
     }
 }
 
@@ -223,5 +234,29 @@ fn config_update_error_reason(
         ironclaw_reborn_config::RebornConfigFileUpdateError::Write { source, .. } => {
             format!("write failed: {source}")
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `EnvDetection` denotes incomplete/invalid operator env configuration
+    /// (`RebornProviderAdmin::detect_env_llm`'s "partial env" outcome), not a
+    /// transient backend failure — it must map to `InvalidBindingRequest` so
+    /// callers don't retry a config problem as if it were flaky.
+    #[test]
+    fn env_detection_maps_to_invalid_binding_request_not_transient() {
+        let error = RebornProviderAdminError::EnvDetection {
+            source: Box::new(ironclaw_llm::LlmError::InvalidResponse {
+                provider: "openai".to_string(),
+                reason: "OPENAI_API_KEY is unset but OPENAI_MODEL is set".to_string(),
+            }),
+        };
+        let mapped = provider_admin_workflow_error(error);
+        assert!(
+            matches!(mapped, ProductWorkflowError::InvalidBindingRequest { .. }),
+            "EnvDetection must map to InvalidBindingRequest, not Transient: {mapped:?}"
+        );
     }
 }

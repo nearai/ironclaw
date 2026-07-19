@@ -13,25 +13,31 @@ publish = false
 [package.metadata.ironclaw]
 layer = "app"
 
+# The user-facing binary is now `ironclaw`, but the Cargo package remains
+# `ironclaw_reborn_cli` while the legacy root package still owns `ironclaw`.
+# Keep cargo-dist disabled until #3483 transfers the package/tag identity.
 [package.metadata.dist]
-dist = true
-features = [
-    "openai-compat-beta",
-    "slack-v2-host-beta",
+dist = false
+
+[features]
+# libsql is the default storage backend: a file-backed local database needs
+# no external server, so a default `ironclaw` build is runnable as-is.
+# `postgres` remains opt-in for deployments that point `[storage]` at a server.
+default = ["root-llm-provider", "libsql"]
+# Everything a full-fat local/desktop build ships: the WebChat v2 HTTP
+# gateway (and with it `serve` + `service`), the Slack and OpenAI-compat
+# host mounts, and every storage backend so the binary can honor whatever
+# `[storage]` the operator's config selects at runtime rather than being
+# pinned at compile time.
+full = [
     "webui-v2-beta",
+    "slack-v2-host-beta",
     "libsql",
     "postgres",
     "inmemory-turn-state",
+    "openai-compat-beta",
+    "root-llm-provider",
 ]
-
-[package.metadata.wix]
-upgrade-guid = "6301E43A-1806-43AC-9732-8785B45EE105"
-path-guid = "47201070-B2F0-4AFF-9604-60209AF4B700"
-license = false
-eula = false
-
-[features]
-default = ["root-llm-provider"]
 # Wire a real LLM provider into the assembled runtime. Mirrors the same
 # `root-llm-provider` feature on `ironclaw_reborn_composition` /
 # `ironclaw_runner`, so building without it produces a CLI binary that
@@ -40,9 +46,9 @@ default = ["root-llm-provider"]
 root-llm-provider = [
     "ironclaw_reborn_composition/root-llm-provider",
 ]
-# Compile in the WebChat v2 beta HTTP gateway subcommand
-# (`ironclaw-reborn serve`). Off by default so a default binary build
-# does not link the auth/HTTP middleware stack at all — production
+# Compile in the WebUI beta HTTP gateway subcommand (`ironclaw serve`). Off by
+# default so a default binary build does not link the auth/HTTP middleware
+# stack at all — production
 # binaries that genuinely expose v2 over HTTP must opt in. Pulls in
 # `webui-v2-beta` on the composition crate plus the ingress crate
 # that owns the serve loop. Also enables the WebChat v2 SSO login
@@ -53,22 +59,31 @@ root-llm-provider = [
 # dev-only feature required.
 webui-v2-beta = [
     "ironclaw_reborn_composition/webui-v2-beta",
-    "dep:ironclaw_reborn_webui_ingress",
+    "dep:ironclaw_webui",
     "dep:async-trait",
 ]
-# Compile in the Slack Events API host-beta mount for `ironclaw-reborn serve`.
+# Compile in the Slack Events API host-beta mount for `ironclaw serve`.
 # Still requires effective Slack enablement at runtime before the route is
 # mounted: either `[slack].enabled = true` or
 # `IRONCLAW_REBORN_SLACK_ENABLED=true`.
 slack-v2-host-beta = [
     "webui-v2-beta",
     "ironclaw_reborn_composition/slack-v2-host-beta",
+    "ironclaw_webui/slack-v2-host-beta",
+]
+# Compile in the Telegram webhook channel host. Still requires effective
+# Telegram enablement at runtime before the route is mounted: either
+# `[telegram].enabled = true` or `IRONCLAW_REBORN_TELEGRAM_ENABLED=true`.
+telegram-v2-host-beta = [
+    "webui-v2-beta",
+    "ironclaw_reborn_composition/telegram-v2-host-beta",
 ]
 openai-compat-beta = [
     "webui-v2-beta",
     "ironclaw_reborn_composition/openai-compat-beta",
+    "ironclaw_webui/openai-compat-beta",
 ]
-# Enable production PostgreSQL storage composition for `ironclaw-reborn`.
+# Enable production PostgreSQL storage composition for `ironclaw`.
 postgres = [
     "ironclaw_reborn_composition/postgres",
 ]
@@ -92,22 +107,36 @@ chrono = { version = "0.4", features = ["serde"] }
 hex = "0.4.3"
 clap = { version = "4", features = ["derive", "env"] }
 clap_complete = "4.5.0"
+# Masked (echo-suppressed) API-key prompt in `onboard`. Same crate v1's setup
+# wizard uses for secret-input masking — reused here rather than adding a
+# second terminal-masking dependency.
+crossterm = "0.29"
 dotenvy = "0.15"
 ironclaw_reborn_composition = { path = "../ironclaw_reborn_composition", version = "0.1.0" }
 ironclaw_reborn_config = { path = "../ironclaw_reborn_config", version = "0.1.0" }
 ironclaw_reborn_traces = { path = "../ironclaw_reborn_traces", version = "0.1.0" }
-ironclaw_reborn_webui_ingress = { path = "../ironclaw_reborn_webui_ingress", version = "0.1.0", optional = true }
+ironclaw_webui = { path = "../ironclaw_webui", version = "0.1.0", optional = true }
+rand = "0.10"
 reqwest = { version = "0.12", default-features = false, features = ["json", "multipart", "rustls-tls-native-roots", "stream"] }
 secrecy = "0.10"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sha2 = "0.11"
 tempfile = "3"
+thiserror = "2"
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "signal", "io-util", "io-std", "sync", "time"] }
 tokio-util = { version = "0.7", features = ["rt"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
 uuid = { version = "1", features = ["v4", "v5", "serde"] }
+
+[target.'cfg(unix)'.dependencies]
+# O_NOFOLLOW for the single-handle, symlink-safe token file open in
+# `webui_token::read_token_file_checked` — the flag's raw value differs
+# across unix platforms (Linux vs macOS), so it must come from `libc`
+# rather than being hardcoded. Already present transitively; pinned here
+# as a direct dependency of the code that now uses it.
+libc = "0.2"
 
 [dev-dependencies]
 # Enable the composition crate's `test-support` seam for CLI unit tests so
@@ -122,7 +151,23 @@ ironclaw_reborn_composition = { path = "../ironclaw_reborn_composition", version
 # second, non-serializing lock domain (the #6015 flake). Dev-only: the lock is
 # reached solely from `#[cfg(test)]` code in `runtime::test_env`.
 ironclaw_common = { path = "../ironclaw_common", version = "0.4.2" }
+# Unconditional (not the feature-gated `dep:async-trait` optional dependency
+# above): `commands::onboard::mod`'s write-first-then-config-ordering test
+# implements a fake `ironclaw_secrets::SecretStore` whose `put` always fails,
+# needing `#[async_trait::async_trait]` in every feature combination `cargo
+# test` runs, not just under `webui-v2-beta`.
+async-trait = "0.1"
+# Same fake `SecretStore` impl takes `ResourceScope` / `SecretHandle` /
+# `Timestamp` in its trait method signatures.
+ironclaw_host_api = { path = "../ironclaw_host_api", version = "0.1.0" }
+# Same fake `SecretStore` impl (`FailingSecretStore` in `commands::onboard::mod`'s
+# tests) implements `ironclaw_secrets::SecretStore` directly; production
+# onboarding code only ever touches secrets through
+# `ironclaw_reborn_composition::LlmKeyStore`'s facade (`put_plaintext`), so
+# this stays a dev-only dependency — see
+# `crates/ironclaw_architecture/tests/reborn_dependency_boundaries.rs::reborn_cli_binary_crate_stays_separate_from_v1_root`.
+ironclaw_secrets = { path = "../ironclaw_secrets", version = "0.1.0" }
 
 [[bin]]
-name = "ironclaw-reborn"
+name = "ironclaw"
 path = "src/main.rs"

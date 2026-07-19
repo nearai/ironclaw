@@ -1,6 +1,6 @@
 """Live QA runner for Reborn WebUI v2.
 
-This lane intentionally starts the standalone ``ironclaw-reborn serve`` binary
+This lane intentionally starts the standalone ``ironclaw serve`` binary
 and drives the React WebUI v2 surface with Playwright. It does not use the
 legacy gateway stack and does not mock the LLM provider.
 """
@@ -368,7 +368,7 @@ def _cargo_target_dir() -> Path:
 
 
 def _reborn_binary() -> Path:
-    return _cargo_target_dir() / "debug" / "ironclaw-reborn"
+    return _cargo_target_dir() / "debug" / "ironclaw"
 
 
 def build_reborn_binary() -> Path:
@@ -388,14 +388,15 @@ def build_reborn_binary() -> Path:
             "--features",
             features,
             "--bin",
-            "ironclaw-reborn",
+            "ironclaw",
         ],
         cwd=ROOT,
         env=build_env,
     )
     binary = _reborn_binary()
     if not binary.exists():
-        raise LiveQaError(f"ironclaw-reborn binary was not produced at {binary}")
+        message = f"ironclaw binary was not produced at {binary}"
+        raise LiveQaError(message)
     return binary
 
 
@@ -760,7 +761,7 @@ def server_env(
             "RUST_BACKTRACE": "1",
             "RUST_LOG": os.environ.get(
                 "RUST_LOG",
-                "ironclaw=warn,ironclaw_runner=warn,ironclaw_reborn_webui_ingress=info",
+                "ironclaw=warn,ironclaw_runner=warn,ironclaw_webui=info",
             ),
         }
     )
@@ -818,7 +819,7 @@ async def start_reborn_server(
     workspace_dir.mkdir(parents=True, exist_ok=True)
     out = stdout_path.open("a", encoding="utf-8")
     err = stderr_path.open("a", encoding="utf-8")
-    separator = f"\n--- ironclaw-reborn serve start {time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())} ---\n"
+    separator = f"\n--- ironclaw serve start {time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())} ---\n"
     out.write(separator)
     err.write(separator)
     out.flush()
@@ -847,7 +848,7 @@ async def start_reborn_server(
         if stderr_path.exists():
             tail = "\n".join(stderr_path.read_text(encoding="utf-8", errors="replace").splitlines()[-80:])
         raise LiveQaError(
-            f"ironclaw-reborn serve did not become healthy at {base_url}: {exc}\n{tail}"
+            f"ironclaw serve did not become healthy at {base_url}: {exc}\n{tail}"
         ) from exc
     return proc, base_url
 
@@ -1435,7 +1436,7 @@ async def _live_chat_case(
     async def action(page: object) -> None:
         if extensions:
             await page.goto(
-                f"{ctx.base_url}/v2/extensions/registry?token={AUTH_TOKEN}",
+                f"{ctx.base_url}/extensions/registry?token={AUTH_TOKEN}",
                 wait_until="domcontentloaded",
             )  # type: ignore[attr-defined]
             await expect(page.locator("body")).to_contain_text(  # type: ignore[attr-defined]
@@ -1455,7 +1456,7 @@ async def _live_chat_case(
                 )
 
         await page.goto(
-            f"{ctx.base_url}/v2/?token={AUTH_TOKEN}",
+            f"{ctx.base_url}/?token={AUTH_TOKEN}",
             wait_until="domcontentloaded",
         )  # type: ignore[attr-defined]
         if await _dismiss_visible_connect_action(page):
@@ -3153,12 +3154,12 @@ async def _slack_connect_case(ctx: LiveQaContext, *, case_name: str) -> ProbeRes
     started = time.monotonic()
     observed: dict[str, object] = {
         "qa_sheet_prompt": _qa_sheet_prompt(case_name),
-        "slack_connect_surface": "/v2/extensions/channels",
+        "slack_connect_surface": "/extensions/channels",
     }
 
     async def action(page: object) -> None:
         await page.goto(
-            f"{ctx.base_url}/v2/extensions/channels?token={AUTH_TOKEN}",
+            f"{ctx.base_url}/extensions/channels?token={AUTH_TOKEN}",
             wait_until="domcontentloaded",
         )  # type: ignore[attr-defined]
         await expect(page.locator("body")).to_contain_text("Channels", timeout=15000)  # type: ignore[attr-defined]
@@ -3346,7 +3347,7 @@ async def _extension_authenticated_case(
 
     async def action(page: object) -> None:
         await page.goto(
-            f"{ctx.base_url}/v2/extensions/registry?token={AUTH_TOKEN}",
+            f"{ctx.base_url}/extensions/registry?token={AUTH_TOKEN}",
             wait_until="domcontentloaded",
         )  # type: ignore[attr-defined]
         await expect(page.locator("body")).to_contain_text("Extensions", timeout=15000)  # type: ignore[attr-defined]
@@ -7935,7 +7936,7 @@ async def run_cases(args: argparse.Namespace) -> int:
     binary = _reborn_binary() if args.skip_build else build_reborn_binary()
     if not binary.exists():
         raise LiveQaError(
-            f"ironclaw-reborn binary missing at {binary}; rerun without --skip-build"
+            f"ironclaw binary missing at {binary}; rerun without --skip-build"
         )
     results: list[ProbeResult] = []
     trace_exports: list[dict[str, object]] = []

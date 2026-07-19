@@ -36,7 +36,7 @@ use ironclaw_reborn_composition::{
     build_webui_services, local_dev_runtime_policy,
 };
 use ironclaw_turns::{ReplyTargetBindingRef, TurnEventProjectionSource, TurnStatus};
-use ironclaw_webui_v2::{
+use ironclaw_webui::webui_v2::{
     DEFAULT_SSE_MAX_CONCURRENT_PER_CALLER, WebUiV2Capabilities, WebUiV2State, webui_v2_router,
 };
 use reborn_support::builder::{RebornIntegrationHarness, StorageMode};

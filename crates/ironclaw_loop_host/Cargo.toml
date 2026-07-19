@@ -34,6 +34,7 @@ ironclaw_skills = { path = "../ironclaw_skills", version = "0.3.0", default-feat
 ironclaw_memory = { path = "../ironclaw_memory", version = "0.1.0" }
 ironclaw_threads = { path = "../ironclaw_threads", version = "0.1.0" }
 ironclaw_turns = { path = "../ironclaw_turns", version = "0.1.0" }
+ironclaw_run_state = { path = "../ironclaw_run_state", version = "0.1.0" }
 rust_decimal = { version = "1", features = ["serde", "serde-with-str"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

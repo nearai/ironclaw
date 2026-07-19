@@ -11,15 +11,11 @@ mod process_executor;
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
-use ironclaw_approvals::{
-    ApprovalResolver, InMemoryPersistentApprovalPolicyStore, PersistentApprovalPolicyStore,
-};
-use ironclaw_authorization::{
-    CapabilityLeaseStore, InMemoryCapabilityLeaseStore, TrustAwareCapabilityDispatchAuthorizer,
-};
+use ironclaw_approvals::{ApprovalResolver, PersistentApprovalPolicyStore};
+use ironclaw_authorization::{CapabilityLeaseStore, TrustAwareCapabilityDispatchAuthorizer};
 use ironclaw_capabilities::CapabilityObligationHandler;
 use ironclaw_dispatcher::{
-    RuntimeAdapter, RuntimeAdapterRequest, RuntimeAdapterResult, RuntimeDispatcher,
+    RuntimeAdapter, RuntimeAdapterRequest, RuntimeAdapterResult, RuntimeDispatcher, RuntimeExecutor,
 };
 use ironclaw_events::{
     AuditSink, DurableAuditLog, DurableAuditSink, DurableEventLog, DurableEventSink, EventSink,
@@ -31,10 +27,11 @@ use ironclaw_extensions::{ExtensionRegistry, ExtensionRuntime, SharedExtensionRe
 use ironclaw_filesystem::LibSqlRootFilesystem;
 #[cfg(feature = "postgres")]
 use ironclaw_filesystem::PostgresRootFilesystem;
-use ironclaw_filesystem::{LocalFilesystem, RootFilesystem, ScopedFilesystem};
+use ironclaw_filesystem::{DiskFilesystem, RootFilesystem, ScopedFilesystem};
 use ironclaw_host_api::{
     CapabilityDispatcher, CapabilityId, DispatchError, ResourceReservationId, ResourceScope,
-    ResourceUsage, RuntimeDispatchErrorKind, RuntimeHttpEgress, RuntimeKind, SecretHandle,
+    ResourceUsage, RuntimeDispatchErrorKind, RuntimeHttpEgress, RuntimeKind, RuntimeLane,
+    SecretHandle,
     runtime_policy::{
         DeploymentMode, EffectiveRuntimePolicy, FilesystemBackendKind, NetworkMode,
         ProcessBackendKind, RuntimeProfile, SecretMode,
@@ -43,8 +40,8 @@ use ironclaw_host_api::{
 use ironclaw_mcp::{McpError, McpExecutionRequest, McpExecutor, McpInvocation};
 use ironclaw_network::NetworkHttpEgress;
 use ironclaw_processes::{
-    BackgroundFailureStage, InMemoryProcessResultStore, InMemoryProcessStore, ProcessExecutor,
-    ProcessManager, ProcessResultStore, ProcessServices, ProcessStore,
+    BackgroundFailureStage, ProcessExecutor, ProcessManager, ProcessResultStore, ProcessServices,
+    ProcessStore,
 };
 use ironclaw_reborn_event_store::{
     CoalescingEventSink, EventBatchConfig, RebornEventStoreConfig, RebornEventStoreError,
@@ -53,7 +50,7 @@ use ironclaw_reborn_event_store::{
 use ironclaw_resources::{FilesystemResourceGovernor, InMemoryResourceGovernor, ResourceGovernor};
 use ironclaw_run_state::{
     ApprovalRequestStore, FilesystemApprovalRequestStore, FilesystemRunStateStore,
-    InMemoryApprovalRequestStore, InMemoryRunStateStore, RunStateApprovalStore, RunStateStore,
+    RunStateApprovalStore, RunStateStore,
 };
 use ironclaw_scripts::{ScriptError, ScriptExecutionRequest, ScriptExecutor, ScriptInvocation};
 use ironclaw_secrets::{
@@ -79,9 +76,9 @@ use crate::obligations::{
 };
 use crate::{
     BuiltinObligationHandler, CapabilitySurfaceVersion, DefaultHostRuntime,
-    FirstPartyCapabilityRegistry, FirstPartyCapabilityRequest, HostRuntimeError,
+    FirstPartyCapabilityRegistry, FirstPartyCapabilityRequest, HostProcessPort, HostRuntimeError,
     HostRuntimeHttpEgressPort, InvocationServicesResolutionRequest, InvocationServicesResolver,
-    LocalHostProcessPort, LocalInvocationServicesResolver, PlannerError,
+    LocalInvocationServicesResolver, PlannerError, PostEditCheckConfig,
     ProcessObligationLifecycleStore, RuntimeBackendHealth, RuntimeProcessPort,
     RuntimeSecretMaterialStager, RuntimeSecretStageError, TenantSandboxProcessPort,
     ToolCallHttpEgress, plan_capability,
@@ -107,7 +104,7 @@ pub use production_wiring::{
     ProductionWiringIssue, ProductionWiringIssueKind, ProductionWiringReport,
 };
 use runtime_adapters::{
-    FirstPartyRuntimeAdapter, McpRuntimeAdapter, ScriptRuntimeAdapter,
+    FirstPartyRuntimeAdapter, McpRuntimeAdapter, RuntimeLaneExecutor, ScriptRuntimeAdapter,
     ServiceResolvedRuntimeAdapter, WasmRuntimeAdapter,
 };
 
@@ -167,6 +164,7 @@ where
     run_profile_resolver: Option<Arc<dyn RunProfileResolver>>,
     turn_run_transition_port: Option<Arc<dyn TurnRunTransitionPort>>,
     turn_run_wake_notifier: Option<Arc<dyn TurnRunWakeNotifier>>,
+    post_edit_check: Option<PostEditCheckConfig>,
     component_types: ProductionComponentTypes,
 }
 
@@ -323,7 +321,7 @@ where
             process_lifecycle_store,
             runtime_http_egress: Arc::new(Mutex::new(None)),
             tool_call_http_egress: Arc::new(Mutex::new(None)),
-            process_port: Arc::new(LocalHostProcessPort::new()),
+            process_port: Arc::new(HostProcessPort::new()),
             managed_process_port: true,
             tenant_sandbox_process_port: None,
             wasm_credential_provider: None,
@@ -338,6 +336,7 @@ where
             run_profile_resolver: None,
             turn_run_transition_port: None,
             turn_run_wake_notifier: None,
+            post_edit_check: None,
             component_types: ProductionComponentTypes {
                 trust_policy: None,
                 trust_policy_verified: false,
@@ -356,7 +355,7 @@ where
                 credential_session_store: None,
                 runtime_http_egress: None,
                 runtime_http_egress_verified: false,
-                runtime_process_port: ProductionComponentType::of::<LocalHostProcessPort>(),
+                runtime_process_port: ProductionComponentType::of::<HostProcessPort>(),
                 tenant_sandbox_process_port: None,
                 wasm_credential_provider: None,
                 wasm_credential_provider_verified: false,
@@ -383,18 +382,12 @@ where
             .wasm_runtime_credential_provider_captured
     }
 
-    /// Builds a runtime dispatcher with every configured runtime adapter.
-    fn runtime_dispatcher(&self) -> RuntimeDispatcher<'static, F, G> {
-        let mut dispatcher = RuntimeDispatcher::from_shared_registry(
-            Arc::clone(&self.registry),
-            Arc::clone(&self.filesystem),
-            Arc::clone(&self.governor),
-        )
-        .with_runtime_policy(
-            self.runtime_policy
-                .clone()
-                .unwrap_or_else(local_testing_runtime_policy),
-        );
+    /// Builds a runtime dispatcher over the closed [`RuntimeLaneExecutor`].
+    ///
+    /// Each configured lane becomes an enum variant; the dispatcher holds one
+    /// monomorphized executor and routes by `RuntimeLane` match rather than a
+    /// per-lane trait-object registry (arch-simplification §4.2).
+    fn runtime_dispatcher(&self) -> RuntimeDispatcher<'static, F, G, RuntimeLaneExecutor> {
         let mut invocation_services_resolver = LocalInvocationServicesResolver::new(
             Arc::clone(&self.filesystem) as Arc<dyn RootFilesystem>,
             runtime_http_egress(&self.runtime_http_egress),
@@ -411,45 +404,53 @@ where
             invocation_services_resolver = invocation_services_resolver
                 .with_tenant_sandbox_process_port(Arc::clone(process_port));
         }
+        if let Some(post_edit_check) = &self.post_edit_check {
+            invocation_services_resolver =
+                invocation_services_resolver.with_post_edit_check(post_edit_check.clone());
+        }
         let invocation_services: Arc<dyn InvocationServicesResolver> =
             Arc::new(invocation_services_resolver);
 
-        if let Some(runtime) = &self.script_runtime {
-            dispatcher = dispatcher.with_runtime_adapter_arc(
-                RuntimeKind::Script,
-                Arc::new(ServiceResolvedRuntimeAdapter::new(
-                    Arc::new(ScriptRuntimeAdapter::from_executor(Arc::clone(runtime))),
-                    Arc::clone(&invocation_services),
-                )),
-            );
-        }
-        if let Some(runtime) = &self.mcp_runtime {
-            dispatcher = dispatcher.with_runtime_adapter_arc(
-                RuntimeKind::Mcp,
-                Arc::new(ServiceResolvedRuntimeAdapter::new(
-                    Arc::new(McpRuntimeAdapter::from_executor(Arc::clone(runtime))),
-                    Arc::clone(&invocation_services),
-                )),
-            );
-        }
-        if let Some(runtime) = &self.first_party_runtime {
-            dispatcher = dispatcher.with_runtime_adapter_arc(
-                RuntimeKind::FirstParty,
-                Arc::new(FirstPartyRuntimeAdapter::from_registry(
-                    Arc::clone(runtime),
-                    Arc::clone(&invocation_services),
-                )),
-            );
-        }
-        if let Some(runtime) = &self.wasm_runtime {
-            dispatcher = dispatcher.with_runtime_adapter_arc(
-                RuntimeKind::Wasm,
-                Arc::new(ServiceResolvedRuntimeAdapter::new(
-                    Arc::clone(runtime),
-                    Arc::clone(&invocation_services),
-                )),
-            );
-        }
+        // `Script` executes on the `Process` lane; `Mcp`/`Wasm` keep the
+        // service-resolution decorator; `FirstParty` resolves services itself
+        // (so it is not double-wrapped) — preserving the prior wiring exactly.
+        let process = self.script_runtime.as_ref().map(|runtime| {
+            ServiceResolvedRuntimeAdapter::new(
+                Arc::new(ScriptRuntimeAdapter::from_executor(Arc::clone(runtime))),
+                Arc::clone(&invocation_services),
+            )
+        });
+        let mcp = self.mcp_runtime.as_ref().map(|runtime| {
+            ServiceResolvedRuntimeAdapter::new(
+                Arc::new(McpRuntimeAdapter::from_executor(Arc::clone(runtime))),
+                Arc::clone(&invocation_services),
+            )
+        });
+        let first_party = self.first_party_runtime.as_ref().map(|runtime| {
+            FirstPartyRuntimeAdapter::from_registry(
+                Arc::clone(runtime),
+                Arc::clone(&invocation_services),
+            )
+        });
+        let wasm = self.wasm_runtime.as_ref().map(|runtime| {
+            ServiceResolvedRuntimeAdapter::new(
+                Arc::clone(runtime),
+                Arc::clone(&invocation_services),
+            )
+        });
+        let executor = RuntimeLaneExecutor::new(first_party, wasm, mcp, process);
+
+        let mut dispatcher = RuntimeDispatcher::from_shared_registry(
+            Arc::clone(&self.registry),
+            Arc::clone(&self.filesystem),
+            Arc::clone(&self.governor),
+            executor,
+        )
+        .with_runtime_policy(
+            self.runtime_policy
+                .clone()
+                .unwrap_or_else(local_testing_runtime_policy),
+        );
         if let Some(event_sink) = &self.event_sink {
             dispatcher = dispatcher.with_event_sink_arc(Arc::clone(event_sink));
         }

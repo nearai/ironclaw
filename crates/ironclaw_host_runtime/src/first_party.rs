@@ -11,8 +11,8 @@ use std::{collections::HashMap, fmt, sync::Arc};
 use async_trait::async_trait;
 use ironclaw_host_api::{
     CapabilityDisplayOutputPreview, CapabilityId, DispatchFailureDetail, DispatchInputIssue,
-    MountView, ResourceEstimate, ResourceScope, ResourceUsage, RuntimeCredentialAuthRequirement,
-    RuntimeDispatchErrorKind, SecretHandle, UserId,
+    MountView, ResourceEstimate, ResourceScope, ResourceUsage, RunId,
+    RuntimeCredentialAuthRequirement, RuntimeDispatchErrorKind, SecretHandle, UserId,
 };
 use serde_json::Value;
 
@@ -29,6 +29,10 @@ pub struct FirstPartyCapabilityRequest {
     pub capability_id: CapabilityId,
     pub scope: ResourceScope,
     pub authenticated_actor_user_id: Option<UserId>,
+    /// Loop turn-run identity forwarded from the dispatch chain. `None` for
+    /// non-loop callers. Handlers that enforce within-run continuity (e.g.
+    /// coding read-before-edit) key state on it.
+    pub run_id: Option<RunId>,
     pub estimate: ResourceEstimate,
     pub mounts: Option<MountView>,
     pub services: InvocationServices,
@@ -45,6 +49,7 @@ impl fmt::Debug for FirstPartyCapabilityRequest {
                 "authenticated_actor_user_id",
                 &self.authenticated_actor_user_id,
             )
+            .field("run_id", &self.run_id)
             .field("estimate", &self.estimate)
             .field("mounts", &self.mounts)
             .field("services", &self.services)
@@ -58,6 +63,7 @@ impl PartialEq for FirstPartyCapabilityRequest {
         self.capability_id == other.capability_id
             && self.scope == other.scope
             && self.authenticated_actor_user_id == other.authenticated_actor_user_id
+            && self.run_id == other.run_id
             && self.estimate == other.estimate
             && self.mounts == other.mounts
             && self.input == other.input
@@ -77,6 +83,7 @@ impl FirstPartyCapabilityRequest {
             capability_id,
             scope,
             authenticated_actor_user_id: None,
+            run_id: None,
             estimate: ResourceEstimate::default(),
             mounts: None,
             services: InvocationServices {
@@ -84,10 +91,11 @@ impl FirstPartyCapabilityRequest {
                 runtime_http_egress,
                 tool_call_http_egress: None,
                 runtime_secret_material_stager: None,
-                process: Arc::new(crate::LocalHostProcessPort::new()),
+                process: Arc::new(crate::HostProcessPort::new()),
                 secret_store: None,
                 audit_sink: None,
                 unsafe_raw_diagnostics_allowed: false,
+                post_edit_check: None,
             },
             input,
         }

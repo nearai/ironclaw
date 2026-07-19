@@ -1,3 +1,4 @@
+// arch-exempt: large_file, mechanical LocalTraceSubmission*->NodeTraceSubmission* Bucket-3 rename (arch-simplification §4.4), no logic change, plan #6168
 //! Thread and session operations for the agent.
 //!
 //! Extracted from `agent_loop.rs` to isolate thread management (user input
@@ -3928,11 +3929,11 @@ mod tests {
     #[cfg(feature = "libsql")]
     fn write_trace_notice_record_for_user(user_id: &str, pending: f32, final_credit: f32) {
         let submission_id = Uuid::new_v4();
-        let record = crate::trace_contribution::LocalTraceSubmissionRecord {
+        let record = crate::trace_contribution::NodeTraceSubmissionRecord {
             submission_id,
             trace_id: Uuid::new_v4(),
             endpoint: Some("https://trace.example.com/v1/traces".to_string()),
-            status: crate::trace_contribution::LocalTraceSubmissionStatus::Submitted,
+            status: crate::trace_contribution::NodeTraceSubmissionStatus::Submitted,
             server_status: Some("accepted".to_string()),
             submitted_at: Some(chrono::Utc::now()),
             revoked_at: None,

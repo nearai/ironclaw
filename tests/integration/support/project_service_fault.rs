@@ -5,7 +5,7 @@
 //!
 //! Deliberately forces `ProjectServiceError::Denied`, not
 //! `Unavailable`/`Internal`: those retry via `DefaultRecoveryStrategy` and hit
-//! a real `LocalDevCapabilityIo` input-ref restaging bug (issue #5608),
+//! a real `StagedCapabilityIo` input-ref restaging bug (issue #5608),
 //! collapsing the retry contract into an immediate `driver_unavailable`.
 //! `Denied` surfaces to the model on the first attempt, avoiding the bug.
 

@@ -633,7 +633,7 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
             fake_page.gotos,
             [
                 (
-                    "http://127.0.0.1:3000/v2/extensions/channels?"
+                    "http://127.0.0.1:3000/extensions/channels?"
                     f"token={run_live_qa.AUTH_TOKEN}",
                     "domcontentloaded",
                 )
@@ -646,10 +646,10 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
         self.assertNotIn("Connect Slack with OAuth", observed_expectations)
         self.assertNotIn("Connect Slack", observed_expectations)
         self.assertNotIn("pairing code", observed_expectations)
-        self.assertFalse(any("/v2/chat" in url for url, _wait in fake_page.gotos))
+        self.assertFalse(any("/chat" in url for url, _wait in fake_page.gotos))
         self.assertEqual(
             result.details["slack_connect_surface"],
-            "/v2/extensions/channels",
+            "/extensions/channels",
         )
         self.assertEqual(
             result.details["slack_connect_title"],
@@ -1046,7 +1046,7 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
             self.assertEqual(prompt, run_live_qa.QA_SHEET_PROMPTS[case_name])
             self.assertNotIn("extension_search", prompt)
             self.assertNotIn(f"`{package_id}`", prompt)
-            self.assertNotIn("/v2/extensions/registry", prompt)
+            self.assertNotIn("/extensions/registry", prompt)
             self.assertIsNone(captured_chat[case_name]["marker"])
             extra_details = captured_chat[case_name]["extra_details"]
             self.assertIsInstance(extra_details, dict)
@@ -2260,12 +2260,12 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
             },
         )
         registry_index = events.index(
-            f"goto:{self._dummy_ctx().base_url}/v2/extensions/registry?token="
+            f"goto:{self._dummy_ctx().base_url}/extensions/registry?token="
             f"{run_live_qa.AUTH_TOKEN}"
         )
         auth_index = events.index("authenticate:slack")
         chat_index = events.index(
-            f"goto:{self._dummy_ctx().base_url}/v2/?token={run_live_qa.AUTH_TOKEN}"
+            f"goto:{self._dummy_ctx().base_url}/?token={run_live_qa.AUTH_TOKEN}"
         )
         submit_index = events.index("submit")
         self.assertLess(registry_index, auth_index)
@@ -3462,7 +3462,7 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
             ):
                 proc, base_url = asyncio.run(
                     run_live_qa.start_reborn_server(
-                        root / "ironclaw-reborn",
+                        root / "ironclaw",
                         root / "reborn-home",
                         root / "out",
                         {
@@ -3535,7 +3535,7 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
             ):
                 proc, base_url = asyncio.run(
                     run_live_qa.start_reborn_server(
-                        root / "ironclaw-reborn",
+                        root / "ironclaw",
                         reborn_home,
                         root / "out",
                         {
@@ -7257,6 +7257,11 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
             "webui-v2-beta,slack-v2-host-beta",
             prepare_body,
         )
+        self.assertIn("cp target/debug/ironclaw target/debug/ironclaw-reborn", prepare_body)
+        self.assertIn(
+            "ironclaw-reborn.tar.gz ironclaw ironclaw-reborn",
+            prepare_body,
+        )
         self.assertIn("using the canary fallback build", prepare_body)
         self.assertIn("prepared-reborn-webui-v2-binary-${{ steps.target.outputs.checkout_ref }}", prepare_body)
         self.assertIn("path: artifacts/prepared-reborn-webui-v2-binary/", prepare_body)
@@ -7275,6 +7280,11 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
         )
         self.assertIn(
             '["openai-compat-beta","slack-v2-host-beta","webui-v2-beta"]',
+            reborn_e2e,
+        )
+        self.assertIn("cp target/debug/ironclaw target/debug/ironclaw-reborn", reborn_e2e)
+        self.assertIn(
+            "ironclaw-reborn.tar.gz\" ironclaw ironclaw-reborn",
             reborn_e2e,
         )
         self.assertIn(
@@ -8008,7 +8018,7 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
             with tempfile.TemporaryDirectory() as tmpdir:
                 root = Path(tmpdir)
                 output_dir = root / "out"
-                binary = root / "ironclaw-reborn"
+                binary = root / "ironclaw"
                 binary.touch()
                 prepared_home = root / "prepared-home"
                 prepared_home.mkdir()
@@ -8109,7 +8119,7 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
             output_dir = root / "out"
-            binary = root / "ironclaw-reborn"
+            binary = root / "ironclaw"
             binary.touch()
             args = argparse.Namespace(
                 all_cases=False,
@@ -8238,7 +8248,7 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
             output_dir = root / "out"
-            binary = root / "ironclaw-reborn"
+            binary = root / "ironclaw"
             binary.touch()
             args = argparse.Namespace(
                 all_cases=False,
@@ -8350,7 +8360,7 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
             output_dir = root / "out"
-            binary = root / "ironclaw-reborn"
+            binary = root / "ironclaw"
             binary.touch()
             args = argparse.Namespace(
                 all_cases=False,
@@ -8418,7 +8428,7 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
             output_dir = root / "out"
-            binary = root / "ironclaw-reborn"
+            binary = root / "ironclaw"
             binary.touch()
             args = argparse.Namespace(
                 all_cases=False,
@@ -8480,7 +8490,7 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
             output_dir = root / "out"
-            binary = root / "ironclaw-reborn"
+            binary = root / "ironclaw"
             binary.touch()
             prepared_home = root / "prepared-home"
             prepared_home.mkdir()
@@ -8568,7 +8578,7 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
             output_dir = root / "out"
-            binary = root / "ironclaw-reborn"
+            binary = root / "ironclaw"
             binary.touch()
             prepared_home = root / "prepared-home"
             prepared_home.mkdir()

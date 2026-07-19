@@ -458,8 +458,21 @@ pub struct PutToolResultRecordRequest {
     pub content: Vec<u8>,
 }
 
-/// Maximum byte window returned by one durable tool-result read.
-pub const TOOL_RESULT_RECORD_READ_MAX_BYTES: usize = 2 * 1024;
+/// Maximum byte window returned by one durable tool-result read, and the
+/// inline first-look preview size (`local_dev.rs`'s
+/// `LOCAL_DEV_RESULT_PREVIEW_MAX_BYTES` mirrors this so a model paging past
+/// `next_offset` sees no gap or overlap). PR #5902 (fixing #5838's
+/// context-compaction crash) originally set this to 2,048 bytes -- a 49x cut
+/// from the pre-fix 100,000-byte inline cap that left most tool results
+/// requiring dozens of manual `result_read` calls to recover, which tanked
+/// agent benchmark performance. Raised to 24KB: still per-call bounded (the
+/// property #5838 actually needed -- unbounded *accumulation* of large
+/// results in the compacted transcript, not single-call size, caused the
+/// crash) and far below the pre-fix 100,000-byte constant, while making most
+/// tool outputs recoverable in 1-2 calls instead of ~49.
+/// `tool_result_reference.rs`'s `MAX_MODEL_OBSERVATION_BYTES` is derived from
+/// this value; raising it here raises that ceiling too.
+pub const TOOL_RESULT_RECORD_READ_MAX_BYTES: usize = 24 * 1024;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ReadToolResultRecordRequest {

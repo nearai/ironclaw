@@ -57,7 +57,7 @@ pub(crate) struct CoreBuiltinOptions {
     /// `true` (default) injects the inert `RecordingProcessPort` so
     /// `builtin.shell` invocations in tests never spawn a real OS process.
     /// `.with_live_shell()` sets this `false`, which skips injection and lets
-    /// `HostRuntimeServices` default to the real `LocalHostProcessPort`.
+    /// `HostRuntimeServices` default to the real `HostProcessPort`.
     /// Consulted for `EgressMode::Recording` and `EgressMode::RealPipeline`;
     /// the `Live` path never wires a process port either way.
     pub(crate) recording_process: bool,
@@ -83,7 +83,7 @@ impl CoreBuiltinOptions {
         self
     }
 
-    /// Opts out of the recording process port so the real `LocalHostProcessPort`
+    /// Opts out of the recording process port so the real `HostProcessPort`
     /// executes shell commands on the host.
     pub(crate) fn with_live_shell(mut self) -> Self {
         self.recording_process = false;
@@ -116,7 +116,7 @@ pub(crate) async fn core_builtin_tools(
     // Inject the inert recording port by default so `builtin.shell`
     // invocations in tests never spawn a real OS process. `.with_live_shell()`
     // sets `recording_process = false`, which skips injection and lets
-    // `HostRuntimeServices` default to the real `LocalHostProcessPort`.
+    // `HostRuntimeServices` default to the real `HostProcessPort`.
     let recording_process_port = if recording_process {
         Some(Arc::new(
             super::super::super::process::RecordingProcessPort::new(),
@@ -193,9 +193,9 @@ pub(crate) async fn core_builtin_tools_default() -> HarnessResult<HostRuntimeCap
 /// workspace mount view — mirrors `local_dev_mounts::ambient_workspace_mount_view`
 /// appending a `/host` alias when `host_home_aliases` is non-empty. This is
 /// the ONLY integration-tier construction with a confirmed host-home mount,
-/// so it is the sole way to observe `wrap_local_dev_surface_disclosure`'s
+/// so it is the sole way to observe `wrap_surface_disclosure`'s
 /// scoped-roots note (the layer is a no-op — disabled — without a `/host`
-/// alias present, see `LocalDevSurfaceDisclosure::enabled`).
+/// alias present, see `HostSurfaceDisclosure::enabled`).
 pub(crate) async fn core_builtin_tools_with_confirmed_host_mount()
 -> HarnessResult<HostRuntimeCapabilityHarness> {
     let mut harness = core_builtin_tools(CoreBuiltinOptions::default()).await?;

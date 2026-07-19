@@ -12,6 +12,7 @@ pub mod external;
 pub mod fakes;
 pub mod identity;
 pub mod inbound;
+pub mod interaction_commands;
 mod outbound;
 mod projection;
 pub mod redaction;
@@ -53,6 +54,7 @@ pub use inbound::{
     ScopedApprovalResolutionPayload, TrustedInboundContext, UserMessagePayload,
     parse_product_slash_command,
 };
+pub use interaction_commands::{parse_interaction_resolution_text, strip_wrapping_inline_code};
 pub use outbound::{
     ApprovalPromptActionView, ApprovalPromptContextView, ApprovalPromptDestinationView,
     ApprovalPromptDetailView, ApprovalPromptScopeView, AuthPromptChallengeKind,

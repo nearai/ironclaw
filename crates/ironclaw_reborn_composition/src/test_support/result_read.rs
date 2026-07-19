@@ -11,7 +11,7 @@ pub const RESULT_READ_CAPABILITY_ID: &str = crate::runtime::RESULT_READ_CAPABILI
 /// Test-support entry point for the `result_read` synthetic-capability wrap.
 /// Lets the integration-test harness inject the synthetic `result_read`
 /// capability onto its host-runtime capability port via the real production
-/// wrap (`wrap_local_dev_synthetic_capabilities` + `result_read_capability`),
+/// wrap (`wrap_synthetic_capabilities` + `result_read_capability`),
 /// so the dispatch path never drifts from production's unconditional wire-in
 /// (`refreshing_capability_port.rs`'s `build_inner`).
 #[cfg(feature = "test-support")]

@@ -13,8 +13,8 @@ use thiserror::Error;
 
 use crate::{
     CapabilityId, ExtensionId, MountView, ResourceEstimate, ResourceReceipt, ResourceReservation,
-    ResourceScope, ResourceUsage, RuntimeCredentialAuthRequirement, RuntimeKind, SecretHandle,
-    UserId,
+    ResourceScope, ResourceUsage, RunId, RuntimeCredentialAuthRequirement, RuntimeKind,
+    SecretHandle, UserId,
 };
 
 /// Request for one already-authorized declared capability dispatch.
@@ -23,6 +23,9 @@ pub struct CapabilityDispatchRequest {
     pub capability_id: CapabilityId,
     pub scope: ResourceScope,
     pub authenticated_actor_user_id: Option<UserId>,
+    /// Loop turn-run identity forwarded from `ExecutionContext::run_id`.
+    /// `None` for non-loop callers.
+    pub run_id: Option<RunId>,
     pub estimate: ResourceEstimate,
     pub mounts: Option<MountView>,
     pub resource_reservation: Option<ResourceReservation>,

@@ -20,7 +20,8 @@ use ironclaw_host_api::{
 };
 use ironclaw_product_adapter_registry::PRODUCT_ADAPTER_HOST_API_ID;
 use ironclaw_product_workflow::{
-    ChannelConnectionRequirement, LifecycleBlockerRef, LifecycleExtensionSummary,
+    ChannelConnectionRequirement, ExtensionAccountSetupDescriptor, ExtensionAccountSetupError,
+    ExtensionAccountSetupRegistry, LifecycleBlockerRef, LifecycleExtensionSummary,
     LifecycleExtensionSurfaceKind, LifecycleInstalledExtensionSummary, LifecyclePackageKind,
     LifecyclePackageRef, LifecyclePhase, LifecycleProductPayload, LifecycleProductResponse,
     LifecycleReadinessBlocker, LifecycleSearchExtensionSummary, ProductWorkflowError,
@@ -132,6 +133,10 @@ pub(crate) struct RebornLocalExtensionManagementPort {
     /// not re-derive admin-ness.
     tenant_operator_user_id: UserId,
     removal_cleanup: Arc<ExtensionRemovalCleanupRegistry>,
+    /// Product-owned setup metadata and extension-owned connection-status
+    /// sources. Descriptors are declared during composition; sources connect
+    /// only when their host surface is mounted.
+    account_setups: ExtensionAccountSetupRegistry,
 }
 
 /// Concurrent `import_bundle` decodes allowed before further uploads wait.
@@ -151,7 +156,7 @@ pub(crate) struct ActiveExtensionCapability {
     pub(crate) network_targets: Vec<NetworkTargetPattern>,
     /// Who the providing extension's installation belongs to (#5459 P1).
     /// Tenant-owned capabilities are grant-minted for every user; user-owned
-    /// ones only for their owner (filtered in `LocalDevExtensionSurface`).
+    /// ones only for their owner (filtered in `ExtensionCapabilitySurface`).
     pub(crate) owner: InstallationOwner,
 }
 
@@ -324,7 +329,21 @@ impl RebornLocalExtensionManagementPort {
             import_decode_semaphore: Arc::new(Semaphore::new(MAX_CONCURRENT_IMPORT_DECODES)),
             tenant_operator_user_id,
             removal_cleanup: Arc::new(ExtensionRemovalCleanupRegistry::empty()),
+            account_setups: ExtensionAccountSetupRegistry::default(),
         }
+    }
+
+    pub(crate) fn with_account_setup_registry(
+        mut self,
+        account_setups: ExtensionAccountSetupRegistry,
+    ) -> Self {
+        self.account_setups = account_setups;
+        self
+    }
+
+    #[allow(dead_code)]
+    pub(crate) fn account_setup_registry(&self) -> ExtensionAccountSetupRegistry {
+        self.account_setups.clone()
     }
 
     pub(crate) fn with_removal_cleanup_registry(
@@ -363,7 +382,7 @@ impl RebornLocalExtensionManagementPort {
     /// host activations (e.g. Slack host-beta channel setup) that operate a
     /// shared install and therefore act as the operator rather than any
     /// individual member.
-    #[cfg(feature = "slack-v2-host-beta")]
+    #[allow(dead_code)]
     pub(crate) fn tenant_operator_user_id(&self) -> &UserId {
         &self.tenant_operator_user_id
     }
@@ -538,7 +557,15 @@ impl RebornLocalExtensionManagementPort {
         // confirms a private credentialed install exists (#5525 review).
         ensure_caller_may_operate(&installation, caller)?;
         let package = self.lifecycle_package(&extension_id).await?;
-        let requirements = package_runtime_credential_auth_requirements(&package);
+        let mut requirements = package_runtime_credential_auth_requirements(&package);
+        if let Some(requirement) = self
+            .account_setups
+            .missing_requirement(&extension_id, caller)
+            .await
+            .map_err(map_account_setup_error)?
+        {
+            requirements.push(requirement);
+        }
         Ok(requirements)
     }
 
@@ -1040,7 +1067,11 @@ impl RebornLocalExtensionManagementPort {
             // claimant already activated this exact package. Treat that state
             // as the authoritative success instead of re-publishing and
             // risking a conflicting failure followed by credential rollback.
-            return Ok(activation_success_response(package_ref, &active_package));
+            return Ok(activation_success_response(
+                package_ref,
+                &active_package,
+                self.account_setups.descriptor(extension_id),
+            ));
         }
         self.enable_lifecycle_package(extension_id).await?;
         if let Err(error) = self
@@ -1081,7 +1112,11 @@ impl RebornLocalExtensionManagementPort {
             return Err(error);
         }
 
-        Ok(activation_success_response(package_ref, &active_package))
+        Ok(activation_success_response(
+            package_ref,
+            &active_package,
+            self.account_setups.descriptor(extension_id),
+        ))
     }
 
     pub(crate) async fn package_requires_hosted_mcp_discovery(
@@ -2095,13 +2130,20 @@ fn package_visible_capability_ids(package: &ExtensionPackage) -> Vec<String> {
 fn activation_success_response(
     package_ref: LifecyclePackageRef,
     package: &ExtensionPackage,
+    account_setup: Option<ExtensionAccountSetupDescriptor>,
 ) -> LifecycleProductResponse {
     let visible_capability_ids = package_visible_capability_ids(package);
-    let message = activation_success_message(&package_ref, package, &visible_capability_ids);
+    let message = activation_success_message(
+        &package_ref,
+        package,
+        &visible_capability_ids,
+        account_setup.as_ref(),
+    );
     let connection_required = if package_declares_inbound_product_adapter(package) {
         Some(channel_connection_requirement(
             package_ref.id.as_str(),
             package.manifest.name.as_str(),
+            account_setup.as_ref(),
         ))
     } else {
         None
@@ -2154,8 +2196,12 @@ fn activation_success_message(
     package_ref: &LifecyclePackageRef,
     package: &ExtensionPackage,
     visible_capability_ids: &[String],
+    account_setup: Option<&ExtensionAccountSetupDescriptor>,
 ) -> String {
     if package_declares_inbound_product_adapter(package) {
+        if let Some(account_setup) = account_setup {
+            return account_setup.activation_success_message.clone();
+        }
         if package_ref.id.as_str() == "slack_bot" {
             return "Slack is installed as an inbound entrypoint. If WebChat shows a Slack account connection panel, tell the user to configure Slack OAuth for this extension rather than pasting anything into normal chat. If the user's Slack account is already connected, continue the user's original request; Slack DMs and WebUI chat can use the same user-scoped Slack tools.".to_string();
         }
@@ -2190,7 +2236,11 @@ fn activation_success_message(
 pub(crate) fn channel_connection_requirement(
     channel_id: &str,
     display_name: &str,
+    account_setup: Option<&ExtensionAccountSetupDescriptor>,
 ) -> ChannelConnectionRequirement {
+    if let Some(account_setup) = account_setup {
+        return account_setup.connection_requirement.clone();
+    }
     if channel_id == "slack_bot" {
         ChannelConnectionRequirement {
             channel: "slack".to_string(),
@@ -2354,6 +2404,35 @@ fn map_search_credential_stage_error(
     }
 }
 
+fn map_account_setup_error(error: ExtensionAccountSetupError) -> ProductWorkflowError {
+    match error {
+        ExtensionAccountSetupError::HostUnavailable { extension_id } => {
+            ProductWorkflowError::InvalidBindingRequest {
+                reason: format!(
+                    "the account setup host for extension {} is not enabled on this deployment",
+                    extension_id.as_str()
+                ),
+            }
+        }
+        ExtensionAccountSetupError::StatusUnavailable {
+            extension_id,
+            source,
+        } => {
+            tracing::debug!(
+                extension_id = %extension_id,
+                error = %source,
+                "extension account connection status read failed during activation"
+            );
+            ProductWorkflowError::Transient {
+                reason: format!(
+                    "account connection status is temporarily unavailable for extension {}",
+                    extension_id.as_str()
+                ),
+            }
+        }
+    }
+}
+
 fn map_extension_error(error: ExtensionError) -> ProductWorkflowError {
     match error {
         ExtensionError::Filesystem(_) | ExtensionError::LifecycleEventSink { .. } => {
@@ -2474,7 +2553,7 @@ mod tests {
         SharedExtensionRegistry,
     };
     use ironclaw_filesystem::{
-        DirEntry, FileStat, FilesystemError, FilesystemOperation, LocalFilesystem,
+        DirEntry, DiskFilesystem, FileStat, FilesystemError, FilesystemOperation,
     };
     use ironclaw_host_api::{
         AgentId, CapabilityId, ExtensionLifecycleOperation, HostPath, HostPortCatalog,
@@ -2636,7 +2715,8 @@ mod tests {
             .expect("valid package ref");
         let package = fixture_extension_package().package;
         let visible_capability_ids = vec!["fixture.search".to_string()];
-        let message = activation_success_message(&package_ref, &package, &visible_capability_ids);
+        let message =
+            activation_success_message(&package_ref, &package, &visible_capability_ids, None);
         assert!(message.contains("fixture.search"));
         assert!(
             message.contains("callable by exact name"),
@@ -2655,7 +2735,7 @@ mod tests {
         let package_ref = LifecyclePackageRef::new(LifecyclePackageKind::Extension, "fixture")
             .expect("valid package ref");
         let package = fixture_extension_package().package;
-        let message = activation_success_message(&package_ref, &package, &[]);
+        let message = activation_success_message(&package_ref, &package, &[], None);
         assert!(message.contains("Extension activation succeeded"));
         assert!(
             !message.contains("callable by exact name"),
@@ -3087,15 +3167,20 @@ output_schema_ref = "schemas/run.output.json"
 
     #[tokio::test]
     async fn extension_activate_returns_generic_pairing_guidance_for_external_channel_package() {
+        // Deliberately a channel with NO native host in this crate: `telegram`
+        // now routes through the telegram-v2 host's own activation copy when
+        // that feature is compiled in, so a `telegram`-named fixture would no
+        // longer exercise the surface-generic external-channel path this test
+        // pins.
         let (_dir, _storage_root, facade, _active_registry, _installation_store) =
             extension_lifecycle_fixture_with_catalog_and_service(
                 AvailableExtensionCatalog::from_packages(vec![fixture_external_channel_package(
-                    "telegram", "Telegram",
+                    "signal", "Signal",
                 )]),
                 ExtensionLifecycleService::new(ExtensionRegistry::new()),
             );
-        let package_ref = LifecyclePackageRef::new(LifecyclePackageKind::Extension, "telegram")
-            .expect("valid ref");
+        let package_ref =
+            LifecyclePackageRef::new(LifecyclePackageKind::Extension, "signal").expect("valid ref");
         facade
             .execute(
                 lifecycle_surface_context(),
@@ -3117,7 +3202,7 @@ output_schema_ref = "schemas/run.output.json"
         assert_eq!(activate.phase, LifecyclePhase::Active);
         let message = activate.message.as_deref().expect("activation message");
         assert!(
-            message.contains("Telegram is installed as an external channel")
+            message.contains("Signal is installed as an external channel")
                 && message.contains("app or bot")
                 && message.contains("pairing code")
                 && message.contains("WebChat connection panel")
@@ -3137,13 +3222,13 @@ output_schema_ref = "schemas/run.output.json"
         let requirement = connection_required
             .as_ref()
             .expect("external channel activation must carry a structured connection requirement");
-        assert_eq!(requirement.channel, "telegram");
+        assert_eq!(requirement.channel, "signal");
         assert_eq!(
             requirement.strategy,
             RebornChannelConnectStrategy::InboundProofCode
         );
         assert!(
-            requirement.instructions.contains("Telegram"),
+            requirement.instructions.contains("Signal"),
             "generic channel copy should name the channel: {}",
             requirement.instructions
         );
@@ -4078,6 +4163,97 @@ output_schema_ref = "schemas/run.output.json"
         );
     }
 
+    /// A declared account-setup extension whose host was not mounted must fail
+    /// closed instead of parking a run that no connection surface can resume.
+    /// A pairing-status store outage during telegram activation preflight is
+    /// an availability fault: it must classify as retryable `Transient` (not
+    /// the non-retryable `InvalidBindingRequest` reserved for the unmounted
+    /// host / configuration fault) and must not leak the store error text into
+    /// the product-facing reason.
+    #[cfg(feature = "telegram-v2-host-beta")]
+    #[tokio::test]
+    async fn telegram_declared_without_mounted_host_fails_closed_through_activation_requirements() {
+        let (_dir, _storage_root, port, _active_registry, _installation_store) =
+            extension_management_port_fixture_with_catalog_and_service(
+                AvailableExtensionCatalog::from_first_party_assets().expect("first-party catalog"),
+                ExtensionLifecycleService::new(ExtensionRegistry::new()),
+            );
+        let telegram_ref = LifecyclePackageRef::new(LifecyclePackageKind::Extension, "telegram")
+            .expect("telegram ref");
+        port.install(telegram_ref.clone(), &lifecycle_owner())
+            .await
+            .expect("install telegram extension");
+        assert!(
+            port.account_setup_registry().declare(
+                ironclaw_telegram_extension::telegram_account_setup_descriptor()
+                    .expect("Telegram account setup descriptor")
+            )
+        );
+
+        let error = port
+            .activation_credential_requirements(&telegram_ref, &lifecycle_owner())
+            .await
+            .expect_err("a declared setup without its mounted host must fail closed");
+
+        assert!(
+            matches!(error, ProductWorkflowError::InvalidBindingRequest { .. }),
+            "an unmounted host is a non-retryable composition fault, got {error:?}"
+        );
+    }
+
+    #[cfg(feature = "telegram-v2-host-beta")]
+    #[tokio::test]
+    async fn telegram_pairing_status_outage_is_transient_through_activation_requirements() {
+        #[derive(Debug)]
+        struct FailingPairedSource;
+
+        #[async_trait::async_trait]
+        impl ironclaw_product_workflow::AccountConnectionStatusSource for FailingPairedSource {
+            async fn connected(
+                &self,
+                _user_id: &UserId,
+            ) -> Result<bool, ironclaw_product_workflow::AccountConnectionStatusError> {
+                Err(
+                    ironclaw_product_workflow::AccountConnectionStatusError::new(
+                        "test pairing store outage",
+                    ),
+                )
+            }
+        }
+
+        let (_dir, _storage_root, port, _active_registry, _installation_store) =
+            extension_management_port_fixture_with_catalog_and_service(
+                AvailableExtensionCatalog::from_first_party_assets().expect("first-party catalog"),
+                ExtensionLifecycleService::new(ExtensionRegistry::new()),
+            );
+        let telegram_ref = LifecyclePackageRef::new(LifecyclePackageKind::Extension, "telegram")
+            .expect("telegram ref");
+        port.install(telegram_ref.clone(), &lifecycle_owner())
+            .await
+            .expect("install telegram extension");
+        let descriptor = ironclaw_telegram_extension::telegram_account_setup_descriptor()
+            .expect("Telegram account setup descriptor");
+        let extension_id = descriptor.extension_id.clone();
+        assert!(port.account_setup_registry().declare(descriptor));
+        assert!(
+            port.account_setup_registry()
+                .connect(&extension_id, Arc::new(FailingPairedSource))
+        );
+
+        let error = port
+            .activation_credential_requirements(&telegram_ref, &lifecycle_owner())
+            .await
+            .expect_err("a status outage is an error, not an empty requirement list");
+        assert!(
+            matches!(error, ProductWorkflowError::Transient { .. }),
+            "availability faults must stay retryable, got {error:?}"
+        );
+        assert!(
+            !error.to_string().contains("test pairing store outage"),
+            "store error text must not reach the product-facing reason"
+        );
+    }
+
     #[cfg(feature = "slack-v2-host-beta")]
     #[tokio::test]
     async fn slack_tools_extension_removal_fails_closed_without_channel_cleanup() {
@@ -4836,7 +5012,7 @@ output_schema_ref = "schemas/run.output.json"
         );
         let installation_store_trait: Arc<dyn ExtensionInstallationStore> =
             installation_store.clone();
-        let filesystem: Arc<dyn RootFilesystem> = Arc::new(LocalFilesystem::new());
+        let filesystem: Arc<dyn RootFilesystem> = Arc::new(DiskFilesystem::new());
 
         restore_extension_lifecycle_state(
             &AvailableExtensionCatalog::from_packages(Vec::new()),
@@ -5135,7 +5311,7 @@ output_schema_ref = "schemas/run.output.json"
             Arc::clone(&restored_trust_policy),
         );
         let installation_store: Arc<dyn ExtensionInstallationStore> = installation_store;
-        let filesystem: Arc<dyn RootFilesystem> = Arc::new(LocalFilesystem::new());
+        let filesystem: Arc<dyn RootFilesystem> = Arc::new(DiskFilesystem::new());
 
         let error = restore_extension_lifecycle_state(
             &catalog,
@@ -5838,7 +6014,7 @@ output_schema_ref = "schemas/run.output.json"
         let dir = tempfile::tempdir().expect("tempdir");
         let storage_root = dir.path().join("local-dev");
         std::fs::create_dir_all(storage_root.join("system/extensions")).expect("storage root");
-        let mut filesystem = LocalFilesystem::new();
+        let mut filesystem = DiskFilesystem::new();
         filesystem
             .mount_local(
                 VirtualPath::new("/system/extensions").expect("valid virtual path"),
@@ -7001,7 +7177,7 @@ output_schema_ref = "schemas/run.output.json"
         let storage_root = dir.path().join("local-dev");
         std::fs::create_dir_all(storage_root.join("system/extensions")).expect("storage root");
 
-        let mut filesystem = LocalFilesystem::new();
+        let mut filesystem = DiskFilesystem::new();
         filesystem
             .mount_local(
                 VirtualPath::new("/projects").expect("valid virtual path"),
@@ -7115,7 +7291,7 @@ output_schema_ref = "schemas/run.output.json"
         let storage_root = dir.path().join("local-dev");
         std::fs::create_dir_all(storage_root.join("system/extensions")).expect("storage root");
 
-        let mut filesystem = LocalFilesystem::new();
+        let mut filesystem = DiskFilesystem::new();
         filesystem
             .mount_local(
                 VirtualPath::new("/projects").expect("valid virtual path"),
@@ -7205,7 +7381,7 @@ output_schema_ref = "schemas/run.output.json"
         let storage_root = dir.path().join("local-dev");
         std::fs::create_dir_all(storage_root.join("system/extensions")).expect("storage root");
 
-        let mut filesystem = LocalFilesystem::new();
+        let mut filesystem = DiskFilesystem::new();
         filesystem
             .mount_local(
                 VirtualPath::new("/projects").expect("valid virtual path"),
@@ -7336,7 +7512,7 @@ output_schema_ref = "schemas/run.output.json"
         let dir = tempfile::tempdir().expect("tempdir");
         let storage_root = dir.path().join("local-dev");
         std::fs::create_dir_all(storage_root.join("system/extensions")).expect("storage root");
-        let mut filesystem = LocalFilesystem::new();
+        let mut filesystem = DiskFilesystem::new();
         filesystem
             .mount_local(
                 VirtualPath::new("/projects").expect("valid virtual path"),
@@ -7380,7 +7556,7 @@ output_schema_ref = "schemas/run.output.json"
         let dir = tempfile::tempdir().expect("tempdir");
         let storage_root = dir.path().join("local-dev");
         std::fs::create_dir_all(storage_root.join("system/extensions")).expect("storage root");
-        let mut filesystem = LocalFilesystem::new();
+        let mut filesystem = DiskFilesystem::new();
         filesystem
             .mount_local(
                 VirtualPath::new("/projects").expect("valid virtual path"),

@@ -457,11 +457,14 @@ async fn disabled_spawn_subagent_capability_call_anyway_fails_the_run() {
 }
 
 /// A `read_file` result large enough to exceed `TOOL_RESULT_RECORD_READ_MAX_BYTES`
-/// (2048 bytes) once serialized, so both durable-projection tests below
-/// exercise truncation. Every line is distinct so `TAIL_MARKER` (the last
-/// line) can only appear once the raw payload's tail is reached.
-const DURABLE_CONTENT_LINES: usize = 400;
-const TAIL_MARKER: &str = "line-0399";
+/// once serialized, so both durable-projection tests below exercise
+/// truncation, while staying under `PROVIDER_ARGUMENTS_MAX_BYTES` (64 KiB) --
+/// this content also rides as the `write_file` tool CALL's arguments earlier
+/// in the same script, a separate cap on model-emitted tool-call size.
+/// Every line is distinct so `TAIL_MARKER` (the last line) can only appear
+/// once the raw payload's tail is reached.
+const DURABLE_CONTENT_LINES: usize = 1300;
+const TAIL_MARKER: &str = "line-1299";
 
 fn large_durable_file_content() -> String {
     (0..DURABLE_CONTENT_LINES)
@@ -471,7 +474,7 @@ fn large_durable_file_content() -> String {
 }
 
 /// Durable tool-result projection (issue #5838 / PR #5902): a `read_file`
-/// result routed through the REAL `LocalDevCapabilityIo`
+/// result routed through the REAL `StagedCapabilityIo`
 /// (`.with_durable_capability_io_file_tools()`, which wires
 /// `new_with_durable_previews` over this harness's own local-dev session
 /// thread service — mirrors production's `capability_wiring`) must reach the
@@ -525,7 +528,7 @@ async fn durable_large_read_file_result_reaches_model_as_truncated_preview() {
     // messages (not ANY role): the model's OWN `write_file` tool-call
     // arguments legitimately echo the full content elsewhere in history —
     // this asserts the absence specifically from the persisted TOOL RESULT
-    // side, which is what `LocalDevCapabilityIo` controls.
+    // side, which is what `StagedCapabilityIo` controls.
     assert!(
         h.assert_conversation_history_role_contains(MessageKind::ToolResultReference, TAIL_MARKER)
             .await
@@ -658,13 +661,19 @@ async fn result_read_out_of_range_max_bytes_surfaces_repair_guidance_impl() {
         .expect("model-visible observation carries a structured issue code, not just prose");
     h.assert_conversation_history_role_contains(
         MessageKind::ToolResultReference,
-        "\"expected\":\"4..=2048\"",
+        &format!(
+            "\"expected\":\"4..={}\"",
+            ironclaw_threads::TOOL_RESULT_RECORD_READ_MAX_BYTES
+        ),
     )
     .await
     .expect("model-visible issue states the allowed range");
     h.assert_conversation_history_role_contains(
         MessageKind::ToolResultReference,
-        "\"received\":\"2049\"",
+        &format!(
+            "\"received\":\"{}\"",
+            ironclaw_threads::TOOL_RESULT_RECORD_READ_MAX_BYTES as u64 + 1
+        ),
     )
     .await
     .expect("model-visible issue echoes the offending value");
@@ -748,10 +757,10 @@ fn truncated_array_result_persists_item_count_to_model_transcript() {
 }
 
 async fn truncated_array_result_persists_item_count_to_model_transcript_impl() {
-    let items: Vec<String> = (0..600).map(|i| format!("item-{i:04}")).collect();
+    let items: Vec<String> = (0..4000).map(|i| format!("item-{i:04}")).collect();
     let array_json = serde_json::to_string(&items).expect("array fixture serializes");
     assert!(
-        array_json.len() > 2048,
+        array_json.len() > ironclaw_threads::TOOL_RESULT_RECORD_READ_MAX_BYTES,
         "fixture must exceed the preview cap so the truncated branch runs"
     );
     let h = RebornIntegrationHarness::test_default()
@@ -773,11 +782,11 @@ async fn truncated_array_result_persists_item_count_to_model_transcript_impl() {
 
     h.assert_conversation_history_role_contains(
         MessageKind::ToolResultReference,
-        "\"item_count\":600",
+        "\"item_count\":4000",
     )
     .await
     .expect("persisted observation carries the structured item count");
-    h.assert_conversation_history_role_contains(MessageKind::ToolResultReference, "600 items")
+    h.assert_conversation_history_role_contains(MessageKind::ToolResultReference, "4000 items")
         .await
         .expect("persisted summary names the array's element count");
 }

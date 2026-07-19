@@ -5,7 +5,7 @@ paths:
   - "crates/ironclaw_dispatcher/**"
   - "crates/ironclaw_product_workflow/**"
   - "crates/ironclaw_first_party_extensions/**"
-  - "crates/ironclaw_webui_v2/**"
+  - "crates/ironclaw_webui/**"
   - "crates/ironclaw_reborn_composition/**"
   - "crates/ironclaw_agent_loop/**"
   - "crates/ironclaw_runner/**"

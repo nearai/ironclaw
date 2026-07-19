@@ -67,8 +67,8 @@ MOCK_SKILL_CONTENT = (
 
 async def go_to_skills(page):
     """Navigate to Reborn v2 Settings > Skills."""
-    base_url = page.url.split("/v2", 1)[0]
-    await page.goto(f"{base_url}/v2/settings/skills?token={REBORN_V2_AUTH_TOKEN}")
+    base_url = await page.evaluate("location.origin")
+    await page.goto(f"{base_url}/settings/skills?token={REBORN_V2_AUTH_TOKEN}")
     await expect(page.get_by_text("Add skill")).to_be_visible(timeout=15000)
 
 

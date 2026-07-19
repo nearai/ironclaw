@@ -10,7 +10,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     AgentId, CapabilitySet, CorrelationId, ExtensionId, HostApiError, InvocationId, MissionId,
-    MountView, ProcessId, ProjectId, ResourceScope, RuntimeKind, SystemServiceId, TenantId,
+    MountView, ProcessId, ProjectId, ResourceScope, RunId, RuntimeKind, SystemServiceId, TenantId,
     ThreadId, TrustClass, UserId,
 };
 
@@ -50,6 +50,19 @@ pub struct ExecutionContext {
     pub project_id: Option<ProjectId>,
     pub mission_id: Option<MissionId>,
     pub thread_id: Option<ThreadId>,
+    /// Prompt-visible run identity for the loop turn-run this invocation
+    /// belongs to, sitting between `thread_id` (spans many runs) and
+    /// `invocation_id` (one tool call) in the scope cascade.
+    ///
+    /// Stamped host-side by loop orchestration when it builds the invocation
+    /// context (see `invocation_context_from_visible` in
+    /// `ironclaw_loop_support`); tool calls within the same run share it.
+    /// `None` for non-loop callers (system services, one-shot product
+    /// invocations). Policy layers that require "within the current run"
+    /// continuity (e.g. coding read-before-edit) key on it; consumers must
+    /// treat `None` as its own bucket, never as a wildcard.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub run_id: Option<RunId>,
 
     pub extension_id: ExtensionId,
     pub runtime: RuntimeKind,
@@ -88,6 +101,7 @@ impl ExecutionContext {
             project_id: resource_scope.project_id.clone(),
             mission_id: None,
             thread_id: None,
+            run_id: None,
             extension_id,
             runtime,
             trust,
@@ -144,7 +158,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn legacy_execution_context_without_authenticated_actor_deserializes() {
+    fn legacy_execution_context_without_optional_identity_fields_deserializes() {
         let mut context = ExecutionContext::local_default(
             UserId::new("subject").unwrap(),
             ExtensionId::new("demo").unwrap(),
@@ -155,14 +169,15 @@ mod tests {
         )
         .unwrap();
         context.authenticated_actor_user_id = Some(UserId::new("slack-alice").unwrap());
+        context.run_id = Some(RunId::new());
         let mut legacy = serde_json::to_value(context).unwrap();
-        legacy
-            .as_object_mut()
-            .unwrap()
-            .remove("authenticated_actor_user_id");
+        let fields = legacy.as_object_mut().unwrap();
+        fields.remove("authenticated_actor_user_id");
+        fields.remove("run_id");
 
         let decoded: ExecutionContext = serde_json::from_value(legacy).unwrap();
 
         assert_eq!(decoded.authenticated_actor_user_id, None);
+        assert_eq!(decoded.run_id, None);
     }
 }

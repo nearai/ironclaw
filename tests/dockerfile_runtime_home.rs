@@ -51,7 +51,7 @@ fn setup_fake_entrypoint() -> FakeEntrypoint {
 
     std::fs::create_dir_all(&bin_dir).expect("bin dir");
     write_executable(
-        &bin_dir.join("ironclaw-reborn"),
+        &bin_dir.join("ironclaw"),
         "#!/bin/sh\nprintf '%s\\n' \"$@\" > \"$IRONCLAW_REBORN_TEST_ARGS_FILE\"\n",
     );
     write_executable(
@@ -77,7 +77,7 @@ fn setup_fake_entrypoint_recording_cp() -> FakeEntrypoint {
 
     std::fs::create_dir_all(&bin_dir).expect("bin dir");
     write_executable(
-        &bin_dir.join("ironclaw-reborn"),
+        &bin_dir.join("ironclaw"),
         "#!/bin/sh\nprintf '%s\\n' \"$@\" > \"$IRONCLAW_REBORN_TEST_ARGS_FILE\"\n",
     );
     write_executable(
@@ -146,7 +146,7 @@ fn reborn_dockerfile_keeps_bundled_skills_in_build_context() {
 }
 
 #[test]
-fn reborn_dockerfile_uses_feature_matched_cache_and_loopback_default() {
+fn reborn_dockerfile_uses_feature_matched_cache_and_published_port_default() {
     let dockerfile = read_repo_file("Dockerfile.reborn");
 
     assert!(
@@ -156,8 +156,8 @@ fn reborn_dockerfile_uses_feature_matched_cache_and_loopback_default() {
         "cargo chef cook must target the Reborn CLI package with the same features as the final build"
     );
     assert!(
-        dockerfile.contains("IRONCLAW_REBORN_SERVE_HOST=127.0.0.1"),
-        "image default serve host must stay loopback; Railway should override to 0.0.0.0"
+        dockerfile.contains("IRONCLAW_REBORN_SERVE_HOST=0.0.0.0"),
+        "container service must bind all interfaces so published Docker ports are reachable"
     );
     assert!(
         dockerfile.contains("config.hosted-single-tenant.toml"),

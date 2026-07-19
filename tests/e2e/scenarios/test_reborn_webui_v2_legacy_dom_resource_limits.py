@@ -125,7 +125,7 @@ async def test_reborn_chat_history_dom_stays_page_bounded_until_user_loads_more(
     await page.route(f"**/api/webchat/v2/threads/{THREAD_ID}/timeline**", handle_timeline)
 
     try:
-        await page.goto(f"{reborn_v2_server}/v2/chat/{THREAD_ID}?token={REBORN_V2_AUTH_TOKEN}")
+        await page.goto(f"{reborn_v2_server}/chat/{THREAD_ID}?token={REBORN_V2_AUTH_TOKEN}")
 
         bubbles = page.locator(f"{SEL_V2['msg_user']}, {SEL_V2['msg_assistant']}")
         await expect(bubbles).to_have_count(50, timeout=15000)
@@ -250,7 +250,7 @@ async def test_reborn_response_projection_survives_full_history_page(
 
     try:
         await page.goto(
-            f"{reborn_v2_server}/v2/chat/{FULL_PAGE_THREAD_ID}?token={REBORN_V2_AUTH_TOKEN}"
+            f"{reborn_v2_server}/chat/{FULL_PAGE_THREAD_ID}?token={REBORN_V2_AUTH_TOKEN}"
         )
 
         bubbles = page.locator(f"{SEL_V2['msg_user']}, {SEL_V2['msg_assistant']}")
@@ -415,7 +415,7 @@ async def test_reborn_user_send_survives_full_history_page_without_loading_older
 
     try:
         await page.goto(
-            f"{reborn_v2_server}/v2/chat/{FULL_PAGE_SEND_THREAD_ID}"
+            f"{reborn_v2_server}/chat/{FULL_PAGE_SEND_THREAD_ID}"
             f"?token={REBORN_V2_AUTH_TOKEN}"
         )
 
@@ -566,7 +566,7 @@ async def test_reborn_sse_reconnect_timer_clears_when_tab_hidden(
 
     try:
         await page.goto(
-            f"{reborn_v2_server}/v2/chat/{RECONNECT_THREAD_ID}?token={REBORN_V2_AUTH_TOKEN}"
+            f"{reborn_v2_server}/chat/{RECONNECT_THREAD_ID}?token={REBORN_V2_AUTH_TOKEN}"
         )
         await expect(page.locator(SEL_V2["chat_composer"])).to_be_visible(timeout=15000)
         await page.wait_for_function("() => window.__v2SseHasErrorHandler()")

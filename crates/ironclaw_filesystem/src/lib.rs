@@ -47,7 +47,7 @@ pub use in_memory::InMemoryBackend;
 pub use index::{Filter, IndexKey, IndexKind, IndexName, IndexSpec, IndexValue, Page};
 #[cfg(feature = "libsql")]
 pub use libsql::LibSqlRootFilesystem;
-pub use local::LocalFilesystem;
+pub use local::DiskFilesystem;
 #[cfg(feature = "postgres")]
 pub use postgres::PostgresRootFilesystem;
 pub use record::{

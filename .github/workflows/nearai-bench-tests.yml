@@ -36,6 +36,41 @@ jobs:
         with:
           persist-credentials: false
 
+      - name: Assert forwarded job timeout clears the run step's internal guard
+        run: |
+          set -euo pipefail
+          # The reusable workflow (nearai/benchmarks) bounds the actual
+          # benchmark with an in-step `timeout --kill-after=120s 290m` so an
+          # overrun exits gracefully — snapshotting a partial run, uploading it,
+          # and posting the PR comment. That only works if GitHub's job-level
+          # cap sits ABOVE 290m; if the job cap fires first, GitHub CANCELS the
+          # job and the compound-`if` upload/comment steps are skipped (this is
+          # exactly what cancelled run 29606955146 at the old 240 default). So
+          # the `timeout-minutes` the dispatcher forwards must satisfy
+          # 290 < N <= 360 (the ubuntu-16core hard cap). Lock that invariant in.
+          GUARD_MIN=290        # keep in sync with the reusable workflow's 'timeout 290m'
+          SETUP_HEADROOM=30    # job cap also covers checkout/setup/container pull BEFORE
+                               # the benchmark step starts its in-step guard clock, so the
+                               # forwarded cap needs explicit pre-run headroom on top of it
+          HARD_CAP=360         # GitHub-hosted runner max job minutes
+          MIN_REQUIRED=$((GUARD_MIN + SETUP_HEADROOM))
+          # Anchor to the 6-space with:-entry indentation so a future job-level
+          # (4-space) timeout-minutes on the parse job can't be misread here.
+          # First match then quit — no `| head`, which under pipefail can turn a
+          # multi-match sed into a SIGPIPE (141) hard-fail.
+          forwarded=$(sed -nE '/^      timeout-minutes:[[:space:]]*[0-9]+/{s@^      timeout-minutes:[[:space:]]*([0-9]+).*@\1@p; q}' \
+            .github/workflows/nearai-bench.yml)
+          echo "forwarded timeout-minutes=${forwarded:-<none>} (guard=${GUARD_MIN}, setup headroom=${SETUP_HEADROOM}, cap=${HARD_CAP})"
+          if [ -z "$forwarded" ]; then
+            echo "::error::no timeout-minutes forwarded in nearai-bench.yml — it would fall to the reusable 240 default, below the ${GUARD_MIN}m internal guard, and overruns would be hard-cancelled"
+            exit 1
+          fi
+          if [ "$forwarded" -lt "$MIN_REQUIRED" ] || [ "$forwarded" -gt "$HARD_CAP" ]; then
+            echo "::error::forwarded timeout-minutes=$forwarded must satisfy ${MIN_REQUIRED} <= N <= ${HARD_CAP}: the job cap covers setup BEFORE the ${GUARD_MIN}m in-step guard starts, so it needs ${SETUP_HEADROOM}m pre-run headroom for overruns to exit via the graceful guard, not a job cancellation"
+            exit 1
+          fi
+          echo "PASS  forwarded job timeout clears the internal run guard"
+
       - name: Run dispatcher parser fixtures
         run: |
           set -euo pipefail

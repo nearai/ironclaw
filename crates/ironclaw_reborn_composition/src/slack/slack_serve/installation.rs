@@ -1,11 +1,10 @@
 //! Slack installation resolution and post-auth installation-scoped ingress policy.
 
-use std::collections::HashMap;
 use std::future::Future;
 use std::num::NonZeroU32;
 use std::pin::Pin;
-use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
+use std::sync::Arc;
+use std::time::Duration;
 
 use axum::http::HeaderMap;
 use futures::future::join_all;
@@ -18,8 +17,8 @@ use thiserror::Error;
 
 use super::SlackEventsWebhookDispatcher;
 
-const SLACK_INSTALLATION_MAX_REQUESTS: NonZeroU32 = NonZeroU32::new(120).unwrap(); // safety: 120 requests is a non-zero literal.
-const SLACK_INSTALLATION_RATE_WINDOW: Duration = Duration::from_secs(60);
+pub(crate) const SLACK_INSTALLATION_MAX_REQUESTS: NonZeroU32 = NonZeroU32::new(120).unwrap(); // safety: 120 requests is a non-zero literal.
+pub(crate) const SLACK_INSTALLATION_RATE_WINDOW: Duration = Duration::from_secs(60);
 const MAX_SLACK_METADATA_PAYLOAD_BYTES: usize = 1024 * 1024;
 const MAX_SLACK_VERIFICATION_CANDIDATES: usize = 8;
 
@@ -756,134 +755,6 @@ impl SlackInstallationResolver for StaticSlackInstallationResolver {
                 .map(|installation| installation.dispatcher.drain_immediate_ack_tasks());
             join_all(drains).await;
         })
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct SlackInstallationRateLimitConfig {
-    pub max_requests: NonZeroU32,
-    pub window: Duration,
-}
-
-impl SlackInstallationRateLimitConfig {
-    pub fn new(max_requests: NonZeroU32, window: Duration) -> Self {
-        Self {
-            max_requests,
-            window,
-        }
-    }
-}
-
-impl Default for SlackInstallationRateLimitConfig {
-    fn default() -> Self {
-        Self {
-            max_requests: SLACK_INSTALLATION_MAX_REQUESTS,
-            window: SLACK_INSTALLATION_RATE_WINDOW,
-        }
-    }
-}
-
-#[derive(Clone)]
-pub struct SlackInstallationRateLimiter {
-    config: SlackInstallationRateLimitConfig,
-    buckets: Arc<Mutex<HashMap<SlackInstallationRateLimitKey, SlackRateLimitBucket>>>,
-}
-
-impl SlackInstallationRateLimiter {
-    pub fn new(config: SlackInstallationRateLimitConfig) -> Self {
-        Self {
-            config,
-            buckets: Arc::new(Mutex::new(HashMap::new())),
-        }
-    }
-
-    pub fn check(&self, installation: &ResolvedSlackInstallation) -> Result<(), SlackIngressError> {
-        let now = Instant::now();
-        let key = SlackInstallationRateLimitKey {
-            tenant_id: installation.tenant_id.clone(),
-            adapter_installation_id: installation.adapter_installation_id.clone(),
-        };
-        let mut buckets = match self.buckets.lock() {
-            Ok(buckets) => buckets,
-            Err(poisoned) => poisoned.into_inner(),
-        };
-        self.prune_stale_buckets(&mut buckets, now);
-        let bucket = buckets
-            .entry(key)
-            .or_insert_with(|| SlackRateLimitBucket::full(now, &self.config));
-        bucket.refill(now, &self.config);
-        if !bucket.try_consume() {
-            return Err(SlackIngressError::InstallationRateLimited {
-                tenant_id: installation.tenant_id.clone(),
-                adapter_installation_id: installation.adapter_installation_id.clone(),
-            });
-        }
-        Ok(())
-    }
-
-    fn prune_stale_buckets(
-        &self,
-        buckets: &mut HashMap<SlackInstallationRateLimitKey, SlackRateLimitBucket>,
-        now: Instant,
-    ) {
-        let ttl = self.config.window.saturating_mul(2);
-        let capacity = self.config.max_requests.get() as f64;
-        buckets.retain(|_, bucket| {
-            now.duration_since(bucket.last_refilled_at) < ttl || bucket.tokens < capacity
-        });
-    }
-}
-
-impl std::fmt::Debug for SlackInstallationRateLimiter {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter
-            .debug_struct("SlackInstallationRateLimiter")
-            .field("config", &self.config)
-            .finish_non_exhaustive()
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-struct SlackInstallationRateLimitKey {
-    tenant_id: TenantId,
-    adapter_installation_id: AdapterInstallationId,
-}
-
-#[derive(Debug, Clone)]
-struct SlackRateLimitBucket {
-    last_refilled_at: Instant,
-    tokens: f64,
-}
-
-impl SlackRateLimitBucket {
-    fn full(now: Instant, config: &SlackInstallationRateLimitConfig) -> Self {
-        Self {
-            last_refilled_at: now,
-            tokens: config.max_requests.get() as f64,
-        }
-    }
-
-    fn refill(&mut self, now: Instant, config: &SlackInstallationRateLimitConfig) {
-        let elapsed = now.duration_since(self.last_refilled_at);
-        if elapsed.is_zero() {
-            return;
-        }
-        let capacity = config.max_requests.get() as f64;
-        let refill_ratio = if config.window.is_zero() {
-            1.0
-        } else {
-            elapsed.as_secs_f64() / config.window.as_secs_f64()
-        };
-        self.tokens = capacity.min(self.tokens + refill_ratio * capacity);
-        self.last_refilled_at = now;
-    }
-
-    fn try_consume(&mut self) -> bool {
-        if self.tokens < 1.0 {
-            return false;
-        }
-        self.tokens -= 1.0;
-        true
     }
 }
 

@@ -26,7 +26,7 @@ fn manager_with_source(
             Arc::new(InMemoryProjectionStreamAdmissionPolicy::default()),
             Arc::clone(&update_source),
             Arc::new(NoExposureProjectionRedactionValidator),
-            Arc::new(InMemoryOutboundStateStore::default()),
+            Arc::new(in_memory_backed_outbound_state_store()),
         ),
         update_source,
     }
@@ -43,7 +43,7 @@ async fn assert_second_subscription_denied_by_admission(
         Arc::new(InMemoryProjectionStreamAdmissionPolicy::new(limits)),
         Arc::new(InMemoryProjectionUpdateSource::new(8)),
         Arc::new(NoExposureProjectionRedactionValidator),
-        Arc::new(InMemoryOutboundStateStore::default()),
+        Arc::new(in_memory_backed_outbound_state_store()),
     );
 
     let _first = manager

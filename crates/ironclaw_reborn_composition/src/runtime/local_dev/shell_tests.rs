@@ -16,7 +16,7 @@ use ironclaw_turns::{
 };
 
 use super::{
-    LocalDevCapabilityIo, LocalDevExtensionSurfaceSource, LocalDevLoopCapabilityPortFactory,
+    ExtensionCapabilitySurfaceSource, RefreshingLoopCapabilityPortFactory, StagedCapabilityIo,
 };
 
 async fn run_context(label: &str) -> LoopRunContext {
@@ -65,7 +65,7 @@ async fn local_dev_yolo_shell_translates_workspace_workdir_without_scoped_mounts
             crate::RebornCompositionProfile::LocalDevYolo,
             "local-dev-shell-owner",
             storage_root,
-            crate::RebornLocalRuntimeProfileOptions {
+            crate::RebornRuntimeProfileOptions {
                 confirm_host_access: true,
             },
         )
@@ -83,12 +83,12 @@ async fn local_dev_yolo_shell_translates_workspace_workdir_without_scoped_mounts
     let workspace_mounts = local_runtime.workspace_mounts.clone();
     let memory_mounts = local_runtime.memory_mounts.clone();
     let policy = Arc::new(
-        crate::local_dev_capability_policy::local_dev_capability_policy().expect("policy parses"),
+        crate::builtin_capability_policy::builtin_capability_policy().expect("policy parses"),
     );
-    let capability_io = Arc::new(LocalDevCapabilityIo::default());
+    let capability_io = Arc::new(StagedCapabilityIo::default());
     let input_resolver: Arc<dyn LoopCapabilityInputResolver> = capability_io.clone();
     let result_writer: Arc<dyn LoopCapabilityResultWriter> = capability_io.clone();
-    let factory = LocalDevLoopCapabilityPortFactory {
+    let factory = RefreshingLoopCapabilityPortFactory {
         runtime,
         fallback_user_id: UserId::new("local-dev-shell-user").expect("user id"),
         policy,
@@ -97,7 +97,7 @@ async fn local_dev_yolo_shell_translates_workspace_workdir_without_scoped_mounts
         system_extensions_lifecycle_mounts: local_runtime
             .system_extensions_lifecycle_mounts
             .clone(),
-        extension_surface_source: LocalDevExtensionSurfaceSource::default(),
+        extension_surface_source: ExtensionCapabilitySurfaceSource::default(),
         input_resolver,
         result_writer,
         milestone_sink: Arc::new(InMemoryLoopHostMilestoneSink::default()),

@@ -2150,13 +2150,77 @@ async fn append_tool_result_reference_persists_model_observation_in_envelope() {
     assert!(observation["detail"].get("preview").is_none());
 }
 
+/// Regression (#5902): an ordinary result preview containing "Secretary" must
+/// survive the owning persistence-to-model-context path. The credential-marker
+/// policy must not reduce `secretary` to a safe-summary-only replay.
+#[tokio::test]
+async fn tool_result_preview_with_secretary_survives_model_context_replay() {
+    let service = InMemorySessionThreadService::default();
+    let scope = scope("secretary-preview-replay");
+    let thread = service
+        .ensure_thread(EnsureThreadRequest {
+            scope: scope.clone(),
+            thread_id: Some(ThreadId::new("thread-secretary-preview-replay").unwrap()),
+            created_by_actor_id: "actor".into(),
+            title: None,
+            metadata_json: None,
+        })
+        .await
+        .unwrap();
+    let preview = "Report by the Secretary of the Treasury";
+    let tool_result = service
+        .append_tool_result_reference(AppendToolResultReferenceRequest {
+            scope: scope.clone(),
+            thread_id: thread.thread_id.clone(),
+            turn_run_id: "run-1".into(),
+            result_ref: "result:secretary-preview".into(),
+            safe_summary: ToolResultSafeSummary::new("read treasury report").unwrap(),
+            provider_call: None,
+            model_observation: Some(serde_json::json!({
+                "schema_version": 1,
+                "status": "success",
+                "summary": "Tool completed; preview available.",
+                "detail": {
+                    "kind": "result_reference",
+                    "result_ref": "result:secretary-preview",
+                    "byte_len": preview.len(),
+                    "preview": preview,
+                    "total_bytes": preview.len(),
+                    "next_offset": preview.len(),
+                },
+                "trust": "untrusted_tool_output"
+            })),
+        })
+        .await
+        .unwrap();
+
+    let context = service
+        .load_context_window(LoadContextWindowRequest {
+            scope,
+            thread_id: thread.thread_id,
+            max_messages: 10,
+        })
+        .await
+        .unwrap();
+    let replayed = context
+        .messages
+        .iter()
+        .find(|message| message.message_id == Some(tool_result.message_id))
+        .expect("tool result should be included in model context");
+    assert!(
+        replayed.content.contains(preview),
+        "model context must retain ordinary document text rather than fall back to the summary"
+    );
+}
+
 /// Issue #5838: `ironclaw_reborn_composition::local_dev` inlines a first-look
-/// result preview up to `TOOL_RESULT_RECORD_READ_MAX_BYTES` (2048 bytes) into
-/// the `result_reference` observation. This pins that a full-size,
-/// JSON-braces-heavy 2048-byte preview survives this crate's own
-/// `validate_model_observation` boundary (whole-envelope cap 4096 bytes) —
-/// the preview is not dropped, and it appears in the replayed model-visible
-/// content.
+/// result preview up to `TOOL_RESULT_RECORD_READ_MAX_BYTES` into the
+/// `result_reference` observation. This pins that a full-size,
+/// JSON-braces-heavy preview at that cap survives this crate's own
+/// `validate_model_observation` boundary (`MAX_MODEL_OBSERVATION_BYTES`,
+/// derived from `TOOL_RESULT_RECORD_READ_MAX_BYTES` with escaping/overhead
+/// headroom) — the preview is not dropped, and it appears in the replayed
+/// model-visible content.
 #[tokio::test]
 async fn append_tool_result_reference_retains_full_size_result_preview() {
     let service = InMemorySessionThreadService::default();
@@ -2172,24 +2236,27 @@ async fn append_tool_result_reference_retains_full_size_result_preview() {
         .await
         .unwrap();
 
-    // JSON-braces-heavy text repeated to exactly 2048 bytes, matching the
-    // production preview cap.
+    // JSON-braces-heavy text repeated to exactly the production preview cap,
+    // stressing worst-case JSON-string-escaping inflation (every `"` doubles
+    // under escaping) against the whole-envelope validator.
     let unit = r#"{"id":1,"value":"x"},"#;
-    let mut preview = unit.repeat(2048 / unit.len() + 1);
-    preview.truncate(2048);
-    assert_eq!(preview.len(), 2048);
+    let mut preview = unit.repeat(TOOL_RESULT_RECORD_READ_MAX_BYTES / unit.len() + 1);
+    preview.truncate(TOOL_RESULT_RECORD_READ_MAX_BYTES);
+    assert_eq!(preview.len(), TOOL_RESULT_RECORD_READ_MAX_BYTES);
 
     let observation = serde_json::json!({
         "schema_version": 1,
         "status": "success",
-        "summary": "Tool completed; preview truncated, use result_read with the result reference and offset 2048 for more output.",
+        "summary": format!(
+            "Tool completed; preview truncated, use result_read with the result reference and offset {TOOL_RESULT_RECORD_READ_MAX_BYTES} for more output."
+        ),
         "detail": {
             "kind": "result_reference",
             "result_ref": "result:full-size-result-preview-tool",
-            "byte_len": 9000,
+            "byte_len": TOOL_RESULT_RECORD_READ_MAX_BYTES * 2,
             "preview": preview,
-            "total_bytes": 9000,
-            "next_offset": 2048
+            "total_bytes": TOOL_RESULT_RECORD_READ_MAX_BYTES * 2,
+            "next_offset": TOOL_RESULT_RECORD_READ_MAX_BYTES
         },
         "artifacts": [{
             "artifact_ref": "result:full-size-result-preview-tool",
@@ -2217,7 +2284,7 @@ async fn append_tool_result_reference_retains_full_size_result_preview() {
     assert_eq!(
         envelope.model_observation,
         Some(observation),
-        "a full-size 2048-byte preview must not be dropped by envelope validation"
+        "a full-size preview at the production cap must not be dropped by envelope validation"
     );
     // The replayed content is the JSON-encoded observation, so the quote
     // characters in the JSON-braces-heavy preview are escaped there; compare

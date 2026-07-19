@@ -1,3 +1,4 @@
+// arch-exempt: large_file, mechanical LocalFilesystem->DiskFilesystem Bucket-2 rename (arch-simplification §4.4), no logic change, plan #6168
 //! Filesystem-backed implementations of the scoped secret and credential stores.
 //!
 //! Routes persistence through the unified
@@ -70,7 +71,7 @@ use crate::{
 // Every persisted entry must carry a `RecordKind` so that record-aware
 // backends (Postgres, libSQL) can distinguish schema families and reject
 // byte-only `CasExpectation::Absent` blind-write attempts that the
-// `LocalFilesystem` byte-only backend would otherwise let through.
+// `DiskFilesystem` byte-only backend would otherwise let through.
 
 const SECRET_RECORD_KIND: &str = "secret_record";
 const SECRET_LEASE_KIND: &str = "secret_lease";
@@ -1368,7 +1369,7 @@ fn tag_entry_with_tenant(entry: Entry, scope: &ResourceScope) -> Entry {
 }
 
 /// Declare the `tenant_id` exact-equality index on the `/secrets` mount,
-/// tolerating backends that don't materialize indexes (LocalFilesystem).
+/// tolerating backends that don't materialize indexes (DiskFilesystem).
 /// Idempotent across the mount lifetime and avoids per-owner DDL churn under
 /// concurrent secret/lease writes.
 async fn ensure_tenant_id_index_secret<F>(

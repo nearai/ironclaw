@@ -7,6 +7,13 @@ publish = false
 [package.metadata.ironclaw]
 layer = "kernel"
 
+[features]
+# In-memory-backed approval store constructors for this crate's own tests and
+# downstream integration tiers. The stores themselves are the production
+# `Filesystem*Store<InMemoryBackend>`; the helpers just wire the in-memory
+# backend seam. Ships zero bytes in production binaries.
+test-support = []
+
 [dependencies]
 async-trait = "0.1"
 chrono = { version = "0.4", default-features = false, features = ["clock", "serde"] }
@@ -22,5 +29,9 @@ tokio = { version = "1", features = ["sync"] }
 tracing = "0.1"
 
 [dev-dependencies]
+# Enables the in-memory-backed capability-lease store constructor for tests only.
+ironclaw_authorization = { path = "../ironclaw_authorization", features = ["test-support"] }
+# Enables the in-memory-backed run-state/approval store constructors for tests only.
+ironclaw_run_state = { path = "../ironclaw_run_state", features = ["test-support"] }
 tempfile = "3"
 tokio = { version = "1", features = ["macros", "rt", "rt-multi-thread"] }

@@ -948,7 +948,7 @@ async fn encode_failure_maps_to_apply_without_write() {
 /// time) whose `get` returns `Ok(None)` (absent → first write) and whose `put`
 /// gates on `entry.kind.is_some()`: a record-shaped entry is rejected with
 /// `FilesystemError::Unsupported { operation: WriteFile }`, while a byte-only
-/// entry (kind = None) would be accepted. This models `LocalFilesystem`'s check
+/// entry (kind = None) would be accepted. This models `DiskFilesystem`'s check
 /// at local.rs:189-208: `if entry.kind.is_some() || !entry.indexed.is_empty() {
 /// return Unsupported { WriteFile } }`.
 ///
@@ -993,7 +993,7 @@ impl RootFilesystem for KindGatedByteOnlyBackend {
             "first writes must use CasExpectation::Absent"
         );
         if entry.kind.is_some() {
-            // Record-shaped entries are rejected — mirrors `LocalFilesystem`'s
+            // Record-shaped entries are rejected — mirrors `DiskFilesystem`'s
             // `if entry.kind.is_some() || !entry.indexed.is_empty()` guard.
             Err(FilesystemError::Unsupported {
                 path: path.clone(),
@@ -1021,7 +1021,7 @@ async fn record_shaped_first_write_fails_closed_on_byte_only_backend() {
     // Regression for the byte-only first-write fail-closed gap.
     //
     // Store encoders now set `entry.kind = Some(RecordKind)` (record-shaped).
-    // `LocalFilesystem` rejects record-shaped entries with `Unsupported { WriteFile }`
+    // `DiskFilesystem` rejects record-shaped entries with `Unsupported { WriteFile }`
     // BEFORE the CAS check (local.rs:189-208: `if entry.kind.is_some() ||
     // !entry.indexed.is_empty() { return Unsupported { WriteFile } }`), even for
     // `CasExpectation::Absent`. This means `cas_update` with a record-shaped encode

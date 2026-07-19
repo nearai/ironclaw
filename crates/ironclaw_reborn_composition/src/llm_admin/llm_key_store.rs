@@ -45,6 +45,19 @@ impl LlmKeyStore {
         Ok(())
     }
 
+    /// [`Self::put`] taking a plain `String` rather than [`SecretMaterial`] —
+    /// for callers outside this crate (namely `ironclaw_reborn_cli::onboard`)
+    /// that must not depend on `ironclaw_secrets` directly (see
+    /// `crates/ironclaw_architecture/tests/reborn_dependency_boundaries.rs::reborn_cli_binary_crate_stays_separate_from_v1_root`,
+    /// which pins `ironclaw_reborn_cli`'s allowed workspace dependency set).
+    pub async fn put_plaintext(
+        &self,
+        provider_id: &str,
+        value: String,
+    ) -> Result<(), LlmKeyStoreError> {
+        self.put(provider_id, SecretMaterial::from(value)).await
+    }
+
     /// Whether a stored key exists for `provider_id` (without revealing it).
     pub async fn exists(&self, provider_id: &str) -> Result<bool, LlmKeyStoreError> {
         let handle = handle_for(provider_id)?;

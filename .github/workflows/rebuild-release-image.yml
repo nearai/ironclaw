@@ -33,13 +33,17 @@ jobs:
       - name: Extract version from Cargo.toml
         id: version
         run: |
-          VERSION=$(grep '^version' Cargo.toml | head -1 | sed 's/.*"\(.*\)"/\1/')
+          MANIFEST=Cargo.toml
+          if grep -q -- '--package ironclaw_reborn_cli' Dockerfile; then
+            MANIFEST=crates/ironclaw_reborn_cli/Cargo.toml
+          fi
+          VERSION=$(sed -n 's/^version = "\(.*\)"/\1/p' "$MANIFEST" | head -1)
           if [[ ! "${VERSION}" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]]; then
             echo "::error::Extracted version '${VERSION}' must match MAJOR.MINOR.PATCH[-prerelease] (Docker tags forbid '+')"
             exit 1
           fi
           echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
-          echo "Detected version: ${VERSION}"
+          echo "Detected version from ${MANIFEST}: ${VERSION}"
 
       - name: Verify requested tag matches source version
         env:

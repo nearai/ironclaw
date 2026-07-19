@@ -33,6 +33,7 @@ on:
 
 env:
   IMAGE_NAME: nearaidev/ironclaw
+  WORKER_IMAGE_NAME: nearaidev/ironclaw-worker
 
 jobs:
   build:
@@ -59,7 +60,8 @@ jobs:
       - name: Extract version from Cargo.toml
         id: version
         run: |
-          VERSION=$(grep '^version' Cargo.toml | head -1 | sed 's/.*"\(.*\)"/\1/')
+          VERSION=$(cargo metadata --no-deps --format-version 1 \
+            | jq -r '.packages[] | select(.name == "ironclaw_reborn_cli") | .version')
           if [[ ! "${VERSION}" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]]; then
             echo "::error::Extracted version '${VERSION}' must match MAJOR.MINOR.PATCH[-prerelease] (Docker tags forbid '+')"
             exit 1
@@ -89,20 +91,28 @@ jobs:
             TAGS="${IMAGE_NAME}:${VERSION}"
             TAGS="${TAGS},${IMAGE_NAME}:latest"
             TAGS="${TAGS},${IMAGE_NAME}:${SHA}"
+            WORKER_TAGS="${WORKER_IMAGE_NAME}:${VERSION}"
+            WORKER_TAGS="${WORKER_TAGS},${WORKER_IMAGE_NAME}:latest"
+            WORKER_TAGS="${WORKER_TAGS},${WORKER_IMAGE_NAME}:${SHA}"
           elif [[ "${EVENT_NAME}" == "schedule" ]]; then
             # Hourly staging: :staging + :sha-xxx
             TAGS="${IMAGE_NAME}:staging"
             TAGS="${TAGS},${IMAGE_NAME}:${SHA}"
+            WORKER_TAGS="${WORKER_IMAGE_NAME}:staging"
+            WORKER_TAGS="${WORKER_TAGS},${WORKER_IMAGE_NAME}:${SHA}"
           else
             # Manual dispatch: :sha-xxx only
             TAGS="${IMAGE_NAME}:${SHA}"
+            WORKER_TAGS="${WORKER_IMAGE_NAME}:${SHA}"
           fi
 
           # Manual override adds an extra tag (e.g. "staging")
           if [[ -n "${INPUT_TAG}" ]]; then
             TAGS="${TAGS},${IMAGE_NAME}:${INPUT_TAG}"
+            WORKER_TAGS="${WORKER_TAGS},${WORKER_IMAGE_NAME}:${INPUT_TAG}"
           fi
           echo "tags=${TAGS}" >> "$GITHUB_OUTPUT"
+          echo "worker_tags=${WORKER_TAGS}" >> "$GITHUB_OUTPUT"
 
           # Staging tags use the same Reborn runtime image; the Dockerfile no
           # longer defines a separate staging target.
@@ -121,20 +131,25 @@ jobs:
           SOURCE_SHA: ${{ steps.source_sha.outputs.sha }}
         run: |
           CURRENT_BUILT_SHA=""
+          WORKER_BUILT_SHA=""
 
           if docker pull "${IMAGE_NAME}:staging" > /dev/null 2>&1; then
             CURRENT_BUILT_SHA=$(docker inspect --format='{{index .Config.Labels "ironclaw.git.sha"}}' "${IMAGE_NAME}:staging" 2>/dev/null || echo "")
           fi
+          if docker pull "${WORKER_IMAGE_NAME}:staging" > /dev/null 2>&1; then
+            WORKER_BUILT_SHA=$(docker inspect --format='{{index .Config.Labels "ironclaw.git.sha"}}' "${WORKER_IMAGE_NAME}:staging" 2>/dev/null || echo "")
+          fi
 
           echo "Current built commit (ironclaw Reborn image): ${CURRENT_BUILT_SHA:-<none>}"
+          echo "Current built commit (Reborn process sandbox): ${WORKER_BUILT_SHA:-<none>}"
           echo "Current source commit: ${SOURCE_SHA}"
 
-          if [[ -n "${CURRENT_BUILT_SHA}" && "${CURRENT_BUILT_SHA}" == "${SOURCE_SHA}" ]]; then
+          if [[ -n "${CURRENT_BUILT_SHA}" && "${CURRENT_BUILT_SHA}" == "${SOURCE_SHA}" && -n "${WORKER_BUILT_SHA}" && "${WORKER_BUILT_SHA}" == "${SOURCE_SHA}" ]]; then
             echo "skip=true" >> "$GITHUB_OUTPUT"
-            echo "Current commit already built for the Reborn image — skipping."
+            echo "Current commit already built for both Reborn images — skipping."
           else
             echo "skip=false" >> "$GITHUB_OUTPUT"
-            echo "Image is missing or out of date — proceeding."
+            echo "At least one Reborn image is missing or out of date — proceeding."
           fi
 
       - name: Set up Docker Buildx
@@ -155,6 +170,21 @@ jobs:
           platforms: linux/amd64
           cache-from: type=gha
           cache-to: type=gha,mode=max
+
+      - name: Build and push (Reborn process sandbox)
+        if: steps.check.outputs.skip != 'true'
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
+        with:
+          context: .
+          file: Dockerfile.process-sandbox
+          push: true
+          tags: ${{ steps.tags.outputs.worker_tags }}
+          labels: |
+            ironclaw.git.sha=${{ steps.source_sha.outputs.sha }}
+            ironclaw.runtime=process-sandbox
+          platforms: linux/amd64
+          cache-from: type=gha,scope=process-sandbox
+          cache-to: type=gha,mode=max,scope=process-sandbox
 
       - name: Create releases-manager app token
         id: app-token
@@ -192,6 +222,7 @@ jobs:
         if: steps.check.outputs.skip != 'true'
         env:
           TAGS: ${{ steps.tags.outputs.tags }}
+          WORKER_TAGS: ${{ steps.tags.outputs.worker_tags }}
           VERSION: ${{ steps.version.outputs.version }}
           SOURCE_SHA: ${{ steps.source_sha.outputs.sha }}
         run: |
@@ -201,6 +232,11 @@ jobs:
             echo "**ironclaw (Reborn runtime):**"
             echo '```'
             echo "${TAGS}" | tr ',' '\n'
+            echo '```'
+            echo ""
+            echo "**ironclaw-worker (Reborn process sandbox):**"
+            echo '```'
+            echo "${WORKER_TAGS}" | tr ',' '\n'
             echo '```'
             echo ""
             echo "- version: \`${VERSION}\`"

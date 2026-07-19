@@ -1,10 +1,10 @@
-# Default production Dockerfile for the standalone Reborn CLI HTTP service.
+# Default production Dockerfile for the canonical IronClaw Reborn HTTP service.
 #
 # Build:
-#   docker build -t ironclaw-reborn:latest .
+#   docker build --target runtime -t ironclaw:latest .
 #
 # Run locally:
-#   docker run --rm --env-file .env.reborn -p 127.0.0.1:3000:3000 ironclaw-reborn:latest
+#   docker run --rm --env-file .env.reborn -p 127.0.0.1:3000:3000 ironclaw:latest
 #
 # Railway:
 #   Use the default Dockerfile and set IRONCLAW_REBORN_SERVE_HOST=0.0.0.0.
@@ -51,10 +51,14 @@ ENV CARGO_PROFILE_DIST_PANIC=abort \
     CARGO_PROFILE_DIST_CODEGEN_UNITS=1
 
 COPY --from=planner /app/recipe.json recipe.json
+COPY crates/ironclaw_webui/frontend/ crates/ironclaw_webui/frontend/
+WORKDIR /app/crates/ironclaw_webui/frontend
+RUN pnpm install --frozen-lockfile
+WORKDIR /app
 RUN cargo chef cook \
     --profile dist \
     --package ironclaw_reborn_cli \
-    --features openai-compat-beta,slack-v2-host-beta,webui-v2-beta,libsql,postgres,inmemory-turn-state \
+    --features webui-v2-beta,slack-v2-host-beta,telegram-v2-host-beta,openai-compat-beta,libsql,postgres,inmemory-turn-state \
     --recipe-path recipe.json
 RUN cargo chef cook \
     --profile dist \
@@ -77,15 +81,15 @@ RUN mkdir -p src \
     && printf 'fn main() {}\n' > src/main.rs \
     && printf '\n' > src/lib.rs
 
-WORKDIR /app/crates/ironclaw_webui_v2/frontend
+WORKDIR /app/crates/ironclaw_webui/frontend
 RUN pnpm install --frozen-lockfile
 WORKDIR /app
 
 RUN cargo build \
     --profile dist \
     --package ironclaw_reborn_cli \
-    --features openai-compat-beta,slack-v2-host-beta,webui-v2-beta,libsql,postgres,inmemory-turn-state \
-    --bin ironclaw-reborn
+    --features webui-v2-beta,slack-v2-host-beta,telegram-v2-host-beta,openai-compat-beta,libsql,postgres,inmemory-turn-state \
+    --bin ironclaw
 
 RUN cargo build \
     --profile dist \
@@ -104,7 +108,7 @@ RUN apt-get -o Acquire::Retries=3 update \
         sqlite3 \
     && rm -rf /var/lib/apt/lists/*
 
-COPY --from=builder /app/target/dist/ironclaw-reborn /usr/local/bin/ironclaw-reborn
+COPY --from=builder /app/target/dist/ironclaw /usr/local/bin/ironclaw
 COPY --from=builder /app/target/dist/ironclaw-reborn-extension-ownership-migration /usr/local/bin/ironclaw-reborn-extension-ownership-migration
 COPY docker/reborn/config.toml /opt/ironclaw/reborn/config.toml
 COPY docker/reborn/config.hosted-single-tenant.toml /opt/ironclaw/reborn/config.hosted-single-tenant.toml
@@ -114,7 +118,7 @@ COPY docker/reborn/entrypoint.sh /usr/local/bin/ironclaw-reborn-entrypoint
 
 ENV HOME=/home/ironclaw \
     IRONCLAW_REBORN_LOG=info \
-    IRONCLAW_REBORN_SERVE_HOST=127.0.0.1
+    IRONCLAW_REBORN_SERVE_HOST=0.0.0.0
 
 RUN useradd -m -d /home/ironclaw -u 1000 ironclaw \
     && mkdir -p /data/ironclaw-reborn /workspace \

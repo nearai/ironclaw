@@ -1,12 +1,23 @@
-//! Caller-level test for issue #3285's default-off wiring.
+//! Caller-level test for the Telegram v1↔v2 exclusivity guard.
+//!
+//! `REBORN_TELEGRAM_V2_ENABLED=true` now means the **Reborn Telegram channel
+//! host** (`crates/ironclaw_reborn_composition/src/telegram/`, cargo feature
+//! `telegram-v2-host-beta`) owns the deployment bot; the legacy v1 Telegram
+//! WASM channel (`channels-src/telegram`) must not activate for the same
+//! installation while it does. The env name is retained unchanged for config
+//! compatibility with the original issue #3285 tracer gate — only its
+//! referent moved (see `docs/reborn/contracts/telegram-v2.md`).
 //!
 //! This test drives [`ironclaw::config::validate_telegram_v1_v2_exclusivity`]
 //! against constructed [`ChannelsConfig`] values — the same input type the
-//! host now hands to the validator after [`ChannelsConfig::resolve`]
-//! invokes it. A unit test inside `channels.rs` covers the resolve path
-//! end-to-end; this caller-level test exercises every observable
-//! (v1-enabled, v1-telegram-listed, v2-enabled, persisted-active) tuple
-//! to pin the contract.
+//! host hands to the validator after [`ChannelsConfig::resolve`] invokes it.
+//! A unit test inside `channels.rs` covers the resolve path end-to-end; this
+//! caller-level test exercises every observable (v1-enabled,
+//! v1-telegram-listed, v2-enabled, persisted-active) tuple to pin the
+//! arbitration contract. It deliberately builds WITHOUT the
+//! `telegram-v2-host-beta` feature: the guard is the root binary's startup
+//! arbiter, not part of the Reborn host module (whose behavior is pinned by
+//! `cargo test -p ironclaw_reborn_composition --features telegram-v2-host-beta telegram`).
 
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
@@ -40,16 +51,19 @@ fn persisted(names: &[&str]) -> HashSet<String> {
 
 #[test]
 fn default_off_keeps_v1_only() {
-    // The default IronClaw config has REBORN_TELEGRAM_V2_ENABLED = false.
-    // Even if v1 telegram is configured, the validator must allow startup.
+    // The default IronClaw config has REBORN_TELEGRAM_V2_ENABLED = false, so
+    // the reborn channel host does not claim the bot. Even if v1 telegram is
+    // configured, the validator must allow startup.
     validate_telegram_v1_v2_exclusivity(&channels_cfg(true, true, false), None)
         .expect("default off is valid");
 }
 
 #[test]
-fn v2_only_is_valid_when_v1_disabled() {
+fn reborn_host_alone_is_valid_when_v1_disabled() {
+    // The reborn telegram channel host owns the bot and no v1 channel is
+    // configured — the intended deployment shape once an operator opts in.
     validate_telegram_v1_v2_exclusivity(&channels_cfg(false, false, true), None)
-        .expect("v2 alone is valid");
+        .expect("reborn host alone is valid");
 }
 
 #[test]
@@ -59,17 +73,19 @@ fn neither_is_valid() {
 }
 
 #[test]
-fn v1_plus_v2_simultaneous_is_a_hard_startup_error() {
-    // Assert the structured error, not message substrings — the wording is
-    // not part of the public contract and reformatting it should not break
-    // this regression (Copilot #1 on PR #3356).
+fn v1_plus_reborn_host_simultaneous_is_a_hard_startup_error() {
+    // The arbitration rule: while the reborn channel host owns the bot
+    // (REBORN_TELEGRAM_V2_ENABLED), v1 telegram activation must fail closed
+    // at startup. Assert the structured error, not message substrings — the
+    // wording is not part of the public contract and reformatting it should
+    // not break this regression (Copilot #1 on PR #3356).
     let err = validate_telegram_v1_v2_exclusivity(&channels_cfg(true, true, true), None)
-        .expect_err("simultaneous v1+v2 must reject");
+        .expect_err("simultaneous v1+reborn-host must reject");
     match err {
         ConfigError::InvalidValue { ref key, .. } => {
             assert_eq!(
                 key, "REBORN_TELEGRAM_V2_ENABLED",
-                "v1+v2 conflict must be reported against REBORN_TELEGRAM_V2_ENABLED",
+                "v1/reborn-host conflict must be reported against REBORN_TELEGRAM_V2_ENABLED",
             );
         }
         other => panic!("expected ConfigError::InvalidValue, got: {other:?}"),
@@ -77,23 +93,24 @@ fn v1_plus_v2_simultaneous_is_a_hard_startup_error() {
 }
 
 #[test]
-fn v1_enabled_without_telegram_listed_allows_v2() {
+fn v1_enabled_without_telegram_listed_allows_reborn_host() {
     // wasm_channels_enabled = true but the telegram channel is not in
-    // configured_wasm_channels — v1 is not handling telegram, so v2 OK.
+    // configured_wasm_channels — v1 is not handling telegram, so the reborn
+    // host may own the bot.
     validate_telegram_v1_v2_exclusivity(&channels_cfg(true, false, true), None)
-        .expect("non-telegram v1 channels do not block v2");
+        .expect("non-telegram v1 channels do not block the reborn host");
 }
 
 #[test]
-fn telegram_listed_but_wasm_channels_disabled_allows_v2() {
+fn telegram_listed_but_wasm_channels_disabled_allows_reborn_host() {
     // configured_wasm_channels lists "telegram" but wasm_channels_enabled
-    // is false — v1 is not active for startup, so v2 is fine.
+    // is false — v1 is not active for startup, so the reborn host is fine.
     validate_telegram_v1_v2_exclusivity(&channels_cfg(false, true, true), None)
-        .expect("disabled v1 list does not block v2");
+        .expect("disabled v1 list does not block the reborn host");
 }
 
 #[test]
-fn persisted_active_telegram_blocks_v2_even_when_env_list_omits_it() {
+fn persisted_active_telegram_blocks_reborn_host_even_when_env_list_omits_it() {
     // Henry's #3356 finding: a deployment whose env-var WASM_CHANNELS does
     // NOT list "telegram" but whose persisted `activated_channels` row
     // carries it. setup_wasm_channels auto-loads persisted-active channels
@@ -102,7 +119,7 @@ fn persisted_active_telegram_blocks_v2_even_when_env_list_omits_it() {
     let cfg = channels_cfg(true, false, true);
     let persisted_set = persisted(&["telegram"]);
     let err = validate_telegram_v1_v2_exclusivity(&cfg, Some(&persisted_set))
-        .expect_err("persisted v1 telegram + v2 must reject");
+        .expect_err("persisted v1 telegram + reborn host must reject");
     match err {
         ConfigError::InvalidValue { ref key, .. } => {
             assert_eq!(key, "REBORN_TELEGRAM_V2_ENABLED");
@@ -112,18 +129,18 @@ fn persisted_active_telegram_blocks_v2_even_when_env_list_omits_it() {
 }
 
 #[test]
-fn persisted_active_non_telegram_does_not_block_v2() {
-    // The persisted set carries other channels but not telegram. v2 OK.
+fn persisted_active_non_telegram_does_not_block_reborn_host() {
+    // The persisted set carries other channels but not telegram.
     let cfg = channels_cfg(true, false, true);
     let persisted_set = persisted(&["slack", "discord"]);
     validate_telegram_v1_v2_exclusivity(&cfg, Some(&persisted_set))
-        .expect("non-telegram persisted set does not block v2");
+        .expect("non-telegram persisted set does not block the reborn host");
 }
 
 #[test]
-fn persisted_active_telegram_with_wasm_channels_disabled_allows_v2() {
+fn persisted_active_telegram_with_wasm_channels_disabled_allows_reborn_host() {
     // wasm_channels_enabled = false: setup_wasm_channels never runs, so the
-    // persisted set is dormant and v2 is fine.
+    // persisted set is dormant and the reborn host may own the bot.
     let cfg = channels_cfg(false, false, true);
     let persisted_set = persisted(&["telegram"]);
     validate_telegram_v1_v2_exclusivity(&cfg, Some(&persisted_set))
@@ -132,9 +149,11 @@ fn persisted_active_telegram_with_wasm_channels_disabled_allows_v2() {
 
 #[test]
 #[cfg(feature = "libsql")]
-fn config_for_testing_has_v2_disabled() {
-    // The library's testing helper produces a Config with reborn_telegram_v2_enabled
-    // = false. Pin that so the legacy v1 path runs unchanged in every test.
+fn config_for_testing_has_reborn_telegram_disabled() {
+    // Default-off posture: the library's testing helper produces a Config
+    // with reborn_telegram_v2_enabled = false. Pin that so the legacy v1
+    // path runs unchanged in every test until an operator opts into the
+    // reborn channel host explicitly.
     let temp = tempfile::tempdir().expect("tempdir");
     let libsql = temp.path().join("test.db");
     let skills = temp.path().join("skills");
@@ -142,6 +161,6 @@ fn config_for_testing_has_v2_disabled() {
     let config = ironclaw::config::Config::for_testing(libsql, skills, installed);
     assert!(
         !config.channels.reborn_telegram_v2_enabled,
-        "test config must default Reborn Telegram v2 to off"
+        "test config must default the reborn Telegram channel host to off"
     );
 }

@@ -17,7 +17,8 @@ mod support;
 
 use ironclaw_host_api::CapabilityId;
 use ironclaw_loop_host::{HostManagedModelErrorKind, HostManagedModelResponse};
-use ironclaw_reborn_composition::{FailureLane, RetryDisposition, failure_lane, retry_disposition};
+use ironclaw_runner::failure_lane::{FailureLane, failure_lane};
+use ironclaw_runner::retry_disposition::{RetryDisposition, retry_disposition};
 use ironclaw_turns::{TurnRunState, TurnStatus, run_profile::LoopHostMilestoneKind};
 use parity_qa_support::{
     binary_e2e::RebornBinaryE2EHarness,

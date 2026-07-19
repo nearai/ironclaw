@@ -14,6 +14,13 @@ publish = false
 [package.metadata.ironclaw]
 layer = "substrates"
 
+[features]
+# Compile the panic-on-violation conformance harnesses in `test_support`. Off
+# by default so production binaries carry zero bytes of the assertion suites;
+# this crate's own tests and downstream crates enable it from
+# `[dev-dependencies]`.
+test-support = []
+
 [dependencies]
 async-trait = "0.1"
 base64 = "0.22"
@@ -31,5 +38,9 @@ urlencoding = "2"
 uuid = { version = "1", features = ["v4", "serde"] }
 
 [dev-dependencies]
+# Self-reference with `test-support` so this crate's own `tests/` integration
+# binaries (which link the lib as an external crate, without `cfg(test)`) can
+# reach `ironclaw_auth::test_support`.
+ironclaw_auth = { path = ".", features = ["test-support"] }
 serde_json = "1"
 tokio = { version = "1", features = ["macros", "rt", "sync"] }

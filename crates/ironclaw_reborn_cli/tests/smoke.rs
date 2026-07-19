@@ -10,7 +10,20 @@ use std::{
 const INVALID_PROFILE_MESSAGE: &str = "IRONCLAW_REBORN_PROFILE must be one of";
 
 fn reborn_bin() -> &'static str {
-    env!("CARGO_BIN_EXE_ironclaw-reborn")
+    env!("CARGO_BIN_EXE_ironclaw")
+}
+
+/// Shared builder for every real-binary spawn in this file: `Command::new(reborn_bin())`
+/// with `env_clear()` and `IRONCLAW_DISABLE_OS_KEYCHAIN=1` already applied — the
+/// suppression a spawned real binary needs the same way `cfg!(test)` suppresses
+/// keychain access for in-process unit tests (see
+/// `ironclaw_secrets::keychain::os_keychain_suppressed`). Callers chain further
+/// `.env(...)`/`.arg(...)` calls on top; this only centralizes the two lines every
+/// site needs regardless of what else it sets up.
+fn reborn_command() -> Command {
+    let mut command = Command::new(reborn_bin());
+    command.env_clear().env("IRONCLAW_DISABLE_OS_KEYCHAIN", "1");
+    command
 }
 
 fn assert_stdout_file_action(stdout: &str, file_name: &str, action: &str) {
@@ -34,10 +47,9 @@ fn assert_stdout_labeled_action(stdout: &str, label: &str, action: &str) {
 }
 
 fn isolated_no_llm_command(workspace: &Path, reborn_home: &Path) -> Command {
-    let mut command = Command::new(reborn_bin());
+    let mut command = reborn_command();
     command
         .current_dir(workspace)
-        .env_clear()
         .env("HOME", workspace.join("isolated-home"))
         .env("LLM_USE_CODEX_AUTH", "false")
         .env("LLM_BACKEND", "")
@@ -63,7 +75,7 @@ fn fake_reborn_bin(bin_dir: &Path) {
     use std::os::unix::fs::PermissionsExt;
 
     std::fs::create_dir_all(bin_dir).expect("fake bin dir");
-    let bin = bin_dir.join("ironclaw-reborn");
+    let bin = bin_dir.join("ironclaw");
     std::fs::write(
         &bin,
         "#!/bin/sh\nprintf 'home=%s\\n' \"$IRONCLAW_REBORN_HOME\"\nprintf 'args=%s\\n' \"$*\"\n",
@@ -110,21 +122,29 @@ fn write_sparse_reborn_config(reborn_home: &Path) {
 }
 
 #[test]
-fn dockerfile_reborn_builds_with_postgres_feature() {
+fn dockerfile_reborn_builds_with_production_features() {
     let dockerfile = std::fs::read_to_string(workspace_root().join("Dockerfile.reborn"))
         .expect("Dockerfile.reborn");
 
     assert!(
-        dockerfile
-            .matches("webui-v2-beta,slack-v2-host-beta,libsql,postgres")
-            .count()
-            >= 2,
-        "Dockerfile.reborn must compile both cargo-chef deps and final binary with libsql and postgres: {dockerfile}"
+        dockerfile.matches("openai-compat-beta").count() >= 2
+            && dockerfile.matches("webui-v2-beta").count() >= 2
+            && dockerfile.matches("slack-v2-host-beta").count() >= 2
+            && dockerfile.matches("telegram-v2-host-beta").count() >= 2
+            && dockerfile.matches("libsql").count() >= 2
+            && dockerfile.matches("postgres").count() >= 2,
+        "Dockerfile.reborn must compile both cargo-chef deps and final binary with the current shipping features: {dockerfile}"
+    );
+    assert!(
+        dockerfile.contains("--bin ironclaw")
+            && dockerfile
+                .contains("COPY --from=builder /app/target/dist/ironclaw /usr/local/bin/ironclaw"),
+        "Dockerfile.reborn must build and copy the canonical ironclaw binary: {dockerfile}"
     );
     assert!(
         dockerfile.contains("corepack enable pnpm")
             && dockerfile.matches("pnpm install --frozen-lockfile").count() >= 2
-            && dockerfile.contains("crates/ironclaw_webui_v2/frontend"),
+            && dockerfile.contains("crates/ironclaw_webui/frontend"),
         "Dockerfile.reborn must install WebUI frontend dependencies before cargo-chef and final webui-v2-beta builds: {dockerfile}"
     );
     assert!(
@@ -171,16 +191,17 @@ fn default_dockerfile_targets_reborn_runtime() {
 
     assert!(
         dockerfile.contains("--package ironclaw_reborn_cli")
-            && dockerfile.contains("--bin ironclaw-reborn")
-            && dockerfile.contains("COPY --from=builder /app/target/dist/ironclaw-reborn /usr/local/bin/ironclaw-reborn")
+            && dockerfile.contains("--bin ironclaw")
+            && dockerfile
+                .contains("COPY --from=builder /app/target/dist/ironclaw /usr/local/bin/ironclaw",)
             && dockerfile.contains("ENTRYPOINT [\"ironclaw-reborn-entrypoint\"]"),
         "default Dockerfile must build and run the Reborn CLI image: {dockerfile}"
     );
     assert!(
-        !dockerfile.contains("--bin ironclaw\n")
-            && !dockerfile.contains("ENTRYPOINT [\"ironclaw\"]")
-            && !dockerfile.contains("/usr/local/bin/ironclaw\n"),
-        "default Dockerfile must not build or run the legacy root ironclaw binary: {dockerfile}"
+        !dockerfile.contains("--bin ironclaw-legacy")
+            && !dockerfile.contains("/target/dist/ironclaw-legacy")
+            && !dockerfile.contains("ENTRYPOINT [\"ironclaw-legacy\"]"),
+        "default Dockerfile must not build or run the legacy root binary: {dockerfile}"
     );
     assert!(
         dockerfile.contains(
@@ -189,9 +210,11 @@ fn default_dockerfile_targets_reborn_runtime() {
         "default Dockerfile must pin the shipped runtime base image: {dockerfile}"
     );
     assert!(
-        !deps_stage.contains("pnpm install --frozen-lockfile")
+        deps_stage.contains("crates/ironclaw_webui/frontend")
+            && deps_stage.contains("pnpm install --frozen-lockfile")
+            && builder_stage.contains("crates/ironclaw_webui/frontend")
             && builder_stage.contains("pnpm install --frozen-lockfile"),
-        "default Dockerfile must install frontend dependencies only in the builder stage: {dockerfile}"
+        "default Dockerfile must prepare the current WebUI in both cargo-chef and final build stages: {dockerfile}"
     );
     assert!(
         dockerfile.contains("curl \\")
@@ -223,7 +246,7 @@ fn release_workflows_keep_existing_ironclaw_tags() {
 }
 
 #[test]
-fn reborn_release_artifacts_use_shipping_features() {
+fn reborn_shipping_builds_use_current_features() {
     let manifest =
         std::fs::read_to_string(workspace_root().join("crates/ironclaw_reborn_cli/Cargo.toml"))
             .expect("Reborn CLI manifest");
@@ -234,6 +257,7 @@ fn reborn_release_artifacts_use_shipping_features() {
     let expected_features = [
         "openai-compat-beta",
         "slack-v2-host-beta",
+        "telegram-v2-host-beta",
         "webui-v2-beta",
         "libsql",
         "postgres",
@@ -242,8 +266,10 @@ fn reborn_release_artifacts_use_shipping_features() {
 
     for feature in expected_features {
         assert!(
-            manifest.contains(&format!("\"{feature}\"")),
-            "Reborn cargo-dist metadata must include shipping feature {feature}: {manifest}"
+            manifest
+                .lines()
+                .any(|line| line.trim_start().starts_with(&format!("{feature} ="))),
+            "Reborn CLI manifest must define shipping feature {feature}: {manifest}"
         );
         assert!(
             dockerfile.contains(feature),
@@ -257,16 +283,37 @@ fn reborn_release_artifacts_use_shipping_features() {
 }
 
 #[test]
-fn legacy_v1_worker_and_test_dockerfiles_are_retired() {
-    let root = workspace_root();
+fn docker_workflow_publishes_reborn_process_sandbox() {
+    let workflow = std::fs::read_to_string(workspace_root().join(".github/workflows/docker.yml"))
+        .expect("docker workflow");
 
     assert!(
-        !root.join("Dockerfile.worker").exists(),
-        "Dockerfile.worker built the retired v1 ironclaw worker image and must stay removed"
+        workflow.contains("file: Dockerfile.process-sandbox")
+            && workflow.contains("ironclaw.runtime=process-sandbox")
+            && workflow.contains("WORKER_IMAGE_NAME: nearaidev/ironclaw-worker"),
+        "the existing worker tag must publish the Reborn process sandbox: {workflow}"
     );
     assert!(
-        !root.join("Dockerfile.test").exists(),
-        "Dockerfile.test built the retired v1 gateway test image and must stay removed"
+        !workflow.contains("file: Dockerfile.worker"),
+        "the Docker publish workflow must not rebuild the legacy v1 worker: {workflow}"
+    );
+}
+
+#[test]
+fn release_docker_publish_waits_for_reborn_package_identity() {
+    let root = workspace_root();
+    let release = std::fs::read_to_string(root.join(".github/workflows/release.yml"))
+        .expect("release workflow");
+    let manifest = std::fs::read_to_string(root.join("crates/ironclaw_reborn_cli/Cargo.toml"))
+        .expect("Reborn CLI manifest");
+
+    assert!(
+        manifest.contains("[package.metadata.dist]\ndist = false"),
+        "Reborn must remain outside cargo-dist until the Cargo package identity is transferred"
+    );
+    assert!(
+        release.contains("docker-image:") && release.contains("if: ${{ false }}"),
+        "tag-triggered Docker publishing must remain disabled while release tags use the legacy root version"
     );
 }
 
@@ -419,6 +466,7 @@ fn docker_reborn_entrypoint_uses_railway_volume_mount_for_home() {
         .arg(workspace_root().join("docker/reborn/entrypoint.sh"))
         .arg("--help")
         .env_clear()
+        .env("IRONCLAW_DISABLE_OS_KEYCHAIN", "1")
         .env("PATH", fake_bin_path(&bin_dir))
         .env("HOME", temp.path().join("home"))
         .env("RAILWAY_ENVIRONMENT", "production")
@@ -451,6 +499,7 @@ fn docker_reborn_entrypoint_rejects_ephemeral_railway_without_volume() {
     let output = Command::new("/bin/sh")
         .arg(workspace_root().join("docker/reborn/entrypoint.sh"))
         .env_clear()
+        .env("IRONCLAW_DISABLE_OS_KEYCHAIN", "1")
         .env("PATH", fake_bin_path(&bin_dir))
         .env("HOME", temp.path().join("home"))
         .env("IRONCLAW_REBORN_HOME", &reborn_home)
@@ -482,6 +531,7 @@ fn docker_reborn_entrypoint_rejects_sparse_config_as_local_dev_on_railway() {
     let output = Command::new("/bin/sh")
         .arg(workspace_root().join("docker/reborn/entrypoint.sh"))
         .env_clear()
+        .env("IRONCLAW_DISABLE_OS_KEYCHAIN", "1")
         .env("PATH", fake_bin_path(&bin_dir))
         .env("HOME", temp.path().join("home"))
         .env("IRONCLAW_REBORN_HOME", &reborn_home)
@@ -511,6 +561,7 @@ fn docker_reborn_entrypoint_rejects_local_dev_home_outside_railway_volume() {
         .arg(workspace_root().join("docker/reborn/entrypoint.sh"))
         .arg("--help")
         .env_clear()
+        .env("IRONCLAW_DISABLE_OS_KEYCHAIN", "1")
         .env("PATH", fake_bin_path(&bin_dir))
         .env("HOME", temp.path().join("home"))
         .env("IRONCLAW_REBORN_HOME", &reborn_home)
@@ -540,6 +591,7 @@ fn docker_reborn_entrypoint_allows_railway_production_without_volume() {
         .arg(workspace_root().join("docker/reborn/entrypoint.sh"))
         .arg("--help")
         .env_clear()
+        .env("IRONCLAW_DISABLE_OS_KEYCHAIN", "1")
         .env("PATH", fake_bin_path(&bin_dir))
         .env("HOME", temp.path().join("home"))
         .env("IRONCLAW_REBORN_HOME", &reborn_home)
@@ -574,6 +626,7 @@ fn docker_reborn_entrypoint_rejects_stale_local_dev_config_for_production() {
         .arg(workspace_root().join("docker/reborn/entrypoint.sh"))
         .arg("--help")
         .env_clear()
+        .env("IRONCLAW_DISABLE_OS_KEYCHAIN", "1")
         .env("PATH", fake_bin_path(&bin_dir))
         .env("HOME", temp.path().join("home"))
         .env("IRONCLAW_REBORN_HOME", &reborn_home)
@@ -591,6 +644,155 @@ fn docker_reborn_entrypoint_rejects_stale_local_dev_config_for_production() {
     assert!(stderr.contains("stale local-dev seed"), "stderr: {stderr}");
 }
 
+/// The exact `[llm.default]` bytes every shipped Docker profile config used
+/// to bake in before this change (`docker/reborn/config.toml`,
+/// `config.hosted-single-tenant.toml`,
+/// `config.hosted-single-tenant-volume.toml`, `config.production.toml` all
+/// carried this identical block) — a persistent Railway volume from before
+/// this change still has it verbatim in its own `config.toml`, since the
+/// entrypoint only installs a default config when `$config_path` doesn't
+/// exist yet.
+#[cfg(unix)]
+const STALE_BAKED_LLM_DEFAULT_STUB: &str = "[llm.default]\nprovider_id = \"nearai\"\nmodel = \"deepseek-ai/DeepSeek-V4-Flash\"\napi_key_env = \"NEARAI_API_KEY\"\n";
+
+/// RED (entrypoint one-time volume migration): a persistent volume's
+/// `config.toml` carrying the EXACT old baked-in `[llm.default]` stub must
+/// have that section stripped on boot, with the pre-migration file backed
+/// up alongside as `config.toml.pre-llm-migration` — proving an existing
+/// Railway deployment converges onto the "no implicit LLM slot" behavior
+/// without an operator having to intervene.
+#[cfg(unix)]
+#[test]
+fn docker_reborn_entrypoint_migrates_a_stale_baked_llm_default_stub() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let bin_dir = temp.path().join("bin");
+    fake_reborn_bin(&bin_dir);
+    let reborn_home = temp.path().join("reborn-home");
+    std::fs::create_dir_all(&reborn_home).expect("reborn home");
+    let original_config = format!(
+        "api_version = \"ironclaw.runtime/v1\"\n\n[boot]\nprofile = \"local-dev\"\n\n{STALE_BAKED_LLM_DEFAULT_STUB}\n[slack]\nenabled = false\n"
+    );
+    let config_path = reborn_home.join("config.toml");
+    std::fs::write(&config_path, &original_config).expect("write stale config");
+
+    let output = Command::new("/bin/sh")
+        .arg(workspace_root().join("docker/reborn/entrypoint.sh"))
+        .arg("--help")
+        .env_clear()
+        .env("IRONCLAW_DISABLE_OS_KEYCHAIN", "1")
+        .env("PATH", fake_bin_path(&bin_dir))
+        .env("HOME", temp.path().join("home"))
+        .env("IRONCLAW_REBORN_HOME", &reborn_home)
+        .output()
+        .expect("entrypoint should run");
+
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("Migrated a stale baked-in [llm.default] stub"),
+        "entrypoint must report the migration on stderr: {stderr}"
+    );
+
+    let migrated_config = std::fs::read_to_string(&config_path).expect("read migrated config");
+    assert!(
+        !migrated_config.contains("[llm.default]"),
+        "the stale [llm.default] section must be stripped: {migrated_config}"
+    );
+    assert!(
+        migrated_config.contains("profile = \"local-dev\"") && migrated_config.contains("[slack]"),
+        "unrelated sections must survive the migration untouched: {migrated_config}"
+    );
+
+    let backup_path = reborn_home.join("config.toml.pre-llm-migration");
+    let backup_config = std::fs::read_to_string(&backup_path).expect("read backup config");
+    assert_eq!(
+        backup_config, original_config,
+        "the backup must be a byte-for-byte copy of the pre-migration file"
+    );
+
+    // A second boot (backup already exists) must not clobber the backup
+    // with the now-already-migrated file, and must not re-run the
+    // migration (nothing left to strip).
+    let second_output = Command::new("/bin/sh")
+        .arg(workspace_root().join("docker/reborn/entrypoint.sh"))
+        .arg("--help")
+        .env_clear()
+        .env("IRONCLAW_DISABLE_OS_KEYCHAIN", "1")
+        .env("PATH", fake_bin_path(&bin_dir))
+        .env("HOME", temp.path().join("home"))
+        .env("IRONCLAW_REBORN_HOME", &reborn_home)
+        .output()
+        .expect("entrypoint should run a second time");
+    assert!(
+        second_output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&second_output.stderr)
+    );
+    let second_stderr = String::from_utf8_lossy(&second_output.stderr);
+    assert!(
+        !second_stderr.contains("Migrated a stale baked-in [llm.default] stub"),
+        "a second boot must not re-run the migration: {second_stderr}"
+    );
+    let backup_after_second_boot =
+        std::fs::read_to_string(&backup_path).expect("read backup config after second boot");
+    assert_eq!(
+        backup_after_second_boot, original_config,
+        "the backup must never be overwritten once written"
+    );
+}
+
+/// Negative case: an operator-modified `[llm.default]` section (here, a
+/// deliberately different model) must be left COMPLETELY untouched — the
+/// migration only strips an EXACT match of the old baked-in stub, never a
+/// section an operator has since edited in any way.
+#[cfg(unix)]
+#[test]
+fn docker_reborn_entrypoint_does_not_migrate_an_operator_modified_llm_default() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let bin_dir = temp.path().join("bin");
+    fake_reborn_bin(&bin_dir);
+    let reborn_home = temp.path().join("reborn-home");
+    std::fs::create_dir_all(&reborn_home).expect("reborn home");
+    let original_config = "api_version = \"ironclaw.runtime/v1\"\n\n[boot]\nprofile = \"local-dev\"\n\n[llm.default]\nprovider_id = \"nearai\"\nmodel = \"an-operator-chosen-model\"\napi_key_env = \"NEARAI_API_KEY\"\n\n[slack]\nenabled = false\n";
+    let config_path = reborn_home.join("config.toml");
+    std::fs::write(&config_path, original_config).expect("write operator-modified config");
+
+    let output = Command::new("/bin/sh")
+        .arg(workspace_root().join("docker/reborn/entrypoint.sh"))
+        .arg("--help")
+        .env_clear()
+        .env("IRONCLAW_DISABLE_OS_KEYCHAIN", "1")
+        .env("PATH", fake_bin_path(&bin_dir))
+        .env("HOME", temp.path().join("home"))
+        .env("IRONCLAW_REBORN_HOME", &reborn_home)
+        .output()
+        .expect("entrypoint should run");
+
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        !stderr.contains("Migrated a stale baked-in [llm.default] stub"),
+        "an operator-modified [llm.default] must never be migrated: {stderr}"
+    );
+    let unchanged_config = std::fs::read_to_string(&config_path).expect("read config");
+    assert_eq!(
+        unchanged_config, original_config,
+        "an operator-modified [llm.default] must be byte-for-byte unchanged"
+    );
+    assert!(
+        !reborn_home.join("config.toml.pre-llm-migration").exists(),
+        "no backup should be written when nothing was migrated"
+    );
+}
+
 #[test]
 fn help_mentions_reborn_commands() {
     let output = Command::new(reborn_bin())
@@ -605,9 +807,10 @@ fn help_mentions_reborn_commands() {
     );
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(
-        stdout.contains("Standalone IronClaw Reborn runtime"),
+        stdout.contains("IronClaw agent runtime"),
         "stdout: {stdout}"
     );
+    assert!(stdout.contains("Usage: ironclaw"), "stdout: {stdout}");
     assert!(stdout.contains("channels"), "stdout: {stdout}");
     assert!(stdout.contains("completion"), "stdout: {stdout}");
     assert!(stdout.contains("config"), "stdout: {stdout}");
@@ -620,12 +823,107 @@ fn help_mentions_reborn_commands() {
     assert!(stdout.contains("profile"), "stdout: {stdout}");
     assert!(stdout.contains("repl"), "stdout: {stdout}");
     assert!(stdout.contains("run"), "stdout: {stdout}");
-    // `serve` is gated behind the `webui-v2-beta` Cargo feature so a
-    // default binary build does not link the beta HTTP/auth gateway.
-    // The dedicated `serve_*` tests below also `#[cfg]` themselves.
+    // `serve` and `service` are gated behind the `webui-v2-beta` Cargo
+    // feature so a default binary build does not link the beta HTTP/auth
+    // gateway or the OS-service installer that runs it. The dedicated
+    // `serve_*`/`service_*` tests below also `#[cfg]` themselves.
     #[cfg(feature = "webui-v2-beta")]
     assert!(stdout.contains("serve"), "stdout: {stdout}");
+    #[cfg(feature = "webui-v2-beta")]
+    assert!(stdout.contains("service"), "stdout: {stdout}");
     assert!(stdout.contains("skills"), "stdout: {stdout}");
+    // No standalone `tui` subcommand exists (Reborn's interactive surface
+    // is `repl`); pin this so a `full`-feature build never grows one
+    // without an explicit, reviewed decision.
+    assert!(
+        !stdout.to_lowercase().contains("tui"),
+        "unexpected tui subcommand: {stdout}"
+    );
+}
+
+#[cfg(feature = "webui-v2-beta")]
+#[test]
+fn service_help_lists_all_verbs() {
+    let output = Command::new(reborn_bin())
+        .arg("service")
+        .arg("--help")
+        .output()
+        .expect("ironclaw-reborn service --help should run");
+
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    for verb in ["install", "start", "stop", "status", "restart", "uninstall"] {
+        assert!(stdout.contains(verb), "missing `{verb}` verb: {stdout}");
+    }
+}
+
+/// Onboard's OS-service finale (`OnboardCommand::finish_with_service_and_login_link`)
+/// only calls `commands::service::install_and_start` when
+/// `should_install_service` sees an interactive session — and every child
+/// this suite spawns via `Command::output()`/`.spawn()` sees piped, non-tty
+/// stdin, so `onboard` can never be driven into that install-attempt branch
+/// through a real subprocess here (`onboard_then_serve_boots_in_degraded_mode_with_an_empty_environment`
+/// below pins the non-interactive `service: skipped (non-interactive
+/// session)` line onboard prints instead). There is no clean "break $HOME"
+/// hook that forces onboard itself into the install branch in this
+/// environment, so the next best equivalent — same file convention as
+/// `onboard_dry_run_propagates_a_webui_token_io_error_without_mutating_home`,
+/// which plants a wrong-type filesystem entry at a write target to force a
+/// real I/O error — is to drive `service install` directly. That is the
+/// exact call `install_and_start` makes on the interactive path
+/// (`ServicePlatform::install` writes the same plist/unit file), so this
+/// still pins that a blocked service-definition path surfaces as a clean
+/// non-zero exit with a readable error, not a panic or a hang.
+#[cfg(all(
+    feature = "webui-v2-beta",
+    any(target_os = "macos", target_os = "linux")
+))]
+#[test]
+fn service_install_reports_error_when_service_definition_path_is_blocked() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let home = temp.path().join("home");
+    std::fs::create_dir_all(&home).expect("mkdir home");
+
+    // Plant a plain file where the service-definition directory needs to
+    // be created (`~/Library/LaunchAgents/...` on macOS,
+    // `~/.config/systemd/user/...` on Linux), so the install's
+    // `create_dir_all(parent)` hits a real "not a directory" I/O error
+    // instead of writing the plist/unit successfully.
+    #[cfg(target_os = "macos")]
+    let blocked_parent = home.join("Library");
+    #[cfg(target_os = "linux")]
+    let blocked_parent = home.join(".config");
+    std::fs::write(&blocked_parent, b"not a directory").expect("plant blocking file");
+
+    let output = Command::new(reborn_bin())
+        .args(["service", "install"])
+        .env_clear()
+        .env("HOME", &home)
+        .env("IRONCLAW_REBORN_HOME", temp.path().join("reborn-home"))
+        .output()
+        .expect("ironclaw-reborn service install should run");
+
+    assert!(
+        !output.status.success(),
+        "a blocked service-definition path must fail `service install`, not silently succeed: \
+         stdout={} stderr={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        !stderr.contains("panicked"),
+        "install failure must be a handled `anyhow` error surfaced on stderr, not a panic: \
+         stderr={stderr}"
+    );
+    assert!(
+        !stderr.trim().is_empty(),
+        "install failure must surface a readable error, not swallow it: stderr={stderr}"
+    );
 }
 
 #[test]
@@ -633,9 +931,8 @@ fn extension_search_does_not_seed_reborn_config() {
     let temp = tempfile::tempdir().expect("tempdir");
     let reborn_home = temp.path().join("reborn-home");
 
-    let output = Command::new(reborn_bin())
+    let output = reborn_command()
         .args(["extension", "search", "--json"])
-        .env_clear()
         .env("IRONCLAW_REBORN_HOME", &reborn_home)
         .env("HOME", temp.path().join("home"))
         .output()
@@ -654,10 +951,9 @@ fn extension_search_does_not_seed_reborn_config() {
 
 #[test]
 fn profile_list_shows_supported_profiles_without_reborn_home() {
-    let output = Command::new(reborn_bin())
+    let output = reborn_command()
         .arg("profile")
         .arg("list")
-        .env_clear()
         .output()
         .expect("ironclaw-reborn profile list should run");
 
@@ -688,11 +984,10 @@ fn profile_list_shows_supported_profiles_without_reborn_home() {
 
 #[test]
 fn profile_list_json_is_stable_and_does_not_resolve_reborn_home() {
-    let output = Command::new(reborn_bin())
+    let output = reborn_command()
         .arg("profile")
         .arg("list")
         .arg("--json")
-        .env_clear()
         .output()
         .expect("ironclaw-reborn profile list --json should run");
 
@@ -741,58 +1036,27 @@ fn profile_list_json_is_stable_and_does_not_resolve_reborn_home() {
 }
 
 #[test]
-fn channels_list_reports_unwired_empty_surface_without_reborn_home() {
-    assert_empty_not_wired_surface(
+fn channels_list_reports_not_implemented() {
+    assert_not_implemented(
         &["channels", "list"],
-        "IronClaw Reborn channels",
-        "channels",
-        "configured",
+        "`channels list` is not implemented yet",
     );
-}
-
-#[test]
-fn channels_list_verbose_explains_missing_reborn_registry() {
-    assert_verbose_detail(
+    assert_not_implemented(
         &["channels", "list", "--verbose"],
-        "Reborn channel registry is not wired yet",
+        "`channels list` is not implemented yet",
+    );
+    assert_not_implemented(
+        &["channels", "list", "--json"],
+        "`channels list` is not implemented yet",
     );
 }
 
 #[test]
-fn channels_list_json_verbose_includes_status_details() {
-    assert_json_verbose_detail(
-        &["channels", "list", "--json", "--verbose"],
-        "channels",
-        "configured",
-        "Reborn channel registry is not wired yet",
-    );
-}
-
-#[test]
-fn hooks_list_reports_unwired_empty_surface_without_reborn_home() {
-    assert_empty_not_wired_surface(
-        &["hooks", "list"],
-        "IronClaw Reborn hooks",
-        "hooks",
-        "configured",
-    );
-}
-
-#[test]
-fn hooks_list_verbose_explains_missing_reborn_registry() {
-    assert_verbose_detail(
+fn hooks_list_reports_not_implemented() {
+    assert_not_implemented(&["hooks", "list"], "`hooks list` is not implemented yet");
+    assert_not_implemented(
         &["hooks", "list", "--verbose"],
-        "Reborn hook registry is not wired yet",
-    );
-}
-
-#[test]
-fn hooks_list_json_verbose_includes_status_details() {
-    assert_json_verbose_detail(
-        &["hooks", "list", "--json", "--verbose"],
-        "hooks",
-        "configured",
-        "Reborn hook registry is not wired yet",
+        "`hooks list` is not implemented yet",
     );
 }
 
@@ -803,10 +1067,9 @@ fn skills_list_reports_reborn_skill_data() {
     let v1_home = temp.path().join("v1-home");
     write_reborn_skill(&reborn_home, "catalog-helper", "catalog helper");
 
-    let output = Command::new(reborn_bin())
+    let output = reborn_command()
         .arg("skills")
         .arg("list")
-        .env_clear()
         .env("IRONCLAW_REBORN_HOME", &reborn_home)
         .env("IRONCLAW_BASE_DIR", &v1_home)
         .output()
@@ -855,11 +1118,10 @@ fn skills_list_verbose_reports_reborn_skill_details() {
     let reborn_home = temp.path().join("reborn-home");
     write_verbose_reborn_skill(&reborn_home, "verbose-helper", "verbose helper");
 
-    let output = Command::new(reborn_bin())
+    let output = reborn_command()
         .arg("skills")
         .arg("list")
         .arg("--verbose")
-        .env_clear()
         .env("IRONCLAW_REBORN_HOME", &reborn_home)
         .output()
         .expect("ironclaw-reborn skills list --verbose should run");
@@ -892,12 +1154,11 @@ fn skills_list_json_reports_reborn_skill_data() {
     let reborn_home = temp.path().join("reborn-home");
     write_reborn_skill(&reborn_home, "json-helper", "json helper");
 
-    let output = Command::new(reborn_bin())
+    let output = reborn_command()
         .arg("skills")
         .arg("list")
         .arg("--json")
         .arg("--verbose")
-        .env_clear()
         .env("IRONCLAW_REBORN_HOME", &reborn_home)
         .output()
         .expect("ironclaw-reborn skills list --json should run");
@@ -937,10 +1198,9 @@ fn assert_skill_source(json: &serde_json::Value, name: &str, source: &str) {
 fn skills_list_rejects_unsupported_profiles() {
     for profile in ["production", "migration-dry-run"] {
         let temp = tempfile::tempdir().expect("tempdir");
-        let output = Command::new(reborn_bin())
+        let output = reborn_command()
             .arg("skills")
             .arg("list")
-            .env_clear()
             .env("IRONCLAW_REBORN_HOME", temp.path().join("reborn-home"))
             .env("IRONCLAW_REBORN_PROFILE", profile)
             .output()
@@ -952,7 +1212,7 @@ fn skills_list_rejects_unsupported_profiles() {
         );
         let stderr = String::from_utf8_lossy(&output.stderr);
         assert!(
-            stderr.contains("ironclaw-reborn skills currently supports profile=local-dev"),
+            stderr.contains("ironclaw skills currently supports profile=local-dev"),
             "stderr: {stderr}"
         );
         assert!(
@@ -963,33 +1223,18 @@ fn skills_list_rejects_unsupported_profiles() {
 }
 
 #[test]
-fn logs_reports_unwired_surface_without_reborn_home() {
-    assert_empty_not_wired_surface(&["logs"], "IronClaw Reborn logs", "logs", "entries");
-}
-
-#[test]
-fn logs_verbose_explains_missing_reborn_log_source() {
-    assert_verbose_detail(&["logs", "--verbose"], "Reborn log source is not wired yet");
-}
-
-#[test]
-fn logs_json_verbose_includes_status_details() {
-    assert_json_verbose_detail(
-        &["logs", "--json", "--verbose"],
-        "logs",
-        "entries",
-        "Reborn log source is not wired yet",
-    );
+fn logs_reports_not_implemented() {
+    assert_not_implemented(&["logs"], "`logs` is not implemented yet");
+    assert_not_implemented(&["logs", "--verbose"], "`logs` is not implemented yet");
 }
 
 #[cfg(feature = "root-llm-provider")]
 #[test]
 fn models_list_reports_reborn_provider_catalog_without_v1_state() {
     let temp = tempfile::tempdir().expect("tempdir");
-    let output = Command::new(reborn_bin())
+    let output = reborn_command()
         .arg("models")
         .arg("list")
-        .env_clear()
         .env("HOME", temp.path())
         .output()
         .expect("ironclaw-reborn models list should run");
@@ -1017,11 +1262,10 @@ fn models_list_reports_reborn_provider_catalog_without_v1_state() {
 #[test]
 fn models_status_json_reports_routes_not_configured_without_v1_state() {
     let temp = tempfile::tempdir().expect("tempdir");
-    let output = Command::new(reborn_bin())
+    let output = reborn_command()
         .arg("models")
         .arg("status")
         .arg("--json")
-        .env_clear()
         .env("HOME", temp.path())
         .output()
         .expect("ironclaw-reborn models status --json should run");
@@ -1055,11 +1299,10 @@ api_key_env = "OPENAI_API_KEY"
     )
     .expect("write config");
 
-    let output = Command::new(reborn_bin())
+    let output = reborn_command()
         .arg("models")
         .arg("status")
         .arg("--json")
-        .env_clear()
         .env("IRONCLAW_REBORN_HOME", &reborn_home)
         .output()
         .expect("ironclaw-reborn models status --json should run");
@@ -1084,13 +1327,12 @@ api_key_env = "OPENAI_API_KEY"
 fn models_set_provider_writes_reborn_config_without_v1_state() {
     let temp = tempfile::tempdir().expect("tempdir");
     let reborn_home = temp.path().join("reborn-home");
-    let output = Command::new(reborn_bin())
+    let output = reborn_command()
         .arg("models")
         .arg("set-provider")
         .arg("openai")
         .arg("--model")
         .arg("gpt-5-mini")
-        .env_clear()
         .env("IRONCLAW_REBORN_HOME", &reborn_home)
         .output()
         .expect("ironclaw-reborn models set-provider should run");
@@ -1144,11 +1386,10 @@ api_key_env = "OPENAI_API_KEY"
     )
     .expect("write config");
 
-    let output = Command::new(reborn_bin())
+    let output = reborn_command()
         .arg("models")
         .arg("set")
         .arg("gpt-5.3-codex")
-        .env_clear()
         .env("IRONCLAW_REBORN_HOME", &reborn_home)
         .output()
         .expect("ironclaw-reborn models set should run");
@@ -1174,11 +1415,10 @@ api_key_env = "OPENAI_API_KEY"
 fn models_set_without_provider_fails_without_panicking() {
     let temp = tempfile::tempdir().expect("tempdir");
     let reborn_home = temp.path().join("reborn-home");
-    let output = Command::new(reborn_bin())
+    let output = reborn_command()
         .arg("models")
         .arg("set")
         .arg("gpt-5.3-codex")
-        .env_clear()
         .env("IRONCLAW_REBORN_HOME", &reborn_home)
         .output()
         .expect("ironclaw-reborn models set should run");
@@ -1195,10 +1435,9 @@ fn models_set_without_provider_fails_without_panicking() {
 #[cfg(not(feature = "root-llm-provider"))]
 #[test]
 fn models_list_no_default_features_does_not_resolve_reborn_home() {
-    let output = Command::new(reborn_bin())
+    let output = reborn_command()
         .arg("models")
         .arg("list")
-        .env_clear()
         .output()
         .expect("ironclaw-reborn models list should run");
 
@@ -1218,11 +1457,10 @@ fn models_list_no_default_features_does_not_resolve_reborn_home() {
 #[cfg(not(feature = "root-llm-provider"))]
 #[test]
 fn models_status_no_default_features_does_not_resolve_reborn_home() {
-    let output = Command::new(reborn_bin())
+    let output = reborn_command()
         .arg("models")
         .arg("status")
         .arg("--json")
-        .env_clear()
         .output()
         .expect("ironclaw-reborn models status should run");
 
@@ -1244,11 +1482,10 @@ fn models_write_commands_report_root_llm_provider_required_without_default_featu
         &["models", "set", "gpt-5.3-codex"][..],
         &["models", "set-provider", "openai"][..],
     ] {
-        let output = Command::new(reborn_bin())
+        let output = reborn_command()
             .args(args)
-            .env_clear()
             .output()
-            .expect("ironclaw-reborn models write command should run");
+            .expect("ironclaw-reborn models command should run");
 
         assert!(!output.status.success(), "command should fail: {args:?}");
         let stderr = String::from_utf8_lossy(&output.stderr);
@@ -1264,56 +1501,20 @@ fn models_write_commands_report_root_llm_provider_required_without_default_featu
     }
 }
 
-fn assert_empty_not_wired_surface(
-    args: &[&str],
-    title: &str,
-    collection_key: &str,
-    count_key: &str,
-) {
-    let output = Command::new(reborn_bin())
+fn assert_not_implemented(args: &[&str], expected_message: &str) {
+    let output = reborn_command()
         .args(args)
-        .env_clear()
         .output()
         .expect("ironclaw-reborn command should run");
 
     assert!(
-        output.status.success(),
-        "stderr: {}",
-        String::from_utf8_lossy(&output.stderr)
+        !output.status.success(),
+        "`{}` should fail while disabled",
+        args.join(" ")
     );
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(stdout.contains(title), "stdout: {stdout}");
-    assert!(
-        stdout.contains(&format!("{count_key}: 0")),
-        "stdout: {stdout}"
-    );
-    assert!(stdout.contains("status: not-wired"), "stdout: {stdout}");
-    assert!(stdout.contains("v1_state: not-used"), "stdout: {stdout}");
-
-    let mut json_args = args.to_vec();
-    json_args.push("--json");
-    let output = Command::new(reborn_bin())
-        .args(json_args)
-        .env_clear()
-        .output()
-        .expect("ironclaw-reborn JSON command should run");
-    assert!(
-        output.status.success(),
-        "stderr: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let json: serde_json::Value = serde_json::from_str(stdout.trim()).expect("valid JSON");
-    assert_eq!(json[count_key], 0);
-    assert_eq!(
-        json[collection_key]
-            .as_array()
-            .expect("collection array")
-            .len(),
-        0
-    );
-    assert_eq!(json["status"], "not-wired");
-    assert_eq!(json["v1_state"], "not-used");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains(expected_message), "stderr: {stderr}");
+    assert!(!stderr.contains("panicked"), "stderr: {stderr}");
 }
 
 fn write_reborn_skill(reborn_home: &std::path::Path, name: &str, description: &str) {
@@ -1351,56 +1552,6 @@ Use {name}.
 
 fn reborn_cli_skill_root(reborn_home: &std::path::Path) -> std::path::PathBuf {
     reborn_home.join("local-dev/tenants/default/users/reborn-cli/skills")
-}
-
-fn assert_verbose_detail(args: &[&str], expected_detail: &str) {
-    let output = Command::new(reborn_bin())
-        .args(args)
-        .env_clear()
-        .output()
-        .expect("ironclaw-reborn verbose command should run");
-
-    assert!(
-        output.status.success(),
-        "stderr: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(stdout.contains(expected_detail), "stdout: {stdout}");
-}
-
-fn assert_json_verbose_detail(
-    args: &[&str],
-    collection_key: &str,
-    count_key: &str,
-    expected_detail: &str,
-) {
-    let output = Command::new(reborn_bin())
-        .args(args)
-        .env_clear()
-        .output()
-        .expect("ironclaw-reborn JSON verbose command should run");
-
-    assert!(
-        output.status.success(),
-        "stderr: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let json: serde_json::Value = serde_json::from_str(stdout.trim()).expect("valid JSON");
-    assert_eq!(json[count_key], 0);
-    assert_eq!(
-        json[collection_key]
-            .as_array()
-            .expect("collection array")
-            .len(),
-        0
-    );
-    let details = json["details"].as_array().expect("details array");
-    assert!(
-        details.iter().any(|detail| detail == expected_detail),
-        "json: {json}"
-    );
 }
 
 #[test]
@@ -1483,11 +1634,10 @@ fn config_path_reports_default_reborn_home_without_creating_directories() {
 
 #[test]
 fn completion_generates_zsh_script_without_reborn_home() {
-    let output = Command::new(reborn_bin())
+    let output = reborn_command()
         .arg("completion")
         .arg("--shell")
         .arg("zsh")
-        .env_clear()
         .output()
         .expect("ironclaw-reborn completion should run");
 
@@ -1497,11 +1647,8 @@ fn completion_generates_zsh_script_without_reborn_home() {
         String::from_utf8_lossy(&output.stderr)
     );
     let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(
-        stdout.contains("#compdef ironclaw-reborn"),
-        "stdout: {stdout}"
-    );
-    assert!(stdout.contains("_ironclaw-reborn"), "stdout: {stdout}");
+    assert!(stdout.contains("#compdef ironclaw"), "stdout: {stdout}");
+    assert!(stdout.contains("_ironclaw"), "stdout: {stdout}");
     assert!(
         stdout.contains("$+functions[compdef]"),
         "zsh completion should guard compdef: {stdout}"
@@ -1510,11 +1657,10 @@ fn completion_generates_zsh_script_without_reborn_home() {
 
 #[test]
 fn completion_generates_bash_script_without_reborn_home() {
-    let output = Command::new(reborn_bin())
+    let output = reborn_command()
         .arg("completion")
         .arg("--shell")
         .arg("bash")
-        .env_clear()
         .output()
         .expect("ironclaw-reborn completion should run");
 
@@ -1524,17 +1670,16 @@ fn completion_generates_bash_script_without_reborn_home() {
         String::from_utf8_lossy(&output.stderr)
     );
     let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(stdout.contains("_ironclaw-reborn()"), "stdout: {stdout}");
+    assert!(stdout.contains("_ironclaw()"), "stdout: {stdout}");
     assert!(stdout.contains("COMPREPLY"), "stdout: {stdout}");
 }
 
 #[cfg(feature = "webui-v2-beta")]
 #[test]
 fn serve_help_mentions_host_and_port() {
-    let output = Command::new(reborn_bin())
+    let output = reborn_command()
         .arg("serve")
         .arg("--help")
-        .env_clear()
         .output()
         .expect("ironclaw-reborn serve --help should run");
 
@@ -1585,30 +1730,165 @@ fn serve_fails_closed_when_env_bearer_token_var_is_unset() {
 
 #[cfg(feature = "webui-v2-beta")]
 #[test]
-fn serve_fails_closed_when_env_user_id_var_is_unset() {
+fn serve_boots_without_user_id_env_var() {
+    // A unit env with only HOME/PROFILE and no IRONCLAW_REBORN_WEBUI_USER_ID
+    // must fall back to [identity].default_owner (or "reborn-cli" when
+    // absent) instead of hard-failing before binding a listener.
     let temp = tempfile::tempdir().expect("tempdir");
-    let output = Command::new(reborn_bin())
-        .arg("serve")
-        .arg("--host")
-        .arg("127.0.0.1")
-        .arg("--port")
-        .arg("0")
-        .env("IRONCLAW_REBORN_HOME", temp.path().join("reborn-home"))
+    let reborn_home = temp.path().join("reborn-home");
+    let home = temp.path().join("home");
+    std::fs::create_dir_all(&home).expect("home dir");
+    let _serve_port_guard = SERVE_PORT_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let port = unused_local_port();
+
+    let mut child = reborn_command()
+        .args(["serve", "--host", "127.0.0.1", "--port"])
+        .arg(port.to_string())
+        .env("HOME", &home)
+        .env("IRONCLAW_REBORN_HOME", &reborn_home)
         .env_remove("IRONCLAW_REBORN_PROFILE")
-        .env("IRONCLAW_REBORN_WEBUI_TOKEN", "any-non-empty-token")
+        // Token must be >=32 bytes so it clears its own entropy floor before
+        // the user-id fallback under test is reached.
+        .env(
+            "IRONCLAW_REBORN_WEBUI_TOKEN",
+            "reborn-smoke-test-token-0123456789abcdef",
+        )
         .env_remove("IRONCLAW_REBORN_WEBUI_USER_ID")
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("ironclaw-reborn serve should start");
+    wait_for_serve_banner(&mut child);
+
+    let _ = child.kill();
+    let _ = child.wait();
+}
+
+/// Proves `serve` boots when launched with cwd=<reborn_home>/workspace, the
+/// cwd the installed launchd/systemd service now uses.
+/// - Regression: unit-content tests only checked `WorkingDirectory` was
+///   present, never that serve actually boots from it.
+/// - Companion negative test below shows the prior cwd (reborn_home itself)
+///   still fails, proving this test discriminates.
+#[cfg(feature = "webui-v2-beta")]
+#[test]
+fn serve_boots_from_the_workspace_subdir_the_installed_service_now_uses_as_cwd() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let reborn_home = temp.path().join("reborn-home");
+    let home = temp.path().join("home");
+    let working_directory = reborn_home.join("workspace");
+    std::fs::create_dir_all(&home).expect("home dir");
+    std::fs::create_dir_all(&working_directory).expect("working directory");
+    let _serve_port_guard = SERVE_PORT_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let port = unused_local_port();
+
+    let mut child = reborn_command()
+        .args(["serve", "--host", "127.0.0.1", "--port"])
+        .arg(port.to_string())
+        .current_dir(&working_directory)
+        .env("HOME", &home)
+        .env("IRONCLAW_REBORN_HOME", &reborn_home)
+        .env_remove("IRONCLAW_REBORN_PROFILE")
+        .env(
+            "IRONCLAW_REBORN_WEBUI_TOKEN",
+            "reborn-smoke-test-cwd-workspace-token-0123456789abcdef",
+        )
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("ironclaw-reborn serve should start");
+    wait_for_serve_banner(&mut child);
+
+    let _ = child.kill();
+    let _ = child.wait();
+}
+
+/// Companion regression pin: cwd=reborn_home itself (the crate's first,
+/// insufficient fix attempt) still fails, because reborn_home is an
+/// ancestor of the default local-dev skill/extension roots and trips
+/// composition's `paths_overlap` check. Guards against reverting the
+/// installer back to cwd=reborn_home.
+#[cfg(feature = "webui-v2-beta")]
+#[test]
+fn serve_crash_loops_with_skill_root_overlap_when_cwd_is_reborn_home_itself() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let reborn_home = temp.path().join("reborn-home");
+    let home = temp.path().join("home");
+    std::fs::create_dir_all(&home).expect("home dir");
+    std::fs::create_dir_all(&reborn_home).expect("reborn home");
+    let _serve_port_guard = SERVE_PORT_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let port = unused_local_port();
+
+    let output = reborn_command()
+        .args(["serve", "--host", "127.0.0.1", "--port"])
+        .arg(port.to_string())
+        .current_dir(&reborn_home)
+        .env("HOME", &home)
+        .env("IRONCLAW_REBORN_HOME", &reborn_home)
+        .env_remove("IRONCLAW_REBORN_PROFILE")
+        .env(
+            "IRONCLAW_REBORN_WEBUI_TOKEN",
+            "reborn-smoke-test-cwd-reborn-home-token-0123456789abcdef",
+        )
         .output()
-        .expect("ironclaw-reborn serve should run");
+        .expect("ironclaw-reborn serve should run and exit");
 
     assert!(
         !output.status.success(),
-        "serve must fail closed when the user-id env var is unset"
+        "serve launched with cwd=reborn_home must fail closed on the skill-root overlap, \
+         not silently boot: stdout={} stderr={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
     );
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
-        stderr.contains("IRONCLAW_REBORN_WEBUI_USER_ID must be set"),
-        "stderr should name the missing user-id env var: {stderr}"
+        stderr.contains("local-dev workspace root must not overlap default skill root"),
+        "expected the exact composition overlap error this fix eliminates for \
+         <reborn_home>/workspace: stderr={stderr}"
     );
+}
+
+#[cfg(feature = "webui-v2-beta")]
+#[test]
+fn a_real_env_var_beats_the_config_default_end_to_end() {
+    // Railway/service-install spine: operator sets IRONCLAW_REBORN_WEBUI_USER_ID
+    // explicitly with no [identity].default_owner configured; must still boot
+    // after user-id resolution moved into resolve_webui_user_id_raw.
+    // [identity] left unset deliberately — a configured default that diverges
+    // from env is a separate, already-covered misconfiguration case.
+    let temp = tempfile::tempdir().expect("tempdir");
+    let reborn_home = temp.path().join("reborn-home");
+    let home = temp.path().join("home");
+    std::fs::create_dir_all(&home).expect("home dir");
+    let _serve_port_guard = SERVE_PORT_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let port = unused_local_port();
+
+    let mut child = reborn_command()
+        .args(["serve", "--host", "127.0.0.1", "--port"])
+        .arg(port.to_string())
+        .env("HOME", &home)
+        .env("IRONCLAW_REBORN_HOME", &reborn_home)
+        .env(
+            "IRONCLAW_REBORN_WEBUI_TOKEN",
+            "reborn-smoke-test-token-0123456789abcdef",
+        )
+        .env("IRONCLAW_REBORN_WEBUI_USER_ID", "env-user")
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("ironclaw-reborn serve should start");
+    wait_for_serve_banner(&mut child);
+
+    let _ = child.kill();
+    let _ = child.wait();
 }
 
 #[cfg(feature = "webui-v2-beta")]
@@ -1618,12 +1898,14 @@ fn serve_with_env_auth_seeds_reborn_config_before_binding() {
     let reborn_home = temp.path().join("reborn-home");
     let home = temp.path().join("home");
     std::fs::create_dir_all(&home).expect("home dir");
+    let _serve_port_guard = SERVE_PORT_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
     let port = unused_local_port();
 
-    let mut child = Command::new(reborn_bin())
+    let mut child = reborn_command()
         .args(["serve", "--host", "127.0.0.1", "--port"])
         .arg(port.to_string())
-        .env_clear()
         .env("HOME", &home)
         .env("IRONCLAW_REBORN_HOME", &reborn_home)
         .env(
@@ -1663,7 +1945,7 @@ fn serve_with_env_auth_seeds_reborn_config_before_binding() {
             Ok(Ok(line)) => {
                 stderr_text.push_str(&line);
                 stderr_text.push('\n');
-                if stderr_text.contains("ironclaw-reborn: WebChat v2 listener") {
+                if stderr_text.contains("ironclaw: WebChat v2 listener") {
                     break;
                 }
             }
@@ -1738,6 +2020,83 @@ fn serve_with_env_auth_seeds_reborn_config_before_binding() {
     );
 }
 
+#[cfg(feature = "webui-v2-beta")]
+#[test]
+fn serve_resolves_bearer_token_from_reborn_home_webui_token_file() {
+    // Regression for the service-install crash loop: a launchd/systemd unit
+    // whose environment carries only HOME/PROFILE (see serve_invocation.rs)
+    // never sets IRONCLAW_REBORN_WEBUI_TOKEN, so `serve` must also accept
+    // the `onboard`-provisioned `<reborn_home>/webui-token` fallback file.
+    // Mirrors `serve_with_env_auth_seeds_reborn_config_before_binding` but
+    // omits the env var and seeds the file instead.
+    let temp = tempfile::tempdir().expect("tempdir");
+    let reborn_home = temp.path().join("reborn-home");
+    let home = temp.path().join("home");
+    std::fs::create_dir_all(&home).expect("home dir");
+    std::fs::create_dir_all(&reborn_home).expect("reborn home dir");
+    std::fs::write(
+        reborn_home.join("webui-token"),
+        // >=32 bytes: same entropy floor as the env-var path.
+        "reborn-smoke-test-token-0123456789abcdef",
+    )
+    .expect("seed webui-token file");
+    let _serve_port_guard = SERVE_PORT_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let port = unused_local_port();
+
+    let mut child = reborn_command()
+        .args(["serve", "--host", "127.0.0.1", "--port"])
+        .arg(port.to_string())
+        .env("HOME", &home)
+        .env("IRONCLAW_REBORN_HOME", &reborn_home)
+        .env_remove("IRONCLAW_REBORN_WEBUI_TOKEN")
+        .env("IRONCLAW_REBORN_WEBUI_USER_ID", "test-user")
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("ironclaw-reborn serve should start");
+    let stderr = child.stderr.take().expect("stderr should be piped");
+    let (stderr_tx, stderr_rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        for line in std::io::BufReader::new(stderr).lines() {
+            if stderr_tx.send(line).is_err() {
+                break;
+            }
+        }
+    });
+
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
+    let mut stderr_text = String::new();
+    loop {
+        if let Some(status) = child.try_wait().expect("serve child status") {
+            panic!("serve exited before binding with {status}; stderr: {stderr_text}");
+        }
+        if std::time::Instant::now() >= deadline {
+            let _ = child.kill();
+            let _ = child.wait();
+            panic!("serve did not reach listener banner; stderr: {stderr_text}");
+        }
+        match stderr_rx.recv_timeout(std::time::Duration::from_millis(100)) {
+            Ok(Ok(line)) => {
+                stderr_text.push_str(&line);
+                stderr_text.push('\n');
+                if stderr_text.contains("ironclaw: WebChat v2 listener") {
+                    break;
+                }
+            }
+            Ok(Err(error)) => panic!("failed to read serve stderr: {error}"),
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                panic!("serve stderr closed before banner; stderr: {stderr_text}");
+            }
+        }
+    }
+
+    let _ = child.kill();
+    let _ = child.wait();
+}
+
 #[cfg(all(feature = "webui-v2-beta", feature = "slack-v2-host-beta"))]
 #[test]
 fn serve_env_slack_enabled_mounts_slack_events_route() {
@@ -1745,12 +2104,14 @@ fn serve_env_slack_enabled_mounts_slack_events_route() {
     let reborn_home = temp.path().join("reborn-home");
     let home = temp.path().join("home");
     std::fs::create_dir_all(&home).expect("home dir");
+    let _serve_port_guard = SERVE_PORT_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
     let port = unused_local_port();
 
-    let mut child = Command::new(reborn_bin())
+    let mut child = reborn_command()
         .args(["serve", "--host", "127.0.0.1", "--port"])
         .arg(port.to_string())
-        .env_clear()
         .env("HOME", &home)
         .env("IRONCLAW_REBORN_HOME", &reborn_home)
         .env(
@@ -1791,7 +2152,7 @@ fn serve_env_slack_enabled_mounts_slack_events_route() {
             Ok(Ok(line)) => {
                 stderr_text.push_str(&line);
                 stderr_text.push('\n');
-                if stderr_text.contains("ironclaw-reborn: WebChat v2 listener") {
+                if stderr_text.contains("ironclaw: WebChat v2 listener") {
                     break;
                 }
             }
@@ -1819,6 +2180,36 @@ fn serve_env_slack_enabled_mounts_slack_events_route() {
         "env-enabled Slack route should be mounted, got status line: {status_line}"
     );
 }
+
+/// `true` when `config_text` carries a live (uncommented) `provider_id =`
+/// line — used to assert a de-seeded `config.toml` has no `[llm.default]`
+/// slot. A plain `.contains("provider_id =")` also matches the stub's own
+/// commented-out `# provider_id = "nearai"` example line, so this only
+/// counts a line whose first non-whitespace character isn't `#`.
+#[cfg(feature = "webui-v2-beta")]
+fn config_text_has_live_provider_id(config_text: &str) -> bool {
+    config_text.lines().any(|line| {
+        let trimmed = line.trim_start();
+        trimmed.starts_with("provider_id =") || trimmed.starts_with("provider_id=")
+    })
+}
+
+/// Guards the bind-close-then-spawn window every `unused_local_port()`
+/// caller below goes through: the helper binds a listener to port 0 to get
+/// an OS-assigned free port, reads it back, and closes it — then hands
+/// that port number to a spawned `serve` child to bind itself. Between the
+/// helper's close and the child's own bind, `cargo test`'s parallel test
+/// threads can race for the same freed port (one test's helper grabs the
+/// port another test's child is about to bind), causing real cross-talk —
+/// proven in CI logs, one test observing another test's HTTP response.
+/// Every test that spawns a `serve`-mode child on a port from
+/// `unused_local_port()` takes this lock before allocating its port and
+/// holds it for the rest of the test (dropped at function end), so no two
+/// of these tests' allocate-then-spawn windows can overlap. This is a
+/// small serialization fix, not a port-reservation framework — do not
+/// extend it into a pool or retry-with-backoff mechanism.
+#[cfg(feature = "webui-v2-beta")]
+static SERVE_PORT_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 #[cfg(feature = "webui-v2-beta")]
 fn unused_local_port() -> u16 {
@@ -1949,7 +2340,7 @@ max_body_bytes_fallback = 0
             "stderr should contain {expected:?}; got: {stderr}"
         );
         assert!(
-            !stderr.contains("ironclaw-reborn: WebChat v2 listener"),
+            !stderr.contains("ironclaw: WebChat v2 listener"),
             "serve must not bind after invalid WebUI security config; got: {stderr}"
         );
     }
@@ -1988,7 +2379,7 @@ fn serve_fails_closed_when_sso_provider_has_no_allowed_domain_allowlist() {
         "stderr should explain the missing SSO admission allowlist; got: {stderr}"
     );
     assert!(
-        !stderr.contains("ironclaw-reborn: WebChat v2 listener"),
+        !stderr.contains("ironclaw: WebChat v2 listener"),
         "serve must not bind after SSO admission misconfiguration; got: {stderr}"
     );
 }
@@ -2022,9 +2413,454 @@ fn serve_fails_closed_when_session_token_lacks_entropy_without_sso() {
         "stderr should explain the session-signing entropy floor; got: {stderr}"
     );
     assert!(
-        !stderr.contains("ironclaw-reborn: WebChat v2 listener"),
+        !stderr.contains("ironclaw: WebChat v2 listener"),
         "serve must not bind with a low-entropy session-signing secret; got: {stderr}"
     );
+}
+
+/// Send `request` and read the full response: status line, headers, and
+/// (best-effort, non-chunked) body. Used by the CLI-token-login tests below,
+/// which need `Location`/JSON body content that [`http_status_line`] doesn't
+/// capture.
+#[cfg(feature = "webui-v2-beta")]
+fn http_response(port: u16, request: &str, label: &str) -> Result<HttpResponse, String> {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    let stream = loop {
+        match std::net::TcpStream::connect(("127.0.0.1", port)) {
+            Ok(stream) => break stream,
+            Err(_) if std::time::Instant::now() < deadline => {
+                std::thread::sleep(std::time::Duration::from_millis(50));
+            }
+            Err(error) => return Err(format!("connect to serve listener failed: {error}")),
+        }
+    };
+    stream
+        .set_read_timeout(Some(std::time::Duration::from_secs(5)))
+        .map_err(|error| format!("set {label} read timeout failed: {error}"))?;
+    let mut stream = stream;
+    stream
+        .write_all(request.as_bytes())
+        .map_err(|error| format!("write {label} failed: {error}"))?;
+    let mut reader = std::io::BufReader::new(stream);
+    let mut status_line = String::new();
+    reader
+        .read_line(&mut status_line)
+        .map_err(|error| format!("read {label} status line failed: {error}"))?;
+    let mut headers = Vec::new();
+    loop {
+        let mut line = String::new();
+        reader
+            .read_line(&mut line)
+            .map_err(|error| format!("read {label} header line failed: {error}"))?;
+        let trimmed = line.trim_end_matches(['\r', '\n']);
+        if trimmed.is_empty() {
+            break;
+        }
+        if let Some((name, value)) = trimmed.split_once(':') {
+            headers.push((name.trim().to_ascii_lowercase(), value.trim().to_string()));
+        }
+    }
+    let mut body = String::new();
+    std::io::Read::read_to_string(&mut reader, &mut body)
+        .map_err(|error| format!("read {label} body failed: {error}"))?;
+    Ok(HttpResponse {
+        status_line: status_line.trim_end_matches(['\r', '\n']).to_string(),
+        headers,
+        body,
+    })
+}
+
+#[cfg(feature = "webui-v2-beta")]
+#[derive(Debug)]
+struct HttpResponse {
+    status_line: String,
+    headers: Vec<(String, String)>,
+    body: String,
+}
+
+#[cfg(feature = "webui-v2-beta")]
+impl HttpResponse {
+    fn header(&self, name: &str) -> Option<&str> {
+        self.headers
+            .iter()
+            .find(|(header_name, _)| header_name == name)
+            .map(|(_, value)| value.as_str())
+    }
+}
+
+/// With no SSO provider and a file-sourced webui token, `serve` must mount
+/// the CLI-printed `/login?token=` route plus `POST /auth/session/exchange`.
+/// A valid token redirects into the ticket hand-off, which then resolves to
+/// a real session bearer; an invalid token gets a flat 401.
+#[cfg(feature = "webui-v2-beta")]
+#[test]
+fn serve_mounts_cli_login_route_without_sso() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let reborn_home = temp.path().join("reborn-home");
+    let home = temp.path().join("home");
+    std::fs::create_dir_all(&home).expect("home dir");
+    let _serve_port_guard = SERVE_PORT_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let port = unused_local_port();
+    let webui_token = "reborn-smoke-test-token-0123456789abcdef";
+    // File-sourced token, not `IRONCLAW_REBORN_WEBUI_TOKEN` — this is the
+    // one source `cli_login_mount` still mounts the route for.
+    std::fs::create_dir_all(&reborn_home).expect("reborn home dir");
+    std::fs::write(reborn_home.join("webui-token"), webui_token).expect("seed webui-token file");
+
+    let mut child = reborn_command()
+        .args(["serve", "--host", "127.0.0.1", "--port"])
+        .arg(port.to_string())
+        .env("HOME", &home)
+        .env("IRONCLAW_REBORN_HOME", &reborn_home)
+        .env("IRONCLAW_REBORN_WEBUI_USER_ID", "test-user")
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("ironclaw-reborn serve should start");
+    wait_for_serve_banner(&mut child);
+
+    let wrong_token_status = http_response(
+        port,
+        "GET /login?token=wrong HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n",
+        "login wrong-token probe",
+    );
+    let good_login = http_response(
+        port,
+        &format!(
+            "GET /login?token={webui_token} HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n"
+        ),
+        "login probe",
+    );
+
+    let (wrong_token_status, good_login) = match (wrong_token_status, good_login) {
+        (Ok(a), Ok(b)) => (a, b),
+        (result_a, result_b) => {
+            let _ = child.kill();
+            let _ = child.wait();
+            panic!("login probe failed: {result_a:?} / {result_b:?}");
+        }
+    };
+
+    assert!(
+        wrong_token_status.status_line.contains(" 401 "),
+        "wrong token must 401, got: {}",
+        wrong_token_status.status_line
+    );
+    assert!(
+        good_login.status_line.contains(" 302 ") || good_login.status_line.contains(" 303 "),
+        "valid token must redirect into the ticket hand-off, got: {}",
+        good_login.status_line
+    );
+    let location = good_login
+        .header("location")
+        .expect("redirect must carry a Location header");
+    let ticket = location
+        .split("login_ticket=")
+        .nth(1)
+        .expect("redirect Location must carry a login_ticket query param");
+
+    let exchange_body = format!(r#"{{"ticket":"{ticket}"}}"#);
+    let exchange_request = format!(
+        "POST /auth/session/exchange HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{exchange_body}",
+        exchange_body.len()
+    );
+    let exchange = http_response(port, &exchange_request, "session exchange probe");
+
+    let _ = child.kill();
+    let _ = child.wait();
+
+    let exchange = exchange.expect("exchange probe must complete");
+    assert!(
+        exchange.status_line.contains(" 200 "),
+        "ticket must exchange for a real bearer exactly once, got: {}; body: {}",
+        exchange.status_line,
+        exchange.body
+    );
+    assert!(
+        exchange.body.contains("\"token\""),
+        "exchange response must carry the minted bearer: {}",
+        exchange.body
+    );
+}
+
+/// Security: an env-sourced webui bearer token must not get a mounted
+/// CLI-token `/login?token=` route — that route puts the bearer in a public
+/// URL query string, where an edge/proxy would capture it in access logs.
+///
+/// Under root-path serving (#6152) an unmounted `/login` isn't a hard 404:
+/// the root SPA wildcard (`static_router`) only fails closed for namespaces
+/// composition actually reserved (derived from mounted route descriptors —
+/// see `webui_serve.rs::static_router_config_from_descriptors`), so a route
+/// nobody mounted here falls through to the ordinary SPA shell like any
+/// other client-side path. The security property under test is narrower and
+/// still holds: the response must be the generic SPA shell, not this
+/// route's own handler (a 302/303 redirect carrying a freshly minted
+/// session bearer's ticket).
+#[cfg(feature = "webui-v2-beta")]
+#[test]
+fn serve_does_not_mount_cli_login_route_when_token_is_env_sourced() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let reborn_home = temp.path().join("reborn-home");
+    let home = temp.path().join("home");
+    std::fs::create_dir_all(&home).expect("home dir");
+    let _serve_port_guard = SERVE_PORT_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let port = unused_local_port();
+
+    let mut child = reborn_command()
+        .args(["serve", "--host", "127.0.0.1", "--port"])
+        .arg(port.to_string())
+        .env("HOME", &home)
+        .env("IRONCLAW_REBORN_HOME", &reborn_home)
+        .env(
+            "IRONCLAW_REBORN_WEBUI_TOKEN",
+            "reborn-smoke-test-env-token-0123456789abcdef",
+        )
+        .env("IRONCLAW_REBORN_WEBUI_USER_ID", "test-user")
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("ironclaw-reborn serve should start");
+    wait_for_serve_banner(&mut child);
+
+    let login_response = http_response(
+        port,
+        "GET /login?token=irrelevant HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n",
+        "cli login probe with env-sourced token",
+    );
+
+    let _ = child.kill();
+    let _ = child.wait();
+
+    let login_response = login_response.expect("login probe must complete");
+    assert!(
+        login_response.status_line.contains(" 200 "),
+        "an unmounted /login must fall through to the ordinary SPA shell \
+         (200), got: {}",
+        login_response.status_line
+    );
+    assert!(
+        login_response.header("location").is_none(),
+        "the CLI-only /login route's redirect-with-session-ticket handler \
+         must not run for an env-sourced token, got Location: {:?}",
+        login_response.header("location")
+    );
+    assert_eq!(
+        login_response.header("content-type"),
+        Some("text/html; charset=utf-8"),
+        "must be the generic SPA shell response, not a route-specific body"
+    );
+}
+
+/// With an SSO provider configured, `serve` must not also mount the
+/// CLI-token-login route's own `/auth/session/exchange` — that would
+/// register the path twice. Proven by the CLI-only `/login?token=` route's
+/// handler not running (see `serve_does_not_mount_cli_login_route_when_token_is_env_sourced`
+/// for why an unmounted `/login` is a 200 SPA-shell fallthrough rather than a
+/// 404 under root-path serving, not this route's own redirect) while
+/// `/auth/providers` stays up.
+#[cfg(feature = "webui-v2-beta")]
+#[test]
+fn serve_with_sso_does_not_double_mount_session_exchange() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let reborn_home = temp.path().join("reborn-home");
+    let home = temp.path().join("home");
+    std::fs::create_dir_all(&home).expect("home dir");
+    let _serve_port_guard = SERVE_PORT_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let port = unused_local_port();
+
+    let mut child = reborn_command()
+        .args(["serve", "--host", "127.0.0.1", "--port"])
+        .arg(port.to_string())
+        .env("HOME", &home)
+        .env("IRONCLAW_REBORN_HOME", &reborn_home)
+        .env(
+            "IRONCLAW_REBORN_WEBUI_TOKEN",
+            "reborn-smoke-test-token-0123456789abcdef",
+        )
+        .env("IRONCLAW_REBORN_WEBUI_USER_ID", "test-user")
+        .env("IRONCLAW_REBORN_WEBUI_GOOGLE_CLIENT_ID", "client-id")
+        .env(
+            "IRONCLAW_REBORN_WEBUI_GOOGLE_CLIENT_SECRET",
+            "client-secret",
+        )
+        .env("IRONCLAW_REBORN_WEBUI_ALLOWED_EMAIL_DOMAINS", "example.com")
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("ironclaw-reborn serve should start");
+    wait_for_serve_banner(&mut child);
+
+    let login_response = http_response(
+        port,
+        "GET /login?token=irrelevant HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n",
+        "cli login probe under SSO",
+    );
+    let providers_status = http_status_line(
+        port,
+        concat!(
+            "GET /auth/providers HTTP/1.1\r\n",
+            "Host: 127.0.0.1\r\n",
+            "Connection: close\r\n",
+            "\r\n",
+        ),
+        "providers route probe",
+    );
+
+    let _ = child.kill();
+    let _ = child.wait();
+
+    let login_response = login_response.expect("cli login probe must complete");
+    let providers_status = providers_status.expect("providers probe must complete");
+    assert!(
+        login_response.status_line.contains(" 200 ") && login_response.header("location").is_none(),
+        "the CLI-only /login route's own redirect-with-session-ticket \
+         handler must not run when SSO is configured (its own \
+         /auth/session/exchange would collide with the SSO surface's) — \
+         expected the ordinary SPA-shell fallthrough, got: {} location={:?}",
+        login_response.status_line,
+        login_response.header("location")
+    );
+    assert!(
+        providers_status.contains(" 200 "),
+        "the SSO surface's own routes (including its /auth/session/exchange) \
+         must still be the sole mount, got: {providers_status}"
+    );
+}
+
+/// Strip ANSI SGR escape sequences (`\x1b[...m`) from `text`. `init_tracing`'s
+/// stderr `fmt::layer()` colorizes its output unconditionally — it does not
+/// gate on the writer being a real terminal — so a piped `Child::stderr`
+/// still carries color codes interleaved between field names and values
+/// (e.g. `provider_id` and `=openai` are split by a reset/dim escape pair).
+/// Assertions on structured-log field text must strip these first or a
+/// plain `contains("provider_id=openai")` silently never matches.
+#[cfg(feature = "webui-v2-beta")]
+fn strip_ansi(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut chars = text.chars();
+    while let Some(ch) = chars.next() {
+        if ch == '\u{1b}' && chars.clone().next() == Some('[') {
+            chars.next(); // consume '['
+            for next in chars.by_ref() {
+                if next == 'm' {
+                    break;
+                }
+            }
+        } else {
+            out.push(ch);
+        }
+    }
+    out
+}
+
+/// Blocks until `child`'s stderr carries the ready banner. Returns
+/// everything captured up to and including the banner line, so callers can
+/// also assert on pre-banner diagnostics without their own drain thread.
+#[cfg(feature = "webui-v2-beta")]
+fn wait_for_serve_banner(child: &mut std::process::Child) -> String {
+    let stderr = child.stderr.take().expect("stderr should be piped");
+    let (stderr_tx, stderr_rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        for line in std::io::BufReader::new(stderr).lines() {
+            if stderr_tx.send(line).is_err() {
+                break;
+            }
+        }
+    });
+
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
+    let mut stderr_text = String::new();
+    loop {
+        if let Some(status) = child.try_wait().expect("serve child status") {
+            panic!("serve exited before binding with {status}; stderr: {stderr_text}");
+        }
+        if std::time::Instant::now() >= deadline {
+            let _ = child.kill();
+            let _ = child.wait();
+            panic!("serve did not reach listener banner; stderr: {stderr_text}");
+        }
+        match stderr_rx.recv_timeout(std::time::Duration::from_millis(100)) {
+            Ok(Ok(line)) => {
+                stderr_text.push_str(&line);
+                stderr_text.push('\n');
+                if stderr_text.contains("ironclaw: WebChat v2 listener") {
+                    break;
+                }
+            }
+            Ok(Err(error)) => panic!("failed to read serve stderr: {error}"),
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                panic!("serve stderr closed before banner; stderr: {stderr_text}");
+            }
+        }
+    }
+    stderr_text
+}
+
+/// Like [`wait_for_serve_banner`], but keeps capturing `child`'s stderr for
+/// the rest of the test (returned as a live-updating buffer) instead of
+/// dropping the reader once the banner line is seen. The real-turn tests
+/// that use this drive several more HTTP round trips after the banner and
+/// occasionally hit a `Connection refused` under CPU-contended parallel test
+/// runs — the banner line is flushed just before the listener starts
+/// accepting, not after, so a loaded box can have a brief gap. Keeping the
+/// capture alive (rather than a one-shot channel that's dropped as soon as
+/// the caller returns) means a failure can print what `serve` actually did
+/// in that window instead of only "connection refused".
+#[cfg(feature = "webui-v2-beta")]
+fn wait_for_serve_banner_with_capture(
+    child: &mut std::process::Child,
+    label: &str,
+) -> std::sync::Arc<std::sync::Mutex<String>> {
+    let stderr_all = std::sync::Arc::new(std::sync::Mutex::new(String::new()));
+    let stderr = child.stderr.take().expect("stderr should be piped");
+    let collector = std::sync::Arc::clone(&stderr_all);
+    std::thread::spawn(move || {
+        for line in std::io::BufReader::new(stderr)
+            .lines()
+            .map_while(Result::ok)
+        {
+            let mut guard = collector
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            guard.push_str(&line);
+            guard.push('\n');
+        }
+    });
+
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
+    loop {
+        if stderr_all
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .contains("ironclaw: WebChat v2 listener")
+        {
+            return stderr_all;
+        }
+        if let Some(status) = child.try_wait().expect("serve child status") {
+            panic!(
+                "{label}: serve exited before binding with {status}; stderr: {}",
+                stderr_all
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+            );
+        }
+        if std::time::Instant::now() >= deadline {
+            panic!(
+                "{label}: serve did not reach listener banner; stderr: {}",
+                stderr_all
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+            );
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
 }
 
 // Note: port `0` is intentionally accepted now — it lets the kernel
@@ -2034,7 +2870,7 @@ fn serve_fails_closed_when_session_token_lacks_entropy_without_sso() {
 //
 // Banner formatting (IPv6 / IPv4 / config readout) is exercised by
 // the caller-level test in
-// `ironclaw_reborn_webui_ingress::tests` rather than from the binary
+// `ironclaw_webui::tests` rather than from the binary
 // smoke test, because the banner is printed AFTER env-token resolution
 // + runtime build, both of which require a configured environment.
 
@@ -2140,10 +2976,9 @@ fn doctor_uses_reborn_home_override_without_touching_v1_state() {
 
 #[test]
 fn repl_help_mentions_composed_runtime() {
-    let output = Command::new(reborn_bin())
+    let output = reborn_command()
         .arg("repl")
         .arg("--help")
-        .env_clear()
         .output()
         .expect("ironclaw-reborn repl --help should run");
 
@@ -2166,9 +3001,8 @@ fn repl_exit_command_seeds_reborn_config() {
     let home_dir = temp.path().join("home");
     let v1_base_dir = temp.path().join("v1-state");
 
-    let mut child = Command::new(reborn_bin())
+    let mut child = reborn_command()
         .arg("repl")
-        .env_clear()
         .env("IRONCLAW_REBORN_HOME", &reborn_home)
         .env("HOME", &home_dir)
         .env("IRONCLAW_BASE_DIR", &v1_base_dir)
@@ -2196,7 +3030,7 @@ fn repl_exit_command_seeds_reborn_config() {
     assert!(stdout.is_empty(), "stdout should stay reply-only: {stdout}");
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
-        stderr.contains("ironclaw-reborn: runtime started"),
+        stderr.contains("ironclaw: runtime started"),
         "stderr: {stderr}"
     );
     assert!(
@@ -2247,9 +3081,8 @@ fn repl_resolves_codex_auth_env_without_openai_api_key() {
     )
     .expect("write codex auth fixture");
 
-    let mut child = Command::new(reborn_bin())
+    let mut child = reborn_command()
         .arg("repl")
-        .env_clear()
         .env("IRONCLAW_REBORN_HOME", &reborn_home)
         .env("HOME", &home_dir)
         .env("LLM_BACKEND", "openai_codex")
@@ -2278,7 +3111,7 @@ fn repl_resolves_codex_auth_env_without_openai_api_key() {
     );
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
-        stderr.contains("ironclaw-reborn: runtime started"),
+        stderr.contains("ironclaw: runtime started"),
         "stderr: {stderr}"
     );
     assert!(
@@ -2303,9 +3136,8 @@ fn repl_resolves_codex_api_key_auth_env_without_openai_api_key() {
     )
     .expect("write codex auth fixture");
 
-    let mut child = Command::new(reborn_bin())
+    let mut child = reborn_command()
         .arg("repl")
-        .env_clear()
         .env("IRONCLAW_REBORN_HOME", &reborn_home)
         .env("HOME", &home_dir)
         .env("LLM_BACKEND", "openai_codex")
@@ -2334,7 +3166,7 @@ fn repl_resolves_codex_api_key_auth_env_without_openai_api_key() {
     );
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
-        stderr.contains("ironclaw-reborn: runtime started"),
+        stderr.contains("ironclaw: runtime started"),
         "stderr: {stderr}"
     );
     assert!(
@@ -2353,9 +3185,8 @@ fn run_rejects_codex_backend_when_auth_file_is_missing() {
     let reborn_home = temp.path().join("reborn-home");
     let missing_codex_auth_path = temp.path().join("missing-codex-auth.json");
 
-    let output = Command::new(reborn_bin())
+    let output = reborn_command()
         .args(["run", "-m", "ping"])
-        .env_clear()
         .env("IRONCLAW_REBORN_HOME", &reborn_home)
         .env("LLM_BACKEND", "openai_codex")
         .env("CODEX_AUTH_PATH", &missing_codex_auth_path)
@@ -2382,9 +3213,8 @@ fn run_rejects_codex_backend_when_auth_file_is_missing() {
 fn repl_help_command_prints_repl_commands_and_exits_on_exit() {
     let temp = tempfile::tempdir().expect("tempdir");
 
-    let mut child = Command::new(reborn_bin())
+    let mut child = reborn_command()
         .arg("repl")
-        .env_clear()
         .env("IRONCLAW_REBORN_HOME", temp.path().join("reborn-home"))
         .env("HOME", temp.path().join("home"))
         .stdin(Stdio::piped())
@@ -2417,9 +3247,8 @@ fn repl_help_command_prints_repl_commands_and_exits_on_exit() {
 fn run_help_command_prints_repl_commands_and_exits_on_quit() {
     let temp = tempfile::tempdir().expect("tempdir");
 
-    let mut child = Command::new(reborn_bin())
+    let mut child = reborn_command()
         .arg("run")
-        .env_clear()
         .env("IRONCLAW_REBORN_HOME", temp.path().join("reborn-home"))
         .env("HOME", temp.path().join("home"))
         .stdin(Stdio::piped())
@@ -2455,9 +3284,8 @@ fn repl_piped_message_exits_nonzero_when_runtime_does_not_produce_reply() {
     let temp = tempfile::tempdir().expect("tempdir");
     let reborn_home = temp.path().join("reborn-home");
 
-    let mut child = Command::new(reborn_bin())
+    let mut child = reborn_command()
         .arg("repl")
-        .env_clear()
         .env("IRONCLAW_REBORN_HOME", &reborn_home)
         .env("HOME", temp.path().join("home"))
         .stdin(Stdio::piped())
@@ -2512,11 +3340,10 @@ fn run_message_exits_nonzero_when_runtime_does_not_produce_reply() {
     let temp = tempfile::tempdir().expect("tempdir");
     let reborn_home = temp.path().join("reborn-home");
 
-    let output = Command::new(reborn_bin())
+    let output = reborn_command()
         .arg("run")
         .arg("--message")
         .arg("hello")
-        .env_clear()
         .env("IRONCLAW_REBORN_HOME", &reborn_home)
         .env("HOME", temp.path().join("home"))
         .output()
@@ -2559,9 +3386,8 @@ fn run_message_exits_nonzero_when_runtime_does_not_produce_reply() {
 fn run_piped_stdin_exits_nonzero_when_runtime_does_not_produce_reply() {
     let temp = tempfile::tempdir().expect("tempdir");
 
-    let mut child = Command::new(reborn_bin())
+    let mut child = reborn_command()
         .arg("run")
-        .env_clear()
         .env("IRONCLAW_REBORN_HOME", temp.path().join("reborn-home"))
         .env("HOME", temp.path().join("home"))
         .stdin(Stdio::piped())
@@ -2796,9 +3622,8 @@ fn doctor_rejects_reborn_home_equal_to_relative_explicit_v1_base_dir() {
 
 #[test]
 fn doctor_rejects_empty_reborn_home_override() {
-    let output = Command::new(reborn_bin())
+    let output = reborn_command()
         .arg("doctor")
-        .env_clear()
         .env("IRONCLAW_REBORN_HOME", "")
         .output()
         .expect("ironclaw-reborn doctor should run");
@@ -2813,9 +3638,8 @@ fn doctor_rejects_empty_reborn_home_override() {
 
 #[test]
 fn doctor_rejects_relative_reborn_home_override() {
-    let output = Command::new(reborn_bin())
+    let output = reborn_command()
         .arg("doctor")
-        .env_clear()
         .env("IRONCLAW_REBORN_HOME", "relative/reborn")
         .output()
         .expect("ironclaw-reborn doctor should run");
@@ -2833,9 +3657,8 @@ fn doctor_rejects_relative_reborn_home_override() {
 
 #[test]
 fn doctor_rejects_missing_home_for_default_reborn_home() {
-    let output = Command::new(reborn_bin())
+    let output = reborn_command()
         .arg("doctor")
-        .env_clear()
         .output()
         .expect("ironclaw-reborn doctor should run");
 
@@ -2901,7 +3724,7 @@ fn config_init_writes_both_files() {
         .env_remove("USERPROFILE")
         .env("IRONCLAW_REBORN_HOME", &reborn_home)
         .output()
-        .expect("ironclaw-reborn config init should run");
+        .expect("ironclaw config init should run");
     assert!(
         output.status.success(),
         "stderr: {}",
@@ -3018,9 +3841,8 @@ fn onboard_bootstraps_reborn_home_without_touching_v1_state() {
     let reborn_home = temp.path().join("reborn-home");
     let v1_home = temp.path().join("v1-home");
 
-    let output = Command::new(reborn_bin())
+    let output = reborn_command()
         .arg("onboard")
-        .env_clear()
         .env("IRONCLAW_REBORN_HOME", &reborn_home)
         .env("IRONCLAW_BASE_DIR", &v1_home)
         .output()
@@ -3045,6 +3867,29 @@ fn onboard_bootstraps_reborn_home_without_touching_v1_state() {
         reborn_home.join("providers.json").exists(),
         "providers.json missing"
     );
+    // onboard also provisions a `<reborn_home>/webui-token` fallback file
+    // so a service-installed `serve` (unit env carries only HOME/PROFILE)
+    // still has a bearer token to read when IRONCLAW_REBORN_WEBUI_TOKEN is
+    // unset.
+    let webui_token_path = reborn_home.join("webui-token");
+    assert!(webui_token_path.exists(), "webui-token file missing");
+    let webui_token_text = std::fs::read_to_string(&webui_token_path).expect("read webui-token");
+    assert!(
+        webui_token_text.trim().len() >= 32,
+        "generated webui-token must meet the >=32 byte entropy floor: {} bytes",
+        webui_token_text.trim().len()
+    );
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = std::fs::metadata(&webui_token_path)
+            .expect("stat webui-token")
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(mode, 0o600, "webui-token file must be 0600, got {mode:o}");
+    }
+    assert_stdout_labeled_action(&stdout, "webui_token:", "wrote");
     let marker_path = reborn_home.join(".onboard-completed.json");
     assert!(marker_path.exists(), "onboarding marker missing");
     let marker_text = std::fs::read_to_string(marker_path).expect("read marker");
@@ -3058,13 +3903,1516 @@ fn onboard_bootstraps_reborn_home_without_touching_v1_state() {
 }
 
 #[test]
+fn onboard_is_idempotent_for_the_webui_token_file() {
+    // Token doubles as serve's session-signing key: re-running onboard must
+    // preserve it, or every signed session and copied env var breaks.
+    let temp = tempfile::tempdir().expect("tempdir");
+    let reborn_home = temp.path().join("reborn-home");
+
+    let first = reborn_command()
+        .arg("onboard")
+        .env("IRONCLAW_REBORN_HOME", &reborn_home)
+        .output()
+        .expect("first onboard should run");
+    assert!(
+        first.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&first.stderr)
+    );
+    let token_path = reborn_home.join("webui-token");
+    let first_token = std::fs::read_to_string(&token_path).expect("read webui-token");
+
+    let second = reborn_command()
+        .arg("onboard")
+        .env("IRONCLAW_REBORN_HOME", &reborn_home)
+        .output()
+        .expect("second onboard should run");
+    assert!(
+        second.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&second.stderr)
+    );
+    let second_stdout = String::from_utf8_lossy(&second.stdout);
+    assert_stdout_labeled_action(&second_stdout, "webui_token:", "preserved");
+    let second_token = std::fs::read_to_string(&token_path).expect("read webui-token again");
+    assert_eq!(
+        first_token, second_token,
+        "re-running onboard must not regenerate a valid webui-token"
+    );
+}
+
+/// Full daemon-case journey: headless `onboard` (no LLM env set) followed by
+/// `serve` booted with no LLM overrides.
+/// - `onboard` must write NO `[llm.default]` slot when nothing is detected
+///   in env — config.toml is the single source of truth, seeded only by an
+///   explicit act. Non-LLM artifacts (webui-token, marker, login link) are
+///   still provisioned, and output teaches how to configure an LLM later.
+/// - `serve`'s runtime-LLM resolution is unchanged: no slot + no env means
+///   `resolve_reborn_runtime_llm` returns `Ok(None)`, which is not a
+///   boot-time hard failure — serve still binds but logs a `warn!`.
+/// - Pins both halves: onboard's teaching output/de-seeded config, and
+///   serve's warn-but-still-bind behavior.
+#[cfg(feature = "webui-v2-beta")]
+#[test]
+fn onboard_then_serve_boots_in_degraded_mode_with_an_empty_environment() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let reborn_home = temp.path().join("reborn-home");
+    let home = temp.path().join("home");
+    std::fs::create_dir_all(&home).expect("home dir");
+
+    let onboard_output = reborn_command()
+        .arg("onboard")
+        .env("HOME", &home)
+        .env("IRONCLAW_REBORN_HOME", &reborn_home)
+        .output()
+        .expect("ironclaw-reborn onboard should run");
+    assert!(
+        onboard_output.status.success(),
+        "onboard must succeed non-interactively even with no LLM configured; stderr: {}",
+        String::from_utf8_lossy(&onboard_output.stderr)
+    );
+    let onboard_stdout = String::from_utf8_lossy(&onboard_output.stdout);
+    assert!(
+        onboard_stdout.contains("service: skipped (non-interactive session)"),
+        "headless onboarding must not attempt a launchd/systemd install; stdout: {onboard_stdout}"
+    );
+    assert!(
+        onboard_stdout.contains("login_link: http://127.0.0.1:3000/login?token="),
+        "onboard must print the CLI-token login link even with no LLM configured; stdout: \
+         {onboard_stdout}"
+    );
+    assert!(
+        onboard_stdout.contains("llm_credentials: skipped (non-interactive session)"),
+        "onboard must report the LLM step as skipped (nothing detected in env); stdout: \
+         {onboard_stdout}"
+    );
+    assert!(
+        onboard_stdout.contains("configure LLM credentials:")
+            && onboard_stdout.contains("export a provider's LLM environment variables"),
+        "onboard must teach how to configure an LLM afterward; stdout: {onboard_stdout}"
+    );
+    assert!(
+        reborn_home.join("webui-token").exists(),
+        "onboard must provision the webui-token file `serve` reads as a fallback"
+    );
+
+    let config_path = reborn_home.join("config.toml");
+    let config_text = std::fs::read_to_string(&config_path).expect("read seeded config.toml");
+    assert!(
+        !config_text_has_live_provider_id(&config_text),
+        "config.toml is the single source of truth for `[llm.default]`, written only by an \
+         explicit act — a fresh headless onboard with nothing detected in env must not seed a \
+         provider: {config_text}"
+    );
+
+    let _serve_port_guard = SERVE_PORT_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let port = unused_local_port();
+    let mut child = reborn_command()
+        .args(["serve", "--host", "127.0.0.1", "--port"])
+        .arg(port.to_string())
+        .env("HOME", &home)
+        .env("IRONCLAW_REBORN_HOME", &reborn_home)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("ironclaw-reborn serve should start");
+    let pre_banner_stderr = wait_for_serve_banner(&mut child);
+    assert!(
+        pre_banner_stderr.contains("no LLM selection configured"),
+        "serve must still bind (runtime resolution is unchanged: Ok(None) is not a boot-time \
+         hard failure) but warn that runs will fail until an LLM is wired; stderr: \
+         {pre_banner_stderr}"
+    );
+
+    let _ = child.kill();
+    let _ = child.wait();
+}
+
+/// Sibling of `onboard_then_serve_boots_in_degraded_mode_with_an_empty_environment`:
+/// a headless onboard run WITH a complete `openai`-shape env (API key +
+/// model) must silently WRITE `[llm.default]` to config.toml, and a later
+/// `serve` booted without `OPENAI_MODEL` set must resolve the PERSISTED
+/// model, not a fresh env re-resolution (which would fall back to openai's
+/// catalog default).
+/// - Uses `openai`, not `nearai`: `nearai`'s `api_key_required = false`
+///   would hit the pre-existing idempotency short-circuit that resolves
+///   straight from env and never reaches the new write path. `openai`'s
+///   idempotency check only looks at the persisted secret store, so a
+///   fresh store here reaches the write and proves it happens.
+#[cfg(feature = "webui-v2-beta")]
+#[test]
+fn onboard_with_complete_llm_env_then_serve_boots_from_the_env_seeded_slot() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let reborn_home = temp.path().join("reborn-home");
+    let home = temp.path().join("home");
+    std::fs::create_dir_all(&home).expect("home dir");
+    const ENV_DETECTED_MODEL: &str = "gpt-test-env-detected-model";
+
+    let onboard_output = reborn_command()
+        .arg("onboard")
+        .env("HOME", &home)
+        .env("IRONCLAW_REBORN_HOME", &reborn_home)
+        .env("OPENAI_API_KEY", "sk-smoke-test-env-detected-openai-key")
+        .env("OPENAI_MODEL", ENV_DETECTED_MODEL)
+        .output()
+        .expect("ironclaw-reborn onboard should run");
+    assert!(
+        onboard_output.status.success(),
+        "onboard must succeed non-interactively; stderr: {}",
+        String::from_utf8_lossy(&onboard_output.stderr)
+    );
+    let onboard_stdout = String::from_utf8_lossy(&onboard_output.stdout);
+    assert!(
+        onboard_stdout.contains("llm_credentials: configured provider `openai`")
+            && onboard_stdout.contains("from environment"),
+        "onboard must report the env-detected provider was silently seeded; stdout: \
+         {onboard_stdout}"
+    );
+
+    let config_path = reborn_home.join("config.toml");
+    let config_text = std::fs::read_to_string(&config_path).expect("read env-seeded config.toml");
+    assert!(
+        config_text.contains("provider_id = \"openai\"")
+            && config_text.contains(&format!("model = \"{ENV_DETECTED_MODEL}\"")),
+        "headless onboard with a complete openai-shape env must seed the openai slot with the \
+         env-detected model: {config_text}"
+    );
+
+    // serve, booted without OPENAI_MODEL (only the key), must resolve the
+    // PERSISTED model from config.toml, not fall back to openai's catalog
+    // default. IRONCLAW_REBORN_LOG scopes the resolved-LLM debug! trace.
+    let _serve_port_guard = SERVE_PORT_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let port = unused_local_port();
+    let mut child = reborn_command()
+        .args(["serve", "--host", "127.0.0.1", "--port"])
+        .arg(port.to_string())
+        .env("HOME", &home)
+        .env("IRONCLAW_REBORN_HOME", &reborn_home)
+        .env("OPENAI_API_KEY", "sk-smoke-test-env-detected-openai-key")
+        .env("IRONCLAW_REBORN_LOG", "info,ironclaw=debug")
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("ironclaw-reborn serve should start");
+    let pre_banner_stderr = strip_ansi(&wait_for_serve_banner(&mut child));
+    assert!(
+        !pre_banner_stderr.contains("no LLM selection configured"),
+        "serve must boot against the env-seeded slot without the degraded-mode warning; \
+         stderr: {pre_banner_stderr}"
+    );
+    assert!(
+        pre_banner_stderr.contains(&format!("model={ENV_DETECTED_MODEL}")),
+        "serve must resolve the model PERSISTED in the env-seeded slot, not a fresh \
+         env-fallback re-resolution (`OPENAI_MODEL` is deliberately unset at `serve` time, so \
+         a fresh env-fallback would resolve openai's catalog default `gpt-5-mini` instead); \
+         stderr: {pre_banner_stderr}"
+    );
+
+    let _ = child.kill();
+    let _ = child.wait();
+}
+
+/// Full-chain capstone: onboard's printed CLI-token login link must
+/// actually work once `serve` is up, and the minted session must authorize
+/// a real request against the composed WebChat v2 API — not just bind a
+/// listener.
+/// - Uses onboard's OWN provisioned token file (not a hand-seeded one) to
+///   drive the login → ticket → exchange flow, then goes one step further
+///   and uses the exchanged bearer to call the real `RebornServicesApi`,
+///   proving the session is mintable AND usable.
+#[cfg(feature = "webui-v2-beta")]
+#[test]
+fn onboard_login_link_then_bearer_authorizes_a_protected_request() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let reborn_home = temp.path().join("reborn-home");
+    let home = temp.path().join("home");
+    std::fs::create_dir_all(&home).expect("home dir");
+
+    let onboard_output = reborn_command()
+        .arg("onboard")
+        .env("HOME", &home)
+        .env("IRONCLAW_REBORN_HOME", &reborn_home)
+        .env("NEARAI_MODEL", "deepseek-ai/DeepSeek-V4-Flash")
+        .output()
+        .expect("ironclaw-reborn onboard should run");
+    assert!(
+        onboard_output.status.success(),
+        "onboard must succeed non-interactively; stderr: {}",
+        String::from_utf8_lossy(&onboard_output.stderr)
+    );
+    let onboard_stdout = String::from_utf8_lossy(&onboard_output.stdout);
+    assert!(
+        onboard_stdout.contains("login_link: http://127.0.0.1:3000/login?token="),
+        "onboard must print the CLI-token login link; stdout: {onboard_stdout}"
+    );
+    let token_path = reborn_home.join("webui-token");
+    assert!(
+        token_path.exists(),
+        "onboard must provision the webui-token file `serve` reads as a fallback"
+    );
+    let webui_token = std::fs::read_to_string(&token_path)
+        .expect("read onboard-provisioned webui-token")
+        .trim()
+        .to_string();
+    assert!(
+        !webui_token.is_empty(),
+        "onboard-provisioned webui-token must not be empty"
+    );
+
+    // Not required for serve to boot (nearai's api_key_required = false) but
+    // exercises the stored-key overlay path a real interactive run takes.
+    seed_stored_llm_key(&reborn_home, "nearai", "nearai-smoke-test-session");
+
+    let _serve_port_guard = SERVE_PORT_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let port = unused_local_port();
+    let mut child = reborn_command()
+        .args(["serve", "--host", "127.0.0.1", "--port"])
+        .arg(port.to_string())
+        .env("HOME", &home)
+        .env("IRONCLAW_REBORN_HOME", &reborn_home)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("ironclaw-reborn serve should start");
+    wait_for_serve_banner(&mut child);
+
+    // 1. Onboard-provisioned token at /login?token= must redirect into the
+    //    ticket hand-off.
+    let login = http_response(
+        port,
+        &format!(
+            "GET /login?token={webui_token} HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n"
+        ),
+        "onboard login-link probe",
+    );
+    let login = match login {
+        Ok(response) => response,
+        Err(error) => {
+            let _ = child.kill();
+            let _ = child.wait();
+            panic!("login-link probe failed: {error}");
+        }
+    };
+    assert!(
+        login.status_line.contains(" 302 ") || login.status_line.contains(" 303 "),
+        "onboard's login link must redirect into the ticket hand-off, got: {}",
+        login.status_line
+    );
+    let location = login
+        .header("location")
+        .expect("redirect must carry a Location header");
+    assert!(
+        location.starts_with("/?login_ticket="),
+        "redirect must land on the SPA with a login_ticket, got: {location}"
+    );
+    let ticket = location
+        .split("login_ticket=")
+        .nth(1)
+        .expect("redirect Location must carry a login_ticket query param");
+
+    // 2. Exchange the ticket for the real session bearer.
+    let exchange_body = format!(r#"{{"ticket":"{ticket}"}}"#);
+    let exchange_request = format!(
+        "POST /auth/session/exchange HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{exchange_body}",
+        exchange_body.len()
+    );
+    let exchange = http_response(port, &exchange_request, "session exchange probe");
+    let exchange = match exchange {
+        Ok(response) => response,
+        Err(error) => {
+            let _ = child.kill();
+            let _ = child.wait();
+            panic!("session exchange probe failed: {error}");
+        }
+    };
+    assert!(
+        exchange.status_line.contains(" 200 "),
+        "ticket must exchange for a real bearer, got: {}; body: {}",
+        exchange.status_line,
+        exchange.body
+    );
+    #[derive(serde::Deserialize)]
+    struct ExchangeResponse {
+        token: String,
+    }
+    let bearer: ExchangeResponse =
+        serde_json::from_str(&exchange.body).expect("exchange response body must be valid JSON");
+    assert!(
+        !bearer.token.is_empty(),
+        "exchanged bearer must not be empty"
+    );
+
+    // 3. The exchanged bearer must authorize a real request against the
+    //    production RebornServicesApi, not just be well-formed — catches a
+    //    bearer the auth middleware rejects.
+    let api_request = format!(
+        "GET /api/webchat/v2/threads HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer {}\r\nConnection: close\r\n\r\n",
+        bearer.token
+    );
+    let api_response = http_response(port, &api_request, "authenticated protected-route probe");
+
+    // 4. Authenticating with the webui token = operator/admin, whether via
+    //    raw Bearer or this login link — the bearer must also authorize an
+    //    operator-gated route, not just an ordinary authenticated one.
+    let operator_request = format!(
+        "GET /api/webchat/v2/operator/setup HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer {}\r\nConnection: close\r\n\r\n",
+        bearer.token
+    );
+    let operator_response = http_response(port, &operator_request, "operator-gated route probe");
+
+    let _ = child.kill();
+    let _ = child.wait();
+
+    let api_response = api_response.expect("authenticated protected-route probe must complete");
+    assert!(
+        !api_response.status_line.contains(" 401 ") && !api_response.status_line.contains(" 403 "),
+        "the login link's exchanged bearer must authorize a real WebChat v2 request, got: {}; body: {}",
+        api_response.status_line,
+        api_response.body
+    );
+    assert!(
+        api_response.status_line.contains(" 200 "),
+        "GET /api/webchat/v2/threads with a valid bearer should succeed, got: {}; body: {}",
+        api_response.status_line,
+        api_response.body
+    );
+
+    let operator_response = operator_response.expect("operator-gated route probe must complete");
+    assert!(
+        !operator_response.status_line.contains(" 403 "),
+        "the login link's exchanged bearer must authorize an operator-gated \
+         request per the USER-DECIDED LAW (webui-token auth = operator), \
+         got: {}; body: {}",
+        operator_response.status_line,
+        operator_response.body
+    );
+    assert!(
+        operator_response.status_line.contains(" 200 "),
+        "GET /api/webchat/v2/operator/setup with a valid operator bearer should succeed, got: {}; body: {}",
+        operator_response.status_line,
+        operator_response.body
+    );
+}
+
+/// Minimal blocking chat-completions stub standing in for a real LLM
+/// provider. Accepts NEAR AI-shaped (`POST /v1/chat/completions`) requests on
+/// an OS-assigned local port, captures each request's raw `Authorization`
+/// header on `auth_rx`, and answers with a fixed non-streaming completion —
+/// enough for the turn loop to finish successfully without ever reaching a
+/// real network endpoint. Any other path (e.g. a models-list probe) gets an
+/// empty JSON object so an unexpected preflight call doesn't hang the
+/// connection.
+///
+/// Runs on a background `std::thread` (not tokio) because `smoke.rs` tests
+/// spawn `ironclaw-reborn` as a real child process and drive it over plain
+/// blocking sockets, matching `http_response`'s style above.
+#[cfg(feature = "webui-v2-beta")]
+fn spawn_chat_completion_stub() -> (String, std::sync::mpsc::Receiver<Option<String>>) {
+    let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).expect("bind stub listener");
+    let base_url = format!(
+        "http://127.0.0.1:{}",
+        listener.local_addr().expect("stub local addr").port()
+    );
+    let (auth_tx, auth_rx) = std::sync::mpsc::channel();
+
+    std::thread::spawn(move || {
+        for stream in listener.incoming() {
+            let Ok(mut stream) = stream else { break };
+            stream
+                .set_read_timeout(Some(std::time::Duration::from_secs(10)))
+                .ok();
+            let mut reader = std::io::BufReader::new(&mut stream);
+            let mut request_line = String::new();
+            if std::io::BufRead::read_line(&mut reader, &mut request_line).unwrap_or(0) == 0 {
+                continue;
+            }
+            let mut headers = Vec::new();
+            let mut content_length = 0usize;
+            let mut auth_header = None;
+            loop {
+                let mut line = String::new();
+                if std::io::BufRead::read_line(&mut reader, &mut line).unwrap_or(0) == 0 {
+                    break;
+                }
+                let trimmed = line.trim_end_matches(['\r', '\n']);
+                if trimmed.is_empty() {
+                    break;
+                }
+                if let Some((name, value)) = trimmed.split_once(':') {
+                    let name = name.trim().to_ascii_lowercase();
+                    let value = value.trim().to_string();
+                    if name == "content-length" {
+                        content_length = value.parse().unwrap_or(0);
+                    }
+                    if name == "authorization" {
+                        auth_header = Some(value.clone());
+                    }
+                    headers.push((name, value));
+                }
+            }
+            let mut body = vec![0u8; content_length];
+            if content_length > 0 {
+                let _ = std::io::Read::read_exact(&mut reader, &mut body);
+            }
+            let is_chat_completion = request_line.starts_with("POST /v1/chat/completions");
+            // Only report auth for the chat-completions request itself — an
+            // authenticated non-chat probe (e.g. a models-list preflight)
+            // must not be able to satisfy an assertion meant for the chat call.
+            if is_chat_completion {
+                let _ = auth_tx.send(auth_header);
+            }
+            // The reborn turn loop always drives the provider through its
+            // streaming method when a progress sink is wired (which it is for
+            // a real WebUI-driven turn, unlike an in-process `send_user_
+            // message` call) — it sends `"stream": true` and expects an SSE
+            // body, not a plain JSON one. Detect it and answer accordingly,
+            // mirroring `start_nearai_auth_capture_server` in
+            // `ironclaw_reborn_composition`'s runtime tests.
+            let wants_stream = serde_json::from_slice::<serde_json::Value>(&body)
+                .ok()
+                .and_then(|value| value.get("stream").and_then(serde_json::Value::as_bool))
+                .unwrap_or(false);
+
+            let response = if is_chat_completion && wants_stream {
+                let sse_body = concat!(
+                    r#"data: {"choices":[{"delta":{"content":"stub reply: stored key reached the live provider"},"finish_reason":"stop"}],"usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2}}"#,
+                    "\n\n",
+                    "data: [DONE]\n\n"
+                );
+                format!(
+                    "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ncache-control: no-cache\r\nconnection: close\r\n\r\n{sse_body}"
+                )
+            } else {
+                let response_body = if is_chat_completion {
+                    serde_json::json!({
+                        "id": "chatcmpl-smoke-stub",
+                        "choices": [{
+                            "message": {
+                                "role": "assistant",
+                                "content": "stub reply: stored key reached the live provider"
+                            },
+                            "finish_reason": "stop"
+                        }],
+                        "usage": { "prompt_tokens": 1, "completion_tokens": 1 }
+                    })
+                } else {
+                    serde_json::json!({})
+                };
+                let body_text = response_body.to_string();
+                format!(
+                    "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
+                    body_text.len(),
+                    body_text
+                )
+            };
+            let _ = std::io::Write::write_all(&mut stream, response.as_bytes());
+        }
+    });
+
+    (base_url, auth_rx)
+}
+
+/// Insert `base_url = "<stub_base_url>"` into the active (uncommented)
+/// `[llm.default]` section written by `models set-provider`, which never
+/// carries a `base_url` line itself (see the fixture dumped by that
+/// command). Targets the one active `api_key_env = "NEARAI_API_KEY"` line
+/// (the commented reference blocks further down the file are prefixed with
+/// `#` and don't match this exact, unindented text).
+#[cfg(feature = "webui-v2-beta")]
+fn patch_config_base_url(reborn_home: &Path, base_url: &str) {
+    let config_path = reborn_home.join("config.toml");
+    let original = std::fs::read_to_string(&config_path).expect("read config.toml to patch");
+    let anchor = "api_key_env = \"NEARAI_API_KEY\"\n";
+    assert!(
+        original.contains(anchor),
+        "expected an active `[llm.default]` NEAR AI selection to patch; config: {original}"
+    );
+    let patched = original.replacen(anchor, &format!("{anchor}base_url = \"{base_url}\"\n"), 1);
+    std::fs::write(&config_path, patched).expect("write patched config.toml");
+}
+
+/// Drive a real turn through the WebChat v2 HTTP API against a running
+/// `serve` process: exchange the onboard-provisioned webui token for a
+/// session bearer (mirrors `onboard_login_link_then_bearer_authorizes_a_
+/// protected_request`'s steps 1-2), create a thread, send a message, and
+/// poll the timeline until the assistant reply lands. Returns the reply
+/// text, or `Err` with the last observed timeline body on timeout.
+#[cfg(feature = "webui-v2-beta")]
+fn drive_real_turn_via_webui(port: u16, webui_token: &str, label: &str) -> Result<String, String> {
+    let login = http_response(
+        port,
+        &format!(
+            "GET /login?token={webui_token} HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n"
+        ),
+        "login-link probe",
+    )?;
+    let location = login
+        .header("location")
+        .ok_or_else(|| format!("redirect must carry a Location header, got: {login:?}"))?;
+    let ticket = location
+        .split("login_ticket=")
+        .nth(1)
+        .ok_or_else(|| format!("redirect must carry a login_ticket, got: {location}"))?
+        .to_string();
+
+    let exchange_body = format!(r#"{{"ticket":"{ticket}"}}"#);
+    let exchange_request = format!(
+        "POST /auth/session/exchange HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{exchange_body}",
+        exchange_body.len()
+    );
+    let exchange = http_response(port, &exchange_request, "session exchange probe")?;
+    let exchange_json: serde_json::Value =
+        serde_json::from_str(&exchange.body).map_err(|error| format!("exchange body: {error}"))?;
+    let bearer = exchange_json["token"]
+        .as_str()
+        .ok_or_else(|| format!("exchange response missing token: {exchange_json}"))?
+        .to_string();
+
+    let create_thread_body = format!(r#"{{"client_action_id":"smoke-create-thread-{label}"}}"#);
+    let create_thread_request = format!(
+        "POST /api/webchat/v2/threads HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer {bearer}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{create_thread_body}",
+        create_thread_body.len()
+    );
+    let created = http_response(port, &create_thread_request, "create thread")?;
+    let created_json: serde_json::Value = serde_json::from_str(&created.body)
+        .map_err(|error| format!("create-thread body: {error}"))?;
+    let thread_id = created_json["thread"]["thread_id"]
+        .as_str()
+        .ok_or_else(|| format!("create-thread response missing thread_id: {created_json}"))?
+        .to_string();
+
+    let message_body =
+        format!(r#"{{"content":"hi","client_action_id":"smoke-send-message-{label}"}}"#);
+    let send_request = format!(
+        "POST /api/webchat/v2/threads/{thread_id}/messages HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer {bearer}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{message_body}",
+        message_body.len()
+    );
+    let sent = http_response(port, &send_request, "send message")?;
+    let sent_json: serde_json::Value =
+        serde_json::from_str(&sent.body).map_err(|error| format!("send-message body: {error}"))?;
+    if let Some(outcome) = sent_json["outcome"].as_str()
+        && outcome != "submitted"
+    {
+        return Err(format!("turn was not submitted: {sent_json}"));
+    }
+
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
+    let mut last_timeline = String::new();
+    while std::time::Instant::now() < deadline {
+        let timeline_request = format!(
+            "GET /api/webchat/v2/threads/{thread_id}/timeline HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer {bearer}\r\nConnection: close\r\n\r\n"
+        );
+        let timeline = http_response(port, &timeline_request, "timeline poll")?;
+        last_timeline = timeline.body.clone();
+        if let Ok(timeline_json) = serde_json::from_str::<serde_json::Value>(&timeline.body)
+            && let Some(messages) = timeline_json["messages"].as_array()
+        {
+            for message in messages {
+                let kind = message["kind"].as_str().unwrap_or_default();
+                let status = message["status"].as_str().unwrap_or_default();
+                if kind == "assistant" && status == "finalized" {
+                    return Ok(message["content"].as_str().unwrap_or_default().to_string());
+                }
+                if kind == "assistant" && status == "interrupted" {
+                    return Err(format!(
+                        "turn failed (assistant message interrupted): {timeline_json}"
+                    ));
+                }
+            }
+        }
+        std::thread::sleep(std::time::Duration::from_millis(200));
+    }
+    Err(format!(
+        "timed out waiting for the assistant reply; last timeline: {last_timeline}"
+    ))
+}
+
+/// Journey-critical fix (PR #6174) regression pin: a provider selected
+/// through `config.toml` (mirrors `models set-provider` / onboard) with its
+/// key living ONLY in the encrypted secret store (never an env var) must
+/// reach the turn-serving provider for a REAL turn driven through the same
+/// WebUI HTTP API the browser uses — not just a boot-time trace.
+///
+/// Before the fix, cold boot resolved the LLM config, then a separate
+/// `apply_startup_stored_llm_key` mechanism was supposed to overlay the
+/// stored key onto the model gateway directly — but demonstrably never
+/// reached the turn-serving provider (see the runtime.rs fix). This test
+/// pins the fix: the stub HTTP server captures the `Authorization` header
+/// the live provider actually sends, and asserts it carries the stored key.
+#[cfg(feature = "webui-v2-beta")]
+#[test]
+fn stored_key_reaches_real_turn_via_webui_api() {
+    const STORED_KEY: &str = "sk-smoke-real-turn-stored-nearai-key";
+
+    let temp = tempfile::tempdir().expect("tempdir");
+    let reborn_home = temp.path().join("reborn-home");
+    let home = temp.path().join("home");
+    std::fs::create_dir_all(&home).expect("home dir");
+
+    let onboard_output = reborn_command()
+        .arg("onboard")
+        .env("HOME", &home)
+        .env("IRONCLAW_REBORN_HOME", &reborn_home)
+        .output()
+        .expect("ironclaw-reborn onboard should run");
+    assert!(
+        onboard_output.status.success(),
+        "onboard must succeed non-interactively; stderr: {}",
+        String::from_utf8_lossy(&onboard_output.stderr)
+    );
+    let onboard_stdout = String::from_utf8_lossy(&onboard_output.stdout);
+    let webui_token = std::fs::read_to_string(reborn_home.join("webui-token"))
+        .expect("read onboard-provisioned webui-token")
+        .trim()
+        .to_string();
+    assert!(
+        !webui_token.is_empty(),
+        "onboard-provisioned webui-token must not be empty; stdout: {onboard_stdout}"
+    );
+
+    let set_provider_output = reborn_command()
+        .args(["models", "set-provider", "nearai", "--model", "test-model"])
+        .env("IRONCLAW_REBORN_HOME", &reborn_home)
+        .output()
+        .expect("ironclaw-reborn models set-provider should run");
+    assert!(
+        set_provider_output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&set_provider_output.stderr)
+    );
+
+    // The stored key lives ONLY in the encrypted secret store — this is the
+    // onboard-style credential path (`onboard`'s interactive prompt / the
+    // webui settings surface), never an env var.
+    seed_stored_llm_key_at_runtime_root(&reborn_home, "nearai", STORED_KEY);
+
+    let (stub_base_url, auth_rx) = spawn_chat_completion_stub();
+    patch_config_base_url(&reborn_home, &stub_base_url);
+
+    let _serve_port_guard = SERVE_PORT_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let port = unused_local_port();
+    let mut child = reborn_command()
+        .args(["serve", "--host", "127.0.0.1", "--port"])
+        .arg(port.to_string())
+        .env("HOME", &home)
+        .env("IRONCLAW_REBORN_HOME", &reborn_home)
+        // No NEARAI_API_KEY / NEARAI_SESSION_TOKEN: the stored key is the
+        // ONLY thing that can authenticate the live provider.
+        .env_remove("NEARAI_API_KEY")
+        .env_remove("NEARAI_SESSION_TOKEN")
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("ironclaw-reborn serve should start");
+    let stderr_all = wait_for_serve_banner_with_capture(&mut child, "single-boot");
+
+    let turn_result = drive_real_turn_via_webui(port, &webui_token, "single-boot");
+    if turn_result.is_err() {
+        eprintln!("full stderr:\n{}", stderr_all.lock().unwrap());
+    }
+
+    let _ = child.kill();
+    let _ = child.wait();
+
+    let reply = turn_result.expect("real turn through the WebUI API must succeed");
+    assert!(
+        reply.contains("stub reply"),
+        "assistant reply should come from the stub provider; got: {reply}"
+    );
+
+    let captured_auth = auth_rx
+        .recv_timeout(std::time::Duration::from_millis(10))
+        .expect("stub must have captured at least one request's Authorization header");
+    let captured_auth = captured_auth.expect("captured request must carry an Authorization header");
+    assert_eq!(
+        captured_auth,
+        format!("Bearer {STORED_KEY}"),
+        "the live provider must authenticate with the stored key, not a session token or nothing"
+    );
+}
+
+/// Companion to `stored_key_reaches_real_turn_via_webui_api`: proves the
+/// stored-key path is not a one-boot fluke by driving TWO independent `serve`
+/// boots (fresh child process each time, same `reborn_home`, no `onboard` or
+/// `models set-provider` run again in between) and asserting the second boot
+/// also authenticates a real turn with the stored key. This is the cheaper,
+/// faithful stand-in for "save settings while serve is running, then
+/// restart": both scenarios exercise the same boot-reads-from-disk-and-store
+/// path with no env var and no in-process state carried over — driving the
+/// live `LlmConfigService` HTTP save route while `serve` is already up would
+/// additionally require standing up its multipart auth/session flow, which
+/// buys no extra coverage of the fix (the boot-time reload chokepoint is
+/// identical either way).
+#[cfg(feature = "webui-v2-beta")]
+#[test]
+fn stored_key_reaches_real_turn_across_fresh_boots() {
+    const STORED_KEY: &str = "sk-smoke-restart-stored-nearai-key";
+
+    let temp = tempfile::tempdir().expect("tempdir");
+    let reborn_home = temp.path().join("reborn-home");
+    let home = temp.path().join("home");
+    std::fs::create_dir_all(&home).expect("home dir");
+
+    let onboard_output = reborn_command()
+        .arg("onboard")
+        .env("HOME", &home)
+        .env("IRONCLAW_REBORN_HOME", &reborn_home)
+        .output()
+        .expect("ironclaw-reborn onboard should run");
+    assert!(
+        onboard_output.status.success(),
+        "onboard must succeed non-interactively; stderr: {}",
+        String::from_utf8_lossy(&onboard_output.stderr)
+    );
+    let webui_token = std::fs::read_to_string(reborn_home.join("webui-token"))
+        .expect("read onboard-provisioned webui-token")
+        .trim()
+        .to_string();
+
+    let set_provider_output = reborn_command()
+        .args(["models", "set-provider", "nearai", "--model", "test-model"])
+        .env("IRONCLAW_REBORN_HOME", &reborn_home)
+        .output()
+        .expect("ironclaw-reborn models set-provider should run");
+    assert!(
+        set_provider_output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&set_provider_output.stderr)
+    );
+
+    seed_stored_llm_key_at_runtime_root(&reborn_home, "nearai", STORED_KEY);
+
+    let _serve_port_guard = SERVE_PORT_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+
+    for boot in 1..=2 {
+        let (stub_base_url, auth_rx) = spawn_chat_completion_stub();
+        patch_config_base_url_replacing_previous(&reborn_home, &stub_base_url);
+
+        let port = unused_local_port();
+        let mut child = reborn_command()
+            .args(["serve", "--host", "127.0.0.1", "--port"])
+            .arg(port.to_string())
+            .env("HOME", &home)
+            .env("IRONCLAW_REBORN_HOME", &reborn_home)
+            .env_remove("NEARAI_API_KEY")
+            .env_remove("NEARAI_SESSION_TOKEN")
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap_or_else(|error| {
+                panic!("boot {boot}: ironclaw-reborn serve should start: {error}")
+            });
+        let stderr_all = wait_for_serve_banner_with_capture(&mut child, &format!("boot {boot}"));
+
+        let turn_result = drive_real_turn_via_webui(port, &webui_token, &format!("boot-{boot}"));
+        if turn_result.is_err() {
+            eprintln!("boot {boot} full stderr:\n{}", stderr_all.lock().unwrap());
+        }
+
+        let _ = child.kill();
+        let _ = child.wait();
+
+        turn_result.unwrap_or_else(|error| {
+            panic!("boot {boot}: real turn through the WebUI API must succeed: {error}")
+        });
+
+        let captured_auth = auth_rx
+            .recv_timeout(std::time::Duration::from_millis(10))
+            .unwrap_or_else(|_| panic!("boot {boot}: stub must have captured a request"))
+            .unwrap_or_else(|| {
+                panic!("boot {boot}: captured request missing Authorization header")
+            });
+        assert_eq!(
+            captured_auth,
+            format!("Bearer {STORED_KEY}"),
+            "boot {boot}: the live provider must authenticate with the stored key on every fresh \
+             boot, not just the first"
+        );
+    }
+}
+
+/// Like [`patch_config_base_url`], but replaces whichever `base_url` line is
+/// currently in `[llm.default]` — the previous boot's stub port is dead by
+/// the time the next boot patches it in, so the second call in
+/// `stored_key_reaches_real_turn_across_fresh_boots` must overwrite rather
+/// than duplicate the line `patch_config_base_url` already inserted.
+#[cfg(feature = "webui-v2-beta")]
+fn patch_config_base_url_replacing_previous(reborn_home: &Path, base_url: &str) {
+    let config_path = reborn_home.join("config.toml");
+    let original = std::fs::read_to_string(&config_path).expect("read config.toml to patch");
+    if let Some(start) = original.find("base_url = \"http://127.0.0.1:") {
+        let rest = &original[start..];
+        let end = rest
+            .find('\n')
+            .map(|index| start + index + 1)
+            .unwrap_or(original.len());
+        let mut patched = String::with_capacity(original.len());
+        patched.push_str(&original[..start]);
+        patched.push_str(&format!("base_url = \"{base_url}\"\n"));
+        patched.push_str(&original[end..]);
+        std::fs::write(&config_path, patched).expect("write patched config.toml");
+    } else {
+        patch_config_base_url(reborn_home, base_url);
+    }
+}
+
+/// Seed the local-dev encrypted secret store with an LLM API key for
+/// `provider_id`, through the same `open_local_dev_secret_store` +
+/// `LlmKeyStore::put` opener `onboard`'s interactive credential prompt uses
+/// — bypassing the prompt UI. Also seeds the cached master-key dotfile first
+/// so the resolver never reaches the OS keychain (a headless run would
+/// otherwise hang on a GUI keychain prompt — see
+/// `onboard_with_complete_llm_env_then_serve_boots_from_the_env_seeded_slot`'s
+/// call site for the same rationale).
+#[cfg(feature = "webui-v2-beta")]
+fn seed_stored_llm_key(reborn_home: &Path, provider_id: &str, key: &str) {
+    std::fs::write(
+        reborn_home.join(ironclaw_reborn_composition::LOCAL_DEV_SECRETS_MASTER_KEY_PATH),
+        ironclaw_secrets::keychain::generate_master_key_hex(),
+    )
+    .expect("seed cached master key dotfile");
+    let seed_rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("current-thread tokio runtime for LLM key seed");
+    let provider_id = provider_id.to_string();
+    let key = key.to_string();
+    let reborn_home = reborn_home.to_path_buf();
+    seed_rt.block_on(async move {
+        let store = ironclaw_reborn_composition::open_local_dev_secret_store(&reborn_home)
+            .await
+            .expect("open local dev secret store");
+        ironclaw_reborn_composition::LlmKeyStore::new(store)
+            .put(&provider_id, ironclaw_secrets::SecretMaterial::from(key))
+            .await
+            .expect("seed provider key");
+    });
+}
+
+/// Seed the stored LLM key at the SAME secret-store root `serve` actually
+/// reads from for a `local-dev` boot — `<reborn_home>/local-dev/…` (see
+/// `local_runtime_storage_root` / `RebornProfile::local_runtime_storage_
+/// subdir`), NOT the bare `reborn_home` root [`seed_stored_llm_key`] (and
+/// `onboard`'s own interactive credential prompt) write to.
+///
+/// This distinction matters for these real-turn tests specifically: they
+/// pin the fix to `RebornLlmReloadAdapter::reload`, which reads through
+/// `RebornRuntime`'s own `services.secret_store()` — rooted at the
+/// `local-dev` subdirectory. Seeding through the bare-root opener instead
+/// (matching `onboard`'s CLI path) would silently miss that store and fail
+/// for an unrelated reason (a pre-existing root mismatch between `onboard`'s
+/// credential prompt and the runtime's own store, out of scope here — filed
+/// as a follow-up). The webui settings-save path this fix's reload
+/// mechanism mirrors always writes through `services.secret_store()`
+/// directly, so this is the faithful root to seed for these tests.
+#[cfg(feature = "webui-v2-beta")]
+fn seed_stored_llm_key_at_runtime_root(reborn_home: &Path, provider_id: &str, key: &str) {
+    let runtime_root = reborn_home.join("local-dev");
+    std::fs::create_dir_all(&runtime_root).expect("runtime local-dev root dir");
+    seed_stored_llm_key(&runtime_root, provider_id, key);
+}
+
+/// A key stored via `onboard`/`models set-provider` for an
+/// `api_key_required = true` provider (openai/anthropic) must reach
+/// `serve`'s runtime resolution — `apply_startup_stored_llm_key` must run
+/// before `resolve_reborn_runtime_llm` fails closed on `ApiKeyEnvUnset`.
+/// `nearai` (`api_key_required = false`) never exercises this path, so the
+/// existing daemon-case capstones didn't catch it.
+/// - Crate smoke tier (real binary spawn): the bug lives in serve's
+///   pre-async-runtime boot sequence, so only a real-process boot proves
+///   the fix ordering.
+/// - Also proves the model scripted via `models set-provider --model` is
+///   the model `serve` actually resolves, not just A model — asserted via
+///   the resolved-LLM `debug!` trace, scoped into view with
+///   `IRONCLAW_REBORN_LOG` (never `info!`/`warn!` per the REPL/TUI logging
+///   rule). Uses a non-default model name to rule out a hardcoded fallback.
+#[cfg(feature = "webui-v2-beta")]
+#[test]
+fn onboard_openai_key_then_serve_boots_with_env_var_unset() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let reborn_home = temp.path().join("reborn-home");
+    let home = temp.path().join("home");
+    std::fs::create_dir_all(&home).expect("home dir");
+
+    let onboard_output = reborn_command()
+        .arg("onboard")
+        .env("HOME", &home)
+        .env("IRONCLAW_REBORN_HOME", &reborn_home)
+        .output()
+        .expect("ironclaw-reborn onboard should run");
+    assert!(
+        onboard_output.status.success(),
+        "onboard must succeed non-interactively; stderr: {}",
+        String::from_utf8_lossy(&onboard_output.stderr)
+    );
+
+    // models set-provider is the non-interactive equivalent of onboard's
+    // credential prompt; SCRIPTED_MODEL is deliberately non-default.
+    const SCRIPTED_MODEL: &str = "gpt-test-model";
+    let set_provider_output = reborn_command()
+        .args([
+            "models",
+            "set-provider",
+            "openai",
+            "--model",
+            SCRIPTED_MODEL,
+        ])
+        .env("IRONCLAW_REBORN_HOME", &reborn_home)
+        .output()
+        .expect("ironclaw-reborn models set-provider should run");
+    assert!(
+        set_provider_output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&set_provider_output.stderr)
+    );
+
+    seed_stored_llm_key_at_runtime_root(&reborn_home, "openai", "sk-smoke-test-stored-openai-key");
+
+    let _serve_port_guard = SERVE_PORT_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let port = unused_local_port();
+    let mut child = reborn_command()
+        .args(["serve", "--host", "127.0.0.1", "--port"])
+        .arg(port.to_string())
+        .env("HOME", &home)
+        .env("IRONCLAW_REBORN_HOME", &reborn_home)
+        // No OPENAI_API_KEY: the stored key must be what makes this boot.
+        // Target is `ironclaw` (the bin's normalized crate name, not
+        // the `ironclaw_reborn_cli` package this test itself compiles as).
+        // `ironclaw_reborn_composition=debug` is also needed to observe
+        // `RebornLlmReloadAdapter::reload`'s own `key_applied` trace below —
+        // that's the mechanism that actually swaps the placeholder gateway
+        // for the stored-key-backed openai provider (PR #6174 item A).
+        .env(
+            "IRONCLAW_REBORN_LOG",
+            "info,ironclaw=debug,ironclaw_reborn_composition=debug",
+        )
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("ironclaw-reborn serve should start");
+    let pre_banner_stderr = strip_ansi(&wait_for_serve_banner(&mut child));
+
+    let _ = child.kill();
+    let _ = child.wait();
+
+    assert!(
+        pre_banner_stderr.contains("resolved LLM selection for Reborn runtime"),
+        "serve must emit the resolved-LLM debug trace before binding; stderr: {pre_banner_stderr}"
+    );
+    // Regression pin for PR #6174 item A: `openai` has `api_key_required =
+    // true`, so unlike `nearai` it used to hit the STRICT
+    // `resolve_reborn_runtime_llm` inside `RebornLlmReloadAdapter::reload`
+    // (boot-time and Settings -> Inference save both go through it) and fail
+    // closed on `ApiKeyEnvUnset` before ever reaching the stored-key lookup
+    // — the placeholder gateway was silently never replaced. This asserts
+    // the live reload actually ran and applied the seeded key.
+    assert!(
+        pre_banner_stderr.contains("LLM reload applied to the live provider")
+            && pre_banner_stderr.contains("key_applied=true"),
+        "the seeded openai key must be found and applied to the live provider by the boot-time \
+         LLM reload, not left on the placeholder gateway; stderr: {pre_banner_stderr}"
+    );
+    assert!(
+        pre_banner_stderr.contains("provider_id=openai"),
+        "resolved-LLM trace must name the openai provider; stderr: {pre_banner_stderr}"
+    );
+    assert!(
+        pre_banner_stderr.contains(&format!("model={SCRIPTED_MODEL}")),
+        "resolved-LLM trace must carry the scripted model `{SCRIPTED_MODEL}`, proving the \
+         operator's `models set-provider --model` answer reached the runtime `serve` actually \
+         boots with, not a hardcoded default; stderr: {pre_banner_stderr}"
+    );
+}
+
+/// Regression pin: nearai's coded default base URL used to key on API-key
+/// presence at resolve time (cloud when a key was already attached, private
+/// otherwise). An operator-stored key (attached to the runtime *after*
+/// config resolution, via `apply_startup_stored_llm_key`) always missed that
+/// window, so a key stored through `onboard`/`models set-provider` — the
+/// exact path the webui settings surface uses — left the live runtime
+/// pinned to the keyless private endpoint even though the same key made the
+/// admin `test_connection` probe and the settings-panel catalog snapshot
+/// correctly report cloud. Fixed by making nearai's coded default
+/// unconditionally cloud (`ironclaw_llm::resolution::default_nearai_base_url`),
+/// so resolution order no longer matters.
+///
+/// `nearai`'s `api_key_required = false`, so unlike `openai` this boots
+/// successfully either way — the only observable symptom was the wrong base
+/// URL — asserted here on the resolved-LLM `debug!` trace's `base_url`
+/// field, which fires during boot-time config resolution (no stored-key
+/// application needed to observe the fix: it holds even in the fully
+/// keyless case this test drives).
+#[cfg(feature = "webui-v2-beta")]
+#[test]
+fn onboard_nearai_then_serve_boots_with_cloud_base_url() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let reborn_home = temp.path().join("reborn-home");
+    let home = temp.path().join("home");
+    std::fs::create_dir_all(&home).expect("home dir");
+
+    let onboard_output = reborn_command()
+        .arg("onboard")
+        .env("HOME", &home)
+        .env("IRONCLAW_REBORN_HOME", &reborn_home)
+        .output()
+        .expect("ironclaw-reborn onboard should run");
+    assert!(
+        onboard_output.status.success(),
+        "onboard must succeed non-interactively; stderr: {}",
+        String::from_utf8_lossy(&onboard_output.stderr)
+    );
+
+    let set_provider_output = reborn_command()
+        .args(["models", "set-provider", "nearai"])
+        .env("IRONCLAW_REBORN_HOME", &reborn_home)
+        .output()
+        .expect("ironclaw-reborn models set-provider should run");
+    assert!(
+        set_provider_output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&set_provider_output.stderr)
+    );
+
+    let _serve_port_guard = SERVE_PORT_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let port = unused_local_port();
+    let mut child = reborn_command()
+        .args(["serve", "--host", "127.0.0.1", "--port"])
+        .arg(port.to_string())
+        .env("HOME", &home)
+        .env("IRONCLAW_REBORN_HOME", &reborn_home)
+        // No NEARAI_API_KEY, no NEARAI_BASE_URL: nothing pins the base URL —
+        // proving the coded default itself is cloud, not a key-presence race.
+        .env_remove("NEARAI_API_KEY")
+        .env_remove("NEARAI_BASE_URL")
+        .env("IRONCLAW_REBORN_LOG", "info,ironclaw=debug")
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("ironclaw-reborn serve should start");
+    let pre_banner_stderr = strip_ansi(&wait_for_serve_banner(&mut child));
+
+    let _ = child.kill();
+    let _ = child.wait();
+
+    assert!(
+        pre_banner_stderr.contains("resolved LLM selection for Reborn runtime"),
+        "serve must emit the resolved-LLM debug trace before binding; stderr: {pre_banner_stderr}"
+    );
+    assert!(
+        pre_banner_stderr.contains("provider_id=nearai"),
+        "resolved-LLM trace must name the nearai provider; stderr: {pre_banner_stderr}"
+    );
+    assert!(
+        pre_banner_stderr.contains("base_url=https://cloud-api.near.ai"),
+        "nearai's coded default must be the cloud endpoint even fully keyless; \
+         stderr: {pre_banner_stderr}"
+    );
+    assert!(
+        !pre_banner_stderr.contains("base_url=https://private.near.ai"),
+        "resolved-LLM trace must never carry the retired keyless-private default; \
+         stderr: {pre_banner_stderr}"
+    );
+}
+
+/// Companion to `onboard_nearai_then_serve_boots_with_cloud_base_url`: that
+/// test only pins the fully-keyless coded default, since `onboard`/`models
+/// set-provider` never stores a NearAI key non-interactively — a regression
+/// in the boot-time LLM reload (`RebornLlmReloadAdapter::reload`) or its
+/// ordering relative to config resolution would still pass it. This test
+/// seeds an encrypted NearAI credential AFTER provider selection, AT THE
+/// SAME RUNTIME STORAGE ROOT `serve` actually opens
+/// (`local_runtime_storage_root`, i.e. `<reborn_home>/local-dev` —
+/// `seed_stored_llm_key_at_runtime_root`, not the bare-root
+/// `seed_stored_llm_key`, which writes to a root `serve` never reads), with
+/// both NearAI env overrides removed. Asserts through the resolved-LLM
+/// boot-trace seam that the late-attached stored credential still resolves
+/// to the cloud endpoint, AND — the discriminating half, since
+/// `default_nearai_base_url` is unconditionally cloud regardless of
+/// key-presence — through `RebornLlmReloadAdapter::reload`'s own
+/// `key_applied` debug trace that the seeded credential was actually found
+/// and applied to the live provider, not silently skipped.
+#[cfg(feature = "webui-v2-beta")]
+#[test]
+fn onboard_nearai_stored_key_then_serve_boots_with_cloud_base_url() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let reborn_home = temp.path().join("reborn-home");
+    let home = temp.path().join("home");
+    std::fs::create_dir_all(&home).expect("home dir");
+
+    let onboard_output = reborn_command()
+        .arg("onboard")
+        .env("HOME", &home)
+        .env("IRONCLAW_REBORN_HOME", &reborn_home)
+        .output()
+        .expect("ironclaw-reborn onboard should run");
+    assert!(
+        onboard_output.status.success(),
+        "onboard must succeed non-interactively; stderr: {}",
+        String::from_utf8_lossy(&onboard_output.stderr)
+    );
+
+    let set_provider_output = reborn_command()
+        .args(["models", "set-provider", "nearai"])
+        .env("IRONCLAW_REBORN_HOME", &reborn_home)
+        .output()
+        .expect("ironclaw-reborn models set-provider should run");
+    assert!(
+        set_provider_output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&set_provider_output.stderr)
+    );
+
+    seed_stored_llm_key_at_runtime_root(
+        &reborn_home,
+        "nearai",
+        "session-smoke-test-stored-nearai-key",
+    );
+
+    let _serve_port_guard = SERVE_PORT_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let port = unused_local_port();
+    let mut child = reborn_command()
+        .args(["serve", "--host", "127.0.0.1", "--port"])
+        .arg(port.to_string())
+        .env("HOME", &home)
+        .env("IRONCLAW_REBORN_HOME", &reborn_home)
+        // No NEARAI_API_KEY, no NEARAI_BASE_URL: only the stored credential
+        // (applied by the boot-time LLM reload) is present — proving the
+        // late-attached path also lands on cloud.
+        .env_remove("NEARAI_API_KEY")
+        .env_remove("NEARAI_BASE_URL")
+        // `key_applied` is emitted by `ironclaw_reborn_composition`'s
+        // `RebornLlmReloadAdapter::reload`, not the `ironclaw_reborn_cli`
+        // binary crate — the default filter caps that crate at `info`, so
+        // it must be named explicitly.
+        .env(
+            "IRONCLAW_REBORN_LOG",
+            "info,ironclaw=debug,ironclaw_reborn_composition=debug",
+        )
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("ironclaw-reborn serve should start");
+    let pre_banner_stderr = strip_ansi(&wait_for_serve_banner(&mut child));
+
+    let _ = child.kill();
+    let _ = child.wait();
+
+    assert!(
+        pre_banner_stderr.contains("resolved LLM selection for Reborn runtime"),
+        "serve must emit the resolved-LLM debug trace before binding; stderr: {pre_banner_stderr}"
+    );
+    assert!(
+        pre_banner_stderr.contains("provider_id=nearai"),
+        "resolved-LLM trace must name the nearai provider; stderr: {pre_banner_stderr}"
+    );
+    assert!(
+        pre_banner_stderr.contains("base_url=https://cloud-api.near.ai"),
+        "a NearAI key stored after provider selection and applied via the boot-time LLM reload \
+         must still resolve to the cloud endpoint; stderr: {pre_banner_stderr}"
+    );
+    assert!(
+        !pre_banner_stderr.contains("base_url=https://private.near.ai"),
+        "resolved-LLM trace must never carry the retired keyless-private default, even on the \
+         late-stored-key path; stderr: {pre_banner_stderr}"
+    );
+    assert!(
+        pre_banner_stderr.contains("LLM reload applied to the live provider")
+            && pre_banner_stderr.contains("key_applied=true"),
+        "the seeded credential must actually be found and applied to the live provider — a \
+         discriminating signal independent of the unconditionally-cloud coded default: \
+         stderr: {pre_banner_stderr}"
+    );
+}
+
+/// RAILWAY PIN 1: the production Railway deployment boots with an
+/// `api_key_required = false` provider (`nearai`) and its API key env var
+/// (`NEARAI_API_KEY`) set — never a stored key, never an unset-key error.
+/// This pins that the stored-key fallback added for the regression above is
+/// additive only: the ordinary env-var-set boot path must behave exactly as
+/// before, with the secret store never even opened (an empty store, as
+/// Railway's is, must not matter here — it is only ever consulted on the
+/// `ApiKeyEnvUnset` error path, which this scenario never reaches).
+#[cfg(feature = "webui-v2-beta")]
+#[test]
+fn serve_boots_with_env_api_key_set_and_empty_secret_store() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let reborn_home = temp.path().join("reborn-home");
+    let home = temp.path().join("home");
+    std::fs::create_dir_all(&home).expect("home dir");
+
+    let onboard_output = reborn_command()
+        .arg("onboard")
+        .env("HOME", &home)
+        .env("IRONCLAW_REBORN_HOME", &reborn_home)
+        .output()
+        .expect("ironclaw-reborn onboard should run");
+    assert!(
+        onboard_output.status.success(),
+        "onboard must succeed non-interactively; stderr: {}",
+        String::from_utf8_lossy(&onboard_output.stderr)
+    );
+    // Sanity: config carries no [llm.default] slot; this boots purely off
+    // NEARAI_API_KEY via the env-fallback path, matching Railway's shape.
+    let config_text =
+        std::fs::read_to_string(reborn_home.join("config.toml")).expect("read seeded config.toml");
+    assert!(
+        !config_text_has_live_provider_id(&config_text),
+        "config: {config_text}"
+    );
+
+    let _serve_port_guard = SERVE_PORT_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let port = unused_local_port();
+    let mut child = reborn_command()
+        .args(["serve", "--host", "127.0.0.1", "--port"])
+        .arg(port.to_string())
+        .env("HOME", &home)
+        .env("IRONCLAW_REBORN_HOME", &reborn_home)
+        .env("NEARAI_API_KEY", "railway-shape-smoke-test-nearai-key")
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("ironclaw-reborn serve should start");
+    wait_for_serve_banner(&mut child);
+
+    let _ = child.kill();
+    let _ = child.wait();
+}
+
+/// RAILWAY PIN 2: an `api_key_required = true` provider with neither the env
+/// var set nor a key in the secret store must still fail closed at boot with
+/// the same `ApiKeyEnvUnset` error text as before this fix — the
+/// stored-key fallback must never mask a genuine misconfiguration.
+#[cfg(feature = "webui-v2-beta")]
+#[test]
+fn serve_fails_closed_when_neither_env_nor_store_has_the_key() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let reborn_home = temp.path().join("reborn-home");
+    let home = temp.path().join("home");
+    std::fs::create_dir_all(&home).expect("home dir");
+
+    let onboard_output = reborn_command()
+        .arg("onboard")
+        .env("HOME", &home)
+        .env("IRONCLAW_REBORN_HOME", &reborn_home)
+        .output()
+        .expect("ironclaw-reborn onboard should run");
+    assert!(
+        onboard_output.status.success(),
+        "onboard must succeed non-interactively; stderr: {}",
+        String::from_utf8_lossy(&onboard_output.stderr)
+    );
+    let set_provider_output = reborn_command()
+        .args(["models", "set-provider", "openai", "--model", "gpt-5-mini"])
+        .env("IRONCLAW_REBORN_HOME", &reborn_home)
+        .output()
+        .expect("ironclaw-reborn models set-provider should run");
+    assert!(
+        set_provider_output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&set_provider_output.stderr)
+    );
+    // No `seed_stored_llm_key` call: the secret store stays empty.
+
+    // Spawn + poll try_wait() with a deadline instead of blocking .output():
+    // a regression that binds a listener instead of exiting must not hang
+    // this test (and CI) forever.
+    let mut child = reborn_command()
+        .args(["serve", "--host", "127.0.0.1", "--port", "0"])
+        .env("HOME", &home)
+        .env("IRONCLAW_REBORN_HOME", &reborn_home)
+        // No OPENAI_API_KEY set.
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("ironclaw-reborn serve should start");
+
+    // Drain stdout/stderr on background threads so a full pipe buffer can't
+    // block the child from exiting.
+    let mut stdout_reader = child.stdout.take().expect("stdout should be piped");
+    let stdout_thread = std::thread::spawn(move || {
+        let mut buf = Vec::new();
+        let _ = std::io::Read::read_to_end(&mut stdout_reader, &mut buf);
+        buf
+    });
+    let mut stderr_reader = child.stderr.take().expect("stderr should be piped");
+    let stderr_thread = std::thread::spawn(move || {
+        let mut buf = Vec::new();
+        let _ = std::io::Read::read_to_end(&mut stderr_reader, &mut buf);
+        buf
+    });
+
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
+    let status = loop {
+        if let Some(status) = child.try_wait().expect("serve child status") {
+            break status;
+        }
+        if std::time::Instant::now() >= deadline {
+            let _ = child.kill();
+            let _ = child.wait();
+            panic!(
+                "serve did not exit within the deadline; expected a fail-closed exit with \
+                 neither an env key nor a stored key — it may have regressed into binding a \
+                 listener instead"
+            );
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    };
+
+    let stdout_bytes = stdout_thread.join().expect("stdout reader thread panicked");
+    let stderr_bytes = stderr_thread.join().expect("stderr reader thread panicked");
+    let stderr = String::from_utf8_lossy(&stderr_bytes);
+
+    assert!(
+        !status.success(),
+        "serve must fail closed with neither an env key nor a stored key; stdout: {}",
+        String::from_utf8_lossy(&stdout_bytes)
+    );
+    assert!(
+        stderr
+            .contains("llm provider `openai` requires API key env var `OPENAI_API_KEY` to be set"),
+        "stderr must carry the same ApiKeyEnvUnset error text as before this fix: {stderr}"
+    );
+}
+
+/// Security fix companion: `onboard`'s finale must not print a CLI-token
+/// login link when the operator's env var is active — that link would point
+/// at a route `serve` no longer mounts for an env-sourced token (see
+/// `serve_does_not_mount_cli_login_route_when_token_is_env_sourced`). It
+/// must instead note that the env token is in charge.
+#[cfg(feature = "webui-v2-beta")]
+#[test]
+fn onboard_prints_env_token_note_instead_of_login_link_when_env_token_is_set() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let reborn_home = temp.path().join("reborn-home");
+    let home = temp.path().join("home");
+    std::fs::create_dir_all(&home).expect("home dir");
+
+    let onboard_output = reborn_command()
+        .arg("onboard")
+        .env("HOME", &home)
+        .env("IRONCLAW_REBORN_HOME", &reborn_home)
+        .env(
+            "IRONCLAW_REBORN_WEBUI_TOKEN",
+            "reborn-smoke-test-onboard-env-token-0123456789abcdef",
+        )
+        .output()
+        .expect("ironclaw-reborn onboard should run");
+    assert!(
+        onboard_output.status.success(),
+        "onboard must succeed non-interactively; stderr: {}",
+        String::from_utf8_lossy(&onboard_output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&onboard_output.stdout);
+    assert!(
+        stdout.contains("login_note: IRONCLAW_REBORN_WEBUI_TOKEN is set"),
+        "stdout must note the active env var instead of a login link: {stdout}"
+    );
+    assert!(
+        !stdout.contains("login_link:"),
+        "stdout must not print a login link that points at an unmounted route: {stdout}"
+    );
+}
+
+/// `status` companion: reprinting the login link must also respect
+/// env-token precedence, unless `status` already knows the OS service isn't
+/// running, in which case that takes priority — no point advertising a
+/// login credential into a `serve` that isn't listening.
+/// - The service-state query is host-wide, not scoped to this test's temp
+///   $HOME, so the exact `service:` value can't be pinned (CI reads "not
+///   installed"; a dev host with the real service may read differently).
+///   Assert the invariant instead: `login_link` is always absent, and
+///   `login_note` matches whichever branch the observed state took.
+#[cfg(feature = "webui-v2-beta")]
+#[test]
+fn status_prints_env_token_note_instead_of_login_link_when_env_token_is_set() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let reborn_home = temp.path().join("reborn-home");
+    let home = temp.path().join("home");
+    std::fs::create_dir_all(&home).expect("home dir");
+
+    let onboard_output = reborn_command()
+        .arg("onboard")
+        .env("HOME", &home)
+        .env("IRONCLAW_REBORN_HOME", &reborn_home)
+        .output()
+        .expect("ironclaw-reborn onboard should run");
+    assert!(
+        onboard_output.status.success(),
+        "onboard must succeed non-interactively; stderr: {}",
+        String::from_utf8_lossy(&onboard_output.stderr)
+    );
+
+    let status_output = reborn_command()
+        .arg("status")
+        .env("HOME", &home)
+        .env("IRONCLAW_REBORN_HOME", &reborn_home)
+        .env(
+            "IRONCLAW_REBORN_WEBUI_TOKEN",
+            "reborn-smoke-test-status-env-token-0123456789abcdef",
+        )
+        .output()
+        .expect("ironclaw-reborn status should run");
+    assert!(
+        status_output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&status_output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&status_output.stdout);
+    let service_line = stdout
+        .lines()
+        .find(|line| line.starts_with("service:"))
+        .unwrap_or_else(|| panic!("status text must include a `service:` line: {stdout}"));
+    let service_state = service_line.trim_start_matches("service:").trim();
+    match service_state {
+        // `apply_service_suppression` passes `Running`/`Unknown` through
+        // unchanged by design — `Unknown` is what CI runners actually hit
+        // (no user dbus session to query), so this arm is load-bearing for
+        // CI, not just local-dev symmetry.
+        "running" | "unknown" => assert!(
+            stdout.contains("login_note:") && stdout.contains("IRONCLAW_REBORN_WEBUI_TOKEN is set"),
+            "service is running or unknown, so the env-token note must still win: {stdout}"
+        ),
+        "stopped" | "not installed" => assert!(
+            stdout.contains("login_note:") && stdout.contains("service is not running"),
+            "a known not-running service must take priority over the env-token note — \
+             there is no login credential (env-sourced or not) worth advertising into \
+             a `serve` process that isn't listening: {stdout}"
+        ),
+        other => panic!("unexpected service: state {other:?}: {stdout}"),
+    }
+    assert!(
+        !stdout.contains("login_link:"),
+        "stdout must not print a login link that points at an unmounted route \
+         (a valid webui-token file exists from onboard, but the env var takes \
+         precedence): {stdout}"
+    );
+}
+
+#[test]
 fn onboard_dry_run_is_read_only() {
     let temp = tempfile::tempdir().expect("tempdir");
     let reborn_home = temp.path().join("reborn-home");
 
-    let output = Command::new(reborn_bin())
+    let output = reborn_command()
         .args(["onboard", "--dry-run", "--import-history"])
-        .env_clear()
         .env("IRONCLAW_REBORN_HOME", &reborn_home)
         .output()
         .expect("ironclaw-reborn onboard --dry-run should run");
@@ -3094,9 +5442,8 @@ fn onboard_dry_run_reports_existing_marker_as_preserved() {
     let marker_path = reborn_home.join(".onboard-completed.json");
     std::fs::write(&marker_path, "custom marker\n").expect("write marker");
 
-    let output = Command::new(reborn_bin())
+    let output = reborn_command()
         .args(["onboard", "--dry-run"])
-        .env_clear()
         .env("IRONCLAW_REBORN_HOME", &reborn_home)
         .output()
         .expect("ironclaw-reborn onboard --dry-run should run");
@@ -3116,13 +5463,56 @@ fn onboard_dry_run_reports_existing_marker_as_preserved() {
 }
 
 #[test]
+fn onboard_dry_run_propagates_a_webui_token_io_error_without_mutating_home() {
+    // `print_dry_run` propagates `webui_token_file_is_valid`'s error with
+    // `?` instead of defaulting to "would_write" on an I/O failure (see
+    // that fn's doc comment). Pin the end-to-end behavior: a directory
+    // planted at the token path is a real I/O error, the process exits
+    // non-zero, and the dry run's read-only contract still holds — no
+    // marker or config file gets written to the (already-existing)
+    // Reborn home.
+    let temp = tempfile::tempdir().expect("tempdir");
+    let reborn_home = temp.path().join("reborn-home");
+    std::fs::create_dir_all(&reborn_home).expect("mkdir reborn_home");
+    std::fs::create_dir_all(reborn_home.join("webui-token"))
+        .expect("seed a directory at token path");
+
+    let output = Command::new(reborn_bin())
+        .args(["onboard", "--dry-run"])
+        .env_clear()
+        .env("IRONCLAW_REBORN_HOME", &reborn_home)
+        .output()
+        .expect("ironclaw-reborn onboard --dry-run should run");
+
+    assert!(
+        !output.status.success(),
+        "a directory at the token path must fail dry-run, not silently proceed: stdout={} stderr={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        !reborn_home.join(".onboard-completed.json").exists(),
+        "a failed dry-run must not write the onboarding marker"
+    );
+    assert!(
+        !reborn_home.join("config.toml").exists(),
+        "a failed dry-run must not write config.toml"
+    );
+    assert!(
+        std::fs::metadata(reborn_home.join("webui-token"))
+            .expect("token path still present")
+            .is_dir(),
+        "a failed dry-run must not touch the pre-existing token path"
+    );
+}
+
+#[test]
 fn onboard_import_history_records_pending_step() {
     let temp = tempfile::tempdir().expect("tempdir");
     let reborn_home = temp.path().join("reborn-home");
 
-    let output = Command::new(reborn_bin())
+    let output = reborn_command()
         .args(["onboard", "--import-history"])
-        .env_clear()
         .env("IRONCLAW_REBORN_HOME", &reborn_home)
         .output()
         .expect("ironclaw-reborn onboard --import-history should run");
@@ -3144,6 +5534,19 @@ fn onboard_import_history_records_pending_step() {
     );
 }
 
+/// `config.toml`'s content here ("custom config\n") is deliberately not
+/// valid TOML — it used to prove Preserve-policy writes are byte-for-byte,
+/// unvalidated. That's still true (the Preserve write runs before LLM-
+/// credential provisioning ever inspects the file), but
+/// `already_configured_outcome` now fails loud on an unparseable
+/// `config.toml` rather than silently treating it as "not yet configured"
+/// (see that function's doc): a corrupt config is a real problem onboard
+/// must surface, not quietly succeed over. So the overall command now fails
+/// — this test pins that (a) it fails with a parse-error message, and (b)
+/// the artifacts written/preserved BEFORE that failure (config.toml's exact
+/// bytes, the marker, providers.json) are still correct on disk, since
+/// `write_default_config_files` and the marker/master-key steps all run
+/// ahead of the LLM-credential step that fails.
 #[test]
 fn onboard_preserves_existing_config_without_force() {
     let temp = tempfile::tempdir().expect("tempdir");
@@ -3156,31 +5559,37 @@ fn onboard_preserves_existing_config_without_force() {
     )
     .expect("write marker");
 
-    let output = Command::new(reborn_bin())
+    let output = reborn_command()
         .arg("onboard")
-        .env_clear()
         .env("IRONCLAW_REBORN_HOME", &reborn_home)
         .output()
         .expect("ironclaw-reborn onboard should run");
 
     assert!(
-        output.status.success(),
-        "stderr: {}",
-        String::from_utf8_lossy(&output.stderr)
+        !output.status.success(),
+        "onboard must fail when a pre-existing config.toml can't be parsed, not silently \
+         succeed over a broken config; stdout: {}",
+        String::from_utf8_lossy(&output.stdout)
     );
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    assert_stdout_file_action(&stdout, "config.toml", "preserved");
-    assert_stdout_file_action(&stdout, "providers.json", "wrote");
-    assert_stdout_labeled_action(&stdout, "onboarding_marker:", "preserved");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("could not parse config file"),
+        "stderr must explain the config.toml parse failure: {stderr}"
+    );
+
     let config_text =
         std::fs::read_to_string(reborn_home.join("config.toml")).expect("read config");
-    assert_eq!(config_text, "custom config\n");
+    assert_eq!(
+        config_text, "custom config\n",
+        "the Preserve write runs before the LLM-credential step, so the malformed file on disk \
+         must stay untouched even though the overall command later fails"
+    );
     let marker_text =
         std::fs::read_to_string(reborn_home.join(".onboard-completed.json")).expect("read marker");
     assert_eq!(marker_text, "custom marker\n");
     assert!(
         reborn_home.join("providers.json").exists(),
-        "missing providers file"
+        "missing providers file — write_default_config_files runs before the failing step"
     );
     assert!(
         reborn_home.join(".onboard-completed.json").exists(),
@@ -3202,9 +5611,8 @@ fn onboard_with_force_overwrites_existing_files_and_marker() {
     )
     .expect("write marker");
 
-    let output = Command::new(reborn_bin())
+    let output = reborn_command()
         .args(["onboard", "--force"])
-        .env_clear()
         .env("IRONCLAW_REBORN_HOME", &reborn_home)
         .output()
         .expect("ironclaw-reborn onboard --force should run");
@@ -3232,6 +5640,98 @@ fn onboard_with_force_overwrites_existing_files_and_marker() {
     assert!(providers_text.contains("\"id\": \"acme-openrouter\""));
     let marker: serde_json::Value = serde_json::from_str(&marker_text).expect("valid marker JSON");
     assert_eq!(marker["schema_version"], "ironclaw.reborn.onboarding/v1");
+}
+
+/// With no cached master-key dotfile and the OS keychain suppressed
+/// (`IRONCLAW_DISABLE_OS_KEYCHAIN=1`, this test's real-binary equivalent of
+/// a headless Linux / denied prompt), onboard must print the
+/// SECRETS_MASTER_KEY/dotfile fallback note and still exit 0 — never fail
+/// onboarding just because the keychain step provisioned nothing. A real
+/// successful keychain write needs an actual OS keychain and stays
+/// manual/E2E only.
+#[test]
+fn onboard_reports_suppressed_master_key_fallback_and_still_succeeds() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let reborn_home = temp.path().join("reborn-home");
+
+    let output = reborn_command()
+        .arg("onboard")
+        .env("IRONCLAW_REBORN_HOME", &reborn_home)
+        .output()
+        .expect("ironclaw-reborn onboard should run");
+
+    assert!(
+        output.status.success(),
+        "onboard must exit 0 even when the OS keychain is suppressed; stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("master_key: OS keychain unavailable; falling back to env/dotfile"),
+        "stdout must report the suppressed keychain outcome: {stdout}"
+    );
+    assert!(
+        stdout.contains("master_key_note:") && stdout.contains("SECRETS_MASTER_KEY"),
+        "stdout must print the SECRETS_MASTER_KEY/dotfile fallback note: {stdout}"
+    );
+    // Dotfile creation stays the resolver's own auto-gen-on-first-boot job,
+    // not onboarding's.
+    assert!(
+        !reborn_home
+            .join(".reborn-local-dev-secrets-master-key")
+            .exists(),
+        "onboard's suppressed keychain path must not write the dotfile itself"
+    );
+}
+
+/// A second `onboard` run over the same Reborn home must not attempt the
+/// keychain again once a cached dotfile exists (from a prior `serve`/onboard
+/// boot) — it's a no-op that reports `cached dotfile already present`.
+///
+/// The dotfile is seeded at the RUNTIME storage root
+/// (`<reborn_home>/local-dev/…`, `local_runtime_storage_root`'s subdir for
+/// `RebornProfile::LocalDev`) — the same root the real resolver
+/// (`resolve_local_dev_secret_master_key_with_env`) reads/writes and
+/// `serve` actually boots against — not the bare `reborn_home` root (PR
+/// #6174 item D: `provision_master_key` used to check the bare root, so its
+/// `exists()` check was always false and it re-attempted keychain
+/// provisioning on every rerun).
+#[test]
+fn onboard_master_key_provisioning_is_a_noop_once_a_dotfile_is_cached() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let reborn_home = temp.path().join("reborn-home");
+    let runtime_root = reborn_home.join("local-dev");
+    std::fs::create_dir_all(&runtime_root).expect("mkdir");
+    std::fs::write(
+        runtime_root.join(".reborn-local-dev-secrets-master-key"),
+        "a".repeat(64),
+    )
+    .expect("seed cached master-key dotfile");
+
+    let output = reborn_command()
+        .arg("onboard")
+        .env("IRONCLAW_REBORN_HOME", &reborn_home)
+        .output()
+        .expect("ironclaw-reborn onboard should run");
+
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("master_key: cached dotfile already present"),
+        "stdout must report the dotfile no-op: {stdout}"
+    );
+    let dotfile_text =
+        std::fs::read_to_string(runtime_root.join(".reborn-local-dev-secrets-master-key"))
+            .expect("read cached dotfile");
+    assert_eq!(
+        dotfile_text,
+        "a".repeat(64),
+        "an existing cached dotfile must not be rewritten by onboard"
+    );
 }
 
 #[test]
@@ -3659,9 +6159,8 @@ fn run_confirm_host_access_requires_home_or_userprofile() {
     let reborn_home = temp.path().join("reborn-home");
     std::fs::create_dir_all(&reborn_home).expect("reborn home");
 
-    let output = Command::new(reborn_bin())
+    let output = reborn_command()
         .args(["run", "--confirm-host-access", "-m", "ping"])
-        .env_clear()
         .env("IRONCLAW_REBORN_HOME", &reborn_home)
         .env("IRONCLAW_REBORN_PROFILE", "local-dev-yolo")
         .output()
@@ -3684,9 +6183,8 @@ fn run_confirm_host_access_uses_userprofile_when_home_is_absent() {
     std::fs::create_dir_all(&reborn_home).expect("reborn home");
     std::fs::create_dir_all(&host_home).expect("host home");
 
-    let output = Command::new(reborn_bin())
+    let output = reborn_command()
         .args(["run", "--confirm-host-access", "-m", "ping"])
-        .env_clear()
         .env("IRONCLAW_REBORN_HOME", &reborn_home)
         .env("IRONCLAW_REBORN_PROFILE", "local-dev-yolo")
         .env("USERPROFILE", &host_home)
@@ -4213,10 +6711,9 @@ fn local_yolo_command(temp: &tempfile::TempDir, args: &[&str]) -> Command {
     let home = temp.path().join("home");
     std::fs::create_dir_all(&reborn_home).expect("reborn home");
     std::fs::create_dir_all(&home).expect("home");
-    let mut command = Command::new(reborn_bin());
+    let mut command = reborn_command();
     command
         .args(args)
-        .env_clear()
         .env("IRONCLAW_REBORN_HOME", reborn_home)
         .env("IRONCLAW_REBORN_PROFILE", "local-dev-yolo")
         .env("HOME", home);

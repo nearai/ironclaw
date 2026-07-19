@@ -30,8 +30,9 @@ use crate::tool_args::parse_tool_call_args_allow_trailing_lossy;
 
 #[path = "nearai_tool_message_flattening.rs"]
 mod nearai_tool_message_flattening;
+use crate::session::SessionManager;
 use crate::tool_schema::{ToolSchemaPolicy, shape_tool_schema};
-use crate::{costs, session::SessionManager};
+use ironclaw_common::llm_costs as costs;
 
 /// Information about an available model from NEAR AI API.
 #[derive(Debug, Clone, Serialize, Deserialize)]

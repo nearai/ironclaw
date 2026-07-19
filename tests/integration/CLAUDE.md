@@ -137,7 +137,7 @@ So a two-turn thread where both turns raise and resolve a gate needs 4 entries
   `CommandExecutionRequest.command` and returns exit 0 / empty output without
   spawning any OS process. Injected by default when `with_builtin_http_tools()` is
   used; the `.with_live_shell()` opt-in skips injection so the real
-  `LocalHostProcessPort` executes instead.
+  `HostProcessPort` executes instead.
 - `http_matcher.rs` — `ScriptedHttpResponse`, the URL/method/capability-keyed
   HTTP scripting layer over `RecordingRuntimeHttpEgress` (install via
   `.with_keyed_http_responses([..])`).
@@ -257,7 +257,7 @@ spawning any OS process.
 - `assert_shell_ran_through_inert_port()` — at least one shell command was recorded by the inert port (proves no real OS process ran).
 
 **`.with_live_shell()`** — opt-in; skips recording-port injection so the real
-`LocalHostProcessPort` executes instead. Use only for hermetic commands
+`HostProcessPort` executes instead. Use only for hermetic commands
 (no network, no external state, reproducible on any machine).
 Implies `.with_builtin_http_tools()`.
 

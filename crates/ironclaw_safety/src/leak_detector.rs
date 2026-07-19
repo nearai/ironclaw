@@ -1070,7 +1070,7 @@ mod tests {
             let _result = detector.scan(&payload);
             let elapsed = start.elapsed();
             assert!(
-                elapsed.as_millis() < 100,
+                elapsed.as_millis() < crate::REDOS_SCAN_BUDGET_MS,
                 "openai_key pattern took {}ms on 100KB near-miss",
                 elapsed.as_millis()
             );
@@ -1088,7 +1088,7 @@ mod tests {
             let _result = detector.scan(&payload);
             let elapsed = start.elapsed();
             assert!(
-                elapsed.as_millis() < 100,
+                elapsed.as_millis() < crate::REDOS_SCAN_BUDGET_MS,
                 "high_entropy_hex pattern took {}ms on 100KB near-miss",
                 elapsed.as_millis()
             );
@@ -1106,7 +1106,7 @@ mod tests {
             let _result = detector.scan(&payload);
             let elapsed = start.elapsed();
             assert!(
-                elapsed.as_millis() < 100,
+                elapsed.as_millis() < crate::REDOS_SCAN_BUDGET_MS,
                 "bearer_token pattern took {}ms on 100KB near-miss",
                 elapsed.as_millis()
             );
@@ -1124,7 +1124,7 @@ mod tests {
             let _result = detector.scan(&payload);
             let elapsed = start.elapsed();
             assert!(
-                elapsed.as_millis() < 100,
+                elapsed.as_millis() < crate::REDOS_SCAN_BUDGET_MS,
                 "authorization pattern took {}ms on 100KB near-miss",
                 elapsed.as_millis()
             );
@@ -1142,7 +1142,7 @@ mod tests {
             let _result = detector.scan(&payload);
             let elapsed = start.elapsed();
             assert!(
-                elapsed.as_millis() < 100,
+                elapsed.as_millis() < crate::REDOS_SCAN_BUDGET_MS,
                 "anthropic_api_key pattern took {}ms on 100KB near-miss",
                 elapsed.as_millis()
             );
@@ -1160,7 +1160,7 @@ mod tests {
             let _result = detector.scan(&payload);
             let elapsed = start.elapsed();
             assert!(
-                elapsed.as_millis() < 100,
+                elapsed.as_millis() < crate::REDOS_SCAN_BUDGET_MS,
                 "aws_access_key pattern took {}ms on 100KB near-miss",
                 elapsed.as_millis()
             );
@@ -1178,7 +1178,7 @@ mod tests {
             let _result = detector.scan(&payload);
             let elapsed = start.elapsed();
             assert!(
-                elapsed.as_millis() < 100,
+                elapsed.as_millis() < crate::REDOS_SCAN_BUDGET_MS,
                 "github_token pattern took {}ms on 100KB near-miss",
                 elapsed.as_millis()
             );
@@ -1196,7 +1196,7 @@ mod tests {
             let _result = detector.scan(&payload);
             let elapsed = start.elapsed();
             assert!(
-                elapsed.as_millis() < 100,
+                elapsed.as_millis() < crate::REDOS_SCAN_BUDGET_MS,
                 "github_fine_grained_pat pattern took {}ms on 100KB near-miss",
                 elapsed.as_millis()
             );
@@ -1214,7 +1214,7 @@ mod tests {
             let _result = detector.scan(&payload);
             let elapsed = start.elapsed();
             assert!(
-                elapsed.as_millis() < 100,
+                elapsed.as_millis() < crate::REDOS_SCAN_BUDGET_MS,
                 "stripe_api_key pattern took {}ms on 100KB near-miss",
                 elapsed.as_millis()
             );
@@ -1232,7 +1232,7 @@ mod tests {
             let _result = detector.scan(&payload);
             let elapsed = start.elapsed();
             assert!(
-                elapsed.as_millis() < 100,
+                elapsed.as_millis() < crate::REDOS_SCAN_BUDGET_MS,
                 "nearai_session pattern took {}ms on 100KB near-miss",
                 elapsed.as_millis()
             );
@@ -1250,7 +1250,7 @@ mod tests {
             let _result = detector.scan(&payload);
             let elapsed = start.elapsed();
             assert!(
-                elapsed.as_millis() < 100,
+                elapsed.as_millis() < crate::REDOS_SCAN_BUDGET_MS,
                 "pem_private_key pattern took {}ms on 100KB near-miss",
                 elapsed.as_millis()
             );
@@ -1268,7 +1268,7 @@ mod tests {
             let _result = detector.scan(&payload);
             let elapsed = start.elapsed();
             assert!(
-                elapsed.as_millis() < 100,
+                elapsed.as_millis() < crate::REDOS_SCAN_BUDGET_MS,
                 "ssh_private_key pattern took {}ms on 100KB near-miss",
                 elapsed.as_millis()
             );
@@ -1286,7 +1286,7 @@ mod tests {
             let _result = detector.scan(&payload);
             let elapsed = start.elapsed();
             assert!(
-                elapsed.as_millis() < 100,
+                elapsed.as_millis() < crate::REDOS_SCAN_BUDGET_MS,
                 "google_api_key pattern took {}ms on 100KB near-miss",
                 elapsed.as_millis()
             );
@@ -1304,7 +1304,7 @@ mod tests {
             let _result = detector.scan(&payload);
             let elapsed = start.elapsed();
             assert!(
-                elapsed.as_millis() < 100,
+                elapsed.as_millis() < crate::REDOS_SCAN_BUDGET_MS,
                 "slack_token pattern took {}ms on 100KB near-miss",
                 elapsed.as_millis()
             );
@@ -1322,7 +1322,7 @@ mod tests {
             let _result = detector.scan(&payload);
             let elapsed = start.elapsed();
             assert!(
-                elapsed.as_millis() < 100,
+                elapsed.as_millis() < crate::REDOS_SCAN_BUDGET_MS,
                 "twilio_api_key pattern took {}ms on 100KB near-miss",
                 elapsed.as_millis()
             );
@@ -1340,7 +1340,7 @@ mod tests {
             let _result = detector.scan(&payload);
             let elapsed = start.elapsed();
             assert!(
-                elapsed.as_millis() < 100,
+                elapsed.as_millis() < crate::REDOS_SCAN_BUDGET_MS,
                 "sendgrid_api_key pattern took {}ms on 100KB near-miss",
                 elapsed.as_millis()
             );
@@ -1356,7 +1356,7 @@ mod tests {
             let result = detector.scan(&payload);
             let elapsed = start.elapsed();
             assert!(
-                elapsed.as_millis() < 100,
+                elapsed.as_millis() < crate::REDOS_SCAN_BUDGET_MS,
                 "full scan took {}ms on 100KB clean text",
                 elapsed.as_millis()
             );

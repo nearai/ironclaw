@@ -1,10 +1,10 @@
+// arch-exempt: large_file, mechanical LocalFilesystem->DiskFilesystem Bucket-2 rename (arch-simplification §4.4), no logic change, plan #6168
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use chrono::Utc;
 use ironclaw_authorization::TrustAwareCapabilityDispatchAuthorizer;
 use ironclaw_extensions::{ExtensionManifest, ExtensionPackage, ExtensionRegistry, ManifestSource};
-use ironclaw_filesystem::LocalFilesystem;
+use ironclaw_filesystem::DiskFilesystem;
 use ironclaw_host_api::{
     AgentId, CapabilityDescriptor, CapabilityGrant, CapabilityGrantId, CapabilityId, CapabilitySet,
     CorrelationId, CredentialStageError, Decision, EffectKind, ExecutionContext, ExtensionId,
@@ -28,8 +28,7 @@ use ironclaw_resources::{
 };
 use ironclaw_secrets::{InMemorySecretStore, SecretMaterial, SecretStore};
 use ironclaw_trust::{
-    AdminConfig, AdminEntry, AuthorityCeiling, EffectiveTrustClass, HostTrustAssignment,
-    HostTrustPolicy, TrustDecision, TrustProvenance,
+    AdminConfig, AdminEntry, HostTrustAssignment, HostTrustPolicy, TrustDecision,
 };
 use ironclaw_wasm::{
     RecordingWasmHostHttp, WasmHostError, WasmHttpResponse, WitToolExecution, WitToolHost,
@@ -2048,8 +2047,8 @@ fn registry_with_slack_user_package() -> ExtensionRegistry {
     registry
 }
 
-fn filesystem_with_slack_user_package() -> LocalFilesystem {
-    let mut filesystem = LocalFilesystem::new();
+fn filesystem_with_slack_user_package() -> DiskFilesystem {
+    let mut filesystem = DiskFilesystem::new();
     filesystem
         .mount_local(
             VirtualPath::new("/system/extensions").unwrap(),
@@ -2147,8 +2146,8 @@ fn registry_with_google_drive_package() -> ExtensionRegistry {
     registry_with_google_package("google-drive")
 }
 
-fn filesystem_with_github_package() -> LocalFilesystem {
-    let mut filesystem = LocalFilesystem::new();
+fn filesystem_with_github_package() -> DiskFilesystem {
+    let mut filesystem = DiskFilesystem::new();
     filesystem
         .mount_local(
             VirtualPath::new("/system/extensions").unwrap(),
@@ -2158,7 +2157,7 @@ fn filesystem_with_github_package() -> LocalFilesystem {
     filesystem
 }
 
-fn filesystem_with_google_drive_package() -> LocalFilesystem {
+fn filesystem_with_google_drive_package() -> DiskFilesystem {
     filesystem_with_google_package("google-drive")
 }
 
@@ -2180,8 +2179,8 @@ fn registry_with_google_package(package_id: &str) -> ExtensionRegistry {
     registry
 }
 
-fn filesystem_with_google_package(package_id: &str) -> LocalFilesystem {
-    let mut filesystem = LocalFilesystem::new();
+fn filesystem_with_google_package(package_id: &str) -> DiskFilesystem {
+    let mut filesystem = DiskFilesystem::new();
     filesystem
         .mount_local(
             VirtualPath::new("/system/extensions").unwrap(),
@@ -2298,13 +2297,7 @@ fn wasm_runtime_request_for_scope(
     input: serde_json::Value,
 ) -> RuntimeCapabilityRequest {
     let context = execution_context_with_dispatch_grant_for_scope(capability_id.clone(), scope);
-    RuntimeCapabilityRequest::new(
-        context,
-        capability_id,
-        wasm_http_estimate(),
-        input,
-        trust_decision_with_dispatch_authority(),
-    )
+    RuntimeCapabilityRequest::new(context, capability_id, wasm_http_estimate(), input)
 }
 
 fn execution_context_with_dispatch_grant_for_scope(
@@ -2312,6 +2305,7 @@ fn execution_context_with_dispatch_grant_for_scope(
     scope: ResourceScope,
 ) -> ExecutionContext {
     let context = ExecutionContext {
+        run_id: None,
         invocation_id: scope.invocation_id,
         correlation_id: CorrelationId::new(),
         process_id: None,
@@ -2357,23 +2351,6 @@ fn capability_grants(capability: CapabilityId) -> CapabilitySet {
         },
     });
     grants
-}
-
-fn trust_decision_with_dispatch_authority() -> TrustDecision {
-    TrustDecision {
-        effective_trust: EffectiveTrustClass::user_trusted(),
-        authority_ceiling: AuthorityCeiling {
-            allowed_effects: vec![
-                EffectKind::DispatchCapability,
-                EffectKind::Network,
-                EffectKind::UseSecret,
-                EffectKind::ExternalWrite,
-            ],
-            max_resource_ceiling: None,
-        },
-        provenance: TrustProvenance::Default,
-        evaluated_at: Utc::now(),
-    }
 }
 
 fn execute_bundled_github_wasm(

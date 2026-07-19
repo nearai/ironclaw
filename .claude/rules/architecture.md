@@ -201,11 +201,25 @@ exempt without a plan link is a violation, not an exception.
 - **One-off scripts under `scripts/`.** Architectural sprawl in a
   shell script or migration helper is a different conversation.
 
+## Direction: the consolidation plan for this debt
+
+The smells above are the *symptoms*; the accumulated debt (the ~14-type
+mirror-DTO capability path, single-impl `dyn` mediators kept for test doubles,
+per-domain `InMemory*Store` duplication, the `LocalDev*` deployment-mode type
+family) and the target structure are catalogued in
+`docs/reborn/2026-07-17-architecture-simplification-dto-dyn-local.md`. When a
+smell here traces to one of those, cite that doc's section as the "plan #NNNN"
+an `arch-exempt` must name, rather than opening a new one. The doc's §5 is the
+minimal-kernel/clean-interface destination; new code should move toward it, not
+add to the debt.
+
 ## References
 
 - Adjacent rules with the same shape (extract a single gateway,
   route everything through it): `tools.md`, `safety-and-sandbox.md`,
   `gateway-events.md`.
+- Type location/multiplicity (mirror DTOs, `host_api` ownership):
+  `type-placement.md` — the rule the capability-path collapse applies.
 - Annotation discipline reference: `gateway-events.md` —
   `// projection-exempt: <category>, <detail>` is the canonical
   shape this rule borrows.

@@ -58,7 +58,7 @@ impl ModelCostTable for ZeroCostTable {
 
 /// Static `(ModelProfileId → ModelCost)` lookup. Composition layers
 /// populate this from their model-route registry (provider model name →
-/// known per-token price via `ironclaw_llm::costs::model_cost`) so the
+/// known per-token price via `ironclaw_common::llm_costs::model_cost`) so the
 /// accountant can compute actual USD spend on every reconcile.
 ///
 /// Profiles missing from the table fall back to `None`, which the

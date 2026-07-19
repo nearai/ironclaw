@@ -38,8 +38,8 @@ async def test_reborn_legacy_core_shell_loads_and_navigates(reborn_v2_page):
         await reborn_v2_page.get_by_role("link", name=label).click()
         await expect(reborn_v2_page).to_have_url(re.compile(f".*{path}.*"), timeout=10000)
 
-    base_url = reborn_v2_page.url.split("/v2", 1)[0]
-    await reborn_v2_page.goto(f"{base_url}/v2/chat?token={REBORN_V2_AUTH_TOKEN}")
+    base_url = await reborn_v2_page.evaluate("location.origin")
+    await reborn_v2_page.goto(f"{base_url}/chat?token={REBORN_V2_AUTH_TOKEN}")
     await expect(reborn_v2_page.locator(SEL_V2["chat_composer"])).to_be_visible(
         timeout=15000
     )
@@ -61,7 +61,7 @@ async def test_reborn_legacy_core_auth_rejection(reborn_v2_server, reborn_v2_bro
     context = await reborn_v2_browser.new_context(viewport={"width": 1280, "height": 720})
     page = await context.new_page()
     try:
-        await page.goto(f"{reborn_v2_server}/v2/")
+        await page.goto(f"{reborn_v2_server}/")
         await expect(page.locator(SEL_V2["login_token"])).to_be_visible(timeout=15000)
     finally:
         await context.close()
@@ -142,7 +142,7 @@ async def test_reborn_legacy_session_switch_does_not_restore_previous_user_draft
     await page.route("**/auth/logout", handle_logout)
 
     try:
-        await page.goto(f"{reborn_v2_server}/v2/chat?token=token-user-a")
+        await page.goto(f"{reborn_v2_server}/chat?token=token-user-a")
         composer = page.locator(SEL_V2["chat_composer"])
         await expect(composer).to_be_visible(timeout=15000)
         await composer.fill("user A private draft")

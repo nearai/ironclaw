@@ -54,7 +54,7 @@ jobs:
         run: |
           CHANGED_FILES="$(git diff --name-only "$BASE_SHA"..."$HEAD_SHA")"
 
-          if printf '%s\n' "$CHANGED_FILES" | grep -Eq '^(src/|crates/|channels-src/|tools-src/|tests/|migrations/|Cargo\.toml$|Cargo\.lock$|Dockerfile|build\.rs$|\.gitignore$|scripts/ci/|\.githooks/|scripts/check_no_panics\.py$|scripts/check_gateway_boundaries\.py$|\.github/workflows/code_style\.yml$)'; then
+          if printf '%s\n' "$CHANGED_FILES" | grep -Eq '^(src/|crates/|channels-src/|tools-src/|tests/|migrations/|Cargo\.toml$|Cargo\.lock$|Dockerfile|build\.rs$|\.gitignore$|scripts/ci/|\.githooks/|scripts/check_no_panics\.py$|scripts/check_gateway_boundaries\.py$|\.github/scripts/(pr-labeler|test-pr-labeler)\.sh$|\.github/workflows/code_style\.yml$)'; then
             echo "has_code=true" >> "$GITHUB_OUTPUT"
           else
             echo "has_code=false" >> "$GITHUB_OUTPUT"
@@ -149,18 +149,34 @@ jobs:
         with:
           node-version: "22"
           cache: "pnpm"
-          cache-dependency-path: crates/ironclaw_webui_v2/frontend/pnpm-lock.yaml
+          cache-dependency-path: crates/ironclaw_webui/frontend/pnpm-lock.yaml
       # `no-undef` over WebUI v2 JavaScript catches production modules that reference a
       # symbol they never imported. The VM-based component suites stub
       # every collaborator through a `vm` context, so that class of bug (e.g. an
       # htm `${Component}` used without an import) passes the unit tests and only
       # surfaces at runtime — this is the gate the eval harness cannot provide.
       - name: Install WebUI v2 frontend deps
-        working-directory: crates/ironclaw_webui_v2/frontend
+        working-directory: crates/ironclaw_webui/frontend
         run: pnpm install --frozen-lockfile
       - name: Lint WebUI v2 JS
-        working-directory: crates/ironclaw_webui_v2/frontend
+        working-directory: crates/ironclaw_webui/frontend
         run: pnpm lint
+      # The full vitest suite (chat, extensions, telegram/slack panels, gate
+      # routing, channels tab, configure modal — the vm-tsx harness) previously
+      # never ran in CI: only the settings-scoped subset was wired elsewhere,
+      # so whole component suites could rot silently (the PR #5362 gap). The
+      # vm-tsx setup file is declared in vite.config.ts setupFiles; no extra
+      # CI configuration beyond node + pnpm is needed.
+      - name: WebUI v2 frontend tests (vitest)
+        working-directory: crates/ironclaw_webui/frontend
+        run: pnpm test
+      # The SPA build is embedded into the serve binary at compile time through
+      # Cargo's OUT_DIR (see ironclaw_webui/build.rs), so a frontend that lints
+      # and tests but does not build still breaks downstream binary builds.
+      # Keep the build in the same job so the three gates travel together.
+      - name: Build WebUI v2 frontend
+        working-directory: crates/ironclaw_webui/frontend
+        run: pnpm build
 
   deny-check:
     name: cargo-deny
@@ -227,6 +243,9 @@ jobs:
         run: |
           scripts/ci/test-check-include-str-paths.sh
           scripts/ci/test-check-hermetic-env.sh
+          scripts/ci/test-classify-test-scope.sh
+          scripts/ci/test-package-feature-flags.sh
+          bash .github/scripts/test-pr-labeler.sh
 
   clippy:
     name: Clippy (${{ matrix.name }})
@@ -255,14 +274,14 @@ jobs:
         with:
           node-version: "22"
           cache: "pnpm"
-          cache-dependency-path: crates/ironclaw_webui_v2/frontend/pnpm-lock.yaml
+          cache-dependency-path: crates/ironclaw_webui/frontend/pnpm-lock.yaml
       - name: Enable pnpm
         if: contains(matrix.flags, '--all-features')
         run: corepack enable pnpm
       - name: Install WebUI frontend dependencies
         if: contains(matrix.flags, '--all-features')
         run: |
-          cd crates/ironclaw_webui_v2/frontend
+          cd crates/ironclaw_webui/frontend
           pnpm install --frozen-lockfile
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
@@ -311,14 +330,14 @@ jobs:
         with:
           node-version: "22"
           cache: "pnpm"
-          cache-dependency-path: crates/ironclaw_webui_v2/frontend/pnpm-lock.yaml
+          cache-dependency-path: crates/ironclaw_webui/frontend/pnpm-lock.yaml
       - name: Enable pnpm
         if: contains(matrix.flags, '--all-features')
         run: corepack enable pnpm
       - name: Install WebUI frontend dependencies
         if: contains(matrix.flags, '--all-features')
         run: |
-          cd crates/ironclaw_webui_v2/frontend
+          cd crates/ironclaw_webui/frontend
           pnpm install --frozen-lockfile
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
@@ -408,6 +427,30 @@ jobs:
       - name: Self-test the boundary script
         run: python3 scripts/check_gateway_boundaries.py test
 
+  composition-budget:
+    name: Composition mass ratchet
+    needs: changes
+    if: needs.changes.outputs.has_code == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          persist-credentials: false
+      # Gate: ironclaw_reborn_composition's share of production crate code must
+      # not grow past the committed ceiling (scripts/ci/composition-budget.toml).
+      # Pure bash over the working tree — no compile, seconds to run.
+      - name: Check composition mass budget
+        run: bash scripts/ci/check-composition-budget.sh
+      # Guardrails are code — self-test the gate whenever it or its budget changes.
+      - name: Self-test the composition budget gate
+        run: bash scripts/ci/test-check-composition-budget.sh
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: "3.12"
+      - name: Unit-test the dev-metrics tool
+        run: python3 scripts/test_dev_metrics.py
+
   code-style:
     name: Code Style (fmt + clippy)
     runs-on: ubuntu-latest
@@ -425,6 +468,7 @@ jobs:
       - reborn-cli-smoke
       - no-panics
       - gateway-boundaries
+      - composition-budget
       - webui-v2-js-lint
     steps:
       - name: Checkout repository
@@ -451,6 +495,7 @@ jobs:
             "tracked-ignored-files=${{ needs.tracked-ignored-files.result }}" \
             "static-checks=${{ needs.static-checks.result }}" \
             "gateway-boundaries=${{ needs.gateway-boundaries.result }}" \
+            "composition-budget=${{ needs.composition-budget.result }}" \
             "webui-v2-js-lint=${{ needs.webui-v2-js-lint.result }}"; do
             name="${job_result%%=*}"
             result="${job_result##*=}"

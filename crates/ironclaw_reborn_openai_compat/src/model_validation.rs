@@ -12,27 +12,6 @@ use crate::OpenAiCompatHttpError;
 /// Maximum accepted `model` string length, in bytes.
 pub(crate) const MAX_MODEL_NAME_BYTES: usize = 256;
 
-/// The OpenAI-compatible alias every client may send to mean "use the server's
-/// active/default model" rather than naming a concrete one. The models listing
-/// advertises it, so it is not a routable model id.
-const DEFAULT_MODEL_ALIAS: &str = "default";
-
-/// Map a validated client `model` string to an optional caller-requested model
-/// *hint* for turn routing.
-///
-/// Returns `None` for the [`DEFAULT_MODEL_ALIAS`] sentinel (and defensively for
-/// empty), so a client asking for the server default does not pin an advisory
-/// route to the non-routable `"default"` id — which the model gateway rejects as
-/// non-concrete and which would fail route resolution on routed hosts. A
-/// concrete model name is forwarded as `Some`.
-pub(crate) fn requested_model_hint(model: &str) -> Option<String> {
-    let trimmed = model.trim();
-    if trimmed.is_empty() || trimmed.eq_ignore_ascii_case(DEFAULT_MODEL_ALIAS) {
-        return None;
-    }
-    Some(trimmed.to_string())
-}
-
 /// Validate the client-supplied `model` string before it is carried as a
 /// projection/policy hint.
 ///
@@ -102,23 +81,5 @@ mod tests {
     fn accepts_model_at_byte_cap() {
         let at_cap = "m".repeat(MAX_MODEL_NAME_BYTES);
         assert!(validate_model_name(&at_cap).is_ok());
-    }
-
-    #[test]
-    fn requested_model_hint_drops_default_sentinel() {
-        assert_eq!(requested_model_hint("default"), None);
-        assert_eq!(requested_model_hint("DEFAULT"), None);
-        assert_eq!(requested_model_hint("Default"), None);
-        assert_eq!(requested_model_hint(""), None);
-        assert_eq!(requested_model_hint("   "), None);
-    }
-
-    #[test]
-    fn requested_model_hint_forwards_concrete_model() {
-        assert_eq!(requested_model_hint("gpt-4o"), Some("gpt-4o".to_string()));
-        assert_eq!(
-            requested_model_hint("anthropic/claude-opus-4"),
-            Some("anthropic/claude-opus-4".to_string())
-        );
     }
 }

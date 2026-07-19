@@ -421,14 +421,13 @@ async fn webui_event_stream_surfaces_auth_challenge_lookup_failure() {
 #[tokio::test]
 async fn webui_event_stream_creates_google_oauth_prompt_for_runtime_credential_gate() {
     use crate::OAuthClientConfig;
-    use crate::product_auth::api::auth::{
-        RebornAuthContinuationDispatcher, RebornProductAuthServices,
-    };
+    use crate::product_auth::api::auth::RebornProductAuthServices;
     use crate::product_auth::oauth::oauth_gate::{
         GoogleOAuthGateProvider, OAuthGateFlowDriver, OAuthGateProviderRegistry,
     };
     use async_trait::async_trait;
     use ironclaw_auth::{AuthContinuationEvent, InMemoryAuthProductServices};
+    use ironclaw_channel_host::auth_continuation::RebornAuthContinuationDispatcher;
     use ironclaw_secrets::InMemorySecretStore;
 
     #[derive(Debug)]
@@ -545,9 +544,7 @@ async fn webui_event_stream_creates_google_oauth_prompt_for_runtime_credential_g
 
 #[tokio::test]
 async fn webui_event_stream_creates_notion_dcr_oauth_prompt_for_runtime_credential_gate() {
-    use crate::product_auth::api::auth::{
-        RebornAuthContinuationDispatcher, RebornProductAuthServices,
-    };
+    use crate::product_auth::api::auth::RebornProductAuthServices;
     use crate::product_auth::oauth::oauth_dcr::{
         OAuthDcrProvider, OAuthDcrProviderConfig, OAuthDcrProviderRegistry,
     };
@@ -556,6 +553,7 @@ async fn webui_event_stream_creates_notion_dcr_oauth_prompt_for_runtime_credenti
         AuthContinuationEvent, CredentialAccountLabel, InMemoryAuthProductServices,
     };
     use ironclaw_capabilities::{CapabilityObligationHandler, CapabilityObligationRequest};
+    use ironclaw_channel_host::auth_continuation::RebornAuthContinuationDispatcher;
     use ironclaw_secrets::InMemorySecretStore;
 
     #[derive(Debug)]

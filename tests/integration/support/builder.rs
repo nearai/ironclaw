@@ -25,7 +25,6 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
-use ironclaw_extensions::ExtensionInstallationStore;
 use ironclaw_filesystem::{
     CompositeRootFilesystem, InMemoryBackend, LibSqlRootFilesystem, ScopedFilesystem,
 };
@@ -309,7 +308,7 @@ impl RebornIntegrationHarnessBuilder {
     }
 
     /// `write_file`/`read_file` tools (same set as `file_tools()`), backed by
-    /// the REAL `LocalDevCapabilityIo` (durable tool-result projection seam,
+    /// the REAL `StagedCapabilityIo` (durable tool-result projection seam,
     /// issue #5838) instead of the ephemeral `ProductLiveCapabilityIo` test
     /// double, so a large `read_file` output is persisted durably and
     /// `result_read` can page through it.
@@ -319,7 +318,7 @@ impl RebornIntegrationHarnessBuilder {
     }
 
     /// Harness-port-seam Change 4: same as `.with_builtin_http_tools()` plus a
-    /// confirmed `/host` mount grant, so `wrap_local_dev_surface_disclosure`'s
+    /// confirmed `/host` mount grant, so `wrap_surface_disclosure`'s
     /// scoped-roots note is observable on `read_file`'s captured tool
     /// definition (the layer is disabled without a confirmed host-home mount).
     pub fn with_confirmed_host_mount(mut self) -> Self {
@@ -1007,32 +1006,10 @@ impl RebornIntegrationHarness {
         &self,
         extension_id: &str,
     ) -> HarnessResult<()> {
-        let harness = match &self._shared.capability {
-            GroupCapability::HostRuntime(arc) => arc,
-            GroupCapability::Recording => {
-                return Err("no host-runtime capability backend for durable reopen".into());
-            }
-        };
-        let store =
-            ironclaw_reborn_composition::test_support::open_local_dev_extension_installation_store_for_test(
-                &harness.storage_root_for_test(),
-            )
-            .await?;
-        let installations = store.list_installations().await?;
-        if installations
-            .iter()
-            .any(|installation| installation.extension_id().as_str() == extension_id)
-        {
-            return Ok(());
-        }
-        let seen: Vec<&str> = installations
-            .iter()
-            .map(|installation| installation.extension_id().as_str())
-            .collect();
-        Err(
-            format!("extension {extension_id:?} not found after independent reopen; saw {seen:?}")
-                .into(),
-        )
+        self._shared
+            .capability
+            .assert_extension_install_persists_after_reopen(extension_id)
+            .await
     }
 
     /// Assert the named capability was invoked through the real capability path
@@ -1576,6 +1553,33 @@ impl RebornIntegrationHarness {
         harness
             .seed_credential_account_with_material(&scope, provider, label, provider_scopes)
             .await
+    }
+
+    /// Flip every non-revoked credential account for `provider` under this
+    /// group's capability dispatch scope to `Revoked` — modeling an external
+    /// revocation of the user's grant (#5878 shape). Same scoping as
+    /// [`Self::seed_capability_credential_account`]; errors if nothing was
+    /// revoked so a vacuous revoke can't silently pass a re-auth assertion.
+    pub async fn revoke_capability_credential_accounts(&self, provider: &str) -> HarnessResult<()> {
+        let harness = match &self._shared.capability {
+            GroupCapability::HostRuntime(arc) => arc,
+            GroupCapability::Recording => {
+                return Err(
+                    "no host-runtime capability backend to revoke credential accounts".into(),
+                );
+            }
+        };
+        let scope = self.run_resource_scope_for_user(harness.capability_user_id().clone());
+        let revoked = harness
+            .revoke_credential_accounts_for_provider(&scope, provider)
+            .await?;
+        if revoked == 0 {
+            return Err(format!(
+                "no non-revoked credential account for provider {provider:?} was found to revoke"
+            )
+            .into());
+        }
+        Ok(())
     }
 
     /// This thread's run `(tenant, agent, project)` scope with `user_id` as

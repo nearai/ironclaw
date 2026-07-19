@@ -10,7 +10,25 @@ use serde::{Deserialize, Serialize};
 // ASCII letters, digits, `_`, `-`, or `.`.
 const MAX_TOOL_RESULT_REF_BYTES: usize = 256;
 const MAX_TOOL_RESULT_SUMMARY_BYTES: usize = 512;
-const MAX_MODEL_OBSERVATION_BYTES: usize = 4096;
+/// Whole-envelope cap for a `model_observation` JSON blob (preview text plus
+/// surrounding schema fields). Derived as 2x
+/// `crate::contract::TOOL_RESULT_RECORD_READ_MAX_BYTES` (the largest raw
+/// preview/chunk this crate will ever embed): a preview of ordinary tool
+/// output (text/JSON) grows only slightly under JSON-string escaping, so 2x
+/// leaves ample room for the preview plus the fixed envelope fields (summary,
+/// result_ref, artifacts). A pathological all-`"`/all-control preview that
+/// would exceed the cap degrades gracefully to `safe_summary` rather than
+/// corrupting the transcript. Keep this DERIVED from the preview cap, never a
+/// second independent literal -- when the two drift apart (an oversized
+/// preview that can't fit the envelope) the observation is dropped to a bare
+/// stub on replay and the model loses the content, exactly the retention
+/// failure behind the #5902 regression.
+const MAX_MODEL_OBSERVATION_BYTES: usize = crate::contract::TOOL_RESULT_RECORD_READ_MAX_BYTES * 2;
+// Keep the observation envelope large enough for the largest result-read
+// preview. This is compile-time because both bounds are compile-time contract
+// constants; a drift must fail the build rather than rely on a runtime test.
+const _: [(); 1] = [(); (MAX_MODEL_OBSERVATION_BYTES
+    >= crate::contract::TOOL_RESULT_RECORD_READ_MAX_BYTES) as usize];
 const MODEL_VISIBLE_TOOL_OBSERVATION_SCHEMA_VERSION: u64 = 1;
 const MODEL_OBSERVATION_SUMMARY_MAX_BYTES: usize = 512;
 const MODEL_OBSERVATION_ARTIFACTS_MAX: usize = 16;
@@ -465,7 +483,7 @@ fn validate_tool_result_safe_summary(value: String) -> Result<String, String> {
 
     let lower = value.to_ascii_lowercase();
     for forbidden in SENSITIVE_SUMMARY_MARKERS {
-        if lower.contains(forbidden) {
+        if contains_marker_at_word_boundary(&lower, forbidden) {
             return Err(format!(
                 "tool result summary must not contain sensitive marker `{forbidden}`"
             ));
@@ -539,14 +557,14 @@ fn validate_model_observation_text(value: &str) -> Result<(), String> {
     }
     let lower = value.to_ascii_lowercase();
     for forbidden in SENSITIVE_OBSERVATION_MARKERS {
-        if lower.contains(forbidden) {
+        if contains_marker_at_word_boundary(&lower, forbidden) {
             return Err(format!(
                 "model observation must not contain sensitive marker `{forbidden}`"
             ));
         }
     }
     for forbidden in PROMPT_INJECTION_OBSERVATION_MARKERS {
-        if lower.contains(forbidden) {
+        if contains_marker_at_word_boundary(&lower, forbidden) {
             return Err(format!(
                 "model observation must not contain instruction marker `{forbidden}`"
             ));
@@ -559,6 +577,35 @@ fn validate_model_observation_text(value: &str) -> Result<(), String> {
         return Err("model observation must not contain API-key-like tokens".to_string());
     }
     Ok(())
+}
+
+/// True if `marker` occurs in `haystack` (already lowercased) as a standalone
+/// token rather than embedded inside a larger alphanumeric word. Prevents
+/// false positives like the marker `secret` matching the ordinary word
+/// `secretary` (e.g. "Secretary of the Treasury"), which would otherwise scrub
+/// legitimate tool output from the replayed transcript and force the model to
+/// re-fetch it every turn. Markers that begin/end with a non-alphanumeric
+/// delimiter (e.g. `bearer `, `authorization:`) already carry their own
+/// boundary and keep matching exactly as before.
+fn contains_marker_at_word_boundary(haystack: &str, marker: &str) -> bool {
+    if marker.is_empty() {
+        return false;
+    }
+    let starts_alnum = marker.starts_with(|c: char| c.is_ascii_alphanumeric());
+    let ends_alnum = marker.ends_with(|c: char| c.is_ascii_alphanumeric());
+    for (start, _) in haystack.match_indices(marker) {
+        let end = start + marker.len();
+        let before_ok = !starts_alnum
+            || start == 0
+            || !haystack[..start].ends_with(|c: char| c.is_ascii_alphanumeric());
+        let after_ok = !ends_alnum
+            || end >= haystack.len()
+            || !haystack[end..].starts_with(|c: char| c.is_ascii_alphanumeric());
+        if before_ok && after_ok {
+            return true;
+        }
+    }
+    false
 }
 
 fn validate_model_visible_tool_observation_schema(value: &serde_json::Value) -> Result<(), String> {
@@ -1012,6 +1059,169 @@ mod tests {
     };
 
     #[test]
+    fn sensitive_markers_match_on_word_boundary_not_substring() {
+        use super::{contains_marker_at_word_boundary, validate_model_observation_text};
+        // Regression (#5902): a tool result containing "Secretary of the
+        // Treasury" must NOT be scrubbed by the `secret` marker — that false
+        // positive evicted document reads from the replayed transcript and
+        // sent the model into a re-fetch loop.
+        assert!(!contains_marker_at_word_boundary(
+            "secretary of the treasury",
+            "secret"
+        ));
+        // Continuing past a non-match must stay on a UTF-8 character boundary,
+        // including if a future marker itself begins with a multibyte character.
+        assert!(contains_marker_at_word_boundary("éxy éx", "éx"));
+        assert!(validate_model_observation_text("Report by the Secretary of the Treasury").is_ok());
+        // Standalone credential markers must still be rejected.
+        assert!(contains_marker_at_word_boundary(
+            "here is the client secret value",
+            "secret"
+        ));
+        assert!(validate_model_observation_text("the api secret is xyz").is_err());
+        // Delimiter-bounded markers keep matching as before.
+        assert!(contains_marker_at_word_boundary(
+            "authorization: bearer abc",
+            "bearer "
+        ));
+    }
+
+    /// Regression (#5902): a tool-result preview of ordinary document content
+    /// — here containing "Secretary of the Treasury", which used to trip the
+    /// `secret` substring marker — must be RETAINED on replay, not scrubbed to
+    /// a bare safe-summary stub. Losing it every turn is what evicted document
+    /// reads from context and drove the re-fetch loop.
+    #[test]
+    fn document_content_preview_is_retained_on_replay_not_scrubbed() {
+        // ~8 KB of Treasury-bulletin-like text — well past the old 4 KB
+        // envelope cap, so this also guards the cap-sizing regression.
+        let preview =
+            "Table FD-1. Federal Debt reported by the Secretary of the Treasury. ".repeat(120);
+        assert!(
+            preview.len() > 4096,
+            "fixture must exceed the pre-fix 4 KB envelope cap"
+        );
+        let observation = serde_json::json!({
+            "schema_version": 1,
+            "status": "success",
+            "summary": "Tool completed; preview truncated, use result_read for more output.",
+            "detail": {
+                "kind": "result_reference",
+                "result_ref": "result:treasury-doc",
+                "byte_len": preview.len(),
+                "preview": preview,
+                "total_bytes": preview.len() * 4,
+                "next_offset": preview.len(),
+            },
+            "trust": "untrusted_tool_output"
+        });
+        let envelope = ToolResultReferenceEnvelope::new_best_effort_model_observation(
+            "result:treasury-doc",
+            ToolResultSafeSummary::new("read of treasury_bulletin").expect("summary"),
+            Some(observation),
+        )
+        .expect("envelope construction is fail-open");
+
+        assert!(
+            envelope.model_observation.is_some(),
+            "document content must be retained, not dropped to a stub"
+        );
+        let replayed = envelope.model_visible_content_or_safe_summary();
+        assert!(
+            replayed.contains("Secretary of the Treasury"),
+            "replayed observation must carry the document content, not the safe-summary stub"
+        );
+    }
+
+    /// A preview filled to the full preview cap must still fit the envelope and
+    /// survive replay — the envelope has to have room for a max-size preview
+    /// plus the surrounding schema fields, or the largest reads silently stub.
+    #[test]
+    fn full_cap_preview_survives_replay() {
+        let cap = crate::contract::TOOL_RESULT_RECORD_READ_MAX_BYTES;
+        let unit = "Bureau of the Fiscal Service data table row entry value ";
+        let mut preview = unit.repeat(cap / unit.len() + 1);
+        preview.truncate(cap);
+        if let Some(idx) = preview.rfind(' ') {
+            preview.truncate(idx); // avoid a partial trailing token
+        }
+        let observation = serde_json::json!({
+            "schema_version": 1,
+            "status": "success",
+            "summary": "Tool completed; preview contains the full result.",
+            "detail": {
+                "kind": "result_reference",
+                "result_ref": "result:full-cap-doc",
+                "byte_len": preview.len(),
+                "preview": preview,
+            },
+            "trust": "untrusted_tool_output"
+        });
+        let envelope = ToolResultReferenceEnvelope::new_best_effort_model_observation(
+            "result:full-cap-doc",
+            ToolResultSafeSummary::new("full read").expect("summary"),
+            Some(observation),
+        )
+        .expect("envelope construction is fail-open");
+
+        assert!(
+            envelope.model_observation.is_some(),
+            "a full-cap preview must fit the envelope and be retained on replay"
+        );
+    }
+
+    /// Airtight guard for the paged-`result_read` retention path (the "issues
+    /// #1/#2" a caller might frame separately): a `result_read` CHUNK
+    /// observation — same shape `result_read_observation` emits, a
+    /// ResultReference whose `preview` is a paged content chunk plus a
+    /// `next_offset` — must ALSO survive replay when it contains marker-like
+    /// document words ("Secretary of the Treasury"). Before the word-boundary
+    /// fix this chunk was scrubbed to a stub exactly like the first-look
+    /// preview, so paged content "vanished" and the model re-paged/re-fetched
+    /// in a loop. Chunk observations flow through the same
+    /// `normalized_model_observation` scrub as first-look previews, so fixing
+    /// the matcher fixes both — this pins that they stay coupled.
+    #[test]
+    fn result_read_chunk_observation_with_document_content_is_retained() {
+        let chunk = "Ownership of Federal Securities. Secretary of the Treasury. ".repeat(60);
+        let observation = serde_json::json!({
+            "schema_version": 1,
+            "status": "success",
+            "summary": "Requested tool-result chunk returned.",
+            "detail": {
+                "kind": "result_reference",
+                "result_ref": "result:paged-chunk",
+                "byte_len": chunk.len(),
+                "preview": chunk,
+                "total_bytes": chunk.len() * 3,
+                "next_offset": chunk.len() * 2,
+            },
+            "artifacts": [{
+                "artifact_ref": "result:paged-chunk",
+                "summary": "Stored result-read response"
+            }],
+            "trust": "untrusted_tool_output"
+        });
+        let envelope = ToolResultReferenceEnvelope::new_best_effort_model_observation(
+            "result:paged-chunk",
+            ToolResultSafeSummary::new("Requested tool-result chunk returned.").expect("summary"),
+            Some(observation),
+        )
+        .expect("envelope construction is fail-open");
+
+        assert!(
+            envelope.model_observation.is_some(),
+            "a result_read chunk of document content must be retained, not evicted to a stub"
+        );
+        assert!(
+            envelope
+                .model_visible_content_or_safe_summary()
+                .contains("Secretary of the Treasury"),
+            "the paged chunk's content must survive replay so the model does not re-fetch it"
+        );
+    }
+
+    #[test]
     fn collapse_to_repeated_error_marker_produces_valid_observation() {
         let error_obs = serde_json::json!({
             "schema_version": 1,
@@ -1152,7 +1362,12 @@ mod tests {
 
     #[test]
     fn safe_summary_still_rejects_credentials_and_delimiters() {
+        assert!(
+            ToolResultSafeSummary::new("Secretary of the Treasury").is_ok(),
+            "ordinary words containing a marker prefix must remain valid summaries"
+        );
         for rejected in [
+            "secret",
             "leaked sk-LIVEsecretvalue token",
             "authorization header bearer abc123",
             "the api key was exposed",

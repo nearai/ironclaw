@@ -1,5 +1,5 @@
 //! Harness-port-seam P1 Change 4: RED-first integration-tier pin for
-//! `wrap_local_dev_surface_disclosure` — one of the production port layers
+//! `wrap_surface_disclosure` — one of the production port layers
 //! the OLD harness (`apply_synthetic_capability_wrappers` hand-rebuilding
 //! three of the seven production wrap layers) never applied at all, so it was
 //! invisible to every integration test before this seam PR.
@@ -7,10 +7,10 @@
 //! Ground truth (verified against
 //! `crates/ironclaw_reborn_composition/src/runtime/local_dev/surface_disclosure.rs`,
 //! NOT the plan doc's "must deny rather than execute" framing, which does not
-//! match the code): `wrap_local_dev_surface_disclosure` never hides or denies
+//! match the code): `wrap_surface_disclosure` never hides or denies
 //! a capability. It is a description/schema ANNOTATION layer, disabled unless
 //! the workspace mount view carries a confirmed `/host` alias
-//! (`LocalDevSurfaceDisclosure::enabled`). When enabled, it appends a
+//! (`HostSurfaceDisclosure::enabled`). When enabled, it appends a
 //! "confirmed scoped roots" note to the `description`/`parameters` of the
 //! local-dev scoped-path capabilities (`read_file`, `write_file`, `list_dir`,
 //! `glob`, `grep`, `apply_patch`) and a local-host-shell note to
@@ -42,7 +42,7 @@ const FLAT_READ_FILE_TOOL_NAME: &str = "builtin__read_file";
 /// Flat wire name for `builtin.shell` (same `.` -> `__` encoding).
 const FLAT_SHELL_TOOL_NAME: &str = "builtin__shell";
 
-/// Substring of `LocalDevSurfaceDisclosure`'s `confirmed_host_roots_note`
+/// Substring of `HostSurfaceDisclosure`'s `confirmed_host_roots_note`
 /// output stable across `local_dev_mounts.rs` mount-alias wording changes.
 const SCOPED_ROOTS_NOTE_NEEDLE: &str = "Available scoped roots";
 
@@ -57,7 +57,7 @@ const SHELL_LOCAL_HOST_NOTE_NEEDLE: &str = "Runs on the local host with local-de
 /// `.with_confirmed_host_mount()` backend) must surface the scoped-roots note
 /// on `read_file`'s captured tool definition. Before the harness-port-seam
 /// switch, `create_recording_capability_port` never called
-/// `wrap_local_dev_surface_disclosure` at all, so this assertion fails for
+/// `wrap_surface_disclosure` at all, so this assertion fails for
 /// the right reason on the OLD harness (RED) regardless of the mount grant —
 /// the switch (not just the new mount backend) is what turns it GREEN.
 #[tokio::test]
@@ -78,7 +78,7 @@ async fn confirmed_host_mount_adds_scoped_roots_note_to_read_file() {
 
 /// Negative control: the plain `BuiltinHttpTools` backend's workspace mounts
 /// carry only `/workspace` (no confirmed `/host` alias), so
-/// `LocalDevSurfaceDisclosure::enabled()` is false and the note never
+/// `HostSurfaceDisclosure::enabled()` is false and the note never
 /// appears — proves the positive assertion above discriminates on the mount
 /// grant, not on `read_file` always carrying the note.
 #[tokio::test]
@@ -101,9 +101,9 @@ async fn workspace_only_mount_excludes_scoped_roots_note() {
 /// (`capability_id.as_str() == SHELL_CAPABILITY_ID`, checked before the
 /// scoped-path capability match): it appends `LOCAL_DEV_LOCAL_HOST_SHELL_NOTE`
 /// unconditionally rather than gating on `scoped_roots_note`. But the whole
-/// port is still gated on `LocalDevSurfaceDisclosure::enabled()`
+/// port is still gated on `HostSurfaceDisclosure::enabled()`
 /// (`scoped_roots_note.is_some()`, i.e. a confirmed `/host` mount) in
-/// `wrap_local_dev_surface_disclosure` — without a confirmed host mount the
+/// `wrap_surface_disclosure` — without a confirmed host mount the
 /// wrapper is skipped entirely and `builtin.shell` never gets annotated. This
 /// pins the enabled case; the negative control below pins the disabled case.
 #[tokio::test]
@@ -123,7 +123,7 @@ async fn confirmed_host_mount_adds_local_host_shell_note_to_shell() {
 }
 
 /// Negative control: without a confirmed `/host` mount `enabled()` is false,
-/// so `wrap_local_dev_surface_disclosure` returns the inner port unwrapped
+/// so `wrap_surface_disclosure` returns the inner port unwrapped
 /// and `builtin.shell`'s description is never touched.
 #[tokio::test]
 async fn workspace_only_mount_excludes_local_host_shell_note() {
@@ -143,9 +143,9 @@ async fn workspace_only_mount_excludes_local_host_shell_note() {
 
 /// Change 4's second pin: the input-ref/result-ref round trip crosses ONE
 /// staged store. A full `builtin.time` dispatch (register -> invoke ->
-/// completed) only succeeds if the SAME shared `LocalDevCapabilityIo`
+/// completed) only succeeds if the SAME shared `StagedCapabilityIo`
 /// resolves the input ref it staged and accepts the result write under a
-/// correlated ref — the invariant `RefreshingLocalDevCapabilityPortTestParts`
+/// correlated ref — the invariant `RefreshingCapabilityPortTestParts`
 /// documents ("input_resolver AND result_writer must be two `Arc::clone`s of
 /// the SAME shared io object"). A harness wiring two independently-sourced io
 /// objects would fail this dispatch outright (unresolvable input ref), not

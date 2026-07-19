@@ -40,6 +40,10 @@ use crate::{LlmKeyStore, ProviderRepo, RebornProviderAdmin};
 
 const NEARAI_LOGIN_STATE_TTL: Duration = Duration::from_secs(15 * 60);
 const CODEX_LOGIN_ATTEMPT_TTL: Duration = Duration::from_secs(15 * 60);
+/// Bounds memory if callers mint NEAR AI login redirects but never complete
+/// them; mirrors `LoginTicketStore::MAX_TICKETS` in
+/// `ironclaw_webui::cli_token_login`.
+const MAX_NEARAI_LOGIN_STATES: usize = 1024;
 
 /// In-memory CSRF state for NEAR AI browser redirects. The login start endpoint
 /// issues a state token, and the public callback must consume it before any
@@ -58,6 +62,14 @@ impl NearAiLoginStateStore {
         let state = uuid::Uuid::new_v4().to_string();
         let mut states = self.states.lock().await;
         prune_expired(&mut states, Instant::now());
+        if states.len() >= MAX_NEARAI_LOGIN_STATES
+            && let Some(oldest) = states
+                .iter()
+                .min_by_key(|(_, expires_at)| **expires_at)
+                .map(|(key, _)| key.clone())
+        {
+            states.remove(&oldest);
+        }
         states.insert(state.clone(), Instant::now() + NEARAI_LOGIN_STATE_TTL);
         state
     }
@@ -74,12 +86,94 @@ impl NearAiLoginStateStore {
     }
 }
 
+/// `user_code`/`verification_uri` are `None` while a reservation is
+/// in-flight (see [`reserve_codex_login_slot`]) and `Some` once the device
+/// code has been minted.
 #[derive(Debug, Clone)]
 struct CodexLoginAttempt {
     id: uuid::Uuid,
-    user_code: String,
-    verification_uri: String,
+    user_code: Option<String>,
+    verification_uri: Option<String>,
     expires_at: Instant,
+}
+
+/// Outcome of reserving the codex-login slot for a key.
+enum CodexLoginReserveOutcome {
+    /// A device code was already minted for this key; return it.
+    Ready(CodexLoginStart),
+    /// A device-code request for this key is already in flight.
+    InFlight,
+    /// No attempt existed for this key; the caller now owns a placeholder
+    /// reservation (inserted under the same lock) and must request a device
+    /// code, then finalize or remove it.
+    Reserved,
+}
+
+/// Checks/reserves the codex-login slot for `key` under the map lock held
+/// by the caller. A placeholder (`user_code: None`) is inserted before the
+/// lock is released so a concurrent caller for the same key sees it and
+/// does not also request a device code from OpenAI (each request is a
+/// distinct, differently-coded grant — two in flight for one login attempt
+/// would leave the tracked attempt id pointing at whichever finalized last,
+/// orphaning the other flow even if the user completes it).
+fn reserve_codex_login_slot(
+    attempts: &mut HashMap<String, CodexLoginAttempt>,
+    key: &str,
+    attempt_id: uuid::Uuid,
+    now: Instant,
+) -> CodexLoginReserveOutcome {
+    attempts.retain(|_, attempt| attempt.expires_at > now);
+    if let Some(attempt) = attempts.get(key) {
+        return match (&attempt.user_code, &attempt.verification_uri) {
+            (Some(user_code), Some(verification_uri)) => {
+                CodexLoginReserveOutcome::Ready(CodexLoginStart {
+                    user_code: user_code.clone(),
+                    verification_uri: verification_uri.clone(),
+                })
+            }
+            _ => CodexLoginReserveOutcome::InFlight,
+        };
+    }
+    attempts.insert(
+        key.to_string(),
+        CodexLoginAttempt {
+            id: attempt_id,
+            user_code: None,
+            verification_uri: None,
+            expires_at: now + CODEX_LOGIN_ATTEMPT_TTL,
+        },
+    );
+    CodexLoginReserveOutcome::Reserved
+}
+
+/// Finalizes a codex-login reservation with the minted device code, but only
+/// if the map entry for `key` is still present and belongs to `attempt_id`.
+/// If this attempt's reservation TTL lapsed before its device-code
+/// initiation returned, a newer caller may have since reserved (or removed,
+/// e.g. after its own failure) the same key — in either case ownership is
+/// gone, so this fails rather than clobbering the newer state or reinserting
+/// a reservation nothing still owns. Returns `false` when the caller must
+/// abort (no polling, no insert).
+fn finalize_codex_login_slot(
+    attempts: &mut HashMap<String, CodexLoginAttempt>,
+    key: &str,
+    attempt_id: uuid::Uuid,
+    login: &CodexLoginStart,
+    expires_at: Instant,
+) -> bool {
+    if !matches!(attempts.get(key), Some(current) if current.id == attempt_id) {
+        return false;
+    }
+    attempts.insert(
+        key.to_string(),
+        CodexLoginAttempt {
+            id: attempt_id,
+            user_code: Some(login.user_code.clone()),
+            verification_uri: Some(login.verification_uri.clone()),
+            expires_at,
+        },
+    );
+    true
 }
 
 fn prune_expired(states: &mut HashMap<String, Instant>, now: Instant) {
@@ -188,7 +282,7 @@ impl RebornLlmConfigService {
             let metadata = info.metadata;
             let env_key_set = metadata.as_ref().is_some_and(metadata_env_key_set);
             let api_key_set = stored_key_set || env_key_set;
-            let base_url = provider_snapshot_base_url(&info.id, metadata.as_ref(), api_key_set);
+            let base_url = provider_snapshot_base_url(&info.id, metadata.as_ref());
             if info.active && active.is_none() {
                 active = Some(LlmActiveSelection {
                     provider_id: info.id.clone(),
@@ -684,16 +778,17 @@ impl LlmConfigService for RebornLlmConfigService {
         caller: WebUiAuthenticatedCaller,
     ) -> Result<CodexLoginStart, LlmConfigServiceError> {
         let attempt_key = codex_login_attempt_key(&caller);
-        let now = Instant::now();
-        {
+        let attempt_id = uuid::Uuid::new_v4();
+        let reserved = {
             let mut attempts = self.codex_login_attempts.lock().await;
-            attempts.retain(|_, attempt| attempt.expires_at > now);
-            if let Some(attempt) = attempts.get(&attempt_key) {
-                return Ok(CodexLoginStart {
-                    user_code: attempt.user_code.clone(),
-                    verification_uri: attempt.verification_uri.clone(),
-                });
-            }
+            reserve_codex_login_slot(&mut attempts, &attempt_key, attempt_id, Instant::now())
+        };
+        match reserved {
+            CodexLoginReserveOutcome::Ready(login) => return Ok(login),
+            // A device-code request for this key is already in flight from
+            // another concurrent call; don't start a second one.
+            CodexLoginReserveOutcome::InFlight => return Err(LlmConfigServiceError::Internal),
+            CodexLoginReserveOutcome::Reserved => {}
         }
 
         // Point the login manager at the same session file the live openai_codex
@@ -707,29 +802,52 @@ impl LlmConfigService for RebornLlmConfigService {
             nonempty_env("OPENAI_CODEX_SESSION_PATH").map(std::path::PathBuf::from),
             None,
         );
-        let manager = OpenAiCodexSessionManager::new(codex_config)
-            .map_err(|_| LlmConfigServiceError::Internal)?;
-        let start = manager
-            .initiate_device_code()
-            .await
-            .map_err(|_| LlmConfigServiceError::Internal)?;
+        let manager = match OpenAiCodexSessionManager::new(codex_config) {
+            Ok(manager) => manager,
+            Err(_) => {
+                remove_codex_attempt_if_current(
+                    &self.codex_login_attempts,
+                    &attempt_key,
+                    attempt_id,
+                )
+                .await;
+                return Err(LlmConfigServiceError::Internal);
+            }
+        };
+        let start = match manager.initiate_device_code().await {
+            Ok(start) => start,
+            Err(_) => {
+                remove_codex_attempt_if_current(
+                    &self.codex_login_attempts,
+                    &attempt_key,
+                    attempt_id,
+                )
+                .await;
+                return Err(LlmConfigServiceError::Internal);
+            }
+        };
 
         let login = CodexLoginStart {
             user_code: start.user_code.clone(),
             verification_uri: start.verification_uri.clone(),
         };
-        let attempt_id = uuid::Uuid::new_v4();
         {
             let mut attempts = self.codex_login_attempts.lock().await;
-            attempts.insert(
-                attempt_key.clone(),
-                CodexLoginAttempt {
-                    id: attempt_id,
-                    user_code: login.user_code.clone(),
-                    verification_uri: login.verification_uri.clone(),
-                    expires_at: Instant::now() + CODEX_LOGIN_ATTEMPT_TTL,
-                },
+            let finalized = finalize_codex_login_slot(
+                &mut attempts,
+                &attempt_key,
+                attempt_id,
+                &login,
+                Instant::now() + CODEX_LOGIN_ATTEMPT_TTL,
             );
+            if !finalized {
+                // A newer caller superseded this reservation (or removed it
+                // after its own failure) before our device-code request
+                // returned; we no longer own the slot, so abort rather than
+                // spawn a poller or hand back a code that isn't tracked.
+                tracing::debug!("codex login: reservation no longer owned at finalize; aborting");
+                return Err(LlmConfigServiceError::Internal);
+            }
         }
 
         // Poll for authorization off-thread: persist the tokens, make Codex the
@@ -937,7 +1055,6 @@ fn env_var_present(name: &str) -> bool {
 fn provider_snapshot_base_url(
     provider_id: &str,
     metadata: Option<&crate::RebornProviderMetadata>,
-    api_key_set: bool,
 ) -> Option<String> {
     if let Some(base_url) = metadata
         .and_then(|meta| meta.base_url.as_deref())
@@ -949,7 +1066,6 @@ fn provider_snapshot_base_url(
 
     if provider_id.eq_ignore_ascii_case("nearai") {
         return Some(default_nearai_base_url(
-            api_key_set,
             ironclaw_common::env_helpers::env_or_override("NEARAI_BASE_URL"),
         ));
     }
@@ -962,6 +1078,103 @@ fn normalized_endpoint(value: Option<&str>) -> Option<String> {
         .map(str::trim)
         .filter(|value| !value.is_empty())
         .map(|value| value.trim_end_matches('/').to_string())
+}
+
+/// Build a transient provider from a not-yet-persisted provider/key/model
+/// combination and list its models — used by
+/// [`crate::RebornProviderAdmin::probe_candidate`] (onboard's pre-write
+/// key/model verification step).
+///
+/// - Reuses [`RebornLlmConfigService::probe_provider`]'s `custom_definition`
+///   + `resolve_against_registry` + `build_static_provider_chain` machinery,
+///     minus its stored-key fallback: nothing is persisted yet, so only the
+///     caller's inline candidate key (or none) can ever apply.
+/// - Never returns `Err`: every failure folds into `ok: false` with a
+///   user-safe `message`, matching `test_connection`/`list_models` — callers
+///   (onboard's `provision_via_menu`) must not invent a separate error
+///   channel.
+pub(crate) async fn probe_candidate_provider(
+    request: &LlmProbeRequest,
+) -> crate::ProviderProbeOutcome {
+    let endpoint = probe_endpoint_label(request);
+    let Some(protocol) = parse_adapter(&request.adapter) else {
+        return crate::ProviderProbeOutcome {
+            ok: false,
+            models: Vec::new(),
+            message: format!("unknown adapter `{}`", request.adapter),
+        };
+    };
+    let base_url = request
+        .base_url
+        .clone()
+        .filter(|url| !url.trim().is_empty());
+    let model = request
+        .model
+        .clone()
+        .filter(|model| !model.trim().is_empty())
+        .unwrap_or_default();
+    let definition = custom_definition(&request.provider_id, protocol, base_url.clone(), model);
+    let registry = ProviderRegistry::new(vec![definition]);
+    let selection = LlmSlotSelection {
+        provider_id: Some(request.provider_id.clone()),
+        model: request
+            .model
+            .clone()
+            .filter(|model| !model.trim().is_empty()),
+        api_key_env: None,
+        base_url,
+    };
+    let mut config = match resolve_against_registry(&selection, &registry) {
+        Ok(config) => config,
+        Err(error) => {
+            return crate::ProviderProbeOutcome {
+                ok: false,
+                models: Vec::new(),
+                message: error.to_string(),
+            };
+        }
+    };
+    if let Some(key) = request.api_key.clone() {
+        apply_stored_api_key(&mut config, key);
+    }
+
+    let session = ironclaw_llm::create_session_manager(config.session.clone()).await;
+    let provider = match ironclaw_llm::build_static_provider_chain(&config, session).await {
+        Ok(provider) => provider,
+        Err(error) => {
+            tracing::debug!(
+                provider_id = %request.provider_id,
+                adapter = %request.adapter,
+                %error,
+                "onboard candidate probe: provider build failed"
+            );
+            return crate::ProviderProbeOutcome {
+                ok: false,
+                models: Vec::new(),
+                message: format!("could not reach {endpoint} with these settings"),
+            };
+        }
+    };
+    match provider.list_models().await {
+        Ok(models) => crate::ProviderProbeOutcome {
+            ok: true,
+            models,
+            message: String::new(),
+        },
+        Err(error) => {
+            tracing::debug!(
+                provider_id = %request.provider_id,
+                adapter = %request.adapter,
+                %error,
+                "onboard candidate probe: list_models failed"
+            );
+            crate::ProviderProbeOutcome {
+                ok: false,
+                models: Vec::new(),
+                message: format!("could not reach {endpoint} with these settings"),
+            }
+        }
+    }
 }
 
 /// Human-readable endpoint for probe-result messages so a connectivity failure
@@ -1110,9 +1323,10 @@ fn map_admin_error(error: crate::RebornProviderAdminError) -> LlmConfigServiceEr
             field: None,
             reason,
         },
-        E::LoadRegistry { .. } | E::LoadConfig { .. } | E::UpdateConfig { .. } => {
-            LlmConfigServiceError::Unavailable
-        }
+        E::LoadRegistry { .. }
+        | E::LoadConfig { .. }
+        | E::UpdateConfig { .. }
+        | E::EnvDetection { .. } => LlmConfigServiceError::Unavailable,
     }
 }
 
@@ -1122,7 +1336,7 @@ mod tests {
 
     use super::*;
     use ironclaw_host_api::{AgentId, ProjectId, ResourceScope, SecretHandle, TenantId, UserId};
-    use ironclaw_llm::{NEARAI_CLOUD_DEFAULT_BASE_URL, NEARAI_PRIVATE_DEFAULT_BASE_URL};
+    use ironclaw_llm::NEARAI_CLOUD_DEFAULT_BASE_URL;
     use ironclaw_reborn_config::{RebornHome, RebornProfile};
     use ironclaw_secrets::{
         InMemorySecretStore, SecretLease, SecretLeaseId, SecretMaterial, SecretMetadata,
@@ -1422,26 +1636,20 @@ mod tests {
         }
     }
 
+    /// nearai has exactly one default now — cloud — regardless of whether an
+    /// API key is present at resolve time. This is what fixes the runtime
+    /// twin of the `candidate_probe_base_url` bug: a key stored through the
+    /// secret store (applied *after* resolution) no longer needs to win a
+    /// race with base-URL selection, because there is nothing left to race.
     #[test]
-    fn nearai_default_base_url_selects_private_without_api_key() {
-        assert_eq!(
-            default_nearai_base_url(false, None),
-            NEARAI_PRIVATE_DEFAULT_BASE_URL
-        );
-    }
-
-    #[test]
-    fn nearai_default_base_url_selects_cloud_with_api_key() {
-        assert_eq!(
-            default_nearai_base_url(true, None),
-            NEARAI_CLOUD_DEFAULT_BASE_URL
-        );
+    fn nearai_default_base_url_always_selects_cloud() {
+        assert_eq!(default_nearai_base_url(None), NEARAI_CLOUD_DEFAULT_BASE_URL);
     }
 
     #[test]
     fn nearai_default_base_url_prefers_explicit_base_url() {
         assert_eq!(
-            default_nearai_base_url(false, Some("https://nearai.example.test/v1".to_string())),
+            default_nearai_base_url(Some("https://nearai.example.test/v1".to_string())),
             "https://nearai.example.test/v1"
         );
     }
@@ -1492,6 +1700,25 @@ mod tests {
         }
     }
 
+    /// An unknown adapter (validated locally, not via the network) must
+    /// report `ok: false` like every other probe failure — never `Err` —
+    /// since `provision_via_menu` treats all `ok: false` the same way.
+    #[tokio::test]
+    async fn probe_candidate_provider_reports_unknown_adapter_as_not_ok() {
+        let mut request = probe_request("acme", "https://api.acme.test/v1", Some("sk-test"));
+        request.adapter = "not-a-real-adapter".to_string();
+
+        let outcome = probe_candidate_provider(&request).await;
+
+        assert!(!outcome.ok);
+        assert!(outcome.models.is_empty());
+        assert!(
+            outcome.message.contains("not-a-real-adapter"),
+            "message should name the invalid adapter: {}",
+            outcome.message
+        );
+    }
+
     #[cfg(feature = "webui-v2-beta")]
     #[tokio::test]
     async fn nearai_login_state_is_single_use() {
@@ -1504,6 +1731,194 @@ mod tests {
             "state must not be reusable after a successful callback"
         );
         assert!(!store.consume("missing-state").await);
+    }
+
+    // `start_codex_login`'s real device-code request hits a live network
+    // endpoint (OpenAI), so a deterministic two-caller concurrency test
+    // through the full method would need an HTTP stub server — scaffolding
+    // disproportionate to this fix. Instead these pin the reservation
+    // primitive directly: a second reserve for the same key must observe
+    // `InFlight` (never `Reserved` again) while the first is outstanding,
+    // and a failed/removed reservation must free the key for a retry.
+    #[test]
+    fn codex_login_reservation_blocks_concurrent_same_key_start() {
+        let mut attempts = HashMap::new();
+        let key = "tenant:user";
+        let now = Instant::now();
+
+        let first = reserve_codex_login_slot(&mut attempts, key, uuid::Uuid::new_v4(), now);
+        assert!(matches!(first, CodexLoginReserveOutcome::Reserved));
+
+        // A second concurrent caller for the same key must not also reserve
+        // (and thus must not also request a device code from OpenAI).
+        let second = reserve_codex_login_slot(&mut attempts, key, uuid::Uuid::new_v4(), now);
+        assert!(matches!(second, CodexLoginReserveOutcome::InFlight));
+    }
+
+    #[test]
+    fn codex_login_reservation_ready_after_finalize() {
+        let mut attempts = HashMap::new();
+        let key = "tenant:user";
+        let now = Instant::now();
+        let attempt_id = uuid::Uuid::new_v4();
+
+        reserve_codex_login_slot(&mut attempts, key, attempt_id, now);
+        attempts.insert(
+            key.to_string(),
+            CodexLoginAttempt {
+                id: attempt_id,
+                user_code: Some("ABCD-1234".to_string()),
+                verification_uri: Some("https://example.test/device".to_string()),
+                expires_at: now + CODEX_LOGIN_ATTEMPT_TTL,
+            },
+        );
+
+        let reserved = reserve_codex_login_slot(&mut attempts, key, uuid::Uuid::new_v4(), now);
+        match reserved {
+            CodexLoginReserveOutcome::Ready(login) => {
+                assert_eq!(login.user_code, "ABCD-1234");
+            }
+            _ => panic!("expected Ready after finalize, got a non-Ready outcome instead"),
+        }
+    }
+
+    /// Regression pin (PR #6174 item C): if a device-code initiation
+    /// outlives the reservation TTL, a newer caller can reserve the same
+    /// key before the stale caller's finalize runs. The stale finalize must
+    /// not clobber the newer caller's reservation.
+    #[test]
+    fn codex_login_finalize_does_not_clobber_a_newer_reservation() {
+        let mut attempts = HashMap::new();
+        let key = "tenant:user";
+        let now = Instant::now();
+        let stale_attempt_id = uuid::Uuid::new_v4();
+
+        // Stale caller reserves the slot, but its TTL lapses before its
+        // device-code initiation returns.
+        reserve_codex_login_slot(&mut attempts, key, stale_attempt_id, now);
+
+        // A newer caller reserves the same key after the stale entry expired.
+        let newer_now = now + CODEX_LOGIN_ATTEMPT_TTL + Duration::from_secs(1);
+        let newer = reserve_codex_login_slot(&mut attempts, key, uuid::Uuid::new_v4(), newer_now);
+        assert!(matches!(newer, CodexLoginReserveOutcome::Reserved));
+        let newer_attempt_id = attempts.get(key).expect("newer reservation present").id;
+
+        // The stale caller's device-code initiation now finally returns and
+        // attempts to finalize under its own (now-abandoned) attempt id.
+        let stale_login = CodexLoginStart {
+            user_code: "STALE-CODE".to_string(),
+            verification_uri: "https://example.test/stale".to_string(),
+        };
+        let finalized = finalize_codex_login_slot(
+            &mut attempts,
+            key,
+            stale_attempt_id,
+            &stale_login,
+            newer_now + CODEX_LOGIN_ATTEMPT_TTL,
+        );
+        assert!(
+            !finalized,
+            "a stale finalize must report failure when a newer reservation owns the key"
+        );
+
+        let current = attempts
+            .get(key)
+            .expect("newer reservation must still be present");
+        assert_eq!(
+            current.id, newer_attempt_id,
+            "a stale finalize must not overwrite a newer caller's reservation"
+        );
+        assert!(
+            current.user_code.is_none(),
+            "the newer reservation must remain in-flight (not finalized with the stale device code)"
+        );
+    }
+
+    /// Regression pin (PR #6174 review thread 3607817325): the prior guard
+    /// only blocked finalize when the entry belonged to a *different*
+    /// attempt id — an absent entry (newer reservation superseded the stale
+    /// one, then failed and removed itself before the stale device-code
+    /// request returned) passed through and let the stale finalize reinsert
+    /// itself. Ownership must require the entry to still be present and
+    /// match this attempt id; absent-or-mismatched must abort.
+    #[test]
+    fn codex_login_finalize_does_not_reinsert_after_removal() {
+        let mut attempts = HashMap::new();
+        let key = "tenant:user";
+        let now = Instant::now();
+        let attempt_id = uuid::Uuid::new_v4();
+
+        reserve_codex_login_slot(&mut attempts, key, attempt_id, now);
+        // Simulate a newer reservation superseding this one, then failing
+        // and removing itself — the key is now absent entirely.
+        attempts.remove(key);
+
+        let stale_login = CodexLoginStart {
+            user_code: "STALE-CODE".to_string(),
+            verification_uri: "https://example.test/stale".to_string(),
+        };
+        let finalized = finalize_codex_login_slot(
+            &mut attempts,
+            key,
+            attempt_id,
+            &stale_login,
+            now + CODEX_LOGIN_ATTEMPT_TTL,
+        );
+
+        assert!(
+            !finalized,
+            "finalize must fail when the reservation is no longer owned"
+        );
+        assert!(
+            !attempts.contains_key(key),
+            "a stale finalize must not reinsert an entry after its reservation was removed"
+        );
+    }
+
+    #[tokio::test]
+    async fn codex_login_reservation_removed_on_error_frees_key_for_retry() {
+        let attempts = tokio::sync::Mutex::new(HashMap::new());
+        let key = "tenant:user";
+        let attempt_id = uuid::Uuid::new_v4();
+        {
+            let mut guard = attempts.lock().await;
+            reserve_codex_login_slot(&mut guard, key, attempt_id, Instant::now());
+        }
+
+        assert!(remove_codex_attempt_if_current(&attempts, key, attempt_id).await);
+
+        let mut guard = attempts.lock().await;
+        let retried =
+            reserve_codex_login_slot(&mut guard, key, uuid::Uuid::new_v4(), Instant::now());
+        assert!(
+            matches!(retried, CodexLoginReserveOutcome::Reserved),
+            "removing a failed reservation must free the key for a fresh attempt"
+        );
+    }
+
+    #[cfg(feature = "webui-v2-beta")]
+    #[tokio::test]
+    async fn nearai_login_state_store_evicts_oldest_at_capacity() {
+        // Unexpired states within the 15-min TTL must still be bounded, or a
+        // caller that mints login redirects without ever completing them
+        // grows this map unboundedly. Fill to capacity, mint one more, and
+        // confirm the oldest state was evicted while the newest survives.
+        let store = NearAiLoginStateStore::new();
+        let mut states = Vec::with_capacity(MAX_NEARAI_LOGIN_STATES);
+        for _ in 0..MAX_NEARAI_LOGIN_STATES {
+            states.push(store.issue().await);
+        }
+        let newest = store.issue().await;
+
+        let oldest = &states[0];
+        assert!(
+            !store.consume(oldest).await,
+            "oldest state must be evicted once the store is at capacity"
+        );
+        assert!(
+            store.consume(&newest).await,
+            "newest state must survive eviction"
+        );
     }
 
     #[test]
@@ -1927,6 +2342,8 @@ mod tests {
         );
     }
 
+    /// NEAR AI has one default base URL — cloud — whether or not a key is
+    /// configured yet, so a fresh (keyless) snapshot must already show it.
     #[tokio::test]
     #[allow(clippy::await_holding_lock)]
     async fn nearai_snapshot_exposes_effective_default_base_url() {
@@ -1942,11 +2359,15 @@ mod tests {
 
         assert_eq!(
             nearai.base_url.as_deref(),
-            Some(NEARAI_PRIVATE_DEFAULT_BASE_URL),
+            Some(NEARAI_CLOUD_DEFAULT_BASE_URL),
             "NEAR AI snapshot should show the same effective default base URL the runtime resolves"
         );
     }
 
+    /// Same cloud default holds once a key is stored — proving stored-key
+    /// presence never changes the base URL (the runtime twin of this: a key
+    /// stored via `onboard`/`models set-provider`, applied after config
+    /// resolution, no longer races the base-URL default).
     #[tokio::test]
     #[allow(clippy::await_holding_lock)]
     async fn nearai_snapshot_uses_cloud_default_with_stored_api_key() {

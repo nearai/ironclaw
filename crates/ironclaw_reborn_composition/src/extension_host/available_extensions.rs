@@ -27,10 +27,17 @@ use crate::extension_host::extension_credential_requirements::{
     product_auth_credential_source,
 };
 use crate::extension_host::extension_removal_cleanup::ExtensionRemovalCleanupRequirement;
-#[cfg(feature = "slack-v2-host-beta")]
+#[cfg(any(feature = "slack-v2-host-beta", feature = "telegram-v2-host-beta"))]
 use crate::extension_host::extension_removal_cleanup::{
     ExtensionRemovalChannelId, ExtensionRemovalCleanupAdapterId,
+};
+#[cfg(feature = "slack-v2-host-beta")]
+use crate::extension_host::extension_removal_cleanup::{
     SLACK_EXTENSION_REMOVAL_CHANNEL_ID, SLACK_PERSONAL_CONNECTION_CLEANUP_ADAPTER_ID,
+};
+#[cfg(feature = "telegram-v2-host-beta")]
+use crate::extension_host::extension_removal_cleanup::{
+    TELEGRAM_EXTENSION_REMOVAL_CHANNEL_ID, TELEGRAM_PAIRING_CONNECTION_CLEANUP_ADAPTER_ID,
 };
 use crate::extension_host::host_api_contracts::product_extension_host_api_contract_registry;
 use crate::llm_admin::nearai_mcp::{
@@ -86,11 +93,15 @@ const NEARAI_MCP_MANIFEST: &str =
 #[cfg(feature = "slack-v2-host-beta")]
 const SLACK_BOT_MANIFEST: &str =
     include_str!("../../../ironclaw_first_party_extensions/assets/slack_bot/manifest.toml");
+#[cfg(feature = "telegram-v2-host-beta")]
+use ironclaw_telegram_extension::telegram_manifest::TELEGRAM_MANIFEST;
 const NEARAI_EXTENSION_ID: &str = HostManagedCredentialExtension::NearAi.id();
 #[cfg(feature = "slack-v2-host-beta")]
 pub(crate) const SLACK_BOT_EXTENSION_ID: &str = "slack_bot";
 #[cfg(feature = "slack-v2-host-beta")]
 pub(crate) const SLACK_EXTENSION_ID: &str = "slack";
+#[cfg(feature = "telegram-v2-host-beta")]
+pub(crate) const TELEGRAM_EXTENSION_ID: &str = "telegram";
 #[cfg(feature = "slack-v2-host-beta")]
 const SLACK_PERSONAL_OAUTH_REQUIREMENT_NAME: &str = "slack_personal_oauth";
 // The slack_personal OAuth setup scopes are the union of the Slack tools'
@@ -414,7 +425,10 @@ impl AvailableExtensionCatalog {
     pub(crate) fn from_first_party_assets_with_nearai_mcp_config(
         nearai_mcp_config: Option<&NearAiMcpBootstrapConfig>,
     ) -> Result<Self, ProductWorkflowError> {
-        #[cfg_attr(not(feature = "slack-v2-host-beta"), allow(unused_mut))]
+        #[cfg_attr(
+            not(any(feature = "slack-v2-host-beta", feature = "telegram-v2-host-beta")),
+            allow(unused_mut)
+        )]
         let mut packages = vec![
             github_package()?,
             notion_mcp_package()?,
@@ -431,6 +445,8 @@ impl AvailableExtensionCatalog {
         packages.push(slack_bot_package()?);
         #[cfg(feature = "slack-v2-host-beta")]
         packages.push(slack_package()?);
+        #[cfg(feature = "telegram-v2-host-beta")]
+        packages.push(telegram_package()?);
         Ok(Self::from_packages(packages))
     }
 
@@ -638,6 +654,38 @@ fn slack_bot_package() -> Result<AvailableExtensionPackage, ProductWorkflowError
     bundled_extension_package("slack_bot", "Slack", SLACK_BOT_MANIFEST, slack_bot_assets())
 }
 
+/// The Telegram channel package: one user-visible extension owning the
+/// webhook ingress. Unlike the Slack model-B split there is no hidden
+/// operator companion — admin bot setup and per-user pairing both hang off
+/// this single `telegram` id.
+#[cfg(feature = "telegram-v2-host-beta")]
+pub(crate) fn telegram_package() -> Result<AvailableExtensionPackage, ProductWorkflowError> {
+    let mut package = bundled_extension_package(
+        TELEGRAM_EXTENSION_ID,
+        "Telegram",
+        TELEGRAM_MANIFEST,
+        Vec::new(),
+    )?;
+    // Removal must unpair the removing user (identity binding, DM delivery
+    // target, pending pairing code) — declared here, executed by
+    // TelegramPairingConnectionCleanupAdapter through the shared
+    // channel-connection facade slot.
+    package
+        .cleanup_requirements
+        .push(ExtensionRemovalCleanupRequirement::channel_connection(
+            ExtensionRemovalCleanupAdapterId::new(TELEGRAM_PAIRING_CONNECTION_CLEANUP_ADAPTER_ID)
+                .map_err(|error| ProductWorkflowError::InvalidBindingRequest {
+                reason: error.to_string(),
+            })?,
+            ExtensionRemovalChannelId::new(TELEGRAM_EXTENSION_REMOVAL_CHANNEL_ID).map_err(
+                |error| ProductWorkflowError::InvalidBindingRequest {
+                    reason: error.to_string(),
+                },
+            )?,
+        ));
+    Ok(package)
+}
+
 pub(crate) fn google_calendar_manifest_digest() -> String {
     sha256_digest_token(GOOGLE_CALENDAR_MANIFEST.as_bytes())
 }
@@ -701,6 +749,11 @@ pub(crate) fn slack_bot_manifest_digest() -> String {
 #[cfg(feature = "slack-v2-host-beta")]
 pub(crate) fn slack_bot_manifest_toml() -> &'static str {
     SLACK_BOT_MANIFEST
+}
+
+#[cfg(feature = "telegram-v2-host-beta")]
+pub(crate) fn telegram_manifest_digest() -> String {
+    sha256_digest_token(TELEGRAM_MANIFEST.as_bytes())
 }
 
 pub(crate) fn nearai_mcp_manifest_toml_for_config(
@@ -881,6 +934,7 @@ fn github_assets() -> Vec<AvailableExtensionAsset> {
         github_schema_asset!("get_file_content.input.v1.json"),
         github_schema_asset!("get_issue.input.v1.json"),
         github_schema_asset!("get_issue.output.v1.json"),
+        github_schema_asset!("get_job_logs.input.v1.json"),
         github_schema_asset!("get_pull_request.input.v1.json"),
         github_schema_asset!("get_pull_request_files.input.v1.json"),
         github_schema_asset!("get_pull_request_reviews.input.v1.json"),
@@ -931,6 +985,7 @@ fn github_assets() -> Vec<AvailableExtensionAsset> {
         github_prompt_asset!("get_combined_status.md"),
         github_prompt_asset!("get_file_content.md"),
         github_prompt_asset!("get_issue.md"),
+        github_prompt_asset!("get_job_logs.md"),
         github_prompt_asset!("get_pull_request.md"),
         github_prompt_asset!("get_pull_request_files.md"),
         github_prompt_asset!("get_pull_request_reviews.md"),
@@ -3185,5 +3240,58 @@ output_schema_ref = "schemas/write.output.json"
                 },
             ],
         }
+    }
+}
+
+#[cfg(all(test, feature = "telegram-v2-host-beta"))]
+mod telegram_catalog_tests {
+    use super::*;
+
+    #[test]
+    fn telegram_package_is_visible_channel_with_zero_tools() {
+        let package = telegram_package().expect("telegram manifest parses");
+        assert_eq!(package.package_ref.id.as_str(), TELEGRAM_EXTENSION_ID);
+        assert!(
+            !is_internal_extension_package_ref(&package.package_ref),
+            "telegram must stay user-visible (no hidden companion pattern)"
+        );
+        assert!(
+            package
+                .surface_kinds
+                .contains(&LifecycleExtensionSurfaceKind::ExternalChannel),
+            "telegram must project the external-channel surface"
+        );
+        assert!(
+            package.package.manifest.capabilities.is_empty(),
+            "telegram must expose zero tools in v1"
+        );
+    }
+
+    #[test]
+    fn telegram_package_is_listed_in_first_party_catalog_search() {
+        let catalog = AvailableExtensionCatalog::from_first_party_assets()
+            .expect("first-party catalog builds");
+        let found = catalog
+            .search("telegram")
+            .any(|package| package.package_ref.id.as_str() == TELEGRAM_EXTENSION_ID);
+        assert!(found, "telegram must appear in the user-visible catalog");
+    }
+}
+
+#[cfg(all(test, feature = "telegram-v2-host-beta"))]
+mod telegram_cleanup_requirement_tests {
+    use super::*;
+
+    #[test]
+    fn telegram_package_declares_the_pairing_removal_cleanup() {
+        let package = telegram_package().expect("telegram package builds");
+        assert_eq!(package.cleanup_requirements.len(), 1);
+        let requirement = &package.cleanup_requirements[0];
+        assert_eq!(
+            requirement.adapter_id.as_str(),
+            TELEGRAM_PAIRING_CONNECTION_CLEANUP_ADAPTER_ID
+        );
+        let crate::extension_host::extension_removal_cleanup::ExtensionRemovalCleanupBinding::ChannelConnection { channel } = &requirement.binding;
+        assert_eq!(channel.as_str(), TELEGRAM_EXTENSION_REMOVAL_CHANNEL_ID);
     }
 }
