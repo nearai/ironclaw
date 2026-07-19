@@ -174,6 +174,8 @@ fn dockerfile_reborn_builds_with_production_features() {
 
 #[test]
 fn release_ci_compiles_reborn_for_all_supported_targets() {
+    // This is a structural contract for release workflow wiring. Hosted Actions
+    // runs provide the behavioral cross-platform compile and startup validation.
     let root = workspace_root();
     let compile_workflow =
         std::fs::read_to_string(root.join(".github/workflows/reborn-release-compile.yml"))
@@ -224,7 +226,7 @@ fn release_ci_compiles_reborn_for_all_supported_targets() {
     );
     assert!(
         compile_workflow.matches("musl: true").count() == 2
-            && compile_workflow.contains("sudo apt-get install --yes musl-tools")
+            && compile_workflow.contains("sudo apt-get install --yes musl-tools binutils")
             && compile_workflow.contains("CC_x86_64_unknown_linux_musl=musl-gcc")
             && compile_workflow.contains("CC_aarch64_unknown_linux_musl=musl-gcc")
             && !compile_workflow.contains("CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_LINKER")

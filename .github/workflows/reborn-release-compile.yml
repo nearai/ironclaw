@@ -23,6 +23,7 @@ jobs:
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 120
     strategy:
+      # Run every target so one release attempt reports the complete platform matrix.
       fail-fast: false
       matrix:
         include:
@@ -72,6 +73,7 @@ jobs:
         with:
           targets: ${{ matrix.target }}
 
+      # webui-v2-beta embeds the frontend during compilation and requires Node/pnpm.
       - name: Install Node.js for the embedded WebUI
         uses: actions/setup-node@60edb5dd545a775178f52524783378180af0d1f8 # v4
         with:
@@ -85,7 +87,7 @@ jobs:
         shell: bash
         run: |
           sudo apt-get update
-          sudo apt-get install --yes musl-tools
+          sudo apt-get install --yes musl-tools binutils
 
       - name: Configure musl C compiler
         if: matrix.musl
@@ -160,7 +162,7 @@ jobs:
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: reborn-compile-${{ matrix.target }}
-          path: target/${{ matrix.target }}/dist/${{ matrix.binary }}
+          path: "target/${{ matrix.target }}/dist/${{ matrix.binary }}"
           if-no-files-found: error
           retention-days: 7
 
