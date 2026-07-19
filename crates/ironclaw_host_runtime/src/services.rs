@@ -54,8 +54,8 @@ use ironclaw_run_state::{
 };
 use ironclaw_scripts::{ScriptError, ScriptExecutionRequest, ScriptExecutor, ScriptInvocation};
 use ironclaw_secrets::{
-    CredentialAccountStore, CredentialSessionStore, InMemoryCredentialBroker, InMemorySecretStore,
-    SecretStore, SecretStoreError,
+    CredentialAccountStore, CredentialSessionStore, FilesystemSecretStore,
+    InMemoryCredentialBroker, SecretStore, SecretStoreError,
 };
 use ironclaw_trust::{HostTrustPolicy, TrustPolicy};
 use ironclaw_turns::{

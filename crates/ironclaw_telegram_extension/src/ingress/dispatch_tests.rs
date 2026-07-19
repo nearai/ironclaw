@@ -11,7 +11,7 @@ pub(crate) mod test_fixtures {
         ProductAdapterError, ProductInboundAck, ProductInboundEnvelope,
         ProjectionSubscriptionRequest,
     };
-    use ironclaw_secrets::InMemorySecretStore;
+    use ironclaw_secrets::FilesystemSecretStore;
     use secrecy::SecretString;
 
     use super::super::*;
@@ -154,7 +154,7 @@ pub(crate) mod test_fixtures {
             None,
             UserId::new("operator").expect("valid user"), // safety: test-only fixture
             state,
-            Arc::new(InMemorySecretStore::new()),
+            Arc::new(FilesystemSecretStore::ephemeral()),
             bot_api.client(),
             Some("https://ironclaw.example".to_string()),
         ))

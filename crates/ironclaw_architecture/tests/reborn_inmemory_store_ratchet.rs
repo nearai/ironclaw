@@ -30,9 +30,10 @@
 //! duplicate and must not be blindly "consolidated"). **Definition of done for
 //! this axis (§10): the DEBT list shrinks to empty.** The mechanical
 //! consolidations (A1–A8: approvals, authorization, processes, run-state,
-//! budget-gate, the outbound family) and the checkpoint cluster
-//! (checkpoint-state payloads, loop-checkpoint metadata) and the Slack
-//! host-state test doubles are done.
+//! budget-gate, the outbound family), the checkpoint cluster
+//! (checkpoint-state payloads, loop-checkpoint metadata), the Slack
+//! host-state test doubles, and the secrets cluster
+//! (`FilesystemSecretStore::ephemeral()`) are done.
 
 mod ratchet_support;
 
@@ -74,16 +75,12 @@ const FROZEN_DEBT_INMEMORY_STORES: &[&str] = &[
     //     checkpoint metadata is served by the turn-state store's own
     //     `LoopCheckpointStore` impl in both build paths.) ---
     "InMemoryTurnStateStore",
-    // --- secrets cluster: SECURITY-SENSITIVE; deliberate careful work, not a
-    //     mechanical swap. Durable builds wire the filesystem-backed encrypted
-    //     secret store (`build_local_dev_secret_store`); the no-durable build
-    //     wires `InMemorySecretStore`, whose encrypted engine is the
-    //     crate-private `InMemorySecretsStore` (legacy_store.rs). Consolidating
-    //     means running the filesystem secret store over an in-memory backend
-    //     with an ephemeral master key — crypto key sourcing and AAD scoping
-    //     must be reviewed by someone holding the secrets contract. ---
-    "InMemorySecretStore",
-    "InMemorySecretsStore",
+    // --- secrets cluster: DONE — `InMemorySecretStore` and its crate-private
+    //     `InMemorySecretsStore` engine (legacy_store.rs) are deleted; every
+    //     consumer is consolidated onto `FilesystemSecretStore::ephemeral()`
+    //     (the production encrypted store over `InMemoryBackend` with an
+    //     ephemeral master key and the tenant-rewriting `/secrets` mount
+    //     resolver). ---
 ];
 
 /// Audited JUSTIFIED KEEPS: pub-visible `InMemory*Store` types that are NOT

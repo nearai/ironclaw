@@ -651,7 +651,9 @@ impl RebornProductAuthServices {
             cleanup_service,
             continuation_dispatcher,
             security_audit_sink: None,
-            secret_store: Arc::new(ironclaw_secrets::InMemorySecretStore::new()),
+            // §4.3: volatile default — the production encrypted filesystem
+            // secret store over an in-memory backend (ephemeral master key).
+            secret_store: Arc::new(ironclaw_secrets::FilesystemSecretStore::ephemeral()),
             host_managed_nearai_credential_scope: None,
             dcr_oauth_registry: None,
             oauth_gate_registry: None,
@@ -1897,7 +1899,7 @@ impl RebornProductAuthServices {
         RebornProductAuthServicePorts::from_shared(services.clone())
             .into_services(
                 continuation_dispatcher,
-                Arc::new(ironclaw_secrets::InMemorySecretStore::new()),
+                Arc::new(ironclaw_secrets::FilesystemSecretStore::ephemeral()),
             )
             .with_flow_record_source(services)
     }
@@ -2595,7 +2597,7 @@ mod tests {
             RebornProductAuthServicePorts::from_shared_with_provider(shared, provider_client);
         let services = ports.into_services(
             Arc::new(NoopAuthContinuationDispatcher),
-            Arc::new(ironclaw_secrets::InMemorySecretStore::new()),
+            Arc::new(ironclaw_secrets::FilesystemSecretStore::ephemeral()),
         );
 
         assert_eq!(arc_data_ptr(&services.flow_manager()), shared_ptr);
