@@ -1,13 +1,13 @@
 //! Turn-run persistence-snapshot abstraction shared by every reader of live
 //! turn-run state in this crate: the local-dev approval/auth interaction
-//! locators (`LocalDevApprovalTurnRunLocator` in `runtime.rs`,
-//! `LocalDevAuthInteractionReadModel` in `runtime/auth_interaction.rs`) and
+//! locators (`SnapshotApprovalTurnRunLocator` in `runtime.rs`,
+//! `SnapshotAuthInteractionReadModel` in `runtime/auth_interaction.rs`) and
 //! the trigger poller's active-run lookup (`SnapshotActiveRunLookup` in
 //! `trigger_poller/active_run_lookup.rs`).
 //!
 //! Exists so a `test-support` caller can substitute the turn-state store a
 //! locator reads from without those locators depending on the specific
-//! concrete `LocalDevTurnStateStore` type: `RebornIntegrationGroup`'s
+//! concrete `ComposedTurnStateStore` type: `RebornIntegrationGroup`'s
 //! real runs execute against its own `shared.turn_store`
 //! (`FilesystemTurnStateStore<HarnessTurnBackend>`, built by
 //! `build_default_planned_runtime`) — a DIFFERENT store than
@@ -32,11 +32,11 @@ pub(crate) trait TurnRunSnapshotSource: Send + Sync {
 }
 
 // Durable filesystem store: async fallible snapshot. Generic over any
-// `RootFilesystem` backend so both `LocalDevTurnStateStore` (production/
+// `RootFilesystem` backend so both `ComposedTurnStateStore` (production/
 // local-dev, when it resolves to `FilesystemTurnStateStore<CompositeRootFilesystem>`)
 // and a caller's own store (e.g. `RebornIntegrationGroup`'s
 // `FilesystemTurnStateStore<HarnessTurnBackend>`) implement this identically.
-// Unconditional (not cfg-gated on which backend `LocalDevTurnStateStore`
+// Unconditional (not cfg-gated on which backend `ComposedTurnStateStore`
 // happens to alias to in this build, nor on this crate's `libsql`/`postgres`
 // features): `FilesystemTurnStateStore` is defined unconditionally in
 // `ironclaw_turns`, and this impl targets a different concrete type per `F`

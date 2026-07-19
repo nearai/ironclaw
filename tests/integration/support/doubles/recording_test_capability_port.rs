@@ -2,7 +2,7 @@
 
 /// Test double substituting the whole production capability-port dispatch
 /// pipeline (`HostRuntimeLoopCapabilityPortFactory` +
-/// `LocalDevLoopCapabilityPortFactory`) with a lightweight in-memory Echo backend.
+/// `RefreshingLoopCapabilityPortFactory`) with a lightweight in-memory Echo backend.
 use std::sync::{
     Arc, Mutex,
     atomic::{AtomicUsize, Ordering},

@@ -440,7 +440,6 @@ async fn assert_process_capabilities_unavailable_for_processless_runtime(
             CapabilityId::new(SHELL_CAPABILITY_ID).unwrap(),
             ResourceEstimate::default(),
             json!({"command": "echo should-not-run"}),
-            production_builtin_trust_decision(),
         ))
         .await
         .expect("shell invocation returns an outcome");
@@ -457,7 +456,6 @@ async fn assert_process_capabilities_unavailable_for_processless_runtime(
             CapabilityId::new(SPAWN_SUBAGENT_CAPABILITY_ID).unwrap(),
             ResourceEstimate::default(),
             json!({}),
-            production_builtin_trust_decision(),
         ))
         .await
         .expect("spawn_subagent invocation returns an outcome");
@@ -500,7 +498,6 @@ async fn invoke_trigger_management(
             CapabilityId::new(capability).unwrap(),
             ResourceEstimate::default(),
             input,
-            trigger_management_trust_decision(),
         ))
         .await
         .expect("trigger management capability invoke");
@@ -537,19 +534,6 @@ fn trigger_management_execution_context() -> ExecutionContext {
         MountView::default(),
     )
     .unwrap()
-}
-
-#[cfg(feature = "libsql")]
-fn trigger_management_trust_decision() -> TrustDecision {
-    TrustDecision {
-        effective_trust: EffectiveTrustClass::user_trusted(),
-        authority_ceiling: AuthorityCeiling {
-            allowed_effects: vec![EffectKind::DispatchCapability, EffectKind::ExternalWrite],
-            max_resource_ceiling: None,
-        },
-        provenance: TrustProvenance::AdminConfig,
-        evaluated_at: Utc::now(),
-    }
 }
 
 #[cfg(feature = "libsql")]

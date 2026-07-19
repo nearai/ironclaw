@@ -29,7 +29,7 @@ Why it's wrong: one production impl means the trait encodes no variation — it'
 | Exemplar | Variation behind it | Re-verify |
 | --- | --- | --- |
 | `RootFilesystem` (`crates/ironclaw_filesystem/src/root.rs`) | local / postgres / libsql / in-memory / composite / HSM / memory-adapter | `rg -n "impl RootFilesystem for" crates/ironclaw_filesystem/src crates/ironclaw_memory_native/src` |
-| `PolicySource` (`crates/ironclaw_trust/src/sources.rs`) | AdminConfig / BundledRegistry / LocalDevOverride / SignedRegistry | `grep -n "impl PolicySource" crates/ironclaw_trust/src/sources.rs` |
+| `PolicySource` (`crates/ironclaw_trust/src/sources.rs`) | AdminConfig / BundledRegistry / DevTrustOverride / SignedRegistry | `grep -n "impl PolicySource" crates/ironclaw_trust/src/sources.rs` |
 | `EmbeddingProvider` (`crates/ironclaw_embeddings/src/provider.rs`) | OpenAI / NearAI / Ollama / Bedrock + caching decorator (v1-only shape example) | `rg -n "impl EmbeddingProvider for (OpenAi|NearAi|Ollama|Bedrock|Cached)" crates/ironclaw_embeddings/src` |
 
 **GOOD — one impl but a real boundary** (the acceptable exception): `SkillInferencePort` (`crates/ironclaw_skill_learning/src/lib.rs`) has one production adapter — supplied by composition — because the port exists to keep LLM/runtime deps *out* of a pure-domain crate. The justification is verifiable in Cargo.toml (its only workspace/domain dependency is `ironclaw_skills`; it has no LLM/runtime/filesystem deps), not in a comment.

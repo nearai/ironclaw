@@ -2,7 +2,6 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use chrono::Utc;
 use ironclaw_authorization::TrustAwareCapabilityDispatchAuthorizer;
 use ironclaw_extensions::{ExtensionManifest, ExtensionPackage, ExtensionRegistry, ManifestSource};
 use ironclaw_filesystem::DiskFilesystem;
@@ -29,8 +28,7 @@ use ironclaw_resources::{
 };
 use ironclaw_secrets::{InMemorySecretStore, SecretMaterial, SecretStore};
 use ironclaw_trust::{
-    AdminConfig, AdminEntry, AuthorityCeiling, EffectiveTrustClass, HostTrustAssignment,
-    HostTrustPolicy, TrustDecision, TrustProvenance,
+    AdminConfig, AdminEntry, HostTrustAssignment, HostTrustPolicy, TrustDecision,
 };
 use ironclaw_wasm::{
     RecordingWasmHostHttp, WasmHostError, WasmHttpResponse, WitToolExecution, WitToolHost,
@@ -2299,13 +2297,7 @@ fn wasm_runtime_request_for_scope(
     input: serde_json::Value,
 ) -> RuntimeCapabilityRequest {
     let context = execution_context_with_dispatch_grant_for_scope(capability_id.clone(), scope);
-    RuntimeCapabilityRequest::new(
-        context,
-        capability_id,
-        wasm_http_estimate(),
-        input,
-        trust_decision_with_dispatch_authority(),
-    )
+    RuntimeCapabilityRequest::new(context, capability_id, wasm_http_estimate(), input)
 }
 
 fn execution_context_with_dispatch_grant_for_scope(
@@ -2359,23 +2351,6 @@ fn capability_grants(capability: CapabilityId) -> CapabilitySet {
         },
     });
     grants
-}
-
-fn trust_decision_with_dispatch_authority() -> TrustDecision {
-    TrustDecision {
-        effective_trust: EffectiveTrustClass::user_trusted(),
-        authority_ceiling: AuthorityCeiling {
-            allowed_effects: vec![
-                EffectKind::DispatchCapability,
-                EffectKind::Network,
-                EffectKind::UseSecret,
-                EffectKind::ExternalWrite,
-            ],
-            max_resource_ceiling: None,
-        },
-        provenance: TrustProvenance::Default,
-        evaluated_at: Utc::now(),
-    }
 }
 
 fn execute_bundled_github_wasm(

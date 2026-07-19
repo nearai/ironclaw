@@ -193,9 +193,9 @@ pub(crate) async fn core_builtin_tools_default() -> HarnessResult<HostRuntimeCap
 /// workspace mount view — mirrors `local_dev_mounts::ambient_workspace_mount_view`
 /// appending a `/host` alias when `host_home_aliases` is non-empty. This is
 /// the ONLY integration-tier construction with a confirmed host-home mount,
-/// so it is the sole way to observe `wrap_local_dev_surface_disclosure`'s
+/// so it is the sole way to observe `wrap_surface_disclosure`'s
 /// scoped-roots note (the layer is a no-op — disabled — without a `/host`
-/// alias present, see `LocalDevSurfaceDisclosure::enabled`).
+/// alias present, see `HostSurfaceDisclosure::enabled`).
 pub(crate) async fn core_builtin_tools_with_confirmed_host_mount()
 -> HarnessResult<HostRuntimeCapabilityHarness> {
     let mut harness = core_builtin_tools(CoreBuiltinOptions::default()).await?;

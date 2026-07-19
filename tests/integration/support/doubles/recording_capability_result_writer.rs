@@ -1,9 +1,9 @@
 /// Test double substituting the production `LoopCapabilityResultWriter` impl
-/// (`LocalDevCapabilityIo`, `crates/ironclaw_reborn_composition/src/runtime/local_dev.rs`).
+/// (`StagedCapabilityIo`, `crates/ironclaw_reborn_composition/src/runtime/local_dev.rs`).
 ///
 /// Also implements `LoopCapabilityInputResolver`, delegating straight to
 /// `input_resolver` (no recording — only result writes are recorded).
-/// Harness-port-seam P1 Change 2: production assigns ONE `LocalDevCapabilityIo`
+/// Harness-port-seam P1 Change 2: production assigns ONE `StagedCapabilityIo`
 /// to both the `input_resolver` and `result_writer` config roles so
 /// input-ref/result-ref correlation by `call_id` works; this double must be
 /// usable the same way — `input_resolver` and `result_writer` below must be
@@ -34,7 +34,7 @@ use super::super::harness::RecordedCapabilityResult;
 
 /// Wraps whatever real io the harness is currently backed by -- production's
 /// ephemeral `ProductLiveCapabilityIo` test double by default, or the real
-/// `LocalDevCapabilityIo` (durable tool-result projection seam, issue #5838)
+/// `StagedCapabilityIo` (durable tool-result projection seam, issue #5838)
 /// when the harness opts into `.with_durable_capability_io()`. Trait-object
 /// fields so this recorder is agnostic to which one is underneath.
 pub(crate) struct RecordingCapabilityResultWriter {

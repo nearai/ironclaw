@@ -11,7 +11,7 @@ use ironclaw_threads::{
 };
 
 use super::{
-    CapabilityDisplayPreviewStore, LocalDevCapabilityIo, UserId, local_dev_thread_scope_for_run,
+    CapabilityDisplayPreviewStore, StagedCapabilityIo, UserId, local_dev_thread_scope_for_run,
     provider_tool_call, run_context,
 };
 
@@ -34,7 +34,7 @@ async fn capability_io_writes_display_preview_to_durable_history() {
         })
         .await
         .expect("thread exists");
-    let capability_io = LocalDevCapabilityIo::new_with_durable_previews(
+    let capability_io = StagedCapabilityIo::new_with_durable_previews(
         Arc::new(CapabilityDisplayPreviewStore::default()),
         thread_service.clone(),
         fallback_user_id.clone(),
@@ -121,7 +121,7 @@ async fn capability_io_writes_failure_display_preview_to_durable_history() {
         })
         .await
         .expect("thread exists");
-    let capability_io = LocalDevCapabilityIo::new_with_durable_previews(
+    let capability_io = StagedCapabilityIo::new_with_durable_previews(
         Arc::new(CapabilityDisplayPreviewStore::default()),
         thread_service.clone(),
         fallback_user_id.clone(),

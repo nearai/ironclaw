@@ -8,10 +8,9 @@ use std::sync::{
 };
 
 use async_trait::async_trait;
-use chrono::Utc;
 use ironclaw_authorization::{GrantAuthorizer, TrustAwareCapabilityDispatchAuthorizer};
 use ironclaw_dispatcher::{
-    RuntimeAdapter, RuntimeAdapterRequest, RuntimeAdapterResult, RuntimeDispatcher,
+    RuntimeAdapterRequest, RuntimeAdapterResult, RuntimeDispatcher, RuntimeExecutor,
 };
 use ironclaw_events::{InMemoryEventSink, RuntimeEventKind};
 use ironclaw_extensions::{ExtensionManifest, ExtensionPackage, ExtensionRegistry, ManifestSource};
@@ -26,8 +25,7 @@ use ironclaw_resources::{
 };
 use ironclaw_run_state::{RunStateStore, RunStatus};
 use ironclaw_trust::{
-    AdminConfig, AdminEntry, AuthorityCeiling, EffectiveTrustClass, HostTrustAssignment,
-    HostTrustPolicy, TrustDecision, TrustProvenance,
+    AdminConfig, AdminEntry, HostTrustAssignment, HostTrustPolicy, TrustDecision,
 };
 use serde_json::{Value, json};
 
@@ -69,7 +67,6 @@ async fn default_host_runtime_invokes_through_runtime_dispatcher_with_resources_
             capability_id(),
             estimate.clone(),
             input.clone(),
-            trust_decision(),
         ))
         .await
         .unwrap();
@@ -135,7 +132,6 @@ async fn default_host_runtime_fails_unsupported_obligations_before_runtime_dispa
             capability_id(),
             ResourceEstimate::default(),
             json!({"message":"obligation"}),
-            trust_decision(),
         ))
         .await
         .unwrap();
@@ -200,9 +196,14 @@ impl RecordingRuntimeAdapter {
 }
 
 #[async_trait]
-impl RuntimeAdapter<DiskFilesystem, InMemoryResourceGovernor> for RecordingRuntimeAdapter {
+impl RuntimeExecutor<DiskFilesystem, InMemoryResourceGovernor> for RecordingRuntimeAdapter {
+    fn supports_lane(&self, lane: RuntimeLane) -> bool {
+        lane == RuntimeLane::Wasm
+    }
+
     async fn dispatch_json(
         &self,
+        _lane: RuntimeLane,
         request: RuntimeAdapterRequest<'_, DiskFilesystem, InMemoryResourceGovernor>,
     ) -> Result<RuntimeAdapterResult, DispatchError> {
         self.requests.lock().unwrap().push(RecordedRuntimeRequest {
@@ -288,11 +289,18 @@ impl TrustAwareCapabilityDispatchAuthorizer for ObligatingAuthorizer {
     }
 }
 
+type RecordingDispatcher = RuntimeDispatcher<
+    'static,
+    DiskFilesystem,
+    InMemoryResourceGovernor,
+    Arc<RecordingRuntimeAdapter>,
+>;
+
 fn runtime_dispatcher_stack(
     adapter: Arc<RecordingRuntimeAdapter>,
 ) -> (
     Arc<ExtensionRegistry>,
-    RuntimeDispatcher<'static, DiskFilesystem, InMemoryResourceGovernor>,
+    RecordingDispatcher,
     Arc<InMemoryResourceGovernor>,
     InMemoryEventSink,
 ) {
@@ -300,10 +308,13 @@ fn runtime_dispatcher_stack(
     let filesystem = Arc::new(DiskFilesystem::new());
     let governor = Arc::new(InMemoryResourceGovernor::new());
     let events = InMemoryEventSink::new();
-    let dispatcher =
-        RuntimeDispatcher::from_arcs(Arc::clone(&registry), filesystem, Arc::clone(&governor))
-            .with_runtime_adapter_arc(RuntimeKind::Wasm, adapter)
-            .with_event_sink_arc(Arc::new(events.clone()));
+    let dispatcher = RuntimeDispatcher::from_arcs(
+        Arc::clone(&registry),
+        filesystem,
+        Arc::clone(&governor),
+        adapter,
+    )
+    .with_event_sink_arc(Arc::new(events.clone()));
     (registry, dispatcher, governor, events)
 }
 
@@ -371,18 +382,6 @@ fn local_manifest_trust_policy() -> HostTrustPolicy {
         ),
     ]))])
     .unwrap()
-}
-
-fn trust_decision() -> TrustDecision {
-    TrustDecision {
-        effective_trust: EffectiveTrustClass::user_trusted(),
-        authority_ceiling: AuthorityCeiling {
-            allowed_effects: vec![EffectKind::DispatchCapability],
-            max_resource_ceiling: None,
-        },
-        provenance: TrustProvenance::Default,
-        evaluated_at: Utc::now(),
-    }
 }
 
 fn capability_id() -> CapabilityId {
