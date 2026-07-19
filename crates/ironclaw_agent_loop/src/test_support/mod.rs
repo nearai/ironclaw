@@ -10,7 +10,9 @@ use std::{
 };
 
 use async_trait::async_trait;
-use ironclaw_host_api::{CapabilityId, RuntimeKind, TenantId, ThreadId};
+use ironclaw_host_api::{
+    CapabilityId, Resolution, ResolutionBatch, RuntimeKind, TenantId, ThreadId,
+};
 use ironclaw_turns::{
     AgentLoopDriverDescriptor, LoopFailureKind, LoopGateRef, LoopMessageRef, LoopResultRef,
     RunProfileId, RunProfileVersion, TurnCheckpointId, TurnId, TurnRunId, TurnScope,
@@ -33,7 +35,7 @@ use ironclaw_turns::{
         ResolvedRunProfile, ResourceBudgetPolicy, ResourceBudgetTier, RunClassId,
         RunProfileFingerprint, RuntimeProfileConstraints, SchedulingClass,
         StageCheckpointPayloadRequest, SteeringPolicy, VisibleCapabilityRequest,
-        VisibleCapabilitySurface,
+        VisibleCapabilitySurface, capability_outcome_to_resolution,
     },
 };
 
@@ -592,6 +594,37 @@ impl ScriptedCapabilityOutcome {
         Self::Failed {
             error_kind: scripted_failure_kind(error_kind.as_ref()),
         }
+    }
+}
+
+/// Convert a fixture [`CapabilityOutcome`] to its host_api [`Resolution`] channel
+/// via the production mapping ([`capability_outcome_to_resolution`]), discarding
+/// the side records the pure mapping also emits.
+///
+/// The §5.3 capability-result flip re-points the loop's ~150 existing
+/// `CapabilityOutcome` test fixtures at `Resolution`. This lets each of those
+/// convert through the real mapping instead of hand-rolling a `Resolution` by
+/// hand (which would drift from the acceptance table). Additive: nothing wires
+/// it yet.
+pub fn resolution_from_scripted_outcome(outcome: CapabilityOutcome) -> Resolution {
+    capability_outcome_to_resolution(outcome).resolution
+}
+
+/// Convert a batch of fixture [`CapabilityOutcome`]s to a [`ResolutionBatch`],
+/// mapping each through [`resolution_from_scripted_outcome`] and carrying the
+/// `stopped_on_suspension` flag through unchanged — the `Resolution`-over-
+/// `CapabilityOutcome` analogue of `CapabilityBatchOutcome`, for the flip's
+/// batch-loop test sites.
+pub fn resolution_batch_from_scripted(
+    outcomes: impl IntoIterator<Item = CapabilityOutcome>,
+    stopped_on_suspension: bool,
+) -> ResolutionBatch {
+    ResolutionBatch {
+        resolutions: outcomes
+            .into_iter()
+            .map(resolution_from_scripted_outcome)
+            .collect(),
+        stopped_on_suspension,
     }
 }
 
@@ -1263,4 +1296,66 @@ fn lock_or_panic<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
 
 fn clone_mutex_vec<T: Clone>(mutex: &Mutex<Vec<T>>) -> Vec<T> {
     lock_or_panic(mutex).clone()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Build a fixture `CapabilityOutcome` from a scripted outcome via the same
+    /// private mapper the mock host uses, so these tests exercise the real
+    /// fixture-shaped inputs the flip will feed the helpers.
+    fn outcome(scripted: ScriptedCapabilityOutcome) -> CapabilityOutcome {
+        scripted_capability_outcome(scripted).expect("scripted fixture builds an outcome")
+    }
+
+    #[test]
+    fn scripted_outcome_maps_to_the_right_resolution_channel() {
+        // Completed → Done (ran, does not park).
+        let completed = resolution_from_scripted_outcome(outcome(
+            ScriptedCapabilityOutcome::completed("result:one"),
+        ));
+        assert_eq!(completed.kind(), "done");
+        assert!(!completed.parks());
+
+        // Failed → Done (a recoverable failure rides the Done channel; the model
+        // can retry) — it does not park.
+        let failed =
+            resolution_from_scripted_outcome(outcome(ScriptedCapabilityOutcome::failed("network")));
+        assert_eq!(failed.kind(), "done");
+        assert!(!failed.parks());
+
+        // ApprovalRequired → Blocked (a re-entrant gate): it parks but is NOT a
+        // suspension — the distinction parks() exists to preserve.
+        let approval = resolution_from_scripted_outcome(outcome(
+            ScriptedCapabilityOutcome::ApprovalRequired {
+                gate_ref: "gate:approve-1".to_string(),
+            },
+        ));
+        assert_eq!(approval.kind(), "blocked");
+        assert!(approval.parks());
+        assert!(!approval.is_suspension());
+    }
+
+    #[test]
+    fn resolution_batch_from_scripted_preserves_order_and_stop_flag() {
+        let batch = resolution_batch_from_scripted(
+            [
+                outcome(ScriptedCapabilityOutcome::completed("result:a")),
+                outcome(ScriptedCapabilityOutcome::AwaitDependentRun {
+                    gate_ref: "gate:dep-1".to_string(),
+                    result_ref: "result:dep-1".to_string(),
+                    byte_len: 0,
+                }),
+            ],
+            true,
+        );
+        assert!(batch.stopped_on_suspension);
+        assert_eq!(batch.resolutions.len(), 2);
+        assert_eq!(batch.resolutions[0].kind(), "done");
+        // AwaitDependentRun → Suspended: parks and is a suspension.
+        assert_eq!(batch.resolutions[1].kind(), "suspended");
+        assert!(batch.resolutions[1].parks());
+        assert!(batch.resolutions[1].is_suspension());
+    }
 }

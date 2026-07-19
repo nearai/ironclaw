@@ -494,8 +494,42 @@ impl Resolution {
     /// suspends — a `Done` with a `ChildSpawned` verdict is explicitly
     /// non-suspending (§5.3 table: the executor appends the child result and
     /// continues). Getting this wrong is the #6137 bug class.
+    ///
+    /// This is the *narrow* suspension question ("is this the parked-work
+    /// channel?"). A batch loop that stops early on the first invocation that
+    /// cannot be followed by more work must use [`Resolution::parks`] instead —
+    /// it also stops on a re-entrant gate, which `is_suspension` deliberately
+    /// excludes.
     pub fn is_suspension(&self) -> bool {
         matches!(self, Resolution::Suspended(_))
+    }
+
+    /// Whether the batch loop *parks* on this resolution — the loop-semantics
+    /// suspension predicate the §5.3 flip's batch loops must gate on, a strict
+    /// SUPERSET of [`Resolution::is_suspension`].
+    ///
+    /// A batch that stops "on first suspension" must also stop on a re-entrant
+    /// gate ([`Resolution::Blocked`] — approval/auth/resource): the gated
+    /// invocation did not run, so nothing after it in the batch can proceed
+    /// until it is resolved, exactly as parked work ([`Resolution::Suspended`] —
+    /// process/dependent-run/external-tool) blocks the batch. `parks()` answers
+    /// the *loop* question "does the batch stop here?"; `is_suspension()` answers
+    /// the narrower "is this the parked-work channel?".
+    ///
+    /// `parks()` ⊋ `is_suspension()`: every `Suspended` parks, but a
+    /// `Blocked::Approval` parks while it is NOT a suspension. Using
+    /// `is_suspension()` where `parks()` is meant silently lets a gate fall
+    /// through as if the call had completed — the verified hazard §5.3 Stage 1
+    /// closes ahead of the atomic flip. `Done` (ran, including the non-suspending
+    /// `ChildSpawned`) and terminal `Denied` do not park.
+    pub fn parks(&self) -> bool {
+        // Exhaustive match, not `matches!`: a new `Resolution` variant must be
+        // a compile error here (§11.9 no-wildcard) so its parking behavior is
+        // decided deliberately, never silently defaulted to `false`.
+        match self {
+            Resolution::Blocked(_) | Resolution::Suspended(_) => true,
+            Resolution::Done(_) | Resolution::Denied(_) => false,
+        }
     }
 
     /// Whether this is a re-entrant gate (resolving it re-enters `authorize()`).
@@ -511,6 +545,33 @@ impl Resolution {
             _ => None,
         }
     }
+}
+
+/// The loop-facing result of a *batch* of capability invocations — the §5.3
+/// flip's [`Resolution`]-over-`CapabilityOutcome` replacement for the loop's
+/// current `CapabilityBatchOutcome` (`ironclaw_turns`). It mirrors that type's
+/// shape and semantics exactly: the per-invocation [`Resolution`]s in call
+/// order, plus whether the executor stopped early because one of them *parked*.
+///
+/// The stop flag keeps its established name, `stopped_on_suspension`, to match
+/// `CapabilityBatchOutcome`; note the flip's loop must set it whenever an
+/// invocation [`Resolution::parks`] — a re-entrant gate as well as a suspension —
+/// not only on the narrower [`Resolution::is_suspension`]. That is precisely the
+/// predicate this slice provides so the flip has one canonical, tested site to
+/// call.
+///
+/// Additive (§9): nothing produces or consumes a `ResolutionBatch` yet — the
+/// flip's batch loops adopt it. Wire-stable serde (a bounded `Vec` + `bool`, per
+/// the `host_api` charter) so a persisted or transported batch keeps its
+/// contract if it is ever serialized.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ResolutionBatch {
+    /// The resolution for each invocation, in call order.
+    pub resolutions: Vec<Resolution>,
+    /// True when the batch stopped early because an invocation parked
+    /// ([`Resolution::parks`]) and the batch was configured to stop on the first
+    /// such park.
+    pub stopped_on_suspension: bool,
 }
 
 #[cfg(test)]
@@ -877,16 +938,21 @@ mod tests {
     #[test]
     fn resolution_covers_the_full_acceptance_table() {
         let proc = || ProcessRef::parse("0f0e0d0c-0b0a-4908-8706-050403020100").unwrap();
-        // (today's CapabilityOutcome variant, the Resolution channel, is_suspension)
-        let rows: [(&str, Resolution, bool); 10] = [
+        // (today's CapabilityOutcome variant, the Resolution channel,
+        //  is_suspension, parks). `parks` ⊇ `is_suspension`: it adds the three
+        // re-entrant gate variants (Approval/Auth/Resource) the batch loop must
+        // also stop on — see `parks_is_a_strict_superset_of_is_suspension`.
+        let rows: [(&str, Resolution, bool, bool); 10] = [
             (
                 "Completed",
                 Resolution::Done(outcome(ToolVerdict::Success)),
+                false,
                 false,
             ),
             (
                 "Failed",
                 Resolution::Done(outcome(recoverable_failure())),
+                false,
                 false,
             ),
             (
@@ -895,25 +961,30 @@ mod tests {
                     DenyRef::parse("018f6a00-0000-7000-8000-000000000002").unwrap(),
                 )),
                 false,
+                false,
             ),
             (
                 "ApprovalRequired",
                 Resolution::Blocked(Blocked::Approval(GateWaypoint::new(gate()))),
                 false,
+                true,
             ),
             (
                 "AuthRequired",
                 Resolution::Blocked(Blocked::Auth(GateWaypoint::new(gate()))),
                 false,
+                true,
             ),
             (
                 "ResourceBlocked",
                 Resolution::Blocked(Blocked::Resource(GateWaypoint::new(gate()))),
                 false,
+                true,
             ),
             (
                 "SpawnedProcess",
                 Resolution::Suspended(Suspension::Process(ProcessWaypoint::new(proc()))),
+                true,
                 true,
             ),
             // Non-suspending — the one that has bitten before (#6137, §5.3 table).
@@ -921,30 +992,113 @@ mod tests {
                 "SpawnedChildRun",
                 Resolution::Done(outcome(child_spawned())),
                 false,
+                false,
             ),
             (
                 "AwaitDependentRun",
                 Resolution::Suspended(Suspension::DependentRun(GateWaypoint::new(gate()))),
+                true,
                 true,
             ),
             (
                 "ExternalToolPending",
                 Resolution::Suspended(Suspension::ExternalTool(GateWaypoint::new(gate()))),
                 true,
+                true,
             ),
         ];
         assert_eq!(rows.len(), 10, "all ten CapabilityOutcome variants covered");
-        for (variant, resolution, suspends) in rows {
+        for (variant, resolution, suspends, parks) in rows {
             assert_eq!(
                 resolution.is_suspension(),
                 suspends,
                 "{variant}: suspension semantics"
             );
+            assert_eq!(resolution.parks(), parks, "{variant}: park semantics");
             // Round-trips through the wire like every channel.
             let json = serde_json::to_value(&resolution).unwrap();
             let back: Resolution = serde_json::from_value(json).unwrap();
             assert_eq!(back, resolution, "{variant}: round-trip");
         }
+    }
+
+    /// `parks()` is the loop-suspension predicate the §5.3 batch loops must gate
+    /// on — a STRICT superset of `is_suspension()`. The inner match is
+    /// exhaustive by construction: a new `Resolution` variant added later will
+    /// fail to compile here until its park semantics are declared (§11.9).
+    #[test]
+    fn parks_is_a_strict_superset_of_is_suspension() {
+        fn expected_parks(resolution: &Resolution) -> bool {
+            match resolution {
+                // Ran (incl. the non-suspending ChildSpawned) or terminally
+                // denied: the batch continues past it.
+                Resolution::Done(_) | Resolution::Denied(_) => false,
+                // Re-entrant gates AND parked work: the batch stops here.
+                Resolution::Blocked(_) | Resolution::Suspended(_) => true,
+            }
+        }
+
+        let samples = [
+            Resolution::Done(outcome(ToolVerdict::Success)),
+            Resolution::Done(outcome(child_spawned())),
+            Resolution::Denied(Denial::new(
+                DenyRef::parse("018f6a00-0000-7000-8000-000000000002").unwrap(),
+            )),
+            Resolution::Blocked(Blocked::Approval(gate_wp())),
+            Resolution::Blocked(Blocked::Auth(gate_wp())),
+            Resolution::Blocked(Blocked::Resource(gate_wp())),
+            Resolution::Suspended(Suspension::Process(proc_wp())),
+            Resolution::Suspended(Suspension::DependentRun(gate_wp())),
+            Resolution::Suspended(Suspension::ExternalTool(gate_wp())),
+        ];
+        for resolution in &samples {
+            assert_eq!(
+                resolution.parks(),
+                expected_parks(resolution),
+                "parks() disagrees for {}",
+                resolution.kind()
+            );
+            // Superset direction: every suspension parks.
+            if resolution.is_suspension() {
+                assert!(
+                    resolution.parks(),
+                    "{}: is_suspension ⊆ parks",
+                    resolution.kind()
+                );
+            }
+        }
+
+        // STRICT: a re-entrant approval gate parks but is NOT a suspension — the
+        // exact variant a naive `is_suspension()` batch guard would mis-handle
+        // as if the call had completed (the hazard §5.3 Stage 1 closes).
+        let gate = Resolution::Blocked(Blocked::Approval(gate_wp()));
+        assert!(gate.parks(), "an approval gate parks");
+        assert!(
+            !gate.is_suspension(),
+            "an approval gate is not a suspension"
+        );
+    }
+
+    #[test]
+    fn resolution_batch_mirrors_capability_batch_outcome_and_roundtrips() {
+        let batch = ResolutionBatch {
+            resolutions: vec![
+                Resolution::Done(outcome(ToolVerdict::Success)),
+                Resolution::Blocked(Blocked::Approval(GateWaypoint::new(gate()))),
+            ],
+            stopped_on_suspension: true,
+        };
+        // Order and the stop flag survive a wire round-trip.
+        let back: ResolutionBatch =
+            serde_json::from_value(serde_json::to_value(&batch).unwrap()).unwrap();
+        assert_eq!(back, batch);
+        assert!(back.stopped_on_suspension);
+        assert_eq!(back.resolutions.len(), 2);
+        assert_eq!(back.resolutions[0].kind(), "done");
+        // The batch stopped on a variant that parks (a gate) — exactly why the
+        // flip's loop must gate on parks(), not the narrower is_suspension().
+        assert!(back.resolutions[1].parks());
+        assert!(!back.resolutions[1].is_suspension());
     }
 
     #[test]
