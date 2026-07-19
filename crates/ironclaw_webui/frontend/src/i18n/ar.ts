@@ -75,6 +75,7 @@ registerPack("ar", {
   "login.connect": "اتصال",
   "login.oauthDivider": "أو المتابعة مع",
   "login.oauthProvider": "المتابعة مع {provider}",
+  "login.localDevHint": "هل تشغّل IronClaw محليًا؟ احصل على رابط تسجيل الدخول الخاص بك:",
 
   // Chat — empty state
   "chat.heroTitle": "مرحبًا، بماذا تحتاج إلى المساعدة؟",

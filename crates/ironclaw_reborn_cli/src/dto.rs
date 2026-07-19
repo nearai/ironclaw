@@ -32,6 +32,13 @@ pub(crate) struct StatusDto {
     /// (not inferred from file presence). `Unknown` on detection
     /// error/unsupported platform; `status` must never fail over this.
     pub service: ServiceStateDto,
+    /// Set only when Google OAuth env config is *asymmetrically* partial
+    /// (`client_id` without `redirect_uri`, or vice versa) — the quiet
+    /// degrade-to-disabled case from `resolve_google_oauth_config`. `None`
+    /// both when Google OAuth is fully unconfigured (nothing to report) and
+    /// when it is fully configured (no degradation to surface).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub google_oauth_degraded: Option<String>,
 }
 
 /// Live OS-service lifecycle state. Mirrors `commands::service::ServiceState`,
@@ -40,6 +47,10 @@ pub(crate) struct StatusDto {
 /// an `Unknown` fallback) on every build.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
+// The concrete states are constructed only by the `webui-v2-beta`-gated
+// resolver (`status::resolve_service_state`); the enum stays whole on every
+// build for wire stability, so the variants are legitimately unconstructed
+// (dead-code in the default/libsql clippy lanes) without that feature.
 #[cfg_attr(not(feature = "webui-v2-beta"), allow(dead_code))]
 pub(crate) enum ServiceStateDto {
     Running,

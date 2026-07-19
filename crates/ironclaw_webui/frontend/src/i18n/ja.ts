@@ -75,6 +75,7 @@ registerPack("ja", {
   "login.connect": "接続",
   "login.oauthDivider": "または続行",
   "login.oauthProvider": "{provider} で続行",
+  "login.localDevHint": "IronClaw をローカルで実行していますか？サインインリンクを取得してください:",
 
   // Chat — empty state
   "chat.heroTitle": "こんにちは。何を手伝いましょうか?",

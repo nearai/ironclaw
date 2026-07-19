@@ -4140,6 +4140,8 @@ dependencies = [
  "ironclaw_run_state",
  "ironclaw_safety",
  "ironclaw_trust",
+ "ironclaw_turns",
+ "serde",
  "serde_json",
  "thiserror 2.0.18",
  "tokio",

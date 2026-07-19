@@ -256,9 +256,61 @@ mod test_channel_tests {
             )
             .await
             .unwrap();
+        channel
+            .send_status(
+                StatusUpdate::tool_started(
+                    "shell".to_string(),
+                    &serde_json::json!({"command": "cargo run zizmor --version"}),
+                ),
+                &metadata,
+            )
+            .await
+            .unwrap();
 
+        // The identity accessor stays bare-name (several suites compare with
+        // `==`); the display accessor carries the argument-prefixed form the
+        // live-canary assertions grep. Regression: after engine v2's removal no
+        // accessor surfaced the detail, so "did any shell attempt mention
+        // zizmor" could never see the command.
         let started = channel.tool_calls_started();
-        assert_eq!(started, vec!["memory_search", "echo"]);
+        assert_eq!(started, vec!["memory_search", "echo", "shell"]);
+        let display = channel.tool_call_display_names();
+        assert_eq!(
+            display,
+            vec!["memory_search", "echo", "shell(cargo run zizmor --version)"]
+        );
+    }
+
+    /// Regression for the dropped routine-notify receiver: the rig used to
+    /// construct the RoutineEngine with `(notify_tx, _notify_rx)`, so every
+    /// routine-path notification died with "channel closed" and the only
+    /// coverage was the ignored live mission canary. This pins the forwarder
+    /// seam the rig now wires: a response sent down the notify channel must
+    /// land in the TestChannel's captured responses.
+    #[tokio::test]
+    async fn routine_notify_forwarder_delivers_into_test_channel() {
+        use ironclaw::channels::OutgoingResponse;
+
+        let channel = Arc::new(TestChannel::new());
+        let (notify_tx, notify_rx) = tokio::sync::mpsc::channel::<OutgoingResponse>(4);
+        crate::support::test_rig::spawn_routine_notify_forwarder(notify_rx, Arc::clone(&channel));
+
+        notify_tx
+            .send(OutgoingResponse {
+                content: "✅ *Routine 'daily-news-digest'*: ok".to_string(),
+                thread_id: None,
+                attachments: Vec::new(),
+                inline_attachments: Vec::new(),
+                metadata: serde_json::json!({"source": "routine"}),
+            })
+            .await
+            .expect("forwarder receiver must be alive");
+
+        let responses = channel
+            .wait_for_responses(1, std::time::Duration::from_secs(5))
+            .await;
+        assert_eq!(responses.len(), 1, "routine notification must be captured");
+        assert!(responses[0].content.contains("daily-news-digest"));
     }
 
     #[tokio::test]
