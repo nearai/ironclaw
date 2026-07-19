@@ -23,10 +23,7 @@ use ironclaw_processes::{
     ProcessError, ProcessManager, ProcessRecord, ProcessStart, ProcessStatus,
 };
 use ironclaw_run_state::{RunStart, RunStateStore, RunStatus};
-use ironclaw_trust::{
-    AdminConfig, AdminEntry, AuthorityCeiling, EffectiveTrustClass, HostTrustAssignment,
-    HostTrustPolicy, TrustDecision, TrustProvenance,
-};
+use ironclaw_trust::{AdminConfig, AdminEntry, HostTrustAssignment, HostTrustPolicy};
 use serde_json::json;
 
 #[tokio::test]
@@ -78,7 +75,6 @@ async fn default_runtime_uses_persistent_policy_as_dispatch_authority() {
             capability_id(),
             ResourceEstimate::default(),
             json!({"message": "hello"}),
-            trust_decision_with_dispatch_authority(),
         ))
         .await
         .unwrap();
@@ -172,7 +168,6 @@ async fn default_runtime_uses_persistent_policy_as_auth_resume_authority() {
             capability_id(),
             ResourceEstimate::default(),
             json!({"message": "hello"}),
-            trust_decision_with_dispatch_authority(),
             None,
         ))
         .await
@@ -247,7 +242,6 @@ async fn default_runtime_uses_user_grantee_persistent_policy_as_dispatch_authori
             capability_id(),
             ResourceEstimate::default(),
             json!({"message": "hello"}),
-            trust_decision_with_dispatch_authority(),
         ))
         .await
         .unwrap();
@@ -323,7 +317,6 @@ async fn default_runtime_uses_threadless_filesystem_policy_after_thread_change()
             capability_id(),
             ResourceEstimate::default(),
             json!({"message": "hello"}),
-            trust_decision_with_dispatch_authority(),
         ))
         .await
         .unwrap();
@@ -387,7 +380,6 @@ async fn default_runtime_does_not_replay_tenant_grantee_persistent_policy() {
             capability_id(),
             ResourceEstimate::default(),
             json!({"message": "hello"}),
-            trust_decision_with_dispatch_authority(),
         ))
         .await
         .unwrap();
@@ -471,7 +463,6 @@ async fn default_runtime_skips_unusable_persistent_policy_for_later_match() {
             capability_id(),
             ResourceEstimate::default(),
             json!({"message": "hello"}),
-            trust_decision_with_dispatch_authority(),
         ))
         .await
         .unwrap();
@@ -515,7 +506,6 @@ async fn default_runtime_falls_back_when_persistent_policy_lookup_fails() {
             capability_id(),
             ResourceEstimate::default(),
             json!({"message": "hello"}),
-            trust_decision_with_dispatch_authority(),
         ))
         .await
         .unwrap();
@@ -579,7 +569,6 @@ async fn default_runtime_reuses_persistent_policy_for_manifest_ask() {
             capability_id(),
             ResourceEstimate::default(),
             json!({"message": "hello"}),
-            trust_decision_with_dispatch_authority(),
         ))
         .await
         .unwrap();
@@ -643,7 +632,6 @@ async fn default_runtime_skips_expired_persistent_policy() {
             capability_id(),
             ResourceEstimate::default(),
             json!({"message": "hello"}),
-            trust_decision_with_dispatch_authority(),
         ))
         .await
         .unwrap();
@@ -715,7 +703,6 @@ async fn default_runtime_uses_persistent_policy_for_no_project_no_thread_scope()
             capability_id(),
             ResourceEstimate::default(),
             json!({"message": "hello"}),
-            trust_decision_with_dispatch_authority(),
         ))
         .await
         .unwrap();
@@ -784,7 +771,6 @@ async fn default_runtime_uses_persistent_policy_as_spawn_capability_authority() 
             capability_id(),
             ResourceEstimate::default(),
             json!({"message": "hello"}),
-            trust_decision_with_spawn_authority(),
         ))
         .await
         .unwrap();
@@ -1002,30 +988,6 @@ fn local_manifest_trust_policy_with_effects(allowed_effects: Vec<EffectKind>) ->
         ),
     ]))])
     .unwrap()
-}
-
-fn trust_decision_with_dispatch_authority() -> TrustDecision {
-    TrustDecision {
-        effective_trust: EffectiveTrustClass::user_trusted(),
-        authority_ceiling: AuthorityCeiling {
-            allowed_effects: vec![EffectKind::DispatchCapability],
-            max_resource_ceiling: None,
-        },
-        provenance: TrustProvenance::Default,
-        evaluated_at: Utc::now(),
-    }
-}
-
-fn trust_decision_with_spawn_authority() -> TrustDecision {
-    TrustDecision {
-        effective_trust: EffectiveTrustClass::user_trusted(),
-        authority_ceiling: AuthorityCeiling {
-            allowed_effects: vec![EffectKind::DispatchCapability, EffectKind::SpawnProcess],
-            max_resource_ceiling: None,
-        },
-        provenance: TrustProvenance::Default,
-        evaluated_at: Utc::now(),
-    }
 }
 
 fn capability_id() -> CapabilityId {

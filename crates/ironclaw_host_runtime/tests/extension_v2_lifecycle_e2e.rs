@@ -5,8 +5,8 @@ use std::{
 
 use async_trait::async_trait;
 use ironclaw_dispatcher::{
-    CapabilityDispatcher, DispatchError, RuntimeAdapter, RuntimeAdapterRequest,
-    RuntimeAdapterResult, RuntimeDispatchErrorKind, RuntimeDispatcher,
+    CapabilityDispatcher, DispatchError, RuntimeAdapterRequest, RuntimeAdapterResult,
+    RuntimeDispatchErrorKind, RuntimeDispatcher, RuntimeExecutor,
 };
 use ironclaw_extensions::{
     CapabilityVisibility, ExtensionError, ExtensionLifecycleService, ExtensionManifest,
@@ -17,8 +17,8 @@ use ironclaw_host_api::{
     CapabilityId, EffectKind, ExtensionId, HostPath, MountView, NetworkScheme,
     NetworkTargetPattern, PermissionMode, ReservationStatus, ResourceEstimate,
     ResourceReservationId, ResourceScope, ResourceUsage, RuntimeCredentialAccountProviderId,
-    RuntimeCredentialRequirementSource, RuntimeCredentialTarget, RuntimeKind, SecretHandle,
-    TenantId, UserId, VirtualPath,
+    RuntimeCredentialRequirementSource, RuntimeCredentialTarget, RuntimeKind, RuntimeLane,
+    SecretHandle, TenantId, UserId, VirtualPath,
 };
 use ironclaw_host_runtime::{
     default_host_api_contract_registry, default_host_port_catalog,
@@ -85,13 +85,13 @@ async fn extension_v2_lifecycle_discovers_installs_publishes_and_dispatches_host
                 .set_max_output_bytes(10_000),
         )
         .unwrap();
-    let adapter = Arc::new(RecordingAdapter::new(
-        RuntimeKind::Script,
-        json!({"message":"script ok"}),
-    ));
-    let dispatcher =
-        RuntimeDispatcher::from_arcs(Arc::new(discovered), Arc::new(fs), Arc::clone(&governor))
-            .with_runtime_adapter_arc(RuntimeKind::Script, Arc::clone(&adapter));
+    let adapter = RecordingAdapter::new(RuntimeKind::Script, json!({"message":"script ok"}));
+    let dispatcher = RuntimeDispatcher::from_arcs(
+        Arc::new(discovered),
+        Arc::new(fs),
+        Arc::clone(&governor),
+        adapter.clone(),
+    );
     let dispatch_port: &dyn CapabilityDispatcher = &dispatcher;
     let reservation = governor.reserve(scope.clone(), estimate.clone()).unwrap();
     let reservation_id = reservation.id;
@@ -471,9 +471,14 @@ struct RecordedAdapterRequest {
 }
 
 #[async_trait]
-impl RuntimeAdapter<DiskFilesystem, InMemoryResourceGovernor> for RecordingAdapter {
+impl RuntimeExecutor<DiskFilesystem, InMemoryResourceGovernor> for RecordingAdapter {
+    fn supports_lane(&self, lane: RuntimeLane) -> bool {
+        RuntimeLane::from_runtime_kind(self.runtime) == Some(lane)
+    }
+
     async fn dispatch_json(
         &self,
+        _lane: RuntimeLane,
         request: RuntimeAdapterRequest<'_, DiskFilesystem, InMemoryResourceGovernor>,
     ) -> Result<RuntimeAdapterResult, DispatchError> {
         self.requests.lock().unwrap().push(RecordedAdapterRequest {

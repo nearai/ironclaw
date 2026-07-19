@@ -45,8 +45,8 @@ use ironclaw_network::{
 };
 use ironclaw_product_workflow::RebornOutboundDeliveryTargetId;
 use ironclaw_reborn_composition::{
-    AssistantReply, PollSettings, RebornCompositionProfile, RebornLocalRuntimeProfileOptions,
-    RebornProductAuthServices, RebornRuntime, RebornRuntimeIdentity, RebornRuntimeInput,
+    AssistantReply, PollSettings, RebornCompositionProfile, RebornProductAuthServices,
+    RebornRuntime, RebornRuntimeIdentity, RebornRuntimeInput, RebornRuntimeProfileOptions,
     RebornTurnDriveOutcome, TriggerPollerSettings, build_reborn_runtime, build_reborn_services,
     local_runtime_build_input_with_options,
 };
@@ -356,7 +356,7 @@ async fn build_qa_trace_runtime_with_http_interceptor_and_trigger_poller(
         RebornCompositionProfile::LocalDevYolo,
         QA_USER,
         root.path().join("local-dev"),
-        RebornLocalRuntimeProfileOptions {
+        RebornRuntimeProfileOptions {
             confirm_host_access: true,
         },
     )
@@ -823,7 +823,7 @@ impl RebornQaCredentialSource {
             RebornCompositionProfile::LocalDev,
             &self.user,
             self.local_dev_root.clone(),
-            RebornLocalRuntimeProfileOptions::default(),
+            RebornRuntimeProfileOptions::default(),
         )
         .expect("Reborn QA credential source input")
         .with_local_runtime_identity(

@@ -4,7 +4,6 @@ use std::{
 };
 
 use async_trait::async_trait;
-use chrono::Utc;
 use futures_util::FutureExt;
 use ironclaw_authorization::GrantAuthorizer;
 use ironclaw_events::{InMemoryEventSink, RuntimeEventKind};
@@ -27,10 +26,7 @@ use ironclaw_network::{
 use ironclaw_resources::{InMemoryResourceGovernor, ResourceAccount, ResourceTally};
 use ironclaw_run_state::{RunStateStore, RunStatus};
 use ironclaw_secrets::{InMemorySecretStore, SecretMaterial, SecretStore};
-use ironclaw_trust::{
-    AdminConfig, AdminEntry, AuthorityCeiling, EffectiveTrustClass, HostTrustAssignment,
-    HostTrustPolicy, TrustDecision, TrustProvenance,
-};
+use ironclaw_trust::{AdminConfig, AdminEntry, HostTrustAssignment, HostTrustPolicy};
 use serde_json::{Value, json};
 
 const FIRST_PARTY_STAGED_SECRET: &str = "sk-first-party-staged-secret";
@@ -72,7 +68,6 @@ async fn host_runtime_invokes_first_party_handler_through_capability_host() {
             capability_id(),
             estimate.clone(),
             input.clone(),
-            trust_decision(),
         ))
         .await
         .unwrap();
@@ -152,7 +147,6 @@ async fn first_party_handler_uses_staged_secret_through_production_host_egress()
                 .set_network_egress_bytes(100)
                 .set_output_bytes(1024),
             json!({"url":"https://api.example.test/v1/native"}),
-            trust_decision(),
         ))
         .await
         .unwrap();
@@ -435,7 +429,6 @@ async fn first_party_handler_error_reconciles_reported_usage_after_side_effect()
             capability_id(),
             ResourceEstimate::default().set_network_egress_bytes(100),
             json!({"message":"status"}),
-            trust_decision(),
         ))
         .await
         .unwrap();
@@ -481,7 +474,6 @@ async fn first_party_handler_panic_fails_closed_and_releases_reservation() {
         capability_id(),
         ResourceEstimate::default().set_network_egress_bytes(100),
         json!({"message":"status"}),
-        trust_decision(),
     )))
     .catch_unwind()
     .await
@@ -531,7 +523,6 @@ async fn first_party_missing_handler_fails_closed_without_side_effect_handler() 
             capability_id(),
             ResourceEstimate::default(),
             json!({"message":"status"}),
-            trust_decision(),
         ))
         .await
         .unwrap();
@@ -819,7 +810,6 @@ async fn invoke_http_fixture(
                 .set_network_egress_bytes(100)
                 .set_output_bytes(1024),
             input,
-            trust_decision(),
         ))
         .await
         .unwrap()
@@ -921,18 +911,6 @@ async fn stage_http_secret(
         )
         .await
         .unwrap();
-}
-
-fn trust_decision() -> TrustDecision {
-    TrustDecision {
-        effective_trust: EffectiveTrustClass::user_trusted(),
-        authority_ceiling: AuthorityCeiling {
-            allowed_effects: vec![EffectKind::DispatchCapability],
-            max_resource_ceiling: None,
-        },
-        provenance: TrustProvenance::Default,
-        evaluated_at: Utc::now(),
-    }
 }
 
 fn provider_id() -> ExtensionId {

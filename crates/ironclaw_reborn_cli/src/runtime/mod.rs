@@ -19,8 +19,8 @@ use ironclaw_reborn_composition::host_api::{AgentId, TenantId};
 use ironclaw_reborn_composition::hosted_single_tenant_runtime_policy;
 use ironclaw_reborn_composition::{
     CredentialRefreshSettings, OAuthClientConfig, OperatorLogLayer, PollSettings, RebornBuildInput,
-    RebornCompositionProfile, RebornLocalRuntimeProfileOptions, RebornRuntimeIdentity,
-    RebornRuntimeInput, TurnRunnerSettings, build_reborn_runtime,
+    RebornCompositionProfile, RebornRuntimeIdentity, RebornRuntimeInput,
+    RebornRuntimeProfileOptions, TurnRunnerSettings, build_reborn_runtime,
     local_runtime_build_input_with_options, nearai_mcp_bootstrap_config_from_env,
 };
 #[cfg(feature = "webui-v2-beta")]
@@ -787,7 +787,7 @@ fn build_standalone_local_runtime_services_input(
         composition_profile(profile),
         owner_id,
         local_runtime_root,
-        RebornLocalRuntimeProfileOptions {
+        RebornRuntimeProfileOptions {
             confirm_host_access: options.confirm_host_access,
         },
     )

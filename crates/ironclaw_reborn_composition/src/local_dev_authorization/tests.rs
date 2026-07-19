@@ -30,7 +30,7 @@ use ironclaw_trust::{AuthorityCeiling, EffectiveTrustClass, TrustDecision, Trust
 use serde_json::json;
 
 use super::*;
-use crate::local_dev_capability_policy::local_dev_capability_policy;
+use crate::builtin_capability_policy::builtin_capability_policy;
 
 struct ErroringToolPermissionOverrideStore;
 
@@ -361,7 +361,7 @@ fn local_dev_shell_authorization_inputs(
         network_targets: Vec::new(),
         resource_profile: None,
     };
-    let policy = local_dev_capability_policy().expect("capability policy");
+    let policy = builtin_capability_policy().expect("capability policy");
     let grants = policy.builtin_grants(
         &provider_id,
         &MountView::default(),
@@ -412,7 +412,7 @@ async fn trace_commons_authorize_decision(
         network_targets: Vec::new(),
         resource_profile: None,
     };
-    let policy = Arc::new(local_dev_capability_policy().expect("capability policy"));
+    let policy = Arc::new(builtin_capability_policy().expect("capability policy"));
     let provider_id = ExtensionId::new(BUILTIN_FIRST_PARTY_PROVIDER).expect("provider id");
     let grants = policy.builtin_grants(
         &provider_id,
@@ -541,7 +541,7 @@ async fn local_dev_authorizer_refreshes_approval_settings_on_next_invocation() {
         auto_approve.clone(),
         Arc::new(in_memory_backed_persistent_approval_policy_store()),
     ));
-    let policy = Arc::new(local_dev_capability_policy().expect("capability policy"));
+    let policy = Arc::new(builtin_capability_policy().expect("capability policy"));
     let authorizer = local_dev_authorizer(None, policy, settings);
 
     // Global auto-approve now defaults ON, so explicitly disable it first to
@@ -599,7 +599,7 @@ async fn local_dev_authorizer_observes_global_auto_approve_revocation_on_next_in
         auto_approve.clone(),
         Arc::new(in_memory_backed_persistent_approval_policy_store()),
     ));
-    let policy = Arc::new(local_dev_capability_policy().expect("capability policy"));
+    let policy = Arc::new(builtin_capability_policy().expect("capability policy"));
     let authorizer = local_dev_authorizer(None, policy, settings);
 
     let before = local_dev_shell_decision_with_authorizer(authorizer.as_ref(), &user_id).await;
@@ -638,7 +638,7 @@ async fn local_dev_authorizer_caches_global_auto_approve_within_one_invocation()
         auto_approve.clone(),
         Arc::new(in_memory_backed_persistent_approval_policy_store()),
     ));
-    let policy = Arc::new(local_dev_capability_policy().expect("capability policy"));
+    let policy = Arc::new(builtin_capability_policy().expect("capability policy"));
     let authorizer = local_dev_authorizer(None, policy, settings);
     let (descriptor, context, trust_decision) = local_dev_shell_authorization_inputs(&user_id);
 
@@ -715,7 +715,7 @@ async fn local_dev_authorizer_coalesces_concurrent_global_auto_approve_misses() 
         auto_approve.clone(),
         Arc::new(in_memory_backed_persistent_approval_policy_store()),
     ));
-    let policy = Arc::new(local_dev_capability_policy().expect("capability policy"));
+    let policy = Arc::new(builtin_capability_policy().expect("capability policy"));
     let authorizer = local_dev_authorizer(None, policy, settings);
     let (descriptor, context, trust_decision) = local_dev_shell_authorization_inputs(&user_id);
 
@@ -912,7 +912,7 @@ async fn local_dev_authorizer_fails_closed_when_override_lookup_errors() {
         auto_approve,
         Arc::new(in_memory_backed_persistent_approval_policy_store()),
     ));
-    let policy = Arc::new(local_dev_capability_policy().expect("capability policy"));
+    let policy = Arc::new(builtin_capability_policy().expect("capability policy"));
     let authorizer = local_dev_authorizer(None, policy, settings);
 
     let decision = local_dev_shell_decision_with_authorizer(authorizer.as_ref(), &user_id).await;
@@ -938,7 +938,7 @@ async fn per_tool_disabled_overrides_global_auto_approve_through_store() {
         auto_approve,
         Arc::new(in_memory_backed_persistent_approval_policy_store()),
     ));
-    let policy = Arc::new(local_dev_capability_policy().expect("capability policy"));
+    let policy = Arc::new(builtin_capability_policy().expect("capability policy"));
     let authorizer = local_dev_authorizer(None, policy, settings);
 
     let decision = local_dev_shell_decision_with_authorizer(authorizer.as_ref(), &user_id).await;
@@ -961,7 +961,7 @@ async fn per_tool_ask_each_time_overrides_global_auto_approve_through_store() {
         auto_approve,
         Arc::new(in_memory_backed_persistent_approval_policy_store()),
     ));
-    let policy = Arc::new(local_dev_capability_policy().expect("capability policy"));
+    let policy = Arc::new(builtin_capability_policy().expect("capability policy"));
     let authorizer = local_dev_authorizer(None, policy, settings);
 
     let decision = local_dev_shell_decision_with_authorizer(authorizer.as_ref(), &user_id).await;
@@ -985,7 +985,7 @@ async fn global_auto_approve_does_not_bypass_manifest_ineligible_tool_through_st
         auto_approve,
         Arc::new(in_memory_backed_persistent_approval_policy_store()),
     ));
-    let policy = Arc::new(local_dev_capability_policy().expect("capability policy"));
+    let policy = Arc::new(builtin_capability_policy().expect("capability policy"));
     let authorizer = local_dev_authorizer(None, policy, settings);
 
     // `Deny` manifest permission is not durable-approval eligible, so the

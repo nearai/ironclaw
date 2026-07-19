@@ -6,10 +6,11 @@ use ironclaw_host_api::VirtualPath;
 
 use crate::backend::EventRecord;
 use crate::db::{
-    child_path_like_pattern, direct_children, directory_append_error, directory_write_error,
-    escape_like_literal, escape_like_with_trailing_wildcard, infrastructure_libsql_error,
-    is_not_found, libsql_db_error, not_found, page_offset_to_i64, record_version_from_i64,
-    record_version_to_i64, sql_index_name, system_time_from_unix_seconds, virtual_path_prefixes,
+    child_path_like_pattern, descendant_path_range, direct_children, directory_append_error,
+    directory_write_error, escape_like_literal, escape_like_with_trailing_wildcard,
+    infrastructure_libsql_error, is_not_found, libsql_db_error, not_found, page_offset_to_i64,
+    record_version_from_i64, record_version_to_i64, sql_index_name, system_time_from_unix_seconds,
+    virtual_path_prefixes,
 };
 #[cfg(feature = "libsql")]
 use crate::libsql_pool::{LibSqlPool, PooledLibSqlConnection, build_libsql_pool};
@@ -25,6 +26,18 @@ use crate::{
 pub struct LibSqlRootFilesystem {
     pool: LibSqlPool,
 }
+
+#[cfg(feature = "libsql")]
+const LIBSQL_CHILD_ENTRIES_SQL: &str = "SELECT path, length(contents), is_dir \
+    FROM root_filesystem_entries \
+    WHERE path >= ?1 AND path < ?2 \
+    ORDER BY path";
+
+#[cfg(feature = "libsql")]
+const LIBSQL_HAS_CHILD_ENTRY_SQL: &str = "SELECT 1 \
+    FROM root_filesystem_entries \
+    WHERE path >= ?1 AND path < ?2 \
+    LIMIT 1";
 
 #[cfg(feature = "libsql")]
 impl LibSqlRootFilesystem {
@@ -1321,11 +1334,11 @@ async fn has_child_entry_libsql(
     conn: &libsql::Connection,
     parent: &VirtualPath,
 ) -> Result<bool, FilesystemError> {
-    let pattern = child_path_like_pattern(parent);
+    let (prefix_lower, prefix_upper) = descendant_path_range(parent);
     let mut rows = conn
         .query(
-            "SELECT 1 FROM root_filesystem_entries WHERE path LIKE ?1 ESCAPE '!' LIMIT 1",
-            libsql::params![pattern],
+            LIBSQL_HAS_CHILD_ENTRY_SQL,
+            libsql::params![prefix_lower, prefix_upper],
         )
         .await
         .map_err(|error| libsql_db_error(parent.clone(), FilesystemOperation::Stat, error))?;
@@ -1488,11 +1501,11 @@ impl LibSqlRootFilesystem {
         operation: FilesystemOperation,
     ) -> Result<Vec<(VirtualPath, u64, FileType)>, FilesystemError> {
         let conn = self.connect().await?;
-        let pattern = child_path_like_pattern(parent);
+        let (prefix_lower, prefix_upper) = descendant_path_range(parent);
         let mut rows = conn
             .query(
-                "SELECT path, length(contents), is_dir FROM root_filesystem_entries WHERE path LIKE ?1 ESCAPE '!' ORDER BY path",
-                libsql::params![pattern],
+                LIBSQL_CHILD_ENTRIES_SQL,
+                libsql::params![prefix_lower, prefix_upper],
             )
             .await
             .map_err(|error| libsql_db_error(parent.clone(), operation, error))?;
@@ -1528,19 +1541,7 @@ impl LibSqlRootFilesystem {
 
     async fn has_child_entry(&self, parent: &VirtualPath) -> Result<bool, FilesystemError> {
         let conn = self.connect().await?;
-        let pattern = child_path_like_pattern(parent);
-        let mut rows = conn
-            .query(
-                "SELECT 1 FROM root_filesystem_entries WHERE path LIKE ?1 ESCAPE '!' LIMIT 1",
-                libsql::params![pattern],
-            )
-            .await
-            .map_err(|error| libsql_db_error(parent.clone(), FilesystemOperation::Stat, error))?;
-        Ok(rows
-            .next()
-            .await
-            .map_err(|error| libsql_db_error(parent.clone(), FilesystemOperation::Stat, error))?
-            .is_some())
+        has_child_entry_libsql(&conn, parent).await
     }
 
     /// Resolve every FTS index name covering `path` whose first key is
@@ -2137,6 +2138,51 @@ mod tests {
         let fs = LibSqlRootFilesystem::new(db);
         fs.run_migrations().await.unwrap();
         (fs, dir)
+    }
+
+    #[tokio::test]
+    async fn child_entries_query_uses_the_path_index_for_descendant_ranges() {
+        let (fs, _dir) = fresh_backend().await;
+        let parent = VirtualPath::new("/tenants/tenant/users/user/secrets/product-auth").unwrap();
+        let (prefix_lower, prefix_upper) = descendant_path_range(&parent);
+        assert_eq!(
+            prefix_lower,
+            "/tenants/tenant/users/user/secrets/product-auth/"
+        );
+        assert_eq!(
+            prefix_upper,
+            "/tenants/tenant/users/user/secrets/product-auth0"
+        );
+        let conn = fs.connect().await.unwrap();
+        for query in [LIBSQL_CHILD_ENTRIES_SQL, LIBSQL_HAS_CHILD_ENTRY_SQL] {
+            let explain_sql = format!("EXPLAIN QUERY PLAN {query}");
+            let mut rows = conn
+                .query(
+                    &explain_sql,
+                    libsql::params![prefix_lower.clone(), prefix_upper.clone()],
+                )
+                .await
+                .unwrap();
+            let mut details = Vec::new();
+            while let Some(row) = rows.next().await.unwrap() {
+                details.push(row.get::<String>(3).unwrap());
+            }
+
+            assert!(
+                details.iter().any(|detail| {
+                    detail.contains("SEARCH root_filesystem_entries USING")
+                        && detail.contains("path>?")
+                        && detail.contains("path<?")
+                }),
+                "descendant lookup must seek through the path index, plan: {details:?}"
+            );
+            assert!(
+                details
+                    .iter()
+                    .all(|detail| !detail.contains("SCAN root_filesystem_entries")),
+                "descendant lookup must not scan the complete path index, plan: {details:?}"
+            );
+        }
     }
 
     /// Drive the phase-2 materialize step directly with a synthesised

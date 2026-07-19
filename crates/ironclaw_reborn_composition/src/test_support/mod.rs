@@ -13,7 +13,7 @@
 //!    [`OAuthProductAuthTestBundle`], `build_oauth_product_auth_for_test`,
 //!    `build_google_oauth_product_auth_for_test` — real store / real client /
 //!    scripted HTTP egress for OAuth connect, refresh, and error-path tests.
-//! 3. [`local_dev_boot`] — `build_local_dev_approval_gate_evidence_for_test`,
+//! 3. [`local_dev_boot`] — `build_approval_gate_evidence_for_test`,
 //!    `build_default_local_dev_database_roots_for_test`,
 //!    `mount_local_dev_database_roots_for_test`,
 //!    `build_local_dev_secret_store_for_test` — mirror the production
@@ -44,12 +44,12 @@
 //! 11. [`projection`] — `build_webui_event_stream_for_test`, a deliberately
 //!     narrowed `ProjectionStream` (turn-lifecycle events only) for the SSE
 //!     activity-stream scenario (W5-WEBUI-API-1 Enabler A).
-//! 12. [`refreshing_capability_port`] — `create_refreshing_local_dev_capability_port_for_test`,
-//!     the production `create_refreshing_local_dev_capability_port` factory
+//! 12. [`refreshing_capability_port`] — `create_refreshing_capability_port_for_test`,
+//!     the production `create_refreshing_capability_port` factory
 //!     (all wrap layers) driven with harness-injectable parts (harness-port-seam
 //!     P1 seam).
-//! 13. [`local_dev_capability_io`] — `local_dev_capability_io_for_test`, the
-//!     production `LocalDevCapabilityIo` constructor (`capability_wiring`'s
+//! 13. [`local_dev_capability_io`] — `staged_capability_io_for_test`, the
+//!     production `StagedCapabilityIo` constructor (`capability_wiring`'s
 //!     `new_with_durable_previews` call), for durable tool-result projection
 //!     coverage (issue #5838).
 //! 14. [`result_read`] — `wrap_result_read_capability_for_test`, the
@@ -99,11 +99,11 @@ pub use local_dev_boot::LOCAL_DEV_DB_FILENAME;
 pub use local_dev_boot::build_local_dev_secret_store_for_test;
 #[cfg(feature = "test-support")]
 pub use local_dev_boot::{
-    build_default_local_dev_database_roots_for_test,
-    build_local_dev_approval_gate_evidence_for_test, mount_local_dev_database_roots_for_test,
+    build_approval_gate_evidence_for_test, build_default_local_dev_database_roots_for_test,
+    mount_local_dev_database_roots_for_test,
 };
 #[cfg(feature = "test-support")]
-pub use local_dev_capability_io::local_dev_capability_io_for_test;
+pub use local_dev_capability_io::staged_capability_io_for_test;
 #[cfg(any(feature = "libsql", feature = "postgres"))]
 pub use oauth_product_auth::build_google_oauth_product_auth_for_test;
 pub use oauth_product_auth::{
@@ -119,9 +119,8 @@ pub use project_create::PROJECT_CREATE_CAPABILITY_ID;
 pub use projection::build_webui_event_stream_for_test;
 #[cfg(feature = "test-support")]
 pub use refreshing_capability_port::{
-    ExtensionManagementTestHandle, RefreshingLocalDevCapabilityPortTestParts,
-    build_local_dev_extension_management_for_test,
-    create_refreshing_local_dev_capability_port_for_test,
+    ExtensionManagementTestHandle, RefreshingCapabilityPortTestParts,
+    build_local_dev_extension_management_for_test, create_refreshing_capability_port_for_test,
 };
 #[cfg(feature = "test-support")]
 pub use result_read::{RESULT_READ_CAPABILITY_ID, wrap_result_read_capability_for_test};
