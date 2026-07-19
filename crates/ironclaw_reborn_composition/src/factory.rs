@@ -1302,7 +1302,10 @@ impl RebornServices {
             production_runtime: None,
             #[cfg(any(feature = "libsql", feature = "postgres"))]
             production_scheduler_wake: None,
-            secret_store: Arc::new(ironclaw_secrets::InMemorySecretStore::new()),
+            // §4.3: the deleted `FilesystemSecretStore::ephemeral()` is gone — the disabled
+            // bundle wires the one production encrypted secret store over an
+            // in-memory backend with an ephemeral master key.
+            secret_store: Arc::new(ironclaw_secrets::FilesystemSecretStore::ephemeral()),
             #[cfg(any(test, feature = "test-support"))]
             local_dev_wasm_runtime_credential_provider_captured: false,
             #[cfg(any(feature = "libsql", feature = "postgres"))]
@@ -1688,8 +1691,13 @@ async fn build_local_runtime(input: RebornBuildInput) -> Result<RebornServices, 
     .await?;
     #[cfg(any(feature = "libsql", feature = "postgres"))]
     let secret_store: Arc<dyn SecretStore> = local_dev_secret_bundle.0.clone();
+    // §4.3: the deleted `FilesystemSecretStore::ephemeral()` is gone — the no-durable build
+    // wires the one production encrypted `FilesystemSecretStore` over an
+    // `InMemoryBackend` with an ephemeral master key and the tenant-rewriting
+    // `/secrets` mount resolver.
     #[cfg(not(any(feature = "libsql", feature = "postgres")))]
-    let secret_store: Arc<dyn SecretStore> = Arc::new(ironclaw_secrets::InMemorySecretStore::new());
+    let secret_store: Arc<dyn SecretStore> =
+        Arc::new(ironclaw_secrets::FilesystemSecretStore::ephemeral());
     // Admin per-user secret provisioner over the shared root + the SAME crypto
     // as the runtime's own secret store (webui-v2-beta implies libsql, so the
     // bundle above always exists here).

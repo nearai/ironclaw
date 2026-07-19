@@ -4,7 +4,7 @@ use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use ironclaw_host_api::{AgentId, SecretHandle, TenantId, UserId};
 use ironclaw_product_adapters::AdapterInstallationId;
-use ironclaw_secrets::InMemorySecretStore;
+use ironclaw_secrets::FilesystemSecretStore;
 use tokio::sync::RwLock;
 use tower::ServiceExt;
 
@@ -728,7 +728,7 @@ fn dynamic_route_config(
         None,
         UserId::new("user:admin").expect("operator user"),
         setup_store,
-        Arc::new(InMemorySecretStore::new()),
+        Arc::new(FilesystemSecretStore::ephemeral()),
     ));
     SlackChannelRouteAdminRouteConfig::dynamic(route_store, setup_service)
 }

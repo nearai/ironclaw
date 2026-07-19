@@ -70,6 +70,13 @@ impl SecretsCrypto {
         }
     }
 
+    /// Crypto with a random single-process master key, for volatile stores
+    /// whose contents are not meant to survive the process (§4.3 replacement
+    /// for the deleted `InMemorySecretStore`'s key sourcing).
+    pub fn ephemeral() -> Self {
+        Self::from_valid_master_key(uuid::Uuid::new_v4().simple().to_string())
+    }
+
     pub fn generate_salt() -> Vec<u8> {
         use rand::{RngExt as _, TryRng as _};
 

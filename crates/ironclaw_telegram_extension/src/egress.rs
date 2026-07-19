@@ -343,7 +343,7 @@ mod tests {
         EgressMethod, EgressPath,
     };
     use ironclaw_resources::InMemoryResourceGovernor;
-    use ironclaw_secrets::{InMemorySecretStore, SecretStore};
+    use ironclaw_secrets::{FilesystemSecretStore, SecretStore};
 
     use super::*;
     use crate::setup::TelegramInstallationSetup;
@@ -410,7 +410,7 @@ mod tests {
 
     fn host_egress_port(network: RecordingNetworkHttpEgress) -> HostRuntimeHttpEgressPort {
         let services = test_host_runtime_services()
-            .with_secret_store(Arc::new(InMemorySecretStore::new()))
+            .with_secret_store(Arc::new(FilesystemSecretStore::ephemeral()))
             .try_with_host_http_egress(network)
             .expect("host HTTP egress should wire");
         services
@@ -596,7 +596,7 @@ mod tests {
         let host_egress = host_egress_port(network);
         let handle = telegram_handle();
         let state = telegram_state();
-        let secret_store = Arc::new(InMemorySecretStore::new());
+        let secret_store = Arc::new(FilesystemSecretStore::ephemeral());
         let tenant_id = ironclaw_host_api::TenantId::new("tenant-a").expect("tenant");
         let user_id = ironclaw_host_api::UserId::new("operator").expect("user");
         let agent_id = ironclaw_host_api::AgentId::new("agent-a").expect("agent");
