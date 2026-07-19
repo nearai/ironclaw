@@ -523,7 +523,13 @@ impl Resolution {
     /// closes ahead of the atomic flip. `Done` (ran, including the non-suspending
     /// `ChildSpawned`) and terminal `Denied` do not park.
     pub fn parks(&self) -> bool {
-        matches!(self, Resolution::Blocked(_) | Resolution::Suspended(_))
+        // Exhaustive match, not `matches!`: a new `Resolution` variant must be
+        // a compile error here (§11.9 no-wildcard) so its parking behavior is
+        // decided deliberately, never silently defaulted to `false`.
+        match self {
+            Resolution::Blocked(_) | Resolution::Suspended(_) => true,
+            Resolution::Done(_) | Resolution::Denied(_) => false,
+        }
     }
 
     /// Whether this is a re-entrant gate (resolving it re-enters `authorize()`).
