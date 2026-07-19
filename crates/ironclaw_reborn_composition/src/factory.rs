@@ -1319,13 +1319,18 @@ pub async fn build_reborn_services(
         owner_id = %input.owner_id,
         "building Reborn composition facades"
     );
-    match input.profile {
-        RebornCompositionProfile::Disabled => Ok(RebornServices::disabled()),
-        RebornCompositionProfile::LocalDev
-        | RebornCompositionProfile::LocalDevYolo
-        | RebornCompositionProfile::HostedSingleTenant
-        | RebornCompositionProfile::HostedSingleTenantVolume => build_local_runtime(input).await,
-        RebornCompositionProfile::Production | RebornCompositionProfile::MigrationDryRun => {
+    // Substrate selection is deployment *data* (§4.4/§5.6), not a profile
+    // match: the config says which substrate to assemble and this dispatches
+    // on that value.
+    let substrate = crate::deployment::DeploymentConfig::for_profile(
+        input.profile,
+        input.grants_trusted_laptop_access(),
+    )
+    .substrate();
+    match substrate {
+        crate::deployment::RuntimeSubstrate::None => Ok(RebornServices::disabled()),
+        crate::deployment::RuntimeSubstrate::Local => build_local_runtime(input).await,
+        crate::deployment::RuntimeSubstrate::ProductionShaped => {
             build_production_shaped(input).await
         }
     }
@@ -1476,7 +1481,8 @@ async fn build_local_runtime(input: RebornBuildInput) -> Result<RebornServices, 
         postgres_resource_governor_singleton,
     ) = match storage {
         RebornStorageInput::LocalDev { .. }
-            if profile == RebornCompositionProfile::HostedSingleTenant =>
+            if crate::deployment::DeploymentConfig::for_profile(profile, false).storage_shape()
+                == crate::deployment::StorageShape::HostedSingleTenantPool =>
         {
             return Err(RebornBuildError::InvalidConfig {
                     reason: "profile=hosted-single-tenant requires hosted single-tenant Postgres storage input"
@@ -1497,7 +1503,8 @@ async fn build_local_runtime(input: RebornBuildInput) -> Result<RebornServices, 
         ),
         #[cfg(feature = "postgres")]
         RebornStorageInput::HostedSingleTenantPostgres { .. }
-            if profile != RebornCompositionProfile::HostedSingleTenant =>
+            if crate::deployment::DeploymentConfig::for_profile(profile, false).storage_shape()
+                != crate::deployment::StorageShape::HostedSingleTenantPool =>
         {
             return Err(RebornBuildError::InvalidConfig {
                 reason: format!("{profile} profile requires local-runtime storage input"),

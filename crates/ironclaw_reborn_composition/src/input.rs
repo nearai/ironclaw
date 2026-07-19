@@ -319,7 +319,13 @@ impl RebornBuildInput {
         pool: deadpool_postgres::Pool,
         secret_master_key: ironclaw_secrets::SecretMaterial,
     ) -> Result<Self, RebornBuildError> {
-        if profile != RebornCompositionProfile::HostedSingleTenant {
+        // The storage handle and the deployment must agree. Expressed as the
+        // config's storage-shape axis rather than a profile-name comparison
+        // (§4.4): a deployment that takes a hosted single-tenant pool is a
+        // property of the deployment, not of its name.
+        if crate::deployment::DeploymentConfig::for_profile(profile, false).storage_shape()
+            != crate::deployment::StorageShape::HostedSingleTenantPool
+        {
             return Err(RebornBuildError::InvalidConfig {
                 reason: format!(
                     "hosted single-tenant Postgres storage requires profile=hosted-single-tenant; got profile={profile}"
@@ -347,7 +353,13 @@ impl RebornBuildInput {
         root: PathBuf,
         config_file: Option<&ironclaw_reborn_config::RebornConfigFile>,
     ) -> Result<Self, RebornBuildError> {
-        if profile != RebornCompositionProfile::HostedSingleTenant {
+        // The storage handle and the deployment must agree. Expressed as the
+        // config's storage-shape axis rather than a profile-name comparison
+        // (§4.4): a deployment that takes a hosted single-tenant pool is a
+        // property of the deployment, not of its name.
+        if crate::deployment::DeploymentConfig::for_profile(profile, false).storage_shape()
+            != crate::deployment::StorageShape::HostedSingleTenantPool
+        {
             return Err(RebornBuildError::InvalidConfig {
                 reason: format!(
                     "hosted single-tenant Postgres storage requires profile=hosted-single-tenant; got profile={profile}"

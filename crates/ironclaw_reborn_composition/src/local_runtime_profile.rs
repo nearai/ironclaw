@@ -16,6 +16,8 @@ pub enum RebornRuntimeProfileError {
     MissingLibsqlFeature,
     #[error("failed to resolve local runtime policy: {0}")]
     Policy(#[from] ResolveError),
+    #[error("profile={profile} carries no runtime-policy request to resolve")]
+    MissingPolicyRequest { profile: RebornCompositionProfile },
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -30,21 +32,15 @@ pub(crate) fn deployment_config_for_profile(
     profile: RebornCompositionProfile,
     options: RebornRuntimeProfileOptions,
 ) -> Result<DeploymentConfig, RebornRuntimeProfileError> {
-    match profile {
-        RebornCompositionProfile::LocalDev => Ok(DeploymentConfig::local_dev()),
-        RebornCompositionProfile::LocalDevYolo => Ok(DeploymentConfig::local_dev_yolo(
-            options.confirm_host_access,
-        )),
-        RebornCompositionProfile::HostedSingleTenantVolume => {
-            Ok(DeploymentConfig::hosted_single_tenant_volume())
-        }
-        RebornCompositionProfile::Disabled
-        | RebornCompositionProfile::HostedSingleTenant
-        | RebornCompositionProfile::Production
-        | RebornCompositionProfile::MigrationDryRun => {
-            Err(RebornRuntimeProfileError::UnsupportedProfile { profile })
-        }
+    let config = DeploymentConfig::for_profile(profile, options.confirm_host_access);
+    // This module builds the *local-dev storage input* shape (a filesystem
+    // root). Deployments that take an operator-supplied pool or assemble no
+    // runtime are not its business — expressed as the config axis rather than
+    // a second list of profile names.
+    if !config.uses_local_dev_storage_input() {
+        return Err(RebornRuntimeProfileError::UnsupportedProfile { profile });
     }
+    Ok(config)
 }
 
 /// Build the local runtime substrate input and its matching runtime policy from
@@ -121,7 +117,17 @@ pub fn hosted_single_tenant_runtime_policy() -> Result<ResolvedRuntimePolicy, Re
 /// scoped virtual filesystem, brokered network, brokered secret handles, and
 /// ask-always approval posture from the resolver-owned secure default.
 pub fn hosted_single_tenant_volume_runtime_policy() -> Result<ResolvedRuntimePolicy, ResolveError> {
-    DeploymentConfig::hosted_single_tenant_volume().resolve()
+    // The hosted volume preview always carries a policy request, so the
+    // `None` arm is unreachable in practice; it maps to the resolver's own
+    // fail-closed shape rather than being unwrapped.
+    DeploymentConfig::hosted_single_tenant_volume()
+        .resolve()
+        .and_then(|policy| {
+            policy.ok_or(ResolveError::IncompatibleDeployment {
+                deployment: ironclaw_host_api::runtime_policy::DeploymentMode::HostedMultiTenant,
+                profile: ironclaw_host_api::runtime_policy::RuntimeProfile::SecureDefault,
+            })
+        })
 }
 
 /// Resolved policy for trusted single-user local development with inherited
@@ -143,6 +149,9 @@ pub fn local_dev_yolo_runtime_policy(
         RebornRuntimeProfileError::UnsupportedProfile { .. } => {
             unreachable!("local-dev-yolo is a local runtime profile")
         }
+        RebornRuntimeProfileError::MissingPolicyRequest { .. } => {
+            unreachable!("local-dev-yolo carries a runtime-policy request")
+        }
     })
 }
 
@@ -150,7 +159,9 @@ fn local_runtime_policy(
     profile: RebornCompositionProfile,
     options: RebornRuntimeProfileOptions,
 ) -> Result<ResolvedRuntimePolicy, RebornRuntimeProfileError> {
-    Ok(deployment_config_for_profile(profile, options)?.resolve()?)
+    deployment_config_for_profile(profile, options)?
+        .resolve()?
+        .ok_or(RebornRuntimeProfileError::MissingPolicyRequest { profile })
 }
 
 fn local_runtime_policy_for_local_dev_shape(
@@ -167,6 +178,9 @@ fn local_runtime_policy_for_local_dev_shape(
         }
         RebornRuntimeProfileError::UnsupportedProfile { .. } => {
             unreachable!("{profile_name} uses the local-dev runtime policy shape")
+        }
+        RebornRuntimeProfileError::MissingPolicyRequest { .. } => {
+            unreachable!("{profile_name} carries a runtime-policy request")
         }
     })
 }
