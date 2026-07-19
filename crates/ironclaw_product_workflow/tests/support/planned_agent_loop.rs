@@ -293,6 +293,16 @@ impl ProductLiveAgentLoopHarness {
         let cancellation_factory = Arc::new(ReadyRunCancellationFactory::default());
         let capability_invocations = Arc::new(Mutex::new(Vec::new()));
         let capability_results = Arc::new(Mutex::new(Vec::new()));
+        // The durable gate-record store is shared between the ProductLive
+        // capability port (which persists the record) and the turn executor
+        // (which re-sources an auth block's credential requirements from it,
+        // §5.2.9). Capture it here so the SAME store is wired into both — else the
+        // executor gets `None` and an auth block is applied with empty
+        // requirements / fails the exit (#6287 IronLoop). `None` for the
+        // non-ProductLive fakes (which do not persist gate records), preserving
+        // the executor's tolerant "no store wired" path.
+        let mut turn_executor_gate_store: Option<Arc<dyn ironclaw_run_state::GateRecordStore>> =
+            None;
         let capability_factory: Arc<dyn LoopCapabilityPortFactory> =
             if let Some(capability) = config.host_runtime_capability {
                 // Durable gate-record + replay-payload stores over ONE in-memory
@@ -305,6 +315,7 @@ impl ProductLiveAgentLoopHarness {
                     Arc::new(ironclaw_run_state::FilesystemGateRecordStore::new(
                         Arc::clone(&capability_store_filesystem),
                     ));
+                turn_executor_gate_store = Some(Arc::clone(&gate_record_store));
                 let replay_payload_store: Arc<dyn ironclaw_capabilities::ReplayPayloadStore> =
                     Arc::new(ironclaw_capabilities::FilesystemReplayPayloadStore::new(
                         capability_store_filesystem,
@@ -373,7 +384,7 @@ impl ProductLiveAgentLoopHarness {
         ));
         let composition = build_product_live_planned_runtime(DefaultPlannedRuntimeParts {
             attachment_read_port: None,
-            gate_record_store: None,
+            gate_record_store: turn_executor_gate_store,
             turn_state: turn_state_for_runtime,
             thread_service: Arc::new(thread_service.clone()),
             thread_scope: thread_scope.clone(),
