@@ -667,12 +667,22 @@ Do not port the current `src/cli/*` command tree wholesale. Port commands one at
 
 The first Reborn-only release is version `1.0.0`. Release tags use the branded
 unified form `ironclaw/v*`, which cargo-dist accepts independently of the Cargo
-package name. The legacy root package is marked `dist = false`;
-`crates/ironclaw_reborn_cli` is marked `dist = true` and carries its own WiX
-identity so Windows installers do not reuse the legacy package identity.
+package name. The retired root package no longer exists;
+`crates/ironclaw_reborn_cli` is the only dist-enabled package and carries its
+own WiX identity.
 
 The Docker image rebuild workflow follows the same tag family:
 `source_ref=ironclaw/v<version>`.
+
+The tag-driven release pipeline also preflights the shipping binary through
+`.github/workflows/reborn-release-compile.yml`. That matrix performs a final
+link on the two GNU Linux, two musl Linux, two macOS, and one Windows target
+configured for releases, using the same `full` feature set as cargo-dist, then
+runs the exact native output through config-free CLI startup checks. The musl
+jobs additionally reject `PT_INTERP` and `DT_NEEDED` entries so their outputs
+remain portable to systems without a musl loader. Its short-lived
+`reborn-compile-*` workflow artifacts are preflight evidence only and are
+excluded from the `artifacts-*` set uploaded to the GitHub Release.
 
 ```toml
 [package.metadata.dist]
