@@ -1292,6 +1292,33 @@ fn models_list_no_default_features_does_not_resolve_reborn_home() {
 
 #[cfg(not(feature = "root-llm-provider"))]
 #[test]
+fn models_list_with_provider_reports_root_llm_provider_required_without_default_features() {
+    // A provider-detail request needs real provider data; without the feature
+    // it must error like the write commands rather than succeed with the
+    // unrelated generic slot list (2026-07-19 ironloopai review finding).
+    for args in [
+        &["models", "list", "openai"][..],
+        &["models", "list", "--verbose"][..],
+    ] {
+        let output = reborn_command()
+            .args(args)
+            .output()
+            .expect("ironclaw-reborn models list should run");
+        assert!(!output.status.success(), "command should fail: {args:?}");
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            stderr.contains("requires the root-llm-provider feature"),
+            "stderr: {stderr}"
+        );
+        assert!(
+            !stderr.contains("HOME or USERPROFILE"),
+            "must not resolve Reborn home before feature error: {stderr}"
+        );
+    }
+}
+
+#[cfg(not(feature = "root-llm-provider"))]
+#[test]
 fn models_status_no_default_features_does_not_resolve_reborn_home() {
     let output = reborn_command()
         .arg("models")

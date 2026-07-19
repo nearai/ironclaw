@@ -94,6 +94,16 @@ impl ModelsListCommand {
     fn execute(self) -> anyhow::Result<()> {
         // Reads stay informational without the provider feature (the libsql-only
         // lane's smoke tests pin this); only writes error — see ModelsSetCommand.
+        // A provider-detail request (`models list <provider>` / `--verbose`)
+        // needs real provider data, so answering it with the generic slot list
+        // would be silently wrong — those option-bearing invocations error like
+        // the write commands do.
+        if let Some(provider) = self.provider.as_deref() {
+            return Err(feature_not_available(&format!("list {provider}")));
+        }
+        if self.verbose {
+            return Err(feature_not_available("list --verbose"));
+        }
         let slots = ironclaw_reborn_composition::reborn_model_slot_names();
 
         if self.json {
@@ -103,11 +113,11 @@ impl ModelsListCommand {
                 .collect::<Vec<_>>();
             println!(
                 "{}",
-                serde_json::json!({
+                serde_json::to_string_pretty(&serde_json::json!({
                     "slots": slots,
                     "routes": "not-configured",
                     "v1_state": "not-used",
-                })
+                }))?
             );
             return Ok(());
         }
@@ -202,11 +212,11 @@ impl ModelsStatusCommand {
                 .collect();
             println!(
                 "{}",
-                serde_json::json!({
+                serde_json::to_string_pretty(&serde_json::json!({
                     "routes": "not-configured",
                     "slots": slot_status,
                     "v1_state": "not-used",
-                })
+                }))?
             );
             return Ok(());
         }
