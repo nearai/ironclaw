@@ -1705,10 +1705,7 @@ mod tests {
     use super::*;
     use ironclaw_turns::{
         LoopGateRef, LoopResultRef,
-        run_profile::{
-            CapabilityInputRef, CapabilityOutcome, CapabilitySurfaceVersion,
-            capability_outcome_to_resolution,
-        },
+        run_profile::{CapabilityInputRef, CapabilitySurfaceVersion, resolution},
     };
 
     fn call(input: &str) -> CapabilityCallCandidate {
@@ -1723,31 +1720,30 @@ mod tests {
         }
     }
 
-    // The fixtures build a loop-facing `CapabilityOutcome` and map it through the
-    // production mapping so `shared_await_dependent_gate` sees the exact
-    // `Resolution` the flip produces (origin preserved on the channel).
+    // The fixtures build the exact `Resolution` the producer constructors
+    // emit so `shared_await_dependent_gate` sees the flip's channel shape
+    // (origin preserved on the channel).
     fn await_dependent(gate: &str, result: &str) -> Resolution {
-        capability_outcome_to_resolution(CapabilityOutcome::AwaitDependentRun {
-            gate_ref: LoopGateRef::new(gate).unwrap(),
-            result_ref: LoopResultRef::new(format!("result:{result}")).unwrap(),
-            safe_summary: "summary".to_string(),
-            byte_len: 0,
-            model_observation: None,
-        })
+        resolution::await_dependent_run(
+            LoopGateRef::new(gate).unwrap(),
+            LoopResultRef::new(format!("result:{result}")).unwrap(),
+            "summary".to_string(),
+            0,
+            None,
+        )
         .resolution
     }
 
     fn completed(result: &str) -> Resolution {
-        capability_outcome_to_resolution(CapabilityOutcome::Completed(CapabilityResultMessage {
-            result_ref: LoopResultRef::new(format!("result:{result}")).unwrap(),
-            safe_summary: "summary".to_string(),
-            progress: CapabilityProgress::MadeProgress,
-            terminate_hint: false,
-            byte_len: 0,
-            output_digest: None,
-            model_observation: None,
-        }))
-        .resolution
+        resolution::completed(
+            LoopResultRef::new(format!("result:{result}")).unwrap(),
+            "summary".to_string(),
+            CapabilityProgress::MadeProgress,
+            false,
+            0,
+            None,
+            None,
+        )
     }
 
     #[test]
@@ -1788,11 +1784,11 @@ mod tests {
         let calls = vec![call("a"), call("b")];
         let outcomes = vec![
             await_dependent("gate:1", "r1"),
-            capability_outcome_to_resolution(CapabilityOutcome::ApprovalRequired {
-                gate_ref: LoopGateRef::new("gate:approval").unwrap(),
-                safe_summary: "approval".to_string(),
-                approval_resume: None,
-            })
+            resolution::approval_required(
+                LoopGateRef::new("gate:approval").unwrap(),
+                "approval".to_string(),
+                None,
+            )
             .resolution,
         ];
         assert!(shared_await_dependent_gate(&calls, &outcomes).is_none());
