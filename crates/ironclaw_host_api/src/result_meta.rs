@@ -33,7 +33,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::HostApiError;
+use crate::{DispatchInputIssueCode, HostApiError, SafeSummary};
 
 /// Stable digest over a capability's normalized output content — the host_api
 /// mirror of `ironclaw_turns`' `ContentDigest` (a Blake3 keyed hash truncated to
@@ -410,6 +410,125 @@ impl<'de> Deserialize<'de> for LoopRef {
     }
 }
 
+/// The upper bound on model-visible input issues carried on an
+/// [`ModelFailureDiagnostic::InvalidInput`]. Matches the loop's
+/// `MODEL_OBSERVATION_INPUT_ISSUES_MAX` storage cap, so the producer can carry
+/// every issue the loop retained; the eventual renderer applies its own
+/// (smaller) display cap on top. Keeps the diagnostic a *bounded* list.
+pub const MAX_MODEL_INPUT_ISSUES: usize = 16;
+
+/// A redacted, model-visible schema-validation issue — the host_api mirror of the
+/// loop's `CapabilityInputIssue`. It is the sanitized, wire-boundary view: every
+/// free-text field is a bounded, redacted [`SafeSummary`] (no raw payload, path,
+/// or secret), and the issue `code` is the stable [`DispatchInputIssueCode`]
+/// host_api enum (already the canonical code for the loop-side issue). Distinct
+/// from the fuller internal [`DispatchInputIssue`](crate::DispatchInputIssue),
+/// which carries raw `String` fields on the dispatch port — this is the redacted
+/// projection that may cross the sanitized `Resolution` boundary (a
+/// security-boundary mirror, `type-placement.md`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ModelInputIssue {
+    /// The redacted input path the issue is about (e.g. `schedule.kind`).
+    pub path: SafeSummary,
+    /// The stable, structured issue code.
+    pub code: DispatchInputIssueCode,
+    /// The redacted expected shape/value, when the producer supplied one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expected: Option<SafeSummary>,
+    /// The redacted received shape/value, when the producer supplied one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub received: Option<SafeSummary>,
+    /// The redacted schema pointer, when the producer supplied one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub schema_path: Option<SafeSummary>,
+}
+
+impl ModelInputIssue {
+    /// A bare issue carrying only the redacted path and structured code. Use the
+    /// `with_*` setters to attach the optional redacted expected/received/schema
+    /// fields (default-backed builder).
+    pub fn new(path: SafeSummary, code: DispatchInputIssueCode) -> Self {
+        Self {
+            path,
+            code,
+            expected: None,
+            received: None,
+            schema_path: None,
+        }
+    }
+
+    /// Attach the redacted expected shape/value.
+    pub fn with_expected(mut self, expected: SafeSummary) -> Self {
+        self.expected = Some(expected);
+        self
+    }
+
+    /// Attach the redacted received shape/value.
+    pub fn with_received(mut self, received: SafeSummary) -> Self {
+        self.received = Some(received);
+        self
+    }
+
+    /// Attach the redacted schema pointer.
+    pub fn with_schema_path(mut self, schema_path: SafeSummary) -> Self {
+        self.schema_path = Some(schema_path);
+        self
+    }
+}
+
+/// The model-visible structured diagnostic a recoverable failure carries so the
+/// model can correct a bad tool call — the redacted host_api mirror of the loop's
+/// `CapabilityFailureDetail`. Rides [`ToolVerdict::RecoverableFailure`](crate::ToolVerdict)
+/// so the loop can render the correction hint without reading host storage (§5.3
+/// flip prep).
+///
+/// Both arms are plain redacted vocabulary (host_api charter): enums, a
+/// [`DispatchInputIssueCode`], and bounded [`SafeSummary`] values — never a raw
+/// cause, secret, host path, or backend error string. The free-text `Diagnostic`
+/// arm is deliberately stricter than the loop's lenient diagnostic channel (which
+/// permits paths): at this sanitized boundary the text must satisfy the full
+/// [`SafeSummary`] redaction contract, so a path-shaped diagnostic is redacted
+/// rather than carried raw.
+///
+/// Internally tagged (`kind`) to mirror the loop enum's shape.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum ModelFailureDiagnostic {
+    /// The tool input failed schema validation; carries the bounded, redacted
+    /// structured issues the model corrects from.
+    InvalidInput { issues: Vec<ModelInputIssue> },
+    /// A bounded, redacted free-text cause.
+    Diagnostic { text: SafeSummary },
+}
+
+impl ModelFailureDiagnostic {
+    /// Stable discriminant (matches the serde tag) for logs/routing.
+    pub fn kind(&self) -> &'static str {
+        match self {
+            ModelFailureDiagnostic::InvalidInput { .. } => "invalid_input",
+            ModelFailureDiagnostic::Diagnostic { .. } => "diagnostic",
+        }
+    }
+
+    /// The structured schema issues, present exactly on
+    /// [`ModelFailureDiagnostic::InvalidInput`].
+    pub fn issues(&self) -> Option<&[ModelInputIssue]> {
+        match self {
+            ModelFailureDiagnostic::InvalidInput { issues } => Some(issues),
+            ModelFailureDiagnostic::Diagnostic { .. } => None,
+        }
+    }
+
+    /// The redacted free-text cause, present exactly on
+    /// [`ModelFailureDiagnostic::Diagnostic`].
+    pub fn diagnostic_text(&self) -> Option<&SafeSummary> {
+        match self {
+            ModelFailureDiagnostic::Diagnostic { text } => Some(text),
+            ModelFailureDiagnostic::InvalidInput { .. } => None,
+        }
+    }
+}
+
 /// Shared validator for bounded safe-identifier tags (the `FailureKind::Unknown`
 /// tag): non-empty, bounded, and restricted to a safe identifier charset so no
 /// raw payload/path/secret can ride along.
@@ -552,6 +671,67 @@ mod tests {
         assert!(ResumeToken::new("").is_err());
         assert!(ResumeToken::new("has\nnewline").is_err());
         assert!(ResumeToken::new("x".repeat(ResumeToken::MAX_BYTES + 1)).is_err());
+    }
+
+    #[test]
+    fn model_failure_diagnostic_invalid_input_roundtrips_structured_issues() {
+        // A recoverable failure's InvalidInput diagnostic carries the structured,
+        // redacted schema issues the model corrects from — code (a host_api enum)
+        // plus bounded redacted path/expected/received/schema_path.
+        let issue = ModelInputIssue::new(
+            SafeSummary::new("schedule.kind").unwrap(),
+            DispatchInputIssueCode::TypeMismatch,
+        )
+        .with_expected(SafeSummary::new("integer").unwrap())
+        .with_received(SafeSummary::new("string").unwrap())
+        .with_schema_path(SafeSummary::new("properties.schedule").unwrap());
+        let diagnostic = ModelFailureDiagnostic::InvalidInput {
+            issues: vec![issue.clone()],
+        };
+        let back: ModelFailureDiagnostic =
+            serde_json::from_value(serde_json::to_value(&diagnostic).unwrap()).unwrap();
+        assert_eq!(back, diagnostic);
+        // The structured issue survives with its code and every redacted field.
+        match back {
+            ModelFailureDiagnostic::InvalidInput { issues } => {
+                assert_eq!(issues.len(), 1);
+                assert_eq!(issues[0], issue);
+                assert_eq!(issues[0].code, DispatchInputIssueCode::TypeMismatch);
+                assert_eq!(issues[0].path.as_str(), "schedule.kind");
+                assert_eq!(
+                    issues[0].expected.as_ref().map(SafeSummary::as_str),
+                    Some("integer")
+                );
+            }
+            other => panic!("expected InvalidInput, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn model_failure_diagnostic_free_text_roundtrips() {
+        let diagnostic = ModelFailureDiagnostic::Diagnostic {
+            text: SafeSummary::new("backend returned an error").unwrap(),
+        };
+        let wire = serde_json::to_value(&diagnostic).unwrap();
+        // Internally tagged like the loop's CapabilityFailureDetail mirror.
+        assert_eq!(
+            wire,
+            serde_json::json!({ "kind": "diagnostic", "text": "backend returned an error" })
+        );
+        let back: ModelFailureDiagnostic = serde_json::from_value(wire).unwrap();
+        assert_eq!(back, diagnostic);
+        assert_eq!(
+            back.diagnostic_text().map(SafeSummary::as_str),
+            Some("backend returned an error")
+        );
+    }
+
+    #[test]
+    fn model_failure_diagnostic_rejects_an_unsafe_free_text_on_the_wire() {
+        // A hostile persisted diagnostic (path-shaped) cannot rehydrate: the
+        // SafeSummary redaction contract fires on deserialize.
+        let json = serde_json::json!({ "kind": "diagnostic", "text": "leaked /etc/passwd" });
+        assert!(serde_json::from_value::<ModelFailureDiagnostic>(json).is_err());
     }
 
     #[test]

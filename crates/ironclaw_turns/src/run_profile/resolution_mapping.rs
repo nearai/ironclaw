@@ -22,8 +22,15 @@
 //!
 //! - `CapabilityFailure::error_kind` ([`CapabilityFailureKind`]) → the
 //!   [`FailureKind`] on [`ToolVerdict::RecoverableFailure`] — the recovery class
-//!   that drives retry-vs-terminal now crosses (was "G1-dropped"). Only the raw
-//!   `detail` stays host-side (a backend cause, not vocabulary — charter).
+//!   that drives retry-vs-terminal now crosses (was "G1-dropped"). Its structured
+//!   `detail` ([`CapabilityFailureDetail`]) now crosses too, as a redacted
+//!   [`ModelFailureDiagnostic`] on the same variant (the model-visible correction
+//!   hint — PR-B): the `InvalidInput` schema issues carry their
+//!   [`DispatchInputIssueCode`](ironclaw_host_api::DispatchInputIssueCode) plus
+//!   redacted [`SafeSummary`] fields, and a free-text `Diagnostic` is redacted to
+//!   a [`SafeSummary`] (path-shaped text degrades to the placeholder — the raw
+//!   path never crosses the charter). No backend cause stays behind for want of a
+//!   home.
 //! - `CapabilityResultMessage::{progress, terminate_hint, output_digest}` →
 //!   [`Outcome::progress`]/[`Outcome::terminate_hint`]/[`OutcomeRefs::output_digest`]
 //!   (were the "G4-dropped" loop-derived signals).
@@ -51,10 +58,10 @@
 //! `Uuid`, preserved via `RunId::from_uuid`.
 
 use ironclaw_host_api::{
-    Blocked, DenyReason, DenyRecord, DenyRef, FailureKind, GateRecord, GateRef, GateWaypoint,
-    LoopRef, Outcome, OutcomeRefs, OutputDigest, ProcessRef, ProcessWaypoint, Resolution,
-    ResultProgress, ResultRef, ResumeToken, RunId, SafeSummary, Suspension, TerminateHint,
-    ToolVerdict,
+    Blocked, Denial, DenyReason, DenyRecord, DenyRef, FailureKind, GateRecord, GateRef,
+    GateWaypoint, LoopRef, MAX_MODEL_INPUT_ISSUES, ModelFailureDiagnostic, ModelInputIssue,
+    Outcome, OutcomeRefs, OutputDigest, ProcessRef, ProcessWaypoint, Resolution, ResultProgress,
+    ResultRef, ResumeToken, RunId, SafeSummary, Suspension, TerminateHint, ToolVerdict,
 };
 
 use super::content_digest::ContentDigest;
@@ -63,7 +70,9 @@ use super::host::{
     CapabilityFailure, CapabilityFailureKind, CapabilityOutcome, CapabilityProgress,
     CapabilityResultMessage, CapabilityResumeToken, LoopProcessRef, ProcessHandleSummary,
 };
-use super::model_observation::ModelVisibleToolObservation;
+use super::model_observation::{
+    CapabilityFailureDetail, CapabilityInputIssue, ModelVisibleToolObservation,
+};
 use crate::{LoopGateRef, LoopResultRef};
 
 /// A [`Resolution`] plus the side records its opaque refs render from (§5.2.9).
@@ -174,22 +183,29 @@ pub fn capability_outcome_to_resolution(outcome: CapabilityOutcome) -> MappedRes
             MappedResolution::bare(Resolution::Done(outcome)).bind_result(loop_result, minted)
         }
         // Ran and failed in a model-visible, correctable way. The recovery class
-        // (error_kind) rides the verdict; only the raw detail stays host-side.
+        // (error_kind) AND the redacted structured diagnostic (the model-visible
+        // correction hint) ride the verdict.
         CapabilityOutcome::Failed(failure) => {
             MappedResolution::bare(Resolution::Done(failed_outcome(failure)))
         }
-        // Terminal policy denial — model-visible, not re-entrant.
+        // Terminal policy denial — model-visible, not re-entrant. The model-visible
+        // reason + summary now ride the Denial channel too (a projection of the
+        // sibling DenyRecord), so the loop can render the denial without reading
+        // the host-persisted record (PR-B).
         CapabilityOutcome::Denied(denied) => {
             let CapabilityDenied {
                 reason_kind,
                 safe_summary,
             } = denied;
+            let reason = deny_reason_from_kind(&reason_kind);
+            let summary = safe_summary_or_placeholder(safe_summary);
             MappedResolution::with_deny(
-                Resolution::Denied(DenyRef::new()),
-                DenyRecord {
-                    reason: deny_reason_from_kind(&reason_kind),
-                    summary: safe_summary_or_placeholder(safe_summary),
-                },
+                Resolution::Denied(
+                    Denial::new(DenyRef::new())
+                        .with_reason_kind(reason)
+                        .with_summary(summary.clone()),
+                ),
+                DenyRecord { reason, summary },
             )
         }
         // Re-entrant gate: needs human approval before it may run. The gate-render
@@ -360,13 +376,14 @@ fn completed_outcome(message: CapabilityResultMessage) -> (Outcome, LoopResultRe
 }
 
 /// Build the `Done` payload for a `Failed` outcome (verdict `RecoverableFailure`),
-/// carrying the recovery classification on the verdict. Only the raw `detail`
-/// (a backend cause) stays host-side — not authority vocabulary (charter).
+/// carrying the recovery classification AND the redacted structured diagnostic on
+/// the verdict, so the model-visible correction hint crosses without the loop
+/// reading host storage (PR-B).
 fn failed_outcome(failure: CapabilityFailure) -> Outcome {
     let CapabilityFailure {
         error_kind,
         safe_summary,
-        detail: _,
+        detail,
     } = failure;
     Outcome {
         refs: OutcomeRefs {
@@ -379,13 +396,76 @@ fn failed_outcome(failure: CapabilityFailure) -> Outcome {
             origin: None,
             output_digest: None,
         },
-        verdict: ToolVerdict::RecoverableFailure {
-            error_kind: failure_kind_of(error_kind),
+        verdict: match model_failure_diagnostic(detail) {
+            Some(diagnostic) => ToolVerdict::recoverable_failure_with_diagnostic(
+                failure_kind_of(error_kind),
+                diagnostic,
+            ),
+            None => ToolVerdict::recoverable_failure(failure_kind_of(error_kind)),
         },
         summary: safe_summary_or_placeholder(safe_summary),
         progress: ResultProgress::default(),
         terminate_hint: TerminateHint::default(),
     }
+}
+
+/// Redact a loop-facing [`CapabilityFailureDetail`] into the host_api
+/// [`ModelFailureDiagnostic`] carried on the verdict.
+///
+/// The loop's `InvalidInput` schema issues cross with their structured
+/// [`DispatchInputIssueCode`](ironclaw_host_api::DispatchInputIssueCode) and
+/// every free-text field re-validated through the [`SafeSummary`] redaction
+/// contract (a field that fails is dropped; an issue whose required `path` fails
+/// is dropped whole), bounded to [`MAX_MODEL_INPUT_ISSUES`]. The loop's lenient
+/// free-text `Diagnostic` (which permits paths) is redacted to a [`SafeSummary`]:
+/// a path-shaped diagnostic degrades to the placeholder rather than carry a raw
+/// host path across the charter.
+fn model_failure_diagnostic(
+    detail: Option<CapabilityFailureDetail>,
+) -> Option<ModelFailureDiagnostic> {
+    match detail? {
+        CapabilityFailureDetail::InvalidInput { issues } => {
+            let issues = issues
+                .into_iter()
+                .take(MAX_MODEL_INPUT_ISSUES)
+                .filter_map(model_input_issue)
+                .collect();
+            Some(ModelFailureDiagnostic::InvalidInput { issues })
+        }
+        CapabilityFailureDetail::Diagnostic { text } => Some(ModelFailureDiagnostic::Diagnostic {
+            // The loop channel allows paths; the host_api boundary does not — a
+            // path-shaped diagnostic redacts to the placeholder (never raw).
+            text: SafeSummary::new(text).unwrap_or_else(|_| SafeSummary::placeholder()),
+        }),
+    }
+}
+
+/// Redact one loop-facing [`CapabilityInputIssue`] into a host_api
+/// [`ModelInputIssue`], routing every free-text field through [`SafeSummary`].
+/// Returns `None` when the required `path` fails the redaction contract (a
+/// path-shaped or secret-shaped path — which a safe producer never emits — is
+/// dropped rather than carried raw); optional fields that fail are individually
+/// dropped. `.ok()` here converts a pure text-to-safe-text validation failure
+/// into an absent field, never a swallowed I/O error.
+fn model_input_issue(issue: CapabilityInputIssue) -> Option<ModelInputIssue> {
+    let CapabilityInputIssue {
+        path,
+        code,
+        expected,
+        received,
+        schema_path,
+    } = issue;
+    let mut model = ModelInputIssue::new(SafeSummary::new(path).ok()?, code);
+    if let Some(expected) = expected.and_then(|value| SafeSummary::new(value).ok()) {
+        model = model.with_expected(expected);
+    }
+    if let Some(received) = received.and_then(|value| SafeSummary::new(value).ok()) {
+        model = model.with_received(received);
+    }
+    if let Some(schema_path) = schema_path.and_then(|value| SafeSummary::new(value).ok()) {
+        model = model.with_schema_path(schema_path);
+    }
+    Some(model)
 }
 
 /// A gate waypoint: the minted kernel handle plus the preserved originating loop
@@ -516,8 +596,8 @@ fn deny_reason_from_kind(kind: &CapabilityDeniedReasonKind) -> DenyReason {
 mod tests {
     use super::super::host::CapabilityInputRef;
     use super::super::{
-        CapabilityFailureKind, CapabilityProgress, LoopProcessRef,
-        MODEL_VISIBLE_TOOL_OBSERVATION_SCHEMA_VERSION,
+        CapabilityFailureDetail, CapabilityFailureKind, CapabilityInputIssue, CapabilityProgress,
+        LoopProcessRef, MODEL_VISIBLE_TOOL_OBSERVATION_SCHEMA_VERSION,
     };
     use super::*;
     use crate::{LoopGateRef, LoopResultRef, TurnRunId};
@@ -909,14 +989,188 @@ mod tests {
                 Resolution::Done(done) => {
                     assert_eq!(
                         done.verdict,
-                        ToolVerdict::RecoverableFailure {
-                            error_kind: expected.clone()
-                        },
+                        ToolVerdict::recoverable_failure(expected.clone()),
                         "the recovery class must ride the verdict (was G1-dropped)"
                     );
                 }
                 other => panic!("expected Done, got {other:?}"),
             }
+        }
+    }
+
+    /// PR-B: a `Failed` outcome's structured `InvalidInput` diagnostic
+    /// round-trips its schema issues (path, code, expected/received) through the
+    /// mapping onto `ToolVerdict::RecoverableFailure.diagnostic`, so the model can
+    /// still correct a bad tool call after the loop reads `Resolution` instead of
+    /// `CapabilityOutcome`.
+    #[test]
+    fn failed_invalid_input_diagnostic_round_trips_structured_issues() {
+        use ironclaw_host_api::{DispatchInputIssueCode, ModelFailureDiagnostic};
+
+        let outcome = CapabilityOutcome::Failed(CapabilityFailure {
+            error_kind: CapabilityFailureKind::InvalidInput,
+            safe_summary: "tool input rejected".to_string(),
+            detail: Some(CapabilityFailureDetail::InvalidInput {
+                issues: vec![CapabilityInputIssue {
+                    path: "schedule.kind".to_string(),
+                    code: DispatchInputIssueCode::TypeMismatch,
+                    expected: Some("integer".to_string()),
+                    received: Some("string".to_string()),
+                    schema_path: Some("properties.schedule".to_string()),
+                }],
+            }),
+        });
+        let mapped = capability_outcome_to_resolution(outcome);
+        match mapped.resolution {
+            Resolution::Done(done) => match done.verdict.diagnostic() {
+                Some(ModelFailureDiagnostic::InvalidInput { issues }) => {
+                    assert_eq!(issues.len(), 1);
+                    assert_eq!(issues[0].code, DispatchInputIssueCode::TypeMismatch);
+                    assert_eq!(issues[0].path.as_str(), "schedule.kind");
+                    assert_eq!(
+                        issues[0].expected.as_ref().map(SafeSummary::as_str),
+                        Some("integer")
+                    );
+                    assert_eq!(
+                        issues[0].received.as_ref().map(SafeSummary::as_str),
+                        Some("string")
+                    );
+                }
+                other => panic!("expected InvalidInput diagnostic, got {other:?}"),
+            },
+            other => panic!("expected Done, got {other:?}"),
+        }
+    }
+
+    /// PR-B: a `Failed` outcome's free-text `Diagnostic` detail rides the verdict
+    /// as a redacted `SafeSummary`.
+    #[test]
+    fn failed_free_text_diagnostic_round_trips() {
+        use ironclaw_host_api::ModelFailureDiagnostic;
+
+        let outcome = CapabilityOutcome::Failed(CapabilityFailure {
+            error_kind: CapabilityFailureKind::Backend,
+            safe_summary: "tool failed".to_string(),
+            detail: Some(CapabilityFailureDetail::Diagnostic {
+                text: "backend returned an error".to_string(),
+            }),
+        });
+        match capability_outcome_to_resolution(outcome).resolution {
+            Resolution::Done(done) => match done.verdict.diagnostic() {
+                Some(ModelFailureDiagnostic::Diagnostic { text }) => {
+                    assert_eq!(text.as_str(), "backend returned an error");
+                }
+                other => panic!("expected Diagnostic, got {other:?}"),
+            },
+            other => panic!("expected Done, got {other:?}"),
+        }
+    }
+
+    /// PR-B redaction proof: a free-text diagnostic carrying a host path (which
+    /// the loop's lenient diagnostic channel allows) is REDACTED at the host_api
+    /// boundary — the raw path never appears in the `Resolution` output; it
+    /// degrades to the redaction-safe placeholder. Likewise a secret-shaped
+    /// InvalidInput field is dropped rather than carried raw.
+    #[test]
+    fn failed_diagnostic_redacts_path_and_secret_shaped_content() {
+        use ironclaw_host_api::{DispatchInputIssueCode, ModelFailureDiagnostic};
+
+        // Free-text with a raw path: redacted to the placeholder, path gone.
+        let outcome = CapabilityOutcome::Failed(CapabilityFailure {
+            error_kind: CapabilityFailureKind::Backend,
+            safe_summary: "tool failed".to_string(),
+            detail: Some(CapabilityFailureDetail::Diagnostic {
+                text: "failed reading /etc/passwd".to_string(),
+            }),
+        });
+        match capability_outcome_to_resolution(outcome).resolution {
+            Resolution::Done(done) => match done.verdict.diagnostic() {
+                Some(ModelFailureDiagnostic::Diagnostic { text }) => {
+                    assert_eq!(text, &SafeSummary::placeholder());
+                    assert!(
+                        !text.as_str().contains("/etc/passwd"),
+                        "the raw host path must not cross the host_api boundary"
+                    );
+                }
+                other => panic!("expected Diagnostic, got {other:?}"),
+            },
+            other => panic!("expected Done, got {other:?}"),
+        }
+
+        // A secret-shaped `received` value is dropped (not carried raw); the
+        // path-shaped issue with a secret-shaped field is filtered field-wise.
+        let outcome = CapabilityOutcome::Failed(CapabilityFailure {
+            error_kind: CapabilityFailureKind::InvalidInput,
+            safe_summary: "tool input rejected".to_string(),
+            detail: Some(CapabilityFailureDetail::InvalidInput {
+                issues: vec![CapabilityInputIssue {
+                    path: "token".to_string(),
+                    code: DispatchInputIssueCode::InvalidValue,
+                    expected: Some("opaque string".to_string()),
+                    received: Some("sk-ant-abc123def456".to_string()),
+                    schema_path: None,
+                }],
+            }),
+        });
+        match capability_outcome_to_resolution(outcome).resolution {
+            Resolution::Done(done) => match done.verdict.diagnostic() {
+                Some(ModelFailureDiagnostic::InvalidInput { issues }) => {
+                    assert_eq!(issues.len(), 1);
+                    assert_eq!(issues[0].path.as_str(), "token");
+                    assert_eq!(
+                        issues[0].received, None,
+                        "a secret-shaped issue field must be dropped, never carried raw"
+                    );
+                    assert_eq!(
+                        issues[0].expected.as_ref().map(SafeSummary::as_str),
+                        Some("opaque string")
+                    );
+                }
+                other => panic!("expected InvalidInput, got {other:?}"),
+            },
+            other => panic!("expected Done, got {other:?}"),
+        }
+    }
+
+    /// PR-B: a `Denied` outcome carries its model-visible `reason_kind` + redacted
+    /// `summary` ON THE CHANNEL (not only in the host-persisted `DenyRecord`), so
+    /// the loop can render the denial without reading host storage. A path-shaped
+    /// summary is redacted to the placeholder on the channel too.
+    #[test]
+    fn denied_channel_carries_reason_kind_and_redacted_summary() {
+        let mapped =
+            capability_outcome_to_resolution(CapabilityOutcome::Denied(CapabilityDenied {
+                reason_kind: CapabilityDeniedReasonKind::unknown("network_denied").unwrap(),
+                safe_summary: "blocked egress".to_string(),
+            }));
+        match &mapped.resolution {
+            Resolution::Denied(denial) => {
+                assert_eq!(denial.reason_kind, Some(DenyReason::NetworkDenied));
+                assert_eq!(
+                    denial.summary.as_ref().map(SafeSummary::as_str),
+                    Some("blocked egress")
+                );
+                // The channel content mirrors the persisted record.
+                let record = mapped.deny_record.as_ref().expect("deny record");
+                assert_eq!(denial.reason_kind, Some(record.reason));
+                assert_eq!(denial.summary.as_ref(), Some(&record.summary));
+            }
+            other => panic!("expected Denied, got {other:?}"),
+        }
+
+        // Redaction proof: a path-shaped denial summary degrades to placeholder
+        // on the channel, never carrying the raw path.
+        let mapped =
+            capability_outcome_to_resolution(CapabilityOutcome::Denied(CapabilityDenied {
+                reason_kind: CapabilityDeniedReasonKind::EmptySurface,
+                safe_summary: "denied reading /secret/path".to_string(),
+            }));
+        match mapped.resolution {
+            Resolution::Denied(denial) => {
+                assert_eq!(denial.reason_kind, Some(DenyReason::PolicyDenied));
+                assert_eq!(denial.summary, Some(SafeSummary::placeholder()));
+            }
+            other => panic!("expected Denied, got {other:?}"),
         }
     }
 

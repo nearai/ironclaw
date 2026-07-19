@@ -37,8 +37,8 @@
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    DenyRef, FailureKind, GateRef, LoopRef, OutputDigest, ProcessRef, ResultProgress, ResultRef,
-    ResumeToken, RunId, SafeSummary, TerminateHint,
+    DenyReason, DenyRef, FailureKind, GateRef, LoopRef, ModelFailureDiagnostic, OutputDigest,
+    ProcessRef, ResultProgress, ResultRef, ResumeToken, RunId, SafeSummary, TerminateHint,
 };
 
 /// A pending-gate handle plus the additive context needed to resume and correlate
@@ -264,14 +264,44 @@ pub enum ToolVerdict {
     Success,
     /// The capability ran and failed in a model-visible, correctable way — NOT a
     /// `HostFailure` (that is infrastructure, §1.2). The model may retry or adapt.
-    /// Carries the [`FailureKind`] recovery classification.
-    RecoverableFailure { error_kind: FailureKind },
+    /// Carries the [`FailureKind`] recovery classification, and — additively — the
+    /// redacted, model-visible [`ModelFailureDiagnostic`] the model corrects from
+    /// (the structured `InvalidInput` issues or a redacted free-text cause), so a
+    /// later slice can render the tool error without reading host storage. `None`
+    /// when the producer supplied no structured diagnostic.
+    RecoverableFailure {
+        error_kind: FailureKind,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        diagnostic: Option<ModelFailureDiagnostic>,
+    },
     /// The capability spawned a child run; non-suspending (§5.3 table). Carries
     /// the child's [`RunId`] — a correlation ref, safe on the sanitized boundary.
     ChildSpawned { child_run: RunId },
 }
 
 impl ToolVerdict {
+    /// A recoverable failure carrying only its recovery classification (no
+    /// structured diagnostic). Use [`ToolVerdict::recoverable_failure_with_diagnostic`]
+    /// to attach the model-visible [`ModelFailureDiagnostic`].
+    pub fn recoverable_failure(error_kind: FailureKind) -> Self {
+        Self::RecoverableFailure {
+            error_kind,
+            diagnostic: None,
+        }
+    }
+
+    /// A recoverable failure carrying its recovery classification and the redacted,
+    /// model-visible diagnostic the model corrects from.
+    pub fn recoverable_failure_with_diagnostic(
+        error_kind: FailureKind,
+        diagnostic: ModelFailureDiagnostic,
+    ) -> Self {
+        Self::RecoverableFailure {
+            error_kind,
+            diagnostic: Some(diagnostic),
+        }
+    }
+
     /// Whether the capability completed successfully.
     pub fn is_success(&self) -> bool {
         matches!(self, ToolVerdict::Success)
@@ -281,7 +311,16 @@ impl ToolVerdict {
     /// [`ToolVerdict::RecoverableFailure`].
     pub fn error_kind(&self) -> Option<&FailureKind> {
         match self {
-            ToolVerdict::RecoverableFailure { error_kind } => Some(error_kind),
+            ToolVerdict::RecoverableFailure { error_kind, .. } => Some(error_kind),
+            _ => None,
+        }
+    }
+
+    /// The redacted, model-visible diagnostic, present only on a
+    /// [`ToolVerdict::RecoverableFailure`] whose producer supplied one.
+    pub fn diagnostic(&self) -> Option<&ModelFailureDiagnostic> {
+        match self {
+            ToolVerdict::RecoverableFailure { diagnostic, .. } => diagnostic.as_ref(),
             _ => None,
         }
     }
@@ -365,6 +404,54 @@ fn is_default_terminate_hint(hint: &TerminateHint) -> bool {
     *hint == TerminateHint::default()
 }
 
+/// A terminal policy denial's channel payload: the opaque [`DenyRef`] plus the
+/// additive, model-visible denial content the loop renders to the model (§5.2.9 /
+/// §5.3 flip prep). The full denial record stays host-owned behind `deny`; the
+/// `reason_kind` + `summary` here are the redacted subset the loop needs so it can
+/// render the denial WITHOUT reading the host-persisted `DenyRecord` (which it
+/// cannot reach).
+///
+/// Both additive fields are plain redacted vocabulary: [`DenyReason`] is already a
+/// model-visible closed enum, and [`SafeSummary`] is redacted by construction.
+/// They mirror the sibling `DenyRecord` the same ref points at — the channel is a
+/// model-visible projection of the host-owned record, not a second source of
+/// truth. `None` on both when a producer supplied only the bare ref.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Denial {
+    /// The opaque handle to the host-owned denial record.
+    pub deny: DenyRef,
+    /// The structured, model-visible reason the action was denied.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason_kind: Option<DenyReason>,
+    /// A bounded, redacted, model-visible summary of the denial.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub summary: Option<SafeSummary>,
+}
+
+impl Denial {
+    /// A bare denial carrying only the opaque ref. Use the `with_*` setters to
+    /// attach the model-visible reason and summary (default-backed builder).
+    pub fn new(deny: DenyRef) -> Self {
+        Self {
+            deny,
+            reason_kind: None,
+            summary: None,
+        }
+    }
+
+    /// Attach the model-visible denial reason.
+    pub fn with_reason_kind(mut self, reason_kind: DenyReason) -> Self {
+        self.reason_kind = Some(reason_kind);
+        self
+    }
+
+    /// Attach the redacted, model-visible denial summary.
+    pub fn with_summary(mut self, summary: SafeSummary) -> Self {
+        self.summary = Some(summary);
+        self
+    }
+}
+
 /// The composed answer of one capability invocation — the single value
 /// `AgentLoopHost::invoke` returns in its `Ok` arm (§3, §5.4); the `Err` arm is
 /// [`crate::HostFailure`]. This is the **five-channel** replacement for today's
@@ -382,8 +469,10 @@ pub enum Resolution {
     /// [`Outcome`]'s [`ToolVerdict`]).
     Done(Outcome),
     /// Terminal policy denial — model-visible, **not** re-entrant (distinct from
-    /// every gate). `AuthorizeResult::Denied` folds into this (§3).
-    Denied(DenyRef),
+    /// every gate). `AuthorizeResult::Denied` folds into this (§3). Carries the
+    /// [`Denial`] channel payload: the opaque ref plus the redacted reason/summary
+    /// the loop renders from.
+    Denied(Denial),
     /// A re-entrant gate: resolve it and the invocation may run.
     Blocked(Blocked),
     /// Parked work: the effect is in flight or handed off.
@@ -413,6 +502,14 @@ impl Resolution {
     /// A `Denied` is terminal and is deliberately excluded.
     pub fn is_reentrant_gate(&self) -> bool {
         matches!(self, Resolution::Blocked(_))
+    }
+
+    /// The terminal denial payload, present exactly on [`Resolution::Denied`].
+    pub fn denial(&self) -> Option<&Denial> {
+        match self {
+            Resolution::Denied(denial) => Some(denial),
+            _ => None,
+        }
     }
 }
 
@@ -530,9 +627,7 @@ mod tests {
             serde_json::Value::String("success".to_string())
         );
         assert_eq!(ToolVerdict::Success.kind(), "success");
-        let failure = ToolVerdict::RecoverableFailure {
-            error_kind: FailureKind::InvalidInput,
-        };
+        let failure = ToolVerdict::recoverable_failure(FailureKind::InvalidInput);
         assert_eq!(failure.kind(), "recoverable_failure");
         assert_eq!(
             serde_json::to_value(&failure).unwrap(),
@@ -546,6 +641,57 @@ mod tests {
     }
 
     #[test]
+    fn recoverable_failure_carries_its_model_visible_diagnostic() {
+        // The structured, model-visible diagnostic rides the verdict so a later
+        // slice can render the correction hint without reading host storage.
+        let diagnostic = ModelFailureDiagnostic::Diagnostic {
+            text: SafeSummary::new("tool input rejected").unwrap(),
+        };
+        let verdict = ToolVerdict::RecoverableFailure {
+            error_kind: FailureKind::InvalidInput,
+            diagnostic: Some(diagnostic.clone()),
+        };
+        assert_eq!(verdict.diagnostic(), Some(&diagnostic));
+        let back: ToolVerdict =
+            serde_json::from_value(serde_json::to_value(&verdict).unwrap()).unwrap();
+        assert_eq!(back, verdict);
+        assert_eq!(back.diagnostic(), Some(&diagnostic));
+        // The additive diagnostic is omitted from the wire when absent, so the
+        // pre-diagnostic wire shape still rehydrates.
+        let bare = ToolVerdict::recoverable_failure(FailureKind::Network);
+        assert_eq!(bare.diagnostic(), None);
+        assert_eq!(
+            serde_json::to_value(&bare).unwrap(),
+            serde_json::json!({ "recoverable_failure": { "error_kind": "network" } }),
+            "absent diagnostic must not appear on the wire"
+        );
+    }
+
+    #[test]
+    fn denial_carries_reason_kind_and_summary_and_roundtrips() {
+        let deny = DenyRef::parse("018f6a00-0000-7000-8000-000000000002").unwrap();
+        let denial = Denial::new(deny)
+            .with_reason_kind(DenyReason::PolicyDenied)
+            .with_summary(SafeSummary::new("blocked by policy").unwrap());
+        assert_eq!(denial.deny, deny);
+        assert_eq!(denial.reason_kind, Some(DenyReason::PolicyDenied));
+        let resolution = Resolution::Denied(denial.clone());
+        let back: Resolution =
+            serde_json::from_value(serde_json::to_value(&resolution).unwrap()).unwrap();
+        assert_eq!(back, resolution);
+        // A bare denial (ref only) still serializes/rehydrates additively.
+        let bare = Resolution::Denied(Denial::new(deny));
+        assert_eq!(
+            serde_json::to_value(&bare).unwrap(),
+            serde_json::json!({ "denied": { "deny": "018f6a00-0000-7000-8000-000000000002" } })
+        );
+        assert_eq!(
+            serde_json::from_value::<Resolution>(serde_json::to_value(&bare).unwrap()).unwrap(),
+            bare
+        );
+    }
+
+    #[test]
     fn recoverable_failure_carries_its_error_kind_across_the_wire() {
         // The recovery classification (retry-vs-terminal) survives round-trip —
         // the field the old mapping dropped as "G1".
@@ -553,9 +699,7 @@ mod tests {
             FailureKind::Network,
             FailureKind::unknown("quota_exceeded").unwrap(),
         ] {
-            let verdict = ToolVerdict::RecoverableFailure {
-                error_kind: kind.clone(),
-            };
+            let verdict = ToolVerdict::recoverable_failure(kind.clone());
             let back: ToolVerdict =
                 serde_json::from_value(serde_json::to_value(&verdict).unwrap()).unwrap();
             assert_eq!(back.error_kind(), Some(&kind));
@@ -598,9 +742,7 @@ mod tests {
                 origin: None,
                 output_digest: None,
             },
-            verdict: ToolVerdict::RecoverableFailure {
-                error_kind: FailureKind::InvalidInput,
-            },
+            verdict: ToolVerdict::recoverable_failure(FailureKind::InvalidInput),
             summary: SafeSummary::new("tool input rejected").unwrap(),
             progress: ResultProgress::default(),
             terminate_hint: TerminateHint::default(),
@@ -709,9 +851,7 @@ mod tests {
     }
 
     fn recoverable_failure() -> ToolVerdict {
-        ToolVerdict::RecoverableFailure {
-            error_kind: FailureKind::InvalidInput,
-        }
+        ToolVerdict::recoverable_failure(FailureKind::InvalidInput)
     }
 
     fn outcome(verdict: ToolVerdict) -> Outcome {
@@ -751,7 +891,9 @@ mod tests {
             ),
             (
                 "Denied",
-                Resolution::Denied(DenyRef::parse("018f6a00-0000-7000-8000-000000000002").unwrap()),
+                Resolution::Denied(Denial::new(
+                    DenyRef::parse("018f6a00-0000-7000-8000-000000000002").unwrap(),
+                )),
                 false,
             ),
             (
@@ -815,8 +957,9 @@ mod tests {
         );
         assert!(Resolution::Blocked(Blocked::Approval(gate_wp())).is_reentrant_gate());
         // Denied is terminal — not a re-entrant gate, not a suspension.
-        let denied =
-            Resolution::Denied(DenyRef::parse("018f6a00-0000-7000-8000-000000000002").unwrap());
+        let denied = Resolution::Denied(Denial::new(
+            DenyRef::parse("018f6a00-0000-7000-8000-000000000002").unwrap(),
+        ));
         assert!(!denied.is_reentrant_gate());
         assert!(!denied.is_suspension());
         // A spawned child run completes; it does not suspend.
@@ -846,8 +989,8 @@ mod tests {
                 }),
             ),
             (
-                Resolution::Denied(deny),
-                serde_json::json!({ "denied": "018f6a00-0000-7000-8000-000000000002" }),
+                Resolution::Denied(Denial::new(deny)),
+                serde_json::json!({ "denied": { "deny": "018f6a00-0000-7000-8000-000000000002" } }),
             ),
             (
                 Resolution::Blocked(Blocked::Approval(GateWaypoint::new(gate))),
