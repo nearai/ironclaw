@@ -1283,7 +1283,7 @@ mod tests {
     use ironclaw_host_api::{RuntimeCredentialAccountProviderId, RuntimeCredentialAuthRequirement};
     #[cfg(feature = "slack-v2-host-beta")]
     use ironclaw_product_adapters::AdapterInstallationId;
-    use ironclaw_secrets::{InMemorySecretStore, SecretStore};
+    use ironclaw_secrets::{FilesystemSecretStore, SecretStore};
     use ironclaw_turns::{TurnRunId, TurnScope};
     #[cfg(feature = "slack-v2-host-beta")]
     use std::sync::atomic::AtomicBool;
@@ -1376,7 +1376,7 @@ mod tests {
             None,
             UserId::new("user:operator").expect("operator"),
             Arc::new(MemorySlackSetupStore::default()),
-            Arc::new(InMemorySecretStore::new()),
+            Arc::new(FilesystemSecretStore::ephemeral()),
         ));
         service
             .save(SlackInstallationSetupUpdate {
@@ -1399,7 +1399,7 @@ mod tests {
     #[tokio::test]
     async fn google_oauth_callback_uses_gate_pkce_store_when_route_cache_misses() {
         let shared = Arc::new(InMemoryAuthProductServices::new());
-        let secret_store = Arc::new(InMemorySecretStore::new());
+        let secret_store = Arc::new(FilesystemSecretStore::ephemeral());
         let secret_store_for_provider: Arc<dyn SecretStore> = secret_store.clone();
         let dispatcher = Arc::new(RecordingDispatcher::default());
         let google_gate = Arc::new(OAuthGateFlowDriver::new(
@@ -1534,7 +1534,7 @@ mod tests {
         ));
         let gate_driver = Arc::new(OAuthGateFlowDriver::new(
             Arc::new(SlackPersonalOAuthGateProvider::new(slot.clone())),
-            Arc::new(InMemorySecretStore::new()),
+            Arc::new(FilesystemSecretStore::ephemeral()),
         ));
         let product_auth = Arc::new(
             RebornProductAuthServices::from_shared(shared.clone(), dispatcher.clone())
@@ -1818,7 +1818,7 @@ mod tests {
     #[tokio::test]
     async fn google_oauth_callback_with_empty_scope_returns_html_failure_page() {
         let shared = Arc::new(InMemoryAuthProductServices::new());
-        let secret_store = Arc::new(InMemorySecretStore::new());
+        let secret_store = Arc::new(FilesystemSecretStore::ephemeral());
         let secret_store_for_provider: Arc<dyn SecretStore> = secret_store.clone();
         let dispatcher = Arc::new(RecordingDispatcher::default());
         let google_gate = Arc::new(OAuthGateFlowDriver::new(
@@ -1940,7 +1940,7 @@ mod tests {
     async fn provider_denials_preserve_response_and_attempt_failing_terminal_hook_once() {
         FAILING_TERMINAL_HOOK_CALLS.store(0, Ordering::SeqCst);
         let shared = Arc::new(InMemoryAuthProductServices::new());
-        let secret_store = Arc::new(InMemorySecretStore::new());
+        let secret_store = Arc::new(FilesystemSecretStore::ephemeral());
         let secret_store_for_provider: Arc<dyn SecretStore> = secret_store.clone();
         let google_gate = Arc::new(OAuthGateFlowDriver::new(
             Arc::new(GoogleOAuthGateProvider::new(
@@ -2102,7 +2102,7 @@ mod tests {
     #[tokio::test]
     async fn oauth_callback_route_failure_renders_html_failure_with_completion_signal() {
         let shared = Arc::new(InMemoryAuthProductServices::new());
-        let secret_store = Arc::new(InMemorySecretStore::new());
+        let secret_store = Arc::new(FilesystemSecretStore::ephemeral());
         let secret_store_for_provider: Arc<dyn SecretStore> = secret_store.clone();
         let dispatcher = Arc::new(RecordingDispatcher::default());
         let google_gate = Arc::new(OAuthGateFlowDriver::new(

@@ -666,15 +666,37 @@ Do not port the current `src/cli/*` command tree wholesale. Port commands one at
 
 ## Release packaging decision
 
-The canonical Reborn binary is not yet a cargo-dist release artifact. Renaming
-the executable to `ironclaw` did not rename its Cargo package: the legacy root
-package still owns package name `ironclaw`, while Reborn remains
-`ironclaw_reborn_cli`.
+The canonical Reborn `ironclaw` binary from `ironclaw_reborn_cli` is **not yet
+included in cargo-dist release artifacts**. Renaming the executable did not
+rename its Cargo package: the legacy root package still owns package name
+`ironclaw`, while Reborn remains `ironclaw_reborn_cli`.
 
-Enabling cargo-dist now would make the existing `ironclaw-v*` tags ambiguous or
-associate them with the legacy package version. Tag-triggered Docker publishing
-therefore remains disabled until #3483 transfers the Cargo package, version,
-release-plz, cargo-dist, and WiX identities together.
+The tag-driven release pipeline preflights the shipping binary directly through
+`.github/workflows/reborn-release-compile.yml`. That matrix performs a final
+link on the two GNU Linux, two musl Linux, two macOS, and one Windows target
+configured for releases, then runs the exact native output through config-free
+CLI startup checks. The musl jobs additionally reject `PT_INTERP` and
+`DT_NEEDED` entries so their outputs remain portable to systems without a musl
+loader. Its short-lived `reborn-compile-*` workflow artifacts are preflight
+evidence only and are excluded from the `artifacts-*` set uploaded to the
+GitHub Release. It does not claim `serve`, external-service, installer, or
+canonical Reborn packaging coverage.
+
+Current `dist plan --output-format=json` with `crates/ironclaw_reborn_cli` marked
+`dist = false` emits only the root legacy package artifacts (`ironclaw` package,
+`ironclaw-legacy` executable). Removing `dist = false` alone is not enough to
+ship the canonical Reborn `ironclaw` executable in the existing `ironclaw-v*`
+release workflow because that workflow is shaped around the root `ironclaw`
+package tag. Enabling the `ironclaw_reborn_cli` release also requires cargo-dist
+WiX metadata/template work and an explicit package/tag/versioning decision.
+
+Tag-triggered Docker publishing therefore remains disabled until #3483
+transfers the Cargo package, version, release-plz, cargo-dist, and WiX identities
+together.
+
+Follow-up issue: #3483 tracks packaging the canonical Reborn binary in release artifacts.
+
+Until #3483 is resolved, keep:
 
 ```toml
 [package.metadata.dist]

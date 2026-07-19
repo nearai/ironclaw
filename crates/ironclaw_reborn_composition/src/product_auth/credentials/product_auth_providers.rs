@@ -377,7 +377,7 @@ mod tests {
         RuntimeHttpEgressResponse, SecretHandle, TenantId, ThreadId, UserId,
     };
     use ironclaw_product_adapters::AuthPromptChallengeKind;
-    use ironclaw_secrets::{InMemorySecretStore, SecretStore};
+    use ironclaw_secrets::{FilesystemSecretStore, SecretStore};
     use ironclaw_turns::{TurnRunId, TurnScope};
     use secrecy::SecretString;
     use std::sync::Mutex;
@@ -421,7 +421,7 @@ mod tests {
                 },
             ],
             Vec::new(),
-            Arc::new(InMemorySecretStore::new()),
+            Arc::new(FilesystemSecretStore::ephemeral()),
             OAuthProviderRuntimePorts::new(egress.clone(), Arc::new(NoopObligationHandler)),
             #[cfg(feature = "slack-v2-host-beta")]
             None,
@@ -464,7 +464,7 @@ mod tests {
                 client: oauth_client("google-client", "https://app.example/oauth/google"),
             }],
             Vec::new(),
-            Arc::new(InMemorySecretStore::new()),
+            Arc::new(FilesystemSecretStore::ephemeral()),
             OAuthProviderRuntimePorts::new(
                 Arc::new(RecordingEgress::ok(Vec::new())),
                 Arc::new(NoopObligationHandler),
@@ -524,7 +524,7 @@ mod tests {
             br#"{"access_token":"new-google-access","refresh_token":"new-google-refresh","expires_in":3600}"#
                 .to_vec(),
         ));
-        let secret_store = Arc::new(InMemorySecretStore::new());
+        let secret_store = Arc::new(FilesystemSecretStore::ephemeral());
         let resource_scope = sample_scope();
         let auth_scope = AuthProductScope::new(resource_scope.clone(), AuthSurface::Callback);
         let old_access = SecretHandle::new("google-old-access").unwrap();
@@ -633,7 +633,7 @@ mod tests {
             400,
             br#"{"error":"invalid_grant"}"#.to_vec(),
         ));
-        let secret_store = Arc::new(InMemorySecretStore::new());
+        let secret_store = Arc::new(FilesystemSecretStore::ephemeral());
         let resource_scope = sample_scope();
         let auth_scope = AuthProductScope::new(resource_scope.clone(), AuthSurface::Callback);
         let old_access = SecretHandle::new("google-old-access").unwrap();

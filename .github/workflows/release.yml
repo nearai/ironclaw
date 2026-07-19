@@ -41,9 +41,18 @@ permissions:
 on:
   push:
     tags:
-      - 'ironclaw-v[0-9]+.[0-9]+.[0-9]+*'
+      - 'ironclaw-v[0-9]*.[0-9]*.[0-9]*'
 
 jobs:
+  # Compile the shipping Reborn binary on every supported release target.
+  # This is intentionally separate from cargo-dist until #3483 resolves the
+  # Reborn package/tag/installer contract.
+  reborn-binary-compile:
+    name: Reborn binary compile
+    uses: ./.github/workflows/reborn-release-compile.yml
+    with:
+      ref: ${{ github.sha }}
+
   # Run 'dist plan' (or host) to determine what tasks we need to do
   plan:
     runs-on: "ubuntu-22.04"
@@ -402,8 +411,10 @@ jobs:
       - build-local-artifacts
       - build-global-artifacts
       - build-wasm-extensions
-    # Only run if we're "publishing", and only if plan, local, global, and wasm didn't fail (skipped is fine)
-    if: ${{ always() && needs.plan.result == 'success' && needs.plan.outputs.publishing == 'true' && (needs.build-global-artifacts.result == 'skipped' || needs.build-global-artifacts.result == 'success') && (needs.build-local-artifacts.result == 'skipped' || needs.build-local-artifacts.result == 'success') && (needs.build-wasm-extensions.result == 'skipped' || needs.build-wasm-extensions.result == 'success') }}
+      - reborn-binary-compile
+    # Only publish after the explicit Reborn target matrix succeeds. Existing
+    # cargo-dist jobs may still be skipped, but a failed Reborn compile is fatal.
+    if: ${{ always() && needs.plan.result == 'success' && needs.plan.outputs.publishing == 'true' && (needs.build-global-artifacts.result == 'skipped' || needs.build-global-artifacts.result == 'success') && (needs.build-local-artifacts.result == 'skipped' || needs.build-local-artifacts.result == 'success') && (needs.build-wasm-extensions.result == 'skipped' || needs.build-wasm-extensions.result == 'success') && needs.reborn-binary-compile.result == 'success' }}
     permissions:
       contents: write
     env:
