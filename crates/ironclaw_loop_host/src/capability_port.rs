@@ -4,6 +4,7 @@ use std::{
 };
 
 use async_trait::async_trait;
+use ironclaw_capabilities::{ReplayPayload, ReplayPayloadStore, ReplayPayloadStoreError};
 use ironclaw_host_api::{
     CapabilityDisplayOutputPreview, CapabilityId, CapabilitySet, CorrelationId,
     DispatchFailureDetail, DispatchInputIssue, DispatchInputIssueCode, EffectKind,
@@ -17,7 +18,6 @@ use ironclaw_host_runtime::{
     RuntimeCapabilityOutcome, RuntimeCapabilityRequest, RuntimeCapabilityResumeRequest,
     RuntimeFailureKind,
 };
-use ironclaw_capabilities::{ReplayPayload, ReplayPayloadStore, ReplayPayloadStoreError};
 use ironclaw_process_sandbox::{SandboxProcessPlan, ValidatedSandboxProcessPlan};
 use ironclaw_run_state::{GateRecordStore, RunStateError};
 use ironclaw_turns::{
@@ -2158,72 +2158,47 @@ impl HostRuntimeLoopCapabilityPort {
             // (arch-simplification §5.3 Stage 2a-i).
             Some(payload) => (payload.input, payload.estimate),
             Option::None => {
-            let input = self
-                .input_resolver
-                .resolve_capability_input(&self.run_context, effective_input_ref)
-                .await?;
-            // Trajectory capture: the resolved input is the model's tool
-            // arguments, and this is the one place they are visible (the provider
-            // tool-call decorator stages them upstream and bypasses the input
-            // resolver hook).
-            if let Some(observer) = &self.trajectory_observer {
-                // Best-effort, inline on the capability hot path: a panicking
-                // observer must never unwind the invocation before dispatch.
-                // (Blocking is the observer's own contract.)
-                let caught = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    observer.on_capability_input(
-                        effective_input_ref.as_str(),
-                        request.capability_id.as_str(),
-                        &input,
-                    );
-                }));
-                if caught.is_err() {
-                    tracing::warn!(
-                        capability_id = request.capability_id.as_str(),
-                        "trajectory observer on_capability_input panicked; dropping event"
-                    );
-                }
-            }
-            let input = match prepare_provider_arguments_with_detail(
-                &input,
-                &capability.parameters_schema,
-                "capability input",
-            ) {
-                Ok(input) => input,
-                Err(error)
-                    if error.error.kind == AgentLoopHostErrorKind::InvalidInvocation
-                        && is_provider_tool_call_input_ref(effective_input_ref) =>
-                {
-                    let host_error = *error.error;
-                    let result = Ok(CapabilityOutcome::Failed(CapabilityFailure {
-                        error_kind: CapabilityFailureKind::InvalidInput,
-                        safe_summary: host_error.safe_summary,
-                        detail: error.detail,
+                let input = self
+                    .input_resolver
+                    .resolve_capability_input(&self.run_context, effective_input_ref)
+                    .await?;
+                // Trajectory capture: the resolved input is the model's tool
+                // arguments, and this is the one place they are visible (the provider
+                // tool-call decorator stages them upstream and bypasses the input
+                // resolver hook).
+                if let Some(observer) = &self.trajectory_observer {
+                    // Best-effort, inline on the capability hot path: a panicking
+                    // observer must never unwind the invocation before dispatch.
+                    // (Blocking is the observer's own contract.)
+                    let caught = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                        observer.on_capability_input(
+                            effective_input_ref.as_str(),
+                            request.capability_id.as_str(),
+                            &input,
+                        );
                     }));
-                    guard.commit();
-                    self.record_loop_completed(
-                        &idempotency_key,
-                        requested_invocation_id,
-                        result.clone(),
-                    )?;
-                    return result;
+                    if caught.is_err() {
+                        tracing::warn!(
+                            capability_id = request.capability_id.as_str(),
+                            "trajectory observer on_capability_input panicked; dropping event"
+                        );
+                    }
                 }
-                Err(error) => return Err(*error.error),
-            };
-            let runtime_input =
-                match host_runtime_input_for_capability(&request.capability_id, input) {
-                    Ok(runtime_input) => runtime_input,
-                    Err(error) if error.kind == AgentLoopHostErrorKind::InvalidInvocation => {
-                        // A malformed/invalid model-supplied process sandbox plan is a
-                        // model-fixable error, not a host fault: surface it as a
-                        // model-visible tool error so the agent can correct the
-                        // arguments instead of ending the run. `host_runtime_input_for_capability`
-                        // only returns `InvalidInvocation` for the sandbox-plan parse/validation
-                        // case; its host-internal serialization failure keeps its `Internal` Err.
+                let input = match prepare_provider_arguments_with_detail(
+                    &input,
+                    &capability.parameters_schema,
+                    "capability input",
+                ) {
+                    Ok(input) => input,
+                    Err(error)
+                        if error.error.kind == AgentLoopHostErrorKind::InvalidInvocation
+                            && is_provider_tool_call_input_ref(effective_input_ref) =>
+                    {
+                        let host_error = *error.error;
                         let result = Ok(CapabilityOutcome::Failed(CapabilityFailure {
                             error_kind: CapabilityFailureKind::InvalidInput,
-                            safe_summary: error.safe_summary,
-                            detail: None,
+                            safe_summary: host_error.safe_summary,
+                            detail: error.detail,
                         }));
                         guard.commit();
                         self.record_loop_completed(
@@ -2233,9 +2208,34 @@ impl HostRuntimeLoopCapabilityPort {
                         )?;
                         return result;
                     }
-                    Err(error) => return Err(error),
+                    Err(error) => return Err(*error.error),
                 };
-            (runtime_input, capability.estimate.clone())
+                let runtime_input =
+                    match host_runtime_input_for_capability(&request.capability_id, input) {
+                        Ok(runtime_input) => runtime_input,
+                        Err(error) if error.kind == AgentLoopHostErrorKind::InvalidInvocation => {
+                            // A malformed/invalid model-supplied process sandbox plan is a
+                            // model-fixable error, not a host fault: surface it as a
+                            // model-visible tool error so the agent can correct the
+                            // arguments instead of ending the run. `host_runtime_input_for_capability`
+                            // only returns `InvalidInvocation` for the sandbox-plan parse/validation
+                            // case; its host-internal serialization failure keeps its `Internal` Err.
+                            let result = Ok(CapabilityOutcome::Failed(CapabilityFailure {
+                                error_kind: CapabilityFailureKind::InvalidInput,
+                                safe_summary: error.safe_summary,
+                                detail: None,
+                            }));
+                            guard.commit();
+                            self.record_loop_completed(
+                                &idempotency_key,
+                                requested_invocation_id,
+                                result.clone(),
+                            )?;
+                            return result;
+                        }
+                        Err(error) => return Err(error),
+                    };
+                (runtime_input, capability.estimate.clone())
             }
         };
         let mut invocation_context =
@@ -3056,17 +3056,15 @@ async fn runtime_outcome_to_loop(
                 }),
             }
         }
-        RuntimeCapabilityOutcome::AuthRequired(gate) => {
-            CapabilityOutcome::AuthRequired {
-                gate_ref: loop_gate_ref("auth", gate.gate_id.to_string())?,
-                credential_requirements: gate.credential_requirements,
-                safe_summary: blocked_summary(gate.reason).to_string(),
-                auth_resume: Some(ironclaw_turns::run_profile::CapabilityAuthResume {
-                    resume_token: resume_token_from_invocation_id(conversion.invocation_id)?,
-                    prior_approval: None,
-                }),
-            }
-        }
+        RuntimeCapabilityOutcome::AuthRequired(gate) => CapabilityOutcome::AuthRequired {
+            gate_ref: loop_gate_ref("auth", gate.gate_id.to_string())?,
+            credential_requirements: gate.credential_requirements,
+            safe_summary: blocked_summary(gate.reason).to_string(),
+            auth_resume: Some(ironclaw_turns::run_profile::CapabilityAuthResume {
+                resume_token: resume_token_from_invocation_id(conversion.invocation_id)?,
+                prior_approval: None,
+            }),
+        },
         RuntimeCapabilityOutcome::ResourceBlocked(gate) => CapabilityOutcome::ResourceBlocked {
             gate_ref: loop_gate_ref("resource", gate.gate_id.to_string())?,
             safe_summary: blocked_summary(gate.reason).to_string(),

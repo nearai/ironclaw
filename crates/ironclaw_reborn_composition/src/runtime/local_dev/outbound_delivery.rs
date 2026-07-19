@@ -457,8 +457,10 @@ impl OutboundDeliveryTargetSetHandler {
         // fingerprint that MUST match the one saved at raise; the input the
         // decorator already reconstituted (`invocation.input`) is cross-checked
         // against the persisted payload here as anti-tamper.
-        let replay_scope =
-            super::local_dev_resource_scope_for_run(&invocation.run_context, &self.fallback_user_id);
+        let replay_scope = super::local_dev_resource_scope_for_run(
+            &invocation.run_context,
+            &self.fallback_user_id,
+        );
         let replay = self
             .replay_payload_store
             .load(&replay_scope, invocation_id)

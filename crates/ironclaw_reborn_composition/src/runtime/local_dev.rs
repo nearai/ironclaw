@@ -162,9 +162,9 @@ pub(super) fn capability_wiring(
     let capability_store_filesystem =
         crate::wrap_scoped(Arc::clone(&local_runtime.extension_filesystem));
     let gate_record_store: Arc<dyn ironclaw_run_state::GateRecordStore> =
-        Arc::new(ironclaw_run_state::FilesystemGateRecordStore::new(Arc::clone(
-            &capability_store_filesystem,
-        )));
+        Arc::new(ironclaw_run_state::FilesystemGateRecordStore::new(
+            Arc::clone(&capability_store_filesystem),
+        ));
     let replay_payload_store: Arc<dyn ironclaw_capabilities::ReplayPayloadStore> = Arc::new(
         ironclaw_capabilities::FilesystemReplayPayloadStore::new(capability_store_filesystem),
     );
