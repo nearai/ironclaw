@@ -17,9 +17,9 @@ Emulate provider-contract tests also require Node.js with `npx`.
 ## Run
 
 ```bash
-pytest tests/e2e/scenarios/test_reborn_blackbox_smoke.py -v --timeout=120
-pytest tests/e2e/scenarios/test_reborn_webui_v2_smoke.py -v --timeout=120
-pytest tests/e2e/scenarios/test_emulate_reborn_provider_contracts.py -v
+pytest scenarios/test_reborn_blackbox_smoke.py -v --timeout=120
+pytest scenarios/test_reborn_webui_v2_smoke.py -v --timeout=120
+pytest scenarios/test_emulate_reborn_provider_contracts.py -v
 ```
 
 The binary fixtures build `-p ironclaw_reborn_cli --bin ironclaw`. WebUI tests

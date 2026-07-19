@@ -9,11 +9,11 @@ This is intentionally small and complements the Rust composition tests
 (`crates/ironclaw_reborn_composition/tests/webui_v2_serve.rs`), which drive the
 same router in-process via `tower::ServiceExt::oneshot` with no real TCP
 listener or browser. This is the browser smoke for the standalone
-`ironclaw-reborn` binary and the v2 webUI surface.
+`ironclaw` binary and the v2 webUI surface.
 
 Wiring confirmed manually before this test existed:
 - The v2 SPA + `serve` subcommand are gated behind `webui-v2-beta` (transitively
-  enables `libsql`); the binary is `ironclaw-reborn`.
+  enables `libsql`); the binary is `ironclaw`.
 - LLM is selected via `$IRONCLAW_REBORN_HOME/config.toml` `[llm.default]`; the
   built-in `openai` provider (OpenAI `/v1/chat/completions`) is pointed at the
   mock with a `base_url` override and `api_key_env`.

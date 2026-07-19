@@ -5,7 +5,7 @@ coverage workhorse for Reborn behavior, but it cannot prove three things: real
 process startup, real HTTP end-to-end, and process-death durability (its
 `new_at_path()` reopen approximates a restart; it cannot cover kill -9 /
 partial-write / lock-file behavior). This suite is the thin black-box layer on
-top of the real `ironclaw-reborn` binary — SMALL and permanent, five
+top of the real `ironclaw` binary — SMALL and permanent, five
 scenarios, not a second workhorse. Resist scope growth here; deeper
 functional/UI coverage belongs in `test_reborn_webui_v2_smoke.py` and its
 siblings, not this file.
