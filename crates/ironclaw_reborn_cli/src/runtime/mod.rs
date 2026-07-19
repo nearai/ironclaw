@@ -324,16 +324,18 @@ async fn send_once(
     text: &str,
     cancellation: CancellationToken,
 ) -> anyhow::Result<()> {
-    let reply = runtime
-        .send_user_message_with_cancellation(conversation, text, cancellation)
-        .await?;
+    let reply = run_with_spinner(
+        std::io::stderr().is_terminal(),
+        runtime.send_user_message_with_cancellation(conversation, text, cancellation),
+    )
+    .await?;
     if !reply.is_successful_final_reply() {
         anyhow::bail!(
             "reborn run did not produce an assistant reply\n{}",
             no_assistant_text_message(&reply)
         );
     }
-    print_reply(&reply);
+    print_reply(&reply, std::io::stdout().is_terminal());
     Ok(())
 }
 
@@ -367,16 +369,21 @@ async fn run_repl_loop(
                         continue;
                     }
                     Some(text) => {
-                        match runtime
-                            .send_user_message_with_cancellation(
+                        let render_markdown = std::io::stdout().is_terminal();
+                        let result = run_with_spinner(
+                            stdin_is_tty,
+                            runtime.send_user_message_with_cancellation(
                                 conversation,
                                 &text,
                                 cancellation.clone(),
-                            )
-                            .await
-                        {
-                            Ok(reply) if reply.is_successful_final_reply() => print_reply(&reply),
-                            Ok(reply) if stdin_is_tty => print_reply(&reply),
+                            ),
+                        )
+                        .await;
+                        match result {
+                            Ok(reply) if reply.is_successful_final_reply() => {
+                                print_reply(&reply, render_markdown)
+                            }
+                            Ok(reply) if stdin_is_tty => print_reply(&reply, render_markdown),
                             Ok(reply) => {
                                 anyhow::bail!(
                                     "reborn run did not produce an assistant reply\n{}",
@@ -424,8 +431,44 @@ fn print_repl_help() {
     eprintln!("  /quit  Exit the REPL");
 }
 
-fn print_reply(reply: &ironclaw_reborn_composition::AssistantReply) {
+/// Show an animated spinner on stderr while `fut` runs, then clear the line.
+/// A no-op (just awaits) when `show` is false, so piped/non-interactive runs
+/// stay clean. stderr keeps stdout free for piping the reply.
+async fn run_with_spinner<F, T>(show: bool, fut: F) -> T
+where
+    F: Future<Output = T>,
+{
+    if !show {
+        return fut.await;
+    }
+    const FRAMES: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+    tokio::pin!(fut);
+    let mut ticker = tokio::time::interval(Duration::from_millis(90));
+    let mut frame = 0usize;
+    loop {
+        tokio::select! {
+            out = &mut fut => {
+                eprint!("\r\x1b[K"); // carriage return + clear line
+                let _ = std::io::stderr().flush();
+                return out;
+            }
+            _ = ticker.tick() => {
+                eprint!("\r{} thinking…", FRAMES[frame % FRAMES.len()]);
+                let _ = std::io::stderr().flush();
+                frame += 1;
+            }
+        }
+    }
+}
+
+/// Print the assistant reply. When stdout is a terminal, render the markdown to
+/// ANSI (bold, code, lists, headers); otherwise emit the raw text so piping
+/// stays byte-clean.
+fn print_reply(reply: &ironclaw_reborn_composition::AssistantReply, render_markdown: bool) {
     match reply.text.as_deref() {
+        Some(text) if render_markdown => {
+            termimad::MadSkin::default().print_text(text);
+        }
         Some(text) => println!("{text}"),
         None => eprintln!("{}", no_assistant_text_message(reply)),
     }
@@ -1609,6 +1652,14 @@ mod tests {
         CredentialRefreshSettings, RebornCompositionProfile, TurnStatus,
         test_support::assistant_reply_without_text_for_test,
     };
+
+    #[tokio::test]
+    async fn spinner_returns_inner_value_in_both_modes() {
+        // Whether or not the spinner is shown, the wrapped future's value must
+        // pass through unchanged.
+        assert_eq!(super::run_with_spinner(false, async { 42 }).await, 42);
+        assert_eq!(super::run_with_spinner(true, async { 42 }).await, 42);
+    }
     #[cfg(feature = "webui-v2-beta")]
     use ironclaw_reborn_composition::{LocalTriggerAccessRole, LocalTriggerAccessSource};
     use ironclaw_reborn_config::RebornBootConfig;
