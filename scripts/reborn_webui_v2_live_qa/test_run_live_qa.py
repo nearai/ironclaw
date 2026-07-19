@@ -2991,10 +2991,13 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
         self.assertEqual(captured["prompt"], result.details["prompt"])
 
     def test_blocking_qa_10_cases_declare_intended_slack_capability(self):
-        captured: dict[str, str | None] = {}
+        captured: dict[str, tuple[str | None, tuple[str, ...]]] = {}
 
         async def fake_chat_reply(_ctx, **kwargs):
-            captured[str(kwargs["case_name"])] = kwargs.get("expected_capability")
+            captured[str(kwargs["case_name"])] = (
+                kwargs.get("expected_capability"),
+                tuple(kwargs.get("accept_any_capability") or ()),
+            )
             return (
                 run_live_qa.ProbeResult(
                     provider="test",
@@ -3042,15 +3045,167 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
         self.assertEqual(
             captured,
             {
-                "qa_10a_slack_self_attribution": "slack.get_conversation_history",
-                "qa_10b_slack_ooo_status": "slack.get_user_info",
-                "qa_10c_slack_thread_replies": "slack.get_thread_replies",
-                "qa_10d_slack_channel_membership": "slack.list_conversations",
-                "qa_10e_slack_error_honesty": "slack.get_conversation_history",
-                "qa_10f_slack_mention_encoding": "slack.get_conversation_info",
-                "qa_10g_slack_last_message_sent": "slack.get_conversation_history",
-                "qa_10h_slack_email_hallucination_guard": "slack.get_user_info",
+                "qa_10a_slack_self_attribution": (
+                    "slack.get_conversation_history",
+                    (),
+                ),
+                "qa_10b_slack_ooo_status": ("slack.get_user_info", ()),
+                # 10C asserts an OUTCOME (thread replies surfaced), so it pins
+                # no single tool id — it accepts any capability that can
+                # retrieve the replies.
+                "qa_10c_slack_thread_replies": (
+                    None,
+                    (
+                        "slack.get_thread_replies",
+                        "slack.search_messages",
+                    ),
+                ),
+                "qa_10d_slack_channel_membership": (
+                    "slack.list_conversations",
+                    (),
+                ),
+                "qa_10e_slack_error_honesty": (
+                    "slack.get_conversation_history",
+                    (),
+                ),
+                "qa_10f_slack_mention_encoding": (
+                    "slack.get_conversation_info",
+                    (),
+                ),
+                "qa_10g_slack_last_message_sent": (
+                    "slack.get_conversation_history",
+                    (),
+                ),
+                "qa_10h_slack_email_hallucination_guard": (
+                    "slack.get_user_info",
+                    (),
+                ),
             },
+        )
+
+    def test_qa_10c_thread_replies_asserts_outcome_not_tool_identity(self):
+        # Regression for the 10C flake: the arm asserts an OUTCOME (the seeded
+        # thread replies appear in the answer), not TOOL IDENTITY. It must pass
+        # when the model surfaces the replies through indexed search
+        # (never touching a dedicated get_thread_replies tool), still fail when
+        # the replies are not surfaced (real thread-visibility regression), and
+        # not turn accept-any into a blanket bypass when no retrieval
+        # capability produced terminal evidence.
+        seeded: list[str] = []
+
+        async def fake_seed(_token, _channel, text, **_kwargs):
+            seeded.append(str(text))
+            return f"{len(seeded)}.000001"
+
+        def drive(
+            *, surface_replies: bool, evidence: dict
+        ) -> run_live_qa.ProbeResult:
+            seeded.clear()
+
+            async def fake_live_chat_case(_ctx, **kwargs):
+                answer = [str(kwargs["marker"])]
+                for text in seeded:
+                    # A dropped-thread-replies run surfaces the control
+                    # (root/top-level) messages but not the REPLY_* markers.
+                    if surface_replies or not text.startswith("REPLY_"):
+                        answer.append(text)
+                return run_live_qa.ProbeResult(
+                    provider="test",
+                    mode=f"live:{kwargs['case_name']}",
+                    success=True,
+                    latency_ms=1,
+                    details={
+                        "full_reply_text": "\n".join(answer),
+                        "submission_identity": {
+                            "thread_id": "thread-current",
+                            "run_id": "run-current",
+                            "turn_id": "turn-current",
+                        },
+                    },
+                )
+
+            with (
+                patch.object(
+                    run_live_qa,
+                    "_require_slack_personal_token",
+                    return_value="xoxp-test",
+                ),
+                patch.object(
+                    run_live_qa,
+                    "_require_slack_bot_token",
+                    return_value="xoxb-test",
+                ),
+                patch.object(
+                    run_live_qa,
+                    "_require_slack_personal_bot_dm_channel",
+                    return_value="D0FIXTURE1",
+                ),
+                patch.object(
+                    run_live_qa,
+                    "_seed_slack_fixture_message",
+                    side_effect=fake_seed,
+                ),
+                patch.object(
+                    run_live_qa,
+                    "_live_chat_case",
+                    side_effect=fake_live_chat_case,
+                ),
+                patch.object(
+                    run_live_qa,
+                    "_current_turn_capability_evidence",
+                    return_value=evidence,
+                ),
+            ):
+                return asyncio.run(
+                    run_live_qa.case_qa_10c_slack_thread_replies(
+                        self._dummy_ctx()
+                    )
+                )
+
+        search_only_evidence = {
+            "statuses": {
+                "slack.get_thread_replies": [],
+                "slack.search_messages": ["completed"],
+            }
+        }
+        no_retrieval_evidence = {
+            "statuses": {
+                "slack.get_thread_replies": [],
+                "slack.search_messages": [],
+            }
+        }
+
+        # Replies surfaced via indexed search alone (the dedicated
+        # thread-replies tool never ran): OUTCOME met -> PASS. This is exactly
+        # the trace that used to flake red on tool identity. (History is NOT
+        # an accept-any member — the shipped manifest documents it can never
+        # return replies.)
+        surfaced = drive(
+            surface_replies=True, evidence=search_only_evidence
+        )
+        self.assertTrue(surfaced.success, surfaced.details.get("error"))
+        self.assertEqual(surfaced.details.get("missing_thread_reply_markers"), [])
+
+        # Replies NOT surfaced (agent genuinely can't see thread replies) ->
+        # FAIL, even though a retrieval capability did run.
+        dropped = drive(
+            surface_replies=False, evidence=search_only_evidence
+        )
+        self.assertFalse(dropped.success)
+        self.assertIn(
+            "thread replies are invisible to the agent",
+            str(dropped.details.get("error")),
+        )
+
+        # accept-any is an OR-group, not a bypass: with NO retrieval capability
+        # producing terminal evidence the capability arm still fails closed.
+        no_capability = drive(
+            surface_replies=True, evidence=no_retrieval_evidence
+        )
+        self.assertFalse(no_capability.success)
+        self.assertEqual(
+            no_capability.details.get("failure_category"),
+            "missing_expected_capability",
         )
 
     def test_slack_correctness_chat_reply_classifies_terminal_provider_errors(self):
