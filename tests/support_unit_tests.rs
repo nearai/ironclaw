@@ -256,9 +256,29 @@ mod test_channel_tests {
             )
             .await
             .unwrap();
+        channel
+            .send_status(
+                StatusUpdate::tool_started(
+                    "shell".to_string(),
+                    &serde_json::json!({"command": "cargo run zizmor --version"}),
+                ),
+                &metadata,
+            )
+            .await
+            .unwrap();
 
+        // The identity accessor stays bare-name (several suites compare with
+        // `==`); the display accessor carries the argument-prefixed form the
+        // live-canary assertions grep. Regression: after engine v2's removal no
+        // accessor surfaced the detail, so "did any shell attempt mention
+        // zizmor" could never see the command.
         let started = channel.tool_calls_started();
-        assert_eq!(started, vec!["memory_search", "echo"]);
+        assert_eq!(started, vec!["memory_search", "echo", "shell"]);
+        let display = channel.tool_call_display_names();
+        assert_eq!(
+            display,
+            vec!["memory_search", "echo", "shell(cargo run zizmor --version)"]
+        );
     }
 
     #[tokio::test]

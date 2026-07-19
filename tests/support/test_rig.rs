@@ -466,6 +466,13 @@ impl TestRig {
         self.channel.tool_calls_started()
     }
 
+    /// Return the display form (`name(detail)` when a contextual detail is
+    /// carried, bare `name` otherwise) of all `ToolStarted` events captured so
+    /// far — see `TestChannel::tool_call_display_names`.
+    pub fn tool_call_display_names(&self) -> Vec<String> {
+        self.channel.tool_call_display_names()
+    }
+
     /// Return the filtered list of captured responses so far.
     ///
     /// Mirrors the bootstrap-greeting filtering used by `wait_for_responses`.
