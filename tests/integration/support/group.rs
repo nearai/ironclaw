@@ -56,16 +56,14 @@ use std::sync::atomic::AtomicU64;
 use std::time::Duration;
 
 use ironclaw_extensions::ExtensionInstallationStore;
-use ironclaw_filesystem::{CompositeRootFilesystem, InMemoryBackend, ScopedFilesystem};
-use ironclaw_host_api::{
-    MountAlias, MountGrant, MountPermissions, MountView, ResourceScope, UserId, VirtualPath,
-};
+use ironclaw_filesystem::CompositeRootFilesystem;
+use ironclaw_host_api::{ResourceScope, UserId};
 use ironclaw_llm::testing::provider_chain_over;
 use ironclaw_llm::{LlmProvider, SessionConfig, create_session_manager};
 use ironclaw_loop_host::{
-    CapabilityAllowSet, CapabilitySurfaceProfileResolver, FilesystemCheckpointStateStore,
-    HostManagedModelGateway, HostUserProfileSource, JsonSpawnSubagentInputCodec, ModelCostTable,
-    SubagentSpawnLimits, ZeroCostTable,
+    CapabilityAllowSet, CapabilitySurfaceProfileResolver, HostManagedModelGateway,
+    HostUserProfileSource, JsonSpawnSubagentInputCodec, ModelCostTable, SubagentSpawnLimits,
+    ZeroCostTable,
 };
 use ironclaw_product_adapters::ProductTriggerReason;
 use ironclaw_product_workflow::{

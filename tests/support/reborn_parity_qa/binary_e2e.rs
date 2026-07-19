@@ -17,14 +17,14 @@
 use std::{path::PathBuf, sync::Arc, time::Duration};
 
 use async_trait::async_trait;
-use ironclaw_filesystem::{DiskFilesystem, InMemoryBackend, ScopedFilesystem};
+use ironclaw_filesystem::{DiskFilesystem, InMemoryBackend};
 use ironclaw_host_api::{
-    CapabilityId, MountAlias, MountGrant, MountPermissions, MountView, NetworkPolicy,
-    ProviderToolName, ResourceScope, RuntimeHttpEgressRequest, ThreadId, VirtualPath,
+    CapabilityId, NetworkPolicy, ProviderToolName, ResourceScope, RuntimeHttpEgressRequest,
+    ThreadId,
 };
 use ironclaw_loop_host::{
-    EmptyUserProfileSource, FilesystemCheckpointStateStore, HostIdentityContextSource,
-    HostManagedModelRequest, JsonSpawnSubagentInputCodec,
+    EmptyUserProfileSource, HostIdentityContextSource, HostManagedModelRequest,
+    JsonSpawnSubagentInputCodec,
 };
 use ironclaw_network::NetworkHttpRequest;
 use ironclaw_product_adapters::{
