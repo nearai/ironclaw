@@ -29,7 +29,7 @@ use ironclaw_turns::{
         CapabilityFailureKind, CapabilityInputIssue, CapabilityInputRef, CapabilityInvocation,
         CapabilityOutcome, CapabilityResultMessage, CapabilityResumeToken, ConcurrencyHint,
         ContentDigest, LoopCapabilityPort, LoopHostMilestone, LoopHostMilestoneKind,
-        LoopHostMilestoneSink, LoopProcessRef, LoopRunContext, LoopSafeSummary,
+        LoopHostMilestoneSink, LoopProcessRef, LoopRunContext, LoopSafeSummary, MappedResolution,
         ModelVisibleToolObservation, ProcessHandleSummary, ProviderToolCall,
         ProviderToolCallCapabilityIds, ProviderToolCallReplay, ProviderToolDefinition,
         RegisterProviderToolCallRequest, VisibleCapabilityRequest, VisibleCapabilitySurface,
@@ -1042,7 +1042,7 @@ pub struct HostRuntimeLoopCapabilityPort {
     trajectory_observer: Option<Arc<dyn CapabilityTrajectoryObserver>>,
     /// Durable store for the model-visible [`GateRecord`] a pending gate renders
     /// from on a later resume turn (§5.2.9). Written at the capability seam when a
-    /// gate/suspension outcome is produced; see `persist_gate_record_for_outcome`.
+    /// gate/suspension outcome is produced; see `persist_gate_record_for_mapped`.
     gate_record_store: Arc<dyn GateRecordStore>,
     /// Host-private store for the raw replay payload (tool `input` + `estimate`)
     /// a gate/auth resume re-dispatches from (arch-simplification §5.3 Stage
@@ -1737,11 +1737,11 @@ impl LoopCapabilityPort for HostRuntimeLoopCapabilityPort {
     ) -> Result<Resolution, AgentLoopHostError> {
         // §5.3 Stage 2 (the atomic flip): the loop-facing result IS the host_api
         // `Resolution` now. Dispatch produces the loop-facing `CapabilityOutcome`
-        // internally; `persist_gate_record_for_outcome` maps it to persist the
+        // internally; `persist_gate_record_for_mapped` maps it to persist the
         // durable gate record its channel renders from; and the boundary returns
         // the mapped `Resolution` (its `origin`/refs carry every loop-side ref the
         // executor reconstructs from). The idempotency key is derived INSIDE
-        // `persist_gate_record_for_outcome`, after dispatch and only for a
+        // `persist_gate_record_for_mapped`, after dispatch and only for a
         // gate-bearing outcome — its `resume.input_ref` binding is the
         // STORE-derived one (same derivation the dispatch cache uses), so it stays
         // byte-stable and identical to dispatch's (§5.3 Stage 0). Deriving it there
@@ -1749,9 +1749,16 @@ impl LoopCapabilityPort for HostRuntimeLoopCapabilityPort {
         // validation the FIRST error a malformed resume surfaces — a missing/stale
         // resume payload must not pre-empt an `InvalidInvocation` activity mismatch.
         let outcome = self.invoke_capability_dispatch(request.clone()).await?;
-        self.persist_gate_record_for_outcome(&request, &outcome)
+        // Map ONCE, then persist and return the SAME `MappedResolution`. The
+        // approval/resource/dependent/external gates each mint a fresh random
+        // `GateRef` per mapping (only auth is deterministic via
+        // `for_auth_gate`), so mapping a second time to build the return value
+        // would hand the executor a gate ref that differs from the one the
+        // record was just persisted under — the resume could never load it.
+        let mapped = capability_outcome_to_resolution(outcome);
+        self.persist_gate_record_for_mapped(&request, &mapped)
             .await?;
-        Ok(capability_outcome_to_resolution(outcome).resolution)
+        Ok(mapped.resolution)
     }
 
     async fn invoke_capability_batch(
@@ -1804,13 +1811,12 @@ impl HostRuntimeLoopCapabilityPort {
     /// missing/stale resume payload from pre-empting dispatch's own resume
     /// identity/activity validation — a malformed resume surfaces
     /// `InvalidInvocation` from dispatch, never a spurious payload-missing error.
-    async fn persist_gate_record_for_outcome(
+    async fn persist_gate_record_for_mapped(
         &self,
         request: &CapabilityInvocation,
-        outcome: &CapabilityOutcome,
+        mapped: &MappedResolution,
     ) -> Result<(), AgentLoopHostError> {
-        let mapped = capability_outcome_to_resolution(outcome.clone());
-        let Some(record) = mapped.gate_record else {
+        let Some(record) = mapped.gate_record.as_ref() else {
             // Done / Denied / Suspended(Process): nothing durable to persist, and
             // no idempotency key needed.
             return Ok(());
@@ -1842,7 +1848,11 @@ impl HostRuntimeLoopCapabilityPort {
             return Ok(());
         }
         let scope = self.visible_request.context.resource_scope.clone();
-        match self.gate_record_store.save(scope, gate_ref, record).await {
+        match self
+            .gate_record_store
+            .save(scope, gate_ref, record.clone())
+            .await
+        {
             Ok(()) => {}
             // A deterministic gate-record key (the auth gate's `for_auth_gate`, and
             // the approval gate's `for_approval_request` on the authorize path)
@@ -9283,6 +9293,20 @@ mod tests {
         assert!(
             matches!(record, GateRecord::Approval { .. }),
             "expected GateRecord::Approval, got {record:?}"
+        );
+        // Regression (#6287 IronLoop): the record must be keyed by the gate ref
+        // the RETURNED Resolution carries — not merely one the seam happened to
+        // save. The approval/resource/dependent/external gates mint a FRESH random
+        // `GateRef` on every `capability_outcome_to_resolution` call, so mapping
+        // the outcome a second time to build the return value (as the pre-fix
+        // `invoke_capability` did) handed the executor a gate ref no record was
+        // ever saved under, and the resume could never load it. `invoke_capability`
+        // now maps ONCE and persists/returns the same `MappedResolution`.
+        let resolution_gate_ref =
+            gate_ref_for_resolution(&outcome).expect("blocked resolution carries a gate ref");
+        assert_eq!(
+            resolution_gate_ref, gate_ref,
+            "the returned Resolution's gate ref must equal the persisted record's key"
         );
         assert_eq!(
             store

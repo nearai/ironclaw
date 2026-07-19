@@ -160,7 +160,7 @@ struct OutboundDeliveryTargetSetHandler {
     replay_payload_store: Arc<dyn ironclaw_capabilities::ReplayPayloadStore>,
     /// Durable model-visible gate-record store. Because this synthetic capability
     /// raises its own approval gate OUTSIDE the loop-host persist seam
-    /// (`HostRuntimeLoopCapabilityPort::persist_gate_record_for_outcome`), it must
+    /// (`HostRuntimeLoopCapabilityPort::persist_gate_record_for_mapped`), it must
     /// persist the [`GateRecord`] itself at the raise — keyed by the canonical
     /// [`GateRef::for_approval_request`] the product read model re-derives — so the
     /// approver-facing gate rendering (§5.2.9) has a record to read (§5.3 Stage 0).
