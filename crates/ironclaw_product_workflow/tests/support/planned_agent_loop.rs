@@ -295,6 +295,20 @@ impl ProductLiveAgentLoopHarness {
         let capability_results = Arc::new(Mutex::new(Vec::new()));
         let capability_factory: Arc<dyn LoopCapabilityPortFactory> =
             if let Some(capability) = config.host_runtime_capability {
+                // Durable gate-record + replay-payload stores over ONE in-memory
+                // filesystem (production mount view via `wrap_scoped`), shared by
+                // both stores so a raise and its resume round-trip through the
+                // same records.
+                let capability_store_filesystem =
+                    ironclaw_reborn_composition::wrap_scoped(Arc::new(InMemoryBackend::new()));
+                let gate_record_store: Arc<dyn ironclaw_run_state::GateRecordStore> =
+                    Arc::new(ironclaw_run_state::FilesystemGateRecordStore::new(
+                        Arc::clone(&capability_store_filesystem),
+                    ));
+                let replay_payload_store: Arc<dyn ironclaw_capabilities::ReplayPayloadStore> =
+                    Arc::new(ironclaw_capabilities::FilesystemReplayPayloadStore::new(
+                        capability_store_filesystem,
+                    ));
                 Arc::new(ProductLiveHostRuntimeCapabilityFactory {
                     services: host_runtime_services.expect("host runtime services"),
                     io: host_runtime_io.expect("host runtime capability io"),
@@ -310,6 +324,8 @@ impl ProductLiveAgentLoopHarness {
                     cancellation_factory: cancellation_factory.clone(),
                     model_provider: config.model_provider.clone(),
                     model_id: config.model_id.clone(),
+                    gate_record_store,
+                    replay_payload_store,
                 })
             } else if let Some(capability) = config.capability {
                 Arc::new(RecordingCapabilityFactory {
@@ -703,6 +719,12 @@ struct ProductLiveHostRuntimeCapabilityFactory {
     cancellation_factory: Arc<ReadyRunCancellationFactory>,
     model_provider: String,
     model_id: String,
+    // Durable gate-record + replay-payload stores wired into the ProductLive
+    // capability port, so a raise and its later resume round-trip through the
+    // SAME store (both built over one in-memory filesystem below). Modeling the
+    // production wiring the local-dev path already has (#6287).
+    gate_record_store: Arc<dyn ironclaw_run_state::GateRecordStore>,
+    replay_payload_store: Arc<dyn ironclaw_capabilities::ReplayPayloadStore>,
 }
 
 #[async_trait]
@@ -757,6 +779,8 @@ impl LoopCapabilityPortFactory for ProductLiveHostRuntimeCapabilityFactory {
                 model_budget_accountant: Arc::new(NoOpBudgetAccountant),
                 safety_context: test_safety_context(),
                 milestone_sink: Arc::new(InMemoryLoopHostMilestoneSink::default()),
+                gate_record_store: Arc::clone(&self.gate_record_store),
+                replay_payload_store: Arc::clone(&self.replay_payload_store),
             },
         )
         .map_err(adapter_error)?;

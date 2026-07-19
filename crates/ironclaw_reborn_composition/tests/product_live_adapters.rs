@@ -437,6 +437,8 @@ async fn local_dev_adapter_gates_builtin_echo_when_global_auto_approve_is_off() 
     let adapters = ProductLivePlannedRuntimeAdapters::from_services(
         &services,
         ProductLivePlannedRuntimeAdapterConfig {
+            gate_record_store: test_gate_record_store(),
+            replay_payload_store: test_replay_payload_store(),
             capability_authority_resolver: authority_resolver(
                 ProductLiveVisibleCapabilityRequestConfig::new(
                     UserId::new("user-builtin-echo").unwrap(),
@@ -565,6 +567,8 @@ async fn local_dev_adapter_invokes_builtin_shell_through_product_live_surface() 
     let adapters = ProductLivePlannedRuntimeAdapters::from_services(
         &services,
         ProductLivePlannedRuntimeAdapterConfig {
+            gate_record_store: test_gate_record_store(),
+            replay_payload_store: test_replay_payload_store(),
             capability_authority_resolver: authority_resolver(
                 ProductLiveVisibleCapabilityRequestConfig::new(
                     user_id,
@@ -663,6 +667,8 @@ async fn local_dev_adapter_invokes_extension_scoped_grants_with_loop_driver_prin
     let adapters = ProductLivePlannedRuntimeAdapters::from_services(
         &services,
         ProductLivePlannedRuntimeAdapterConfig {
+            gate_record_store: test_gate_record_store(),
+            replay_payload_store: test_replay_payload_store(),
             capability_authority_resolver: authority_resolver(
                 ProductLiveVisibleCapabilityRequestConfig::new(
                     UserId::new("user-extension-grant").unwrap(),
@@ -757,6 +763,8 @@ async fn local_dev_adapter_registers_provider_tool_calls_as_run_scoped_inputs() 
     let adapters = ProductLivePlannedRuntimeAdapters::from_services(
         &services,
         ProductLivePlannedRuntimeAdapterConfig {
+            gate_record_store: test_gate_record_store(),
+            replay_payload_store: test_replay_payload_store(),
             capability_authority_resolver: authority_resolver(
                 ProductLiveVisibleCapabilityRequestConfig::new(
                     UserId::new("user-provider-tool").unwrap(),
@@ -908,6 +916,8 @@ async fn local_dev_adapter_exposes_skill_install_provider_tool_schema_requires_s
     let adapters = ProductLivePlannedRuntimeAdapters::from_services(
         &services,
         ProductLivePlannedRuntimeAdapterConfig {
+            gate_record_store: test_gate_record_store(),
+            replay_payload_store: test_replay_payload_store(),
             capability_authority_resolver: authority_resolver(
                 ProductLiveVisibleCapabilityRequestConfig::new(
                     user_id.clone(),
@@ -1001,6 +1011,8 @@ async fn adapter_config_can_authorize_non_dispatch_provider_trust_effects() {
     let adapters = ProductLivePlannedRuntimeAdapters::from_services(
         &services,
         ProductLivePlannedRuntimeAdapterConfig {
+            gate_record_store: test_gate_record_store(),
+            replay_payload_store: test_replay_payload_store(),
             capability_authority_resolver: authority_resolver(
                 ProductLiveVisibleCapabilityRequestConfig::new(
                     UserId::new("user-read-effect").unwrap(),
@@ -1075,6 +1087,8 @@ async fn local_dev_adapter_invokes_read_file_with_configured_mounts() {
     let adapters = ProductLivePlannedRuntimeAdapters::from_services(
         &services,
         ProductLivePlannedRuntimeAdapterConfig {
+            gate_record_store: test_gate_record_store(),
+            replay_payload_store: test_replay_payload_store(),
             capability_authority_resolver: authority_resolver(
                 ProductLiveVisibleCapabilityRequestConfig::new(
                     UserId::new("user-read-file").unwrap(),
@@ -1174,6 +1188,8 @@ async fn adapter_bundle_maps_authority_resolution_failure_to_host_error() {
     let adapters = ProductLivePlannedRuntimeAdapters::from_services(
         &services,
         ProductLivePlannedRuntimeAdapterConfig {
+            gate_record_store: test_gate_record_store(),
+            replay_payload_store: test_replay_payload_store(),
             capability_authority_resolver: Arc::new(FailingAuthorityResolver),
             ..adapter_config()
         },
@@ -1299,6 +1315,8 @@ async fn adapter_bundle_resolves_authority_for_each_run_context() {
     let adapters = ProductLivePlannedRuntimeAdapters::from_services(
         &services,
         ProductLivePlannedRuntimeAdapterConfig {
+            gate_record_store: test_gate_record_store(),
+            replay_payload_store: test_replay_payload_store(),
             capability_authority_resolver: Arc::new(RecordingAuthorityResolver {
                 calls: Arc::clone(&calls),
             }),
@@ -1454,6 +1472,8 @@ async fn model_route_settings_wire_default_and_mission_slots() {
     let adapters = ProductLivePlannedRuntimeAdapters::from_services(
         &services,
         ProductLivePlannedRuntimeAdapterConfig {
+            gate_record_store: test_gate_record_store(),
+            replay_payload_store: test_replay_payload_store(),
             model_routes: settings,
             ..adapter_config()
         },
@@ -1483,6 +1503,8 @@ async fn model_route_settings_respect_selection_mode_override() {
     let adapters = ProductLivePlannedRuntimeAdapters::from_services(
         &services,
         ProductLivePlannedRuntimeAdapterConfig {
+            gate_record_store: test_gate_record_store(),
+            replay_payload_store: test_replay_payload_store(),
             model_routes: settings,
             ..adapter_config()
         },
@@ -1499,8 +1521,22 @@ async fn model_route_settings_respect_selection_mode_override() {
     );
 }
 
+fn test_gate_record_store() -> Arc<dyn ironclaw_run_state::GateRecordStore> {
+    Arc::new(ironclaw_run_state::FilesystemGateRecordStore::new(
+        ironclaw_reborn_composition::wrap_scoped(Arc::new(InMemoryBackend::new())),
+    ))
+}
+
+fn test_replay_payload_store() -> Arc<dyn ironclaw_capabilities::ReplayPayloadStore> {
+    Arc::new(ironclaw_capabilities::FilesystemReplayPayloadStore::new(
+        ironclaw_reborn_composition::wrap_scoped(Arc::new(InMemoryBackend::new())),
+    ))
+}
+
 fn adapter_config() -> ProductLivePlannedRuntimeAdapterConfig {
     ProductLivePlannedRuntimeAdapterConfig {
+        gate_record_store: test_gate_record_store(),
+        replay_payload_store: test_replay_payload_store(),
         capability_authority_resolver: authority_resolver(visible_capability_request_config(
             "adapter-config",
         )),
