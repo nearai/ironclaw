@@ -33,11 +33,10 @@ use ironclaw_loop_host::{
 };
 use ironclaw_turns::run_profile::{
     AgentLoopHostError, AgentLoopHostErrorKind, CapabilityBatchInvocation, CapabilityCallCandidate,
-    CapabilityInvocation, CapabilityOutcome, CapabilityProgress, CapabilityResultMessage,
-    CapabilitySurfaceVersion, ConcurrencyHint, LoopCapabilityPort, LoopRunContext,
-    ProviderToolCall, ProviderToolCallCapabilityIds, ProviderToolCallReplay,
-    ProviderToolDefinition, RegisterProviderToolCallRequest, VisibleCapabilityRequest,
-    VisibleCapabilitySurface, capability_outcome_to_resolution,
+    CapabilityInvocation, CapabilityProgress, CapabilitySurfaceVersion, ConcurrencyHint,
+    LoopCapabilityPort, LoopRunContext, ProviderToolCall, ProviderToolCallCapabilityIds,
+    ProviderToolCallReplay, ProviderToolDefinition, RegisterProviderToolCallRequest,
+    VisibleCapabilityRequest, VisibleCapabilitySurface, resolution,
 };
 use ironclaw_turns::{ExternalToolCatalog, PendingExternalCall};
 use ironclaw_turns::{LoopGateRef, TurnRunId};
@@ -183,7 +182,7 @@ impl ExternalToolCapabilityPort {
     async fn complete_or_park(
         &self,
         request: CapabilityInvocation,
-    ) -> Result<CapabilityOutcome, AgentLoopHostError> {
+    ) -> Result<Resolution, AgentLoopHostError> {
         if request.surface_version != self.surface_version()? {
             return Err(AgentLoopHostError::new(
                 AgentLoopHostErrorKind::StaleSurface,
@@ -223,21 +222,22 @@ impl ExternalToolCapabilityPort {
                 .complete_call_for_input_ref(self.run_id, &input_ref)
                 .await
                 .map_err(catalog_error)?;
-            return Ok(CapabilityOutcome::Completed(CapabilityResultMessage {
-                result_ref: write.result_ref,
-                safe_summary: "external tool output".to_string(),
-                progress: CapabilityProgress::MadeProgress,
-                terminate_hint: false,
-                byte_len: write.byte_len,
-                output_digest: write.output_digest,
-                model_observation: write.model_observation,
-            }));
+            return Ok(resolution::completed(
+                write.result_ref,
+                "external tool output".to_string(),
+                CapabilityProgress::MadeProgress,
+                false,
+                write.byte_len,
+                write.output_digest,
+                write.model_observation,
+            ));
         }
         // No output yet → park and return control to the API client.
-        Ok(CapabilityOutcome::ExternalToolPending {
-            gate_ref: external_tool_gate_ref(&call_id)?,
-            safe_summary: "awaiting client tool output".to_string(),
-        })
+        Ok(resolution::external_tool_pending(
+            external_tool_gate_ref(&call_id)?,
+            "awaiting client tool output".to_string(),
+        )
+        .resolution)
     }
 }
 
@@ -420,11 +420,8 @@ impl LoopCapabilityPort for ExternalToolCapabilityPort {
         if !self.owns_capability(&request.capability_id) {
             return self.inner.invoke_capability(request).await;
         }
-        // `complete_or_park` still constructs `CapabilityOutcome` (unchanged
-        // internal helper); collapse it to the host `Resolution` at this
-        // `LoopCapabilityPort` boundary.
-        let outcome = self.complete_or_park(request).await?;
-        Ok(capability_outcome_to_resolution(outcome).resolution)
+        // `complete_or_park` emits the host `Resolution` directly (§5.3 Stage 2b).
+        self.complete_or_park(request).await
     }
 
     async fn invoke_capability_batch(
