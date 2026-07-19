@@ -14,11 +14,19 @@ async-trait = "0.1"
 chrono = "0.4"
 ironclaw_authorization = { path = "../ironclaw_authorization" }
 ironclaw_extensions = { path = "../ironclaw_extensions" }
+# Storage substrate: the host-private ReplayPayloadStore persists behind a
+# ScopedFilesystem over the shared CAS lane (mirrors run_state's Filesystem*Store).
+ironclaw_filesystem = { path = "../ironclaw_filesystem" }
 ironclaw_host_api = { path = "../ironclaw_host_api" }
 ironclaw_processes = { path = "../ironclaw_processes" }
 ironclaw_run_state = { path = "../ironclaw_run_state" }
 ironclaw_safety = { path = "../ironclaw_safety" }
 ironclaw_trust = { path = "../ironclaw_trust" }
+# Resume-payload vocabulary owner: ReplayPayload embeds CapabilityInputRef and
+# AuthResumeApprovalIdentity from turns (the CapabilityApprovalResume/AuthResume
+# field types) rather than re-typing them.
+ironclaw_turns = { path = "../ironclaw_turns" }
+serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 thiserror = "2"
 tracing = "0.1"
@@ -33,6 +41,5 @@ ironclaw_processes = { path = "../ironclaw_processes", features = ["test-support
 ironclaw_run_state = { path = "../ironclaw_run_state", features = ["test-support"] }
 ironclaw_dispatcher = { path = "../ironclaw_dispatcher" }
 ironclaw_events = { path = "../ironclaw_events" }
-ironclaw_filesystem = { path = "../ironclaw_filesystem" }
 ironclaw_resources = { path = "../ironclaw_resources" }
 tokio = { version = "1", features = ["macros", "rt"] }
