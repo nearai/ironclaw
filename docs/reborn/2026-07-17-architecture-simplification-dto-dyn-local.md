@@ -1916,6 +1916,43 @@ transition directly; the cross-tenant, gate/resume, and adapter-conformance test
 integration-tier through the caller. Every bug fixed during the migration lands with the
 regression test that pins it (the commit-msg hook already requires one).
 
+### 11.9 Compile-time transition exhaustiveness, and every edge through full infra
+
+The capability state machines — **`authorize`** (`Authorized | Denied | Blocked`),
+**resolution/`dispatch`** (`Done | Blocked(Auth) | Suspended | HostFailure`), the
+**`Authorized` lifecycle** (§5.3.2: minted → single-use → consumed-or-expired), the
+**lease**, and **gate/resume** (§11.1) — are the kernel's trust core. Their correctness
+must be a *compiler guarantee first, test second*, so that adding a state or event can't
+silently leave a transition unhandled. Two obligations beyond §11.4's runtime enumeration:
+
+**1. Each transition function is a total match over `(source state × event)` with no
+wildcard arm.** Every capability machine models its step as
+`fn step(state: S, event: E) -> Transition` where `S` and `E` are closed enums and the
+body is an exhaustive `match` on the pair — each cell is either a named safe transition or
+an explicit typed rejection (`Rejected(reason)`), never a catch-all `_ =>`. Adding a new
+state or event is then a **compile error** at every machine until the new cells are wired,
+turning "did we handle the new case everywhere it flows?" from a review question (the
+recurring identity/exhaustiveness bug class in `types.md`) into a build failure. The
+transition enum is the single source of truth: the runtime machine and the §11.4
+(state × op) enumeration test both consume the *same* `step`, so a proven cell and a
+shipped cell cannot drift. This is also a §10 ratchet — a `_ =>` arm (or a non-exhaustive
+`#[non_exhaustive]` escape) added to a capability transition `match` is a mechanical
+review reject, tested by the ratchet on its own file.
+
+**2. Every edge is exercised end-to-end through the real infrastructure, not only the
+reference model.** §11.4's property tests prove the *logic* against a small model; §11.9
+additionally requires that **each transition edge in the §11.1 capability machines is hit
+by at least one integration/e2e path through production composition** — real stores, real
+`authorize`→`dispatch`, real gate persistence (#6243) and resume-read, real runtime lane —
+asserting at a seam per §11.8, never `wait_for_status` alone. A coverage manifest lists
+every edge and the e2e scenario that drives it; an edge with no full-infra scenario is a
+gap the suite reports (a completeness critic over the transition table), so "the model
+handles it" can never stand in for "the wiring handles it." The `authorize`/`dispatch`
+conformance harness (§11.7) is where the per-edge assertions live; the §5.3 acceptance
+table (every outcome row producible in its channel) is the crate-tier half of the same
+coverage, and the e2e manifest is the integration half — together they prove the machine
+both *decides* every case and *is wired for* every case.
+
 ---
 
 ## 12. Performance-critical paths: locking, remote-store latency, event fan-out
