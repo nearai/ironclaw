@@ -1793,13 +1793,15 @@ pub struct CapabilityAuthResume {
     pub resume_token: CapabilityResumeToken,
     /// Present when the invocation previously passed a one-shot approval gate.
     /// The two sub-fields are always set together; see [`AuthResumeApprovalIdentity`].
-    ///
-    /// The raw runtime `input`/`estimate` no longer ride here (arch-simplification
-    /// §5.3 Stage 2a-i): capability input refs are scoped to a loop run and may be
-    /// consumed by the first dispatch, so the host persists the host-private
-    /// `ReplayPayload` (`ironclaw_capabilities`) at the gate raise — keyed by the
-    /// invocation id encoded in `resume_token` — and reconstitutes it host-side on
-    /// resume, rather than round-tripping raw tool args through the loop checkpoint.
+    //
+    // Design note (not part of this field's contract): the raw runtime
+    // `input`/`estimate` no longer ride this struct (arch-simplification §5.3
+    // Stage 2a-i) — capability input refs are scoped to a loop run and may be
+    // consumed by the first dispatch, so the host persists the host-private
+    // `ReplayPayload` (`ironclaw_capabilities`) at the gate raise — keyed by
+    // the invocation id encoded in `resume_token` — and reconstitutes it
+    // host-side on resume, rather than round-tripping raw tool args through
+    // the loop checkpoint.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub prior_approval: Option<AuthResumeApprovalIdentity>,
 }
