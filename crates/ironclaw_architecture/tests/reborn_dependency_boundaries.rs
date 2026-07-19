@@ -297,7 +297,8 @@ fn retired_v1_runtime_stays_removed() {
     let retired_delivery_references = active_delivery_files
         .into_iter()
         .filter_map(|path| {
-            let contents = std::fs::read_to_string(&path).ok()?;
+            let contents = std::fs::read_to_string(&path)
+                .unwrap_or_else(|error| panic!("failed to read {}: {error}", path.display()));
             let has_retired_reference = contents.contains("ironclaw-legacy")
                 || contents.contains("crates/ironclaw_gateway")
                 || contents.contains("crates/ironclaw_tui")
@@ -4204,16 +4205,24 @@ fn workspace_root() -> PathBuf {
 
 fn non_hidden_files_under(root: &Path) -> Vec<PathBuf> {
     fn visit(dir: &Path, files: &mut Vec<PathBuf>) {
-        let Ok(entries) = std::fs::read_dir(dir) else {
-            return;
+        let entries = match std::fs::read_dir(dir) {
+            Ok(entries) => entries,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return,
+            Err(error) => panic!("failed to read directory {}: {error}", dir.display()),
         };
-        for entry in entries.flatten() {
+        for entry in entries {
+            let entry = entry.unwrap_or_else(|error| {
+                panic!("failed to read an entry under {}: {error}", dir.display())
+            });
             let file_name = entry.file_name();
             if file_name.to_string_lossy().starts_with('.') {
                 continue;
             }
             let path = entry.path();
-            if path.is_dir() {
+            let file_type = entry.file_type().unwrap_or_else(|error| {
+                panic!("failed to read file type for {}: {error}", path.display())
+            });
+            if file_type.is_dir() {
                 visit(&path, files);
             } else {
                 files.push(path);

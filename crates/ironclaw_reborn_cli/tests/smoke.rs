@@ -205,7 +205,7 @@ fn release_automation_targets_the_reborn_cli() {
     let cli_manifest = std::fs::read_to_string(root.join("crates/ironclaw_reborn_cli/Cargo.toml"))
         .expect("Reborn CLI manifest");
     assert!(
-        release.contains("ironclaw/v[0-9]*.[0-9]*.[0-9]*")
+        release.contains("ironclaw/v[0-9]+.[0-9]+.[0-9]+*")
             && rebuild.contains("EXPECTED_REF=\"ironclaw/v${EXPECTED_TAG}\""),
         "release workflows must use cargo-dist-compatible branded unified tags"
     );
@@ -407,7 +407,7 @@ fn release_ci_compiles_reborn_for_all_supported_targets() {
         "release host must not publish Reborn compile evidence"
     );
 
-    let release_tag_trigger = "      - 'ironclaw/v[0-9]*.[0-9]*.[0-9]*'";
+    let release_tag_trigger = "      - 'ironclaw/v[0-9]+.[0-9]+.[0-9]+*'";
     assert!(
         release_workflow.contains(release_tag_trigger)
             && release_workflow.contains("uses: ./.github/workflows/reborn-release-compile.yml")
