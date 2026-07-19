@@ -14,10 +14,10 @@ use ironclaw_events::{
     DurableAuditLog, DurableEventLog, EventStreamKey, InMemoryDurableAuditLog,
     InMemoryDurableEventLog, ReadScope,
 };
-use ironclaw_filesystem::{InMemoryBackend, ScopedFilesystem};
+use ironclaw_filesystem::InMemoryBackend;
 use ironclaw_host_api::{
-    AgentId, CapabilityId, ExtensionId, InvocationId, MissionId, MountAlias, MountGrant,
-    MountPermissions, MountView, ProjectId, RuntimeKind, TenantId, ThreadId, UserId, VirtualPath,
+    AgentId, CapabilityId, ExtensionId, InvocationId, MissionId, ProjectId, RuntimeKind, TenantId,
+    ThreadId, UserId,
 };
 use ironclaw_loop_host::{
     FilesystemCheckpointStateStore, HostManagedModelError, HostManagedModelErrorKind,
@@ -675,17 +675,7 @@ fn read_all_file_bytes_lossy(root: &Path) -> String {
     output
 }
 
-fn in_memory_checkpoint_state_store() -> Arc<FilesystemCheckpointStateStore<InMemoryBackend>> {
-    let mounts = MountView::new(vec![MountGrant::new(
-        MountAlias::new("/checkpoint-state").unwrap(),
-        VirtualPath::new("/checkpoint-state").unwrap(),
-        MountPermissions::read_write_list_delete(),
-    )])
-    .unwrap();
-    Arc::new(FilesystemCheckpointStateStore::new(Arc::new(
-        ScopedFilesystem::with_fixed_view(Arc::new(InMemoryBackend::new()), mounts),
-    )))
-}
+use ironclaw_loop_host::in_memory_backed_checkpoint_state_store as in_memory_checkpoint_state_store;
 
 struct HostFixture {
     thread_service: Arc<InMemorySessionThreadService>,

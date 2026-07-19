@@ -16,6 +16,10 @@ use std::{
 };
 
 mod await_edge_port;
+#[cfg(any(test, feature = "test-support"))]
+mod test_support;
+#[cfg(any(test, feature = "test-support"))]
+pub use test_support::in_memory_backed_checkpoint_state_store;
 mod budget_accountant;
 mod budget_cost_table;
 mod budget_seeding;

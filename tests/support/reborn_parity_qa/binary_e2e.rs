@@ -91,17 +91,7 @@ use crate::reborn_support::test_adapter::{RebornTestIngress, RebornTestProductAd
 
 pub type HarnessWaitConfig = WaitConfig;
 
-fn in_memory_checkpoint_state_store() -> Arc<FilesystemCheckpointStateStore<InMemoryBackend>> {
-    let mounts = MountView::new(vec![MountGrant::new(
-        MountAlias::new("/checkpoint-state").unwrap(),
-        VirtualPath::new("/checkpoint-state").unwrap(),
-        MountPermissions::read_write_list_delete(),
-    )])
-    .unwrap();
-    Arc::new(FilesystemCheckpointStateStore::new(Arc::new(
-        ScopedFilesystem::with_fixed_view(Arc::new(InMemoryBackend::new()), mounts),
-    )))
-}
+use ironclaw_loop_host::in_memory_backed_checkpoint_state_store as in_memory_checkpoint_state_store;
 
 pub struct RebornBinaryE2EHarness {
     ingress: RebornTestIngress,

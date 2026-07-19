@@ -16,13 +16,12 @@ use ironclaw_host_api::{
 use ironclaw_host_runtime::{CapabilitySurfacePolicy, SurfaceKind};
 use ironclaw_loop_host::{
     CapabilityAllowSet, CapabilityResolveError, CapabilitySurfaceProfileResolver,
-    EmptyLoopCapabilityPort, EmptyUserProfileSource, FilesystemCheckpointStateStore,
-    HostIdentityContextBuildError, HostIdentityContextCandidate, HostIdentityContextSource,
-    HostInputBatch, HostInputQueue, HostInputQueueError, HostManagedModelError,
-    HostManagedModelErrorKind, HostManagedModelGateway, HostManagedModelRequest,
-    HostManagedModelResponse, JsonSpawnSubagentInputCodec, LoopCapabilityPortFactory,
-    LoopCapabilityResultWriter, ProductLiveCancellationProbe, RunCancellationFactory,
-    RunCancellationHandle,
+    EmptyLoopCapabilityPort, EmptyUserProfileSource, HostIdentityContextBuildError,
+    HostIdentityContextCandidate, HostIdentityContextSource, HostInputBatch, HostInputQueue,
+    HostInputQueueError, HostManagedModelError, HostManagedModelErrorKind, HostManagedModelGateway,
+    HostManagedModelRequest, HostManagedModelResponse, JsonSpawnSubagentInputCodec,
+    LoopCapabilityPortFactory, LoopCapabilityResultWriter, ProductLiveCancellationProbe,
+    RunCancellationFactory, RunCancellationHandle,
 };
 use ironclaw_product_adapters::{
     AdapterInstallationId, AuthRequirement, ExternalActorRef, ExternalConversationRef,
@@ -76,17 +75,7 @@ use ironclaw_turns::{
 use tokio::time::{sleep, timeout};
 use tokio_util::sync::CancellationToken;
 
-fn in_memory_checkpoint_state_store() -> Arc<FilesystemCheckpointStateStore<InMemoryBackend>> {
-    let mounts = MountView::new(vec![MountGrant::new(
-        MountAlias::new("/checkpoint-state").unwrap(),
-        VirtualPath::new("/checkpoint-state").unwrap(),
-        MountPermissions::read_write_list_delete(),
-    )])
-    .unwrap();
-    Arc::new(FilesystemCheckpointStateStore::new(Arc::new(
-        ScopedFilesystem::with_fixed_view(Arc::new(InMemoryBackend::new()), mounts),
-    )))
-}
+use ironclaw_loop_host::in_memory_backed_checkpoint_state_store as in_memory_checkpoint_state_store;
 
 pub struct ProductLiveAgentLoopHarness {
     binding_service: FakeConversationBindingService,

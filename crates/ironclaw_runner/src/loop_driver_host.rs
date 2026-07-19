@@ -2781,11 +2781,8 @@ mod compaction_tests;
 mod tests {
     use super::*;
 
-    use ironclaw_filesystem::{InMemoryBackend, ScopedFilesystem};
-    use ironclaw_host_api::{
-        AgentId, MountAlias, MountGrant, MountPermissions, MountView, ProjectId, TenantId,
-        ThreadId, UserId, VirtualPath,
-    };
+    use ironclaw_filesystem::InMemoryBackend;
+    use ironclaw_host_api::{AgentId, ProjectId, TenantId, ThreadId, UserId};
     use ironclaw_loop_host::FilesystemCheckpointStateStore;
     use ironclaw_turns::{
         InMemoryRunProfileResolver, InMemoryTurnStateStore, PutLoopCheckpointRequest,
@@ -2861,17 +2858,7 @@ mod tests {
         );
     }
 
-    fn in_memory_checkpoint_state_store() -> Arc<FilesystemCheckpointStateStore<InMemoryBackend>> {
-        let mounts = MountView::new(vec![MountGrant::new(
-            MountAlias::new("/checkpoint-state").unwrap(),
-            VirtualPath::new("/checkpoint-state").unwrap(),
-            MountPermissions::read_write_list_delete(),
-        )])
-        .unwrap();
-        Arc::new(FilesystemCheckpointStateStore::new(Arc::new(
-            ScopedFilesystem::with_fixed_view(Arc::new(InMemoryBackend::new()), mounts),
-        )))
-    }
+    use ironclaw_loop_host::in_memory_backed_checkpoint_state_store as in_memory_checkpoint_state_store;
 
     fn test_checkpoint_port(
         context: LoopRunContext,

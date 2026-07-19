@@ -19,12 +19,12 @@ use ironclaw_host_runtime::{
 };
 use ironclaw_loop_host::{
     CapabilityResultWrite, CapabilityWriteResult, DurablePersistence, EmptyUserProfileSource,
-    FilesystemCheckpointStateStore, HostIdentityContextBuildError, HostIdentityContextCandidate,
-    HostIdentityContextSource, HostInputBatch, HostInputEnvelope, HostInputQueue,
-    HostInputQueueError, HostManagedModelError, HostManagedModelErrorKind, HostManagedModelGateway,
-    HostManagedModelRequest, HostManagedModelResponse, JsonSpawnSubagentInputCodec,
-    LoopCapabilityInputResolver, LoopCapabilityResultWriter, ProductLiveCancellationProbe,
-    RunCancellationFactory, RunCancellationHandle, loop_driver_execution_extension_id,
+    HostIdentityContextBuildError, HostIdentityContextCandidate, HostIdentityContextSource,
+    HostInputBatch, HostInputEnvelope, HostInputQueue, HostInputQueueError, HostManagedModelError,
+    HostManagedModelErrorKind, HostManagedModelGateway, HostManagedModelRequest,
+    HostManagedModelResponse, JsonSpawnSubagentInputCodec, LoopCapabilityInputResolver,
+    LoopCapabilityResultWriter, ProductLiveCancellationProbe, RunCancellationFactory,
+    RunCancellationHandle, loop_driver_execution_extension_id,
     verify_product_live_cancellation_probe,
 };
 use ironclaw_reborn_composition::{
@@ -64,17 +64,7 @@ use ironclaw_turns::{
     },
 };
 
-fn in_memory_checkpoint_state_store() -> Arc<FilesystemCheckpointStateStore<InMemoryBackend>> {
-    let mounts = MountView::new(vec![MountGrant::new(
-        MountAlias::new("/checkpoint-state").unwrap(),
-        VirtualPath::new("/checkpoint-state").unwrap(),
-        MountPermissions::read_write_list_delete(),
-    )])
-    .unwrap();
-    Arc::new(FilesystemCheckpointStateStore::new(Arc::new(
-        ScopedFilesystem::with_fixed_view(Arc::new(InMemoryBackend::new()), mounts),
-    )))
-}
+use ironclaw_loop_host::in_memory_backed_checkpoint_state_store as in_memory_checkpoint_state_store;
 
 async fn write_capability_result_for_test(
     io: &ProductLiveCapabilityIo,

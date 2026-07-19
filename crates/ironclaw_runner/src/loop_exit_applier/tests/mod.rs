@@ -1,12 +1,8 @@
 // arch-exempt: large_file, mechanical §4.3 store swap only — InMemory{CheckpointState,LoopCheckpoint}Store deleted; test helper added over FilesystemCheckpointStateStore<InMemoryBackend> (arch-simplification §4.3), plan #6168
 use std::sync::Arc;
 
-use ironclaw_filesystem::{InMemoryBackend, ScopedFilesystem};
-use ironclaw_host_api::{
-    AgentId, ApprovalRequestId, MountAlias, MountGrant, MountPermissions, MountView, TenantId,
-    ThreadId, UserId, VirtualPath,
-};
-use ironclaw_loop_host::{FilesystemCheckpointStateStore, SpawnSubagentMode};
+use ironclaw_host_api::{AgentId, ApprovalRequestId, TenantId, ThreadId, UserId};
+use ironclaw_loop_host::SpawnSubagentMode;
 use ironclaw_threads::{
     AppendAssistantDraftRequest, EnsureThreadRequest, InMemorySessionThreadService, MessageContent,
     MessageKind, MessageStatus, SessionThreadService, ThreadHistoryRequest, ThreadMessageId,
@@ -31,17 +27,7 @@ mod support;
 
 use support::*;
 
-fn in_memory_checkpoint_state_store() -> Arc<FilesystemCheckpointStateStore<InMemoryBackend>> {
-    let mounts = MountView::new(vec![MountGrant::new(
-        MountAlias::new("/checkpoint-state").unwrap(),
-        VirtualPath::new("/checkpoint-state").unwrap(),
-        MountPermissions::read_write_list_delete(),
-    )])
-    .unwrap();
-    Arc::new(FilesystemCheckpointStateStore::new(Arc::new(
-        ScopedFilesystem::with_fixed_view(Arc::new(InMemoryBackend::new()), mounts),
-    )))
-}
+use ironclaw_loop_host::in_memory_backed_checkpoint_state_store as in_memory_checkpoint_state_store;
 
 #[tokio::test]
 async fn loop_exit_applier_rejects_driver_supplied_evidence_policy() {

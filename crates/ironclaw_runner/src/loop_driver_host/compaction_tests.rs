@@ -5,29 +5,14 @@
 
 use super::*;
 
-use ironclaw_filesystem::{InMemoryBackend, ScopedFilesystem};
-use ironclaw_host_api::{
-    AgentId, MountAlias, MountGrant, MountPermissions, MountView, ProjectId, TenantId, ThreadId,
-    VirtualPath,
-};
-use ironclaw_loop_host::FilesystemCheckpointStateStore;
+use ironclaw_host_api::{AgentId, ProjectId, TenantId, ThreadId};
 use ironclaw_turns::{
     InMemoryRunProfileResolver, InMemoryTurnStateStore, RunProfileResolver, TurnId, TurnRunId,
     TurnScope,
     run_profile::{InMemoryLoopHostMilestoneSink, RunProfileResolutionRequest},
 };
 
-fn in_memory_checkpoint_state_store() -> Arc<FilesystemCheckpointStateStore<InMemoryBackend>> {
-    let mounts = MountView::new(vec![MountGrant::new(
-        MountAlias::new("/checkpoint-state").unwrap(), // safety: cfg(test)-only module (see loop_driver_host.rs mod decl)
-        VirtualPath::new("/checkpoint-state").unwrap(), // safety: cfg(test)-only module
-        MountPermissions::read_write_list_delete(),
-    )])
-    .unwrap(); // safety: cfg(test)-only module
-    Arc::new(FilesystemCheckpointStateStore::new(Arc::new(
-        ScopedFilesystem::with_fixed_view(Arc::new(InMemoryBackend::new()), mounts),
-    )))
-}
+use ironclaw_loop_host::in_memory_backed_checkpoint_state_store as in_memory_checkpoint_state_store;
 
 /// Coverage gap closed: `build_compaction_ports` (see above) resolves a
 /// scope-specific gateway via `self.model_gateway.resolve_for_scope(&run_context.scope)`,

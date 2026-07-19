@@ -41,7 +41,7 @@ use ironclaw_events::{
     EventStreamKey, InMemoryDurableEventLog, InMemorySecurityAuditSink, ReadScope, RuntimeEvent,
     RuntimeEventKind, SecurityAuditSink, SecurityBoundary, SecurityDecision,
 };
-use ironclaw_filesystem::{InMemoryBackend, ScopedFilesystem};
+use ironclaw_filesystem::InMemoryBackend;
 use ironclaw_hooks::HookRegistrar;
 use ironclaw_hooks::dispatch::{HookDispatcher, HookDispatcherBuilder};
 use ironclaw_hooks::error::HookError;
@@ -70,8 +70,8 @@ use ironclaw_hooks::wasm::{
     WasmHookModuleRequest, WasmHookModuleResolver, WasmHookRuntime, WasmHookRuntimeError,
 };
 use ironclaw_host_api::{
-    AgentId, CapabilityId, InvocationId, MountAlias, MountGrant, MountPermissions, MountView,
-    ProjectId, ResourceScope, RuntimeKind, TenantId, ThreadId, UserId, VirtualPath,
+    AgentId, CapabilityId, InvocationId, ProjectId, ResourceScope, RuntimeKind, TenantId, ThreadId,
+    UserId,
 };
 use ironclaw_loop_host::{
     FilesystemCheckpointStateStore, HostManagedModelError, HostManagedModelGateway,
@@ -1003,17 +1003,7 @@ const WASM_CTX_READ_THEN_DENY: &str = r#"
 
 // ─── Fixture for building hosts with the factory ───────────────────────────
 
-fn in_memory_checkpoint_state_store() -> Arc<FilesystemCheckpointStateStore<InMemoryBackend>> {
-    let mounts = MountView::new(vec![MountGrant::new(
-        MountAlias::new("/checkpoint-state").unwrap(),
-        VirtualPath::new("/checkpoint-state").unwrap(),
-        MountPermissions::read_write_list_delete(),
-    )])
-    .unwrap();
-    Arc::new(FilesystemCheckpointStateStore::new(Arc::new(
-        ScopedFilesystem::with_fixed_view(Arc::new(InMemoryBackend::new()), mounts),
-    )))
-}
+use ironclaw_loop_host::in_memory_backed_checkpoint_state_store as in_memory_checkpoint_state_store;
 
 struct Fixture {
     thread_service: Arc<InMemorySessionThreadService>,

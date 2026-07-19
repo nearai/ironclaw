@@ -15,9 +15,9 @@ use ironclaw_host_api::{
 use ironclaw_loop_host::{
     CapabilityAllowSet, CapabilityResolveError, CapabilityResultWrite,
     CapabilitySurfaceProfileResolver, CapabilityWriteResult, EmptyLoopCapabilityPort,
-    EmptyUserProfileSource, FilesystemCheckpointStateStore, HostIdentityContextBuildError,
-    HostIdentityContextCandidate, HostIdentityContextSource, HostInputBatch, HostInputQueue,
-    HostInputQueueError, HostManagedModelError, HostManagedModelGateway, HostManagedModelRequest,
+    EmptyUserProfileSource, HostIdentityContextBuildError, HostIdentityContextCandidate,
+    HostIdentityContextSource, HostInputBatch, HostInputQueue, HostInputQueueError,
+    HostManagedModelError, HostManagedModelGateway, HostManagedModelRequest,
     HostManagedModelResponse, JsonSpawnSubagentInputCodec, LoopCapabilityPortFactory,
     LoopCapabilityResultWriter, ProductLiveCancellationProbe, RunCancellationFactory,
     RunCancellationHandle,
@@ -67,17 +67,7 @@ use ironclaw_turns::{
 use tokio::time::{sleep, timeout};
 use tokio_util::sync::CancellationToken;
 
-fn in_memory_checkpoint_state_store() -> Arc<FilesystemCheckpointStateStore<InMemoryBackend>> {
-    let mounts = MountView::new(vec![MountGrant::new(
-        MountAlias::new("/checkpoint-state").unwrap(),
-        VirtualPath::new("/checkpoint-state").unwrap(),
-        MountPermissions::read_write_list_delete(),
-    )])
-    .unwrap();
-    Arc::new(FilesystemCheckpointStateStore::new(Arc::new(
-        ScopedFilesystem::with_fixed_view(Arc::new(InMemoryBackend::new()), mounts),
-    )))
-}
+use ironclaw_loop_host::in_memory_backed_checkpoint_state_store as in_memory_checkpoint_state_store;
 
 fn sample_user_message_envelope(event_suffix: &str) -> ProductInboundEnvelope {
     sample_user_message_envelope_with_install_and_text(event_suffix, "install_alpha", "hello world")
