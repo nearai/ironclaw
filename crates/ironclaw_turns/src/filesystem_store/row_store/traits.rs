@@ -365,13 +365,27 @@ where
             let record = loop_checkpoint_record_from_request(request);
             let delta = SnapshotDelta::default().set_loop_checkpoints_upsert(vec![record.clone()]);
             let ack = {
-                let _commit_guard = self.commit_gate.lock().await;
+                // Serialize the durable enqueue on the shared snapshot-state lock
+                // — the same lock every apply path holds across its
+                // read-seq -> enqueue window — so the delta journal observes a
+                // consistent append order without a separate commit gate.
+                let mut guard = self.snapshot_state.lock().await;
                 let ack = self
                     .enqueue_delta(row_store_durable_delta(delta.clone()))
                     .map_err(|error| match error {
                         RowPersistError::Turn(error) => error,
                     })?;
-                self.apply_cached_delta(delta).await?;
+                if let Some(state) = guard.as_mut()
+                    && let Err(error) = state.apply_delta(delta, state.journal_seq)
+                {
+                    // A failed in-memory apply may leave the cached snapshot
+                    // partially mutated; drop it so the next read rebuilds from
+                    // durable state, matching `apply` / `apply_with_targeted_delta`.
+                    // (The durable enqueue already succeeded, so recovery replays
+                    // it — the cache is the only thing to invalidate.)
+                    *guard = None;
+                    return Err(error);
+                }
                 ack
             };
             self.await_pending_commit(
