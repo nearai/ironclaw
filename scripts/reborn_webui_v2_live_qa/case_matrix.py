@@ -61,17 +61,31 @@ QA_SHEET_CASES: dict[str, dict[str, object]] = {
     "qa_1a_telegram_connect": {
         "rows": ["1A"],
         "feature": "Telegram connection flow",
-        "gate": "requires live Telegram bot/user credentials and OAuth/pairing automation",
+        "gate": (
+            "requires a live Telegram bot token (admin setup: PUT "
+            "/api/webchat/v2/channels/telegram/setup, bot_token only), a "
+            "public HTTPS base for the /webhooks/extensions/telegram/updates "
+            "webhook, and pairing automation via "
+            "/api/webchat/v2/channels/telegram/pairing (deep-link consume)"
+        ),
     },
     "qa_1b_telegram_near_news_chat": {
         "rows": ["1B"],
         "feature": "Telegram NEAR AI news summary delivery",
-        "gate": "requires live Telegram connection and live Twitter/X or web search access",
+        "gate": (
+            "requires a paired Telegram account (admin setup + "
+            "/api/webchat/v2/channels/telegram/pairing) and live Twitter/X "
+            "or web search access"
+        ),
     },
     "qa_1c_telegram_near_news_routine": {
         "rows": ["1C"],
         "feature": "Scheduled Telegram NEAR AI news digest routine",
-        "gate": "requires live Telegram connection and routine delivery verification",
+        "gate": (
+            "requires a paired Telegram account (admin setup + "
+            "/api/webchat/v2/channels/telegram/pairing) and routine delivery "
+            "verification into the paired DM"
+        ),
     },
     "qa_2a_gmail_connect": {
         "rows": ["2A"],

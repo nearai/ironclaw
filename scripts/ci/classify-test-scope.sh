@@ -81,7 +81,10 @@ is_reborn_test_path() {
     crates/ironclaw_product_*/*|crates/ironclaw_slack_v2_adapter/*|crates/ironclaw_telegram_v2_adapter/*)
       return 0
       ;;
-    crates/ironclaw_wasm_product_adapters/*|crates/ironclaw_webui_v2/*)
+    crates/ironclaw_channel_host/*|crates/ironclaw_channel_delivery/*|crates/ironclaw_telegram_extension/*)
+      return 0
+      ;;
+    crates/ironclaw_wasm_product_adapters/*|crates/ironclaw_webui/*)
       return 0
       ;;
     crates/ironclaw_conversations/*|crates/ironclaw_outbound/*|crates/ironclaw_triggers/*)
@@ -129,7 +132,7 @@ is_runtime_heavy_path() {
     crates/ironclaw_resources/*|crates/ironclaw_authorization/*|crates/ironclaw_approvals/*|crates/ironclaw_run_state/*|crates/ironclaw_runtime_policy/*|crates/ironclaw_hooks/*|crates/ironclaw_llm/*)
       return 0
       ;;
-    crates/ironclaw_reborn_*/*|crates/ironclaw_product_*/*|crates/ironclaw_webui_v2/*|crates/ironclaw_webui_v2_static/*)
+    crates/ironclaw_reborn_*/*|crates/ironclaw_product_*/*|crates/ironclaw_webui/*)
       return 0
       ;;
     channels-src/*|migrations/*|tests/reborn_*.rs|tests/integration/*|tests/e2e/reborn_*|tests/e2e/scenarios/test_reborn_*|tests/e2e/scenarios/test_v2_*)

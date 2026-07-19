@@ -98,7 +98,20 @@ def install_playwright(python: Path, mode: str) -> None:
 
 
 def cargo_build() -> None:
-    run(["cargo", "build", "--no-default-features", "--features", "libsql"], cwd=ROOT)
+    run(
+        [
+            "cargo",
+            "build",
+            "-p",
+            "ironclaw",
+            "--bin",
+            "ironclaw-legacy",
+            "--no-default-features",
+            "--features",
+            "libsql",
+        ],
+        cwd=ROOT,
+    )
 
 
 def env_str(name: str, default: str | None = None) -> str | None:
@@ -495,7 +508,7 @@ async def start_gateway_stack(
             extra_env=extra_gateway_env,
         )
         gateway_proc = subprocess.Popen(
-            [str(ROOT / "target" / "debug" / "ironclaw"), "--no-onboard"],
+            [str(ROOT / "target" / "debug" / "ironclaw-legacy"), "--no-onboard"],
             cwd=ROOT,
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,

@@ -220,6 +220,40 @@ string_id!(
     validate_name_segment
 );
 string_id!(SystemServiceId, "system_service", validate_name_segment);
+// Slice-C kernel vocabulary (arch-simplification §3/§5.2.1): the two non-loop
+// origins of a capability invocation. Modeled as validated string newtypes
+// (not enums) because the product/routine sets are still evolving (§5.8); they
+// may harden into enums once those sets stabilize. `RoutineId` names the
+// routine/heartbeat/schedule an `Automation` invocation belongs to; `ProductKind`
+// names the product surface a direct-user `Product` invocation entered through.
+string_id!(ProductKind, "product", validate_name_segment);
+string_id!(RoutineId, "routine", validate_name_segment);
+// Slice-C kernel vocabulary (arch-simplification §3): an opaque correlation
+// handle to a durably-stored host-error record. The recoverability *class* rides
+// the `HostFailure` variant (transient/permanent/uncertain); the raw cause stays
+// host-owned and is retrieved only through this ref — the "sanitized category
+// plus opaque invocation ID for correlation" contract (error-handling.md).
+// Deliberately a UUID id, NOT a validated string: `HostFailure` serializes and
+// Displays this value across the sanitized error boundary, so construction must
+// be structurally incapable of smuggling raw backend/error text (an existing
+// invocation/correlation id is carried via `ErrRef::from_uuid(id.as_uuid())`).
+uuid_id!(ErrRef);
+// Slice-C kernel vocabulary (arch-simplification §3/§5.3): opaque handles into
+// durably-stored control-plane records. Each names a record the kernel produced;
+// the model-visible content (what the approver sees, the deny reason, the process
+// summary) is rendered FROM the referenced record through the gate/rendering
+// contract (§5.2.9), never carried inline on the ref. UUID ids for the same
+// structural reason as `ErrRef`: they ride serialized `Blocked`/`Suspension`/
+// verdict values across sanitized boundaries, so free text must be
+// unrepresentable — a kernel record id travels via `from_uuid`/`new`, never as
+// a caller-composed string.
+uuid_id!(GateRef);
+uuid_id!(ProcessRef);
+uuid_id!(DenyRef);
+// Handle to the durably-stored full capability output. The full bytes stay
+// host-owned and are retrieved only through this ref (§3); model-visible metadata
+// rides `OutcomeRefs`/`SafeSummary` alongside it. UUID id like its siblings.
+uuid_id!(ResultRef);
 
 /// Provider-facing tool/function name.
 ///
@@ -371,3 +405,15 @@ uuid_id!(ResourceReservationId);
 uuid_id!(ApprovalRequestId);
 uuid_id!(AuditEventId);
 uuid_id!(CorrelationId);
+// Prompt-visible run identity: identifies the loop turn-run an invocation
+// belongs to. Stamped host-side by loop orchestration (never caller-supplied
+// over untrusted input); `None` for non-loop callers. See
+// `ExecutionContext::run_id`.
+uuid_id!(RunId);
+// Slice-C kernel vocabulary (arch-simplification §3): the idempotency identity
+// of one capability invocation. Minted host-side once per logical invocation and
+// carried across retries — a resolved `ActivityId` replays its recorded outcome
+// rather than re-running the side effect (§11.3, at-most-once). This is what
+// §1.1's "dead-future `idempotency_key`" becomes: unified into the invocation
+// identity rather than deleted.
+uuid_id!(ActivityId);

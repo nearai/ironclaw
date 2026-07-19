@@ -1,10 +1,10 @@
+// arch-exempt: large_file, mechanical LocalFilesystem->DiskFilesystem Bucket-2 rename (arch-simplification §4.4), no logic change, plan #6168
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use chrono::Utc;
 use ironclaw_authorization::TrustAwareCapabilityDispatchAuthorizer;
 use ironclaw_extensions::{ExtensionManifest, ExtensionPackage, ExtensionRegistry, ManifestSource};
-use ironclaw_filesystem::LocalFilesystem;
+use ironclaw_filesystem::DiskFilesystem;
 use ironclaw_host_api::{
     AgentId, CapabilityDescriptor, CapabilityGrant, CapabilityGrantId, CapabilityId, CapabilitySet,
     CorrelationId, CredentialStageError, Decision, EffectKind, ExecutionContext, ExtensionId,
@@ -28,8 +28,7 @@ use ironclaw_resources::{
 };
 use ironclaw_secrets::{InMemorySecretStore, SecretMaterial, SecretStore};
 use ironclaw_trust::{
-    AdminConfig, AdminEntry, AuthorityCeiling, EffectiveTrustClass, HostTrustAssignment,
-    HostTrustPolicy, TrustDecision, TrustProvenance,
+    AdminConfig, AdminEntry, HostTrustAssignment, HostTrustPolicy, TrustDecision,
 };
 use ironclaw_wasm::{
     RecordingWasmHostHttp, WasmHostError, WasmHttpResponse, WitToolExecution, WitToolHost,
@@ -2048,8 +2047,8 @@ fn registry_with_slack_user_package() -> ExtensionRegistry {
     registry
 }
 
-fn filesystem_with_slack_user_package() -> LocalFilesystem {
-    let mut filesystem = LocalFilesystem::new();
+fn filesystem_with_slack_user_package() -> DiskFilesystem {
+    let mut filesystem = DiskFilesystem::new();
     filesystem
         .mount_local(
             VirtualPath::new("/system/extensions").unwrap(),
@@ -2147,8 +2146,8 @@ fn registry_with_google_drive_package() -> ExtensionRegistry {
     registry_with_google_package("google-drive")
 }
 
-fn filesystem_with_github_package() -> LocalFilesystem {
-    let mut filesystem = LocalFilesystem::new();
+fn filesystem_with_github_package() -> DiskFilesystem {
+    let mut filesystem = DiskFilesystem::new();
     filesystem
         .mount_local(
             VirtualPath::new("/system/extensions").unwrap(),
@@ -2158,7 +2157,7 @@ fn filesystem_with_github_package() -> LocalFilesystem {
     filesystem
 }
 
-fn filesystem_with_google_drive_package() -> LocalFilesystem {
+fn filesystem_with_google_drive_package() -> DiskFilesystem {
     filesystem_with_google_package("google-drive")
 }
 
@@ -2180,8 +2179,8 @@ fn registry_with_google_package(package_id: &str) -> ExtensionRegistry {
     registry
 }
 
-fn filesystem_with_google_package(package_id: &str) -> LocalFilesystem {
-    let mut filesystem = LocalFilesystem::new();
+fn filesystem_with_google_package(package_id: &str) -> DiskFilesystem {
+    let mut filesystem = DiskFilesystem::new();
     filesystem
         .mount_local(
             VirtualPath::new("/system/extensions").unwrap(),
@@ -2298,13 +2297,7 @@ fn wasm_runtime_request_for_scope(
     input: serde_json::Value,
 ) -> RuntimeCapabilityRequest {
     let context = execution_context_with_dispatch_grant_for_scope(capability_id.clone(), scope);
-    RuntimeCapabilityRequest::new(
-        context,
-        capability_id,
-        wasm_http_estimate(),
-        input,
-        trust_decision_with_dispatch_authority(),
-    )
+    RuntimeCapabilityRequest::new(context, capability_id, wasm_http_estimate(), input)
 }
 
 fn execution_context_with_dispatch_grant_for_scope(
@@ -2312,6 +2305,7 @@ fn execution_context_with_dispatch_grant_for_scope(
     scope: ResourceScope,
 ) -> ExecutionContext {
     let context = ExecutionContext {
+        run_id: None,
         invocation_id: scope.invocation_id,
         correlation_id: CorrelationId::new(),
         process_id: None,
@@ -2357,23 +2351,6 @@ fn capability_grants(capability: CapabilityId) -> CapabilitySet {
         },
     });
     grants
-}
-
-fn trust_decision_with_dispatch_authority() -> TrustDecision {
-    TrustDecision {
-        effective_trust: EffectiveTrustClass::user_trusted(),
-        authority_ceiling: AuthorityCeiling {
-            allowed_effects: vec![
-                EffectKind::DispatchCapability,
-                EffectKind::Network,
-                EffectKind::UseSecret,
-                EffectKind::ExternalWrite,
-            ],
-            max_resource_ceiling: None,
-        },
-        provenance: TrustProvenance::Default,
-        evaluated_at: Utc::now(),
-    }
 }
 
 fn execute_bundled_github_wasm(
@@ -3143,7 +3120,7 @@ async fn slack_search_matches_carry_display_names_thread_ts_and_page() {
             200,
             r#"{"ok":true,"query":"deploy","messages":{"total":2,"matches":[
                 {"iid":"1","channel":{"id":"C0GENERAL","name":"general"},"type":"message","user":"U0AAA","username":"firat","ts":"1751970001.000100","text":"deploy went fine per <@U0BBB>","permalink":"https://x.slack.com/archives/C0GENERAL/p1751970001000100","thread_ts":"1751960000.000100"},
-                {"iid":"2","channel":{"id":"C0GENERAL","name":"general"},"type":"message","user":"U0BBB","username":"ada","ts":"1751970002.000100","text":"deploying again","permalink":"https://x.slack.com/archives/C0GENERAL/p1751970002000100"}
+                {"iid":"2","channel":{"id":"C0GENERAL","name":"general"},"type":"message","user":"U0BBB","username":"ada","ts":"1751970002.000100","text":"deploying again cc <@U0QQQQQQQ|contractor.jane>","permalink":"https://x.slack.com/archives/C0GENERAL/p1751970002000100"}
             ]}}"#,
         ),
         ("users.info?user=U0AAA", 200, SLACK_USER_AAA_BODY),
@@ -3203,15 +3180,24 @@ async fn slack_search_matches_carry_display_names_thread_ts_and_page() {
         first_text.contains("@Ada Lovelace") && !first_text.contains("<@U"),
         "search match text must resolve in-text mentions like history does: {output}"
     );
+    // Digest/names-not-ids (qa_9c) rides the SAME resolver as quoted-message
+    // hygiene (qa_10i): a labeled mention whose id can't be resolved via
+    // users.info must render Slack's inline label rather than leak the raw id.
+    let second_text = matches[1]["text"].as_str().expect("text");
+    assert!(
+        second_text.contains("@contractor.jane") && !second_text.contains("<@U0QQQQQQQ"),
+        "search/digest text must fall back to the inline label for unresolvable mentions: {output}"
+    );
 }
 
 /// Inbound entity hygiene (qa_10i): message text arrives with raw Slack
 /// control tokens — `<@U…>` mentions, `<#C…|name>` channel refs, HTML
 /// entities — and the model leaks the raw ids into user-facing replies.
 /// The tool must resolve in-text mentions to `@Display Name` via the same
-/// users.info cache/budget as author enrichment (unresolved tokens stay
-/// as-is, never fabricated), rewrite channel refs to `#name`, and decode
-/// &amp;/&lt;/&gt;.
+/// users.info cache/budget as author enrichment; a labeled mention whose id
+/// can't be resolved falls back to Slack's own inline `|label` (never leaking
+/// the raw id), while a bare unresolved mention stays as-is (never fabricated).
+/// Channel refs render as `#name`, and &amp;/&lt;/&gt; decode.
 #[tokio::test]
 async fn slack_history_text_resolves_in_text_entities_to_display_names() {
     let capability_id = CapabilityId::new("slack.get_conversation_history").unwrap();
@@ -3222,7 +3208,7 @@ async fn slack_history_text_resolves_in_text_entities_to_display_names() {
             200,
             r#"{"ok":true,"has_more":false,"messages":[
                 {"type":"message","user":"U0AAA","text":"ENTITYMSG please sync with <@U0BBB>","ts":"1751970001.000100"},
-                {"type":"message","user":"U0AAA","text":"see <@U0AAA|firat> &amp; <#C0GENERAL|general> re &lt;q3&gt; <@U0ZZZZZZZ> <https://x.example/a|link>","ts":"1751970002.000100"}
+                {"type":"message","user":"U0AAA","text":"see <@U0AAA|firat> &amp; <#C0GENERAL|general> re &lt;q3&gt; <@U0ZZZZZZZ> cc <@U0ZZZZZZZ|external.person> <https://x.example/a|link>","ts":"1751970002.000100"}
             ]}"#,
         ),
         ("users.info?user=U0AAA", 200, SLACK_USER_AAA_BODY),
@@ -3272,7 +3258,20 @@ async fn slack_history_text_resolves_in_text_entities_to_display_names() {
     );
     assert!(
         second_text.contains("<@U0ZZZZZZZ>"),
-        "unresolved mention tokens must stay as-is, never fabricated: {output}"
+        "unresolved BARE mention tokens must stay as-is, never fabricated: {output}"
+    );
+    // A LABELED mention whose id can't be resolved via users.info must fall
+    // back to Slack's own inline label (`@external.person`) instead of leaking
+    // the raw `<@U0ZZZZZZZ|external.person>` token — the same inline-label
+    // fallback the `<#C…|name>` channel-ref arm uses. This is the qa_10i leak
+    // vector: a labeled mention that resolution missed still carries the raw id.
+    assert!(
+        second_text.contains("@external.person"),
+        "labeled mention with an unresolvable id must render Slack's inline label: {output}"
+    );
+    assert!(
+        !second_text.contains("<@U0ZZZZZZZ|"),
+        "labeled unresolvable mention must not leak the raw <@U…|label> token: {output}"
     );
     assert!(
         second_text.contains("<https://x.example/a|link>"),

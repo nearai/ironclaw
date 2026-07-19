@@ -1,14 +1,12 @@
 # Reborn E2E coverage gate.
 #
 # Keep this list limited to tests that exercise the standalone
-# `ironclaw-reborn serve` binary and its Reborn WebChat v2 / OpenAI-compatible
-# API surface. Do not add legacy `ironclaw` gateway tests, even when they run
-# with ENGINE_V2=true; those belong in compatibility/runtime E2E jobs, not this
-# Reborn coverage gate.
+# canonical `ironclaw serve` binary and its Reborn WebChat / OpenAI-compatible
+# API surface. Do not add retired gateway tests; the v1 runtime no longer has a
+# supported compatibility lane.
 #
 # Direct Emulate provider-contract tests are useful QA, but they mostly validate
-# the provider fixture layer. Full-path hosted OAuth tests currently start the
-# legacy gateway binary, so they are intentionally excluded here too.
+# the provider fixture layer and remain outside this binary coverage gate.
 #
 # Pytest node IDs are allowed. Use them when a scenario file contains broader
 # provider-fixture or model-tool-choice coverage that should stay in the normal
@@ -17,6 +15,7 @@ tests/e2e/scenarios/test_reborn_webui_v2_smoke.py
 tests/e2e/scenarios/test_reborn_webui_v2_legacy_pending_messages.py::test_reborn_legacy_send_failure_renders_inline_error_not_toast
 tests/e2e/scenarios/test_reborn_webui_v2_legacy_tool_permissions.py::test_reborn_legacy_tool_permission_menu_persists_after_reload
 tests/e2e/scenarios/test_reborn_webui_v2_legacy_extensions.py::test_reborn_v2_extension_registry_renders_while_installed_list_is_pending
+tests/e2e/scenarios/test_reborn_webui_v2_notifications.py::test_reborn_v2_error_toast_pauses_dismisses_and_stays_above_notifications
 tests/e2e/scenarios/test_reborn_v2_file_download.py
 # Responses-specific selectors live in reborn_responses_e2e_tests.txt so the
 # required PR gate and push-to-main coverage execute the same inventory.

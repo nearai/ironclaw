@@ -2,7 +2,7 @@
 //!
 //! Builds the REAL [`SlackChannelConnectionFacade`] over the composed
 //! local-dev runtime's durable Slack host state and late-binds it into
-//! `RebornLocalRuntimeServices::channel_connection_facade_slot`, mirroring the
+//! `RebornRuntimeSubstrate::channel_connection_facade_slot`, mirroring the
 //! production wiring in
 //! `slack_connectable_channel::build_webui_services_with_slack_host_beta_mounts`
 //! (facade construction + `set_channel_connection_facade`). With the slot
@@ -26,7 +26,7 @@ use ironclaw_host_api::{AgentId, TenantId, UserId};
 use ironclaw_product_workflow::{ChannelConnectionFacade, WebUiAuthenticatedCaller};
 
 use crate::factory::RebornServices;
-use crate::slack::slack_actor_identity::{RebornUserIdentityLookup, SLACK_IDENTITY_PROVIDER};
+use crate::slack::slack_actor_identity::SLACK_IDENTITY_PROVIDER;
 use crate::slack::slack_channel_connection::{
     SlackChannelConnectionFacadeTestParts, SlackPersonalCredentialCleanup,
     slack_channel_connection_facade_from_test_parts,
@@ -42,6 +42,7 @@ use crate::slack::slack_personal_binding::{
 use crate::slack::slack_serve::{
     SlackApiAppId, SlackInstallationSelector, SlackTeamId, SlackUserId,
 };
+use ironclaw_channel_host::identity::RebornUserIdentityLookup;
 
 /// Identity inputs for [`build_slack_channel_connection_for_test`]. Plain
 /// strings so harness callers outside this crate don't need the internal

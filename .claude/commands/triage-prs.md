@@ -31,19 +31,16 @@ For each open PR, determine the primary module it touches by examining the `file
 
 | Category | Directories |
 |----------|------------|
-| **Reborn stack (most current work)** | `crates/ironclaw_runner/`, `crates/ironclaw_reborn_cli/`, `crates/ironclaw_reborn_composition/`, `crates/ironclaw_reborn_event_store/`, `crates/ironclaw_reborn_identity/`, `crates/ironclaw_reborn_openai_compat*/`, `crates/ironclaw_reborn_traces/`, `crates/ironclaw_reborn_webui_ingress/`, `crates/ironclaw_product_workflow/`, `crates/ironclaw_webui_v2*/`, `crates/ironclaw_turns/`, `crates/ironclaw_threads/`, `crates/ironclaw_agent_loop/`, `crates/ironclaw_host_runtime/`, `crates/ironclaw_loop_host/`, `crates/ironclaw_capabilities/` |
-| **Legacy v1 crates** | `crates/ironclaw_engine/`, `crates/ironclaw_gateway/`, `crates/ironclaw_oauth/`, `crates/ironclaw_embeddings/`, `crates/ironclaw_tui/` |
+| **Reborn stack (most current work)** | `crates/ironclaw_runner/`, `crates/ironclaw_reborn_cli/`, `crates/ironclaw_reborn_composition/`, `crates/ironclaw_reborn_event_store/`, `crates/ironclaw_reborn_identity/`, `crates/ironclaw_reborn_openai_compat*/`, `crates/ironclaw_reborn_traces/`, `crates/ironclaw_webui/`, `crates/ironclaw_product_workflow/`, `crates/ironclaw_webui*/`, `crates/ironclaw_turns/`, `crates/ironclaw_threads/`, `crates/ironclaw_agent_loop/`, `crates/ironclaw_host_runtime/`, `crates/ironclaw_loop_host/`, `crates/ironclaw_capabilities/` |
 | **LLM & Inference** | `crates/ironclaw_llm/` |
-| **Agent Core** | `src/agent/`, `src/skills/` |
-| **Tools** | `src/tools/`, `tools-src/` |
-| **Channels** | `src/channels/`, `channels-src/` |
-| **Storage & Memory** | `src/db/`, `src/workspace/`, `migrations/` |
-| **Security** | `src/safety/`, `src/secrets/` |
-| **Config & Setup** | `src/config/`, `src/setup/`, `src/cli/`, `crates/ironclaw_reborn_config/` |
-| **Sandbox & Orchestration** | `src/sandbox/`, `src/orchestrator/`, `src/worker/` |
-| **Hooks & Extensions** | `src/hooks/`, `src/extensions/` |
-| **Context & History** | `src/context/`, `src/history/`, `src/estimation/`, `src/evaluation/` |
-| **Web Gateway** | `src/channels/web/` |
+| **Agent Core** | `crates/ironclaw_agent_loop/`, `crates/ironclaw_runner/`, `crates/ironclaw_loop_host/` |
+| **Tools and Extensions** | `crates/ironclaw_capabilities/`, `crates/ironclaw_extensions/`, `crates/ironclaw_first_party_extensions/` |
+| **Channels** | `crates/ironclaw_channel_host/`, `crates/ironclaw_channel_delivery/`, `crates/ironclaw_product_adapters/` |
+| **Storage & Memory** | `crates/ironclaw_filesystem/`, `crates/ironclaw_memory*/`, `migrations/` |
+| **Security** | `crates/ironclaw_safety/`, `crates/ironclaw_secrets/`, `crates/ironclaw_authorization/`, `crates/ironclaw_trust/` |
+| **Config & Setup** | `crates/ironclaw_reborn_config/`, `crates/ironclaw_reborn_cli/` |
+| **Sandbox & Runtime** | `crates/ironclaw_process_sandbox/`, `crates/ironclaw_host_runtime/`, `crates/ironclaw_dispatcher/` |
+| **WebUI** | `crates/ironclaw_webui/` |
 | **CI/CD & Docs** | `.github/`, `README.md`, `CLAUDE.md`, `*.md` (no src) |
 | **Other** | Anything else |
 

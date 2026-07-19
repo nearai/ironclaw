@@ -21,12 +21,10 @@ crate and skip the selection cascade in §1 — but still run the §1 Reborn/leg
 a legitimate Reborn target. Otherwise pick one per §1.
 
 ## 0. Environment & state
-- **Reborn-only.** New feature and quality work targets the Reborn stack in `crates/`, never the v1
-  `src/` monolith (root CLAUDE.md, "Where to Build — Reborn-First"). This loop only touches `crates/`
-  Reborn crates. It must **skip the legacy enclave** — crates that serve *only* the retiring v1
-  monolith (`ironclaw_tui`, `ironclaw_gateway`, `ironclaw_oauth`, `ironclaw_embeddings`; `ironclaw_engine`
-  is already removed). Don't trust that hardcoded list — it drifts. Verify each candidate's status
-  with the orientation recipe (§1) before picking it.
+- **Supported-runtime only.** Product and quality work targets the workspace
+  crates behind the canonical `ironclaw` binary. The retired root runtime and
+  v1 crates must remain absent. Verify each candidate's ownership with the
+  orientation recipe (§1) before picking it.
 - **Local gate reality.** You can prove `cargo fmt`, `cargo clippy`, per-crate `cargo test -p <crate>`,
   the workspace unit-test tier, and the architecture-boundary test (`cargo test -p ironclaw_architecture`)
   locally. The **integration tier** (`cargo test --features integration`) needs a running PostgreSQL;
@@ -43,9 +41,8 @@ a legitimate Reborn target. Otherwise pick one per §1.
 
 ## 1. Pick ONE un-de-slopped Reborn crate — stop at first viable
 List the crates (`ls crates/`). A crate is a **candidate** when ALL hold:
-- **it is a Reborn crate, not legacy-enclave.** Verify: `grep -rl "<crate_name>" crates/*/Cargo.toml Cargo.toml`
-  — if the **only** consumer is the root `Cargo.toml` package, it's v1-only; skip it. When unsure,
-  consult the `ironclaw-reborn-orientation` skill (it maps which side each crate is on).
+- **it is a supported product crate.** Verify reverse dependencies and consult
+  the `ironclaw-reborn-orientation` skill when ownership is unclear.
 - **not already in the ledger DESLOPPED list** (§0),
 - **not the hot surface of an open PR** (§0) — leave those to the build/review loops,
 - it has real source to review (skip thin aggregator/facade crates with ~no `src` — though their
@@ -54,7 +51,7 @@ List the crates (`ls crates/`). A crate is a **candidate** when ALL hold:
 **Selection bias:** prefer **smaller / leaf crates first** — they fit entirely in context, gate
 cleanly, and merge independently. A crate whose `src` is **under ~2k lines** can and SHOULD be read in
 full (§3). Clear the small, high-leverage crates before taking on the giants (e.g.
-`ironclaw_reborn_composition`, `ironclaw_product_workflow`, `ironclaw_gateway`-scale surfaces need
+`ironclaw_reborn_composition`, `ironclaw_product_workflow`, and `ironclaw_webui`-scale surfaces need
 targeted reading, not a full load, and may warrant splitting the de-slop across iterations
 module-by-module). When unsure, prefer a crate that is **load-bearing for invariants** (turns,
 dispatcher, authorization, approvals, secrets, run_state, event store) over a purely mechanical one —

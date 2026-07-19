@@ -500,7 +500,7 @@ mod tests {
         MemoryServiceSearchRequest, MemoryServiceSearchResponse, MemoryServiceSearchResult,
     };
 
-    use crate::{FirstPartyCapabilityRequest, InvocationServices, LocalHostProcessPort};
+    use crate::{FirstPartyCapabilityRequest, HostProcessPort, InvocationServices};
 
     use super::*;
 
@@ -555,6 +555,7 @@ mod tests {
 
     fn memory_request(capability_id: &'static str, input: Value) -> FirstPartyCapabilityRequest {
         FirstPartyCapabilityRequest {
+            run_id: None,
             capability_id: CapabilityId::new(capability_id).unwrap(),
             scope: sample_scope(),
             authenticated_actor_user_id: None,
@@ -565,10 +566,11 @@ mod tests {
                 runtime_http_egress: None,
                 tool_call_http_egress: None,
                 runtime_secret_material_stager: None,
-                process: Arc::new(LocalHostProcessPort::new()),
+                process: Arc::new(HostProcessPort::new()),
                 secret_store: None,
                 audit_sink: None,
                 unsafe_raw_diagnostics_allowed: false,
+                post_edit_check: None,
             },
             input,
         }

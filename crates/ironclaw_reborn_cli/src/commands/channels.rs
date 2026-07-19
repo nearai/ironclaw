@@ -1,11 +1,6 @@
 use clap::{Args, Subcommand};
 
-const STATUS_NOT_WIRED: &str = "not-wired";
-const V1_STATE_NOT_USED: &str = "not-used";
-const DETAILS: [&str; 2] = [
-    "Reborn channel registry is not wired yet",
-    "v1 channel configuration is intentionally not read",
-];
+use super::not_yet_implemented;
 
 #[derive(Debug, Args)]
 pub(crate) struct ChannelsCommand {
@@ -40,33 +35,19 @@ impl ChannelsCommand {
 
 impl ChannelsListCommand {
     fn execute(self) -> anyhow::Result<()> {
-        let details = self.verbose.then_some(DETAILS.as_slice());
+        Err(not_yet_implemented("channels list"))
+    }
+}
 
-        if self.json {
-            let mut output = serde_json::json!({
-                "configured": 0,
-                "channels": [],
-                "status": STATUS_NOT_WIRED,
-                "v1_state": V1_STATE_NOT_USED,
-            });
-            if let Some(details) = details {
-                output["details"] = serde_json::json!(details);
-            }
-            println!("{}", output);
-            return Ok(());
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn list_reports_not_yet_implemented_regardless_of_flags() {
+        for (verbose, json) in [(false, false), (true, false), (false, true), (true, true)] {
+            let err = ChannelsListCommand { verbose, json }.execute().unwrap_err();
+            assert_eq!(err.to_string(), "`channels list` is not implemented yet");
         }
-
-        println!("IronClaw Reborn channels");
-        println!("configured: 0");
-        println!("status: {STATUS_NOT_WIRED}");
-        println!("v1_state: {V1_STATE_NOT_USED}");
-
-        if let Some(details) = details {
-            for detail in details {
-                println!("detail: {detail}");
-            }
-        }
-
-        Ok(())
     }
 }

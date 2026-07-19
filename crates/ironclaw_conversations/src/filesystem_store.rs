@@ -75,7 +75,7 @@ const FILESYSTEM_CAS_RETRIES: usize = 5;
 /// Construct with an [`Arc<ScopedFilesystem<F>>`] over any
 /// [`RootFilesystem`]. Tenant/user isolation lives in the caller's
 /// [`MountView`](ironclaw_host_api::MountView), not in this store.
-pub struct FilesystemConversationStateStore<F>
+pub struct FilesystemConversationStateStore<F: ?Sized>
 where
     F: RootFilesystem,
 {
@@ -84,7 +84,7 @@ where
 
 impl<F> FilesystemConversationStateStore<F>
 where
-    F: RootFilesystem,
+    F: RootFilesystem + ?Sized,
 {
     pub fn new(filesystem: Arc<ScopedFilesystem<F>>) -> Self {
         Self { filesystem }
@@ -203,7 +203,7 @@ impl StoredConversationState {
 #[async_trait]
 impl<F> ConversationStateRepository for FilesystemConversationStateStore<F>
 where
-    F: RootFilesystem,
+    F: RootFilesystem + ?Sized,
 {
     async fn load_state(&self) -> Result<PersistedConversationState, InboundTurnError> {
         let path = state_path()?;
@@ -353,7 +353,7 @@ fn index_key_tenant_ids() -> IndexKey {
 ///
 /// Mirrors the secrets / processes / run-state stores: record-shaped
 /// entries and non-`Any` CAS are stripped/downgraded when the backend
-/// reports `Unsupported` so byte-only mounts (LocalFilesystem) keep
+/// reports `Unsupported` so byte-only mounts (DiskFilesystem) keep
 /// working. The single-instance `mutation_lock` on
 /// [`InMemoryConversationServices`] is the caller-side ordering guarantee
 /// that CAS would otherwise provide on byte-only backends.
@@ -365,7 +365,7 @@ async fn put_with_byte_fallback<F>(
     cas: CasExpectation,
 ) -> Result<(), FilesystemError>
 where
-    F: RootFilesystem,
+    F: RootFilesystem + ?Sized,
 {
     let fallback = entry.clone();
     match filesystem.put(scope, path, entry, cas).await {
@@ -430,7 +430,7 @@ pub struct RebornFilesystemConversationServices {
 impl RebornFilesystemConversationServices {
     pub async fn new<F>(filesystem: Arc<ScopedFilesystem<F>>) -> Result<Self, InboundTurnError>
     where
-        F: RootFilesystem + 'static,
+        F: RootFilesystem + ?Sized + 'static,
     {
         let store = Arc::new(FilesystemConversationStateStore::new(filesystem));
         Ok(Self {

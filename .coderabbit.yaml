@@ -9,7 +9,7 @@
 #
 # Deterministic CI remains authoritative for everything it gates (cargo fmt,
 # clippy -D warnings, cargo-deny, scripts/check_no_panics.py,
-# scripts/check_gateway_boundaries.py, regression-test-check) — CodeRabbit is
+# architecture boundary tests, regression-test-check) — CodeRabbit is
 # configured NOT to repeat those findings.
 #
 # On-demand deep review: comment `@coderabbitai full review` (replaces
@@ -43,13 +43,12 @@ reviews:
     - "!tests/test-pages/**" # saved web pages (linguist-generated)
     - "!tests/fixtures/**" # recorded LLM/gateway traces
     - "!tests/snapshots/**" # insta snapshots — the replay gate owns these
-    - "!src/cli/snapshots/**"
     - "!tests/e2e/ironclaw_e2e.egg-info/**"
     - "!tests/e2e/**/*.png"
     - "!fuzz/corpus/**"
     - "!crates/ironclaw_safety/fuzz/corpus/**"
     - "!**/*.wasm" # compiled artifacts; new binaries surface via registry/ and manifest review
-    - "!crates/ironclaw_webui_v2_static/static/assets/**" # binary icons; static/js IS hand-written and reviewed
+    - "!crates/ironclaw_webui/frontend/public/assets/**" # binary icons; frontend source remains reviewed
     - "!wix/**" # cargo-dist/WiX installer boilerplate
     - "!ironclaw.png"
 
@@ -72,8 +71,8 @@ reviews:
         - "LLM data is never deleted": no stripping/truncating/deleting LLM output, context,
           reasoning or tool calls from the database; cleanup means cache eviction, never row
           deletion.
-        - Prompt templates live in files (crates/ironclaw_engine/prompts/*.md via
-          include_str!), never inline Rust string constants.
+        - Prompt templates live in files under the owning crate's `prompts/`
+          directory and are loaded with include_str!, never inline Rust strings.
         - REPL/TUI logging: info!/warn! corrupt the terminal UI — internal diagnostics use
           debug!; background tasks never use info!.
         - Test through the caller: when a helper gates a side effect, require a test driving
@@ -94,27 +93,15 @@ reviews:
         existing V*.sql or to a pinned hash in migrations/checksums.lock is a hard error (the
         released_migrations_are_immutable test enforces SipHasher13 checksums). New
         migrations: next sequential V{n}__snake_case.sql, up-only, PostgreSQL dialect.
-        Dual-backend mandate: schema changes generally need a matching hand-translated update
-        in src/db/libsql_migrations.rs (UUID→TEXT, TIMESTAMPTZ→ISO-8601 TEXT, JSONB→TEXT,
-        BYTEA→BLOB, VECTOR→F32_BLOB) — flag a new V*.sql without a libSQL twin change unless
-        justified. Ported schema must include indexes and seed data, with semantic
-        differences documented. Destructive DDL is review track C: 2 approvals + documented
-        rollback plan (CONTRIBUTING.md).
-    - path: "src/db/**"
-      instructions: |
-        Dual-backend persistence: every new persistence feature supports BOTH PostgreSQL and
-        libSQL — extend the shared Database trait first, then both backends (Reborn stores
-        keep ironclaw_hooks_postgres / ironclaw_hooks_libsql in parity via hooks_parity).
-        Multi-step DB operations must be wrapped in a transaction. Driver types
-        (tokio_postgres::, libsql::) must not leak outside the allowed modules
-        (scripts/check-boundaries.sh).
+        Keep PostgreSQL and libSQL schema behavior aligned through their owning
+        Reborn filesystem/store crates. Ported schema must include indexes and
+        seed data, with semantic differences documented. Destructive DDL is
+        review track C with a documented rollback plan.
     - path: "**/*.wit"
       instructions: |
         Hand-written WIT contracts define the trusted/untrusted WASM ABI. Interface changes
-        must stay in sync with the host bindgen sites (src/tools/wasm/wrapper.rs,
-        src/channels/wasm/wrapper.rs, crates/ironclaw_wasm/src/bindings.rs,
-        crates/ironclaw_wasm_product_adapters/src/bindings.rs) and the ~20 guest crates under
-        tools-src/ and channels-src/. WIT or extension-source changes require version bumps
+        must stay in sync with the host bindgen sites in `ironclaw_wasm` and
+        `ironclaw_wasm_product_adapters` and their guest extension sources. WIT or extension-source changes require version bumps
         (scripts/check-version-bumps.sh; escape token [skip-version-check]). Host capability
         functions are security-gated: secrets must never cross into WASM guests; guest
         outputs are scanned for leaks — flag anything that widens host capabilities or
@@ -131,7 +118,7 @@ reviews:
         Verify URLs point at expected upstreams, artifact references carry checksums, and no
         un-audited prebuilt WASM is introduced (root build.rs documents committed WASM as a
         supply-chain risk).
-    - path: "{src/sandbox/**,src/secrets/**,src/safety/**,src/gate/**,src/pairing/**,src/auth/**,crates/ironclaw_safety/**,crates/ironclaw_secrets/**,crates/ironclaw_network/**,crates/ironclaw_trust/**,crates/ironclaw_authorization/**,crates/ironclaw_capabilities/**,crates/ironclaw_process_sandbox/**,crates/ironclaw_prompt_envelope/**,crates/ironclaw_reborn_webui_ingress/**}"
+    - path: "{crates/ironclaw_safety/**,crates/ironclaw_secrets/**,crates/ironclaw_network/**,crates/ironclaw_trust/**,crates/ironclaw_authorization/**,crates/ironclaw_capabilities/**,crates/ironclaw_process_sandbox/**,crates/ironclaw_prompt_envelope/**,crates/ironclaw_webui/**}"
       instructions: |
         Kernel/safety boundary — review track C (2 approvals + rollback plan). Hold the line
         on: no weakening of bearer/webhook auth, CORS/origin checks, body/rate limits or
@@ -155,7 +142,7 @@ reviews:
     - path: "{scripts/**,.github/scripts/**}"
       instructions: |
         CI and dev tooling. Expect set -euo pipefail and quoted expansions; these scripts
-        gate merges (check_no_panics.py, check_gateway_boundaries.py, pr-labeler.sh), so
+        gate merges (check_no_panics.py, architecture tests, pr-labeler.sh), so
         behavior changes need matching workflow updates.
     - path: "tests/e2e/**"
       instructions: |
@@ -166,12 +153,10 @@ reviews:
         Sandbox and deployment images are security boundaries running untrusted workloads.
         Flag privilege escalation (root user, added capabilities, docker.sock mounts),
         weakened entrypoint isolation, secrets baked into layers, and unpinned base images.
-    - path: "{crates/ironclaw_gateway/static/**,crates/ironclaw_webui_v2_static/static/js/**,src/channels/web/static/**}"
+    - path: "crates/ironclaw_webui/frontend/src/**"
       instructions: |
-        Hand-written no-build frontends embedded into the binary. Watch XSS sinks
-        (innerHTML / htm interpolation), CSP-nonce handling
-        (ironclaw_webui_v2_static/src/router.rs), origin/CSRF checks, and token handling in
-        client JS.
+        WebUI frontend source. Watch XSS sinks, origin/CSRF handling, and token
+        storage or disclosure in client code.
 
   auto_review:
     enabled: true
@@ -254,12 +239,8 @@ knowledge_base:
     filePatterns:
       - ".claude/rules/*.md" # error-handling, review-discipline, testing, safety-and-sandbox — the most review-shaped rules in the repo
       - "CONTRIBUTING.md" # review tracks A/B/C, issue-first policy, FEATURE_PARITY requirement
-      - files: "src/tools/README.md" # declared module specs (root CLAUDE.md table) hidden from the defaults by README naming
-        applyTo: "src/tools/**"
-      - files: "src/setup/README.md"
-        applyTo: "src/setup/**"
-      - files: "src/workspace/README.md"
-        applyTo: "src/workspace/**"
+      - files: "crates/AGENTS.md"
+        applyTo: "crates/**"
 
 chat:
   auto_reply: true

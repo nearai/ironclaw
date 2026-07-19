@@ -9,7 +9,6 @@ use ironclaw_host_api::{
     TrustClass, UserId,
 };
 use ironclaw_host_runtime::{RuntimeCapabilityOutcome, RuntimeFailureKind};
-use ironclaw_trust::{AuthorityCeiling, EffectiveTrustClass, TrustDecision, TrustProvenance};
 
 use crate::extension_host::extension_lifecycle::RebornLocalExtensionManagementPort;
 use crate::extension_host::extension_lifecycle_capabilities::{
@@ -269,7 +268,6 @@ async fn invoke_json_with_context(
         capability_id,
         context,
         input,
-        trust_decision(),
     )
     .await
 }
@@ -285,7 +283,6 @@ async fn invoke_outcome_with_context(
         capability_id,
         context,
         input,
-        trust_decision(),
     )
     .await
 }
@@ -308,6 +305,7 @@ fn execution_context_for_scope<'a>(
 ) -> ExecutionContext {
     let caller = ExtensionId::new("extension-tool-test-caller").expect("valid extension id"); // safety: static test extension id is valid.
     let context = ExecutionContext {
+        run_id: None,
         invocation_id: resource_scope.invocation_id,
         correlation_id: ironclaw_host_api::CorrelationId::new(),
         process_id: None,
@@ -380,16 +378,4 @@ fn allowed_effects() -> Vec<EffectKind> {
         EffectKind::WriteFilesystem,
         EffectKind::Network,
     ]
-}
-
-fn trust_decision() -> TrustDecision {
-    TrustDecision {
-        effective_trust: EffectiveTrustClass::user_trusted(),
-        authority_ceiling: AuthorityCeiling {
-            allowed_effects: allowed_effects(),
-            max_resource_ceiling: None,
-        },
-        provenance: TrustProvenance::Default,
-        evaluated_at: chrono::Utc::now(),
-    }
 }

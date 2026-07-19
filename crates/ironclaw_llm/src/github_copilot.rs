@@ -19,7 +19,6 @@ use secrecy::ExposeSecret;
 use serde::{Deserialize, Serialize};
 
 use crate::config::RegistryProviderConfig;
-use crate::costs;
 use crate::error::LlmError;
 use crate::github_copilot_auth::CopilotTokenManager;
 use crate::provider::{
@@ -27,6 +26,7 @@ use crate::provider::{
     Role, ToolCall, ToolCompletionRequest, ToolCompletionResponse,
     strip_unsupported_completion_params, strip_unsupported_tool_params,
 };
+use ironclaw_common::llm_costs as costs;
 
 /// Map an HTTP error status + response body to a context-length error when it
 /// indicates the prompt exceeded the model's context window.

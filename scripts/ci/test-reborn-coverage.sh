@@ -290,7 +290,7 @@ assert_line_before "A5: zero-covered crate sorted to top (lowest-covered first)"
 # allowlist), but files outside crates/ entirely (or under a different
 # top-level crates-like dir) are still excluded from the aggregate.
 cat > "${fixtures_dir}/a6_boundary.lcov" <<'EOF'
-SF:/work/ironclaw/crates/ironclaw_engine/src/a.rs
+SF:/work/ironclaw/crates/ironclaw_example_runtime/src/a.rs
 LF:10
 LH:5
 end_of_record
@@ -302,7 +302,7 @@ EOF
 capture "${summary_sh}" "${fixtures_dir}/a6_boundary.lcov" "${empty_exemptions}"
 assert_exit_code "A6: boundary fixture summary exits 0" 0 "${CAP_RC}"
 assert_contains "A6: any crates/ironclaw_* crate is included (not just the old Reborn allowlist)" "${CAP_OUT}" \
-  "| \`ironclaw_engine\` | 50% | 5 / 10 |"
+  "| \`ironclaw_example_runtime\` | 50% | 5 / 10 |"
 assert_not_contains "A6: non-crates/ file excluded from the table" "${CAP_OUT}" "main.rs"
 assert_contains "A6: aggregate drops the non-crates file's 999 lines (5/10, not 5/1009)" "${CAP_OUT}" \
   '**Line coverage (Reborn crates): 50%** — 5 / 10 lines'
@@ -311,7 +311,7 @@ assert_contains "A6: aggregate drops the non-crates file's 999 lines (5/10, not 
 # lists it in the report's own Exemptions section.
 cat > "${fixtures_dir}/a7_exemptions.toml" <<'TOML'
 [[exemption]]
-module = "crates/ironclaw_engine/src/a.rs"
+module = "crates/ironclaw_example_runtime/src/a.rs"
 reason = "generated code, not exercisable by int-tier tests"
 issue = "https://github.com/nearai/ironclaw/issues/1"
 TOML
@@ -321,9 +321,9 @@ assert_exit_code "A7: summary with an exemption exits 0" 0 "${CAP_RC}"
 # The exempted crate's file path still legitimately appears in the report's
 # own Exemptions section below, so assert against the per-crate table ROW
 # specifically (not "the whole output"), matching the A6/A5 row-shaped checks.
-assert_not_contains "A7: exempted crate dropped from the per-crate table" "${CAP_OUT}" "| \`ironclaw_engine\` |"
+assert_not_contains "A7: exempted crate dropped from the per-crate table" "${CAP_OUT}" "| \`ironclaw_example_runtime\` |"
 assert_contains "A7: exempted file listed in its own Exemptions section" "${CAP_OUT}" \
-  "\`crates/ironclaw_engine/src/a.rs\`"
+  "\`crates/ironclaw_example_runtime/src/a.rs\`"
 assert_contains "A7: exemption reason rendered" "${CAP_OUT}" "generated code, not exercisable by int-tier tests"
 assert_contains "A7: exemption issue link rendered" "${CAP_OUT}" "https://github.com/nearai/ironclaw/issues/1"
 assert_contains "A7: aggregate becomes 'no data' once the only crate is fully exempted" "${CAP_OUT}" \
@@ -332,7 +332,7 @@ assert_contains "A7: aggregate becomes 'no data' once the only crate is fully ex
 # A8: malformed exemption (missing reason/issue) -> summary refuses to render.
 cat > "${fixtures_dir}/a8_malformed_exemptions.toml" <<'TOML'
 [[exemption]]
-module = "crates/ironclaw_engine/src/a.rs"
+module = "crates/ironclaw_example_runtime/src/a.rs"
 reason = "missing issue link"
 TOML
 capture "${summary_sh}" "${fixtures_dir}/a6_boundary.lcov" "${fixtures_dir}/a8_malformed_exemptions.toml"

@@ -10,12 +10,12 @@ Every rule below counters a rot pattern this repo's guidance is prone to. Guidan
 ## The two skill systems — never conflate them
 
 - `.claude/skills/` + `.claude/commands/` + `.claude/rules/` → **developer-facing** (Claude Code; Codex reads only the AGENTS.md hierarchy).
-- Top-level `skills/` → **product runtime skills, compiled into both shipping binaries** (`build.rs` → `src/skills/bundled.rs`; `crates/ironclaw_reborn_composition/src/bundled_skills.rs`). Editing `skills/` changes what users' agents do, not your workflow. Treat it as production code: test-first, product review.
+- Top-level `skills/` → **product runtime skills compiled into the canonical binary** by `crates/ironclaw_reborn_composition/src/bundled_skills.rs`. Editing `skills/` changes what users' agents do, not your workflow. Treat it as production code: test-first, product review.
 
 ## Authoring rules (each one earned)
 
 1. **Recipes over maps.** Encode grep/verify *procedures* that re-derive facts, not hardcoded file:function maps. **When someone asks for a "key files list" in guidance, do not ship a bare list** — ship (a) the grep recipes that regenerate it, (b) at most a handful of stable anchor paths, and (c) beside *every* listed path, the one-line command that re-verifies it. A list without its regeneration recipe will drift.
-   - Corollary: any flow/architecture map you write must respect the legacy enclave — `ironclaw_engine`, `ironclaw_tui`, `ironclaw_gateway`, `ironclaw_oauth`, `ironclaw_embeddings` are v1-only and never belong in a Reborn flow list (check `ironclaw-reborn-orientation` when unsure which side a crate is on).
+   - Corollary: a flow map that resolves to a retired v1 crate or root `src/` path is stale and must be regenerated from the current workspace.
 2. **Verify every concrete reference at write time — and make it re-verifiable.** Branches die silently; prefer in-tree worked examples over branch/PR refs. For each cited path/symbol, keep a one-line grep a maintainer can re-run.
 3. **No universal claims without a count.** Avoid absolute docs coverage claims. Write "most; fall back to Cargo.toml + lib.rs" or generate the list.
 4. **Triggers live in frontmatter `description`, nowhere else.** The runtime surfaces only frontmatter for selection; a "when to use" buried in the body is invisible. Description = triggering conditions only — never a workflow summary (agents will follow the summary and skip the body).

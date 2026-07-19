@@ -21,9 +21,9 @@
 ### Task 1: Add the source-convention checker test-first
 
 **Files:**
-- Create: `crates/ironclaw_webui_v2/frontend/scripts/check-source-conventions.ts`
-- Create: `crates/ironclaw_webui_v2/frontend/src/test/source-conventions.test.ts`
-- Modify: `crates/ironclaw_webui_v2/frontend/tsconfig.json`
+- Create: `crates/ironclaw_webui/frontend/scripts/check-source-conventions.ts`
+- Create: `crates/ironclaw_webui/frontend/src/test/source-conventions.test.ts`
+- Modify: `crates/ironclaw_webui/frontend/tsconfig.json`
 
 **Interfaces:**
 - Produces: `ConventionViolation`, `checkSourceFile(filePath, sourceText)`, `checkSourceTree(sourceRoot)`, and `formatViolation(violation)`.
@@ -38,7 +38,7 @@ Create fixture-driven tests that require the checker module and assert rejection
 Run:
 
 ```bash
-pnpm --dir crates/ironclaw_webui_v2/frontend exec vitest run src/test/source-conventions.test.ts
+pnpm --dir crates/ironclaw_webui/frontend exec vitest run src/test/source-conventions.test.ts
 ```
 
 Expected: FAIL because `scripts/check-source-conventions.ts` does not exist.
@@ -55,9 +55,9 @@ Add `scripts` to `tsconfig.json#include`, then rerun the focused test and `pnpm 
 
 **Files:**
 - Rename/modify: the 11 `.js/.mjs/.mts` modules currently tracked under `frontend/src`
-- Delete: `crates/ironclaw_webui_v2/frontend/src/design-system/button.test.mjs`
-- Modify: `crates/ironclaw_webui_v2/frontend/src/design-system/button.test.tsx`
-- Rename/modify: `crates/ironclaw_webui_v2/frontend/src/components/slack-channel-picker.test.ts` to `.tsx`
+- Delete: `crates/ironclaw_webui/frontend/src/design-system/button.test.mjs`
+- Modify: `crates/ironclaw_webui/frontend/src/design-system/button.test.tsx`
+- Rename/modify: `crates/ironclaw_webui/frontend/src/components/slack-channel-picker.test.ts` to `.tsx`
 - Modify: affected imports and current-layout comments under `frontend/src`
 
 **Interfaces:**
@@ -88,8 +88,8 @@ Run `pnpm test`. Expected: the restored test files are discovered and every test
 
 **Files:**
 - Modify: affected `frontend/src/**/*.ts` and `frontend/src/**/*.tsx` imports
-- Modify: `crates/ironclaw_webui_v2/frontend/package.json`
-- Modify: `crates/ironclaw_webui_v2/frontend/pnpm-lock.yaml`
+- Modify: `crates/ironclaw_webui/frontend/package.json`
+- Modify: `crates/ironclaw_webui/frontend/pnpm-lock.yaml`
 - Delete: `crates/ironclaw_webui_v2/eslint.config.mjs`
 
 **Interfaces:**

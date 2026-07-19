@@ -71,7 +71,7 @@ pub(crate) async fn qa_smoke_tools() -> HarnessResult<HostRuntimeCapabilityHarne
             br#"{"accepted":true,"source":"qa-smoke"}"#.to_vec(),
         )),
         // qa_smoke_tools exercises real process execution (SpawnProcess effect);
-        // leave the default LocalHostProcessPort in place.
+        // leave the default HostProcessPort in place.
         None,
     )?;
     let mounts = qa_smoke_mounts()?;

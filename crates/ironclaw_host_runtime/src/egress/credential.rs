@@ -376,11 +376,6 @@ fn apply_credential_injection(
                     reason: "credential injection path placeholder is invalid".to_string(),
                 });
             }
-            if !is_rfc3986_unreserved_segment(value) {
-                return Err(RuntimeHttpEgressError::Credential {
-                    reason: "credential injection path value is invalid".to_string(),
-                });
-            }
             let url = parsed_request_url(&request.url, parsed_url)?;
             if url.scheme() != "https" {
                 return Err(RuntimeHttpEgressError::Credential {
@@ -394,17 +389,65 @@ fn apply_credential_injection(
             };
             let path = url.path().to_string();
             let path = path.strip_prefix('/').unwrap_or(&path);
-            let placeholder_count = path
+            // Two placeholder shapes, exactly one injection site total:
+            //  - whole-segment: a path segment equal to the bare placeholder
+            //    (historic shape; value stays RFC3986-unreserved), and
+            //  - braced in-segment: `{placeholder}` embedded inside a segment
+            //    (e.g. Telegram's `/bot{telegram_bot_token}/sendMessage`),
+            //    where the value additionally admits `:` — a legal pchar the
+            //    Bot API token format requires. Neither shape ever admits
+            //    `/`, `%`, braces, or control bytes, so a substituted value
+            //    cannot add segments, escape sequences, or nested
+            //    placeholders.
+            // `url::Url::parse` percent-encodes braces, so the braced shape
+            // appears in the parsed path as `%7B<placeholder>%7D`. Match both
+            // spellings; substitution happens on the parsed path string.
+            let braced_literal = format!("{{{placeholder}}}");
+            let braced_encoded = format!("%7B{placeholder}%7D");
+            let whole_segment_count = path
                 .split('/')
                 .filter(|segment| *segment == placeholder)
                 .count();
-            match placeholder_count {
-                0 => {
+            let braced_count = path.matches(braced_literal.as_str()).count()
+                + path.matches(braced_encoded.as_str()).count();
+            match (whole_segment_count, braced_count) {
+                (1, 0) => {
+                    if !is_rfc3986_unreserved_segment(value) {
+                        return Err(RuntimeHttpEgressError::Credential {
+                            reason: "credential injection path value is invalid".to_string(),
+                        });
+                    }
+                    let mut rewritten_path = String::with_capacity(path.len() + value.len());
+                    for (index, segment) in path.split('/').enumerate() {
+                        if index > 0 {
+                            rewritten_path.push('/');
+                        }
+                        if segment == placeholder {
+                            rewritten_path.push_str(value);
+                        } else {
+                            rewritten_path.push_str(segment);
+                        }
+                    }
+                    url.set_path(&rewritten_path);
+                }
+                (0, 1) => {
+                    if !is_in_segment_path_credential_value(value) {
+                        return Err(RuntimeHttpEgressError::Credential {
+                            reason: "credential injection path value is invalid".to_string(),
+                        });
+                    }
+                    let rewritten_path = if path.contains(braced_encoded.as_str()) {
+                        path.replacen(braced_encoded.as_str(), value, 1)
+                    } else {
+                        path.replacen(braced_literal.as_str(), value, 1)
+                    };
+                    url.set_path(&rewritten_path);
+                }
+                (0, 0) => {
                     return Err(RuntimeHttpEgressError::Credential {
                         reason: "credential injection path placeholder was not found".to_string(),
                     });
                 }
-                1 => {}
                 _ => {
                     return Err(RuntimeHttpEgressError::Credential {
                         reason: "credential injection path placeholder must appear exactly once"
@@ -412,21 +455,20 @@ fn apply_credential_injection(
                     });
                 }
             }
-            let mut rewritten_path = String::with_capacity(path.len() + value.len());
-            for (index, segment) in path.split('/').enumerate() {
-                if index > 0 {
-                    rewritten_path.push('/');
-                }
-                if segment == placeholder {
-                    rewritten_path.push_str(value);
-                } else {
-                    rewritten_path.push_str(segment);
-                }
-            }
-            url.set_path(&rewritten_path);
         }
     }
     Ok(())
+}
+
+/// Charset for braced in-segment path credentials: RFC3986 unreserved plus
+/// `:` (a legal `pchar`), which Telegram bot tokens require. Excludes every
+/// delimiter that could alter URL structure (`/`, `%`, `?`, `#`, braces) and
+/// all control bytes.
+fn is_in_segment_path_credential_value(value: &str) -> bool {
+    !value.is_empty()
+        && value.bytes().all(|byte| {
+            byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'.' | b'_' | b'~' | b':')
+        })
 }
 
 fn parsed_request_url<'a>(
@@ -808,5 +850,149 @@ mod tests {
             .build()
             .unwrap()
             .block_on(future)
+    }
+}
+
+#[cfg(test)]
+mod path_placeholder_tests {
+    use super::*;
+    use ironclaw_host_api::{
+        CapabilityId, InvocationId, NetworkMethod, NetworkPolicy, ResourceScope,
+        RuntimeCredentialInjection, RuntimeCredentialSource, RuntimeHttpEgressRequest, RuntimeKind,
+        TenantId, UserId,
+    };
+    use ironclaw_secrets::InMemorySecretStore;
+
+    fn request_with_url(url: &str) -> RuntimeHttpEgressRequest {
+        RuntimeHttpEgressRequest {
+            runtime: RuntimeKind::Script,
+            scope: ResourceScope {
+                tenant_id: TenantId::new("tenant1").unwrap(),
+                user_id: UserId::new("user1").unwrap(),
+                agent_id: None,
+                project_id: None,
+                mission_id: None,
+                thread_id: None,
+                invocation_id: InvocationId::new(),
+            },
+            capability_id: CapabilityId::new("runtime.http").unwrap(),
+            method: NetworkMethod::Post,
+            url: url.to_string(),
+            headers: vec![],
+            body: Vec::new(),
+            network_policy: NetworkPolicy {
+                allowed_targets: vec![],
+                deny_private_ip_ranges: true,
+                max_egress_bytes: Some(4096),
+            },
+            credential_injections: vec![],
+            response_body_limit: Some(4096),
+            save_body_to: None,
+            timeout_ms: None,
+        }
+    }
+
+    fn apply_path_placeholder(
+        url: &str,
+        placeholder: &str,
+        secret_value: &str,
+    ) -> Result<String, RuntimeHttpEgressError> {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .unwrap();
+        let store = InMemorySecretStore::new();
+        let mut request = request_with_url(url);
+        let handle = SecretHandle::new("path-credential").unwrap();
+        runtime
+            .block_on(store.put(
+                request.scope.clone(),
+                handle.clone(),
+                SecretMaterial::from(secret_value.to_string()),
+                None,
+            ))
+            .unwrap();
+        request
+            .credential_injections
+            .push(RuntimeCredentialInjection {
+                handle,
+                source: RuntimeCredentialSource::SecretStoreLease,
+                target: RuntimeCredentialTarget::PathPlaceholder {
+                    placeholder: placeholder.to_string(),
+                },
+                required: true,
+            });
+        apply_credential_injections(&store, None, &mut request)?;
+        Ok(request.url.clone())
+    }
+
+    #[test]
+    fn braced_in_segment_placeholder_substitutes_telegram_shaped_token() {
+        let url = apply_path_placeholder(
+            "https://api.telegram.org/bot{telegram_bot_token}/sendMessage",
+            "telegram_bot_token",
+            "123456:AA-test_token.abc~",
+        )
+        .expect("in-segment substitution succeeds");
+        assert_eq!(
+            url,
+            "https://api.telegram.org/bot123456:AA-test_token.abc~/sendMessage"
+        );
+    }
+
+    #[test]
+    fn braced_in_segment_value_rejects_structural_bytes() {
+        for value in ["a/b", "a%2Fb", "a{b}", "a?b", "a#b", "", "a b"] {
+            let error = apply_path_placeholder(
+                "https://api.telegram.org/bot{telegram_bot_token}/sendMessage",
+                "telegram_bot_token",
+                value,
+            )
+            .expect_err("structural bytes must be rejected");
+            assert!(matches!(error, RuntimeHttpEgressError::Credential { .. }));
+        }
+    }
+
+    #[test]
+    fn braced_placeholder_must_appear_exactly_once() {
+        let error = apply_path_placeholder(
+            "https://api.telegram.org/bot{telegram_bot_token}/x/{telegram_bot_token}",
+            "telegram_bot_token",
+            "123456:AAtoken",
+        )
+        .expect_err("duplicate placeholders must be rejected");
+        assert!(matches!(error, RuntimeHttpEgressError::Credential { .. }));
+    }
+
+    #[test]
+    fn mixed_whole_segment_and_braced_placeholders_are_rejected() {
+        let error = apply_path_placeholder(
+            "https://api.example.test/telegram_bot_token/bot{telegram_bot_token}/send",
+            "telegram_bot_token",
+            "tokenvalue",
+        )
+        .expect_err("mixed placeholder shapes must be rejected");
+        assert!(matches!(error, RuntimeHttpEgressError::Credential { .. }));
+    }
+
+    #[test]
+    fn whole_segment_mode_still_rejects_colon_values() {
+        let error = apply_path_placeholder(
+            "https://api.example.test/credential_slot/run",
+            "credential_slot",
+            "123456:AAtoken",
+        )
+        .expect_err("whole-segment values stay RFC3986-unreserved");
+        assert!(matches!(error, RuntimeHttpEgressError::Credential { .. }));
+    }
+
+    #[test]
+    fn whole_segment_mode_still_substitutes_unreserved_values() {
+        let url = apply_path_placeholder(
+            "https://api.example.test/credential_slot/run",
+            "credential_slot",
+            "plain-token_1.2~",
+        )
+        .expect("whole-segment substitution unchanged");
+        assert_eq!(url, "https://api.example.test/plain-token_1.2~/run");
     }
 }

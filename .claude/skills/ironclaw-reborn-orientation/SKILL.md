@@ -9,15 +9,11 @@ The corrected map, verified against HEAD on 2026-07-02 by a full architecture au
 
 ## Where things go
 
-- **All new features: Reborn, in `crates/`** — never `src/` (v1 monolith, being strangled; nothing depends on it). Binary: **`ironclaw-reborn`**, built from `crates/ironclaw_reborn_cli` (root docs sometimes say "reborn_cli"). For any endpoint/facade/capability work, use the `reborn-feature` skill.
-- **The canonical request flow** (memorize; saves ~25 tool calls of rediscovery): browser JS (`webui_v2_static`) → route+handler (`webui_v2`) → `RebornServicesApi` facade (`product_workflow`) → port impl (`reborn_composition`) → substrates. Turn execution: `SessionThreadService` (threads) → `TurnCoordinator` (turns) → **`TurnRunScheduler`** (`runner`) claims → **`RebornTurnRunExecutor`** (`runner`) → `PlannedDriver` → `CanonicalAgentLoopExecutor` (`agent_loop`) → host ports (`loop_host`) → `CapabilityHost` (capabilities) → dispatcher → runtime lanes. Boot: `commands/serve.rs` → `build_reborn_runtime` → `build_webui_services`.
+- **All product features live in `crates/`**. The canonical **`ironclaw`** binary is built from `crates/ironclaw_reborn_cli`; the root v1 runtime has been retired. For endpoint/facade/capability work, use the `reborn-feature` skill.
+- **The canonical request flow** (memorize; saves ~25 tool calls of rediscovery): browser UI (`ironclaw_webui/frontend`) → route+handler (`ironclaw_webui`) → `RebornServicesApi` facade (`product_workflow`) → port impl (`reborn_composition`) → substrates. Turn execution: `SessionThreadService` (threads) → `TurnCoordinator` (turns) → **`TurnRunScheduler`** (`runner`) claims → **`RebornTurnRunExecutor`** (`runner`) → `PlannedDriver` → `CanonicalAgentLoopExecutor` (`agent_loop`) → host ports (`loop_host`) → `CapabilityHost` (capabilities) → dispatcher → runtime lanes. Boot: `commands/serve.rs` → `build_reborn_runtime` → `build_webui_services`.
 - **Current runner/lease names**: turn claims and execution use `TurnRunScheduler` + `RebornTurnRunExecutor`; expired lease is terminal `Failed{lease_expired}` (`RecoveryRequired` is a legacy status).
-- **Host-side product code** (serve/delivery/setup for a channel): the model is `ironclaw_reborn_webui_ingress` (WebChat's host side). Do **not** default it into `ironclaw_reborn_composition` — that crate is for assembly, and existing Slack/auth host code there is debt, not precedent.
-- **New prompt templates**: a `.md` file inside the **owning Reborn crate**, loaded via `include_str!` (pattern: `crates/ironclaw_loop_host`, `crates/ironclaw_turns`, `crates/ironclaw_skill_learning` prompt files). `crates/ironclaw_engine/prompts/` is the **v1 engine's** directory — root CLAUDE.md still points there; don't follow it for new Reborn work.
-
-## The legacy enclave (easy to mistake for current architecture)
-
-Five crates in `crates/` serve **only** the v1 monolith: `ironclaw_engine` (a complete second agent loop — boundary tests forbid Reborn crates from using it), `ironclaw_tui`, `ironclaw_gateway`, `ironclaw_oauth`, `ironclaw_embeddings`. Verify any crate's status before building on it: `python3 -c ...` is overkill — just check who depends on it: `grep -rl "<crate_name>" crates/*/Cargo.toml Cargo.toml`. If the only consumer is the root package, it's v1-only.
+- **Host-side product code** (serve/delivery/setup for a channel): the model is `ironclaw_webui` (WebChat's host side). Do **not** default it into `ironclaw_reborn_composition` — that crate is for assembly, and existing Slack/auth host code there is debt, not precedent.
+- **New prompt templates**: a `.md` file inside the owning crate, loaded via `include_str!` (for example `crates/ironclaw_loop_host/prompts/` and `crates/ironclaw_agent_loop/prompts/`).
 
 ## Discovery procedure (graph may be absent — don't stall)
 

@@ -1,0 +1,57 @@
+[package]
+name = "ironclaw_telegram_extension"
+version = "0.1.0"
+edition = "2024"
+rust-version.workspace = true
+description = "Telegram channel host for IronClaw Reborn: bot setup, webhook ingress, WebGeneratedCode pairing, DM delivery"
+authors = ["NEAR AI <support@near.ai>"]
+license = "MIT OR Apache-2.0"
+homepage = "https://github.com/nearai/ironclaw"
+repository = "https://github.com/nearai/ironclaw"
+publish = false
+
+[package.metadata.ironclaw]
+layer = "products"
+
+[dependencies]
+async-trait = "0.1"
+axum = "0.8"
+chrono = { version = "0.4", features = ["serde"] }
+ironclaw_auth = { path = "../ironclaw_auth" }
+ironclaw_channel_delivery = { path = "../ironclaw_channel_delivery" }
+ironclaw_channel_host = { path = "../ironclaw_channel_host", features = ["webhook-serve"] }
+ironclaw_common = { path = "../ironclaw_common" }
+ironclaw_conversations = { path = "../ironclaw_conversations" }
+ironclaw_filesystem = { path = "../ironclaw_filesystem" }
+ironclaw_host_api = { path = "../ironclaw_host_api" }
+ironclaw_host_runtime = { path = "../ironclaw_host_runtime" }
+ironclaw_outbound = { path = "../ironclaw_outbound" }
+ironclaw_product_adapters = { path = "../ironclaw_product_adapters" }
+ironclaw_product_workflow = { path = "../ironclaw_product_workflow" }
+ironclaw_safety = { path = "../ironclaw_safety" }
+ironclaw_secrets = { path = "../ironclaw_secrets" }
+ironclaw_run_state = { path = "../ironclaw_run_state" }
+ironclaw_telegram_v2_adapter = { path = "../ironclaw_telegram_v2_adapter" }
+ironclaw_turns = { path = "../ironclaw_turns" }
+ironclaw_threads = { path = "../ironclaw_threads" }
+ironclaw_triggers = { path = "../ironclaw_triggers" }
+ironclaw_wasm_product_adapters = { path = "../ironclaw_wasm_product_adapters" }
+rand = "0.9"
+secrecy = "0.10"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.11"
+thiserror = "2"
+tokio = { version = "1", features = ["sync", "rt", "time"] }
+tracing = "0.1"
+
+[dev-dependencies]
+http-body-util = "0.1"
+ironclaw_authorization = { path = "../ironclaw_authorization" }
+ironclaw_extensions = { path = "../ironclaw_extensions" }
+ironclaw_network = { path = "../ironclaw_network" }
+ironclaw_processes = { path = "../ironclaw_processes", features = ["test-support"] }
+ironclaw_product_adapters = { path = "../ironclaw_product_adapters", features = ["test-support", "host-auth-mint"] }
+ironclaw_resources = { path = "../ironclaw_resources" }
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "sync", "test-util", "time"] }
+tower = { version = "0.5", features = ["util"] }

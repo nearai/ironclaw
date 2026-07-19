@@ -32,7 +32,7 @@ grep -rn "async fn " crates/ironclaw_product_workflow/src/reborn_services.rs
 grep -rln "RebornProviderAdmin\|Reborn.*Admin\|Reborn.*Facade\|ProductCommandService" crates/ironclaw_reborn_composition/src
 
 # Existing webui2 routes + handlers (mirror the pattern, don't invent a shape)
-grep -n "WEBUI_V2_PATTERN_\|fn .*_descriptor" crates/ironclaw_webui_v2/src/descriptors.rs
+grep -n "WEBUI_V2_PATTERN_\|fn .*_descriptor" crates/ironclaw_webui/src/webui_v2/descriptors.rs
 
 # Existing primitives in the extracted crates (config writers, swap/reload, secrets)
 grep -rn "Swappable\|Reload\|UpdateSession\|FileExt\|SecretStore" crates/ironclaw_llm/src crates/ironclaw_reborn_config/src crates/ironclaw_secrets/src
@@ -51,8 +51,8 @@ Read the wiring path end-to-end ONCE so "what must I expose?" is answered before
 you write the service, not discovered while wiring. The canonical request flow:
 
 ```
-browser (webui_v2_static JS)
-  └ apiFetch → ironclaw_webui_v2 handler (descriptor + route)
+browser (`ironclaw_webui/frontend`)
+  └ apiFetch → ironclaw_webui handler (descriptor + route)
       └ Arc<dyn RebornServicesApi>  (ironclaw_product_workflow facade)
           └ port trait → composition impl (ironclaw_reborn_composition)
               └ substrate handles (secret store, config files, reload handle)
@@ -84,16 +84,15 @@ For a feature with N endpoints, expect to touch (in dependency order):
 | Port | `ironclaw_product_workflow` | trait + DTOs + error type in `reborn_services/<feature>.rs`; re-export in `reborn_services.rs` + `lib.rs` |
 | Facade | `ironclaw_product_workflow` | `Option<Arc<dyn Port>>` field + `with_*` builder + N `RebornServicesApi` methods (give them **default "unavailable" bodies** so existing fakes/tests compile untouched) + an error mapper (port error → `RebornServicesError`, whose ctors are `pub(super)`) |
 | Impl | `ironclaw_reborn_composition` | the adapter (`mod <feature>.rs`, gated on the right feature, e.g. `root-llm-provider`); register in `lib.rs` |
-| HTTP | `ironclaw_webui_v2` | route constants + pattern + `*_descriptor()` (use `read_policy`/`mutation_policy`) + add to `webui_v2_routes()`; thin handler over `state.services()`; mount in `router.rs`; **update `tests/webui_v2_descriptors_contract.rs`** (it locks the table) |
+| HTTP | `ironclaw_webui` | route constants + pattern + `*_descriptor()` (use `read_policy`/`mutation_policy`) + add to `webui_v2_routes()`; thin handler over `state.services()`; mount in `router.rs`; **update `tests/webui_v2_descriptors_contract.rs`** (it locks the table) |
 | Wiring | `ironclaw_reborn_composition` + `ironclaw_reborn_cli` | thread inputs through `RebornRuntimeInput`/`RebornRuntime`; attach in `build_webui_services`; pass from `serve.rs` |
-| Frontend | `ironclaw_webui_v2_static` | call endpoints via `apiFetch` in `static/js/pages/*/lib/*-api.js`; consume in hooks. No build step — `node --check <file>.js` to syntax-check |
-| Tests | `tests/integration/` + crate tests | for whole-turn behavior, add a scripted-model harness case (see `tests/integration/CLAUDE.md` — mock only at the vendor-SDK seam); facade changes extend `crates/ironclaw_product_workflow/tests/reborn_services_contract.rs`, and handler changes extend `crates/ironclaw_webui_v2/tests/webui_v2_handlers_contract.rs` |
+| Frontend | `ironclaw_webui/frontend` | call endpoints through the existing TypeScript API helpers and consume them in hooks; run the frontend test and build scripts |
+| Tests | `tests/integration/` + crate tests | for whole-turn behavior, add a scripted-model harness case (see `tests/integration/CLAUDE.md` — mock only at the vendor-SDK seam); facade changes extend `crates/ironclaw_product_workflow/tests/reborn_services_contract.rs`, and handler changes extend `crates/ironclaw_webui/tests/webui_v2_handlers_contract.rs` |
 
 ## Boundary rules (the guardrails that will reject your PR)
 
-- `ironclaw_reborn_composition` must **not** depend on the root `ironclaw` crate
-  or `src/` — only extracted crates (`ironclaw_llm`, `ironclaw_secrets`,
-  `ironclaw_auth`, …). v1 code under `src/channels/web/` is reference-only.
+- `ironclaw_reborn_composition` must not depend on the retired root runtime or
+  retired v1 crates. The architecture suite enforces this absence.
 - webui_v2 handlers consume **only** `RebornServicesApi`. No dispatcher,
   extensions, host_runtime, DB, etc.
 - Keep substrate handles (secret store, raw stores) **private** to factories;
@@ -117,7 +116,7 @@ they trade with eyes open.
 
 ```bash
 cargo build -p ironclaw_product_workflow --all-features
-cargo build -p ironclaw_webui_v2 --features webui-v2-beta
+cargo build -p ironclaw_webui
 cargo build -p ironclaw_reborn_composition --features "root-llm-provider webui-v2-beta libsql"
 cargo build -p ironclaw_reborn_cli          # compiles the full serve graph
 cargo clippy -p <crate> ... --tests          # gate per crate, not at the end
@@ -134,7 +133,8 @@ alive in the tree today:
   methods in `crates/ironclaw_product_workflow/src/reborn_services.rs`
 - Impl: `crates/ironclaw_reborn_composition/src/llm_admin/llm_config_service.rs`
 - HTTP: `get_llm_config_descriptor()` in
-  `crates/ironclaw_webui_v2/src/descriptors.rs` + handler in `handlers.rs`
+  `crates/ironclaw_webui/src/webui_v2/descriptors.rs` + handler in `handlers.rs`
 - Wiring: `build_llm_config_service` attach in
   `crates/ironclaw_reborn_composition/src/webui.rs`
-- Frontend: `crates/ironclaw_webui_v2_static/static/js/pages/settings/lib/settings-api.js`
+- Frontend: the settings API helpers and hooks under
+  `crates/ironclaw_webui/frontend/src/pages/settings/`

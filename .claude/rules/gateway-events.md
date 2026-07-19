@@ -5,8 +5,7 @@ paths:
   - "crates/ironclaw_event_streams/**"
   - "crates/ironclaw_reborn_event_store/**"
   - "crates/ironclaw_product_workflow/**"
-  - "crates/ironclaw_webui_v2/**"
-  - "crates/ironclaw_reborn_webui_ingress/**"
+  - "crates/ironclaw_webui/**"
   - "src/channels/web/**"
 ---
 # Reborn events and transport projections
@@ -77,7 +76,7 @@ producer-to-consumer path. Re-derive it with:
 rg -n "append|EventSink|EventLog" crates/ironclaw_events crates/ironclaw_reborn_event_store
 rg -n "ProjectionRequest|ProjectionCursor|snapshot|updates" crates/ironclaw_event_projections
 rg -n "EventStreamManager|subscribe|rebase|lag|redaction" crates/ironclaw_event_streams
-rg -n "Sse|WebSocket|stream" crates/ironclaw_webui_v2 crates/ironclaw_reborn_webui_ingress
+rg -n "Sse|WebSocket|stream" crates/ironclaw_webui
 ```
 
 Durable event variants require tests for persistence, replay, projection visibility,

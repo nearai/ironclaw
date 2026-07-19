@@ -46,7 +46,10 @@ root-llm-provider = [
 # budget pipeline end-to-end. Enable with `cargo test --features
 # test-support` (plus whatever feature surface the test crate also
 # requires, e.g. `webui-v2-beta`).
-test-support = ["ironclaw_host_runtime/test-support"]
+test-support = [
+    "ironclaw_channel_delivery/test-support",
+    "ironclaw_host_runtime/test-support",
+]
 # Expose the narrow `extension_installation_store_for_migration` accessor for
 # the v1→Reborn migration tool (`ironclaw_reborn_migration`). Ships zero bytes in
 # a default production binary; mirrors the `test-support` substrate seams.
@@ -58,8 +61,10 @@ migration-support = []
 # from its `serve` subcommand. Substrate-only callers (v1 `AppBuilder`,
 # diagnostic harnesses) stay off the feature and carry no WebUI code.
 webui-v2-beta = [
-    "dep:ironclaw_webui_v2",
-    "ironclaw_webui_v2/webui-v2-beta",
+    # The WebChat v2 route surface + serve loop merged up into `ironclaw_webui`
+    # (as its `webui_v2` module + `webui_serve`); this crate no longer depends on
+    # that route crate. Composition keeps this feature to gate the WebUI facade,
+    # identity, admin, and route-mount vocabulary it still owns.
     "dep:ironclaw_reborn_identity",
     "ironclaw_runner/webui-user-store",
     "libsql",
@@ -75,6 +80,17 @@ slack-v2-host-beta = [
     "webui-v2-beta",
     "dep:ironclaw_slack_v2_adapter",
     "dep:ironclaw_wasm_product_adapters",
+    "ironclaw_channel_host/webhook-serve",
+    "ironclaw_product_workflow/storage",
+]
+# Host-mounted Telegram Bot API webhook ingress + pairing for the single
+# user-visible `telegram` channel extension. Off by default; host binaries
+# opt in and mount it behind their Telegram enablement/config checks.
+telegram-v2-host-beta = [
+    "webui-v2-beta",
+    "dep:ironclaw_telegram_extension",
+    "dep:ironclaw_wasm_product_adapters",
+    "ironclaw_channel_host/webhook-serve",
     "ironclaw_product_workflow/storage",
 ]
 openai-compat-beta = [
@@ -113,6 +129,8 @@ chrono = "0.4"
 deadpool-postgres = { version = "0.14", optional = true }
 futures = "0.3"
 ironclaw_auth = { path = "../ironclaw_auth" }
+ironclaw_channel_host = { path = "../ironclaw_channel_host" }
+ironclaw_channel_delivery = { path = "../ironclaw_channel_delivery" }
 ironclaw_common = { path = "../ironclaw_common" }
 ironclaw_capabilities = { path = "../ironclaw_capabilities" }
 ironclaw_approvals = { path = "../ironclaw_approvals" }
@@ -153,6 +171,7 @@ ironclaw_safety = { path = "../ironclaw_safety" }
 ironclaw_secrets = { path = "../ironclaw_secrets" }
 ironclaw_skills = { path = "../ironclaw_skills" }
 ironclaw_slack_v2_adapter = { path = "../ironclaw_slack_v2_adapter", optional = true }
+ironclaw_telegram_extension = { path = "../ironclaw_telegram_extension", optional = true }
 ironclaw_threads = { path = "../ironclaw_threads" }
 ironclaw_triggers = { path = "../ironclaw_triggers" }
 ironclaw_projects = { path = "../ironclaw_projects" }
@@ -162,9 +181,8 @@ ironclaw_product_context = { path = "../ironclaw_product_context", version = "0.
 nix = { version = "0.30", default-features = false, features = ["process"] }
 # Unpacking uploaded WASM-tool bundles for the WebUI "Install Tool" import flow.
 zip = { version = "8", default-features = false, features = ["deflate"] }
-# WebUI v2 route surface — feature-gated; only used by `webui_serve`.
-ironclaw_webui_v2 = { path = "../ironclaw_webui_v2", optional = true }
-# WebUI v2 static SPA bundle — feature-gated; mounted under `/v2`.
+# WebUI v2 route surface + static SPA bundle merged up into
+# `ironclaw_webui`; no longer a composition dependency.
 ironclaw_wasm_product_adapters = { path = "../ironclaw_wasm_product_adapters", optional = true }
 libsql = { version = "0.9", optional = true, default-features = false, features = ["core", "replication", "remote", "tls"] }
 libc = "0.2"
@@ -196,11 +214,29 @@ uuid = { version = "1", features = ["v4"] }
 async-trait = "0.1"
 chrono = "0.4"
 hmac = "0.13"
+# Enables the in-memory-backed outbound-state store constructor for tests only.
+ironclaw_outbound = { path = "../ironclaw_outbound", features = ["test-support"] }
+# Enables the in-memory-backed approval store constructors for tests only.
+ironclaw_approvals = { path = "../ironclaw_approvals", features = ["test-support"] }
+# Enables the in-memory-backed capability-lease store constructor for tests only.
+ironclaw_authorization = { path = "../ironclaw_authorization", features = ["test-support"] }
+# Enables the in-memory-backed process store constructors for tests only.
+ironclaw_processes = { path = "../ironclaw_processes", features = ["test-support"] }
+# Enables the in-memory-backed run-state/approval store constructors for tests only.
+ironclaw_run_state = { path = "../ironclaw_run_state", features = ["test-support"] }
+# Enables the in-memory-backed budget-gate store constructor for tests only.
+ironclaw_resources = { path = "../ironclaw_resources", features = ["test-support"] }
 http = "1"
 http-body-util = "0.1"
 # Admin-user-management e2e test drives the composed app with a real session
 # authenticator so a minted API token can be validated (login-with-token).
-ironclaw_reborn_webui_ingress = { path = "../ironclaw_reborn_webui_ingress" }
+# `slack-v2-host-beta` is enabled because composition's own WebUI integration
+# tests (`tests/webui_v2_product_auth*.rs`) exercise
+# `#[cfg(feature = "slack-v2-host-beta")]` blocks that call the
+# `WebuiServeConfig::with_slack_*` setters — which moved into this ingress crate
+# and are gated on the ingress slack feature. Cargo features cannot reach a
+# dev-dependency, so the dev-dep must request the feature directly.
+ironclaw_webui = { path = "../ironclaw_webui", features = ["slack-v2-host-beta"] }
 secrecy = { version = "0.10", features = ["serde"] }
 ironclaw_common = { path = "../ironclaw_common" }
 ironclaw_host_api = { path = "../ironclaw_host_api" }

@@ -267,16 +267,16 @@ mod tests {
     use ironclaw_turns::{ReplyTargetBindingRef, TurnActor, TurnScope};
 
     use super::*;
+    use crate::test_support::in_memory_backed_outbound_state_store;
     use crate::{
         CommunicationDeliveryIntent, CommunicationDeliveryResolutionRequest, CommunicationModality,
-        CommunicationPreferenceRecord, InMemoryOutboundStateStore, OutboundPushKind,
-        RunNotificationContext, RunNotificationEventKind, RunNotificationOrigin,
-        SourceRouteContext, SystemEventReasonCode,
+        CommunicationPreferenceRecord, OutboundPushKind, RunNotificationContext,
+        RunNotificationEventKind, RunNotificationOrigin, SourceRouteContext, SystemEventReasonCode,
     };
 
     #[tokio::test]
     async fn prepare_communication_delivery_attempt_returns_none_for_no_delivery() {
-        let store = InMemoryOutboundStateStore::default();
+        let store = in_memory_backed_outbound_state_store();
         let validator = TestReplyTargetBindingValidator::default();
         let access_policy = AllowAllProjectionAccessPolicy;
         let service = OutboundPolicyService::new(&store, &access_policy, &validator);
@@ -316,7 +316,7 @@ mod tests {
 
     #[tokio::test]
     async fn prepare_communication_delivery_attempt_lowers_prompt_kinds_to_gate_required() {
-        let store = InMemoryOutboundStateStore::default();
+        let store = in_memory_backed_outbound_state_store();
         let validator = TestReplyTargetBindingValidator::default();
         let access_policy = AllowAllProjectionAccessPolicy;
         let service = OutboundPolicyService::new(&store, &access_policy, &validator);

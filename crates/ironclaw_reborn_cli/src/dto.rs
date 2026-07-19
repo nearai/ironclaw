@@ -14,6 +14,51 @@ pub(crate) struct StatusDto {
     pub providers_file: FilePresence,
     pub model_slots: Vec<String>,
     pub drivers: DriversSnapshot,
+    /// CLI-token `/login?token=` bootstrap link, present only when a valid
+    /// `webui-token` file exists under `reborn_home`. `None` without the
+    /// `webui-v2-beta` feature.
+    ///
+    /// `skip_serializing`: carries a live bearer token in the query string;
+    /// `status --json` is diagnostic data pasted into issues/logs and must
+    /// never leak it. The text renderer reads this field directly, not
+    /// through serde, so the terminal `login_link:` line is unaffected.
+    #[serde(skip_serializing)]
+    pub login_link: Option<String>,
+    /// `Some` when `serve` will authenticate off an active env var rather
+    /// than the token file — mutually exclusive with `login_link`. Carries
+    /// no secret, so not `skip_serializing`.
+    pub login_note: Option<String>,
+    /// Whether the OS-managed service is actually running, queried live
+    /// (not inferred from file presence). `Unknown` on detection
+    /// error/unsupported platform; `status` must never fail over this.
+    pub service: ServiceStateDto,
+    /// Set only when Google OAuth env config is *asymmetrically* partial
+    /// (`client_id` without `redirect_uri`, or vice versa) — the quiet
+    /// degrade-to-disabled case from `resolve_google_oauth_config`. `None`
+    /// both when Google OAuth is fully unconfigured (nothing to report) and
+    /// when it is fully configured (no degradation to surface).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub google_oauth_degraded: Option<String>,
+}
+
+/// Live OS-service lifecycle state. Mirrors `commands::service::ServiceState`,
+/// redefined here rather than deriving `Serialize` on that type directly
+/// because it's gated behind `webui-v2-beta` and this DTO must exist (with
+/// an `Unknown` fallback) on every build.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+// The concrete states are constructed only by the `webui-v2-beta`-gated
+// resolver (`status::resolve_service_state`); the enum stays whole on every
+// build for wire stability, so the variants are legitimately unconstructed
+// (dead-code in the default/libsql clippy lanes) without that feature.
+#[cfg_attr(not(feature = "webui-v2-beta"), allow(dead_code))]
+pub(crate) enum ServiceStateDto {
+    Running,
+    Stopped,
+    NotInstalled,
+    /// Detection failed, or `webui-v2-beta` isn't compiled in. Distinct
+    /// from `NotInstalled`: "we don't know" vs. "we know it isn't installed".
+    Unknown,
 }
 
 #[derive(Debug, Clone, Serialize)]

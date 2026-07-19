@@ -1696,7 +1696,7 @@ async fn filesystem_resource_governor_fails_closed_then_recovers_after_delta_app
 /// supports versioned CAS and therefore never takes the
 /// `CasUnsupported` branch.
 ///
-/// `LocalFilesystem` is used here because it is the canonical byte-only
+/// `DiskFilesystem` is used here because it is the canonical byte-only
 /// `RootFilesystem`: its `put` impl rejects entries with
 /// `entry.kind.is_some()`, which `cas_update` maps to `CasUnsupported`.
 /// Mirrors `ironclaw_run_state`'s
@@ -1706,13 +1706,13 @@ async fn filesystem_resource_governor_fails_closed_then_recovers_after_delta_app
 /// the resources crate's CAS snapshot stores.
 #[tokio::test]
 async fn filesystem_resource_governor_store_fails_closed_on_byte_only_backend() {
-    use ironclaw_filesystem::{LocalFilesystem, ScopedFilesystem};
+    use ironclaw_filesystem::{DiskFilesystem, ScopedFilesystem};
     use ironclaw_host_api::{
         HostPath, MountAlias, MountGrant, MountPermissions, MountView, VirtualPath,
     };
 
     let dir = tempdir().expect("temp dir");
-    let mut local_fs = LocalFilesystem::new();
+    let mut local_fs = DiskFilesystem::new();
     local_fs
         .mount_local(
             VirtualPath::new("/tenants").expect("virtual root"),
@@ -1742,7 +1742,7 @@ async fn filesystem_resource_governor_store_fails_closed_on_byte_only_backend() 
 
     assert!(
         matches!(&err, ResourceError::Storage { reason } if reason.contains("compare-and-swap")),
-        "expected Storage(CasUnsupported) from byte-only LocalFilesystem but got {err:?}",
+        "expected Storage(CasUnsupported) from byte-only DiskFilesystem but got {err:?}",
     );
 }
 
@@ -1754,13 +1754,13 @@ async fn filesystem_resource_governor_store_fails_closed_on_byte_only_backend() 
 /// pending gate.
 #[tokio::test]
 async fn filesystem_budget_gate_store_fails_closed_on_byte_only_backend() {
-    use ironclaw_filesystem::{LocalFilesystem, ScopedFilesystem};
+    use ironclaw_filesystem::{DiskFilesystem, ScopedFilesystem};
     use ironclaw_host_api::{
         HostPath, MountAlias, MountGrant, MountPermissions, MountView, VirtualPath,
     };
 
     let dir = tempdir().expect("temp dir");
-    let mut local_fs = LocalFilesystem::new();
+    let mut local_fs = DiskFilesystem::new();
     local_fs
         .mount_local(
             VirtualPath::new("/tenants").expect("virtual root"),
@@ -1801,7 +1801,7 @@ async fn filesystem_budget_gate_store_fails_closed_on_byte_only_backend() {
     let err = store.open(&scope, gate).unwrap_err();
     assert!(
         matches!(&err, BudgetGateError::Storage { reason } if reason.contains("compare-and-swap")),
-        "expected Storage(CasUnsupported) from byte-only LocalFilesystem but got {err:?}",
+        "expected Storage(CasUnsupported) from byte-only DiskFilesystem but got {err:?}",
     );
 }
 

@@ -1,12 +1,12 @@
 //! Contract tests for [`FilesystemCheckpointStateStore`] against a
-//! [`ScopedFilesystem`] over [`LocalFilesystem`].
+//! [`ScopedFilesystem`] over [`DiskFilesystem`].
 
 use std::sync::Arc;
 
 use async_trait::async_trait;
 use ironclaw_filesystem::{
-    BackendCapabilities, CasExpectation, DirEntry, Entry, FileStat, FilesystemError,
-    FilesystemOperation, InMemoryBackend, LocalFilesystem, RecordVersion, RootFilesystem,
+    BackendCapabilities, CasExpectation, DirEntry, DiskFilesystem, Entry, FileStat,
+    FilesystemError, FilesystemOperation, InMemoryBackend, RecordVersion, RootFilesystem,
     ScopedFilesystem, VersionedEntry,
 };
 use ironclaw_host_api::{
@@ -21,9 +21,9 @@ use ironclaw_turns::{
     run_profile::LoopCheckpointStateRef,
 };
 
-fn engine_filesystem() -> LocalFilesystem {
+fn engine_filesystem() -> DiskFilesystem {
     let storage = tempfile::tempdir().unwrap().keep();
-    let mut fs = LocalFilesystem::new();
+    let mut fs = DiskFilesystem::new();
     fs.mount_local(
         VirtualPath::new("/engine").unwrap(),
         HostPath::from_path_buf(storage),

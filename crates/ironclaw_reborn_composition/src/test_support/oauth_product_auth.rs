@@ -247,7 +247,7 @@ impl ironclaw_capabilities::CapabilityObligationHandler for TestNoopObligationHa
 struct TestNoopContinuationDispatcher;
 
 #[async_trait]
-impl crate::product_auth::api::auth::RebornAuthContinuationDispatcher
+impl ironclaw_channel_host::auth_continuation::RebornAuthContinuationDispatcher
     for TestNoopContinuationDispatcher
 {
     async fn dispatch_auth_continuation(

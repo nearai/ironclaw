@@ -25,7 +25,6 @@ use ironclaw_auth::{
 };
 use ironclaw_events::{SecurityAuditEvent, SecurityAuditSink, SecurityBoundary, SecurityDecision};
 use ironclaw_product_adapters::AuthPromptChallengeKind;
-use ironclaw_product_workflow::ProductAuthTurnGateResumeDispatcher;
 use secrecy::SecretString;
 use serde::{Deserialize, Serialize};
 
@@ -54,34 +53,7 @@ use crate::{AuthChallengeProvider, AuthChallengeView, BlockedAuthFlowCanceller};
 
 pub(crate) const AUTH_CONTINUATION_DISPATCH_FAILED_CODE: &str = "auth_continuation_dispatch_failed";
 
-/// Dispatches a typed continuation event once an OAuth callback flow has
-/// completed.
-///
-/// # Idempotency contract
-///
-/// Implementations MUST be idempotent on `flow_id`.  The product-auth layer
-/// guarantees *at-least-once* delivery: if `dispatch_auth_continuation`
-/// succeeds but the subsequent `mark_continuation_dispatched` call fails
-/// (e.g. a transient `BackendConflict` or `BackendUnavailable`), the caller
-/// will retry the full callback path and dispatch the same `flow_id` again.
-/// An implementation that assumes exactly-once delivery will process duplicate
-/// continuations and is incorrect.
-#[async_trait]
-pub trait RebornAuthContinuationDispatcher: Send + Sync {
-    async fn dispatch_auth_continuation(
-        &self,
-        event: AuthContinuationEvent,
-    ) -> Result<(), AuthProductError>;
-
-    /// Deny a turn gate whose backing auth flow was canceled by lifecycle
-    /// cleanup. Non-turn continuations remain cancel-only.
-    async fn dispatch_canceled_auth_continuation(
-        &self,
-        _event: AuthContinuationEvent,
-    ) -> Result<(), AuthProductError> {
-        Err(AuthProductError::BackendUnavailable)
-    }
-}
+use ironclaw_channel_host::auth_continuation::RebornAuthContinuationDispatcher;
 
 #[cfg(test)]
 #[derive(Debug, Default)]
@@ -95,23 +67,6 @@ impl RebornAuthContinuationDispatcher for NoopAuthContinuationDispatcher {
         _event: AuthContinuationEvent,
     ) -> Result<(), AuthProductError> {
         Ok(())
-    }
-}
-
-#[async_trait]
-impl RebornAuthContinuationDispatcher for ProductAuthTurnGateResumeDispatcher {
-    async fn dispatch_auth_continuation(
-        &self,
-        event: AuthContinuationEvent,
-    ) -> Result<(), AuthProductError> {
-        ProductAuthTurnGateResumeDispatcher::dispatch_auth_continuation(self, event).await
-    }
-
-    async fn dispatch_canceled_auth_continuation(
-        &self,
-        event: AuthContinuationEvent,
-    ) -> Result<(), AuthProductError> {
-        ProductAuthTurnGateResumeDispatcher::dispatch_canceled_auth_continuation(self, event).await
     }
 }
 
@@ -912,6 +867,16 @@ impl RebornProductAuthServices {
     ) -> Self {
         self.continuation_dispatcher = dispatcher;
         self
+    }
+
+    /// The composed auth-continuation dispatcher (turn-gate resume + lifecycle
+    /// continuations). Channel hosts (today the Telegram pairing service —
+    /// hence the feature gate) reuse it so a pairing completion resumes
+    /// blocked turns through the same path as OAuth callbacks and
+    /// manual-token submissions.
+    #[cfg(feature = "telegram-v2-host-beta")]
+    pub(crate) fn continuation_dispatcher(&self) -> Arc<dyn RebornAuthContinuationDispatcher> {
+        Arc::clone(&self.continuation_dispatcher)
     }
 
     pub fn with_security_audit_sink(mut self, sink: Arc<dyn SecurityAuditSink>) -> Self {

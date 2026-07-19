@@ -14,9 +14,11 @@ Do not start the deletion PR until these are true:
 
 - `ironclaw_reborn_migration` no longer depends on the root `ironclaw` package,
   or migration support has been explicitly retired.
-- Docker and release flows already target `ironclaw-reborn`.
+- Docker and release flows already target the canonical Reborn `ironclaw`
+  binary.
 - Reborn tests cover behavior still needed from legacy v1 tests.
-- Docs and common developer commands already point to `ironclaw-reborn`.
+- Docs and common developer commands already point to the canonical Reborn
+  `ironclaw` command.
 - `ironclaw_embeddings` has a final decision: delete or keep with Reborn
   ownership and live Reborn consumers.
 
@@ -66,7 +68,7 @@ suite from "legacy is quarantined" to "legacy is absent."
 
 ```bash
 cargo metadata --no-deps --format-version 1
-cargo build -p ironclaw_reborn_cli
+cargo build -p ironclaw_reborn_cli --bin ironclaw
 cargo test -p ironclaw_architecture
 bash scripts/reborn-e2e-rust.sh
 rg -n 'layer = "legacy"|ironclaw_gateway|ironclaw_tui|use ironclaw::|\bironclaw::|src/channels/web|src/main.rs' Cargo.toml crates tests scripts .github Dockerfile* README.md FEATURE_PARITY.md

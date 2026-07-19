@@ -112,12 +112,18 @@ The V1 subscription is intentionally scoped and current-state based. It does not
 `ProcessServices` is a composition helper that wires the process store, result store, and cancellation registry together so `ProcessHost` and `BackgroundProcessManager` share the same lifecycle/result/cancellation state:
 
 ```rust
-let services = ProcessServices::in_memory();
+let services = ProcessServices::filesystem(scoped_filesystem);
 let host = services.host();
 let manager = services.background_manager(executor);
 ```
 
-It also supports filesystem-backed composition from a shared filesystem handle. `CapabilityHost::with_process_services(...)` can derive its spawn manager from this same bundle, while callers still use `services.host()` for lifecycle/result/output operations. This helper is convenience wiring only; it does not move process lifecycle into `CapabilityHost`, `ironclaw_dispatcher`, or any runtime lane.
+The lifecycle and result stores share the one scoped filesystem handle, so
+externalized output (`output_ref`) written by the result store resolves on
+read-back. There is no bespoke in-memory store pair anymore
+(arch-simplification §4.3): tests wire the same filesystem stores over
+`InMemoryBackend` via the `test-support` helpers
+(`in_memory_backed_process_services()`, or the equivalent `test-support`-gated
+`ProcessServices::in_memory()`). `CapabilityHost::with_process_services(...)` can derive its spawn manager from this same bundle, while callers still use `services.host()` for lifecycle/result/output operations. This helper is convenience wiring only; it does not move process lifecycle into `CapabilityHost`, `ironclaw_dispatcher`, or any runtime lane.
 
 `BackgroundProcessManager` composes a `ProcessStore` and `ProcessExecutor`:
 

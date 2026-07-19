@@ -1,3 +1,4 @@
+// arch-exempt: large_file, §4.3 delete InMemoryDeliveredGateRouteStore (workflow default -> NoopDeliveredGateRouteStore; test doubles -> FilesystemOutboundStateStore helper), no logic change, plan #6168
 //! Host-side `ProductWorkflow` implementation.
 //!
 //! This is the top-level product action orchestrator that dispatches inbound
@@ -82,9 +83,7 @@ impl DefaultProductWorkflow {
             command_service: Arc::new(RejectingProductCommandService),
             approval_interaction_service: Arc::new(RejectingApprovalInteractionService),
             auth_interaction_service: Arc::new(RejectingAuthInteractionService),
-            delivered_gate_routes: Arc::new(
-                ironclaw_outbound::InMemoryDeliveredGateRouteStore::default(),
-            ),
+            delivered_gate_routes: Arc::new(ironclaw_outbound::NoopDeliveredGateRouteStore),
         }
     }
 

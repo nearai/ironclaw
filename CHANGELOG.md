@@ -10,9 +10,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 
 - *(reborn)* automations and `trigger_list` now surface why a scheduled trigger is currently held (approval/auth/in-progress) and how many scheduled occurrences elapsed while held ([#5886](https://github.com/nearai/ironclaw/issues/5886)).
+- *(reborn)* `ironclaw-reborn service install`/`start`/`stop`/`restart`/`status`/`uninstall` manage the standalone Reborn binary as an OS-native service (launchd user agent on macOS, systemd user unit on Linux), with a webui-token-file fallback for `serve` and atomic install with rollback on failure.
 
 ### Fixed
 
+- *(filesystem)* make libSQL descendant listings seek through the path index instead of scanning the full root-filesystem table, preventing extension-readiness fan-out from stalling unrelated WebUI requests.
+- *(webui-v2)* expose per-user secret provisioning in Admin user details with write-only values, handle-only listings, and confirmed deletion ([#6118](https://github.com/nearai/ironclaw/issues/6118)).
 - *(webui-v2)* render the Extensions Registry as soon as catalog data arrives instead of holding the skeleton screen for slower installed-extension enrichment ([#6052](https://github.com/nearai/ironclaw/issues/6052)).
 - *(webui-v2)* submit the latest composer value when Enter follows input before React rerenders, avoiding intermittently dropped follow-up messages ([#6044](https://github.com/nearai/ironclaw/issues/6044)).
 - *(reborn)* recover the filesystem resource governor after transient libSQL writer contention without bypassing durable accounting, reject stale authority writes during recovery, and distinguish accounting outages from provider budget failures.
@@ -25,7 +28,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
-- *(release)* make `ironclaw-reborn` 1.0.0 the release-plz, cargo-dist, and Docker version source with cargo-dist-compatible `ironclaw/v*` tags.
+- *(release)* make the canonical Reborn `ironclaw` 1.0.0 binary the release-plz, cargo-dist, and Docker version source with cargo-dist-compatible `ironclaw/v*` tags.
+- *(reborn)* move product-neutral channel delivery into `ironclaw_channel_delivery` and make the Telegram host own its concrete state, setup-revision workflow, and trigger-delivery behavior while composition remains mount/registration-only ([#6159](https://github.com/nearai/ironclaw/pull/6159)).
+- *(webui-v2)* serve the Reborn WebUI from root-level browser routes, with temporary `/v2` compatibility redirects that preserve deep links and login query parameters; `/api/webchat/v2/*` remains unchanged ([#6142](https://github.com/nearai/ironclaw/issues/6142)).
 - *(reborn)* raise the default agent-loop runaway backstop from 256 to 1,024 iterations and the subagent ceiling from 16 to 256 ([#5959](https://github.com/nearai/ironclaw/pull/5959)).
 - *(reborn-cli)* document the standalone `config init` atomic-write dependency on `tempfile` and call out the default runner cadence change to 5s heartbeats / 200ms polling (down from 10s / 2s).
 - *(reborn)* expose runtime poll settings and document the standalone turn-runner cadence change for callers using `TurnRunnerSettings::default()`.

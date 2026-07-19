@@ -1,4 +1,6 @@
 #[cfg(feature = "root-llm-provider")]
+pub(crate) mod active_model;
+#[cfg(feature = "root-llm-provider")]
 pub(crate) mod llm_catalog;
 #[cfg(feature = "root-llm-provider")]
 pub(crate) mod llm_config_service;

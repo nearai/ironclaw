@@ -34,8 +34,8 @@ use crate::outbound::{
 };
 use crate::profile_approval_authorization::ApprovalSettingsProvider;
 use crate::runtime::local_dev::synthetic_capability::{
-    LocalDevSyntheticCapability, LocalDevSyntheticCapabilityDescriptor,
-    LocalDevSyntheticCapabilityHandler, LocalDevSyntheticCapabilityInvocation,
+    SyntheticCapability, SyntheticCapabilityDescriptor, SyntheticCapabilityHandler,
+    SyntheticCapabilityInvocation,
 };
 
 pub(super) fn outbound_delivery_capabilities(
@@ -45,10 +45,10 @@ pub(super) fn outbound_delivery_capabilities(
     capability_leases: Arc<dyn CapabilityLeaseStore>,
     target_set_requires_approval: bool,
     approval_settings: Arc<dyn ApprovalSettingsProvider>,
-) -> Result<Vec<LocalDevSyntheticCapability>, AgentLoopHostError> {
+) -> Result<Vec<SyntheticCapability>, AgentLoopHostError> {
     Ok(vec![
-        LocalDevSyntheticCapability::new(
-            LocalDevSyntheticCapabilityDescriptor::new(
+        SyntheticCapability::new(
+            SyntheticCapabilityDescriptor::new(
                 OUTBOUND_DELIVERY_TARGETS_LIST_CAPABILITY_ID,
                 OUTBOUND_DELIVERY_TARGETS_LIST_PROVIDER_TOOL_NAME,
                 OUTBOUND_DELIVERY_TARGETS_LIST_DESCRIPTION,
@@ -60,8 +60,8 @@ pub(super) fn outbound_delivery_capabilities(
                 fallback_user_id: fallback_user_id.clone(),
             }),
         ),
-        LocalDevSyntheticCapability::new(
-            LocalDevSyntheticCapabilityDescriptor::new(
+        SyntheticCapability::new(
+            SyntheticCapabilityDescriptor::new(
                 OUTBOUND_DELIVERY_TARGET_SET_CAPABILITY_ID,
                 OUTBOUND_DELIVERY_TARGET_SET_PROVIDER_TOOL_NAME,
                 OUTBOUND_DELIVERY_TARGET_SET_DESCRIPTION,
@@ -86,7 +86,7 @@ struct OutboundDeliveryTargetsListHandler {
 }
 
 #[async_trait]
-impl LocalDevSyntheticCapabilityHandler for OutboundDeliveryTargetsListHandler {
+impl SyntheticCapabilityHandler for OutboundDeliveryTargetsListHandler {
     fn validate_provider_arguments(
         &self,
         arguments: &serde_json::Value,
@@ -98,7 +98,7 @@ impl LocalDevSyntheticCapabilityHandler for OutboundDeliveryTargetsListHandler {
 
     async fn invoke(
         &self,
-        invocation: LocalDevSyntheticCapabilityInvocation,
+        invocation: SyntheticCapabilityInvocation,
     ) -> Result<CapabilityOutcome, AgentLoopHostError> {
         let input =
             parse_outbound_delivery_targets_list_input(&invocation.input).map_err(input_error)?;
@@ -166,7 +166,7 @@ enum OutboundDeliveryApprovalSettingsDecision {
 }
 
 #[async_trait]
-impl LocalDevSyntheticCapabilityHandler for OutboundDeliveryTargetSetHandler {
+impl SyntheticCapabilityHandler for OutboundDeliveryTargetSetHandler {
     fn validate_provider_arguments(
         &self,
         arguments: &serde_json::Value,
@@ -178,7 +178,7 @@ impl LocalDevSyntheticCapabilityHandler for OutboundDeliveryTargetSetHandler {
 
     async fn invoke(
         &self,
-        invocation: LocalDevSyntheticCapabilityInvocation,
+        invocation: SyntheticCapabilityInvocation,
     ) -> Result<CapabilityOutcome, AgentLoopHostError> {
         if invocation.request.auth_resume.is_some() {
             return Err(AgentLoopHostError::new(
@@ -284,7 +284,7 @@ impl LocalDevSyntheticCapabilityHandler for OutboundDeliveryTargetSetHandler {
 impl OutboundDeliveryTargetSetHandler {
     async fn settings_decision(
         &self,
-        invocation: &LocalDevSyntheticCapabilityInvocation,
+        invocation: &SyntheticCapabilityInvocation,
         capability_id: &CapabilityId,
     ) -> Result<OutboundDeliveryApprovalSettingsDecision, AgentLoopHostError> {
         let scope = settings_scope_for_run(&invocation.run_context, &self.fallback_user_id);
@@ -315,7 +315,7 @@ impl OutboundDeliveryTargetSetHandler {
 
     async fn request_approval(
         &self,
-        invocation: &LocalDevSyntheticCapabilityInvocation,
+        invocation: &SyntheticCapabilityInvocation,
         input: &serde_json::Value,
         target_id: &RebornOutboundDeliveryTargetId,
     ) -> Result<CapabilityOutcome, AgentLoopHostError> {
@@ -368,7 +368,7 @@ impl OutboundDeliveryTargetSetHandler {
 
     async fn verify_approved_resume(
         &self,
-        invocation: &LocalDevSyntheticCapabilityInvocation,
+        invocation: &SyntheticCapabilityInvocation,
         resume: &CapabilityApprovalResume,
         input: &serde_json::Value,
     ) -> Result<ApprovedResumeDecision, AgentLoopHostError> {
@@ -473,7 +473,7 @@ impl OutboundDeliveryTargetSetHandler {
 }
 
 async fn write_completed_result(
-    invocation: LocalDevSyntheticCapabilityInvocation,
+    invocation: SyntheticCapabilityInvocation,
     output: serde_json::Value,
     safe_summary: String,
 ) -> Result<CapabilityOutcome, AgentLoopHostError> {
@@ -500,9 +500,7 @@ async fn write_completed_result(
     }))
 }
 
-fn invocation_replay_input(
-    invocation: &LocalDevSyntheticCapabilityInvocation,
-) -> &serde_json::Value {
+fn invocation_replay_input(invocation: &SyntheticCapabilityInvocation) -> &serde_json::Value {
     invocation
         .request
         .approval_resume
@@ -512,7 +510,7 @@ fn invocation_replay_input(
 }
 
 fn invocation_effective_input_ref(
-    invocation: &LocalDevSyntheticCapabilityInvocation,
+    invocation: &SyntheticCapabilityInvocation,
 ) -> &CapabilityInputRef {
     invocation
         .request
@@ -523,7 +521,7 @@ fn invocation_effective_input_ref(
 }
 
 fn caller_for_run(
-    invocation: &LocalDevSyntheticCapabilityInvocation,
+    invocation: &SyntheticCapabilityInvocation,
     fallback_user_id: &UserId,
 ) -> WebUiAuthenticatedCaller {
     WebUiAuthenticatedCaller::new(

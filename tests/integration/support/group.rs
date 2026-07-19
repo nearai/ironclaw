@@ -73,9 +73,10 @@ use ironclaw_product_workflow::{
 use ironclaw_reborn_composition::build_default_budget_accountant;
 use ironclaw_reborn_composition::test_support::SlackChannelConnectionTestBundle;
 use ironclaw_reborn_config::BudgetDefaults;
+use ironclaw_resources::test_support::in_memory_backed_budget_gate_store;
 use ironclaw_resources::{
-    BudgetEventSink, BudgetGateStore, InMemoryBudgetEventSink, InMemoryBudgetGateStore,
-    InMemoryResourceGovernor, ResourceAccount, ResourceGovernor,
+    BudgetEventSink, BudgetGateStore, InMemoryBudgetEventSink, InMemoryResourceGovernor,
+    ResourceAccount, ResourceGovernor,
 };
 use ironclaw_runner::loop_driver_host::HookDispatcherBuilderFactory;
 use ironclaw_runner::loop_exit_applier::{
@@ -818,7 +819,7 @@ impl RebornIntegrationGroupBuilder {
         .with_checkpoint_state_store(checkpoint_state_store.clone());
         if let Some(approval_requests) = capability_recorder.approval_requests_store() {
             evidence = evidence.with_approval_gate_evidence(
-                ironclaw_reborn_composition::test_support::build_local_dev_approval_gate_evidence_for_test(
+                ironclaw_reborn_composition::test_support::build_approval_gate_evidence_for_test(
                     approval_requests,
                 ),
             );
@@ -886,7 +887,7 @@ impl RebornIntegrationGroupBuilder {
             let accountant = build_default_budget_accountant(
                 Arc::clone(&governor) as Arc<dyn ResourceGovernor>,
                 Arc::new(ZeroCostTable) as Arc<dyn ModelCostTable>,
-                Arc::new(InMemoryBudgetGateStore::new()) as Arc<dyn BudgetGateStore>,
+                Arc::new(in_memory_backed_budget_gate_store()) as Arc<dyn BudgetGateStore>,
                 Arc::new(InMemoryBudgetEventSink::new()) as Arc<dyn BudgetEventSink>,
                 &BudgetDefaults::compiled_defaults(),
             );

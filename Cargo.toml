@@ -1,5 +1,5 @@
 [workspace]
-members = [".", "crates/ironclaw_common", "crates/ironclaw_observability", "crates/ironclaw_host_api", "crates/ironclaw_filesystem", "crates/ironclaw_attachments", "crates/ironclaw_extractors", "crates/ironclaw_memory", "crates/ironclaw_memory_native", "crates/ironclaw_events", "crates/ironclaw_event_projections", "crates/ironclaw_event_streams", "crates/ironclaw_reborn_event_store", "crates/ironclaw_extensions", "crates/ironclaw_processes", "crates/ironclaw_dispatcher", "crates/ironclaw_scripts", "crates/ironclaw_process_sandbox", "crates/ironclaw_mcp", "crates/ironclaw_wasm", "crates/ironclaw_wasm_limiter", "crates/ironclaw_capabilities", "crates/ironclaw_secrets", "crates/ironclaw_network", "crates/ironclaw_host_runtime", "crates/ironclaw_runtime_policy", "crates/ironclaw_authorization", "crates/ironclaw_run_state", "crates/ironclaw_approvals", "crates/ironclaw_resources", "crates/ironclaw_auth", "crates/ironclaw_trust", "crates/ironclaw_turns", "crates/ironclaw_agent_loop", "crates/ironclaw_threads", "crates/ironclaw_prompt_envelope", "crates/ironclaw_hooks", "crates/ironclaw_loop_host", "crates/ironclaw_runner", "crates/ironclaw_reborn_config", "crates/ironclaw_reborn_composition", "crates/ironclaw_reborn_identity", "crates/ironclaw_first_party_extensions", "crates/ironclaw_reborn_cli", "crates/ironclaw_reborn_traces", "crates/ironclaw_reborn_webui_ingress", "crates/ironclaw_reborn_openai_compat", "crates/ironclaw_conversations", "crates/ironclaw_product_adapters", "crates/ironclaw_product_context", "crates/ironclaw_product_workflow", "crates/ironclaw_product_adapter_registry", "crates/ironclaw_wasm_product_adapters", "crates/ironclaw_telegram_v2_adapter", "crates/ironclaw_slack_v2_adapter", "crates/ironclaw_outbound", "crates/ironclaw_triggers", "crates/ironclaw_projects", "crates/ironclaw_architecture", "crates/ironclaw_safety", "crates/ironclaw_skills", "crates/ironclaw_llm", "crates/ironclaw_webui_v2", "crates/ironclaw_reborn_migration", "tools/ironclaw_stress"]
+members = [".", "crates/ironclaw_common", "crates/ironclaw_observability", "crates/ironclaw_host_api", "crates/ironclaw_filesystem", "crates/ironclaw_attachments", "crates/ironclaw_extractors", "crates/ironclaw_memory", "crates/ironclaw_memory_native", "crates/ironclaw_events", "crates/ironclaw_event_projections", "crates/ironclaw_event_streams", "crates/ironclaw_reborn_event_store", "crates/ironclaw_extensions", "crates/ironclaw_processes", "crates/ironclaw_dispatcher", "crates/ironclaw_scripts", "crates/ironclaw_process_sandbox", "crates/ironclaw_mcp", "crates/ironclaw_wasm", "crates/ironclaw_wasm_limiter", "crates/ironclaw_capabilities", "crates/ironclaw_secrets", "crates/ironclaw_network", "crates/ironclaw_host_runtime", "crates/ironclaw_runtime_policy", "crates/ironclaw_authorization", "crates/ironclaw_run_state", "crates/ironclaw_approvals", "crates/ironclaw_resources", "crates/ironclaw_auth", "crates/ironclaw_trust", "crates/ironclaw_turns", "crates/ironclaw_agent_loop", "crates/ironclaw_threads", "crates/ironclaw_prompt_envelope", "crates/ironclaw_hooks", "crates/ironclaw_loop_host", "crates/ironclaw_runner", "crates/ironclaw_reborn_config", "crates/ironclaw_reborn_composition", "crates/ironclaw_reborn_identity", "crates/ironclaw_first_party_extensions", "crates/ironclaw_reborn_cli", "crates/ironclaw_reborn_traces", "crates/ironclaw_webui", "crates/ironclaw_reborn_openai_compat", "crates/ironclaw_conversations", "crates/ironclaw_product_adapters", "crates/ironclaw_product_context", "crates/ironclaw_product_workflow", "crates/ironclaw_product_adapter_registry", "crates/ironclaw_wasm_product_adapters", "crates/ironclaw_channel_host", "crates/ironclaw_channel_delivery", "crates/ironclaw_telegram_extension", "crates/ironclaw_telegram_v2_adapter", "crates/ironclaw_slack_v2_adapter", "crates/ironclaw_outbound", "crates/ironclaw_triggers", "crates/ironclaw_projects", "crates/ironclaw_architecture", "crates/ironclaw_safety", "crates/ironclaw_skills", "crates/ironclaw_llm", "crates/ironclaw_reborn_migration", "tools/ironclaw_stress"]
 exclude = [
     "channels-src/discord",
     "channels-src/feishu",
@@ -103,6 +103,7 @@ toml = "0.9"
 tokio = { version = "1", features = ["macros", "net", "rt", "rt-multi-thread", "sync", "time"] }
 tokio-test = "0.4"
 tower = { version = "0.5", features = ["util"] }
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
 tracing-test = "0.2"
 testcontainers-modules = { version = "0.12", features = ["postgres"] }
 pretty_assertions = "1"
@@ -115,11 +116,16 @@ zip = { version = "8", default-features = false, features = ["deflate"] }
 # fault-injection helpers don't ship in release binaries.
 ironclaw_llm = { path = "crates/ironclaw_llm", version = "0.1.0", features = ["testing"] }
 ironclaw_agent_loop = { path = "crates/ironclaw_agent_loop", version = "0.1.0", features = ["test-support"] }
-ironclaw_approvals = { path = "crates/ironclaw_approvals", version = "0.1.0" }
+ironclaw_approvals = { path = "crates/ironclaw_approvals", version = "0.1.0", features = ["test-support"] }
+# Pull the auth crate's `test-support` feature in only for tests so the
+# `test_support::conformance` OAuth-flow suite (used by the
+# `reborn_integration_oauth_connect` test) doesn't ship in release binaries.
+ironclaw_auth = { path = "crates/ironclaw_auth", version = "0.1.0", features = ["test-support"] }
 # C-ATTACH: `InboundAttachment` for `submit_turn_with_image_attachment`.
 ironclaw_attachments = { path = "crates/ironclaw_attachments", version = "0.1.0" }
-ironclaw_auth = { path = "crates/ironclaw_auth", version = "0.1.0" }
-ironclaw_authorization = { path = "crates/ironclaw_authorization", version = "0.1.0" }
+# `test-support` enables the in-memory-backed capability-lease store constructor
+# for the integration-test harness (cfg(test) does not propagate into deps).
+ironclaw_authorization = { path = "crates/ironclaw_authorization", version = "0.1.0", features = ["test-support"] }
 ironclaw_common = { path = "crates/ironclaw_common", version = "0.4.2" }
 ironclaw_extensions = { path = "crates/ironclaw_extensions", version = "0.1.0" }
 ironclaw_filesystem = { path = "crates/ironclaw_filesystem", version = "0.1.0" }
@@ -128,21 +134,21 @@ ironclaw_mcp = { path = "crates/ironclaw_mcp", version = "0.1.0" }
 ironclaw_first_party_extensions = { path = "crates/ironclaw_first_party_extensions", version = "0.1.0" }
 # W6-COLD-SPOTS: `CommunicationPreferenceRecord`/`CommunicationPreferenceKey`
 # for the outbound-store-durability reopen test.
-ironclaw_outbound = { path = "crates/ironclaw_outbound", version = "0.1.0" }
+ironclaw_outbound = { path = "crates/ironclaw_outbound", version = "0.1.0", features = ["test-support"] }
 # Recording hook doubles + `HookDispatcherBuilderFactory` builders for the
 # C-HOOKS / E-HOOK-INFRA int-tier coverage (tests/integration/support/hooks.rs).
 ironclaw_hooks = { path = "crates/ironclaw_hooks", version = "0.1.0" }
 ironclaw_loop_host = { path = "crates/ironclaw_loop_host", version = "0.1.0" }
 ironclaw_host_runtime = { path = "crates/ironclaw_host_runtime", version = "0.1.0" }
 ironclaw_network = { path = "crates/ironclaw_network", version = "0.1.0" }
-ironclaw_processes = { path = "crates/ironclaw_processes", version = "0.1.0" }
-ironclaw_resources = { path = "crates/ironclaw_resources", version = "0.1.0" }
+ironclaw_processes = { path = "crates/ironclaw_processes", version = "0.1.0", features = ["test-support"] }
+ironclaw_resources = { path = "crates/ironclaw_resources", version = "0.1.0", features = ["test-support"] }
 ironclaw_safety = { path = "crates/ironclaw_safety", version = "0.2.2" }
 ironclaw_secrets = { path = "crates/ironclaw_secrets", version = "0.1.0" }
 ironclaw_product_adapters = { path = "crates/ironclaw_product_adapters", version = "0.1.0", features = ["test-support"] }
 ironclaw_product_workflow = { path = "crates/ironclaw_product_workflow", version = "0.1.0", features = ["test-support"] }
 ironclaw_runner = { path = "crates/ironclaw_runner", version = "0.1.0", features = ["root-llm-provider"] }
-# `webui-v2-beta` puts `ironclaw_webui_v2` + `ironclaw_reborn_identity` on the
+# `webui-v2-beta` puts `ironclaw_webui` + `ironclaw_reborn_identity` on the
 # int-tier coverage lane (identity_resolution_smoke / webui_v2_router_smoke);
 # feature unification compiles them into every int-tier build, behaviorally
 # inert for suites that never call them.
@@ -152,19 +158,20 @@ ironclaw_runner = { path = "crates/ironclaw_runner", version = "0.1.0", features
 # all 17 gated modules into every int-tier test binary — real, one-time
 # build-time cost for the lane, behaviorally inert for suites that never
 # reference Slack types.
-ironclaw_reborn_composition = { path = "crates/ironclaw_reborn_composition", version = "0.1.0", features = ["test-support", "libsql", "webui-v2-beta", "slack-v2-host-beta"] }
+ironclaw_reborn_composition = { path = "crates/ironclaw_reborn_composition", version = "0.1.0", features = ["test-support", "libsql", "webui-v2-beta", "slack-v2-host-beta", "telegram-v2-host-beta"] }
 # Direct dev-dep: composition deliberately does NOT re-export the bare
 # `webui_v2_router`/`WebUiV2State` (facade-only rule), and the router smoke
-# drives the bare router, not the `webui_v2_app` wrapper.
-ironclaw_webui_v2 = { path = "crates/ironclaw_webui_v2", version = "0.1.0", features = ["webui-v2-beta"] }
-# Direct dev-dep for the same reason as ironclaw_webui_v2 above: composition's
+# drives the bare router, not the `webui_v2_app` wrapper. The v2 route surface
+# merged into `ironclaw_webui` (as its public `webui_v2` module).
+ironclaw_webui = { path = "crates/ironclaw_webui", version = "0.1.0" }
+# Direct dev-dep for the same reason as ironclaw_webui above: composition's
 # facade-only rule means it re-exports no SLACK_V2_ADAPTER_ID/SLACK_USER_ACTOR_KIND-style
 # constants; Slack pairing/actor-resolution int-tier tests need them directly.
 ironclaw_slack_v2_adapter = { path = "crates/ironclaw_slack_v2_adapter", version = "0.1.0" }
 ironclaw_reborn_config = { path = "crates/ironclaw_reborn_config", version = "0.1.0" }
 ironclaw_reborn_openai_compat = { path = "crates/ironclaw_reborn_openai_compat", version = "0.1.0", features = ["openai-compat-beta"] }
 ironclaw_reborn_traces = { path = "crates/ironclaw_reborn_traces", version = "0.1.0" }
-ironclaw_run_state = { path = "crates/ironclaw_run_state", version = "0.1.0" }
+ironclaw_run_state = { path = "crates/ironclaw_run_state", version = "0.1.0", features = ["test-support"] }
 ironclaw_threads = { path = "crates/ironclaw_threads", version = "0.1.0" }
 # `InMemoryDurableEventLog` for the W5-WEBUI-API-1 SSE scenario's test-local
 # `ProjectionStream` wiring (`build_webui_event_stream_for_test`).
@@ -374,6 +381,10 @@ path = "tests/integration/triggered_submit.rs"
 [[test]]
 name = "reborn_integration_web_access"
 path = "tests/integration/web_access.rs"
+
+[[test]]
+name = "reborn_integration_telegram_journey"
+path = "tests/integration/telegram_journeys/main.rs"
 
 [[test]]
 name = "reborn_integration_webui_v2_product_api"

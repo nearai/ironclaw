@@ -2,9 +2,9 @@ name: Live Canary
 run-name: ${{ inputs.trigger_context || github.workflow }}
 
 on:
-  # Scheduled runs are intentionally limited to Reborn WebUI v2 live QA.
-  # Legacy canary lanes remain available through workflow_dispatch for
-  # manual diagnosis, but do not run on cron.
+  # The supported live path is the Reborn WebUI QA lane. Retired v1 canary
+  # implementations remain in repository history rather than as dispatchable
+  # jobs that would try to build the deleted root runtime.
   schedule:
     # Every 3 hours. Only reborn-webui-v2-live-qa has a matching guard.
     - cron: "0 */3 * * *"
@@ -16,20 +16,6 @@ on:
         required: true
         default: reborn-webui-v2-live-qa
         options:
-          - all
-          - deterministic-replay
-          - public-smoke
-          - persona-rotating
-          - private-oauth
-          - provider-matrix
-          - release-public-full
-          - upgrade-canary
-          - auth-smoke
-          - auth-full
-          - auth-channels
-          - auth-live-seeded
-          - auth-browser-consent
-          - workflow-canary
           - reborn-webui-v2-live-qa
       scenario:
         description: "Optional scenario/test filter. Use auto for rotating persona."
@@ -814,7 +800,7 @@ jobs:
           cargo build
           -p ironclaw_reborn_cli
           --features webui-v2-beta,slack-v2-host-beta
-          --bin ironclaw-reborn
+          --bin ironclaw
 
       - name: Package fallback Reborn WebUI v2 binary
         id: fallback
@@ -825,7 +811,10 @@ jobs:
           set -euo pipefail
           rm -rf artifacts/prepared-reborn-webui-v2-binary
           mkdir -p artifacts/prepared-reborn-webui-v2-binary
-          tar -C target/debug -czf artifacts/prepared-reborn-webui-v2-binary/ironclaw-reborn.tar.gz ironclaw-reborn
+          # Temporary compatibility member for downstream QA consumers; remove
+          # after every consumer invokes the canonical ironclaw binary.
+          cp target/debug/ironclaw target/debug/ironclaw-reborn
+          tar -C target/debug -czf artifacts/prepared-reborn-webui-v2-binary/ironclaw-reborn.tar.gz ironclaw ironclaw-reborn
           (
             cd artifacts/prepared-reborn-webui-v2-binary
             sha256sum ironclaw-reborn.tar.gz > ironclaw-reborn.tar.gz.sha256
@@ -1111,7 +1100,7 @@ jobs:
             "webui-v2-beta,slack-v2-host-beta"
           mkdir -p target/debug
           tar -C target/debug -xzf .live-qa-binary/ironclaw-reborn.tar.gz
-          chmod 755 target/debug/ironclaw-reborn
+          chmod 755 target/debug/ironclaw target/debug/ironclaw-reborn
       - name: Materialize Reborn WebUI v2 live QA sensitive secrets to files
         if: steps.filter_reborn_webui_v2_google_cases.outputs.skip_shard != '1'
         shell: bash

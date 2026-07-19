@@ -13,6 +13,8 @@ use std::{
     sync::Arc,
 };
 
+use ironclaw_channel_host::identity::RebornUserIdentityLookup;
+
 use ironclaw_auth::{
     AuthProductScope, AuthProviderId, AuthSurface, SLACK_PERSONAL_PROVIDER_ID, SecretCleanupAction,
     SecretCleanupReport, SecretCleanupRequest,
@@ -30,8 +32,7 @@ use crate::{
     RebornProductAuthServices, SlackHostBetaMounts,
     extension_host::available_extensions::SLACK_BOT_EXTENSION_ID,
     slack::slack_actor_identity::{
-        RebornUserIdentityLookup, SLACK_IDENTITY_PROVIDER,
-        parse_slack_user_identity_provider_user_id,
+        SLACK_IDENTITY_PROVIDER, parse_slack_user_identity_provider_user_id,
     },
     slack::slack_host_beta::{SlackPersonalConnectionScope, SlackPersonalConnectionScopeResolver},
     slack::slack_outbound_targets::SlackPersonalDmTargetStore,
@@ -464,10 +465,10 @@ mod tests {
     use ironclaw_product_workflow::WebUiAuthenticatedCaller;
 
     use super::*;
+    use ironclaw_channel_host::identity::RebornUserIdentityLookupError;
+
     use crate::{
-        slack::slack_actor_identity::{
-            RebornUserIdentityLookupError, slack_user_identity_provider_user_id,
-        },
+        slack::slack_actor_identity::slack_user_identity_provider_user_id,
         slack::slack_outbound_targets::{
             InMemorySlackPersonalDmTargetStore, SlackPersonalDmTarget, SlackPersonalDmTargetKey,
         },

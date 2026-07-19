@@ -29,8 +29,7 @@ Why it's wrong: one production impl means the trait encodes no variation — it'
 | Exemplar | Variation behind it | Re-verify |
 | --- | --- | --- |
 | `RootFilesystem` (`crates/ironclaw_filesystem/src/root.rs`) | local / postgres / libsql / in-memory / composite / HSM / memory-adapter | `rg -n "impl RootFilesystem for" crates/ironclaw_filesystem/src crates/ironclaw_memory_native/src` |
-| `PolicySource` (`crates/ironclaw_trust/src/sources.rs`) | AdminConfig / BundledRegistry / LocalDevOverride / SignedRegistry | `grep -n "impl PolicySource" crates/ironclaw_trust/src/sources.rs` |
-| `EmbeddingProvider` (`crates/ironclaw_embeddings/src/provider.rs`) | OpenAI / NearAI / Ollama / Bedrock + caching decorator (v1-only shape example) | `rg -n "impl EmbeddingProvider for (OpenAi|NearAi|Ollama|Bedrock|Cached)" crates/ironclaw_embeddings/src` |
+| `PolicySource` (`crates/ironclaw_trust/src/sources.rs`) | AdminConfig / BundledRegistry / DevTrustOverride / SignedRegistry | `grep -n "impl PolicySource" crates/ironclaw_trust/src/sources.rs` |
 
 **GOOD — one impl but a real boundary** (the acceptable exception): `SkillInferencePort` (`crates/ironclaw_skill_learning/src/lib.rs`) has one production adapter — supplied by composition — because the port exists to keep LLM/runtime deps *out* of a pure-domain crate. The justification is verifiable in Cargo.toml (its only workspace/domain dependency is `ironclaw_skills`; it has no LLM/runtime/filesystem deps), not in a comment.
 
@@ -66,7 +65,7 @@ Consumer named, enforcing test named, items listed explicitly. No test, no re-ex
 
 **BAD — precedent-by-pollution**: "Slack's host code lives in `ironclaw_reborn_composition`, so mine can too." Existing delivery observer, host state, setup, and channel route code there is composition debt — not precedent.
 
-**GOOD — the host-side product crate**: `ironclaw_reborn_webui_ingress` is the model. It owns WebChat's listener, auth, and serve loop as its *own crate*, entering through the same composition seams as everything else. A new channel gets: a protocol-pure adapter crate (parse/render only — the boundary test bans host auth/credentials/delivery from it) **plus** a host-side crate for serving/verification/delivery, **plus** its dependency rule added to `crates/ironclaw_architecture/tests/reborn_dependency_boundaries.rs` in the same PR. Composition gets only `build_*`/`with_*` wiring.
+**GOOD — the host-side product crate**: `ironclaw_webui` is the model. It owns WebChat's listener, auth, and serve loop as its *own crate*, entering through the same composition seams as everything else. A new channel gets: a protocol-pure adapter crate (parse/render only — the boundary test bans host auth/credentials/delivery from it) **plus** a host-side crate for serving/verification/delivery, **plus** its dependency rule added to `crates/ironclaw_architecture/tests/reborn_dependency_boundaries.rs` in the same PR. Composition gets only `build_*`/`with_*` wiring.
 
 ## 5. File budget and `arch-exempt` annotations
 

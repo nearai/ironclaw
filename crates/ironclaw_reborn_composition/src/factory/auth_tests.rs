@@ -1070,7 +1070,7 @@ fn provider_scope(value: &str) -> ProviderScope {
 #[cfg(test)]
 async fn submit_and_block_auth_run(
     turn_coordinator: &dyn ironclaw_turns::TurnCoordinator,
-    local_runtime: &RebornLocalRuntimeServices,
+    local_runtime: &RebornRuntimeSubstrate,
     scope: TurnScope,
     actor: TurnActor,
     gate_ref: &str,

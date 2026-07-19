@@ -42,7 +42,7 @@ struct ExtensionSearchCommand {
 
 #[derive(Debug, Args)]
 struct ExtensionPackageCommand {
-    /// Extension id from `ironclaw-reborn extension search`.
+    /// Extension id from `ironclaw extension search`.
     id: String,
 
     /// Output the lifecycle response as JSON.

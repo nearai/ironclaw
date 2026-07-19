@@ -8,6 +8,8 @@ pub mod env_helpers;
 mod event;
 pub mod hashing;
 mod identity;
+pub mod llm_costs;
+pub mod model_selection;
 pub mod paths;
 pub mod pkce;
 mod platform;

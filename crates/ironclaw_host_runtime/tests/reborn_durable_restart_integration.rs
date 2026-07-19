@@ -5,7 +5,6 @@ use support::legacy_capability_fixture_to_v2;
 use std::{path::Path, sync::Arc, time::Duration};
 
 use async_trait::async_trait;
-use chrono::Utc;
 use ironclaw_approvals::LeaseApproval;
 use ironclaw_authorization::{
     CapabilityLeaseStatus, CapabilityLeaseStore, FilesystemCapabilityLeaseStore, GrantAuthorizer,
@@ -17,7 +16,7 @@ use ironclaw_events::{
 use ironclaw_extensions::{ExtensionManifest, ExtensionPackage, ExtensionRegistry, ManifestSource};
 #[cfg(feature = "libsql")]
 use ironclaw_filesystem::LibSqlRootFilesystem;
-use ironclaw_filesystem::{InMemoryBackend, LocalFilesystem, RootFilesystem, ScopedFilesystem};
+use ironclaw_filesystem::{DiskFilesystem, InMemoryBackend, RootFilesystem, ScopedFilesystem};
 use ironclaw_host_api::*;
 use ironclaw_host_runtime::{
     CapabilitySurfaceVersion, HostRuntime, HostRuntimeServices, RuntimeCapabilityOutcome,
@@ -40,8 +39,7 @@ use ironclaw_scripts::{
     ScriptBackend, ScriptBackendOutput, ScriptBackendRequest, ScriptRuntime, ScriptRuntimeConfig,
 };
 use ironclaw_trust::{
-    AdminConfig, AdminEntry, AuthorityCeiling, EffectiveTrustClass, HostTrustAssignment,
-    HostTrustPolicy, TrustDecision, TrustProvenance,
+    AdminConfig, AdminEntry, HostTrustAssignment, HostTrustPolicy, TrustDecision,
 };
 use serde_json::{Value, json};
 
@@ -105,7 +103,6 @@ async fn approval_resume_survives_filesystem_service_restart_and_consumes_lease_
             script_capability_id(),
             estimate.clone(),
             input.clone(),
-            trust_decision_with_dispatch_authority(),
         ))
         .await
         .unwrap();
@@ -180,7 +177,6 @@ async fn approval_resume_survives_filesystem_service_restart_and_consumes_lease_
             script_capability_id(),
             estimate,
             json!({"message": "restart approval"}),
-            trust_decision_with_dispatch_authority(),
         ))
         .await
         .unwrap();
@@ -256,7 +252,6 @@ async fn approval_resume_survives_durable_libsql_reopen_and_consumes_lease_once(
             script_capability_id(),
             estimate.clone(),
             input.clone(),
-            trust_decision_with_dispatch_authority(),
         ))
         .await
         .unwrap();
@@ -331,7 +326,6 @@ async fn approval_resume_survives_durable_libsql_reopen_and_consumes_lease_once(
             script_capability_id(),
             estimate,
             json!({"message": "restart approval"}),
-            trust_decision_with_dispatch_authority(),
         ))
         .await
         .unwrap();
@@ -432,7 +426,6 @@ async fn jsonl_event_and_audit_replay_survive_reopen_without_raw_sentinels() {
             script_capability_id(),
             ResourceEstimate::default(),
             payload.clone(),
-            trust_decision_with_dispatch_authority(),
         ))
         .await
         .unwrap();
@@ -480,15 +473,15 @@ async fn jsonl_event_and_audit_replay_survive_reopen_without_raw_sentinels() {
 }
 
 type DurableProcessServices = ProcessServices<
-    FilesystemProcessStore<LocalFilesystem>,
-    FilesystemProcessResultStore<LocalFilesystem>,
+    FilesystemProcessStore<DiskFilesystem>,
+    FilesystemProcessResultStore<DiskFilesystem>,
 >;
 
 type DurableHostRuntimeServices = HostRuntimeServices<
-    LocalFilesystem,
+    DiskFilesystem,
     InMemoryResourceGovernor,
-    FilesystemProcessStore<LocalFilesystem>,
-    FilesystemProcessResultStore<LocalFilesystem>,
+    FilesystemProcessStore<DiskFilesystem>,
+    FilesystemProcessResultStore<DiskFilesystem>,
 >;
 
 struct DurableServices<F = InMemoryBackend>
@@ -498,7 +491,7 @@ where
     services: DurableHostRuntimeServices,
     run_state: Arc<FilesystemRunStateStore<F>>,
     approval_requests: Arc<FilesystemApprovalRequestStore<F>>,
-    capability_leases: Arc<FilesystemCapabilityLeaseStore<LocalFilesystem>>,
+    capability_leases: Arc<FilesystemCapabilityLeaseStore<DiskFilesystem>>,
     events: RebornEventStores,
 }
 
@@ -506,7 +499,7 @@ where
 /// backend, generic over the backend type so the same mount shape can be
 /// reused for the shared in-memory backend (service-graph-restart coverage)
 /// and a real durable backend like [`LibSqlRootFilesystem`] (durable-reopen
-/// coverage). `LocalFilesystem` rejects the record-shaped entries
+/// coverage). `DiskFilesystem` rejects the record-shaped entries
 /// (`entry.kind = Some(RecordKind::new(…))`) these stores write, so callers
 /// must pick a backend whose `BackendCapabilities` accept them.
 fn scoped_run_state_filesystem<F>(backend: Arc<F>) -> Arc<ScopedFilesystem<F>>
@@ -692,22 +685,22 @@ fn durable_mount_view() -> MountView {
     .unwrap()
 }
 
-/// Build a fresh [`ScopedFilesystem`] over a [`LocalFilesystem`] rooted at
+/// Build a fresh [`ScopedFilesystem`] over a [`DiskFilesystem`] rooted at
 /// `engine_root`. The restart contract spawns multiple service graphs against
 /// the same on-disk root, so each call here constructs a distinct
-/// `ScopedFilesystem` over a freshly-mounted `LocalFilesystem`; identity of
+/// `ScopedFilesystem` over a freshly-mounted `DiskFilesystem`; identity of
 /// the wrapping struct is irrelevant — durability lives on disk, and the
 /// per-path lock map is process-global by design.
-fn scoped_engine_filesystem(engine_root: &Path) -> Arc<ScopedFilesystem<LocalFilesystem>> {
+fn scoped_engine_filesystem(engine_root: &Path) -> Arc<ScopedFilesystem<DiskFilesystem>> {
     Arc::new(ScopedFilesystem::with_fixed_view(
         Arc::new(mounted_engine_filesystem(engine_root)),
         durable_mount_view(),
     ))
 }
 
-fn mounted_engine_filesystem(engine_root: &Path) -> LocalFilesystem {
+fn mounted_engine_filesystem(engine_root: &Path) -> DiskFilesystem {
     std::fs::create_dir_all(engine_root).unwrap();
-    let mut filesystem = LocalFilesystem::new();
+    let mut filesystem = DiskFilesystem::new();
     // Backend mount for `/engine` plus the consumer-store virtual roots
     // exposed via `durable_mount_view`. Each top-level root resolves to a
     // sibling subdirectory under `engine_root` so durable-restart fixtures
@@ -743,7 +736,6 @@ async fn block_for_approval(
             script_capability_id(),
             estimate,
             input,
-            trust_decision_with_dispatch_authority(),
         ))
         .await
         .unwrap();
@@ -917,6 +909,7 @@ fn parse_manifest(manifest: &str) -> ExtensionManifest {
 
 fn execution_context_without_grants_for_scope(scope: ResourceScope) -> ExecutionContext {
     let context = ExecutionContext {
+        run_id: None,
         invocation_id: scope.invocation_id,
         correlation_id: CorrelationId::new(),
         process_id: None,
@@ -944,6 +937,7 @@ fn execution_context_with_dispatch_grant_for_scope(
     scope: ResourceScope,
 ) -> ExecutionContext {
     let context = ExecutionContext {
+        run_id: None,
         invocation_id: scope.invocation_id,
         correlation_id: CorrelationId::new(),
         process_id: None,
@@ -1023,18 +1017,6 @@ fn local_manifest_trust_policy(
         ),
     ]))])
     .unwrap()
-}
-
-fn trust_decision_with_dispatch_authority() -> TrustDecision {
-    TrustDecision {
-        effective_trust: EffectiveTrustClass::user_trusted(),
-        authority_ceiling: AuthorityCeiling {
-            allowed_effects: vec![EffectKind::DispatchCapability],
-            max_resource_ceiling: None,
-        },
-        provenance: TrustProvenance::Default,
-        evaluated_at: Utc::now(),
-    }
 }
 
 fn sample_scope(invocation_id: InvocationId) -> ResourceScope {

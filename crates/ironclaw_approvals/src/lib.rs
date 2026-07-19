@@ -9,6 +9,9 @@ mod capability_permission;
 mod cas_record;
 mod policy;
 
+#[cfg(any(test, feature = "test-support"))]
+pub mod test_support;
+
 use ironclaw_authorization::{CapabilityLease, CapabilityLeaseError, CapabilityLeaseStore};
 use ironclaw_events::AuditSink;
 use ironclaw_host_api::{
@@ -21,20 +24,18 @@ use thiserror::Error;
 pub use auto_approve::{
     AUTO_APPROVE_DEFAULT_ENABLED, AutoApproveSettingInput, AutoApproveSettingKey,
     AutoApproveSettingRecord, AutoApproveSettingStore, FilesystemAutoApproveSettingStore,
-    InMemoryAutoApproveSettingStore,
 };
 pub use capability_permission::{
     CapabilityPermissionOverride, CapabilityPermissionOverrideInput,
     CapabilityPermissionOverrideKey, CapabilityPermissionOverrideRecord,
     CapabilityPermissionOverrideStore, CapabilityPermissionState, CapabilityPermissionStoreError,
-    FilesystemCapabilityPermissionOverrideStore, InMemoryCapabilityPermissionOverrideStore,
+    FilesystemCapabilityPermissionOverrideStore,
 };
 pub use policy::{
-    FilesystemPersistentApprovalPolicyStore, InMemoryPersistentApprovalPolicyStore,
-    PersistentApprovalAction, PersistentApprovalPolicy, PersistentApprovalPolicyError,
-    PersistentApprovalPolicyInput, PersistentApprovalPolicyKey, PersistentApprovalPolicyStore,
-    PersistentApprovalScope, permission_mode_allows_persistent_approval,
-    persistent_approval_grant_issuer,
+    FilesystemPersistentApprovalPolicyStore, PersistentApprovalAction, PersistentApprovalPolicy,
+    PersistentApprovalPolicyError, PersistentApprovalPolicyInput, PersistentApprovalPolicyKey,
+    PersistentApprovalPolicyStore, PersistentApprovalScope,
+    permission_mode_allows_persistent_approval, persistent_approval_grant_issuer,
 };
 
 pub type ToolPermissionOverride = CapabilityPermissionOverride;
@@ -44,7 +45,6 @@ pub type ToolPermissionOverrideRecord = CapabilityPermissionOverrideRecord;
 pub type ToolPermissionState = CapabilityPermissionState;
 pub type ToolPermissionStoreError = CapabilityPermissionStoreError;
 pub type FilesystemToolPermissionOverrideStore<F> = FilesystemCapabilityPermissionOverrideStore<F>;
-pub type InMemoryToolPermissionOverrideStore = InMemoryCapabilityPermissionOverrideStore;
 
 pub trait ToolPermissionOverrideStore: CapabilityPermissionOverrideStore {}
 

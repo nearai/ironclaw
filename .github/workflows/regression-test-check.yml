@@ -193,7 +193,7 @@ jobs:
             exit 0
           fi
 
-          if grep -qE '^crates/ironclaw_webui_v2/frontend/src/.*\.test\.(ts|mts)$' <<< "$CHANGED_FILES"; then
+          if grep -qE '^crates/ironclaw_webui/frontend/src/.*\.test\.(ts|mts)$' <<< "$CHANGED_FILES"; then
             echo "Reborn WebUI v2 JS test file changes found."
             exit 0
           fi

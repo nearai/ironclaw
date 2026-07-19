@@ -742,12 +742,17 @@ fn sort_routable_team_subjects(subjects: &mut [subjects::SlackRoutableTeamSubjec
     });
 }
 
-pub(crate) struct SlackChannelRouteAdminRouteMount {
-    pub(crate) protected: Router,
-    pub(crate) descriptors: Vec<IngressRouteDescriptor>,
+// `pub` (not `pub(crate)`) because the sole caller — `webui_v2_app` — was
+// hoisted up into `ironclaw_webui` when the WebUI host stack was
+// merged; the moved caller composes this admin mount into the v2 router, so its
+// builder and return type (with its two fields) are part of composition's public
+// surface, mirroring the already-public `PublicRouteMount` / `ProtectedRouteMount`.
+pub struct SlackChannelRouteAdminRouteMount {
+    pub protected: Router,
+    pub descriptors: Vec<IngressRouteDescriptor>,
 }
 
-pub(crate) fn slack_channel_route_admin_route_mount(
+pub fn slack_channel_route_admin_route_mount(
     config: SlackChannelRouteAdminRouteConfig,
 ) -> SlackChannelRouteAdminRouteMount {
     SlackChannelRouteAdminRouteMount {

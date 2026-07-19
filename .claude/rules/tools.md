@@ -89,6 +89,6 @@ Review for parallel pipelines with:
 
 ```bash
 rg -n "\.dispatch\(|\.invoke\(|\.resume\(" crates/ironclaw_product_workflow \
-  crates/ironclaw_reborn_composition crates/ironclaw_webui_v2
+  crates/ironclaw_reborn_composition crates/ironclaw_webui
 rg -n "RuntimeAdapter|CapabilityHost" crates
 ```

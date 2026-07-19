@@ -46,8 +46,8 @@ use ironclaw_network::{NetworkHttpRequest, NetworkTransportRequest};
 use ironclaw_product_workflow::{ProjectService, ResolvedBinding};
 use ironclaw_reborn_composition::test_support::SkillActivationTestSource;
 use ironclaw_reborn_composition::{
-    ProductLiveCapabilityIo, RebornBuildInput, RebornLocalDevApprovalTestParts,
-    RebornProductAuthServices, build_reborn_services,
+    ProductLiveCapabilityIo, RebornApprovalTestParts, RebornBuildInput, RebornProductAuthServices,
+    build_reborn_services,
 };
 use ironclaw_trust::EffectiveTrustClass;
 use ironclaw_turns::{
@@ -177,7 +177,7 @@ pub(crate) struct HostRuntimeCapabilityHarness {
     /// this harness is already `Arc`'d — the same chicken-and-egg constraint
     /// `io`/`result_writer_io` document above `install_durable_capability_io`.
     runtime: Mutex<Arc<dyn HostRuntime>>,
-    approval_parts: Option<RebornLocalDevApprovalTestParts>,
+    approval_parts: Option<RebornApprovalTestParts>,
     auto_approve_settings: Option<Arc<dyn ironclaw_approvals::AutoApproveSettingStore>>,
     pending_approval_scopes: Arc<Mutex<HashMap<ApprovalRequestId, ResourceScope>>>,
     /// Input-resolver half of this harness's capability io. Default (every
@@ -228,7 +228,7 @@ pub(crate) struct HostRuntimeCapabilityHarness {
     /// request reaches this double. `None` for every other construction.
     real_egress_transport: Option<Arc<RecordingNetworkHttpTransport>>,
     /// Inert recording process port. `Some` when the harness injected a
-    /// `RecordingProcessPort`; `None` when the live `LocalHostProcessPort` was
+    /// `RecordingProcessPort`; `None` when the live `HostProcessPort` was
     /// used (`.with_live_shell()` path).
     process_port: Option<Arc<super::process::RecordingProcessPort>>,
     /// Raw local-dev memory filesystem backing the user-profile source
@@ -271,7 +271,7 @@ pub(crate) struct HostRuntimeCapabilityHarness {
     outbound_target_tools: Option<OutboundTargetToolsParts>,
     /// C-MULTIUSER seam: when `true`, [`create_capability_port`] resolves the
     /// capability-execution user from the RUN's owner/actor (mirroring
-    /// production `local_dev_visible_capability_request`,
+    /// production `visible_capability_request`,
     /// `crates/ironclaw_reborn_composition/src/runtime/local_dev.rs`) instead of
     /// this harness's single fixed `user_id`. That is what lets two distinct
     /// actors dispatching over the group's ONE shared capability backend run
@@ -604,7 +604,7 @@ impl HostRuntimeCapabilityHarness {
                 ironclaw_reborn_composition::RebornCompositionProfile::LocalDevYolo,
                 service_label,
                 storage_root,
-                ironclaw_reborn_composition::RebornLocalRuntimeProfileOptions {
+                ironclaw_reborn_composition::RebornRuntimeProfileOptions {
                     confirm_host_access: true,
                 },
             )?
@@ -836,15 +836,15 @@ impl HostRuntimeCapabilityHarness {
     }
 
     /// Durable tool-result projection seam (issue #5838): swap this
-    /// harness's capability io for the REAL `LocalDevCapabilityIo`
-    /// (`ironclaw_reborn_composition::test_support::local_dev_capability_io_for_test`,
+    /// harness's capability io for the REAL `StagedCapabilityIo`
+    /// (`ironclaw_reborn_composition::test_support::staged_capability_io_for_test`,
     /// which mirrors production's `capability_wiring`), wired over
     /// `thread_service`.
     ///
     /// `thread_service` MUST be the SAME `SessionThreadService` the calling
     /// group's turns actually dispatch against (`group.rs`'s `into_group`
     /// builds it as `group_thread_harness.service`, BEFORE this harness's
-    /// capability parts are assembled) -- `LocalDevCapabilityIo::write_capability_result`
+    /// capability parts are assembled) -- `StagedCapabilityIo::write_capability_result`
     /// resolves the run's thread scope and appends the durable record keyed
     /// by `run_context.thread_id`; a different (e.g. this harness's own
     /// local-dev-only) thread service would never have that thread and every
@@ -864,7 +864,7 @@ impl HostRuntimeCapabilityHarness {
         thread_service: Arc<dyn ironclaw_threads::SessionThreadService>,
     ) {
         let (io, result_writer_io) =
-            ironclaw_reborn_composition::test_support::local_dev_capability_io_for_test(
+            ironclaw_reborn_composition::test_support::staged_capability_io_for_test(
                 thread_service.clone(),
                 self.user_id.clone(),
             );
@@ -957,7 +957,7 @@ impl HostRuntimeCapabilityHarness {
     }
 
     /// Snapshot of every command string recorded by the inert process port.
-    /// Empty when the harness uses the live `LocalHostProcessPort`
+    /// Empty when the harness uses the live `HostProcessPort`
     /// (`.with_live_shell()` path).
     pub(crate) fn process_commands(&self) -> Vec<String> {
         self.process_port
@@ -1413,11 +1413,11 @@ impl HostRuntimeCapabilityHarness {
 
     /// Assembles the recording `LoopCapabilityPort` for one run by driving the
     /// REAL production capability-port factory
-    /// (`create_refreshing_local_dev_capability_port`, harness-port-seam P1
+    /// (`create_refreshing_capability_port`, harness-port-seam P1
     /// Change 2) with this harness's fields, then wrapping the returned port
     /// in the invocation-recording port (outermost, unchanged). Every
     /// production wrap layer (synthetic capabilities, surface disclosure,
-    /// external tools, StaleSurface refresh, the shared `LocalDevCapabilityIo`)
+    /// external tools, StaleSurface refresh, the shared `StagedCapabilityIo`)
     /// is now exercised automatically — this method no longer hand-rebuilds
     /// any of them. Owned here (rather than in the
     /// `HostRuntimeHarnessCapabilityPortFactory` test double) because the
@@ -1427,7 +1427,7 @@ impl HostRuntimeCapabilityHarness {
     /// this method.
     ///
     /// The returned port refreshes itself internally
-    /// (`RefreshingLocalDevCapabilityPort`'s own `StaleSurface` recovery), so
+    /// (`RefreshingCapabilityPort`'s own `StaleSurface` recovery), so
     /// there is no harness-level refresh wrapper layered on top anymore — one
     /// refresh mechanism (production's), not two.
     pub(crate) async fn create_recording_capability_port(
@@ -1442,7 +1442,7 @@ impl HostRuntimeCapabilityHarness {
         // port, matching the per-run construction this method already had.
         let dispatch_user = self.dispatch_user_for_run(run_context);
         // ONE shared io, both roles: production assigns a single
-        // `LocalDevCapabilityIo` to both `input_resolver` and `result_writer`
+        // `StagedCapabilityIo` to both `input_resolver` and `result_writer`
         // so input-ref/result-ref correlation by `call_id` works.
         // `RecordingCapabilityResultWriter` implements both traits over
         // `self.io` (recording only result writes) — `Arc::clone` the SAME
@@ -1475,7 +1475,9 @@ impl HostRuntimeCapabilityHarness {
             .approval_parts
             .as_ref()
             .map(|parts| Arc::clone(&parts.approval_requests))
-            .unwrap_or_else(|| Arc::new(ironclaw_run_state::InMemoryApprovalRequestStore::new()));
+            .unwrap_or_else(|| {
+                Arc::new(ironclaw_run_state::in_memory_backed_approval_request_store())
+            });
         let approval_requests: Arc<dyn ironclaw_run_state::ApprovalRequestStore> =
             Arc::new(super::doubles::RecordingApprovalRequestStore {
                 inner: inner_approval_requests,
@@ -1486,15 +1488,19 @@ impl HostRuntimeCapabilityHarness {
             .as_ref()
             .map(|parts| Arc::clone(&parts.capability_leases))
             .unwrap_or_else(|| {
-                Arc::new(ironclaw_authorization::InMemoryCapabilityLeaseStore::new())
+                Arc::new(ironclaw_authorization::in_memory_backed_capability_lease_store())
             });
         let tool_permission_overrides: Arc<dyn ironclaw_approvals::ToolPermissionOverrideStore> =
             self.tool_permission_overrides.clone().unwrap_or_else(|| {
-                Arc::new(ironclaw_approvals::InMemoryCapabilityPermissionOverrideStore::new())
+                Arc::new(
+                    ironclaw_approvals::test_support::in_memory_backed_capability_permission_override_store(),
+                )
             });
         let auto_approve_settings: Arc<dyn ironclaw_approvals::AutoApproveSettingStore> =
             self.auto_approve_settings.clone().unwrap_or_else(|| {
-                Arc::new(ironclaw_approvals::InMemoryAutoApproveSettingStore::new())
+                Arc::new(
+                    ironclaw_approvals::test_support::in_memory_backed_auto_approve_setting_store(),
+                )
             });
         let persistent_approval_policies: Arc<
             dyn ironclaw_approvals::PersistentApprovalPolicyStore,
@@ -1502,7 +1508,9 @@ impl HostRuntimeCapabilityHarness {
             .persistent_approval_policies
             .clone()
             .unwrap_or_else(|| {
-                Arc::new(ironclaw_approvals::InMemoryPersistentApprovalPolicyStore::new())
+                Arc::new(
+                    ironclaw_approvals::test_support::in_memory_backed_persistent_approval_policy_store(),
+                )
             });
         let outbound_preferences_facade = self.outbound_target_tools.as_ref().map(|parts| {
             Arc::clone(&parts.facade)
@@ -1514,8 +1522,8 @@ impl HostRuntimeCapabilityHarness {
             .map(|parts| parts.requires_approval)
             .unwrap_or(false);
         // Grantee = the loop-driver execution extension — the SAME principal
-        // production's `local_dev_visible_capability_request` executes under
-        // and mints extension grants for (`LocalDevExtensionSurface::grants`);
+        // production's `visible_capability_request` executes under
+        // and mints extension grants for (`ExtensionCapabilitySurface::grants`);
         // a `Principal::User` grantee (the pre-seam harness's choice, matched
         // to its removed hand-built User-principal authority) is skipped by
         // authorization under the production request. Computed early (moved
@@ -1526,11 +1534,11 @@ impl HostRuntimeCapabilityHarness {
             ironclaw_loop_host::loop_driver_execution_extension_id(run_context)?;
         // Which providers ALREADY have a production trust decision arriving
         // through the real activation handshake (`extension_surface_source`'s
-        // `LocalDevExtensionSurface::provider_trust()`, same
+        // `ExtensionCapabilitySurface::provider_trust()`, same
         // `extension_management` + grantee production's factory reads) --
         // queried the SAME way `build_local_dev_extension_management_for_test`
         // -> `extension_surface_source` will read it downstream in
-        // `create_refreshing_local_dev_capability_port_for_test`. NOT the same
+        // `create_refreshing_capability_port_for_test`. NOT the same
         // as "this harness has `reborn_services` wired": a harness can have
         // `reborn_services` (so `new_with_options`) while only ever calling
         // the `publish_bundled_extension_for_test` SHORTCUT (registers the
@@ -1610,7 +1618,7 @@ impl HostRuntimeCapabilityHarness {
             })
             .collect();
         let parts =
-            ironclaw_reborn_composition::test_support::RefreshingLocalDevCapabilityPortTestParts {
+            ironclaw_reborn_composition::test_support::RefreshingCapabilityPortTestParts {
                 runtime: self.runtime.lock().unwrap().clone(),
                 run_context: run_context.clone(),
                 fallback_user_id: dispatch_user,
@@ -1693,7 +1701,10 @@ impl HostRuntimeCapabilityHarness {
                 capability_id_filter: Some(self.capability_ids.iter().cloned().collect()),
                 additional_capability_grants,
             };
-        let port = ironclaw_reborn_composition::test_support::create_refreshing_local_dev_capability_port_for_test(parts)
+        let port =
+            ironclaw_reborn_composition::test_support::create_refreshing_capability_port_for_test(
+                parts,
+            )
             .await?;
         Ok(Arc::new(RecordingDelegatingCapabilityPort {
             inner: port,
@@ -1726,7 +1737,7 @@ impl HostRuntimeCapabilityHarness {
     }
 
     /// The capability-execution `UserId` for one run. Mirrors production
-    /// `local_dev_visible_capability_request`'s owner→actor→fallback resolution
+    /// `visible_capability_request`'s owner→actor→fallback resolution
     /// (`runtime/local_dev.rs`): when [`scope_capability_by_run_owner`] is set,
     /// prefer the run scope's explicit owner, then the run actor, then fall back
     /// to the fixed harness `user_id`. Without the flag, always the fixed
@@ -1766,7 +1777,7 @@ impl HostRuntimeCapabilityHarness {
     }
 
     /// Builds the composition-facing `additional_provider_trust` map this
-    /// harness forwards to `RefreshingLocalDevCapabilityPortTestParts` on
+    /// harness forwards to `RefreshingCapabilityPortTestParts` on
     /// every capability-port refresh (`create_recording_capability_port`
     /// calls this and passes the result straight through).
     ///

@@ -122,4 +122,4 @@ async def test_reborn_legacy_command_palette_filters_and_navigates(reborn_v2_pag
     await expect(palette.get_by_role("button", name="Go to Extensions")).to_have_count(0)
 
     await search.press("Enter")
-    await expect(page).to_have_url(re.compile(r".*/v2/settings.*"), timeout=10000)
+    await expect(page).to_have_url(re.compile(r".*/settings.*"), timeout=10000)

@@ -1468,6 +1468,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3d52eff69cd5e647efe296129160853a42795992097e8af39800e1060caeea9b"
 
 [[package]]
+name = "convert_case"
+version = "0.10.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "633458d4ef8c78b72454de2d54fd6ab2e60f9e02be22f3c6104cdc8a4e0fceb9"
+dependencies = [
+ "unicode-segmentation",
+]
+
+[[package]]
 name = "core-foundation"
 version = "0.9.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1748,6 +1757,33 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d0a5c400df2834b80a4c3327b3aad3a4c4cd4de0629063962b03235697506a28"
 
 [[package]]
+name = "crossterm"
+version = "0.29.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d8b9f2e4c67f833b660cdb0a3523065869fb35570177239812ed4c905aeff87b"
+dependencies = [
+ "bitflags 2.13.0",
+ "crossterm_winapi",
+ "derive_more",
+ "document-features",
+ "mio",
+ "parking_lot",
+ "rustix 1.1.4",
+ "signal-hook",
+ "signal-hook-mio",
+ "winapi",
+]
+
+[[package]]
+name = "crossterm_winapi"
+version = "0.9.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "acdd7c62a3665c7f6830a51635d9ac9b23ed385797f70a83bb8bafe9c572ab2b"
+dependencies = [
+ "winapi",
+]
+
+[[package]]
 name = "crunchy"
 version = "0.2.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1951,6 +1987,28 @@ dependencies = [
 ]
 
 [[package]]
+name = "derive_more"
+version = "2.1.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d751e9e49156b02b44f9c1815bcb94b984cdcc4396ecc32521c739452808b134"
+dependencies = [
+ "derive_more-impl",
+]
+
+[[package]]
+name = "derive_more-impl"
+version = "2.1.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "799a97264921d8623a957f6c3b9011f3b5492f557bbb7a5a19b7fa6d06ba8dcb"
+dependencies = [
+ "convert_case",
+ "proc-macro2",
+ "quote",
+ "rustc_version",
+ "syn 2.0.117",
+]
+
+[[package]]
 name = "diff"
 version = "0.1.13"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2042,6 +2100,15 @@ dependencies = [
  "base64 0.22.1",
  "serde",
  "serde_json",
+]
+
+[[package]]
+name = "document-features"
+version = "0.2.12"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d4b8a88685455ed29a21542a33abd9cb6510b6b129abadabdcef0f4c55bc8f61"
+dependencies = [
+ "litrs",
 ]
 
 [[package]]
@@ -3282,6 +3349,7 @@ dependencies = [
  "async-trait",
  "base64 0.22.1",
  "chrono",
+ "ironclaw_auth",
  "ironclaw_common",
  "ironclaw_host_api",
  "secrecy",
@@ -3329,10 +3397,62 @@ dependencies = [
  "ironclaw_run_state",
  "ironclaw_safety",
  "ironclaw_trust",
+ "ironclaw_turns",
+ "serde",
  "serde_json",
  "thiserror 2.0.18",
  "tokio",
  "tracing",
+]
+
+[[package]]
+name = "ironclaw_channel_delivery"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "chrono",
+ "ironclaw_auth",
+ "ironclaw_channel_host",
+ "ironclaw_conversations",
+ "ironclaw_filesystem",
+ "ironclaw_host_api",
+ "ironclaw_outbound",
+ "ironclaw_product_adapters",
+ "ironclaw_product_workflow",
+ "ironclaw_run_state",
+ "ironclaw_threads",
+ "ironclaw_triggers",
+ "ironclaw_turns",
+ "ironclaw_wasm_product_adapters",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "ironclaw_channel_host"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "axum 0.8.9",
+ "ironclaw_auth",
+ "ironclaw_conversations",
+ "ironclaw_extensions",
+ "ironclaw_filesystem",
+ "ironclaw_host_api",
+ "ironclaw_host_runtime",
+ "ironclaw_outbound",
+ "ironclaw_product_adapter_registry",
+ "ironclaw_product_adapters",
+ "ironclaw_product_workflow",
+ "ironclaw_threads",
+ "ironclaw_turns",
+ "ironclaw_wasm_product_adapters",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tokio",
 ]
 
 [[package]]
@@ -3344,6 +3464,8 @@ dependencies = [
  "dirs",
  "hex",
  "rand 0.10.1",
+ "rust_decimal",
+ "rust_decimal_macros",
  "serde",
  "serde_json",
  "sha2 0.11.0",
@@ -3716,6 +3838,7 @@ dependencies = [
  "ironclaw_observability",
  "ironclaw_process_sandbox",
  "ironclaw_resources",
+ "ironclaw_run_state",
  "ironclaw_safety",
  "ironclaw_skills",
  "ironclaw_threads",
@@ -3988,13 +4111,18 @@ dependencies = [
  "chrono",
  "clap",
  "clap_complete",
+ "crossterm",
  "dotenvy",
  "hex",
  "ironclaw_common",
+ "ironclaw_host_api",
  "ironclaw_reborn_composition",
  "ironclaw_reborn_config",
  "ironclaw_reborn_traces",
- "ironclaw_reborn_webui_ingress",
+ "ironclaw_secrets",
+ "ironclaw_webui",
+ "libc",
+ "rand 0.10.1",
  "reqwest 0.12.28",
  "secrecy",
  "semver",
@@ -4002,6 +4130,7 @@ dependencies = [
  "serde_json",
  "sha2 0.11.0",
  "tempfile",
+ "thiserror 2.0.18",
  "tokio",
  "tokio-util",
  "tracing",
@@ -4029,6 +4158,8 @@ dependencies = [
  "ironclaw_auth",
  "ironclaw_authorization",
  "ironclaw_capabilities",
+ "ironclaw_channel_delivery",
+ "ironclaw_channel_host",
  "ironclaw_common",
  "ironclaw_conversations",
  "ironclaw_event_projections",
@@ -4060,7 +4191,6 @@ dependencies = [
  "ironclaw_reborn_identity",
  "ironclaw_reborn_openai_compat",
  "ironclaw_reborn_traces",
- "ironclaw_reborn_webui_ingress",
  "ironclaw_resources",
  "ironclaw_run_state",
  "ironclaw_runner",
@@ -4069,12 +4199,13 @@ dependencies = [
  "ironclaw_secrets",
  "ironclaw_skills",
  "ironclaw_slack_v2_adapter",
+ "ironclaw_telegram_extension",
  "ironclaw_threads",
  "ironclaw_triggers",
  "ironclaw_trust",
  "ironclaw_turns",
  "ironclaw_wasm_product_adapters",
- "ironclaw_webui_v2",
+ "ironclaw_webui",
  "libc",
  "libsql",
  "lru",
@@ -4207,7 +4338,7 @@ dependencies = [
  "ironclaw_trust",
  "ironclaw_turns",
  "ironclaw_wasm",
- "ironclaw_webui_v2",
+ "ironclaw_webui",
  "libsql",
  "pretty_assertions",
  "regex",
@@ -4225,6 +4356,7 @@ dependencies = [
  "tokio-test",
  "toml 0.9.12+spec-1.1.0",
  "tower 0.5.3",
+ "tracing-subscriber",
  "tracing-test",
  "url",
  "zip",
@@ -4266,6 +4398,7 @@ dependencies = [
  "http 1.4.2",
  "http-body-util",
  "ironclaw_attachments",
+ "ironclaw_common",
  "ironclaw_filesystem",
  "ironclaw_host_api",
  "ironclaw_product_adapters",
@@ -4310,43 +4443,6 @@ dependencies = [
  "thiserror 2.0.18",
  "tokio",
  "tracing",
- "uuid",
-]
-
-[[package]]
-name = "ironclaw_reborn_webui_ingress"
-version = "0.1.0"
-dependencies = [
- "async-trait",
- "axum 0.8.9",
- "base64 0.22.1",
- "chrono",
- "hex",
- "hmac 0.13.0",
- "http 1.4.2",
- "http-body-util",
- "ironclaw_host_api",
- "ironclaw_product_workflow",
- "ironclaw_reborn_composition",
- "ironclaw_threads",
- "ironclaw_turns",
- "jsonwebtoken",
- "parking_lot",
- "rand 0.10.1",
- "rand_core 0.6.4",
- "reqwest 0.12.28",
- "rsa",
- "secrecy",
- "serde",
- "serde_json",
- "sha2 0.11.0",
- "subtle",
- "thiserror 2.0.18",
- "tokio",
- "tower 0.5.3",
- "tracing",
- "url",
- "urlencoding",
  "uuid",
 ]
 
@@ -4401,6 +4497,7 @@ dependencies = [
  "futures-util",
  "ironclaw_agent_loop",
  "ironclaw_authorization",
+ "ironclaw_common",
  "ironclaw_event_projections",
  "ironclaw_events",
  "ironclaw_extensions",
@@ -4571,6 +4668,49 @@ dependencies = [
 ]
 
 [[package]]
+name = "ironclaw_telegram_extension"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "axum 0.8.9",
+ "chrono",
+ "http-body-util",
+ "ironclaw_auth",
+ "ironclaw_authorization",
+ "ironclaw_channel_delivery",
+ "ironclaw_channel_host",
+ "ironclaw_common",
+ "ironclaw_conversations",
+ "ironclaw_extensions",
+ "ironclaw_filesystem",
+ "ironclaw_host_api",
+ "ironclaw_host_runtime",
+ "ironclaw_network",
+ "ironclaw_outbound",
+ "ironclaw_processes",
+ "ironclaw_product_adapters",
+ "ironclaw_product_workflow",
+ "ironclaw_resources",
+ "ironclaw_run_state",
+ "ironclaw_safety",
+ "ironclaw_secrets",
+ "ironclaw_telegram_v2_adapter",
+ "ironclaw_threads",
+ "ironclaw_triggers",
+ "ironclaw_turns",
+ "ironclaw_wasm_product_adapters",
+ "rand 0.9.4",
+ "secrecy",
+ "serde",
+ "serde_json",
+ "sha2 0.11.0",
+ "thiserror 2.0.18",
+ "tokio",
+ "tower 0.5.3",
+ "tracing",
+]
+
+[[package]]
 name = "ironclaw_telegram_v2_adapter"
 version = "0.1.0"
 dependencies = [
@@ -4726,29 +4866,49 @@ dependencies = [
 ]
 
 [[package]]
-name = "ironclaw_webui_v2"
+name = "ironclaw_webui"
 version = "0.1.0"
 dependencies = [
  "async-stream",
  "async-trait",
  "axum 0.8.9",
+ "base64 0.22.1",
  "chrono",
  "futures",
+ "hex",
+ "hmac 0.13.0",
  "http 1.4.2",
  "http-body-util",
  "ironclaw_host_api",
+ "ironclaw_loop_host",
  "ironclaw_product_adapters",
  "ironclaw_product_workflow",
+ "ironclaw_reborn_composition",
+ "ironclaw_reborn_openai_compat",
  "ironclaw_threads",
  "ironclaw_turns",
- "ironclaw_webui_v2",
+ "jsonwebtoken",
+ "lru",
+ "parking_lot",
  "rand 0.10.1",
+ "rand_core 0.6.4",
+ "reqwest 0.12.28",
+ "rsa",
+ "secrecy",
  "serde",
  "serde_json",
+ "sha2 0.11.0",
+ "subtle",
+ "tempfile",
+ "thiserror 2.0.18",
  "tokio",
  "tokio-tungstenite 0.29.0",
  "tower 0.5.3",
+ "tower-http 0.6.11",
  "tracing",
+ "url",
+ "urlencoding",
+ "uuid",
 ]
 
 [[package]]
@@ -5150,6 +5310,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "92daf443525c4cce67b150400bc2316076100ce0b3686209eb8cf3c31612e6f0"
 
 [[package]]
+name = "litrs"
+version = "1.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "11d3d7f243d5c5a8b9bb5d6dd2b1602c0cb0b9db1621bafc7ed66e35ff9fe092"
+
+[[package]]
 name = "lock_api"
 version = "0.4.14"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5328,6 +5494,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "50b7e5b27aa02a74bac8c3f23f448f8d87ff11f92d3aac1a6ed369ee08cc56c1"
 dependencies = [
  "libc",
+ "log",
  "wasi 0.11.1+wasi-snapshot-preview1",
  "windows-sys 0.61.2",
 ]
@@ -7226,6 +7393,27 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0fda2ff0d084019ba4d7c6f371c95d8fd75ce3524c3cb8fb653a3023f6323e64"
 
 [[package]]
+name = "signal-hook"
+version = "0.3.18"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d881a16cf4426aa584979d30bd82cb33429027e42122b169753d6ef1085ed6e2"
+dependencies = [
+ "libc",
+ "signal-hook-registry",
+]
+
+[[package]]
+name = "signal-hook-mio"
+version = "0.2.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b75a19a7a740b25bc7944bdee6172368f988763b744e3d4dfe753f6b4ece40cc"
+dependencies = [
+ "libc",
+ "mio",
+ "signal-hook",
+]
+
+[[package]]
 name = "signal-hook-registry"
 version = "1.4.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -8310,6 +8498,12 @@ name = "unicode-properties"
 version = "0.1.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7df058c713841ad818f1dc5d3fd88063241cc61f49f5fbea4b951e8cf5a8d71d"
+
+[[package]]
+name = "unicode-segmentation"
+version = "1.13.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9629274872b2bfaf8d66f5f15725007f635594914870f65218920345aa11aa8c"
 
 [[package]]
 name = "unicode-width"

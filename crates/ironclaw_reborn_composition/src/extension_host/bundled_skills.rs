@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use ironclaw_filesystem::{
-    CasExpectation, Entry, FileType, FilesystemError, LocalFilesystem, RootFilesystem,
+    CasExpectation, DiskFilesystem, Entry, FileType, FilesystemError, RootFilesystem,
 };
 use ironclaw_host_api::{HostPath, VirtualPath};
 use ironclaw_loop_host::SkillFilePath;
@@ -125,9 +125,9 @@ fn embedded_reborn_skill_bundles() -> Result<Vec<EmbeddedRebornSkillBundle>, Reb
 
 fn local_dev_storage_filesystem(
     local_dev_storage_root: &Path,
-) -> Result<LocalFilesystem, RebornBuildError> {
+) -> Result<DiskFilesystem, RebornBuildError> {
     let storage_root = prepare_local_dev_storage_root(local_dev_storage_root)?;
-    let mut filesystem = LocalFilesystem::new();
+    let mut filesystem = DiskFilesystem::new();
     filesystem
         .mount_local(
             VirtualPath::new("/projects")?,

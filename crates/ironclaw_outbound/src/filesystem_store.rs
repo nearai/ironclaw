@@ -1,3 +1,4 @@
+// arch-exempt: large_file, mechanical LocalFilesystem->DiskFilesystem Bucket-2 rename (arch-simplification §4.4), no logic change, plan #6168
 //! Filesystem-backed [`OutboundStateStore`] implementation.
 //!
 //! Persists outbound metadata under a fixed [`ScopedPath`] tree rooted at the
@@ -171,7 +172,7 @@ where
     /// Write `entry` with the given CAS expectation, falling back to a
     /// metadata-stripped opaque write + `CasExpectation::Any` for backends
     /// that reject record-shape entries or non-`Any` CAS (e.g.
-    /// `LocalFilesystem`). Mirrors
+    /// `DiskFilesystem`). Mirrors
     /// [`ironclaw_processes::filesystem_store::put_with_byte_fallback`] so
     /// every byte-only mount in the workspace stays writeable through the
     /// new filesystem stores.
@@ -358,12 +359,12 @@ where
     /// same path will overwrite them.
     ///
     /// Note on `put_with_byte_fallback`: when the underlying mount is a
-    /// `LocalFilesystem`, the fallback leg strips the CAS expectation and
+    /// `DiskFilesystem`, the fallback leg strips the CAS expectation and
     /// retries with `CasExpectation::Any`. That means the versioned-CAS
     /// guarantee is not available for local-filesystem mounts; concurrent
     /// writes on that backend still risk last-write-wins. This is accepted
     /// because (a) local-filesystem mounts are dev/test only and (b) the
-    /// `LocalFilesystem` has no version-tracking sidecar yet. The fallback
+    /// `DiskFilesystem` has no version-tracking sidecar yet. The fallback
     /// is kept to avoid breaking those mounts entirely; production
     /// (libSQL/Postgres) backends honour the CAS expectation.
     async fn retry_conv_idx(

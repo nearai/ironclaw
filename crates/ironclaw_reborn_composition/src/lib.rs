@@ -29,16 +29,16 @@ mod admin_user_directory;
 mod approval_test_support;
 mod automation;
 mod blocked_auth_resume;
+mod builtin_capability_policy;
+mod deployment;
 mod error;
 mod extension_host;
 mod factory;
-mod failure_lane;
-mod failure_summary;
+mod google_oauth_secret_store;
 mod input;
 mod lifecycle_auth_continuation;
 mod llm_admin;
 mod local_dev_authorization;
-mod local_dev_capability_policy;
 mod local_dev_mounts;
 mod local_runtime_profile;
 mod observability;
@@ -49,15 +49,13 @@ mod production_runtime_policy;
 mod profile_approval_authorization;
 mod projection;
 mod slack;
-pub use product_auth::api::auth_prompt::{
+mod telegram;
+pub use ironclaw_product_workflow::{
     AuthChallengeProvider, AuthChallengeView, BlockedAuthFlowCanceller,
 };
-#[cfg(feature = "slack-v2-host-beta")]
+#[cfg(any(feature = "slack-v2-host-beta", feature = "telegram-v2-host-beta"))]
 mod delivered_gate_routing;
-#[cfg(feature = "slack-v2-host-beta")]
-mod host_ingress;
 mod readiness;
-mod retry_disposition;
 mod root;
 mod runtime;
 mod runtime_input;
@@ -82,13 +80,20 @@ pub use extension_host::gsuite::{
 pub use extension_host::skill_listing::{RebornSkillListError, list_reborn_local_skills};
 #[cfg(feature = "test-support")]
 pub use factory::AttachmentTestSupport;
+#[cfg(any(feature = "libsql", feature = "postgres"))]
+pub use factory::LOCAL_DEV_SECRETS_MASTER_KEY_PATH;
 #[cfg(feature = "test-support")]
-pub use factory::RebornLocalDevApprovalTestParts;
+pub use factory::RebornApprovalTestParts;
 #[cfg(feature = "migration-support")]
 pub use factory::extension_installation_store_for_migration;
+#[cfg(any(feature = "libsql", feature = "test-support"))]
+pub use factory::local_dev_db_path;
+#[cfg(feature = "libsql")]
+pub use factory::open_local_dev_secret_store;
+#[cfg(any(feature = "libsql", feature = "postgres"))]
+pub use factory::{KeychainMasterKeyOutcome, provision_local_dev_keychain_master_key};
 pub use factory::{RebornServices, build_reborn_services, builtin_first_party_trust_policy};
-pub use failure_lane::{ALL_RUN_FAILURE_CATEGORIES, FailureLane, failure_lane};
-pub use failure_summary::reborn_failure_summary_for_category;
+pub use google_oauth_secret_store::{GoogleOauthSecretStore, GoogleOauthSecretStoreError};
 pub use input::{OAuthClientConfig, RebornBuildInput, RebornRuntimeProcessBinding};
 #[cfg(feature = "webui-v2-beta")]
 pub use ironclaw_auth::GoogleOAuthRouteConfig;
@@ -107,6 +112,12 @@ pub use ironclaw_product_workflow::{
     LifecycleProductResponse, LifecycleSearchExtensionSummary,
 };
 pub use ironclaw_runner::runtime::DEFAULT_TURN_RUNNER_WORKER_COUNT;
+// Re-exported for `ironclaw_reborn_cli` (`runtime/mod.rs` turn-failure display):
+// the CLI consumes composition as its facade and must not grow a direct
+// `ironclaw_runner` edge for one summary helper. All other run-failure
+// classifier items moved to `ironclaw_runner::{failure_lane, failure_summary,
+// retry_disposition}` with consumers repointed (no path-preservation shims).
+pub use ironclaw_runner::failure_summary::reborn_failure_summary_for_category;
 #[cfg(any(feature = "libsql", feature = "postgres"))]
 pub use ironclaw_runtime_policy::{
     ResolveRequest as RuntimePolicyResolveRequest, resolve as resolve_runtime_policy,
@@ -120,8 +131,8 @@ pub use ironclaw_turns::TurnStatus;
 #[cfg(feature = "root-llm-provider")]
 pub use llm_admin::llm_catalog::{
     ProviderCatalogValidationError, RebornLlmCatalogError, resolve_against_registry,
-    resolve_llm_selection_against_catalog, resolve_reborn_runtime_llm,
-    validate_reborn_provider_catalog_contents,
+    resolve_llm_selection_against_catalog, resolve_llm_selection_allow_missing_key,
+    resolve_reborn_runtime_llm, validate_reborn_provider_catalog_contents,
 };
 #[cfg(feature = "root-llm-provider")]
 pub use llm_admin::llm_config_service::{LlmReloadTrigger, RebornLlmConfigService};
@@ -132,8 +143,16 @@ pub use llm_admin::nearai_mcp::{
 };
 #[cfg(feature = "openai-compat-beta")]
 pub use llm_admin::openai_compat_serve::build_openai_compat_route_mount;
+// Re-exported for the host-owned `ironclaw_webui::webui_v2_app`
+// (hoisted up from this crate): its bearer-auth middleware mints tenant-scoped
+// verified-bearer evidence for protected OpenAI-compatible mounts. Ingress must
+// not depend on `ironclaw_product_adapters` directly (architecture boundary), so
+// it reaches this helper through composition's facade.
+#[cfg(feature = "openai-compat-beta")]
+pub use ironclaw_product_adapters::mark_bearer_token_verified_for_tenant;
 #[cfg(feature = "root-llm-provider")]
 pub use llm_admin::provider_admin::{
+    DetectedEnvLlm, EXAMPLE_OVERLAY_PROVIDER_ID, ProviderMenuEntry, ProviderProbeOutcome,
     RebornModelRoutesState, RebornProviderAdmin, RebornProviderAdminError, RebornProviderInfo,
     RebornProviderList, RebornProviderMetadata, RebornProviderSelection, RebornProviderStatus,
     RebornProviderWriteOutcome, RebornV1State,
@@ -143,9 +162,9 @@ pub use llm_admin::provider_admin_product_command::RebornProviderAdminProductCom
 #[cfg(feature = "root-llm-provider")]
 pub use llm_admin::provider_repo::{ProviderRepo, ProviderRepoError};
 pub use local_runtime_profile::{
-    RebornLocalRuntimeProfileError, RebornLocalRuntimeProfileOptions,
-    hosted_single_tenant_runtime_policy, hosted_single_tenant_volume_runtime_policy,
-    local_dev_runtime_policy, local_dev_yolo_runtime_policy, local_runtime_build_input,
+    RebornRuntimeProfileError, RebornRuntimeProfileOptions, hosted_single_tenant_runtime_policy,
+    hosted_single_tenant_volume_runtime_policy, local_dev_runtime_policy,
+    local_dev_yolo_runtime_policy, local_runtime_build_input,
     local_runtime_build_input_with_options,
 };
 pub use observability::budget::build_default_budget_accountant;
@@ -161,15 +180,31 @@ pub use observability::operator_logs::{
     OperatorLogLayer, capture_tracing_log, operator_log_buffer,
 };
 pub use observability::trajectory_observer::RebornTrajectoryObserver;
+// The continuation-dispatch port lives in ironclaw_channel_host so channel
+// host crates can hold it without a composition dependency; composition's
+// facade re-exports it for its own downstream consumers (root test suites,
+// the CLI) alongside the product-auth service surface that produces it.
+pub use ironclaw_channel_host::auth_continuation::RebornAuthContinuationDispatcher;
+#[cfg(feature = "slack-v2-host-beta")]
+pub use ironclaw_channel_host::identity::{
+    RebornUserIdentityLookup, RebornUserIdentityLookupError,
+};
 pub use product_auth::api::auth::{
-    RebornAuthContinuationDispatcher, RebornAuthProductError, RebornCredentialLifecycleError,
-    RebornManualTokenChallenge, RebornManualTokenError, RebornManualTokenSetupRequest,
-    RebornManualTokenSubmitRequest, RebornManualTokenSubmitResponse, RebornOAuthCallbackError,
-    RebornOAuthCallbackOutcome, RebornOAuthCallbackRequest, RebornOAuthCallbackResponse,
-    RebornProductAuthServicePorts, RebornProductAuthServices,
+    RebornAuthProductError, RebornCredentialLifecycleError, RebornManualTokenChallenge,
+    RebornManualTokenError, RebornManualTokenSetupRequest, RebornManualTokenSubmitRequest,
+    RebornManualTokenSubmitResponse, RebornOAuthCallbackError, RebornOAuthCallbackOutcome,
+    RebornOAuthCallbackRequest, RebornOAuthCallbackResponse, RebornProductAuthServicePorts,
+    RebornProductAuthServices,
 };
 #[cfg(feature = "slack-v2-host-beta")]
 pub use product_auth::serve::SlackPersonalOAuthBindingConfig;
+// Product-auth WebUI route-mount builders, exposed so the host-owned
+// `ironclaw_webui::webui_v2_app` (moved up from this crate) can
+// compose the Reborn-native product-auth surface into the WebChat v2 router.
+#[cfg(feature = "webui-v2-beta")]
+pub use product_auth::serve::{
+    ProductAuthRouteMount, ProductAuthRouteState, product_auth_route_mount,
+};
 #[cfg(any(feature = "libsql", feature = "postgres"))]
 pub use production_runtime_policy::RebornProductionRuntimePolicy;
 pub use readiness::{
@@ -177,7 +212,6 @@ pub use readiness::{
     RebornReadinessDiagnosticComponent, RebornReadinessDiagnosticReason,
     RebornReadinessDiagnosticStatus, RebornReadinessState, RebornWorkerReadiness,
 };
-pub use retry_disposition::{RetryDisposition, retry_disposition};
 pub use root::product_live_adapters::{
     ProductLiveCapabilityAuthorityResolver, ProductLiveCapabilityIo, ProductLiveModelRouteSettings,
     ProductLivePlannedRuntimeAdapterConfig, ProductLivePlannedRuntimeAdapterError,
@@ -202,26 +236,35 @@ pub use runtime_input::{
 pub use runtime_input::{RebornProviderFactory, ResolvedRebornLlm};
 #[cfg(feature = "slack-v2-host-beta")]
 pub use slack::slack_actor_identity::{
-    RebornUserIdentityLookup, RebornUserIdentityLookupError, SlackUserIdentityActorResolver,
-    slack_user_identity_provider_user_id,
+    SlackUserIdentityActorResolver, slack_user_identity_provider_user_id,
 };
 #[cfg(feature = "slack-v2-host-beta")]
 pub use slack::slack_channel_routes::{
-    SlackChannelRouteAdminRouteConfig, WEBUI_V2_CHANNELS_SLACK_ALLOWED_PATH,
-    WEBUI_V2_CHANNELS_SLACK_ROUTES_PATH, WEBUI_V2_CHANNELS_SLACK_SUBJECTS_PATH,
+    SlackChannelRouteAdminRouteConfig, SlackChannelRouteAdminRouteMount,
+    WEBUI_V2_CHANNELS_SLACK_ALLOWED_PATH, WEBUI_V2_CHANNELS_SLACK_ROUTES_PATH,
+    WEBUI_V2_CHANNELS_SLACK_SUBJECTS_PATH, slack_channel_route_admin_route_mount,
 };
 #[cfg(feature = "slack-v2-host-beta")]
 pub use slack::slack_connectable_channel::{
     SlackOperatorRouteVisibility, build_webui_services_with_slack_host_beta_mounts,
 };
-#[cfg(feature = "slack-v2-host-beta")]
-pub use slack::slack_delivery::{
+#[cfg(all(feature = "slack-v2-host-beta", feature = "telegram-v2-host-beta"))]
+pub use webui::facade::build_webui_services_with_slack_and_telegram_host_mounts;
+// Exported under either channel-host feature: the delivery observer and the
+// triggered-run driver are adapter-generic machinery in
+// `ironclaw_channel_delivery`; each channel host injects its own
+// adapter/egress/sink plus a `ChannelDeliveryProtocol`.
+#[cfg(any(feature = "slack-v2-host-beta", feature = "telegram-v2-host-beta"))]
+pub use ironclaw_channel_delivery::{
+    FinalReplyDeliveryObserver, FinalReplyDeliveryServices, FinalReplyDeliverySettings,
+};
+#[cfg(any(feature = "slack-v2-host-beta", feature = "telegram-v2-host-beta"))]
+pub use ironclaw_channel_delivery::{
     NoopPostSubmitDeliveryHook, PostSubmitDeliveryHook, TriggeredRunDeliveryDriver,
 };
-#[cfg(feature = "slack-v2-host-beta")]
-pub use slack::slack_delivery::{
-    SlackFinalReplyDeliveryObserver, SlackFinalReplyDeliveryServices,
-    SlackFinalReplyDeliverySettings,
+#[cfg(feature = "telegram-v2-host-beta")]
+pub use ironclaw_telegram_extension::channel_routes::{
+    WEBUI_V2_CHANNELS_TELEGRAM_PAIRING_PATH, WEBUI_V2_CHANNELS_TELEGRAM_SETUP_PATH,
 };
 #[cfg(feature = "slack-v2-host-beta")]
 pub use slack::slack_egress::{
@@ -246,15 +289,22 @@ pub use slack::slack_serve::{
 };
 #[cfg(feature = "slack-v2-host-beta")]
 pub use slack::slack_setup::SlackPersonalSetupServiceSlot;
+#[cfg(feature = "telegram-v2-host-beta")]
+pub use telegram::telegram_host_beta::{
+    TelegramHostBuildError, TelegramHostMounts, TelegramHostRuntimeConfig,
+    build_telegram_host_runtime_mounts,
+};
 pub use web_access::register_bundled_web_access_first_party_handlers;
+#[cfg(feature = "telegram-v2-host-beta")]
+pub use webui::facade::build_webui_services_with_telegram_host_mounts;
 pub use webui::facade::{RebornWebuiBundle, build_webui_services};
+// Host-supplied route-mount vocabulary shared with composition's own route
+// builders (nearai login, OpenAI-compat) and the host-owned gateway assembly
+// in `ironclaw_webui`. The `WebuiServeConfig` / `webui_v2_app`
+// / `WebuiAuthenticator` surface moved up into that ingress crate.
 #[cfg(feature = "webui-v2-beta")]
-pub use webui::webui_rate_limit::RateLimitConfigError;
-#[cfg(feature = "webui-v2-beta")]
-pub use webui::webui_serve::{
+pub use webui::route_mounts::{
     ProtectedRouteMount, PublicRouteDrain, PublicRouteDrains, PublicRouteMount,
-    WebuiAuthentication, WebuiAuthenticator, WebuiServeConfig, WebuiServeConfigError,
-    WebuiServeError, WebuiV2App, webui_v2_app, webui_v2_app_with_lifecycle,
 };
 
 /// Re-exported identity vocabulary host binaries need to construct
@@ -568,10 +618,8 @@ use ironclaw_authorization::CapabilityLeaseError;
 use ironclaw_filesystem::LibSqlRootFilesystem;
 #[cfg(feature = "postgres")]
 use ironclaw_filesystem::PostgresRootFilesystem;
-#[cfg(any(feature = "libsql", feature = "postgres"))]
 use ironclaw_filesystem::{RootFilesystem, ScopedFilesystem};
 use ironclaw_host_api::ProcessBackendKind;
-#[cfg(any(feature = "libsql", feature = "postgres"))]
 use ironclaw_host_api::{
     MountAlias, MountGrant, MountPermissions, MountView, ResourceScope, SYSTEM_RESERVED_ID,
     VirtualPath,
@@ -618,7 +666,6 @@ pub type PostgresProductionHostRuntimeServices = HostRuntimeServices<
 /// `/tenants/<tenant>/users/<user>/<alias>` for the caller's scope, so
 /// two tenants sharing one underlying [`RootFilesystem`] cannot collide
 /// on identically-shaped paths.
-#[cfg(any(feature = "libsql", feature = "postgres"))]
 const PER_USER_ALIASES: &[&str] = &[
     "/processes",
     "/secrets",
@@ -626,6 +673,7 @@ const PER_USER_ALIASES: &[&str] = &[
     "/outbound",
     "/run-state",
     "/approvals",
+    "/gate-records",
     "/threads",
     "/conversations",
     "/turns",
@@ -651,7 +699,6 @@ const PER_USER_ALIASES: &[&str] = &[
 /// `/tenants/__system__/users/__system__/<alias>`. Production code uses
 /// it for process-global records whose paths already encode per-tenant
 /// identity (event-log stream keys, conversation singleton state).
-#[cfg(any(feature = "libsql", feature = "postgres"))]
 pub fn invocation_mount_view(
     scope: &ResourceScope,
 ) -> Result<MountView, ironclaw_host_api::HostApiError> {
@@ -661,7 +708,6 @@ pub fn invocation_mount_view(
     )
 }
 
-#[cfg(any(feature = "libsql", feature = "postgres"))]
 fn resource_scope_path_segment(value: &str) -> &str {
     if value == SYSTEM_RESERVED_ID {
         "__system__"
@@ -670,7 +716,6 @@ fn resource_scope_path_segment(value: &str) -> &str {
     }
 }
 
-#[cfg(any(feature = "libsql", feature = "postgres"))]
 fn invocation_mount_view_for_segments(
     tenant_id: &str,
     user_id: &str,
@@ -766,11 +811,60 @@ pub(crate) fn slack_host_state_mount_view(
     ])
 }
 
+#[cfg(all(
+    any(feature = "libsql", feature = "postgres"),
+    feature = "telegram-v2-host-beta"
+))]
+pub(crate) fn telegram_host_state_mount_view(
+    scope: &ResourceScope,
+) -> Result<MountView, ironclaw_host_api::HostApiError> {
+    let tenant_id = resource_scope_path_segment(scope.tenant_id.as_str());
+    MountView::new(vec![
+        MountGrant::new(
+            MountAlias::new("/tenant-shared/telegram-setup")?,
+            VirtualPath::new(format!("/tenants/{tenant_id}/shared/telegram-setup"))?,
+            MountPermissions::read_write_list_delete(),
+        ),
+        MountGrant::new(
+            MountAlias::new("/tenant-shared/telegram-pairing")?,
+            VirtualPath::new(format!("/tenants/{tenant_id}/shared/telegram-pairing"))?,
+            MountPermissions::read_write_list_delete(),
+        ),
+        MountGrant::new(
+            MountAlias::new("/tenant-shared/telegram-binding")?,
+            VirtualPath::new(format!("/tenants/{tenant_id}/shared/telegram-binding"))?,
+            MountPermissions::read_write_list_delete(),
+        ),
+        MountGrant::new(
+            MountAlias::new("/tenant-shared/telegram-dm-targets")?,
+            VirtualPath::new(format!("/tenants/{tenant_id}/shared/telegram-dm-targets"))?,
+            MountPermissions::read_write_list_delete(),
+        ),
+        MountGrant::new(
+            MountAlias::new("/engine/product_workflow/idempotency")?,
+            VirtualPath::new(format!(
+                "/tenants/{tenant_id}/shared/telegram-product-workflow/idempotency"
+            ))?,
+            MountPermissions::read_write_list_delete(),
+        ),
+        // Durable Telegram conversation-binding store: RebornFilesystemConversationServices
+        // persists `/conversations/state.json`. Without this alias the ScopedFilesystem
+        // cannot resolve that path, the conversation store fails to open, and every
+        // inbound Telegram update (e.g. a DM to the bot) is dropped with a 503.
+        MountGrant::new(
+            MountAlias::new("/conversations")?,
+            VirtualPath::new(format!(
+                "/tenants/{tenant_id}/shared/telegram-conversations"
+            ))?,
+            MountPermissions::read_write_list_delete(),
+        ),
+    ])
+}
+
 /// Wrap `root` in a tenant-aware [`ScopedFilesystem`] whose resolver is
 /// [`invocation_mount_view`]. The returned filesystem is the single
 /// production handle — every consumer-store call routes per-scope
 /// through this one instance.
-#[cfg(any(feature = "libsql", feature = "postgres"))]
 pub fn wrap_scoped<F>(root: Arc<F>) -> Arc<ScopedFilesystem<F>>
 where
     F: RootFilesystem,
@@ -1065,6 +1159,66 @@ mod mount_view_tests {
         );
     }
 
+    #[cfg(feature = "telegram-v2-host-beta")]
+    #[test]
+    fn telegram_host_state_mount_view_grants_delete_only_to_telegram_state_roots() {
+        let scope = sample_scope();
+        let view = telegram_host_state_mount_view(&scope).unwrap();
+        for (alias, path, target) in [
+            (
+                "/tenant-shared/telegram-setup",
+                "/tenant-shared/telegram-setup/installation.json",
+                "telegram-setup/installation.json",
+            ),
+            (
+                "/tenant-shared/telegram-pairing",
+                "/tenant-shared/telegram-pairing/codes/code.json",
+                "telegram-pairing/codes/code.json",
+            ),
+            (
+                "/tenant-shared/telegram-binding",
+                "/tenant-shared/telegram-binding/identities/identity.json",
+                "telegram-binding/identities/identity.json",
+            ),
+            (
+                "/tenant-shared/telegram-dm-targets",
+                "/tenant-shared/telegram-dm-targets/target.json",
+                "telegram-dm-targets/target.json",
+            ),
+            (
+                "/engine/product_workflow/idempotency",
+                "/engine/product_workflow/idempotency/actions/action.json",
+                "telegram-product-workflow/idempotency/actions/action.json",
+            ),
+            // Regression: the durable conversation-binding store persists
+            // `/conversations/state.json`; without this alias every inbound Telegram
+            // update (e.g. a DM to the bot) fails to open the store and is dropped.
+            (
+                "/conversations",
+                "/conversations/state.json",
+                "telegram-conversations/state.json",
+            ),
+        ] {
+            let (resolved, grant) = view
+                .resolve_with_grant(&ScopedPath::new(path).unwrap())
+                .unwrap();
+            assert_eq!(
+                resolved.as_str(),
+                &format!("/tenants/{}/shared/{target}", scope.tenant_id.as_str())
+            );
+            assert_eq!(grant.alias.as_str(), alias);
+            assert_eq!(
+                grant.permissions,
+                MountPermissions::read_write_list_delete()
+            );
+        }
+        assert!(
+            view.resolve(&ScopedPath::new("/tenant-shared/other.json").unwrap())
+                .is_err(),
+            "non-telegram tenant-shared paths must not resolve through the telegram host-state mount"
+        );
+    }
+
     #[test]
     fn invocation_mount_view_sanitizes_system_scope_segments() {
         let view = invocation_mount_view(&ResourceScope::system()).unwrap();
@@ -1258,5 +1412,57 @@ mod two_tenant_isolation_tests {
         let lease_b = store.lease_once(&scope_b, &handle).await.unwrap();
         let material_b = store.consume(&scope_b, lease_b.id).await.unwrap();
         assert_eq!(material_b.expose_secret(), "bob-secret");
+    }
+}
+
+#[cfg(test)]
+mod gate_record_production_mount_tests {
+    //! Production-shape mount coverage for the `/gate-records` alias: drives the
+    //! `GateRecordStore` seam over the real `wrap_scoped`/`invocation_mount_view`
+    //! wiring. Pins two things: the alias is actually registered in
+    //! [`PER_USER_ALIASES`] (an unregistered alias fails every save with
+    //! `MountNotFound`, making the store unusable in production), and the
+    //! per-tenant path rewriting keeps identically-shaped refs from colliding
+    //! across tenants.
+    use super::*;
+    use ironclaw_filesystem::InMemoryBackend;
+    use ironclaw_host_api::{
+        GateRecord, GateRef, InvocationId, ProjectId, SafeSummary, TenantId, UserId,
+    };
+    use ironclaw_run_state::{FilesystemGateRecordStore, GateRecordStore};
+
+    fn scope(tenant: &str, user: &str) -> ResourceScope {
+        ResourceScope {
+            tenant_id: TenantId::new(tenant).unwrap(),
+            user_id: UserId::new(user).unwrap(),
+            agent_id: None,
+            project_id: Some(ProjectId::new("default").unwrap()),
+            mission_id: None,
+            thread_id: None,
+            invocation_id: InvocationId::new(),
+        }
+    }
+
+    #[tokio::test]
+    async fn gate_records_save_and_load_through_the_production_mount_view() {
+        let scoped = wrap_scoped(Arc::new(InMemoryBackend::new()));
+        let store = FilesystemGateRecordStore::new(scoped);
+        let record = GateRecord::Approval {
+            summary: SafeSummary::new("awaiting decision").unwrap(),
+        };
+        let gate_ref = GateRef::new();
+        let scope_a = scope("tenant_a", "alice");
+
+        // The alias must resolve (a missing PER_USER_ALIASES entry fails here
+        // with MountNotFound), and the owner must read the record back.
+        store
+            .save(scope_a.clone(), gate_ref, record.clone())
+            .await
+            .unwrap();
+        assert_eq!(store.load(&scope_a, gate_ref).await.unwrap(), Some(record));
+
+        // Structural tenant isolation: same ref, different tenant → unknown.
+        let scope_b = scope("tenant_b", "bob");
+        assert_eq!(store.load(&scope_b, gate_ref).await.unwrap(), None);
     }
 }

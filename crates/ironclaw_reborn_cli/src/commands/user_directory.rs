@@ -26,9 +26,7 @@ use ironclaw_reborn_composition::{
     LocalTriggerAccessStore, ProviderKind, RebornIdentityError, RebornIdentityResolver,
     ResolveExternalIdentity, SurfaceKind,
 };
-use ironclaw_reborn_webui_ingress::{
-    OAuthProviderName, OAuthUserProfile, UserDirectory, UserDirectoryError,
-};
+use ironclaw_webui::{OAuthProviderName, OAuthUserProfile, UserDirectory, UserDirectoryError};
 
 /// Admission + persistence adapter implementing the ingress
 /// [`UserDirectory`] seam.

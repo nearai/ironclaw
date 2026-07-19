@@ -1,17 +1,15 @@
 # Released migration checksums (refinery SipHasher13 over name+version+sql).
 #
 # This file is the immutability guard for released migrations. The
-# `released_migrations_are_immutable` test in src/db/migration_fixup.rs
-# asserts every migration listed below still hashes to the pinned value
-# and that every migration on disk has a pinned value here.
+# This is retained as the checksum record for databases created by historical
+# releases. The retired v1 migration runner that generated it is no longer in
+# the workspace.
 #
 # Modifying a released migration is forbidden — it desyncs every
 # production database from refinery's checksum validation. See issue
 # #1328 for the historical accident this guard prevents.
 #
-# When adding a new migration, append a new line in the same commit.
-# Regenerate locally with:
-#   cargo test -p ironclaw -- --ignored regenerate_migration_checksums_lockfile
+# Do not rewrite these values when adding Reborn-owned schema migrations.
 
 V1__initial = 13924994861355873385
 V2__wasm_secure_api = 7920426121433120191
