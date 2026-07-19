@@ -16,12 +16,11 @@ use ironclaw_turns::{
     CapabilityActivityId, TurnId,
     run_profile::{
         AgentLoopHostError, AgentLoopHostErrorKind, CapabilityBatchInvocation,
-        CapabilityCallCandidate, CapabilityFailure, CapabilityFailureKind, CapabilityInputRef,
-        CapabilityInvocation, CapabilityOutcome, CapabilityProgress, CapabilityResultMessage,
-        CapabilitySurfaceVersion, LoopCapabilityPort, LoopRunContext, ProviderToolCall,
-        ProviderToolCallCapabilityIds, ProviderToolCallReplay, ProviderToolDefinition,
-        RegisterProviderToolCallRequest, VisibleCapabilityRequest, VisibleCapabilitySurface,
-        capability_outcome_to_resolution,
+        CapabilityCallCandidate, CapabilityFailureKind, CapabilityInputRef, CapabilityInvocation,
+        CapabilityProgress, CapabilitySurfaceVersion, LoopCapabilityPort, LoopRunContext,
+        ProviderToolCall, ProviderToolCallCapabilityIds, ProviderToolCallReplay,
+        ProviderToolDefinition, RegisterProviderToolCallRequest, VisibleCapabilityRequest,
+        VisibleCapabilitySurface, resolution,
     },
 };
 use serde_json::{Value, json};
@@ -543,8 +542,7 @@ impl LoopCapabilityPort for ToolDisclosureCapabilityPort {
             }
             return Ok(resolution);
         }
-        let outcome = self.invoke_bridge(request).await?;
-        Ok(capability_outcome_to_resolution(outcome).resolution)
+        self.invoke_bridge(request).await
     }
 
     async fn invoke_capability_batch(
@@ -895,7 +893,7 @@ impl ToolDisclosureCapabilityPort {
     async fn invoke_bridge(
         &self,
         request: CapabilityInvocation,
-    ) -> Result<CapabilityOutcome, AgentLoopHostError> {
+    ) -> Result<Resolution, AgentLoopHostError> {
         let bridge = self
             .bridge_inputs
             .lock()
@@ -917,7 +915,7 @@ impl ToolDisclosureCapabilityPort {
         &self,
         request: &CapabilityInvocation,
         bridge: &BridgeInvocation,
-    ) -> Result<CapabilityOutcome, AgentLoopHostError> {
+    ) -> Result<Resolution, AgentLoopHostError> {
         let Some(query) = bridge.arguments.get("query").and_then(Value::as_str) else {
             return Ok(failed_invalid_input("tool_search requires query"));
         };
@@ -963,7 +961,7 @@ impl ToolDisclosureCapabilityPort {
         &self,
         request: &CapabilityInvocation,
         bridge: &BridgeInvocation,
-    ) -> Result<CapabilityOutcome, AgentLoopHostError> {
+    ) -> Result<Resolution, AgentLoopHostError> {
         let Some(name) = bridge.arguments.get("name").and_then(Value::as_str) else {
             return Ok(failed_invalid_input("tool_describe requires name"));
         };
@@ -1003,7 +1001,7 @@ impl ToolDisclosureCapabilityPort {
         &self,
         request: &CapabilityInvocation,
         bridge: &BridgeInvocation,
-    ) -> Result<CapabilityOutcome, AgentLoopHostError> {
+    ) -> Result<Resolution, AgentLoopHostError> {
         let Some(name) = bridge.arguments.get("name").and_then(Value::as_str) else {
             return Ok(failed_invalid_input("auto-schema requires a target name"));
         };
@@ -1035,7 +1033,7 @@ impl ToolDisclosureCapabilityPort {
         request: &CapabilityInvocation,
         output: Value,
         safe_summary: &'static str,
-    ) -> Result<CapabilityOutcome, AgentLoopHostError> {
+    ) -> Result<Resolution, AgentLoopHostError> {
         let write = self
             .result_writer
             .write_capability_result(CapabilityResultWrite {
@@ -1048,15 +1046,15 @@ impl ToolDisclosureCapabilityPort {
                 durable_persistence: DurablePersistence::Persist,
             })
             .await?;
-        Ok(CapabilityOutcome::Completed(CapabilityResultMessage {
-            result_ref: write.result_ref,
-            safe_summary: safe_summary.to_string(),
-            progress: CapabilityProgress::MadeProgress,
-            terminate_hint: false,
-            byte_len: write.byte_len,
-            output_digest: write.output_digest,
-            model_observation: write.model_observation,
-        }))
+        Ok(resolution::completed(
+            write.result_ref,
+            safe_summary.to_string(),
+            CapabilityProgress::MadeProgress,
+            false,
+            write.byte_len,
+            write.output_digest,
+            write.model_observation,
+        ))
     }
 
     fn target_call(
@@ -1291,12 +1289,12 @@ fn provider_call_digest_input(provider_call_id: &str, name: &str, arguments: &Va
     .to_string()
 }
 
-fn failed_invalid_input(summary: &'static str) -> CapabilityOutcome {
-    CapabilityOutcome::Failed(CapabilityFailure {
-        error_kind: CapabilityFailureKind::InvalidInput,
-        safe_summary: summary.to_string(),
-        detail: None,
-    })
+fn failed_invalid_input(summary: &'static str) -> Resolution {
+    resolution::failed(
+        CapabilityFailureKind::InvalidInput,
+        summary.to_string(),
+        None,
+    )
 }
 
 fn invalid_invocation(summary: impl Into<String>) -> AgentLoopHostError {
@@ -1473,25 +1471,24 @@ mod tests {
                 .lock()
                 .expect("invocations lock")
                 .push(request);
-            let outcome = if suspends {
-                CapabilityOutcome::ApprovalRequired {
-                    gate_ref: ironclaw_turns::LoopGateRef::new("gate:test")
-                        .expect("valid gate ref"),
-                    safe_summary: "approval needed".to_string(),
-                    approval_resume: None,
-                }
+            if suspends {
+                Ok(resolution::approval_required(
+                    ironclaw_turns::LoopGateRef::new("gate:test").expect("valid gate ref"),
+                    "approval needed".to_string(),
+                    None,
+                )
+                .resolution)
             } else {
-                CapabilityOutcome::Completed(CapabilityResultMessage {
-                    result_ref: LoopResultRef::new("result:target").expect("valid result ref"),
-                    safe_summary: "target completed".to_string(),
-                    progress: CapabilityProgress::MadeProgress,
-                    terminate_hint: false,
-                    byte_len: 2,
-                    output_digest: None,
-                    model_observation: None,
-                })
-            };
-            Ok(capability_outcome_to_resolution(outcome).resolution)
+                Ok(resolution::completed(
+                    LoopResultRef::new("result:target").expect("valid result ref"),
+                    "target completed".to_string(),
+                    CapabilityProgress::MadeProgress,
+                    false,
+                    2,
+                    None,
+                    None,
+                ))
+            }
         }
 
         async fn invoke_capability_batch(

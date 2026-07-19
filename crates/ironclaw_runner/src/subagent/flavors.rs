@@ -429,10 +429,9 @@ mod tests {
         };
         use ironclaw_turns::run_profile::{
             AgentLoopHostError, CapabilityBatchInvocation, CapabilityDescriptorView,
-            CapabilityInputRef, CapabilityInvocation, CapabilityOutcome, CapabilityResultMessage,
-            CapabilitySurfaceVersion, ConcurrencyHint, LoopCapabilityPort, LoopDriverId,
-            ProviderToolDefinition, VisibleCapabilityRequest, VisibleCapabilitySurface,
-            capability_outcome_to_resolution,
+            CapabilityInputRef, CapabilityInvocation, CapabilitySurfaceVersion, ConcurrencyHint,
+            LoopCapabilityPort, LoopDriverId, ProviderToolDefinition, VisibleCapabilityRequest,
+            VisibleCapabilitySurface, resolution,
         };
         use ironclaw_turns::{LoopResultRef, RunProfileId, RunProfileVersion};
 
@@ -531,16 +530,15 @@ mod tests {
                     .lock()
                     .expect("invoked lock")
                     .push(request.capability_id.as_str().to_string());
-                let outcome = CapabilityOutcome::Completed(CapabilityResultMessage {
-                    result_ref: LoopResultRef::new("result:ok").expect("valid result ref"),
-                    safe_summary: "ok".to_string(),
-                    progress: ironclaw_turns::run_profile::CapabilityProgress::MadeProgress,
-                    terminate_hint: false,
-                    byte_len: 0,
-                    output_digest: None,
-                    model_observation: None,
-                });
-                Ok(capability_outcome_to_resolution(outcome).resolution)
+                Ok(resolution::completed(
+                    LoopResultRef::new("result:ok").expect("valid result ref"),
+                    "ok".to_string(),
+                    ironclaw_turns::run_profile::CapabilityProgress::MadeProgress,
+                    false,
+                    0,
+                    None,
+                    None,
+                ))
             }
 
             async fn invoke_capability_batch(
