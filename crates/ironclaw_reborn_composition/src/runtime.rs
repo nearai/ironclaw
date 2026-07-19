@@ -3159,12 +3159,18 @@ pub async fn build_reborn_runtime(
             reason: format!("profile={profile} must not start live Reborn runtime traffic"),
         });
     }
-    if services_input.runtime_policy().is_none() {
-        return Err(RebornRuntimeError::InvalidArgument {
-            reason: "RebornRuntimeInput.services must include a resolved runtime policy"
-                .to_string(),
-        });
-    }
+    // Capture the resolved policy before `build_reborn_services` consumes the
+    // input. Downstream wiring selects enforcement behaviour from resolved
+    // policy *values* (§4.4) rather than re-branching on the deployment
+    // profile, so the policy has to outlive the services input.
+    let runtime_policy =
+        services_input
+            .runtime_policy()
+            .cloned()
+            .ok_or(RebornRuntimeError::InvalidArgument {
+                reason: "RebornRuntimeInput.services must include a resolved runtime policy"
+                    .to_string(),
+            })?;
 
     let validated_identity = validate_runtime_identity(identity)?;
     services_input = services_input.with_local_runtime_identity(
@@ -3418,8 +3424,11 @@ pub async fn build_reborn_runtime(
     let resolved_cost_table = llm_cost_table_arc;
 
     // Build the model budget accountant from the resolved cost table plus
-    // the local-dev governor. `local-dev-yolo` is the explicit local
-    // exception: it inherits host trust and must not pause on budget gates.
+    // the local-dev governor. `BudgetEnforcement::Unenforced` — the resolved
+    // trusted-laptop boundary — is the explicit exception: it inherits host
+    // trust and must not pause on budget gates. Reading the resolved value
+    // rather than the deployment profile means a tenant/org ceiling that
+    // narrows yolo away also restores enforcement (§4.4).
     // When neither an LLM policy nor a test override supplies a cost table
     // we deliberately skip the accountant — there's no spend to track and
     // the cascade would never fire.
@@ -3437,8 +3446,11 @@ pub async fn build_reborn_runtime(
     // re-read by the wiring helper).
     let model_budget_accountant: Option<
         Arc<dyn ironclaw_turns::run_profile::LoopModelBudgetAccountant>,
-    > = match (profile, resolved_cost_table) {
-        (RebornCompositionProfile::LocalDevYolo, _) => None,
+    > = match (
+        ironclaw_runtime_policy::budget_enforcement(&runtime_policy),
+        resolved_cost_table,
+    ) {
+        (ironclaw_runtime_policy::BudgetEnforcement::Unenforced, _) => None,
         (_, Some(cost_table)) => {
             let resolved_budget_defaults = match budget_defaults {
                 Some(defaults) => {
