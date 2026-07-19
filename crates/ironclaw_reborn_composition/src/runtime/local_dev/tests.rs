@@ -3628,6 +3628,15 @@ mod tests {
                 local_runtime.persistent_approval_policies.clone(),
             ),
         );
+        // A durable gate-record store shared with the assertion below: the
+        // local-dev approval producer persists a `GateRecord` at the gate raise
+        // (§5.3 Stage 0), keyed by the canonical `GateRef::for_approval_request`
+        // that the product read model re-derives, so a host-persisted gate is
+        // findable.
+        let gate_record_store: Arc<dyn ironclaw_run_state::GateRecordStore> =
+            Arc::new(ironclaw_run_state::FilesystemGateRecordStore::new(
+                crate::wrap_scoped(Arc::clone(&local_runtime.extension_filesystem)),
+            ));
         let factory = RefreshingLoopCapabilityPortFactory {
             runtime,
             fallback_user_id: fallback_user_id.clone(),
@@ -3650,9 +3659,7 @@ mod tests {
             thread_service: Arc::new(InMemorySessionThreadService::default()),
             approval_requests: local_runtime.approval_requests.clone(),
             capability_leases: local_runtime.capability_leases.clone(),
-            gate_record_store: Arc::new(ironclaw_run_state::FilesystemGateRecordStore::new(
-                crate::wrap_scoped(Arc::clone(&local_runtime.extension_filesystem)),
-            )),
+            gate_record_store: Arc::clone(&gate_record_store),
             replay_payload_store: Arc::new(
                 ironclaw_capabilities::FilesystemReplayPayloadStore::new(crate::wrap_scoped(
                     Arc::clone(&local_runtime.extension_filesystem),
@@ -3954,18 +3961,55 @@ mod tests {
             .invoke_capability(invocation_for_candidate(&set_candidate))
             .await
             .expect("set call reaches approval gate");
-        let approval_resume = match blocked_outcome {
+        let (approval_resume, set_gate_ref) = match blocked_outcome {
             CapabilityOutcome::ApprovalRequired {
                 gate_ref,
                 approval_resume: Some(resume),
                 ..
             } => {
                 assert!(gate_ref.as_str().starts_with("gate:approval-"));
-                resume
+                (resume, gate_ref)
             }
             outcome => panic!("set should require approval, got {outcome:?}"),
         };
         let approval_request_id = approval_resume.approval_request_id;
+        // Fix 2 (§5.3 Stage 0): the local-dev synthetic approval producer persists
+        // a durable `GateRecord` at the gate raise. Fix 3: it is keyed by the
+        // canonical `GateRef::for_approval_request`, which the product read model
+        // re-derives from the routing `gate:approval-{id}` ref — so a
+        // host-persisted approval gate resolves through the read model.
+        {
+            use ironclaw_product_workflow::approval_request_id_from_gate_ref;
+            // The routing ref the loop carries is `gate:approval-{id}`; the product
+            // read model recovers the approval id from it, agreeing with the id the
+            // gate was raised under.
+            let routing_ref = ironclaw_turns::GateRef::new(set_gate_ref.as_str())
+                .expect("routing gate ref is valid");
+            let recovered_id = approval_request_id_from_gate_ref(&routing_ref)
+                .expect("read model recovers the approval request id from the routing ref");
+            assert_eq!(
+                recovered_id, approval_request_id,
+                "routing ref must encode the same approval id the gate was raised under"
+            );
+            // The host persists the GateRecord under `GateRef::for_approval_request`
+            // (a host_api::GateRef), the canonical key the read model derives from
+            // the recovered id — proving both encodings agree.
+            let record_key =
+                ironclaw_host_api::GateRef::for_approval_request(recovered_id);
+            let record_scope = crate::runtime::local_dev::local_dev_resource_scope_for_run(
+                &run_context,
+                &fallback_user_id,
+            );
+            let persisted = gate_record_store
+                .load(&record_scope, record_key)
+                .await
+                .expect("gate record load succeeds")
+                .expect("local-dev approval gate persisted a durable gate record");
+            assert!(
+                matches!(persisted, ironclaw_host_api::GateRecord::Approval { .. }),
+                "persisted gate record is an approval record, got {persisted:?}"
+            );
+        }
         assert!(
             local_runtime
                 .outbound_preferences

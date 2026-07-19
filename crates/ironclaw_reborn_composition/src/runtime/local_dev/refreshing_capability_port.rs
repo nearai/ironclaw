@@ -323,6 +323,7 @@ impl RefreshingCapabilityPort {
                 self.outbound_delivery_target_set_requires_approval,
                 Arc::clone(&self.approval_settings),
                 Arc::clone(&self.replay_payload_store),
+                Arc::clone(&self.gate_record_store),
             )?);
         }
         let port = wrap_synthetic_capabilities(

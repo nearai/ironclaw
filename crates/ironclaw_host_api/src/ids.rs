@@ -248,6 +248,28 @@ uuid_id!(ErrRef);
 // unrepresentable — a kernel record id travels via `from_uuid`/`new`, never as
 // a caller-composed string.
 uuid_id!(GateRef);
+
+impl GateRef {
+    /// The canonical [`GateRef`] under which an approval gate's
+    /// [`GateRecord`](crate::GateRecord) is persisted and later resolved.
+    ///
+    /// Derived from the approval request's uuid so the host persist side
+    /// (`ironclaw_capabilities` authorize, the local-dev synthetic approval
+    /// producer, and any future host-side gate rendering per §5.2.9) and the
+    /// product read model derive the SAME record key from the one shared
+    /// [`ApprovalRequestId`]. The two must never diverge or a persisted gate is
+    /// unfindable (§5.3 Stage 0 flip prep).
+    ///
+    /// This is the typed GateRecord key — a uuid, per this ref family's
+    /// no-caller-composed-string contract above — and is deliberately distinct
+    /// from the loop-facing `gate:approval-{id}` routing ref
+    /// (`ironclaw_turns::GateRef`), which stays string-encoded so the
+    /// `is_approval_gate_ref` prefix predicate keeps routing approvals vs auth.
+    pub fn for_approval_request(approval_request_id: ApprovalRequestId) -> Self {
+        Self::from_uuid(approval_request_id.as_uuid())
+    }
+}
+
 uuid_id!(ProcessRef);
 uuid_id!(DenyRef);
 // Handle to the durably-stored full capability output. The full bytes stay
@@ -417,3 +439,24 @@ uuid_id!(RunId);
 // §1.1's "dead-future `idempotency_key`" becomes: unified into the invocation
 // identity rather than deleted.
 uuid_id!(ActivityId);
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn approval_gate_record_ref_is_the_request_uuid_and_round_trips() {
+        // The canonical GateRecord key is the approval request's uuid, so the
+        // host persist side and the product read model derive an identical key
+        // from the one shared `ApprovalRequestId` (§5.3 Stage 0).
+        let request_id = ApprovalRequestId::new();
+        let gate_ref = GateRef::for_approval_request(request_id);
+        assert_eq!(gate_ref.as_uuid(), request_id.as_uuid());
+        // A second derivation from the same id yields the same key (stable, not
+        // freshly random like `GateRef::new()`).
+        assert_eq!(gate_ref, GateRef::for_approval_request(request_id));
+        // Distinct requests never collide.
+        let other = ApprovalRequestId::new();
+        assert_ne!(gate_ref, GateRef::for_approval_request(other));
+    }
+}

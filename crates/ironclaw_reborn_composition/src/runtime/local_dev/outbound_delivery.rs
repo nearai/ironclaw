@@ -5,7 +5,8 @@ use ironclaw_approvals::ToolPermissionOverride;
 use ironclaw_authorization::{CapabilityLeaseError, CapabilityLeaseStatus, CapabilityLeaseStore};
 use ironclaw_host_api::{
     Action, ApprovalRequest, ApprovalRequestId, CapabilityGrantId, CapabilityId, CorrelationId,
-    InvocationFingerprint, InvocationId, Principal, ResourceEstimate, ResourceScope, UserId,
+    GateRecord, GateRef, InvocationFingerprint, InvocationId, Principal, ResourceEstimate,
+    ResourceScope, SafeSummary, UserId,
 };
 use ironclaw_loop_host::{CapabilityResultWrite, DurablePersistence};
 use ironclaw_product_workflow::{
@@ -50,6 +51,7 @@ pub(super) fn outbound_delivery_capabilities(
     target_set_requires_approval: bool,
     approval_settings: Arc<dyn ApprovalSettingsProvider>,
     replay_payload_store: Arc<dyn ironclaw_capabilities::ReplayPayloadStore>,
+    gate_record_store: Arc<dyn ironclaw_run_state::GateRecordStore>,
 ) -> Result<Vec<SyntheticCapability>, AgentLoopHostError> {
     Ok(vec![
         SyntheticCapability::new(
@@ -81,6 +83,7 @@ pub(super) fn outbound_delivery_capabilities(
                 requires_approval: target_set_requires_approval,
                 approval_settings,
                 replay_payload_store,
+                gate_record_store,
             }),
         ),
     ])
@@ -140,6 +143,11 @@ impl SyntheticCapabilityHandler for OutboundDeliveryTargetsListHandler {
     }
 }
 
+/// Host-authored, model-independent summary for the outbound-delivery approval
+/// gate. Shared by the persisted [`GateRecord`] and the loop-facing outcome so
+/// the record the approver renders (§5.2.9) and the loop's summary never drift.
+const APPROVAL_GATE_SUMMARY: &str = "changing the outbound delivery target requires approval";
+
 struct OutboundDeliveryTargetSetHandler {
     facade: Arc<dyn OutboundPreferencesProductFacade>,
     fallback_user_id: UserId,
@@ -150,6 +158,13 @@ struct OutboundDeliveryTargetSetHandler {
     /// reconstitutes them on resume host-side (§5.3 Stage 2a-i) rather than
     /// round-tripping raw tool args through the loop checkpoint.
     replay_payload_store: Arc<dyn ironclaw_capabilities::ReplayPayloadStore>,
+    /// Durable model-visible gate-record store. Because this synthetic capability
+    /// raises its own approval gate OUTSIDE the loop-host persist seam
+    /// (`HostRuntimeLoopCapabilityPort::persist_gate_record_for_outcome`), it must
+    /// persist the [`GateRecord`] itself at the raise — keyed by the canonical
+    /// [`GateRef::for_approval_request`] the product read model re-derives — so the
+    /// approver-facing gate rendering (§5.2.9) has a record to read (§5.3 Stage 0).
+    gate_record_store: Arc<dyn ironclaw_run_state::GateRecordStore>,
     requires_approval: bool,
     approval_settings: Arc<dyn ApprovalSettingsProvider>,
 }
@@ -386,9 +401,39 @@ impl OutboundDeliveryTargetSetHandler {
             .await
             .map_err(|error| approval_store_error("save_pending_approval", error))?;
 
+        // Persist the model-visible gate record BEFORE returning the gate. This
+        // synthetic producer raises its own gate outside the loop-host persist
+        // seam, so without this the approver-facing gate rendering (§5.2.9) would
+        // have no record to read (§5.3 Stage 0). Keyed by the canonical
+        // `GateRef::for_approval_request` the product read model re-derives from
+        // the routing `gate:approval-{id}` ref, in the run's resource-owner scope
+        // (the same owner axes the replay payload uses, so raise and read agree).
+        let gate_summary = SafeSummary::new(APPROVAL_GATE_SUMMARY).map_err(|error| {
+            ironclaw_loop_host::raw_agent_loop_host_error(
+                "local_dev_outbound_delivery",
+                "gate_record_summary",
+                AgentLoopHostErrorKind::Internal,
+                "outbound delivery gate summary is not renderable",
+                error,
+            )
+        })?;
+        self.gate_record_store
+            .save(
+                super::local_dev_resource_scope_for_run(
+                    &invocation.run_context,
+                    &self.fallback_user_id,
+                ),
+                GateRef::for_approval_request(approval_request_id),
+                GateRecord::Approval {
+                    summary: gate_summary,
+                },
+            )
+            .await
+            .map_err(|error| approval_store_error("save_gate_record", error))?;
+
         Ok(CapabilityOutcome::ApprovalRequired {
             gate_ref: approval_gate_ref(approval_request_id)?,
-            safe_summary: "changing the outbound delivery target requires approval".to_string(),
+            safe_summary: APPROVAL_GATE_SUMMARY.to_string(),
             approval_resume: Some(CapabilityApprovalResume {
                 approval_request_id,
                 resume_token: resume_token_from_invocation_id(invocation_id)?,
