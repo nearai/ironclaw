@@ -32,6 +32,13 @@ pub(crate) struct StatusDto {
     /// (not inferred from file presence). `Unknown` on detection
     /// error/unsupported platform; `status` must never fail over this.
     pub service: ServiceStateDto,
+    /// Set only when Google OAuth env config is *asymmetrically* partial
+    /// (`client_id` without `redirect_uri`, or vice versa) — the quiet
+    /// degrade-to-disabled case from `resolve_google_oauth_config`. `None`
+    /// both when Google OAuth is fully unconfigured (nothing to report) and
+    /// when it is fully configured (no degradation to surface).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub google_oauth_degraded: Option<String>,
 }
 
 /// Live OS-service lifecycle state. Mirrors `commands::service::ServiceState`,

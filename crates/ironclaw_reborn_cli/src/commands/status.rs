@@ -78,6 +78,7 @@ fn build_status_dto_with_service_state(
         login_link,
         login_note,
         service,
+        google_oauth_degraded: resolve_google_oauth_degraded(context.boot_config())?,
     })
 }
 
@@ -99,6 +100,27 @@ fn apply_service_suppression(
         }
         ServiceStateDto::Running | ServiceStateDto::Unknown => (login_link, login_note),
     }
+}
+
+/// Re-runs the boot resolver's public-field asymmetry check over env and
+/// `[google]` config.toml purely to report *why* Google OAuth is disabled when
+/// partially configured. The encrypted client secret is deliberately not
+/// opened: it is optional under public-client PKCE and cannot change this
+/// classification. Returns `None` when Google OAuth is either fully
+/// unconfigured or fully configured; only the partial case is reported.
+fn resolve_google_oauth_degraded(
+    config: &ironclaw_reborn_config::RebornBootConfig,
+) -> anyhow::Result<Option<String>> {
+    Ok(
+        crate::runtime::resolve_google_oauth_config_state_from_env(config)?.and_then(|state| {
+            state.missing_config_key().map(|missing| {
+                format!(
+                    "partially configured (missing google.{missing}) — disabled; fix with \
+             `ironclaw config set google.{missing} <value>`"
+                )
+            })
+        }),
+    )
 }
 
 /// Live OS-service state for the `service` DTO field — see
@@ -222,6 +244,9 @@ impl Renderable for StatusDto {
         if let Some(login_note) = &self.login_note {
             kv(w, "login_note", login_note)?;
         }
+        if let Some(google_oauth_degraded) = &self.google_oauth_degraded {
+            kv(w, "google_oauth", google_oauth_degraded)?;
+        }
         writeln!(w)?;
         writeln!(w, "drivers:")?;
         driver_line(w, "  text_only", &self.drivers.text_only)?;
@@ -340,6 +365,123 @@ mod tests {
         assert!(
             !json.contains("login_link"),
             "status --json must not emit a login_link field at all: {json}"
+        );
+    }
+
+    /// Clear every Google OAuth input for a test and restore the caller's
+    /// exact process environment (including non-UTF-8 values) on drop.
+    fn cleared_google_oauth_env() -> Vec<crate::runtime::test_env::EnvGuard> {
+        [
+            "IRONCLAW_REBORN_GOOGLE_CLIENT_ID",
+            "IRONCLAW_REBORN_GOOGLE_OAUTH_REDIRECT_URI",
+            "IRONCLAW_REBORN_GOOGLE_CLIENT_SECRET",
+            "IRONCLAW_REBORN_GOOGLE_HOSTED_DOMAIN_HINT",
+            "GOOGLE_CLIENT_ID",
+            "GOOGLE_OAUTH_REDIRECT_URI",
+            "GOOGLE_CLIENT_SECRET",
+            "GOOGLE_ALLOWED_HD",
+        ]
+        .into_iter()
+        .map(crate::runtime::test_env::EnvGuard::clear)
+        .collect()
+    }
+
+    #[test]
+    fn status_dto_google_oauth_degraded_none_when_unconfigured() {
+        let _guard = crate::runtime::test_env::lock_runtime_env();
+        let _env = cleared_google_oauth_env();
+
+        let (_tmp, context) = RebornCliContext::test_context();
+        let dto = build_status_dto(&context).expect("must build");
+        assert!(
+            dto.google_oauth_degraded.is_none(),
+            "no Google OAuth vars set at all must not report a degraded state: {:?}",
+            dto.google_oauth_degraded
+        );
+    }
+
+    /// Caller-level proof that the complete status path does not open the
+    /// secret store. A directory at the database path is a deliberate
+    /// tripwire: any database open fails, while public-field diagnosis must
+    /// still succeed.
+    #[cfg(feature = "libsql")]
+    #[test]
+    fn status_dto_complete_google_config_does_not_open_secret_store() {
+        let _guard = crate::runtime::test_env::lock_runtime_env();
+        let _env = cleared_google_oauth_env();
+        let (_tmp, context) = RebornCliContext::test_context();
+        let config = context.boot_config();
+        std::fs::create_dir_all(config.home().path()).expect("create reborn home");
+        std::fs::write(
+            config.home().config_file_path(),
+            r#"[google]
+client_id = "client.apps.googleusercontent.com"
+redirect_uri = "http://127.0.0.1:3000/oauth/google/callback"
+"#,
+        )
+        .expect("write Google config");
+        let storage_root = crate::runtime::local_runtime_storage_root(config, config.profile());
+        let db_path = ironclaw_reborn_composition::local_dev_db_path(&storage_root);
+        std::fs::create_dir_all(&db_path).expect("create database-path tripwire");
+
+        let dto = build_status_dto_with_service_state(&context, ServiceStateDto::Unknown)
+            .expect("complete status path must not open the secret store");
+
+        assert!(
+            dto.google_oauth_degraded.is_none(),
+            "complete public config must not be reported as degraded"
+        );
+        assert!(
+            db_path.is_dir(),
+            "status must leave the secret-store tripwire untouched"
+        );
+    }
+
+    #[test]
+    fn status_dto_reports_google_oauth_degraded_when_client_id_present_but_redirect_uri_missing() {
+        let _guard = crate::runtime::test_env::lock_runtime_env();
+        let _env = cleared_google_oauth_env();
+        let _client_id = crate::runtime::test_env::EnvGuard::set(
+            "IRONCLAW_REBORN_GOOGLE_CLIENT_ID",
+            "reborn-client.apps.googleusercontent.com",
+        );
+
+        let (_tmp, context) = RebornCliContext::test_context();
+        let dto = build_status_dto(&context).expect("must build");
+        let degraded = dto
+            .google_oauth_degraded
+            .expect("client_id-without-redirect_uri must surface as a degraded status line");
+        assert!(
+            degraded.contains("redirect_uri"),
+            "status line must name the missing key: {degraded}"
+        );
+        assert!(
+            degraded.contains("config set google.redirect_uri"),
+            "status line must include the fix command: {degraded}"
+        );
+    }
+
+    #[test]
+    fn status_dto_reports_google_oauth_degraded_when_redirect_uri_present_but_client_id_missing() {
+        let _guard = crate::runtime::test_env::lock_runtime_env();
+        let _env = cleared_google_oauth_env();
+        let _redirect_uri = crate::runtime::test_env::EnvGuard::set(
+            "IRONCLAW_REBORN_GOOGLE_OAUTH_REDIRECT_URI",
+            "http://127.0.0.1:3000/api/reborn/product-auth/oauth/google/callback",
+        );
+
+        let (_tmp, context) = RebornCliContext::test_context();
+        let dto = build_status_dto(&context).expect("must build");
+        let degraded = dto
+            .google_oauth_degraded
+            .expect("redirect_uri-without-client_id must surface as a degraded status line");
+        assert!(
+            degraded.contains("client_id"),
+            "status line must name the missing key: {degraded}"
+        );
+        assert!(
+            degraded.contains("config set google.client_id"),
+            "status line must include the fix command: {degraded}"
         );
     }
 

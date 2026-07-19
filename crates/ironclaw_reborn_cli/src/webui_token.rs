@@ -26,6 +26,13 @@ use crate::file_write::FileWriteAction;
 /// the token is unset or empty).
 pub(crate) const WEBUI_TOKEN_FILENAME: &str = "webui-token";
 
+/// Default name of the env var that overrides the token file at runtime,
+/// absent an operator override via `[webui].env_token_var`. Shared by
+/// `serve` (which reads it) and `config set webui.token --rotate` (which
+/// checks it before rotating, since rotating the file has no effect while
+/// this env var is set and non-empty — see `commands::config::set`).
+pub(crate) const DEFAULT_ENV_TOKEN_VAR: &str = "IRONCLAW_REBORN_WEBUI_TOKEN";
+
 /// Minimum byte length for the WebChat v2 bearer token, mirroring the
 /// server-side session-signing entropy floor: an attacker who obtains
 /// one legitimate signed session can brute-force a low-entropy key
@@ -251,6 +258,21 @@ pub(crate) fn ensure_webui_token_file(reborn_home: &Path) -> anyhow::Result<File
     } else {
         FileWriteAction::Wrote
     })
+}
+
+/// Unconditionally replace `<reborn_home>/webui-token` with a freshly
+/// generated token, regardless of whether the existing one is valid.
+///
+/// Distinct from [`ensure_webui_token_file`], which deliberately preserves
+/// a valid existing token — `config set webui.token --rotate` is the one
+/// caller that must invalidate every existing session on purpose (the
+/// token doubles as the session-signing HMAC key, so rotating it kills
+/// every live WebChat v2 session; the caller is responsible for warning
+/// the operator before calling this).
+pub(crate) fn rotate_webui_token_file(reborn_home: &Path) -> anyhow::Result<()> {
+    let file_path = webui_token_file_path(reborn_home);
+    let token = generate_webui_token();
+    write_token_file(&file_path, &token)
 }
 
 /// Generate a cryptographically-random token comfortably over the
@@ -587,6 +609,30 @@ mod tests {
         assert_eq!(action, FileWriteAction::Overwrote);
         let contents = fs::read_to_string(&path).expect("read token file");
         assert!(contents.trim().len() >= WEBUI_TOKEN_MIN_BYTES);
+    }
+
+    #[test]
+    fn rotate_webui_token_file_replaces_a_valid_existing_token() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        ensure_webui_token_file(dir.path()).expect("seed valid token");
+        let path = webui_token_file_path(dir.path());
+        let before = fs::read_to_string(&path).expect("read token file");
+
+        rotate_webui_token_file(dir.path()).expect("rotate must succeed");
+
+        let after = fs::read_to_string(&path).expect("read rotated token file");
+        assert_ne!(before, after, "rotate must generate a new token value");
+        assert!(after.trim().len() >= WEBUI_TOKEN_MIN_BYTES);
+    }
+
+    #[test]
+    fn rotate_webui_token_file_creates_a_token_when_none_exists() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        assert!(!webui_token_file_is_valid(dir.path()).expect("query must succeed"));
+
+        rotate_webui_token_file(dir.path()).expect("rotate must succeed");
+
+        assert!(webui_token_file_is_valid(dir.path()).expect("query must succeed"));
     }
 
     #[cfg(feature = "webui-v2-beta")]

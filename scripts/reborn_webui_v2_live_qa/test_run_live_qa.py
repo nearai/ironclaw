@@ -1195,6 +1195,120 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
         self.assertGreaterEqual(len(observed_sleeps), 1)
         self.assertGreaterEqual(waited_ms, 0)
 
+    def test_wait_for_slack_search_marker_ready_when_marker_indexed(self):
+        # Slack's search index is eventually consistent: the first sweeps come
+        # back empty (message not yet indexed), then the marker appears. The
+        # barrier must report ready as soon as a hit lands.
+        sweeps = iter(
+            [
+                {"checked": True, "hits": []},
+                {"checked": True, "hits": []},
+                {"checked": True, "hits": [{"ts": "1784422248.376"}]},
+            ]
+        )
+        observed_sleeps: list[float] = []
+
+        async def fake_search(_ctx, *, marker: str) -> dict[str, object]:
+            self.assertEqual(marker, "LASTSENT_GLOBAL_1784422248376")
+            return next(sweeps)
+
+        async def fake_sleep(seconds: float) -> None:
+            observed_sleeps.append(seconds)
+
+        with (
+            patch.object(
+                run_live_qa, "_slack_search_marker_hits", side_effect=fake_search
+            ),
+            patch.object(run_live_qa.asyncio, "sleep", new=fake_sleep),
+        ):
+            readiness = asyncio.run(
+                run_live_qa._wait_for_slack_search_marker(
+                    self._dummy_ctx(),
+                    marker="LASTSENT_GLOBAL_1784422248376",
+                    timeout=10.0,
+                    poll_interval=0.01,
+                )
+            )
+
+        self.assertTrue(readiness.get("ready"))
+        self.assertTrue(readiness.get("checked"))
+        self.assertFalse(readiness.get("permanent"))
+        self.assertEqual(readiness.get("attempts"), 3)
+        self.assertGreaterEqual(len(observed_sleeps), 2)
+
+    def test_wait_for_slack_search_marker_inconclusive_when_never_indexed(self):
+        # The marker never becomes searchable within the bounded deadline —
+        # external index lag, not an agent regression. The barrier must report
+        # not-ready (non-permanent) so the caller can surface an INCONCLUSIVE
+        # result instead of a spurious answer-mismatch red.
+        async def fake_search(_ctx, *, marker: str) -> dict[str, object]:
+            return {"checked": True, "hits": []}
+
+        async def fake_sleep(_seconds: float) -> None:
+            return None
+
+        # Deterministic clock: each call advances 20ms past a 50ms deadline, so
+        # the loop exits after a bounded number of iterations instead of
+        # busy-spinning real CPU for the whole timeout window.
+        clock = {"now": 0.0}
+
+        def fake_monotonic() -> float:
+            clock["now"] += 0.02
+            return clock["now"]
+
+        with (
+            patch.object(
+                run_live_qa, "_slack_search_marker_hits", side_effect=fake_search
+            ),
+            patch.object(run_live_qa.asyncio, "sleep", new=fake_sleep),
+            patch.object(run_live_qa.time, "monotonic", new=fake_monotonic),
+        ):
+            readiness = asyncio.run(
+                run_live_qa._wait_for_slack_search_marker(
+                    self._dummy_ctx(),
+                    marker="LASTSENT_GLOBAL_never",
+                    timeout=0.05,
+                    poll_interval=0.01,
+                )
+            )
+
+        self.assertFalse(readiness.get("ready"))
+        self.assertFalse(readiness.get("permanent"))
+        self.assertGreaterEqual(readiness.get("attempts"), 1)
+
+    def test_wait_for_slack_search_marker_permanent_when_search_cannot_run(self):
+        # A permanent token/scope problem means the sweep can NEVER run here;
+        # the barrier must short-circuit as permanent (not spin to the
+        # deadline) so the caller can surface the real env-repair reason.
+        calls = {"count": 0}
+
+        async def fake_search(_ctx, *, marker: str) -> dict[str, object]:
+            calls["count"] += 1
+            return {"checked": False, "permanent": True, "error": "missing_scope"}
+
+        async def fake_sleep(_seconds: float) -> None:
+            raise AssertionError("permanent failure must not poll")
+
+        with (
+            patch.object(
+                run_live_qa, "_slack_search_marker_hits", side_effect=fake_search
+            ),
+            patch.object(run_live_qa.asyncio, "sleep", new=fake_sleep),
+        ):
+            readiness = asyncio.run(
+                run_live_qa._wait_for_slack_search_marker(
+                    self._dummy_ctx(),
+                    marker="LASTSENT_GLOBAL_perm",
+                    timeout=10.0,
+                    poll_interval=0.01,
+                )
+            )
+
+        self.assertFalse(readiness.get("ready"))
+        self.assertTrue(readiness.get("permanent"))
+        self.assertEqual(calls["count"], 1)
+        self.assertEqual(readiness.get("error"), "missing_scope")
+
     def test_routine_confirmation_follow_up_answers_timezone_confirmation(self):
         text = (
             "I'll set up a trigger every 5 minutes and send a Slack DM. "
@@ -2991,10 +3105,13 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
         self.assertEqual(captured["prompt"], result.details["prompt"])
 
     def test_blocking_qa_10_cases_declare_intended_slack_capability(self):
-        captured: dict[str, str | None] = {}
+        captured: dict[str, tuple[str | None, tuple[str, ...]]] = {}
 
         async def fake_chat_reply(_ctx, **kwargs):
-            captured[str(kwargs["case_name"])] = kwargs.get("expected_capability")
+            captured[str(kwargs["case_name"])] = (
+                kwargs.get("expected_capability"),
+                tuple(kwargs.get("accept_any_capability") or ()),
+            )
             return (
                 run_live_qa.ProbeResult(
                     provider="test",
@@ -3042,15 +3159,167 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
         self.assertEqual(
             captured,
             {
-                "qa_10a_slack_self_attribution": "slack.get_conversation_history",
-                "qa_10b_slack_ooo_status": "slack.get_user_info",
-                "qa_10c_slack_thread_replies": "slack.get_thread_replies",
-                "qa_10d_slack_channel_membership": "slack.list_conversations",
-                "qa_10e_slack_error_honesty": "slack.get_conversation_history",
-                "qa_10f_slack_mention_encoding": "slack.get_conversation_info",
-                "qa_10g_slack_last_message_sent": "slack.get_conversation_history",
-                "qa_10h_slack_email_hallucination_guard": "slack.get_user_info",
+                "qa_10a_slack_self_attribution": (
+                    "slack.get_conversation_history",
+                    (),
+                ),
+                "qa_10b_slack_ooo_status": ("slack.get_user_info", ()),
+                # 10C asserts an OUTCOME (thread replies surfaced), so it pins
+                # no single tool id — it accepts any capability that can
+                # retrieve the replies.
+                "qa_10c_slack_thread_replies": (
+                    None,
+                    (
+                        "slack.get_thread_replies",
+                        "slack.search_messages",
+                    ),
+                ),
+                "qa_10d_slack_channel_membership": (
+                    "slack.list_conversations",
+                    (),
+                ),
+                "qa_10e_slack_error_honesty": (
+                    "slack.get_conversation_history",
+                    (),
+                ),
+                "qa_10f_slack_mention_encoding": (
+                    "slack.get_conversation_info",
+                    (),
+                ),
+                "qa_10g_slack_last_message_sent": (
+                    "slack.get_conversation_history",
+                    (),
+                ),
+                "qa_10h_slack_email_hallucination_guard": (
+                    "slack.get_user_info",
+                    (),
+                ),
             },
+        )
+
+    def test_qa_10c_thread_replies_asserts_outcome_not_tool_identity(self):
+        # Regression for the 10C flake: the arm asserts an OUTCOME (the seeded
+        # thread replies appear in the answer), not TOOL IDENTITY. It must pass
+        # when the model surfaces the replies through indexed search
+        # (never touching a dedicated get_thread_replies tool), still fail when
+        # the replies are not surfaced (real thread-visibility regression), and
+        # not turn accept-any into a blanket bypass when no retrieval
+        # capability produced terminal evidence.
+        seeded: list[str] = []
+
+        async def fake_seed(_token, _channel, text, **_kwargs):
+            seeded.append(str(text))
+            return f"{len(seeded)}.000001"
+
+        def drive(
+            *, surface_replies: bool, evidence: dict
+        ) -> run_live_qa.ProbeResult:
+            seeded.clear()
+
+            async def fake_live_chat_case(_ctx, **kwargs):
+                answer = [str(kwargs["marker"])]
+                for text in seeded:
+                    # A dropped-thread-replies run surfaces the control
+                    # (root/top-level) messages but not the REPLY_* markers.
+                    if surface_replies or not text.startswith("REPLY_"):
+                        answer.append(text)
+                return run_live_qa.ProbeResult(
+                    provider="test",
+                    mode=f"live:{kwargs['case_name']}",
+                    success=True,
+                    latency_ms=1,
+                    details={
+                        "full_reply_text": "\n".join(answer),
+                        "submission_identity": {
+                            "thread_id": "thread-current",
+                            "run_id": "run-current",
+                            "turn_id": "turn-current",
+                        },
+                    },
+                )
+
+            with (
+                patch.object(
+                    run_live_qa,
+                    "_require_slack_personal_token",
+                    return_value="xoxp-test",
+                ),
+                patch.object(
+                    run_live_qa,
+                    "_require_slack_bot_token",
+                    return_value="xoxb-test",
+                ),
+                patch.object(
+                    run_live_qa,
+                    "_require_slack_personal_bot_dm_channel",
+                    return_value="D0FIXTURE1",
+                ),
+                patch.object(
+                    run_live_qa,
+                    "_seed_slack_fixture_message",
+                    side_effect=fake_seed,
+                ),
+                patch.object(
+                    run_live_qa,
+                    "_live_chat_case",
+                    side_effect=fake_live_chat_case,
+                ),
+                patch.object(
+                    run_live_qa,
+                    "_current_turn_capability_evidence",
+                    return_value=evidence,
+                ),
+            ):
+                return asyncio.run(
+                    run_live_qa.case_qa_10c_slack_thread_replies(
+                        self._dummy_ctx()
+                    )
+                )
+
+        search_only_evidence = {
+            "statuses": {
+                "slack.get_thread_replies": [],
+                "slack.search_messages": ["completed"],
+            }
+        }
+        no_retrieval_evidence = {
+            "statuses": {
+                "slack.get_thread_replies": [],
+                "slack.search_messages": [],
+            }
+        }
+
+        # Replies surfaced via indexed search alone (the dedicated
+        # thread-replies tool never ran): OUTCOME met -> PASS. This is exactly
+        # the trace that used to flake red on tool identity. (History is NOT
+        # an accept-any member — the shipped manifest documents it can never
+        # return replies.)
+        surfaced = drive(
+            surface_replies=True, evidence=search_only_evidence
+        )
+        self.assertTrue(surfaced.success, surfaced.details.get("error"))
+        self.assertEqual(surfaced.details.get("missing_thread_reply_markers"), [])
+
+        # Replies NOT surfaced (agent genuinely can't see thread replies) ->
+        # FAIL, even though a retrieval capability did run.
+        dropped = drive(
+            surface_replies=False, evidence=search_only_evidence
+        )
+        self.assertFalse(dropped.success)
+        self.assertIn(
+            "thread replies are invisible to the agent",
+            str(dropped.details.get("error")),
+        )
+
+        # accept-any is an OR-group, not a bypass: with NO retrieval capability
+        # producing terminal evidence the capability arm still fails closed.
+        no_capability = drive(
+            surface_replies=True, evidence=no_retrieval_evidence
+        )
+        self.assertFalse(no_capability.success)
+        self.assertEqual(
+            no_capability.details.get("failure_category"),
+            "missing_expected_capability",
         )
 
     def test_slack_correctness_chat_reply_classifies_terminal_provider_errors(self):
@@ -6359,6 +6628,13 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
                 reply,
             )
 
+        # The GLOBAL arm gates the turn on the seeded marker becoming
+        # searchable; drive the real barrier through a mocked sweep that
+        # reports the marker indexed so the assertion path (not the
+        # inconclusive path) runs.
+        async def fake_search_ready(_ctx, *, marker: str) -> dict[str, object]:
+            return {"checked": True, "hits": [{"ts": "1.0"}]}
+
         seeded.clear()
         with (
             patch.object(
@@ -6378,6 +6654,11 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
             ),
             patch.object(
                 run_live_qa,
+                "_slack_search_marker_hits",
+                side_effect=fake_search_ready,
+            ),
+            patch.object(
+                run_live_qa,
                 "_slack_correctness_chat_reply",
                 side_effect=fake_global_chat,
             ),
@@ -6389,6 +6670,9 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
             )
 
         self.assertTrue(global_result.success)
+        self.assertTrue(
+            global_result.details["search_index_readiness"]["ready"]
+        )
         self.assertEqual(len(global_calls), 1)
         self.assertEqual(
             global_calls[0]["prompt"],
@@ -6397,6 +6681,74 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
         )
         self.assertNotIn("D0FIXTURE1", global_calls[0]["prompt"])
         self.assertIsNone(global_calls[0].get("expected_capability"))
+
+        # When the seeded marker never becomes searchable within the deadline,
+        # the GLOBAL arm must NOT drive the agent turn or red on answer
+        # mismatch — it returns a non-blocking INCONCLUSIVE result attributing
+        # the miss to external Slack search-index lag.
+        lagged_chat_calls: list[dict[str, object]] = []
+
+        async def fake_lagged_chat(_ctx, **kwargs):
+            lagged_chat_calls.append(kwargs)
+            raise AssertionError("agent turn must not run when index lags")
+
+        async def fake_barrier_not_ready(_ctx, *, marker: str) -> dict[str, object]:
+            return {
+                "ready": False,
+                "checked": True,
+                "permanent": False,
+                "attempts": 5,
+                "waited_ms": 45000,
+                "error": None,
+            }
+
+        seeded.clear()
+        with (
+            patch.object(
+                run_live_qa,
+                "_require_slack_personal_token",
+                return_value="xoxp-unit-test",
+            ),
+            patch.object(
+                run_live_qa,
+                "_require_slack_personal_bot_dm_channel",
+                return_value="D0FIXTURE1",
+            ),
+            patch.object(
+                run_live_qa,
+                "_seed_slack_fixture_message",
+                side_effect=fake_seed,
+            ),
+            patch.object(
+                run_live_qa,
+                "_wait_for_slack_search_marker",
+                side_effect=fake_barrier_not_ready,
+            ),
+            patch.object(
+                run_live_qa,
+                "_slack_correctness_chat_reply",
+                side_effect=fake_lagged_chat,
+            ),
+        ):
+            lagged_result = asyncio.run(
+                run_live_qa.case_qa_10g_slack_last_message_sent_global(
+                    self._dummy_ctx()
+                )
+            )
+
+        self.assertFalse(lagged_result.success)
+        self.assertEqual(lagged_chat_calls, [])
+        self.assertFalse(lagged_result.details["blocking"])
+        self.assertTrue(lagged_result.details["inconclusive"])
+        self.assertEqual(
+            lagged_result.details["failure_class"], "infrastructure"
+        )
+        self.assertEqual(
+            lagged_result.details["failure_category"], "slack_search_index_lag"
+        )
+        self.assertFalse(
+            lagged_result.details["search_index_readiness"]["ready"]
+        )
 
     def test_qa_10i_requires_display_name_and_rejects_raw_ids_once(self):
         async def fake_identity(_token):

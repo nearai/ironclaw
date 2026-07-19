@@ -34,6 +34,7 @@ mod deployment;
 mod error;
 mod extension_host;
 mod factory;
+mod google_oauth_secret_store;
 mod input;
 mod lifecycle_auth_continuation;
 mod llm_admin;
@@ -85,11 +86,14 @@ pub use factory::LOCAL_DEV_SECRETS_MASTER_KEY_PATH;
 pub use factory::RebornApprovalTestParts;
 #[cfg(feature = "migration-support")]
 pub use factory::extension_installation_store_for_migration;
+#[cfg(any(feature = "libsql", feature = "test-support"))]
+pub use factory::local_dev_db_path;
 #[cfg(feature = "libsql")]
 pub use factory::open_local_dev_secret_store;
 #[cfg(any(feature = "libsql", feature = "postgres"))]
 pub use factory::{KeychainMasterKeyOutcome, provision_local_dev_keychain_master_key};
 pub use factory::{RebornServices, build_reborn_services, builtin_first_party_trust_policy};
+pub use google_oauth_secret_store::{GoogleOauthSecretStore, GoogleOauthSecretStoreError};
 pub use input::{OAuthClientConfig, RebornBuildInput, RebornRuntimeProcessBinding};
 #[cfg(feature = "webui-v2-beta")]
 pub use ironclaw_auth::GoogleOAuthRouteConfig;
