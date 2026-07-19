@@ -143,6 +143,23 @@ fn reborn_inmemory_store_allowlist_is_frozen_and_only_shrinks() {
         &mut found,
     );
 
+    // Check each list for internal duplicates first, so a combined-length
+    // mismatch below can only mean cross-list overlap (a duplicate inside one
+    // list would otherwise masquerade as a disjointness failure).
+    for (label, list) in [
+        ("FROZEN_DEBT_INMEMORY_STORES", FROZEN_DEBT_INMEMORY_STORES),
+        (
+            "JUSTIFIED_KEEP_INMEMORY_STORES",
+            JUSTIFIED_KEEP_INMEMORY_STORES,
+        ),
+    ] {
+        let unique: BTreeSet<&str> = list.iter().copied().collect();
+        assert_eq!(
+            unique.len(),
+            list.len(),
+            "{label} contains duplicate entries"
+        );
+    }
     let frozen: BTreeSet<&str> = FROZEN_DEBT_INMEMORY_STORES
         .iter()
         .chain(JUSTIFIED_KEEP_INMEMORY_STORES)
