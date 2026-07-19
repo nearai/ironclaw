@@ -7,9 +7,9 @@ use ironclaw_host_api::{
     ActivityId, AuthorizeResult, Authorized, Blocked, CapabilityAuthorizer, CapabilityDescriptor,
     CapabilityDispatchRequest, CapabilityDispatchResult, CapabilityDispatcher, CapabilityGrantId,
     CapabilityId, Decision, DenyReason, DenyRef, DispatchError, ExecutionContext, GateRef,
-    Invocation, InvocationFingerprint, InvocationId, InvocationOrigin, Obligation, ProcessId,
-    ProductKind, ResourceEstimate, ResourceReservation, ResourceReservationId, ResourceScope,
-    RuntimeLane,
+    GateWaypoint, Invocation, InvocationFingerprint, InvocationId, InvocationOrigin, Obligation,
+    ProcessId, ProductKind, ResourceEstimate, ResourceReservation, ResourceReservationId,
+    ResourceScope, RuntimeLane,
 };
 use ironclaw_processes::{ProcessManager, ProcessStart};
 use ironclaw_run_state::{
@@ -729,8 +729,8 @@ where
                     }
                 }
                 Ok(AuthorizeFold::Blocked {
-                    result: AuthorizeResult::Blocked(Blocked::Approval(GateRef::from_uuid(
-                        approval_request_id.as_uuid(),
+                    result: AuthorizeResult::Blocked(Blocked::Approval(GateWaypoint::new(
+                        GateRef::from_uuid(approval_request_id.as_uuid()),
                     ))),
                 })
             }
@@ -2035,8 +2035,8 @@ where
                     }
                 }
                 Ok(AuthorizeFold::Blocked {
-                    result: AuthorizeResult::Blocked(Blocked::Approval(GateRef::from_uuid(
-                        approval_request_id.as_uuid(),
+                    result: AuthorizeResult::Blocked(Blocked::Approval(GateWaypoint::new(
+                        GateRef::from_uuid(approval_request_id.as_uuid()),
                     ))),
                 })
             }
@@ -2154,7 +2154,9 @@ where
                 // `AuthorizationRequiresApproval` with no persisted gate, so the
                 // forward-looking Blocked witness carries a fresh correlation id.
                 Ok(AuthorizeFold::Blocked {
-                    result: AuthorizeResult::Blocked(Blocked::Approval(GateRef::new())),
+                    result: AuthorizeResult::Blocked(Blocked::Approval(GateWaypoint::new(
+                        GateRef::new(),
+                    ))),
                 })
             }
         }
