@@ -95,8 +95,7 @@ configured models for OpenAI-compatible clients (model pickers, etc.).
   composition wiring.
 - `ironclaw_reborn_composition::build_openai_compat_route_mount` wires a catalog
   backed by the operator `LlmConfigService` snapshot (the same configured-model
-  source the operator WebUI uses), but only under the `root-llm-provider`
-  feature; otherwise the route stays fail-closed.
+  source the operator WebUI uses).
 - The crate maps catalog entries into the OpenAI list envelope
   (`{ object: "list", data: [{ id, object: "model", created, owned_by }] }`);
   it does not reach into `ironclaw_llm` or the runtime directly.

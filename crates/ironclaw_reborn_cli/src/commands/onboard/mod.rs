@@ -11,7 +11,7 @@ mod llm_credentials;
 mod master_key;
 pub(crate) mod prompts;
 
-#[cfg(all(feature = "libsql", feature = "root-llm-provider"))]
+#[cfg(feature = "libsql")]
 use llm_credentials::LlmCredentialProvisionOutcome;
 use llm_credentials::{EncryptedLlmKeyStoreOpener, LiveLlmProbe, provision_llm_credentials};
 use master_key::{MasterKeyProvisionOutcome, provision_master_key};
@@ -75,7 +75,7 @@ impl OnboardCommand {
             // Non-interactive session (headless CI, piped/scripted) is expected —
             // mirrors `MasterKeyProvisionOutcome::Suppressed`; `models set-provider`
             // remains the non-interactive path to configure a provider.
-            #[cfg(all(feature = "libsql", feature = "root-llm-provider"))]
+            #[cfg(feature = "libsql")]
             Err(LlmCredentialPromptError::NonInteractive) => {
                 LlmCredentialProvisionOutcome::SkippedNonInteractive
             }
@@ -83,14 +83,14 @@ impl OnboardCommand {
         };
         // Computed after `llm_outcome` so `steps_pending` reflects what actually
         // happened this run, not an unconditional `llm_credentials` pending.
-        #[cfg(all(feature = "libsql", feature = "root-llm-provider"))]
+        #[cfg(feature = "libsql")]
         let llm_configured = matches!(
             llm_outcome,
             LlmCredentialProvisionOutcome::Configured { .. }
                 | LlmCredentialProvisionOutcome::AlreadyConfigured { .. }
                 | LlmCredentialProvisionOutcome::ConfiguredFromEnv { .. }
         );
-        #[cfg(not(all(feature = "libsql", feature = "root-llm-provider")))]
+        #[cfg(not(feature = "libsql"))]
         let llm_configured = false;
         let marker_action = write_onboarding_marker(
             home,
@@ -131,13 +131,13 @@ impl OnboardCommand {
         println!("- config.toml and providers.json available");
         println!("- webui bearer token provisioned (used by `serve` when the env var is unset)");
         println!("- onboarding completion marker available");
-        #[cfg(all(feature = "libsql", feature = "root-llm-provider"))]
+        #[cfg(feature = "libsql")]
         if let LlmCredentialProvisionOutcome::Configured { provider_id, .. }
         | LlmCredentialProvisionOutcome::AlreadyConfigured { provider_id, .. } = &llm_outcome
         {
             println!("- LLM provider `{provider_id}` credentials stored");
         }
-        #[cfg(all(feature = "libsql", feature = "root-llm-provider"))]
+        #[cfg(feature = "libsql")]
         if let LlmCredentialProvisionOutcome::ConfiguredFromEnv { provider_id, .. } = &llm_outcome {
             println!(
                 "- LLM provider `{provider_id}` configured from environment (key also saved to \
@@ -149,12 +149,12 @@ impl OnboardCommand {
         if llm_configured {
             println!("- none for LLM credentials (configured above)");
         } else {
-            #[cfg(not(all(feature = "libsql", feature = "root-llm-provider")))]
+            #[cfg(not(feature = "libsql"))]
             println!(
                 "- LLM credential provisioning is unavailable in this build: rebuild or \
                  install `ironclaw` with `--features full`, then rerun `ironclaw onboard`"
             );
-            #[cfg(all(feature = "libsql", feature = "root-llm-provider"))]
+            #[cfg(feature = "libsql")]
             println!(
                 "- configure LLM credentials: rerun `ironclaw onboard` from an \
                  interactive terminal, run \
@@ -367,7 +367,7 @@ fn pending_steps(import_history: bool, llm_configured: bool) -> Vec<&'static str
     steps
 }
 
-#[cfg(all(test, feature = "libsql", feature = "root-llm-provider"))]
+#[cfg(all(test, feature = "libsql"))]
 mod tests {
     use super::*;
 

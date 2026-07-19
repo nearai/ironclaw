@@ -3,7 +3,7 @@
 //! `RebornRuntimeInput` extends `RebornBuildInput` (which is substrate-only)
 //! with the additional knobs needed to assemble a runnable agent:
 //!
-//! - **LLM configuration** (optional, behind the `root-llm-provider` feature).
+//! - **LLM configuration** (optional).
 //!   Used by the composition root to construct an `LlmProviderModelGateway`
 //!   that satisfies the loop-host `HostManagedModelGateway` contract.
 //! - **Turn-runner configuration** — poll/heartbeat intervals for the worker
@@ -29,7 +29,6 @@ use ironclaw_host_api::{AgentId, ProjectId, TenantId, Timestamp, UserId};
 use ironclaw_loop_host::HostManagedModelGateway;
 use ironclaw_loop_host::HostSkillContextSource;
 use ironclaw_reborn_config::BudgetDefaults;
-#[cfg(feature = "root-llm-provider")]
 use ironclaw_reborn_config::RebornBootConfig;
 use ironclaw_runner::runtime::{
     DEFAULT_MAX_CONCURRENT_RUNS_PER_USER, DEFAULT_MAX_CONCURRENT_TRIGGER_RUNS,
@@ -126,7 +125,6 @@ pub trait TriggerFireAccessChecker: Send + Sync {
     ) -> Result<TriggerFireAccessDecision, TriggerFireAccessError>;
 }
 
-#[cfg(feature = "root-llm-provider")]
 #[derive(Clone)]
 pub struct ResolvedRebornLlm {
     provider_id: String,
@@ -143,13 +141,11 @@ pub struct ResolvedRebornLlm {
 
 /// Decorator over the config-built LLM provider. See
 /// [`ResolvedRebornLlm::with_provider_factory`].
-#[cfg(feature = "root-llm-provider")]
 pub type RebornProviderFactory = Arc<
     dyn Fn(Arc<dyn ironclaw_llm::LlmProvider>) -> Arc<dyn ironclaw_llm::LlmProvider> + Send + Sync,
 >;
 
 // `LlmProvider` is not `Debug`, so derive can't see through `provider_override`.
-#[cfg(feature = "root-llm-provider")]
 impl std::fmt::Debug for ResolvedRebornLlm {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("ResolvedRebornLlm")
@@ -160,7 +156,6 @@ impl std::fmt::Debug for ResolvedRebornLlm {
     }
 }
 
-#[cfg(feature = "root-llm-provider")]
 impl ResolvedRebornLlm {
     pub fn provider_id(&self) -> &str {
         &self.provider_id
@@ -189,8 +184,7 @@ impl ResolvedRebornLlm {
     /// it — e.g. to layer token/reasoning/cost instrumentation over the real
     /// provider.
     ///
-    /// This is the instrumentation seam (feature-gated on `root-llm-provider`).
-    /// The composition still constructs the provider from `config` and hands it
+    /// This is the instrumentation seam. The composition still constructs the provider from `config` and hands it
     /// to the factory, so `config` remains the single source of truth and the
     /// raw `ironclaw_llm::LlmProvider` substrate handle is never accepted
     /// wholesale through the facade — the caller only supplies a decorator over
@@ -410,12 +404,9 @@ impl TriggerPollerSettings {
 #[derive(Default)]
 pub struct RebornRuntimeInput {
     pub services: Option<RebornBuildInput>,
-    #[cfg(feature = "root-llm-provider")]
     pub llm: Option<ResolvedRebornLlm>,
-    /// Operator boot config. When present (and `root-llm-provider` is on), the
-    /// WebUI facade composes the LLM-config settings service from it so the
+    /// Operator boot config. When present, the WebUI facade composes the LLM-config settings service from it so the
     /// settings surface can read/write `providers.json` + `config.toml`.
-    #[cfg(feature = "root-llm-provider")]
     pub boot: Option<RebornBootConfig>,
     pub runner: TurnRunnerSettings,
     pub tool_disclosure: Option<ToolDisclosureMode>,
@@ -483,9 +474,7 @@ impl RebornRuntimeInput {
     pub fn from_services(services: RebornBuildInput) -> Self {
         Self {
             services: Some(services),
-            #[cfg(feature = "root-llm-provider")]
             llm: None,
-            #[cfg(feature = "root-llm-provider")]
             boot: None,
             runner: TurnRunnerSettings::default(),
             tool_disclosure: None,
@@ -594,7 +583,6 @@ impl RebornRuntimeInput {
         self
     }
 
-    #[cfg(feature = "root-llm-provider")]
     pub fn with_resolved_llm(mut self, llm: ResolvedRebornLlm) -> Self {
         self.llm = Some(llm);
         self
@@ -602,7 +590,6 @@ impl RebornRuntimeInput {
 
     /// Supply the operator boot config so the WebUI facade can compose the
     /// LLM-config settings service.
-    #[cfg(feature = "root-llm-provider")]
     pub fn with_boot_config(mut self, boot: RebornBootConfig) -> Self {
         self.boot = Some(boot);
         self

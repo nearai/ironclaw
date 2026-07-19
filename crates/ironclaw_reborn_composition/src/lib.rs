@@ -8,8 +8,8 @@
 //!   turn coordinator, product auth). Useful when an outer harness wires the loop
 //!   drivers / turn-runner itself (e.g. v1 `AppBuilder`).
 //! - [`build_reborn_runtime`] — full runtime assembly: substrate + loop
-//!   driver registry + LLM model gateway (under `root-llm-provider`) +
-//!   turn-runner worker, spawned as one unit. This is the single entry
+//!   driver registry + LLM model gateway + turn-runner worker, spawned
+//!   as one unit. This is the single entry
 //!   point used by the standalone `ironclaw-reborn` binary and any
 //!   future Reborn ingress.
 //!
@@ -124,15 +124,12 @@ pub use ironclaw_skills::{
 };
 pub use ironclaw_triggers::TriggerId;
 pub use ironclaw_turns::TurnStatus;
-#[cfg(feature = "root-llm-provider")]
 pub use llm_admin::llm_catalog::{
     ProviderCatalogValidationError, RebornLlmCatalogError, resolve_against_registry,
     resolve_llm_selection_against_catalog, resolve_llm_selection_allow_missing_key,
     resolve_reborn_runtime_llm, validate_reborn_provider_catalog_contents,
 };
-#[cfg(feature = "root-llm-provider")]
 pub use llm_admin::llm_config_service::{LlmReloadTrigger, RebornLlmConfigService};
-#[cfg(feature = "root-llm-provider")]
 pub use llm_admin::llm_key_store::{LlmKeyStore, LlmKeyStoreError};
 pub use llm_admin::nearai_mcp::{
     NearAiMcpBootstrapConfig, NearAiMcpBootstrapConfigError, nearai_mcp_bootstrap_config_from_env,
@@ -144,16 +141,13 @@ pub use llm_admin::openai_compat_serve::build_openai_compat_route_mount;
 // not depend on `ironclaw_product_adapters` directly (architecture boundary), so
 // it reaches this helper through composition's facade.
 pub use ironclaw_product_adapters::mark_bearer_token_verified_for_tenant;
-#[cfg(feature = "root-llm-provider")]
 pub use llm_admin::provider_admin::{
     DetectedEnvLlm, EXAMPLE_OVERLAY_PROVIDER_ID, ProviderMenuEntry, ProviderProbeOutcome,
     RebornModelRoutesState, RebornProviderAdmin, RebornProviderAdminError, RebornProviderInfo,
     RebornProviderList, RebornProviderMetadata, RebornProviderSelection, RebornProviderStatus,
     RebornProviderWriteOutcome, RebornV1State,
 };
-#[cfg(feature = "root-llm-provider")]
 pub use llm_admin::provider_admin_product_command::RebornProviderAdminProductCommandService;
-#[cfg(feature = "root-llm-provider")]
 pub use llm_admin::provider_repo::{ProviderRepo, ProviderRepoError};
 pub use local_runtime_profile::{
     RebornRuntimeProfileError, RebornRuntimeProfileOptions, hosted_single_tenant_runtime_policy,
@@ -223,7 +217,6 @@ pub use runtime_input::{
     TriggerFireAccessCheck, TriggerFireAccessChecker, TriggerFireAccessDecision,
     TriggerFireAccessError, TriggerPollerSettings, TurnRunnerSettings,
 };
-#[cfg(feature = "root-llm-provider")]
 pub use runtime_input::{RebornProviderFactory, ResolvedRebornLlm};
 pub use slack::slack_actor_identity::{
     SlackUserIdentityActorResolver, slack_user_identity_provider_user_id,

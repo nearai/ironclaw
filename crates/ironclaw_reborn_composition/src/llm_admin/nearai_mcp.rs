@@ -114,7 +114,6 @@ fn nearai_mcp_bootstrap_config_from_lookup(
     NearAiMcpBootstrapConfig::from_optional_parts(configured_base, api_key)
 }
 
-#[cfg(feature = "root-llm-provider")]
 pub(crate) async fn nearai_mcp_bootstrap_config_from_llm_config(
     config: &ironclaw_llm::LlmConfig,
 ) -> Result<Option<NearAiMcpBootstrapConfig>, NearAiMcpBootstrapConfigError> {

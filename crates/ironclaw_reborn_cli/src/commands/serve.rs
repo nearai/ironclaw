@@ -220,7 +220,6 @@ impl ServeCommand {
         let mut runtime_input = runtime_input.with_owner_id(runtime_owner);
         // Carry the boot config so the WebUI facade can compose the operator
         // LLM-config settings service over `providers.json` / `config.toml`.
-        #[cfg(feature = "root-llm-provider")]
         {
             runtime_input = runtime_input.with_boot_config(boot_config.clone());
         }
@@ -719,7 +718,6 @@ impl ServeCommand {
             }
             // Public NEAR AI login callback route (token redirect target). Built
             // from the runtime's LLM seam; absent when no LLM was wired.
-            #[cfg(feature = "root-llm-provider")]
             if let Some(nearai_mount) = runtime.nearai_login_callback_mount() {
                 serve_config = serve_config.with_public_route_mount(nearai_mount);
             }

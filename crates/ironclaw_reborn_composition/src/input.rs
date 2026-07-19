@@ -285,7 +285,6 @@ impl RebornBuildInput {
         &self.owner_id
     }
 
-    #[cfg(feature = "root-llm-provider")]
     pub(crate) fn has_nearai_mcp_bootstrap_config(&self) -> bool {
         self.nearai_mcp_bootstrap_config.is_some()
     }

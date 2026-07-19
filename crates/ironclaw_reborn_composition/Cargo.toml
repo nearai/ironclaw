@@ -29,16 +29,6 @@ default = []
 # `tools/ironclaw_stress/results/2026-06-30-turn-state-inmemory/` for the
 # contention measurements that motivated it.
 inmemory-turn-state = []
-# Wire a host-managed LLM model gateway into the assembled runtime via
-# ironclaw_runner's `LlmProviderModelGateway`. Off by default so this crate
-# stays substrate-only when callers don't want a model gateway in the
-# composed runtime. Mirrors `ironclaw_runner`'s own `root-llm-provider`
-# feature shape (optional dep, `default-features = false`).
-root-llm-provider = [
-    "dep:ironclaw_llm",
-    "ironclaw_llm/registry-provider-factory",
-    "ironclaw_runner/root-llm-provider",
-]
 # Expose test-only helpers (mock LLM gateway, budget runtime accessors)
 # so integration tests in this crate's `tests/` directory and downstream
 # crates can drive `build_reborn_runtime` with a stub model gateway
@@ -97,7 +87,7 @@ ironclaw_first_party_extensions = { path = "../ironclaw_first_party_extensions" 
 ironclaw_hooks = { path = "../ironclaw_hooks" }
 ironclaw_host_api = { path = "../ironclaw_host_api" }
 ironclaw_host_runtime = { path = "../ironclaw_host_runtime" }
-ironclaw_llm = { path = "../ironclaw_llm", optional = true, default-features = false }
+ironclaw_llm = { path = "../ironclaw_llm", default-features = false, features = ["registry-provider-factory"] }
 ironclaw_loop_host = { path = "../ironclaw_loop_host" }
 ironclaw_memory = { path = "../ironclaw_memory" }
 ironclaw_mcp = { path = "../ironclaw_mcp" }

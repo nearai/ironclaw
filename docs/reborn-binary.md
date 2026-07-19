@@ -424,26 +424,9 @@ records the variable *name*, never the value. Once `[llm.default]` exists it
 selects the provider; `LLM_BACKEND` is only an env fallback when no default slot
 is configured.
 
-All of the above requires the `root-llm-provider` Cargo feature, which is
-**on by default** (`default = ["root-llm-provider", "libsql"]` in
-`crates/ironclaw_reborn_cli/Cargo.toml`). A binary built with
-`--no-default-features` (or any feature set that drops `root-llm-provider`)
-does not have `RebornProviderAdmin` linked in, so all four `models`
-subcommands error instead:
-
-```bash
-cargo run -q -p ironclaw_reborn_cli --no-default-features --features libsql --bin ironclaw-reborn -- models list
-```
-
-```
-Error: `models list` requires the root-llm-provider feature; v1_state: not-used
-```
-
-`set`/`set-provider` report the same `requires the root-llm-provider feature`
-error in that build; `list`/`status` used to instead print placeholder text
-(`routes: not-configured`, `v1_state: not-used`) as if the command had
-succeeded — that placeholder path was removed so all four subcommands fail
-the same way when the feature is off.
+The `models` subcommands are always available: the LLM provider
+(`ironclaw_llm`) is a mandatory dependency of the Reborn CLI, so there is no
+build of the binary without `RebornProviderAdmin` linked in.
 
 ### `profile list`
 

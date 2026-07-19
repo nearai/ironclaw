@@ -22,15 +22,7 @@ dist = false
 # libsql is the default storage backend: a file-backed local database needs
 # no external server, so a default `ironclaw-reborn` build is runnable as-is.
 # `postgres` remains opt-in for deployments that point `[storage]` at a server.
-default = ["root-llm-provider", "libsql"]
-# Wire a real LLM provider into the assembled runtime. Mirrors the same
-# `root-llm-provider` feature on `ironclaw_reborn_composition` /
-# `ironclaw_runner`, so building without it produces a CLI binary that
-# can still boot the runtime substrate but will surface an "LLM gateway
-# not wired" error on the first `send_user_message`.
-root-llm-provider = [
-    "ironclaw_reborn_composition/root-llm-provider",
-]
+default = ["libsql"]
 # Enable production PostgreSQL storage composition for `ironclaw-reborn`.
 postgres = [
     "ironclaw_reborn_composition/postgres",

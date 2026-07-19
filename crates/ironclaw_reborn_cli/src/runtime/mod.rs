@@ -545,7 +545,7 @@ fn apply_credential_refresh_override(
 ///   with no GUI session). `onboard` already pays that cost interactively;
 ///   `serve` is the boot path this fix unblocks. `run` stays fail-fast so
 ///   a forgotten env var doesn't hang instead of erroring clearly.
-#[cfg(all(feature = "libsql", feature = "root-llm-provider"))]
+#[cfg(feature = "libsql")]
 fn resolve_reborn_runtime_llm_with_stored_key_fallback(
     config: &RebornBootConfig,
     config_file: Option<&ironclaw_reborn_config::RebornConfigFile>,
@@ -602,7 +602,7 @@ fn resolve_reborn_runtime_llm_with_stored_key_fallback(
 /// to check, so behavior here is byte-identical to calling
 /// `resolve_reborn_runtime_llm` directly — a required-but-unset API key
 /// still fails closed with `ApiKeyEnvUnset`.
-#[cfg(all(feature = "root-llm-provider", not(feature = "libsql")))]
+#[cfg(not(feature = "libsql"))]
 fn resolve_reborn_runtime_llm_with_stored_key_fallback(
     config: &RebornBootConfig,
     config_file: Option<&ironclaw_reborn_config::RebornConfigFile>,
@@ -636,7 +636,6 @@ pub(crate) fn build_runtime_input_with_options(
             runtime_services.config_file.as_ref(),
         ));
 
-    #[cfg(feature = "root-llm-provider")]
     {
         // The composition runtime cold-boots with a placeholder gateway and
         // needs the boot config to run its initial provider reload. This is
@@ -1956,7 +1955,6 @@ mod tests {
         assert!(runtime_input.runner.worker_count.is_none());
     }
 
-    #[cfg(feature = "root-llm-provider")]
     #[test]
     fn runtime_inputs_carry_boot_config_for_initial_llm_reload() {
         let _lock = lock_runtime_env();

@@ -428,10 +428,7 @@ pub(crate) fn build_webui_services_with_connectable_channels(
     )));
     api = api.with_operator_logs_service(crate::operator_log_buffer());
     if let Some(local_runtime) = &services.local_runtime {
-        #[cfg(feature = "root-llm-provider")]
         let webui_boot_config = runtime.webui_boot_config();
-        #[cfg(not(feature = "root-llm-provider"))]
-        let webui_boot_config = None;
         api = api.with_operator_service_lifecycle_service(Arc::new(
             RebornLocalServiceLifecycle::new_for_operator_with_boot_config(
                 runtime.webui_tenant_id().clone(),
@@ -444,7 +441,6 @@ pub(crate) fn build_webui_services_with_connectable_channels(
     // Compose the operator LLM-config settings service when the runtime was
     // assembled with a boot config. The secret store stays private to this
     // crate; the service is the only facade-shaped handle that leaves.
-    #[cfg(feature = "root-llm-provider")]
     if let Some(llm_config) = build_llm_config_service(runtime) {
         api = api.with_llm_config_service(llm_config);
     }
@@ -452,7 +448,6 @@ pub(crate) fn build_webui_services_with_connectable_channels(
     // Wire the live active-model reader so a default-model run (no explicit
     // `model`, hence no `resolved_model_route`) is still priced — against the
     // model that actually ran, tracking operator model swaps.
-    #[cfg(feature = "root-llm-provider")]
     if let Some(active_model_reader) = runtime.webui_active_model_reader() {
         api = api.with_active_model_reader(active_model_reader);
     }
@@ -470,7 +465,6 @@ pub(crate) fn build_webui_services_with_connectable_channels(
 /// Returns `None` when the runtime was assembled without a boot config. Shared
 /// by `build_webui_services` (operator LLM routes) and the OpenAI-compatible
 /// `/v1/models` catalog so both read the same configured-model source.
-#[cfg(feature = "root-llm-provider")]
 pub(crate) fn build_llm_config_service(
     runtime: &RebornRuntime,
 ) -> Option<Arc<dyn ironclaw_product_workflow::LlmConfigService>> {

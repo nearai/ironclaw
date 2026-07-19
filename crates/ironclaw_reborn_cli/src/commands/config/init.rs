@@ -299,7 +299,7 @@ const PROVIDERS_STUB: &str = r#"[
 ]
 "#;
 
-#[cfg(all(test, feature = "root-llm-provider"))]
+#[cfg(test)]
 mod tests {
     use super::*;
     use crate::context::RebornCliContext;

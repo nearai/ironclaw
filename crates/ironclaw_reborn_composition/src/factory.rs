@@ -6644,7 +6644,7 @@ mod tests {
     /// `forbid(unsafe_code)` note above — this crate's inline tests cannot
     /// mutate process env, and a cached dotfile is the non-env-mutating way
     /// to make the resolver deterministic here).
-    #[cfg(all(feature = "libsql", feature = "root-llm-provider"))]
+    #[cfg(feature = "libsql")]
     #[tokio::test]
     async fn open_local_dev_secret_store_opens_a_working_store_over_the_bare_root() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -6676,7 +6676,7 @@ mod tests {
     /// db file, same cached master key) must decrypt a value written by a
     /// prior open — this is the "onboard writes, serve reads" contract B2
     /// exists to satisfy.
-    #[cfg(all(feature = "libsql", feature = "root-llm-provider"))]
+    #[cfg(feature = "libsql")]
     #[tokio::test]
     async fn open_local_dev_secret_store_is_visible_across_reopens_of_the_same_root() {
         let dir = tempfile::tempdir().expect("tempdir");

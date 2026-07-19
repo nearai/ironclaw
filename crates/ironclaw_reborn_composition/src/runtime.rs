@@ -4,9 +4,8 @@
 //! product-level wiring on top of the substrate facades exposed by
 //! `build_reborn_services`. It is the **only** place in the workspace where
 //! `ironclaw_runner` (drivers, host factory, model gateway bridge),
-//! `ironclaw_threads` (session thread service), and (under the
-//! `root-llm-provider` feature) `ironclaw_llm` are composed into a running
-//! agent.
+//! `ironclaw_threads` (session thread service), and `ironclaw_llm` are
+//! composed into a running agent.
 //!
 //! Downstream callers (the CLI, future channel adapters, e2e harnesses) reach
 //! this assembly only through:
@@ -515,7 +514,6 @@ pub use skills::{
 
 use skills::skill_asset_error;
 
-#[cfg(feature = "root-llm-provider")]
 use crate::runtime_input::ResolvedRebornLlm;
 
 /// Stable identifier for a Reborn CLI conversation. Wraps a `ThreadId`.
@@ -603,7 +601,6 @@ pub enum RebornRuntimeError {
     InvalidArgument { reason: String },
     #[error("malformed runtime configuration: {reason}")]
     MalformedConfig { reason: String },
-    #[cfg(feature = "root-llm-provider")]
     #[error("llm provider construction failed: {0}")]
     LlmProvider(String),
     #[error("turn-runner worker is no longer running")]
@@ -657,7 +654,6 @@ pub struct RebornRuntime {
     credential_refresh_worker_handle:
         Option<crate::product_auth::credentials::credential_refresh_worker::CredentialRefreshWorkerRuntimeHandle>,
     trace_flush_worker: crate::observability::trace_capture::TraceQueueFlushWorkerHandle,
-    #[cfg(feature = "root-llm-provider")]
     skill_learning_extraction_tasks:
         Option<Arc<crate::extension_host::skill_learning::SkillLearningExtractionTasks>>,
     /// Late-binding slot shared with the poller's `PostSubmitHookWrappedSubmitter`.
@@ -697,10 +693,8 @@ pub struct RebornRuntime {
     skill_execution_adapter: Option<Arc<ComposedSkillExecutionAdapter>>,
     /// Operator boot config, carried so the WebUI facade can compose the
     /// LLM-config settings service over `providers.json` / `config.toml`.
-    #[cfg(feature = "root-llm-provider")]
     boot: Option<ironclaw_reborn_config::RebornBootConfig>,
     /// Hot-swap handle for the live LLM provider, when one was wired at boot.
-    #[cfg(feature = "root-llm-provider")]
     llm_reload: Option<RebornLlmReloadParts>,
 }
 
@@ -1436,7 +1430,6 @@ impl RebornRuntime {
 
     /// Operator boot config, when the runtime was assembled with one. The
     /// WebUI facade uses it to compose the LLM-config settings service.
-    #[cfg(feature = "root-llm-provider")]
     pub(crate) fn webui_boot_config(&self) -> Option<&ironclaw_reborn_config::RebornBootConfig> {
         self.boot.as_ref()
     }
@@ -1444,7 +1437,6 @@ impl RebornRuntime {
     /// The runtime's NEAR AI session manager, when an LLM seam is wired. The
     /// LLM-config service uses it so a completed NEAR AI login applies to the
     /// live provider on reload.
-    #[cfg(feature = "root-llm-provider")]
     pub(crate) fn webui_llm_session(&self) -> Option<Arc<ironclaw_llm::SessionManager>> {
         self.llm_reload
             .as_ref()
@@ -1453,7 +1445,6 @@ impl RebornRuntime {
 
     /// Shared NEAR AI login-state store. The authenticated start endpoint
     /// issues states and the public callback consumes them.
-    #[cfg(feature = "root-llm-provider")]
     pub(crate) fn webui_nearai_login_states(
         &self,
     ) -> Option<Arc<crate::llm_admin::llm_config_service::NearAiLoginStateStore>> {
@@ -1466,7 +1457,6 @@ impl RebornRuntime {
     /// `ironclaw_webui::WebuiServeConfig::with_public_route_mount`. Built
     /// from the runtime's private session/reload/boot so those stay internal.
     /// `None` when no LLM seam or boot config was wired.
-    #[cfg(feature = "root-llm-provider")]
     pub fn nearai_login_callback_mount(
         &self,
     ) -> Option<crate::webui::route_mounts::PublicRouteMount> {
@@ -1485,7 +1475,6 @@ impl RebornRuntime {
     /// hot-swap adapter when an LLM provider was wired at boot; otherwise
     /// `None`, in which case config edits persist to disk and apply on the
     /// next restart.
-    #[cfg(feature = "root-llm-provider")]
     pub(crate) fn webui_llm_reload_trigger(&self) -> Option<Arc<dyn crate::LlmReloadTrigger>> {
         let boot = self.boot.as_ref()?;
         let parts = self.llm_reload.as_ref()?;
@@ -1504,7 +1493,6 @@ impl RebornRuntime {
     /// against the model that actually ran. Backed by the same hot-swappable
     /// primary provider the model gateway drives, so it tracks operator model
     /// swaps. `None` when no LLM provider was wired at boot.
-    #[cfg(feature = "root-llm-provider")]
     pub(crate) fn webui_active_model_reader(
         &self,
     ) -> Option<Arc<dyn ironclaw_product_workflow::ActiveModelReader>> {
@@ -2090,10 +2078,9 @@ impl RebornRuntime {
     /// reach a terminal state, and return the assistant reply read back
     /// from the session thread service.
     ///
-    /// Without an LLM gateway wired in (i.e. when this crate is built
-    /// without the `root-llm-provider` feature or an LLM config is not
-    /// provided), the run will fail and the returned reply will surface
-    /// that failure via `status = Failed` and `text = None`.
+    /// Without an LLM provider configured, the run will fail and the
+    /// returned reply will surface that failure via `status = Failed`
+    /// and `text = None`.
     ///
     /// **WebUI-only origin contract**: this task-level send path resolves
     /// the turn's product-context origin as WebUI chat (`resolve_web_ui`).
@@ -2547,7 +2534,6 @@ impl RebornRuntime {
                 .await;
         }
         self.trace_flush_worker.shutdown().await;
-        #[cfg(feature = "root-llm-provider")]
         if let Some(skill_learning_extraction_tasks) = self.skill_learning_extraction_tasks {
             skill_learning_extraction_tasks.shutdown().await;
         }
@@ -3071,9 +3057,7 @@ pub async fn build_reborn_runtime(
 ) -> Result<RebornRuntime, RebornRuntimeError> {
     let RebornRuntimeInput {
         services: services_input,
-        #[cfg(feature = "root-llm-provider")]
         llm,
-        #[cfg(feature = "root-llm-provider")]
         boot,
         runner,
         tool_disclosure,
@@ -3128,9 +3112,7 @@ pub async fn build_reborn_runtime(
         validated_identity.tenant_id.clone(),
         validated_identity.agent_id.clone(),
     );
-    #[cfg(feature = "root-llm-provider")]
     let mut has_nearai_mcp_bootstrap_config = services_input.has_nearai_mcp_bootstrap_config();
-    #[cfg(feature = "root-llm-provider")]
     if !has_nearai_mcp_bootstrap_config
         && let Some(llm) = llm.as_ref()
         && let Some(config) =
@@ -3159,7 +3141,6 @@ pub async fn build_reborn_runtime(
         UserId::new(owner_id.clone()).map_err(|reason| RebornRuntimeError::InvalidArgument {
             reason: format!("user id: {reason}"),
         })?;
-    #[cfg(feature = "root-llm-provider")]
     let nearai_mcp_owner_scope = ResourceScope {
         tenant_id: validated_identity.tenant_id.clone(),
         user_id: actor_user_id.clone(),
@@ -3174,7 +3155,6 @@ pub async fn build_reborn_runtime(
     // post-construction reload below); the NEAR AI MCP bootstrap check is a
     // separate consumer that inspects `llm.config.nearai.api_key` directly,
     // so it still needs the key overlaid onto a local clone.
-    #[cfg(feature = "root-llm-provider")]
     if !has_nearai_mcp_bootstrap_config {
         let llm_for_mcp_bootstrap =
             overlay_stored_llm_key_for_nearai_mcp_bootstrap(llm.clone(), &services).await?;
@@ -3318,19 +3298,7 @@ pub async fn build_reborn_runtime(
         mission_id: None,
     };
 
-    // Resolve the model gateway in three flat steps so the cfg gates
-    // don't multiply into a 4-way permutation:
-    //
-    // 1. Normalize the test-only override into a plain `Option`.
-    //    Off-feature builds get a hard `None` so downstream control flow
-    //    stays plain.
-    // 2. Build the production gateway + cost table from the LLM config
-    //    (cfg-gated helper); without `root-llm-provider` the helper
-    //    short-circuits to a stub.
-    // 3. The test override wins over the production gateway when set;
-    //    the LLM-derived cost table is kept regardless so the
-    //    accountant can fire against a stub gateway too.
-    // 3. A test gateway override short-circuits the production build entirely:
+    // A test gateway override short-circuits the production build entirely:
     //    building a real gateway only to discard it wastes startup work (and, on
     //    the cold-boot path, an LLM session manager), which made
     //    timeout-sensitive tests flaky. When no override is set, build normally.
@@ -3339,34 +3307,17 @@ pub async fn build_reborn_runtime(
     // (IRONCLAW_SKILL_LEARNING_MODEL), reusing the run's NEAR AI credentials
     // with only the model overridden. `llm` no longer feeds the model gateway
     // build below (see `build_production_model_gateway`).
-    #[cfg(feature = "root-llm-provider")]
     let skill_learning_provider = match llm.as_ref() {
         Some(resolved) => build_skill_learning_provider(&resolved.config).await,
         None => None,
     };
-    #[cfg(all(feature = "root-llm-provider", any(test, feature = "test-support")))]
+    #[cfg(any(test, feature = "test-support"))]
     let (model_gateway, llm_cost_table, llm_reload) = match model_gateway_override {
         Some(override_gateway) => (override_gateway, None, None),
         None => build_production_model_gateway().await?,
     };
-    #[cfg(all(
-        feature = "root-llm-provider",
-        not(any(test, feature = "test-support"))
-    ))]
+    #[cfg(not(any(test, feature = "test-support")))]
     let (model_gateway, llm_cost_table, llm_reload) = build_production_model_gateway().await?;
-    #[cfg(all(
-        not(feature = "root-llm-provider"),
-        any(test, feature = "test-support")
-    ))]
-    let (model_gateway, llm_cost_table) = match model_gateway_override {
-        Some(override_gateway) => (override_gateway, None),
-        None => build_production_model_gateway()?,
-    };
-    #[cfg(all(
-        not(feature = "root-llm-provider"),
-        not(any(test, feature = "test-support"))
-    ))]
-    let (model_gateway, llm_cost_table) = build_production_model_gateway()?;
 
     // Resolved cost table is either: the LLM-policy-derived table (real
     // LLM wired), a test override (so tests can drive deterministic
@@ -3532,7 +3483,6 @@ pub async fn build_reborn_runtime(
         };
     // Clone the live projection publisher for the skill-learning sink before
     // the milestone-sink builder consumes the original by value.
-    #[cfg(feature = "root-llm-provider")]
     let skill_learning_publisher = Arc::clone(&live_projection_publisher);
     let milestone_sink = projection_services.with_live_progress_milestone_sink_for_publisher(
         durable_milestone_sink,
@@ -3672,14 +3622,11 @@ pub async fn build_reborn_runtime(
     // additively, so the trace-capture path is unchanged). It is active only
     // when a learning model is configured (a stronger model than the run's, via
     // IRONCLAW_SKILL_LEARNING_MODEL); otherwise only trace capture runs.
-    #[cfg_attr(not(feature = "root-llm-provider"), allow(unused_mut))]
     let mut turn_event_sinks: Vec<Arc<dyn ironclaw_turns::TurnEventSink>> =
         vec![trace_capture_sink, projection_turn_event_wake_sink];
-    #[cfg(feature = "root-llm-provider")]
     let mut skill_learning_extraction_tasks: Option<
         Arc<crate::extension_host::skill_learning::SkillLearningExtractionTasks>,
     > = None;
-    #[cfg(feature = "root-llm-provider")]
     if let (Some((learning_provider, learning_model)), Some(local_runtime)) =
         (skill_learning_provider, local_runtime)
     {
@@ -4103,7 +4050,6 @@ pub async fn build_reborn_runtime(
     // path the settings UI uses (see `webui_llm_reload_trigger`). Failure
     // degrades like a boot with no LLM configured: placeholder stays wired,
     // operator retries through Settings -> Inference without a restart.
-    #[cfg(feature = "root-llm-provider")]
     if let (Some(boot_config), Some(reload_parts)) = (boot.as_ref(), llm_reload.as_ref()) {
         let boot_reload_adapter = crate::llm_admin::llm_reload::RebornLlmReloadAdapter::new(
             boot_config.clone(),
@@ -4133,7 +4079,6 @@ pub async fn build_reborn_runtime(
         #[cfg(any(feature = "libsql", feature = "postgres"))]
         credential_refresh_worker_handle,
         trace_flush_worker,
-        #[cfg(feature = "root-llm-provider")]
         skill_learning_extraction_tasks,
         post_submit_hook_slot: runtime_post_submit_hook_slot,
         post_submit_hook_composite: runtime_post_submit_hook_composite,
@@ -4156,9 +4101,7 @@ pub async fn build_reborn_runtime(
         send_locks: Mutex::new(HashMap::new()),
         skill_activation_source,
         skill_execution_adapter,
-        #[cfg(feature = "root-llm-provider")]
         boot,
-        #[cfg(feature = "root-llm-provider")]
         llm_reload,
     })
 }
@@ -4403,7 +4346,6 @@ fn local_dev_filesystem_skill_context_source(
 /// check (it inspects the config directly, not the live provider). NOT the
 /// general "stored key -> live provider" mechanism — that's
 /// [`RebornLlmReloadAdapter::reload`], invoked once after boot construction.
-#[cfg(feature = "root-llm-provider")]
 async fn overlay_stored_llm_key_for_nearai_mcp_bootstrap(
     llm: Option<ResolvedRebornLlm>,
     services: &RebornServices,
@@ -4424,7 +4366,6 @@ async fn overlay_stored_llm_key_for_nearai_mcp_bootstrap(
     Ok(Some(llm))
 }
 
-#[cfg(feature = "root-llm-provider")]
 async fn bootstrap_nearai_mcp_from_effective_llm(
     services: &RebornServices,
     llm: Option<&ResolvedRebornLlm>,
@@ -4531,7 +4472,6 @@ impl CapabilitySurfaceProfileResolver for AllowAllCapabilitySurfaceResolver {
 /// through the same live-reload path the settings UI uses
 /// (`RebornLlmReloadAdapter::reload`). No cost table is derived here: there's
 /// no real model to cost until that reload swaps in a real provider.
-#[cfg(feature = "root-llm-provider")]
 async fn build_production_model_gateway() -> Result<
     (
         Arc<dyn ironclaw_loop_host::HostManagedModelGateway>,
@@ -4554,7 +4494,6 @@ async fn build_production_model_gateway() -> Result<
 /// multi-model and honours a per-request model override). Returns `None` when
 /// unconfigured, when the backend is not NEAR AI, or when provider construction
 /// fails — in all of which cases skill learning stays disabled.
-#[cfg(feature = "root-llm-provider")]
 async fn build_skill_learning_provider(
     config: &ironclaw_llm::LlmConfig,
 ) -> Option<(Arc<dyn ironclaw_llm::LlmProvider>, String)> {
@@ -4584,18 +4523,6 @@ async fn build_skill_learning_provider(
     }
 }
 
-#[cfg(not(feature = "root-llm-provider"))]
-fn build_production_model_gateway() -> Result<
-    (
-        Arc<dyn ironclaw_loop_host::HostManagedModelGateway>,
-        Option<ironclaw_loop_host::StaticModelCostTable>,
-    ),
-    RebornRuntimeError,
-> {
-    Ok((build_stub_gateway(), None))
-}
-
-#[cfg(feature = "root-llm-provider")]
 struct LlmGatewayBundle {
     gateway: Arc<dyn ironclaw_loop_host::HostManagedModelGateway>,
     /// Hot-swap handle + session for the live-reload path. The model gateway
@@ -4608,7 +4535,6 @@ struct LlmGatewayBundle {
 /// The pieces the LLM-config settings service needs to hot-swap the running
 /// provider: the reload handle wrapping the live `SwappableLlmProvider`, and
 /// the session manager to rebuild the chain against.
-#[cfg(feature = "root-llm-provider")]
 pub(crate) struct RebornLlmReloadParts {
     pub(crate) reload_handle: Arc<ironclaw_llm::LlmReloadHandle>,
     pub(crate) session: Arc<ironclaw_llm::SessionManager>,
@@ -4620,7 +4546,6 @@ pub(crate) struct RebornLlmReloadParts {
 /// errors until swapped) so the model-gateway + reload seam exist from the
 /// start; the first configuration applied through the settings UI swaps the
 /// placeholder for a real provider chain with no restart.
-#[cfg(feature = "root-llm-provider")]
 async fn build_placeholder_llm_gateway() -> Result<LlmGatewayBundle, RebornRuntimeError> {
     let session =
         ironclaw_llm::create_session_manager(ironclaw_llm::SessionConfig::default()).await;
@@ -4639,7 +4564,6 @@ async fn build_placeholder_llm_gateway() -> Result<LlmGatewayBundle, RebornRunti
 /// instrumentation stays in the call path and continues to observe model calls
 /// against the reloaded provider. (Applying the factory to the bare provider
 /// instead would let the first reload silently drop the wrapper.)
-#[cfg(feature = "root-llm-provider")]
 fn wrap_swappable_gateway(
     raw: Arc<dyn ironclaw_llm::LlmProvider>,
     session: Arc<ironclaw_llm::SessionManager>,
@@ -4679,11 +4603,9 @@ fn wrap_swappable_gateway(
 /// Stand-in provider used before any LLM is configured. Every call fails with a
 /// clear, user-safe message; it exists only so the gateway/reload seam is live
 /// from a cold boot and the first configuration can swap it out.
-#[cfg(feature = "root-llm-provider")]
 #[derive(Debug)]
 struct PlaceholderLlmProvider;
 
-#[cfg(feature = "root-llm-provider")]
 #[async_trait::async_trait]
 impl ironclaw_llm::LlmProvider for PlaceholderLlmProvider {
     fn model_name(&self) -> &str {
@@ -4709,46 +4631,11 @@ impl ironclaw_llm::LlmProvider for PlaceholderLlmProvider {
     }
 }
 
-#[cfg(feature = "root-llm-provider")]
 fn placeholder_unconfigured_error() -> ironclaw_llm::LlmError {
     ironclaw_llm::LlmError::RequestFailed {
         provider: ironclaw_llm::UNCONFIGURED_PROVIDER_ID.to_string(),
         reason: "no LLM provider is configured yet; choose one in Settings → Inference".to_string(),
     }
-}
-
-// Only the substrate-only build (no `root-llm-provider`) still wires a dead
-// stub gateway. With the LLM provider compiled in, a cold boot uses a
-// placeholder-backed swappable gateway instead (see `build_placeholder_llm_gateway`).
-#[cfg(not(feature = "root-llm-provider"))]
-fn build_stub_gateway() -> Arc<dyn ironclaw_loop_host::HostManagedModelGateway> {
-    use async_trait::async_trait;
-    use ironclaw_loop_host::{
-        HostManagedModelError, HostManagedModelErrorKind, HostManagedModelGateway,
-        HostManagedModelRequest, HostManagedModelResponse,
-    };
-
-    #[derive(Debug, Default)]
-    struct StubGateway;
-
-    #[async_trait]
-    impl HostManagedModelGateway for StubGateway {
-        async fn stream_model(
-            &self,
-            _request: HostManagedModelRequest,
-        ) -> Result<HostManagedModelResponse, HostManagedModelError> {
-            // A missing gateway is a build-configuration fault, not an
-            // availability blip: CredentialUnavailable is unclassified in
-            // loop recovery, so runs fail fast instead of riding the
-            // availability backoff budget.
-            Err(HostManagedModelError::safe(
-                HostManagedModelErrorKind::CredentialUnavailable,
-                "no LLM gateway wired (build with `root-llm-provider` feature)",
-            ))
-        }
-    }
-
-    Arc::new(StubGateway)
 }
 
 #[cfg(test)]

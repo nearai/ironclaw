@@ -32,24 +32,24 @@ pub(crate) trait PromptSource {
     /// invalid input re-prompts up to 3 attempts, then errors. Returns the
     /// selected entry's canonical provider id.
     ///
-    /// Gated with the same `libsql`+`root-llm-provider` cfg as
+    /// Gated on `libsql`, the same cfg as
     /// `ironclaw_reborn_composition::ProviderMenuEntry` itself, matching
     /// `provision_llm_credentials`'s own cfg split (see that function's
     /// feature-off stub, which never calls this method).
-    #[cfg(all(feature = "libsql", feature = "root-llm-provider"))]
+    #[cfg(feature = "libsql")]
     fn provider_menu(
         &mut self,
         entries: &[ironclaw_reborn_composition::ProviderMenuEntry],
     ) -> Result<String, LlmCredentialPromptError>;
 
     /// Prompt for `provider`'s API key with input masked (not echoed).
-    #[cfg(all(feature = "libsql", feature = "root-llm-provider"))]
+    #[cfg(feature = "libsql")]
     fn api_key(&mut self, provider: &str) -> Result<String, LlmCredentialPromptError>;
 
     /// Ask a yes/no `question`, defaulting to yes on a blank answer (`[Y/n]`
     /// framing). Used by onboard's env-detect-and-confirm step: "Found
     /// `<provider>` configured in environment — use it?"
-    #[cfg(all(feature = "libsql", feature = "root-llm-provider"))]
+    #[cfg(feature = "libsql")]
     fn confirm(&mut self, question: &str) -> Result<bool, LlmCredentialPromptError>;
 
     /// Prompt for a model override for `provider_id`. `default_model` is
@@ -59,7 +59,7 @@ pub(crate) trait PromptSource {
     ///
     /// Gated the same as [`Self::provider_menu`] — this trait's two
     /// composition-DTO-touching methods share one cfg reason.
-    #[cfg(all(feature = "libsql", feature = "root-llm-provider"))]
+    #[cfg(feature = "libsql")]
     fn model(
         &mut self,
         provider_id: &str,
@@ -79,7 +79,7 @@ pub(crate) enum LlmCredentialPromptError {
          `ironclaw models set-provider <provider>` and set the provider's API key env \
          var instead, or rerun `onboard` from an interactive shell"
     )]
-    #[cfg(all(feature = "libsql", feature = "root-llm-provider"))]
+    #[cfg(feature = "libsql")]
     NonInteractive,
     #[error(transparent)]
     Other(#[from] anyhow::Error),
@@ -102,7 +102,7 @@ impl PromptSource for StdinPromptSource {
         std::io::stdin().is_terminal() && std::io::stdout().is_terminal()
     }
 
-    #[cfg(all(feature = "libsql", feature = "root-llm-provider"))]
+    #[cfg(feature = "libsql")]
     fn provider_menu(
         &mut self,
         entries: &[ironclaw_reborn_composition::ProviderMenuEntry],
@@ -139,7 +139,7 @@ impl PromptSource for StdinPromptSource {
         provider_menu_typed(entries, typed_seed)
     }
 
-    #[cfg(all(feature = "libsql", feature = "root-llm-provider"))]
+    #[cfg(feature = "libsql")]
     fn api_key(&mut self, provider: &str) -> Result<String, LlmCredentialPromptError> {
         if !std::io::stdin().is_terminal() {
             return Err(LlmCredentialPromptError::NonInteractive);
@@ -170,7 +170,7 @@ impl PromptSource for StdinPromptSource {
         )))
     }
 
-    #[cfg(all(feature = "libsql", feature = "root-llm-provider"))]
+    #[cfg(feature = "libsql")]
     fn model(
         &mut self,
         provider_id: &str,
@@ -195,7 +195,7 @@ impl PromptSource for StdinPromptSource {
         })
     }
 
-    #[cfg(all(feature = "libsql", feature = "root-llm-provider"))]
+    #[cfg(feature = "libsql")]
     fn confirm(&mut self, question: &str) -> Result<bool, LlmCredentialPromptError> {
         if !std::io::stdin().is_terminal() {
             return Err(LlmCredentialPromptError::NonInteractive);
@@ -219,7 +219,7 @@ impl PromptSource for StdinPromptSource {
 /// an exact provider id, or an alias — all case-insensitive for the id/alias
 /// forms. Returns the selected entry's canonical provider id, or `None` when
 /// nothing matches.
-#[cfg(all(feature = "libsql", feature = "root-llm-provider"))]
+#[cfg(feature = "libsql")]
 fn resolve_menu_selection(
     entries: &[ironclaw_reborn_composition::ProviderMenuEntry],
     input: &str,
@@ -249,7 +249,7 @@ fn resolve_menu_selection(
 /// - `nearai`'s `api_key_required` is `true` here (menu-level override) even
 ///   though the raw catalog marks it optional — no session-token auth wired,
 ///   so it's required-key like every other entry and gets no special note.
-#[cfg(all(feature = "libsql", feature = "root-llm-provider"))]
+#[cfg(feature = "libsql")]
 fn menu_entry_key_note(entry: &ironclaw_reborn_composition::ProviderMenuEntry) -> &'static str {
     if entry.api_key_required {
         ""
@@ -270,7 +270,7 @@ fn menu_entry_key_note(entry: &ironclaw_reborn_composition::ProviderMenuEntry) -
 /// back onto the first attempt's line so the operator's keystroke isn't
 /// dropped (e.g. typing "openai" must not land "penai"). Only the first
 /// attempt is seeded — later re-prompts (on invalid input) read a plain line.
-#[cfg(all(feature = "libsql", feature = "root-llm-provider"))]
+#[cfg(feature = "libsql")]
 fn provider_menu_typed(
     entries: &[ironclaw_reborn_composition::ProviderMenuEntry],
     seed: Option<char>,
@@ -321,7 +321,7 @@ fn provider_menu_typed(
 /// `read_line` captured after it) — pure so the "does the seed survive"
 /// behavior is unit-testable without a real terminal. See
 /// [`provider_menu_typed`]'s doc for why the seed exists.
-#[cfg(all(feature = "libsql", feature = "root-llm-provider"))]
+#[cfg(feature = "libsql")]
 fn seed_typed_input(seed: Option<char>, rest: &str) -> String {
     match seed {
         Some(c) => {
@@ -340,7 +340,7 @@ fn seed_typed_input(seed: Option<char>, rest: &str) -> String {
 /// [`run_arrow_menu`] can still fail if `enable_raw_mode()` errors later,
 /// which [`PromptSource::provider_menu`] treats the same: fall back to
 /// [`provider_menu_typed`].
-#[cfg(all(feature = "libsql", feature = "root-llm-provider"))]
+#[cfg(feature = "libsql")]
 fn terminal_supports_arrow_menu() -> bool {
     if !std::io::stdin().is_terminal() || !std::io::stdout().is_terminal() {
         return false;
@@ -354,10 +354,10 @@ fn terminal_supports_arrow_menu() -> bool {
 /// - [`read_masked_line`] instead pairs enable/disable manually since it has
 ///   one exit point; `run_arrow_menu` has several, so a guard avoids
 ///   repeating the pairing at each one.
-#[cfg(all(feature = "libsql", feature = "root-llm-provider"))]
+#[cfg(feature = "libsql")]
 struct RawModeGuard;
 
-#[cfg(all(feature = "libsql", feature = "root-llm-provider"))]
+#[cfg(feature = "libsql")]
 impl RawModeGuard {
     fn enable() -> std::io::Result<Self> {
         crossterm::terminal::enable_raw_mode()?;
@@ -365,7 +365,7 @@ impl RawModeGuard {
     }
 }
 
-#[cfg(all(feature = "libsql", feature = "root-llm-provider"))]
+#[cfg(feature = "libsql")]
 impl Drop for RawModeGuard {
     fn drop(&mut self) {
         let _ = crossterm::terminal::disable_raw_mode();
@@ -375,7 +375,7 @@ impl Drop for RawModeGuard {
 /// Classified key input for the interactive provider menu — the terminal
 /// loop ([`run_arrow_menu`]) maps a raw `crossterm::event::KeyEvent` down to
 /// one of these before handing it to the pure reducer, [`apply_menu_key`].
-#[cfg(all(feature = "libsql", feature = "root-llm-provider"))]
+#[cfg(feature = "libsql")]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum MenuKey {
     Up,
@@ -394,7 +394,7 @@ enum MenuKey {
 /// index — pure and terminal-free so it's unit-tested directly (see this
 /// module's `tests`) rather than only indirectly through [`run_arrow_menu`]'s
 /// real terminal loop.
-#[cfg(all(feature = "libsql", feature = "root-llm-provider"))]
+#[cfg(feature = "libsql")]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum MenuStep {
     /// Up/Down: the new highlighted index (wraps at both ends — Up from
@@ -413,7 +413,7 @@ enum MenuStep {
 /// menu. `highlighted` and `len` (`entries.len()`, always `>= 1` — onboard
 /// never calls `provider_menu` with an empty menu) come from the caller;
 /// this function has no terminal or process-global state of its own.
-#[cfg(all(feature = "libsql", feature = "root-llm-provider"))]
+#[cfg(feature = "libsql")]
 fn apply_menu_key(highlighted: usize, len: usize, key: MenuKey) -> MenuStep {
     debug_assert!(len > 0, "apply_menu_key requires a non-empty menu");
     match key {
@@ -426,7 +426,7 @@ fn apply_menu_key(highlighted: usize, len: usize, key: MenuKey) -> MenuStep {
 }
 
 /// Outcome of [`run_arrow_menu`]'s interactive loop.
-#[cfg(all(feature = "libsql", feature = "root-llm-provider"))]
+#[cfg(feature = "libsql")]
 enum ArrowMenuOutcome {
     Selected(String),
     Cancelled,
@@ -440,7 +440,7 @@ enum ArrowMenuOutcome {
 /// mid-flight, which the caller ([`StdinPromptSource::provider_menu`])
 /// treats the same as [`terminal_supports_arrow_menu`] returning `false`
 /// up front: fall back to [`provider_menu_typed`].
-#[cfg(all(feature = "libsql", feature = "root-llm-provider"))]
+#[cfg(feature = "libsql")]
 fn run_arrow_menu(
     entries: &[ironclaw_reborn_composition::ProviderMenuEntry],
 ) -> std::io::Result<ArrowMenuOutcome> {
@@ -504,7 +504,7 @@ fn run_arrow_menu(
 ///   moves the cursor up exactly `entries.len()` lines (entries only, header
 ///   stays put) and clears downward before reprinting — updates in place
 ///   rather than scrolling.
-#[cfg(all(feature = "libsql", feature = "root-llm-provider"))]
+#[cfg(feature = "libsql")]
 fn render_menu(
     stdout: &mut std::io::Stdout,
     entries: &[ironclaw_reborn_composition::ProviderMenuEntry],
@@ -611,7 +611,7 @@ fn drain_pending_events() {
     }
 }
 
-#[cfg(all(test, feature = "libsql", feature = "root-llm-provider"))]
+#[cfg(all(test, feature = "libsql"))]
 mod tests {
     use ironclaw_reborn_composition::ProviderMenuEntry;
 

@@ -196,7 +196,7 @@ fn release_ci_compiles_reborn_for_all_supported_targets() {
         ("aarch64-apple-darwin", "macos-15"),
         ("x86_64-pc-windows-msvc", "windows-2022"),
     ];
-    let release_features = "root-llm-provider,libsql,postgres,inmemory-turn-state";
+    let release_features = "libsql,postgres,inmemory-turn-state";
 
     assert_eq!(
         compile_workflow.matches("          - target: ").count(),
@@ -1234,7 +1234,6 @@ fn logs_reports_not_implemented() {
     assert_not_implemented(&["logs", "--verbose"], "`logs` is not implemented yet");
 }
 
-#[cfg(feature = "root-llm-provider")]
 #[test]
 fn models_list_reports_reborn_provider_catalog_without_v1_state() {
     let temp = tempfile::tempdir().expect("tempdir");
@@ -1264,7 +1263,6 @@ fn models_list_reports_reborn_provider_catalog_without_v1_state() {
     assert!(stdout.contains("v1_state: not-used"), "stdout: {stdout}");
 }
 
-#[cfg(feature = "root-llm-provider")]
 #[test]
 fn models_status_json_reports_routes_not_configured_without_v1_state() {
     let temp = tempfile::tempdir().expect("tempdir");
@@ -1288,7 +1286,6 @@ fn models_status_json_reports_routes_not_configured_without_v1_state() {
     assert_eq!(json["v1_state"], "not-used");
 }
 
-#[cfg(feature = "root-llm-provider")]
 #[test]
 fn models_status_reads_reborn_default_llm_slot() {
     let temp = tempfile::tempdir().expect("tempdir");
@@ -1328,7 +1325,6 @@ api_key_env = "OPENAI_API_KEY"
     assert_eq!(json["v1_state"], "not-used");
 }
 
-#[cfg(feature = "root-llm-provider")]
 #[test]
 fn models_set_provider_writes_reborn_config_without_v1_state() {
     let temp = tempfile::tempdir().expect("tempdir");
@@ -1375,7 +1371,6 @@ fn models_set_provider_writes_reborn_config_without_v1_state() {
     );
 }
 
-#[cfg(feature = "root-llm-provider")]
 #[test]
 fn models_set_updates_reborn_default_model() {
     let temp = tempfile::tempdir().expect("tempdir");
@@ -1416,7 +1411,6 @@ api_key_env = "OPENAI_API_KEY"
     );
 }
 
-#[cfg(feature = "root-llm-provider")]
 #[test]
 fn models_set_without_provider_fails_without_panicking() {
     let temp = tempfile::tempdir().expect("tempdir");
@@ -1436,102 +1430,6 @@ fn models_set_without_provider_fails_without_panicking() {
         "stderr: {stderr}"
     );
     assert!(!stderr.contains("panicked"), "stderr: {stderr}");
-}
-
-#[cfg(not(feature = "root-llm-provider"))]
-#[test]
-fn models_list_no_default_features_does_not_resolve_reborn_home() {
-    let output = reborn_command()
-        .arg("models")
-        .arg("list")
-        .output()
-        .expect("ironclaw-reborn models list should run");
-
-    assert!(
-        output.status.success(),
-        "stderr: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(
-        stdout.contains("IronClaw Reborn model slots"),
-        "stdout: {stdout}"
-    );
-    assert!(stdout.contains("v1_state: not-used"), "stdout: {stdout}");
-}
-
-#[cfg(not(feature = "root-llm-provider"))]
-#[test]
-fn models_list_with_provider_reports_root_llm_provider_required_without_default_features() {
-    // A provider-detail request needs real provider data; without the feature
-    // it must error like the write commands rather than succeed with the
-    // unrelated generic slot list (2026-07-19 ironloopai review finding).
-    for args in [
-        &["models", "list", "openai"][..],
-        &["models", "list", "--verbose"][..],
-    ] {
-        let output = reborn_command()
-            .args(args)
-            .output()
-            .expect("ironclaw-reborn models list should run");
-        assert!(!output.status.success(), "command should fail: {args:?}");
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        assert!(
-            stderr.contains("requires the root-llm-provider feature"),
-            "stderr: {stderr}"
-        );
-        assert!(
-            !stderr.contains("HOME or USERPROFILE"),
-            "must not resolve Reborn home before feature error: {stderr}"
-        );
-    }
-}
-
-#[cfg(not(feature = "root-llm-provider"))]
-#[test]
-fn models_status_no_default_features_does_not_resolve_reborn_home() {
-    let output = reborn_command()
-        .arg("models")
-        .arg("status")
-        .arg("--json")
-        .output()
-        .expect("ironclaw-reborn models status should run");
-
-    assert!(
-        output.status.success(),
-        "stderr: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let json: serde_json::Value = serde_json::from_str(stdout.trim()).expect("valid JSON");
-    assert_eq!(json["routes"], "not-configured");
-    assert_eq!(json["v1_state"], "not-used");
-}
-
-#[cfg(not(feature = "root-llm-provider"))]
-#[test]
-fn models_write_commands_report_root_llm_provider_required_without_default_features() {
-    for args in [
-        &["models", "set", "gpt-5.3-codex"][..],
-        &["models", "set-provider", "openai"][..],
-    ] {
-        let output = reborn_command()
-            .args(args)
-            .output()
-            .expect("ironclaw-reborn models command should run");
-
-        assert!(!output.status.success(), "command should fail: {args:?}");
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        assert!(
-            stderr.contains("requires the root-llm-provider feature"),
-            "stderr: {stderr}"
-        );
-        assert!(stderr.contains("v1_state: not-used"), "stderr: {stderr}");
-        assert!(
-            !stderr.contains("HOME or USERPROFILE"),
-            "must not resolve Reborn home before feature error: {stderr}"
-        );
-    }
 }
 
 fn assert_not_implemented(args: &[&str], expected_message: &str) {
@@ -3336,10 +3234,8 @@ fn repl_resolves_codex_api_key_auth_env_without_openai_api_key() {
     );
 }
 
-// Provider/auth validation lives behind `root-llm-provider` (a default
-// feature); the `libsql-only` build drops it and boots a stub, so this test
-// only applies when that feature is compiled in.
-#[cfg(feature = "root-llm-provider")]
+// Provider/auth validation is always compiled in: the LLM provider is a
+// mandatory dependency of the Reborn CLI.
 #[test]
 fn run_rejects_codex_backend_when_auth_file_is_missing() {
     let temp = tempfile::tempdir().expect("tempdir");
@@ -4063,7 +3959,7 @@ fn onboard_bootstraps_reborn_home_without_touching_v1_state() {
     );
 }
 
-#[cfg(not(all(feature = "libsql", feature = "root-llm-provider")))]
+#[cfg(not(feature = "libsql"))]
 #[test]
 fn onboard_reduced_feature_build_reports_llm_provisioning_as_unavailable() {
     let temp = tempfile::tempdir().expect("tempdir");
@@ -5733,7 +5629,6 @@ fn onboard_import_history_records_pending_step() {
 // config.toml) exists only when the provider feature compiles that step in;
 // without it onboard legitimately succeeds, so the test would fail the
 // libsql-only lane for behavior that build cannot have.
-#[cfg(feature = "root-llm-provider")]
 #[test]
 fn onboard_preserves_existing_config_without_force() {
     let temp = tempfile::tempdir().expect("tempdir");
@@ -6279,7 +6174,6 @@ api_key_env = "sk-proj-1234567890abcdef12345678"
     );
 }
 
-#[cfg(feature = "root-llm-provider")]
 #[test]
 fn run_warns_when_falling_back_to_stub_gateway() {
     let temp = tempfile::tempdir().expect("tempdir");
@@ -6717,7 +6611,6 @@ default_approval_policy = "ask_always"
     );
 }
 
-#[cfg(feature = "root-llm-provider")]
 #[test]
 fn run_rejects_malformed_explicit_provider_overlay() {
     let temp = tempfile::tempdir().expect("tempdir");
@@ -6747,7 +6640,6 @@ provider_id = "openai"
     );
 }
 
-#[cfg(feature = "root-llm-provider")]
 #[test]
 fn run_rejects_empty_required_api_key_env() {
     let temp = tempfile::tempdir().expect("tempdir");
@@ -6852,7 +6744,6 @@ poll_interval_ms = 0
     );
 }
 
-#[cfg(feature = "root-llm-provider")]
 #[test]
 fn run_resolves_provider_from_config_and_demands_api_key_env() {
     let temp = tempfile::tempdir().expect("tempdir");

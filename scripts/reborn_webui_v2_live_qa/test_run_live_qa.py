@@ -7734,7 +7734,7 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
         self.assertIn("if ! (", prepare_body)
         self.assertIn("validate_reborn_binary_artifact.py", prepare_body)
         self.assertIn(
-            "root-llm-provider,libsql",
+            "libsql",
             prepare_body,
         )
         self.assertIn("cp target/debug/ironclaw target/debug/ironclaw-reborn", prepare_body)
@@ -7755,7 +7755,7 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
             reborn_e2e,
         )
         self.assertIn(
-            '["root-llm-provider","libsql"]',
+            '["libsql"]',
             reborn_e2e,
         )
         self.assertIn("cp target/debug/ironclaw target/debug/ironclaw-reborn", reborn_e2e)
