@@ -146,46 +146,16 @@ fn validate_loop_safe_identifier(
 }
 
 fn validate_loop_safe_summary(value: String) -> Result<String, String> {
-    let value = validate_bounded_loop_string(value, "loop safe summary", 512)?;
+    // Loop-input-encoding sentinel bypass: a host-authored fixed literal that is
+    // not a redaction concern. Everything else delegates to the single canonical
+    // redaction rule owned by `ironclaw_host_api::SafeSummary` (see that type's
+    // module docs) — this validator must never diverge from it.
     if value == INPUT_ENCODE_HUMAN_SUMMARY {
         return Ok(value);
     }
-    if value.chars().any(|character| {
-        matches!(
-            character,
-            '{' | '}' | '[' | ']' | '`' | '<' | '>' | '/' | '\\'
-        )
-    }) {
-        return Err(
-            "loop safe summary must not contain raw payload or path delimiters".to_string(),
-        );
-    }
-
-    let lower = value.to_ascii_lowercase();
-    // Only credential markers are banned; descriptive error vocabulary
-    // ("provider error", "stack trace", "tool input", …) is allowed because
-    // the raw cause now rides the dedicated model-visible detail channel.
-    for forbidden in [
-        "access token",
-        "api key",
-        "api_key",
-        "apikey",
-        "authorization:",
-        "bearer ",
-        "password",
-        "passwd",
-        "secret",
-    ] {
-        if lower.contains(forbidden) {
-            return Err(format!(
-                "loop safe summary must not contain sensitive marker `{forbidden}`"
-            ));
-        }
-    }
-    if contains_secret_like_token(&lower) {
-        return Err("loop safe summary must not contain API-key-like tokens".to_string());
-    }
-    Ok(value)
+    ironclaw_host_api::SafeSummary::new(value)
+        .map(|summary| summary.into_inner())
+        .map_err(|error| error.to_string())
 }
 
 fn contains_secret_like_token(lower: &str) -> bool {

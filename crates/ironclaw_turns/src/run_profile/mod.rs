@@ -23,6 +23,7 @@ mod policy;
 mod prompt;
 mod prompt_text;
 mod refs;
+mod resolution_mapping;
 mod resolver;
 mod runtime_context;
 mod skill_context;
@@ -112,6 +113,7 @@ pub use refs::{
     LoopDriverId, ModelProfileId, ResourceBudgetTier, RunClassId, RunProfileFingerprint,
     RunProfileSourceLayer, RunProfileSourceRef, RunnerPoolId, SchedulingClass,
 };
+pub use resolution_mapping::{MappedResolution, RefBindings, capability_outcome_to_resolution};
 pub use resolver::{
     InMemoryRunProfileRegistry, InMemoryRunProfileResolver, RunProfileDefinition,
     RunProfileRegistryError, RunProfileResolutionRequest, RunProfileResolver,

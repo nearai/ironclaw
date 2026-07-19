@@ -56,35 +56,13 @@ fn is_localdev_type(ident: &str) -> bool {
 /// leak that Slice B removes by resolving mode to a `DeploymentConfig` value.
 /// Remove an entry in the same PR that deletes its type; never add one.
 const FROZEN_LOCALDEV_TYPES: &[&str] = &[
-    "LocalDevActiveExtensionAuthorityForTest",
-    "LocalDevApprovalDefaultsPolicy",
-    "LocalDevApprovalGatePolicy",
-    "LocalDevApprovalLeaseTermsProvider",
-    "LocalDevApprovalPolicyAction",
-    "LocalDevApprovalRequestStore",
-    "LocalDevAuthInteractionReadModel",
-    "LocalDevAutoApproveSettingStore",
-    "LocalDevCapabilityGrantPolicy",
-    "LocalDevCapabilityLeaseStore",
-    "LocalDevCapabilityPolicy",
-    "LocalDevCapabilityPolicyError",
-    "LocalDevCapabilityWiring",
-    "LocalDevConstraintPolicy",
-    "LocalDevDurableBackend",
-    "LocalDevExtensionSurface",
-    "LocalDevExtensionSurfaceSource",
-    "LocalDevMountProfile",
-    "LocalDevNetworkProfile",
-    "LocalDevOverride",
-    "LocalDevPersistentApprovalPolicyStore",
-    "LocalDevProviderPolicy",
-    "LocalDevSelectableSkillContextSource",
-    "LocalDevSyntheticCapability",
-    "LocalDevSyntheticCapabilityDescriptor",
-    "LocalDevSyntheticCapabilityHandler",
-    "LocalDevSyntheticCapabilityInvocation",
-    "LocalDevToolPermissionOverrideStore",
-    "LocalDevTurnStateStore",
+    // EMPTY — the §4.4 definition of done for this axis, reached by the
+    // DeploymentConfig refactor: deployment mode is one config value
+    // (`ironclaw_reborn_composition::deployment::DeploymentConfig`) and the
+    // former `LocalDev*` shadow-runtime types are renamed to the shared
+    // mechanism they always were (Builtin*/Composed*/Staged*/Synthetic*/
+    // Snapshot* families). Any new `LocalDev*` type definition fails this
+    // ratchet outright.
 ];
 
 #[test]

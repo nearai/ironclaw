@@ -184,12 +184,10 @@ impl HostRuntime for ParkingHostRuntime {
 mod tests {
     use std::time::Duration;
 
-    use chrono::Utc;
     use ironclaw_host_api::{
-        CapabilityId, CapabilitySet, EffectKind, ExecutionContext, ExtensionId, MountView,
-        ResourceEstimate, RuntimeKind, TrustClass, UserId,
+        CapabilityId, CapabilitySet, ExecutionContext, ExtensionId, MountView, ResourceEstimate,
+        RuntimeKind, TrustClass, UserId,
     };
-    use ironclaw_trust::{AuthorityCeiling, EffectiveTrustClass, TrustDecision, TrustProvenance};
     use serde_json::Value;
 
     use super::*;
@@ -277,15 +275,6 @@ mod tests {
             CapabilityId::new("echo.say").unwrap(),
             ResourceEstimate::default(),
             Value::Null,
-            TrustDecision {
-                effective_trust: EffectiveTrustClass::user_trusted(),
-                authority_ceiling: AuthorityCeiling {
-                    allowed_effects: vec![EffectKind::DispatchCapability],
-                    max_resource_ceiling: None,
-                },
-                provenance: TrustProvenance::Default,
-                evaluated_at: Utc::now(),
-            },
         )
     }
 

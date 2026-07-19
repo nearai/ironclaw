@@ -43,10 +43,7 @@ use ironclaw_host_runtime::{
 };
 use ironclaw_resources::InMemoryResourceGovernor;
 use ironclaw_triggers::InMemoryTriggerRepository;
-use ironclaw_trust::{
-    AdminConfig, AdminEntry, AuthorityCeiling, EffectiveTrustClass, HostTrustAssignment,
-    HostTrustPolicy, TrustDecision, TrustProvenance,
-};
+use ironclaw_trust::{AdminConfig, AdminEntry, HostTrustAssignment, HostTrustPolicy};
 use ironclaw_turns::{
     RunProfileResolver, TurnActor, TurnId, TurnRunId, TurnScope,
     run_profile::{InMemoryRunProfileResolver, LoopRuntimeContext, RunProfileResolutionRequest},
@@ -108,27 +105,6 @@ fn trust_policy() -> HostTrustPolicy {
         ),
     ]))])
     .unwrap()
-}
-
-fn trust_decision() -> TrustDecision {
-    TrustDecision {
-        effective_trust: EffectiveTrustClass::user_trusted(),
-        authority_ceiling: AuthorityCeiling {
-            allowed_effects: vec![
-                EffectKind::DispatchCapability,
-                EffectKind::ReadFilesystem,
-                EffectKind::WriteFilesystem,
-                EffectKind::DeleteFilesystem,
-                EffectKind::Network,
-                EffectKind::SpawnProcess,
-                EffectKind::ExecuteCode,
-                EffectKind::ExternalWrite,
-            ],
-            max_resource_ceiling: None,
-        },
-        provenance: TrustProvenance::Default,
-        evaluated_at: Utc::now(),
-    }
 }
 
 fn memory_mounts() -> MountView {
@@ -297,7 +273,6 @@ async fn profile_set_then_runtime_context_renders_local_time_and_profile_line() 
             ironclaw_host_api::CapabilityId::new(PROFILE_SET_CAPABILITY_ID).unwrap(),
             ResourceEstimate::default(),
             json!({"timezone": "Asia/Tokyo", "locale": "ja-JP", "location": "Tokyo, Japan"}),
-            trust_decision(),
         ))
         .await
         .unwrap();
@@ -413,7 +388,6 @@ async fn profile_set_for_one_user_is_not_visible_to_another() {
             ironclaw_host_api::CapabilityId::new(PROFILE_SET_CAPABILITY_ID).unwrap(),
             ResourceEstimate::default(),
             json!({"timezone": "America/New_York", "locale": "en-US"}),
-            trust_decision(),
         ))
         .await
         .unwrap();

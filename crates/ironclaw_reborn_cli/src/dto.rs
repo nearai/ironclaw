@@ -47,8 +47,10 @@ pub(crate) struct StatusDto {
 /// an `Unknown` fallback) on every build.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
-// Feature-reduced builds preserve the stable status schema but can only
-// construct `Unknown` because the service manager is not compiled in.
+// The concrete states are constructed only by the `webui-v2-beta`-gated
+// resolver (`status::resolve_service_state`); the enum stays whole on every
+// build for wire stability, so the variants are legitimately unconstructed
+// (dead-code in the default/libsql clippy lanes) without that feature.
 #[cfg_attr(not(feature = "webui-v2-beta"), allow(dead_code))]
 pub(crate) enum ServiceStateDto {
     Running,

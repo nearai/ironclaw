@@ -4,8 +4,8 @@
 //! invocations. It is separate from runtime events: events are append-only
 //! history, while run state answers "what is this invocation waiting on now?".
 //!
-//! Durable persistence is provided by [`FilesystemRunStateStore`] and
-//! [`FilesystemApprovalRequestStore`] over a
+//! Durable persistence is provided by [`FilesystemRunStateStore`],
+//! [`FilesystemApprovalRequestStore`], and [`FilesystemGateRecordStore`] over a
 //! [`ScopedFilesystem`](ironclaw_filesystem::ScopedFilesystem). The
 //! `RootFilesystem` choice (libSQL-backed, PostgreSQL-backed, in-memory, or
 //! local-disk) is made at the filesystem layer — the consumer-store level no
@@ -19,8 +19,8 @@ use ironclaw_filesystem::{
     ScopedFilesystem, cas_update,
 };
 use ironclaw_host_api::{
-    ApprovalRequest, ApprovalRequestId, CapabilityId, HostApiError, InvocationId, ResourceScope,
-    ScopedPath, UserId,
+    ApprovalRequest, ApprovalRequestId, CapabilityId, GateRecord, GateRef, HostApiError,
+    InvocationId, ResourceScope, ScopedPath, UserId,
 };
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -29,8 +29,8 @@ use thiserror::Error;
 mod test_support;
 #[cfg(any(test, feature = "test-support"))]
 pub use test_support::{
-    in_memory_backed_approval_request_store, in_memory_backed_run_state_filesystem,
-    in_memory_backed_run_state_store,
+    in_memory_backed_approval_request_store, in_memory_backed_gate_record_store,
+    in_memory_backed_run_state_filesystem, in_memory_backed_run_state_store,
 };
 
 /// Current lifecycle state for one invocation.
@@ -96,6 +96,8 @@ pub enum RunStateError {
     UnknownApprovalRequest { request_id: ApprovalRequestId },
     #[error("approval request {request_id} already exists")]
     ApprovalRequestAlreadyExists { request_id: ApprovalRequestId },
+    #[error("gate record {gate_ref} already exists")]
+    GateRecordAlreadyExists { gate_ref: GateRef },
     #[error("approval request {request_id} is not pending (status: {status:?})")]
     ApprovalNotPending {
         request_id: ApprovalRequestId,
@@ -237,6 +239,48 @@ pub trait RunStateApprovalStore: RunStateStore + ApprovalRequestStore {
     ) -> Result<RunRecord, RunStateError>;
 }
 
+/// Durable store for the model-visible [`GateRecord`] a pending gate renders
+/// from (arch-simplification §5.2.9).
+///
+/// A [`Resolution`](ironclaw_host_api::Resolution) control-plane arm carries only
+/// an opaque [`GateRef`]; the content the loop renders the pending gate from —
+/// the auth gate's credential requirements (G3), the dependent-run staged result
+/// handle (G2), the redacted summary — lives in the referenced [`GateRecord`].
+/// Because a gate blocks on one turn and resumes on a **later** turn, that record
+/// must outlive the turn that produced it, so it needs persistence keyed by
+/// `GateRef`. (The sibling terminal `DenyRecord` is same-turn and needs no store.)
+///
+/// This port mirrors [`ApprovalRequestStore`]: resource-owner scoped, wrong-scope
+/// lookups look unknown. It intentionally exposes no removal method — a
+/// `GateRecord` is host-owned, write-once, model-visible content with no status
+/// field to tombstone, so (unlike `ApprovalRequestStore::discard_pending`, which
+/// tombstones a lifecycle *status*) there is no scope-safe soft-delete to mirror,
+/// and hard deletion of retained model-visible data would need an explicit
+/// product/retention contract (`database.md` "Data safety").
+#[async_trait]
+pub trait GateRecordStore: Send + Sync {
+    /// Persists the gate record for `gate_ref` in the exact resource-owner scope.
+    ///
+    /// Write-once: a `gate_ref` that already has a record is a
+    /// [`RunStateError::GateRecordAlreadyExists`], mirroring
+    /// [`ApprovalRequestStore::save_pending`]. `GateRef`s are freshly minted per
+    /// gate, so a collision is a caller invariant violation, not an update path.
+    async fn save(
+        &self,
+        scope: ResourceScope,
+        gate_ref: GateRef,
+        record: GateRecord,
+    ) -> Result<(), RunStateError>;
+
+    /// Loads the gate record for `gate_ref`; a wrong-scope lookup must look
+    /// unknown (`Ok(None)`), never leak another owner's record.
+    async fn load(
+        &self,
+        scope: &ResourceScope,
+        gate_ref: GateRef,
+    ) -> Result<Option<GateRecord>, RunStateError>;
+}
+
 /// `RecordKind` tag written on every run-state entry so byte-only backends
 /// (e.g. `DiskFilesystem`) are rejected with `Unsupported{WriteFile}` on
 /// first put, which `cas_update` maps to `CasUnsupported` (fail-closed).
@@ -245,6 +289,10 @@ const RUN_STATE_RECORD_KIND: &str = "run_state_record";
 /// `RecordKind` tag written on every approval-request entry for the same
 /// fail-closed CAS gate as [`RUN_STATE_RECORD_KIND`].
 const APPROVAL_RECORD_KIND: &str = "approval_record";
+
+/// `RecordKind` tag written on every gate-record entry for the same
+/// fail-closed CAS gate as [`RUN_STATE_RECORD_KIND`].
+const GATE_RECORD_KIND: &str = "gate_record";
 
 /// Filesystem-backed run-state store under the `/run-state` mount alias.
 ///
@@ -716,10 +764,111 @@ where
     }
 }
 
+/// Durable wrapper carrying the resource-owner scope alongside the host-owned
+/// [`GateRecord`]. `GateRecord` is a `host_api` vocabulary type with no scope
+/// field; persisting the scope beside it lets [`FilesystemGateRecordStore::load`]
+/// apply the same `same_scope_owner` defense-in-depth check the sibling
+/// [`ApprovalRecord`] does, so a wrong-scope read looks unknown. The scope is
+/// storage metadata only — `load` returns the bare [`GateRecord`].
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+struct StoredGateRecord {
+    scope: ResourceScope,
+    record: GateRecord,
+}
+
+/// Filesystem-backed gate-record store under the `/gate-records` mount alias.
+///
+/// See [`FilesystemRunStateStore`] for the structural-tenant-isolation
+/// rationale; this store applies the same shape to gate records under a sibling
+/// mount alias so a single composition can wire run state, approvals, and gate
+/// records to distinct alias targets while sharing one backend.
+pub struct FilesystemGateRecordStore<F>
+where
+    F: RootFilesystem,
+{
+    filesystem: Arc<ScopedFilesystem<F>>,
+}
+
+impl<F> FilesystemGateRecordStore<F>
+where
+    F: RootFilesystem,
+{
+    pub fn new(filesystem: Arc<ScopedFilesystem<F>>) -> Self {
+        Self { filesystem }
+    }
+
+    fn record_entry(record: &StoredGateRecord) -> Result<Entry, RunStateError> {
+        let body = serialize_pretty(record)?;
+        let kind =
+            RecordKind::new(GATE_RECORD_KIND).map_err(|e| RunStateError::Backend(e.to_string()))?;
+        let mut entry = Entry::bytes(body).with_content_type(ContentType::json());
+        entry.kind = Some(kind);
+        Ok(entry)
+    }
+}
+
+#[async_trait]
+impl<F> GateRecordStore for FilesystemGateRecordStore<F>
+where
+    F: RootFilesystem,
+{
+    async fn save(
+        &self,
+        scope: ResourceScope,
+        gate_ref: GateRef,
+        record: GateRecord,
+    ) -> Result<(), RunStateError> {
+        let path = gate_record_path(&scope, gate_ref)?;
+        let stored = StoredGateRecord {
+            scope: scope.clone(),
+            record,
+        };
+        cas_update(
+            self.filesystem.as_ref(),
+            &scope,
+            &path,
+            |bytes: &[u8]| deserialize::<StoredGateRecord>(bytes),
+            |r: &StoredGateRecord| Self::record_entry(r),
+            |current: Option<StoredGateRecord>| {
+                let fresh = stored.clone();
+                // Write-once: reject a duplicate ref rather than clobbering the
+                // host-owned record a later resume turn still needs.
+                let outcome = if current.is_some() {
+                    Err(RunStateError::GateRecordAlreadyExists { gate_ref })
+                } else {
+                    Ok(CasApply::new(fresh, ()))
+                };
+                async move { outcome }
+            },
+        )
+        .await
+        .map_err(map_cas_error)
+    }
+
+    async fn load(
+        &self,
+        scope: &ResourceScope,
+        gate_ref: GateRef,
+    ) -> Result<Option<GateRecord>, RunStateError> {
+        let path = gate_record_path(scope, gate_ref)?;
+        let Some(versioned) = self.filesystem.get(scope, &path).await? else {
+            return Ok(None);
+        };
+        let stored = deserialize::<StoredGateRecord>(&versioned.entry.body)?;
+        // Defense-in-depth against a shared-path read; wrong scope looks unknown.
+        if same_scope_owner(&stored.scope, scope) {
+            Ok(Some(stored.record))
+        } else {
+            Ok(None)
+        }
+    }
+}
+
 // Path layout under the `/run-state` and `/approvals` mount aliases:
 //
 //     /run-state[/agents/<agent>][/projects/<project>][/missions/<mission>][/threads/<thread>]/runs/<invocation_id>.json
 //     /approvals[/agents/<agent>][/projects/<project>][/missions/<mission>][/threads/<thread>]/<request_id>.json
+//     /gate-records[/agents/<agent>][/projects/<project>][/missions/<mission>][/threads/<thread>]/<gate_ref>.json
 //
 // Tenant + user identity moves into the caller's `MountView` per the
 // per-tenant `MountAlias` rewriting, so neither prefix is encoded in the
@@ -729,6 +878,7 @@ where
 
 const RUN_STATE_PREFIX: &str = "/run-state";
 const APPROVALS_PREFIX: &str = "/approvals";
+const GATE_RECORDS_PREFIX: &str = "/gate-records";
 
 fn run_record_path(
     scope: &ResourceScope,
@@ -764,6 +914,13 @@ fn approval_records_root(scope: &ResourceScope) -> Result<ScopedPath, RunStateEr
 
 fn approval_records_root_string(scope: &ResourceScope) -> String {
     scope_owner_alias_string(APPROVALS_PREFIX, scope)
+}
+
+fn gate_record_path(scope: &ResourceScope, gate_ref: GateRef) -> Result<ScopedPath, RunStateError> {
+    scoped_path(&format!(
+        "{}/{gate_ref}.json",
+        scope_owner_alias_string(GATE_RECORDS_PREFIX, scope)
+    ))
 }
 
 /// Build the alias-relative owner prefix for a scope under the given mount

@@ -14,10 +14,10 @@ use thiserror::Error;
 
 use crate::runtime_profile_approval_policy::RuntimeProfileApprovalGateEffectSets;
 
-const LOCAL_DEV_CAPABILITY_POLICY_TOML: &str = include_str!("local_dev_capability_policy.toml");
+const BUILTIN_CAPABILITY_POLICY_TOML: &str = include_str!("builtin_capability_policy.toml");
 
 #[derive(Debug, Error)]
-pub(crate) enum LocalDevCapabilityPolicyError {
+pub(crate) enum BuiltinCapabilityPolicyError {
     #[error("local-dev capability policy TOML is invalid: {0}")]
     InvalidToml(#[from] toml::de::Error),
     #[error("local-dev capability policy has no grants")]
@@ -42,22 +42,22 @@ pub(crate) enum LocalDevCapabilityPolicyError {
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub(crate) struct LocalDevCapabilityPolicy {
-    pub(crate) provider: LocalDevProviderPolicy,
-    pub(crate) approval_gates: LocalDevApprovalGatePolicy,
-    pub(crate) approval_defaults: LocalDevApprovalDefaultsPolicy,
-    pub(crate) grants: Vec<LocalDevCapabilityGrantPolicy>,
+pub(crate) struct BuiltinCapabilityPolicy {
+    pub(crate) provider: BuiltinProviderPolicy,
+    pub(crate) approval_gates: BuiltinApprovalGatePolicy,
+    pub(crate) approval_defaults: BuiltinApprovalDefaultsPolicy,
+    pub(crate) grants: Vec<BuiltinCapabilityGrantPolicy>,
 }
 
-impl LocalDevCapabilityPolicy {
+impl BuiltinCapabilityPolicy {
     fn grant(
         &self,
         capability: &CapabilityId,
-    ) -> Result<&LocalDevCapabilityGrantPolicy, LocalDevCapabilityPolicyError> {
+    ) -> Result<&BuiltinCapabilityGrantPolicy, BuiltinCapabilityPolicyError> {
         self.grants
             .iter()
             .find(|grant| grant.capability == *capability)
-            .ok_or_else(|| LocalDevCapabilityPolicyError::MissingGrant {
+            .ok_or_else(|| BuiltinCapabilityPolicyError::MissingGrant {
                 capability: capability.clone(),
             })
     }
@@ -70,14 +70,14 @@ impl LocalDevCapabilityPolicy {
     pub(crate) fn skill_management_capability_ids(&self) -> impl Iterator<Item = &CapabilityId> {
         self.grants
             .iter()
-            .filter(|grant| grant.mounts == LocalDevMountProfile::SkillManagement)
+            .filter(|grant| grant.mounts == CapabilityMountProfile::SkillManagement)
             .map(|grant| &grant.capability)
     }
 
     pub(crate) fn memory_capability_ids(&self) -> impl Iterator<Item = &CapabilityId> {
         self.grants
             .iter()
-            .filter(|grant| grant.mounts == LocalDevMountProfile::Memory)
+            .filter(|grant| grant.mounts == CapabilityMountProfile::Memory)
             .map(|grant| &grant.capability)
     }
 
@@ -86,7 +86,7 @@ impl LocalDevCapabilityPolicy {
     ) -> impl Iterator<Item = &CapabilityId> {
         self.grants
             .iter()
-            .filter(|grant| grant.mounts == LocalDevMountProfile::SystemExtensionsLifecycle)
+            .filter(|grant| grant.mounts == CapabilityMountProfile::SystemExtensionsLifecycle)
             .map(|grant| &grant.capability)
     }
 
@@ -126,7 +126,7 @@ impl LocalDevCapabilityPolicy {
         skill_mounts: &MountView,
         memory_mounts: &MountView,
         system_extensions_mounts: &MountView,
-    ) -> Result<GrantConstraints, LocalDevCapabilityPolicyError> {
+    ) -> Result<GrantConstraints, BuiltinCapabilityPolicyError> {
         let grant = self.grant(capability)?;
         Ok(constraint_terms(
             grant,
@@ -140,21 +140,21 @@ impl LocalDevCapabilityPolicy {
 
     pub(crate) fn lease_approval_for(
         &self,
-        action: LocalDevApprovalPolicyAction<'_>,
+        action: BuiltinApprovalPolicyAction<'_>,
         workspace_mounts: &MountView,
         skill_mounts: &MountView,
         memory_mounts: &MountView,
         system_extensions_mounts: &MountView,
-    ) -> Result<LeaseApproval, LocalDevCapabilityPolicyError> {
+    ) -> Result<LeaseApproval, BuiltinCapabilityPolicyError> {
         let constraints = match action {
-            LocalDevApprovalPolicyAction::Dispatch { capability } => self.grant_constraints_for(
+            BuiltinApprovalPolicyAction::Dispatch { capability } => self.grant_constraints_for(
                 capability,
                 workspace_mounts,
                 skill_mounts,
                 memory_mounts,
                 system_extensions_mounts,
             )?,
-            LocalDevApprovalPolicyAction::SpawnCapability { capability } => {
+            BuiltinApprovalPolicyAction::SpawnCapability { capability } => {
                 match self.grant(capability) {
                     Ok(grant) => constraint_terms(
                         grant,
@@ -164,7 +164,7 @@ impl LocalDevCapabilityPolicy {
                         system_extensions_mounts,
                         Some(EffectKind::SpawnProcess),
                     ),
-                    Err(LocalDevCapabilityPolicyError::MissingGrant { .. }) => {
+                    Err(BuiltinCapabilityPolicyError::MissingGrant { .. }) => {
                         tracing::debug!(
                             %capability,
                             "local-dev spawn capability approval is using default lease terms"
@@ -182,7 +182,7 @@ impl LocalDevCapabilityPolicy {
                 }
             }
         };
-        Ok(local_dev_one_shot_lease_approval(constraints))
+        Ok(builtin_one_shot_lease_approval(constraints))
     }
 
     pub(crate) fn approval_gate_effects(&self) -> RuntimeProfileApprovalGateEffectSets {
@@ -197,7 +197,7 @@ impl LocalDevCapabilityPolicy {
     }
 }
 
-pub(crate) fn local_dev_one_shot_lease_approval(constraints: GrantConstraints) -> LeaseApproval {
+pub(crate) fn builtin_one_shot_lease_approval(constraints: GrantConstraints) -> LeaseApproval {
     LeaseApproval {
         issued_by: Principal::HostRuntime,
         constraints: GrantConstraints {
@@ -216,7 +216,7 @@ pub(crate) fn local_dev_one_shot_lease_approval(constraints: GrantConstraints) -
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub(crate) struct LocalDevProviderPolicy {
+pub(crate) struct BuiltinProviderPolicy {
     pub(crate) id: PackageId,
     pub(crate) manifest_path: String,
     pub(crate) authority_effects: Vec<EffectKind>,
@@ -224,7 +224,7 @@ pub(crate) struct LocalDevProviderPolicy {
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub(crate) struct LocalDevApprovalGatePolicy {
+pub(crate) struct BuiltinApprovalGatePolicy {
     pub(crate) ask_writes: Vec<EffectKind>,
     pub(crate) ask_destructive: Vec<EffectKind>,
     #[serde(default)]
@@ -233,30 +233,30 @@ pub(crate) struct LocalDevApprovalGatePolicy {
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub(crate) struct LocalDevApprovalDefaultsPolicy {
-    pub(crate) spawn_capability: LocalDevConstraintPolicy,
+pub(crate) struct BuiltinApprovalDefaultsPolicy {
+    pub(crate) spawn_capability: BuiltinConstraintPolicy,
 }
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub(crate) struct LocalDevCapabilityGrantPolicy {
+pub(crate) struct BuiltinCapabilityGrantPolicy {
     pub(crate) capability: CapabilityId,
     pub(crate) effects: Vec<EffectKind>,
-    pub(crate) mounts: LocalDevMountProfile,
-    pub(crate) network: LocalDevNetworkProfile,
+    pub(crate) mounts: CapabilityMountProfile,
+    pub(crate) network: CapabilityNetworkProfile,
 }
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub(crate) struct LocalDevConstraintPolicy {
+pub(crate) struct BuiltinConstraintPolicy {
     pub(crate) effects: Vec<EffectKind>,
-    pub(crate) mounts: LocalDevMountProfile,
-    pub(crate) network: LocalDevNetworkProfile,
+    pub(crate) mounts: CapabilityMountProfile,
+    pub(crate) network: CapabilityNetworkProfile,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub(crate) enum LocalDevMountProfile {
+pub(crate) enum CapabilityMountProfile {
     Workspace,
     Ambient,
     SkillManagement,
@@ -266,18 +266,18 @@ pub(crate) enum LocalDevMountProfile {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub(crate) enum LocalDevNetworkProfile {
+pub(crate) enum CapabilityNetworkProfile {
     Default,
-    LocalDevWildcard,
+    DevWildcard,
 }
 
 #[derive(Clone, Copy)]
-pub(crate) enum LocalDevApprovalPolicyAction<'a> {
+pub(crate) enum BuiltinApprovalPolicyAction<'a> {
     Dispatch { capability: &'a CapabilityId },
     SpawnCapability { capability: &'a CapabilityId },
 }
 
-impl<'a> LocalDevApprovalPolicyAction<'a> {
+impl<'a> BuiltinApprovalPolicyAction<'a> {
     pub(crate) fn from_host_action(action: &'a Action) -> Option<Self> {
         match action {
             Action::Dispatch { capability, .. } => Some(Self::Dispatch { capability }),
@@ -303,68 +303,68 @@ impl<'a> LocalDevApprovalPolicyAction<'a> {
     }
 }
 
-trait LocalDevConstraintSource {
+trait BuiltinConstraintSource {
     fn effects(&self) -> &[EffectKind];
-    fn mounts(&self) -> LocalDevMountProfile;
-    fn network(&self) -> LocalDevNetworkProfile;
+    fn mounts(&self) -> CapabilityMountProfile;
+    fn network(&self) -> CapabilityNetworkProfile;
 }
 
-impl LocalDevConstraintSource for LocalDevCapabilityGrantPolicy {
+impl BuiltinConstraintSource for BuiltinCapabilityGrantPolicy {
     fn effects(&self) -> &[EffectKind] {
         &self.effects
     }
 
-    fn mounts(&self) -> LocalDevMountProfile {
+    fn mounts(&self) -> CapabilityMountProfile {
         self.mounts
     }
 
-    fn network(&self) -> LocalDevNetworkProfile {
+    fn network(&self) -> CapabilityNetworkProfile {
         self.network
     }
 }
 
-impl LocalDevConstraintSource for LocalDevConstraintPolicy {
+impl BuiltinConstraintSource for BuiltinConstraintPolicy {
     fn effects(&self) -> &[EffectKind] {
         &self.effects
     }
 
-    fn mounts(&self) -> LocalDevMountProfile {
+    fn mounts(&self) -> CapabilityMountProfile {
         self.mounts
     }
 
-    fn network(&self) -> LocalDevNetworkProfile {
+    fn network(&self) -> CapabilityNetworkProfile {
         self.network
     }
 }
 
-pub(crate) fn local_dev_capability_policy()
--> Result<LocalDevCapabilityPolicy, LocalDevCapabilityPolicyError> {
-    static POLICY: OnceLock<Result<LocalDevCapabilityPolicy, String>> = OnceLock::new();
+pub(crate) fn builtin_capability_policy()
+-> Result<BuiltinCapabilityPolicy, BuiltinCapabilityPolicyError> {
+    static POLICY: OnceLock<Result<BuiltinCapabilityPolicy, String>> = OnceLock::new();
     POLICY
         .get_or_init(|| {
-            parse_local_dev_capability_policy(LOCAL_DEV_CAPABILITY_POLICY_TOML)
+            parse_builtin_capability_policy(BUILTIN_CAPABILITY_POLICY_TOML)
                 .map_err(|error| error.to_string())
         })
         .clone()
-        .map_err(|reason| LocalDevCapabilityPolicyError::CachedInvalid { reason })
+        .map_err(|reason| BuiltinCapabilityPolicyError::CachedInvalid { reason })
 }
 
-fn parse_local_dev_capability_policy(
+fn parse_builtin_capability_policy(
     input: &str,
-) -> Result<LocalDevCapabilityPolicy, LocalDevCapabilityPolicyError> {
-    let policy: LocalDevCapabilityPolicy = toml::from_str(input)?;
+) -> Result<BuiltinCapabilityPolicy, BuiltinCapabilityPolicyError> {
+    let policy: BuiltinCapabilityPolicy = toml::from_str(input)?;
     validate_policy(&policy)?;
     Ok(policy)
 }
 
-fn validate_policy(policy: &LocalDevCapabilityPolicy) -> Result<(), LocalDevCapabilityPolicyError> {
+fn validate_policy(policy: &BuiltinCapabilityPolicy) -> Result<(), BuiltinCapabilityPolicyError> {
     ExtensionId::new(policy.provider.id.as_str())
-        .map_err(LocalDevCapabilityPolicyError::InvalidProviderExtensionId)?;
+        .map_err(BuiltinCapabilityPolicyError::InvalidProviderExtensionId)?;
     if policy.provider.manifest_path.trim().is_empty() {
-        return Err(LocalDevCapabilityPolicyError::EmptyProviderManifestPath);
+        return Err(BuiltinCapabilityPolicyError::EmptyProviderManifestPath);
     }
     if !policy.provider.manifest_path.starts_with('/') {
-        return Err(LocalDevCapabilityPolicyError::NonAbsoluteProviderManifestPath);
+        return Err(BuiltinCapabilityPolicyError::NonAbsoluteProviderManifestPath);
     }
     validate_effects(
         "provider authority_effects",
@@ -383,12 +383,12 @@ fn validate_policy(policy: &LocalDevCapabilityPolicy) -> Result<(), LocalDevCapa
         &policy.approval_defaults.spawn_capability.effects,
     )?;
     if policy.grants.is_empty() {
-        return Err(LocalDevCapabilityPolicyError::EmptyGrants);
+        return Err(BuiltinCapabilityPolicyError::EmptyGrants);
     }
     let mut seen = BTreeSet::new();
     for grant in &policy.grants {
         if !seen.insert(grant.capability.clone()) {
-            return Err(LocalDevCapabilityPolicyError::DuplicateGrant {
+            return Err(BuiltinCapabilityPolicyError::DuplicateGrant {
                 capability: grant.capability.clone(),
             });
         }
@@ -403,16 +403,16 @@ fn validate_policy(policy: &LocalDevCapabilityPolicy) -> Result<(), LocalDevCapa
 fn validate_effects(
     target: &str,
     effects: &[EffectKind],
-) -> Result<(), LocalDevCapabilityPolicyError> {
+) -> Result<(), BuiltinCapabilityPolicyError> {
     if effects.is_empty() {
-        return Err(LocalDevCapabilityPolicyError::EmptyEffects {
+        return Err(BuiltinCapabilityPolicyError::EmptyEffects {
             target: target.to_string(),
         });
     }
     let mut seen = HashSet::new();
     for effect in effects {
         if !seen.insert(*effect) {
-            return Err(LocalDevCapabilityPolicyError::DuplicateEffect {
+            return Err(BuiltinCapabilityPolicyError::DuplicateEffect {
                 target: target.to_string(),
                 effect: *effect,
             });
@@ -422,7 +422,7 @@ fn validate_effects(
 }
 
 fn constraint_terms(
-    source: &impl LocalDevConstraintSource,
+    source: &impl BuiltinConstraintSource,
     workspace_mounts: &MountView,
     skill_mounts: &MountView,
     memory_mounts: &MountView,
@@ -430,15 +430,15 @@ fn constraint_terms(
     required_effect: Option<EffectKind>,
 ) -> GrantConstraints {
     let mounts = match source.mounts() {
-        LocalDevMountProfile::Workspace => workspace_mounts.clone(),
-        LocalDevMountProfile::Ambient => MountView::default(),
-        LocalDevMountProfile::SkillManagement => skill_mounts.clone(),
-        LocalDevMountProfile::Memory => memory_mounts.clone(),
-        LocalDevMountProfile::SystemExtensionsLifecycle => system_extensions_mounts.clone(),
+        CapabilityMountProfile::Workspace => workspace_mounts.clone(),
+        CapabilityMountProfile::Ambient => MountView::default(),
+        CapabilityMountProfile::SkillManagement => skill_mounts.clone(),
+        CapabilityMountProfile::Memory => memory_mounts.clone(),
+        CapabilityMountProfile::SystemExtensionsLifecycle => system_extensions_mounts.clone(),
     };
     let network = match source.network() {
-        LocalDevNetworkProfile::Default => NetworkPolicy::default(),
-        LocalDevNetworkProfile::LocalDevWildcard => local_dev_wildcard_network_policy(),
+        CapabilityNetworkProfile::Default => NetworkPolicy::default(),
+        CapabilityNetworkProfile::DevWildcard => dev_wildcard_network_policy(),
     };
     let mut allowed_effects = source.effects().to_vec();
     if let Some(effect) = required_effect
@@ -457,7 +457,7 @@ fn constraint_terms(
     }
 }
 
-pub(crate) fn local_dev_wildcard_network_policy() -> NetworkPolicy {
+pub(crate) fn dev_wildcard_network_policy() -> NetworkPolicy {
     NetworkPolicy {
         allowed_targets: vec![NetworkTargetPattern {
             scheme: None,
@@ -478,8 +478,8 @@ mod tests {
     use super::*;
 
     #[test]
-    fn bundled_local_dev_capability_policy_parses() {
-        let policy = local_dev_capability_policy().expect("policy parses");
+    fn bundled_builtin_capability_policy_parses() {
+        let policy = builtin_capability_policy().expect("policy parses");
 
         assert_eq!(policy.provider.id.as_str(), "builtin");
         assert_eq!(
@@ -537,11 +537,11 @@ mod tests {
         );
         assert_eq!(
             policy.approval_defaults.spawn_capability.mounts,
-            LocalDevMountProfile::Workspace
+            CapabilityMountProfile::Workspace
         );
         assert_eq!(
             policy.approval_defaults.spawn_capability.network,
-            LocalDevNetworkProfile::Default
+            CapabilityNetworkProfile::Default
         );
         assert!(
             policy
@@ -601,10 +601,10 @@ mod tests {
                 EffectKind::ExternalWrite,
             ]
         );
-        assert_eq!(onboard.mounts, LocalDevMountProfile::Ambient);
+        assert_eq!(onboard.mounts, CapabilityMountProfile::Ambient);
         // Onboarding posts to an operator-chosen invite origin, so it needs the
         // wildcard egress profile (private/metadata IP ranges stay blocked).
-        assert_eq!(onboard.network, LocalDevNetworkProfile::LocalDevWildcard);
+        assert_eq!(onboard.network, CapabilityNetworkProfile::DevWildcard);
         for capability in [
             "builtin.trace_commons.status",
             "builtin.trace_commons.credits",
@@ -616,8 +616,8 @@ mod tests {
                 grant.effects,
                 vec![EffectKind::DispatchCapability, EffectKind::ReadFilesystem]
             );
-            assert_eq!(grant.mounts, LocalDevMountProfile::Ambient);
-            assert_eq!(grant.network, LocalDevNetworkProfile::Default);
+            assert_eq!(grant.mounts, CapabilityMountProfile::Ambient);
+            assert_eq!(grant.network, CapabilityNetworkProfile::Default);
         }
         // builtin.profile_set writes context/profile.json under the memory mount.
         // It mirrors memory_write's effect set (read+write filesystem, memory mount,
@@ -633,8 +633,11 @@ mod tests {
                 EffectKind::WriteFilesystem,
             ]
         );
-        assert_eq!(builtin_profile_set.mounts, LocalDevMountProfile::Memory);
-        assert_eq!(builtin_profile_set.network, LocalDevNetworkProfile::Default);
+        assert_eq!(builtin_profile_set.mounts, CapabilityMountProfile::Memory);
+        assert_eq!(
+            builtin_profile_set.network,
+            CapabilityNetworkProfile::Default
+        );
 
         // profile_token writes profile_token.jwt (0600), so its grant carries
         // WriteFilesystem; trace_commons.profile_set only reads policy + posts, so it does not.
@@ -653,11 +656,8 @@ mod tests {
                 EffectKind::ExternalWrite,
             ]
         );
-        assert_eq!(profile_token.mounts, LocalDevMountProfile::Ambient);
-        assert_eq!(
-            profile_token.network,
-            LocalDevNetworkProfile::LocalDevWildcard
-        );
+        assert_eq!(profile_token.mounts, CapabilityMountProfile::Ambient);
+        assert_eq!(profile_token.network, CapabilityNetworkProfile::DevWildcard);
         let profile_set = policy
             .grant(&CapabilityId::new("builtin.trace_commons.profile_set").expect("capability id"))
             .expect("trace_commons.profile_set grant");
@@ -670,22 +670,19 @@ mod tests {
                 EffectKind::ExternalWrite,
             ]
         );
-        assert_eq!(profile_set.mounts, LocalDevMountProfile::Ambient);
-        assert_eq!(
-            profile_set.network,
-            LocalDevNetworkProfile::LocalDevWildcard
-        );
+        assert_eq!(profile_set.mounts, CapabilityMountProfile::Ambient);
+        assert_eq!(profile_set.network, CapabilityNetworkProfile::DevWildcard);
     }
 
     #[test]
     fn network_effect_grants_use_non_empty_network_policy() {
-        let policy = local_dev_capability_policy().expect("policy parses");
+        let policy = builtin_capability_policy().expect("policy parses");
 
         for grant in &policy.grants {
             if grant.effects.contains(&EffectKind::Network) {
                 assert_ne!(
                     grant.network,
-                    LocalDevNetworkProfile::Default,
+                    CapabilityNetworkProfile::Default,
                     "{} declares network authority but would stage an empty network policy",
                     grant.capability
                 );
@@ -694,7 +691,7 @@ mod tests {
     }
 
     fn assert_trigger_grant(
-        policy: &LocalDevCapabilityPolicy,
+        policy: &BuiltinCapabilityPolicy,
         capability: &str,
         effects: &[EffectKind],
     ) {
@@ -702,17 +699,17 @@ mod tests {
             .grant(&CapabilityId::new(capability).expect("capability id"))
             .expect("trigger grant");
         assert_eq!(grant.effects, effects);
-        assert_eq!(grant.mounts, LocalDevMountProfile::Ambient);
-        assert_eq!(grant.network, LocalDevNetworkProfile::Default);
+        assert_eq!(grant.mounts, CapabilityMountProfile::Ambient);
+        assert_eq!(grant.network, CapabilityNetworkProfile::Default);
     }
 
     #[test]
     fn spawn_capability_approval_adds_required_spawn_effect_for_grants_without_it() {
-        let policy = local_dev_capability_policy().expect("policy parses");
+        let policy = builtin_capability_policy().expect("policy parses");
         let capability = CapabilityId::new("builtin.echo").expect("capability id");
         let approval = policy
             .lease_approval_for(
-                LocalDevApprovalPolicyAction::SpawnCapability {
+                BuiltinApprovalPolicyAction::SpawnCapability {
                     capability: &capability,
                 },
                 &MountView::default(),
@@ -741,11 +738,11 @@ mod tests {
 
     #[test]
     fn spawn_capability_approval_does_not_duplicate_declared_spawn_effect() {
-        let policy = local_dev_capability_policy().expect("policy parses");
+        let policy = builtin_capability_policy().expect("policy parses");
         let capability = CapabilityId::new("builtin.shell").expect("capability id");
         let approval = policy
             .lease_approval_for(
-                LocalDevApprovalPolicyAction::SpawnCapability {
+                BuiltinApprovalPolicyAction::SpawnCapability {
                     capability: &capability,
                 },
                 &MountView::default(),
@@ -767,26 +764,26 @@ mod tests {
     }
 
     #[test]
-    fn bundled_local_dev_capability_policy_rejects_unknown_fields() {
-        let invalid = LOCAL_DEV_CAPABILITY_POLICY_TOML.replace(
+    fn bundled_builtin_capability_policy_rejects_unknown_fields() {
+        let invalid = BUILTIN_CAPABILITY_POLICY_TOML.replace(
             "manifest_path = \"/system/extensions/builtin/manifest.toml\"",
             "manifest_path = \"/system/extensions/builtin/manifest.toml\"\nunknown = true",
         );
 
         assert!(matches!(
-            parse_local_dev_capability_policy(&invalid),
-            Err(LocalDevCapabilityPolicyError::InvalidToml(_))
+            parse_builtin_capability_policy(&invalid),
+            Err(BuiltinCapabilityPolicyError::InvalidToml(_))
         ));
     }
 
     #[test]
-    fn bundled_local_dev_capability_policy_rejects_invalid_capability_ids() {
-        let invalid = LOCAL_DEV_CAPABILITY_POLICY_TOML
+    fn bundled_builtin_capability_policy_rejects_invalid_capability_ids() {
+        let invalid = BUILTIN_CAPABILITY_POLICY_TOML
             .replace("capability = \"builtin.echo\"", "capability = \"echo\"");
 
         assert!(matches!(
-            parse_local_dev_capability_policy(&invalid),
-            Err(LocalDevCapabilityPolicyError::InvalidToml(_))
+            parse_builtin_capability_policy(&invalid),
+            Err(BuiltinCapabilityPolicyError::InvalidToml(_))
         ));
     }
 }

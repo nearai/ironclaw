@@ -226,6 +226,30 @@ impl TestChannel {
             .collect()
     }
 
+    /// Return the display form of all `ToolStarted` events captured so far:
+    /// the argument-prefixed `name(detail)` when the event carries a contextual
+    /// detail (e.g. `shell(cargo run zizmor …)` — see `tool_call_detail`), or
+    /// the bare `name` otherwise.
+    ///
+    /// Assertions that check *what* a tool attempt targeted (e.g. the live
+    /// canary's "did any shell attempt mention zizmor") need the detail; engine
+    /// v2's `format_action_display_name` used to bake it into the started-event
+    /// name, and its removal (#5545) silently reduced those assertions to bare
+    /// names, stranding them. Use [`Self::tool_calls_started`] when only the
+    /// tool identity matters.
+    pub fn tool_call_display_names(&self) -> Vec<String> {
+        self.captured_status_events()
+            .iter()
+            .filter_map(|s| match s {
+                StatusUpdate::ToolStarted { name, detail, .. } => Some(match detail {
+                    Some(detail) => format!("{name}({detail})"),
+                    None => name.clone(),
+                }),
+                _ => None,
+            })
+            .collect()
+    }
+
     /// Return `(name, success)` for all `ToolCompleted` events captured so far.
     pub fn tool_calls_completed(&self) -> Vec<(String, bool)> {
         self.captured_status_events()
