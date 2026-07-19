@@ -1365,7 +1365,7 @@ mod tests {
         RebornSetOutboundPreferencesRequest, WebUiAuthenticatedCaller,
     };
     use ironclaw_resources::InMemoryResourceGovernor;
-    use ironclaw_secrets::InMemorySecretStore;
+    use ironclaw_secrets::FilesystemSecretStore;
     use ironclaw_slack_v2_adapter::SLACK_USER_ACTOR_KIND;
     use ironclaw_threads::{ListThreadsForScopeRequest, ThreadHistoryRequest, ThreadScope};
     use ironclaw_triggers::TriggerRunHistoryStatus;
@@ -4035,7 +4035,7 @@ mod tests {
         network: Arc<RecordingRuntimeHttpEgress>,
     ) -> HostRuntimeHttpEgressPort {
         test_host_runtime_services()
-            .with_secret_store(Arc::new(InMemorySecretStore::new()))
+            .with_secret_store(Arc::new(FilesystemSecretStore::ephemeral()))
             .try_with_host_http_egress(RecordingNetworkHttpEgress(network))
             .expect("host HTTP egress should wire")
             .host_runtime_http_egress_port()

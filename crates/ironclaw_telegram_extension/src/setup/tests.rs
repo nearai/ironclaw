@@ -1,8 +1,9 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use ironclaw_filesystem::InMemoryBackend;
 use ironclaw_host_api::{AgentId, ResourceScope, SecretHandle, TenantId, UserId};
-use ironclaw_secrets::{InMemorySecretStore, SecretMaterial, SecretStore, SecretStoreError};
+use ironclaw_secrets::{FilesystemSecretStore, SecretMaterial, SecretStore, SecretStoreError};
 use secrecy::{ExposeSecret, SecretString};
 
 use super::*;
@@ -19,7 +20,7 @@ fn service_with(
 ) -> TelegramSetupService {
     service_with_secret_store(
         state,
-        Arc::new(InMemorySecretStore::new()),
+        Arc::new(FilesystemSecretStore::ephemeral()),
         bot_api,
         public_base_url,
     )
@@ -47,7 +48,7 @@ fn service_with_secret_store(
 /// everything else forwards to a real in-memory store.
 #[derive(Debug)]
 struct FaultInjectingSecretStore {
-    inner: InMemorySecretStore,
+    inner: FilesystemSecretStore<InMemoryBackend>,
     fail_puts: std::sync::atomic::AtomicBool,
     fail_deletes: std::sync::atomic::AtomicBool,
 }
@@ -55,7 +56,7 @@ struct FaultInjectingSecretStore {
 impl FaultInjectingSecretStore {
     fn new() -> Self {
         Self {
-            inner: InMemorySecretStore::new(),
+            inner: FilesystemSecretStore::ephemeral(),
             fail_puts: std::sync::atomic::AtomicBool::new(false),
             fail_deletes: std::sync::atomic::AtomicBool::new(false),
         }

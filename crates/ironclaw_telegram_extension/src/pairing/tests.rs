@@ -98,7 +98,7 @@ use ironclaw_auth::{AuthContinuationEvent, AuthContinuationRef, AuthProductError
 use ironclaw_channel_host::auth_continuation::RebornAuthContinuationDispatcher;
 use ironclaw_host_api::{AgentId, TenantId, UserId};
 use ironclaw_product_adapters::AdapterInstallationId;
-use ironclaw_secrets::InMemorySecretStore;
+use ironclaw_secrets::FilesystemSecretStore;
 use secrecy::SecretString;
 
 use super::*;
@@ -177,7 +177,7 @@ async fn fixture_with_state(
         None,
         UserId::new("operator").expect("user"),
         Arc::clone(&state),
-        Arc::new(InMemorySecretStore::new()),
+        Arc::new(FilesystemSecretStore::ephemeral()),
         bot_api.client(),
         Some("https://ironclaw.example".to_string()),
     ));

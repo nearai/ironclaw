@@ -933,7 +933,7 @@ mod tests {
     use axum::http::{Request, StatusCode};
     use ironclaw_host_api::AgentId;
     use ironclaw_product_adapters::ProductAdapterId;
-    use ironclaw_secrets::InMemorySecretStore;
+    use ironclaw_secrets::FilesystemSecretStore;
     use tower::ServiceExt;
 
     use crate::slack::slack_host_state::test_support::in_memory_slack_host_state;
@@ -1874,7 +1874,7 @@ mod tests {
             None,
             UserId::new("user:admin").expect("operator user"),
             setup_store,
-            Arc::new(InMemorySecretStore::new()),
+            Arc::new(FilesystemSecretStore::ephemeral()),
         ));
         SlackChannelRouteAdminRouteConfig::dynamic(route_store, setup_service)
     }

@@ -342,7 +342,7 @@ mod tests {
         DeclaredEgressHost, DeclaredEgressTarget, EgressCredentialHandle, EgressMethod, EgressPath,
     };
     use ironclaw_resources::InMemoryResourceGovernor;
-    use ironclaw_secrets::InMemorySecretStore;
+    use ironclaw_secrets::FilesystemSecretStore;
 
     use super::*;
 
@@ -402,7 +402,7 @@ mod tests {
     ) {
         let requests = network.requests();
         let services = test_host_runtime_services()
-            .with_secret_store(Arc::new(InMemorySecretStore::new()))
+            .with_secret_store(Arc::new(FilesystemSecretStore::ephemeral()))
             .try_with_host_http_egress(network)
             .expect("host HTTP egress should wire");
         let port = services

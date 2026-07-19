@@ -2,12 +2,12 @@ use ironclaw_host_api::{
     AgentId, InvocationId, MissionId, ProjectId, ResourceScope, SecretHandle, TenantId, ThreadId,
     UserId,
 };
-use ironclaw_secrets::{InMemorySecretStore, SecretLeaseStatus, SecretMaterial, SecretStore};
+use ironclaw_secrets::{FilesystemSecretStore, SecretLeaseStatus, SecretMaterial, SecretStore};
 use secrecy::ExposeSecret;
 
 #[tokio::test]
 async fn secret_store_returns_metadata_without_secret_material() {
-    let store = InMemorySecretStore::new();
+    let store = FilesystemSecretStore::ephemeral();
     let scope = sample_scope("tenant-a", "user-a");
     let handle = SecretHandle::new("github_token").unwrap();
 
@@ -28,7 +28,7 @@ async fn secret_store_returns_metadata_without_secret_material() {
 
 #[tokio::test]
 async fn secret_store_consumes_one_shot_secret_lease() {
-    let store = InMemorySecretStore::new();
+    let store = FilesystemSecretStore::ephemeral();
     let scope = sample_scope("tenant-a", "user-a");
     let handle = SecretHandle::new("api_key").unwrap();
     store
@@ -55,7 +55,7 @@ async fn secret_store_consumes_one_shot_secret_lease() {
 
 #[tokio::test]
 async fn consuming_one_lease_does_not_delete_underlying_secret() {
-    let store = InMemorySecretStore::new();
+    let store = FilesystemSecretStore::ephemeral();
     let scope = sample_scope("tenant-a", "user-a");
     let handle = SecretHandle::new("refresh_token").unwrap();
     store
@@ -98,7 +98,7 @@ async fn consuming_one_lease_does_not_delete_underlying_secret() {
 
 #[tokio::test]
 async fn secret_store_isolates_same_handle_between_tenants() {
-    let store = InMemorySecretStore::new();
+    let store = FilesystemSecretStore::ephemeral();
     let tenant_a = sample_scope("tenant-a", "user-a");
     let tenant_b = sample_scope("tenant-b", "user-a");
     let handle = SecretHandle::new("shared_name").unwrap();
@@ -150,7 +150,7 @@ async fn secret_store_isolates_same_handle_between_tenants() {
 
 #[tokio::test]
 async fn secret_store_delete_is_idempotent_and_scope_isolated() {
-    let store = InMemorySecretStore::new();
+    let store = FilesystemSecretStore::ephemeral();
     let owner = sample_scope("tenant-a", "user-a");
     let other = sample_scope("tenant-a", "user-b");
     let handle = SecretHandle::new("shared_name").unwrap();
@@ -191,7 +191,7 @@ async fn secret_store_delete_is_idempotent_and_scope_isolated() {
 
 #[tokio::test]
 async fn secret_store_isolates_same_handle_between_users_and_projects() {
-    let store = InMemorySecretStore::new();
+    let store = FilesystemSecretStore::ephemeral();
     let user_a = sample_scope("tenant-a", "user-a");
     let user_b = sample_scope("tenant-a", "user-b");
     let project_b = ResourceScope {
@@ -267,7 +267,7 @@ async fn secret_store_isolates_same_handle_between_users_and_projects() {
 
 #[tokio::test]
 async fn secret_store_isolates_same_handle_between_agents() {
-    let store = InMemorySecretStore::new();
+    let store = FilesystemSecretStore::ephemeral();
     let mut agent_a = sample_scope("tenant-a", "user-a");
     agent_a.agent_id = Some(AgentId::new("agent-a").unwrap());
     let mut agent_b = agent_a.clone();
@@ -317,7 +317,7 @@ async fn secret_store_isolates_same_handle_between_agents() {
 
 #[tokio::test]
 async fn revoked_secret_lease_cannot_be_consumed() {
-    let store = InMemorySecretStore::new();
+    let store = FilesystemSecretStore::ephemeral();
     let scope = sample_scope("tenant-a", "user-a");
     let handle = SecretHandle::new("api_key").unwrap();
     store
@@ -340,7 +340,7 @@ async fn revoked_secret_lease_cannot_be_consumed() {
 
 #[tokio::test]
 async fn missing_secret_fails_without_creating_lease() {
-    let store = InMemorySecretStore::new();
+    let store = FilesystemSecretStore::ephemeral();
     let scope = sample_scope("tenant-a", "user-a");
     let handle = SecretHandle::new("missing").unwrap();
 
