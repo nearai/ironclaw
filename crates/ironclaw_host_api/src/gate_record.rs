@@ -84,6 +84,14 @@ pub enum GateRecord {
         summary: SafeSummary,
         result: ResultRef,
         byte_len: u64,
+        /// The preserved originating loop result ref the staged result was
+        /// keyed under (§5.3 Stage 1 non-lossy carry): `result` is a freshly
+        /// minted uuid handle, so without this the child output the loop staged
+        /// under its own ref would become unreachable from the durable record a
+        /// later resume turn renders from. `None` on records persisted before
+        /// this field existed (serde default keeps old rows rehydratable).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        result_origin: Option<crate::LoopRef>,
     },
     /// Awaiting a client-executed external tool the host does not run.
     ExternalTool { summary: SafeSummary },
@@ -149,6 +157,7 @@ mod tests {
                     summary: summary(),
                     result,
                     byte_len: 2048,
+                    result_origin: Some(crate::LoopRef::new("result:child-1").unwrap()),
                 },
                 "dependent_run",
             ),
