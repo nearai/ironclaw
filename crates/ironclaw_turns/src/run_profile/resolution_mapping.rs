@@ -59,9 +59,9 @@
 
 use ironclaw_host_api::{
     Blocked, Denial, DenyReason, DenyRecord, DenyRef, FailureKind, GateRecord, GateRef,
-    GateWaypoint, LoopRef, MAX_MODEL_INPUT_ISSUES, ModelFailureDiagnostic, ModelInputIssue,
-    Outcome, OutcomeRefs, OutputDigest, ProcessRef, ProcessWaypoint, Resolution, ResultProgress,
-    ResultRef, ResumeToken, RunId, SafeSummary, Suspension, TerminateHint, ToolVerdict,
+    GateWaypoint, LoopRef, ModelFailureDiagnostic, ModelInputIssue, ModelInputIssues, Outcome,
+    OutcomeRefs, OutputDigest, ProcessRef, ProcessWaypoint, Resolution, ResultProgress, ResultRef,
+    ResumeToken, RunId, SafeSummary, Suspension, TerminateHint, ToolVerdict,
 };
 
 use super::content_digest::ContentDigest;
@@ -425,11 +425,8 @@ fn model_failure_diagnostic(
 ) -> Option<ModelFailureDiagnostic> {
     match detail? {
         CapabilityFailureDetail::InvalidInput { issues } => {
-            let issues = issues
-                .into_iter()
-                .take(MAX_MODEL_INPUT_ISSUES)
-                .filter_map(model_input_issue)
-                .collect();
+            let issues =
+                ModelInputIssues::truncating(issues.into_iter().filter_map(model_input_issue));
             Some(ModelFailureDiagnostic::InvalidInput { issues })
         }
         CapabilityFailureDetail::Diagnostic { text } => Some(ModelFailureDiagnostic::Diagnostic {

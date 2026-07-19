@@ -417,6 +417,67 @@ impl<'de> Deserialize<'de> for LoopRef {
 /// (smaller) display cap on top. Keeps the diagnostic a *bounded* list.
 pub const MAX_MODEL_INPUT_ISSUES: usize = 16;
 
+/// The bounded list of model-visible input issues on an
+/// [`ModelFailureDiagnostic::InvalidInput`] — at most
+/// [`MAX_MODEL_INPUT_ISSUES`], enforced at construction AND on the wire
+/// (`#[serde(try_from = "Vec<ModelInputIssue>")]`), so no producer, persisted
+/// row, or direct construction can bypass the documented cap.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(try_from = "Vec<ModelInputIssue>")]
+pub struct ModelInputIssues(Vec<ModelInputIssue>);
+
+impl ModelInputIssues {
+    /// Validating constructor: rejects more than [`MAX_MODEL_INPUT_ISSUES`].
+    pub fn new(issues: Vec<ModelInputIssue>) -> Result<Self, HostApiError> {
+        if issues.len() > MAX_MODEL_INPUT_ISSUES {
+            return Err(HostApiError::invalid_id(
+                "model_input_issues",
+                issues.len().to_string(),
+                format!("must carry at most {MAX_MODEL_INPUT_ISSUES} issues"),
+            ));
+        }
+        Ok(Self(issues))
+    }
+
+    /// Producer convenience: keep the first [`MAX_MODEL_INPUT_ISSUES`] issues,
+    /// dropping the tail (a producer with an oversized set truncates rather
+    /// than fails — the cap is a rendering bound, not an error condition on
+    /// the producing side).
+    pub fn truncating(issues: impl IntoIterator<Item = ModelInputIssue>) -> Self {
+        Self(issues.into_iter().take(MAX_MODEL_INPUT_ISSUES).collect())
+    }
+
+    pub fn as_slice(&self) -> &[ModelInputIssue] {
+        &self.0
+    }
+
+    pub fn len(&self) -> usize {
+        self.0.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+}
+
+impl TryFrom<Vec<ModelInputIssue>> for ModelInputIssues {
+    type Error = HostApiError;
+
+    /// Wire revalidation matches construction (types.md): a persisted/relayed
+    /// 17-item payload is rejected on deserialize, never trusted.
+    fn try_from(issues: Vec<ModelInputIssue>) -> Result<Self, HostApiError> {
+        Self::new(issues)
+    }
+}
+
+impl std::ops::Index<usize> for ModelInputIssues {
+    type Output = ModelInputIssue;
+
+    fn index(&self, index: usize) -> &ModelInputIssue {
+        &self.0[index]
+    }
+}
+
 /// A redacted, model-visible schema-validation issue — the host_api mirror of the
 /// loop's `CapabilityInputIssue`. It is the sanitized, wire-boundary view: every
 /// free-text field is a bounded, redacted [`SafeSummary`] (no raw payload, path,
@@ -496,7 +557,7 @@ impl ModelInputIssue {
 pub enum ModelFailureDiagnostic {
     /// The tool input failed schema validation; carries the bounded, redacted
     /// structured issues the model corrects from.
-    InvalidInput { issues: Vec<ModelInputIssue> },
+    InvalidInput { issues: ModelInputIssues },
     /// A bounded, redacted free-text cause.
     Diagnostic { text: SafeSummary },
 }
@@ -514,7 +575,7 @@ impl ModelFailureDiagnostic {
     /// [`ModelFailureDiagnostic::InvalidInput`].
     pub fn issues(&self) -> Option<&[ModelInputIssue]> {
         match self {
-            ModelFailureDiagnostic::InvalidInput { issues } => Some(issues),
+            ModelFailureDiagnostic::InvalidInput { issues } => Some(issues.as_slice()),
             ModelFailureDiagnostic::Diagnostic { .. } => None,
         }
     }
@@ -563,6 +624,39 @@ fn validate_safe_tag(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The documented 16-item cap is enforced by the TYPE, not just one
+    /// producer's `.take(16)`: direct construction and a 17-item wire payload
+    /// are both rejected, and the truncating producer constructor keeps the
+    /// first 16 (2026-07-19 ironloopai review finding on #6273).
+    #[test]
+    fn model_input_issues_cap_is_enforced_at_construction_and_on_the_wire() {
+        let issue = ModelInputIssue {
+            code: DispatchInputIssueCode::TypeMismatch,
+            path: SafeSummary::new("schedule.kind").unwrap(),
+            expected: None,
+            received: None,
+            schema_path: None,
+        };
+        let seventeen: Vec<ModelInputIssue> = (0..=MAX_MODEL_INPUT_ISSUES)
+            .map(|_| issue.clone())
+            .collect();
+        assert!(ModelInputIssues::new(seventeen.clone()).is_err());
+        assert_eq!(
+            ModelInputIssues::truncating(seventeen.clone()).len(),
+            MAX_MODEL_INPUT_ISSUES
+        );
+        // A hostile 17-item wire payload is rejected on deserialize.
+        let wire = serde_json::to_value(&seventeen).unwrap();
+        assert!(serde_json::from_value::<ModelInputIssues>(wire).is_err());
+        // At-cap round-trips.
+        let at_cap =
+            ModelInputIssues::new((0..MAX_MODEL_INPUT_ISSUES).map(|_| issue.clone()).collect())
+                .unwrap();
+        let back: ModelInputIssues =
+            serde_json::from_value(serde_json::to_value(&at_cap).unwrap()).unwrap();
+        assert_eq!(back, at_cap);
+    }
 
     #[test]
     fn output_digest_is_transparent_on_the_wire() {
@@ -686,7 +780,7 @@ mod tests {
         .with_received(SafeSummary::new("string").unwrap())
         .with_schema_path(SafeSummary::new("properties.schedule").unwrap());
         let diagnostic = ModelFailureDiagnostic::InvalidInput {
-            issues: vec![issue.clone()],
+            issues: ModelInputIssues::truncating([issue.clone()]),
         };
         let back: ModelFailureDiagnostic =
             serde_json::from_value(serde_json::to_value(&diagnostic).unwrap()).unwrap();
