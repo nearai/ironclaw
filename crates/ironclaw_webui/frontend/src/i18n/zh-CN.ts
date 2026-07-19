@@ -75,6 +75,7 @@ registerPack("zh-CN", {
   "login.connect": "连接",
   "login.oauthDivider": "或继续使用",
   "login.oauthProvider": "通过 {provider} 继续",
+  "login.localDevHint": "在本地运行 IronClaw？获取你的登录链接：",
 
   // Chat — empty state
   "chat.heroTitle": "你好，需要我帮你做什么？",

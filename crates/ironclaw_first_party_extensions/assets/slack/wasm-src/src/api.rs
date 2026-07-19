@@ -527,7 +527,10 @@ fn is_slack_user_id(id: &str) -> bool {
 
 /// Rewrite Slack control tokens in message text for human consumption
 /// (inbound entity hygiene): resolved `<@U…>` / `<@U…|label>` mentions become
-/// `@Display Name` (unresolved tokens are left as-is — never fabricated),
+/// `@Display Name`; when `users.info` is unavailable but the token carries an
+/// inline `|label`, that label is rendered (`@label`) — Slack's own text, not a
+/// fabrication — so a labeled mention never leaks its raw `U…` id. A bare
+/// unresolved `<@U…>` is left as-is (inventing a name would be fabrication).
 /// `<#C…|name>` channel refs become `#name`, other tokens (links, `<!here>`)
 /// pass through untouched, and Slack's HTML entities (&lt; &gt; &amp;) are
 /// decoded AFTER token rewriting so literal `&lt;@U…&gt;` text never turns
@@ -550,13 +553,33 @@ fn humanize_message_text(
         let token = &after[..end];
         let original = &rest[start..start + end + 2];
         if let Some(mention) = token.strip_prefix('@') {
-            let id = mention.split('|').next().unwrap_or("");
+            // Slack encodes user mentions as `<@U…>` or `<@U…|label>`, where the
+            // label is Slack's own inline rendering of that user's name.
+            let (id, inline_label) = match mention.split_once('|') {
+                Some((id, label)) => (id, Some(label)),
+                None => (mention, None),
+            };
             match names.get(id) {
+                // Prefer the freshly resolved users.info display name.
                 Some(name) if is_slack_user_id(id) => {
                     out.push('@');
                     out.push_str(name);
                 }
-                _ => out.push_str(original),
+                // users.info was unavailable (missing scope, over budget,
+                // outage) but Slack embedded a label in the token: render
+                // Slack's own `@label` rather than leak the raw `<@U…|label>`
+                // token (which carries the raw `U…` id). The label is provided
+                // by Slack, not fabricated — the same inline-label fallback the
+                // `<#C…|name>` channel-ref arm below already uses. A bare
+                // unresolved `<@U…>` still stays as-is: inventing a name would
+                // be fabrication.
+                _ => match inline_label.filter(|label| !label.is_empty()) {
+                    Some(label) if is_slack_user_id(id) => {
+                        out.push('@');
+                        out.push_str(label);
+                    }
+                    _ => out.push_str(original),
+                },
             }
         } else if let Some(channel_ref) = token.strip_prefix('#') {
             match channel_ref

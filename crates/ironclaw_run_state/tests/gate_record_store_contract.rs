@@ -200,6 +200,7 @@ fn every_gate_record_variant() -> Vec<GateRecord> {
             summary: summary(),
             result,
             byte_len: 2048,
+            result_origin: Some(LoopRef::new("result:child-1").unwrap()),
         },
         GateRecord::ExternalTool { summary: summary() },
     ]

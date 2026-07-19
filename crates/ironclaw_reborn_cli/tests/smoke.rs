@@ -1292,6 +1292,33 @@ fn models_list_no_default_features_does_not_resolve_reborn_home() {
 
 #[cfg(not(feature = "root-llm-provider"))]
 #[test]
+fn models_list_with_provider_reports_root_llm_provider_required_without_default_features() {
+    // A provider-detail request needs real provider data; without the feature
+    // it must error like the write commands rather than succeed with the
+    // unrelated generic slot list (2026-07-19 ironloopai review finding).
+    for args in [
+        &["models", "list", "openai"][..],
+        &["models", "list", "--verbose"][..],
+    ] {
+        let output = reborn_command()
+            .args(args)
+            .output()
+            .expect("ironclaw-reborn models list should run");
+        assert!(!output.status.success(), "command should fail: {args:?}");
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            stderr.contains("requires the root-llm-provider feature"),
+            "stderr: {stderr}"
+        );
+        assert!(
+            !stderr.contains("HOME or USERPROFILE"),
+            "must not resolve Reborn home before feature error: {stderr}"
+        );
+    }
+}
+
+#[cfg(not(feature = "root-llm-provider"))]
+#[test]
 fn models_status_no_default_features_does_not_resolve_reborn_home() {
     let output = reborn_command()
         .arg("models")
@@ -1465,6 +1492,161 @@ fn config_path_reports_default_reborn_home_without_creating_directories() {
     assert!(
         !temp.path().join(".ironclaw").exists(),
         "config path should not create default Reborn or v1 state directories"
+    );
+}
+
+#[test]
+fn config_set_google_client_id_writes_config_toml() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let reborn_home = temp.path().join("reborn-home");
+
+    let output = reborn_command()
+        .args([
+            "config",
+            "set",
+            "google.client_id",
+            "abc123.apps.googleusercontent.com",
+        ])
+        .env("IRONCLAW_REBORN_HOME", &reborn_home)
+        .env("HOME", temp.path().join("home"))
+        .output()
+        .expect("ironclaw config set google.client_id should run");
+
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("google.client_id: saved"),
+        "stdout: {stdout}"
+    );
+    assert!(
+        stdout.contains("to apply: ironclaw service restart"),
+        "config set must never auto-restart; it must print the explicit apply step: {stdout}"
+    );
+    assert_eq!(
+        stdout.matches("service restart").count(),
+        1,
+        "the restart instruction must appear exactly once (remediation text plus the \
+         apply-step line must not both print it): {stdout}"
+    );
+
+    let config = std::fs::read_to_string(reborn_home.join("config.toml")).expect("read config");
+    assert!(config.contains("[google]"), "config: {config}");
+    assert!(
+        config.contains("client_id = \"abc123.apps.googleusercontent.com\""),
+        "config: {config}"
+    );
+}
+
+/// PR-C round-2 fix: `slack_remediation_text` used to embed its own
+/// trailing "run `service restart`" sentence on top of `print_apply_step`'s
+/// canonical line, double-printing the restart instruction. Pin the
+/// exactly-once invariant the same way the google.client_id test above
+/// does.
+#[test]
+fn config_set_slack_enabled_prints_restart_exactly_once() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let reborn_home = temp.path().join("reborn-home");
+
+    let output = reborn_command()
+        .args(["config", "set", "slack.enabled", "true"])
+        .env("IRONCLAW_REBORN_HOME", &reborn_home)
+        .env("HOME", temp.path().join("home"))
+        .output()
+        .expect("ironclaw config set slack.enabled should run");
+
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("slack.enabled: saved"), "stdout: {stdout}");
+    assert!(
+        stdout.contains("to apply: ironclaw service restart"),
+        "config set must never auto-restart; it must print the explicit apply step: {stdout}"
+    );
+    assert_eq!(
+        stdout.matches("service restart").count(),
+        1,
+        "the restart instruction must appear exactly once (remediation text plus the \
+         apply-step line must not both print it): {stdout}"
+    );
+}
+
+/// PR C review fix (item 1): `status` must read the same `[google]`
+/// config.toml section `config set google.*` writes, not just env vars —
+/// cheapest observable proof is the asymmetric-partial case, since a fully
+/// configured or fully unconfigured backend both print no `google_oauth`
+/// line at all (see `resolve_google_oauth_degraded`). Setting only
+/// `client_id` through `config set` (no env vars, no redirect_uri) must
+/// surface as "partially configured (missing redirect_uri)" — which is only
+/// possible if `status` actually read the config file this test just wrote.
+#[test]
+fn config_set_google_client_id_then_status_reports_partial_from_config_file() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let reborn_home = temp.path().join("reborn-home");
+    let home = temp.path().join("home");
+
+    let set_client_id = reborn_command()
+        .args([
+            "config",
+            "set",
+            "google.client_id",
+            "abc123.apps.googleusercontent.com",
+        ])
+        .env("IRONCLAW_REBORN_HOME", &reborn_home)
+        .env("HOME", &home)
+        .output()
+        .expect("ironclaw config set google.client_id should run");
+    assert!(
+        set_client_id.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&set_client_id.stderr)
+    );
+
+    let status = reborn_command()
+        .args(["status"])
+        .env("IRONCLAW_REBORN_HOME", &reborn_home)
+        .env("HOME", &home)
+        .output()
+        .expect("ironclaw status should run");
+    assert!(
+        status.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&status.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&status.stdout);
+    assert!(
+        stdout.contains("google_oauth")
+            && stdout.contains("missing google.redirect_uri")
+            && stdout.contains("config set google.redirect_uri"),
+        "status must reflect the [google] config.toml section config set wrote, not just env \
+         vars, and must give the actionable fix command: {stdout}"
+    );
+}
+
+#[test]
+fn config_set_rejects_unknown_key() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let reborn_home = temp.path().join("reborn-home");
+
+    let output = reborn_command()
+        .args(["config", "set", "nonsense.key", "value"])
+        .env("IRONCLAW_REBORN_HOME", &reborn_home)
+        .env("HOME", temp.path().join("home"))
+        .output()
+        .expect("ironclaw config set should run");
+
+    assert!(!output.status.success(), "unknown key must fail");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("unknown config key"), "stderr: {stderr}");
+    assert!(
+        !reborn_home.join("config.toml").exists(),
+        "an unknown key must not seed config.toml"
     );
 }
 
@@ -3738,6 +3920,45 @@ fn onboard_bootstraps_reborn_home_without_touching_v1_state() {
     );
 }
 
+#[cfg(not(all(feature = "libsql", feature = "root-llm-provider")))]
+#[test]
+fn onboard_reduced_feature_build_reports_llm_provisioning_as_unavailable() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let process_home = temp.path().join("process-home");
+    let reborn_home = temp.path().join("reborn-home");
+    std::fs::create_dir_all(&process_home).expect("create process home");
+
+    let output = reborn_command()
+        .arg("onboard")
+        .env_clear()
+        .env("HOME", &process_home)
+        .env("IRONCLAW_REBORN_HOME", &reborn_home)
+        .env("IRONCLAW_DISABLE_OS_KEYCHAIN", "1")
+        .output()
+        .expect("reduced-feature ironclaw onboard should run");
+
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("llm_credentials: unavailable in this build"),
+        "the feature-off outcome must not be reported as non-interactive: {stdout}"
+    );
+    assert!(
+        stdout.contains("--features full") && stdout.contains("rerun `ironclaw onboard`"),
+        "reduced-feature onboarding must print feature-specific remediation: {stdout}"
+    );
+    assert!(
+        !stdout.contains(
+            "configure LLM credentials: rerun `ironclaw onboard` from an interactive terminal"
+        ),
+        "feature-disabled provisioning must not blame terminal interactivity: {stdout}"
+    );
+}
+
 #[test]
 fn onboard_is_idempotent_for_the_webui_token_file() {
     // Token doubles as serve's session-signing key: re-running onboard must
@@ -5383,6 +5604,11 @@ fn onboard_import_history_records_pending_step() {
 /// bytes, the marker, providers.json) are still correct on disk, since
 /// `write_default_config_files` and the marker/master-key steps all run
 /// ahead of the LLM-credential step that fails.
+// The pinned failure (the LLM-credential step parsing the malformed
+// config.toml) exists only when the provider feature compiles that step in;
+// without it onboard legitimately succeeds, so the test would fail the
+// libsql-only lane for behavior that build cannot have.
+#[cfg(feature = "root-llm-provider")]
 #[test]
 fn onboard_preserves_existing_config_without_force() {
     let temp = tempfile::tempdir().expect("tempdir");

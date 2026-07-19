@@ -10,10 +10,10 @@ use ironclaw_extensions::{
     ExtensionRuntime, MANIFEST_SCHEMA_VERSION, ManifestSource,
 };
 use ironclaw_first_party_extensions::{
-    GsuiteCapabilitySpec, GsuiteCredentialStageError, GsuiteCredentialStageRequest,
-    GsuiteCredentialStager, GsuiteDispatchError, GsuiteDispatchRequest, GsuiteExecutor,
-    GsuitePackageSpec, find_gsuite_capability, gsuite_google_account_visible_to_requester,
-    gsuite_package_specs, gsuite_resource_profile,
+    GsuiteCapabilitySpec, GsuiteCredentialDispatchReason, GsuiteCredentialStageError,
+    GsuiteCredentialStageRequest, GsuiteCredentialStager, GsuiteDispatchError,
+    GsuiteDispatchRequest, GsuiteExecutor, GsuitePackageSpec, find_gsuite_capability,
+    gsuite_google_account_visible_to_requester, gsuite_package_specs, gsuite_resource_profile,
 };
 use ironclaw_host_api::{
     CapabilityId, CapabilityProfileSchemaRef, ExtensionId, HostApiError, NetworkScheme,
@@ -65,10 +65,17 @@ impl RuntimeCredentialAccountVisibilityPolicy for GsuiteRuntimeCredentialAccount
 ///
 /// Handler registration is allowed before lifecycle activation because runtime
 /// dispatch still requires active package descriptors.
+///
+/// `google_oauth_configured` is the cheap, build-time signal for whether a
+/// Google OAuth backend was registered on this composition's
+/// `RebornBuildInput`. It is not a live credential check: it gates a
+/// pre-dispatch "not configured" tool result, distinct from the per-account
+/// `AuthRequired` gate `GoogleCredentialResolver` still owns once dispatch proceeds.
 pub fn bundled_gsuite_first_party_handlers(
     accounts: Arc<dyn CredentialAccountService>,
     account_records: Arc<dyn CredentialAccountRecordSource>,
     credential_stager: Arc<dyn GsuiteCredentialStager>,
+    google_oauth_configured: bool,
 ) -> Result<FirstPartyCapabilityRegistry, HostApiError> {
     let mut registry = FirstPartyCapabilityRegistry::new();
     register_bundled_gsuite_first_party_handlers(
@@ -76,6 +83,7 @@ pub fn bundled_gsuite_first_party_handlers(
         accounts,
         account_records,
         credential_stager,
+        google_oauth_configured,
     )?;
     Ok(registry)
 }
@@ -85,9 +93,11 @@ pub(crate) fn register_bundled_gsuite_first_party_handlers(
     accounts: Arc<dyn CredentialAccountService>,
     account_records: Arc<dyn CredentialAccountRecordSource>,
     credential_stager: Arc<dyn GsuiteCredentialStager>,
+    google_oauth_configured: bool,
 ) -> Result<(), HostApiError> {
     let handler = Arc::new(GsuiteFirstPartyHandler {
         executor: GsuiteExecutor::new(accounts, account_records, credential_stager),
+        google_oauth_configured,
     });
     for package in gsuite_package_specs() {
         for capability in package.capabilities {
@@ -99,6 +109,7 @@ pub(crate) fn register_bundled_gsuite_first_party_handlers(
 
 struct GsuiteFirstPartyHandler {
     executor: GsuiteExecutor,
+    google_oauth_configured: bool,
 }
 
 #[async_trait]
@@ -107,6 +118,17 @@ impl FirstPartyCapabilityHandler for GsuiteFirstPartyHandler {
         &self,
         request: FirstPartyCapabilityRequest,
     ) -> Result<FirstPartyCapabilityResult, FirstPartyCapabilityError> {
+        // Pre-dispatch check: every GSuite capability requires a Google OAuth
+        // account (`runtime_credentials` below always sources from
+        // `GOOGLE_PROVIDER_ID`), so a missing build-time OAuth backend means
+        // no dispatch can ever succeed. Short-circuit before the executor
+        // call reaches `GoogleCredentialResolver::resolve` (which owns the
+        // separate missing-account/revoked-account `AuthRequired` gate) so a
+        // fresh install with no Google OAuth backend at all gets a
+        // remediation tool result instead of a silent auth-gate stall.
+        if !self.google_oauth_configured {
+            return Err(google_oauth_not_configured_error());
+        }
         let egress = request
             .services
             .runtime_http_egress
@@ -129,6 +151,28 @@ impl FirstPartyCapabilityHandler for GsuiteFirstPartyHandler {
             .map_err(|error| gsuite_error(error, &request.capability_id))?;
         Ok(FirstPartyCapabilityResult::new(result.output, result.usage))
     }
+}
+
+/// Tool-result error for a GSuite capability dispatched with no Google OAuth
+/// backend configured at all — distinct from `AuthRequired` (an account was
+/// expected but is missing/revoked/needs selection).
+///
+/// Rides the diagnostic-detail channel (not `safe_summary`) because the
+/// remediation text names `config.toml` keys containing "secret" and console
+/// URLs, which the strict `safe_summary` validator rejects outright; the
+/// diagnostic channel scrubs secret *values*, not vocabulary, so this text
+/// survives intact to the model.
+fn google_oauth_not_configured_error() -> FirstPartyCapabilityError {
+    let text = format!(
+        "Google Workspace access is not configured on this ironclaw instance.\n\n{}\n\n{}",
+        ironclaw_reborn_config::google_remediation_text(),
+        ironclaw_reborn_config::apply_step_text()
+    );
+    FirstPartyCapabilityError::dispatch_with_diagnostic(
+        RuntimeDispatchErrorKind::OperationFailed,
+        None,
+        text,
+    )
 }
 
 fn package_from_spec(spec: &GsuitePackageSpec) -> Result<ExtensionPackage, ExtensionError> {
@@ -239,7 +283,31 @@ fn gsuite_error(
             ),
             Err(error) => error,
         },
-        None => FirstPartyCapabilityError::new(error.kind()),
+        None => match error.reason() {
+            // `BackendAuth` means the account resolved but the provider
+            // rejected the request while exchanging/refreshing the token
+            // (e.g. `invalid_client`) — configured, but rejected. Distinct
+            // from `AuthRequired` (no/expired account) and the
+            // not-configured pre-dispatch check above (no backend at all).
+            Some(GsuiteCredentialDispatchReason::BackendAuth) => {
+                FirstPartyCapabilityError::dispatch_with_diagnostic(
+                    error.kind(),
+                    Some(
+                        "Google OAuth is configured but the provider rejected the credentials"
+                            .to_string(),
+                    ),
+                    format!(
+                        "Google OAuth is configured but the provider rejected the request \
+                         while exchanging or refreshing the token (e.g. invalid_client). \
+                         Re-run `ironclaw config set google.client_secret` to update \
+                         the client secret, and confirm the client id/secret at \
+                         https://console.cloud.google.com/apis/credentials. {}",
+                        ironclaw_reborn_config::apply_step_text()
+                    ),
+                )
+            }
+            _ => FirstPartyCapabilityError::new(error.kind()),
+        },
     };
     match usage {
         Some(u) => base.with_usage(u),
@@ -303,9 +371,7 @@ impl GsuiteCredentialStager for ProductAuthRuntimeGsuiteCredentialStager {
 
 #[cfg(test)]
 mod tests {
-    use ironclaw_first_party_extensions::{
-        GMAIL_LIST_MESSAGES_CAPABILITY_ID, GsuiteCredentialDispatchReason,
-    };
+    use ironclaw_first_party_extensions::GMAIL_LIST_MESSAGES_CAPABILITY_ID;
     use ironclaw_host_api::RuntimeDispatchErrorKind;
 
     use super::*;

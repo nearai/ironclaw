@@ -8,7 +8,7 @@
 
 use ironclaw_host_api::{
     ActivityId, AuthorizeResult, Authorized, Blocked, CapabilityAuthorizer, CapabilityId, DenyRef,
-    GateRef, Invocation, InvocationOrigin, MountView, ProductKind, ResourceEstimate,
+    GateRef, GateWaypoint, Invocation, InvocationOrigin, MountView, ProductKind, ResourceEstimate,
     ResourceReservation, ResourceReservationId, ResourceScope, RuntimeLane, Timestamp, UserId,
 };
 
@@ -107,7 +107,7 @@ fn authorize_result_kinds() {
     );
     assert_eq!(AuthorizeResult::Denied(DenyRef::new()).kind(), "denied");
     assert_eq!(
-        AuthorizeResult::Blocked(Blocked::Auth(GateRef::new())).kind(),
+        AuthorizeResult::Blocked(Blocked::Auth(GateWaypoint::new(GateRef::new()))).kind(),
         "blocked"
     );
 }

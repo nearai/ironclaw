@@ -10,15 +10,12 @@
 //! return [`LlmCredentialPromptError::NonInteractive`] rather than calling
 //! `process::exit`.
 
-// The terminal prompt surface is consumed by LLM provisioning only when the
-// provider-admin feature is present. Keep the shared feature-off onboarding
-// shape without emitting dead-code warnings in slim builds.
-#![cfg_attr(
-    not(all(feature = "libsql", feature = "root-llm-provider")),
-    allow(dead_code)
-)]
-
-use std::io::{IsTerminal, Write as _};
+#[cfg(any(
+    feature = "webui-v2-beta",
+    all(feature = "libsql", feature = "root-llm-provider")
+))]
+use std::io::IsTerminal;
+use std::io::Write as _;
 
 /// Where onboarding's LLM-credential prompts (provider menu, API key,
 /// model) come from, plus whether this session can prompt at all
@@ -30,6 +27,10 @@ pub(crate) trait PromptSource {
     /// attached). Checked once up front so a non-interactive session skips
     /// both the LLM-credential prompts and the OS-service install without
     /// either one independently re-deriving "is this interactive".
+    #[cfg(any(
+        feature = "webui-v2-beta",
+        all(feature = "libsql", feature = "root-llm-provider")
+    ))]
     fn is_interactive(&self) -> bool;
 
     /// Prompt for the LLM provider via a numbered menu built from `entries`
@@ -50,11 +51,13 @@ pub(crate) trait PromptSource {
     ) -> Result<String, LlmCredentialPromptError>;
 
     /// Prompt for `provider`'s API key with input masked (not echoed).
+    #[cfg(all(feature = "libsql", feature = "root-llm-provider"))]
     fn api_key(&mut self, provider: &str) -> Result<String, LlmCredentialPromptError>;
 
     /// Ask a yes/no `question`, defaulting to yes on a blank answer (`[Y/n]`
     /// framing). Used by onboard's env-detect-and-confirm step: "Found
     /// `<provider>` configured in environment — use it?"
+    #[cfg(all(feature = "libsql", feature = "root-llm-provider"))]
     fn confirm(&mut self, question: &str) -> Result<bool, LlmCredentialPromptError>;
 
     /// Prompt for a model override for `provider_id`. `default_model` is
@@ -84,6 +87,7 @@ pub(crate) enum LlmCredentialPromptError {
          `ironclaw models set-provider <provider>` and set the provider's API key env \
          var instead, or rerun `onboard` from an interactive shell"
     )]
+    #[cfg(all(feature = "libsql", feature = "root-llm-provider"))]
     NonInteractive,
     #[error(transparent)]
     Other(#[from] anyhow::Error),
@@ -98,6 +102,10 @@ pub(crate) enum LlmCredentialPromptError {
 pub(crate) struct StdinPromptSource;
 
 impl PromptSource for StdinPromptSource {
+    #[cfg(any(
+        feature = "webui-v2-beta",
+        all(feature = "libsql", feature = "root-llm-provider")
+    ))]
     fn is_interactive(&self) -> bool {
         // Both streams matter: a redirected/piped stdout must not receive
         // the masked `*` characters `api_key`'s raw-mode read writes as the
@@ -143,6 +151,7 @@ impl PromptSource for StdinPromptSource {
         provider_menu_typed(entries, typed_seed)
     }
 
+    #[cfg(all(feature = "libsql", feature = "root-llm-provider"))]
     fn api_key(&mut self, provider: &str) -> Result<String, LlmCredentialPromptError> {
         if !std::io::stdin().is_terminal() {
             return Err(LlmCredentialPromptError::NonInteractive);
@@ -198,6 +207,7 @@ impl PromptSource for StdinPromptSource {
         })
     }
 
+    #[cfg(all(feature = "libsql", feature = "root-llm-provider"))]
     fn confirm(&mut self, question: &str) -> Result<bool, LlmCredentialPromptError> {
         if !std::io::stdin().is_terminal() {
             return Err(LlmCredentialPromptError::NonInteractive);
@@ -553,7 +563,10 @@ fn render_menu(
 /// `drain_pending_events()` discards keystrokes buffered before raw mode was
 /// entered (e.g. a stray Enter from the preceding plain-line prompt) so they
 /// can't be replayed into the masked read.
-fn read_masked_line() -> std::io::Result<String> {
+///
+/// `pub(crate)` — reused by `commands::config::set` for secret-valued
+/// `config set` keys so a plaintext secret never echoes to the terminal.
+pub(crate) fn read_masked_line() -> std::io::Result<String> {
     use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
     use crossterm::{execute, style::Print, terminal};
 
