@@ -82,7 +82,7 @@ where
     /// Shared row-store authorities keyed by tenant/user mount. This preserves
     /// durable filesystem writes while avoiding a full row-set reload for every
     /// measured operation in the same process.
-    row_turn_stores: Mutex<HashMap<String, Arc<dyn StressTurnStore>>>,
+    row_turn_stores: Mutex<RowTurnStoreCache>,
     /// Shared in-memory `RootFilesystem` backing the `RowMemory` variant's row
     /// stores — one in-process backend for the whole run, so the row store's
     /// journal/delta mechanism is measured without durable-backend cost.
@@ -1760,22 +1760,37 @@ where
         build: impl FnOnce(MountView) -> Arc<dyn StressTurnStore>,
     ) -> Result<Arc<dyn StressTurnStore>, OperationFailure> {
         let key = row_turn_store_key(resource_scope);
-        let mut stores = self.row_turn_stores.lock().map_err(|_| {
+        // Fast path: a shared read of the cache under the lock. The lock is NOT
+        // held across `build` — in a throughput benchmark, serializing every
+        // thread's store construction behind one mutex would distort the very
+        // latency evidence this harness measures.
+        if let Some(store) = self.lock_row_stores()?.get(&key).cloned() {
+            return Ok(store);
+        }
+
+        // Build outside the lock. A concurrent thread may build the same key in
+        // parallel; that is a bounded, one-time waste (a cache miss races), not
+        // a correctness issue — the insert below dedups to a single shared store.
+        let view = user_turn_mount_view(&self.run_id, resource_scope)
+            .map_err(|error| OperationFailure::invalid_request("turn_store", error))?;
+        let built = build(view);
+
+        let mut stores = self.lock_row_stores()?;
+        // Re-check under the lock: if another thread inserted first, adopt theirs
+        // and drop ours so every caller for this key shares one store.
+        Ok(Arc::clone(stores.entry(key).or_insert(built)))
+    }
+
+    fn lock_row_stores(
+        &self,
+    ) -> Result<std::sync::MutexGuard<'_, RowTurnStoreCache>, OperationFailure> {
+        self.row_turn_stores.lock().map_err(|_| {
             OperationFailure::new(
                 "turn_store_lock_poisoned",
                 "turn_store",
                 "row turn-store cache lock poisoned",
             )
-        })?;
-        if let Some(store) = stores.get(&key).cloned() {
-            return Ok(store);
-        }
-
-        let view = user_turn_mount_view(&self.run_id, resource_scope)
-            .map_err(|error| OperationFailure::invalid_request("turn_store", error))?;
-        let store = build(view);
-        stores.insert(key, Arc::clone(&store));
-        Ok(store)
+        })
     }
 }
 
@@ -2416,3 +2431,5 @@ fn resource_failure(stage: &'static str, error: ResourceError) -> OperationFailu
         cause: resource_ops::failure_for_stage(stage, error),
     }
 }
+/// Per-tenant/user row turn-store cache, keyed by scope.
+type RowTurnStoreCache = HashMap<String, Arc<dyn StressTurnStore>>;

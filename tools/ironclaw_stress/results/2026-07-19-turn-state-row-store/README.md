@@ -73,9 +73,9 @@ breakdown below); ops/s counts succeeded operations only.
 | Concurrency | memory | row-memory | filesystem-row | filesystem (blob) |
 | ---: | ---: | ---: | ---: | ---: |
 | 8   | 58ms → 81ms (0%), 1088/s | 33ms → 42ms (0%), 632/s | 98ms → 123ms (0%), 371/s | 92ms → 100ms (0%), 404/s |
-| 32  | 78ms → 135ms (16.1%), 875/s | 91ms → 158ms (20.0%), 736/s | 438ms → 658ms (18.0%), 321/s | 617ms → 978ms (26.1%), 227/s |
-| 64  | 124ms → 163ms (34.1%), 646/s | 317ms → 420ms (62.4%), 264/s | 531ms → 650ms (84.8%), 64/s | 830ms → 1.27s (41.9%), 203/s |
-| 100 | 175ms → 251ms (44.5%), 509/s | 510ms → 545ms (71.3%), 168/s | 873ms → 1.04s (87.2%), 51/s | 1.73s → 2.93s (55.7%), 183/s |
+| 32  | 78ms → 135ms (16.1%), 875/s | 91ms → 158ms (20.0%), 736/s | 438ms → 658ms (18.0%), 321/s | 617ms → 978ms (26.1%), 168/s |
+| 64  | 124ms → 163ms (34.1%), 646/s | 317ms → 420ms (62.4%), 264/s | 531ms → 650ms (84.8%), 64/s | 830ms → 1.27s (41.9%), 118/s |
+| 100 | 175ms → 251ms (44.5%), 509/s | 510ms → 545ms (71.3%), 168/s | 873ms → 1.04s (87.2%), 51/s | 1.73s → 2.93s (55.7%), 81/s |
 
 ## Results — store-isolated (turn-store stage time per op: submit + claim + complete)
 
