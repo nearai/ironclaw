@@ -7,10 +7,10 @@ use ironclaw_turns::{
     LoopFailureKind, LoopResultRef,
     run_profile::{
         AuthResumeApprovalIdentity, CapabilityActivityId, CapabilityApprovalResume,
-        CapabilityAuthResume, CapabilityBatchInvocation,
-        CapabilityCallCandidate, CapabilityFailureKind, CapabilityOutcome, CapabilityProgress,
-        CapabilityResultMessage, LoopDriverNoteKind, LoopProgressEvent,
-        ModelVisibleToolObservation, VisibleCapabilitySurface,
+        CapabilityAuthResume, CapabilityBatchInvocation, CapabilityCallCandidate,
+        CapabilityFailureKind, CapabilityOutcome, CapabilityProgress, CapabilityResultMessage,
+        LoopDriverNoteKind, LoopProgressEvent, ModelVisibleToolObservation,
+        VisibleCapabilitySurface,
     },
 };
 
