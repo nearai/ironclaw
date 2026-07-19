@@ -1935,8 +1935,9 @@ turning "did we handle the new case everywhere it flows?" from a review question
 recurring identity/exhaustiveness bug class in `types.md`) into a build failure. The
 transition enum is the single source of truth: the runtime machine and the §11.4
 (state × op) enumeration test both consume the *same* `step`, so a proven cell and a
-shipped cell cannot drift. This is also a §10 ratchet — a `_ =>` arm (or a non-exhaustive
-`#[non_exhaustive]` escape) added to a capability transition `match` is a mechanical
+shipped cell cannot drift. This is also a §10 ratchet — a `_ =>` arm added to a capability
+transition `match`, or a `#[non_exhaustive]` attribute on a capability state/event enum
+(which forces downstream matches into exactly that wildcard arm), is a mechanical
 review reject, tested by the ratchet on its own file.
 
 **2. Every edge is exercised end-to-end through the real infrastructure, not only the
@@ -1946,7 +1947,7 @@ by at least one integration/e2e path through production composition** — real s
 `authorize`→`dispatch`, real gate persistence (#6243) and resume-read, real runtime lane —
 asserting at a seam per §11.8, never `wait_for_status` alone. A coverage manifest lists
 every edge and the e2e scenario that drives it; an edge with no full-infra scenario is a
-gap the suite reports (a completeness critic over the transition table), so "the model
+gap the suite reports (a completeness check over the transition table), so "the model
 handles it" can never stand in for "the wiring handles it." The `authorize`/`dispatch`
 conformance harness (§11.7) is where the per-edge assertions live; the §5.3 acceptance
 table (every outcome row producible in its channel) is the crate-tier half of the same
