@@ -1,7 +1,6 @@
-use std::{collections::HashMap, fmt, sync::Mutex};
+use std::fmt;
 
 use async_trait::async_trait;
-use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
@@ -212,126 +211,6 @@ pub trait LoopCheckpointStore: Send + Sync {
     ) -> Result<Option<LoopCheckpointRecord>, TurnError>;
 }
 
-#[derive(Default)]
-pub struct InMemoryCheckpointStateStore {
-    records: Mutex<HashMap<LoopCheckpointStateRef, CheckpointStateRecord>>,
-}
-
-#[derive(Default)]
-pub struct InMemoryLoopCheckpointStore {
-    records: Mutex<HashMap<TurnCheckpointId, LoopCheckpointRecord>>,
-}
-
-#[async_trait]
-impl CheckpointStateStore for InMemoryCheckpointStateStore {
-    async fn put_checkpoint_state(
-        &self,
-        request: PutCheckpointStateRequest,
-    ) -> Result<CheckpointStateRecord, TurnError> {
-        validate_checkpoint_payload_len(request.payload.len())
-            .map_err(|reason| TurnError::InvalidRequest { reason })?;
-        let state_ref = new_checkpoint_state_ref()?;
-        let payload = RedactedCheckpointPayload::new(request.payload)
-            .map_err(|reason| TurnError::InvalidRequest { reason })?;
-        let record = CheckpointStateRecord {
-            state_ref: state_ref.clone(),
-            scope: request.scope,
-            turn_id: request.turn_id,
-            run_id: request.run_id,
-            schema_id: request.schema_id,
-            schema_version: request.schema_version,
-            kind: request.kind,
-            payload,
-            created_at: Utc::now(),
-        };
-
-        let mut records = self.records.lock().map_err(|_| TurnError::Unavailable {
-            reason: "checkpoint state store lock poisoned".to_string(),
-        })?;
-        records.insert(state_ref, record.clone());
-        Ok(record)
-    }
-
-    async fn get_checkpoint_state(
-        &self,
-        request: GetCheckpointStateRequest,
-    ) -> Result<Option<CheckpointStateRecord>, TurnError> {
-        let records = self.records.lock().map_err(|_| TurnError::Unavailable {
-            reason: "checkpoint state store lock poisoned".to_string(),
-        })?;
-        let Some(record) = records.get(&request.state_ref) else {
-            return Ok(None);
-        };
-        if checkpoint_state_record_matches_request(record, &request) {
-            Ok(Some(record.clone()))
-        } else {
-            Ok(None)
-        }
-    }
-}
-
-#[async_trait]
-impl LoopCheckpointStore for InMemoryLoopCheckpointStore {
-    async fn put_loop_checkpoint(
-        &self,
-        request: PutLoopCheckpointRequest,
-    ) -> Result<LoopCheckpointRecord, TurnError> {
-        let checkpoint_id = TurnCheckpointId::new();
-        let record = LoopCheckpointRecord {
-            checkpoint_id,
-            scope: request.scope,
-            turn_id: request.turn_id,
-            run_id: request.run_id,
-            state_ref: request.state_ref,
-            schema_id: request.schema_id,
-            schema_version: request.schema_version,
-            kind: request.kind,
-            gate_ref: request.gate_ref,
-            created_at: Utc::now(),
-        };
-        let mut records = self.records.lock().map_err(|_| TurnError::Unavailable {
-            reason: "loop checkpoint store lock poisoned".to_string(),
-        })?;
-        records.insert(checkpoint_id, record.clone());
-        Ok(record)
-    }
-
-    async fn get_loop_checkpoint(
-        &self,
-        request: GetLoopCheckpointRequest,
-    ) -> Result<Option<LoopCheckpointRecord>, TurnError> {
-        let records = self.records.lock().map_err(|_| TurnError::Unavailable {
-            reason: "loop checkpoint store lock poisoned".to_string(),
-        })?;
-        let Some(record) = records.get(&request.checkpoint_id) else {
-            return Ok(None);
-        };
-        if loop_checkpoint_record_matches_request(record, &request) {
-            Ok(Some(record.clone()))
-        } else {
-            Ok(None)
-        }
-    }
-}
-
-pub fn checkpoint_state_record_matches_request(
-    record: &CheckpointStateRecord,
-    request: &GetCheckpointStateRequest,
-) -> bool {
-    checkpoint_state_metadata_matches_request(
-        CheckpointStateMatchMetadata {
-            state_ref: &record.state_ref,
-            scope: &record.scope,
-            turn_id: record.turn_id,
-            run_id: record.run_id,
-            schema_id: &record.schema_id,
-            schema_version: record.schema_version,
-            kind: record.kind,
-        },
-        request,
-    )
-}
-
 pub fn checkpoint_state_metadata_matches_request(
     metadata: CheckpointStateMatchMetadata<'_>,
     request: &GetCheckpointStateRequest,
@@ -343,16 +222,6 @@ pub fn checkpoint_state_metadata_matches_request(
         && metadata.schema_id == &request.schema_id
         && metadata.schema_version == request.schema_version
         && metadata.kind == request.kind
-}
-
-fn loop_checkpoint_record_matches_request(
-    record: &LoopCheckpointRecord,
-    request: &GetLoopCheckpointRequest,
-) -> bool {
-    record.scope == request.scope
-        && record.turn_id == request.turn_id
-        && record.run_id == request.run_id
-        && record.checkpoint_id == request.checkpoint_id
 }
 
 pub fn new_checkpoint_state_ref() -> Result<LoopCheckpointStateRef, TurnError> {

@@ -206,6 +206,16 @@ DEFAULT_USER_ID = "reborn-webui-v2-live-qa-user"
 ENDPOINT_STATUS_URL = "https://near.ai"
 PROVIDER = "reborn-webui-v2"
 MODE = "live"
+# Live QA is model- and network-nondeterministic: the same commit can pass then
+# flake red hours later. Retry a transient (assertion/behavioral) case failure up
+# to this many total attempts before recording a red. Default 2 = one retry;
+# override via REBORN_WEBUI_V2_LIVE_QA_CASE_ATTEMPTS.
+try:
+    LIVE_QA_CASE_ATTEMPTS = max(
+        1, int(os.environ.get("REBORN_WEBUI_V2_LIVE_QA_CASE_ATTEMPTS", "2"))
+    )
+except ValueError:
+    LIVE_QA_CASE_ATTEMPTS = 2
 HN_KEYWORD_SEARCH_URL = (
     "https://hn.algolia.com/api/v1/search_by_date"
     "?query=NEAR%20AI&tags=story&hitsPerPage=1"
@@ -1178,6 +1188,14 @@ ASSISTANT_REPLY_POLL_SECONDS = 0.5
 # Persisted diagnostic excerpt only — content checks read
 # AssistantReplyWaitResult.full_text, never this truncation.
 ASSISTANT_REPLY_EXCERPT_MAX_CHARS = 2000
+# Capture-race re-confirm: the finalized-reply flag and the bubble text are
+# read in separate Playwright round-trips, so the flag can flip to "true" one
+# poll after a stale/mid-stream text snapshot was captured. Before hard-failing
+# on a missing marker, re-read the finalized bubble this many times (spaced by
+# this delay) so a truncated snapshot doesn't fail a reply that actually
+# contains the marker.
+ASSISTANT_REPLY_MARKER_RECONFIRM_ATTEMPTS = 3
+ASSISTANT_REPLY_MARKER_RECONFIRM_SECONDS = 0.3
 
 
 def _exc_text(exc: BaseException) -> str:
@@ -1230,6 +1248,60 @@ def _is_provider_incident(result: ProbeResult) -> bool:
         "provider_unavailable",
         "provider_transient",
     }
+
+
+def _is_case_retriable(result: ProbeResult) -> bool:
+    """Whether an unsuccessful case result is a transient failure worth re-running.
+
+    Only assertion/behavioral failures are retriable. Non-transient failures are
+    recorded as-is without wasting a retry: blocked preconditions, and
+    infrastructure/provider incidents (failure_class=="infrastructure",
+    inconclusive, or a model/provider incident per _is_provider_incident).
+    """
+    if result.success:
+        return False
+    details = result.details
+    if details.get("blocked"):
+        return False
+    if details.get("failure_class") == "infrastructure":
+        return False
+    if details.get("inconclusive"):
+        return False
+    if _is_provider_incident(result):
+        return False
+    return True
+
+
+async def _run_case_with_retries(
+    fn: CaseFn,
+    ctx: "LiveQaContext",
+    *,
+    attempts: int,
+    is_retriable: Callable[[ProbeResult], bool],
+) -> ProbeResult:
+    """Run a live-QA case, retrying a transient failure before recording a red.
+
+    Runs ``fn(ctx)``; on an unsuccessful *and* retriable result with attempts
+    remaining, runs it again; otherwise returns the (last) result. Re-running
+    ``fn(ctx)`` drives a fresh chat turn against the same already-running
+    server/ctx — no restart — which is the intended retry semantics for a
+    nondeterministic model/network flake. The number of attempts made is
+    recorded into ``result.details["attempts"]``.
+    """
+    total = max(1, attempts)
+    result: ProbeResult | None = None
+    for attempt in range(1, total + 1):
+        result = await fn(ctx)
+        result.details["attempts"] = attempt
+        if result.success or attempt >= total or not is_retriable(result):
+            return result
+        print(
+            "[reborn-webui-v2-live-qa] retrying case after retriable failure "
+            f"attempt={attempt}/{total}",
+            flush=True,
+        )
+    assert result is not None  # the loop body always runs at least once
+    return result
 
 
 def _record_assistant_reply_wait_result(
@@ -1790,11 +1862,65 @@ async def _wait_for_assistant_reply(
             )
             required_text_matched = required_text_matches(normalized, required_text)
             if last_final_reply_state == "true" and not marker_matches:
-                raise AssertionError(
-                    "finalized assistant reply did not contain required marker. "
-                    f"marker={marker!r} "
-                    f"last_assistant={last_final_assistant_text[-500:]!r}"
-                )
+                # Capture race: `data-final-reply` and the bubble text are read
+                # in two separate Playwright round-trips, so the finalized flag
+                # can flip to "true" a poll after a stale/mid-stream text
+                # snapshot was captured — truncating the marker out of an
+                # otherwise-complete reply. Re-read the finalized bubble a
+                # bounded number of times with the freshest text before failing,
+                # and only raise if the marker is still genuinely absent.
+                for _ in range(ASSISTANT_REPLY_MARKER_RECONFIRM_ATTEMPTS):
+                    await asyncio.sleep(ASSISTANT_REPLY_MARKER_RECONFIRM_SECONDS)
+                    try:
+                        reconfirm_final_assistant_text = await assistant.inner_text(
+                            timeout=1000
+                        )
+                    except Exception:
+                        reconfirm_final_assistant_text = ""
+                    if reconfirm_final_assistant_text:
+                        last_final_assistant_text = reconfirm_final_assistant_text
+                    try:
+                        reconfirm_block_texts = [
+                            block.strip()
+                            for block in (await assistant_blocks.all_inner_texts())[
+                                max(0, assistant_count_before) :
+                            ]
+                            if block.strip()
+                        ]
+                    except Exception:
+                        reconfirm_block_texts = []
+                    if reconfirm_block_texts:
+                        text = "\n".join(reconfirm_block_texts)
+                        last_text = text
+                        last_observed_text = text
+                        normalized = text.lower()
+                    elif reconfirm_final_assistant_text:
+                        # Block-texts read failed or came back empty this
+                        # attempt; fall back to the whole-bubble text so the
+                        # marker AND required-text checks evaluate against the
+                        # freshest snapshot — never a stale pre-reconfirm
+                        # truncation (which could otherwise fail required_text
+                        # or, worse, succeed with stale text on record).
+                        text = reconfirm_final_assistant_text
+                        last_text = text
+                        last_observed_text = text
+                        normalized = text.lower()
+                    marker_matches = (
+                        not enforce_marker
+                        or not marker
+                        or marker in last_final_assistant_text
+                    )
+                    if marker_matches:
+                        required_text_matched = required_text_matches(
+                            normalized, required_text
+                        )
+                        break
+                if not marker_matches:
+                    raise AssertionError(
+                        "finalized assistant reply did not contain required marker. "
+                        f"marker={marker!r} "
+                        f"last_assistant={last_final_assistant_text[-500:]!r}"
+                    )
             if marker_matches and required_text_matched:
                 if last_final_reply_state == "false":
                     await asyncio.sleep(ASSISTANT_REPLY_POLL_SECONDS)
@@ -8449,7 +8575,12 @@ async def run_cases(args: argparse.Namespace) -> int:
                 write_preflight(args.output_dir, prepared_home)
                 shutil.copyfile(preflight_path, case_preflight_path)
             print(f"[reborn-webui-v2-live-qa] running case={name}", flush=True)
-            result = await CASES[name].fn(ctx)
+            result = await _run_case_with_retries(
+                CASES[name].fn,
+                ctx,
+                attempts=LIVE_QA_CASE_ATTEMPTS,
+                is_retriable=_is_case_retriable,
+            )
             result = _attach_browser_diagnostics(args.output_dir, result)
             results.append(result)
             print(

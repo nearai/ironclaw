@@ -428,7 +428,7 @@ async fn webui_event_stream_creates_google_oauth_prompt_for_runtime_credential_g
     use async_trait::async_trait;
     use ironclaw_auth::{AuthContinuationEvent, InMemoryAuthProductServices};
     use ironclaw_channel_host::auth_continuation::RebornAuthContinuationDispatcher;
-    use ironclaw_secrets::InMemorySecretStore;
+    use ironclaw_secrets::FilesystemSecretStore;
 
     #[derive(Debug)]
     struct NoopDispatcher;
@@ -474,7 +474,7 @@ async fn webui_event_stream_creates_google_oauth_prompt_for_runtime_credential_g
             )
             .unwrap(),
         )),
-        Arc::new(InMemorySecretStore::new()),
+        Arc::new(FilesystemSecretStore::ephemeral()),
     ));
     let product_auth = Arc::new(
         RebornProductAuthServices::from_shared(shared.clone(), Arc::new(NoopDispatcher))
@@ -554,7 +554,7 @@ async fn webui_event_stream_creates_notion_dcr_oauth_prompt_for_runtime_credenti
     };
     use ironclaw_capabilities::{CapabilityObligationHandler, CapabilityObligationRequest};
     use ironclaw_channel_host::auth_continuation::RebornAuthContinuationDispatcher;
-    use ironclaw_secrets::InMemorySecretStore;
+    use ironclaw_secrets::FilesystemSecretStore;
 
     #[derive(Debug)]
     struct NoopDispatcher;
@@ -648,7 +648,7 @@ async fn webui_event_stream_creates_notion_dcr_oauth_prompt_for_runtime_credenti
                 scopes: Vec::new(),
             },
             Arc::new(RouteDcrEgress),
-            Arc::new(InMemorySecretStore::new()),
+            Arc::new(FilesystemSecretStore::ephemeral()),
             Arc::new(NoopObligationHandler),
         )
         .unwrap(),

@@ -150,10 +150,10 @@ pub enum LlmKeyStoreError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ironclaw_secrets::InMemorySecretStore;
+    use ironclaw_secrets::FilesystemSecretStore;
 
     fn store() -> LlmKeyStore {
-        LlmKeyStore::new(Arc::new(InMemorySecretStore::new()))
+        LlmKeyStore::new(Arc::new(FilesystemSecretStore::ephemeral()))
     }
 
     #[tokio::test]
@@ -211,7 +211,7 @@ mod tests {
 
     #[tokio::test]
     async fn stored_provider_ids_ignores_unrelated_secret_handles() {
-        let store = Arc::new(InMemorySecretStore::new());
+        let store = Arc::new(FilesystemSecretStore::ephemeral());
         store
             .put(
                 scope(),
