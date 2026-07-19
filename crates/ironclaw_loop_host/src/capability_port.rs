@@ -1051,17 +1051,32 @@ pub struct HostRuntimeLoopCapabilityPort {
     /// invocation id recovered from the resume token
     /// (`replay_payload_for_resume`). Never model-visible.
     replay_payload_store: Arc<dyn ReplayPayloadStore>,
-    /// The mapped [`Resolution`] persisted for each idempotency key, so a
-    /// replayed invocation (same key) returns the SAME resolution — and
-    /// therefore the SAME [`GateRef`] the record was persisted under — instead
-    /// of a freshly-minted one. The mapping mints a fresh random `GateRef` per
-    /// call for the approval/resource/dependent/external channels, so returning
-    /// the re-mapped resolution on a replay would hand back a gate ref no record
-    /// exists under (#6287). Doubling as the write-once replay guard: the first
-    /// invocation reserves the key with its resolution and persists exactly one
-    /// record; a repeat finds the reservation and returns it without a second
-    /// save. An entry is rolled back on a failed save so the next replay retries.
-    persisted_gate_resolutions: Mutex<HashMap<IdempotencyKey, Resolution>>,
+    /// Per-idempotency-key reservation for a gate outcome's persisted
+    /// [`Resolution`]. The mapping mints a fresh random `GateRef` per call for
+    /// the approval/resource/dependent/external channels, so a replayed
+    /// invocation (same key) must return the FIRST invocation's resolution — the
+    /// one whose gate ref the record is under — not a freshly-minted ref no
+    /// record exists under (#6287). Exactly one caller (the owner) persists the
+    /// record; concurrent duplicates and later replays WAIT on the reservation's
+    /// notify for that durable save before receiving the resolution, so a
+    /// concurrent replay never receives a blocked resolution whose record is not
+    /// yet persisted. A failed save clears the reservation and wakes the waiters
+    /// so one of them re-owns and retries.
+    persisted_gate_resolutions: Mutex<HashMap<IdempotencyKey, GateResolutionState>>,
+}
+
+/// Reservation state for a gate outcome's persisted resolution, keyed by
+/// idempotency key. Mirrors the `InFlight`/completed shape of
+/// [`DispatchRecord`] so the wait is the same lost-wakeup-safe pattern as
+/// [`HostRuntimeLoopCapabilityPort::wait_for_dispatch_completion`].
+enum GateResolutionState {
+    /// The owning invocation is persisting the record. Waiters block on the
+    /// notify until it either publishes `Persisted` or clears the entry.
+    InFlight(Arc<Notify>),
+    /// The record is durably persisted; the resolution is safe to hand back to
+    /// a replayed invocation. Boxed so this variant does not dominate the map
+    /// entry's size over the pointer-sized `InFlight`.
+    Persisted(Box<Resolution>),
 }
 
 /// Lock a poisoned-aware `Mutex` and wrap a poison error as the canonical
@@ -1844,59 +1859,109 @@ impl HostRuntimeLoopCapabilityPort {
             .unwrap_or(&request.input_ref);
         let idempotency_key =
             invocation_idempotency_key(&self.run_context, request, effective_input_ref)?;
-        // Replay dedup: the dispatch cache replays the same gate outcome for a
-        // repeated invocation (same idempotency key), and the mapping mints a
-        // fresh random `GateRef` on every call. Reserve the key with THIS
-        // resolution and persist exactly one record under its gate ref; a repeat
-        // (or a concurrent duplicate) finds the reservation and returns the SAME
-        // resolution — the one whose gate ref the record is under — instead of
-        // re-minting a gate ref no record exists under (#6287). The check-and-
-        // reserve is atomic under one lock, so only the first caller saves.
+        // Reserve-or-wait: exactly one caller (the owner) persists the record;
+        // repeats and concurrent duplicates WAIT for that durable save before
+        // receiving the resolution, so a concurrent replay never receives a
+        // blocked resolution whose gate record is not yet persisted (#6287). The
+        // mapping mints a fresh random `GateRef` per call, so a waiter must
+        // return the owner's resolution — the one whose gate ref the record is
+        // under — not its own re-mint. A failed save clears the reservation and
+        // wakes the waiters so one re-owns and retries.
+        let owner_notify = loop {
+            let wait_notify = {
+                let mut reserved = lock_mut(
+                    &self.persisted_gate_resolutions,
+                    "gate resolution replay cache",
+                )?;
+                match reserved.get(&idempotency_key) {
+                    Some(GateResolutionState::Persisted(resolution)) => {
+                        return Ok(resolution.as_ref().clone());
+                    }
+                    Some(GateResolutionState::InFlight(notify)) => Arc::clone(notify),
+                    None => {
+                        let notify = Arc::new(Notify::new());
+                        reserved.insert(
+                            idempotency_key.clone(),
+                            GateResolutionState::InFlight(Arc::clone(&notify)),
+                        );
+                        break notify;
+                    }
+                }
+            };
+            // Lost-wakeup-safe wait (mirrors `wait_for_dispatch_completion`):
+            // register on the notify, then re-check under the lock; only await if
+            // the entry is still the SAME in-flight reservation.
+            let notified = wait_notify.notified();
+            tokio::pin!(notified);
+            if self.gate_resolution_in_flight_matches(&idempotency_key, &wait_notify)? {
+                notified.await;
+            }
+        };
+
+        let scope = self.visible_request.context.resource_scope.clone();
+        let save_result = self
+            .gate_record_store
+            .save(scope, gate_ref, record.clone())
+            .await;
+        // Publish to waiters: on success (or benign AlreadyExists) store the
+        // resolution; on a transient fault clear the reservation so a waiter
+        // re-owns and retries. Wake the waiters either way.
         {
             let mut reserved = lock_mut(
                 &self.persisted_gate_resolutions,
                 "gate resolution replay cache",
             )?;
-            if let Some(existing) = reserved.get(&idempotency_key) {
-                return Ok(existing.clone());
+            match &save_result {
+                Ok(()) | Err(RunStateError::GateRecordAlreadyExists { .. }) => {
+                    reserved.insert(
+                        idempotency_key.clone(),
+                        GateResolutionState::Persisted(Box::new(mapped.resolution.clone())),
+                    );
+                }
+                Err(_) => {
+                    reserved.remove(&idempotency_key);
+                }
             }
-            reserved.insert(idempotency_key.clone(), mapped.resolution.clone());
         }
-        let scope = self.visible_request.context.resource_scope.clone();
-        match self
-            .gate_record_store
-            .save(scope, gate_ref, record.clone())
-            .await
-        {
-            Ok(()) => {}
-            // A deterministic gate-record key (the auth gate's `for_auth_gate`, and
-            // the approval gate's `for_approval_request` on the authorize path)
-            // means a re-raise of the SAME gate — a deny-then-retry, or a fresh
-            // port instance whose in-memory replay cache was reset across turns —
-            // derives the SAME content-addressed key and an identical record. The
-            // write-once store reports `GateRecordAlreadyExists`; that is benign
-            // (the record is already persisted, byte-identical), never a fault.
+        owner_notify.notify_waiters();
+        match save_result {
+            Ok(()) => Ok(mapped.resolution),
+            // A deterministic gate-record key (the auth gate's `for_auth_gate`,
+            // and the approval gate's `for_approval_request` on the authorize
+            // path) means a re-raise of the SAME gate — a deny-then-retry, or a
+            // fresh port instance whose in-memory reservation was reset across
+            // turns — derives the SAME content-addressed key and an identical
+            // record. The write-once store reports `GateRecordAlreadyExists`;
+            // that is benign (already persisted, byte-identical), never a fault.
             // Mirrors `persist_replay_payload_for_fresh_gate`'s tolerance of
-            // `ReplayPayloadAlreadyExists`. Keep the reservation.
+            // `ReplayPayloadAlreadyExists`.
             Err(RunStateError::GateRecordAlreadyExists { .. }) => {
                 tracing::debug!(
                     %gate_ref,
                     "gate record already persisted for this deterministic key; keeping existing record"
                 );
+                Ok(mapped.resolution)
             }
-            Err(error) => {
-                // Roll the reservation back so a later replay retries the persist
-                // instead of permanently returning a resolution whose record was
-                // never saved after a transient store fault.
-                lock_mut(
-                    &self.persisted_gate_resolutions,
-                    "gate resolution replay cache",
-                )?
-                .remove(&idempotency_key);
-                return Err(gate_record_store_error(error));
-            }
+            Err(error) => Err(gate_record_store_error(error)),
         }
-        Ok(mapped.resolution)
+    }
+
+    /// True iff `key`'s reservation is still the SAME in-flight entry `notify`
+    /// belongs to — the re-check that makes [`Self::persist_gate_record_for_mapped`]'s
+    /// wait lost-wakeup-safe (mirrors [`Self::dispatch_in_flight_matches`]).
+    fn gate_resolution_in_flight_matches(
+        &self,
+        key: &IdempotencyKey,
+        notify: &Arc<Notify>,
+    ) -> Result<bool, AgentLoopHostError> {
+        let reserved = lock_mut(
+            &self.persisted_gate_resolutions,
+            "gate resolution replay cache",
+        )?;
+        Ok(match reserved.get(key) {
+            Some(GateResolutionState::InFlight(existing)) => Arc::ptr_eq(existing, notify),
+            _ => false,
+        })
     }
 
     /// Persist the host-private [`ReplayPayload`] a later gate/auth resume
