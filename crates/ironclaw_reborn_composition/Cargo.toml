@@ -211,6 +211,7 @@ url = "2"
 uuid = { version = "1", features = ["v4"] }
 
 [dev-dependencies]
+ironclaw_loop_host = { path = "../ironclaw_loop_host", features = ["test-support"] }
 async-trait = "0.1"
 chrono = "0.4"
 hmac = "0.13"

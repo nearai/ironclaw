@@ -2353,7 +2353,7 @@ mod tests {
         ResourceReservationId, RuntimeKind, TenantId, TrustClass, UserId,
     };
     use ironclaw_resources::{InMemoryResourceGovernor, ResourceAccount};
-    use ironclaw_secrets::InMemorySecretStore;
+    use ironclaw_secrets::FilesystemSecretStore;
 
     use super::*;
 
@@ -2429,7 +2429,7 @@ mod tests {
     async fn builtin_obligation_handler_satisfy_release_preserves_staged_handoffs() {
         let network_policies = Arc::new(NetworkObligationPolicyStore::new());
         let secret_injections = Arc::new(RuntimeSecretInjectionStore::new());
-        let secret_store = Arc::new(InMemorySecretStore::new());
+        let secret_store = Arc::new(FilesystemSecretStore::ephemeral());
         let governor = Arc::new(InMemoryResourceGovernor::new());
         let services = BuiltinObligationServices::with_handoff_stores(
             Arc::new(InMemoryAuditSink::new()),
@@ -2499,7 +2499,7 @@ mod tests {
         let shared = caller.tenant_shared_managed_scope();
 
         // Absent in both scopes -> None (dispatch then gates with AuthRequired).
-        let store = InMemorySecretStore::new();
+        let store = FilesystemSecretStore::ephemeral();
         assert_eq!(
             secret_owner_scope(&store, &caller, &handle).await.unwrap(),
             None,
@@ -2507,7 +2507,7 @@ mod tests {
 
         // Present ONLY at the tenant-shared admin-managed scope -> resolves there,
         // so one admin-set key satisfies a caller who never provisioned it.
-        let store = InMemorySecretStore::new();
+        let store = FilesystemSecretStore::ephemeral();
         store
             .put(
                 shared.clone(),
@@ -2526,7 +2526,7 @@ mod tests {
         );
 
         // Present at BOTH scopes -> the caller's OWN secret wins over the shared one.
-        let store = InMemorySecretStore::new();
+        let store = FilesystemSecretStore::ephemeral();
         store
             .put(
                 caller.clone(),
@@ -2559,7 +2559,7 @@ mod tests {
     // material is staged at the caller's own invocation slot (#5459).
     #[tokio::test]
     async fn inject_secret_once_falls_back_to_tenant_shared_admin_key() {
-        let secret_store = Arc::new(InMemorySecretStore::new());
+        let secret_store = Arc::new(FilesystemSecretStore::ephemeral());
         let secret_injections = Arc::new(RuntimeSecretInjectionStore::new());
         let services = BuiltinObligationServices::with_handoff_stores(
             Arc::new(InMemoryAuditSink::new()),
@@ -2617,7 +2617,7 @@ mod tests {
         let services = BuiltinObligationServices::with_handoff_stores(
             Arc::new(InMemoryAuditSink::new()),
             Arc::new(NetworkObligationPolicyStore::new()),
-            Arc::new(InMemorySecretStore::new()),
+            Arc::new(FilesystemSecretStore::ephemeral()),
             Arc::new(RuntimeSecretInjectionStore::new()),
             Arc::new(InMemoryResourceGovernor::new()),
         );
@@ -2675,7 +2675,7 @@ mod tests {
         let services = BuiltinObligationServices::with_handoff_stores(
             Arc::new(InMemoryAuditSink::new()),
             Arc::new(NetworkObligationPolicyStore::new()),
-            Arc::new(InMemorySecretStore::new()),
+            Arc::new(FilesystemSecretStore::ephemeral()),
             Arc::new(RuntimeSecretInjectionStore::new()),
             Arc::new(InMemoryResourceGovernor::new()),
         );
@@ -2750,7 +2750,7 @@ mod tests {
         let services = BuiltinObligationServices::with_handoff_stores(
             Arc::new(InMemoryAuditSink::new()),
             Arc::new(NetworkObligationPolicyStore::new()),
-            Arc::new(InMemorySecretStore::new()),
+            Arc::new(FilesystemSecretStore::ephemeral()),
             Arc::new(RuntimeSecretInjectionStore::new()),
             Arc::new(InMemoryResourceGovernor::new()),
         );
@@ -2848,7 +2848,7 @@ mod tests {
         let services = BuiltinObligationServices::with_handoff_stores(
             Arc::new(InMemoryAuditSink::new()),
             Arc::new(NetworkObligationPolicyStore::new()),
-            Arc::new(InMemorySecretStore::new()),
+            Arc::new(FilesystemSecretStore::ephemeral()),
             Arc::new(RuntimeSecretInjectionStore::new()),
             Arc::new(InMemoryResourceGovernor::new()),
         );

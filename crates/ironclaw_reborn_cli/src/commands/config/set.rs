@@ -508,7 +508,7 @@ mod tests {
     impl FakeSecretStoreOpener {
         fn new() -> Self {
             Self {
-                store: Arc::new(ironclaw_secrets::InMemorySecretStore::new()),
+                store: Arc::new(ironclaw_secrets::FilesystemSecretStore::ephemeral()),
                 opened_paths: Mutex::new(Vec::new()),
             }
         }

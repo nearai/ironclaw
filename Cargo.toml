@@ -284,6 +284,7 @@ zbus = "5"
 serde_json = "1"
 
 [dev-dependencies]
+ironclaw_loop_host = { path = "crates/ironclaw_loop_host", features = ["test-support"] }
 tokio-test = "0.4"
 tracing-test = "0.2"
 testcontainers-modules = { version = "0.12", features = ["postgres"] }

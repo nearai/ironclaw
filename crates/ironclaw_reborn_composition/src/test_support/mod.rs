@@ -16,7 +16,7 @@
 //! 3. [`local_dev_boot`] — `build_approval_gate_evidence_for_test`,
 //!    `build_default_local_dev_database_roots_for_test`,
 //!    `mount_local_dev_database_roots_for_test`,
-//!    `build_local_dev_secret_store_for_test` — mirror the production
+//!    `build_secret_store_for_test` — mirror the production
 //!    local-dev boot sequence so the integration-test harness
 //!    (`tests/support/reborn/`) drives the real local-dev composition paths
 //!    without duplicating the wiring logic.
@@ -96,7 +96,7 @@ pub use durable::{
 };
 pub use local_dev_boot::LOCAL_DEV_DB_FILENAME;
 #[cfg(any(feature = "libsql", feature = "postgres"))]
-pub use local_dev_boot::build_local_dev_secret_store_for_test;
+pub use local_dev_boot::build_secret_store_for_test;
 #[cfg(feature = "test-support")]
 pub use local_dev_boot::{
     build_approval_gate_evidence_for_test, build_default_local_dev_database_roots_for_test,
@@ -120,14 +120,13 @@ pub use projection::build_webui_event_stream_for_test;
 #[cfg(feature = "test-support")]
 pub use refreshing_capability_port::{
     ExtensionManagementTestHandle, RefreshingCapabilityPortTestParts,
-    build_local_dev_extension_management_for_test, create_refreshing_capability_port_for_test,
+    build_extension_management_for_test, create_refreshing_capability_port_for_test,
 };
 #[cfg(feature = "test-support")]
 pub use result_read::{RESULT_READ_CAPABILITY_ID, wrap_result_read_capability_for_test};
 #[cfg(feature = "test-support")]
 pub use skill_activation::{
-    SKILL_ACTIVATE_CAPABILITY_ID, SkillActivationTestSource,
-    build_local_dev_skill_context_source_for_test,
+    SKILL_ACTIVATE_CAPABILITY_ID, SkillActivationTestSource, build_skill_context_source_for_test,
 };
 #[cfg(all(feature = "test-support", feature = "slack-v2-host-beta"))]
 pub use slack_channel_connection::{

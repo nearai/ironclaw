@@ -9,7 +9,7 @@ use std::{
 };
 
 use chrono::Utc;
-use ironclaw_filesystem::{RootFilesystem, ScopedFilesystem};
+use ironclaw_filesystem::{InMemoryBackend, RootFilesystem, ScopedFilesystem};
 use ironclaw_host_api::{
     CapabilityId, HostApiError, InvocationId, MountAlias, MountGrant, MountPermissions, MountView,
     ResourceReservation, ResourceReservationId, ResourceScope, ThreadId, VirtualPath,
@@ -82,7 +82,11 @@ where
     /// Shared row-store authorities keyed by tenant/user mount. This preserves
     /// durable filesystem writes while avoiding a full row-set reload for every
     /// measured operation in the same process.
-    row_turn_stores: Mutex<HashMap<String, Arc<dyn StressTurnStore>>>,
+    row_turn_stores: Mutex<RowTurnStoreCache>,
+    /// Shared in-memory `RootFilesystem` backing the `RowMemory` variant's row
+    /// stores — one in-process backend for the whole run, so the row store's
+    /// journal/delta mechanism is measured without durable-backend cost.
+    memory_root: Arc<InMemoryBackend>,
 }
 
 pub(crate) enum UserTurnWorkload {
@@ -1701,29 +1705,33 @@ where
             }
             TurnStateBackend::FilesystemRow => {
                 let resource_scope = context.turn_scope.to_resource_scope();
-                let key = row_turn_store_key(&resource_scope);
-                let mut stores = self.row_turn_stores.lock().map_err(|_| {
-                    OperationFailure::new(
-                        "turn_store_lock_poisoned",
-                        "turn_store",
-                        "row turn-store cache lock poisoned",
+                self.cached_row_store(&resource_scope, |view| {
+                    let scoped = Arc::new(ScopedFilesystem::with_fixed_view(
+                        Arc::clone(&self.root),
+                        view,
+                    ));
+                    Arc::new(
+                        FilesystemTurnStateRowStore::new(scoped)
+                            .with_limits(self.turn_state_limits),
                     )
-                })?;
-                if let Some(store) = stores.get(&key).cloned() {
-                    return Ok(store);
-                }
-
-                let view = user_turn_mount_view(&self.run_id, &resource_scope)
-                    .map_err(|error| OperationFailure::invalid_request("turn_store", error))?;
-                let scoped = Arc::new(ScopedFilesystem::with_fixed_view(
-                    Arc::clone(&self.root),
-                    view,
-                ));
-                let store = Arc::new(
-                    FilesystemTurnStateRowStore::new(scoped).with_limits(self.turn_state_limits),
-                ) as Arc<dyn StressTurnStore>;
-                stores.insert(key, Arc::clone(&store));
-                Ok(store)
+                })
+            }
+            // Same row-store mechanism, but over the shared in-process
+            // in-memory backend — models replacing the direct in-memory
+            // authority in the `inmemory-turn-state` profile with the row
+            // store (journal/delta semantics, no durable-backend cost).
+            TurnStateBackend::RowMemory => {
+                let resource_scope = context.turn_scope.to_resource_scope();
+                self.cached_row_store(&resource_scope, |view| {
+                    let scoped = Arc::new(ScopedFilesystem::with_fixed_view(
+                        Arc::clone(&self.memory_root),
+                        view,
+                    ));
+                    Arc::new(
+                        FilesystemTurnStateRowStore::new(scoped)
+                            .with_limits(self.turn_state_limits),
+                    )
+                })
             }
             // Durable path: a per-context store whose `/turns/state.json`
             // resolves per (tenant, agent, project, user), so all of a user's
@@ -1741,6 +1749,48 @@ where
                 ) as Arc<dyn StressTurnStore>)
             }
         }
+    }
+
+    /// Look up (or build and cache) the shared per-tenant/user row store for
+    /// `resource_scope`. Both row-store variants share this cache — only one
+    /// backend is active per process, so keys never mix roots.
+    fn cached_row_store(
+        &self,
+        resource_scope: &ResourceScope,
+        build: impl FnOnce(MountView) -> Arc<dyn StressTurnStore>,
+    ) -> Result<Arc<dyn StressTurnStore>, OperationFailure> {
+        let key = row_turn_store_key(resource_scope);
+        // Fast path: a shared read of the cache under the lock. The lock is NOT
+        // held across `build` — in a throughput benchmark, serializing every
+        // thread's store construction behind one mutex would distort the very
+        // latency evidence this harness measures.
+        if let Some(store) = self.lock_row_stores()?.get(&key).cloned() {
+            return Ok(store);
+        }
+
+        // Build outside the lock. A concurrent thread may build the same key in
+        // parallel; that is a bounded, one-time waste (a cache miss races), not
+        // a correctness issue — the insert below dedups to a single shared store.
+        let view = user_turn_mount_view(&self.run_id, resource_scope)
+            .map_err(|error| OperationFailure::invalid_request("turn_store", error))?;
+        let built = build(view);
+
+        let mut stores = self.lock_row_stores()?;
+        // Re-check under the lock: if another thread inserted first, adopt theirs
+        // and drop ours so every caller for this key shares one store.
+        Ok(Arc::clone(stores.entry(key).or_insert(built)))
+    }
+
+    fn lock_row_stores(
+        &self,
+    ) -> Result<std::sync::MutexGuard<'_, RowTurnStoreCache>, OperationFailure> {
+        self.row_turn_stores.lock().map_err(|_| {
+            OperationFailure::new(
+                "turn_store_lock_poisoned",
+                "turn_store",
+                "row turn-store cache lock poisoned",
+            )
+        })
     }
 }
 
@@ -1789,6 +1839,7 @@ where
             }
         }),
         row_turn_stores: Mutex::new(HashMap::new()),
+        memory_root: Arc::new(InMemoryBackend::new()),
     })
 }
 
@@ -2380,3 +2431,5 @@ fn resource_failure(stage: &'static str, error: ResourceError) -> OperationFailu
         cause: resource_ops::failure_for_stage(stage, error),
     }
 }
+/// Per-tenant/user row turn-store cache, keyed by scope.
+type RowTurnStoreCache = HashMap<String, Arc<dyn StressTurnStore>>;
