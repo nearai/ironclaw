@@ -676,6 +676,13 @@ evidence only and are excluded from the `artifacts-*` set uploaded to the
 GitHub Release. It does not claim `serve`, external-service, installer, or
 canonical Reborn packaging coverage.
 
+While #6160's temporary Reborn-only release policy is active, matching tag runs
+stop after this compile matrix. The legacy cargo-dist plan, WASM build, GitHub
+Release host, registry-checksum, announcement, and release Docker caller all
+skip, so the run creates neither a GitHub Release nor published release assets
+or images. The independent manual and hourly entry points in `docker.yml`
+remain available.
+
 Current `dist plan --output-format=json` with `crates/ironclaw_reborn_cli` marked `dist = false` emits only the root legacy package artifacts (`ironclaw` package, `ironclaw-legacy` executable). Removing `dist = false` alone is not enough to ship the canonical Reborn `ironclaw` executable in the existing `ironclaw-v*` release workflow because that workflow is shaped around the root `ironclaw` package tag. Enabling the `ironclaw_reborn_cli` release also requires cargo-dist WiX metadata/template work and an explicit package/tag/versioning decision.
 
 Follow-up issue: #3483 tracks packaging the canonical Reborn binary in release artifacts.

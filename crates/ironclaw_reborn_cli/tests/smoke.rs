@@ -6948,6 +6948,108 @@ api_key_env = "REBORN_TEST_UNSET_BC8F4D_KEY"
     );
 }
 
+#[test]
+fn release_ci_skips_legacy_publish_dag_without_disabling_independent_docker_runs() {
+    let root = workspace_root();
+    let release_workflow = std::fs::read_to_string(root.join(".github/workflows/release.yml"))
+        .expect("release workflow")
+        .replace("\r\n", "\n");
+    let docker_workflow = std::fs::read_to_string(root.join(".github/workflows/docker.yml"))
+        .expect("Docker workflow")
+        .replace("\r\n", "\n");
+    let code_style_workflow =
+        std::fs::read_to_string(root.join(".github/workflows/code_style.yml"))
+            .expect("code style workflow")
+            .replace("\r\n", "\n");
+
+    let release_job = |job_name: &str| {
+        let job_marker = format!("  {job_name}:\n");
+        let job_start = release_workflow
+            .match_indices(&job_marker)
+            .find_map(|(index, _)| {
+                (index == 0 || release_workflow.as_bytes()[index - 1] == b'\n')
+                    .then_some(index + job_marker.len())
+            })
+            .unwrap_or_else(|| panic!("release workflow should retain the {job_name} job"));
+        let jobs_after_marker = &release_workflow[job_start..];
+        let job_body = jobs_after_marker
+            .lines()
+            .take_while(|line| {
+                let trimmed = line.trim_start();
+                trimmed.is_empty() || line.len() - trimmed.len() > 2
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            !job_body.is_empty(),
+            "release workflow should retain the {job_name} job body"
+        );
+        job_body
+    };
+
+    let reborn_compile_job = release_job("reborn-binary-compile");
+    assert!(
+        reborn_compile_job.contains("uses: ./.github/workflows/reborn-release-compile.yml")
+            && reborn_compile_job.contains("ref: ${{ github.sha }}")
+            && !reborn_compile_job
+                .lines()
+                .any(|line| line.starts_with("    if:")),
+        "the Reborn compile matrix must remain the active release path"
+    );
+
+    let plan_job = release_job("plan");
+    assert!(
+        plan_job.contains("if: github.repository == ''")
+            && plan_job.contains("dist host --steps=create")
+            && plan_job.contains("dist plan --output-format=json"),
+        "release CI must retain but skip the legacy cargo-dist plan root"
+    );
+    for legacy_job_name in [
+        "build-local-artifacts",
+        "build-global-artifacts",
+        "build-wasm-extensions",
+        "host",
+        "update-registry-checksums",
+        "announce",
+    ] {
+        let legacy_job = release_job(legacy_job_name);
+        assert!(
+            legacy_job.contains("\n      - plan\n"),
+            "legacy release job {legacy_job_name} must remain downstream of the disabled plan root"
+        );
+    }
+
+    let docker_job = release_job("docker-image");
+    assert!(
+        docker_job.contains("needs: host")
+            && docker_job.contains("if: github.repository == ''")
+            && docker_job.contains("uses: ./.github/workflows/docker.yml")
+            && docker_job.contains("release: true")
+            && docker_job.contains("secrets: inherit"),
+        "release CI must retain but skip its Docker build/publish caller"
+    );
+    assert!(
+        docker_workflow.contains("workflow_dispatch:") && docker_workflow.contains("schedule:"),
+        "the independent Docker workflow must remain manually and periodically runnable"
+    );
+    let reborn_cli_selector = code_style_workflow
+        .lines()
+        .find(|line| line.contains("grep -Eq") && line.contains("crates/ironclaw_reborn_cli/"))
+        .expect("code style workflow should classify Reborn CLI changes");
+    assert!(
+        reborn_cli_selector.contains(
+            r"\.github/workflows/(code_style|release|docker|reborn-release-compile)\.yml$"
+        ),
+        "release workflow-only PRs must run the Reborn CLI smoke contract"
+    );
+    assert!(
+        code_style_workflow.contains(
+            r#"if [[ "${{ needs.changes.outputs.has_reborn_cli }}" == "true" && "${{ needs.reborn-cli-smoke.result }}" != "success" ]]; then"#,
+        ),
+        "the required Code Style roll-up must propagate workflow-only Reborn CLI smoke failures"
+    );
+}
+
 fn local_yolo_command(temp: &tempfile::TempDir, args: &[&str]) -> Command {
     let reborn_home = temp.path().join("reborn-home");
     let home = temp.path().join("home");

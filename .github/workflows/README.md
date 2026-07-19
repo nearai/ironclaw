@@ -63,9 +63,11 @@ Rules for a roll-up job that is (or may become) required:
 
 `reborn-release-compile.yml` is a compile-and-smoke preflight for the shipping
 Reborn `ironclaw` binary. The tag-only `release.yml` calls it for matching
-release tags and will not run its `host` job unless every target succeeds. The
-preflight workflow can also run directly through `workflow_dispatch`; it is not
-triggered by pull requests, so ordinary CLI and WebUI changes do not start the
+release tags. Under #6160's temporary compile-only policy below, the legacy
+`host` job stays disabled; if that job is restored, its dependency and success
+gate still prevent it from running unless every target succeeds. The preflight
+workflow can also run directly through `workflow_dispatch`; it is not triggered
+by pull requests, so ordinary CLI and WebUI changes do not start the
 seven-platform release matrix.
 
 | Rust target | GitHub runner |
@@ -150,6 +152,26 @@ intentionally separate from the canary/nightly `SLACK_WEBHOOK_URL` so main CI
 alerts can target dedicated channels.
 When adding a new workflow that runs on `push` to `main`, add its workflow
 `name:` to the watched list in `main-ci-slack-alerts.yml`.
+
+## Reborn-only release validation policy
+
+For #6160, `release.yml` temporarily keeps the legacy cargo-dist release chain
+visible but disables its `plan` root with the impossible
+`github.repository == ''` guard. Its dependent local/global artifact, WASM,
+GitHub Release host, registry-checksum, and announcement jobs therefore skip.
+The Reborn compile matrix merged in #6176 is the only intended active path.
+This compile-only mode produces short-lived Actions evidence artifacts; it does
+not create a GitHub Release or permanent downloadable release assets.
+
+The release Docker caller retains its own impossible guard as an explicit
+defense against image publication. The reusable `docker.yml` workflow is
+unchanged, so its manual and hourly entry points remain available. Changes to
+the release, Docker, or reusable Reborn compile workflow enter the Reborn CLI
+smoke selector, and the required Code Style roll-up propagates that contract
+result. To restore the non-Docker legacy release path, remove `plan`'s
+impossible guard; the workflow's tag-only trigger already scopes it to release
+tags. Restore the Docker caller's host-success condition separately only when
+release image publication is intentionally re-enabled.
 
 ## Known accepted gaps (deliberate, revisit as needed)
 
