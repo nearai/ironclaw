@@ -3994,8 +3994,7 @@ mod tests {
             // The host persists the GateRecord under `GateRef::for_approval_request`
             // (a host_api::GateRef), the canonical key the read model derives from
             // the recovered id — proving both encodings agree.
-            let record_key =
-                ironclaw_host_api::GateRef::for_approval_request(recovered_id);
+            let record_key = ironclaw_host_api::GateRef::for_approval_request(recovered_id);
             let record_scope = crate::runtime::local_dev::local_dev_resource_scope_for_run(
                 &run_context,
                 &fallback_user_id,
