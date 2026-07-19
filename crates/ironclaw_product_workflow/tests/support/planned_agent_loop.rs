@@ -65,12 +65,12 @@ use ironclaw_turns::{
     TurnStatus,
     run_profile::{
         AgentLoopHostError, CapabilityBatchInvocation, CapabilityCallCandidate,
-        CapabilityDescriptorView, CapabilityInputRef, CapabilityInvocation, CapabilityOutcome,
-        CapabilityResultMessage, CapabilitySurfaceVersion, ConcurrencyHint,
+        CapabilityDescriptorView, CapabilityInputRef, CapabilityInvocation,
+        CapabilitySurfaceVersion, ConcurrencyHint,
         InMemoryLoopHostMilestoneSink, InstructionSafetyContext, LoopCancelReasonKind,
         LoopCapabilityPort, LoopInputAckToken, LoopInputCursorToken, LoopRunContext,
         NoOpBudgetAccountant, NoOpPolicyGuard, ParentLoopOutput, PromptMode,
-        VisibleCapabilityRequest, VisibleCapabilitySurface, capability_outcome_to_resolution,
+        VisibleCapabilityRequest, VisibleCapabilitySurface, resolution,
     },
 };
 use tokio::time::{sleep, timeout};
@@ -956,7 +956,7 @@ impl LoopCapabilityPort for RecordingCapabilityPort {
             .push(request);
         let outcome = resolution::completed(LoopResultRef::new(self.capability.result_ref.clone())
                 .expect("valid harness result ref"), self.capability.safe_summary.clone(), ironclaw_turns::run_profile::CapabilityProgress::MadeProgress, self.capability.terminate_hint, 0, None, None);
-        Ok(capability_outcome_to_resolution(outcome).resolution)
+        Ok(outcome)
     }
 
     async fn invoke_capability_batch(

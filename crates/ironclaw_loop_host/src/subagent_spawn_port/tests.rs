@@ -17,9 +17,8 @@ use ironclaw_turns::{
     SubmitTurnRequest, TurnId, TurnRunProfile, TurnRunRecord, TurnRunState, TurnStateStore,
     TurnStatus,
     run_profile::{
-        CapabilityOutcome, CapabilityResultMessage, CapabilitySurfaceVersion,
-        ModelVisibleToolObservation, ObservationTrust, RegisterProviderToolCallRequest,
-        ToolObservationDetail, ToolObservationStatus, capability_outcome_to_resolution,
+        CapabilitySurfaceVersion, ModelVisibleToolObservation, ObservationTrust,
+        RegisterProviderToolCallRequest, ToolObservationDetail, ToolObservationStatus, resolution,
     },
 };
 use serde_json::json;
@@ -288,20 +287,15 @@ impl LoopCapabilityPort for SurfacePrimedSpawnAuthPort {
         &self,
         _request: CapabilityInvocation,
     ) -> Result<Resolution, AgentLoopHostError> {
-        Ok(
-            capability_outcome_to_resolution(CapabilityOutcome::Completed(
-                CapabilityResultMessage {
-                    result_ref: LoopResultRef::new("result:auth").unwrap(),
-                    safe_summary: "authorized".to_string(),
-                    progress: ironclaw_turns::run_profile::CapabilityProgress::MadeProgress,
-                    terminate_hint: false,
-                    byte_len: 0,
-                    output_digest: None,
-                    model_observation: None,
-                },
-            ))
-            .resolution,
-        )
+        Ok(resolution::completed(
+            LoopResultRef::new("result:auth").unwrap(),
+            "authorized".to_string(),
+            ironclaw_turns::run_profile::CapabilityProgress::MadeProgress,
+            false,
+            0,
+            None,
+            None,
+        ))
     }
 
     async fn invoke_capability_batch(
@@ -418,20 +412,15 @@ impl LoopCapabilityPort for AuthPassPort {
         &self,
         _request: CapabilityInvocation,
     ) -> Result<Resolution, AgentLoopHostError> {
-        Ok(
-            capability_outcome_to_resolution(CapabilityOutcome::Completed(
-                CapabilityResultMessage {
-                    result_ref: LoopResultRef::new("result:auth").unwrap(),
-                    safe_summary: "authorized".to_string(),
-                    progress: ironclaw_turns::run_profile::CapabilityProgress::MadeProgress,
-                    terminate_hint: false,
-                    byte_len: 0,
-                    output_digest: None,
-                    model_observation: None,
-                },
-            ))
-            .resolution,
-        )
+        Ok(resolution::completed(
+            LoopResultRef::new("result:auth").unwrap(),
+            "authorized".to_string(),
+            ironclaw_turns::run_profile::CapabilityProgress::MadeProgress,
+            false,
+            0,
+            None,
+            None,
+        ))
     }
 
     async fn invoke_capability_batch(
@@ -484,8 +473,7 @@ impl LoopCapabilityPort for FixedToolPort {
         request: CapabilityInvocation,
     ) -> Result<Resolution, AgentLoopHostError> {
         Ok(
-            capability_outcome_to_resolution(completed_outcome(request.capability_id.as_str()))
-                .resolution,
+            completed_outcome(request.capability_id.as_str()),
         )
     }
 
@@ -522,8 +510,7 @@ impl LoopCapabilityPort for RecordingBatchPort {
         request: CapabilityInvocation,
     ) -> Result<Resolution, AgentLoopHostError> {
         Ok(
-            capability_outcome_to_resolution(completed_outcome(request.capability_id.as_str()))
-                .resolution,
+            completed_outcome(request.capability_id.as_str()),
         )
     }
 
@@ -537,10 +524,9 @@ impl LoopCapabilityPort for RecordingBatchPort {
                 .invocations
                 .iter()
                 .map(|invocation| {
-                    capability_outcome_to_resolution(completed_outcome(
+                    completed_outcome(
                         invocation.capability_id.as_str(),
-                    ))
-                    .resolution
+                    )
                 })
                 .collect(),
             stopped_on_suspension: false,
@@ -565,14 +551,12 @@ impl LoopCapabilityPort for SuspendedBatchPort {
         &self,
         _request: CapabilityInvocation,
     ) -> Result<Resolution, AgentLoopHostError> {
-        Ok(
-            capability_outcome_to_resolution(CapabilityOutcome::ApprovalRequired {
-                gate_ref: LoopGateRef::new("gate:inner-suspended").unwrap(),
-                safe_summary: "approval required".to_string(),
-                approval_resume: None,
-            })
-            .resolution,
+        Ok(resolution::approval_required(
+            LoopGateRef::new("gate:inner-suspended").unwrap(),
+            "approval required".to_string(),
+            None,
         )
+        .resolution)
     }
 
     async fn invoke_capability_batch(
@@ -582,11 +566,11 @@ impl LoopCapabilityPort for SuspendedBatchPort {
         self.batches.lock().unwrap().push(request);
         Ok(ResolutionBatch {
             resolutions: vec![
-                capability_outcome_to_resolution(CapabilityOutcome::ApprovalRequired {
-                    gate_ref: LoopGateRef::new("gate:inner-suspended").unwrap(),
-                    safe_summary: "approval required".to_string(),
-                    approval_resume: None,
-                })
+                resolution::approval_required(
+                    LoopGateRef::new("gate:inner-suspended").unwrap(),
+                    "approval required".to_string(),
+                    None,
+                )
                 .resolution,
             ],
             stopped_on_suspension: true,
@@ -648,8 +632,7 @@ impl LoopCapabilityPort for FailingBatchPort {
         request: CapabilityInvocation,
     ) -> Result<Resolution, AgentLoopHostError> {
         Ok(
-            capability_outcome_to_resolution(completed_outcome(request.capability_id.as_str()))
-                .resolution,
+            completed_outcome(request.capability_id.as_str()),
         )
     }
 
@@ -1373,16 +1356,16 @@ async fn invoke_spawn_for_activity(
     .unwrap()
 }
 
-fn completed_outcome(label: &str) -> CapabilityOutcome {
-    CapabilityOutcome::Completed(CapabilityResultMessage {
-        result_ref: LoopResultRef::new(format!("result:{label}")).unwrap(),
-        safe_summary: "completed".to_string(),
-        progress: ironclaw_turns::run_profile::CapabilityProgress::MadeProgress,
-        terminate_hint: false,
-        byte_len: 0,
-        output_digest: None,
-        model_observation: None,
-    })
+fn completed_outcome(label: &str) -> Resolution {
+    resolution::completed(
+        LoopResultRef::new(format!("result:{label}")).unwrap(),
+        "completed".to_string(),
+        ironclaw_turns::run_profile::CapabilityProgress::MadeProgress,
+        false,
+        0,
+        None,
+        None,
+    )
 }
 
 // After the §5.3 collapse the open-set loop reason_kind no longer survives on

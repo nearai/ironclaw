@@ -97,12 +97,12 @@ use ironclaw_turns::{
     TurnRunnerId, TurnScope, TurnStateStore, TurnStatus,
     run_profile::{
         AgentLoopHostError, CapabilityBatchInvocation, CapabilityDescriptorView,
-        CapabilityInputRef, CapabilityInvocation, CapabilityOutcome, CapabilityResultMessage,
+        CapabilityInputRef, CapabilityInvocation,
         CapabilitySurfaceVersion, InMemoryLoopHostMilestoneSink, InstructionSafetyContext,
         LoopCapabilityPort, LoopCheckpointKind, LoopCheckpointPort, LoopCheckpointRequest,
         LoopHostMilestoneKind, LoopModelPort, LoopModelRequest, LoopPromptPort, LoopRunContext,
         LoopTranscriptPort, RunScopedHookMilestoneSink, VisibleCapabilityRequest,
-        VisibleCapabilitySurface, capability_outcome_to_resolution,
+        VisibleCapabilitySurface, resolution,
     },
     runner::ClaimedTurnRun,
 };
@@ -224,7 +224,7 @@ impl LoopCapabilityPort for RecordingCapabilityPort {
             .push(request.capability_id.clone());
         let outcome = resolution::completed(LoopResultRef::new(format!("result:{}", request.capability_id))
                 .expect("result ref literal is valid"), "stub capability completed".to_string(), ironclaw_turns::run_profile::CapabilityProgress::MadeProgress, false, 0, None, None);
-        Ok(capability_outcome_to_resolution(outcome).resolution)
+        Ok(outcome)
     }
 
     async fn invoke_capability_batch(
@@ -292,7 +292,7 @@ impl LoopCapabilityPort for ProviderAwareCapabilityPort {
             .push(request.capability_id.clone());
         let outcome = resolution::completed(LoopResultRef::new(format!("result:{}", request.capability_id))
                 .expect("result ref literal is valid"), "stub capability completed".to_string(), ironclaw_turns::run_profile::CapabilityProgress::MadeProgress, false, 0, None, None);
-        Ok(capability_outcome_to_resolution(outcome).resolution)
+        Ok(outcome)
     }
 
     async fn invoke_capability_batch(

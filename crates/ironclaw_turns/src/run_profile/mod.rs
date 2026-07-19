@@ -24,7 +24,6 @@ mod prompt;
 mod prompt_text;
 mod refs;
 pub mod resolution;
-mod resolution_mapping;
 mod resolver;
 mod runtime_context;
 mod skill_context;
@@ -49,11 +48,10 @@ pub use host::{
     AgentLoopDriverHost, AgentLoopHostError, AgentLoopHostErrorKind, AgentLoopHostErrorReasonKind,
     AppendCapabilityResultRef, AssistantReply, AuthResumeApprovalIdentity, BatchPolicyKind,
     BeginAssistantDraft, CapabilityApprovalResume, CapabilityAuthResume, CapabilityBatchInvocation,
-    CapabilityBatchOutcome, CapabilityCallCandidate, CapabilityDenied, CapabilityDeniedReasonKind,
-    CapabilityDeniedReasonKindValue, CapabilityDescriptorView, CapabilityFailure,
-    CapabilityFailureKind, CapabilityFailureKindValue, CapabilityInputRef, CapabilityInvocation,
-    CapabilityOutcome, CapabilityProgress, CapabilityResultMessage, CapabilityResumeToken,
-    CapabilitySurfaceVersion, ConcurrencyHint, FinalizeAssistantMessage,
+    CapabilityCallCandidate, CapabilityDeniedReasonKind, CapabilityDeniedReasonKindValue,
+    CapabilityDescriptorView, CapabilityFailureKind, CapabilityFailureKindValue, CapabilityInputRef,
+    CapabilityInvocation, CapabilityProgress, CapabilityResumeToken, CapabilitySurfaceVersion,
+    ConcurrencyHint, FinalizeAssistantMessage,
     LOOP_CONTEXT_SNIPPET_MODEL_CONTENT_MAX_BYTES, LOOP_CONTEXT_TOTAL_MODEL_CONTENT_MAX_BYTES,
     LoadCheckpointPayloadRequest, LoadedCheckpointPayload, LoopCancelReasonKind,
     LoopCancellationPort, LoopCancellationSignal, LoopCapabilityPort, LoopCheckpointKind,
@@ -67,7 +65,7 @@ pub use host::{
     LoopProgressEvent, LoopProgressPort, LoopPromptBundle, LoopPromptBundleAuthority,
     LoopPromptBundleGrant, LoopPromptBundleRef, LoopPromptBundleRequest, LoopPromptPort,
     LoopRunContext, LoopRunInfoPort, LoopSafeSummary, LoopTranscriptPort, ModelStreamChunk,
-    ParentLoopOutput, ProcessHandleSummary, PromptMode, ProviderToolCall,
+    ParentLoopOutput, PromptMode, ProviderToolCall,
     ProviderToolCallCapabilityIds, ProviderToolCallReference, ProviderToolCallReplay,
     ProviderToolDefinition, RegisterProviderToolCallRequest, StageCheckpointPayloadRequest,
     UpdateAssistantDraft, VisibleCapabilityRequest, VisibleCapabilitySurface,
@@ -114,7 +112,6 @@ pub use refs::{
     RunProfileSourceLayer, RunProfileSourceRef, RunnerPoolId, SchedulingClass,
 };
 pub use resolution::{DeniedResolution, GatedResolution};
-pub use resolution_mapping::{MappedResolution, RefBindings, capability_outcome_to_resolution};
 pub use resolver::{
     InMemoryRunProfileRegistry, InMemoryRunProfileResolver, RunProfileDefinition,
     RunProfileRegistryError, RunProfileResolutionRequest, RunProfileResolver,
