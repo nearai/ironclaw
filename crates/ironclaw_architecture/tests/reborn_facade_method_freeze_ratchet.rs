@@ -163,7 +163,30 @@ const FROZEN_REBORN_SERVICES_METHODS: &[&str] = &[
 fn extract_trait_methods(source: &str, trait_name: &str) -> Vec<String> {
     let stripped = strip_comments_and_strings(source);
     let decl = format!("trait {trait_name}");
-    let Some(decl_pos) = stripped.find(&decl) else {
+    let is_word = |c: char| c.is_alphanumeric() || c == '_';
+    // Word-boundary match so a rename that keeps the same method set —
+    // `trait RebornServicesApiV2`, `RebornServicesApi_legacy`, or a `subtrait`-
+    // like prefix — does NOT silently bind here and defeat the rename guard
+    // (#6292 IronLoop/Gemini): `trait` must start a word and the char right
+    // after the trait name must not be an identifier char.
+    let mut decl_pos = None;
+    let mut search_from = 0;
+    while let Some(rel) = stripped[search_from..].find(&decl) {
+        let pos = search_from + rel;
+        let after = pos + decl.len();
+        let before_ok = pos == 0
+            || stripped[..pos]
+                .chars()
+                .next_back()
+                .is_none_or(|c| !is_word(c));
+        let after_ok = stripped[after..].chars().next().is_none_or(|c| !is_word(c));
+        if before_ok && after_ok {
+            decl_pos = Some(pos);
+            break;
+        }
+        search_from = after;
+    }
+    let Some(decl_pos) = decl_pos else {
         return Vec::new();
     };
     let after_decl = &stripped[decl_pos..];
@@ -172,7 +195,6 @@ fn extract_trait_methods(source: &str, trait_name: &str) -> Vec<String> {
     };
     let chars: Vec<char> = after_decl[brace_off..].chars().collect();
 
-    let is_word = |c: char| c.is_alphanumeric() || c == '_';
     let mut methods = Vec::new();
     let mut depth: i32 = 0;
     let mut i = 0usize;
@@ -237,7 +259,10 @@ fn reborn_facade_method_allowlist_is_frozen_and_only_shrinks() {
     // Duplicate detection (defensive — a trait cannot legally declare two, but a
     // silent extractor bug would otherwise mask a swap).
     let mut seen = BTreeSet::new();
-    let duplicated: Vec<&String> = found.iter().filter(|m| !seen.insert((*m).clone())).collect();
+    let duplicated: Vec<&String> = found
+        .iter()
+        .filter(|m| !seen.insert((*m).clone()))
+        .collect();
     assert!(
         duplicated.is_empty(),
         "`{FACADE_TRAIT}` block yielded duplicate method names {duplicated:?} — the extractor or \
@@ -302,7 +327,12 @@ fn extract_trait_methods_self_test() {
     let methods = extract_trait_methods(sample, "SampleFacade");
     assert_eq!(
         methods,
-        vec!["create_thread", "sync_method", "with_default", "last_method"],
+        vec![
+            "create_thread",
+            "sync_method",
+            "with_default",
+            "last_method"
+        ],
         "extractor must yield exactly the trait-declaration-depth methods, in source order — \
          skipping nested/default-body fns, impl-block fns, free fns, and comment/string decoys"
     );
@@ -314,4 +344,39 @@ fn extract_trait_methods_self_test() {
 fn extract_trait_methods_missing_trait_self_test() {
     let sample = "pub trait Other { fn a(&self); }";
     assert!(extract_trait_methods(sample, "RebornServicesApi").is_empty());
+}
+
+/// #6292 IronLoop/Gemini: the trait lookup must be a WORD-boundary match, not a
+/// substring match — otherwise a rename that keeps the same method set (e.g.
+/// `RebornServicesApiV2` or `RebornServicesApi_legacy`) would silently bind here
+/// and defeat the freeze's rename guard. A prefixed `subtrait`-like token must
+/// not bind either. Only the exact `trait RebornServicesApi` block is picked up.
+#[test]
+fn extract_trait_methods_rejects_renamed_or_prefixed_trait_self_test() {
+    for renamed in [
+        "pub trait RebornServicesApiV2 { fn a(&self); }",
+        "pub trait RebornServicesApi_legacy { fn a(&self); }",
+        "pub subtrait RebornServicesApi { fn a(&self); }",
+    ] {
+        assert!(
+            extract_trait_methods(renamed, "RebornServicesApi").is_empty(),
+            "must not bind to a renamed/prefixed trait: {renamed}"
+        );
+    }
+    // The exact trait (with a supertrait bound / generics right after the name)
+    // still binds.
+    assert_eq!(
+        extract_trait_methods(
+            "trait RebornServicesApi: Send { fn a(&self); }",
+            "RebornServicesApi"
+        ),
+        vec!["a".to_string()],
+    );
+    assert_eq!(
+        extract_trait_methods(
+            "pub trait RebornServicesApi { fn b(&self); }",
+            "RebornServicesApi"
+        ),
+        vec!["b".to_string()],
+    );
 }
