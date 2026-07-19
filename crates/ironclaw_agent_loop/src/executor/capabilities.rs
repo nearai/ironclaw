@@ -1415,14 +1415,45 @@ fn result_reference_observation_from_outcome(
 fn dependent_run_result_message(
     result: &DependentRunResult,
 ) -> Result<CapabilityResultMessage, AgentLoopExecutorError> {
+    let result_ref = loop_result_ref_from_origin(result.origin.as_ref())?;
+    // Forward the child's staged observation caption (#6287 IronLoop). The
+    // mapping preserves a bounded `SafeSummary` caption on
+    // `DependentRunResult.observation` — "model_observation now rides the inline
+    // observation preview (was dropped entirely)". Hardcoding `None` here re-drops
+    // it, so `append_capability_result_ref` falls back to a bare synthesized
+    // success observation and the resumed parent loses both the caption and the
+    // staged result reference. Surface it as a `ResultReference` observation
+    // pointing at the staged child result. The full inline first-look preview
+    // content stays host-owned and is the completed-`Outcome` path, not this
+    // suspension channel.
+    let model_observation =
+        result
+            .observation
+            .as_ref()
+            .map(|caption| ModelVisibleToolObservation {
+                schema_version: MODEL_VISIBLE_TOOL_OBSERVATION_SCHEMA_VERSION,
+                status: ToolObservationStatus::Success,
+                summary: caption.as_str().to_string(),
+                detail: ToolObservationDetail::ResultReference {
+                    result_ref: result_ref.as_str().to_string(),
+                    byte_len: result.byte_len,
+                    preview: None,
+                    total_bytes: None,
+                    next_offset: None,
+                    item_count: None,
+                },
+                artifacts: Vec::new(),
+                recovery: None,
+                trust: ObservationTrust::UntrustedToolOutput,
+            });
     Ok(CapabilityResultMessage {
-        result_ref: loop_result_ref_from_origin(result.origin.as_ref())?,
+        result_ref,
         safe_summary: result.summary.as_str().to_string(),
         progress: CapabilityProgress::MadeProgress,
         terminate_hint: false,
         byte_len: result.byte_len,
         output_digest: None,
-        model_observation: None,
+        model_observation,
     })
 }
 

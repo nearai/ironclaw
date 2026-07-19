@@ -5059,21 +5059,35 @@ async fn await_dependent_run_preserves_model_observation_for_replay() {
     assert_eq!(appended.len(), 1);
     // The appended result carries the safe_summary preview...
     assert_eq!(appended[0].safe_summary, awaited_summary);
-    // ...and a synthesized Success observation reconstructed from that summary,
-    // NOT the original structured `ResultReference` observation (which collapsed).
-    let synthesized = appended[0]
+    // ...and the child's staged observation caption is forwarded (#6287 IronLoop):
+    // a Success `ResultReference` observation carrying the caption as its summary
+    // and pointing at the staged child result, so the resumed parent can
+    // `result_read` it — NOT the bare synthesized success observation the append
+    // path falls back to when the consumer drops the observation.
+    let observation = appended[0]
         .model_observation
         .as_ref()
-        .expect("append re-synthesizes a model-visible observation from the summary");
-    assert_eq!(synthesized.status, ToolObservationStatus::Success);
-    assert_eq!(synthesized.summary, awaited_summary);
-    assert!(matches!(
-        &synthesized.detail,
-        ToolObservationDetail::GenericFailure {
-            failure_kind,
-            detail: None,
-        } if failure_kind.as_str() == "none"
-    ));
+        .expect("the forwarded child observation caption must survive to the parent");
+    assert_eq!(observation.status, ToolObservationStatus::Success);
+    assert_eq!(
+        observation.summary, "Use result_read to continue this child result.",
+        "the forwarded observation summary is the staged caption, not the bare safe_summary"
+    );
+    match &observation.detail {
+        ToolObservationDetail::ResultReference {
+            result_ref,
+            byte_len,
+            preview,
+            ..
+        } => {
+            assert_eq!(result_ref, "result:await-dependent-preserved-observation");
+            assert_eq!(*byte_len, 4_096);
+            // The full inline first-look preview content stays host-owned this
+            // stage; only the caption + staged result ref are forwarded.
+            assert!(preview.is_none());
+        }
+        other => panic!("expected a forwarded ResultReference observation, got {other:?}"),
+    }
 }
 
 /// D2 regression: byte_len was hardcoded to 0 for SpawnedChildRun outcomes.
