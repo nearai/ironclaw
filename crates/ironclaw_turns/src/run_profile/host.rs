@@ -21,8 +21,9 @@ use crate::{
 
 use super::{
     compaction::{CompactionInitiator, LoopCompactionPort},
+    content_digest::ContentDigest,
     instruction_bundle::InstructionBundleFingerprint,
-    model_observation::ModelVisibleToolObservation,
+    model_observation::{CapabilityFailureDetail, ModelVisibleToolObservation},
     prompt_text::{PromptTextSurface, validate_prompt_text},
     refs::{CheckpointSchemaId, LoopDriverId, ModelProfileId},
     snapshot::ResolvedRunProfile,
@@ -1825,6 +1826,41 @@ pub enum CapabilityProgress {
     NoChange,
     /// The capability reached a deterministic non-suspending blocker.
     Blocked,
+}
+
+/// The agent-loop executor's reconstructed view of a completed capability result.
+///
+/// Producers no longer emit this (they emit [`Resolution`](ironclaw_host_api::Resolution)
+/// directly, §5.3 Stage 2b); the executor rebuilds it from the host_api
+/// [`Outcome`](ironclaw_host_api::Outcome) channel (`capability_result_from_outcome`)
+/// to feed its result-admission/strategy pipeline. It is loop-internal working
+/// vocabulary, no longer a wire/producer DTO.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CapabilityResultMessage {
+    pub result_ref: LoopResultRef,
+    pub safe_summary: String,
+    #[serde(default)]
+    pub progress: CapabilityProgress,
+    #[serde(default)]
+    pub terminate_hint: bool,
+    #[serde(default)]
+    pub byte_len: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output_digest: Option<ContentDigest>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model_observation: Option<ModelVisibleToolObservation>,
+}
+
+/// The agent-loop executor's reconstructed view of a recoverable capability
+/// failure, rebuilt from the host_api `RecoverableFailure` verdict
+/// (`capability_failure_from_recoverable`) to drive retry/explain recovery.
+/// Loop-internal working vocabulary, no longer a wire/producer DTO.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CapabilityFailure {
+    pub error_kind: CapabilityFailureKind,
+    pub safe_summary: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub detail: Option<CapabilityFailureDetail>,
 }
 
 #[non_exhaustive]
