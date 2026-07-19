@@ -14,13 +14,14 @@ use ironclaw_events::{
     DurableAuditLog, DurableEventLog, EventStreamKey, InMemoryDurableAuditLog,
     InMemoryDurableEventLog, ReadScope,
 };
+use ironclaw_filesystem::{InMemoryBackend, ScopedFilesystem};
 use ironclaw_host_api::{
-    AgentId, CapabilityId, ExtensionId, InvocationId, MissionId, ProjectId, RuntimeKind, TenantId,
-    ThreadId, UserId,
+    AgentId, CapabilityId, ExtensionId, InvocationId, MissionId, MountAlias, MountGrant,
+    MountPermissions, MountView, ProjectId, RuntimeKind, TenantId, ThreadId, UserId, VirtualPath,
 };
 use ironclaw_loop_host::{
-    HostManagedModelError, HostManagedModelErrorKind, HostManagedModelGateway,
-    HostManagedModelRequest, HostManagedModelResponse,
+    FilesystemCheckpointStateStore, HostManagedModelError, HostManagedModelErrorKind,
+    HostManagedModelGateway, HostManagedModelRequest, HostManagedModelResponse,
 };
 use ironclaw_reborn_event_store::{
     RebornEventStoreConfig, RebornProfile, build_reborn_event_stores,
@@ -38,12 +39,12 @@ use ironclaw_threads::{
 };
 use ironclaw_turns::{
     AcceptedMessageRef, CancelRunRequest, CancelRunResponse, CapabilityActivityId, EventCursor,
-    GetRunStateRequest, InMemoryCheckpointStateStore, InMemoryLoopCheckpointStore,
-    InMemoryRunProfileResolver, LoopCompletionKind, LoopExitId, LoopFailureKind,
-    ReplyTargetBindingRef, ResumeTurnRequest, RunProfileId, RunProfileResolutionRequest,
-    RunProfileResolver, RunProfileVersion, SourceBindingRef, SubmitTurnRequest, SubmitTurnResponse,
-    TurnActor, TurnAdmissionPolicy, TurnCheckpointId, TurnError, TurnId, TurnLeaseToken, TurnRunId,
-    TurnRunState, TurnRunnerId, TurnScope, TurnStateStore, TurnStatus,
+    GetRunStateRequest, InMemoryRunProfileResolver, InMemoryTurnStateStore, LoopCompletionKind,
+    LoopExitId, LoopFailureKind, ReplyTargetBindingRef, ResumeTurnRequest, RunProfileId,
+    RunProfileResolutionRequest, RunProfileResolver, RunProfileVersion, SourceBindingRef,
+    SubmitTurnRequest, SubmitTurnResponse, TurnActor, TurnAdmissionPolicy, TurnCheckpointId,
+    TurnError, TurnId, TurnLeaseToken, TurnRunId, TurnRunState, TurnRunnerId, TurnScope,
+    TurnStateStore, TurnStatus,
     run_profile::{
         AgentLoopHostErrorKind, BatchPolicyKind, CapabilityFailureKind, FinalizeAssistantMessage,
         HookDecisionSummary, InstructionSafetyContext, LoopCheckpointKind, LoopDriverId,
@@ -674,11 +675,23 @@ fn read_all_file_bytes_lossy(root: &Path) -> String {
     output
 }
 
+fn in_memory_checkpoint_state_store() -> Arc<FilesystemCheckpointStateStore<InMemoryBackend>> {
+    let mounts = MountView::new(vec![MountGrant::new(
+        MountAlias::new("/checkpoint-state").unwrap(),
+        VirtualPath::new("/checkpoint-state").unwrap(),
+        MountPermissions::read_write_list_delete(),
+    )])
+    .unwrap();
+    Arc::new(FilesystemCheckpointStateStore::new(Arc::new(
+        ScopedFilesystem::with_fixed_view(Arc::new(InMemoryBackend::new()), mounts),
+    )))
+}
+
 struct HostFixture {
     thread_service: Arc<InMemorySessionThreadService>,
-    checkpoint_state_store: Arc<InMemoryCheckpointStateStore>,
+    checkpoint_state_store: Arc<FilesystemCheckpointStateStore<InMemoryBackend>>,
     turn_state_store: Arc<StaticTurnStateStore>,
-    loop_checkpoint_store: Arc<InMemoryLoopCheckpointStore>,
+    loop_checkpoint_store: Arc<InMemoryTurnStateStore>,
     gateway: Arc<ControlledGateway>,
     milestone_sink: Arc<dyn LoopHostMilestoneSink>,
     thread_scope: ThreadScope,
@@ -746,8 +759,8 @@ impl HostFixture {
         gateway: ControlledGateway,
     ) -> Self {
         let thread_service = Arc::new(InMemorySessionThreadService::default());
-        let checkpoint_state_store = Arc::new(InMemoryCheckpointStateStore::default());
-        let loop_checkpoint_store = Arc::new(InMemoryLoopCheckpointStore::default());
+        let checkpoint_state_store = in_memory_checkpoint_state_store();
+        let loop_checkpoint_store = Arc::new(InMemoryTurnStateStore::default());
         let gateway = Arc::new(gateway);
         let thread_scope = ThreadScope {
             tenant_id: tenant_id(),

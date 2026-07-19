@@ -13,12 +13,16 @@ use std::sync::{
 
 use async_trait::async_trait;
 use chrono::Utc;
-use ironclaw_host_api::{AgentId, ProjectId, TenantId, ThreadId, UserId};
+use ironclaw_filesystem::{InMemoryBackend, ScopedFilesystem};
+use ironclaw_host_api::{
+    AgentId, MountAlias, MountGrant, MountPermissions, MountView, ProjectId, TenantId, ThreadId,
+    UserId, VirtualPath,
+};
 use ironclaw_loop_host::{
-    EmptyUserProfileSource, HostIdentityContextBuildError, HostIdentityContextCandidate,
-    HostIdentityContextSource, HostManagedModelError, HostManagedModelErrorKind,
-    HostManagedModelGateway, HostManagedModelRequest, HostManagedModelResponse,
-    HostUserProfileSource,
+    EmptyUserProfileSource, FilesystemCheckpointStateStore, HostIdentityContextBuildError,
+    HostIdentityContextCandidate, HostIdentityContextSource, HostManagedModelError,
+    HostManagedModelErrorKind, HostManagedModelGateway, HostManagedModelRequest,
+    HostManagedModelResponse, HostUserProfileSource,
 };
 use ironclaw_runner::turn_run_executor::RebornTurnRunExecutor;
 use ironclaw_runner::{
@@ -36,11 +40,11 @@ use ironclaw_turns::TurnRunWakeNotifier as _;
 use ironclaw_turns::{
     AcceptedMessageRef, AgentLoopDriver, AgentLoopDriverDescriptor, AgentLoopDriverError,
     AgentLoopDriverResumeRequest, AgentLoopDriverRunRequest, AllowAllTurnAdmissionPolicy,
-    EventCursor, GetRunStateRequest, IdempotencyKey, InMemoryCheckpointStateStore,
-    InMemoryRunProfileResolver, InMemoryTurnStateStore, InMemoryTurnStateStoreLimits,
-    LoopCheckpointStore, LoopExit, LoopExitId, LoopFailed, LoopFailureKind, ReplyTargetBindingRef,
-    RunProfileResolutionRequest, RunProfileResolver, SourceBindingRef, SubmitTurnRequest,
-    SubmitTurnResponse, TurnActor, TurnRunId, TurnRunWake, TurnScope, TurnStateStore, TurnStatus,
+    EventCursor, GetRunStateRequest, IdempotencyKey, InMemoryRunProfileResolver,
+    InMemoryTurnStateStore, InMemoryTurnStateStoreLimits, LoopCheckpointStore, LoopExit,
+    LoopExitId, LoopFailed, LoopFailureKind, ReplyTargetBindingRef, RunProfileResolutionRequest,
+    RunProfileResolver, SourceBindingRef, SubmitTurnRequest, SubmitTurnResponse, TurnActor,
+    TurnRunId, TurnRunWake, TurnScope, TurnStateStore, TurnStatus,
     run_profile::{
         AgentLoopDriverHost, InMemoryLoopHostMilestoneSink, InstructionSafetyContext,
         LoopRunContext, PromptMode,
@@ -48,6 +52,18 @@ use ironclaw_turns::{
     runner::TurnRunTransitionPort,
 };
 use tokio::sync::Barrier;
+
+fn in_memory_checkpoint_state_store() -> Arc<FilesystemCheckpointStateStore<InMemoryBackend>> {
+    let mounts = MountView::new(vec![MountGrant::new(
+        MountAlias::new("/checkpoint-state").unwrap(),
+        VirtualPath::new("/checkpoint-state").unwrap(),
+        MountPermissions::read_write_list_delete(),
+    )])
+    .unwrap();
+    Arc::new(FilesystemCheckpointStateStore::new(Arc::new(
+        ScopedFilesystem::with_fixed_view(Arc::new(InMemoryBackend::new()), mounts),
+    )))
+}
 
 // ---------------------------------------------------------------------------
 // Barrier-blocking driver
@@ -598,7 +614,7 @@ async fn scheduler_executor_two_runs_concurrently() {
     let registry = Arc::new(registry);
 
     // Build shared deps.
-    let checkpoint_state_store = Arc::new(InMemoryCheckpointStateStore::default());
+    let checkpoint_state_store = in_memory_checkpoint_state_store();
     let loop_checkpoint_store: Arc<dyn LoopCheckpointStore> = turn_store.clone();
     let milestone_sink = Arc::new(InMemoryLoopHostMilestoneSink::default());
     let gateway = Arc::new(NoOpGateway);
@@ -830,7 +846,7 @@ async fn scheduler_executor_applies_loop_exit_end_to_end() {
         .unwrap();
     let registry = Arc::new(registry);
 
-    let checkpoint_state_store = Arc::new(InMemoryCheckpointStateStore::default());
+    let checkpoint_state_store = in_memory_checkpoint_state_store();
     let loop_checkpoint_store: Arc<dyn LoopCheckpointStore> = turn_store.clone();
     let milestone_sink = Arc::new(InMemoryLoopHostMilestoneSink::default());
     let gateway = Arc::new(NoOpGateway);

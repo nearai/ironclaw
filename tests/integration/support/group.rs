@@ -56,14 +56,16 @@ use std::sync::atomic::AtomicU64;
 use std::time::Duration;
 
 use ironclaw_extensions::ExtensionInstallationStore;
-use ironclaw_filesystem::CompositeRootFilesystem;
-use ironclaw_host_api::{ResourceScope, UserId};
+use ironclaw_filesystem::{CompositeRootFilesystem, InMemoryBackend, ScopedFilesystem};
+use ironclaw_host_api::{
+    MountAlias, MountGrant, MountPermissions, MountView, ResourceScope, UserId, VirtualPath,
+};
 use ironclaw_llm::testing::provider_chain_over;
 use ironclaw_llm::{LlmProvider, SessionConfig, create_session_manager};
 use ironclaw_loop_host::{
-    CapabilityAllowSet, CapabilitySurfaceProfileResolver, HostManagedModelGateway,
-    HostUserProfileSource, JsonSpawnSubagentInputCodec, ModelCostTable, SubagentSpawnLimits,
-    ZeroCostTable,
+    CapabilityAllowSet, CapabilitySurfaceProfileResolver, FilesystemCheckpointStateStore,
+    HostManagedModelGateway, HostUserProfileSource, JsonSpawnSubagentInputCodec, ModelCostTable,
+    SubagentSpawnLimits, ZeroCostTable,
 };
 use ironclaw_product_adapters::ProductTriggerReason;
 use ironclaw_product_workflow::{
@@ -102,9 +104,8 @@ use ironclaw_turns::run_profile::{
     ModelProfileId,
 };
 use ironclaw_turns::{
-    FilesystemTurnStateStore, InMemoryCheckpointStateStore, InMemoryTurnEventSink,
-    InMemoryTurnStateStoreLimits, LoopCheckpointStore, TurnCoordinator, TurnEventSink, TurnScope,
-    TurnStateStore,
+    FilesystemTurnStateStore, InMemoryTurnEventSink, InMemoryTurnStateStoreLimits,
+    LoopCheckpointStore, TurnCoordinator, TurnEventSink, TurnScope, TurnStateStore,
 };
 
 use super::builder::{
@@ -152,6 +153,18 @@ mod group_options;
 
 /// Convenience alias matching `builder.rs` and `harness.rs`.
 pub type HarnessResult<T> = Result<T, Box<dyn std::error::Error + Send + Sync>>;
+
+fn in_memory_checkpoint_state_store() -> Arc<FilesystemCheckpointStateStore<InMemoryBackend>> {
+    let mounts = MountView::new(vec![MountGrant::new(
+        MountAlias::new("/checkpoint-state").unwrap(),
+        VirtualPath::new("/checkpoint-state").unwrap(),
+        MountPermissions::read_write_list_delete(),
+    )])
+    .unwrap();
+    Arc::new(FilesystemCheckpointStateStore::new(Arc::new(
+        ScopedFilesystem::with_fixed_view(Arc::new(InMemoryBackend::new()), mounts),
+    )))
+}
 
 // ---------------------------------------------------------------------------
 // GroupSharedStorage
@@ -744,7 +757,7 @@ impl RebornIntegrationGroupBuilder {
                 .with_limits(turn_state_limits),
         );
         let loop_checkpoint_store: Arc<dyn LoopCheckpointStore> = turn_store.clone();
-        let checkpoint_state_store = Arc::new(InMemoryCheckpointStateStore::default());
+        let checkpoint_state_store = in_memory_checkpoint_state_store();
 
         let group_thread_scope = thread_scope_from_binding(&base.canonical_binding)?;
         let group_thread_harness = RebornThreadHarness::filesystem_shared_composite(

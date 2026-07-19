@@ -16,12 +16,13 @@ use ironclaw_host_api::{
 use ironclaw_host_runtime::{CapabilitySurfacePolicy, SurfaceKind};
 use ironclaw_loop_host::{
     CapabilityAllowSet, CapabilityResolveError, CapabilitySurfaceProfileResolver,
-    EmptyLoopCapabilityPort, EmptyUserProfileSource, HostIdentityContextBuildError,
-    HostIdentityContextCandidate, HostIdentityContextSource, HostInputBatch, HostInputQueue,
-    HostInputQueueError, HostManagedModelError, HostManagedModelErrorKind, HostManagedModelGateway,
-    HostManagedModelRequest, HostManagedModelResponse, JsonSpawnSubagentInputCodec,
-    LoopCapabilityPortFactory, LoopCapabilityResultWriter, ProductLiveCancellationProbe,
-    RunCancellationFactory, RunCancellationHandle,
+    EmptyLoopCapabilityPort, EmptyUserProfileSource, FilesystemCheckpointStateStore,
+    HostIdentityContextBuildError, HostIdentityContextCandidate, HostIdentityContextSource,
+    HostInputBatch, HostInputQueue, HostInputQueueError, HostManagedModelError,
+    HostManagedModelErrorKind, HostManagedModelGateway, HostManagedModelRequest,
+    HostManagedModelResponse, JsonSpawnSubagentInputCodec, LoopCapabilityPortFactory,
+    LoopCapabilityResultWriter, ProductLiveCancellationProbe, RunCancellationFactory,
+    RunCancellationHandle,
 };
 use ironclaw_product_adapters::{
     AdapterInstallationId, AuthRequirement, ExternalActorRef, ExternalConversationRef,
@@ -59,10 +60,9 @@ use ironclaw_threads::{
 };
 use ironclaw_trust::EffectiveTrustClass;
 use ironclaw_turns::{
-    CancelRunRequest, GetRunStateRequest, IdempotencyKey, InMemoryCheckpointStateStore,
-    InMemoryLoopCheckpointStore, InMemoryTurnStateStore, LoopResultRef, SanitizedCancelReason,
-    TurnActor, TurnCoordinator, TurnRunId, TurnRunState, TurnRunWake, TurnScope, TurnStateStore,
-    TurnStatus,
+    CancelRunRequest, GetRunStateRequest, IdempotencyKey, InMemoryTurnStateStore, LoopResultRef,
+    SanitizedCancelReason, TurnActor, TurnCoordinator, TurnRunId, TurnRunState, TurnRunWake,
+    TurnScope, TurnStateStore, TurnStatus,
     run_profile::{
         AgentLoopHostError, CapabilityBatchInvocation, CapabilityBatchOutcome,
         CapabilityCallCandidate, CapabilityDescriptorView, CapabilityInputRef,
@@ -75,6 +75,18 @@ use ironclaw_turns::{
 };
 use tokio::time::{sleep, timeout};
 use tokio_util::sync::CancellationToken;
+
+fn in_memory_checkpoint_state_store() -> Arc<FilesystemCheckpointStateStore<InMemoryBackend>> {
+    let mounts = MountView::new(vec![MountGrant::new(
+        MountAlias::new("/checkpoint-state").unwrap(),
+        VirtualPath::new("/checkpoint-state").unwrap(),
+        MountPermissions::read_write_list_delete(),
+    )])
+    .unwrap();
+    Arc::new(FilesystemCheckpointStateStore::new(Arc::new(
+        ScopedFilesystem::with_fixed_view(Arc::new(InMemoryBackend::new()), mounts),
+    )))
+}
 
 pub struct ProductLiveAgentLoopHarness {
     binding_service: FakeConversationBindingService,
@@ -247,7 +259,7 @@ impl ProductLiveAgentLoopHarness {
         };
         let thread_service = InMemorySessionThreadService::default();
         let turn_store = Arc::new(InMemoryTurnStateStore::default());
-        let checkpoint_store = Arc::new(InMemoryLoopCheckpointStore::default());
+        let checkpoint_store = Arc::clone(&turn_store);
         let model_requests = Arc::new(Mutex::new(Vec::new()));
         let model_responses = VecDeque::from(config.model_responses);
         let model_release = config
@@ -361,7 +373,7 @@ impl ProductLiveAgentLoopHarness {
             thread_service: Arc::new(thread_service.clone()),
             thread_scope: thread_scope.clone(),
             model_gateway,
-            checkpoint_state_store: Arc::new(InMemoryCheckpointStateStore::default()),
+            checkpoint_state_store: in_memory_checkpoint_state_store(),
             loop_checkpoint_store: checkpoint_store.clone(),
             milestone_sink: Arc::new(InMemoryLoopHostMilestoneSink::default()),
             capability_factory,

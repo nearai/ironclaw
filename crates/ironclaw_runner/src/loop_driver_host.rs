@@ -2781,11 +2781,15 @@ mod compaction_tests;
 mod tests {
     use super::*;
 
-    use ironclaw_host_api::{AgentId, ProjectId, TenantId, ThreadId, UserId};
+    use ironclaw_filesystem::{InMemoryBackend, ScopedFilesystem};
+    use ironclaw_host_api::{
+        AgentId, MountAlias, MountGrant, MountPermissions, MountView, ProjectId, TenantId,
+        ThreadId, UserId, VirtualPath,
+    };
+    use ironclaw_loop_host::FilesystemCheckpointStateStore;
     use ironclaw_turns::{
-        InMemoryCheckpointStateStore, InMemoryLoopCheckpointStore, InMemoryRunProfileResolver,
-        PutLoopCheckpointRequest, RunProfileResolver, TurnActor, TurnCheckpointId, TurnId,
-        TurnRunId, TurnScope,
+        InMemoryRunProfileResolver, InMemoryTurnStateStore, PutLoopCheckpointRequest,
+        RunProfileResolver, TurnActor, TurnCheckpointId, TurnId, TurnRunId, TurnScope,
         run_profile::{
             AgentLoopHostErrorKind, CheckpointSchemaId, InMemoryLoopHostMilestoneSink,
             LoadCheckpointPayloadRequest, LoopCheckpointKind, LoopCheckpointRequest,
@@ -2857,15 +2861,27 @@ mod tests {
         );
     }
 
+    fn in_memory_checkpoint_state_store() -> Arc<FilesystemCheckpointStateStore<InMemoryBackend>> {
+        let mounts = MountView::new(vec![MountGrant::new(
+            MountAlias::new("/checkpoint-state").unwrap(),
+            VirtualPath::new("/checkpoint-state").unwrap(),
+            MountPermissions::read_write_list_delete(),
+        )])
+        .unwrap();
+        Arc::new(FilesystemCheckpointStateStore::new(Arc::new(
+            ScopedFilesystem::with_fixed_view(Arc::new(InMemoryBackend::new()), mounts),
+        )))
+    }
+
     fn test_checkpoint_port(
         context: LoopRunContext,
     ) -> (
         HostManagedLoopCheckpointPort,
-        Arc<InMemoryCheckpointStateStore>,
-        Arc<InMemoryLoopCheckpointStore>,
+        Arc<FilesystemCheckpointStateStore<InMemoryBackend>>,
+        Arc<InMemoryTurnStateStore>,
     ) {
-        let state_store = Arc::new(InMemoryCheckpointStateStore::default());
-        let checkpoint_store = Arc::new(InMemoryLoopCheckpointStore::default());
+        let state_store = in_memory_checkpoint_state_store();
+        let checkpoint_store = Arc::new(InMemoryTurnStateStore::default());
         let milestone_sink = Arc::new(InMemoryLoopHostMilestoneSink::default());
         let port = HostManagedLoopCheckpointPort::new(
             context,

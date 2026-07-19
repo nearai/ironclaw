@@ -17,14 +17,14 @@
 use std::{path::PathBuf, sync::Arc, time::Duration};
 
 use async_trait::async_trait;
-use ironclaw_filesystem::{DiskFilesystem, InMemoryBackend};
+use ironclaw_filesystem::{DiskFilesystem, InMemoryBackend, ScopedFilesystem};
 use ironclaw_host_api::{
-    CapabilityId, NetworkPolicy, ProviderToolName, ResourceScope, RuntimeHttpEgressRequest,
-    ThreadId,
+    CapabilityId, MountAlias, MountGrant, MountPermissions, MountView, NetworkPolicy,
+    ProviderToolName, ResourceScope, RuntimeHttpEgressRequest, ThreadId, VirtualPath,
 };
 use ironclaw_loop_host::{
-    EmptyUserProfileSource, HostIdentityContextSource, HostManagedModelRequest,
-    JsonSpawnSubagentInputCodec,
+    EmptyUserProfileSource, FilesystemCheckpointStateStore, HostIdentityContextSource,
+    HostManagedModelRequest, JsonSpawnSubagentInputCodec,
 };
 use ironclaw_network::NetworkHttpRequest;
 use ironclaw_product_adapters::{
@@ -61,7 +61,7 @@ use ironclaw_threads::{
 };
 use ironclaw_turns::{
     CancelRunRequest, FilesystemTurnStateStore, GateRef, GetLoopCheckpointRequest,
-    GetRunStateRequest, IdempotencyKey, InMemoryCheckpointStateStore, LoopBlockedKind,
+    GetRunStateRequest, IdempotencyKey, LoopBlockedKind,
     LoopCheckpointKind, LoopCheckpointStore, ReplyTargetBindingRef, ResumeTurnRequest,
     RetryTurnRequest, RetryTurnResponse, SanitizedCancelReason, SourceBindingRef, TurnActor,
     TurnCoordinator, TurnError, TurnRunId, TurnRunRecord, TurnRunState, TurnScope,
@@ -91,6 +91,18 @@ use crate::reborn_support::session_thread::RebornThreadHarness;
 use crate::reborn_support::test_adapter::{RebornTestIngress, RebornTestProductAdapter};
 
 pub type HarnessWaitConfig = WaitConfig;
+
+fn in_memory_checkpoint_state_store() -> Arc<FilesystemCheckpointStateStore<InMemoryBackend>> {
+    let mounts = MountView::new(vec![MountGrant::new(
+        MountAlias::new("/checkpoint-state").unwrap(),
+        VirtualPath::new("/checkpoint-state").unwrap(),
+        MountPermissions::read_write_list_delete(),
+    )])
+    .unwrap();
+    Arc::new(FilesystemCheckpointStateStore::new(Arc::new(
+        ScopedFilesystem::with_fixed_view(Arc::new(InMemoryBackend::new()), mounts),
+    )))
+}
 
 pub struct RebornBinaryE2EHarness {
     ingress: RebornTestIngress,
@@ -760,7 +772,7 @@ impl RebornBinaryE2EHarness {
         };
         let turns_scoped_fs = scoped_turns_fs(turn_backend, &binding)?;
         let turn_store = Arc::new(FilesystemTurnStateStore::new(Arc::clone(&turns_scoped_fs)));
-        let checkpoint_state_store = Arc::new(InMemoryCheckpointStateStore::default());
+        let checkpoint_state_store = in_memory_checkpoint_state_store();
         let loop_checkpoint_store: Arc<dyn LoopCheckpointStore> = turn_store.clone();
         let milestone_sink =
             Arc::new(ironclaw_turns::run_profile::InMemoryLoopHostMilestoneSink::default());

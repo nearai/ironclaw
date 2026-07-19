@@ -67,13 +67,12 @@ const FROZEN_INMEMORY_STORES: &[&str] = &[
     //     `inmemory-turn-state` production runtime authority (pessimistic Mutex,
     //     no-CAS-livelock); a `FilesystemTurnStateStore<InMemoryBackend>` swap needs
     //     a concurrency stress test PROVING it keeps the no-livelock property first.
-    //     `FilesystemCheckpointStateStore` already EXISTS in `ironclaw_loop_host`
-    //     (contract-tested, composition-wired) — that entry only needs the test-seam
-    //     swap + allowlist trim; LoopCheckpoint/InstructionMaterialization still need
-    //     a filesystem variant BUILT (cross-crate in `ironclaw_loop_host`). ---
+    //     (Checkpoint state + loop-checkpoint metadata are DONE: the payload store
+    //     is `FilesystemCheckpointStateStore` everywhere, and checkpoint metadata is
+    //     served by the turn-state store's own `LoopCheckpointStore` impl in both
+    //     build paths.) `InMemoryInstructionMaterializationStore` still needs
+    //     triage (assess build-vs-justified when picked up). ---
     "InMemoryTurnStateStore",
-    "InMemoryCheckpointStateStore",
-    "InMemoryLoopCheckpointStore",
     "InMemoryInstructionMaterializationStore",
     // --- JUSTIFIED KEEPS — bounded in-memory caches serving the test/no-durable
     //     fallback role. Durable production variants ALREADY EXIST and are wired
