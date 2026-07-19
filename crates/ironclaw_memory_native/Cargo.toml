@@ -15,20 +15,6 @@ layer = "substrates"
 
 [features]
 default = []
-# Conditional gate for substrate-level regression tests that anticipate
-# specific guards beyond what #3180 itself delivers: min_score-after-
-# normalization, deterministic tiebreaking, `ensure_path_matches_context`
-# / `ensure_scope_matches_context` checks, and `.system/engine/
-# orchestrator/*` protected-path registration. The followup PR(s) that
-# implement these must enable `pr3180-ready` in their merge commit so
-# the gated tests run in CI on the merge-queue branch.
-#
-# Empirical note (2026-05-12): on `reborn-integration` HEAD (#3180
-# merged), enabling this feature surfaces ~7 test failures because the
-# anticipated APIs (`ensure_path_matches_context`, deterministic
-# tie-breakers, orchestrator path registration) do not exist yet. The
-# gates are accurate; the substrate just isn't there yet.
-pr3180-ready = []
 # Exposes the trait-level contract test harness in
 # `src/contract_tests.rs` to downstream crates and integration tests.
 # Off by default so panic-style calls in the harness (`.expect`,

@@ -17,10 +17,11 @@ layer = "kernel"
 default = []
 root-llm-provider = ["dep:ironclaw_llm", "dep:base64"]
 # Bare libSQL dependency toggle, mirroring the root `ironclaw` crate's `libsql`
-# feature. CI lints/builds the whole workspace with `--all --features libsql`
-# (e.g. code_style's `libsql-only` leg and platform-and-compat); without this,
-# feature resolution fails because `ironclaw_runner` is the lone workspace
-# member that enables libSQL only through the more specific features below.
+# feature. CI's `libsql-only` leg builds the whole workspace with
+# `--all --no-default-features --features libsql`; without this, feature
+# resolution fails because `ironclaw_runner` is the lone workspace member that
+# enables libSQL only through the more specific features below. Dies with the
+# `libsql-only` leg when the storage-backend split is removed.
 libsql = ["dep:libsql"]
 libsql-secrets = [
     "dep:ironclaw_secrets",

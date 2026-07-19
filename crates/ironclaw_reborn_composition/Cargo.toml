@@ -107,8 +107,6 @@ libsql = [
     "ironclaw_host_runtime/libsql",
     "ironclaw_runner/filesystem-goal-store",
     "ironclaw_reborn_event_store/libsql",
-    "ironclaw_resources/libsql",
-    "ironclaw_run_state/libsql",
     "ironclaw_triggers/libsql",
 ]
 postgres = [
@@ -118,8 +116,6 @@ postgres = [
     "ironclaw_runner/filesystem-goal-store",
     "ironclaw_runner/filesystem-local-trigger-access",
     "ironclaw_reborn_event_store/postgres",
-    "ironclaw_resources/postgres",
-    "ironclaw_run_state/postgres",
     "ironclaw_triggers/postgres",
 ]
 [dependencies]
