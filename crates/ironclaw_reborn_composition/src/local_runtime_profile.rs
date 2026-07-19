@@ -70,9 +70,15 @@ pub fn local_runtime_build_input_with_options(
         return hosted_single_tenant_volume_build_input(owner_id, root);
     }
 
-    let policy = local_runtime_policy(profile, options)?;
+    // Build the deployment once, here, where the operator's host-access
+    // confirmation is known, and carry it on the input rather than letting
+    // downstream re-derive it from the profile name (§4.4).
+    let deployment = deployment_config_for_profile(profile, options)?;
+    let policy = deployment
+        .resolve()?
+        .ok_or(RebornRuntimeProfileError::MissingPolicyRequest { profile })?;
     Ok(
-        RebornBuildInput::local_dev_with_profile(profile, owner_id, root)
+        RebornBuildInput::local_dev_from_deployment(deployment, owner_id, root)
             .with_runtime_policy(policy),
     )
 }
@@ -183,4 +189,92 @@ fn local_runtime_policy_for_local_dev_shape(
             unreachable!("{profile_name} carries a runtime-policy request")
         }
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use ironclaw_host_api::runtime_policy::{ApprovalPolicy, RuntimeProfile};
+
+    use super::*;
+
+    #[test]
+    fn yolo_disclosure_reaches_both_the_carried_deployment_and_the_resolved_policy() {
+        // This module is the one place that holds the operator's host-access
+        // confirmation, so it must be the place that builds the deployment.
+        // The hazard being pinned: `RebornBuildInput::new` cannot know the
+        // disclosure, so a config built there would carry
+        // `yolo_disclosure_acknowledged: false` and resolve fail-closed. The
+        // input must carry the config built *here* instead.
+        let dir = std::env::temp_dir().join("reborn-yolo-disclosure-test");
+        let input = local_runtime_build_input_with_options(
+            RebornCompositionProfile::LocalDevYolo,
+            "yolo-owner",
+            dir,
+            RebornRuntimeProfileOptions {
+                confirm_host_access: true,
+            },
+        )
+        .expect("confirmed local-dev-yolo builds");
+
+        assert_eq!(
+            input.profile(),
+            RebornCompositionProfile::LocalDevYolo,
+            "the carried deployment must keep the requested profile label"
+        );
+        let carried = input
+            .deployment()
+            .resolve()
+            .expect("carried deployment resolves")
+            .expect("local-dev-yolo makes a policy request");
+        assert_eq!(
+            carried.resolved_profile,
+            RuntimeProfile::LocalYolo,
+            "the carried deployment must have the disclosure, or it would fail closed"
+        );
+        assert_eq!(carried.approval_policy, ApprovalPolicy::Minimal);
+    }
+
+    #[test]
+    fn unconfirmed_yolo_fails_closed_before_an_input_is_built() {
+        let dir = std::env::temp_dir().join("reborn-yolo-unconfirmed-test");
+        let error = local_runtime_build_input_with_options(
+            RebornCompositionProfile::LocalDevYolo,
+            "yolo-owner",
+            dir,
+            RebornRuntimeProfileOptions {
+                confirm_host_access: false,
+            },
+        );
+        let Err(error) = error else {
+            panic!("unconfirmed yolo must not produce a build input");
+        };
+        assert!(matches!(
+            error,
+            RebornRuntimeProfileError::Policy(ResolveError::YoloRequiresDisclosure { .. })
+        ));
+    }
+
+    #[test]
+    fn deployments_without_the_local_dev_storage_shape_are_rejected() {
+        // The helper builds the local-dev storage input shape; the rejection is
+        // expressed as the storage-shape axis, not a list of profile names.
+        for profile in [
+            RebornCompositionProfile::Disabled,
+            RebornCompositionProfile::HostedSingleTenant,
+            RebornCompositionProfile::Production,
+            RebornCompositionProfile::MigrationDryRun,
+        ] {
+            let error = deployment_config_for_profile(
+                profile,
+                RebornRuntimeProfileOptions {
+                    confirm_host_access: true,
+                },
+            )
+            .expect_err("non-local-dev-storage deployments are not this helper's business");
+            assert!(matches!(
+                error,
+                RebornRuntimeProfileError::UnsupportedProfile { .. }
+            ));
+        }
+    }
 }

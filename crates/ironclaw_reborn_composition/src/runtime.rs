@@ -3128,8 +3128,7 @@ pub async fn build_reborn_runtime(
     // The deployment this build assembles, as data (§4.4/§5.6). Every axis
     // below — live-traffic admission, the cutover gate, substrate selection —
     // reads a field on this value instead of re-matching the profile.
-    let deployment =
-        DeploymentConfig::for_profile(profile, services_input.grants_trusted_laptop_access());
+    let deployment = services_input.deployment().clone();
     if let Some(reason) = deployment.traffic().live_traffic_refusal(profile) {
         return Err(RebornRuntimeError::InvalidArgument { reason });
     }

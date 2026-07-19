@@ -1315,18 +1315,14 @@ pub async fn build_reborn_services(
     input: RebornBuildInput,
 ) -> Result<RebornServices, RebornBuildError> {
     tracing::debug!(
-        profile = %input.profile,
+        profile = %input.profile(),
         owner_id = %input.owner_id,
         "building Reborn composition facades"
     );
     // Substrate selection is deployment *data* (§4.4/§5.6), not a profile
     // match: the config says which substrate to assemble and this dispatches
     // on that value.
-    let substrate = crate::deployment::DeploymentConfig::for_profile(
-        input.profile,
-        input.grants_trusted_laptop_access(),
-    )
-    .substrate();
+    let substrate = input.deployment().substrate();
     match substrate {
         crate::deployment::RuntimeSubstrate::None => Ok(RebornServices::disabled()),
         crate::deployment::RuntimeSubstrate::Local => build_local_runtime(input).await,
@@ -1453,7 +1449,7 @@ async fn build_local_runtime(input: RebornBuildInput) -> Result<RebornServices, 
     #[cfg(any(test, feature = "test-support"))]
     let network_http_egress_for_test = input.network_http_egress_for_test.clone();
     let RebornBuildInput {
-        profile,
+        deployment,
         storage,
         runtime_policy,
         runtime_process_binding,
@@ -1468,6 +1464,8 @@ async fn build_local_runtime(input: RebornBuildInput) -> Result<RebornServices, 
         turn_state_store_limits,
         ..
     } = input;
+    // Label for logging/errors; behaviour reads `deployment`'s axes.
+    let profile = deployment.profile();
     // Computed before `oauth_provider_configs` is consumed by
     // `compose_provider_client` below — see `google_oauth_configured`.
     let google_oauth_configured = google_oauth_configured(&oauth_provider_configs);
@@ -1481,7 +1479,7 @@ async fn build_local_runtime(input: RebornBuildInput) -> Result<RebornServices, 
         postgres_resource_governor_singleton,
     ) = match storage {
         RebornStorageInput::LocalDev { .. }
-            if crate::deployment::DeploymentConfig::for_profile(profile, false).storage_shape()
+            if deployment.storage_shape()
                 == crate::deployment::StorageShape::HostedSingleTenantPool =>
         {
             return Err(RebornBuildError::InvalidConfig {
@@ -1503,7 +1501,7 @@ async fn build_local_runtime(input: RebornBuildInput) -> Result<RebornServices, 
         ),
         #[cfg(feature = "postgres")]
         RebornStorageInput::HostedSingleTenantPostgres { .. }
-            if crate::deployment::DeploymentConfig::for_profile(profile, false).storage_shape()
+            if deployment.storage_shape()
                 != crate::deployment::StorageShape::HostedSingleTenantPool =>
         {
             return Err(RebornBuildError::InvalidConfig {
@@ -4515,7 +4513,7 @@ async fn build_production_shaped(
     input: RebornBuildInput,
 ) -> Result<RebornServices, RebornBuildError> {
     let RebornBuildInput {
-        profile,
+        deployment,
         owner_id,
         local_runtime_identity,
         storage,
@@ -4542,6 +4540,8 @@ async fn build_production_shaped(
         nearai_mcp_bootstrap_config: _,
         turn_state_store_limits,
     } = input;
+    // Label for logging/errors; behaviour reads `deployment`'s axes.
+    let profile = deployment.profile();
     #[cfg(any(feature = "libsql", feature = "postgres"))]
     let wiring_config = production_config(
         required_runtime_backends,
@@ -6213,11 +6213,16 @@ mod tests {
     #[tokio::test]
     async fn hosted_single_tenant_rejects_local_dev_storage_input() {
         let dir = tempfile::tempdir().expect("tempdir");
-        let mut input = RebornBuildInput::local_dev(
+        let input = RebornBuildInput::local_dev(
             "hosted-single-tenant-local-storage-owner",
             dir.path().join("local-dev"),
         );
-        input.profile = RebornCompositionProfile::HostedSingleTenant;
+        // Deliberate mismatch: a hosted single-tenant deployment paired with a
+        // local-dev storage input must be rejected by the storage-shape guard.
+        let input = input.with_deployment(crate::deployment::DeploymentConfig::for_profile(
+            RebornCompositionProfile::HostedSingleTenant,
+            false,
+        ));
 
         let error = match build_reborn_services(input).await {
             Ok(_) => {
