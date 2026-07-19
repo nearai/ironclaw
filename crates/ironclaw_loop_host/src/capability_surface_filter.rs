@@ -8,10 +8,10 @@ use ironclaw_host_api::{CapabilityId, Resolution, ResolutionBatch};
 use ironclaw_turns::CapabilityActivityId;
 use ironclaw_turns::run_profile::{
     AgentLoopHostError, AgentLoopHostErrorKind, CapabilityBatchInvocation, CapabilityCallCandidate,
-    CapabilityDenied, CapabilityDeniedReasonKind, CapabilityInvocation, CapabilityOutcome,
-    CapabilitySurfaceProfileId, LoopCapabilityPort, LoopRunContext, ProviderToolCall,
-    ProviderToolCallCapabilityIds, ProviderToolDefinition, RegisterProviderToolCallRequest,
-    VisibleCapabilityRequest, VisibleCapabilitySurface, capability_outcome_to_resolution,
+    CapabilityDeniedReasonKind, CapabilityInvocation, CapabilitySurfaceProfileId,
+    LoopCapabilityPort, LoopRunContext, ProviderToolCall, ProviderToolCallCapabilityIds,
+    ProviderToolDefinition, RegisterProviderToolCallRequest, VisibleCapabilityRequest,
+    VisibleCapabilitySurface, resolution,
 };
 
 use crate::{CapabilityAllowSet, LoopCapabilityPortDecorator, capability_info};
@@ -671,10 +671,10 @@ fn provider_capability_permitted(
 }
 
 fn model_view_denied_outcome() -> Resolution {
-    capability_outcome_to_resolution(CapabilityOutcome::Denied(CapabilityDenied {
-        reason_kind: model_view_denied_kind(),
-        safe_summary: "capability outside the model-visible view".to_string(),
-    }))
+    resolution::denied(
+        model_view_denied_kind(),
+        "capability outside the model-visible view".to_string(),
+    )
     .resolution
 }
 
@@ -693,10 +693,10 @@ fn model_view_denied_kind() -> CapabilityDeniedReasonKind {
 }
 
 fn surface_profile_denied_outcome() -> Resolution {
-    capability_outcome_to_resolution(CapabilityOutcome::Denied(CapabilityDenied {
-        reason_kind: surface_profile_denied_kind(),
-        safe_summary: "capability not in run-profile surface".to_string(),
-    }))
+    resolution::denied(
+        surface_profile_denied_kind(),
+        "capability not in run-profile surface".to_string(),
+    )
     .resolution
 }
 
@@ -723,7 +723,8 @@ mod tests {
     };
     use ironclaw_turns::run_profile::{
         CancellationPolicy, CapabilityBatchOutcome, CapabilityDescriptorView, CapabilityInputRef,
-        CapabilityResultMessage, CapabilitySurfaceVersion, CheckpointPolicy, CheckpointSchemaId,
+        CapabilityOutcome, CapabilityResultMessage, CapabilitySurfaceVersion, CheckpointPolicy,
+        CheckpointSchemaId, capability_outcome_to_resolution,
         ConcurrencyClass, ConcurrencyHint, ContextProfileId, LoopDriverId, ModelProfileId,
         PersonalContextPolicy, RedactedRunProfileProvenance, ResolvedRunProfile,
         ResourceBudgetPolicy, ResourceBudgetTier, RuntimeProfileConstraints, SchedulingClass,

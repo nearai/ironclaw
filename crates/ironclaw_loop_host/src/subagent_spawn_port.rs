@@ -11,8 +11,8 @@ use std::{
 use async_trait::async_trait;
 use chrono::Utc;
 use ironclaw_host_api::{
-    CapabilityId, InvocationId, ProviderToolName, Resolution, ResolutionBatch, RuntimeKind,
-    ThreadId,
+    CapabilityId, InvocationId, LoopRef, ProviderToolName, Resolution, ResolutionBatch, RuntimeKind,
+    Suspension, ThreadId,
 };
 use ironclaw_threads::{
     AcceptInboundMessageRequest, EnsureThreadRequest, MessageContent, SessionThreadService,
@@ -25,13 +25,12 @@ use ironclaw_turns::{
     TurnError, TurnErrorCategory, TurnRunId, TurnScope, TurnSpawnTreePort, TurnSpawnTreeStateStore,
     run_profile::{
         AgentLoopHostError, AgentLoopHostErrorKind, CapabilityBatchInvocation,
-        CapabilityCallCandidate, CapabilityDenied, CapabilityDeniedReasonKind,
-        CapabilityDescriptorView, CapabilityFailure, CapabilityFailureKind, CapabilityInputRef,
-        CapabilityInvocation, CapabilityOutcome, ConcurrencyHint, LoopCapabilityPort,
-        LoopRunContext, LoopSafeSummary, ProviderToolCall, ProviderToolCallCapabilityIds,
-        ProviderToolCallReplay, ProviderToolDefinition, RegisterProviderToolCallRequest,
-        VisibleCapabilityRequest, VisibleCapabilitySurface, capability_outcome_to_resolution,
-        sanitize_model_visible_text,
+        CapabilityCallCandidate, CapabilityDeniedReasonKind, CapabilityDescriptorView,
+        CapabilityFailureKind, CapabilityInputRef, CapabilityInvocation, ConcurrencyHint,
+        LoopCapabilityPort, LoopRunContext, LoopSafeSummary, ProviderToolCall,
+        ProviderToolCallCapabilityIds, ProviderToolCallReplay, ProviderToolDefinition,
+        RegisterProviderToolCallRequest, VisibleCapabilityRequest, VisibleCapabilitySurface,
+        resolution, sanitize_model_visible_text,
     },
 };
 use serde::{Deserialize, Serialize};
@@ -699,7 +698,7 @@ impl SubagentSpawnCapabilityPort {
         invocation: &CapabilityInvocation,
         args: SpawnSubagentArgs,
         gate_override: Option<GateRef>,
-    ) -> Result<CapabilityOutcome, AgentLoopHostError> {
+    ) -> Result<Resolution, AgentLoopHostError> {
         let mut compensation = SpawnCompensationState::default();
         self.handle_spawn_with_gate_recording(invocation, args, gate_override, &mut compensation)
             .await
@@ -711,7 +710,7 @@ impl SubagentSpawnCapabilityPort {
         args: SpawnSubagentArgs,
         gate_override: Option<GateRef>,
         compensation: &mut SpawnCompensationState,
-    ) -> Result<CapabilityOutcome, AgentLoopHostError> {
+    ) -> Result<Resolution, AgentLoopHostError> {
         let Some(spawn_slot) = self.reserve_spawn_slot() else {
             return Ok(spawn_rejected("fanout_cap_exceeded"));
         };
@@ -803,7 +802,7 @@ impl SubagentSpawnCapabilityPort {
     async fn authorize_spawn(
         &self,
         invocation: &CapabilityInvocation,
-    ) -> Result<Option<CapabilityOutcome>, AgentLoopHostError> {
+    ) -> Result<Option<Resolution>, AgentLoopHostError> {
         let mut spawn_authorizations = self.spawn_authorizations.lock().map_err(|_| {
             AgentLoopHostError::new(
                 AgentLoopHostErrorKind::Unavailable,
@@ -863,7 +862,7 @@ impl SubagentSpawnCapabilityPort {
         actor: TurnActor,
         invocation: &CapabilityInvocation,
         compensation: &mut SpawnCompensationState,
-    ) -> Result<CapabilityOutcome, AgentLoopHostError> {
+    ) -> Result<Resolution, AgentLoopHostError> {
         let SpawnContext {
             definition,
             child_scope,
@@ -955,7 +954,7 @@ impl SubagentSpawnCapabilityPort {
         // Lazy-recovery admission gate (§5.3): refuse to open a new edge onto
         // a scope whose boot/lazy recovery is still in flight. Transient and
         // retryable, like the `spawn_rejected(...)` outcomes above — surface
-        // it as `CapabilityOutcome::Failed`, not `Err(AgentLoopHostError)`,
+        // it as a model-visible recoverable failure, not `Err(AgentLoopHostError)`,
         // which maps to a run-ending `HostUnavailable` (external review,
         // PR #5819).
         if let Err(error) = self
@@ -964,11 +963,11 @@ impl SubagentSpawnCapabilityPort {
             .check_scope_recovered(&child_turn_scope)
             .await
         {
-            return Ok(CapabilityOutcome::Failed(CapabilityFailure {
-                error_kind: CapabilityFailureKind::Transient,
-                safe_summary: format!("subagent spawn scope recovery in progress: {error}"),
-                detail: None,
-            }));
+            return Ok(resolution::failed(
+                CapabilityFailureKind::Transient,
+                format!("subagent spawn scope recovery in progress: {error}"),
+                None,
+            ));
         }
         self.deps
             .goal_store
@@ -1066,13 +1065,14 @@ impl SubagentSpawnCapabilityPort {
         }
 
         let loop_gate_ref = LoopGateRef::new(gate_ref.as_str()).map_err(invalid_static_ref)?;
-        Ok(CapabilityOutcome::AwaitDependentRun {
-            gate_ref: loop_gate_ref,
+        Ok(resolution::await_dependent_run(
+            loop_gate_ref,
             result_ref,
-            safe_summary: safe_summary("subagent spawned; waiting for completion"),
-            byte_len: write_result.byte_len,
-            model_observation: write_result.model_observation,
-        })
+            safe_summary("subagent spawned; waiting for completion"),
+            write_result.byte_len,
+            write_result.model_observation,
+        )
+        .resolution)
     }
 
     async fn rollback_batch_compensation(&self, compensations: &mut Vec<SpawnCompensationState>) {
@@ -1171,11 +1171,10 @@ impl LoopCapabilityPort for SubagentSpawnCapabilityPort {
                 .spawn_input_codec
                 .decode(&self.run_context, &request.input_ref)
                 .await?;
-            if let Some(outcome) = self.authorize_spawn(&request).await? {
-                return Ok(capability_outcome_to_resolution(outcome).resolution);
+            if let Some(resolution) = self.authorize_spawn(&request).await? {
+                return Ok(resolution);
             }
-            let outcome = self.handle_spawn_with_gate(&request, args, None).await?;
-            return Ok(capability_outcome_to_resolution(outcome).resolution);
+            return self.handle_spawn_with_gate(&request, args, None).await;
         }
         self.inner.invoke_capability(request).await
     }
@@ -1258,17 +1257,21 @@ impl LoopCapabilityPort for SubagentSpawnCapabilityPort {
                         return Err(error);
                     }
                 };
+                // The spawn helpers now emit the host_api `Resolution` directly; a
+                // coalesced batch-await-dependent is the `Suspended(DependentRun)`
+                // whose preserved loop-gate origin is the shared batch gate.
+                let resolution = outcome;
                 let batch_await_dependent = matches!(
-                    &outcome,
-                    CapabilityOutcome::AwaitDependentRun { gate_ref, .. }
-                        if batch_blocking_gate
-                            .as_ref()
-                            .is_some_and(|batch_gate| batch_gate == gate_ref)
+                    &resolution,
+                    Resolution::Suspended(Suspension::DependentRun { waypoint, .. })
+                        if batch_blocking_gate.as_ref().is_some_and(|batch_gate| {
+                            waypoint.origin.as_ref().map(LoopRef::as_str)
+                                == Some(batch_gate.as_str())
+                        })
                 );
                 // `parks()`, not `is_suspension()` (H1): the batch stops on any
                 // parking resolution (gate or suspension), except a coalesced
                 // batch-await-dependent which continues to accrue siblings.
-                let resolution = capability_outcome_to_resolution(outcome).resolution;
                 let parks = resolution.parks();
                 resolutions.push(resolution);
                 if parks && request.stop_on_first_suspension && !batch_await_dependent {
@@ -1405,12 +1408,13 @@ impl crate::AwaitEdgeWriter for InMemoryAwaitEdgeWriter {
     }
 }
 
-fn spawn_rejected(reason: &'static str) -> CapabilityOutcome {
-    CapabilityOutcome::Denied(CapabilityDenied {
-        reason_kind: CapabilityDeniedReasonKind::unknown(reason)
+fn spawn_rejected(reason: &'static str) -> Resolution {
+    resolution::denied(
+        CapabilityDeniedReasonKind::unknown(reason)
             .unwrap_or(CapabilityDeniedReasonKind::EmptySurface),
-        safe_summary: format!("subagent spawn rejected: {reason}"),
-    })
+        format!("subagent spawn rejected: {reason}"),
+    )
+    .resolution
 }
 
 fn background_subagents_disabled() -> AgentLoopHostError {

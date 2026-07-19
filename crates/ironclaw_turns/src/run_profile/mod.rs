@@ -23,7 +23,7 @@ mod policy;
 mod prompt;
 mod prompt_text;
 mod refs;
-mod resolution;
+pub mod resolution;
 mod resolution_mapping;
 mod resolver;
 mod runtime_context;
@@ -113,11 +113,7 @@ pub use refs::{
     LoopDriverId, ModelProfileId, ResourceBudgetTier, RunClassId, RunProfileFingerprint,
     RunProfileSourceLayer, RunProfileSourceRef, RunnerPoolId, SchedulingClass,
 };
-pub use resolution::{
-    DeniedResolution, GatedResolution, approval_required, auth_required, await_dependent_run,
-    completed, denied, external_tool_pending, failed, resource_blocked, spawned_child_run,
-    spawned_process,
-};
+pub use resolution::{DeniedResolution, GatedResolution};
 pub use resolution_mapping::{MappedResolution, RefBindings, capability_outcome_to_resolution};
 pub use resolver::{
     InMemoryRunProfileRegistry, InMemoryRunProfileResolver, RunProfileDefinition,

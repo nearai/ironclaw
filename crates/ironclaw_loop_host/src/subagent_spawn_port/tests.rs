@@ -17,9 +17,9 @@ use ironclaw_turns::{
     SubmitTurnRequest, TurnId, TurnRunProfile, TurnRunRecord, TurnRunState, TurnStateStore,
     TurnStatus,
     run_profile::{
-        CapabilityResultMessage, CapabilitySurfaceVersion, ModelVisibleToolObservation,
-        ObservationTrust, RegisterProviderToolCallRequest, ToolObservationDetail,
-        ToolObservationStatus,
+        CapabilityOutcome, CapabilityResultMessage, CapabilitySurfaceVersion,
+        ModelVisibleToolObservation, ObservationTrust, RegisterProviderToolCallRequest,
+        ToolObservationDetail, ToolObservationStatus, capability_outcome_to_resolution,
     },
 };
 use serde_json::json;
@@ -3095,13 +3095,24 @@ async fn json_spawn_input_codec_propagates_resolver_error() {
 }
 
 #[test]
-fn spawn_rejected_preserves_spawn_specific_reason_kind() {
-    let CapabilityOutcome::Denied(denied) = spawn_rejected("depth_cap_exceeded") else {
+fn spawn_rejected_preserves_spawn_specific_reason_in_summary() {
+    // The §5.3 collapse maps the open-set loop reason ("depth_cap_exceeded",
+    // which is not a host_api `DenyReason` tag) to the model-visible catch-all
+    // `PolicyDenied`; the spawn-specific reason rides the redacted summary.
+    let ironclaw_host_api::Resolution::Denied(denial) = spawn_rejected("depth_cap_exceeded") else {
         panic!("spawn_rejected should deny");
     };
 
-    assert_eq!(denied.reason_kind.as_str(), "depth_cap_exceeded");
-    assert!(denied.safe_summary.contains("depth_cap_exceeded"));
+    assert_eq!(
+        denial.reason_kind,
+        Some(ironclaw_host_api::DenyReason::PolicyDenied)
+    );
+    assert!(
+        denial
+            .summary
+            .as_ref()
+            .is_some_and(|summary| summary.as_str().contains("depth_cap_exceeded"))
+    );
 }
 
 #[tokio::test]
