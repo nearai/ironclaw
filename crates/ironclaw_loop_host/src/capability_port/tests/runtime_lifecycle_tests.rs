@@ -661,6 +661,10 @@ async fn auth_resume_uses_replay_input_without_resolving_stale_input_ref() {
         &capability_id,
         &loop_driver_extension,
     ));
+    // The fresh dispatch raises an auth gate and the host persists the replay
+    // payload here; the resume reconstitutes {input, estimate} from it host-side
+    // (§5.3 Stage 2a-i) rather than re-resolving the possibly-stale input ref.
+    let replay_store = Arc::new(RecordingReplayPayloadStore::default());
     let port = HostRuntimeLoopCapabilityPortFactory::new(
         runtime.clone(),
         visible_request(context).with_provider_trust(std::collections::BTreeMap::from([(
@@ -671,6 +675,7 @@ async fn auth_resume_uses_replay_input_without_resolving_stale_input_ref() {
         Arc::new(RecordingResultWriter::default()),
         Arc::new(ironclaw_turns::run_profile::InMemoryLoopHostMilestoneSink::default()),
     )
+    .with_replay_payload_store(replay_store.clone())
     .port_for_run_context(run_context);
     let surface = port
         .visible_capabilities(VisibleCapabilityRequest {})
@@ -938,6 +943,10 @@ async fn approval_resume_metadata_invokes_runtime_resume_with_original_invocatio
         &capability_id,
         &loop_driver_extension,
     ));
+    // Wire the host-private replay-payload store: raw input/estimate no longer
+    // ride the loop-facing outcome (§5.3 Stage 2a-i), so the host persists them
+    // at the fresh gate raise and reconstitutes them on resume.
+    let replay_store = Arc::new(RecordingReplayPayloadStore::default());
     let port = HostRuntimeLoopCapabilityPortFactory::new(
         runtime.clone(),
         visible_request(context).with_provider_trust(std::collections::BTreeMap::from([(
@@ -948,6 +957,7 @@ async fn approval_resume_metadata_invokes_runtime_resume_with_original_invocatio
         Arc::new(RecordingResultWriter::default()),
         Arc::new(ironclaw_turns::run_profile::InMemoryLoopHostMilestoneSink::default()),
     )
+    .with_replay_payload_store(replay_store.clone())
     .port_for_run_context(run_context);
 
     let first_invocation = visible_runtime_invocation(&port).await;
@@ -962,8 +972,19 @@ async fn approval_resume_metadata_invokes_runtime_resume_with_original_invocatio
     else {
         panic!("approval gate must carry resume metadata, got {first:?}");
     };
-    assert_eq!(resume.input, serde_json::json!({ "message": "hello" }));
-    assert_eq!(resume.estimate, ResourceEstimate::default());
+
+    // The fresh gate raise must have persisted the host-private replay payload
+    // keyed by the invocation id encoded in the resume token — the loop-facing
+    // outcome deliberately no longer carries raw input/estimate.
+    let raised_invocation_id = ironclaw_host_api::InvocationId::parse(resume.resume_token.as_str())
+        .expect("resume token carries original invocation id");
+    let persisted = replay_store
+        .get(raised_invocation_id)
+        .expect("fresh approval-gate raise must persist a replay payload");
+    assert_eq!(persisted.input, serde_json::json!({ "message": "hello" }));
+    assert_eq!(persisted.estimate, ResourceEstimate::default());
+    assert_eq!(persisted.input_ref, first_invocation.input_ref);
+    assert_eq!(persisted.correlation_id, resume.correlation_id);
 
     let surface = port
         .visible_capabilities(VisibleCapabilityRequest {})
@@ -1038,6 +1059,10 @@ async fn auth_resume_after_approval_reuses_original_invocation_identity() {
         &capability_id,
         &loop_driver_extension,
     ));
+    // Wire the host-private replay-payload store: raw input/estimate no longer
+    // ride the loop-facing outcome (§5.3 Stage 2a-i), so the host persists them
+    // at the fresh gate raise and reconstitutes them on resume.
+    let replay_store = Arc::new(RecordingReplayPayloadStore::default());
     let port = HostRuntimeLoopCapabilityPortFactory::new(
         runtime.clone(),
         visible_request(context).with_provider_trust(std::collections::BTreeMap::from([(
@@ -1048,6 +1073,7 @@ async fn auth_resume_after_approval_reuses_original_invocation_identity() {
         Arc::new(RecordingResultWriter::default()),
         Arc::new(ironclaw_turns::run_profile::InMemoryLoopHostMilestoneSink::default()),
     )
+    .with_replay_payload_store(replay_store.clone())
     .port_for_run_context(run_context);
 
     let first_invocation = visible_runtime_invocation(&port).await;
@@ -1101,10 +1127,6 @@ async fn auth_resume_after_approval_reuses_original_invocation_identity() {
                 prior_approval: Some(ironclaw_turns::run_profile::AuthResumeApprovalIdentity {
                     approval_request_id,
                     correlation_id: original_correlation_id,
-                }),
-                replay: Some(ironclaw_turns::run_profile::CapabilityAuthResumeReplay {
-                    input: resume.input.clone(),
-                    estimate: resume.estimate.clone(),
                 }),
             }),
         })
@@ -1174,6 +1196,9 @@ async fn approval_resume_host_error_returns_failed_outcome_and_emits_failure_mil
         Arc::new(RecordingResultWriter::default()),
         milestone_sink.clone(),
     )
+    // Fresh raise persists the replay payload; the approval resume reconstitutes
+    // it host-side before re-dispatch (§5.3 Stage 2a-i).
+    .with_replay_payload_store(Arc::new(RecordingReplayPayloadStore::default()))
     .port_for_run_context(run_context);
 
     let first_invocation = visible_runtime_invocation(&port).await;
@@ -1555,3 +1580,5 @@ impl LoopHostMilestoneSink for FailOnceTerminalMilestoneSink {
         Ok(())
     }
 }
+
+// arch-exempt: large_file, pre-existing large file minimally touched for the §5.3 Stage 2a-i replay-payload move (field/store wiring + tests), plan #6175

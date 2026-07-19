@@ -7,7 +7,7 @@ use ironclaw_turns::{
     LoopFailureKind, LoopResultRef,
     run_profile::{
         AuthResumeApprovalIdentity, CapabilityActivityId, CapabilityApprovalResume,
-        CapabilityAuthResume, CapabilityAuthResumeReplay, CapabilityBatchInvocation,
+        CapabilityAuthResume, CapabilityBatchInvocation,
         CapabilityCallCandidate, CapabilityFailureKind, CapabilityOutcome, CapabilityProgress,
         CapabilityResultMessage, LoopDriverNoteKind, LoopProgressEvent,
         ModelVisibleToolObservation, VisibleCapabilitySurface,
@@ -1259,22 +1259,16 @@ fn auth_resume_for_gate(
         approval_request_id: prior_approval.approval_request_id,
         correlation_id: prior_approval.correlation_id,
     };
-    let prior_replay = || CapabilityAuthResumeReplay {
-        input: prior_approval.input.clone(),
-        estimate: prior_approval.estimate.clone(),
-    };
 
     match auth_resume.as_mut() {
         Some(resume) => {
             resume.resume_token = prior_approval.resume_token.clone();
             resume.prior_approval.get_or_insert_with(prior_identity);
-            resume.replay.get_or_insert_with(prior_replay);
             auth_resume
         }
         None => Some(CapabilityAuthResume {
             resume_token: prior_approval.resume_token.clone(),
             prior_approval: Some(prior_identity()),
-            replay: Some(prior_replay()),
         }),
     }
 }
@@ -1538,3 +1532,5 @@ mod tests {
         );
     }
 }
+
+// arch-exempt: large_file, pre-existing large file minimally touched for the §5.3 Stage 2a-i replay-payload move (field/store wiring + tests), plan #6175

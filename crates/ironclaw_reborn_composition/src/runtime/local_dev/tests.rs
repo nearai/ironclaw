@@ -1460,6 +1460,14 @@ mod tests {
             ),
             approval_requests: local_runtime.approval_requests.clone(),
             capability_leases: local_runtime.capability_leases.clone(),
+            gate_record_store: Arc::new(ironclaw_run_state::FilesystemGateRecordStore::new(
+                crate::wrap_scoped(Arc::clone(&local_runtime.extension_filesystem)),
+            )),
+            replay_payload_store: Arc::new(
+                ironclaw_capabilities::FilesystemReplayPayloadStore::new(crate::wrap_scoped(
+                    Arc::clone(&local_runtime.extension_filesystem),
+                )),
+            ),
             external_tool_catalog: Arc::new(ironclaw_turns::InMemoryExternalToolCatalog::new()),
         };
         let port = factory
@@ -1764,6 +1772,14 @@ mod tests {
             ),
             approval_requests: local_runtime.approval_requests.clone(),
             capability_leases: local_runtime.capability_leases.clone(),
+            gate_record_store: Arc::new(ironclaw_run_state::FilesystemGateRecordStore::new(
+                crate::wrap_scoped(Arc::clone(&local_runtime.extension_filesystem)),
+            )),
+            replay_payload_store: Arc::new(
+                ironclaw_capabilities::FilesystemReplayPayloadStore::new(crate::wrap_scoped(
+                    Arc::clone(&local_runtime.extension_filesystem),
+                )),
+            ),
             external_tool_catalog: Arc::new(ironclaw_turns::InMemoryExternalToolCatalog::new()),
         };
         let port = factory
@@ -2235,6 +2251,14 @@ mod tests {
             thread_service: Arc::new(InMemorySessionThreadService::default()),
             approval_requests: local_runtime.approval_requests.clone(),
             capability_leases: local_runtime.capability_leases.clone(),
+            gate_record_store: Arc::new(ironclaw_run_state::FilesystemGateRecordStore::new(
+                crate::wrap_scoped(Arc::clone(&local_runtime.extension_filesystem)),
+            )),
+            replay_payload_store: Arc::new(
+                ironclaw_capabilities::FilesystemReplayPayloadStore::new(crate::wrap_scoped(
+                    Arc::clone(&local_runtime.extension_filesystem),
+                )),
+            ),
             external_tool_catalog: std::sync::Arc::new(
                 ironclaw_turns::InMemoryExternalToolCatalog::new(),
             ),
@@ -2442,6 +2466,14 @@ mod tests {
             thread_service: Arc::new(InMemorySessionThreadService::default()),
             approval_requests: local_runtime.approval_requests.clone(),
             capability_leases: local_runtime.capability_leases.clone(),
+            gate_record_store: Arc::new(ironclaw_run_state::FilesystemGateRecordStore::new(
+                crate::wrap_scoped(Arc::clone(&local_runtime.extension_filesystem)),
+            )),
+            replay_payload_store: Arc::new(
+                ironclaw_capabilities::FilesystemReplayPayloadStore::new(crate::wrap_scoped(
+                    Arc::clone(&local_runtime.extension_filesystem),
+                )),
+            ),
             external_tool_catalog: catalog,
         };
         let port = factory
@@ -2520,6 +2552,14 @@ mod tests {
             ),
             approval_requests: local_runtime.approval_requests.clone(),
             capability_leases: local_runtime.capability_leases.clone(),
+            gate_record_store: Arc::new(ironclaw_run_state::FilesystemGateRecordStore::new(
+                crate::wrap_scoped(Arc::clone(&local_runtime.extension_filesystem)),
+            )),
+            replay_payload_store: Arc::new(
+                ironclaw_capabilities::FilesystemReplayPayloadStore::new(crate::wrap_scoped(
+                    Arc::clone(&local_runtime.extension_filesystem),
+                )),
+            ),
             external_tool_catalog: std::sync::Arc::new(
                 ironclaw_turns::InMemoryExternalToolCatalog::new(),
             ),
@@ -2716,6 +2756,14 @@ mod tests {
             ),
             approval_requests: local_runtime.approval_requests.clone(),
             capability_leases: local_runtime.capability_leases.clone(),
+            gate_record_store: Arc::new(ironclaw_run_state::FilesystemGateRecordStore::new(
+                crate::wrap_scoped(Arc::clone(&local_runtime.extension_filesystem)),
+            )),
+            replay_payload_store: Arc::new(
+                ironclaw_capabilities::FilesystemReplayPayloadStore::new(crate::wrap_scoped(
+                    Arc::clone(&local_runtime.extension_filesystem),
+                )),
+            ),
             external_tool_catalog: Arc::new(ironclaw_turns::InMemoryExternalToolCatalog::new()),
         };
         let port = factory
@@ -3042,6 +3090,14 @@ mod tests {
             ),
             approval_requests: local_runtime.approval_requests.clone(),
             capability_leases: local_runtime.capability_leases.clone(),
+            gate_record_store: Arc::new(ironclaw_run_state::FilesystemGateRecordStore::new(
+                crate::wrap_scoped(Arc::clone(&local_runtime.extension_filesystem)),
+            )),
+            replay_payload_store: Arc::new(
+                ironclaw_capabilities::FilesystemReplayPayloadStore::new(crate::wrap_scoped(
+                    Arc::clone(&local_runtime.extension_filesystem),
+                )),
+            ),
             external_tool_catalog: std::sync::Arc::new(
                 ironclaw_turns::InMemoryExternalToolCatalog::new(),
             ),
@@ -3462,6 +3518,14 @@ mod tests {
             ),
             approval_requests: local_runtime.approval_requests.clone(),
             capability_leases: local_runtime.capability_leases.clone(),
+            gate_record_store: Arc::new(ironclaw_run_state::FilesystemGateRecordStore::new(
+                crate::wrap_scoped(Arc::clone(&local_runtime.extension_filesystem)),
+            )),
+            replay_payload_store: Arc::new(
+                ironclaw_capabilities::FilesystemReplayPayloadStore::new(crate::wrap_scoped(
+                    Arc::clone(&local_runtime.extension_filesystem),
+                )),
+            ),
             external_tool_catalog: Arc::new(ironclaw_turns::InMemoryExternalToolCatalog::new()),
         };
         // Build the port scoped to thread B's run context: the reference
@@ -3586,6 +3650,14 @@ mod tests {
             thread_service: Arc::new(InMemorySessionThreadService::default()),
             approval_requests: local_runtime.approval_requests.clone(),
             capability_leases: local_runtime.capability_leases.clone(),
+            gate_record_store: Arc::new(ironclaw_run_state::FilesystemGateRecordStore::new(
+                crate::wrap_scoped(Arc::clone(&local_runtime.extension_filesystem)),
+            )),
+            replay_payload_store: Arc::new(
+                ironclaw_capabilities::FilesystemReplayPayloadStore::new(crate::wrap_scoped(
+                    Arc::clone(&local_runtime.extension_filesystem),
+                )),
+            ),
             external_tool_catalog: std::sync::Arc::new(
                 ironclaw_turns::InMemoryExternalToolCatalog::new(),
             ),
@@ -4306,6 +4378,14 @@ mod tests {
             thread_service: Arc::new(InMemorySessionThreadService::default()),
             approval_requests: local_runtime.approval_requests.clone(),
             capability_leases: local_runtime.capability_leases.clone(),
+            gate_record_store: Arc::new(ironclaw_run_state::FilesystemGateRecordStore::new(
+                crate::wrap_scoped(Arc::clone(&local_runtime.extension_filesystem)),
+            )),
+            replay_payload_store: Arc::new(
+                ironclaw_capabilities::FilesystemReplayPayloadStore::new(crate::wrap_scoped(
+                    Arc::clone(&local_runtime.extension_filesystem),
+                )),
+            ),
             external_tool_catalog: std::sync::Arc::new(
                 ironclaw_turns::InMemoryExternalToolCatalog::new(),
             ),
@@ -4417,6 +4497,14 @@ mod tests {
             thread_service: Arc::new(InMemorySessionThreadService::default()),
             approval_requests: local_runtime.approval_requests.clone(),
             capability_leases: local_runtime.capability_leases.clone(),
+            gate_record_store: Arc::new(ironclaw_run_state::FilesystemGateRecordStore::new(
+                crate::wrap_scoped(Arc::clone(&local_runtime.extension_filesystem)),
+            )),
+            replay_payload_store: Arc::new(
+                ironclaw_capabilities::FilesystemReplayPayloadStore::new(crate::wrap_scoped(
+                    Arc::clone(&local_runtime.extension_filesystem),
+                )),
+            ),
             external_tool_catalog: std::sync::Arc::new(
                 ironclaw_turns::InMemoryExternalToolCatalog::new(),
             ),
@@ -4662,6 +4750,14 @@ mod tests {
             thread_service: Arc::new(InMemorySessionThreadService::default()),
             approval_requests: local_runtime.approval_requests.clone(),
             capability_leases: local_runtime.capability_leases.clone(),
+            gate_record_store: Arc::new(ironclaw_run_state::FilesystemGateRecordStore::new(
+                crate::wrap_scoped(Arc::clone(&local_runtime.extension_filesystem)),
+            )),
+            replay_payload_store: Arc::new(
+                ironclaw_capabilities::FilesystemReplayPayloadStore::new(crate::wrap_scoped(
+                    Arc::clone(&local_runtime.extension_filesystem),
+                )),
+            ),
             external_tool_catalog: std::sync::Arc::new(
                 ironclaw_turns::InMemoryExternalToolCatalog::new(),
             ),
@@ -4776,6 +4872,14 @@ mod tests {
             thread_service: Arc::new(InMemorySessionThreadService::default()),
             approval_requests: local_runtime.approval_requests.clone(),
             capability_leases: local_runtime.capability_leases.clone(),
+            gate_record_store: Arc::new(ironclaw_run_state::FilesystemGateRecordStore::new(
+                crate::wrap_scoped(Arc::clone(&local_runtime.extension_filesystem)),
+            )),
+            replay_payload_store: Arc::new(
+                ironclaw_capabilities::FilesystemReplayPayloadStore::new(crate::wrap_scoped(
+                    Arc::clone(&local_runtime.extension_filesystem),
+                )),
+            ),
             external_tool_catalog: std::sync::Arc::new(
                 ironclaw_turns::InMemoryExternalToolCatalog::new(),
             ),
@@ -5354,3 +5458,5 @@ mod tests {
         .await;
     }
 }
+
+// arch-exempt: large_file, pre-existing large file minimally touched for the §5.3 Stage 2a-i replay-payload move (field/store wiring + tests), plan #6175

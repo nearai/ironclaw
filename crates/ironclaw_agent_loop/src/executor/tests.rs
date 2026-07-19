@@ -2,7 +2,7 @@
 use std::collections::VecDeque;
 
 use ironclaw_host_api::{
-    ApprovalRequestId, CorrelationId, DispatchInputIssueCode, ProviderToolName, ResourceEstimate,
+    ApprovalRequestId, CorrelationId, DispatchInputIssueCode, ProviderToolName,
 };
 use ironclaw_turns::{
     CapabilityActivityId, GateResumeDisposition, LoopCancelledReasonKind, LoopCompletionKind,
@@ -2794,8 +2794,6 @@ async fn approval_resume_metadata_is_replayed_after_before_block_checkpoint() {
         resume_token: CapabilityResumeToken::new("resume-token:demo").expect("valid token"),
         correlation_id: CorrelationId::new(),
         input_ref: original_input_ref.clone(),
-        input: serde_json::json!({ "message": "hello" }),
-        estimate: ResourceEstimate::default(),
     };
     let completed_ref = LoopResultRef::new("result:approval-resumed").expect("valid");
     let host = MockHost::new(vec![calls_response()]).with_batch_outcomes(vec![
@@ -2844,8 +2842,6 @@ async fn approval_resume_metadata_is_replayed_after_before_block_checkpoint() {
         pending_resume.correlation_id,
         approval_resume.correlation_id
     );
-    assert_eq!(pending_resume.input, approval_resume.input);
-    assert_eq!(pending_resume.estimate, approval_resume.estimate);
     assert_eq!(pending_resume.surface_version, surface_version());
     assert_eq!(
         pending_resume.effective_capability_ids,
@@ -2898,8 +2894,6 @@ async fn approval_gate_before_block_checkpoint_disposition_is_none() {
             .expect("valid token"),
         correlation_id: CorrelationId::new(),
         input_ref: CapabilityInputRef::new("input:disposition-none-test").expect("valid"),
-        input: serde_json::json!({ "message": "needs approval" }),
-        estimate: ResourceEstimate::default(),
     };
     let host = MockHost::new(vec![calls_response()]).with_batch_outcomes(vec![
         ironclaw_turns::run_profile::CapabilityBatchOutcome {
@@ -5602,7 +5596,6 @@ async fn non_auth_gate_block_preserves_pending_auth_resume() {
         resume_token: None,
         activity_id: CapabilityActivityId::new(),
         prior_approval: None,
-        replay: None,
         disposition: None,
     };
     let mut initial_state = LoopExecutionState::initial_for_run(host.run_context());
@@ -6280,7 +6273,6 @@ async fn gate_stage_skip_and_continue_clears_stale_pending_auth_resume() {
         resume_token: None,
         activity_id: CapabilityActivityId::new(),
         prior_approval: None,
-        replay: None,
         disposition: None,
     });
     let call = match provider_calls_response().output {
@@ -6344,7 +6336,6 @@ async fn gate_stage_abort_clears_stale_pending_auth_resume() {
         resume_token: None,
         activity_id: CapabilityActivityId::new(),
         prior_approval: None,
-        replay: None,
         disposition: None,
     });
     let call = match provider_calls_response().output {
@@ -6411,7 +6402,6 @@ async fn gate_stage_skip_does_not_clear_auth_resume_for_different_capability() {
         resume_token: None,
         activity_id: CapabilityActivityId::new(),
         prior_approval: None,
-        replay: None,
         disposition: None,
     });
     // The call being dispatched through GateStage is capability_id() ("demo.echo"),
@@ -6526,8 +6516,6 @@ async fn auth_resume_after_approval_carries_resume_token_and_approval_request_id
         resume_token: resume_token.clone(),
         correlation_id,
         input_ref: original_input_ref.clone(),
-        input: serde_json::json!({ "message": "hello" }),
-        estimate: ResourceEstimate::default(),
     };
 
     let host = MockHost::new(vec![calls_response()]).with_batch_outcomes(vec![
@@ -6765,8 +6753,6 @@ async fn auth_resume_after_approval_carries_original_correlation_id() {
         resume_token: resume_token.clone(),
         correlation_id,
         input_ref: original_input_ref.clone(),
-        input: serde_json::json!({ "message": "hello" }),
-        estimate: ResourceEstimate::default(),
     };
 
     let host = MockHost::new(vec![calls_response()]).with_batch_outcomes(vec![
@@ -6788,7 +6774,6 @@ async fn auth_resume_after_approval_carries_original_correlation_id() {
                 auth_resume: Some(CapabilityAuthResume {
                     resume_token: auth_gate_resume_token,
                     prior_approval: None,
-                    replay: None,
                 }),
             }],
             stopped_on_suspension: true,
@@ -6856,14 +6841,6 @@ async fn auth_resume_after_approval_carries_original_correlation_id() {
         pending_pa.correlation_id, correlation_id,
         "pending_auth_resume.prior_approval.correlation_id must equal the approval's correlation_id"
     );
-    let pending_replay = pending_auth
-        .replay
-        .as_ref()
-        .expect("pending_auth_resume.replay must be set when approval preceded auth");
-    assert_eq!(
-        pending_replay.input, approval_resume.input,
-        "pending_auth_resume.replay.input must preserve the approval replay input"
-    );
 
     // Phase 3: auth-resume → Completed.
     let phase3_exit = executor
@@ -6890,14 +6867,6 @@ async fn auth_resume_after_approval_carries_original_correlation_id() {
     assert_eq!(
         phase3_pa.correlation_id, correlation_id,
         "phase 3 auth_resume.prior_approval.correlation_id must match the original approval correlation_id"
-    );
-    let phase3_replay = phase3_ar
-        .replay
-        .as_ref()
-        .expect("phase 3 auth_resume.replay must be set");
-    assert_eq!(
-        phase3_replay.input, approval_resume.input,
-        "phase 3 auth_resume.replay.input must match the original approval input"
     );
 }
 
@@ -6979,7 +6948,6 @@ async fn auth_resume_slot_consumed_on_first_batch_match_not_reused_for_second_ca
             approval_request_id,
             correlation_id,
         }),
-        replay: None,
         disposition: None,
     });
 
@@ -7104,8 +7072,6 @@ async fn resume_origin_backend_failure_does_not_die_as_scope_mismatch() {
         resume_token: cap1_resume_token,
         correlation_id: cap1_correlation_id,
         input_ref: cap1_input_ref.clone(),
-        input: serde_json::json!({"action": "cap1"}),
-        estimate: ResourceEstimate::default(),
     };
 
     // Phase 1 model response: issues cap1 with original-run input_ref.
@@ -7450,8 +7416,6 @@ async fn capability_stage_denied_approval_resume_surfaces_gate_declined_failure_
         input_ref: denied_input_ref,
         effective_capability_ids: vec![capability_id()],
         provider_replay,
-        input: serde_json::json!({ "message": "needs approval" }),
-        estimate: ResourceEstimate::default(),
         disposition: Some(GateResumeDisposition::Denied),
     });
 
@@ -7550,7 +7514,6 @@ async fn capability_stage_denied_auth_resume_surfaces_gate_declined_failure_and_
         ),
         activity_id: denied_activity_id,
         prior_approval: None,
-        replay: None,
         disposition: Some(ironclaw_turns::GateResumeDisposition::Denied),
     });
 
@@ -7814,7 +7777,6 @@ async fn capability_stage_denied_auth_resume_only_fails_matching_call_remaining_
         resume_token: None,
         activity_id: denied_activity_id,
         prior_approval: None,
-        replay: None,
         disposition: Some(ironclaw_turns::GateResumeDisposition::Denied),
     });
 
@@ -8012,7 +7974,6 @@ async fn capability_stage_denied_auth_resume_only_fails_matching_activity_when_c
         resume_token: None,
         activity_id: denied_activity_id,
         prior_approval: None,
-        replay: None,
         disposition: Some(ironclaw_turns::GateResumeDisposition::Denied),
     });
 
@@ -8178,7 +8139,6 @@ async fn capability_stage_denied_auth_resume_one_denied_two_remaining_all_dispat
         resume_token: None,
         activity_id: denied_activity_id,
         prior_approval: None,
-        replay: None,
         disposition: Some(ironclaw_turns::GateResumeDisposition::Denied),
     });
 
@@ -8414,8 +8374,6 @@ async fn capability_stage_denied_approval_resume_only_fails_matching_call_remain
         input_ref: CapabilityInputRef::new("input:approval-deny-x").expect("valid"),
         effective_capability_ids: vec![capability_id()],
         provider_replay: None,
-        input: serde_json::json!({"extension_id": "slack"}),
-        estimate: ironclaw_host_api::ResourceEstimate::default(),
         disposition: Some(ironclaw_turns::GateResumeDisposition::Denied),
     });
 
@@ -8631,8 +8589,6 @@ async fn capability_stage_denied_approval_resume_no_matching_call_dispatches_unr
         input_ref: CapabilityInputRef::new("input:approval-deny-no-match-x").expect("valid"),
         effective_capability_ids: vec![capability_id()],
         provider_replay: None,
-        input: serde_json::json!({"extension_id": "slack"}),
-        estimate: ironclaw_host_api::ResourceEstimate::default(),
         disposition: Some(ironclaw_turns::GateResumeDisposition::Denied),
     });
 

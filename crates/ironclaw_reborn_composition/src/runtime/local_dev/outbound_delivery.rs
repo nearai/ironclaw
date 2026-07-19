@@ -38,6 +38,10 @@ use crate::runtime::local_dev::synthetic_capability::{
     SyntheticCapabilityInvocation,
 };
 
+// Synthetic outbound handler now also carries the host-private replay-payload
+// store it persists at its approval-gate raise and reconstitutes from on resume.
+// arch-exempt: too_many_args, outbound handler carries the replay-payload store (§5.3 Stage 2a-i), plan #6175
+#[allow(clippy::too_many_arguments)]
 pub(super) fn outbound_delivery_capabilities(
     facade: Arc<dyn OutboundPreferencesProductFacade>,
     fallback_user_id: UserId,
@@ -45,6 +49,7 @@ pub(super) fn outbound_delivery_capabilities(
     capability_leases: Arc<dyn CapabilityLeaseStore>,
     target_set_requires_approval: bool,
     approval_settings: Arc<dyn ApprovalSettingsProvider>,
+    replay_payload_store: Arc<dyn ironclaw_capabilities::ReplayPayloadStore>,
 ) -> Result<Vec<SyntheticCapability>, AgentLoopHostError> {
     Ok(vec![
         SyntheticCapability::new(
@@ -75,6 +80,7 @@ pub(super) fn outbound_delivery_capabilities(
                 capability_leases,
                 requires_approval: target_set_requires_approval,
                 approval_settings,
+                replay_payload_store,
             }),
         ),
     ])
@@ -139,6 +145,11 @@ struct OutboundDeliveryTargetSetHandler {
     fallback_user_id: UserId,
     approval_requests: Arc<dyn ApprovalRequestStore>,
     capability_leases: Arc<dyn CapabilityLeaseStore>,
+    /// Host-private replay-payload store: this synthetic capability raises its own
+    /// approval gate, so it persists {input, estimate} at the raise and
+    /// reconstitutes them on resume host-side (§5.3 Stage 2a-i) rather than
+    /// round-tripping raw tool args through the loop checkpoint.
+    replay_payload_store: Arc<dyn ironclaw_capabilities::ReplayPayloadStore>,
     requires_approval: bool,
     approval_settings: Arc<dyn ApprovalSettingsProvider>,
 }
@@ -330,6 +341,29 @@ impl OutboundDeliveryTargetSetHandler {
             invocation_id,
         );
         let fingerprint = approval_fingerprint(&scope, &capability_id, &estimate, input)?;
+        // Persist the host-private replay payload BEFORE returning the gate: a later
+        // resume reconstitutes {input, estimate} from it host-side (§5.3 Stage
+        // 2a-i) instead of the loop checkpoint carrying raw tool args. Keyed by the
+        // freshly-minted invocation id (write-once). Scoped by the run's owner axes
+        // (invocation id in the scope is ignored by the store) so raise and resume
+        // agree regardless of run.
+        self.replay_payload_store
+            .save(
+                super::local_dev_resource_scope_for_run(
+                    &invocation.run_context,
+                    &self.fallback_user_id,
+                ),
+                invocation_id,
+                ironclaw_capabilities::ReplayPayload {
+                    input: input.clone(),
+                    estimate: estimate.clone(),
+                    prior_approval: None,
+                    input_ref: invocation.request.input_ref.clone(),
+                    correlation_id,
+                },
+            )
+            .await
+            .map_err(replay_payload_store_error)?;
         self.approval_requests
             .save_pending(
                 scope,
@@ -360,8 +394,6 @@ impl OutboundDeliveryTargetSetHandler {
                 resume_token: resume_token_from_invocation_id(invocation_id)?,
                 correlation_id,
                 input_ref: invocation.request.input_ref.clone(),
-                input: input.clone(),
-                estimate,
             }),
         })
     }
@@ -372,21 +404,39 @@ impl OutboundDeliveryTargetSetHandler {
         resume: &CapabilityApprovalResume,
         input: &serde_json::Value,
     ) -> Result<ApprovedResumeDecision, AgentLoopHostError> {
-        if resume.input != *input {
+        let capability_id = outbound_delivery_target_set_capability_id()?;
+        let invocation_id = invocation_id_from_resume_token(&resume.resume_token)?;
+        // Reconstitute the raw replay payload persisted at the gate raise; a
+        // missing payload is a sanitized terminal failure (fail closed), never a
+        // silent mismatch (§5.3 Stage 2a-i). The estimate feeds the approval
+        // fingerprint that MUST match the one saved at raise; the input the
+        // decorator already reconstituted (`invocation.input`) is cross-checked
+        // against the persisted payload here as anti-tamper.
+        let replay_scope =
+            super::local_dev_resource_scope_for_run(&invocation.run_context, &self.fallback_user_id);
+        let replay = self
+            .replay_payload_store
+            .load(&replay_scope, invocation_id)
+            .await
+            .map_err(replay_payload_store_error)?
+            .ok_or_else(|| {
+                AgentLoopHostError::new(
+                    AgentLoopHostErrorKind::Unavailable,
+                    "outbound delivery target approval replay payload is unavailable",
+                )
+            })?;
+        if replay.input != *input {
             return Err(AgentLoopHostError::new(
                 AgentLoopHostErrorKind::InvalidInvocation,
                 "outbound delivery target approval resume input does not match",
             ));
         }
-
-        let capability_id = outbound_delivery_target_set_capability_id()?;
-        let invocation_id = invocation_id_from_resume_token(&resume.resume_token)?;
         let scope = resource_scope_for_run(
             &invocation.run_context,
             &self.fallback_user_id,
             invocation_id,
         );
-        let fingerprint = approval_fingerprint(&scope, &capability_id, &resume.estimate, input)?;
+        let fingerprint = approval_fingerprint(&scope, &capability_id, &replay.estimate, input)?;
         // A missing or not-yet-granted approval record is recoverable: the user
         // can re-request approval. Surface `Denied` so the run continues rather
         // than ending it with a terminal `Err(Unauthorized)`.
@@ -500,13 +550,25 @@ async fn write_completed_result(
     }))
 }
 
+/// The input a synthetic invocation dispatches from. The decorator already
+/// reconstitutes the replayed input into `invocation.input` on an approval resume
+/// (loading it from the host-private replay-payload store, §5.3 Stage 2a-i), so
+/// this is simply that value on both fresh and resume dispatch.
 fn invocation_replay_input(invocation: &SyntheticCapabilityInvocation) -> &serde_json::Value {
-    invocation
-        .request
-        .approval_resume
-        .as_ref()
-        .map(|resume| &resume.input)
-        .unwrap_or(&invocation.input)
+    &invocation.input
+}
+
+/// Map a replay-payload store failure to a fail-closed host error; the bound
+/// cause (which may carry a host path) is logged server-side and never surfaced
+/// to the model (mirrors the loop-host seam mapper).
+fn replay_payload_store_error(
+    error: ironclaw_capabilities::ReplayPayloadStoreError,
+) -> AgentLoopHostError {
+    tracing::warn!(error = %error, "failed to access outbound-delivery replay payload");
+    AgentLoopHostError::new(
+        AgentLoopHostErrorKind::Unavailable,
+        "failed to access capability replay payload",
+    )
 }
 
 fn invocation_effective_input_ref(

@@ -1490,6 +1490,33 @@ impl HostRuntimeCapabilityHarness {
             .unwrap_or_else(|| {
                 Arc::new(ironclaw_authorization::in_memory_backed_capability_lease_store())
             });
+        // Durable gate-record + host-private replay-payload stores (§5.3 Stage
+        // 2a-i). Shared via `approval_parts` (built once per group over the shared
+        // composite root) so a gate raised on one thread/turn is reconstituted on
+        // resume; harnesses without approval_parts never raise a resumable gate, so
+        // the fresh in-memory-backed fallback is never exercised on resume.
+        let gate_record_store: Arc<dyn ironclaw_run_state::GateRecordStore> = self
+            .approval_parts
+            .as_ref()
+            .map(|parts| Arc::clone(&parts.gate_record_store))
+            .unwrap_or_else(|| {
+                Arc::new(ironclaw_run_state::FilesystemGateRecordStore::new(
+                    ironclaw_reborn_composition::wrap_scoped(Arc::new(
+                        ironclaw_filesystem::InMemoryBackend::new(),
+                    )),
+                ))
+            });
+        let replay_payload_store: Arc<dyn ironclaw_capabilities::ReplayPayloadStore> = self
+            .approval_parts
+            .as_ref()
+            .map(|parts| Arc::clone(&parts.replay_payload_store))
+            .unwrap_or_else(|| {
+                Arc::new(ironclaw_capabilities::FilesystemReplayPayloadStore::new(
+                    ironclaw_reborn_composition::wrap_scoped(Arc::new(
+                        ironclaw_filesystem::InMemoryBackend::new(),
+                    )),
+                ))
+            });
         let tool_permission_overrides: Arc<dyn ironclaw_approvals::ToolPermissionOverrideStore> =
             self.tool_permission_overrides.clone().unwrap_or_else(|| {
                 Arc::new(
@@ -1680,6 +1707,8 @@ impl HostRuntimeCapabilityHarness {
                 persistent_approval_policies,
                 approval_requests,
                 capability_leases,
+                gate_record_store,
+                replay_payload_store,
                 // `self.capability_mount_overrides` is the SAME per-capability
                 // mount-override list production's `skill_mounts`/`memory_mounts`/
                 // `system_extensions_lifecycle_mounts` special-cases apply

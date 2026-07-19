@@ -23,6 +23,7 @@ jsonschema = { version = "0.46", default-features = false }
 parking_lot = "0.12"
 tracing = "0.1"
 tokio = { version = "1", features = ["rt", "sync", "time"] }
+ironclaw_capabilities = { path = "../ironclaw_capabilities", version = "0.1.0" }
 ironclaw_host_api = { path = "../ironclaw_host_api", version = "0.1.0" }
 ironclaw_host_runtime = { path = "../ironclaw_host_runtime", version = "0.1.0" }
 ironclaw_observability = { path = "../ironclaw_observability" }

@@ -44,12 +44,18 @@ pub(crate) fn wrap_result_read_capability_for_test(
 ) -> Result<Arc<dyn ironclaw_turns::run_profile::LoopCapabilityPort>, AgentLoopHostError> {
     super::synthetic_capability::wrap_synthetic_capabilities(
         inner,
-        vec![result_read_capability(thread_service, fallback_user_id)?],
+        vec![result_read_capability(thread_service, fallback_user_id.clone())?],
         run_context,
+        fallback_user_id,
         input_resolver,
         result_writer,
         // trajectory_observer: None — not wired in the integration-test harness.
         None,
+        // `result_read` never raises an approval gate, so its resume path never
+        // loads a replay payload; an in-memory store keeps the seam wired.
+        Arc::new(ironclaw_capabilities::FilesystemReplayPayloadStore::new(
+            crate::wrap_scoped(Arc::new(ironclaw_filesystem::InMemoryBackend::new())),
+        )),
     )
 }
 

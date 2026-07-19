@@ -621,9 +621,23 @@ impl RebornServices {
             local_runtime.approval_requests.clone();
         let capability_leases: Arc<dyn ironclaw_authorization::CapabilityLeaseStore> =
             local_runtime.capability_leases.clone();
+        // Build over the same shared composite root production `capability_wiring`
+        // uses, so these test-support stores persist across the group's
+        // threads/turns and round-trip identically to production.
+        let capability_store_filesystem =
+            crate::wrap_scoped(Arc::clone(&local_runtime.extension_filesystem));
+        let gate_record_store: Arc<dyn ironclaw_run_state::GateRecordStore> =
+            Arc::new(ironclaw_run_state::FilesystemGateRecordStore::new(Arc::clone(
+                &capability_store_filesystem,
+            )));
+        let replay_payload_store: Arc<dyn ironclaw_capabilities::ReplayPayloadStore> = Arc::new(
+            ironclaw_capabilities::FilesystemReplayPayloadStore::new(capability_store_filesystem),
+        );
         Some(RebornApprovalTestParts {
             approval_requests,
             capability_leases,
+            gate_record_store,
+            replay_payload_store,
         })
     }
 
@@ -999,6 +1013,14 @@ pub struct AttachmentTestSupport {
 pub struct RebornApprovalTestParts {
     pub approval_requests: Arc<dyn ironclaw_run_state::ApprovalRequestStore>,
     pub capability_leases: Arc<dyn ironclaw_authorization::CapabilityLeaseStore>,
+    /// Durable model-visible gate-record store, shared across the group's threads
+    /// so a gate raised on one thread can be read back on another.
+    pub gate_record_store: Arc<dyn ironclaw_run_state::GateRecordStore>,
+    /// Durable host-private replay-payload store (§5.3 Stage 2a-i), shared across
+    /// the group's threads/turns so a gate/auth resume reconstitutes the input the
+    /// original raise persisted. Backed by the same composite root as production
+    /// `capability_wiring`, so the harness store round-trips identically.
+    pub replay_payload_store: Arc<dyn ironclaw_capabilities::ReplayPayloadStore>,
 }
 
 pub(crate) struct RebornRuntimeSubstrate {

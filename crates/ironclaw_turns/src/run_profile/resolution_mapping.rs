@@ -522,9 +522,8 @@ mod tests {
     use super::*;
     use crate::{LoopGateRef, LoopResultRef, TurnRunId};
     use ironclaw_host_api::{
-        ApprovalRequestId, CorrelationId, ExtensionId, ResourceEstimate,
-        RuntimeCredentialAccountProviderId, RuntimeCredentialAccountSetup,
-        RuntimeCredentialAuthRequirement,
+        ApprovalRequestId, CorrelationId, ExtensionId, RuntimeCredentialAccountProviderId,
+        RuntimeCredentialAccountSetup, RuntimeCredentialAuthRequirement,
     };
 
     fn result_ref() -> LoopResultRef {
@@ -930,8 +929,6 @@ mod tests {
             resume_token: CapabilityResumeToken::new("approval-resume-1").unwrap(),
             correlation_id: CorrelationId::new(),
             input_ref: CapabilityInputRef::new("input:x").unwrap(),
-            input: serde_json::json!({"k": "v"}),
-            estimate: ResourceEstimate::default(),
         };
         let mapped = capability_outcome_to_resolution(CapabilityOutcome::ApprovalRequired {
             gate_ref: gate_ref(),
@@ -957,7 +954,6 @@ mod tests {
         let auth_resume = CapabilityAuthResume {
             resume_token: CapabilityResumeToken::new("auth-resume-1").unwrap(),
             prior_approval: None,
-            replay: None,
         };
         let mapped = capability_outcome_to_resolution(CapabilityOutcome::AuthRequired {
             gate_ref: gate_ref(),
