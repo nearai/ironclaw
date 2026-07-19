@@ -6837,13 +6837,15 @@ async def case_qa_10c_slack_thread_replies(ctx: LiveQaContext) -> ProbeResult:
 
     Asserts the OUTCOME — the seeded thread replies appear in the answer —
     not the identity of the tool that fetched them. Thread visibility is
-    satisfied whether the model reaches the replies through a dedicated
-    `slack.get_thread_replies` capability or through a thread-scoped
-    `slack.get_conversation_history` read, so the capability arm accepts
-    either (accept-any). The real regression this guards is the agent being
-    UNABLE to see thread replies at all: THREADROOT/TOPLEVEL presence is the
-    control proving plain history reads worked, and the missing-REPLY_* check
-    stays red when the replies are not surfaced.
+    satisfied whether the model reaches the replies through the dedicated
+    `slack.get_thread_replies` capability or through indexed
+    `slack.search_messages` (whose threaded hits carry reply text), so the
+    capability arm accepts either (accept-any). Conversation history is NOT a
+    member: the shipped manifest documents that history returns thread
+    parents only, never replies. The real regression this guards is the
+    agent being UNABLE to see thread replies at all: THREADROOT/TOPLEVEL
+    presence is the control proving plain history reads worked, and the
+    missing-REPLY_* check stays red when the replies are not surfaced.
     """
     case_name = "qa_10c_slack_thread_replies"
     started = time.monotonic()
@@ -6901,14 +6903,16 @@ async def case_qa_10c_slack_thread_replies(ctx: LiveQaContext) -> ProbeResult:
             ),
             answer_marker=answer_marker,
             extra_details=details,
-            # Outcome, not tool identity: any capability that can retrieve the
-            # thread's replies satisfies the arm. The dedicated thread-replies
-            # tool and a thread-scoped conversation-history read both surface
-            # the seeded replies; the missing-REPLY_* assert below is what
-            # actually pins thread visibility.
+            # Outcome, not tool identity: any capability that can genuinely
+            # retrieve thread-reply content satisfies the arm. Per the shipped
+            # manifest, conversation history NEVER returns replies (only
+            # thread parents), so it is deliberately NOT in this set; indexed
+            # search does surface reply text (threaded hits), so a model
+            # reaching the replies via search passes. The missing-REPLY_*
+            # assert below is what actually pins thread visibility.
             accept_any_capability=(
                 "slack.get_thread_replies",
-                "slack.get_conversation_history",
+                "slack.search_messages",
             ),
         )
         if not chat.success:

@@ -3057,7 +3057,7 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
                     None,
                     (
                         "slack.get_thread_replies",
-                        "slack.get_conversation_history",
+                        "slack.search_messages",
                     ),
                 ),
                 "qa_10d_slack_channel_membership": (
@@ -3086,7 +3086,7 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
     def test_qa_10c_thread_replies_asserts_outcome_not_tool_identity(self):
         # Regression for the 10C flake: the arm asserts an OUTCOME (the seeded
         # thread replies appear in the answer), not TOOL IDENTITY. It must pass
-        # when the model surfaces the replies through get_conversation_history
+        # when the model surfaces the replies through indexed search
         # (never touching a dedicated get_thread_replies tool), still fail when
         # the replies are not surfaced (real thread-visibility regression), and
         # not turn accept-any into a blanket bypass when no retrieval
@@ -3162,24 +3162,26 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
                     )
                 )
 
-        history_only_evidence = {
+        search_only_evidence = {
             "statuses": {
                 "slack.get_thread_replies": [],
-                "slack.get_conversation_history": ["completed"],
+                "slack.search_messages": ["completed"],
             }
         }
         no_retrieval_evidence = {
             "statuses": {
                 "slack.get_thread_replies": [],
-                "slack.get_conversation_history": [],
+                "slack.search_messages": [],
             }
         }
 
-        # Replies surfaced via conversation-history alone (the dedicated
+        # Replies surfaced via indexed search alone (the dedicated
         # thread-replies tool never ran): OUTCOME met -> PASS. This is exactly
-        # the trace that used to flake red on tool identity.
+        # the trace that used to flake red on tool identity. (History is NOT
+        # an accept-any member — the shipped manifest documents it can never
+        # return replies.)
         surfaced = drive(
-            surface_replies=True, evidence=history_only_evidence
+            surface_replies=True, evidence=search_only_evidence
         )
         self.assertTrue(surfaced.success, surfaced.details.get("error"))
         self.assertEqual(surfaced.details.get("missing_thread_reply_markers"), [])
@@ -3187,7 +3189,7 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
         # Replies NOT surfaced (agent genuinely can't see thread replies) ->
         # FAIL, even though a retrieval capability did run.
         dropped = drive(
-            surface_replies=False, evidence=history_only_evidence
+            surface_replies=False, evidence=search_only_evidence
         )
         self.assertFalse(dropped.success)
         self.assertIn(
