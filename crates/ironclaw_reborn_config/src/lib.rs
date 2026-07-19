@@ -23,6 +23,7 @@
 
 mod boot;
 mod budget;
+mod capability_remediation;
 mod config_file;
 mod config_seed;
 mod doctor;
@@ -37,13 +38,16 @@ pub use budget::{
     HEARTBEAT_PER_TICK_USD_ENV, MISSION_PER_TICK_USD_ENV, PROJECT_DAILY_USD_ENV,
     ROUTINE_LIGHTWEIGHT_USD_ENV, ROUTINE_STANDARD_USD_ENV, USER_DAILY_USD_ENV,
 };
+pub use capability_remediation::{apply_step_text, google_remediation_text};
 pub use config_file::{
     BootSection, BudgetSection, DefaultLlmSlotUpdate, DefaultLlmSlotUpdateSession, DriversSection,
+    GoogleFieldUpdate, GoogleOauthConfigUpdate, GoogleOauthConfigUpdateSession, GoogleSection,
     HarnessSection, IdentitySection, LlmSlotFieldUpdate, LlmSlotSelection, PolicySection,
     REBORN_CONFIG_API_VERSION, RebornConfigFile, RebornConfigFileError,
     RebornConfigFileUpdateError, RunnerSection, SlackChannelRouteSection, SlackSection,
     StorageBackend, StorageSection, TelegramSection, TriggerPollerConfigSection,
-    begin_default_llm_slot_update, update_default_llm_slot,
+    begin_default_llm_slot_update, begin_google_oauth_config_update, update_default_llm_slot,
+    update_google_oauth_config, update_slack_enabled,
 };
 pub use config_seed::{
     RebornConfigSeedError, RebornConfigSeedOutcome, seed_default_config_file_if_missing,

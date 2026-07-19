@@ -93,6 +93,10 @@ pub struct RebornConfigFile {
     /// identity and secrets are configured through the WebUI setup surface,
     /// never in this file.
     pub telegram: Option<TelegramSection>,
+    /// Google OAuth client identity for the Gmail/Calendar/Drive
+    /// first-party extension. Public identifiers only — `client_secret`
+    /// is never stored here (see [`GoogleSection`]'s doc).
+    pub google: Option<GoogleSection>,
     /// Cost-based budgets. Composition seeds defaults on first reservation
     /// for each user/project; per-account overrides happen through the
     /// `budget_set` tool or CLI at runtime. Setting any limit to `0` means
@@ -343,9 +347,13 @@ pub struct WebuiSection {
 /// `enabled = true` or `IRONCLAW_REBORN_SLACK_ENABLED=true` mounts the Slack
 /// route. The env var overrides only this enablement gate. Installation
 /// identifiers, channel routing, and Slack secrets are configured through the
-/// WebUI channel setup surface. The deprecated fields below are accepted as a
-/// startup migration bridge for existing `config.toml` files; secret values
-/// still stay env-only.
+/// WebUI channel setup surface. The deprecated fields below are **boot-rejected**,
+/// not bridged: `ironclaw serve` fails closed at startup
+/// (`reject_legacy_slack_setup_fields`, `commands/serve_slack.rs`) if any of
+/// them are set in `config.toml`, with an error pointing the operator at the
+/// WebUI Slack OAuth setup flow instead. They remain on this struct only so a
+/// legacy file produces that specific rejection message rather than an
+/// `unknown field` parse error.
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct SlackSection {
@@ -457,6 +465,29 @@ impl TelegramSection {
         self.enabled = Some(enabled);
         self
     }
+}
+
+/// `[google]` section. Google OAuth client identity for Gmail/Calendar/
+/// Drive first-party extension setup. Unlike Slack's `SlackSection`,
+/// values are stored **literally** (not as env-var name pointers) —
+/// `client_id`/`redirect_uri`/`hosted_domain_hint` are public, non-secret
+/// identifiers safe to round-trip through a declarative file.
+/// `client_secret` deliberately has NO field here: it is secret material
+/// and always routes to the encrypted secret store
+/// (`ironclaw_reborn_composition::GoogleOauthSecretStore`), never
+/// `config.toml` — the same law `reject_inline_secret` enforces for every
+/// other section in this file.
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct GoogleSection {
+    /// OAuth client id, e.g. `<id>.apps.googleusercontent.com`. Public —
+    /// safe to store literally.
+    pub client_id: Option<String>,
+    /// OAuth redirect URI registered with the Google Cloud Console
+    /// project (e.g. `http://127.0.0.1:3000/oauth/google/callback`).
+    pub redirect_uri: Option<String>,
+    /// Optional Google Workspace hosted-domain hint (`hd` parameter).
+    pub hosted_domain_hint: Option<String>,
 }
 
 /// `[budget]` section. All limits in USD. **0 = unlimited.**
@@ -727,6 +758,127 @@ impl DefaultLlmSlotUpdateSession {
         apply_llm_slot_field(&mut self.doc, "base_url", &update.base_url);
         write_edit_document(&self.path, &self.doc)
     }
+}
+
+/// Field update for one `[google]` string field — mirrors
+/// [`LlmSlotFieldUpdate`]'s Keep/Set/Remove shape.
+pub type GoogleFieldUpdate = LlmSlotFieldUpdate;
+
+/// Typed patch for `[google]` in the operator config file. Only the three
+/// literal-value fields; `client_secret` has no config.toml representation
+/// (see [`GoogleSection`]'s doc) and so has no update variant here.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct GoogleOauthConfigUpdate {
+    pub client_id: GoogleFieldUpdate,
+    pub redirect_uri: GoogleFieldUpdate,
+    pub hosted_domain_hint: GoogleFieldUpdate,
+}
+
+/// Held exclusive lock plus editable config document for one `[google]`
+/// config update. Mirrors [`DefaultLlmSlotUpdateSession`].
+pub struct GoogleOauthConfigUpdateSession {
+    path: PathBuf,
+    doc: toml_edit::DocumentMut,
+    _lock_file: fs::File,
+}
+
+impl GoogleOauthConfigUpdateSession {
+    pub fn google_section(&self) -> Result<Option<GoogleSection>, RebornConfigFileUpdateError> {
+        let Some(table) = self
+            .doc
+            .get("google")
+            .and_then(toml_edit::Item::as_table_like)
+        else {
+            return Ok(None);
+        };
+        Ok(Some(GoogleSection {
+            client_id: table
+                .get("client_id")
+                .and_then(toml_edit::Item::as_str)
+                .map(str::to_string),
+            redirect_uri: table
+                .get("redirect_uri")
+                .and_then(toml_edit::Item::as_str)
+                .map(str::to_string),
+            hosted_domain_hint: table
+                .get("hosted_domain_hint")
+                .and_then(toml_edit::Item::as_str)
+                .map(str::to_string),
+        }))
+    }
+
+    pub fn apply(
+        mut self,
+        update: &GoogleOauthConfigUpdate,
+    ) -> Result<(), RebornConfigFileUpdateError> {
+        apply_google_field(&mut self.doc, "client_id", &update.client_id);
+        apply_google_field(&mut self.doc, "redirect_uri", &update.redirect_uri);
+        apply_google_field(
+            &mut self.doc,
+            "hosted_domain_hint",
+            &update.hosted_domain_hint,
+        );
+        write_edit_document(&self.path, &self.doc)
+    }
+}
+
+/// Apply a typed patch to `[google]` while preserving unrelated TOML.
+pub fn update_google_oauth_config(
+    path: &Path,
+    update: &GoogleOauthConfigUpdate,
+) -> Result<(), RebornConfigFileUpdateError> {
+    begin_google_oauth_config_update(path)?.apply(update)
+}
+
+pub fn begin_google_oauth_config_update(
+    path: &Path,
+) -> Result<GoogleOauthConfigUpdateSession, RebornConfigFileUpdateError> {
+    let lock_file = acquire_update_lock(path)?;
+    let doc = load_edit_document(path)?;
+    Ok(GoogleOauthConfigUpdateSession {
+        path: path.to_path_buf(),
+        doc,
+        _lock_file: lock_file,
+    })
+}
+
+fn apply_google_field(doc: &mut toml_edit::DocumentMut, field: &str, update: &GoogleFieldUpdate) {
+    match update {
+        LlmSlotFieldUpdate::Keep => {}
+        LlmSlotFieldUpdate::Set(value) => {
+            ensure_google_table(doc);
+            doc["google"][field] = toml_edit::value(value);
+        }
+        LlmSlotFieldUpdate::Remove => {
+            ensure_google_table(doc);
+            if let Some(table) = doc["google"].as_table_like_mut() {
+                table.remove(field);
+            }
+        }
+    }
+}
+
+fn ensure_google_table(doc: &mut toml_edit::DocumentMut) {
+    let root = doc.as_table_mut();
+    if root.get("google").is_none_or(|item| !item.is_table()) {
+        root.insert("google", toml_edit::Item::Table(toml_edit::Table::new()));
+    }
+}
+
+/// Set `[slack].enabled` while preserving unrelated TOML — the one Slack
+/// field `config set` may still write (see `SlackSection`'s doc: every
+/// other Slack field is boot-rejected). Deliberately a plain function
+/// rather than a full update-session type like the LLM/Google ones: a
+/// single bool field has no `Keep`/`Remove` distinction worth modeling.
+pub fn update_slack_enabled(path: &Path, enabled: bool) -> Result<(), RebornConfigFileUpdateError> {
+    let _lock_file = acquire_update_lock(path)?;
+    let mut doc = load_edit_document(path)?;
+    let root = doc.as_table_mut();
+    if root.get("slack").is_none_or(|item| !item.is_table()) {
+        root.insert("slack", toml_edit::Item::Table(toml_edit::Table::new()));
+    }
+    doc["slack"]["enabled"] = toml_edit::value(enabled);
+    write_edit_document(path, &doc)
 }
 
 // ─── Errors ─────────────────────────────────────────────────────────────────
@@ -1050,6 +1202,20 @@ impl RebornConfigFile {
             if let Some(bot_token_env) = &slack.bot_token_env {
                 check_non_empty_trimmed(Cow::Borrowed("slack.bot_token_env"), bot_token_env)?;
                 validate_env_var_reference("slack.bot_token_env", bot_token_env, attributed_path)?;
+            }
+        }
+        if let Some(google) = &self.google {
+            if let Some(client_id) = &google.client_id {
+                check_non_empty_trimmed(Cow::Borrowed("google.client_id"), client_id)?;
+            }
+            if let Some(redirect_uri) = &google.redirect_uri {
+                check_non_empty_trimmed(Cow::Borrowed("google.redirect_uri"), redirect_uri)?;
+            }
+            if let Some(hosted_domain_hint) = &google.hosted_domain_hint {
+                check_non_empty_trimmed(
+                    Cow::Borrowed("google.hosted_domain_hint"),
+                    hosted_domain_hint,
+                )?;
             }
         }
         if let Some(budget) = &self.budget {
@@ -1622,6 +1788,191 @@ model = "gpt-5-mini"
 
         assert!(matches!(err, RebornConfigFileUpdateError::Validate { .. }));
         assert_eq!(fs::read_to_string(&path).expect("read config"), before);
+    }
+
+    #[test]
+    fn google_oauth_update_writes_new_section() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let path = temp.path().join("config.toml");
+
+        update_google_oauth_config(
+            &path,
+            &GoogleOauthConfigUpdate {
+                client_id: GoogleFieldUpdate::Set("abc123.apps.googleusercontent.com".to_string()),
+                redirect_uri: GoogleFieldUpdate::Set(
+                    "http://127.0.0.1:3000/oauth/google/callback".to_string(),
+                ),
+                hosted_domain_hint: GoogleFieldUpdate::Keep,
+            },
+        )
+        .expect("update config");
+
+        let cfg = RebornConfigFile::load(&path)
+            .expect("valid config")
+            .expect("config present");
+        let google = cfg.google.expect("google section present");
+        assert_eq!(
+            google.client_id.as_deref(),
+            Some("abc123.apps.googleusercontent.com")
+        );
+        assert_eq!(
+            google.redirect_uri.as_deref(),
+            Some("http://127.0.0.1:3000/oauth/google/callback")
+        );
+        assert!(google.hosted_domain_hint.is_none());
+    }
+
+    #[test]
+    fn google_oauth_update_preserves_unrelated_config() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let path = temp.path().join("config.toml");
+        fs::write(
+            &path,
+            r#"
+[identity]
+tenant = "acme"
+
+[google]
+client_id = "old-id.apps.googleusercontent.com"
+redirect_uri = "http://127.0.0.1:3000/oauth/google/callback"
+"#,
+        )
+        .expect("write config");
+
+        update_google_oauth_config(
+            &path,
+            &GoogleOauthConfigUpdate {
+                client_id: GoogleFieldUpdate::Set("new-id.apps.googleusercontent.com".to_string()),
+                redirect_uri: GoogleFieldUpdate::Keep,
+                hosted_domain_hint: GoogleFieldUpdate::Keep,
+            },
+        )
+        .expect("update config");
+
+        let text = fs::read_to_string(&path).expect("read config");
+        assert!(text.contains("[identity]"), "config: {text}");
+        assert!(text.contains("tenant = \"acme\""), "config: {text}");
+        assert!(
+            text.contains("client_id = \"new-id.apps.googleusercontent.com\""),
+            "config: {text}"
+        );
+        assert!(
+            text.contains("redirect_uri = \"http://127.0.0.1:3000/oauth/google/callback\""),
+            "config: {text}"
+        );
+
+        // Idempotence: re-setting the same key with the same value must
+        // edit the existing `[google]` section in place, not append a
+        // second one.
+        update_google_oauth_config(
+            &path,
+            &GoogleOauthConfigUpdate {
+                client_id: GoogleFieldUpdate::Set("new-id.apps.googleusercontent.com".to_string()),
+                redirect_uri: GoogleFieldUpdate::Keep,
+                hosted_domain_hint: GoogleFieldUpdate::Keep,
+            },
+        )
+        .expect("update config again with the same value");
+        let text_after_repeat = fs::read_to_string(&path).expect("read config");
+        assert_eq!(
+            text_after_repeat.matches("[google]").count(),
+            1,
+            "re-setting the same key must not duplicate the [google] section header: \
+             {text_after_repeat}"
+        );
+    }
+
+    #[test]
+    fn google_oauth_update_rejects_inline_secret_value_without_writing() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let path = temp.path().join("config.toml");
+        fs::write(&path, "[identity]\ntenant = \"acme\"\n").expect("write config");
+        let before = fs::read_to_string(&path).expect("read config");
+
+        let err = update_google_oauth_config(
+            &path,
+            &GoogleOauthConfigUpdate {
+                client_id: GoogleFieldUpdate::Set("sk-proj-1234567890abcdef1234567890".to_string()),
+                ..Default::default()
+            },
+        )
+        .expect_err("inline secret should reject");
+
+        assert!(matches!(err, RebornConfigFileUpdateError::Validate { .. }));
+        assert_eq!(fs::read_to_string(&path).expect("read config"), before);
+    }
+
+    #[test]
+    fn google_oauth_config_session_reads_back_current_section() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let path = temp.path().join("config.toml");
+        fs::write(
+            &path,
+            "[google]\nclient_id = \"abc.apps.googleusercontent.com\"\n",
+        )
+        .expect("write config");
+
+        let session = begin_google_oauth_config_update(&path).expect("open session");
+        let section = session
+            .google_section()
+            .expect("read section")
+            .expect("section present");
+        assert_eq!(
+            section.client_id.as_deref(),
+            Some("abc.apps.googleusercontent.com")
+        );
+    }
+
+    #[test]
+    fn update_slack_enabled_writes_new_section() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let path = temp.path().join("config.toml");
+
+        update_slack_enabled(&path, true).expect("update config");
+
+        let cfg = RebornConfigFile::load(&path)
+            .expect("valid config")
+            .expect("config present");
+        assert_eq!(
+            cfg.slack.expect("slack section present").enabled,
+            Some(true)
+        );
+    }
+
+    #[test]
+    fn update_slack_enabled_preserves_unrelated_config_and_flips_value() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let path = temp.path().join("config.toml");
+        fs::write(
+            &path,
+            "[identity]\ntenant = \"acme\"\n\n[slack]\nenabled = true\n",
+        )
+        .expect("write config");
+
+        update_slack_enabled(&path, false).expect("update config");
+
+        let text = fs::read_to_string(&path).expect("read config");
+        assert!(text.contains("[identity]"), "config: {text}");
+        assert!(text.contains("tenant = \"acme\""), "config: {text}");
+        let cfg = RebornConfigFile::load(&path)
+            .expect("valid config")
+            .expect("config present");
+        assert_eq!(
+            cfg.slack.expect("slack section present").enabled,
+            Some(false)
+        );
+
+        // Idempotence: re-setting the same key with the same value must
+        // edit the existing `[slack]` section in place, not append a
+        // second one.
+        update_slack_enabled(&path, false).expect("update config again with the same value");
+        let text_after_repeat = fs::read_to_string(&path).expect("read config");
+        assert_eq!(
+            text_after_repeat.matches("[slack]").count(),
+            1,
+            "re-setting the same key must not duplicate the [slack] section header: \
+             {text_after_repeat}"
+        );
     }
 
     #[test]

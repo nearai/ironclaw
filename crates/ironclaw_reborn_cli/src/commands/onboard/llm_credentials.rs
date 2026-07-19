@@ -1,15 +1,9 @@
+// arch-exempt: large_file, targeted onboarding feature-matrix validation stays at the existing credential seam, plan #4088
 //! Onboarding's LLM-credential provisioning step: prompt for a provider and
 //! API key, then persist both — the secret store write lands before the
 //! `config.toml` selection (see [`provision_llm_credentials`]'s doc).
 
-// Feature-off stubs preserve the unconditional onboarding call shape when the
-// provider-admin surface is unavailable; their full variants are intentionally
-// unreachable in slim builds.
-#![cfg_attr(
-    not(all(feature = "libsql", feature = "root-llm-provider")),
-    allow(dead_code)
-)]
-
+#[cfg(all(feature = "libsql", feature = "root-llm-provider"))]
 use std::path::Path;
 
 use ironclaw_reborn_config::RebornHome;
@@ -21,19 +15,15 @@ use super::prompts::{LlmCredentialPromptError, PromptSource};
 /// shape: the `Skipped*` variants are expected and normal, not a failure.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum LlmCredentialProvisionOutcome {
-    Configured {
-        provider_id: String,
-        model: String,
-    },
+    #[cfg(all(feature = "libsql", feature = "root-llm-provider"))]
+    Configured { provider_id: String, model: String },
     /// `[llm.default]` was already pointed at a provider AND the encrypted
     /// secret store already has a key for it (see
     /// [`already_configured_outcome`]) — this run skipped prompting
     /// entirely rather than re-asking for credentials that are already
     /// durably stored.
-    AlreadyConfigured {
-        provider_id: String,
-        model: String,
-    },
+    #[cfg(all(feature = "libsql", feature = "root-llm-provider"))]
+    AlreadyConfigured { provider_id: String, model: String },
     /// Complete LLM config detected in env (`RebornProviderAdmin::detect_env_llm`)
     /// and `[llm.default]` seeded via `set_provider`. The detected API key is
     /// also persisted to the encrypted secret store (same path the menu flow
@@ -43,43 +33,55 @@ pub(crate) enum LlmCredentialProvisionOutcome {
     /// a headless run.
     /// - Idempotency: once seeded, drift between slot and live env is accepted
     ///   (not re-synced) on later runs; `--force` re-seeds from env again.
-    ConfiguredFromEnv {
-        provider_id: String,
-        model: String,
-    },
+    #[cfg(all(feature = "libsql", feature = "root-llm-provider"))]
+    ConfiguredFromEnv { provider_id: String, model: String },
     /// Headless (non-interactive) session; no LLM environment variables are
     /// set at all. Nothing was seeded.
+    #[cfg(all(feature = "libsql", feature = "root-llm-provider"))]
     SkippedNonInteractive,
     /// Headless (non-interactive) session; some LLM environment
     /// configuration was present but incomplete or invalid (e.g. a
     /// provider's model env var set without its required API key env var).
     /// Nothing was seeded — a partial/broken environment must never be
     /// silently adopted.
-    SkippedNonInteractivePartialEnv {
-        reason: String,
-    },
+    #[cfg(all(feature = "libsql", feature = "root-llm-provider"))]
+    SkippedNonInteractivePartialEnv { reason: String },
+    /// This binary was built without the storage/provider features required
+    /// for interactive LLM provisioning. Unlike `SkippedNonInteractive`,
+    /// changing terminal interactivity cannot make this step available.
+    #[cfg(not(all(feature = "libsql", feature = "root-llm-provider")))]
+    UnavailableInBuild,
 }
 
 impl LlmCredentialProvisionOutcome {
     pub(crate) fn display_line(&self) -> String {
         match self {
+            #[cfg(all(feature = "libsql", feature = "root-llm-provider"))]
             Self::Configured { provider_id, model } => {
                 format!("configured provider `{provider_id}` (model `{model}`)")
             }
+            #[cfg(all(feature = "libsql", feature = "root-llm-provider"))]
             Self::AlreadyConfigured { provider_id, model } => {
                 format!(
                     "already configured (provider `{provider_id}`, model `{model}`); use \
                      --force to reconfigure"
                 )
             }
+            #[cfg(all(feature = "libsql", feature = "root-llm-provider"))]
             Self::ConfiguredFromEnv { provider_id, model } => {
                 format!("configured provider `{provider_id}` (model `{model}`) from environment")
             }
+            #[cfg(all(feature = "libsql", feature = "root-llm-provider"))]
             Self::SkippedNonInteractive => "skipped (non-interactive session)".to_string(),
+            #[cfg(all(feature = "libsql", feature = "root-llm-provider"))]
             Self::SkippedNonInteractivePartialEnv { reason } => {
                 format!(
                     "skipped (non-interactive session; partial environment LLM config: {reason})"
                 )
+            }
+            #[cfg(not(all(feature = "libsql", feature = "root-llm-provider")))]
+            Self::UnavailableInBuild => {
+                "unavailable in this build (requires `libsql` and `root-llm-provider`)".to_string()
             }
         }
     }
@@ -122,19 +124,13 @@ impl LlmKeyStoreOpener for EncryptedLlmKeyStoreOpener {
 /// `&EncryptedLlmKeyStoreOpener` call site compiles everywhere — the
 /// feature-off `provision_llm_credentials` below never calls `open`.
 #[cfg(not(all(feature = "libsql", feature = "root-llm-provider")))]
-pub(crate) trait LlmKeyStoreOpener {
-    fn open(&self, home_path: &Path) -> anyhow::Result<()>;
-}
+pub(crate) trait LlmKeyStoreOpener {}
 
 #[cfg(not(all(feature = "libsql", feature = "root-llm-provider")))]
 pub(crate) struct EncryptedLlmKeyStoreOpener;
 
 #[cfg(not(all(feature = "libsql", feature = "root-llm-provider")))]
-impl LlmKeyStoreOpener for EncryptedLlmKeyStoreOpener {
-    fn open(&self, _home_path: &Path) -> anyhow::Result<()> {
-        Ok(())
-    }
-}
+impl LlmKeyStoreOpener for EncryptedLlmKeyStoreOpener {}
 
 /// Where `provision_via_menu`'s pre-write key/model verification probe comes
 /// from — injected so a test can script outcomes (rejected key, unreachable
@@ -189,19 +185,13 @@ impl LlmProbe for LiveLlmProbe {
 /// `execute()`'s unconditional `&LiveLlmProbe` call site compiling; the
 /// feature-off `provision_llm_credentials` below never calls `probe`.
 #[cfg(not(all(feature = "libsql", feature = "root-llm-provider")))]
-pub(crate) trait LlmProbe {
-    fn probe(&self) -> anyhow::Result<()>;
-}
+pub(crate) trait LlmProbe {}
 
 #[cfg(not(all(feature = "libsql", feature = "root-llm-provider")))]
 pub(crate) struct LiveLlmProbe;
 
 #[cfg(not(all(feature = "libsql", feature = "root-llm-provider")))]
-impl LlmProbe for LiveLlmProbe {
-    fn probe(&self) -> anyhow::Result<()> {
-        Ok(())
-    }
-}
+impl LlmProbe for LiveLlmProbe {}
 
 /// Provision onboard's `[llm.default]` slot.
 ///
@@ -639,14 +629,20 @@ fn provider_api_key_required(
 /// `provision_master_key`'s not-any-storage-feature fallback.
 #[cfg(not(all(feature = "libsql", feature = "root-llm-provider")))]
 pub(crate) fn provision_llm_credentials(
-    _home: &RebornHome,
+    home: &RebornHome,
     _boot: &ironclaw_reborn_config::RebornBootConfig,
     _prompts: &mut dyn PromptSource,
     _store_opener: &dyn LlmKeyStoreOpener,
     _probe: &dyn LlmProbe,
     _force: bool,
 ) -> Result<LlmCredentialProvisionOutcome, LlmCredentialPromptError> {
-    Ok(LlmCredentialProvisionOutcome::SkippedNonInteractive)
+    // The full provider path validates the persisted config while checking
+    // whether credentials are already configured. Preserve that fail-closed
+    // behavior in feature-reduced builds even though they cannot provision an
+    // LLM: onboarding must never report success over a corrupt config.toml.
+    let _ = ironclaw_reborn_config::RebornConfigFile::load(&home.config_file_path())
+        .map_err(|error| LlmCredentialPromptError::Other(error.into()))?;
+    Ok(LlmCredentialProvisionOutcome::UnavailableInBuild)
 }
 
 #[cfg(all(test, feature = "libsql", feature = "root-llm-provider"))]

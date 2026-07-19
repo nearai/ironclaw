@@ -75,6 +75,7 @@ registerPack("uk", {
   "login.connect": "Підключитися",
   "login.oauthDivider": "або продовжити",
   "login.oauthProvider": "Продовжити з {provider}",
+  "login.localDevHint": "Запускаєте IronClaw локально? Отримайте своє посилання для входу:",
 
   // Chat — empty state
   "chat.heroTitle": "Привіт, з чим потрібна допомога?",

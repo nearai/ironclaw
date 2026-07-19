@@ -1,3 +1,4 @@
+// arch-exempt: large_file, test-only environment isolation stays with the systemd contract tests, plan #4088
 //! Linux systemd user-unit generators, path resolution, and verb
 //! bodies for `ironclaw service`.
 
@@ -335,8 +336,25 @@ fn stop_with_runner_impl(runner: &mut dyn ServiceCommandRunner, verbose: bool) -
 /// Detects install/running state, then delegates the stop/start decision
 /// tree to [`super::restart_generic`], which both platforms share.
 pub(super) fn restart_with_runner(runner: &mut dyn ServiceCommandRunner) -> Result<()> {
+    let (installed, was_running) = installed_and_running(runner)?;
+    super::restart_generic(
+        runner,
+        installed,
+        was_running,
+        stop_with_runner_quiet,
+        start_with_runner_quiet,
+    )
+}
+
+/// `(installed, running)` without printing anything — factored out of
+/// [`restart_with_runner`]'s own detection, which is its one caller today.
+/// `status_with_runner` (below) does NOT call this: it needs the raw
+/// `ActiveState` string (not just the derived bool) for
+/// [`systemd_status_detail`]'s secondary line, so it keeps its own
+/// `systemctl show` query rather than sharing this bool-only helper.
+pub(super) fn installed_and_running(runner: &mut dyn ServiceCommandRunner) -> Result<(bool, bool)> {
     let installed = unit_path()?.exists();
-    let was_running = if installed {
+    let running = if installed {
         let active_state = runner.run_capture_checked(
             "systemctl show ActiveState",
             Command::new("systemctl").args([
@@ -351,13 +369,7 @@ pub(super) fn restart_with_runner(runner: &mut dyn ServiceCommandRunner) -> Resu
     } else {
         false
     };
-    super::restart_generic(
-        runner,
-        installed,
-        was_running,
-        stop_with_runner_quiet,
-        start_with_runner_quiet,
-    )
+    Ok((installed, running))
 }
 
 /// Secondary detail line for a non-`active` raw `ActiveState`, e.g. a
@@ -1452,6 +1464,57 @@ mod tests {
         let result = status_with_runner(&mut runner);
 
         assert!(result.is_err());
+    }
+
+    // ── installed_and_running ───────────────────────────────────
+
+    #[test]
+    fn installed_and_running_reports_both_true_for_an_active_unit() {
+        let _lock = crate::runtime::test_env::lock_runtime_env();
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let _home = TempHomeGuard::set(tmp.path());
+        let file = unit_path().expect("unit path");
+        std::fs::create_dir_all(file.parent().expect("unit parent")).expect("create parent");
+        std::fs::write(&file, "unit").expect("write unit");
+        let mut runner = RecordingRunner {
+            active_state_output: Some("active\n".to_string()),
+            ..RecordingRunner::default()
+        };
+        let result = installed_and_running(&mut runner);
+
+        assert_eq!(result.expect("query must succeed"), (true, true));
+    }
+
+    #[test]
+    fn installed_and_running_reports_installed_not_running_for_an_inactive_unit() {
+        let _lock = crate::runtime::test_env::lock_runtime_env();
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let _home = TempHomeGuard::set(tmp.path());
+        let file = unit_path().expect("unit path");
+        std::fs::create_dir_all(file.parent().expect("unit parent")).expect("create parent");
+        std::fs::write(&file, "unit").expect("write unit");
+        let mut runner = RecordingRunner {
+            active_state_output: Some("inactive\n".to_string()),
+            ..RecordingRunner::default()
+        };
+        let result = installed_and_running(&mut runner);
+
+        assert_eq!(result.expect("query must succeed"), (true, false));
+    }
+
+    #[test]
+    fn installed_and_running_reports_both_false_when_unit_is_absent() {
+        let _lock = crate::runtime::test_env::lock_runtime_env();
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let _home = TempHomeGuard::set(tmp.path());
+        let mut runner = RecordingRunner::default();
+        let result = installed_and_running(&mut runner);
+
+        assert_eq!(result.expect("query must succeed"), (false, false));
+        assert!(
+            runner.labels.is_empty(),
+            "must not query systemctl when the unit is absent"
+        );
     }
 
     // ── restart ─────────────────────────────────────────────────

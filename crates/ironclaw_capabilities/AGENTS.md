@@ -16,6 +16,7 @@
 - `CapabilityHost` (`host`) and the invoke/resume/spawn requests/results: `CapabilityInvocationRequest`/`CapabilityInvocationResult`, `CapabilityResumeRequest`, `CapabilitySpawnRequest`/`CapabilitySpawnResult` (`requests`); `CapabilityInvocationError`/`ResumeContextMismatchKind` (`error`).
 - The obligation seam (`obligations`): `CapabilityObligationHandler`, `CapabilityObligationRequest`/`CapabilityObligationOutcome`, abort/completion requests, `CapabilityObligationPhase`/`CapabilityObligationFailureKind`/`CapabilityObligationError`.
 - Capability-profile conformance evaluation (`conformance`): `CapabilityProfileClaim`/`CapabilityProfileClaimedOperation`, the conformance report/findings, and `evaluate_profile_conformance`.
+- The host-private replay-payload store (`replay_payload`): `ReplayPayload`, the `ReplayPayloadStore` port, `FilesystemReplayPayloadStore`, and `ReplayPayloadStoreError`. Persists the raw replay payload a gate/auth resume re-dispatches from, keyed by `InvocationId`, behind a `ScopedFilesystem` CAS lane. Never model-visible (no `SafeSummary`) — see `CLAUDE.md`.
 - Crate-local public API, tests, and fixtures needed to prove that ownership.
 
 ## Do Not Move In Here
