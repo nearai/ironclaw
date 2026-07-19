@@ -63,7 +63,7 @@ use ironclaw_scripts::{
     ScriptExecutionResult, ScriptExecutor, ScriptRuntime, ScriptRuntimeConfig,
 };
 use ironclaw_secrets::{
-    InMemorySecretStore, SecretLease, SecretLeaseId, SecretMaterial, SecretMetadata, SecretStore,
+    FilesystemSecretStore, SecretLease, SecretLeaseId, SecretMaterial, SecretMetadata, SecretStore,
     SecretStoreError,
 };
 use ironclaw_trust::{
@@ -156,7 +156,6 @@ pub(crate) async fn assert_services_use_combined_store_for_atomic_approval_block
             script_capability_id(),
             ResourceEstimate::default(),
             json!({"message": message}),
-            trust_decision_with_dispatch_authority(),
         ))
         .await
         .unwrap();
@@ -514,7 +513,6 @@ pub(crate) async fn block_for_approval(
             script_capability_id(),
             estimate,
             input,
-            trust_decision_with_dispatch_authority(),
         ))
         .await
         .unwrap();
@@ -1090,7 +1088,7 @@ where
     let registry = Arc::new(registry_with_manifest(SCRIPT_MANIFEST));
     let dispatcher = Arc::new(NoopDispatcher);
     let governor = Arc::new(InMemoryResourceGovernor::new());
-    let secret_store = Arc::new(InMemorySecretStore::new());
+    let secret_store = Arc::new(FilesystemSecretStore::ephemeral());
     let obligation_services = BuiltinObligationServices::new(
         Arc::new(InMemoryAuditSink::new()),
         secret_store.clone(),
@@ -2014,7 +2012,6 @@ pub(crate) fn process_sandbox_runtime_request_for_scope(
         process_sandbox_capability_id(),
         process_sandbox_estimate(),
         process_sandbox_input(),
-        process_sandbox_trust_decision(),
     )
 }
 
@@ -2199,13 +2196,7 @@ pub(crate) fn wasm_runtime_request_for_scope(
     input: serde_json::Value,
 ) -> RuntimeCapabilityRequest {
     let context = execution_context_with_dispatch_grant_for_scope(capability_id.clone(), scope);
-    RuntimeCapabilityRequest::new(
-        context,
-        capability_id,
-        wasm_http_estimate(),
-        input,
-        trust_decision_with_dispatch_authority(),
-    )
+    RuntimeCapabilityRequest::new(context, capability_id, wasm_http_estimate(), input)
 }
 
 pub(crate) fn wasm_http_estimate() -> ResourceEstimate {

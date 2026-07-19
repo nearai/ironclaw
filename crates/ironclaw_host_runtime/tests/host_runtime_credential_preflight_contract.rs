@@ -20,7 +20,6 @@ mod support;
 
 use std::sync::Arc;
 
-use chrono::Utc;
 use ironclaw_authorization::{GrantAuthorizer, in_memory_backed_capability_lease_store};
 use ironclaw_extensions::{ExtensionManifest, ExtensionPackage, ExtensionRegistry, ManifestSource};
 use ironclaw_filesystem::DiskFilesystem;
@@ -31,11 +30,8 @@ use ironclaw_host_runtime::{
 };
 use ironclaw_processes::ProcessServices;
 use ironclaw_resources::InMemoryResourceGovernor;
-use ironclaw_secrets::{InMemorySecretStore, SecretMaterial, SecretStore};
-use ironclaw_trust::{
-    AdminConfig, AdminEntry, AuthorityCeiling, EffectiveTrustClass, HostTrustAssignment,
-    HostTrustPolicy, TrustDecision, TrustProvenance,
-};
+use ironclaw_secrets::{FilesystemSecretStore, SecretMaterial, SecretStore};
+use ironclaw_trust::{AdminConfig, AdminEntry, HostTrustAssignment, HostTrustPolicy};
 use serde_json::json;
 use support::legacy_capability_fixture_to_v2;
 
@@ -155,18 +151,6 @@ fn local_manifest_trust_policy(
     .unwrap()
 }
 
-fn trust_decision_with_dispatch_authority() -> TrustDecision {
-    TrustDecision {
-        effective_trust: EffectiveTrustClass::user_trusted(),
-        authority_ceiling: AuthorityCeiling {
-            allowed_effects: vec![EffectKind::DispatchCapability, EffectKind::UseSecret],
-            max_resource_ceiling: None,
-        },
-        provenance: TrustProvenance::Default,
-        evaluated_at: Utc::now(),
-    }
-}
-
 // ─── Test A-regression: ProductAuthAccount must NOT trip pre-flight ──────────
 
 /// A required `ProductAuthAccount`-source credential must not trip the
@@ -190,7 +174,7 @@ async fn product_auth_account_credential_does_not_trip_preflight() {
     ));
     let approval_requests = Arc::new(ironclaw_run_state::FilesystemApprovalRequestStore::new(fs));
     let capability_leases = Arc::new(in_memory_backed_capability_lease_store());
-    let secret_store = Arc::new(InMemorySecretStore::new());
+    let secret_store = Arc::new(FilesystemSecretStore::ephemeral());
     // Deliberately do NOT seed any secret under "google_oauth_token".
     // The secret store is empty. If the pre-flight incorrectly probes the
     // product-auth slot, it will return AuthRequired — which is the bug this
@@ -223,7 +207,6 @@ async fn product_auth_account_credential_does_not_trip_preflight() {
             script_capability_id(),
             estimate,
             input,
-            trust_decision_with_dispatch_authority(),
         ))
         .await
         .unwrap();
@@ -251,7 +234,7 @@ async fn secret_handle_credential_absent_still_trips_preflight() {
     ));
     let approval_requests = Arc::new(ironclaw_run_state::FilesystemApprovalRequestStore::new(fs));
     let capability_leases = Arc::new(in_memory_backed_capability_lease_store());
-    let secret_store = Arc::new(InMemorySecretStore::new());
+    let secret_store = Arc::new(FilesystemSecretStore::ephemeral());
     // No secret seeded — the SecretHandle pre-flight must fire.
 
     let services = HostRuntimeServices::new(
@@ -281,7 +264,6 @@ async fn secret_handle_credential_absent_still_trips_preflight() {
             script_capability_id(),
             estimate,
             input,
-            trust_decision_with_dispatch_authority(),
         ))
         .await
         .unwrap();
@@ -314,7 +296,7 @@ async fn tenant_shared_secret_satisfies_credential_preflight() {
     ));
     let approval_requests = Arc::new(ironclaw_run_state::FilesystemApprovalRequestStore::new(fs));
     let capability_leases = Arc::new(in_memory_backed_capability_lease_store());
-    let secret_store = Arc::new(InMemorySecretStore::new());
+    let secret_store = Arc::new(FilesystemSecretStore::ephemeral());
 
     let services = HostRuntimeServices::new(
         Arc::new(registry_with_manifest(SCRIPT_WITH_SECRET_HANDLE_MANIFEST)),
@@ -357,7 +339,6 @@ async fn tenant_shared_secret_satisfies_credential_preflight() {
             script_capability_id(),
             estimate,
             input,
-            trust_decision_with_dispatch_authority(),
         ))
         .await
         .unwrap();
@@ -379,7 +360,7 @@ async fn tenant_shared_secret_satisfies_credential_preflight() {
 /// `InvocationId`) and swapping the `resource_scope` from one onto the other.
 #[tokio::test]
 async fn invoke_capability_forged_scope_fails_before_preflight() {
-    let secret_store = Arc::new(InMemorySecretStore::new());
+    let secret_store = Arc::new(FilesystemSecretStore::ephemeral());
 
     let services = HostRuntimeServices::new(
         Arc::new(registry_with_manifest(SCRIPT_WITH_SECRET_HANDLE_MANIFEST)),
@@ -424,7 +405,6 @@ async fn invoke_capability_forged_scope_fails_before_preflight() {
             script_capability_id(),
             estimate,
             input,
-            trust_decision_with_dispatch_authority(),
         ))
         .await;
 
@@ -445,7 +425,7 @@ async fn invoke_capability_forged_scope_fails_before_preflight() {
 /// Same forged-scope test through the `spawn_capability` path.
 #[tokio::test]
 async fn spawn_capability_forged_scope_fails_before_preflight() {
-    let secret_store = Arc::new(InMemorySecretStore::new());
+    let secret_store = Arc::new(FilesystemSecretStore::ephemeral());
 
     let services = HostRuntimeServices::new(
         Arc::new(registry_with_manifest(SCRIPT_WITH_SECRET_HANDLE_MANIFEST)),
@@ -485,7 +465,6 @@ async fn spawn_capability_forged_scope_fails_before_preflight() {
             script_capability_id(),
             estimate,
             input,
-            trust_decision_with_dispatch_authority(),
         ))
         .await;
 

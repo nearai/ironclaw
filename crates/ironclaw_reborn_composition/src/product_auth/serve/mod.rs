@@ -1747,7 +1747,7 @@ mod tests {
         NetworkMethod, RuntimeCredentialAccountProviderId, RuntimeCredentialAuthRequirement,
         RuntimeHttpEgress, RuntimeHttpEgressRequest, RuntimeHttpEgressResponse, SecretHandle,
     };
-    use ironclaw_secrets::{InMemorySecretStore, SecretMaterial, SecretStore};
+    use ironclaw_secrets::{FilesystemSecretStore, SecretMaterial, SecretStore};
     use ironclaw_turns::{TurnRunId, TurnScope};
     use tower::ServiceExt;
 
@@ -1927,7 +1927,7 @@ mod tests {
 
     #[tokio::test]
     async fn extension_oauth_start_handler_starts_dcr_setup_flow_for_notion() {
-        let secret_store = Arc::new(InMemorySecretStore::new());
+        let secret_store = Arc::new(FilesystemSecretStore::ephemeral());
         let dcr_provider = Arc::new(
             OAuthDcrProvider::new(
                 OAuthDcrProviderConfig {
@@ -2005,7 +2005,7 @@ mod tests {
 
     #[tokio::test]
     async fn extension_oauth_start_aborts_flow_when_extension_disappears_after_creation() {
-        let secret_store = Arc::new(InMemorySecretStore::new());
+        let secret_store = Arc::new(FilesystemSecretStore::ephemeral());
         let dcr_provider = Arc::new(
             OAuthDcrProvider::new(
                 OAuthDcrProviderConfig {
@@ -2353,7 +2353,7 @@ mod tests {
 
     #[tokio::test]
     async fn dcr_oauth_callback_retrieves_pkce_from_registry_when_route_cache_misses() {
-        let secret_store = Arc::new(InMemorySecretStore::new());
+        let secret_store = Arc::new(FilesystemSecretStore::ephemeral());
         let secret_store_for_provider: Arc<dyn SecretStore> = secret_store.clone();
         let dcr_provider = Arc::new(
             OAuthDcrProvider::new(
@@ -2431,7 +2431,7 @@ mod tests {
     #[tokio::test]
     async fn dcr_oauth_callback_resumes_blocked_turn_gate() {
         let shared = Arc::new(ironclaw_auth::InMemoryAuthProductServices::new());
-        let secret_store = Arc::new(InMemorySecretStore::new());
+        let secret_store = Arc::new(FilesystemSecretStore::ephemeral());
         let secret_store_for_provider: Arc<dyn SecretStore> = secret_store;
         let dispatcher = Arc::new(RecordingDispatcher::default());
         let dcr_provider = Arc::new(

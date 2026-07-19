@@ -3815,7 +3815,7 @@ async fn local_dev_runtime_exposes_host_runtime_capabilities_to_model_calls() {
 /// Records both trajectory callbacks so the e2e test can assert the
 /// observer fires through a real `build_reborn_runtime` turn — driving the
 /// input hook (`HostRuntimeLoopCapabilityPort`) and the result hook
-/// (`LocalDevCapabilityIo::write_capability_result`) on the actual dispatch
+/// (`StagedCapabilityIo::write_capability_result`) on the actual dispatch
 /// path, not a direct helper call.
 #[derive(Debug, Default)]
 struct RecordingTrajectoryObserver {

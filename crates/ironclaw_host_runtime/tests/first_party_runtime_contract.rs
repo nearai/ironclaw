@@ -4,7 +4,6 @@ use std::{
 };
 
 use async_trait::async_trait;
-use chrono::Utc;
 use futures_util::FutureExt;
 use ironclaw_authorization::GrantAuthorizer;
 use ironclaw_events::{InMemoryEventSink, RuntimeEventKind};
@@ -13,6 +12,7 @@ use ironclaw_extensions::{
     ExtensionRegistry, ExtensionRuntime, MANIFEST_SCHEMA_VERSION, ManifestSource,
 };
 use ironclaw_filesystem::DiskFilesystem;
+use ironclaw_filesystem::InMemoryBackend;
 use ironclaw_host_api::*;
 use ironclaw_host_runtime::{
     CapabilitySurfaceVersion, FirstPartyCapabilityError, FirstPartyCapabilityHandler,
@@ -26,11 +26,8 @@ use ironclaw_network::{
 };
 use ironclaw_resources::{InMemoryResourceGovernor, ResourceAccount, ResourceTally};
 use ironclaw_run_state::{RunStateStore, RunStatus};
-use ironclaw_secrets::{InMemorySecretStore, SecretMaterial, SecretStore};
-use ironclaw_trust::{
-    AdminConfig, AdminEntry, AuthorityCeiling, EffectiveTrustClass, HostTrustAssignment,
-    HostTrustPolicy, TrustDecision, TrustProvenance,
-};
+use ironclaw_secrets::{FilesystemSecretStore, SecretMaterial, SecretStore};
+use ironclaw_trust::{AdminConfig, AdminEntry, HostTrustAssignment, HostTrustPolicy};
 use serde_json::{Value, json};
 
 const FIRST_PARTY_STAGED_SECRET: &str = "sk-first-party-staged-secret";
@@ -72,7 +69,6 @@ async fn host_runtime_invokes_first_party_handler_through_capability_host() {
             capability_id(),
             estimate.clone(),
             input.clone(),
-            trust_decision(),
         ))
         .await
         .unwrap();
@@ -117,7 +113,7 @@ async fn first_party_handler_uses_staged_secret_through_production_host_egress()
     });
     let first_party =
         FirstPartyCapabilityRegistry::new().with_handler(capability_id(), Arc::clone(&handler));
-    let secret_store = Arc::new(InMemorySecretStore::new());
+    let secret_store = Arc::new(FilesystemSecretStore::ephemeral());
     let network = RecordingNetworkHttpEgress::default();
     let network_recorder = network.requests.clone();
     let runtime = HostRuntimeServices::new(
@@ -152,7 +148,6 @@ async fn first_party_handler_uses_staged_secret_through_production_host_egress()
                 .set_network_egress_bytes(100)
                 .set_output_bytes(1024),
             json!({"url":"https://api.example.test/v1/native"}),
-            trust_decision(),
         ))
         .await
         .unwrap();
@@ -234,7 +229,7 @@ async fn first_party_handler_maps_egress_error_codes_to_dispatch_errors() {
 
     for (error, expected_kind) in cases {
         let handle = SecretHandle::new("api-token").unwrap();
-        let secret_store = Arc::new(InMemorySecretStore::new());
+        let secret_store = Arc::new(FilesystemSecretStore::ephemeral());
         let runtime = http_first_party_services(&handle)
             .with_secret_store(Arc::clone(&secret_store))
             .with_runtime_http_egress(Arc::new(FailingRuntimeHttpEgress { error }))
@@ -259,7 +254,7 @@ async fn first_party_handler_maps_egress_error_codes_to_dispatch_errors() {
     }
 
     let handle = SecretHandle::new("api-token").unwrap();
-    let secret_store = Arc::new(InMemorySecretStore::new());
+    let secret_store = Arc::new(FilesystemSecretStore::ephemeral());
     let runtime = http_first_party_services(&handle)
         .with_secret_store(Arc::clone(&secret_store))
         .with_trust_policy(Arc::new(first_party_trust_policy()))
@@ -280,7 +275,7 @@ async fn first_party_handler_maps_egress_error_codes_to_dispatch_errors() {
     assert_eq!(failure.kind, RuntimeFailureKind::Network);
 
     let handle = SecretHandle::new("api-token").unwrap();
-    let secret_store = Arc::new(InMemorySecretStore::new());
+    let secret_store = Arc::new(FilesystemSecretStore::ephemeral());
     let runtime = http_first_party_services(&handle)
         .with_secret_store(Arc::clone(&secret_store))
         .with_runtime_http_egress(Arc::new(UnreachableRuntimeHttpEgress))
@@ -301,7 +296,7 @@ async fn first_party_handler_maps_egress_error_codes_to_dispatch_errors() {
 async fn first_party_handler_rejects_non_string_url_input() {
     for input in [json!({"url": 123}), json!({"url": true})] {
         let handle = SecretHandle::new("api-token").unwrap();
-        let secret_store = Arc::new(InMemorySecretStore::new());
+        let secret_store = Arc::new(FilesystemSecretStore::ephemeral());
         let runtime = http_first_party_services(&handle)
             .with_secret_store(Arc::clone(&secret_store))
             .with_runtime_http_egress(Arc::new(UnreachableRuntimeHttpEgress))
@@ -435,7 +430,6 @@ async fn first_party_handler_error_reconciles_reported_usage_after_side_effect()
             capability_id(),
             ResourceEstimate::default().set_network_egress_bytes(100),
             json!({"message":"status"}),
-            trust_decision(),
         ))
         .await
         .unwrap();
@@ -481,7 +475,6 @@ async fn first_party_handler_panic_fails_closed_and_releases_reservation() {
         capability_id(),
         ResourceEstimate::default().set_network_egress_bytes(100),
         json!({"message":"status"}),
-        trust_decision(),
     )))
     .catch_unwind()
     .await
@@ -531,7 +524,6 @@ async fn first_party_missing_handler_fails_closed_without_side_effect_handler() 
             capability_id(),
             ResourceEstimate::default(),
             json!({"message":"status"}),
-            trust_decision(),
         ))
         .await
         .unwrap();
@@ -819,7 +811,6 @@ async fn invoke_http_fixture(
                 .set_network_egress_bytes(100)
                 .set_output_bytes(1024),
             input,
-            trust_decision(),
         ))
         .await
         .unwrap()
@@ -908,7 +899,7 @@ fn test_network_policy() -> NetworkPolicy {
 }
 
 async fn stage_http_secret(
-    secret_store: &InMemorySecretStore,
+    secret_store: &FilesystemSecretStore<InMemoryBackend>,
     scope: &ResourceScope,
     handle: &SecretHandle,
 ) {
@@ -921,18 +912,6 @@ async fn stage_http_secret(
         )
         .await
         .unwrap();
-}
-
-fn trust_decision() -> TrustDecision {
-    TrustDecision {
-        effective_trust: EffectiveTrustClass::user_trusted(),
-        authority_ceiling: AuthorityCeiling {
-            allowed_effects: vec![EffectKind::DispatchCapability],
-            max_resource_ceiling: None,
-        },
-        provenance: TrustProvenance::Default,
-        evaluated_at: Utc::now(),
-    }
 }
 
 fn provider_id() -> ExtensionId {

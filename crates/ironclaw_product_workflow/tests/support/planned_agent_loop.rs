@@ -59,10 +59,9 @@ use ironclaw_threads::{
 };
 use ironclaw_trust::EffectiveTrustClass;
 use ironclaw_turns::{
-    CancelRunRequest, GetRunStateRequest, IdempotencyKey, InMemoryCheckpointStateStore,
-    InMemoryLoopCheckpointStore, InMemoryTurnStateStore, LoopResultRef, SanitizedCancelReason,
-    TurnActor, TurnCoordinator, TurnRunId, TurnRunState, TurnRunWake, TurnScope, TurnStateStore,
-    TurnStatus,
+    CancelRunRequest, GetRunStateRequest, IdempotencyKey, InMemoryTurnStateStore, LoopResultRef,
+    SanitizedCancelReason, TurnActor, TurnCoordinator, TurnRunId, TurnRunState, TurnRunWake,
+    TurnScope, TurnStateStore, TurnStatus,
     run_profile::{
         AgentLoopHostError, CapabilityBatchInvocation, CapabilityBatchOutcome,
         CapabilityCallCandidate, CapabilityDescriptorView, CapabilityInputRef,
@@ -75,6 +74,8 @@ use ironclaw_turns::{
 };
 use tokio::time::{sleep, timeout};
 use tokio_util::sync::CancellationToken;
+
+use ironclaw_loop_host::in_memory_backed_checkpoint_state_store as in_memory_checkpoint_state_store;
 
 pub struct ProductLiveAgentLoopHarness {
     binding_service: FakeConversationBindingService,
@@ -247,7 +248,7 @@ impl ProductLiveAgentLoopHarness {
         };
         let thread_service = InMemorySessionThreadService::default();
         let turn_store = Arc::new(InMemoryTurnStateStore::default());
-        let checkpoint_store = Arc::new(InMemoryLoopCheckpointStore::default());
+        let checkpoint_store = Arc::clone(&turn_store);
         let model_requests = Arc::new(Mutex::new(Vec::new()));
         let model_responses = VecDeque::from(config.model_responses);
         let model_release = config
@@ -361,7 +362,7 @@ impl ProductLiveAgentLoopHarness {
             thread_service: Arc::new(thread_service.clone()),
             thread_scope: thread_scope.clone(),
             model_gateway,
-            checkpoint_state_store: Arc::new(InMemoryCheckpointStateStore::default()),
+            checkpoint_state_store: in_memory_checkpoint_state_store(),
             loop_checkpoint_store: checkpoint_store.clone(),
             milestone_sink: Arc::new(InMemoryLoopHostMilestoneSink::default()),
             capability_factory,

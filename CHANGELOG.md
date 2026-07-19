@@ -37,6 +37,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - *(channels)* v1 Slack DM policy now defaults to `allowlist` (previously `pairing`); existing installs still configured with `dm_policy=pairing` fall through to `allowlist` as Slack relay pairing is retired ([#5604](https://github.com/nearai/ironclaw/pull/5604)).
 - *(reborn-cli)* **Breaking:** `ironclaw-reborn serve` now rejects the legacy `[slack]` config fields (`installation_id`, `team_id`, `api_app_id`, `slack_user_id`, `user_id`, `shared_subject_user_id`, `signing_secret_env`, `bot_token_env`, `channel_routes`). Slack bot credentials and routing are configured from the WebUI channel setup page; per-user identity comes only from Slack OAuth. `[slack].enabled` / `IRONCLAW_REBORN_SLACK_ENABLED` still gate whether the channel mounts ([#5604](https://github.com/nearai/ironclaw/pull/5604)).
 
+### CI / Release
+
+- *(release)* compile the canonical Reborn `ironclaw` binary across the seven supported OS/CPU targets as a tag-driven release preflight ([#6160](https://github.com/nearai/ironclaw/issues/6160)).
+
 ### Removed
 
 - *(channels)* remove the v1 `pairing_approve` builtin tool and the generic `channel_connection_resume` machinery as part of retiring Slack relay pairing; existing Slack pairing users reconnect via OAuth (Telegram/WASM self-service pairing via the pairing endpoints is unaffected) ([#5604](https://github.com/nearai/ironclaw/pull/5604)).

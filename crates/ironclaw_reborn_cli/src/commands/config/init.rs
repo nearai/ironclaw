@@ -81,7 +81,7 @@ impl ConfigFileWrite {
 ///   at `serve` boot — so `effective_api_key_required` overrides it to
 ///   `true` and onboarding still asks for a `cloud-api.near.ai` API key like
 ///   every other provider. See `effective_api_key_required`'s doc.
-const DEFAULT_LLM_PROVIDER_ID: &str = "nearai";
+pub(super) const DEFAULT_LLM_PROVIDER_ID: &str = "nearai";
 /// Mirrors `providers.json`'s `nearai` entry's `default_model`.
 const DEFAULT_LLM_MODEL: &str = "deepseek-ai/DeepSeek-V4-Flash";
 /// Mirrors `providers.json`'s `nearai` entry's `api_key_env`.

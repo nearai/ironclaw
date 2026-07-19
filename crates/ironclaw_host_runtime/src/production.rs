@@ -420,7 +420,6 @@ impl HostRuntime for DefaultHostRuntime {
             estimate,
             input,
             idempotency_key,
-            trust_decision: _caller_trust_decision,
         } = request;
         let scope = context.resource_scope.clone();
         let invocation_id = context.invocation_id;
@@ -612,7 +611,6 @@ impl HostRuntime for DefaultHostRuntime {
             estimate,
             input,
             idempotency_key,
-            trust_decision: _caller_trust_decision,
         } = request;
         let input = match host_runtime_spawn_input_for_capability(&capability_id, input)? {
             SpawnInputPreparation::Ready(input) => input,
@@ -724,7 +722,6 @@ impl HostRuntime for DefaultHostRuntime {
             estimate,
             input,
             idempotency_key,
-            trust_decision: _caller_trust_decision,
         } = request;
         if let Some(outcome) = self
             .resume_actor_preflight_guard(&context, &capability_id)
@@ -832,7 +829,6 @@ impl HostRuntime for DefaultHostRuntime {
             estimate,
             input,
             idempotency_key,
-            trust_decision: _caller_trust_decision,
             approval_request_id,
         } = request;
         if let Some(outcome) = self
@@ -957,7 +953,6 @@ impl HostRuntime for DefaultHostRuntime {
             estimate,
             input,
             idempotency_key,
-            trust_decision: _caller_trust_decision,
         } = request;
         if let Some(outcome) = self
             .resume_actor_preflight_guard(&context, &capability_id)
@@ -1941,12 +1936,14 @@ fn trust_evaluation_failure_kind(error: TrustEvaluationError) -> RuntimeFailureK
 /// strings; `Serialization`/`Deserialization` carry serde internals. Forward
 /// the redacted variant discriminator instead of `error.to_string()` so the
 /// boundary stays infrastructure-opaque to upper services.
+// arch-exempt: large_file, host runtime production wiring; +1 arm for RunStateError::GateRecordAlreadyExists (#6243 left this match non-exhaustive), plan #6175
 fn unavailable_from_run_state(error: RunStateError) -> HostRuntimeError {
     let reason = match error {
         RunStateError::UnknownInvocation { .. } => "run-state record not found",
         RunStateError::InvocationAlreadyExists { .. } => "run-state record already exists",
         RunStateError::UnknownApprovalRequest { .. } => "approval request not found",
         RunStateError::ApprovalRequestAlreadyExists { .. } => "approval request already exists",
+        RunStateError::GateRecordAlreadyExists { .. } => "gate record already exists",
         RunStateError::ApprovalNotPending { .. } => "approval request not pending",
         RunStateError::InvalidPath(_) => "run-state storage path invalid",
         RunStateError::Filesystem(_) => "run-state filesystem unavailable",

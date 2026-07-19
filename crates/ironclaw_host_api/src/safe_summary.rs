@@ -8,17 +8,17 @@
 //!
 //! ## Redaction contract
 //!
-//! This is the canonical home for the safe-summary rule. It is an **exact,
-//! non-weakening mirror** of `ironclaw_turns`' `validate_loop_safe_summary`
-//! (the loop-facing `safe_summary: String` fields on `CapabilityOutcome` and
-//! friends). Per `tools.md`, result vocabulary belongs in `host_api`; the doc's
-//! migration folds those ad-hoc `String` fields onto this type. Until that
-//! wiring slice lands, the turns validator is a temporary duplicate that must be
-//! reconciled to delegate here — it must never diverge from the rules below, and
-//! must never become *weaker* than them. The bound (512 bytes), the payload/path
-//! delimiter ban, the credential-marker denylist, and the secret-like-token
-//! detector are all defense-in-depth: the redactor at the construction site
-//! scrubs first, and this type refuses to hold anything that slipped through.
+//! This is the canonical home for the safe-summary rule — the **single
+//! definition**. `ironclaw_turns`' `validate_loop_safe_summary` (the
+//! loop-facing `safe_summary: String` fields on `CapabilityOutcome` and
+//! friends) and `ironclaw_memory_native`'s memory-snippet validator both
+//! DELEGATE to `SafeSummary::new`; they layer only their own domain-specific
+//! concerns on top (a loop-input-encoding sentinel bypass, extra snippet
+//! vocabulary bans). Change the rule here, never in a delegate. The bound
+//! (512 bytes), the payload/path delimiter ban, the credential-marker
+//! denylist, and the secret-like-token detector are all defense-in-depth: the
+//! redactor at the construction site scrubs first, and this type refuses to
+//! hold anything that slipped through.
 
 use serde::{Deserialize, Serialize};
 
@@ -50,7 +50,26 @@ impl SafeSummary {
     pub fn into_inner(self) -> String {
         self.0
     }
+
+    /// An infallible, redaction-safe fallback summary.
+    ///
+    /// A caller that must produce a `SafeSummary` from an untrusted upstream
+    /// string (e.g. mapping a loop-facing `safe_summary: String` onto this type)
+    /// needs a non-panicking last resort when the upstream value fails the
+    /// redaction contract. Only this crate can construct a `SafeSummary` without
+    /// validation, so the placeholder lives here: it is built from a fixed
+    /// compile-time constant that satisfies [`validate_safe_summary`] (pinned by
+    /// `placeholder_is_valid`), so no external caller needs `unwrap`/`expect` to
+    /// obtain a value.
+    pub fn placeholder() -> Self {
+        Self(SAFE_SUMMARY_PLACEHOLDER.to_string())
+    }
 }
+
+/// The fixed, redaction-safe text backing [`SafeSummary::placeholder`]. Contains
+/// only lowercase ASCII letters and spaces, so it can never trip a delimiter,
+/// control-character, credential-marker, or secret-token rule.
+const SAFE_SUMMARY_PLACEHOLDER: &str = "capability summary unavailable";
 
 impl TryFrom<String> for SafeSummary {
     type Error = HostApiError;
@@ -75,10 +94,12 @@ impl std::fmt::Display for SafeSummary {
     }
 }
 
-/// The canonical safe-summary redaction rule. Exact mirror of
-/// `ironclaw_turns::run_profile::host::validate_loop_safe_summary` (minus the
-/// turns-local `INPUT_ENCODE_HUMAN_SUMMARY` sentinel bypass, which is a
-/// loop-input-encoding concern, not a general redaction rule).
+/// The canonical safe-summary redaction rule — the single definition.
+/// `ironclaw_turns::run_profile::host::validate_loop_safe_summary` and
+/// `ironclaw_memory_native`'s memory-snippet validator DELEGATE here (the turns
+/// copy keeps only its `INPUT_ENCODE_HUMAN_SUMMARY` sentinel bypass, a
+/// loop-input-encoding concern; memory_native layers extra snippet-specific
+/// bans on top). Change the rule here, never in a delegate.
 fn validate_safe_summary(value: &str) -> Result<(), HostApiError> {
     if value.is_empty() {
         return Err(HostApiError::invalid_safe_summary("must not be empty"));
@@ -138,7 +159,25 @@ fn contains_secret_like_token(lower: &str) -> bool {
         .split(|character: char| {
             !character.is_ascii_alphanumeric() && !matches!(character, '-' | '_' | '.')
         })
-        .any(is_secret_like_token)
+        .any(has_secret_like_prefix)
+}
+
+/// True when a credential-shaped prefix starts this token or any interior
+/// segment after a `-`/`_`/`.` separator. The tokenizer above deliberately
+/// keeps those separators inside tokens so multi-part prefixes like
+/// `github_pat_` stay matchable — but that alone would let `memo_sk-abc123`
+/// hide a key behind a leading word, so every separator boundary is checked
+/// as a token start too. (Tokens are pure ASCII by construction: the split
+/// removes every non-ASCII-alphanumeric character except `-`/`_`/`.`, so
+/// byte indexing after a separator is char-boundary-safe.)
+fn has_secret_like_prefix(token: &str) -> bool {
+    if is_secret_like_token(token) {
+        return true;
+    }
+    token
+        .char_indices()
+        .filter(|(_, character)| matches!(character, '-' | '_' | '.'))
+        .any(|(index, _)| is_secret_like_token(&token[index + 1..]))
 }
 
 fn is_secret_like_token(token: &str) -> bool {
@@ -176,6 +215,24 @@ mod tests {
     }
 
     #[test]
+    fn placeholder_is_valid() {
+        // The infallible fallback MUST satisfy the same redaction contract it
+        // bypasses at construction; if the constant ever regresses, this fails.
+        assert!(
+            validate_safe_summary(SAFE_SUMMARY_PLACEHOLDER).is_ok(),
+            "placeholder constant must satisfy the redaction rule"
+        );
+        assert_eq!(
+            SafeSummary::placeholder().as_str(),
+            SAFE_SUMMARY_PLACEHOLDER
+        );
+        // And it round-trips through the wire like any other summary.
+        let wire = serde_json::to_string(&SafeSummary::placeholder()).unwrap();
+        let back: SafeSummary = serde_json::from_str(&wire).unwrap();
+        assert_eq!(back, SafeSummary::placeholder());
+    }
+
+    #[test]
     fn rejects_empty_and_overlong() {
         // Assert the specific reason, not just is_err(), so an infrastructure
         // failure can't masquerade as a validation pass.
@@ -206,6 +263,13 @@ mod tests {
             "token sk-ant-abc123",
             "ghp_0123456789abcdef",
             "AKIA0123456789ABCDEF",
+            // A separator-joined leading word must not hide a key: the former
+            // memory_native tokenizer split on `_`/`.` and caught these; the
+            // canonical detector must be no weaker (regression for the
+            // boundary-scan in `has_secret_like_prefix`).
+            "note memo_sk-abc123 saved",
+            "memo.ghp_0123456789abcdef",
+            "backup_AKIA0123456789ABCDEF",
         ] {
             let why = rejection(bad);
             assert!(
@@ -222,6 +286,9 @@ mod tests {
             "provider error",
             "stack trace truncated",
             "tool input rejected",
+            // Boundary scan must not false-positive on words that merely
+            // contain a prefix mid-segment.
+            "risk-based task-list check",
         ] {
             assert!(SafeSummary::new(ok).is_ok(), "should allow {ok:?}");
         }

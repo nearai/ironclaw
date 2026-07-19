@@ -18,7 +18,7 @@ mod tests {
         RuntimeHttpEgressResponse, SecretHandle, TenantId, ThreadId, UserId,
     };
     use ironclaw_product_workflow::WebUiAuthenticatedCaller;
-    use ironclaw_secrets::InMemorySecretStore;
+    use ironclaw_secrets::FilesystemSecretStore;
     use serde_json::json;
     use std::sync::Arc;
     use tower::ServiceExt;
@@ -121,7 +121,7 @@ mod tests {
         // `invocation_id` (fresh per flow) — the old `scope_matches`
         // full-equality compared `invocation_id` and so never matched, forking a
         // new account on every reconnect. The bind is now owner-granularity.
-        let secret_store = Arc::new(InMemorySecretStore::new());
+        let secret_store = Arc::new(FilesystemSecretStore::ephemeral());
         let dcr_provider = Arc::new(
             OAuthDcrProvider::new(
                 OAuthDcrProviderConfig {
@@ -223,7 +223,7 @@ mod tests {
         // agent must never be bound by this owner's reconnect. tenant/user/
         // agent/project stay hard-`==` in the owner match, so a cross-owner
         // account is invisible and the flow starts with no update binding.
-        let secret_store = Arc::new(InMemorySecretStore::new());
+        let secret_store = Arc::new(FilesystemSecretStore::ephemeral());
         let dcr_provider = Arc::new(
             OAuthDcrProvider::new(
                 OAuthDcrProviderConfig {

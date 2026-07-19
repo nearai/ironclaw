@@ -15,7 +15,7 @@ use ironclaw_host_api::{
     RuntimeHttpEgressRequest, RuntimeHttpEgressResponse, TenantId, ThreadId, UserId,
 };
 use ironclaw_product_workflow::ProductAuthTurnGateResumeDispatcher;
-use ironclaw_secrets::InMemorySecretStore;
+use ironclaw_secrets::FilesystemSecretStore;
 use ironclaw_turns::{
     AcceptedMessageRef, BlockedReason, CancelRunRequest, CancelRunResponse, EventCursor, GateRef,
     GetRunStateRequest, IdempotencyKey, LoopCheckpointStateRef, ReplyTargetBindingRef,
@@ -540,7 +540,7 @@ async fn oauth_callback_exchanges_notion_through_reborn_product_auth_boundary() 
     let provider_client = HostOAuthProviderClient::new(
         notion_provider_spec(),
         egress.clone(),
-        Arc::new(InMemorySecretStore::new()),
+        Arc::new(FilesystemSecretStore::ephemeral()),
         Arc::new(NoopObligationHandler),
         OAuthClientId::new("notion-client-123").expect("client id"),
         OAuthRedirectUri::new("https://app.example/oauth/notion/callback").expect("redirect uri"),
@@ -1070,7 +1070,7 @@ fn provider_scope(value: &str) -> ProviderScope {
 #[cfg(test)]
 async fn submit_and_block_auth_run(
     turn_coordinator: &dyn ironclaw_turns::TurnCoordinator,
-    local_runtime: &RebornLocalRuntimeServices,
+    local_runtime: &RebornRuntimeSubstrate,
     scope: TurnScope,
     actor: TurnActor,
     gate_ref: &str,

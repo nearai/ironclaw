@@ -17,14 +17,17 @@ pub use factory::AttachmentTestSupport;
 #[cfg(any(feature = "libsql", feature = "postgres"))]
 pub use factory::LOCAL_DEV_SECRETS_MASTER_KEY_PATH;
 #[cfg(feature = "test-support")]
-pub use factory::RebornLocalDevApprovalTestParts;
+pub use factory::RebornApprovalTestParts;
 #[cfg(feature = "migration-support")]
 pub use factory::extension_installation_store_for_migration;
+#[cfg(any(feature = "libsql", feature = "test-support"))]
+pub use factory::local_dev_db_path;
 #[cfg(feature = "libsql")]
 pub use factory::open_local_dev_secret_store;
 #[cfg(any(feature = "libsql", feature = "postgres"))]
 pub use factory::{KeychainMasterKeyOutcome, provision_local_dev_keychain_master_key};
 pub use factory::{RebornServices, build_reborn_services, builtin_first_party_trust_policy};
+pub use google_oauth_secret_store::{GoogleOauthSecretStore, GoogleOauthSecretStoreError};
 pub use input::{OAuthClientConfig, RebornBuildInput, RebornRuntimeProcessBinding};
 #[cfg(feature = "webui-v2-beta")]
 pub use ironclaw_auth::GoogleOAuthRouteConfig;
@@ -74,9 +77,9 @@ pub use llm_admin::provider_admin_product_command::RebornProviderAdminProductCom
 #[cfg(feature = "root-llm-provider")]
 pub use llm_admin::provider_repo::{ProviderRepo, ProviderRepoError};
 pub use local_runtime_profile::{
-    RebornLocalRuntimeProfileError, RebornLocalRuntimeProfileOptions,
-    hosted_single_tenant_runtime_policy, hosted_single_tenant_volume_runtime_policy,
-    local_dev_runtime_policy, local_dev_yolo_runtime_policy, local_runtime_build_input,
+    RebornRuntimeProfileError, RebornRuntimeProfileOptions, hosted_single_tenant_runtime_policy,
+    hosted_single_tenant_volume_runtime_policy, local_dev_runtime_policy,
+    local_dev_yolo_runtime_policy, local_runtime_build_input,
     local_runtime_build_input_with_options,
 };
 pub use observability::budget::build_default_budget_accountant;

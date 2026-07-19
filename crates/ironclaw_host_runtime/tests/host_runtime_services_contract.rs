@@ -57,7 +57,7 @@ use ironclaw_resources::{
 use ironclaw_run_state::{ApprovalRequestStore, RunStart, RunStateStore, RunStatus};
 use ironclaw_scripts::{ScriptRuntime, ScriptRuntimeConfig};
 use ironclaw_secrets::{
-    InMemoryCredentialBroker, InMemorySecretStore, SecretMaterial, SecretStore,
+    FilesystemSecretStore, InMemoryCredentialBroker, SecretMaterial, SecretStore,
 };
 use ironclaw_triggers::InMemoryTriggerRepository;
 #[cfg(feature = "libsql")]
@@ -1097,7 +1097,7 @@ async fn production_wiring_validation_accepts_verified_host_http_egress_shape() 
         ironclaw_processes::in_memory_backed_process_services(),
         CapabilitySurfaceVersion::new("surface-v1").unwrap(),
     )
-    .with_secret_store(Arc::new(InMemorySecretStore::new()));
+    .with_secret_store(Arc::new(FilesystemSecretStore::ephemeral()));
     let services = services
         .try_with_host_http_egress(RecordingNetworkHttpEgress::new())
         .unwrap();
@@ -1505,7 +1505,6 @@ async fn host_runtime_services_builds_dispatcher_runtime_and_health_from_registe
         script_capability_id(),
         ResourceEstimate::default(),
         json!({"message": "from services"}),
-        trust_decision_with_dispatch_authority(),
     );
 
     let outcome = runtime.invoke_capability(request).await.unwrap();
@@ -1623,7 +1622,6 @@ async fn host_runtime_services_writes_runtime_events_to_durable_event_log_metada
             script_capability_id(),
             ResourceEstimate::default(),
             payload.clone(),
-            trust_decision_with_dispatch_authority(),
         ))
         .await
         .unwrap();
@@ -1720,7 +1718,6 @@ async fn host_runtime_services_consumes_reborn_jsonl_event_store_without_v1_comp
             script_capability_id(),
             ResourceEstimate::default(),
             json!({"message": "from jsonl store"}),
-            trust_decision_with_dispatch_authority(),
         ))
         .await
         .unwrap();
@@ -1787,7 +1784,6 @@ async fn host_runtime_services_durable_event_replay_cursor_and_gap_behavior() {
             script_capability_id(),
             ResourceEstimate::default(),
             json!({"message": "cursor replay"}),
-            trust_decision_with_dispatch_authority(),
         ))
         .await
         .unwrap();
@@ -1881,7 +1877,6 @@ async fn host_runtime_services_runtime_events_project_through_replay_projection_
             script_capability_id(),
             ResourceEstimate::default(),
             payload.clone(),
-            trust_decision_with_dispatch_authority(),
         ))
         .await
         .unwrap();
@@ -1972,7 +1967,6 @@ async fn host_runtime_services_projection_rejects_foreign_cursor_and_surfaces_re
             script_capability_id(),
             ResourceEstimate::default(),
             json!({"message": "scope a"}),
-            trust_decision_with_dispatch_authority(),
         ))
         .await
         .unwrap();
@@ -2078,7 +2072,6 @@ async fn host_runtime_services_jsonl_event_store_projects_same_runtime_sequence_
             script_capability_id(),
             ResourceEstimate::default(),
             payload.clone(),
-            trust_decision_with_dispatch_authority(),
         ))
         .await
         .unwrap();
@@ -2180,7 +2173,6 @@ async fn host_runtime_services_approval_resolution_projects_durable_audit_metada
             script_capability_id(),
             ResourceEstimate::default(),
             input.clone(),
-            trust_decision_with_dispatch_authority(),
         ))
         .await
         .unwrap();
@@ -2346,7 +2338,7 @@ async fn process_lifecycle_projects_through_durable_replay_without_output_leaks(
     )));
     let obligation_services = BuiltinObligationServices::new(
         Arc::new(InMemoryAuditSink::new()),
-        Arc::new(InMemorySecretStore::new()),
+        Arc::new(FilesystemSecretStore::ephemeral()),
         Arc::new(InMemoryResourceGovernor::new()),
     );
     let process_store =
@@ -2568,7 +2560,6 @@ async fn host_runtime_services_resumes_approved_capability_and_consumes_lease_on
             script_capability_id(),
             estimate.clone(),
             input.clone(),
-            trust_decision_with_dispatch_authority(),
         ))
         .await
         .unwrap();
@@ -2611,7 +2602,6 @@ async fn host_runtime_services_resumes_approved_capability_and_consumes_lease_on
             script_capability_id(),
             estimate,
             input,
-            trust_decision_with_dispatch_authority(),
         ))
         .await
         .unwrap();
@@ -2629,7 +2619,7 @@ async fn host_runtime_services_resume_missing_runtime_secret_returns_auth_gate()
     let run_state = Arc::new(ironclaw_run_state::in_memory_backed_run_state_store());
     let approval_requests = Arc::new(ironclaw_run_state::in_memory_backed_approval_request_store());
     let capability_leases = Arc::new(in_memory_backed_capability_lease_store());
-    let secret_store = Arc::new(InMemorySecretStore::new());
+    let secret_store = Arc::new(FilesystemSecretStore::ephemeral());
     let secret_handle = SecretHandle::new("approval_resume_token").unwrap();
     let script_runtime = Arc::new(RecordingScriptExecutor::default());
     let services = HostRuntimeServices::new(
@@ -2668,7 +2658,6 @@ async fn host_runtime_services_resume_missing_runtime_secret_returns_auth_gate()
             script_capability_id(),
             estimate,
             input,
-            trust_decision_with_dispatch_authority(),
         ))
         .await
         .unwrap();
@@ -2729,7 +2718,6 @@ async fn host_runtime_services_resume_changed_input_fails_before_lease_claim_or_
             script_capability_id(),
             estimate,
             json!({"message": "changed"}),
-            trust_decision_with_dispatch_authority(),
         ))
         .await
         .unwrap();
@@ -2777,7 +2765,6 @@ async fn host_runtime_services_resume_wrong_user_scope_is_hidden_before_dispatch
             script_capability_id(),
             estimate,
             input,
-            trust_decision_with_dispatch_authority(),
         ))
         .await
         .unwrap();
@@ -2831,7 +2818,6 @@ async fn host_runtime_services_resume_expired_lease_fails_before_dispatch() {
             script_capability_id(),
             estimate,
             input,
-            trust_decision_with_dispatch_authority(),
         ))
         .await
         .unwrap();
@@ -2876,7 +2862,6 @@ async fn host_runtime_services_resume_trust_preflight_failure_fails_only_matchin
             script_capability_id(),
             estimate.clone(),
             input.clone(),
-            trust_decision_with_dispatch_authority(),
         ))
         .await
         .unwrap();
@@ -2898,7 +2883,6 @@ async fn host_runtime_services_resume_trust_preflight_failure_fails_only_matchin
             script_capability_id(),
             estimate.clone(),
             input.clone(),
-            trust_decision_with_dispatch_authority(),
         ))
         .await
         .unwrap_err();
@@ -2921,7 +2905,6 @@ async fn host_runtime_services_resume_trust_preflight_failure_fails_only_matchin
             script_capability_id(),
             estimate,
             input,
-            trust_decision_with_dispatch_authority(),
         ))
         .await
         .unwrap();
@@ -2974,7 +2957,6 @@ async fn host_runtime_services_resume_runtime_policy_denial_fails_matching_block
             script_capability_id(),
             estimate,
             input,
-            trust_decision_with_dispatch_authority(),
         ))
         .await
         .unwrap();
@@ -3037,7 +3019,6 @@ async fn host_runtime_services_resume_rejects_changed_actor_before_preflight_mut
                 script_capability_id(),
                 estimate.clone(),
                 input.clone(),
-                trust_decision_with_dispatch_authority(),
             ))
             .await
             .unwrap();
@@ -3074,7 +3055,6 @@ async fn host_runtime_services_resume_rejects_changed_actor_before_preflight_mut
             script_capability_id(),
             estimate,
             input,
-            trust_decision_with_dispatch_authority(),
         ))
         .await
         .unwrap();
@@ -3123,7 +3103,6 @@ async fn host_runtime_services_auth_resume_rejects_changed_actor_before_prefligh
                 script_capability_id(),
                 estimate.clone(),
                 input.clone(),
-                trust_decision_with_dispatch_authority(),
                 None,
             ))
             .await
@@ -3149,7 +3128,6 @@ async fn host_runtime_services_auth_resume_rejects_changed_actor_before_prefligh
             script_capability_id(),
             estimate,
             input,
-            trust_decision_with_dispatch_authority(),
             None,
         ))
         .await
@@ -3205,7 +3183,6 @@ async fn host_runtime_services_resume_spawn_rejects_changed_actor_before_input_a
             process_sandbox_capability_id(),
             estimate.clone(),
             input.clone(),
-            process_sandbox_trust_decision(),
         ))
         .await
         .unwrap();
@@ -3241,7 +3218,6 @@ async fn host_runtime_services_resume_spawn_rejects_changed_actor_before_input_a
                 process_sandbox_capability_id(),
                 estimate.clone(),
                 input.clone(),
-                process_sandbox_trust_decision(),
             ))
             .await
             .unwrap();
@@ -3281,7 +3257,6 @@ async fn host_runtime_services_resume_spawn_rejects_changed_actor_before_input_a
             process_sandbox_capability_id(),
             estimate.clone(),
             invalid_process_sandbox_input(),
-            process_sandbox_trust_decision(),
         ))
         .await
         .unwrap();
@@ -3301,7 +3276,6 @@ async fn host_runtime_services_resume_spawn_rejects_changed_actor_before_input_a
             process_sandbox_capability_id(),
             estimate,
             input,
-            process_sandbox_trust_decision(),
         ))
         .await
         .unwrap();
@@ -3337,7 +3311,7 @@ async fn host_runtime_services_auth_resume_dispatches_blocked_auth_run() {
     let run_state = Arc::new(ironclaw_run_state::in_memory_backed_run_state_store());
     let approval_requests = Arc::new(ironclaw_run_state::in_memory_backed_approval_request_store());
     let capability_leases = Arc::new(in_memory_backed_capability_lease_store());
-    let secret_store = Arc::new(InMemorySecretStore::new());
+    let secret_store = Arc::new(FilesystemSecretStore::ephemeral());
     let secret_handle = SecretHandle::new("auth_resume_token").unwrap();
     let script_runtime = Arc::new(RecordingScriptExecutor::default());
     let services = HostRuntimeServices::new(
@@ -3378,7 +3352,6 @@ async fn host_runtime_services_auth_resume_dispatches_blocked_auth_run() {
             script_capability_id(),
             estimate.clone(),
             input.clone(),
-            trust_decision_with_dispatch_authority(),
         ))
         .await
         .unwrap();
@@ -3410,7 +3383,6 @@ async fn host_runtime_services_auth_resume_dispatches_blocked_auth_run() {
             script_capability_id(),
             estimate.clone(),
             input.clone(),
-            trust_decision_with_dispatch_authority(),
             Some(gate.approval_request_id),
         ))
         .await
@@ -3504,7 +3476,6 @@ async fn host_runtime_services_auth_resume_trust_preflight_failure_fails_blocked
             script_capability_id(),
             estimate.clone(),
             input.clone(),
-            trust_decision_with_dispatch_authority(),
             None,
         ))
         .await
@@ -3533,7 +3504,6 @@ async fn host_runtime_services_auth_resume_trust_preflight_failure_fails_blocked
             script_capability_id(),
             estimate.clone(),
             input.clone(),
-            trust_decision_with_dispatch_authority(),
             None,
         ))
         .await
@@ -3625,7 +3595,6 @@ async fn host_runtime_services_auth_resume_with_approval_id_fails_blocked_auth_r
             script_capability_id(),
             estimate.clone(),
             input.clone(),
-            trust_decision_with_dispatch_authority(),
             Some(orphan_approval_id),
         ))
         .await
@@ -3675,7 +3644,6 @@ async fn host_runtime_services_resume_without_backing_stores_fails_closed() {
             script_capability_id(),
             ResourceEstimate::default(),
             json!({"message": "missing stores"}),
-            trust_decision_with_dispatch_authority(),
         ))
         .await
         .unwrap();
@@ -3960,7 +3928,6 @@ async fn host_runtime_spawn_process_sandbox_blocks_for_approval_before_executor(
             process_sandbox_capability_id(),
             estimate.clone(),
             input.clone(),
-            process_sandbox_trust_decision(),
         ))
         .await
         .unwrap();
@@ -3985,7 +3952,6 @@ async fn host_runtime_spawn_process_sandbox_blocks_for_approval_before_executor(
             process_sandbox_capability_id(),
             estimate,
             input,
-            process_sandbox_trust_decision(),
         ))
         .await
         .unwrap();
@@ -4034,7 +4000,6 @@ async fn host_runtime_spawn_process_sandbox_resume_changed_input_fails_before_ex
             process_sandbox_capability_id(),
             estimate.clone(),
             input,
-            process_sandbox_trust_decision(),
         ))
         .await
         .unwrap();
@@ -4052,7 +4017,6 @@ async fn host_runtime_spawn_process_sandbox_resume_changed_input_fails_before_ex
             process_sandbox_capability_id(),
             estimate,
             json!({"run": {"command": "echo", "args": ["changed"]}}),
-            process_sandbox_trust_decision(),
         ))
         .await
         .unwrap();
@@ -4109,7 +4073,6 @@ async fn host_runtime_spawn_process_sandbox_resume_invalid_plan_fails_before_exe
             process_sandbox_capability_id(),
             estimate.clone(),
             input,
-            process_sandbox_trust_decision(),
         ))
         .await
         .unwrap();
@@ -4130,7 +4093,6 @@ async fn host_runtime_spawn_process_sandbox_resume_invalid_plan_fails_before_exe
             process_sandbox_capability_id(),
             estimate,
             invalid_process_sandbox_input(),
-            process_sandbox_trust_decision(),
         ))
         .await
         .expect("invalid sandbox resume input must not be a terminal host runtime error");
@@ -4205,7 +4167,6 @@ async fn host_runtime_spawn_process_sandbox_resume_host_failure_fails_after_appr
             process_sandbox_capability_id(),
             estimate.clone(),
             input.clone(),
-            process_sandbox_trust_decision(),
         ))
         .await
         .unwrap();
@@ -4223,7 +4184,6 @@ async fn host_runtime_spawn_process_sandbox_resume_host_failure_fails_after_appr
             process_sandbox_capability_id(),
             estimate,
             input,
-            process_sandbox_trust_decision(),
         ))
         .await
         .unwrap();
@@ -4265,7 +4225,6 @@ async fn host_runtime_services_installs_builtin_obligation_handler_with_audit_si
             script_capability_id(),
             ResourceEstimate::default(),
             json!({"message": "audited through services"}),
-            trust_decision_with_dispatch_authority(),
         ))
         .await
         .unwrap();
@@ -4308,7 +4267,6 @@ async fn host_runtime_services_maps_script_exit_failure_through_private_adapter(
             script_capability_id(),
             ResourceEstimate::default(),
             json!({"message": "fail through services"}),
-            trust_decision_with_dispatch_authority(),
         ))
         .await
         .unwrap();
@@ -4336,7 +4294,6 @@ async fn host_runtime_services_maps_mcp_client_failure_through_private_adapter()
             mcp_capability_id(),
             ResourceEstimate::default(),
             json!({"query": "fail through services"}),
-            trust_decision_with_dispatch_authority(),
         ))
         .await
         .unwrap();
@@ -4383,7 +4340,6 @@ async fn host_runtime_services_applies_scoped_mount_obligation_to_script_runtime
             script_capability_id(),
             ResourceEstimate::default(),
             json!({"message": "mount narrowed"}),
-            trust_decision_with_dispatch_authority(),
         ))
         .await
         .unwrap();
@@ -4436,7 +4392,6 @@ async fn host_runtime_services_rejects_broader_scoped_mount_before_dispatch() {
             script_capability_id(),
             ResourceEstimate::default(),
             json!({"message": "broader mount"}),
-            trust_decision_with_dispatch_authority(),
         ))
         .await
         .unwrap();
@@ -4487,7 +4442,6 @@ async fn host_runtime_services_writes_obligation_audit_records_to_durable_log_me
             script_capability_id(),
             ResourceEstimate::default(),
             payload.clone(),
-            trust_decision_with_dispatch_authority(),
         ))
         .await
         .unwrap();
@@ -4551,7 +4505,7 @@ async fn host_runtime_services_projects_resource_network_secret_obligation_audit
     .unwrap();
     let audit_log = Arc::clone(&stores.audit);
     let governor = Arc::new(governor_with_default_limit(sample_account()));
-    let secret_store = Arc::new(InMemorySecretStore::new());
+    let secret_store = Arc::new(FilesystemSecretStore::ephemeral());
     let secret_handle = SecretHandle::new("obligation-api-token").unwrap();
     let reservation_id = ResourceReservationId::new();
     let policy = NetworkPolicy {
@@ -4616,7 +4570,6 @@ async fn host_runtime_services_projects_resource_network_secret_obligation_audit
                 .set_network_egress_bytes(10)
                 .set_output_bytes(100),
             payload.clone(),
-            trust_decision_with_dispatch_authority(),
         ))
         .await
         .unwrap();
@@ -4729,7 +4682,6 @@ async fn host_runtime_services_enforces_output_limit_and_reconciles_resource_usa
                 .set_concurrency_slots(1)
                 .set_output_bytes(1024),
             input,
-            trust_decision_with_dispatch_authority(),
         ))
         .await
         .unwrap();
@@ -4786,7 +4738,6 @@ async fn host_runtime_services_releases_reservation_when_dispatch_preflight_fail
             script_capability_id(),
             ResourceEstimate::default().set_concurrency_slots(1),
             json!({"message": "missing runtime after reservation"}),
-            trust_decision_with_dispatch_authority(),
         ))
         .await
         .unwrap();
@@ -4838,7 +4789,6 @@ async fn host_runtime_services_fails_closed_when_durable_obligation_audit_append
             script_capability_id(),
             ResourceEstimate::default(),
             json!({"message": "must not dispatch after audit append failure"}),
-            trust_decision_with_dispatch_authority(),
         ))
         .await
         .unwrap();
@@ -4996,7 +4946,7 @@ async fn host_runtime_services_wasm_http_uses_production_staged_network_and_secr
         .await,
     );
     let governor = Arc::new(governor_with_default_limit(sample_account()));
-    let secret_store = Arc::new(InMemorySecretStore::new());
+    let secret_store = Arc::new(FilesystemSecretStore::ephemeral());
     let secret_handle = SecretHandle::new("api-token").unwrap();
     let policy = wasm_http_policy();
     let authorizer: Arc<dyn TrustAwareCapabilityDispatchAuthorizer> =
@@ -5088,7 +5038,7 @@ async fn host_runtime_services_wasm_http_rejects_secret_store_lease_before_trans
         .await,
     );
     let governor = Arc::new(governor_with_default_limit(sample_account()));
-    let secret_store = Arc::new(InMemorySecretStore::new());
+    let secret_store = Arc::new(FilesystemSecretStore::ephemeral());
     let secret_handle = SecretHandle::new("api-token").unwrap();
     let policy = wasm_http_policy();
     let authorizer: Arc<dyn TrustAwareCapabilityDispatchAuthorizer> =
@@ -5173,7 +5123,7 @@ async fn host_runtime_services_wasm_http_missing_staged_secret_stays_before_tran
         ironclaw_processes::in_memory_backed_process_services(),
         CapabilitySurfaceVersion::new("surface-v1").unwrap(),
     )
-    .with_secret_store(Arc::new(InMemorySecretStore::new()))
+    .with_secret_store(Arc::new(FilesystemSecretStore::ephemeral()))
     .with_wasm_runtime_credential_provider(Arc::new(WasmStagedRuntimeCredentials::new(vec![
         WasmStagedRuntimeCredential::for_exact_url(
             secret_handle,
@@ -5547,7 +5497,7 @@ async fn process_obligation_lifecycle_cleans_record_started_before_wrapper_exist
     let governor = Arc::new(InMemoryResourceGovernor::new());
     let obligation_services = BuiltinObligationServices::new(
         Arc::new(InMemoryAuditSink::new()),
-        Arc::new(InMemorySecretStore::new()),
+        Arc::new(FilesystemSecretStore::ephemeral()),
         governor.clone(),
     );
     let invocation_id = InvocationId::new();
@@ -5591,7 +5541,7 @@ async fn process_obligation_lifecycle_cleans_legacy_handoffs_without_resource_re
     let inner_store = Arc::new(ironclaw_processes::in_memory_backed_process_store());
     let obligation_services = BuiltinObligationServices::new(
         Arc::new(InMemoryAuditSink::new()),
-        Arc::new(InMemorySecretStore::new()),
+        Arc::new(FilesystemSecretStore::ephemeral()),
         Arc::new(InMemoryResourceGovernor::new()),
     );
     let invocation_id = InvocationId::new();
@@ -5620,7 +5570,7 @@ async fn process_obligation_lifecycle_rejects_second_active_handoff_for_same_sco
     let inner_store = Arc::new(ironclaw_processes::in_memory_backed_process_store());
     let obligation_services = BuiltinObligationServices::new(
         Arc::new(InMemoryAuditSink::new()),
-        Arc::new(InMemorySecretStore::new()),
+        Arc::new(FilesystemSecretStore::ephemeral()),
         Arc::new(InMemoryResourceGovernor::new()),
     );
     let invocation_id = InvocationId::new();
@@ -5707,7 +5657,7 @@ async fn process_obligation_lifecycle_does_not_clean_handoffs_twice_after_backgr
     let governor = Arc::new(InMemoryResourceGovernor::new());
     let obligation_services = BuiltinObligationServices::new(
         Arc::new(InMemoryAuditSink::new()),
-        Arc::new(InMemorySecretStore::new()),
+        Arc::new(FilesystemSecretStore::ephemeral()),
         governor.clone(),
     );
     let invocation_id = InvocationId::new();
@@ -5758,7 +5708,7 @@ async fn process_obligation_lifecycle_surfaces_resource_cleanup_errors_after_ter
     let governor = Arc::new(FailingCleanupResourceGovernor);
     let obligation_services = BuiltinObligationServices::new(
         Arc::new(InMemoryAuditSink::new()),
-        Arc::new(InMemorySecretStore::new()),
+        Arc::new(FilesystemSecretStore::ephemeral()),
         governor.clone(),
     );
     let invocation_id = InvocationId::new();
@@ -6091,7 +6041,7 @@ async fn invoke_capability_missing_credential_returns_auth_before_approval() {
     let run_state = Arc::new(ironclaw_run_state::in_memory_backed_run_state_store());
     let approval_requests = Arc::new(ironclaw_run_state::in_memory_backed_approval_request_store());
     let capability_leases = Arc::new(in_memory_backed_capability_lease_store());
-    let secret_store = Arc::new(InMemorySecretStore::new());
+    let secret_store = Arc::new(FilesystemSecretStore::ephemeral());
     // Note: the secret "script_api_token" is deliberately NOT inserted.
     let secret_handle = SecretHandle::new("script_api_token").unwrap();
     let script_runtime = Arc::new(RecordingScriptExecutor::default());
@@ -6126,7 +6076,6 @@ async fn invoke_capability_missing_credential_returns_auth_before_approval() {
             script_capability_id(),
             estimate,
             input,
-            trust_decision_with_dispatch_authority(),
         ))
         .await
         .unwrap();
@@ -6164,7 +6113,7 @@ async fn invoke_capability_present_credential_proceeds_to_approval() {
     let run_state = Arc::new(ironclaw_run_state::in_memory_backed_run_state_store());
     let approval_requests = Arc::new(ironclaw_run_state::in_memory_backed_approval_request_store());
     let capability_leases = Arc::new(in_memory_backed_capability_lease_store());
-    let secret_store = Arc::new(InMemorySecretStore::new());
+    let secret_store = Arc::new(FilesystemSecretStore::ephemeral());
     let secret_handle = SecretHandle::new("script_api_token").unwrap();
     // Build the request context FIRST so we can seed the secret under the same
     // resource_scope that the invocation will use. Using a separate
@@ -6213,7 +6162,6 @@ async fn invoke_capability_present_credential_proceeds_to_approval() {
             script_capability_id(),
             estimate,
             input,
-            trust_decision_with_dispatch_authority(),
         ))
         .await
         .unwrap();
@@ -6245,7 +6193,7 @@ async fn spawn_capability_present_credential_proceeds_to_approval() {
     let run_state = Arc::new(ironclaw_run_state::in_memory_backed_run_state_store());
     let approval_requests = Arc::new(ironclaw_run_state::in_memory_backed_approval_request_store());
     let capability_leases = Arc::new(in_memory_backed_capability_lease_store());
-    let secret_store = Arc::new(InMemorySecretStore::new());
+    let secret_store = Arc::new(FilesystemSecretStore::ephemeral());
     let secret_handle = SecretHandle::new("script_api_token").unwrap();
     // Build the request context FIRST so we can seed the secret under the same
     // resource_scope that the invocation will use. Using a separate
@@ -6296,7 +6244,6 @@ async fn spawn_capability_present_credential_proceeds_to_approval() {
             script_capability_id(),
             estimate,
             input,
-            trust_decision_with_dispatch_authority(),
         ))
         .await
         .unwrap();
@@ -6336,7 +6283,6 @@ async fn invoke_capability_no_credential_requirement_proceeds_normally() {
             script_capability_id(),
             estimate,
             input,
-            trust_decision_with_dispatch_authority(),
         ))
         .await
         .unwrap();
@@ -6359,7 +6305,7 @@ async fn spawn_capability_missing_credential_returns_auth_before_approval() {
     let run_state = Arc::new(ironclaw_run_state::in_memory_backed_run_state_store());
     let approval_requests = Arc::new(ironclaw_run_state::in_memory_backed_approval_request_store());
     let capability_leases = Arc::new(in_memory_backed_capability_lease_store());
-    let secret_store = Arc::new(InMemorySecretStore::new());
+    let secret_store = Arc::new(FilesystemSecretStore::ephemeral());
     // Note: the secret "script_api_token" is deliberately NOT inserted.
     let secret_handle = SecretHandle::new("script_api_token").unwrap();
     let script_runtime = Arc::new(RecordingScriptExecutor::default());
@@ -6394,7 +6340,6 @@ async fn spawn_capability_missing_credential_returns_auth_before_approval() {
             script_capability_id(),
             estimate,
             input,
-            trust_decision_with_dispatch_authority(),
         ))
         .await
         .unwrap();
@@ -6435,7 +6380,7 @@ async fn invoke_capability_no_credential_requirement_with_wired_store_proceeds_n
     let capability_leases = Arc::new(in_memory_backed_capability_lease_store());
     // SCRIPT_MANIFEST has no runtime_credentials; wire a secret store anyway to
     // confirm the is_empty() early-exit branch is taken, not the no-store branch.
-    let secret_store = Arc::new(InMemorySecretStore::new());
+    let secret_store = Arc::new(FilesystemSecretStore::ephemeral());
     let secret_handle = SecretHandle::new("any_token").unwrap();
     let services = HostRuntimeServices::new(
         Arc::new(registry_with_manifest(SCRIPT_MANIFEST)),
@@ -6468,7 +6413,6 @@ async fn invoke_capability_no_credential_requirement_with_wired_store_proceeds_n
             script_capability_id(),
             estimate,
             input,
-            trust_decision_with_dispatch_authority(),
         ))
         .await
         .unwrap();
@@ -6558,7 +6502,6 @@ async fn invoke_capability_secret_store_error_skips_preflight() {
             script_capability_id(),
             estimate.clone(),
             input.clone(),
-            trust_decision_with_dispatch_authority(),
         ))
         .await
         .unwrap();
@@ -6636,7 +6579,6 @@ async fn invoke_capability_secret_store_error_skips_preflight() {
             script_capability_id(),
             estimate,
             input,
-            trust_decision_with_dispatch_authority(),
         ))
         .await
         .unwrap();

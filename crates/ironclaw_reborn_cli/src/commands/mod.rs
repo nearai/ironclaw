@@ -136,3 +136,10 @@ pub(crate) fn parse_channel_enabled_bool(field: &str, value: &str) -> anyhow::Re
         _ => anyhow::bail!("{field} must be a boolean value"),
     }
 }
+
+/// Shared error for CLI surfaces that are intentionally kept visible in
+/// `--help`/shell completions but do not yet have a working implementation
+/// (`channels`, `hooks`, `logs`).
+pub(crate) fn not_yet_implemented(command: &str) -> anyhow::Error {
+    anyhow::anyhow!("`{command}` is not implemented yet")
+}

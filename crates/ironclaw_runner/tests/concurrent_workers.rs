@@ -36,11 +36,11 @@ use ironclaw_turns::TurnRunWakeNotifier as _;
 use ironclaw_turns::{
     AcceptedMessageRef, AgentLoopDriver, AgentLoopDriverDescriptor, AgentLoopDriverError,
     AgentLoopDriverResumeRequest, AgentLoopDriverRunRequest, AllowAllTurnAdmissionPolicy,
-    EventCursor, GetRunStateRequest, IdempotencyKey, InMemoryCheckpointStateStore,
-    InMemoryRunProfileResolver, InMemoryTurnStateStore, InMemoryTurnStateStoreLimits,
-    LoopCheckpointStore, LoopExit, LoopExitId, LoopFailed, LoopFailureKind, ReplyTargetBindingRef,
-    RunProfileResolutionRequest, RunProfileResolver, SourceBindingRef, SubmitTurnRequest,
-    SubmitTurnResponse, TurnActor, TurnRunId, TurnRunWake, TurnScope, TurnStateStore, TurnStatus,
+    EventCursor, GetRunStateRequest, IdempotencyKey, InMemoryRunProfileResolver,
+    InMemoryTurnStateStore, InMemoryTurnStateStoreLimits, LoopCheckpointStore, LoopExit,
+    LoopExitId, LoopFailed, LoopFailureKind, ReplyTargetBindingRef, RunProfileResolutionRequest,
+    RunProfileResolver, SourceBindingRef, SubmitTurnRequest, SubmitTurnResponse, TurnActor,
+    TurnRunId, TurnRunWake, TurnScope, TurnStateStore, TurnStatus,
     run_profile::{
         AgentLoopDriverHost, InMemoryLoopHostMilestoneSink, InstructionSafetyContext,
         LoopRunContext, PromptMode,
@@ -48,6 +48,8 @@ use ironclaw_turns::{
     runner::TurnRunTransitionPort,
 };
 use tokio::sync::Barrier;
+
+use ironclaw_loop_host::in_memory_backed_checkpoint_state_store as in_memory_checkpoint_state_store;
 
 // ---------------------------------------------------------------------------
 // Barrier-blocking driver
@@ -598,7 +600,7 @@ async fn scheduler_executor_two_runs_concurrently() {
     let registry = Arc::new(registry);
 
     // Build shared deps.
-    let checkpoint_state_store = Arc::new(InMemoryCheckpointStateStore::default());
+    let checkpoint_state_store = in_memory_checkpoint_state_store();
     let loop_checkpoint_store: Arc<dyn LoopCheckpointStore> = turn_store.clone();
     let milestone_sink = Arc::new(InMemoryLoopHostMilestoneSink::default());
     let gateway = Arc::new(NoOpGateway);
@@ -830,7 +832,7 @@ async fn scheduler_executor_applies_loop_exit_end_to_end() {
         .unwrap();
     let registry = Arc::new(registry);
 
-    let checkpoint_state_store = Arc::new(InMemoryCheckpointStateStore::default());
+    let checkpoint_state_store = in_memory_checkpoint_state_store();
     let loop_checkpoint_store: Arc<dyn LoopCheckpointStore> = turn_store.clone();
     let milestone_sink = Arc::new(InMemoryLoopHostMilestoneSink::default());
     let gateway = Arc::new(NoOpGateway);
