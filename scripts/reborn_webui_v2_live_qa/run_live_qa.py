@@ -2552,6 +2552,101 @@ async def _slack_search_marker_hits(
     return {"checked": True, "hits": hits}
 
 
+# Bounded search-index readiness window for freshly-seeded markers. Slack's
+# search index is eventually consistent — a Web-API post is typically not
+# searchable for ~15-30s after it lands — so probes that answer via search
+# must gate the agent turn on the seed becoming searchable first.
+SLACK_SEARCH_INDEX_READINESS_TIMEOUT_SECONDS = 45.0
+SLACK_SEARCH_INDEX_READINESS_POLL_SECONDS = 3.0
+
+
+async def _wait_for_slack_search_marker(
+    ctx: LiveQaContext,
+    *,
+    marker: str,
+    timeout: float = SLACK_SEARCH_INDEX_READINESS_TIMEOUT_SECONDS,
+    poll_interval: float = SLACK_SEARCH_INDEX_READINESS_POLL_SECONDS,
+) -> dict[str, object]:
+    """Poll Slack search until a freshly-seeded marker becomes searchable.
+
+    Slack's search index is eventually consistent: a message posted via the
+    Web API is not searchable for many seconds after it lands. A probe that
+    answers a "most recent message I sent" question by calling
+    ``search.messages`` (``from:me`` newest-first) can therefore surface an
+    OLDER already-indexed seed while the newest one is still un-indexed — an
+    external-lag artifact, not an agent regression. This barrier gates the
+    agent turn on the newest seed becoming searchable so the caller can
+    surface an INCONCLUSIVE result on timeout instead of a spurious
+    answer-mismatch red.
+
+    Reuses :func:`_slack_search_marker_hits` (personal-token workspace sweep).
+    Returns a dict:
+      ready      — True once the marker appears in search results
+      checked    — whether the sweep ever actually ran (False => never ran)
+      permanent  — True when search can NEVER run here (missing scope, ...)
+      attempts   — number of search calls made
+      waited_ms  — elapsed poll time
+      error      — last search error, when any
+    """
+    started = time.monotonic()
+    deadline = started + timeout
+    attempts = 0
+    checked_any = False
+    last_error: str | None = None
+    while True:
+        # Deadline check BEFORE the sweep: each sweep carries its own HTTP
+        # timeout, so starting one at/past the deadline could stretch the
+        # advertised readiness bound by a full extra sweep.
+        if time.monotonic() >= deadline:
+            return {
+                "ready": False,
+                "checked": checked_any,
+                "permanent": False,
+                "attempts": attempts,
+                "waited_ms": int((time.monotonic() - started) * 1000),
+                "error": last_error,
+            }
+        attempts += 1
+        sweep = await _slack_search_marker_hits(ctx, marker=marker)
+        if sweep.get("checked"):
+            checked_any = True
+            # A sweep that ran cleanly supersedes any earlier transient error;
+            # a timeout after this point must not report a stale one.
+            last_error = None
+            if sweep.get("hits"):
+                return {
+                    "ready": True,
+                    "checked": True,
+                    "permanent": False,
+                    "attempts": attempts,
+                    "waited_ms": int((time.monotonic() - started) * 1000),
+                }
+        else:
+            last_error = str(sweep.get("error") or "slack_search_unavailable")
+            if sweep.get("permanent"):
+                # The sweep can never run in this environment — spinning to the
+                # deadline would only hide the real env-repair cause.
+                return {
+                    "ready": False,
+                    "checked": checked_any,
+                    "permanent": True,
+                    "attempts": attempts,
+                    "waited_ms": int((time.monotonic() - started) * 1000),
+                    "error": last_error,
+                }
+        now = time.monotonic()
+        if now >= deadline:
+            return {
+                "ready": False,
+                "checked": checked_any,
+                "permanent": False,
+                "attempts": attempts,
+                "waited_ms": int((time.monotonic() - started) * 1000),
+                "error": last_error,
+            }
+        await asyncio.sleep(min(poll_interval, deadline - now))
+
+
 async def _slack_personal_dm_counterpart_names(
     ctx: LiveQaContext,
 ) -> dict[str, object]:
@@ -7298,6 +7393,64 @@ async def case_qa_10g_slack_last_message_sent_global(
             label=last_sent_marker,
             actor="personal",
         )
+        # Slack's search index is eventually consistent: the agent answers this
+        # by searching ``from:me`` newest-first, but a Web-API post is not
+        # searchable for many seconds. Until the freshly-seeded GLOBAL marker is
+        # indexed, that search returns an OLDER already-indexed seed and the
+        # marker assertion below would red for external index lag, not an agent
+        # regression. Gate the turn on the marker becoming searchable; if it
+        # never indexes within the bounded deadline, surface INCONCLUSIVE.
+        readiness = await _wait_for_slack_search_marker(
+            ctx, marker=last_sent_marker
+        )
+        details["search_index_readiness"] = readiness
+        if not readiness.get("ready"):
+            if readiness.get("permanent"):
+                # Search can NEVER run here (missing scope / invalid or revoked
+                # token): this is an actionable env-repair failure, not index
+                # lag — report it as such rather than an inconclusive lag
+                # artifact that would hide the real cause.
+                reason = (
+                    "Slack search readiness check can never run in this "
+                    f"environment (error={readiness.get('error')!r}) — repair "
+                    "the personal token/scopes"
+                )
+                result = _result(
+                    case_name,
+                    False,
+                    started,
+                    {
+                        **details,
+                        "error": reason,
+                        "failure_class": "infrastructure",
+                        "failure_category": "slack_search_unavailable",
+                        "failure_status": "failed",
+                    },
+                )
+                result.details["blocking"] = False
+                return result
+            reason = (
+                "Slack search did not index the workspace-global last-sent "
+                f"marker within {int(SLACK_SEARCH_INDEX_READINESS_TIMEOUT_SECONDS)}s "
+                f"(attempts={readiness.get('attempts')}, "
+                f"error={readiness.get('error')!r}) — external search-index "
+                "lag, not an agent regression"
+            )
+            result = _result(
+                case_name,
+                False,
+                started,
+                {
+                    **details,
+                    "error": reason,
+                    "failure_class": "infrastructure",
+                    "failure_category": "slack_search_index_lag",
+                    "failure_status": "inconclusive",
+                    "inconclusive": True,
+                },
+            )
+            result.details["blocking"] = False
+            return result
         chat, reply_text = await _slack_correctness_chat_reply(
             ctx,
             case_name=case_name,

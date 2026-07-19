@@ -1195,6 +1195,120 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
         self.assertGreaterEqual(len(observed_sleeps), 1)
         self.assertGreaterEqual(waited_ms, 0)
 
+    def test_wait_for_slack_search_marker_ready_when_marker_indexed(self):
+        # Slack's search index is eventually consistent: the first sweeps come
+        # back empty (message not yet indexed), then the marker appears. The
+        # barrier must report ready as soon as a hit lands.
+        sweeps = iter(
+            [
+                {"checked": True, "hits": []},
+                {"checked": True, "hits": []},
+                {"checked": True, "hits": [{"ts": "1784422248.376"}]},
+            ]
+        )
+        observed_sleeps: list[float] = []
+
+        async def fake_search(_ctx, *, marker: str) -> dict[str, object]:
+            self.assertEqual(marker, "LASTSENT_GLOBAL_1784422248376")
+            return next(sweeps)
+
+        async def fake_sleep(seconds: float) -> None:
+            observed_sleeps.append(seconds)
+
+        with (
+            patch.object(
+                run_live_qa, "_slack_search_marker_hits", side_effect=fake_search
+            ),
+            patch.object(run_live_qa.asyncio, "sleep", new=fake_sleep),
+        ):
+            readiness = asyncio.run(
+                run_live_qa._wait_for_slack_search_marker(
+                    self._dummy_ctx(),
+                    marker="LASTSENT_GLOBAL_1784422248376",
+                    timeout=10.0,
+                    poll_interval=0.01,
+                )
+            )
+
+        self.assertTrue(readiness.get("ready"))
+        self.assertTrue(readiness.get("checked"))
+        self.assertFalse(readiness.get("permanent"))
+        self.assertEqual(readiness.get("attempts"), 3)
+        self.assertGreaterEqual(len(observed_sleeps), 2)
+
+    def test_wait_for_slack_search_marker_inconclusive_when_never_indexed(self):
+        # The marker never becomes searchable within the bounded deadline —
+        # external index lag, not an agent regression. The barrier must report
+        # not-ready (non-permanent) so the caller can surface an INCONCLUSIVE
+        # result instead of a spurious answer-mismatch red.
+        async def fake_search(_ctx, *, marker: str) -> dict[str, object]:
+            return {"checked": True, "hits": []}
+
+        async def fake_sleep(_seconds: float) -> None:
+            return None
+
+        # Deterministic clock: each call advances 20ms past a 50ms deadline, so
+        # the loop exits after a bounded number of iterations instead of
+        # busy-spinning real CPU for the whole timeout window.
+        clock = {"now": 0.0}
+
+        def fake_monotonic() -> float:
+            clock["now"] += 0.02
+            return clock["now"]
+
+        with (
+            patch.object(
+                run_live_qa, "_slack_search_marker_hits", side_effect=fake_search
+            ),
+            patch.object(run_live_qa.asyncio, "sleep", new=fake_sleep),
+            patch.object(run_live_qa.time, "monotonic", new=fake_monotonic),
+        ):
+            readiness = asyncio.run(
+                run_live_qa._wait_for_slack_search_marker(
+                    self._dummy_ctx(),
+                    marker="LASTSENT_GLOBAL_never",
+                    timeout=0.05,
+                    poll_interval=0.01,
+                )
+            )
+
+        self.assertFalse(readiness.get("ready"))
+        self.assertFalse(readiness.get("permanent"))
+        self.assertGreaterEqual(readiness.get("attempts"), 1)
+
+    def test_wait_for_slack_search_marker_permanent_when_search_cannot_run(self):
+        # A permanent token/scope problem means the sweep can NEVER run here;
+        # the barrier must short-circuit as permanent (not spin to the
+        # deadline) so the caller can surface the real env-repair reason.
+        calls = {"count": 0}
+
+        async def fake_search(_ctx, *, marker: str) -> dict[str, object]:
+            calls["count"] += 1
+            return {"checked": False, "permanent": True, "error": "missing_scope"}
+
+        async def fake_sleep(_seconds: float) -> None:
+            raise AssertionError("permanent failure must not poll")
+
+        with (
+            patch.object(
+                run_live_qa, "_slack_search_marker_hits", side_effect=fake_search
+            ),
+            patch.object(run_live_qa.asyncio, "sleep", new=fake_sleep),
+        ):
+            readiness = asyncio.run(
+                run_live_qa._wait_for_slack_search_marker(
+                    self._dummy_ctx(),
+                    marker="LASTSENT_GLOBAL_perm",
+                    timeout=10.0,
+                    poll_interval=0.01,
+                )
+            )
+
+        self.assertFalse(readiness.get("ready"))
+        self.assertTrue(readiness.get("permanent"))
+        self.assertEqual(calls["count"], 1)
+        self.assertEqual(readiness.get("error"), "missing_scope")
+
     def test_routine_confirmation_follow_up_answers_timezone_confirmation(self):
         text = (
             "I'll set up a trigger every 5 minutes and send a Slack DM. "
@@ -6514,6 +6628,13 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
                 reply,
             )
 
+        # The GLOBAL arm gates the turn on the seeded marker becoming
+        # searchable; drive the real barrier through a mocked sweep that
+        # reports the marker indexed so the assertion path (not the
+        # inconclusive path) runs.
+        async def fake_search_ready(_ctx, *, marker: str) -> dict[str, object]:
+            return {"checked": True, "hits": [{"ts": "1.0"}]}
+
         seeded.clear()
         with (
             patch.object(
@@ -6533,6 +6654,11 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
             ),
             patch.object(
                 run_live_qa,
+                "_slack_search_marker_hits",
+                side_effect=fake_search_ready,
+            ),
+            patch.object(
+                run_live_qa,
                 "_slack_correctness_chat_reply",
                 side_effect=fake_global_chat,
             ),
@@ -6544,6 +6670,9 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
             )
 
         self.assertTrue(global_result.success)
+        self.assertTrue(
+            global_result.details["search_index_readiness"]["ready"]
+        )
         self.assertEqual(len(global_calls), 1)
         self.assertEqual(
             global_calls[0]["prompt"],
@@ -6552,6 +6681,74 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
         )
         self.assertNotIn("D0FIXTURE1", global_calls[0]["prompt"])
         self.assertIsNone(global_calls[0].get("expected_capability"))
+
+        # When the seeded marker never becomes searchable within the deadline,
+        # the GLOBAL arm must NOT drive the agent turn or red on answer
+        # mismatch — it returns a non-blocking INCONCLUSIVE result attributing
+        # the miss to external Slack search-index lag.
+        lagged_chat_calls: list[dict[str, object]] = []
+
+        async def fake_lagged_chat(_ctx, **kwargs):
+            lagged_chat_calls.append(kwargs)
+            raise AssertionError("agent turn must not run when index lags")
+
+        async def fake_barrier_not_ready(_ctx, *, marker: str) -> dict[str, object]:
+            return {
+                "ready": False,
+                "checked": True,
+                "permanent": False,
+                "attempts": 5,
+                "waited_ms": 45000,
+                "error": None,
+            }
+
+        seeded.clear()
+        with (
+            patch.object(
+                run_live_qa,
+                "_require_slack_personal_token",
+                return_value="xoxp-unit-test",
+            ),
+            patch.object(
+                run_live_qa,
+                "_require_slack_personal_bot_dm_channel",
+                return_value="D0FIXTURE1",
+            ),
+            patch.object(
+                run_live_qa,
+                "_seed_slack_fixture_message",
+                side_effect=fake_seed,
+            ),
+            patch.object(
+                run_live_qa,
+                "_wait_for_slack_search_marker",
+                side_effect=fake_barrier_not_ready,
+            ),
+            patch.object(
+                run_live_qa,
+                "_slack_correctness_chat_reply",
+                side_effect=fake_lagged_chat,
+            ),
+        ):
+            lagged_result = asyncio.run(
+                run_live_qa.case_qa_10g_slack_last_message_sent_global(
+                    self._dummy_ctx()
+                )
+            )
+
+        self.assertFalse(lagged_result.success)
+        self.assertEqual(lagged_chat_calls, [])
+        self.assertFalse(lagged_result.details["blocking"])
+        self.assertTrue(lagged_result.details["inconclusive"])
+        self.assertEqual(
+            lagged_result.details["failure_class"], "infrastructure"
+        )
+        self.assertEqual(
+            lagged_result.details["failure_category"], "slack_search_index_lag"
+        )
+        self.assertFalse(
+            lagged_result.details["search_index_readiness"]["ready"]
+        )
 
     def test_qa_10i_requires_display_name_and_rejects_raw_ids_once(self):
         async def fake_identity(_token):
