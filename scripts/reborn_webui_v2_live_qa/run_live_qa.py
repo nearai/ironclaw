@@ -1178,6 +1178,14 @@ ASSISTANT_REPLY_POLL_SECONDS = 0.5
 # Persisted diagnostic excerpt only — content checks read
 # AssistantReplyWaitResult.full_text, never this truncation.
 ASSISTANT_REPLY_EXCERPT_MAX_CHARS = 2000
+# Capture-race re-confirm: the finalized-reply flag and the bubble text are
+# read in separate Playwright round-trips, so the flag can flip to "true" one
+# poll after a stale/mid-stream text snapshot was captured. Before hard-failing
+# on a missing marker, re-read the finalized bubble this many times (spaced by
+# this delay) so a truncated snapshot doesn't fail a reply that actually
+# contains the marker.
+ASSISTANT_REPLY_MARKER_RECONFIRM_ATTEMPTS = 3
+ASSISTANT_REPLY_MARKER_RECONFIRM_SECONDS = 0.3
 
 
 def _exc_text(exc: BaseException) -> str:
@@ -1790,11 +1798,54 @@ async def _wait_for_assistant_reply(
             )
             required_text_matched = required_text_matches(normalized, required_text)
             if last_final_reply_state == "true" and not marker_matches:
-                raise AssertionError(
-                    "finalized assistant reply did not contain required marker. "
-                    f"marker={marker!r} "
-                    f"last_assistant={last_final_assistant_text[-500:]!r}"
-                )
+                # Capture race: `data-final-reply` and the bubble text are read
+                # in two separate Playwright round-trips, so the finalized flag
+                # can flip to "true" a poll after a stale/mid-stream text
+                # snapshot was captured — truncating the marker out of an
+                # otherwise-complete reply. Re-read the finalized bubble a
+                # bounded number of times with the freshest text before failing,
+                # and only raise if the marker is still genuinely absent.
+                for _ in range(ASSISTANT_REPLY_MARKER_RECONFIRM_ATTEMPTS):
+                    await asyncio.sleep(ASSISTANT_REPLY_MARKER_RECONFIRM_SECONDS)
+                    try:
+                        reconfirm_final_assistant_text = await assistant.inner_text(
+                            timeout=1000
+                        )
+                    except Exception:
+                        reconfirm_final_assistant_text = ""
+                    if reconfirm_final_assistant_text:
+                        last_final_assistant_text = reconfirm_final_assistant_text
+                    try:
+                        reconfirm_block_texts = [
+                            block.strip()
+                            for block in (await assistant_blocks.all_inner_texts())[
+                                max(0, assistant_count_before) :
+                            ]
+                            if block.strip()
+                        ]
+                    except Exception:
+                        reconfirm_block_texts = []
+                    if reconfirm_block_texts:
+                        text = "\n".join(reconfirm_block_texts)
+                        last_text = text
+                        last_observed_text = text
+                        normalized = text.lower()
+                    marker_matches = (
+                        not enforce_marker
+                        or not marker
+                        or marker in last_final_assistant_text
+                    )
+                    if marker_matches:
+                        required_text_matched = required_text_matches(
+                            normalized, required_text
+                        )
+                        break
+                if not marker_matches:
+                    raise AssertionError(
+                        "finalized assistant reply did not contain required marker. "
+                        f"marker={marker!r} "
+                        f"last_assistant={last_final_assistant_text[-500:]!r}"
+                    )
             if marker_matches and required_text_matched:
                 if last_final_reply_state == "false":
                     await asyncio.sleep(ASSISTANT_REPLY_POLL_SECONDS)
