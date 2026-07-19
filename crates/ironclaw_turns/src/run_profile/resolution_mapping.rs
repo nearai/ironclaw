@@ -14,50 +14,54 @@
 //! later producer/consumer migration wires this in. `CapabilityOutcome` is
 //! unchanged and every existing path keeps its current behavior.
 //!
-//! ## What crosses, and what is dropped
+//! ## Non-lossy carry (§5.3 Stage 1)
 //!
-//! The mapping is the definition of done in §5.3's acceptance table. Two classes
-//! of field on the old variants have **no home** on the new channels and are
-//! deliberately dropped here (documented per the G-decisions in the doc):
+//! `host_api::Resolution` now carries **every recoverable field** the old
+//! `CapabilityOutcome` variants held, via the vocabulary in
+//! [`ironclaw_host_api::result_meta`]:
 //!
-//! - **G1 — the failure recovery class does not cross.** `CapabilityFailure`'s
-//!   `error_kind` ([`CapabilityFailureKind`]) and `detail` are host-side recovery
-//!   classification; [`Outcome`] carries only a typed [`ToolVerdict`] plus the
-//!   redacted summary, so a `Failed` maps to a plain
-//!   [`ToolVerdict::RecoverableFailure`] and its kind/detail are not propagated.
-//! - **G4 — loop-derived signals do not cross.** `CapabilityResultMessage`'s
-//!   `progress`, `terminate_hint`, and `output_digest` are loop-derived (the loop
-//!   computes them); they are not part of the host's `Outcome` and are dropped.
+//! - `CapabilityFailure::error_kind` ([`CapabilityFailureKind`]) → the
+//!   [`FailureKind`] on [`ToolVerdict::RecoverableFailure`] — the recovery class
+//!   that drives retry-vs-terminal now crosses (was "G1-dropped"). Only the raw
+//!   `detail` stays host-side (a backend cause, not vocabulary — charter).
+//! - `CapabilityResultMessage::{progress, terminate_hint, output_digest}` →
+//!   [`Outcome::progress`]/[`Outcome::terminate_hint`]/[`OutcomeRefs::output_digest`]
+//!   (were the "G4-dropped" loop-derived signals).
+//! - The `resume_token` inside `approval_resume`/`auth_resume` → the
+//!   [`ResumeToken`] on the gate [`GateWaypoint`], so the loop can echo it back to
+//!   resume the gate. Only the *token* crosses; the raw input/estimate replay it
+//!   was bundled with stays host-side (charter: no raw input in vocabulary — the
+//!   host reconstitutes it from storage keyed by the token).
 //!
-//! `SpawnedProcess`'s `safe_summary` is also dropped: a
-//! [`Suspension::Process`] carries only a [`ProcessRef`] — host_api has no process
-//! record type for a summary to land on. `AwaitDependentRun`'s `model_observation`
-//! is dropped: [`GateRecord::DependentRun`] carries a summary + staged result, not
-//! a preview.
+//! `SpawnedProcess`'s `safe_summary` still has no host channel (a process
+//! suspension carries a [`ProcessRef`], not a summary). `AwaitDependentRun`'s and
+//! `SpawnedChildRun`'s `model_observation` ride the result preview where present.
 //!
-//! ## String refs → uuid refs
+//! ## Loop refs: minted kernel handle + preserved origin
 //!
-//! The loop's refs ([`LoopResultRef`], [`LoopGateRef`], [`LoopProcessRef`],
-//! [`TurnRunId`]) are opaque prefixed strings; host_api's refs
-//! ([`ResultRef`]/[`GateRef`]/[`DenyRef`]/[`ProcessRef`]) are uuids. This pure
-//! mapping **mints a fresh uuid ref** for each host-side handle — it cannot
-//! reconstruct a meaningful uuid from an opaque loop string. Every minted ref is
-//! returned **bound to its loop-side source** in [`RefBindings`], so the later
-//! wiring slice can persist the loop-ref↔uuid-ref association at the
-//! writer/store boundary — already-stored loop state (e.g. output the result
-//! writer stored under the loop ref) stays reachable instead of being stranded
-//! behind an unbound uuid. The only identity that crosses directly is
-//! [`TurnRunId`] → [`RunId`]: both wrap a `Uuid`, preserved via
-//! `RunId::from_uuid`.
+//! The loop's refs ([`LoopResultRef`], [`LoopGateRef`], [`LoopProcessRef`]) are
+//! opaque prefixed strings (`result:*`/`gate:*`/`process:*`); host_api's kernel
+//! refs ([`ResultRef`]/[`GateRef`]/[`ProcessRef`]) are opaque uuids by design, so
+//! they cannot carry the loop's own ref identity. The mapping mints a fresh kernel
+//! handle **and** preserves the originating loop ref on the channel's `origin`
+//! (a [`LoopRef`]) — so loop/evidence state keyed under the loop ref (e.g. output
+//! the result writer staged) stays reachable through the migration window, not only
+//! via the [`RefBindings`] side-table (which is retained). The only identity that
+//! crosses directly is [`TurnRunId`](crate::TurnRunId) → [`RunId`]: both wrap a
+//! `Uuid`, preserved via `RunId::from_uuid`.
 
 use ironclaw_host_api::{
-    Blocked, DenyReason, DenyRecord, DenyRef, GateRecord, GateRef, Outcome, OutcomeRefs,
-    ProcessRef, Resolution, ResultRef, RunId, SafeSummary, Suspension, ToolVerdict,
+    Blocked, DenyReason, DenyRecord, DenyRef, FailureKind, GateRecord, GateRef, GateWaypoint,
+    LoopRef, Outcome, OutcomeRefs, OutputDigest, ProcessRef, ProcessWaypoint, Resolution,
+    ResultProgress, ResultRef, ResumeToken, RunId, SafeSummary, Suspension, TerminateHint,
+    ToolVerdict,
 };
 
+use super::content_digest::ContentDigest;
 use super::host::{
-    CapabilityDenied, CapabilityDeniedReasonKind, CapabilityFailure, CapabilityOutcome,
-    CapabilityResultMessage, LoopProcessRef, ProcessHandleSummary,
+    CapabilityApprovalResume, CapabilityAuthResume, CapabilityDenied, CapabilityDeniedReasonKind,
+    CapabilityFailure, CapabilityFailureKind, CapabilityOutcome, CapabilityProgress,
+    CapabilityResultMessage, CapabilityResumeToken, LoopProcessRef, ProcessHandleSummary,
 };
 use super::model_observation::ModelVisibleToolObservation;
 use crate::{LoopGateRef, LoopResultRef};
@@ -161,15 +165,16 @@ impl MappedResolution {
 pub fn capability_outcome_to_resolution(outcome: CapabilityOutcome) -> MappedResolution {
     match outcome {
         // Ran and succeeded. Loop-derived progress/terminate_hint/output_digest
-        // (G4) are dropped; a fresh ResultRef is minted and bound to the loop
-        // result_ref so the stored output stays reachable.
+        // now cross onto the Outcome; a fresh ResultRef handle is minted, the
+        // loop result_ref is preserved on OutcomeRefs.origin AND bound so the
+        // stored output stays reachable.
         CapabilityOutcome::Completed(message) => {
             let (outcome, loop_result) = completed_outcome(message);
             let minted = outcome.refs.result;
             MappedResolution::bare(Resolution::Done(outcome)).bind_result(loop_result, minted)
         }
         // Ran and failed in a model-visible, correctable way. The recovery class
-        // (error_kind) and detail (G1) are host-side and do not cross.
+        // (error_kind) rides the verdict; only the raw detail stays host-side.
         CapabilityOutcome::Failed(failure) => {
             MappedResolution::bare(Resolution::Done(failed_outcome(failure)))
         }
@@ -187,17 +192,19 @@ pub fn capability_outcome_to_resolution(outcome: CapabilityOutcome) -> MappedRes
                 },
             )
         }
-        // Re-entrant gate: needs human approval before it may run.
+        // Re-entrant gate: needs human approval before it may run. The gate-render
+        // content (summary) rides the GateRecord; the resume token and the
+        // preserved loop gate ref ride the waypoint (never the model-visible
+        // record — §5.2.9).
         CapabilityOutcome::ApprovalRequired {
             gate_ref,
             safe_summary,
-            // approval_resume is loop/host resume identity, not gate-render
-            // content; it does not cross into the GateRecord.
-            ..
+            approval_resume,
         } => {
             let minted = GateRef::new();
+            let waypoint = gate_waypoint(minted, &gate_ref, approval_resume_token(approval_resume));
             MappedResolution::with_gate(
-                Resolution::Blocked(Blocked::Approval(minted)),
+                Resolution::Blocked(Blocked::Approval(waypoint)),
                 GateRecord::Approval {
                     summary: safe_summary_or_placeholder(safe_summary),
                 },
@@ -205,17 +212,18 @@ pub fn capability_outcome_to_resolution(outcome: CapabilityOutcome) -> MappedRes
             .bind_gate(gate_ref, minted)
         }
         // Re-entrant gate: needs a credential the caller has not supplied. The
-        // host-owned credential requirements ride the record (G3).
+        // host-owned credential requirements ride the record (G3); the resume
+        // token and preserved loop gate ref ride the waypoint.
         CapabilityOutcome::AuthRequired {
             gate_ref,
             credential_requirements,
             safe_summary,
-            // auth_resume is loop/host resume identity, not gate-render content.
-            ..
+            auth_resume,
         } => {
             let minted = GateRef::new();
+            let waypoint = gate_waypoint(minted, &gate_ref, auth_resume_token(auth_resume));
             MappedResolution::with_gate(
-                Resolution::Blocked(Blocked::Auth(minted)),
+                Resolution::Blocked(Blocked::Auth(waypoint)),
                 GateRecord::Auth {
                     summary: safe_summary_or_placeholder(safe_summary),
                     credential_requirements,
@@ -223,14 +231,16 @@ pub fn capability_outcome_to_resolution(outcome: CapabilityOutcome) -> MappedRes
             )
             .bind_gate(gate_ref, minted)
         }
-        // Re-entrant gate: needs resource budget currently unavailable.
+        // Re-entrant gate: needs resource budget currently unavailable. No resume
+        // token — a resource gate resumes against then-current budget (§5.3.3).
         CapabilityOutcome::ResourceBlocked {
             gate_ref,
             safe_summary,
         } => {
             let minted = GateRef::new();
+            let waypoint = gate_waypoint(minted, &gate_ref, None);
             MappedResolution::with_gate(
-                Resolution::Blocked(Blocked::Resource(minted)),
+                Resolution::Blocked(Blocked::Resource(waypoint)),
                 GateRecord::Resource {
                     summary: safe_summary_or_placeholder(safe_summary),
                 },
@@ -238,11 +248,13 @@ pub fn capability_outcome_to_resolution(outcome: CapabilityOutcome) -> MappedRes
             .bind_gate(gate_ref, minted)
         }
         // Parked work: a spawned OS process the turn now waits on. Process
-        // suspensions track a ProcessRef, not a gate record; the loop summary has
-        // no home on the host channel and is dropped.
+        // suspensions track a ProcessRef, not a gate record; the loop process ref
+        // is preserved on the waypoint origin (the loop summary still has no host
+        // channel).
         CapabilityOutcome::SpawnedProcess(ProcessHandleSummary { process_ref, .. }) => {
             let minted = ProcessRef::new();
-            MappedResolution::bare(Resolution::Suspended(Suspension::Process(minted)))
+            let waypoint = process_waypoint(minted, &process_ref);
+            MappedResolution::bare(Resolution::Suspended(Suspension::Process(waypoint)))
                 .bind_process(process_ref, minted)
         }
         // NON-suspending (the #6137 bug class): the executor appends the child
@@ -262,11 +274,15 @@ pub fn capability_outcome_to_resolution(outcome: CapabilityOutcome) -> MappedRes
                     result: minted,
                     byte_len,
                     preview: observation_preview(model_observation),
+                    origin: preserved_origin(result_ref.as_str()),
+                    output_digest: None,
                 },
                 verdict: ToolVerdict::ChildSpawned {
                     child_run: RunId::from_uuid(child_run_id.as_uuid()),
                 },
                 summary: safe_summary_or_placeholder(safe_summary),
+                progress: ResultProgress::default(),
+                terminate_hint: TerminateHint::default(),
             }))
             .bind_result(result_ref, minted)
         }
@@ -283,8 +299,9 @@ pub fn capability_outcome_to_resolution(outcome: CapabilityOutcome) -> MappedRes
         } => {
             let minted_gate = GateRef::new();
             let minted_result = ResultRef::new();
+            let waypoint = gate_waypoint(minted_gate, &gate_ref, None);
             MappedResolution::with_gate(
-                Resolution::Suspended(Suspension::DependentRun(minted_gate)),
+                Resolution::Suspended(Suspension::DependentRun(waypoint)),
                 GateRecord::DependentRun {
                     summary: safe_summary_or_placeholder(safe_summary),
                     result: minted_result,
@@ -300,8 +317,9 @@ pub fn capability_outcome_to_resolution(outcome: CapabilityOutcome) -> MappedRes
             safe_summary,
         } => {
             let minted = GateRef::new();
+            let waypoint = gate_waypoint(minted, &gate_ref, None);
             MappedResolution::with_gate(
-                Resolution::Suspended(Suspension::ExternalTool(minted)),
+                Resolution::Suspended(Suspension::ExternalTool(waypoint)),
                 GateRecord::ExternalTool {
                     summary: safe_summary_or_placeholder(safe_summary),
                 },
@@ -320,41 +338,132 @@ fn completed_outcome(message: CapabilityResultMessage) -> (Outcome, LoopResultRe
         safe_summary,
         byte_len,
         model_observation,
-        // G4: progress / terminate_hint / output_digest are loop-derived and have
-        // no home on the host Outcome.
-        ..
+        progress,
+        terminate_hint,
+        output_digest,
     } = message;
     let outcome = Outcome {
         refs: OutcomeRefs {
             result: ResultRef::new(),
             byte_len,
             preview: observation_preview(model_observation),
+            origin: preserved_origin(result_ref.as_str()),
+            output_digest: output_digest.map(output_digest_of),
         },
         verdict: ToolVerdict::Success,
         summary: safe_summary_or_placeholder(safe_summary),
+        progress: result_progress_of(progress),
+        terminate_hint: TerminateHint::from_bool(terminate_hint),
     };
     (outcome, result_ref)
 }
 
-/// Build the `Done` payload for a `Failed` outcome (verdict `RecoverableFailure`).
+/// Build the `Done` payload for a `Failed` outcome (verdict `RecoverableFailure`),
+/// carrying the recovery classification on the verdict. Only the raw `detail`
+/// (a backend cause) stays host-side — not authority vocabulary (charter).
 fn failed_outcome(failure: CapabilityFailure) -> Outcome {
     let CapabilityFailure {
+        error_kind,
         safe_summary,
-        // G1: error_kind (the recovery class) and detail are host-side and do not
-        // cross into the model-visible Outcome.
-        ..
+        detail: _,
     } = failure;
     Outcome {
         refs: OutcomeRefs {
             // A recoverable failure stages no durable output beyond its summary;
-            // the ref is a minted handle the later store may leave unpopulated.
+            // the ref is a minted handle the later store may leave unpopulated,
+            // and there is no originating loop result ref to preserve.
             result: ResultRef::new(),
             byte_len: 0,
             preview: None,
+            origin: None,
+            output_digest: None,
         },
-        verdict: ToolVerdict::RecoverableFailure,
+        verdict: ToolVerdict::RecoverableFailure {
+            error_kind: failure_kind_of(error_kind),
+        },
         summary: safe_summary_or_placeholder(safe_summary),
+        progress: ResultProgress::default(),
+        terminate_hint: TerminateHint::default(),
     }
+}
+
+/// A gate waypoint: the minted kernel handle plus the preserved originating loop
+/// gate ref and (for approval/auth) the opaque resume token the loop echoes back.
+fn gate_waypoint(
+    minted: GateRef,
+    loop_gate: &LoopGateRef,
+    resume: Option<ResumeToken>,
+) -> GateWaypoint {
+    let mut waypoint = GateWaypoint::new(minted);
+    if let Some(origin) = preserved_origin(loop_gate.as_str()) {
+        waypoint = waypoint.with_origin(origin);
+    }
+    if let Some(resume) = resume {
+        waypoint = waypoint.with_resume(resume);
+    }
+    waypoint
+}
+
+/// A process waypoint: the minted kernel handle plus the preserved originating
+/// loop process ref.
+fn process_waypoint(minted: ProcessRef, loop_process: &LoopProcessRef) -> ProcessWaypoint {
+    match preserved_origin(loop_process.as_str()) {
+        Some(origin) => ProcessWaypoint::new(minted).with_origin(origin),
+        None => ProcessWaypoint::new(minted),
+    }
+}
+
+/// Preserve a loop ref as a redacted host_api [`LoopRef`] when it satisfies the
+/// host redaction contract (bounded, control-free, no path delimiters). A loop
+/// ref that fails — which a safe production ref never does — falls back to `None`
+/// and stays reachable only through [`RefBindings`]; `.ok()` here converts a pure
+/// text-to-safe-text validation failure into an absent origin, never a swallowed
+/// I/O error.
+fn preserved_origin(loop_ref: &str) -> Option<LoopRef> {
+    LoopRef::new(loop_ref).ok()
+}
+
+/// The opaque approval resume token, when the outcome carried one.
+fn approval_resume_token(resume: Option<CapabilityApprovalResume>) -> Option<ResumeToken> {
+    resume.and_then(|resume| resume_token_of(&resume.resume_token))
+}
+
+/// The opaque auth resume token, when the outcome carried one.
+fn auth_resume_token(resume: Option<CapabilityAuthResume>) -> Option<ResumeToken> {
+    resume.and_then(|resume| resume_token_of(&resume.resume_token))
+}
+
+/// Convert a loop-facing [`CapabilityResumeToken`] to a host_api [`ResumeToken`].
+/// Both are bounded/control-free, so a valid loop token always crosses; `.ok()`
+/// drops a token that fails the host bound rather than panic (the mapping is
+/// total) — such a token, never produced by the loop's own validator, then
+/// resumes through the retained binding.
+fn resume_token_of(token: &CapabilityResumeToken) -> Option<ResumeToken> {
+    ResumeToken::new(token.as_str()).ok()
+}
+
+/// Map the loop's [`ContentDigest`] onto host_api's [`OutputDigest`]; both wrap
+/// the same truncated Blake3 `u64`.
+fn output_digest_of(digest: ContentDigest) -> OutputDigest {
+    OutputDigest::new(digest.0)
+}
+
+/// Map the loop's [`CapabilityProgress`] onto host_api's [`ResultProgress`]; the
+/// variants correspond one-to-one.
+fn result_progress_of(progress: CapabilityProgress) -> ResultProgress {
+    match progress {
+        CapabilityProgress::Unknown => ResultProgress::Unknown,
+        CapabilityProgress::MadeProgress => ResultProgress::MadeProgress,
+        CapabilityProgress::NoChange => ResultProgress::NoChange,
+        CapabilityProgress::Blocked => ResultProgress::Blocked,
+    }
+}
+
+/// Map the loop's [`CapabilityFailureKind`] onto host_api's [`FailureKind`] by its
+/// stable tag — the two vocabularies share the same closed set plus an open
+/// `Unknown`, so every value crosses losslessly.
+fn failure_kind_of(kind: CapabilityFailureKind) -> FailureKind {
+    FailureKind::from_tag(kind.as_str())
 }
 
 /// Bounded model-visible preview from a loop tool observation, when present.
@@ -404,6 +513,7 @@ fn deny_reason_from_kind(kind: &CapabilityDeniedReasonKind) -> DenyReason {
 
 #[cfg(test)]
 mod tests {
+    use super::super::host::CapabilityInputRef;
     use super::super::{
         CapabilityFailureKind, CapabilityProgress, LoopProcessRef,
         MODEL_VISIBLE_TOOL_OBSERVATION_SCHEMA_VERSION,
@@ -411,7 +521,8 @@ mod tests {
     use super::*;
     use crate::{LoopGateRef, LoopResultRef, TurnRunId};
     use ironclaw_host_api::{
-        ExtensionId, RuntimeCredentialAccountProviderId, RuntimeCredentialAccountSetup,
+        ApprovalRequestId, CorrelationId, ExtensionId, ResourceEstimate,
+        RuntimeCredentialAccountProviderId, RuntimeCredentialAccountSetup,
         RuntimeCredentialAuthRequirement,
     };
 
@@ -735,6 +846,160 @@ mod tests {
         }
     }
 
+    /// Stage-1 non-lossy: a `Completed` outcome's loop-derived G4 signals
+    /// (progress, terminate_hint, output_digest) and its originating loop result
+    /// ref now survive the mapping into `Resolution::Done` instead of being
+    /// dropped.
+    #[test]
+    fn completed_carries_progress_terminate_hint_digest_and_origin() {
+        let digest =
+            ContentDigest::from_json_value(&serde_json::json!({"k": "v"})).expect("digest");
+        let outcome = CapabilityOutcome::Completed(CapabilityResultMessage {
+            result_ref: result_ref(),
+            safe_summary: "did work".to_string(),
+            progress: CapabilityProgress::MadeProgress,
+            terminate_hint: true,
+            byte_len: 4096,
+            output_digest: Some(digest),
+            model_observation: None,
+        });
+        let mapped = capability_outcome_to_resolution(outcome);
+        match mapped.resolution {
+            Resolution::Done(done) => {
+                assert_eq!(done.progress, ResultProgress::MadeProgress);
+                assert!(done.terminate_hint.should_terminate());
+                assert_eq!(
+                    done.refs.output_digest.map(OutputDigest::value),
+                    Some(digest.0),
+                    "output_digest must survive the mapping (was G4-dropped)"
+                );
+                assert_eq!(
+                    done.refs.origin.as_ref().map(LoopRef::as_str),
+                    Some(result_ref().as_str()),
+                    "the originating loop result ref must be preserved on OutcomeRefs.origin"
+                );
+            }
+            other => panic!("expected Done, got {other:?}"),
+        }
+    }
+
+    /// Stage-1 non-lossy: a `Failed` outcome's recovery classification
+    /// (error_kind, the "G1" field) now rides `ToolVerdict::RecoverableFailure`
+    /// instead of being dropped.
+    #[test]
+    fn failed_carries_its_error_kind_on_the_verdict() {
+        for (loop_kind, expected) in [
+            (CapabilityFailureKind::Network, FailureKind::Network),
+            (
+                CapabilityFailureKind::InvalidInput,
+                FailureKind::InvalidInput,
+            ),
+            (
+                CapabilityFailureKind::unknown("quota_exceeded").unwrap(),
+                FailureKind::unknown("quota_exceeded").unwrap(),
+            ),
+        ] {
+            let mapped =
+                capability_outcome_to_resolution(CapabilityOutcome::Failed(CapabilityFailure {
+                    error_kind: loop_kind,
+                    safe_summary: "tool failed".to_string(),
+                    detail: None,
+                }));
+            match mapped.resolution {
+                Resolution::Done(done) => {
+                    assert_eq!(
+                        done.verdict,
+                        ToolVerdict::RecoverableFailure {
+                            error_kind: expected.clone()
+                        },
+                        "the recovery class must ride the verdict (was G1-dropped)"
+                    );
+                }
+                other => panic!("expected Done, got {other:?}"),
+            }
+        }
+    }
+
+    /// Stage-1 non-lossy: an approval gate carries its resume token and preserved
+    /// loop gate ref (was G1-dropped), and an auth gate likewise.
+    #[test]
+    fn approval_and_auth_gates_carry_resume_token_and_preserved_origin() {
+        let approval_resume = CapabilityApprovalResume {
+            approval_request_id: ApprovalRequestId::new(),
+            resume_token: CapabilityResumeToken::new("approval-resume-1").unwrap(),
+            correlation_id: CorrelationId::new(),
+            input_ref: CapabilityInputRef::new("input:x").unwrap(),
+            input: serde_json::json!({"k": "v"}),
+            estimate: ResourceEstimate::default(),
+        };
+        let mapped = capability_outcome_to_resolution(CapabilityOutcome::ApprovalRequired {
+            gate_ref: gate_ref(),
+            safe_summary: "awaiting approval".to_string(),
+            approval_resume: Some(approval_resume),
+        });
+        match &mapped.resolution {
+            Resolution::Blocked(blocked @ Blocked::Approval(_)) => {
+                assert_eq!(
+                    blocked.resume_token().map(ResumeToken::as_str),
+                    Some("approval-resume-1"),
+                    "the approval resume token must cross"
+                );
+                assert_eq!(
+                    blocked.origin().map(LoopRef::as_str),
+                    Some(gate_ref().as_str()),
+                    "the originating loop gate ref must be preserved"
+                );
+            }
+            other => panic!("expected Blocked::Approval, got {other:?}"),
+        }
+
+        let auth_resume = CapabilityAuthResume {
+            resume_token: CapabilityResumeToken::new("auth-resume-1").unwrap(),
+            prior_approval: None,
+            replay: None,
+        };
+        let mapped = capability_outcome_to_resolution(CapabilityOutcome::AuthRequired {
+            gate_ref: gate_ref(),
+            credential_requirements: vec![],
+            safe_summary: "awaiting credential".to_string(),
+            auth_resume: Some(auth_resume),
+        });
+        match &mapped.resolution {
+            Resolution::Blocked(blocked @ Blocked::Auth(_)) => {
+                assert_eq!(
+                    blocked.resume_token().map(ResumeToken::as_str),
+                    Some("auth-resume-1")
+                );
+                assert_eq!(
+                    blocked.origin().map(LoopRef::as_str),
+                    Some(gate_ref().as_str())
+                );
+            }
+            other => panic!("expected Blocked::Auth, got {other:?}"),
+        }
+    }
+
+    /// Stage-1 non-lossy: a spawned-process suspension preserves its loop process
+    /// ref on the channel (not only in the binding side-table).
+    #[test]
+    fn spawned_process_preserves_the_loop_process_ref_on_the_channel() {
+        let mapped = capability_outcome_to_resolution(CapabilityOutcome::SpawnedProcess(
+            ProcessHandleSummary {
+                process_ref: LoopProcessRef::new("process:pid-7").unwrap(),
+                safe_summary: "spawned".to_string(),
+            },
+        ));
+        match &mapped.resolution {
+            Resolution::Suspended(suspension @ Suspension::Process(_)) => {
+                assert_eq!(
+                    suspension.origin().map(LoopRef::as_str),
+                    Some("process:pid-7")
+                );
+            }
+            other => panic!("expected Suspended(Process), got {other:?}"),
+        }
+    }
+
     #[test]
     fn child_run_identity_is_preserved_on_the_verdict() {
         let child_run_id = TurnRunId::new();
@@ -858,7 +1123,10 @@ mod tests {
                 Resolution::Suspended(Suspension::DependentRun(channel_gate)),
                 Some(GateRecord::DependentRun { result, .. }),
             ) => {
-                assert_eq!(*channel_gate, minted_gate, "gate binding matches channel");
+                assert_eq!(
+                    channel_gate.gate, minted_gate,
+                    "gate binding matches channel"
+                );
                 assert_eq!(*result, minted_result, "result binding matches record");
             }
             other => panic!("expected DependentRun channel + record, got {other:?}"),
@@ -884,7 +1152,7 @@ mod tests {
         assert_eq!(loop_process, LoopProcessRef::new("process:pid-1").unwrap());
         match &mapped.resolution {
             Resolution::Suspended(Suspension::Process(channel_process)) => {
-                assert_eq!(*channel_process, minted_process);
+                assert_eq!(channel_process.process, minted_process);
             }
             other => panic!("expected Suspended(Process), got {other:?}"),
         }
