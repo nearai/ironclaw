@@ -625,6 +625,7 @@ impl HostRuntimeCapabilityHarness {
             trigger_active_run_lookup_requested,
             fixture_extension_dirs,
             native_extension_factories,
+            channel_extension_bindings,
             account_setup_descriptors,
             recording_network_egress,
             google_oauth_backend_for_test,
@@ -633,6 +634,7 @@ impl HostRuntimeCapabilityHarness {
         let storage_root = root.path().join("local-dev");
         let workspace_root = storage_root.join("workspace");
         std::fs::create_dir_all(&workspace_root)?;
+        let has_fixture_extensions = !fixture_extension_dirs.is_empty();
         for (source, extension_id) in fixture_extension_dirs {
             copy_dir_recursive(
                 &source,
@@ -661,6 +663,18 @@ impl HostRuntimeCapabilityHarness {
         }
         if !native_extension_factories.is_empty() {
             input = input.with_native_extension_factories(native_extension_factories);
+        }
+        if !channel_extension_bindings.is_empty() {
+            input = input.with_channel_extension_bindings(channel_extension_bindings);
+        }
+        if has_fixture_extensions {
+            // Fixture packages model HOST-BUNDLED extensions (overview §8), so
+            // their `first_party_requested` trust must survive filesystem
+            // discovery; without this the catalog loader stamps them
+            // `InstalledLocal` and skips them (#5459 anti-laundering rule),
+            // and lifecycle installs fail with "available extension was not
+            // found".
+            input = input.with_trusted_fixture_extensions_for_test();
         }
         if !account_setup_descriptors.is_empty() {
             input = input.with_account_setup_descriptors(account_setup_descriptors);
