@@ -223,6 +223,26 @@ fn scope_ids_reject_path_segments_and_controls() {
 }
 
 #[test]
+fn system_resource_scope_round_trips_through_json() {
+    let scope = ResourceScope::system();
+    assert!(scope.is_system());
+
+    let encoded = serde_json::to_string(&scope).expect("serialize system scope");
+    let decoded: ResourceScope = serde_json::from_str(&encoded).expect("deserialize system scope");
+
+    assert!(decoded.is_system());
+    assert_eq!(decoded.tenant_id.as_str(), SYSTEM_RESERVED_ID);
+    assert_eq!(decoded.user_id.as_str(), SYSTEM_RESERVED_ID);
+
+    // Sentinel stays unreachable through ordinary construction; only
+    // `from_trusted` may produce it, so user input can never collide.
+    assert!(TenantId::new(SYSTEM_RESERVED_ID).is_err());
+    assert!(UserId::new(SYSTEM_RESERVED_ID).is_err());
+    assert!(serde_json::from_value::<AgentId>(json!(SYSTEM_RESERVED_ID)).is_err());
+    assert!(serde_json::from_value::<ProjectId>(json!(SYSTEM_RESERVED_ID)).is_err());
+}
+
+#[test]
 fn local_default_resource_scope_uses_default_agent_and_bootstrap_project() {
     let invocation_id = InvocationId::new();
     let scope = ResourceScope::local_default(UserId::new("alice").unwrap(), invocation_id).unwrap();

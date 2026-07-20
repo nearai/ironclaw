@@ -113,6 +113,14 @@ fn validate_name_segment(kind: &'static str, value: &str) -> Result<(), HostApiE
 
 macro_rules! string_id {
     ($name:ident, $kind:literal, $validator:ident) => {
+        string_id!(@build $name, $kind, $validator);
+        string_id!(@deserialize_strict $name);
+    };
+    ($name:ident, $kind:literal, $validator:ident, accepts_system_sentinel) => {
+        string_id!(@build $name, $kind, $validator);
+        string_id!(@deserialize_with_sentinel $name);
+    };
+    (@build $name:ident, $kind:literal, $validator:ident) => {
         #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
         pub struct $name(String);
 
@@ -154,13 +162,30 @@ macro_rules! string_id {
                 serializer.serialize_str(&self.0)
             }
         }
-
+    };
+    (@deserialize_strict $name:ident) => {
         impl<'de> Deserialize<'de> for $name {
             fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
             where
                 D: serde::Deserializer<'de>,
             {
                 let value = String::deserialize(deserializer)?;
+                Self::new(value).map_err(serde::de::Error::custom)
+            }
+        }
+    };
+    (@deserialize_with_sentinel $name:ident) => {
+        impl<'de> Deserialize<'de> for $name {
+            fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+            where
+                D: serde::Deserializer<'de>,
+            {
+                let value = String::deserialize(deserializer)?;
+                // Admit the system sentinel; `Self::new` rejects its
+                // control bytes, so JSON round-trip needs an explicit bypass.
+                if value == crate::SYSTEM_RESERVED_ID {
+                    return Ok(Self::from_trusted(value));
+                }
                 Self::new(value).map_err(serde::de::Error::custom)
             }
         }
@@ -205,8 +230,13 @@ macro_rules! uuid_id {
     };
 }
 
-string_id!(TenantId, "tenant", validate_scope_id);
-string_id!(UserId, "user", validate_scope_id);
+string_id!(
+    TenantId,
+    "tenant",
+    validate_scope_id,
+    accepts_system_sentinel
+);
+string_id!(UserId, "user", validate_scope_id, accepts_system_sentinel);
 string_id!(AgentId, "agent", validate_scope_id);
 string_id!(ProjectId, "project", validate_scope_id);
 string_id!(MissionId, "mission", validate_scope_id);
