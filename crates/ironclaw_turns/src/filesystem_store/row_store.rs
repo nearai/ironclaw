@@ -1,5 +1,9 @@
 // arch-exempt: large_file, WAL row store (apply/reservation/journal + delta commit paths) predates decomposition; #6263 no-op-delta durability fix adds a small guard, plan #6263
-use std::{collections::HashMap, sync::Arc, time::Duration};
+use std::{
+    collections::{HashMap, VecDeque},
+    sync::Arc,
+    time::Duration,
+};
 
 use futures_util::stream::{self, StreamExt, TryStreamExt};
 use ironclaw_filesystem::{
@@ -53,6 +57,31 @@ const ADMISSION_RESERVATION_ROWS: &str = "admission-reservations";
 const SPAWN_TREE_RESERVATION_ROWS: &str = "spawn-tree-reservations";
 const ROW_COLLECTION_READ_CONCURRENCY: usize = 32;
 
+/// Durability mode for [`FilesystemTurnStateRowStore`] (#6263 Step 3).
+///
+/// * [`WriteThrough`](Self::WriteThrough) — today's behavior, byte-for-byte:
+///   every mutation enqueues its delta and awaits the durable ack before
+///   returning `Ok`. No crash-loss window. This is the safety default.
+/// * [`WriteBehind`](Self::WriteBehind) — a mutation whose resulting run status
+///   is NOT [`is_recoverability_critical`](crate::is_recoverability_critical)
+///   returns `Ok` immediately after enqueue, WITHOUT awaiting the ack; the
+///   flusher persists it in the background (memory-speed non-critical writes,
+///   at the cost of a bounded crash-loss window for trailing non-critical
+///   transitions). Recoverability-critical transitions (gate-park + terminal)
+///   still await synchronously, and because the journal is a strictly
+///   sequential single-writer, awaiting a critical op's ack flushes its entire
+///   preceding async tail — critical ops are natural durability barriers.
+///
+/// The default is `WriteThrough`; `WriteBehind` is opt-in via
+/// [`FilesystemTurnStateRowStore::with_durability_policy`]. Wiring it onto a
+/// deployment profile is a separate follow-on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum TurnStateDurabilityPolicy {
+    #[default]
+    WriteThrough,
+    WriteBehind,
+}
+
 /// Filesystem-backed turn-state store using typed append-log deltas.
 ///
 /// This is intentionally separate from [`super::FilesystemTurnStateStore`].
@@ -80,6 +109,13 @@ where
     delta_journal: DeltaJournal,
     apply_timeout: Duration,
     preappend_row_reservations: bool,
+    durability_policy: TurnStateDurabilityPolicy,
+    /// WriteBehind backpressure window: the enqueued-but-un-acked non-critical
+    /// delta acks, oldest first. Bounded by
+    /// [`InMemoryTurnStateStoreLimits::max_pending_write_behind_deltas`]; at the
+    /// cap the next non-critical op awaits the oldest before enqueuing. Empty and
+    /// unused under `WriteThrough`.
+    pending_write_behind: AsyncMutex<VecDeque<DeltaAck>>,
 }
 
 enum ActiveLockReservation {
@@ -121,6 +157,11 @@ struct PendingRowCommit<T> {
     ack: Option<DeltaAck>,
     active_lock_reservations: Vec<ActiveLockReservation>,
     run_row_reservations: Vec<RunRowReservation>,
+    /// Whether the resulting run status is recoverability-critical (gate-park or
+    /// terminal). Under `WriteBehind` a critical commit awaits synchronously (a
+    /// barrier); a non-critical one registers for backpressure and returns
+    /// without awaiting. Ignored under `WriteThrough` (every commit awaits).
+    critical: bool,
 }
 
 enum RowApplyOutcome<T> {
@@ -155,11 +196,29 @@ where
             delta_journal: DeltaJournal::new(filesystem, materialize_gate),
             apply_timeout: FILESYSTEM_APPLY_TIMEOUT,
             preappend_row_reservations: false,
+            durability_policy: TurnStateDurabilityPolicy::default(),
+            pending_write_behind: AsyncMutex::new(VecDeque::new()),
         }
     }
 
     pub fn with_limits(mut self, limits: InMemoryTurnStateStoreLimits) -> Self {
         self.limits = limits;
+        self
+    }
+
+    /// Select the durable-commit mode (default [`TurnStateDurabilityPolicy::WriteThrough`]).
+    ///
+    /// `WriteBehind` moves non-[`is_recoverability_critical`](crate::is_recoverability_critical)
+    /// transitions off the synchronous durable ack; see
+    /// [`TurnStateDurabilityPolicy`] for the guarantees and the crash-loss
+    /// window. Gate-park + terminal transitions stay synchronously durable in
+    /// both modes.
+    pub fn with_durability_policy(mut self, durability_policy: TurnStateDurabilityPolicy) -> Self {
+        self.durability_policy = durability_policy;
+        self.delta_journal.set_write_behind(matches!(
+            durability_policy,
+            TurnStateDurabilityPolicy::WriteBehind
+        ));
         self
     }
 
@@ -196,6 +255,7 @@ where
         &self,
     ) -> Result<(TurnPersistenceSnapshot, Option<RecordVersion>), TurnError> {
         let mut guard = self.snapshot_state.lock().await;
+        self.drop_cache_if_degraded(&mut guard);
         if guard.is_none() {
             *guard = Some(self.load_snapshot_from_rows().await?);
         }
@@ -219,6 +279,7 @@ where
         R: FnOnce(&TurnPersistenceSnapshot) -> T,
     {
         let mut guard = self.snapshot_state.lock().await;
+        self.drop_cache_if_degraded(&mut guard);
         if guard.is_none() {
             *guard = Some(self.load_snapshot_from_rows().await?);
         }
@@ -233,6 +294,149 @@ where
 
     async fn clear_snapshot_cache(&self) {
         *self.snapshot_state.lock().await = None;
+    }
+
+    /// If the store degraded after a write-behind append failure, drop the hot
+    /// cache so the next read reloads from the last consistent durable point.
+    /// A pure atomic check off the hot path when not degraded.
+    fn drop_cache_if_degraded(&self, guard: &mut Option<RowSnapshotState>) {
+        if self.delta_journal.is_degraded() {
+            *guard = None;
+        }
+    }
+
+    fn is_write_behind(&self) -> bool {
+        matches!(
+            self.durability_policy,
+            TurnStateDurabilityPolicy::WriteBehind
+        )
+    }
+
+    /// Whether this commit takes the async (non-awaited) write-behind path: only
+    /// non-critical transitions under `WriteBehind`.
+    fn write_behind_async(&self, critical: bool) -> bool {
+        self.is_write_behind() && !critical
+    }
+
+    /// Whether to pre-append cross-store row reservations for this commit.
+    ///
+    /// Pre-append reservations are a WRITE-THROUGH / strict cross-store-CAS
+    /// mechanism: they CAS the *durable* run/active-lock rows before the journal
+    /// append. Under `WriteBehind` non-critical ops return `Ok` before their
+    /// durable append, so those durable rows do not yet exist — a later critical
+    /// op's reservation CAS would find "durable run row disappeared". Write-behind
+    /// is the single-writer/hot-cache-authority model where cross-store CAS is
+    /// unnecessary anyway, so it never pre-appends; a critical op is a plain
+    /// enqueue+await barrier and durability comes from the journal→materialize
+    /// path. Write-through is unchanged (reserve iff the strict flag is set).
+    fn should_preappend(&self) -> bool {
+        self.preappend_row_reservations && !self.is_write_behind()
+    }
+
+    /// Reset the hot cache after a mutation the embedded engine REJECTED (a
+    /// domain error such as `ThreadBusy` / `InvalidTransition`).
+    ///
+    /// The op ran against the shared cached engine, so it may have left a partial
+    /// mutation; that must be discarded. Under `WriteThrough` the cache is
+    /// dropped (`*guard = None`) and the next access reloads from durable — which
+    /// equals the cache, since every prior op flushed synchronously. Under
+    /// `WriteBehind` durable LAGS the cache (un-acked non-critical ops), so a
+    /// reload-from-durable would silently drop acked-but-unflushed ops the caller
+    /// was told succeeded. Instead, rebuild the embedded engine from the cached
+    /// snapshot (which still includes those un-flushed ops), discarding only the
+    /// failed op's partial mutation.
+    fn reset_cache_after_rejected_mutation(
+        &self,
+        guard: &mut Option<RowSnapshotState>,
+    ) -> Result<(), TurnError> {
+        if !self.is_write_behind() {
+            *guard = None;
+            return Ok(());
+        }
+        if let Some(state) = guard.as_mut() {
+            state.store = Arc::new(self.build_in_memory_store(state.snapshot.clone())?);
+        }
+        Ok(())
+    }
+
+    /// Fail a mutation fast when the store has degraded after a write-behind
+    /// append failure. Clears the diverged hot cache (reads then reload from the
+    /// last consistent durable point) and returns a retryable error.
+    async fn ensure_not_degraded(&self) -> Result<(), TurnError> {
+        if self.delta_journal.is_degraded() {
+            self.clear_snapshot_cache().await;
+            return Err(TurnError::Unavailable {
+                reason: "turn-state row store degraded after a write-behind durable append failure"
+                    .to_string(),
+            });
+        }
+        Ok(())
+    }
+
+    /// Commit a prepared [`PendingRowCommit`] under the active durability policy.
+    ///
+    /// * `WriteThrough` — always await the durable ack (unchanged behavior).
+    /// * `WriteBehind` + critical — await the ack (a barrier: awaiting a critical
+    ///   op's ack implies the whole preceding async tail is durable).
+    /// * `WriteBehind` + non-critical — register the ack for bounded backpressure
+    ///   and return without awaiting.
+    async fn commit_pending<T>(
+        &self,
+        pending: PendingRowCommit<T>,
+        timeout_reason: &'static str,
+    ) -> Result<T, TurnError> {
+        if pending.ack.is_none() {
+            // No durable delta (no-op / empty commit): nothing to flush.
+            return Ok(pending.value);
+        }
+        if self.write_behind_async(pending.critical) {
+            self.register_write_behind_commit(pending).await
+        } else {
+            self.await_pending_commit(pending, timeout_reason).await
+        }
+    }
+
+    /// Non-critical write-behind commit: the hot cache is already updated
+    /// synchronously (reads stay correct), so return `Ok` without awaiting the
+    /// durable ack — only durability lags. Bound the enqueued-but-un-acked window
+    /// with [`InMemoryTurnStateStoreLimits::max_pending_write_behind_deltas`]: at
+    /// the cap, await the OLDEST pending ack first, which bounds both memory and
+    /// the crash-loss window.
+    async fn register_write_behind_commit<T>(
+        &self,
+        pending: PendingRowCommit<T>,
+    ) -> Result<T, TurnError> {
+        let PendingRowCommit {
+            value,
+            ack,
+            active_lock_reservations,
+            run_row_reservations,
+            critical: _,
+        } = pending;
+        debug_assert!(
+            active_lock_reservations.is_empty() && run_row_reservations.is_empty(),
+            "write-behind non-critical commits must not pre-append row reservations",
+        );
+        let Some(ack) = ack else {
+            return Ok(value);
+        };
+        let cap = self.limits.max_pending_write_behind_deltas.max(1);
+        let mut window = self.pending_write_behind.lock().await;
+        while window.len() >= cap {
+            let Some(oldest) = window.pop_front() else {
+                break;
+            };
+            if let Err(error) = DeltaJournal::await_ack(Some(oldest)).await {
+                // The oldest pending append failed; the flusher has halted and
+                // latched the store degraded. Surface the retryable error and
+                // roll the hot cache back to the last consistent durable point.
+                drop(window);
+                self.clear_snapshot_cache().await;
+                return Err(error);
+            }
+        }
+        window.push_back(ack);
+        Ok(value)
     }
 
     async fn ensure_snapshot_cache_for_mutation(
@@ -544,6 +748,7 @@ where
     ) -> Result<Option<TurnRunState>, TurnError> {
         let (run, turn) = {
             let mut guard = self.snapshot_state.lock().await;
+            self.drop_cache_if_degraded(&mut guard);
             if guard.is_none() {
                 *guard = Some(self.load_snapshot_from_rows().await?);
             }
@@ -789,6 +994,7 @@ where
         Fut: std::future::Future<Output = Result<T, TurnError>> + Send,
         T: Send,
     {
+        self.ensure_not_degraded().await?;
         let critical = async {
             let mut guard = self.snapshot_state.lock().await;
             let mut refreshed_after_stale_error = false;
@@ -831,7 +1037,7 @@ where
                             refreshed_after_stale_error = true;
                             continue;
                         }
-                        *guard = None;
+                        self.reset_cache_after_rejected_mutation(&mut guard)?;
                         return Err(error);
                     }
                 };
@@ -864,17 +1070,22 @@ where
                     *guard = Some(next_state);
                     return Ok(RowApplyOutcome::Ready(value));
                 }
+                let delta_critical = delta_is_recoverability_critical(&persist_delta);
                 let reservation_seq = current_journal_seq.next();
                 let next_state = RowSnapshotState::new(new_snapshot, store, reservation_seq)?;
-                let (run_row_reservations, active_lock_reservations) = match self
-                    .reserve_preappend_rows(&baseline, &persist_delta, reservation_seq)
-                    .await
-                {
-                    Ok(reservations) => reservations,
-                    Err(error) => {
-                        *guard = None;
-                        return Err(error);
+                let (run_row_reservations, active_lock_reservations) = if self.should_preappend() {
+                    match self
+                        .reserve_preappend_rows(&baseline, &persist_delta, reservation_seq)
+                        .await
+                    {
+                        Ok(reservations) => reservations,
+                        Err(error) => {
+                            *guard = None;
+                            return Err(error);
+                        }
                     }
+                } else {
+                    (Vec::new(), Vec::new())
                 };
                 let ack = match self.enqueue_delta(persist_delta) {
                     Ok(ack) => ack,
@@ -894,6 +1105,7 @@ where
                     ack,
                     active_lock_reservations,
                     run_row_reservations,
+                    critical: delta_critical,
                 }));
             }
         };
@@ -910,7 +1122,7 @@ where
         match outcome {
             RowApplyOutcome::Ready(value) => Ok(value),
             RowApplyOutcome::Pending(pending) => {
-                self.await_pending_commit(pending, "turn state row-store append ack timed out")
+                self.commit_pending(pending, "turn state row-store append ack timed out")
                     .await
             }
         }
@@ -1646,6 +1858,7 @@ where
             + Send,
         T: Send,
     {
+        self.ensure_not_degraded().await?;
         let critical = async {
             let mut guard = self.snapshot_state.lock().await;
             let mut build_delta = Some(build_delta);
@@ -1686,26 +1899,27 @@ where
                             refreshed_after_stale_error = true;
                             continue;
                         }
-                        *guard = None;
+                        self.reset_cache_after_rejected_mutation(&mut guard)?;
                         return Err(error);
                     }
                 };
                 let build_delta = build_delta.take().ok_or_else(|| TurnError::Unavailable {
                     reason: "turn state row-store targeted delta builder was reused".to_string(),
                 })?;
-                let (delta, persist_delta, reservation_baseline, reservation_seq) = {
+                let (delta, persist_delta, delta_critical, reservation_baseline, reservation_seq) = {
                     let state = guard.as_ref().ok_or_else(|| TurnError::Unavailable {
                         reason: "row snapshot cache was not initialized".to_string(),
                     })?;
                     let delta =
                         build_delta(&state.snapshot, latest_event_cursor, store.as_ref(), &value)?;
                     let persist_delta = row_store_durable_delta(delta.clone());
-                    let reservation_baseline = self
-                        .preappend_row_reservations
-                        .then(|| state.snapshot.clone());
+                    let delta_critical = delta_is_recoverability_critical(&persist_delta);
+                    let reservation_baseline =
+                        self.should_preappend().then(|| state.snapshot.clone());
                     (
                         delta,
                         persist_delta,
+                        delta_critical,
                         reservation_baseline,
                         state.journal_seq.next(),
                     )
@@ -1735,6 +1949,7 @@ where
                         ack: None,
                         active_lock_reservations: Vec::new(),
                         run_row_reservations: Vec::new(),
+                        critical: delta_critical,
                     });
                 }
                 let (run_row_reservations, active_lock_reservations) =
@@ -1797,6 +2012,7 @@ where
                     ack,
                     active_lock_reservations,
                     run_row_reservations,
+                    critical: delta_critical,
                 });
             }
         };
@@ -1810,7 +2026,7 @@ where
                 });
             }
         };
-        self.await_pending_commit(
+        self.commit_pending(
             pending,
             "turn state row-store targeted append ack timed out",
         )
@@ -1917,6 +2133,19 @@ where
             );
         }
     }
+}
+
+/// Whether a durable delta carries a recoverability-critical run transition
+/// (gate-park or terminal). Keyed on the run records the delta upserts, using
+/// the production [`crate::is_recoverability_critical`] boundary. Under
+/// `WriteBehind` this decides the sync-durable barrier vs the async path; a
+/// delta with no critical run upsert (submit/claim/resume/relinquish churn,
+/// loop checkpoints, tree reservations) is non-critical.
+fn delta_is_recoverability_critical(delta: &SnapshotDelta) -> bool {
+    delta
+        .runs_upsert
+        .iter()
+        .any(|run| crate::is_recoverability_critical(run.status))
 }
 
 fn turn_state_write_span(

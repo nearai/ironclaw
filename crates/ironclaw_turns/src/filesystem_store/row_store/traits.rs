@@ -362,6 +362,7 @@ where
             Some(&request.run_id),
         );
         async move {
+            self.ensure_not_degraded().await?;
             let record = loop_checkpoint_record_from_request(request);
             let delta = SnapshotDelta::default().set_loop_checkpoints_upsert(vec![record.clone()]);
             let ack = {
@@ -388,12 +389,17 @@ where
                 }
                 ack
             };
-            self.await_pending_commit(
+            self.commit_pending(
                 PendingRowCommit {
                     value: record,
                     ack,
                     active_lock_reservations: Vec::new(),
                     run_row_reservations: Vec::new(),
+                    // A loop checkpoint carries no run status transition, so it is
+                    // never recoverability-critical: under write-behind it lazy-
+                    // flushes. Any checkpoint a gate-park needs is flushed by the
+                    // block transition's synchronous barrier.
+                    critical: false,
                 },
                 "timed out waiting for loop checkpoint row-store append",
             )

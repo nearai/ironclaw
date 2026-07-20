@@ -1,10 +1,19 @@
-use std::{sync::Arc, time::Duration};
+use std::{
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
+    time::Duration,
+};
 
 use ironclaw_filesystem::{
     CasExpectation, ContentType, Entry, FilesystemError, RootFilesystem, ScopedFilesystem, SeqNo,
 };
 use ironclaw_host_api::ResourceScope;
-use tokio::sync::{Mutex as AsyncMutex, mpsc, oneshot};
+use tokio::{
+    sync::{Mutex as AsyncMutex, mpsc, oneshot},
+    task::JoinHandle,
+};
 
 use crate::TurnError;
 
@@ -32,6 +41,30 @@ pub(super) type DeltaAck = oneshot::Receiver<Result<(), TurnError>>;
 
 pub(super) struct DeltaJournal {
     sender: mpsc::UnboundedSender<DeltaJournalRequest>,
+    /// When set, the flusher HALTS (rather than continues) on an append failure
+    /// — see [`run_delta_journal_flusher`]. Set by the row store when it runs in
+    /// [`crate::TurnStateDurabilityPolicy::WriteBehind`].
+    write_behind: Arc<AtomicBool>,
+    /// Latched `true` by the flusher when a write-behind append fails. The row
+    /// store checks this at mutation entry to fail fast and to reload its hot
+    /// cache from the last consistent durable point.
+    degraded: Arc<AtomicBool>,
+    /// Background task handles, aborted on drop so a "crashed" (dropped) store
+    /// cannot keep appending queued write-behind deltas to a shared backend
+    /// after the crash point.
+    flusher: JoinHandle<()>,
+    materializer: JoinHandle<()>,
+}
+
+impl Drop for DeltaJournal {
+    fn drop(&mut self) {
+        // Deterministic crash: stop the detached durable pipeline at the drop
+        // point. Acked write-through data is already durable (the caller awaited
+        // its ack before dropping the store); only queued-but-un-appended
+        // write-behind deltas are lost — exactly the bounded crash-loss window.
+        self.flusher.abort();
+        self.materializer.abort();
+    }
 }
 
 struct DeltaJournalRequest {
@@ -49,17 +82,41 @@ impl DeltaJournal {
     {
         let (sender, receiver) = mpsc::unbounded_channel();
         let (materialize_sender, materialize_receiver) = mpsc::unbounded_channel();
-        tokio::spawn(run_delta_journal_materializer(
+        let write_behind = Arc::new(AtomicBool::new(false));
+        let degraded = Arc::new(AtomicBool::new(false));
+        let materializer = tokio::spawn(run_delta_journal_materializer(
             Arc::clone(&filesystem),
             materialize_gate,
             materialize_receiver,
         ));
-        tokio::spawn(run_delta_journal_flusher(
+        let flusher = tokio::spawn(run_delta_journal_flusher(
             filesystem,
             receiver,
             materialize_sender,
+            Arc::clone(&write_behind),
+            Arc::clone(&degraded),
         ));
-        Self { sender }
+        Self {
+            sender,
+            write_behind,
+            degraded,
+            flusher,
+            materializer,
+        }
+    }
+
+    /// Select the flusher's append-failure behavior: `false` (default) =
+    /// write-through (continue past a failed append; each caller awaited and
+    /// handles its own error); `true` = write-behind (halt the durable sequence
+    /// on the first append failure).
+    pub(super) fn set_write_behind(&self, on: bool) {
+        self.write_behind.store(on, Ordering::SeqCst);
+    }
+
+    /// Whether the flusher has halted the durable sequence after a write-behind
+    /// append failure. Once `true`, the store is degraded until reopened.
+    pub(super) fn is_degraded(&self) -> bool {
+        self.degraded.load(Ordering::SeqCst)
     }
 
     pub(super) fn enqueue(&self, delta: SnapshotDelta) -> Result<Option<DeltaAck>, TurnError> {
@@ -85,6 +142,8 @@ async fn run_delta_journal_flusher<F>(
     filesystem: Arc<ScopedFilesystem<F>>,
     mut receiver: mpsc::UnboundedReceiver<DeltaJournalRequest>,
     materialize_sender: mpsc::UnboundedSender<SeqNo>,
+    write_behind: Arc<AtomicBool>,
+    degraded: Arc<AtomicBool>,
 ) where
     F: RootFilesystem,
 {
@@ -115,6 +174,28 @@ async fn run_delta_journal_flusher<F>(
                 for request in requests {
                     let _ = request.ack.send(Err(error.clone()));
                 }
+                if write_behind.load(Ordering::SeqCst) {
+                    // Append-failure HALT (write-behind only). Under write-behind
+                    // a non-critical op already returned `Ok` to its caller when
+                    // it enqueued, so CONTINUING to the next batch (the safe
+                    // write-through behavior, where every caller awaited its own
+                    // ack) would append later deltas AFTER a durable GAP the lost
+                    // op left — corruption on replay. Instead, latch the store
+                    // degraded and stop the flusher so nothing can append behind
+                    // the gap. The store then fails subsequent mutations fast and
+                    // reloads its hot cache from the last consistent durable point
+                    // (the accepted, recoverable crash-loss). Drain the remaining
+                    // queue with the halt error so a critical-op barrier parked on
+                    // its ack unblocks with a retryable error rather than hanging.
+                    degraded.store(true, Ordering::SeqCst);
+                    receiver.close();
+                    while let Ok(request) = receiver.try_recv() {
+                        let _ = request.ack.send(Err(delta_journal_halted()));
+                    }
+                    return;
+                }
+                // Write-through: continue to the next batch (unchanged behavior —
+                // the failed op's caller cleared its cache and returned an error).
             }
         }
     }
@@ -531,6 +612,12 @@ where
 fn delta_journal_stopped() -> TurnError {
     TurnError::Unavailable {
         reason: "turn-state delta journal stopped".to_string(),
+    }
+}
+
+fn delta_journal_halted() -> TurnError {
+    TurnError::Unavailable {
+        reason: "turn-state delta journal halted after a write-behind append failure".to_string(),
     }
 }
 

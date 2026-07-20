@@ -76,7 +76,7 @@ use io::{deserialize_snapshot, fs_error, snapshot_entry, snapshot_path};
 use profile_resolver::PreResolvedRunProfileResolver;
 use runner_lease::{RunnerLeaseMemory, RunnerLeaseOverlay, RunnerLeaseRecord, RunnerLeaseStore};
 
-pub use row_store::FilesystemTurnStateRowStore;
+pub use row_store::{FilesystemTurnStateRowStore, TurnStateDurabilityPolicy};
 
 #[cfg(test)]
 mod tests;

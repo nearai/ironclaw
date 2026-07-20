@@ -57,6 +57,25 @@ impl TurnStatus {
     }
 }
 
+/// The recoverability-critical transition boundary (#6263 Step 3 / #6284).
+///
+/// A run status is **recoverability-critical** when it is a gate-park
+/// ([`TurnStatus::is_blocked`]) or a terminal ([`TurnStatus::is_terminal`]):
+///
+/// * losing a gate-park strands a run away from the human who must act on it;
+/// * losing a terminal re-runs an already-performed side effect, or loses the
+///   sanitized, model-visible failure cause the model must see.
+///
+/// These transitions MUST stay synchronously durable even under async
+/// write-behind ([`crate::TurnStateDurabilityPolicy::WriteBehind`]): the async
+/// path may move only NON-critical transitions off the synchronous ack. The
+/// row store keys its write-through-vs-write-behind decision on this predicate,
+/// and the crash-consistency suite references THIS function (not a copy) as the
+/// single boundary write-behind flips.
+pub fn is_recoverability_critical(status: TurnStatus) -> bool {
+    status.is_blocked() || status.is_terminal()
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TurnActiveRunRefState {
     Missing,
