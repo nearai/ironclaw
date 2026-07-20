@@ -17,7 +17,6 @@ use ironclaw_turns::{
 
 const DEFAULT_SYSTEM_PROMPT_NAME: &str = "SYSTEM.md";
 const DEFAULT_SYSTEM_PROMPT_EMBEDDED: &str = include_str!("../../assets/prompts/default-system.md");
-const DEFAULT_SYSTEM_PROMPT_LANGUAGE_POLICY: &str = "- Respond in the same language as the user's current message unless they explicitly request another language.\n";
 /// Progressive tool-disclosure protocol, appended to the system prompt only when
 /// disclosure is active (bridged mode). A weak model will not adopt the
 /// search/describe/call protocol from the `tool_search` tool description alone —
@@ -118,7 +117,9 @@ pub(crate) fn seed_default_system_prompt(
 ) -> Result<(), DefaultSystemPromptError> {
     if path.symlink_metadata().is_ok() {
         validate_default_system_prompt(storage_root, path)?;
-        migrate_known_prior_default_system_prompt(storage_root, path)?;
+        // Existing prompt files are user-owned. Do not replace even a known
+        // prior default: comparing its content before replacement cannot
+        // safely protect an edit saved between those two filesystem actions.
         return Ok(());
     }
     if let Some(parent) = path.parent() {
@@ -137,7 +138,6 @@ pub(crate) fn seed_default_system_prompt(
             })?,
         Err(source) if source.kind() == io::ErrorKind::AlreadyExists => {
             validate_default_system_prompt(storage_root, path)?;
-            migrate_known_prior_default_system_prompt(storage_root, path)?;
         }
         Err(source) => {
             return Err(DefaultSystemPromptError::Io {
@@ -148,100 +148,6 @@ pub(crate) fn seed_default_system_prompt(
     }
     validate_default_system_prompt(storage_root, path)?;
     Ok(())
-}
-
-fn migrate_known_prior_default_system_prompt(
-    storage_root: &Path,
-    path: &Path,
-) -> Result<(), DefaultSystemPromptError> {
-    let Some((before_policy, after_policy)) =
-        DEFAULT_SYSTEM_PROMPT_EMBEDDED.split_once(DEFAULT_SYSTEM_PROMPT_LANGUAGE_POLICY)
-    else {
-        return Ok(());
-    };
-    let known_prior_default = format!("{before_policy}{after_policy}");
-
-    // Only the byte-identical bundled prompt is safe to upgrade; every other
-    // existing file is a user customization and must be left untouched.
-    if read_default_system_prompt(storage_root, path)? != known_prior_default {
-        return Ok(());
-    }
-
-    let staged = stage_default_system_prompt_replacement(path)?;
-
-    // Staging can take long enough for a user to save an edit. Re-check the
-    // editable file immediately before replacement, so migration never
-    // overwrites an edit that appeared while the replacement was being staged.
-    replace_staged_default_system_prompt_if_known_prior(
-        storage_root,
-        path,
-        &known_prior_default,
-        staged,
-    )
-}
-
-fn stage_default_system_prompt_replacement(
-    path: &Path,
-) -> Result<tempfile::NamedTempFile, DefaultSystemPromptError> {
-    // Write the replacement beside the existing prompt, then rename it only
-    // after a complete, durable write. This keeps the prior trusted prompt
-    // intact if staging fails or the process is interrupted before replacement.
-    let permissions = path
-        .symlink_metadata()
-        .map_err(|source| DefaultSystemPromptError::Io {
-            path: path.to_path_buf(),
-            source,
-        })?
-        .permissions();
-    let parent = path
-        .parent()
-        .filter(|parent| !parent.as_os_str().is_empty())
-        .unwrap_or_else(|| Path::new("."));
-    let mut staged =
-        tempfile::NamedTempFile::new_in(parent).map_err(|source| DefaultSystemPromptError::Io {
-            path: path.to_path_buf(),
-            source,
-        })?;
-    staged
-        .write_all(DEFAULT_SYSTEM_PROMPT_EMBEDDED.as_bytes())
-        .map_err(|source| DefaultSystemPromptError::Io {
-            path: path.to_path_buf(),
-            source,
-        })?;
-    staged
-        .as_file_mut()
-        .set_permissions(permissions)
-        .map_err(|source| DefaultSystemPromptError::Io {
-            path: path.to_path_buf(),
-            source,
-        })?;
-    staged
-        .as_file()
-        .sync_all()
-        .map_err(|source| DefaultSystemPromptError::Io {
-            path: path.to_path_buf(),
-            source,
-        })?;
-    Ok(staged)
-}
-
-fn replace_staged_default_system_prompt_if_known_prior(
-    storage_root: &Path,
-    path: &Path,
-    known_prior_default: &str,
-    staged: tempfile::NamedTempFile,
-) -> Result<(), DefaultSystemPromptError> {
-    if read_default_system_prompt(storage_root, path)? != known_prior_default {
-        return Ok(());
-    }
-
-    staged
-        .persist(path)
-        .map_err(|error| DefaultSystemPromptError::Io {
-            path: path.to_path_buf(),
-            source: error.error,
-        })?;
-    validate_default_system_prompt(storage_root, path)
 }
 
 fn read_default_system_prompt(
@@ -568,79 +474,28 @@ mod tests {
     }
 
     #[test]
-    fn default_system_prompt_migrates_known_prior_default_without_overwriting_custom_prompt() {
+    fn default_system_prompt_does_not_replace_existing_prior_default() {
         let root = tempfile::tempdir().expect("tempdir");
         let storage_root = root.path().canonicalize().expect("canonical root");
         let prompt_path = storage_root.join("system/prompts/default-system.md");
         std::fs::create_dir_all(prompt_path.parent().expect("prompt parent"))
             .expect("prompt parent");
-        let (before_policy, after_policy) = DEFAULT_SYSTEM_PROMPT_EMBEDDED
-            .split_once(DEFAULT_SYSTEM_PROMPT_LANGUAGE_POLICY)
-            .expect("embedded prompt contains language policy");
-        let known_prior_default = format!("{before_policy}{after_policy}");
+        let known_prior_default = DEFAULT_SYSTEM_PROMPT_EMBEDDED.replacen(
+            "- Respond in the same language as the user's current message unless they explicitly request another language.\n",
+            "",
+            1,
+        );
+        assert_ne!(
+            known_prior_default, DEFAULT_SYSTEM_PROMPT_EMBEDDED,
+            "fixture should represent the embedded prompt before the language policy"
+        );
 
         std::fs::write(&prompt_path, &known_prior_default).expect("prior prompt writes");
-        #[cfg(unix)]
-        let prior_file = std::fs::symlink_metadata(&prompt_path).expect("prior prompt metadata");
-        seed_default_system_prompt(&storage_root, &prompt_path).expect("prior prompt migrates");
+        seed_default_system_prompt(&storage_root, &prompt_path).expect("prior prompt validates");
         assert_eq!(
-            std::fs::read_to_string(&prompt_path).expect("migrated prompt reads"),
-            DEFAULT_SYSTEM_PROMPT_EMBEDDED
-        );
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::MetadataExt;
-
-            let migrated_file =
-                std::fs::symlink_metadata(&prompt_path).expect("migrated prompt metadata");
-            assert_ne!(
-                prior_file.ino(),
-                migrated_file.ino(),
-                "migration should atomically replace, rather than truncate, the prior prompt"
-            );
-            assert_eq!(prior_file.mode(), migrated_file.mode());
-        }
-
-        std::fs::write(&prompt_path, "custom edited runtime prompt").expect("custom prompt writes");
-        seed_default_system_prompt(&storage_root, &prompt_path).expect("custom prompt validates");
-        assert_eq!(
-            std::fs::read_to_string(&prompt_path).expect("custom prompt reads"),
-            "custom edited runtime prompt"
-        );
-    }
-
-    #[test]
-    fn default_system_prompt_migration_preserves_an_edit_made_while_staging() {
-        let root = tempfile::tempdir().expect("tempdir");
-        let storage_root = root.path().canonicalize().expect("canonical root");
-        let prompt_path = storage_root.join("system/prompts/default-system.md");
-        std::fs::create_dir_all(prompt_path.parent().expect("prompt parent"))
-            .expect("prompt parent");
-        let (before_policy, after_policy) = DEFAULT_SYSTEM_PROMPT_EMBEDDED
-            .split_once(DEFAULT_SYSTEM_PROMPT_LANGUAGE_POLICY)
-            .expect("embedded prompt contains language policy");
-        let known_prior_default = format!("{before_policy}{after_policy}");
-
-        std::fs::write(&prompt_path, &known_prior_default).expect("prior prompt writes");
-        assert_eq!(
-            read_default_system_prompt(&storage_root, &prompt_path).expect("prior prompt reads"),
-            known_prior_default
-        );
-        let staged = stage_default_system_prompt_replacement(&prompt_path)
-            .expect("replacement prompt stages");
-
-        std::fs::write(&prompt_path, "user edit made during migration").expect("user edit writes");
-        replace_staged_default_system_prompt_if_known_prior(
-            &storage_root,
-            &prompt_path,
-            &known_prior_default,
-            staged,
-        )
-        .expect("migration revalidation succeeds");
-
-        assert_eq!(
-            std::fs::read_to_string(&prompt_path).expect("prompt reads"),
-            "user edit made during migration"
+            std::fs::read_to_string(&prompt_path).expect("existing prompt reads"),
+            known_prior_default,
+            "existing prompts must not be auto-replaced because a concurrent user save cannot be safely distinguished from the prior default"
         );
     }
 
