@@ -13,10 +13,10 @@ publish = false
 [package.metadata.ironclaw]
 layer = "app"
 
-# Keep disabled until #3483 resolves cargo-dist tag/versioning + Windows WiX
-# packaging for the standalone Reborn binary.
 [package.metadata.dist]
-dist = false
+dist = true
+display-name = "ironclaw"
+features = ["libsql", "postgres", "inmemory-turn-state"]
 
 [features]
 # libsql is the default storage backend: a file-backed local database needs

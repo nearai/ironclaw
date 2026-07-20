@@ -13,9 +13,9 @@
 # Note that the GitHub Release will be created with a generated
 # title/body based on your changelogs.
 #
-# Temporary #6160 policy: only the Reborn compile preflight below runs;
-# the generated cargo-dist/WASM/GitHub Release and Docker jobs stay defined
-# for rollback but are skipped.
+# #6160/#3483 policy: publish the standalone Reborn `ironclaw` binary through
+# cargo-dist so release assets, installers, checksums, and release notes keep
+# the same shape as previous releases. Docker image publication stays disabled.
 
 name: Release
 permissions:
@@ -48,20 +48,8 @@ on:
       - 'ironclaw-v[0-9]+.[0-9]+.[0-9]+*'
 
 jobs:
-  # Compile the shipping Reborn binary on every supported release target.
-  # This is intentionally separate from cargo-dist until #3483 resolves the
-  # Reborn package/tag/installer contract.
-  reborn-binary-compile:
-    name: Reborn binary compile
-    uses: ./.github/workflows/reborn-release-compile.yml
-    with:
-      ref: ${{ github.sha }}
-
-  # Keep the legacy cargo-dist/WASM/GitHub Release chain visible for rollback,
-  # but disable its root while #6160 makes this workflow Reborn-compile-only.
-  # The Reborn compile matrix above remains the only active release path.
+  # Plan the cargo-dist release for the standalone Reborn CLI.
   plan:
-    if: github.repository == ''
     runs-on: "ubuntu-22.04"
     outputs:
       val: ${{ steps.plan.outputs.manifest }}
@@ -285,7 +273,8 @@ jobs:
   build-wasm-extensions:
     needs:
       - plan
-    if: ${{ needs.plan.outputs.publishing == 'true' }}
+    # Keep extension WASM publication out of the Reborn binary release path.
+    if: github.repository == ''
     runs-on: "ubuntu-22.04"
     env:
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -418,10 +407,7 @@ jobs:
       - build-local-artifacts
       - build-global-artifacts
       - build-wasm-extensions
-      - reborn-binary-compile
-    # Only publish after the explicit Reborn target matrix succeeds. Existing
-    # cargo-dist jobs may still be skipped, but a failed Reborn compile is fatal.
-    if: ${{ always() && needs.plan.result == 'success' && needs.plan.outputs.publishing == 'true' && (needs.build-global-artifacts.result == 'skipped' || needs.build-global-artifacts.result == 'success') && (needs.build-local-artifacts.result == 'skipped' || needs.build-local-artifacts.result == 'success') && (needs.build-wasm-extensions.result == 'skipped' || needs.build-wasm-extensions.result == 'success') && needs.reborn-binary-compile.result == 'success' }}
+    if: ${{ always() && needs.plan.result == 'success' && needs.plan.outputs.publishing == 'true' && (needs.build-global-artifacts.result == 'skipped' || needs.build-global-artifacts.result == 'success') && (needs.build-local-artifacts.result == 'skipped' || needs.build-local-artifacts.result == 'success') && (needs.build-wasm-extensions.result == 'skipped' || needs.build-wasm-extensions.result == 'success') }}
     permissions:
       contents: write
     env:

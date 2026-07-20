@@ -623,6 +623,11 @@ lto = "thin"
 cargo-dist-version = "0.31.0"
 # Ignore out-of-date generated CI so custom release.yml jobs are allowed
 allow-dirty = ["ci"]
+# Release only the standalone Reborn CLI through cargo-dist. The workspace root
+# still contains the legacy package named `ironclaw`, so keep selection explicit.
+packages = ["ironclaw_reborn_cli"]
+# Preserve the existing public release tag namespace: ironclaw-vX.Y.Z.
+tag-namespace = "ironclaw"
 # CI backends to support
 ci = "github"
 # The installers to generate for each app

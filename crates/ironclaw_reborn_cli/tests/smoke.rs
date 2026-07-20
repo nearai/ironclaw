@@ -183,6 +183,9 @@ fn release_ci_compiles_reborn_for_all_supported_targets() {
     let release_workflow = std::fs::read_to_string(root.join(".github/workflows/release.yml"))
         .expect("release workflow")
         .replace("\r\n", "\n");
+    let workspace_manifest = std::fs::read_to_string(root.join("Cargo.toml"))
+        .expect("workspace manifest")
+        .replace("\r\n", "\n");
     let cli_manifest = std::fs::read_to_string(root.join("crates/ironclaw_reborn_cli/Cargo.toml"))
         .expect("Reborn CLI manifest")
         .replace("\r\n", "\n");
@@ -330,23 +333,36 @@ fn release_ci_compiles_reborn_for_all_supported_targets() {
     );
     assert!(
         release_workflow.contains(release_tag_trigger)
-            && release_workflow.contains("uses: ./.github/workflows/reborn-release-compile.yml")
-            && release_workflow.contains("needs.reborn-binary-compile.result == 'success'")
+            && !release_workflow.contains("uses: ./.github/workflows/reborn-release-compile.yml")
+            && !release_workflow.contains("needs.reborn-binary-compile")
             && compile_workflow.contains("  workflow_call:\n")
             && compile_workflow.contains("  workflow_dispatch:\n")
             && !release_workflow.contains("\n  pull_request:\n")
             && !compile_workflow.contains("  pull_request:\n"),
-        "the tag-only release workflow must wait for the Reborn matrix while keeping an independent manual preflight"
+        "the tag-only release workflow must publish through cargo-dist while keeping the Reborn matrix as an independent manual preflight"
     );
     assert!(
-        release_workflow.contains("needs.plan.outputs.publishing == 'true'")
+        release_workflow.contains("dist host --steps=create")
+            && release_workflow.contains("dist build $TAG_FLAG --print=linkage")
+            && release_workflow
+                .contains("dist build $TAG_FLAG --output-format=json \"--artifacts=global\"")
+            && release_workflow.contains("dist host $TAG_FLAG --steps=upload --steps=release")
+            && release_workflow.contains("needs.plan.outputs.publishing == 'true'")
             && !release_workflow.contains("if: ${{ github.event_name != 'pull_request' }}")
             && compile_workflow.contains("permissions:\n  contents: read"),
-        "release compilation must remain read-only without adding PR-only cargo-dist gates"
+        "release CI must use cargo-dist for planning, artifact builds, and hosting"
     );
     assert!(
-        cli_manifest.contains("[package.metadata.dist]\ndist = false"),
-        "#6160 must not opt Reborn into cargo-dist before #3483 is resolved"
+        workspace_manifest.contains("packages = [\"ironclaw_reborn_cli\"]")
+            && workspace_manifest.contains("tag-namespace = \"ironclaw\""),
+        "cargo-dist must select only the Reborn CLI while preserving ironclaw-v* release tags"
+    );
+    assert!(
+        cli_manifest.contains("[package.metadata.dist]\ndist = true")
+            && cli_manifest.contains("display-name = \"ironclaw\"")
+            && cli_manifest
+                .contains("features = [\"libsql\", \"postgres\", \"inmemory-turn-state\"]"),
+        "the standalone Reborn CLI must be the dist-able package with the production release feature set"
     );
 }
 
@@ -6781,7 +6797,7 @@ api_key_env = "REBORN_TEST_UNSET_BC8F4D_KEY"
 }
 
 #[test]
-fn release_ci_skips_legacy_publish_dag_without_disabling_independent_docker_runs() {
+fn release_ci_publishes_reborn_with_cargo_dist_without_docker() {
     let root = workspace_root();
     let release_workflow = std::fs::read_to_string(root.join(".github/workflows/release.yml"))
         .expect("release workflow")
@@ -6819,37 +6835,41 @@ fn release_ci_skips_legacy_publish_dag_without_disabling_independent_docker_runs
         job_body
     };
 
-    let reborn_compile_job = release_job("reborn-binary-compile");
     assert!(
-        reborn_compile_job.contains("uses: ./.github/workflows/reborn-release-compile.yml")
-            && reborn_compile_job.contains("ref: ${{ github.sha }}")
-            && !reborn_compile_job
-                .lines()
-                .any(|line| line.starts_with("    if:")),
-        "the Reborn compile matrix must remain the active release path"
+        !release_workflow.contains("\n  reborn-binary-compile:\n"),
+        "release.yml must not run the old compile-only preflight as its active release path"
     );
 
     let plan_job = release_job("plan");
     assert!(
-        plan_job.contains("if: github.repository == ''")
+        !plan_job.contains("if: github.repository == ''")
             && plan_job.contains("dist host --steps=create")
             && plan_job.contains("dist plan --output-format=json"),
-        "release CI must retain but skip the legacy cargo-dist plan root"
+        "release CI must enable the cargo-dist plan root"
     );
-    for legacy_job_name in [
+    for cargo_dist_job_name in [
         "build-local-artifacts",
         "build-global-artifacts",
-        "build-wasm-extensions",
         "host",
-        "update-registry-checksums",
         "announce",
     ] {
-        let legacy_job = release_job(legacy_job_name);
+        let cargo_dist_job = release_job(cargo_dist_job_name);
         assert!(
-            legacy_job.contains("\n      - plan\n"),
-            "legacy release job {legacy_job_name} must remain downstream of the disabled plan root"
+            cargo_dist_job.contains("\n      - plan\n"),
+            "cargo-dist release job {cargo_dist_job_name} must remain downstream of the plan root"
         );
     }
+    let wasm_job = release_job("build-wasm-extensions");
+    assert!(
+        wasm_job.contains("if: github.repository == ''"),
+        "Reborn binary releases must not also publish extension WASM artifacts"
+    );
+    let registry_job = release_job("update-registry-checksums");
+    assert!(
+        registry_job.contains("needs.host.result == 'success'")
+            && registry_job.contains("needs.build-wasm-extensions.result == 'success'"),
+        "registry checksum updates must stay gated behind disabled WASM publication"
+    );
 
     let docker_job = release_job("docker-image");
     assert!(

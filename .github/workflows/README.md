@@ -59,16 +59,18 @@ Rules for a roll-up job that is (or may become) required:
    merge-queue/push run's clippy matrix is missing any of the three feature
    lanes, so a "green but slim" regression cannot come back silently.
 
-## Reborn release binary compile matrix
+## Reborn release binaries
 
-`reborn-release-compile.yml` is a compile-and-smoke preflight for the shipping
-Reborn `ironclaw` binary. The tag-only `release.yml` calls it for matching
-release tags. Under #6160's temporary compile-only policy below, the legacy
-`host` job stays disabled; if that job is restored, its dependency and success
-gate still prevent it from running unless every target succeeds. The preflight
-workflow can also run directly through `workflow_dispatch`; it is not triggered
-by pull requests, so ordinary CLI and WebUI changes do not start the
-seven-platform release matrix.
+`release.yml` uses cargo-dist to build and publish the standalone Reborn
+`ironclaw` binary on matching release tags. The workspace cargo-dist config
+allow-lists `ironclaw_reborn_cli`, so the legacy root package named `ironclaw`
+is not selected even though the public tag namespace remains
+`ironclaw-vX.Y.Z`. Release tags must match the Reborn CLI package version.
+
+`reborn-release-compile.yml` remains available as a direct
+`workflow_dispatch` compile-and-smoke preflight. It is not called from
+`release.yml` and is not triggered by pull requests, so ordinary CLI and WebUI
+changes do not start the seven-platform release matrix.
 
 | Rust target | GitHub runner |
 |---|---|
@@ -80,7 +82,7 @@ seven-platform release matrix.
 | `aarch64-apple-darwin` | `macos-15` |
 | `x86_64-pc-windows-msvc` | `windows-2022` |
 
-Each matrix entry performs a final `cargo build --locked --profile dist` link
+Each preflight matrix entry performs a final `cargo build --locked --profile dist` link
 for `ironclaw_reborn_cli` / `ironclaw` with an explicit compile feature
 contract owned by this workflow:
 `libsql,postgres,inmemory-turn-state`.
@@ -89,14 +91,14 @@ Before upload, the workflow executes that exact native binary with `--version`,
 reject a program interpreter or dynamic-library dependency, which prevents an
 installed musl loader on the build runner from hiding a non-portable artifact.
 This is shallow CLI startup coverage; it does not validate `serve`, external
-services, installers, or cargo-dist release packaging. The feature list is
+services, installers, or cargo-dist release packaging. The cargo-dist package
+metadata uses the same feature set for release builds. The feature list is
 intentionally not inferred from Docker or #6122.
 
-The uploaded `reborn-compile-*` artifacts are short-lived preflight evidence.
-Their prefix deliberately does not match the release host's `artifacts-*`
-download pattern, so they are not attached to the GitHub Release. Until #3483
-defines the canonical Reborn package/tag/installer contract,
-`ironclaw_reborn_cli` remains `dist = false`.
+The uploaded `reborn-compile-*` artifacts are short-lived preflight evidence
+only. Their prefix deliberately does not match the release host's `artifacts-*`
+download pattern, so direct preflight artifacts are not attached to a GitHub
+Release.
 
 ## Deep tier (nightly)
 
@@ -155,22 +157,19 @@ When adding a new workflow that runs on `push` to `main`, add its workflow
 
 ## Reborn-only release validation policy
 
-For #6160, `release.yml` temporarily keeps the legacy cargo-dist release chain
-visible but disables its `plan` root with the impossible
-`github.repository == ''` guard. Its dependent local/global artifact, WASM,
-GitHub Release host, registry-checksum, and announcement jobs therefore skip.
-The Reborn compile matrix merged in #6176 is the only intended active path.
-This compile-only mode produces short-lived Actions evidence artifacts; it does
-not create a GitHub Release or permanent downloadable release assets.
+For #6160/#3483, `release.yml` publishes the standalone Reborn CLI through
+cargo-dist. The active tag-release path is `plan` -> local/global cargo-dist
+artifact builds -> `host`, which creates the GitHub Release with cargo-dist's
+generated title, body, install links, checksums, and download table. Extension
+WASM publication and registry-checksum updates remain disabled for this
+Reborn-only binary release path.
 
 The release Docker caller retains its own impossible guard as an explicit
 defense against image publication. The reusable `docker.yml` workflow is
 unchanged, so its manual and hourly entry points remain available. Changes to
 the release, Docker, or reusable Reborn compile workflow enter the Reborn CLI
 smoke selector, and the required Code Style roll-up propagates that contract
-result. To restore the non-Docker legacy release path, remove `plan`'s
-impossible guard; the workflow's tag-only trigger already scopes it to release
-tags. Restore the Docker caller's host-success condition separately only when
+result. Restore the Docker caller's host-success condition separately only when
 release image publication is intentionally re-enabled.
 
 ## Known accepted gaps (deliberate, revisit as needed)
