@@ -329,7 +329,7 @@ backend, which is now the source of truth.
 
 - **Trait + in-memory + contract harness** (`ironclaw_hooks`, PR 1/4):
   the `predicate_state::contract` module + `predicate_backend_contract_test!`
-  macro behind the `contract-tests` feature.
+  macro behind the `test-support` feature.
 - **Postgres backend + contract + adversarial** (`ironclaw_hooks_postgres`,
   PR 2/4): env-gated on `IRONCLAW_HOOKS_POSTGRES_URL` / `DATABASE_URL`.
 - **libSQL backend + contract + adversarial** (`ironclaw_hooks_libsql`,

@@ -60,14 +60,14 @@ case "${package}" in
   ironclaw_hooks)
     # The durable libSQL/Postgres backends + parity matrix folded into this
     # crate are exercised by the dedicated hooks-parity job in
-    # platform-and-compat.yml (postgres,libsql,integration,contract-tests).
+    # platform-and-compat.yml (postgres,libsql,integration,test-support).
     # Keep this reborn-closure job light — the framework's own unit tests only —
     # so it does not pull the heavy libSQL/Postgres driver deps that the default
     # fallback would otherwise add now that the crate declares a `libsql` feature.
-    printf '%s\n' "--features contract-tests"
+    printf '%s\n' "--features test-support"
     ;;
   ironclaw_webui)
-    printf '%s\n' "--features dev-in-memory-session"
+    printf '%s\n' "--features test-support"
     ;;
   ironclaw_host_runtime)
     # Integration tests (tests/) link the lib as a normal dependency, so

@@ -15,13 +15,13 @@ layer = "products"
 
 [features]
 default = []
-# Compile in `InMemorySessionStore` as a public crate item. Off by
-# default so a production deployment cannot accidentally wire the
-# process-local store as a `SessionStore` impl — `SessionAuthenticator`
-# would happily accept it, but sessions would vanish on every restart
-# and the O(n) constant-time lookup would scale poorly under real
-# user load. Local dev and tests opt in by enabling this feature.
-dev-in-memory-session = []
+# Compile in `InMemorySessionStore` + `EmailUserDirectory` as public crate
+# items. Off by default so a production deployment cannot accidentally wire the
+# process-local store as a `SessionStore` impl — `SessionAuthenticator` would
+# happily accept it, but sessions would vanish on every restart and the O(n)
+# lookup would scale poorly under real user load. Local dev and tests opt in.
+test-support = []
+
 [dependencies]
 async-stream = "0.3"
 async-trait = "0.1"

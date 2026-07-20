@@ -15,7 +15,7 @@ one `products`-layer crate above `ironclaw_reborn_composition`. Driven by the
   - `src/webui_v2/descriptors.rs` + `tests/webui_v2_descriptors_contract.rs` — the route contract.
   - `src/webui_v2/handlers.rs` + `tests/webui_v2_handlers_contract.rs` — handler dispatch.
   - `src/webui_serve.rs` — the `webui_v2_app` gateway assembly + middleware order.
-  - `Cargo.toml` — the `dev-in-memory-session` feature gate and the
+  - `Cargo.toml` — the `test-support` feature gate and the
     (deliberately narrow) dependency shape.
 
 ## What this crate owns (composed subsystems)
