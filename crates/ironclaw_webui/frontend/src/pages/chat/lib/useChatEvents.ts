@@ -235,6 +235,14 @@ export function useChatEvents({
         }
 
         case "error": {
+          // Retryable stream errors are transport interruptions, not terminal
+          // run outcomes. The EventSource hook reconnects with the last
+          // delivered cursor, so preserve the active run and any partial
+          // assistant text while that recovery happens. Clearing local state
+          // here would make a healthy run appear to stop midway even though
+          // the backend continues executing it.
+          if (frame.retryable === true) return;
+
           setPendingGate(null);
           setIsProcessing(false);
           setActiveRun?.(null);
