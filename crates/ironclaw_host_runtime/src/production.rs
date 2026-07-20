@@ -450,7 +450,7 @@ impl HostRuntime for DefaultHostRuntime {
             );
         }
 
-        if let Err(error) = self.enforce_runtime_policy(&capability_id) {
+        if let Err(error) = self.enforce_runtime_policy(&capability_id, &context.resource_scope.user_id) {
             tracing::debug!(
                 capability_id = %capability_id,
                 runtime_policy_error_kind = error.kind(),
@@ -465,7 +465,7 @@ impl HostRuntime for DefaultHostRuntime {
             return Ok(runtime_policy_failure(capability_id, error));
         }
 
-        let trust_decision = match self.evaluate_invocation_trust(&capability_id) {
+        let trust_decision = match self.evaluate_invocation_trust(&capability_id, &context.resource_scope.user_id) {
             Ok(host_decision) => host_decision,
             Err(error) => {
                 tracing::debug!(
@@ -484,7 +484,7 @@ impl HostRuntime for DefaultHostRuntime {
         };
         context.trust = trust_decision.effective_trust.class();
 
-        let registry = self.registry.snapshot();
+        let registry = self.scoped_snapshot(&context.resource_scope.user_id);
 
         // Validate the execution context before the credential pre-flight queries
         // the secret store. Without this guard a malformed RuntimeCapabilityRequest
@@ -648,7 +648,7 @@ impl HostRuntime for DefaultHostRuntime {
             );
         }
 
-        if let Err(error) = self.enforce_runtime_policy(&capability_id) {
+        if let Err(error) = self.enforce_runtime_policy(&capability_id, &context.resource_scope.user_id) {
             tracing::debug!(
                 capability_id = %capability_id,
                 runtime_policy_error_kind = error.kind(),
@@ -657,7 +657,7 @@ impl HostRuntime for DefaultHostRuntime {
             return Ok(runtime_policy_failure(capability_id, error));
         }
 
-        let trust_decision = match self.evaluate_invocation_trust(&capability_id) {
+        let trust_decision = match self.evaluate_invocation_trust(&capability_id, &context.resource_scope.user_id) {
             Ok(host_decision) => host_decision,
             Err(error) => {
                 tracing::debug!(
@@ -670,7 +670,7 @@ impl HostRuntime for DefaultHostRuntime {
         };
         context.trust = trust_decision.effective_trust.class();
 
-        let registry = self.registry.snapshot();
+        let registry = self.scoped_snapshot(&context.resource_scope.user_id);
 
         // Validate the execution context before the credential pre-flight queries
         // the secret store. Without this guard a malformed RuntimeCapabilityRequest
@@ -755,7 +755,7 @@ impl HostRuntime for DefaultHostRuntime {
             );
         }
 
-        if let Err(error) = self.enforce_runtime_policy(&capability_id) {
+        if let Err(error) = self.enforce_runtime_policy(&capability_id, &context.resource_scope.user_id) {
             tracing::debug!(
                 capability_id = %capability_id,
                 runtime_policy_error_kind = error.kind(),
@@ -771,7 +771,7 @@ impl HostRuntime for DefaultHostRuntime {
             return Ok(runtime_policy_failure(capability_id, error));
         }
 
-        let trust_decision = match self.evaluate_invocation_trust(&capability_id) {
+        let trust_decision = match self.evaluate_invocation_trust(&capability_id, &context.resource_scope.user_id) {
             Ok(host_decision) => host_decision,
             Err(error) => {
                 tracing::debug!(
@@ -791,7 +791,7 @@ impl HostRuntime for DefaultHostRuntime {
         };
         context.trust = trust_decision.effective_trust.class();
 
-        let registry = self.registry.snapshot();
+        let registry = self.scoped_snapshot(&context.resource_scope.user_id);
         let host = self.capability_host(&registry);
         let resume = CapabilityResumeRequest {
             context,
@@ -864,7 +864,7 @@ impl HostRuntime for DefaultHostRuntime {
             );
         }
 
-        if let Err(error) = self.enforce_runtime_policy(&capability_id) {
+        if let Err(error) = self.enforce_runtime_policy(&capability_id, &context.resource_scope.user_id) {
             tracing::debug!(
                 capability_id = %capability_id,
                 runtime_policy_error_kind = error.kind(),
@@ -879,7 +879,7 @@ impl HostRuntime for DefaultHostRuntime {
             return Ok(runtime_policy_failure(capability_id, error));
         }
 
-        let trust_decision = match self.evaluate_invocation_trust(&capability_id) {
+        let trust_decision = match self.evaluate_invocation_trust(&capability_id, &context.resource_scope.user_id) {
             Ok(host_decision) => host_decision,
             Err(error) => {
                 tracing::debug!(
@@ -898,7 +898,7 @@ impl HostRuntime for DefaultHostRuntime {
         };
         context.trust = trust_decision.effective_trust.class();
 
-        let registry = self.registry.snapshot();
+        let registry = self.scoped_snapshot(&context.resource_scope.user_id);
         // Re-apply the persistent-approval grant on the auth-resume preflight,
         // mirroring `dispatch_capability`. The original dispatch injected this
         // grant so the authorizer returned `Allow`; the loop re-dispatches the
@@ -998,7 +998,7 @@ impl HostRuntime for DefaultHostRuntime {
             );
         }
 
-        if let Err(error) = self.enforce_runtime_policy(&capability_id) {
+        if let Err(error) = self.enforce_runtime_policy(&capability_id, &context.resource_scope.user_id) {
             tracing::debug!(
                 capability_id = %capability_id,
                 runtime_policy_error_kind = error.kind(),
@@ -1014,7 +1014,7 @@ impl HostRuntime for DefaultHostRuntime {
             return Ok(runtime_policy_failure(capability_id, error));
         }
 
-        let trust_decision = match self.evaluate_invocation_trust(&capability_id) {
+        let trust_decision = match self.evaluate_invocation_trust(&capability_id, &context.resource_scope.user_id) {
             Ok(host_decision) => host_decision,
             Err(error) => {
                 tracing::debug!(
@@ -1034,7 +1034,7 @@ impl HostRuntime for DefaultHostRuntime {
         };
         context.trust = trust_decision.effective_trust.class();
 
-        let registry = self.registry.snapshot();
+        let registry = self.scoped_snapshot(&context.resource_scope.user_id);
         let host = self.capability_host(&registry);
         let resume = CapabilityResumeRequest {
             context,
@@ -1293,10 +1293,11 @@ impl DefaultHostRuntime {
     fn evaluate_invocation_trust(
         &self,
         capability_id: &CapabilityId,
+        user_id: &ironclaw_host_api::UserId,
     ) -> Result<TrustDecision, TrustEvaluationError> {
         let policy = self.trust_policy.as_ref();
 
-        let registry = self.registry.snapshot();
+        let registry = self.scoped_snapshot(user_id);
         let descriptor = registry
             .get_capability(capability_id)
             .ok_or(TrustEvaluationError::UnknownCapability)?;
@@ -1328,11 +1329,25 @@ impl DefaultHostRuntime {
         Ok(decision)
     }
 
+    /// The extension registry snapshot with `user_id`'s discovered per-user
+    /// hosted-MCP packages merged in. Every per-invocation capability lookup
+    /// (runtime policy, trust, credential preflight, dispatch host) resolves
+    /// through this so a discovered capability is not seen as `unknown` by the
+    /// pre-dispatch gates. Returns the plain global snapshot when the user has
+    /// no overlay entries.
+    fn scoped_snapshot(&self, user_id: &ironclaw_host_api::UserId) -> Arc<ExtensionRegistry> {
+        match &self.scoped_overlay {
+            Some(overlay) => overlay.merged_snapshot(user_id, self.registry.snapshot()),
+            None => self.registry.snapshot(),
+        }
+    }
+
     fn enforce_runtime_policy(
         &self,
         capability_id: &CapabilityId,
+        user_id: &ironclaw_host_api::UserId,
     ) -> Result<(), RuntimePolicyEvaluationError> {
-        let registry = self.registry.snapshot();
+        let registry = self.scoped_snapshot(user_id);
         let descriptor = registry
             .get_capability(capability_id)
             .ok_or(RuntimePolicyEvaluationError::UnknownCapability)?;

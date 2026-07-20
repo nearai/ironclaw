@@ -134,6 +134,38 @@ impl ScopedPackageOverlay {
             .collect()
     }
 
+    /// A concrete `ExtensionRegistry` snapshot with the caller's fresh
+    /// discovered packages merged in (each overlaid extension's static package
+    /// replaced by its discovered one). Returns the `global` Arc unchanged when
+    /// the user has no fresh overlay entries — zero cost for the common case,
+    /// so every existing `self.registry.snapshot()` consumer can resolve a
+    /// user's discovered capabilities by reading this instead, with no change
+    /// to its `&ExtensionRegistry` API.
+    pub fn merged_snapshot(
+        &self,
+        user: &UserId,
+        global: Arc<ExtensionRegistry>,
+    ) -> Arc<ExtensionRegistry> {
+        let packages = self.fresh_packages_for(user);
+        if packages.is_empty() {
+            return global;
+        }
+        let mut merged = global.as_ref().clone();
+        for package in packages {
+            merged.remove(&package.id);
+            let id = package.id.clone();
+            if merged.insert(package.as_ref().clone()).is_err() {
+                // A discovered package is a re-projection of an already-validated
+                // manifest, so this branch is not expected; on the theoretical
+                // failure restore the global entry rather than drop the extension.
+                if let Some(original) = global.get_extension(&id) {
+                    let _ = merged.insert(original.clone());
+                }
+            }
+        }
+        Arc::new(merged)
+    }
+
     /// Build the single-user merged view over `global`. Only unexpired
     /// entries participate: a stale surface must not silently serve past its
     /// TTL when re-discovery has not confirmed it (callers that want the
@@ -349,6 +381,52 @@ runtime_credentials = [
             .map(|descriptor| descriptor.id.as_str())
             .collect();
         assert_eq!(ids, vec!["agent-market.timeless__list_meetings"]);
+    }
+
+    #[test]
+    fn merged_snapshot_replaces_static_package_for_owner_and_is_untouched_for_others() {
+        let overlay = ScopedPackageOverlay::new();
+        let worker = user("worker-user");
+        overlay.insert(
+            worker.clone(),
+            discovered_package("timeless__list_meetings"),
+            Duration::from_secs(60),
+        );
+
+        let worker_reg = overlay.merged_snapshot(&worker, global_registry());
+        assert!(
+            worker_reg
+                .get_capability(&capability("agent-market.timeless__list_meetings"))
+                .is_some(),
+            "merged snapshot resolves the discovered capability by plain get_capability"
+        );
+        assert!(
+            worker_reg
+                .get_capability(&capability("agent-market.search_agents"))
+                .is_none(),
+            "the static capability is replaced in the owner's merged snapshot"
+        );
+
+        let other_reg = overlay.merged_snapshot(&user("other"), global_registry());
+        assert!(
+            other_reg
+                .get_capability(&capability("agent-market.search_agents"))
+                .is_some(),
+            "another user's merged snapshot keeps the static surface"
+        );
+        assert!(
+            other_reg
+                .get_capability(&capability("agent-market.timeless__list_meetings"))
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn merged_snapshot_returns_global_arc_unchanged_without_overlay() {
+        let overlay = ScopedPackageOverlay::new();
+        let global = global_registry();
+        let merged = overlay.merged_snapshot(&user("nobody"), Arc::clone(&global));
+        assert!(Arc::ptr_eq(&global, &merged), "zero-cost passthrough");
     }
 
     #[test]
