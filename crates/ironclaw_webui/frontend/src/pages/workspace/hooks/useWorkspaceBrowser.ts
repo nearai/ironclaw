@@ -11,7 +11,9 @@ import { expandWorkspaceSelection } from "../lib/workspace-presenters";
 export function useWorkspaceBrowser(selectedPath) {
   const t = useT();
   const queryClient = useQueryClient();
-  const [expandedPaths, setExpandedPaths] = React.useState<Set<string>>(() => new Set());
+  const [expandedPaths, setExpandedPaths] = React.useState<Set<string>>(() =>
+    expandWorkspaceSelection(new Set<string>(), selectedPath)
+  );
   const [filter, setFilter] = React.useState("");
   const [result, setResult] = React.useState(null);
 
