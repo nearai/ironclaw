@@ -43,11 +43,10 @@ pub fn google_remediation_text() -> String {
 /// WHAT to configure only; the restart apply-step sentence is appended once
 /// by each caller (`apply_step_text()` / `set.rs::print_apply_step`), never
 /// embedded here.
-fn slack_setup_sentence(webui_extensions_location: &str) -> String {
+fn slack_connect_clause(webui_extensions_location: &str) -> String {
     format!(
-        "Slack setup is WebUI-only: finish connecting Slack at {webui_extensions_location} \
-         (config set slack.enabled true|false only toggles whether the route mounts; it does \
-         not configure Slack app identity or credentials)."
+        "connect your Slack workspace at {webui_extensions_location} (workspace OAuth \
+         happens there; config set cannot supply Slack app identity or credentials)"
     )
 }
 
@@ -56,15 +55,34 @@ fn slack_setup_sentence(webui_extensions_location: &str) -> String {
 /// per-invocation `serve` flag, resolved later), so this variant names the
 /// route relatively. Consumed by
 /// `ironclaw_reborn_composition::extension_host::provider_instance_readiness`.
+/// Unlike `google_remediation_text`, this variant embeds its own restart step:
+/// Slack's apply step sits in the MIDDLE of the sequence (the route must mount
+/// before the WebUI can run workspace OAuth), so a trailing
+/// `apply_step_text()` would both misorder the instructions and imply "then
+/// ask again" when the user still has a connect step left. Callers of this
+/// variant must therefore NOT append `apply_step_text()`.
 pub fn slack_remediation_text() -> String {
-    slack_setup_sentence("/extensions in the WebUI")
+    format!(
+        "Slack setup (one-time, per instance):\n  \
+         1. ironclaw config set slack.enabled true\n  \
+         2. ironclaw service restart   (mounts the Slack extension route)\n  \
+         3. {}",
+        slack_connect_clause("/extensions in the WebUI")
+    )
 }
 
 /// Same sentence, with the concrete serve base URL the CLI resolves at
 /// `config set` time. Consumed by
 /// `ironclaw_reborn_cli::commands::config::capability_config::slack_remediation_text`.
+/// The CLI prints this immediately after the user ran `config set
+/// slack.enabled`, so it neither repeats that command nor embeds the restart
+/// (`set.rs::print_apply_step` appends the canonical restart sentence right
+/// after it) — it only names the remaining connect step.
 pub fn slack_remediation_text_with_base_url(base_url: &str) -> String {
-    slack_setup_sentence(&format!("{base_url}/extensions"))
+    format!(
+        "After restarting, {}",
+        slack_connect_clause(&format!("{base_url}/extensions"))
+    )
 }
 
 /// Canonical "apply the change" follow-up sentence: `config set` never
