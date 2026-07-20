@@ -183,6 +183,10 @@ fn release_ci_compiles_reborn_for_all_supported_targets() {
     let release_workflow = std::fs::read_to_string(root.join(".github/workflows/release.yml"))
         .expect("release workflow")
         .replace("\r\n", "\n");
+    let release_target_manifest =
+        std::fs::read_to_string(root.join(".github/reborn-release-targets.tsv"))
+            .expect("Reborn release target manifest")
+            .replace("\r\n", "\n");
     let cli_manifest = std::fs::read_to_string(root.join("crates/ironclaw_reborn_cli/Cargo.toml"))
         .expect("Reborn CLI manifest")
         .replace("\r\n", "\n");
@@ -197,6 +201,27 @@ fn release_ci_compiles_reborn_for_all_supported_targets() {
         ("x86_64-pc-windows-msvc", "windows-2022"),
     ];
     let release_features = "libsql,postgres,inmemory-turn-state";
+    let target_platforms = release_target_manifest
+        .lines()
+        .map(|line| {
+            let (target, platform) = line
+                .split_once('\t')
+                .expect("each release target row must be tab-delimited");
+            assert!(!target.is_empty() && !platform.is_empty());
+            (target, platform)
+        })
+        .collect::<Vec<_>>();
+    let manifest_targets = target_platforms
+        .iter()
+        .map(|(target, _)| *target)
+        .collect::<std::collections::BTreeSet<_>>();
+    let matrix_targets = target_runners
+        .iter()
+        .map(|(target, _)| *target)
+        .collect::<std::collections::BTreeSet<_>>();
+    assert_eq!(target_platforms.len(), 7);
+    assert_eq!(manifest_targets.len(), target_platforms.len());
+    assert_eq!(manifest_targets, matrix_targets);
 
     assert_eq!(
         compile_workflow.matches("          - target: ").count(),
@@ -6865,19 +6890,14 @@ fn release_ci_publishes_reborn_without_enabling_legacy_or_docker() {
             && !reborn_publish_job.contains("--clobber"),
         "successful Reborn binaries must publish without enabling or overwriting legacy assets"
     );
-    let target_allowlist = concat!(
-        "          targets=(\n",
-        "            x86_64-unknown-linux-gnu\n",
-        "            x86_64-unknown-linux-musl\n",
-        "            aarch64-unknown-linux-gnu\n",
-        "            aarch64-unknown-linux-musl\n",
-        "            x86_64-apple-darwin\n",
-        "            aarch64-apple-darwin\n",
-        "            x86_64-pc-windows-msvc\n",
-        "          )\n",
-    );
     assert!(
-        reborn_publish_job.contains(target_allowlist)
+        reborn_publish_job.contains("targets_file=\".github/reborn-release-targets.tsv\"")
+            && reborn_publish_job.contains("targets+=(\"$target\")")
+            && reborn_publish_job.contains("done < \"$targets_file\"")
+            && reborn_publish_job.contains("Release target row must contain exactly one tab")
+            && reborn_publish_job.contains("CHANGELOG.md \\\n            \"$targets_file\" \\")
+            && reborn_publish_job
+                .contains("Release target manifest must contain exactly seven targets")
             && reborn_publish_job.contains("Expected ${#targets[@]} Reborn artifacts")
             && reborn_publish_job.contains("! -s \"$binary_path\"")
             && reborn_publish_job.contains("install -m 0755")
@@ -6991,7 +7011,8 @@ fn release_ci_publishes_reborn_without_enabling_legacy_or_docker() {
         .find(|line| line.contains("grep -Eq") && line.contains("crates/ironclaw_reborn_cli/"))
         .expect("code style workflow should classify Reborn CLI changes");
     assert!(
-        reborn_cli_selector.contains(r"\.github/scripts/render-reborn-release-notes\.sh$")
+        reborn_cli_selector.contains(r"\.github/reborn-release-targets\.tsv$")
+            && reborn_cli_selector.contains(r"\.github/scripts/render-reborn-release-notes\.sh$")
             && reborn_cli_selector.contains(
                 r"\.github/workflows/(code_style|release|docker|reborn-release-compile)\.yml$"
             ),
@@ -7009,6 +7030,7 @@ fn release_ci_publishes_reborn_without_enabling_legacy_or_docker() {
 #[test]
 fn reborn_release_notes_preserve_the_legacy_notes_and_download_shape() {
     let root = workspace_root();
+    let targets = root.join(".github/reborn-release-targets.tsv");
     let temp = tempfile::tempdir().expect("tempdir");
     let changelog = temp.path().join("CHANGELOG.md");
     std::fs::write(
@@ -7028,8 +7050,9 @@ fn reborn_release_notes_preserve_the_legacy_notes_and_download_shape() {
 
     let output = Command::new("/bin/bash")
         .arg(root.join(".github/scripts/render-reborn-release-notes.sh"))
+        .arg(&changelog)
+        .arg(&targets)
         .args([
-            changelog.as_os_str(),
             std::ffi::OsStr::new("example/ironclaw"),
             std::ffi::OsStr::new("ironclaw-v1.2.3-rc.1"),
             std::ffi::OsStr::new("1.2.3-rc.1"),
@@ -7072,6 +7095,7 @@ fn reborn_release_notes_preserve_the_legacy_notes_and_download_shape() {
 fn reborn_release_notes_require_an_exact_changelog_section_for_stable_tags() {
     let root = workspace_root();
     let script = root.join(".github/scripts/render-reborn-release-notes.sh");
+    let targets = root.join(".github/reborn-release-targets.tsv");
     let temp = tempfile::tempdir().expect("tempdir");
     let changelog = temp.path().join("CHANGELOG.md");
     std::fs::write(
@@ -7089,8 +7113,9 @@ fn reborn_release_notes_require_an_exact_changelog_section_for_stable_tags() {
 
     let exact_output = Command::new("/bin/bash")
         .arg(&script)
+        .arg(&changelog)
+        .arg(&targets)
         .args([
-            changelog.as_os_str(),
             std::ffi::OsStr::new("example/ironclaw"),
             std::ffi::OsStr::new("ironclaw-v1.2.3"),
             std::ffi::OsStr::new("1.2.3"),
@@ -7104,8 +7129,9 @@ fn reborn_release_notes_require_an_exact_changelog_section_for_stable_tags() {
 
     let missing_output = Command::new("/bin/bash")
         .arg(&script)
+        .arg(&changelog)
+        .arg(&targets)
         .args([
-            changelog.as_os_str(),
             std::ffi::OsStr::new("example/ironclaw"),
             std::ffi::OsStr::new("ironclaw-v1.2.4"),
             std::ffi::OsStr::new("1.2.4"),
@@ -7116,6 +7142,71 @@ fn reborn_release_notes_require_an_exact_changelog_section_for_stable_tags() {
     assert!(
         String::from_utf8_lossy(&missing_output.stderr)
             .contains("no publishable notes for [1.2.4]")
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn reborn_release_notes_reject_malformed_target_manifest_rows() {
+    let root = workspace_root();
+    let script = root.join(".github/scripts/render-reborn-release-notes.sh");
+    let temp = tempfile::tempdir().expect("tempdir");
+    let changelog = temp.path().join("CHANGELOG.md");
+    let targets = temp.path().join("targets.tsv");
+    std::fs::write(&changelog, "# Changelog\n\n## [Unreleased]\n\n- Notes.\n")
+        .expect("write changelog fixture");
+
+    for (case, manifest) in [
+        ("missing tab", "x86_64-unknown-linux-gnu Linux\n"),
+        ("empty extra column", "x86_64-unknown-linux-gnu\tLinux\t\n"),
+        (
+            "non-empty extra column",
+            "x86_64-unknown-linux-gnu\tLinux\textra\n",
+        ),
+    ] {
+        std::fs::write(&targets, manifest).expect("write target manifest fixture");
+        let output = Command::new("/bin/bash")
+            .arg(&script)
+            .arg(&changelog)
+            .arg(&targets)
+            .args([
+                std::ffi::OsStr::new("example/ironclaw"),
+                std::ffi::OsStr::new("ironclaw-v1.2.3-rc.1"),
+                std::ffi::OsStr::new("1.2.3-rc.1"),
+            ])
+            .output()
+            .expect("reject malformed target manifest");
+        assert!(!output.status.success(), "{case} should be rejected");
+        assert!(
+            String::from_utf8_lossy(&output.stderr)
+                .contains("release target row must contain exactly one tab"),
+            "unexpected error for {case}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    let canonical_targets =
+        std::fs::read_to_string(root.join(".github/reborn-release-targets.tsv"))
+            .expect("read canonical target manifest");
+    let unterminated_eighth_row =
+        format!("{canonical_targets}i686-unknown-linux-gnu\tUnsupported Linux");
+    std::fs::write(&targets, unterminated_eighth_row)
+        .expect("write unterminated eighth target row");
+    let extra_output = Command::new("/bin/bash")
+        .arg(&script)
+        .arg(&changelog)
+        .arg(&targets)
+        .args([
+            std::ffi::OsStr::new("example/ironclaw"),
+            std::ffi::OsStr::new("ironclaw-v1.2.3-rc.1"),
+            std::ffi::OsStr::new("1.2.3-rc.1"),
+        ])
+        .output()
+        .expect("reject unterminated eighth target row");
+    assert!(!extra_output.status.success());
+    assert!(
+        String::from_utf8_lossy(&extra_output.stderr)
+            .contains("release target manifest must contain exactly seven targets")
     );
 }
 

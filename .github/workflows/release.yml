@@ -102,15 +102,36 @@ jobs:
             exit 1
           fi
 
-          targets=(
-            x86_64-unknown-linux-gnu
-            x86_64-unknown-linux-musl
-            aarch64-unknown-linux-gnu
-            aarch64-unknown-linux-musl
-            x86_64-apple-darwin
-            aarch64-apple-darwin
-            x86_64-pc-windows-msvc
-          )
+          targets_file=".github/reborn-release-targets.tsv"
+          targets=()
+          seen_targets="|"
+          target_count=0
+          while IFS= read -r target_row || [[ -n "$target_row" ]]; do
+            if [[ "$target_row" != *$'\t'* || "${target_row#*$'\t'}" == *$'\t'* ]]; then
+              echo "::error::Release target row must contain exactly one tab: $target_row"
+              exit 1
+            fi
+            target="${target_row%%$'\t'*}"
+            platform="${target_row#*$'\t'}"
+            if [[ ! "$target" =~ ^[0-9A-Za-z_.-]+$ \
+              || -z "$platform" \
+              || "$platform" == *"|"* \
+              || "$platform" == *$'\r'* ]]; then
+              echo "::error::Invalid release target row: $target"
+              exit 1
+            fi
+            if [[ "$seen_targets" == *"|$target|"* ]]; then
+              echo "::error::Duplicate release target: $target"
+              exit 1
+            fi
+            seen_targets+="$target|"
+            targets+=("$target")
+            target_count=$((target_count + 1))
+          done < "$targets_file"
+          if [[ "$target_count" -ne 7 ]]; then
+            echo "::error::Release target manifest must contain exactly seven targets"
+            exit 1
+          fi
 
           mapfile -t artifact_dirs < <(
             find reborn-staging -mindepth 1 -maxdepth 1 -type d -print | sort
@@ -204,6 +225,7 @@ jobs:
           notes_file="$RUNNER_TEMP/release-notes.md"
           bash .github/scripts/render-reborn-release-notes.sh \
             CHANGELOG.md \
+            "$targets_file" \
             "$GH_REPO" \
             "$RELEASE_TAG" \
             "$release_version" \

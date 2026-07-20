@@ -1,18 +1,23 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-if [[ "$#" -ne 4 ]]; then
-  echo "usage: $0 <changelog> <owner/repository> <release-tag> <release-version>" >&2
+if [[ "$#" -ne 5 ]]; then
+  echo "usage: $0 <changelog> <targets-tsv> <owner/repository> <release-tag> <release-version>" >&2
   exit 2
 fi
 
 changelog_path="$1"
-repository="$2"
-release_tag="$3"
-release_version="$4"
+targets_path="$2"
+repository="$3"
+release_tag="$4"
+release_version="$5"
 
 if [[ ! -f "$changelog_path" || ! -r "$changelog_path" ]]; then
   echo "changelog is not a readable regular file: $changelog_path" >&2
+  exit 1
+fi
+if [[ ! -f "$targets_path" || ! -r "$targets_path" ]]; then
+  echo "release targets are not a readable regular file: $targets_path" >&2
   exit 1
 fi
 if [[ ! "$repository" =~ ^[0-9A-Za-z_.-]+/[0-9A-Za-z_.-]+$ ]]; then
@@ -70,24 +75,47 @@ if [[ -z "$release_notes" ]]; then
   exit 1
 fi
 
-download_rows=(
-  "aarch64-apple-darwin|Apple Silicon macOS"
-  "x86_64-apple-darwin|Intel macOS"
-  "x86_64-pc-windows-msvc|x64 Windows"
-  "aarch64-unknown-linux-gnu|ARM64 Linux"
-  "x86_64-unknown-linux-gnu|x64 Linux"
-  "aarch64-unknown-linux-musl|ARM64 MUSL Linux"
-  "x86_64-unknown-linux-musl|x64 MUSL Linux"
-)
+download_targets=()
+download_platforms=()
+seen_targets="|"
+target_count=0
+while IFS= read -r target_row || [[ -n "$target_row" ]]; do
+  if [[ "$target_row" != *$'\t'* || "${target_row#*$'\t'}" == *$'\t'* ]]; then
+    echo "release target row must contain exactly one tab: $target_row" >&2
+    exit 1
+  fi
+  target="${target_row%%$'\t'*}"
+  platform="${target_row#*$'\t'}"
+  if [[ ! "$target" =~ ^[0-9A-Za-z_.-]+$ \
+    || -z "$platform" \
+    || "$platform" == *"|"* \
+    || "$platform" == *$'\r'* ]]; then
+    echo "invalid release target row: $target" >&2
+    exit 1
+  fi
+  if [[ "$seen_targets" == *"|$target|"* ]]; then
+    echo "duplicate release target: $target" >&2
+    exit 1
+  fi
+  seen_targets+="$target|"
+  download_targets+=("$target")
+  download_platforms+=("$platform")
+  target_count=$((target_count + 1))
+done < "$targets_path"
+if [[ "$target_count" -ne 7 ]]; then
+  echo "release target manifest must contain exactly seven targets" >&2
+  exit 1
+fi
+
 release_base_url="https://github.com/$repository/releases/download/$release_tag"
 
 printf '## Release Notes\n\n%s\n\n' "$release_notes"
 printf '## Download ironclaw %s\n\n' "$release_version"
 printf '|  File  | Platform | Checksum |\n'
 printf '|--------|----------|----------|\n'
-for row in "${download_rows[@]}"; do
-  target="${row%%|*}"
-  platform="${row#*|}"
+for index in "${!download_targets[@]}"; do
+  target="${download_targets[$index]}"
+  platform="${download_platforms[$index]}"
   archive="ironclaw-$target.tar.gz"
   printf '| [%s](%s/%s) | %s | [checksum](%s/%s.sha256) |\n' \
     "$archive" \

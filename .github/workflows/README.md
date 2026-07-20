@@ -80,6 +80,10 @@ CLI and WebUI changes do not start the seven-platform release matrix.
 | `aarch64-apple-darwin` | `macos-15` |
 | `x86_64-pc-windows-msvc` | `windows-2022` |
 
+`.github/reborn-release-targets.tsv` is the canonical ordered target/platform
+list consumed by both packaging and Release-note rendering. The CLI workflow
+contract also requires the compile matrix to contain exactly that target set.
+
 Each matrix entry performs a final `cargo build --locked --profile dist` link
 for `ironclaw_reborn_cli` / `ironclaw` with an explicit compile feature
 contract owned by this workflow:
