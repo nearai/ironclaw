@@ -424,8 +424,26 @@ impl RebornBinaryE2EHarness {
         // fixed profile user makes install-then-remove see "never installed".
         // Mirrors `build_group_capability_with_base` in the group harness.
         let subject_user = Self::resolve_default_binding_subject_user(conversation_id).await?;
+        // Google-OAuth-CONFIGURED variant deliberately, matching the Slack
+        // treatment in `harness/mod.rs`: this tier never represents a
+        // provider-unconfigured instance. The base profile already seeds a
+        // `Configured` google credential account with the full gsuite scope set
+        // (`extension_lifecycle_credential_seeds`), so leaving the composition
+        // signal `google_oauth_configured = false` describes an incoherent
+        // instance — a connected google account on a box where the operator
+        // never ran `config set google.client_id`. The provider-instance
+        // readiness chokepoint added in this PR reads that signal, so the
+        // incoherent combination fails every google-family activation with
+        // `ProviderInstanceNotConfigured` and their capabilities never reach
+        // the model surface.
+        //
+        // The `false` arm keeps its own dedicated coverage — it is NOT weakened
+        // here: `provider_instance_readiness.rs`'s unit tests pin the map, and
+        // `scenario_extension_activation_instance_not_configured.rs` drives the
+        // unconfigured activation failure end-to-end off the base
+        // (non-configured) profile via `group_constructors.rs`.
         let host_runtime = Arc::new(
-            crate::reborn_support::harness::profiles::extension::extension_lifecycle_tools_profile_for_user(
+            crate::reborn_support::harness::profiles::extension::extension_lifecycle_tools_profile_google_oauth_configured_for_user(
                 subject_user.as_str(),
             )?
             .build()

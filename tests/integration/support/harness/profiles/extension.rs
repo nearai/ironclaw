@@ -79,6 +79,21 @@ pub(crate) fn extension_lifecycle_tools_profile_google_oauth_configured()
     Ok(profile)
 }
 
+/// [`extension_lifecycle_tools_profile_google_oauth_configured`], seeded under a
+/// caller-supplied `user_id` — the same fixed-user/aligned-user split
+/// [`extension_lifecycle_tools_profile_for_user`] documents. Callers that align
+/// the harness's dispatch scope to a real turn's binding subject (the
+/// `RebornBinaryE2EHarness` extension-lifecycle constructor) need BOTH the
+/// aligned seed user and the configured-instance signal, which neither
+/// single-axis constructor above provides on its own.
+pub(crate) fn extension_lifecycle_tools_profile_google_oauth_configured_for_user(
+    user_id: &str,
+) -> HarnessResult<ToolsProfile> {
+    let mut profile = extension_lifecycle_tools_profile_for_user(user_id)?;
+    profile.options = profile.options.with_google_oauth_backend_for_test();
+    Ok(profile)
+}
+
 pub(crate) async fn extension_lifecycle_tools() -> HarnessResult<HostRuntimeCapabilityHarness> {
     extension_lifecycle_tools_profile()?.build().await
 }
