@@ -212,8 +212,8 @@ impl LlmProbe for LiveLlmProbe {}
 ///
 /// Menu step (via [`super::prompts::PromptSource::provider_menu`]): prompts for
 /// provider, API key (if required), model override, then persists.
-/// - Both prompts run BEFORE any write (pure reads, nothing durable), so the
-///   only fallible steps left are the two durable writes.
+/// - No DURABLE WRITE occurs before the two below, though key/model
+///   verification (`probe_and_confirm_key`) performs external network I/O.
 /// - Write order: secret store (`LlmKeyStore`, key `llm_provider_<id>_api_key`
 ///   — same handle webui2 settings writes and `apply_startup_stored_llm_key`
 ///   reads at boot) FIRST, then `[llm.default]` in `config.toml` SECOND
@@ -369,10 +369,11 @@ fn open_llm_key_store(
 ///
 /// Loops on [`ApiKeyAnswer::Back`] (issue #6360): an operator who realizes at
 /// the key prompt that they picked the wrong provider gets the menu again
-/// instead of having to cancel onboarding. Everything above the two durable
-/// writes is a pure read, so a re-selection discards nothing persisted — and
-/// each pass blocks on at least one operator answer, so the loop cannot spin
-/// on its own.
+/// instead of having to cancel onboarding. Nothing above the two durable
+/// writes persists anything (key/model verification may perform external
+/// network I/O, but writes nothing durable), so a re-selection discards
+/// nothing persisted — and each pass blocks on at least one operator answer,
+/// so the loop cannot spin on its own.
 #[cfg(feature = "libsql")]
 fn provision_via_menu(
     store_root: &Path,
@@ -429,8 +430,9 @@ struct SelectedProvider {
     model: Option<String>,
 }
 
-/// One pass of provider menu → API key → model → probe. All pure reads, no
-/// durable write — [`provision_via_menu`] performs those once this returns.
+/// One pass of provider menu → API key → model → probe. No durable write here
+/// — [`provision_via_menu`] performs those once this returns — though the
+/// probe step performs external network I/O.
 ///
 /// `Ok(None)` means the operator backed out at a key prompt
 /// ([`ApiKeyAnswer::Back`]) and wants the menu again; nothing entered on this

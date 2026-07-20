@@ -82,11 +82,24 @@ pub(crate) trait PromptSource {
 /// `Key` is the key *as typed* — it carries no probe/verification status; that
 /// is `probe_and_confirm_key`'s job downstream.
 #[cfg(feature = "libsql")]
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub(crate) enum ApiKeyAnswer {
     Key(String),
     /// Return to the provider menu without entering a key (Esc at the prompt).
     Back,
+}
+
+/// Manual `Debug`, not derived: `Key` wraps a plaintext LLM API key, and a
+/// derived impl would print it verbatim on any `{:?}` formatting (e.g. a
+/// panic message or a debug log). Redact it instead.
+#[cfg(feature = "libsql")]
+impl std::fmt::Debug for ApiKeyAnswer {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Key(_) => write!(f, "Key(<redacted>)"),
+            Self::Back => write!(f, "Back"),
+        }
+    }
 }
 
 #[derive(Debug, thiserror::Error)]
